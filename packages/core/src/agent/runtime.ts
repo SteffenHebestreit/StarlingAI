@@ -54,7 +54,6 @@ import { turnSteeringManager } from "./turn-steering.js";
 import { registerSessionAbortController, deregisterSessionAbortController } from "./warden.js";
 import { formatFlowMemoryGuidance } from "./flow-memory.js";
 import { looksLikeProviderErrorEcho, looksLikeHallucinatedTruncationClaim } from "./container-failure.js";
-import { sanitizeAssistantContent, NARRATED_TOOL_TEXT_RE } from "./sanitize-response.js";
 import { formatScopedMemoryGuidance } from "../memory/service.js";
 import { retrieveSkillGuidance } from "../skills/service.js";
 import { recordSkillOutcomeAsync, recordSkillHoldoutOutcomeAsync } from "../skills/store.js";
@@ -72,8 +71,6 @@ import {
   extractAssistantName,
   type DynamicTurnGuidance,
   buildLanguageAndIdentityTurnGuidance,
-  WORKFLOW_HINT_TERMS,
-  WORKFLOW_REQUEST_PATTERNS,
   toSoftRoutingHint,
   looksMultiDomainResearch,
 } from "./intent-classifier.js";
@@ -133,6 +130,46 @@ import {
 // Re-export the runtime-utils helpers that external consumers (tests) import from
 // runtime.js, so those imports keep working unchanged after the extraction.
 export { looksLikeRegurgitatedPriorAnswer } from "./runtime-utils.js";
+
+// Terminal user-facing response sanitize/rewrite cluster (god-file seam): pure
+// detectors that decide whether a turn's final text needs sanitizing, resynthesis,
+// or terminal rewriting, plus recovery-evidence fallback inspectors. The three
+// functions that need runtime singletons (rewriteTerminalResponseIfNeeded,
+// finalizeUserFacingAssistantResponse, resolveEmptyAssistantResponseFallback) stay
+// in this file.
+import {
+  sanitizeUserFacingAssistantResponse,
+  EMPTY_ASSISTANT_RESPONSE_FALLBACK,
+  looksLikeGenericNoUsableReply,
+  shouldResynthesizeUserFacingResponse,
+  looksLikeContinuationPromise,
+  looksLikeMaintenanceExecutionPromise,
+  shouldRewriteTerminalResponse,
+  hasRecentUnresolvedDelegatedAction,
+  hasRecentWorkflowAuthoringMaintenanceContext,
+  isForcedSynthesisSystemMessage,
+  hasRecentForcedSynthesisNudge,
+  findRecentJunkDelegationResult,
+  findRecentFailedDelegation,
+} from "./response-finalization.js";
+
+// Required-research fallback routing + search-agents-no-match cluster (god-file
+// seam): pure routing helpers that push a stalled source-sensitive turn into a
+// research delegation, build the canonical fallback route/prompt, and enforce it.
+import {
+  extractAgentRoutingSuggestionFromMetadata,
+  searchAgentsReturnedNoMatch,
+  chooseConfiguredAgent,
+  buildRequiredResearchFallbackRoute,
+  buildSearchAgentsNoMatchFallbackPrompt,
+  enforceRequiredResearchFallbackRouteOnToolCall,
+  isExplicitAgentCatalogRequest,
+  type RequiredResearchFallbackRoute,
+} from "./research-fallback-routing.js";
+
+// Re-export the originally-exported research-fallback route builder so existing
+// imports from runtime.js (research-fallback-route-scoped.test.ts) keep working.
+export { buildRequiredResearchFallbackRoute } from "./research-fallback-routing.js";
 
 // Pure raw-evidence/shared-facts dump detectors + formatters (god-file seam).
 import {
@@ -753,167 +790,6 @@ const AGENT_DISCOVERY_TOOL_NAMES = new Set([
   "search_workflows",
 ]);
 
-function extractAgentRoutingSuggestionFromMetadata(
-  metadata: Record<string, unknown> | undefined,
-): { agentName: string; query?: string; fallbackAgents?: string[] } | undefined {
-  const agentName = typeof metadata?.["topResult"] === "string"
-    ? String(metadata["topResult"]).trim()
-    : "";
-  if (!agentName) return undefined;
-
-  const query = typeof metadata?.["query"] === "string"
-    ? String(metadata["query"]).trim()
-    : "";
-  const fallbackAgents = Array.isArray(metadata?.["suggestedFallbackAgents"])
-    ? (metadata?.["suggestedFallbackAgents"] as unknown[])
-      .map((value) => typeof value === "string" ? value.trim() : "")
-      .filter((value): value is string => Boolean(value) && value !== agentName)
-    : [];
-
-  return {
-    agentName,
-    query: query || undefined,
-    fallbackAgents: fallbackAgents.length > 0 ? fallbackAgents : undefined,
-  };
-}
-
-function searchAgentsReturnedNoMatch(metadata: Record<string, unknown> | undefined): boolean {
-  const resultCount = typeof metadata?.["resultCount"] === "number" ? metadata["resultCount"] : 0;
-  const topResult = typeof metadata?.["topResult"] === "string" ? metadata["topResult"].trim() : "";
-  return resultCount === 0 && !topResult;
-}
-
-function chooseConfiguredAgent(candidates: readonly string[]): string | undefined {
-  const configuredAgents = getConfig().subAgents ?? {};
-  return candidates.find((name) => name in configuredAgents);
-}
-
-type RequiredResearchFallbackRoute = {
-  toolName: "delegate_to_agent" | "create_ephemeral_agent";
-  args: Record<string, unknown>;
-  label: string;
-};
-
-export function buildRequiredResearchFallbackRoute(
-  userMessage: string,
-  guidance: DynamicTurnGuidance | null | undefined,
-  allowedToolNameSet: Set<string>,
-  allowedAgents?: string[] | null,
-): RequiredResearchFallbackRoute | null {
-  // De-layer single-domain research: a coordinator only earns its extra hop when
-  // the task genuinely spans multiple areas (Anthropic/Cognition consensus).
-  // Otherwise route straight to the researcher specialist. Freshness single-shot
-  // lookups keep web_task_coordinator (its purpose-built lane).
-  const multiDomain = looksMultiDomainResearch(userMessage);
-  const basePreference = guidance?.freshnessSensitive && !guidance?.sourceSensitive
-    ? ["web_task_coordinator", "researcher", "mission_coordinator"]
-    : (multiDomain ? ["mission_coordinator", "researcher"] : ["researcher", "mission_coordinator"]);
-  // Inside a scoped scene/job step the session restricts which agents may run. Routing
-  // to an agent outside that set hard-fails ("not permitted in this scene"), so respect
-  // it: keep only allowed preferences, and when none of the default research agents are
-  // allowed, fall back to the step's OWN allowed agents (the step task names them — e.g.
-  // an image step's only agent is image_sourcer). Unrestricted turns keep the old list.
-  const allowSet = allowedAgents && allowedAgents.length > 0 ? new Set(allowedAgents) : null;
-  const preferredAgents = allowSet
-    ? (basePreference.filter((name) => allowSet.has(name)).concat(allowedAgents!.filter((name) => !basePreference.includes(name))))
-    : basePreference;
-  if (preferredAgents.length === 0) return null;
-  const selectedAgent = chooseConfiguredAgent(preferredAgents) ?? preferredAgents[0]!;
-  const fallbackAgents = preferredAgents.filter((agentName) => agentName !== selectedAgent && chooseConfiguredAgent([agentName]));
-
-  if (allowedToolNameSet.has("delegate_to_agent")) {
-    return {
-      toolName: "delegate_to_agent",
-      label: selectedAgent,
-      args: {
-        agentName: selectedAgent,
-        fallbackAgents,
-        task: userMessage,
-      },
-    };
-  }
-
-  if (allowedToolNameSet.has("create_ephemeral_agent")) {
-    return {
-      toolName: "create_ephemeral_agent",
-      label: "ephemeral_research_specialist",
-      args: {
-        agentName: "ephemeral_research_specialist",
-        description: "Purpose-built specialist for source-grounded research and product/component verification.",
-        systemPrompt: [
-          "You are a source-grounded research specialist.",
-          "Use web_search and web_fetch to gather evidence before answering.",
-          "Return concise findings with source URLs and be explicit about uncertainty.",
-          "Do not invent product names, specifications, or artifact paths.",
-        ].join(" "),
-        tools: ["web_search", "web_fetch", "read_shared_facts", "share_finding"],
-        maxIterations: 5,
-        // Leaf sub-agents default to `subAgentTurnSloMs` (60 s), which is far
-        // too short for a research specialist doing 5 web_search iterations.
-        // Grant 5 minutes — the same budget as the configured researcher agent.
-        timeoutMs: 300_000,
-        task: userMessage,
-      },
-    };
-  }
-
-  return null;
-}
-
-function buildSearchAgentsNoMatchFallbackPrompt(route: RequiredResearchFallbackRoute): string {
-  if (route.toolName === "delegate_to_agent") {
-    const fallbackAgents = Array.isArray(route.args["fallbackAgents"]) ? route.args["fallbackAgents"].map(String).filter(Boolean) : [];
-    return [
-      "ROUTING FALLBACK: search_agents returned no usable specialist candidates for this source-sensitive request.",
-      "Do NOT call search_agents or list_agents again in this turn.",
-      `You MUST call delegate_to_agent now with agentName="${route.label}"${fallbackAgents.length ? ` and fallbackAgents=[${fallbackAgents.map((name) => `"${name}"`).join(",")}]` : ""} using the original user request as the task.`,
-      "A further discovery-only response is invalid; delegation must happen before any final answer.",
-    ].join(" ");
-  }
-
-  return [
-    "ROUTING FALLBACK: search_agents returned no usable specialist candidates for this source-sensitive request.",
-    "Do NOT call search_agents or list_agents again in this turn.",
-    "You MUST call create_ephemeral_agent now using the provided research-specialist shape and the original user request as the task.",
-    "A further discovery-only response is invalid; orchestration must happen before any final answer.",
-  ].join(" ");
-}
-
-function enforceRequiredResearchFallbackRouteOnToolCall(
-  toolCall: LLMResponse["tool_calls"][number],
-  route: RequiredResearchFallbackRoute,
-  sessionId: string,
-  guardrailEvents: Array<{ type: string; details: string }>,
-): void {
-  const discoveryRetryTools = new Set(["search_agents", "list_agents", "search_workflows"]);
-  const shouldRewriteDiscoveryRetry = discoveryRetryTools.has(toolCall.name);
-  const shouldEnforceCanonicalRouteArgs = toolCall.name === route.toolName;
-  if (!shouldRewriteDiscoveryRetry && !shouldEnforceCanonicalRouteArgs) return;
-
-  const originalTool = toolCall.name;
-  const originalArgs = toolCall.arguments ?? {};
-  const routeArgs = { ...route.args };
-  const changed = originalTool !== route.toolName || stableSerialize(originalArgs) !== stableSerialize(routeArgs);
-  if (!changed) return;
-
-  toolCall.name = route.toolName;
-  toolCall.arguments = routeArgs;
-  guardrailEvents.push({ type: "delegation_required", details: "required_research_original_task_enforced" });
-  logAudit("tool_call_recovered", {
-    originalTool,
-    rewrittenTo: route.toolName,
-    reason: shouldRewriteDiscoveryRetry
-      ? "required_research_discovery_retry_rewritten"
-      : "required_research_original_task_enforced",
-    recoveredAgentName: route.label,
-  }, { sessionId, severity: shouldRewriteDiscoveryRetry ? "warn" : "info" });
-}
-
-function isExplicitAgentCatalogRequest(message: string): boolean {
-  return /\b(list|show|display|print|enumerate|inspect|browse|catalog|catalogue|katalog|liste|auflisten|anzeigen)\b[\s\S]{0,80}\b(agents?|sub[- ]?agents?|specialists?|spezialisten|agenten|catalog|catalogue|katalog)\b/i.test(message)
-    || /\b(agents?|sub[- ]?agents?|specialists?|spezialisten|agenten|catalog|catalogue|katalog)\b[\s\S]{0,80}\b(list|show|display|print|enumerate|inspect|browse|liste|auflisten|anzeigen)\b/i.test(message);
-}
-
 const __swarmStateContinuity = {
   loadPreviousTurnSwarmTasks,
   buildPersistableSwarmTaskDelta,
@@ -1006,115 +882,6 @@ export function buildRepeatedOutputFingerprint(toolName: string, args: Record<st
 
 export { __swarmStateContinuity };
 
-function sanitizeUserFacingAssistantResponse(value: string, toolIterations: number): string {
-  const cleaned = sanitizeAssistantContent(value, toolIterations > 0);
-  // Final safety net: a slow local model can collapse into a repetition loop during
-  // synthesis and emit the same section many times. Never ship that verbatim — keep
-  // the first occurrence of each unique section (audit 9fd16384: 17× repeated block).
-  return looksLikeDegenerateRepetition(cleaned) ? collapseRepeatedMarkdownSections(cleaned) : cleaned;
-}
-
-const EMPTY_ASSISTANT_RESPONSE_FALLBACK = "I wasn't able to generate a usable reply for that turn. Please try again.";
-
-function looksLikeGenericNoUsableReply(value: string): boolean {
-  const normalized = value.trim().replace(/\s+/g, " ");
-  return normalized === EMPTY_ASSISTANT_RESPONSE_FALLBACK
-    || /^i wasn'?t able to generate a usable reply\b/i.test(normalized)
-    || /^please try again\.?$/i.test(normalized);
-}
-
-function shouldResynthesizeUserFacingResponse(raw: string, cleaned: string, toolIterations: number): boolean {
-  if (!raw.trim() || cleaned.length === 0) return true;
-  if (toolIterations > 0 && looksLikeGenericNoUsableReply(cleaned)) return true;
-  if (toolIterations === 0) return false;
-  if (!NARRATED_TOOL_TEXT_RE.test(raw)) return false;
-  return cleaned.length === 0 || cleaned.length < Math.min(120, Math.ceil(raw.length / 3));
-}
-
-const CONTINUATION_PROMISE_RE = /\b(i(?:'ll| will)(?:\s+now)?|i am going to|ich werde(?:\s+nun)?|ich beauftrage(?:\s+nun)?|n[äa]chste orchestrierung|next orchestration|next logical step|n[äa]chste logische aktion)\b/i;
-const IMPLICIT_CONTINUATION_EXECUTION_RE = /\b(?:i(?:\s+have|'ve)[\s\S]{0,80}\b(?:corrected|fixed|updated|adjusted)\b[\s\S]{0,80}\b(?:am\s+)?(?:now\s+)?(?:running|executing|starting|retrying|restarting)\b|ich\s+habe[\s\S]{0,80}\b(?:korrigiert|angepasst|berichtigt)\b[\s\S]{0,80}\b(?:und\s+)?(?:f(?:[üu]hre|uehre)|starte|versuche|sto(?:ss|ß)e)\b[\s\S]{0,40}\b(?:nun|jetzt)\b[\s\S]{0,20}\b(?:aus|an)\b)/i;
-const MAINTENANCE_EXECUTION_PROMISE_RE = /\b(?:i(?:'ll| will)\s+(?:create|generate|delegate|build)|ich\s+(?:werde|erstelle|generiere|delegiere|beauftrage)|(?:erstelle|generiere|delegiere|beauftrage)\s+ich(?:\s+nun|\s+jetzt)?)\b/i;
-const MISLEADING_EXECUTED_NEXT_STEP_RE = /\b(the next (?:logical )?(?:step|action)|der n[äa]chste(?: logische)?(?: schritt| aktion)|die n[äa]chste(?: logische)? aktion)\b[\s\S]{0,80}\b(which has been executed|has been executed|was executed|has already been executed|wurde(?:\s+bereits)?\s+ausgef[üu]hrt|ist bereits erfolgt)\b/i;
-const NEXT_TURN_HANDOFF_RE = /\b(would you like me to (?:initiate|start|retry)|in the next turn|im n[äa]chsten zug|im n[äa]chsten turn|neue[nr]? delegations(?:strategie|versuch)|new delegation attempt|no further tool calls can be made in this turn|keine weiteren tool calls .* in diesem zug)\b/i;
-
-function looksLikeContinuationPromise(value: string): boolean {
-  return CONTINUATION_PROMISE_RE.test(value) || IMPLICIT_CONTINUATION_EXECUTION_RE.test(value);
-}
-
-function looksLikeMaintenanceExecutionPromise(value: string): boolean {
-  return looksLikeContinuationPromise(value) || MAINTENANCE_EXECUTION_PROMISE_RE.test(value);
-}
-
-function shouldRewriteTerminalResponse(value: string, toolIterations: number): boolean {
-  if (toolIterations === 0) return false;
-  return looksLikeContinuationPromise(value)
-    || MISLEADING_EXECUTED_NEXT_STEP_RE.test(value)
-    || NEXT_TURN_HANDOFF_RE.test(value);
-}
-
-function hasRecentUnresolvedDelegatedAction(history: readonly { role: string; content?: string | null; metadata?: Record<string, unknown> }[]): boolean {
-  const recentMessages = [...history].reverse().slice(0, 12);
-
-  for (const message of recentMessages) {
-    if (message.role !== "tool") continue;
-
-    const metadata = message.metadata ?? {};
-    const delegationOutcome = typeof metadata["delegationOutcome"] === "string"
-      ? String(metadata["delegationOutcome"]).toLowerCase()
-      : undefined;
-    const terminalState = typeof metadata["terminalState"] === "string"
-      ? String(metadata["terminalState"]).toLowerCase()
-      : undefined;
-    const content = String(message.content ?? "");
-
-    if (
-      delegationOutcome === "partial"
-      || delegationOutcome === "failure"
-      || terminalState === "max_iterations"
-      || terminalState === "timeout"
-      || terminalState === "cancelled"
-      || /PARTIAL RESULT|max_iterations|timed out|could not complete|delegation limit/i.test(content)
-    ) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-function hasRecentWorkflowAuthoringMaintenanceContext(history: readonly { role: string; content?: string | null }[]): boolean {
-  let skippedCurrentUser = false;
-  let inspectedPriorUserMessages = 0;
-
-  for (const message of [...history].reverse()) {
-    if (message.role !== "user") continue;
-
-    const content = String(message.content ?? "").trim();
-    if (!content) continue;
-
-    if (!skippedCurrentUser) {
-      skippedCurrentUser = true;
-      continue;
-    }
-
-    inspectedPriorUserMessages += 1;
-    const normalized = content.toLowerCase();
-    const guidance = buildDynamicTurnGuidance(content);
-    const workflowLike = WORKFLOW_REQUEST_PATTERNS.some((pattern) => pattern.test(normalized))
-      || WORKFLOW_HINT_TERMS.some((term) => normalized.includes(term));
-
-    if (guidance?.swarmMaintenanceSensitive && workflowLike) {
-      return true;
-    }
-
-    if (inspectedPriorUserMessages >= 2) {
-      break;
-    }
-  }
-
-  return false;
-}
-
 async function rewriteTerminalResponseIfNeeded(
   response: string,
   toolIterations: number,
@@ -1190,71 +957,6 @@ async function finalizeUserFacingAssistantResponse(
 const WORKFLOW_TOOL_RESULT_RE = /^Workflow\s+\S+\s+\[[^\]]+\]\s+(?:completed|blocked)\./i;
 const EVIDENCE_SECTION_RE = /^Observed evidence:\s*/m;
 
-function isForcedSynthesisSystemMessage(message: { role: string; content?: string | null }): boolean {
-  return message.role === "system"
-    && typeof message.content === "string"
-    && (
-      message.content.startsWith("[SYNTHESIS REQUIRED]")
-      || message.content.startsWith("[WARDEN STOP — FORCED SYNTHESIS]")
-    );
-}
-
-const PRIOR_DELEGATION_JUNK_SUBSTANCE_FLOOR = 1500;
-
-/**
- * Walk recent history for the most recent delegation tool result and decide
- * whether it qualifies as "junk" — i.e. a partial/timeout result whose
- * actual substantive evidence is below the usability floor. Used by the
- * synthesis-required guardrail (Fix 3) to allow ONE recovery delegation
- * through instead of locking the model into synthesizing from a truncated
- * stub. Returns null when the most recent delegation is either substantial
- * or absent.
- */
-function findRecentJunkDelegationResult(
-  history: readonly { role: string; content?: string | null; metadata?: Record<string, unknown> }[],
-): { agentName: string; substanceChars: number; terminalState: string | null } | null {
-  const recent = [...history].reverse().slice(0, 12);
-  for (const message of recent) {
-    if (message.role !== "tool") continue;
-    const content = String(message.content ?? "");
-    const meta = message.metadata ?? {};
-    const isDelegate = DELEGATE_TOOL_RESULT_RE.test(content) || looksLikeDelegateMetadata(meta);
-    if (!isDelegate) continue;
-
-    const terminalState = typeof meta["terminalState"] === "string" ? String(meta["terminalState"]) : null;
-    const delegationOutcome = typeof meta["delegationOutcome"] === "string" ? String(meta["delegationOutcome"]) : null;
-    const isPartialOrTimeout = terminalState === "timeout"
-      || delegationOutcome === "partial"
-      || /—\s*PARTIAL PROGRESS|TIMEOUT|TASK FAILED/i.test(content);
-    if (!isPartialOrTimeout) {
-      // Most recent delegation succeeded with full evidence — there is no
-      // recovery scenario to authorize. Stop walking.
-      return null;
-    }
-
-    // Measure substantive evidence: strip the "Delegated result from / IMPORTANT / Observed evidence:" wrapper and count the body.
-    const evidenceMatch = /Observed evidence:\s*([\s\S]+?)(?:\n\n|$)/.exec(content);
-    const body = evidenceMatch ? evidenceMatch[1]!.trim() : content.trim();
-    // A body containing the "Recovered delegated specialist body (full):"
-    // marker is NOT junk — Fix 2 already surfaced the full delegated answer.
-    if (/Recovered delegated specialist body \(full\):/i.test(body)) return null;
-    if (body.length >= PRIOR_DELEGATION_JUNK_SUBSTANCE_FLOOR) return null;
-
-    const agentName = typeof meta["agentName"] === "string" && meta["agentName"]
-      ? meta["agentName"]
-      : (content.match(/Delegated result from\s+([^\s—]+)/)?.[1] ?? "a specialist agent");
-    return { agentName, substanceChars: body.length, terminalState };
-  }
-  return null;
-}
-
-function hasRecentForcedSynthesisNudge(
-  history: readonly { role: string; content?: string | null }[],
-): boolean {
-  const recent = [...history].reverse().slice(0, 16);
-  return recent.some((message) => isForcedSynthesisSystemMessage(message));
-}
-
 function resolveEmptyAssistantResponseFallback(
   rawResponse: string,
   cleaned: string,
@@ -1309,50 +1011,6 @@ function resolveEmptyAssistantResponseFallback(
   }
 
   return EMPTY_ASSISTANT_RESPONSE_FALLBACK;
-}
-
-/**
- * Walk recent history for a failed delegation tool result.  Returns a
- * short user-facing diagnostic message naming the agent and reason —
- * better UX than the generic empty-response placeholder when the model
- * produced no recoverable text and we already know one specific thing
- * went wrong.  Returns null when the recent transcript shows successful
- * delegations or no delegations at all (in those cases the placeholder
- * remains correct).
- */
-function findRecentFailedDelegation(
-  history: readonly { role: string; content?: string | null; metadata?: Record<string, unknown> }[],
-): { agentName: string; reason: string; message: string } | null {
-  const recent = [...history].reverse().slice(0, 8);
-  for (const message of recent) {
-    if (message.role !== "tool") continue;
-    const content = String(message.content ?? "");
-    const meta = message.metadata ?? {};
-    const isDelegate = DELEGATE_TOOL_RESULT_RE.test(content) || looksLikeDelegateMetadata(meta);
-    if (!isDelegate) continue;
-    // Only fire on visible-failure shape — the runtime's
-    // buildModelVisibleToolResult rewrites the heading to "TASK FAILED"
-    // when the underlying output looked like a failure.  Reading that
-    // marker keeps us aligned with what the model itself saw.
-    if (!/TASK FAILED\b/i.test(content)) {
-      // Successful delegation in scope — don't fire a failure diagnostic.
-      return null;
-    }
-    const agentName = typeof meta["agentName"] === "string" && meta["agentName"]
-      ? meta["agentName"]
-      : (content.match(/Delegated result from\s+([^\s—]+)/)?.[1] ?? "a specialist agent");
-    const evidenceMatch = /Observed evidence:\s*([\s\S]+?)(?:\n\n|$)/.exec(content);
-    const reason = evidenceMatch ? evidenceMatch[1]!.trim().slice(0, 280) : "";
-    const reasonHint = reason ? ` Reason: ${reason}` : "";
-    return {
-      agentName,
-      reason,
-      message:
-        `I delegated this task to ${agentName} but the attempt failed before producing an answer.${reasonHint} `
-        + `Try the request again, or rephrase it so it can be answered without that specialist.`,
-    };
-  }
-  return null;
 }
 
 function stripInterruptedSubAgentBoilerplate(text: string): string {
