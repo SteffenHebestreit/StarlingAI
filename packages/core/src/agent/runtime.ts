@@ -5,7 +5,7 @@
 import { getChatProvider, getChatProviderForTier, getChatProviderWithOverride } from "../providers/index.js";
 import { salvageToolCallArguments } from "../providers/lmstudio.js";
 import type { ChatProvider, LLMMessage, LLMResponse, StreamChunk } from "../providers/lmstudio.js";
-import { tryReceptionistFastLane, buildMemoryCapsule } from "./receptionist.js";
+import { buildMemoryCapsule } from "./receptionist.js";
 import { markOrchestratorActivity, markOrchestratorIdle } from "./cache-warmer.js";
 import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type SwarmState, type ToolContext } from "../tools/registry.js";
 import { isToolAllowed, requiresApproval } from "../guardrails/tool-tiers.js";
@@ -19,9 +19,9 @@ import {
   DELIVERABLE_CONSISTENCY_CRITERION,
 } from "./deliverable-consistency.js";
 import { prefetchCapabilityCandidates } from "./discovery-prefetch.js";
-import { buildUserProfileEvidence, buildProfileBiasedQuery } from "./user-profile-prefetch.js";
-import { checkInput, checkToolOutput } from "../guardrails/input.js";
-import { moderateInputText, moderateToolResultText } from "../guardrails/moderation.js";
+import { buildUserProfileEvidence } from "./user-profile-prefetch.js";
+import { checkToolOutput } from "../guardrails/input.js";
+import { moderateToolResultText } from "../guardrails/moderation.js";
 import { scanOutput } from "../guardrails/output.js";
 import { checkRateLimit } from "../guardrails/rate-limiter.js";
 import { logAudit } from "../audit/logger.js";
@@ -31,7 +31,6 @@ import {
   resolveEffortProfile,
   currentEffortProfile,
   effectiveOrchestration,
-  effectiveMaxDelegatedResultChars,
   effectiveOrchestratorMaxToolIterations,
   currentEffortTier,
 } from "../runtime/effort-context.js";
@@ -42,17 +41,15 @@ import {
   TURN_OVERSIGHT_CHECK_INTERVAL_MS,
   type TurnProgressSample,
 } from "./turn-oversight.js";
-import type { EffortTier } from "../config/schema.js";
 import { childLogger } from "../logger.js";
-import type { AgentSession, SessionHistoryMessage, SessionTranscriptAttachment } from "./session.js";
+import type { AgentSession, SessionHistoryMessage } from "./session.js";
 import { splitOrchestrationModule } from "./session.js";
-import { classifyToolIntervention, type InterventionNotice } from "./interventions.js";
+import { classifyToolIntervention } from "./interventions.js";
 import { getMainAssistantToolNames, type MainAssistantToolMode } from "./default-tools.js";
 import { longRunningGenerationManager } from "./long-running-generation.js";
 import { turnSteeringManager } from "./turn-steering.js";
 import { registerSessionAbortController, deregisterSessionAbortController } from "./warden.js";
 import { formatFlowMemoryGuidance } from "./flow-memory.js";
-import { looksLikeProviderErrorEcho, looksLikeHallucinatedTruncationClaim } from "./container-failure.js";
 import { formatScopedMemoryGuidance } from "../memory/service.js";
 import { retrieveSkillGuidance } from "../skills/service.js";
 import { recordSkillOutcomeAsync, recordSkillHoldoutOutcomeAsync } from "../skills/store.js";
@@ -60,13 +57,11 @@ import { maybeDistillSkillFromTurn } from "../skills/distiller.js";
 import { formatUserModelGuidance } from "../user-model/service.js";
 import { lookupTrajectory, writeTrajectory, invalidateTrajectory } from "../memory/trajectory-cache.js";
 import { graphMarkSessionRetrievalsUseful, graphMarkSessionRetrievalsUnhelpful } from "../memory/graph-service.js";
-import type { SubAgentProgressEvent } from "./sub-agent.js";
 import { artifactFileLooksTruncated } from "./sub-agent.js";
 import { join } from "node:path";
 import { beginFactTurn } from "../swarm/memory.js";
 import {
   buildDynamicTurnGuidance,
-  extractAssistantName,
   buildLanguageAndIdentityTurnGuidance,
   toSoftRoutingHint,
   looksMultiDomainResearch,
@@ -114,14 +109,38 @@ import {
   stableSerialize,
   looksLikeRegurgitatedPriorAnswer,
   looksLikeOrchestrationOnlyEvidence,
-  collapseWhitespace,
   stripPresentationFormatting,
-  looksLikeDelegationTaskEcho,
 } from "./runtime-utils.js";
 
 // Re-export the runtime-utils helpers that external consumers (tests) import from
 // runtime.js, so those imports keep working unchanged after the extraction.
 export { looksLikeRegurgitatedPriorAnswer } from "./runtime-utils.js";
+
+// Model-visible tool-result framing (god-file seam): buildModelVisibleToolResult
+// rewrites raw tool/sub-agent output into the canonical "Delegated result …" frame,
+// plus the small pure text helpers it needs. classifyPostOrchestrationDisposition
+// (which stays here) uses looksLikeDelegatedFailureEvidence from this module.
+import {
+  buildModelVisibleToolResult,
+  looksLikeDelegatedFailureEvidence,
+} from "./tool-result-format.js";
+
+// Re-export the originally-exported buildModelVisibleToolResult so existing imports
+// from runtime.js (runtime-delegation-loop.test.ts, runtime-guidance.test.ts) keep working.
+export { buildModelVisibleToolResult } from "./tool-result-format.js";
+
+// Turn-preparation phases + the blocked() early-exit builder (god-file seam): the
+// pre-loop setup phases of _runTurn and the shared blocked() TurnOutput builder live
+// in ./turn-prepare.ts now. They thread state explicitly and depend on no main-loop
+// closure; runtime.ts imports them back (one-directional edge, no cycle).
+import {
+  blocked,
+  prepareRateLimit,
+  prepareInputGuardrails,
+  recordUserTurnMessage,
+  prepareReceptionistFastLane,
+  prepareDocumentRag,
+} from "./turn-prepare.js";
 
 // Terminal user-facing response sanitize/rewrite cluster (god-file seam): pure
 // detectors that decide whether a turn's final text needs sanitizing, resynthesis,
@@ -164,10 +183,8 @@ export { buildRequiredResearchFallbackRoute } from "./research-fallback-routing.
 
 // Pure raw-evidence/shared-facts dump detectors + formatters (god-file seam).
 import {
-  isJunkEvidenceValue,
   looksLikeRawSharedFactsDump,
   looksLikeRawWorkspaceToolDump,
-  formatRawWorkspaceToolDumpFailure,
   looksLikeRawToolEvidenceDump,
 } from "./runtime-evidence-dump.js";
 
@@ -298,7 +315,6 @@ export {
 // finds the richest recent delegate/workflow result to use as a synthesis backstop.
 import {
   EVIDENCE_SECTION_RE,
-  extractUsefulInterruptedDelegationEvidence,
   looksLikeInterruptedDelegationWithoutUsableEvidence,
   measureEvidenceCoverage,
   findRecentDelegateEvidence,
@@ -314,7 +330,6 @@ import {
   measurePrompt,
   compactBasePromptUnderPressure,
   buildTurnPerformanceMetrics,
-  type TurnPerformanceMetrics,
 } from "./turn-metrics.js";
 
 // Re-export the originally-exported metrics symbols so existing imports from
@@ -330,7 +345,6 @@ import {
   classifyTurnFailure,
   recordTurnFailure,
   finalizeTurnOutput,
-  type TurnFailureKind,
 } from "./turn-failure.js";
 
 // Re-export the originally-exported turn-failure helpers so existing imports from
@@ -348,58 +362,12 @@ const log = childLogger("agent:runtime");
 const DEFAULT_MAX_TOOL_ITERATIONS = 20;
 const MAX_LENGTH_CONTINUATION_ATTEMPTS = 2;
 const MAX_CONTINUATION_OVERLAP_CHARS = 400;
-export interface RunTurnOptions {
-  session: AgentSession;
-  userMessage: string;
-  userDisplayContent?: string;
-  userAttachments?: SessionTranscriptAttachment[];
-  onChunk?: (text: string) => void;
-  /** Live chain-of-thought tokens for the main assistant turn. Streams ahead
-   * of the answer; the UI shows it in a collapsible panel that auto-collapses
-   * once the first answer token arrives. */
-  onReasoning?: (text: string) => void;
-  onStatus?: (status: { phase: string; message: string; iteration?: number }) => void;
-  onToolCall?: (toolCallId: string, name: string, args: Record<string, unknown>) => void;
-  onToolResult?: (toolCallId: string, name: string, result: string, metadata?: Record<string, unknown>) => void;
-  onSubAgentProgress?: (event: SubAgentProgressEvent) => void;
-  onComputerAction?: (action: { computerSessionId: string; actionType: string; [key: string]: unknown }) => void;
-  onComputerScreenshot?: (screenshot: { computerSessionId: string; dataUrl: string; width: number; height: number; [key: string]: unknown }) => void;
-  onComputerSessionState?: (sessionState: { computerSessionId: string; state: string; [key: string]: unknown }) => void;
-  onIntervention?: (notice: InterventionNotice) => void;
-  onSwarmState?: (state: SwarmState) => void;
-  approvalCallback?: (toolName: string, args: Record<string, unknown>) => Promise<boolean>;
-  inputCallback?: (question: string, choices?: string[], timeoutMs?: number) => Promise<string>;
-  signal?: AbortSignal;
-  /** Sub-agents this turn is allowed to delegate to (undefined = no restriction) */
-  allowedAgents?: string[];
-  /** Tool names that must pause for human approval this turn (enforced unconditionally) */
-  humanInLoopSteps?: string[];
-  /** Auto-approve all tool calls this turn — skips the approvalCallback gate entirely. */
-  autoApprove?: boolean;
-  /** Override sub-agent maxIterations for delegated tasks this turn. 0 disables the cap. */
-  maxIterationsOverride?: number;
-  /** When set, this turn is a tool-dev session — iteration limits are lifted. */
-  _toolDevSessionId?: string;
-  /** Active reusable workflow execution stack for nested workflow/self-reentry guards. Internal. */
-  _workflowExecutionStack?: string[];
-  /** Override the per-turn timeout in ms (replaces config gateway.turnTimeoutMs). 0 disables the timeout. */
-  turnTimeoutOverrideMs?: number;
-  /** Per-message Qwen3.5 thinking toggle. true = on, false = off, undefined = model default. */
-  enableThinking?: boolean;
-  /** Effort tier for this turn (low | medium | high | max). Selects an effort profile
-   *  that overlays the orchestration/latency/reasoning knobs. Undefined → config default. */
-  effortTier?: EffortTier;
-}
-
-export interface TurnOutput {
-  response: string;
-  toolCallsExecuted: number;
-  guardrailEvents: Array<{ type: string; details: string }>;
-  usage: { promptTokens: number; completionTokens: number; totalTokens: number };
-  blocked: boolean;
-  swarmState?: SwarmState;
-  performance?: TurnPerformanceMetrics;
-}
+// The public turn input/output shapes (RunTurnOptions, TurnOutput) were extracted
+// to the leaf module ./turn-types.ts (god-file seam) so the turn-preparation
+// helpers can depend on them without importing runtime.js. Re-exported here so
+// every external `import { TurnOutput } from ".../runtime.js"` keeps working.
+import type { RunTurnOptions, TurnOutput } from "./turn-types.js";
+export type { RunTurnOptions, TurnOutput } from "./turn-types.js";
 
 // Shared-facts / evidence / recovery-backstop cluster moved to ./evidence-recovery.ts
 // (god-file seam). The functions runtime.ts still calls internally are imported below;
@@ -875,46 +843,6 @@ async function enforceDelegateCoverage(
   return await rewriteTerminalResponseIfNeeded(cleanedResynth, toolIterations, session, provider, signal);
 }
 
-function truncateForContext(value: string, maxChars: number): string {
-  const normalized = collapseWhitespace(value);
-  if (normalized.length <= maxChars) return normalized;
-  return `${normalized.slice(0, Math.max(0, maxChars - 3)).trimEnd()}...`;
-}
-
-function truncatePlainText(value: string, maxChars: number): string {
-  const normalized = value.trim();
-  if (normalized.length <= maxChars) return normalized;
-  return `${normalized.slice(0, Math.max(0, maxChars - 3)).trimEnd()}...`;
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function stripAgentPrefix(value: string): string {
-  return value.replace(/^\[[^\]]+\]:\s*/i, "").trim();
-}
-
-function stripWorkflowPreamble(value: string): string {
-  // Remove "Workflow <name> [scene|job] completed/blocked ...\n\n" system prefix
-  // so only the actual deliverable content reaches the orchestrator LLM.
-  return value.replace(/^Workflow\s+\S+\s+\[(?:scene|job)\]\s+\S[^\n]*\n\n?/, "").trim();
-}
-
-function looksLikeDelegatedFailureEvidence(value: string): boolean {
-  const preview = value.trim().slice(0, 600);
-  if (!preview) return false;
-  if (/^sub-agent produced no final response\.?$/i.test(preview)) return true;
-  if (/<\|channel\>\w+/i.test(preview)) return true;
-  if (looksLikeProviderErrorEcho(preview)) return true;
-  return /^error:/i.test(preview)
-    || /\b(no results|not found|unable to|failed to|timed out|cancelled|incomplete|max.{0,20}iterations|could not complete|did not complete|cannot complete|cannot proceed|delegation limit|already failed|not permitted|produced no final response|no usable delegated result returned)\b/i.test(preview)
-    || /\bis already running via\s+(?:[a-z0-9_:-]*(?:_agent|_coordinator)|researcher|another agent)\b/i.test(preview)
-    || /\bNo (?:agents|workflows) matched\b/i.test(preview)
-    || /\b(container error|containerized delegation failed|sandbox (?:bootstrap|startup|start) failed|bootstrap failed|runtime crash(?:ed)?|terminated unexpectedly)\b/i.test(preview)
-    || /\b(blocker:|missing source data|required .* unavailable|requested .* unavailable|not available in the current workspace|not available in the workspace|could not be fulfilled with exact figures|cannot be generated at this time|please provide the structured json data to proceed|please provide the source data to proceed|please provide .*json data|i need .*structured json.* to proceed|i need .*data to proceed|task cannot be completed|table does not exist|confirmed non-existent|no source provided the specific .* data)\b/i.test(preview);
-}
-
 const CONTINUATION_CUE_RE = /\b(next (logical )?(step|action)|n[äa]chste (logische )?(schritt|aktion)|before summarizing|continue orchestration|continue with|drill down|inspect the contents|fetch the contents|final required action|determine the actual data file format|extract the raw numerical values)\b/i;
 const USER_INTERACTION_CUE_RE = /\b(please confirm|confirm .* before|approval required|needs approval|ask the user|missing .* from the user|which one|which option|clarify|need the user to|authorization reference|approved target scope)\b/i;
 
@@ -1023,290 +951,11 @@ export function classifyPostOrchestrationDisposition(
   return sawContinuationCue ? "continue" : "synthesize";
 }
 
-export function buildModelVisibleToolResult(
-  toolName: string,
-  resultText: string,
-  metadata?: Record<string, unknown>,
-): string {
-  const fallback = truncateForContext(resultText, 600);
-
-  if (toolName === "delegate_to_agent" || toolName === "swarm_delegate") {
-    const agentName = typeof metadata?.["agentName"] === "string" ? String(metadata["agentName"]) : "delegated agent";
-    const attemptedAgents = Array.isArray(metadata?.["attemptedAgents"])
-      ? (metadata?.["attemptedAgents"] as unknown[]).map(String).filter(Boolean)
-      : [];
-    const routingReason = metadata?.["routingReason"] && typeof metadata["routingReason"] === "object"
-      ? metadata["routingReason"] as Record<string, unknown>
-      : undefined;
-    const cleaned = stripPresentationFormatting(stripAgentPrefix(resultText));
-    const delegationOutcome = typeof metadata?.["delegationOutcome"] === "string" ? String(metadata["delegationOutcome"]) : undefined;
-    const hasInterruptedShape = /Partial progress before interruption:|Recovered evidence snippets from completed tools:/i.test(cleaned);
-    const rawWorkspaceToolDump = looksLikeRawWorkspaceToolDump(cleaned);
-    const partialHasNoUsableEvidence = agentName !== "computer_use_agent"
-      && delegationOutcome === "partial"
-      && (
-        rawWorkspaceToolDump
-        || looksLikeInterruptedDelegationWithoutUsableEvidence(cleaned)
-        || (!hasInterruptedShape && looksLikeOrchestrationOnlyEvidence(cleaned))
-      );
-    // A "partial" outcome whose surfaced content is just a regurgitated
-    // provider/HTTP error (e.g. LM Studio HTTP 500 HTML page that the
-    // soft-deadline synthesis quoted back) is not a useful partial — the
-    // model has no real evidence to relay.  Treat it as an outright
-    // failure so the parent assistant gets a clear failure signal and
-    // can ask the user to retry instead of trying to synthesize an
-    // answer from an HTML error page.
-    const partialIsProviderErrorEcho = delegationOutcome === "partial" && looksLikeProviderErrorEcho(cleaned);
-    const delegationPartial = delegationOutcome === "partial"
-      && !partialIsProviderErrorEcho
-      && !partialHasNoUsableEvidence;
-    const delegationFailed = rawWorkspaceToolDump
-      || delegationOutcome === "failure"
-      || partialIsProviderErrorEcho
-      || partialHasNoUsableEvidence
-      || (!delegationPartial && (
-        metadata?.["delegationSucceeded"] === false
-        || /^error:/i.test(cleaned)
-        || looksLikeDelegatedFailureEvidence(cleaned)
-      ));
-
-    if (agentName === "computer_use_agent") {
-      const evidence = truncatePlainText(cleaned, 1600);
-      if (delegationFailed) {
-        const parts = [
-          `Delegated result from ${agentName} — TASK FAILED.`,
-          attemptedAgents.length > 1 ? `Attempts: ${attemptedAgents.join(", ")}.` : "",
-          routingReason?.["confidence"] ? `Routing confidence: ${String(routingReason["confidence"])}.` : "",
-          "IMPORTANT: This delegated attempt failed. Report the failure honestly using only the explicit evidence below.",
-          "Do NOT claim the task was completed.",
-          "Do NOT invent root causes like connectivity, firewall, permissions, or configuration unless the evidence explicitly says so.",
-          "Do NOT delegate again for the same information in this turn.",
-          `Observed evidence:\n${evidence || "No usable delegated result returned."}`,
-        ].filter(Boolean);
-        return parts.join("\n");
-      }
-      if (delegationPartial) {
-        const parts = [
-          `Delegated result from ${agentName} — PARTIAL PROGRESS.`,
-          attemptedAgents.length > 1 ? `Attempts: ${attemptedAgents.join(", ")}.` : "",
-          routingReason?.["confidence"] ? `Routing confidence: ${String(routingReason["confidence"])}.` : "",
-          "IMPORTANT: Use the evidence below. State clearly that the desktop run made progress but was interrupted before full completion.",
-          "Do NOT ignore the collected evidence.",
-          "Do NOT invent root causes like connectivity, firewall, permissions, or configuration unless the evidence explicitly says so.",
-          "Do NOT delegate again for the same information in this turn unless the user asks for another attempt.",
-          `Observed evidence:\n${evidence || "No usable delegated result returned."}`,
-        ].filter(Boolean);
-        return parts.join("\n");
-      }
-      const parts = [
-        `Delegated result from ${agentName} — TASK COMPLETED SUCCESSFULLY.`,
-        attemptedAgents.length > 1 ? `Attempts: ${attemptedAgents.join(", ")}.` : "",
-        routingReason?.["confidence"] ? `Routing confidence: ${String(routingReason["confidence"])}.` : "",
-        "IMPORTANT: Relay ALL specific details from the evidence below (names, numbers, sizes, statuses) in your answer. Do NOT omit items, say 'partially visible', or claim information is 'cut off' if the evidence lists it. The evidence is authoritative.",
-        "Do NOT delegate again for the same information — it has already been collected.",
-        `Observed evidence:\n${evidence || "No usable delegated result returned."}`,
-      ].filter(Boolean);
-      return parts.join("\n");
-    }
-
-    const partialEvidence = rawWorkspaceToolDump ? null : extractUsefulInterruptedDelegationEvidence(cleaned);
-    // When the inner agent surfaced its full delegated specialist body via
-    // the "Recovered delegated specialist body (full):" marker (Fix 2), the
-    // partial evidence IS the actual completed sub-task answer — bump the
-    // cap to the long-deliverable budget so it survives wrapping. Otherwise
-    // the parent only sees ~1.6 KB of a 13 KB completed answer.
-    const partialEvidenceHasFullBody = /Recovered delegated specialist body \(full\):/i.test(cleaned);
-    const partialEvidenceCap = partialEvidenceHasFullBody ? 12_000 : 1600;
-    const evidence = rawWorkspaceToolDump
-      ? formatRawWorkspaceToolDumpFailure()
-      : truncatePlainText(partialEvidence ?? cleaned, partialEvidenceCap);
-    if (delegationFailed) {
-      const parts = [
-        `Delegated result from ${agentName} — TASK FAILED.`,
-        attemptedAgents.length > 1 ? `Attempts: ${attemptedAgents.join(", ")}.` : "",
-        routingReason?.["confidence"] ? `Routing confidence: ${String(routingReason["confidence"])}.` : "",
-        "IMPORTANT: This delegated attempt failed. Report the failure honestly using only the explicit evidence below.",
-        "Do NOT claim the task was completed or infer extra causes that are not explicitly present in the evidence.",
-        `Observed evidence:\n${evidence || "No usable delegated result returned."}`,
-      ].filter(Boolean);
-      return parts.join("\n");
-    }
-    if (delegationPartial) {
-      const terminalState = typeof metadata?.["terminalState"] === "string" ? String(metadata["terminalState"]) : undefined;
-      const timedOut = terminalState === "timeout";
-      const importantNote = timedOut
-        ? "IMPORTANT: The specialist timed out. Use only the explicit partial evidence below; state what remains unverified or incomplete instead of filling gaps. Do NOT delegate again for this task in this turn."
-        : "IMPORTANT: Use the partial evidence below to continue your workflow. Do NOT treat this as a workflow failure. Proceed with any dependent tools.";
-      const parts = [
-        `Delegated result from ${agentName} — PARTIAL PROGRESS${timedOut ? " (TIMEOUT)" : ""}.`,
-        attemptedAgents.length > 1 ? `Attempts: ${attemptedAgents.join(", ")}.` : "",
-        routingReason?.["confidence"] ? `Routing confidence: ${String(routingReason["confidence"])}.` : "",
-        importantNote,
-        `Observed evidence:\n${evidence || "No usable delegated result returned."}`,
-      ].filter(Boolean);
-      return parts.join("\n");
-    }
-    // For long completed deliverables (papers, reports, analyses) and
-    // structured tabular/list content (markdown tables, numbered lists with
-    // many rows) keep markdown intact and pass the full content so the
-    // orchestrator LLM can relay it verbatim. Smaller models are otherwise
-    // prone to summarising a 27-row headline table down to 2 rows and
-    // appending an invented "(truncated)" marker.
-    const tableRowCount = (cleaned.match(/^\s*\|.+\|\s*$/gm) ?? []).length;
-    const numberedListCount = (cleaned.match(/^\s*\d{1,3}[.)]\s+\S/gm) ?? []).length;
-    const bulletListCount = (cleaned.match(/^\s*[-*+]\s+\S/gm) ?? []).length;
-    const looksStructured =
-      tableRowCount >= 4 || numberedListCount >= 5 || bulletListCount >= 8;
-    const isLongDeliverable = cleaned.length > 2500 || looksStructured;
-    const successEvidence = isLongDeliverable
-      ? truncatePlainText(stripWorkflowPreamble(stripAgentPrefix(resultText)), effectiveMaxDelegatedResultChars())
-      : evidence;
-    // A runtime-authored research slice returns gathered EVIDENCE, never the
-    // user-facing deliverable — the orchestrator must synthesize the actual
-    // answer from it. The VERBATIM instruction (and with it the
-    // single-deliverable relay shortcut, which keys on that exact string)
-    // shipped a component-spec research dump as the entire answer to a device
-    // DESIGN request, skipping synthesis completely (audit b5107ae4).
-    const researchSlice = metadata?.["researchSlice"] === true;
-    const importantNote = researchSlice
-      ? "IMPORTANT: This is gathered research EVIDENCE, not the final deliverable. Write the answer to the user's ORIGINAL request yourself, in the user's language, covering EVERY part of what they asked. Ground every concrete spec, name, number, and recommendation in this evidence and keep the source URLs for the claims you use. Do NOT paste this report verbatim and do NOT invent values that are not in the evidence."
-      : isLongDeliverable
-        ? "IMPORTANT: Present the full content below VERBATIM to the user. Reproduce EVERY row, bullet, list item, table entry, heading, name, number, date, URL, and source exactly as shown. Do NOT summarize, shorten, rephrase, omit any section, collapse rows into 'and others', insert ellipses, or add markers like '(truncated)', '(abgeschnitten)', '(cut off)', '(Zusammenfassung)' — the evidence is the FULL deliverable, not a snippet. Output it exactly as-is, preserving all headings, bullet points, tables, and structure."
-        : "IMPORTANT: Relay ALL specific details from the evidence below (names, numbers, values) in your answer. Do NOT paraphrase with different numbers or names. Do NOT add markers like '(truncated)' or '(abgeschnitten)'.";
-    const parts = [
-      `Delegated result from ${agentName} — TASK COMPLETED.`,
-      attemptedAgents.length > 1 ? `Attempts: ${attemptedAgents.join(", ")}.` : "",
-      routingReason?.["confidence"] ? `Routing confidence: ${String(routingReason["confidence"])}.` : "",
-      importantNote,
-      `Observed evidence:\n${successEvidence || "No usable delegated result returned."}`,
-    ].filter(Boolean);
-    return parts.join("\n");
-  }
-
-  if (toolName === "parallel_delegate") {
-    const succeeded = Number(metadata?.["succeeded"] ?? 0);
-    const failed = Number(metadata?.["failed"] ?? 0);
-    const taskCount = Number(metadata?.["taskCount"] ?? succeeded + failed);
-    const evidence = truncatePlainText(stripPresentationFormatting(resultText), 1600);
-    return [
-      `Parallel delegation completed. Successful tasks: ${succeeded}/${taskCount}. Failed tasks: ${failed}.`,
-      "IMPORTANT: Relay ALL specific details from the evidence below (names, numbers, values, statuses) in your answer. Do NOT replace them with guessed details.",
-      `Observed evidence:\n${evidence || "No usable delegated result returned."}`,
-    ].join("\n");
-  }
-
-  if (toolName === "run_task_graph") {
-    const completed = Array.isArray(metadata?.["completed"]) ? (metadata?.["completed"] as unknown[]).length : 0;
-    const failed = Array.isArray(metadata?.["failed"]) ? (metadata?.["failed"] as unknown[]).length : 0;
-    const blocked = Array.isArray(metadata?.["blocked"]) ? (metadata?.["blocked"] as unknown[]).length : 0;
-    const evidence = truncatePlainText(stripPresentationFormatting(resultText), 1600);
-    const taskGraphStatus = failed > 0 || blocked > 0
-      ? `Task graph finished with incomplete status. Nodes completed: ${completed}. Failed: ${failed}. Blocked: ${blocked}.`
-      : `Task graph completed. Nodes completed: ${completed}. Failed: ${failed}. Blocked: ${blocked}.`;
-    return [
-      taskGraphStatus,
-      "IMPORTANT: Relay ALL specific details from the evidence below (task states, selected agents, values) in your answer. Do NOT replace them with guessed details.",
-      `Observed evidence:\n${evidence || "No usable task-graph result returned."}`,
-    ].join("\n");
-  }
-
-  if (toolName === "run_workflow") {
-    // No saved workflow matched (a routing miss, not a completed run and not a failure):
-    // relay the tool's routing guidance verbatim instead of the "Workflow completed.
-    // Executed steps" framing, so the model delegates rather than treating it as
-    // executed evidence (audit bd3d60dc).
-    if (metadata?.["workflowNotFound"] === true) {
-      return resultText.trim() || "No saved workflow matched this request. Delegate to mission_coordinator or answer the user directly.";
-    }
-    const workflowName = typeof metadata?.["workflowName"] === "string" ? String(metadata["workflowName"]) : "workflow";
-    const workflowType = typeof metadata?.["workflowType"] === "string" ? String(metadata["workflowType"]) : "workflow";
-    const blocked = metadata?.["blocked"] === true;
-    const stepCount = Number(metadata?.["stepCount"] ?? 1);
-    const executedSteps = Number(metadata?.["executedSteps"] ?? stepCount);
-    const evidence = truncatePlainText(stripPresentationFormatting(resultText), 1600);
-    // Artifact-bearing completion: the deliverables are FILES attached to the
-    // turn, not chat text. Without this pivot the model relays the document
-    // body verbatim and ships its truncated head as the final answer
-    // (audit 2445da2e: 1600 chars of the paper's TOC ending in "…" while the
-    // real paper/deck/notes sat in the attachments).
-    const workflowArtifactPaths = Array.isArray(metadata?.["artifacts"])
-      ? (metadata["artifacts"] as Array<Record<string, unknown>>)
-        .map((artifact) => typeof artifact["outputPath"] === "string" ? String(artifact["outputPath"]) : (typeof artifact["filename"] === "string" ? String(artifact["filename"]) : ""))
-        .filter(Boolean)
-      : [];
-    const completedInstruction = workflowArtifactPaths.length > 0
-      ? "IMPORTANT: The workflow's deliverables were SAVED AS FILES and are attached to this message — do NOT paste their contents into your answer. Write a SHORT final summary in the user's language: state what was completed, list EVERY artifact path below with a one-line description, and note anything the evidence marks as incomplete. Do NOT start fresh ad hoc delegation or rerun research for the same request.\n"
-        + `Artifact files (already attached):\n${workflowArtifactPaths.map((path) => `- ${path}`).join("\n")}`
-      : "IMPORTANT: Treat this as executed workflow output, not a plan. Relay the concrete evidence below and do not claim extra steps were run. Do NOT start fresh ad hoc delegation, create_ephemeral_agent, or rerun research for the same request in this turn unless the workflow evidence itself identifies one smallest corrective follow-up.";
-    return [
-      `Workflow ${workflowName} [${workflowType}] ${blocked ? "blocked" : "completed"}. Executed steps: ${executedSteps}/${stepCount}.`,
-      blocked
-        ? "IMPORTANT: This workflow did not complete. Treat the evidence below as a failure report, not as completed research. Do NOT jump straight to drafting-only agents like paper_author or summarizer unless earlier evidence was already collected successfully."
-        : completedInstruction,
-      `Observed evidence:\n${evidence || "No usable workflow result returned."}`,
-    ].join("\n");
-  }
-
-  if (toolName === "create_ephemeral_agent") {
-    const agentName = typeof metadata?.["agentName"] === "string" ? String(metadata["agentName"]) : "ephemeral agent";
-    const rejectedTools = Array.isArray(metadata?.["rejectedTools"]) ? (metadata?.["rejectedTools"] as unknown[]).map(String).filter(Boolean) : [];
-    const evidence = truncatePlainText(stripPresentationFormatting(stripAgentPrefix(resultText)), 1600);
-    const failed = looksLikeDelegatedFailureEvidence(evidence);
-    return [
-      `Ephemeral agent ${agentName} ${failed ? "failed" : "completed"}.`,
-      rejectedTools.length > 0 ? `Rejected tools: ${rejectedTools.join(", ")}.` : "",
-      failed
-        ? "IMPORTANT: This ephemeral-agent attempt failed. Report the failure honestly using only the explicit evidence below. Do NOT claim the task was completed or delegated successfully."
-        : "IMPORTANT: Relay ALL specific details from the evidence below in your answer.",
-      `Observed evidence:\n${evidence || "No usable ephemeral-agent result returned."}`,
-    ].filter(Boolean).join("\n");
-  }
-
-  if (toolName === "search_agents") {
-    const evidence = truncatePlainText(stripPresentationFormatting(resultText), 1600);
-    return [
-      "Agent routing suggestions only. No delegation has happened yet.",
-      "IMPORTANT: Treat this as candidate-selection guidance, not as proof that any task was routed or executed.",
-      "If this turn ends without a completed delegate_to_agent call, do NOT tell the user that work was routed to any suggested agent.",
-      `Observed evidence:\n${evidence || "No routing suggestions returned."}`,
-    ].join("\n");
-  }
-
-  if (toolName === "search_workflows") {
-    const evidence = truncatePlainText(stripPresentationFormatting(resultText), 1600);
-    return [
-      "Workflow catalog suggestions only. No workflow has been executed yet.",
-      "IMPORTANT: Treat this as reusable-workflow discovery, not as proof that any scene or job ran.",
-      "If this turn ends without a completed run_workflow call, do NOT tell the user that a workflow was executed.",
-      "If concrete matches were returned, prefer run_workflow next instead of delegate_to_agent or other ad hoc orchestration.",
-      `Observed evidence:\n${evidence || "No workflow matches returned."}`,
-    ].join("\n");
-  }
-
-  if (toolName === "list_agents") {
-    const evidence = truncatePlainText(stripPresentationFormatting(resultText), 1600);
-    return [
-      "Agent search results only. No delegation has happened yet.",
-      "IMPORTANT: Treat this as candidate-selection guidance, not as proof that any task was routed or executed.",
-      "If this turn ends without a completed delegate_to_agent call, do NOT tell the user that work was routed to any suggested agent.",
-      `Observed evidence:\n${evidence || "No agent candidates returned."}`,
-    ].join("\n");
-  }
-
-  // Informational capability directory the user explicitly asked for — relay it
-  // in full (generously capped) instead of the small generic fallback. The full
-  // list is below; explicitly tell the model not to abbreviate or claim
-  // truncation (the slow local model otherwise lists only the first few).
-  if (toolName === "agent_catalog") {
-    return [
-      "Complete specialist agent directory below — it is NOT truncated.",
-      "If the user asked which agents exist or what they can do, list EVERY entry below. Do NOT abbreviate, sample, summarize to a few, or claim the list was cut off.",
-      truncatePlainText(resultText, 12_000),
-    ].join("\n");
-  }
-
-  return fallback;
-}
+// buildModelVisibleToolResult + its small pure text helpers (truncateForContext,
+// truncatePlainText, escapeRegExp, stripAgentPrefix, stripWorkflowPreamble,
+// looksLikeDelegatedFailureEvidence) were extracted to ./tool-result-format.ts
+// (god-file seam). They touch no main-loop closure. Imported + re-exported above;
+// classifyPostOrchestrationDisposition uses looksLikeDelegatedFailureEvidence from there.
 
 export function buildTemporalContextPrompt(now: Date = new Date()): string {
   const formattedDate = now.toLocaleDateString("en-US", {
@@ -1402,6 +1051,13 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
   }
 }
 
+// ── Turn-preparation phases ──────────────────────────────────────────────────
+// The cleanly-separable pre-loop setup phases (prepareRateLimit,
+// prepareInputGuardrails, recordUserTurnMessage, prepareReceptionistFastLane,
+// prepareDocumentRag) and the blocked() TurnOutput builder were extracted to
+// ./turn-prepare.ts (god-file seam). They thread state explicitly and depend on
+// no main-loop closure. Imported above; _runTurn calls them exactly as before.
+
 async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal: AbortSignal): Promise<TurnOutput> {
   const { session, userMessage } = opts;
   const guardrailEvents: TurnOutput["guardrailEvents"] = [];
@@ -1424,91 +1080,15 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   };
 
   // ── Rate limit check ──────────────────────────────────────────────────────
-  const rl = await checkRateLimit(session.id, "request");
-  if (!rl.allowed) {
-    logAudit("rate_limited", { remaining: 0, resetAt: rl.resetAt }, { sessionId: session.id });
-    return blocked("Rate limit exceeded. Please wait before sending another message.");
-  }
+  const rateLimited = await prepareRateLimit(session);
+  if (rateLimited) return rateLimited;
 
   // ── Input guardrail ───────────────────────────────────────────────────────
-  // Scene/job runs carry the operator-authored task text from config as the
-  // "message" (channel "scene"). That is trusted input, so the prompt-injection
-  // scanner flags but does not block it — otherwise a scene's own security
-  // instruction (e.g. "Never expose credential values") would hard-block the run
-  // with zero turns. Untrusted channels (chat, telegram, email, webhook, a2a, …)
-  // remain strictly blocked.
-  const trustedWorkflowInput = session.channel === "scene";
-  const inputCheck = checkInput(userMessage, { trusted: trustedWorkflowInput });
-  if (!inputCheck.allowed) {
-    const details = inputCheck.reason ?? "Prompt injection detected";
-    logAudit("guardrail_blocked", { type: "input", reason: details, patterns: inputCheck.detectedPatterns }, {
-      sessionId: session.id,
-      severity: "warn",
-    });
-    guardrailEvents.push({ type: "input_blocked", details });
-    return blocked(`I can't process that message: ${details}`);
-  }
+  const inputBlocked = await prepareInputGuardrails(userMessage, session, guardrailEvents);
+  if (inputBlocked) return inputBlocked;
 
-  if (inputCheck.detectedPatterns && inputCheck.detectedPatterns.length > 0) {
-    guardrailEvents.push({ type: "input_flagged", details: inputCheck.reason ?? "" });
-    logAudit("guardrail_flagged", { patterns: inputCheck.detectedPatterns }, { sessionId: session.id, severity: "warn" });
-  }
-
-  const moderatedInput = await moderateInputText(userMessage);
-  if (moderatedInput?.blocked) {
-    const details = `Model moderation blocked input: ${moderatedInput.summary}`;
-    logAudit("guardrail_blocked", { type: "input_model", reason: details, categories: moderatedInput.categories }, {
-      sessionId: session.id,
-      severity: "warn",
-    });
-    guardrailEvents.push({ type: "input_model_blocked", details });
-    return blocked(`I can't process that message: ${details}`);
-  }
-
-  if (moderatedInput?.flagged) {
-    const details = `Model moderation flagged input: ${moderatedInput.summary}`;
-    guardrailEvents.push({ type: "input_model_flagged", details });
-    logAudit("guardrail_flagged", { type: "input_model", categories: moderatedInput.categories }, { sessionId: session.id, severity: "warn" });
-  }
-
-  // ── Build message history ─────────────────────────────────────────────────
-  const userMetadata: Record<string, unknown> = {};
-  if (opts.userDisplayContent?.trim()) {
-    userMetadata["displayContent"] = opts.userDisplayContent.trim();
-  }
-  if (opts.userAttachments?.length) {
-    userMetadata["attachments"] = opts.userAttachments;
-  }
-  session.addMessage({
-    role: "user",
-    content: userMessage,
-    ...(Object.keys(userMetadata).length > 0 ? { metadata: userMetadata } : {}),
-  });
-  session.pruneTransientTurnSystemMessages();
-  session.incrementTurn();
-
-  logAudit("message_received", { length: userMessage.length }, {
-    sessionId: session.id,
-    channel: session.channel,
-    userId: session.userId,
-  });
-
-  // ── Deterministic assistant-rename persistence ──────────────────────────────
-  // An explicit naming command ("Ab jetzt heißt du Luna", "your name is now …")
-  // must actually persist. Local models routinely just acknowledge it ("saved!")
-  // without calling assistant_personality_update (audit b71523fb), so we set the
-  // name here too — making the name durable AND the model's claim truthful.
-  try {
-    const namedAs = extractAssistantName(userMessage);
-    if (namedAs) {
-      const { setMainAssistantName, loadMainAssistantPersonality } = await import("../personality/service.js");
-      const before = loadMainAssistantPersonality().identity.name;
-      setMainAssistantName(namedAs, "user");
-      if (before !== namedAs) log.info({ sessionId: session.id, name: namedAs }, "assistant renamed (deterministic persist)");
-    }
-  } catch (err) {
-    log.warn({ err }, "deterministic assistant-name persist failed");
-  }
+  // ── Build message history + deterministic assistant-rename persistence ──────
+  await recordUserTurnMessage(opts, session, userMessage);
 
   const detectedDynamicGuidance = buildDynamicTurnGuidance(userMessage);
   const hasTurnAttachments = Boolean(opts.userAttachments?.length);
@@ -1524,40 +1104,16 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   // Runs BEFORE document-RAG augmentation so a trivial "hi" never pays the
   // (CPU-bound) engram search cost; turns WITH attachments skip the fast lane so
   // their files are always ingested + injected below.
-  if (detectedDynamicGuidance === null && !hasTurnAttachments && getConfig().receptionist?.enabled) {
-    const fastLane = await timedPhase("receptionistFastLane", () => tryReceptionistFastLane(userMessage, signal).catch(() => null));
-    if (fastLane) {
-      session.addMessage({ role: "assistant", content: fastLane.response });
-      opts.onChunk?.(fastLane.response);
-      logAudit("message_received", { fastLane: true, length: fastLane.response.length }, {
-        sessionId: session.id,
-        channel: session.channel,
-        userId: session.userId,
-      });
-      return {
-        response: fastLane.response,
-        toolCallsExecuted: 0,
-        guardrailEvents,
-        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
-        blocked: false,
-        performance: {
-          turnDurationMs: Date.now() - turnStartedAt,
-          llmCalls: 1,
-          llmTimeMs: 0,
-          toolCallsRequested: 0,
-          toolExecutionTimeMs: 0,
-          systemPromptChars: 0,
-          collapsedHistoryMessages: 0,
-          collapsedHistoryChars: 0,
-          promptChars: userMessage.length,
-          completionChars: fastLane.response.length,
-          toolIterations: 0,
-          finishReason: "receptionist_fast_lane",
-          blocked: false,
-        },
-      };
-    }
-  }
+  const fastLaneOutput = await prepareReceptionistFastLane({
+    eligible: detectedDynamicGuidance === null && !hasTurnAttachments && getConfig().receptionist?.enabled === true,
+    userMessage,
+    signal,
+    opts,
+    session,
+    guardrailEvents,
+    turnStartedAt,
+  });
+  if (fastLaneOutput) return fastLaneOutput;
 
   // ── Document RAG augmentation ───────────────────────────────────────────────
   // Runs AFTER the fast lane, so trivial turns never pay the engram search cost.
@@ -1565,33 +1121,12 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   // the file-MCP extractor) and injects the most relevant excerpts as a transient
   // [DOCUMENT CONTEXT] system message so the assistant answers from the source.
   // No-op when documentRag is disabled / engram is unreachable. Never fatal.
-  // On a userOwnFacts turn with the profile prefetch active, the per-turn RAG is the
-  // SINGLE document source: it uses the profile-biased query (reliable CV recall) and the
-  // prefetch then skips its own duplicate doc retrieval. Captured so the prefetch knows
-  // whether the CV was already surfaced — and so it cannot be lost (the [DOCUMENT CONTEXT]
-  // here runs first and unconditionally).
-  const userOwnFactsTurn = detectedDynamicGuidance?.userOwnFacts === true
-    && getConfig().orchestration?.userProfilePrefetch === true;
-  const ragQuery = userOwnFactsTurn ? buildProfileBiasedQuery(userMessage) : userMessage;
-  let documentRagFoundDocs = false;
-  try {
-    const { augmentTurnWithDocuments } = await import("../retrieval/document-rag.js");
-    const aug = await timedPhase("documentRag", () => augmentTurnWithDocuments({
-      ctx: { sessionId: session.id, ...(session.userId ? { userId: session.userId } : {}) },
-      workspacePath: session.getWorkspacePath(),
-      query: ragQuery,
-      attachments: opts.userAttachments,
-    }));
-    if (aug.ingested > 0 || aug.failed > 0) {
-      logAudit("document_rag_ingest", { ingested: aug.ingested, failed: aug.failed }, { sessionId: session.id });
-    }
-    if (aug.contextBlock) {
-      session.addMessage({ role: "system", content: `[DOCUMENT CONTEXT]\n${aug.contextBlock}` });
-      documentRagFoundDocs = true;
-    }
-  } catch (err) {
-    log.warn({ err }, "document RAG augmentation failed — continuing without it");
-  }
+  const { documentRagFoundDocs } = await prepareDocumentRag({
+    detectedDynamicGuidance,
+    userMessage,
+    opts,
+    session,
+  });
 
   const priorDelegateEvidenceForFollowUp = findRecentDelegateEvidence(session.getHistory());
   const reusePriorDelegateEvidenceForFollowUp = shouldReusePriorDelegateEvidenceForSourceFollowUp(
@@ -5907,17 +5442,9 @@ async function runDeliverableConsistencyGate(
   };
 }
 
-function blocked(reason: string, swarmState?: SwarmState, performance?: TurnPerformanceMetrics): TurnOutput {
-  return {
-    response: reason,
-    toolCallsExecuted: 0,
-    guardrailEvents: [{ type: "blocked", details: reason }],
-    usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
-    blocked: true,
-    swarmState,
-    performance,
-  };
-}
+// blocked() — the early-exit TurnOutput builder — moved to ./turn-prepare.ts with
+// the prepare-phases that also use it (god-file seam). Imported above; the main
+// loop calls it exactly as before.
 
 /**
  * Walk backward through session history and extract completed/partial swarm
