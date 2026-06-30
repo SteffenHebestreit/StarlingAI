@@ -160,11 +160,19 @@ async function cmdStart() {
 
   const dc = (...args) => ["docker", "compose", ...composeFiles, ...profileArgs, ...args];
 
-  // Wipe volumes if --fresh
+  // Wipe volumes + host flat-file state if --fresh (a true clean slate, mirroring
+  // `sai stop --volumes`): `down -v` clears the DB volumes, but the flat-file
+  // memory/skills/audit and uploaded files live on the host bind mount and survive
+  // it, so sweep those too — otherwise --fresh silently leaves stale .starlingai data.
   if (wipeVolumes) {
     hdr("Wiping existing volumes...");
     try { execSync(dc("down", "-v").join(" "), { stdio: "inherit" }); } catch { /* ok */ }
     ok("Volumes wiped");
+    hdr("Clearing flat-file agent state (memory, skills, learning history, audit log)...");
+    wipeFlatFileMemory();
+    hdr("Clearing uploaded attachment files (document-RAG source files)...");
+    wipeUploadedFiles();
+    ok("Clean slate: DB volumes, flat-file memory + audit log, and uploaded files removed (credentials preserved).");
   }
 
   // Build images
@@ -227,15 +235,17 @@ async function cmdStart() {
 `);
 }
 
-// Flat-file agent memory that lives on the host bind mount (NOT in a docker
-// volume), so `docker compose down -v` never removes it. `sai stop --volumes`
-// wipes these too for a true clean slate. The DB-backed memory (Redis session
-// facts, MemGraph knowledge graph, Postgres agent store + embeddings, QuestDB
-// research notes) is already gone with the volumes. Secrets (credentials.enc,
-// .jwt_secret, token) and the audit log are deliberately PRESERVED — they are not
-// "memory" and losing them is irreversible; delete .starlingai by hand for a full
-// factory reset. Both config zones are covered: the gateway cwd (.starlingai) and
-// the workspace (workspace/.starlingai, where the durable memory store lives).
+// Flat-file agent state that lives on the host bind mount (NOT in a docker
+// volume), so `docker compose down -v` never removes it. `sai stop --volumes`,
+// `sai start --fresh`, and `sai wipe` clear these for a true clean slate. The
+// DB-backed memory (Redis session facts, MemGraph knowledge graph, Postgres agent
+// store + embeddings, QuestDB research notes) is already gone with the volumes.
+// The audit log (audit.jsonl) is wiped too. Only the credentials (credentials.enc
+// + .salt, .jwt_secret, token) are PRESERVED so a clean slate does not force a
+// re-auth / token re-mint — `rm -rf .starlingai` by hand for a full factory reset
+// incl. credentials. State now centralizes at the repo-root .starlingai (the
+// gateway's cwd zone, where audit + credentials live); the legacy workspace and
+// packages/core zones are still swept to clear residue from older layouts.
 const MEMORY_FLATFILE_TARGETS = [
   "memory",                            // durable memory store
   "skills",                            // learned procedural skills
@@ -243,6 +253,7 @@ const MEMORY_FLATFILE_TARGETS = [
   "agent_outcomes.ndjson",             // per-agent outcome history
   "promoted_agents.json",              // promoted ephemeral agents
   "config_assistant_proposals.json",   // pending self-improvement proposals
+  "audit.jsonl",                       // audit log — wiped for a clean slate (creds kept)
 ];
 const MEMORY_FLATFILE_ZONES = [
   PRODUCT.stateDirName,                // gateway cwd zone
@@ -327,8 +338,8 @@ async function cmdStop() {
     wipeFlatFileMemory();
     hdr("Clearing uploaded attachment files (document-RAG source files)...");
     wipeUploadedFiles();
-    ok("Clean slate: containers, networks, DB volumes (incl. engram RAG + reranker cache), flat-file memory, and uploaded files removed.");
-    info(`Preserved: credentials, JWT secret, dashboard token, audit log — delete ${PRODUCT.stateDirName} by hand for a full factory reset.`);
+    ok("Clean slate: containers, networks, DB volumes (incl. engram RAG + reranker cache), flat-file memory + audit log, and uploaded files removed.");
+    info(`Preserved: credentials, JWT secret, dashboard token — delete ${PRODUCT.stateDirName} by hand for a full factory reset.`);
   } else {
     ok("All containers and networks removed. Data volumes preserved.");
   }
