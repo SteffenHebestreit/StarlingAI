@@ -16,7 +16,15 @@
       // specific guidance only when it fires). Safe to re-enable now that the
       // embedding fix restored semantic agent search/classification — eval-gated
       // with computer-use vs pentest and server-admin disambiguation cases.
-      "taskConditionalPrompt": true
+      "taskConditionalPrompt": true,
+      // Lift the ~13KB orchestration block (Swarm Rules → Orchestration Strategy)
+      // out of the always-on prompt; inject it back only on orchestration-intent
+      // turns. A direct answer pays a ~half-size prompt; delegation tools + the
+      // honesty/core sections stay regardless. Validating routing quality here.
+      "splitOrchestrationPrompt": true,
+      // Keep the orchestrator base-prompt KV prefix warm during idle so the first
+      // turn after boot / a delegating turn doesn't pay the cold prefill.
+      "promptCacheWarmKeeper": true
     }
   },
   "gateway": {

@@ -92,6 +92,8 @@ import {
   extractInlineHtmlDocument,
   looksLikeCompleteHtmlDocument,
   stripLargeCodeFences,
+  looksLikeArtifactCreationRequest,
+  looksLikeComposedGuideRequest,
 } from "./deliverable-intent.js";
 
 // Re-export the deliverable-intent module so existing imports from runtime.js
@@ -4587,7 +4589,14 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       if (si > 0 && ei > si) {
         const orchestrationModule = systemPrompt.slice(si, ei).trimEnd();
         systemPrompt = systemPrompt.slice(0, si).trimEnd() + "\n\n" + systemPrompt.slice(ei);
-        if (initialDynamicGuidance) orchestrationModuleMsg = orchestrationModule;
+        // Inject the module on any turn that smells like orchestration — a detected intent,
+        // an artifact/app/deck/site build, or a composed multi-part deliverable. Lean only for
+        // clearly direct Q&A. Conservative: when in doubt, include the module (a needless include
+        // just costs prefill; a wrong omission costs routing quality).
+        const needsOrchestrationModule = !!initialDynamicGuidance
+          || looksLikeArtifactCreationRequest(userMessage)
+          || looksLikeComposedGuideRequest(userMessage);
+        if (needsOrchestrationModule) orchestrationModuleMsg = orchestrationModule;
       }
     }
     const temporalContext = buildTemporalContextPrompt();
