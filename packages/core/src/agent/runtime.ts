@@ -6,6 +6,7 @@ import { getChatProvider, getChatProviderForTier, getChatProviderWithOverride } 
 import { salvageToolCallArguments } from "../providers/lmstudio.js";
 import type { ChatProvider, LLMMessage, LLMResponse, StreamChunk } from "../providers/lmstudio.js";
 import { tryReceptionistFastLane, buildMemoryCapsule } from "./receptionist.js";
+import { markOrchestratorActivity, markOrchestratorIdle } from "./cache-warmer.js";
 import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type SwarmState, type ToolContext } from "../tools/registry.js";
 import { isToolAllowed, requiresApproval } from "../guardrails/tool-tiers.js";
 import { loadTurnPlan, classifyTurnRisk } from "./turn-plan.js";
@@ -3450,9 +3451,16 @@ export function buildTemporalContextPrompt(now: Date = new Date()): string {
 }
 
 export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
-  // Establish a fresh per-turn phase-timing store, then run the turn inside it so
-  // timedPhase() calls anywhere in the turn record into THIS turn's map.
-  return _phaseTimingsStore.run(Object.create(null) as Record<string, number>, () => runTurnImpl(opts));
+  // Tell the prompt-cache warm-keeper the orchestrator model is busy (abort any
+  // in-flight warm-up so it never queues ahead of this turn); re-arm on completion.
+  markOrchestratorActivity();
+  try {
+    // Establish a fresh per-turn phase-timing store, then run the turn inside it so
+    // timedPhase() calls anywhere in the turn record into THIS turn's map.
+    return await _phaseTimingsStore.run(Object.create(null) as Record<string, number>, () => runTurnImpl(opts));
+  } finally {
+    markOrchestratorIdle();
+  }
 }
 
 async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {

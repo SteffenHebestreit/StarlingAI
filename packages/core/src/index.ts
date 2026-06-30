@@ -26,6 +26,7 @@ import { startRecoveryMetrics, stopRecoveryMetrics } from "./observability/recov
 import { initSceneJobStore, shutdownSceneJobStore } from "./agent/jobs.js";
 import { startSceneJobWorker, stopSceneJobWorker } from "./agent/scene-worker.js";
 import { initSessionRedis, startSessionPruner, stopSessionPruner } from "./agent/session.js";
+import { startCacheWarmer, stopCacheWarmer } from "./agent/cache-warmer.js";
 import { closeSessionRedis } from "./agent/session-redis.js";
 import { syncConfiguredJobTriggers } from "./runtime/job-triggers.js";
 import { rehydrateScheduledTasks } from "./runtime/scheduled-task-runner.js";
@@ -245,6 +246,11 @@ export async function main() {
   // so ended sessions don't accumulate unbounded in the store + Redis.
   startSessionPruner();
 
+  // Prompt-cache warm-keeper (agents.performance.promptCacheWarmKeeper, default off):
+  // keep the orchestrator's base-prompt KV prefix warm during idle so the first turn
+  // after boot / a delegating turn doesn't pay the cold prefill. No-op when disabled.
+  startCacheWarmer();
+
   // Start the Skill Library self-improvement driver — periodically retires low
   // performers, archives duplicates, and promotes proven skills to scenes.
   if (getConfig().skillLibrary.enabled) {
@@ -332,6 +338,7 @@ export async function main() {
   const shutdown = async (signal: string) => {
     log.info({ signal }, "Shutting down...");
     clearInterval(healthInterval);
+    stopCacheWarmer();
     stopEventLoopMonitor();
     stopProviderActivityMonitor();
     stopRecoveryMetrics();

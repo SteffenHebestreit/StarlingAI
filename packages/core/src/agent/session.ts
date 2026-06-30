@@ -1082,7 +1082,7 @@ function buildOrchestrationExamples(config: ReturnType<typeof getConfig>, delega
   ].join("\n");
 }
 
-  function defaultSystemPrompt(workspacePath?: string): string {
+export function defaultSystemPrompt(workspacePath?: string): string {
   const config = getConfig();
   const toolMode = config.agents.mainAssistant.toolMode;
   const delegateOnly = toolMode === "delegate_only";

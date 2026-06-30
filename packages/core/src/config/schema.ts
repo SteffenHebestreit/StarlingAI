@@ -1836,6 +1836,17 @@ export const ConfigSchema = z.object({
        */
       taskConditionalPrompt: z.boolean().default(false),
       /**
+       * Prompt-cache warm-keeper. When true, a background warm-up prefills the
+       * orchestrator's stable base system prompt into the model server's KV cache
+       * (cache_prompt) on boot and a short idle window after each turn, so the next
+       * real turn reuses the prefix instead of paying the cold prefill. Aborts the
+       * instant a real turn starts; strictly best-effort, never slows a turn.
+       * Default off (A/B the first-token latency). See agent/cache-warmer.ts.
+       */
+      promptCacheWarmKeeper: z.boolean().default(false),
+      /** Idle window (ms) after a turn before the warm-keeper re-warms the prefix. */
+      promptCacheWarmIdleMs: z.number().int().min(1_000).max(120_000).default(4_000),
+      /**
        * Max chars of a single delegated agent's result that the orchestrator
        * relays verbatim. Long deliverables (guides, reports) above this are
        * truncated before the relay, cutting the user's answer off mid-way. The
