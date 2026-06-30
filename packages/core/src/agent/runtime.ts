@@ -217,6 +217,9 @@ export {
   stripFabricatedCitations,
 } from "./citation-honesty.js";
 
+// Terminal honesty/guard blocks that fire on the assembled finalResponse (god-file seam).
+import { applyCitationHonestyGuard } from "./turn-terminal-guards.js";
+
 // Pure response/tool-call collapsing + delegation arg helpers (god-file seam).
 import {
   deriveDelegationTaskFromArgs,
@@ -3010,34 +3013,20 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         }, { sessionId: session.id, severity: "warn" });
       }
 
-      // Citation-honesty guard (orchestration.citationHonestyGuard) — FULLY STRUCTURAL, no input
-      // classification. ANY answer that presents URL citations but ran NO real web/research
-      // execution this turn is fabricating sources (audit 1303e254: 7 invented 404 URLs, zero
-      // delegation, only a failed run_workflow). Strip the fabricated URLs + prepend the honest
-      // unverified caveat so no 404 link ever ships and any "verified" framing is corrected.
-      // Both the trigger (answer carries URLs) and the gate (no real delegation / SUCCESSFUL
-      // workflow / direct web tool / shared findings ran) are STRUCTURAL + language-free — there
-      // is NO sourceSensitive keyword gate (de-lexicalized): a fabricated link is caught whatever
-      // the question was, in any language; a genuinely-researched answer keeps its citations.
-      if (getConfig().orchestration?.citationHonestyGuard === true
-        && answerPresentsSourceCitations(finalResponse)) {
-        const isWebReachingTool = (t: string) => /^web_search/i.test(t) || /^web_fetch$/i.test(t) || /^browser_/i.test(t);
-        const webToolCalledDirectly = [..._turnToolCallCounts.keys()].some(isWebReachingTool);
-        const sharedFactsForCitation = await getSharedFactsEvidenceForFinalSynthesis(session.id);
-        const hadRealResearch = _turnDelegationCount > 0
-          || workflowRunCompletedThisTurn
-          || webToolCalledDirectly
-          || _turnShareFindingCount > 0
-          || (sharedFactsForCitation?.itemCount ?? 0) > 0;
-        if (!hadRealResearch) {
-          finalResponse = prependUnverifiedSourceCaveat(stripFabricatedCitations(finalResponse), userMessage);
-          guardrailEvents.push({ type: "guardrail_flagged", details: "fabricated_citations_stripped" });
-          logAudit("guardrail_flagged", {
-            type: "fabricated_citations_stripped",
-            trigger: "structural_url_citation_without_research",
-          }, { sessionId: session.id, severity: "warn" });
-        }
-      }
+      // Citation-honesty guard (orchestration.citationHonestyGuard) — extracted verbatim to
+      // agent/turn-terminal-guards.ts (god-file seam). FULLY STRUCTURAL: strips fabricated URL
+      // citations + prepends the honest unverified caveat when the answer carries URLs but no
+      // real web/research execution ran this turn. See that module for the full rationale.
+      ({ finalResponse } = await applyCitationHonestyGuard({
+        finalResponse,
+        userMessage,
+        sessionId: session.id,
+        turnToolCallCounts: _turnToolCallCounts,
+        turnDelegationCount: _turnDelegationCount,
+        workflowRunCompletedThisTurn,
+        turnShareFindingCount: _turnShareFindingCount,
+        guardrailEvents,
+      }));
 
       // False-completion guard: the turn asked to CREATE or MODIFY an artifact, produced
       // NO artifact this turn (no build delegation surfaced an attachment, no workspace
