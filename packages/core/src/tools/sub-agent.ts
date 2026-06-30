@@ -32,6 +32,8 @@ import { longRunningGenerationManager } from "../agent/long-running-generation.j
 
 const log = childLogger("tool:sub-agent");
 import { isCanonicalResearchSliceTask } from "../agent/source-sensitive-delegation.js";
+import { awaitQuorum } from "../agent/delegation-quorum.js";
+import { shouldCheckSubAgentDisagreement, checkSubAgentDisagreement } from "../agent/sub-agent-disagreement.js";
 
 const SERVER_EXECUTION_AGENT_NAMES = new Set(["shell_agent", "ops_triage", "infrastructure_agent"]);
 /**
@@ -5858,16 +5860,41 @@ registerTool({
     );
     const taskIds = allocateParallelTaskIds(delegatedCtx, dispatchTasks.length);
 
-    const results = await Promise.all(
-      dispatchTasks.map((taskSpec, index) => executeDelegationWithFallback({
+    const runSlice = (taskSpec: typeof dispatchTasks[number], index: number, ctxOverride: ToolContext) =>
+      executeDelegationWithFallback({
         ...taskSpec,
         taskId: taskIds[index],
         taskTitle: summarizeText(taskSpec.task, 80),
         // Auto-allocated parallel id — let a later round reuse an earlier same-signature
         // slice's evidence instead of re-researching it.
         allowSignatureReuse: true,
-      }, delegatedCtx))
-    );
+      }, ctxOverride);
+
+    // QUORUM EARLY-SYNTHESIS (orchestration.quorumEarlySynthesis, default-off): return as
+    // soon as ceil(quorumFraction * N) slices SUCCEED (+ a straggler grace window), aborting
+    // the rest, instead of blocking on the slowest. Default-off path is the original
+    // Promise.all (wait-for-all), byte-for-byte.
+    const orch = effectiveOrchestration();
+    let results: ToolResult[];
+    if (orch.quorumEarlySynthesis === true && dispatchTasks.length > 1) {
+      const k = Math.max(1, Math.ceil((orch.quorumFraction ?? 0.6) * dispatchTasks.length));
+      results = await awaitQuorum<ToolResult>(
+        dispatchTasks.map((taskSpec, index) => (signal: AbortSignal) =>
+          runSlice(taskSpec, index, { ...delegatedCtx, signal })),
+        {
+          k,
+          graceMs: orch.quorumStragglerGraceMs ?? 8000,
+          isSuccess: (r) => r.success === true,
+          onError: (err) => ({ success: false, output: "", error: String((err as { message?: string })?.message ?? err) }),
+          onAbandon: () => ({ success: false, output: "", error: "abandoned: quorum of successful slices reached before this slice completed (partial evidence persisted to shared facts)" }),
+          ...(delegatedCtx.signal ? { parentSignal: delegatedCtx.signal } : {}),
+        },
+      );
+    } else {
+      results = await Promise.all(
+        dispatchTasks.map((taskSpec, index) => runSlice(taskSpec, index, delegatedCtx)),
+      );
+    }
 
     const formatted = results.map((result, index) => {
       const label = dispatchTasks[index]?.agentName ?? `task_${index + 1}`;
@@ -5899,13 +5926,27 @@ registerTool({
       }
     }
 
+    // DISAGREEMENT-AS-SIGNAL (orchestration.subAgentDisagreementVerify, default-off): when
+    // ≥2 slices succeeded, a cheap routing-tier check flags contradictory outputs so the
+    // orchestrator reconciles them in synthesis instead of silently merging. Fails open.
+    let disagreementMarker: string | null = null;
+    if (shouldCheckSubAgentDisagreement({ enabled: orch.subAgentDisagreementVerify === true, succeeded })) {
+      const successfulOutputs = results
+        .map((result, index) => ({ label: dispatchTasks[index]?.agentName ?? `task_${index + 1}`, text: result.output ?? "", success: result.success }))
+        .filter((entry) => entry.success && entry.text.trim().length > 0)
+        .map(({ label, text }) => ({ label, text }));
+      disagreementMarker = await checkSubAgentDisagreement(successfulOutputs, delegatedCtx.signal);
+    }
+
+    const baseOutput = formatted.join("\n\n---\n\n");
     return {
       success: succeeded > 0,
-      output: formatted.join("\n\n---\n\n"),
+      output: disagreementMarker ? `${disagreementMarker}\n\n${baseOutput}` : baseOutput,
       metadata: {
         taskCount: dispatchTasks.length,
         succeeded,
         failed: results.length - succeeded,
+        ...(disagreementMarker ? { subAgentDisagreement: true } : {}),
         ...(aggregatedArtifacts.length > 0 ? { artifacts: aggregatedArtifacts } : {}),
         ...(duplicatesRemoved > 0 ? { requestedTaskCount: runnableTasks.length, duplicatesRemoved } : {}),
       },

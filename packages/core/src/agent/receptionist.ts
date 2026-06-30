@@ -49,12 +49,15 @@ export type FrontDeskDecision = { fastLane: true } | { fastLane: false; reason: 
  */
 export function classifyFrontDesk(
   userMessage: string,
-  opts: { alwaysEscalateTerms?: readonly string[] } = {},
+  opts: { alwaysEscalateTerms?: readonly string[]; confidenceAttempt?: boolean; confidenceMaxChars?: number } = {},
 ): FrontDeskDecision {
   const normalized = userMessage.trim().toLowerCase();
   if (!normalized) return { fastLane: false, reason: "empty" };
 
-  // Any task intent the runtime's classifier already recognises → full path.
+  // Any task intent the runtime's classifier already recognises → full path. This is
+  // the safety backbone for confidence-attempt mode: research/freshness/source/mail/
+  // user-own-facts/computer/server/maintenance turns all set a guidance flag here and
+  // escalate, so the relaxed gate below only ever sees questions with NO task signal.
   if (buildDynamicTurnGuidance(userMessage) !== null) {
     return { fastLane: false, reason: "task-intent" };
   }
@@ -66,6 +69,17 @@ export function classifyFrontDesk(
   ];
   if (deny.some((term) => term && normalized.includes(term))) {
     return { fastLane: false, reason: "escalate-term" };
+  }
+
+  // CONFIDENCE-ATTEMPT: a clearly-direct, self-contained question (no task intent, no
+  // escalate term) up to a length ceiling is a candidate — the micro-call self-scores
+  // confidence and abstains (escalates) when unsure. Without this flag the front desk
+  // stays smalltalk-only (the original behaviour).
+  if (opts.confidenceAttempt) {
+    if (normalized.length > (opts.confidenceMaxChars ?? 400)) {
+      return { fastLane: false, reason: "too-long-for-attempt" };
+    }
+    return { fastLane: true };
   }
 
   if (!isShortConversational(normalized)) {
@@ -97,6 +111,10 @@ export interface RunReceptionistDeps {
   personaLines?: readonly string[];
   maxResponseChars?: number;
   alwaysEscalateTerms?: readonly string[];
+  /** Confidence-attempt mode (config.receptionist.confidenceAttempt). */
+  confidenceAttempt?: boolean;
+  /** Candidate-length ceiling for the relaxed Stage-0 gate in confidence-attempt mode. */
+  confidenceMaxChars?: number;
 }
 
 /**
@@ -107,7 +125,12 @@ export async function runReceptionist(
   userMessage: string,
   deps: RunReceptionistDeps,
 ): Promise<ReceptionistResult> {
-  const gate = classifyFrontDesk(userMessage, { alwaysEscalateTerms: deps.alwaysEscalateTerms });
+  const confidenceAttempt = deps.confidenceAttempt === true;
+  const gate = classifyFrontDesk(userMessage, {
+    alwaysEscalateTerms: deps.alwaysEscalateTerms,
+    confidenceAttempt,
+    ...(deps.confidenceMaxChars !== undefined ? { confidenceMaxChars: deps.confidenceMaxChars } : {}),
+  });
   if (!gate.fastLane) return { handled: false, escalateReason: gate.reason };
 
   let raw: string;
@@ -117,6 +140,7 @@ export async function runReceptionist(
         memoryCapsule: deps.memoryCapsule,
         assistantName: deps.assistantName,
         personaLines: deps.personaLines ?? getReceptionistPersonaLines(),
+        confidenceAttempt,
       }),
     );
   } catch (err) {
@@ -124,9 +148,20 @@ export async function runReceptionist(
     return { handled: false, escalateReason: "micro-call-error" };
   }
 
-  const text = raw.trim();
-  if (!text || text.includes(ESCALATE_SENTINEL)) {
-    return { handled: false, escalateReason: "model-escalated" };
+  let text: string;
+  if (confidenceAttempt) {
+    // Fail-safe: only a self-reported high-confidence, non-sentinel answer is kept;
+    // low/unsure/unparseable/abstain all escalate to the full model.
+    const verdict = parseReceptionistConfidence(raw);
+    if (!verdict.confident) {
+      return { handled: false, escalateReason: "low-confidence" };
+    }
+    text = verdict.answer;
+  } else {
+    text = raw.trim();
+    if (!text || text.includes(ESCALATE_SENTINEL)) {
+      return { handled: false, escalateReason: "model-escalated" };
+    }
   }
   const maxChars = deps.maxResponseChars ?? 400;
   if (text.length > maxChars) {
@@ -149,22 +184,49 @@ export async function runReceptionist(
 
 export function buildReceptionistMessages(
   userMessage: string,
-  opts: { memoryCapsule?: string; assistantName?: string; personaLines?: readonly string[] } = {},
+  opts: { memoryCapsule?: string; assistantName?: string; personaLines?: readonly string[]; confidenceAttempt?: boolean } = {},
 ): LLMMessage[] {
-  const system = [
-    "You are the first-contact desk of an AI assistant — you see every incoming user message before the full assistant does.",
-    "Only handle trivial conversational turns yourself: greetings, thanks, acknowledgements, and simple questions about how you are or what you can broadly help with.",
-    `For ANYTHING that needs an action, a lookup, a task, or any real work, reply with exactly ${ESCALATE_SENTINEL} and nothing else — it is routed to the full assistant.`,
-    "When you do answer, reply in the user's language in ONE short, polite sentence. Do not introduce yourself unless explicitly asked.",
+  const common = [
     ...(opts.personaLines ?? []),
     opts.assistantName ? `If asked your name, you are "${opts.assistantName}".` : "Do not invent a name for yourself.",
     opts.memoryCapsule ? `Known context (use only if directly relevant):\n${opts.memoryCapsule}` : "",
-  ].filter(Boolean).join("\n");
-
+  ];
+  const lines = opts.confidenceAttempt
+    ? [
+        "You are the fast first-contact desk of an AI assistant — you see every incoming message before the full (larger, slower) assistant does.",
+        "Answer the user yourself ONLY if you can answer FULLY and CORRECTLY from your own general knowledge in one short reply — a definition, a fact, a simple explanation, a quick calculation, a greeting.",
+        `If the question needs a tool, a lookup, current or live data, the user's own files/history, multi-step work, or anything you are not fully sure you can answer correctly on your own — do NOT guess. Reply with exactly ${ESCALATE_SENTINEL} and nothing else; it is routed to the full assistant.`,
+        "Reply in the user's language, in at most a few sentences. Do not introduce yourself unless explicitly asked.",
+        "After your answer, on a NEW final line, output exactly 'CONFIDENCE: high' if you are confident the answer is complete and correct, or 'CONFIDENCE: low' otherwise. When in any doubt, prefer to escalate.",
+        ...common,
+      ]
+    : [
+        "You are the first-contact desk of an AI assistant — you see every incoming user message before the full assistant does.",
+        "Only handle trivial conversational turns yourself: greetings, thanks, acknowledgements, and simple questions about how you are or what you can broadly help with.",
+        `For ANYTHING that needs an action, a lookup, a task, or any real work, reply with exactly ${ESCALATE_SENTINEL} and nothing else — it is routed to the full assistant.`,
+        "When you do answer, reply in the user's language in ONE short, polite sentence. Do not introduce yourself unless explicitly asked.",
+        ...common,
+      ];
   return [
-    { role: "system", content: system },
+    { role: "system", content: lines.filter(Boolean).join("\n") },
     { role: "user", content: userMessage },
   ];
+}
+
+/**
+ * Parse a confidence-attempt reply. Fail-SAFE: returns confident=false unless the
+ * model explicitly self-reported `CONFIDENCE: high` and produced a non-empty answer
+ * with no escalate sentinel. Anything else (sentinel, low/medium/unsure, or a missing
+ * marker) means "escalate to the full model". The CONFIDENCE line is stripped from
+ * the returned answer. Pure + exported for unit testing.
+ */
+export function parseReceptionistConfidence(raw: string): { confident: boolean; answer: string } {
+  const text = raw.trim();
+  if (!text || text.includes(ESCALATE_SENTINEL)) return { confident: false, answer: "" };
+  const marker = text.match(/CONFIDENCE\s*:\s*(high|low|medium|unsure|none)/i);
+  const answer = text.replace(/\n?\s*CONFIDENCE\s*:\s*\w+.*$/is, "").trim();
+  if (!marker) return { confident: false, answer }; // no self-report → do not trust
+  return { confident: marker[1]!.toLowerCase() === "high" && answer.length > 0, answer };
 }
 
 /**
@@ -229,6 +291,8 @@ export async function tryReceptionistFastLane(
     personaLines: getReceptionistPersonaLines(),
     maxResponseChars: config.receptionist.maxResponseChars,
     alwaysEscalateTerms: config.receptionist.alwaysEscalateTerms,
+    confidenceAttempt: config.receptionist.confidenceAttempt === true,
+    confidenceMaxChars: config.receptionist.confidenceAttemptMaxChars,
   });
 
   return result.handled && result.response ? { response: result.response } : null;

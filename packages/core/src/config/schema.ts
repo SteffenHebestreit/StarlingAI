@@ -1586,6 +1586,26 @@ export const OrchestrationSchema = z.object({
    *  latency cap degrades to the confirmed-empty marker if the embed backend is slow. Default
    *  OFF until pass^k confirms no regression. */
   userProfilePrefetch: z.boolean().default(false),
+  /** QUORUM EARLY-SYNTHESIS (vLLM "ReMoM"). When true, parallel_delegate stops blocking on
+   *  the slowest slice: once a quorum of SUCCESSFUL slices has returned (ceil(quorumFraction *
+   *  N)), the remaining stragglers get a short grace window and are then ABORTED, and synthesis
+   *  proceeds on the quorum. Partial evidence the stragglers already published via share_finding
+   *  is preserved. If fewer than the quorum succeed, it waits for all (no premature abandon).
+   *  Default OFF restores today's Promise.all (wait-for-all) exactly; pass^k before default-on. */
+  quorumEarlySynthesis: z.boolean().default(false),
+  /** Fraction of dispatched slices that must SUCCEED to form the quorum (K = ceil(fraction*N)).
+   *  Only consulted when quorumEarlySynthesis is on. 0.6 → 2-of-3, 3-of-5. */
+  quorumFraction: z.number().min(0.34).max(1).default(0.6),
+  /** Grace window (ms) granted to in-flight stragglers AFTER the quorum is reached before they
+   *  are aborted. Only consulted when quorumEarlySynthesis is on. */
+  quorumStragglerGraceMs: z.number().int().min(0).max(120_000).default(8_000),
+  /** DISAGREEMENT-AS-SIGNAL (vLLM "Fusion"). When true, after a parallel fan-out in which ≥2
+   *  slices succeeded, a cheap routing-tier classifier checks whether their outputs CONFLICT;
+   *  on disagreement it prepends a "[SUB-AGENT DISAGREEMENT]" marker (+ metadata flag) to the
+   *  aggregated result so the orchestrator reconciles/verifies in synthesis instead of silently
+   *  averaging conflicting answers. No-op (no added latency) when the slices agree. Default OFF
+   *  until pass^k confirms the check is worth its one extra routing-tier call. */
+  subAgentDisagreementVerify: z.boolean().default(false),
   /** B24 — toolset size ABOVE which the per-turn tool-rerank embedding kicks in. A small
    *  toolset doesn't need semantic reranking (all tools fit the model's attention), so we
    *  skip the embedding round-trip for it. Default 6 preserves the long-standing hardcoded
@@ -1776,6 +1796,22 @@ export const ReceptionistSchema = z.object({
   /** Extra terms (beyond registered fork policies) that must always escalate to
    *  the full runtime rather than be answered at the front desk. */
   alwaysEscalateTerms: z.array(z.string()).default([]),
+  /** CONFIDENCE-ATTEMPT mode (vLLM "Confidence" micro-agent pattern). When true, the
+   *  front desk no longer answers ONLY trivial smalltalk: a clearly-direct, self-
+   *  contained question that the turn classifier flagged with NO task intent (so it is
+   *  not research/freshness/source/user-own-facts/mail/etc. — all of which still
+   *  escalate) becomes a fast-lane candidate. The routing-tier model either answers it
+   *  OR emits an abstain/low-confidence signal, and the answer is accepted ONLY when it
+   *  self-reports high confidence; anything unparseable, low, or sentinel escalates
+   *  (fail-SAFE to the full model). This attacks the generation-latency floor for
+   *  general-knowledge questions the cheap model can fully answer, without touching how
+   *  any flagged/real work is routed. Default OFF until a pass^k eval (with negative
+   *  abstain cases) confirms the cheap model does not over-answer. */
+  confidenceAttempt: z.boolean().default(false),
+  /** Candidate-length ceiling for confidenceAttempt's relaxed Stage-0 gate: a question
+   *  longer than this still escalates WITHOUT a micro-call (likely multi-part/complex).
+   *  Only consulted when confidenceAttempt is on. */
+  confidenceAttemptMaxChars: z.number().int().min(120).max(1_000).default(400),
 });
 
 export const ConfigSchema = z.object({
