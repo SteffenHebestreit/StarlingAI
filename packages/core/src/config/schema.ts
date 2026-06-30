@@ -1,10 +1,63 @@
 import { z } from "zod";
 import { productEnv } from "../product/index.js";
 
-const OptionalEndpointUrlSchema = z.preprocess(
-  (value) => typeof value === "string" ? value.trim() : value,
-  z.union([z.literal(""), z.string().url()]),
-);
+// Domain sub-schemas extracted into config/schemas/* (pure relocation). They are
+// re-exported here so the long-standing `from "../config/schema.js"` import path
+// keeps resolving every moved schema/type for existing consumers.
+export {
+  ChannelWebChatSchema,
+  ChannelTelegramSchema,
+  ChannelSlackSchema,
+  ChannelDiscordSchema,
+  ChannelWhatsappSchema,
+  ChannelEmailSchema,
+  ChannelSignalSchema,
+  ChannelsSchema,
+} from "./schemas/channels.js";
+export type {
+  ChannelSlackConfig,
+  ChannelDiscordConfig,
+  ChannelWhatsappConfig,
+  ChannelEmailConfig,
+  ChannelSignalConfig,
+} from "./schemas/channels.js";
+export {
+  MultimodalServiceSchema,
+  MultimodalFileServiceSchema,
+  MultimodalSpeechToTextSchema,
+  MultimodalTextToSpeechSchema,
+  MultimodalImageGenerationSchema,
+  MultimodalWakeWordSchema,
+  MultimodalSchema,
+} from "./schemas/multimodal.js";
+export type {
+  MultimodalFileConfig,
+  MultimodalSpeechToTextConfig,
+  MultimodalTextToSpeechConfig,
+} from "./schemas/multimodal.js";
+export {
+  RetrievalRerankerSchema,
+  RetrievalSearchSchema,
+  DocumentRagSchema,
+  RetrievalSchema,
+} from "./schemas/retrieval.js";
+export type { DocumentRagConfig, RetrievalSearchConfig } from "./schemas/retrieval.js";
+export { OrchestrationSchema } from "./schemas/orchestration.js";
+export type { OrchestrationConfig } from "./schemas/orchestration.js";
+export {
+  EFFORT_TIERS,
+  EffortTierSchema,
+  EffortProfileSchema,
+  EffortSchema,
+} from "./schemas/effort.js";
+export type { EffortProfile, EffortTier, EffortConfig } from "./schemas/effort.js";
+
+// Value imports used to assemble ConfigSchema below.
+import { ChannelsSchema } from "./schemas/channels.js";
+import { MultimodalSchema } from "./schemas/multimodal.js";
+import { RetrievalSchema } from "./schemas/retrieval.js";
+import { OrchestrationSchema } from "./schemas/orchestration.js";
+import { EffortSchema } from "./schemas/effort.js";
 
 export const LMStudioProviderSchema = z.object({
   baseUrl: z.string().url().default("http://host.docker.internal:1234/v1"),
@@ -173,94 +226,8 @@ export const EphemeralGenerationSchema = z.object({
   architectAgentName: z.string().min(1).default("agent_architect"),
 });
 
-export const ChannelWebChatSchema = z.object({
-  enabled: z.boolean().default(true),
-  port: z.number().int().min(1024).max(65535).default(3001),
-});
-
-export const ChannelTelegramSchema = z.object({
-  enabled: z.boolean().default(false),
-  botToken: z.string().min(1).optional(),
-  allowedUserIds: z.array(z.number().int()).default([]),
-});
-
-// ─── Channel base (shared fields for all inbound message channels) ────────────
-const ChannelBaseSchema = z.object({
-  enabled: z.boolean().default(false),
-  /** How unknown senders are handled */
-  dmPolicy: z.enum(["open", "allowlist", "pairing", "disabled"]).default("pairing"),
-  /** Sender IDs to allow (channel-specific format). "*" = all. */
-  allowFrom: z.array(z.string()).default([]),
-  /** Max messages kept per chat session */
-  historyLimit: z.number().int().min(1).max(500).default(50),
-  /** Per-sender inbound message budget within the rolling window */
-  perSenderRateLimitCount: z.number().int().min(1).max(200).default(12),
-  /** Rolling window for per-sender inbound rate limits */
-  perSenderRateLimitWindowMs: z.number().int().min(1000).max(3_600_000).default(60_000),
-});
-
-export const ChannelSlackSchema = ChannelBaseSchema.extend({
-  /** xoxb-... Bot User OAuth Token */
-  botToken: z.string().optional(),
-  /** xapp-... App-Level Token (Socket Mode) — leave empty for Events API mode */
-  appToken: z.string().optional(),
-  /** Signing secret for verifying Events API requests */
-  signingSecret: z.string().optional(),
-});
-
-export const ChannelDiscordSchema = ChannelBaseSchema.extend({
-  /** Bot token from Discord Developer Portal */
-  token: z.string().optional(),
-  /** Restrict to specific guild (server) IDs; empty = respond in all guilds + DMs */
-  guildIds: z.array(z.string()).default([]),
-});
-
-export const ChannelWhatsappSchema = ChannelBaseSchema.extend({
-  /** Webhook verify token (set same value in Meta Developer Console) */
-  verifyToken: z.string().optional(),
-  /** Meta app secret used to validate X-Hub-Signature-256 on inbound webhooks */
-  appSecret: z.string().optional(),
-  /** Permanent access token or $ENV_VAR for the Meta Graph API */
-  accessToken: z.string().optional(),
-  /** WhatsApp Business phone number ID from Meta Console */
-  phoneNumberId: z.string().optional(),
-});
-
-export const ChannelEmailSchema = ChannelBaseSchema.extend({
-  imapHost: z.string().optional(),
-  imapPort: z.number().int().default(993),
-  imapUser: z.string().optional(),
-  imapPassword: z.string().optional(),
-  smtpHost: z.string().optional(),
-  smtpPort: z.number().int().default(587),
-  smtpUser: z.string().optional(),
-  smtpPassword: z.string().optional(),
-  smtpFrom: z.string().optional(),
-  pollIntervalMs: z.number().int().min(5000).default(30_000),
-});
-
-export const ChannelSignalSchema = ChannelBaseSchema.extend({
-  /** Registered Signal account (phone number) */
-  account: z.string().optional(),
-  /** Path to signal-cli binary */
-  signalCliPath: z.string().default("signal-cli"),
-});
-
-export const ChannelsSchema = z.object({
-  webchat: ChannelWebChatSchema.default({}),
-  telegram: ChannelTelegramSchema.default({}),
-  slack: ChannelSlackSchema.default({}),
-  discord: ChannelDiscordSchema.default({}),
-  whatsapp: ChannelWhatsappSchema.default({}),
-  email: ChannelEmailSchema.default({}),
-  signal: ChannelSignalSchema.default({}),
-});
-
-export type ChannelSlackConfig = z.infer<typeof ChannelSlackSchema>;
-export type ChannelDiscordConfig = z.infer<typeof ChannelDiscordSchema>;
-export type ChannelWhatsappConfig = z.infer<typeof ChannelWhatsappSchema>;
-export type ChannelEmailConfig = z.infer<typeof ChannelEmailSchema>;
-export type ChannelSignalConfig = z.infer<typeof ChannelSignalSchema>;
+// Channel schemas (ChannelWebChatSchema … ChannelsSchema + the *Config types)
+// moved to ./schemas/channels.ts; re-exported above.
 
 export const GatewaySchema = z.object({
   port: z.number().int().min(1024).max(65535).default(8765),
@@ -484,167 +451,13 @@ export const A2ASchema = z.object({
 export type A2APeerConfig = z.infer<typeof A2APeerSchema>;
 export type A2AConfig = z.infer<typeof A2ASchema>;
 
-export const MultimodalServiceSchema = z.object({
-  baseUrl: z.string().url(),
-  apiKey: z.string().optional(),
-  timeoutMs: z.number().int().min(1000).max(300000).default(60000),
-});
+// Multimodal schemas (MultimodalServiceSchema … MultimodalSchema, plus the
+// private OptionalEndpointUrlSchema helper) moved to ./schemas/multimodal.ts;
+// re-exported above.
 
-export const MultimodalFileServiceSchema = MultimodalServiceSchema.extend({
-  baseUrl: z.string().url().default("http://host.docker.internal:8010"),
-  mcpServer: z.string().min(1).optional(),
-  toolName: z.string().min(1).default("file_to_markdown"),
-  /** Vision model used as fallback for images when file_to_markdown returns no content.
-   *  Format: same as agents.defaults.model.primary, e.g. "lmstudio/qwen2-vl-7b-instruct"
-   *  When set, the gateway encodes the image as base64 and calls the LM Studio vision API. */
-  visionModel: z.string().min(1).optional(),
-  /** Optional dedicated OpenAI-compatible endpoint for the vision model fallback. */
-  visionBaseUrl: z.string().url().optional(),
-  /** Optional API key for the dedicated vision endpoint. */
-  visionApiKey: z.string().optional(),
-  /** Timeout for vision LLM calls in milliseconds (default: 120 000).
-   *  Kept separate from timeoutMs (which applies to the file-to-markdown service)
-   *  because local LLM inference on large screenshots can take 60–120 s. */
-  visionTimeoutMs: z.number().int().positive().default(120_000),
-});
-
-export const MultimodalSpeechToTextSchema = MultimodalServiceSchema.extend({
-  baseUrl: OptionalEndpointUrlSchema.default(""),
-  api: z.enum(["auto", "openai-compatible", "transcribe-only"]).default("auto"),
-  model: z.string().min(1).default("whisper-1"),
-});
-
-export const MultimodalTextToSpeechSchema = MultimodalServiceSchema.extend({
-  baseUrl: OptionalEndpointUrlSchema.default(""),
-  api: z.enum(["qwen-compatible", "openai-compatible"]).default("openai-compatible"),
-  // Empty string is a meaningful value: on qwen-compatible it tells the
-  // runtime to skip the /load_model preflight (use whatever the upstream
-  // already has loaded); on openai-compatible the runtime falls back to
-  // "tts-1" when this is empty. See sendSingleTtsRequest in multimodal.ts.
-  model: z.string().default("tts-1"),
-  defaultLanguage: z.string().min(2).default("English"),
-  defaultSpeaker: z.string().min(1).default("alloy"),
-  defaultVoiceId: z.string().min(1).optional(),
-  voiceSamplePath: z.string().min(1).optional(),
-  voiceSampleText: z.string().min(1).optional(),
-  defaultQuality: z.string().min(1).default("medium"),
-  /** Auto-speak a summary of the assistant reply after each turn when voice-input mode is active. */
-  speakReplySummary: z.boolean().default(false),
-  /** Maximum number of spoken sentences in the auto-generated reply summary. */
-  speakReplySummaryMaxSentences: z.number().int().min(1).max(5).default(3),
-});
-
-export const MultimodalImageGenerationSchema = MultimodalServiceSchema.extend({
-  baseUrl: OptionalEndpointUrlSchema.default(""),
-  api: z.enum(["automatic1111-compatible", "comfyui"]).default("automatic1111-compatible"),
-  model: z.string().min(1).optional(),
-  defaultWidth: z.number().int().min(256).max(2048).default(1024),
-  defaultHeight: z.number().int().min(256).max(2048).default(1024),
-  defaultSteps: z.number().int().min(1).max(100).default(28),
-  defaultGuidanceScale: z.number().min(0).max(20).default(7),
-  /** Default negative prompt appended to every generate_image call unless the agent supplies one. */
-  defaultNegativePrompt: z.string().optional(),
-});
-
-export const MultimodalWakeWordSchema = z.object({
-  enabled: z.boolean().default(false),
-  language: z.enum(["de-DE", "en-US", "pl-PL"]).default("en-US"),
-  keywords: z.array(z.string().min(1)).default(["Hey Guarded", "Okay Guarded", "Luna"]),
-  stopPhrases: z.array(z.string().min(1)).default(["stop recording", "end recording", "stop listening", "luna stop"]),
-  silenceTimeoutMs: z.number().int().min(1000).max(15000).default(4000),
-});
-
-export const MultimodalSchema = z.object({
-  maxUploadBytes: z.number().int().min(1024).max(104_857_600).default(20_971_520),
-  files: MultimodalFileServiceSchema.default({}),
-  stt: MultimodalSpeechToTextSchema.default({}),
-  tts: MultimodalTextToSpeechSchema.default({}),
-  wakeWord: MultimodalWakeWordSchema.default({}),
-  imageGeneration: MultimodalImageGenerationSchema.optional(),
-});
-
-export const RetrievalRerankerSchema = z.object({
-  enabled: z.boolean().default(false),
-  /**
-   * How candidates are scored:
-   *  - "tei": a real cross-encoder rerank endpoint (HuggingFace TEI / Infinity)
-   *    via `POST {baseUrl}/rerank` with `{query, texts}` → `[{index, score}]`.
-   *    This is the correct way to use bge-reranker-v2-m3 (LM Studio cannot serve
-   *    a cross-encoder over REST — it only exposes it via /embeddings).
-   *  - "llm": ask an OpenAI-compatible chat model to score candidates as JSON
-   *    via `POST {baseUrl}/chat/completions`. Works with any loaded chat model
-   *    but is slower and less precise than a dedicated cross-encoder.
-   */
-  mode: z.enum(["tei", "llm"]).default("tei"),
-  /** Rerank service base URL. For "tei" the server root (NO /v1 suffix); for "llm" an OpenAI-compatible base (…/v1). */
-  baseUrl: z.string().url().default("http://reranker:80"),
-  apiKey: z.string().default("lm-studio"),
-  model: z.string().min(1).default("BAAI/bge-reranker-v2-m3"),
-  timeoutMs: z.number().int().min(1000).max(120000).default(15000),
-  topK: z.number().int().min(2).max(12).default(6),
-});
-
-export const RetrievalSearchSchema = z.object({
-  backend: z.enum(["auto", "searxng", "playwright", "duckduckgo"]).default("auto"),
-  searxngBaseUrl: z.string().url().optional(),
-  timeoutMs: z.number().int().min(1000).max(60000).default(15000),
-});
-
-/**
- * Document RAG over attached/uploaded files, backed by the engram graph-RAG
- * service (separate from the lightweight pgvector `rag_*` tools). Files are
- * extracted to Markdown via the file-conversion service (`multimodal.files`),
- * then ingested into engram; relevant chunks are retrieved on demand and can be
- * auto-injected as turn context. Scoping is done with engram's `source` token:
- * `session:<id>` (default), `user:<id>`, or `workspace:<name>`.
- */
-export const DocumentRagSchema = z.object({
-  enabled: z.boolean().default(false),
-  /** engram API base URL (the graph-RAG service). */
-  engramBaseUrl: z.string().url().default("http://engram:8088"),
-  /** Optional bearer token for the engram API (engram itself is usually unauthenticated on the internal network). */
-  engramApiKey: z.string().optional(),
-  /** Ingest can be slow (chunk → LLM metadata → embeddings → graph), so allow a generous timeout. */
-  ingestTimeoutMs: z.number().int().min(1000).max(600000).default(120000),
-  searchTimeoutMs: z.number().int().min(1000).max(120000).default(20000),
-  /** When a file is attached to a session, auto-extract + ingest it into the session-scoped corpus. */
-  autoIngestAttachments: z.boolean().default(true),
-  /** Before answering, retrieve relevant chunks for the user's message and inject them as additional context. */
-  injectContext: z.boolean().default(true),
-  /** How many chunks to inject / return after scope filtering. */
-  retrievalTopK: z.number().int().min(1).max(20).default(6),
-  /** engram final_top_k requested before the scope post-filter (kept generous so in-scope chunks survive). */
-  candidateTopK: z.number().int().min(4).max(100).default(30),
-  /** Drop retrieved chunks whose engram rerank score is below this (0 = keep all). */
-  minRerankScore: z.number().min(0).max(1).default(0),
-  /** Cap on the total characters of injected document context per turn. */
-  maxContextChars: z.number().int().min(500).max(50000).default(6000),
-  /** Reuse-the-whole-doc fix (audit ef9bd480): when a file attached THIS turn is small
-   *  enough to fit a prompt, inline its FULL extracted text instead of a handful of
-   *  semantic top-k excerpts. The default RAG path reduced an ~11KB / 3-page offer PDF to
-   *  6 chunks (6000-char cap), dropped the page-2 budget rows, and the model then declared
-   *  present line-items "missing". Inlining the whole small doc is what the user actually
-   *  wants when they attach something and say "evaluate this". Default OFF until live eval
-   *  confirms it; only the just-attached doc is inlined (large docs + prior-turn docs stay
-   *  on the lean retrieval path). */
-  inlineSmallDocuments: z.boolean().default(false),
-  /** Max total extracted chars across THIS turn's freshly-attached docs to inline in full.
-   *  Above this the lean semantic-retrieval path is used instead. */
-  inlineThresholdChars: z.number().int().min(1000).max(50000).default(12000),
-  /** Settings toggle: also search the current user's personal document corpus (`user:<id>`). */
-  includeUserDocs: z.boolean().default(false),
-  /** Settings toggle: also search the workspace-shared document corpus (`workspace:<name>`). */
-  includeWorkspaceDocs: z.boolean().default(false),
-  /** Token used for the workspace-shared scope. */
-  workspaceName: z.string().min(1).default("workspace"),
-});
-export type DocumentRagConfig = z.infer<typeof DocumentRagSchema>;
-
-export const RetrievalSchema = z.object({
-  reranker: RetrievalRerankerSchema.default({}),
-  search: RetrievalSearchSchema.default({}),
-  documentRag: DocumentRagSchema.default({}),
-});
+// Retrieval schemas (RetrievalRerankerSchema / RetrievalSearchSchema /
+// DocumentRagSchema + DocumentRagConfig / RetrievalSchema) moved to
+// ./schemas/retrieval.ts; re-exported above.
 
 // ─── MCP Server configuration ────────────────────────────────────────────────
 
@@ -1396,395 +1209,13 @@ export const ToolPipelineSchema = z.object({
 export type ToolPipelineConfig = z.infer<typeof ToolPipelineSchema>;
 
 // ─── Orchestration tuning ─────────────────────────────────────────────────────
-// Hardware-dependent limits that previously required code edits. All values
-// overlay the built-in defaults — omit a key to keep the default.
-export const OrchestrationSchema = z.object({
-  /** Max simultaneous parallel research slices dispatched by a source-sensitive
-   *  coordinator.  Set to 2 for a single local GPU, 3-4 for multi-GPU or
-   *  API-based backends.  Built-in default: 2. */
-  maxParallelSlices: z.number().int().min(1).max(8).default(2),
-  /** Maximum sub-agent delegation nesting depth. The orchestrator is depth 0;
-   *  its sub-agents depth 1; their sub-agents depth 2; and so on. A sub-agent
-   *  at or beyond this depth may not delegate further — it must gather evidence
-   *  with its own tools and synthesize. Bounds the delegation tree so a complex
-   *  task can't nest into a runaway cascade. Built-in default: 3. */
-  maxDelegationDepth: z.number().int().min(1).max(8).default(3),
-  /** When true, the orchestrator is nudged to record a short structured plan
-   *  (record_plan) before fanning out on a complex/multi-agent turn — a soft
-   *  checkpoint that QA checks against and the operator dock can surface for
-   *  high-stakes approval. Trivial turns still answer directly. Default: true. */
-  planFirst: z.boolean().default(true),
-  /** When true, high-stakes turns (sourced factual claims, approval-gated
-   *  actions, or a plan the orchestrator flagged high-risk) get an automatic
-   *  verification pass that checks the answer against the plan's acceptance
-   *  criteria and repairs it if it falls short. Low-stakes/chat turns skip QA
-   *  entirely. Source-sensitive turns reuse the existing evidence backstop.
-   *  Default: true. */
-  riskGatedQA: z.boolean().default(true),
-  /** Runtime oversight: when true, a sub-agent gathering evidence is checked at
-   *  evidence boundaries against the turn's recorded plan acceptance criteria using
-   *  the cheap routing-tier model; once the goal is already satisfied it is
-   *  authoritatively finalized (the existing strip+synthesis path) instead of
-   *  grinding through more sources. Goal-aware, not a per-task source cap; a
-   *  routing-tier miss/error falls through to the byte/time ladder. Default: true. */
-  oversight: z.boolean().default(true),
-  /** Final-response completion QA gate. When true, before shipping the final answer the
-   *  runtime verifies that an interactive/served app the user asked to BUILD was actually
-   *  produced as a file; if not, it runs ONE bounded corrective build (the right builder)
-   *  and ships the built artifact instead of a concept/description. Bounded to a single
-   *  corrective iteration per turn. Default: true. */
-  finalResponseQaGate: z.boolean().default(true),
-  /** When true, a source- OR freshness-sensitive turn that delegated SUCCESSFULLY
-   *  (so the failure-path evidence backstop never fired) has its final answer
-   *  cross-checked against the curated shared findings: if the answer references
-   *  none of the verified tokens, it is re-synthesized grounded in those findings
-   *  before shipping. This is the universal grounding gate (step 5) — it catches the
-   *  "ships a training-data answer while verified facts sit in shared findings" case.
-   *  The cross-check is deterministic; the extra synthesis call only fires on the
-   *  unanchored-answer path, so clean turns are unaffected. Default ON. */
-  qaEvidenceAnchoring: z.boolean().default(true),
-  /** When true, the orchestrator's system prompt gains a short HONESTY directive:
-   *  never claim the answer is based on CURRENT / LIVE / RECENT / EXTERNAL data unless
-   *  it was actually retrieved via a tool THIS turn — if currency materially matters,
-   *  route to a research specialist instead of asserting from parametric memory. Targets
-   *  the "direct answer dressed up as fresh-data grounding" failure (a freshness-sensitive
-   *  question answered with 0 tool calls that still opens "based on current market
-   *  data…"). General + language-independent (no topic keywords). Default OFF — it's a
-   *  tuned-prompt behavioural nudge, so it stays gated until a pass^k eval confirms it
-   *  doesn't suppress legitimate direct answers. */
-  freshnessHonestyGuard: z.boolean().default(false),
-  /** Citation-honesty guard: on a sourceSensitive turn that ran NO real web/research
-   *  execution (no delegation, no SUCCESSFUL workflow, no direct web tool, no shared
-   *  findings) but whose answer carries URL citations or "verified against N sources"
-   *  claims, strip the fabricated citations (markdown links → plain label, bare URLs
-   *  removed, the explicit verification claim neutralized) and prepend the honest
-   *  unverified caveat — so no invented 404 link or false "verified" claim ever ships
-   *  (audit 1303e254). Structural (URL detection is language-free); never empties the
-   *  answer. Default OFF — gated until a pass^k eval confirms it doesn't strip the
-   *  citations of a genuinely-researched answer. */
-  citationHonestyGuard: z.boolean().default(false),
-  /** S1 of staged orchestration (docs/staged-orchestration.md): when true, the
-   *  TERMINAL forced-synthesis call (forceSynthesis — invoked with no tools, so it
-   *  cannot route or delegate) uses a compact synthesis-only system prompt
-   *  (identity + language + format + grounding/full-coverage/no-truncation rules)
-   *  instead of the full ~24.7K orchestrator prompt, cutting that call's prefill on
-   *  slow local models. Default OFF until pass^k confirms synthesis quality is
-   *  unchanged; flip per-session via effort or globally once validated. */
-  leanSynthesisPrompt: z.boolean().default(false),
-  /** Final stage of staged orchestration (docs/staged-orchestration.md): when true,
-   *  after all existing correctness gates have refined the answer, a bounded QA
-   *  delivery loop verifies the FINAL answer against the turn plan's acceptance
-   *  criteria and — if a criterion is unmet — hands the concrete flaws back for one
-   *  improvement pass, repeating until the QA check passes or qaDeliveryLoopMaxRounds
-   *  is reached (then the best answer so far ships). Generalises the one-shot
-   *  riskGatedQA verify-and-repair into the "loop back until the QA agent says it's
-   *  fine" gate the user asked for. Only fires when a plan with acceptance criteria
-   *  exists and the answer is substantial, so chat/plan-less turns pay nothing. Fails
-   *  OPEN (no criteria, a thrown check, or an empty improvement ships the current
-   *  answer — never blocks delivery). Each round costs extra LLM calls on a slow local
-   *  model, so default OFF until pass^k confirms the quality lift is worth the latency. */
-  qaDeliveryLoop: z.boolean().default(false),
-  /** Max improvement rounds for the QA delivery loop (each round = one check + one
-   *  improve call). Bounded low because every round is extra slow-model latency. */
-  qaDeliveryLoopMaxRounds: z.number().int().min(1).max(4).default(2),
-  /** When true, the QA delivery loop escalates to the COORDINATOR after a cheap
-   *  re-synthesis round has already failed the re-check — handing the flaws back to
-   *  mission_coordinator to make a plan and do NEW work (re-research / re-build),
-   *  the user's "send it back to the coordinator to make a plan to improve … until
-   *  the qa-agent says it's fine" step. The trigger is structural (a rewrite didn't
-   *  move the verdict), not topic-based. Still bounded by qaDeliveryLoopMaxRounds and
-   *  fails open. Default OFF: a coordinator delegation is a full extra sub-agent run,
-   *  so it stays gated until pass^k shows the quality lift beats the latency. Requires
-   *  qaDeliveryLoop. */
-  qaDeliveryLoopEscalateToCoordinator: z.boolean().default(false),
-  /** Deliverable self-consistency gate (audit 17f53ed0). The acceptance-criteria QA gates
-   *  (riskGatedQA / qaDeliveryLoop) only run on plan-bearing turns and check GROUNDING +
-   *  criteria coverage — neither checks whether the deliverable's OWN figures and arithmetic
-   *  cohere. A single research delegation that synthesizes a deliverable records no plan, so
-   *  a self-contradictory answer ships unchecked (a price quote recommending 10k for ~10
-   *  weeks while itself stating a 90–120 €/h market rate ≈ 37 €/h — the user corrected it 3×).
-   *  When true, a substantive deliverable the acceptance-criteria gates did NOT cover gets one
-   *  bounded consistency check: do its own numbers/arithmetic agree, and do they contradict
-   *  any figure/constraint the user explicitly stated? Concrete contradictions → a bounded
-   *  fix-only repair. Structural trigger (length + no acceptance-criteria QA ran), not
-   *  topic/keywords; fails OPEN. Default OFF — it adds one synthesis-tier check call per
-   *  substantive plan-less turn on the slow local model, so it stays gated until pass^k. */
-  deliverableConsistencyQa: z.boolean().default(false),
-  /** Max consistency repair rounds (each = one check + one fix call). Low — a consistency
-   *  fix is usually one shot, and every round is extra slow-model latency. */
-  deliverableConsistencyQaMaxRounds: z.number().int().min(1).max(3).default(1),
-  /** When true, the one bounded corrective build RESUMES a partial deliverable instead
-   *  of regenerating it. If an earlier build attempt THIS turn left a file that genuinely
-   *  looks cut off mid-document (artifactFileLooksTruncated: HTML missing </html>, JSON that
-   *  won't parse), the corrective build is told to read that file and FINISH it in place via
-   *  write_file mode:"append" / edit_file — adding only the missing remainder — rather than
-   *  re-emitting the whole thing (which wastes the work already on disk and risks the same
-   *  cut-off). Trigger is structural file-incompleteness, not the deliverable's topic; a
-   *  complete-but-wrong file still gets a fresh rebuild. Default OFF until live eval confirms
-   *  the resume reliably terminates the document. Requires finalResponseQaGate. */
-  resumePartialOnCorrectiveBuild: z.boolean().default(false),
-  /** Max-effort turn oversight (turn-oversight.ts). At `max` effort agents run unbounded
-   *  and the final-QA gate + never-empty watchdog are OFF, so a turn that keeps
-   *  re-delegating a dying build can churn for minutes and deliver nothing. When true, a
-   *  structural progress check samples the WHOLE turn each window; if it is churning or
-   *  stalled, a small bounded oversight-agent judge decides on_track | redirect | stuck
-   *  and the runtime injects ONE corrective directive so the turn re-plans (e.g. resume a
-   *  truncated partial via append instead of regenerating). If a redirect was already
-   *  tried and the turn is STILL not progressing, the runtime forces the best-available
-   *  delivery so max ALWAYS finishes (the never-empty floor). Fail-open: any judge error
-   *  resolves to on_track. Only fires at `max` effort. Default OFF until live eval on the
-   *  user's stack confirms the oversight rescues stuck turns without derailing healthy
-   *  long runs. */
-  maxEffortTurnOversight: z.boolean().default(false),
-  /** Per-delegation language normalization (delegation-language.ts): "work internally in
-   *  English; deliver in the user's language." When true, a delegated TASK in another
-   *  language is translated to English (one bounded routing-tier call) before routing +
-   *  running the sub-agent, with an output-language directive appended so the deliverable
-   *  still comes back in the user's language. Makes routing/tool-arg matching language-
-   *  independent (the agent catalog is English-only) without bilingual keyword regexes.
-   *  The `context` evidence block is left verbatim (citation fidelity). Fail-open: any
-   *  translation error leaves the task unchanged. Default OFF — it adds one LLM hop per
-   *  non-English delegation on the shared GPU, so it stays gated until live eval shows the
-   *  routing/quality lift beats the latency. */
-  normalizeDelegationToEnglish: z.boolean().default(false),
-  /** Reuse-don't-re-research (audit 17f53ed0): a follow-up that REFINES a deliverable
-   *  already produced this session ("make a proper offer", "tighten it up") otherwise
-   *  makes the orchestrator re-run the FULL research mission whose evidence is still
-   *  sitting in the conversation — a 15-minute web re-fetch in the audit. When true, a
-   *  turn that (a) already has substantial delegated evidence in this session's history
-   *  and (b) introduces no new URL to fetch gets a lean one-line nudge to reuse that
-   *  evidence and refine from it, delegating fresh research ONLY for facts the existing
-   *  evidence does not cover. Structural trigger (prior-evidence-exists + no-new-URL),
-   *  not a keyword regex; a soft nudge with an explicit escape clause, so the model still
-   *  researches when the request genuinely needs new external facts. Default OFF until
-   *  live eval confirms it cuts the redundant-research latency without starving
-   *  genuinely-new follow-ups. */
-  reuseSessionEvidenceOnRefinement: z.boolean().default(false),
-  /** Honesty floor for source-sensitive synthesis on PARTIAL evidence. When the
-   *  research delegation for a source-sensitive turn came back partial / cancelled /
-   *  below the substance floor, the normal "[SYNTHESIS REQUIRED] … copy the exact
-   *  names and numbers from the evidence" directive OVERSELLS the thin evidence and
-   *  the model fills the gaps from training data — fabricating specifics (specs,
-   *  interfaces, ratings, part numbers) and presenting them as confirmed (audit
-   *  0dc158ad: claimed an analog MEMS mic has an I2S interface). When true, that turn
-   *  instead gets an honesty directive: assert a concrete fact only if it is verbatim
-   *  in the evidence, mark everything else UNVERIFIED, never invent a value. Trigger is
-   *  structural (source-sensitive + partial/thin delegation), not topic-based, and only
-   *  fires on the failure condition, so it cannot regress a good-evidence turn. Default
-   *  ON — it enforces the central "never made-up facts" quality rule; flag exists so it
-   *  can be A/B'd / disabled if a model over-hedges. */
-  honestSynthesisOnPartialEvidence: z.boolean().default(true),
-  /** Discovery prefetch (staged orchestration S4 — docs/staged-orchestration.md):
-   *  when true, an escalated turn (one the receptionist fast-lane declined) runs
-   *  agent discovery + workflow discovery CONCURRENTLY up-front and injects a compact,
-   *  droppable "[CAPABILITY CANDIDATES]" capsule into the coordinator's first call —
-   *  so it can plan without first spending one or more slow orchestrator search_agents
-   *  / search_workflows tool rounds. The capsule is a soft head start, not a hard gate
-   *  (the model may still search for something more specific). Costs one up-front
-   *  embedding round-trip + a few hundred prompt tokens per escalated turn, so it only
-   *  pays off when it actually removes a slower discovery round. Default OFF until
-   *  pass^k confirms a net latency/quality win. */
-  discoveryPrefetch: z.boolean().default(false),
-  /** Proactive user-profile prefetch. When true, an iteration-0 turn that the classifier
-   *  flagged userOwnFacts (a question about the user's OWN background/skills/experience/
-   *  fit) AND that has no durable memory capsule runs a BOUNDED, concurrent best-effort
-   *  retrieval over the user's memory records + attached documents (an uploaded CV/profile),
-   *  and injects either a "[USER PROFILE EVIDENCE]" block or an authoritative confirmed-empty
-   *  marker — so the model answers from a REAL lookup result instead of fabricating or
-   *  admitting blindly (the toolCalls=0 "I have no info about you" failure). Fires ONLY on the
-   *  narrow self-referential class, so trivial/general turns pay zero added latency; a hard
-   *  latency cap degrades to the confirmed-empty marker if the embed backend is slow. Default
-   *  OFF until pass^k confirms no regression. */
-  userProfilePrefetch: z.boolean().default(false),
-  /** QUORUM EARLY-SYNTHESIS (vLLM "ReMoM"). When true, parallel_delegate stops blocking on
-   *  the slowest slice: once a quorum of SUCCESSFUL slices has returned (ceil(quorumFraction *
-   *  N)), the remaining stragglers get a short grace window and are then ABORTED, and synthesis
-   *  proceeds on the quorum. Partial evidence the stragglers already published via share_finding
-   *  is preserved. If fewer than the quorum succeed, it waits for all (no premature abandon).
-   *  Default OFF restores today's Promise.all (wait-for-all) exactly; pass^k before default-on. */
-  quorumEarlySynthesis: z.boolean().default(false),
-  /** Fraction of dispatched slices that must SUCCEED to form the quorum (K = ceil(fraction*N)).
-   *  Only consulted when quorumEarlySynthesis is on. 0.6 → 2-of-3, 3-of-5. */
-  quorumFraction: z.number().min(0.34).max(1).default(0.6),
-  /** Grace window (ms) granted to in-flight stragglers AFTER the quorum is reached before they
-   *  are aborted. Only consulted when quorumEarlySynthesis is on. */
-  quorumStragglerGraceMs: z.number().int().min(0).max(120_000).default(8_000),
-  /** DISAGREEMENT-AS-SIGNAL (vLLM "Fusion"). When true, after a parallel fan-out in which ≥2
-   *  slices succeeded, a cheap routing-tier classifier checks whether their outputs CONFLICT;
-   *  on disagreement it prepends a "[SUB-AGENT DISAGREEMENT]" marker (+ metadata flag) to the
-   *  aggregated result so the orchestrator reconciles/verifies in synthesis instead of silently
-   *  averaging conflicting answers. No-op (no added latency) when the slices agree. Default OFF
-   *  until pass^k confirms the check is worth its one extra routing-tier call. */
-  subAgentDisagreementVerify: z.boolean().default(false),
-  /** B24 — toolset size ABOVE which the per-turn tool-rerank embedding kicks in. A small
-   *  toolset doesn't need semantic reranking (all tools fit the model's attention), so we
-   *  skip the embedding round-trip for it. Default 6 preserves the long-standing hardcoded
-   *  threshold; raise it (e.g. 12) to skip the rerank embed for more agents, trading rerank
-   *  coverage for one fewer embed round-trip per delegated turn. Behaviour-preserving at the
-   *  default, so the higher values are the eval-gated knob. */
-  toolRerankMinTools: z.number().int().min(1).default(6),
-  /** Synthesis-headroom reserve (ms) carved out of the parent turn budget when a
-   *  delegated sub-agent inherits that budget as its OWN hard timeout. A sub-agent's
-   *  timeout is currently the FULL parent budget, so one slow node can consume 100% of
-   *  the turn and leave the orchestrator zero time to synthesize+deliver — the gateway
-   *  watchdog then archives the session and returns an error instead of the answer
-   *  (audit b6f8336e: a 19.6-min research graph ate a 20-min turn; the finished answer
-   *  was dropped). When > 0, a sub-agent gets at most (parentBudget − reserve) (floored
-   *  at 60 s), guaranteeing the parent keeps `reserve` ms to finalize. Default 0 =
-   *  identity (today's behavior); set e.g. 90000 to reserve a 90 s synthesis margin. */
-  subAgentSynthesisReserveMs: z.number().int().min(0).max(600_000).default(0),
-  /** Opt-in semantic layer of the max-effort progress verifier. At max effort a
-   *  long-running sub-agent is granted unbounded budget silently (no operator dock);
-   *  a STRUCTURAL stall guard (no new tokens AND no new tool calls across windows)
-   *  always watches it. When this is true, an additional bounded LLM judge also reads
-   *  the objective + recent activity each window and winds the run down if it is
-   *  "drifting" (busy but working toward the wrong goal) — the part structure can't
-   *  see. Default false: the judge is an LLM-behavior change that contends for the
-   *  local GPU, so it stays gated until eval'd on a live stack (pass^k). */
-  progressVerifierSemantic: z.boolean().default(false),
-  /** When true, a source-sensitive turn where the model refuses to delegate (answers
-   *  tool-free from training data even after the delegation nudge) does NOT ship the
-   *  unverified draft — the runtime auto-runs ONE research delegation and synthesizes
-   *  from the gathered findings, falling back to the caveated draft only if that yields
-   *  nothing. Enforces the source-sensitive correctness invariant without dead-ending.
-   *  Costs one research delegation on the refusal path. */
-  autoResearchOnRefusal: z.boolean().default(true),
-  /** When true, before a sub-agent auto-shares a large tool result, a one-shot
-   *  distillation pass is given the agent's OBJECTIVE plus the raw found content and
-   *  extracts only the objective-relevant facts/figures/URLs — instead of storing the
-   *  heuristic extract verbatim. This keeps shared findings dense and shrinks the
-   *  context the final synthesis must read (audit 003f5aeb: raw scraped page chrome
-   *  was filling shared facts and leaking into answers). Skipped for small/clean
-   *  findings (under distillSharedFactsMinChars); on any distillation failure the
-   *  heuristic extract is kept (never drops evidence).
-   *  Curate for QUALITY, not budget: skipping distillation does not save compute, it
-   *  DEFERS and amplifies it — every uncurated finding (raw page chrome included) bloats
-   *  the shared-facts context that the build/synthesis step and every later
-   *  read_shared_facts must process (audit 65f46046: an uncurated 28KB / ~117K-token
-   *  build prompt that a per-finding distill would have shrunk). A small objective-scoped
-   *  distill up-front is a net compute WIN. Default on. */
-  distillSharedFacts: z.boolean().default(true),
-  /** Only auto-share findings whose heuristic extract is at least this many chars are
-   *  routed through the distillation pass; shorter findings are already compact (and
-   *  pure chrome is caught by the low-value gate), so they are stored as-is. Built-in
-   *  default: 200. */
-  distillSharedFactsMinChars: z.number().int().min(120).max(4000).default(200),
-  /** Safety ceiling on distillation passes per sub-agent run — NOT a compute-saving
-   *  budget (uncurated findings cost more downstream than the distill call saves, so we
-   *  curate every eligible web finding). Set high enough to cover a research-heavy run;
-   *  beyond it, extra findings fall back to the heuristic extract. Built-in default: 100. */
-  distillSharedFactsMaxPerRun: z.number().int().min(1).max(500).default(100),
-  /** When true, a source-sensitive turn whose ORIGINAL request asked to create a concrete
-   *  artifact (file/website/presentation/document/report) and that gathered curated
-   *  findings but never produced the artifact (research alone consumed the turn on a slow
-   *  backend) auto-runs ONE content_writer build from the gathered facts before shipping —
-   *  so the deliverable lands in the same turn instead of dead-ending at a "research done,
-   *  confirm to build" message. Mirrors autoResearchOnRefusal. Costs one build delegation
-   *  on that path (the turn runs longer: research + build). Falls back to the honest
-   *  research-gathered message if the build produces nothing. Default on. */
-  autoBuildAfterResearch: z.boolean().default(true),
-  /** When true, while a turn still MUST orchestrate (source-sensitive / required-research
-   *  / required-artifact / workflow) and has NOT yet delegated, the runtime forces the
-   *  model to emit a tool call (tool_choice="required") instead of letting it spend minutes
-   *  drafting a tool-free prose answer that the guardrail then rejects and re-runs (audit
-   *  5d51862f: ~2 min wasted on a discarded draft before delegation). Released automatically
-   *  once a delegation/workflow has run so the model can synthesize, and only forces before
-   *  the routing-nudge fallback. Default on. */
-  forceToolChoiceWhenOrchestrationRequired: z.boolean().default(true),
-  /** When true, a turn whose ONLY orchestration was a single successful delegation that
-   *  returned a complete, presentable deliverable surfaces that deliverable directly instead
-   *  of running a SECOND full synthesis pass over it on the main assistant — which on the slow
-   *  local model doubles turn latency and sometimes diverges from the specialist's conclusion
-   *  (audit 5d51862f: coordinator picked ESP32-C61, the re-synthesized answer shipped a
-   *  different MCU). Only fires for exactly one successful long-deliverable delegation whose
-   *  evidence is clean (not a raw dump); multi-delegation turns still synthesize. Default on. */
-  relaySingleDeliverable: z.boolean().default(true),
-  /** When true, a message the user sends WHILE a turn is running is folded into
-   *  that turn as steering at the next tool-loop iteration (instead of only being
-   *  able to Stop). The runtime drains a per-turn queue before each model call and
-   *  appends it as an authoritative user message. Default on; opt-out disables the
-   *  drain so such messages are ignored mid-turn. */
-  midTurnSteering: z.boolean().default(true),
-  /** When true, a high-stakes or wide plan pauses for human approval in the
-   *  operator dock before the orchestrator executes it. Off by default until the
-   *  dock plan card is confirmed end-to-end. */
-  planApproval: z.boolean().default(false),
-  /** Per-call caps for regular researcher sub-agents.
-   *  Keys are tool names; values override the built-in defaults.
-   *  Built-in: web_search=14, web_fetch=16, write_file=3, … */
-  subAgentToolCaps: z.record(z.string(), z.number().int().min(1).max(500)).default({}),
-  /** Per-call caps specifically for the mission_coordinator sub-agent.
-   *  Coordinator overrides layer on top of subAgentToolCaps overrides.
-   *  Built-in: delegate_to_agent=6, swarm_delegate=6, web_search=20, web_fetch=25. */
-  coordinatorToolCaps: z.record(z.string(), z.number().int().min(1).max(500)).default({}),
-  /** Per-turn caps for the main orchestrator agent (not sub-agents).
-   *  Built-in: delegate_to_agent=5, computer_click=8, computer_type=6, … */
-  perTurnCaps: z.record(z.string(), z.number().int().min(1).max(500)).default({}),
-});
-export type OrchestrationConfig = z.infer<typeof OrchestrationSchema>;
+// OrchestrationSchema + OrchestrationConfig moved to ./schemas/orchestration.ts;
+// re-exported above.
 
 // ─── Effort profiles ──────────────────────────────────────────────────────────
-// A single per-session "effort" dial bundles the scattered latency/budget/size/
-// depth/reasoning knobs (and, at the top tier, the orchestration quality gates)
-// into named profiles. `medium` is the identity overlay — every field undefined,
-// so the turn runs under today's config defaults. Higher tiers relax the caps,
-// raise SLOs, push reasoning, and inject a "be thorough" prompt-chunk; `max`
-// additionally turns the correctness/QA gates OFF (a deliberate "get out of the
-// way" mode). Effort NEVER touches the content-safety/security guardrails
-// (GuardrailsSchema) — only the orchestration quality/latency behavior.
-//
-// Built-in per-tier defaults live in runtime/effort-context.ts
-// (BUILTIN_EFFORT_PROFILES); a `profiles[tier]` entry here overlays its fields on
-// top of that built-in, so a config only needs to specify what it wants to change.
-export const EFFORT_TIERS = ["low", "medium", "high", "max"] as const;
-export const EffortTierSchema = z.enum(EFFORT_TIERS);
-
-export const EffortProfileSchema = z.object({
-  /** Hard turn timeout (ms). 0 = unlimited (disables the gateway turn-timeout kill). */
-  turnTimeoutMs: z.number().int().min(0).max(86_400_000).optional(),
-  /** Orchestrator per-turn tool-call iteration cap (overrides agents.maxToolIterations). 0 = unbounded. */
-  orchestratorMaxToolIterations: z.number().int().min(0).max(500).optional(),
-  /** Delegated sub-agent iteration cap (feeds maxIterationsOverride). 0 = unbounded. */
-  subAgentMaxIterations: z.number().int().min(0).max(500).optional(),
-  /** Max delegation nesting depth (overrides orchestration.maxDelegationDepth). */
-  maxDelegationDepth: z.number().int().min(1).max(12).optional(),
-  /** Max simultaneous research slices (overrides orchestration.maxParallelSlices). */
-  maxParallelSlices: z.number().int().min(1).max(12).optional(),
-  /** Max chars of a single delegated result relayed verbatim (overrides performance.maxDelegatedResultChars). */
-  maxDelegatedResultChars: z.number().int().min(1_000).max(500_000).optional(),
-  /** Completion-token ceiling for delegated sub-agents (overrides the agent's maxTokens). */
-  subAgentMaxTokens: z.number().int().min(256).max(200_000).optional(),
-  /** Orchestrator turn-SLO breach threshold (ms) — raise it so long turns don't spuriously alert. */
-  orchestratorTurnSloMs: z.number().int().min(5_000).optional(),
-  /** Sub-agent turn-SLO breach threshold (ms). */
-  subAgentTurnSloMs: z.number().int().min(5_000).optional(),
-  /** Reasoning effort passed to reasoning-effort models for this turn. */
-  reasoningEffort: z.enum(["low", "medium", "high"]).optional(),
-  /** Extended-thinking toggle for this turn (Qwen/GLM/DeepSeek enable_thinking families). */
-  enableThinking: z.boolean().optional(),
-  /** Multiplier applied to every per-call/per-turn tool cap (subAgentToolCaps, coordinatorToolCaps, perTurnCaps). */
-  toolCapMultiplier: z.number().min(0.1).max(20).optional(),
-  /** Orchestration quality gates — set false to relax (top tier). Undefined = inherit config. */
-  riskGatedQA: z.boolean().optional(),
-  qaEvidenceAnchoring: z.boolean().optional(),
-  finalResponseQaGate: z.boolean().optional(),
-  autoResearchOnRefusal: z.boolean().optional(),
-  autoBuildAfterResearch: z.boolean().optional(),
-  oversight: z.boolean().optional(),
-  /** Lean, droppable system prompt-chunk injected at turn start (e.g. a thoroughness nudge). */
-  promptAddendum: z.string().max(4_000).optional(),
-});
-export type EffortProfile = z.infer<typeof EffortProfileSchema>;
-export type EffortTier = z.infer<typeof EffortTierSchema>;
-
-export const EffortSchema = z.object({
-  /** Effort tier new sessions inherit. Per-session settings override it. Default "medium" (= today's behavior). */
-  default: EffortTierSchema.default("medium"),
-  /** Per-tier overrides layered on top of the built-in profiles (BUILTIN_EFFORT_PROFILES).
-   *  Only specify the fields you want to change; omitted fields keep the built-in value. */
-  profiles: z.record(EffortTierSchema, EffortProfileSchema).default({}),
-});
-export type EffortConfig = z.infer<typeof EffortSchema>;
+// EFFORT_TIERS / EffortTierSchema / EffortProfileSchema / EffortSchema + the
+// EffortProfile / EffortTier / EffortConfig types moved to ./schemas/effort.ts;
+// re-exported above.
 
 /**
  * Receptionist fast lane — an opt-in first-contact gatekeeper that answers
@@ -2028,9 +1459,8 @@ export const ConfigSchema = z.object({
 export type Config = z.infer<typeof ConfigSchema>;
 export type ModelConfig = z.infer<typeof ModelConfigSchema>;
 export type GatewayConfig = z.infer<typeof GatewaySchema>;
-export type MultimodalFileConfig = z.infer<typeof MultimodalFileServiceSchema>;
-export type MultimodalSpeechToTextConfig = z.infer<typeof MultimodalSpeechToTextSchema>;
-export type MultimodalTextToSpeechConfig = z.infer<typeof MultimodalTextToSpeechSchema>;
-export type RetrievalSearchConfig = z.infer<typeof RetrievalSearchSchema>;
+// MultimodalFileConfig / MultimodalSpeechToTextConfig / MultimodalTextToSpeechConfig
+// re-exported from ./schemas/multimodal.js; RetrievalSearchConfig from
+// ./schemas/retrieval.js (both above).
 export type InfrastructureAutomationProfile = z.infer<typeof InfrastructureAutomationProfileSchema>;
 export type MailServiceConfig = z.infer<typeof MailServiceSchema>;
