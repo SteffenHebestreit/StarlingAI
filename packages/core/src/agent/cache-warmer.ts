@@ -20,7 +20,7 @@
  */
 import { getConfig } from "../config/loader.js";
 import { getChatProvider } from "../providers/index.js";
-import { defaultSystemPrompt } from "./session.js";
+import { defaultSystemPrompt, splitOrchestrationModule } from "./session.js";
 import { childLogger } from "../logger.js";
 
 const log = childLogger("agent:cache-warmer");
@@ -44,6 +44,11 @@ async function warmOnce(): Promise<void> {
   let base: string;
   try {
     base = defaultSystemPrompt(getConfig().workspacePath);
+    // Warm the SAME lean base the split turn actually sends — otherwise the warmed KV prefix
+    // diverges at "## Swarm Rules" from the live lean base and the warm-up buys almost nothing.
+    if (getConfig().agents?.performance?.splitOrchestrationPrompt === true) {
+      base = splitOrchestrationModule(base).leanBase;
+    }
   } catch {
     return;
   }

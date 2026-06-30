@@ -1082,6 +1082,26 @@ function buildOrchestrationExamples(config: ReturnType<typeof getConfig>, delega
   ].join("\n");
 }
 
+/**
+ * Marker-split the ~13KB orchestration block ("## Swarm Rules" → "## Proactive Memory",
+ * exclusive) out of a system prompt. Returns the lean base + the lifted module (module is
+ * null when the markers are absent / a custom prompt — leanBase is then the input unchanged).
+ * Shared by the runtime (per-turn split) AND the cache-warmer, so the warm-keeper warms the
+ * IDENTICAL lean base the split direct turn sends — otherwise the warmed KV prefix diverges at
+ * "## Swarm Rules" and the lean-base tail prefills cold (the warm-up buys nothing).
+ */
+export function splitOrchestrationModule(prompt: string): { leanBase: string; orchestrationModule: string | null } {
+  const si = prompt.indexOf("## Swarm Rules");
+  const ei = si >= 0 ? prompt.indexOf("## Proactive Memory", si) : -1;
+  if (si > 0 && ei > si) {
+    return {
+      leanBase: prompt.slice(0, si).trimEnd() + "\n\n" + prompt.slice(ei),
+      orchestrationModule: prompt.slice(si, ei).trimEnd(),
+    };
+  }
+  return { leanBase: prompt, orchestrationModule: null };
+}
+
 export function defaultSystemPrompt(workspacePath?: string): string {
   const config = getConfig();
   const toolMode = config.agents.mainAssistant.toolMode;

@@ -46,6 +46,7 @@ import {
 import type { EffortTier } from "../config/schema.js";
 import { childLogger } from "../logger.js";
 import type { AgentSession, SessionHistoryMessage, SessionTranscriptAttachment } from "./session.js";
+import { splitOrchestrationModule } from "./session.js";
 import { classifyToolIntervention, type InterventionNotice } from "./interventions.js";
 import { getMainAssistantToolNames, type MainAssistantToolMode } from "./default-tools.js";
 import { longRunningGenerationManager } from "./long-running-generation.js";
@@ -4595,16 +4596,23 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     // cacheable KV prefix for both paths.
     let orchestrationModuleMsg = "";
     if (getConfig().agents.performance.splitOrchestrationPrompt === true) {
-      const si = systemPrompt.indexOf("## Swarm Rules");
-      const ei = si >= 0 ? systemPrompt.indexOf("## Proactive Memory", si) : -1;
-      if (si > 0 && ei > si) {
-        const orchestrationModule = systemPrompt.slice(si, ei).trimEnd();
-        systemPrompt = systemPrompt.slice(0, si).trimEnd() + "\n\n" + systemPrompt.slice(ei);
-        // Inject the module on any turn that smells like orchestration — a detected intent,
-        // an artifact/app/deck/site build, or a composed multi-part deliverable. Lean only for
-        // clearly direct Q&A. Conservative: when in doubt, include the module (a needless include
-        // just costs prefill; a wrong omission costs routing quality).
-        const needsOrchestrationModule = !!initialDynamicGuidance
+      const { leanBase, orchestrationModule } = splitOrchestrationModule(systemPrompt);
+      if (orchestrationModule) {
+        systemPrompt = leanBase;
+        // Inject the module only on turns that actually ROUTE — a delegation-intent classifier
+        // flag, an artifact/app/deck/site build, or a composed multi-part deliverable. The mere
+        // PRESENCE of guidance is not enough: the direct-answer classes (userOwnFacts,
+        // inlineAnalyticalContent, durableMemorySensitive, assistantNaming) also produce a
+        // non-null guidance object, but their prompts say recall/store/answer-directly and never
+        // delegate — so gating on `!!initialDynamicGuidance` re-injected the ~13KB module on
+        // exactly the turn class the split targets (e.g. a CV-fit question), defeating it. Gate
+        // on the orchestration-intent SUBSET instead. Delegation tools stay available regardless,
+        // so a misclassified turn loses routing prose, not capability.
+        const g = initialDynamicGuidance;
+        const orchestrationIntent = !!g && (g.freshnessSensitive || g.sourceSensitive || g.mailSensitive
+          || g.computerAccessSensitive || g.serverAccessSensitive || g.pentestMethodologySensitive
+          || g.swarmMaintenanceSensitive || g.artifactSensitive);
+        const needsOrchestrationModule = orchestrationIntent
           || looksLikeArtifactCreationRequest(userMessage)
           || looksLikeComposedGuideRequest(userMessage);
         if (needsOrchestrationModule) orchestrationModuleMsg = orchestrationModule;
