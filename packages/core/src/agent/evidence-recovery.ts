@@ -8,12 +8,13 @@
  * evidence WAS gathered (never raw tool dumps). They are the "never ship a blank
  * or fabricated answer when the run collected real facts" safety net.
  *
- * A few low-level helpers used here (countStructuredItems,
+ * The pure low-level helpers used here (countStructuredItems,
  * looksLikeOrchestrationOnlyEvidence, looksLikeDelegationTaskEcho,
- * stripPresentationFormatting, forceSynthesis) remain in runtime.ts because they
- * are used pervasively across the main loop; they are imported back here. The
- * import is call-time only (no top-level use), so the runtime.ts ↔
- * evidence-recovery.ts cycle is safe under ESM.
+ * stripPresentationFormatting) now live in the leaf module ./runtime-utils.ts, so
+ * importing them no longer creates a cycle. Only forceSynthesis (which drives a
+ * model call) still comes from runtime.ts; that import is call-time only (no
+ * top-level use), so the one remaining runtime.ts ↔ evidence-recovery.ts edge is
+ * safe under ESM.
  */
 import { childLogger } from "../logger.js";
 import { readAllFacts } from "../swarm/memory.js";
@@ -29,8 +30,11 @@ import {
   looksLikeOrchestrationOnlyEvidence,
   looksLikeDelegationTaskEcho,
   stripPresentationFormatting,
-  forceSynthesis,
-} from "./runtime.js";
+} from "./runtime-utils.js";
+// `forceSynthesis` is NOT a pure leaf (it drives a model call + formats facts) so it
+// stays in runtime.ts. This single call-time-only import is the remaining
+// runtime.ts ↔ evidence-recovery.ts edge; the pure helpers above moved to the leaf.
+import { forceSynthesis } from "./runtime.js";
 import type { AgentSession } from "./session.js";
 import type { ChatProvider } from "../providers/lmstudio.js";
 
