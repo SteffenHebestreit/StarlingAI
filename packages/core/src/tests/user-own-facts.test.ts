@@ -80,4 +80,26 @@ describe("renderUserProfileEvidence", () => {
     expect(out).toMatch(/resume\.md/);
     expect(out).not.toMatch(/Stored memory about this user/);
   });
+
+  // Dedup: on a userOwnFacts turn the per-turn RAG is the single doc source, so the
+  // prefetch renders memory only and never re-emits the CV chunks.
+  it("omits the documents section when docs are handled by [DOCUMENT CONTEXT]", () => {
+    const out = renderUserProfileEvidence(
+      [{ scope: "user", kind: "fact", subject: "role", content: "Senior engineer" }],
+      [{ title: "cv.pdf", documentId: "d", text: "SHOULD NOT APPEAR HERE" }],
+      { docsHandledElsewhere: true, documentsAlreadyInjected: true },
+    );
+    expect(out).toMatch(/Senior engineer/);
+    expect(out).not.toMatch(/SHOULD NOT APPEAR HERE/);
+    expect(out).not.toMatch(/Excerpts from documents/);
+  });
+
+  it("returns '' (no marker) when memory is empty but the per-turn RAG already injected the CV", () => {
+    expect(renderUserProfileEvidence([], null, { docsHandledElsewhere: true, documentsAlreadyInjected: true })).toBe("");
+  });
+
+  it("emits the confirmed-empty marker when memory empty AND no docs were injected anywhere", () => {
+    const out = renderUserProfileEvidence([], null, { docsHandledElsewhere: true, documentsAlreadyInjected: false });
+    expect(out).toMatch(/found NOTHING/i);
+  });
 });

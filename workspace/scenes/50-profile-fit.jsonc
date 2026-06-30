@@ -1,0 +1,31 @@
+{
+  // Profile-fit assessment. The use-case DELIVERABLE layer for self-referential
+  // "would I be a good fit?" turns. The CORE already retrieves the user's CV (the
+  // workspace library + engram, surfaced as the injected [USER PROFILE EVIDENCE] /
+  // [DOCUMENT CONTEXT] system message) — this scene does NOT re-retrieve it. It only
+  // gives the repeatable SHAPE: given a role / Projektanfrage, assess the user's fit
+  // from the already-present CV into a structured deliverable, then offer the cover note.
+  "scenes": {
+    "profile_fit_assessment": {
+      "description": "Assess whether the USER's OWN background fits a role, job posting, or Projektanfrage, grounded in their already-retrieved CV/profile, and produce a structured fit deliverable: background summary -> skills-match against the request -> gaps & risks -> verdict, then offer to draft an Anschreiben/cover note. For self-referential fit questions about the user themselves — NOT for screening other candidates. Example queries: 'passt meine Erfahrung zu dieser Projektanfrage?', 'would I be a good fit for this role?', 'bin ich für diese Stelle geeignet?', 'assess my fit for this job posting', 'wie gut passt mein Profil zu dieser Ausschreibung?', 'check my CV against this role and tell me where I fall short', 'soll ich mich auf diese Projektanfrage bewerben?', 'evaluate my background for this freelance project'.",
+      "task": "Assess how well the USER's OWN background fits the role / Projektanfrage below, using the CV/profile that has ALREADY been retrieved for this turn.\n\nGROUNDING (read first, do NOT re-fetch): the user's CV/profile is already in context as the injected [USER PROFILE EVIDENCE] (and/or [DOCUMENT CONTEXT]) system message; also call read_shared_facts for anything prior steps published. Use ONLY that evidence plus the role text the user gave — never re-retrieve the CV, never invent experience, employers, certifications, dates, or skills that the CV does not state. If the profile evidence is empty or explicitly marked confirmed-empty (no CV on file), do NOT fabricate a profile: say plainly that no CV/profile is on file, ask the user to attach or add one, and stop rather than guessing.\n\nUse evidence_analyst to reconcile the CV evidence against the request and build the assessment; the deliverable MUST have these clearly separated sections (write in {{language}}):\n1) BACKGROUND SUMMARY — a faithful 3-6 line precis of the user's relevant experience, skills, and seniority, strictly from the CV.\n2) SKILLS MATCH — map the role's / Projektanfrage's stated requirements to concrete evidence from the CV: for each key requirement mark it Met / Partial / Not evidenced, citing the CV detail that backs it. Keep stated requirements and inferred-but-unconfirmed ones separate.\n3) GAPS & RISKS — requirements with no or weak CV evidence, seniority/domain/stack/availability/rate mismatches, and anything the posting asks for that the CV cannot substantiate.\n4) VERDICT — a calibrated overall fit (e.g. strong / moderate / weak fit) with the 2-3 reasons that drove it, honest about the gaps; if the role text is too vague to assess against, say which details are missing instead of forcing a verdict.\n\nUse quality_supervisor or qa_guard for ONE acceptance pass when the match table or the verdict's grounding looks uncertain (every Met/Partial claim must trace to the CV).\n\nFINALLY, do NOT auto-write a cover letter: end by OFFERING to draft a tailored Anschreiben/cover note for this role (built by content_writer from this same CV evidence and the assessment), and proceed to write it only if the user says yes.",
+      "allowedAgents": [
+        "evidence_analyst",
+        "content_writer",
+        "quality_supervisor",
+        "qa_guard",
+        "summarizer"
+      ],
+      "params": {
+        "role": {
+          "description": "The role, job posting, or Projektanfrage to assess fit against (paste the text or describe it)",
+          "default": "the role / Projektanfrage in the user's request or the attached posting"
+        },
+        "language": {
+          "description": "Output language for the assessment",
+          "default": "the language of the user's request"
+        }
+      }
+    }
+  }
+}

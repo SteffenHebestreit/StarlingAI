@@ -19,7 +19,7 @@ import {
   DELIVERABLE_CONSISTENCY_CRITERION,
 } from "./deliverable-consistency.js";
 import { prefetchCapabilityCandidates } from "./discovery-prefetch.js";
-import { buildUserProfileEvidence } from "./user-profile-prefetch.js";
+import { buildUserProfileEvidence, buildProfileBiasedQuery } from "./user-profile-prefetch.js";
 import { checkInput, checkToolOutput } from "../guardrails/input.js";
 import { moderateInputText, moderateToolResultText } from "../guardrails/moderation.js";
 import { scanOutput } from "../guardrails/output.js";
@@ -3769,12 +3769,21 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   // the file-MCP extractor) and injects the most relevant excerpts as a transient
   // [DOCUMENT CONTEXT] system message so the assistant answers from the source.
   // No-op when documentRag is disabled / engram is unreachable. Never fatal.
+  // On a userOwnFacts turn with the profile prefetch active, the per-turn RAG is the
+  // SINGLE document source: it uses the profile-biased query (reliable CV recall) and the
+  // prefetch then skips its own duplicate doc retrieval. Captured so the prefetch knows
+  // whether the CV was already surfaced — and so it cannot be lost (the [DOCUMENT CONTEXT]
+  // here runs first and unconditionally).
+  const userOwnFactsTurn = detectedDynamicGuidance?.userOwnFacts === true
+    && getConfig().orchestration?.userProfilePrefetch === true;
+  const ragQuery = userOwnFactsTurn ? buildProfileBiasedQuery(userMessage) : userMessage;
+  let documentRagFoundDocs = false;
   try {
     const { augmentTurnWithDocuments } = await import("../retrieval/document-rag.js");
     const aug = await timedPhase("documentRag", () => augmentTurnWithDocuments({
       ctx: { sessionId: session.id, ...(session.userId ? { userId: session.userId } : {}) },
       workspacePath: session.getWorkspacePath(),
-      query: userMessage,
+      query: ragQuery,
       attachments: opts.userAttachments,
     }));
     if (aug.ingested > 0 || aug.failed > 0) {
@@ -3782,6 +3791,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     }
     if (aug.contextBlock) {
       session.addMessage({ role: "system", content: `[DOCUMENT CONTEXT]\n${aug.contextBlock}` });
+      documentRagFoundDocs = true;
     }
   } catch (err) {
     log.warn({ err }, "document RAG augmentation failed — continuing without it");
@@ -4667,7 +4677,13 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
             let timer: ReturnType<typeof setTimeout> | undefined;
             try {
               return await Promise.race([
-                buildUserProfileEvidence(session.getWorkspacePath(), userMessage, session.id, session.userId),
+                buildUserProfileEvidence(session.getWorkspacePath(), userMessage, session.id, session.userId, {
+                  // DEDUP: the per-turn RAG above already retrieved + injected the CV with the
+                  // same profile-biased query, so skip the duplicate doc retrieval here and add
+                  // only memory + the right confirmed-empty signal.
+                  skipDocRetrieval: true,
+                  documentsAlreadyInjected: documentRagFoundDocs,
+                }),
                 new Promise<string>((resolve) => { timer = setTimeout(() => resolve(""), PROFILE_PREFETCH_BUDGET_MS); }),
               ]);
             } finally {
@@ -4726,12 +4742,13 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           durableCapsule,
           "",
         );
-      } else if (!userProfileEvidence) {
-        // No durable facts are PRELOADED for this user, AND the proactive profile prefetch
-        // did not already inject an authoritative result. (When it DID — found a CV/profile,
-        // or established a confirmed-empty — this "no facts" marker is suppressed so it can
-        // never contradict the retrieved evidence: the "keine gespeicherten Informationen …
-        // aber ich sehe Ihren CV" awkwardness.) Make explicit that this is the lean-context
+      } else if (!userProfileEvidence && !documentRagFoundDocs) {
+        // No durable facts are PRELOADED, the proactive profile prefetch did not inject an
+        // authoritative result, AND the per-turn document-RAG surfaced no CV/profile this
+        // turn. (When ANY of those DID happen — prefetch found a profile / confirmed-empty,
+        // OR the [DOCUMENT CONTEXT] carries the CV — this "no facts" marker is suppressed so
+        // it can never contradict the retrieved evidence: the "keine gespeicherten
+        // Informationen … aber ich sehe Ihren CV" awkwardness.) Make explicit that this is the lean-context
         // default — NOT the result of a lookup — so the model cannot (a) fabricate a profile
         // from nothing, nor (b) read "not preloaded" as "checked and empty" and admit
         // ignorance without retrieving. Structural (keys off an empty capsule), language-independent.

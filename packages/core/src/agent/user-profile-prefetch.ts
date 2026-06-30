@@ -23,15 +23,41 @@ function truncate(value: string, max: number): string {
 }
 
 /**
+ * Profile-biased document query. Biases retrieval toward the user's CV/profile instead of
+ * echoing a vague self-referential question ("passt X zu meinem Skillset?" matches a CV
+ * only borderline). Shared so the per-turn document-RAG and this prefetch use the IDENTICAL
+ * query — the per-turn RAG is the single doc retrieval on a userOwnFacts turn (dedup), and
+ * its reliability hinges on this same bias.
+ */
+export function buildProfileBiasedQuery(query: string): string {
+  return `${query}\nProfil des Nutzers: Lebenslauf, beruflicher Werdegang, Berufserfahrung, `
+    + `Fähigkeiten, Qualifikationen, Projekte, Ausbildung — the user's professional `
+    + `background, work experience, skills, qualifications, projects, education (CV / resume).`;
+}
+
+export interface RenderProfileOpts {
+  /** The per-turn document-RAG is the single doc source this turn — omit the documents
+   *  section here (the [DOCUMENT CONTEXT] message already carries the CV). */
+  docsHandledElsewhere?: boolean;
+  /** Whether the per-turn RAG actually injected a document context this turn — drives the
+   *  confirmed-empty marker when docsHandledElsewhere is set. */
+  documentsAlreadyInjected?: boolean;
+}
+
+/**
  * Pure renderer over already-retrieved records + chunks. Exported for unit testing
- * without hitting the memory/engram backends. `bothErrored` distinguishes "looked and
- * found nothing" (→ confirmed-empty marker) from "could not look" (→ "").
+ * without hitting the memory/engram backends. With `docsHandledElsewhere`, documents are
+ * NOT re-rendered here (the per-turn [DOCUMENT CONTEXT] carries them) and the confirmed-
+ * empty fact keys off `documentsAlreadyInjected` instead of `chunks`.
  */
 export function renderUserProfileEvidence(
   records: ReadonlyArray<{ scope: string; kind: string; subject: string; content: string }> | null,
   chunks: ReadonlyArray<{ title?: string; documentId: string; text: string }> | null,
+  opts: RenderProfileOpts = {},
 ): string {
-  if (records === null && chunks === null) return "";
+  const { docsHandledElsewhere = false, documentsAlreadyInjected = false } = opts;
+  // Both sources unavailable (only meaningful when this prefetch owns the doc lookup).
+  if (records === null && chunks === null && !docsHandledElsewhere) return "";
 
   const sections: string[] = [];
   if (records && records.length > 0) {
@@ -40,7 +66,7 @@ export function renderUserProfileEvidence(
       + records.map((r) => `- [${r.scope}/${r.kind}] ${r.subject}: ${truncate(r.content, 180)}`).join("\n"),
     );
   }
-  if (chunks && chunks.length > 0) {
+  if (!docsHandledElsewhere && chunks && chunks.length > 0) {
     sections.push(
       "Excerpts from documents this user has on file (e.g. an uploaded CV / profile):\n"
       + chunks.map((c) => `- [${c.title?.trim() || c.documentId.slice(0, 8)}] ${truncate(c.text, 240)}`).join("\n"),
@@ -48,7 +74,12 @@ export function renderUserProfileEvidence(
   }
 
   if (sections.length === 0) {
-    // Retrieval RAN and found nothing — an authoritative confirmed-empty fact.
+    // No memory evidence to add. Emit the confirmed-empty fact ONLY if NO documents were
+    // found or injected anywhere this turn — otherwise the CV is already present (via the
+    // per-turn [DOCUMENT CONTEXT] or the docs section above) and an empty profile block
+    // would be noise (and would wrongly claim "found nothing").
+    const docsFound = docsHandledElsewhere ? documentsAlreadyInjected : !!(chunks && chunks.length > 0);
+    if (docsFound) return "";
     return "[USER PROFILE EVIDENCE — retrieved this turn]\n"
       + "A profile lookup ran THIS turn over the user's stored memory and the documents attached to this "
       + "conversation, and found NOTHING on file about their background, skills, experience, or projects. "
@@ -73,19 +104,22 @@ export async function buildUserProfileEvidence(
   query: string,
   sessionId: string,
   userId?: string,
+  opts: { skipDocRetrieval?: boolean; documentsAlreadyInjected?: boolean } = {},
 ): Promise<string> {
-  // Bias the DOCUMENT query toward the user's PROFILE rather than echoing the (often
-  // vague) self-referential question — "passt X zu meinem Skillset?" matches a CV only
-  // borderline, so engram returns it unreliably. A profile-oriented query reliably
-  // surfaces the CV/profile chunks; the original question stays in the conversation for
-  // the actual assessment. Memory records still use the raw query (subject-keyed).
-  const profileQuery =
-    `${query}\nProfil des Nutzers: Lebenslauf, beruflicher Werdegang, Berufserfahrung, `
-    + `Fähigkeiten, Qualifikationen, Projekte, Ausbildung — the user's professional `
-    + `background, work experience, skills, qualifications, projects, education (CV / resume).`;
+  // DEDUP: on a userOwnFacts turn the per-turn document-RAG already retrieved the CV with
+  // the SAME profile-biased query (buildProfileBiasedQuery) and injected it as [DOCUMENT
+  // CONTEXT]. So with skipDocRetrieval we do NOT re-fetch documents (that was the
+  // duplicate ~4s engram round-trip + duplicate CV tokens) — we add only memory records,
+  // and the renderer keys the confirmed-empty marker off whether the per-turn RAG found
+  // docs. Memory records still use the raw query (subject-keyed).
   const [records, chunks] = await Promise.all([
     searchMemoryRecords(workspacePath, query, { limit: 6, sessionId }).catch(() => null),
-    retrieveDocumentContext(profileQuery, { sessionId, ...(userId ? { userId } : {}) }).catch(() => null),
+    opts.skipDocRetrieval
+      ? Promise.resolve(null)
+      : retrieveDocumentContext(buildProfileBiasedQuery(query), { sessionId, ...(userId ? { userId } : {}) }).catch(() => null),
   ]);
-  return renderUserProfileEvidence(records, chunks);
+  return renderUserProfileEvidence(records, chunks, {
+    docsHandledElsewhere: opts.skipDocRetrieval === true,
+    documentsAlreadyInjected: opts.documentsAlreadyInjected === true,
+  });
 }
