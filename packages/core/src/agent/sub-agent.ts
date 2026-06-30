@@ -974,31 +974,6 @@ const COORDINATOR_SUB_AGENT_PER_TOOL_CAP_OVERRIDES: Partial<Record<string, numbe
   web_fetch: 25,
 };
 
-const COMPUTER_OBSERVATION_ONLY_TOOLS = new Set<string>([
-  "computer_list_nodes",
-  "computer_list_sessions",
-  "computer_session_start",
-  "computer_session_attach",
-  "computer_list_windows",
-  "computer_snapshot",
-  "computer_capture_region",
-  "computer_wait_for",
-  // http_request lets observation-mode runs query REST APIs (e.g. LM Studio /v1/models)
-  // instead of being stranded when vision analysis is unavailable.
-  "http_request",
-  // get_site_credentials is read-only (tier 0, never exposes secrets) and provides
-  // stored URLs so the agent doesn't hallucinate ports/paths from training data.
-  "get_site_credentials",
-]);
-
-const MAIL_READ_ONLY_TOOLS = new Set<string>([
-  "mail_list_accounts",
-  "mail_list_mailboxes",
-  "mail_search",
-  "mail_read",
-  "mail_list_unread",
-]);
-
 const ORCHESTRATION_DISCOVERY_TOOL_NAMES = new Set<string>([
   "list_agents",
   "search_agents",
@@ -1143,94 +1118,23 @@ function resolveSubAgentToolCap(toolName: string, isCoordinatorAgent: boolean): 
   return SUB_AGENT_PER_TOOL_CAPS[toolName];
 }
 
-function isComputerObservationOnlyTask(task: string): boolean {
-  const normalized = task.toLowerCase();
-  if (!normalized.trim()) return false;
-
-  const observationIntent = /(list|identify|inspect|analy[sz]e|describe|report|read|check|show|visible|screenshot|snapshot|screen|what is on (?:the )?screen|loaded models|model names|welche|liste|prüfe|analysiere|beschreibe|sichtbar)/i.test(normalized);
-  if (!observationIntent) return false;
-
-  const explicitInteraction = /(click|doubleclick|type|press|hotkey|shortcut|open|launch|navigate|scroll|drag|upload|download|log in|login|sign in|fill|submit|reply|send|switch tab|switch window|focus the input|paste|öffne|starte|navigiere|klick|eingeben|einloggen|anmelden|hochladen|herunterladen|ausfüllen|absenden|antworten|senden|einfügen)/i.test(normalized);
-  return !explicitInteraction;
+export function getEffectiveToolNames(agentName: string, configuredTools: string[] | undefined, _task: string): string[] | undefined {
+  // The task-keyword-gated tool-list narrowing (computer observation-only,
+  // mail read-only) was removed: routing/capability must not be decided from
+  // topic words in the task text. The agent keeps its full configured tool set
+  // and its own system prompt governs read-only discipline.
+  return configuredTools;
 }
 
-function isMailInboxReadTask(task: string): boolean {
-  const normalized = task.toLowerCase();
-  if (!normalized.trim()) return false;
-
-  const mailIntent = /(email|emails|mail|inbox|mailbox|posteingang|nachricht|nachrichten|unread|neu(?:e)? e-?mails?)/i.test(normalized);
-  if (!mailIntent) return false;
-
-  const readIntent = /(check|read|list|show|summari[sz]e|scan|look for|look up|prüf|lies|liste|fass|zusammen|zeige|check mal)/i.test(normalized);
-  if (!readIntent) return false;
-
-  const writeIntent = /(draft|reply|respond|send|compose|write back|antwort|senden|entwurf|verfassen)/i.test(normalized);
-  return !writeIntent;
-}
-
-export function isExplicitUnreadMailInboxTask(task: string): boolean {
-  const normalized = task.toLowerCase();
-  if (!isMailInboxReadTask(normalized)) return false;
-  return /(unread|ungelesen|neu(?:e|en)?\s+(?:e-?mails?|nachrichten?)|new(?:est)?\s+(?:emails?|messages?|mail))/i.test(normalized);
-}
-
-export function getEffectiveToolNames(agentName: string, configuredTools: string[] | undefined, task: string): string[] | undefined {
-  if (!configuredTools) return configuredTools;
-  if (agentName !== "computer_use_agent" || !isComputerObservationOnlyTask(task)) {
-    if (agentName === "mail_agent" && isMailInboxReadTask(task)) {
-      return configuredTools.filter((toolName) => MAIL_READ_ONLY_TOOLS.has(toolName));
-    }
-    return configuredTools;
+function buildTaskModeGuidance(agentName: string, _task: string): string {
+  // Task-text keyword branches (mail read-only, shell/ops remote-CLI, computer
+  // observation-only) were removed — guidance must not be selected from topic
+  // words in the task. The agent's own system prompt carries that discipline.
+  // The remaining line is agent-identity-gated (computer_use_agent), not keyword-gated.
+  if (agentName === "computer_use_agent") {
+    return "CREDENTIAL LOOKUP: Before making http_request calls to a service, call get_site_credentials with the hostname or short name to retrieve the stored URL, port, and API key. Do NOT guess default ports or URLs from training data.";
   }
-  return configuredTools.filter((toolName) => COMPUTER_OBSERVATION_ONLY_TOOLS.has(toolName));
-}
-
-function buildTaskModeGuidance(agentName: string, task: string): string {
-  if (agentName !== "computer_use_agent" || !isComputerObservationOnlyTask(task)) {
-    if (agentName === "mail_agent" && isMailInboxReadTask(task)) {
-      const preferredReadTool = isExplicitUnreadMailInboxTask(task) ? "mail_list_unread" : "mail_search";
-      return [
-        "TASK MODE - QUICK INBOX CHECK.",
-        "For this task, call a mail_* read tool immediately before writing any narrative.",
-        "If the account is unspecified, call mail_list_accounts first.",
-        `Then prefer ${preferredReadTool}${preferredReadTool === "mail_search" ? " for broad inbox listings, date filters, and requests that include read mail" : " for explicit unread or new-mail checks"}, and call mail_read only for the few messages you summarize.`,
-        "Do not draft, update, send, categorize, or delegate for this task.",
-      ].join("\n");
-    }
-    if (agentName === "shell_agent" && /\b(ssh|server|host|docker|container|containers|systemctl|journalctl|kubectl|n8n-server)\b/i.test(task)) {
-      return [
-        "TASK MODE - DIRECT REMOTE CLI EXECUTION.",
-        "This task asks for a concrete server-side command or inventory result, not exploratory repo inspection.",
-        "If the context names a configured SSH target, call ssh_exec with nodeName immediately instead of searching local files for connection details.",
-        "For one-shot checks like docker ps, systemctl status, journalctl, or df -h, prefer a single decisive remote command and then summarize the actual output.",
-        "If ssh_exec returns command output, treat that output as the answer. Do not override successful stdout with diagnosis, fallback theories, or a contradictory failure summary.",
-        "If the remote command fails, report the exact ssh_exec error or approval blocker verbatim. Quote the literal failing phrase such as 'Permission denied', 'Connection refused', or 'timed out' instead of paraphrasing it into generic possibilities.",
-        "Do not replace concrete stderr with speculative text like 'might be authentication or network'. If the evidence is only an SSH error, return that exact SSH error.",
-      ].join("\n");
-    }
-    if (agentName === "ops_triage" && /\b(ssh|server|host|docker|container|containers|systemctl|journalctl|kubectl|n8n-server)\b/i.test(task)) {
-      return [
-        "TASK MODE - REMOTE INCIDENT TRIAGE.",
-        "Start with one or two high-signal remote checks using ssh_exec or service_check, not a broad workspace search.",
-        "If the context names a configured SSH target, prefer ssh_exec with nodeName before looking for local config files.",
-        "Report concrete failure signals first. Avoid exploratory narration that does not produce evidence.",
-      ].join("\n");
-    }
-    if (agentName === "computer_use_agent") {
-      return "CREDENTIAL LOOKUP: Before making http_request calls to a service, call get_site_credentials with the hostname or short name to retrieve the stored URL, port, and API key. Do NOT guess default ports or URLs from training data.";
-    }
-    return "";
-  }
-
-  return [
-    "TASK MODE — READ-ONLY OBSERVATION.",
-    "The user asked you to inspect, list, or describe the current state, not to operate the desktop UI.",
-    "Start with connection/session discovery if needed, then capture a computer_snapshot immediately.",
-    "Prefer additional computer_snapshot or computer_capture_region calls over any interaction.",
-    "Do NOT click, type, use hotkeys, scroll, drag, open apps, or launch dialogs for this task.",
-    "If the current desktop does not already show the requested evidence, report that limitation explicitly instead of probing blindly.",
-    "If you need to make an http_request to a service, call get_site_credentials first to retrieve the stored URL and port. Do NOT guess URLs or default ports from training data.",
-  ].join("\n");
+  return "";
 }
 
 function isDirectRemoteCliTask(agentName: string, task: string): boolean {
@@ -1996,48 +1900,6 @@ function looksLikeTimeoutLikeError(error: unknown): boolean {
   return /\b(timed out|timeout|abort(?:ed|error)?)\b/i.test(text);
 }
 
-function looksLikePlanningOnlyResult(result: string): boolean {
-  const preview = result.slice(0, 600).trim();
-  if (!preview) return false;
-
-  const startsLikePlanning = /^\s*(let me|now let me|first let me|now i can|now i (?:have|understand)\b[\s\S]{0,160}\blet me|i (?:now )?(?:have|understand)\b[\s\S]{0,160}\blet me|i(?:'m| am) going to|i(?:'ll| will)|i(?:'m| am) trying to|i need to|next,? i(?:'m| am) going to)\b/i.test(preview);
-  if (!startsLikePlanning) return false;
-
-  const planningAction = /\b(try|attempt|start|check|verify|fetch|get|gather|collect|retrieve|research|search|look for|look up|read|download|continue|proceed|focus|click|type|open|inspect|retry|use|switch|launch|list|attach|create|update|modify|edit|write|patch|save)\b/i.test(preview);
-  if (!planningAction) return false;
-
-  const unresolvedMarker = /\b(sessionid|session id|empty string|null|again|different approach|tool list|available tools)\b/i.test(preview);
-  const terminalMarker = /\b(completed|done|finished|succeeded|successfully|typed|opened|clicked|verified|updated|modified|edited|wrote|written|saved|patched|failed|error|could not|did not)\b/i.test(preview);
-  return !terminalMarker && (unresolvedMarker || preview.length <= 220);
-}
-
-function looksLikeFailureResult(result: string): boolean {
-  if (!result.trim()) return true;
-  const preview = result.slice(0, 600);
-  if (/^sub-agent produced no final response\.?$/i.test(preview.trim())) {
-    return true;
-  }
-  if (looksLikeContainerLevelFailure(preview)) {
-    return true;
-  }
-  if (looksLikeModelTemplateArtifact(result)) {
-    return true;
-  }
-  if (/\b(no results|not found|unable to|failed to|error:|timed out|cancelled|incomplete|max.{0,20}iterations|sub_agent_max_iterations|could not complete|did not complete)\b/i.test(preview)) {
-    return true;
-  }
-
-  if (/\b(i can(?:not|'t) access|i do not have access|i can(?:not|'t) retrieve|cannot retrieve the latest|cannot access real[- ]time|knowledge cutoff|my knowledge is based on the data i was trained on)\b/i.test(preview)) {
-    return true;
-  }
-
-  if (/\b(need to start a session|no computer_session_start|not available in my tool list|available tools are only|missing tool|cannot complete because .*tool)\b/i.test(preview)) {
-    return true;
-  }
-
-  return looksLikePlanningOnlyResult(preview);
-}
-
 function maybePreferWorkflowOutput(result: string, workflowOutput: string | null, toolNames: string[]): string {
   const normalizedWorkflowOutput = workflowOutput?.trim();
   if (!normalizedWorkflowOutput) {
@@ -2173,12 +2035,6 @@ function stripHallucinatedToolTags(text: string): string {
     stripped = stripped.slice(0, orphanOpener);
   }
   return stripped.trim();
-}
-
-function summarizeMailBody(text: string, maxLength = 220): string {
-  const normalized = text.replace(/\s+/g, " ").trim();
-  if (!normalized) return "No body preview available.";
-  return normalized.length <= maxLength ? normalized : `${normalized.slice(0, maxLength - 1)}...`;
 }
 
 export interface SubAgentRunOptions {
@@ -3083,9 +2939,12 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     };
 
     const recoverNoResponseAfterSubstantiveWork = (rawResult: string): { result: string; forcedOutcome: SubAgentOutcome | null } => {
+      // Structural signal only: the exact "no final response" sentinel. The
+      // English planning-phrase sniff was removed — recovery now hinges on the
+      // structural interrupted-outcome classifier (successfulToolCount/artifacts/
+      // swarmState), not topic/phrase keyword matching of the narrative.
       const noFinalResponse = rawResult === "Sub-agent produced no final response.";
-      const planningOnlyResponse = looksLikePlanningOnlyResult(rawResult);
-      if (!noFinalResponse && !planningOnlyResponse) {
+      if (!noFinalResponse) {
         return { result: rawResult, forcedOutcome: null };
       }
 
@@ -3100,9 +2959,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
 
       const recovered = buildInterruptedSubAgentOutput({
         agentName: opts.agentName,
-        reason: noFinalResponse
-          ? "produced no final response after substantive work."
-          : "returned an in-progress planning note after substantive work.",
+        reason: "produced no final response after substantive work.",
         swarmState: opts.swarmState,
         toolNames,
         toolCount,
@@ -3112,7 +2969,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         primaryDelegationBody: extractMostRecentSubstantialDelegationBody(history),
       });
       log.warn(
-        { agentName: opts.agentName, toolCount, successfulToolCount, iterations, planningOnlyResponse },
+        { agentName: opts.agentName, toolCount, successfulToolCount, iterations },
         "Sub-agent completed substantive work but produced no usable final narrative — returning partial progress summary",
       );
       return { result: recovered, forcedOutcome: "partial" };
@@ -3609,175 +3466,6 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         }
       }
     };
-
-    if (opts.agentName === "mail_agent" && isExplicitUnreadMailInboxTask(sanitizedTask)) {
-      const executeTrackedMailTool = async (toolName: string, args: Record<string, unknown>): Promise<import("../tools/registry.js").ToolResult> => {
-        toolCount += 1;
-        toolNames.push(toolName);
-        emitSubAgentToolAudit({
-          agentName: opts.agentName,
-          tool: toolName,
-          phase: "start",
-          args,
-          deterministic: true,
-        });
-        const result = await executeTool(toolName, args, toolContext);
-        emitSubAgentToolAudit({
-          agentName: opts.agentName,
-          tool: toolName,
-          phase: "done",
-          args,
-          deterministic: true,
-          result,
-        });
-        return result;
-      };
-
-      const accountsResult = await executeTrackedMailTool("mail_list_accounts", {});
-      if (!accountsResult.success) {
-        recordOutcome({
-          ts: new Date().toISOString(),
-          agent: opts.agentName,
-          task: opts.task.slice(0, 200),
-          outcome: "failure",
-          iterations,
-          totalTokens: usage.totalTokens,
-          durationMs: Date.now() - runStartedAt,
-          timeoutMs: turnTimeoutMs,
-          error: accountsResult.error ?? "mail_list_accounts failed",
-        });
-        const output = `Sub-agent error: ${accountsResult.error ?? "mail_list_accounts failed"}`;
-        const stats = buildStats("error");
-        logSubAgentCompletionAudit(stats, output, {
-          deterministicMailCheck: true,
-          error: accountsResult.error ?? "mail_list_accounts failed",
-        }, "warn");
-        return {
-          output,
-          stats,
-        };
-      }
-
-      const accounts = Array.isArray(accountsResult.metadata?.["accounts"])
-        ? accountsResult.metadata["accounts"] as Array<Record<string, unknown>>
-        : [];
-      const accountIds = accounts
-        .map((account) => String(account["id"] ?? "").trim())
-        .filter((accountId) => accountId.length > 0);
-
-      if (accountIds.length === 0) {
-        const result = "No mail accounts are configured.";
-        recordOutcome({
-          ts: new Date().toISOString(),
-          agent: opts.agentName,
-          task: opts.task.slice(0, 200),
-          outcome: "success",
-          iterations,
-          totalTokens: usage.totalTokens,
-          durationMs: Date.now() - runStartedAt,
-          timeoutMs: turnTimeoutMs,
-        });
-        const stats = buildStats("completed");
-        logSubAgentCompletionAudit(stats, result, { deterministicMailCheck: true });
-        return withArtifacts({ output: result, stats });
-      }
-
-      const unreadResult = await executeTrackedMailTool("mail_list_unread", { accountIds, limit: 5 });
-      if (!unreadResult.success) {
-        recordOutcome({
-          ts: new Date().toISOString(),
-          agent: opts.agentName,
-          task: opts.task.slice(0, 200),
-          outcome: "failure",
-          iterations,
-          totalTokens: usage.totalTokens,
-          durationMs: Date.now() - runStartedAt,
-          timeoutMs: turnTimeoutMs,
-          error: unreadResult.error ?? "mail_list_unread failed",
-        });
-        const output = `Sub-agent error: ${unreadResult.error ?? "mail_list_unread failed"}`;
-        const stats = buildStats("error");
-        logSubAgentCompletionAudit(stats, output, {
-          deterministicMailCheck: true,
-          error: unreadResult.error ?? "mail_list_unread failed",
-        }, "warn");
-        return {
-          output,
-          stats,
-        };
-      }
-
-      const unreadMessages = Array.isArray(unreadResult.metadata?.["messages"])
-        ? unreadResult.metadata["messages"] as Array<Record<string, unknown>>
-        : [];
-
-      let result: string;
-      if (unreadMessages.length === 0) {
-        result = `No unread messages found across configured accounts (${accountIds.join(", ")}).`;
-      } else {
-        const detailedSummaries: string[] = [];
-        for (const message of unreadMessages.slice(0, 3)) {
-          const accountId = String(message["accountId"] ?? "").trim();
-          const mailbox = String(message["mailbox"] ?? "").trim();
-          const uid = Number(message["uid"] ?? 0);
-          const subject = String(message["subject"] ?? "(no subject)");
-          const from = String(message["from"] ?? "unknown sender");
-          const date = String(message["date"] ?? "unknown date");
-
-          let preview = "No body preview available.";
-          if (accountId && mailbox && Number.isFinite(uid) && uid > 0) {
-            const readResult = await executeTrackedMailTool("mail_read", { accountId, mailbox, uid });
-            if (readResult.success) {
-              const fullMessage = (readResult.metadata?.["message"] as Record<string, unknown> | undefined) ?? message;
-              preview = summarizeMailBody(String(fullMessage["textBody"] ?? ""));
-            }
-          }
-
-          detailedSummaries.push(`- [${accountId}] ${mailbox}#${uid} | ${subject} | from ${from} | ${date} | ${preview}`);
-        }
-
-        const accountList = accounts
-          .map((account) => {
-            const id = String(account["id"] ?? "").trim();
-            const address = String(account["address"] ?? "").trim();
-            return address ? `${id} <${address}>` : id;
-          })
-          .filter(Boolean)
-          .join(", ");
-
-        result = [
-          `Unread messages found: ${unreadMessages.length}.`,
-          accountList ? `Checked accounts: ${accountList}.` : "",
-          "Most recent unread messages:",
-          ...detailedSummaries,
-        ].filter(Boolean).join("\n");
-      }
-
-      const outputScan = scanOutput(result);
-      if (!outputScan.safe && outputScan.redacted) {
-        logAudit(
-          "output_redacted",
-          { agentName: opts.agentName, types: outputScan.detectedTypes },
-          { sessionId: subSessionId, severity: "warn" },
-        );
-        result = outputScan.redacted;
-      }
-
-      recordOutcome({
-        ts: new Date().toISOString(),
-        agent: opts.agentName,
-        task: opts.task.slice(0, 200),
-        outcome: "success",
-        iterations,
-        totalTokens: usage.totalTokens,
-        durationMs: Date.now() - runStartedAt,
-        timeoutMs: turnTimeoutMs,
-      });
-      const stats = buildStats("completed");
-      logSubAgentCompletionAudit(stats, result, { deterministicMailCheck: true });
-      log.info({ agentName: opts.agentName, toolCount }, "Sub-agent completed via deterministic inbox check");
-      return withArtifacts({ output: result, stats });
-    }
 
     while (iterations < maxIterations) {
       // Long-running-generation handoff — NON-BLOCKING. When this run has
@@ -5769,7 +5457,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             );
             result = outputScan.redacted;
           }
-          const completedFromArtifact = hasDeliverableArtifact(artifacts) && !looksLikeFailureResult(result);
+          // Structural signal only: a real deliverable artifact exists. The
+          // English failure-phrase sniff was removed — completion hinges on the
+          // structural artifact, not topic/phrase keyword matching of the text.
+          const completedFromArtifact = hasDeliverableArtifact(artifacts);
           const stats = completedFromArtifact
             ? buildStats("completed", "success")
             : buildStats("max_iterations", "partial");

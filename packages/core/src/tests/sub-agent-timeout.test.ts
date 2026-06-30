@@ -2771,12 +2771,12 @@ describe("sub-agent turn timeouts", () => {
     ]);
   });
 
-  it("only treats explicit unread inbox checks as deterministic unread tasks", async () => {
-    const { isExplicitUnreadMailInboxTask } = await import("../agent/sub-agent.js");
-
-    expect(isExplicitUnreadMailInboxTask("Check mal ob ich neue email bekommen habe")).toBe(true);
-    expect(isExplicitUnreadMailInboxTask("Zeig mir die letzten 10 E-Mails, auch gelesen")).toBe(false);
-    expect(isExplicitUnreadMailInboxTask("Suche mir alle E-Mails aus diesem Jahr aus dem Posteingang")).toBe(false);
+  // DE-LEXICALIZATION: isExplicitUnreadMailInboxTask was deleted (keyword task
+  // classifier). This test asserted keyword-driven behavior; it is skipped pending
+  // a rewrite that asserts the pure semantic + structural path. Do NOT re-add the
+  // keyword classifier to make it pass.
+  it.skip("only treats explicit unread inbox checks as deterministic unread tasks", async () => {
+    // TODO(rewrite): assert the semantic/structural routing path, not task-text keywords.
   });
 
   it("completes simple inbox checks through deterministic mail tools without invoking the LLM", async () => {

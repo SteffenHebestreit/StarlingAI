@@ -10,7 +10,7 @@ import { runSubAgent, runSubAgentWithStats } from "../agent/sub-agent.js";
 import { extractInlineHtmlDocument, looksLikeCompleteHtmlDocument } from "../agent/deliverable-intent.js";
 import { looksLikeContainerLevelFailure, looksLikeModelTemplateArtifact } from "../agent/container-failure.js";
 import { getConfig } from "../config/loader.js";
-import { buildAgentTokenIdf, computeAgentIntentAdjustment, computeAgentTaskShapeAdjustment, getEmbeddingSearchStatus, isEmbeddingAvailable, scoreAgentKeywordMatch, searchByEmbedding } from "../providers/embeddings.js";
+import { buildAgentTokenIdf, getEmbeddingSearchStatus, isEmbeddingAvailable, scoreAgentKeywordMatch, searchByEmbedding } from "../providers/embeddings.js";
 import { getEmbeddingProvider, getChatProviderForTier, getChatProvider } from "../providers/index.js";
 import { effectiveOrchestration } from "../runtime/effort-context.js";
 import { normalizeDelegationTaskLanguage } from "../agent/delegation-language.js";
@@ -89,334 +89,6 @@ export function reserveSubAgentTimeout(
   }
   if (reserveMs <= 0) return parentBudgetMs; // identity (default off)
   return Math.max(floorMs, parentBudgetMs - reserveMs);
-}
-
-interface HeuristicRoutingSignals {
-  looksBroad: boolean;
-  looksFresh: boolean;
-  looksSourceHeavy: boolean;
-  looksDocumentDeliverable: boolean;
-  looksResearchTask: boolean;
-  looksSourceGroundedDocumentWorkflow: boolean;
-  looksWebTask: boolean;
-  looksArtifactRender: boolean;
-  looksGroundedInput: boolean;
-  looksSequential: boolean;
-  looksVisualization: boolean;
-  looksDataHeavy: boolean;
-  looksExternalData: boolean;
-  looksSynthesisHeavy: boolean;
-  looksMultiStageEvidenceWorkflow: boolean;
-  looksRenderFromProvidedData: boolean;
-  looksBrowserLoginTask: boolean;
-  looksComputerUse: boolean;
-  looksServerAdmin: boolean;
-  looksServiceTroubleshooting: boolean;
-  domainCount: number;
-  prefersPlanner: boolean;
-}
-
-function analyzeHeuristicRoutingQuery(query: string): HeuristicRoutingSignals {
-  const normalized = query.trim().toLowerCase();
-  const looksTimeWindow = /\b(last|past)\s+\d+\s+(days?|weeks?|months?|years?)\b/i.test(normalized);
-  const looksMarketData = /\b(etf|fund|funds|index|indices|stocks?|shares?|equities|benchmark|benchmarks|returns?|historical|history|time[ -]?series|performance)\b/i.test(normalized);
-  const looksBroad = /\b(comprehensive|guide|tutorial|walkthrough|step by step|step-by-step|deep dive|covering|compare|comparison|overview|audit)\b/i.test(normalized);
-  const looksFresh = /\b(2025|2026|current|currently|latest|recent|recently|updated|today|now|last year|this year)\b/i.test(normalized);
-  const looksSourceHeavy = /\b(official|source|sources|citation|citations|reference|references|documentation|docs|release notes|spec|specification|standard)\b/i.test(normalized);
-  const looksDocumentDeliverable = /\b(report|reports|brief|briefs|paper|papers|summary|summaries|presentation|writeup|write-ups?|document|documents|whitepaper|white paper|essay|bericht|berichte|aufsatz)\b/i.test(normalized);
-  const looksResearchTask = /\b(research|researching|researcher|recherche|recherchiere|forschung|investigate|investigation)\b/i.test(normalized);
-  // Bare `web` matches casual phrasing like "search the web for X" which
-  // is researcher's idiom — not a real browser/online task.  Require an
-  // explicit web/browser/online noun so wtc only owns true web tasks.
-  const looksWebTask = /\b(website|webseite|browser|online|wcag|a11y|accessibility|testing|audit)\b/i.test(normalized);
-  const looksArtifactRender = /\b(create|build|generate|render|produce|turn|convert|visuali[sz]e|present|html)\b/i.test(normalized);
-  const looksGroundedInput = /\b(already|verified|provided|given|attached|collected|existing|these|this data|the data|following|from these|from this|using the verified|using the collected)\b/i.test(normalized);
-  // Plain `next` matches "next Friday" / "next week" — those are date
-  // qualifiers, not sequential-workflow signals.  Require a workflow noun
-  // after `next` (step, task, phase, …) so weather/scheduler queries
-  // don't get classified as multi-step missions.
-  const looksSequential = /\b(first|then|after|before|next\s+(step|task|phase|stage|action|item|iteration|round)|based on|using the findings|using findings|depends on|dependency|dependencies|workflow|pipeline|plan)\b/i.test(normalized);
-  const looksVisualization = /\b(chart|graph|plot|table|diagram|visuali[sz]ation|dashboard|mermaid)\b/i.test(normalized);
-  const looksDataHeavy = /\b(data|dataset|csv|json|spreadsheet|metrics?|average|averages|trend|trends|monthly|yearly|quarterly|statistics?|analy[sz]e|analyse|calculate|comparison)\b/i.test(normalized)
-    || looksMarketData
-    || looksTimeWindow;
-  const looksExternalData = /\b(weather|climate|temperature|temperatures|sales|revenue|prices?|market|population|forecast|statistics?|latest|recent|current|source|sources)\b/i.test(normalized)
-    || (looksMarketData && !looksGroundedInput)
-    || (looksTimeWindow && looksVisualization && !looksGroundedInput);
-  const looksSynthesisHeavy = /\b(compare|comparison|merge|combine|reconcile|aggregate|synthesi[sz]e|summari[sz]e)\b/i.test(normalized);
-  const looksRenderFromProvidedData = looksGroundedInput
-    && (looksVisualization || looksArtifactRender)
-    && !looksSourceHeavy
-    && !looksFresh
-    && !looksExternalData
-    && !looksSequential;
-  // Require both a login/form/auth signal AND a site/navigation/target signal so that
-  // isolated keywords like "login" in unrelated contexts (e.g. "login taxonomy regulatory")
-  // do not over-match.
-  const hasLoginSignal = /\b(log[ -]?in|login|sign[ -]?in|signin|anmeld(?:en|ung)?|zugangsdaten|credentials?|username|password|portal|account|dashboard|inbox|mailbox|form|formular|apply|application|bewerb(?:en|ung)?|submit|checkout|invoice|rechnung)\b/i.test(normalized);
-  const hasBrowserTargetSignal = /\b(browser|website|web\s?site|webseite|seite|page|url|https?:\/\/|\.(?:com|de|org|net|io|co|app|dev|gov|edu)(?:\/|\b)|site|login[- ]?url|freelancermap|github|gitlab|twitter|linkedin|xing|amazon|ebay|facebook|instagram|portal|dashboard|inbox|mailbox|nachrichten?|messages?|fill|navigate|navigation|open|browse|visit|check|retrieve|download|upload|click|type)\b/i.test(normalized);
-  const looksBrowserLoginTask = hasLoginSignal && hasBrowserTargetSignal;
-  const looksMultiStageEvidenceWorkflow = (looksVisualization || looksArtifactRender)
-    && (looksDataHeavy || looksExternalData || looksSourceHeavy || looksFresh)
-    && (!looksRenderFromProvidedData || looksSequential);
-  const looksSecurityScan = /\b(pentest|penetration|security|vulnerabilit|cve|exploit|scan|nmap|nikto|sqlmap|hydra|metasploit|authorized scope)\b/i.test(normalized);
-  const hasDesktopKeyword = /\b(meinem?\s+(?:pc|computer|rechner|desktop|workstation)|my\s+(?:pc|computer|desktop|workstation)|on\s+(?:the\s+)?(?:pc|computer|desktop|machine)\s+at|lokale[mnrs]?\s+(?:pc|computer|rechner|desktop))\b/i.test(normalized);
-  const hasIpAddress = /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/.test(normalized);
-  const hasDesktopAppContext = /\b(rdp|vnc|desktop|lm\s*studio|obs|vs\s*code|app(?:lication)?|open|type|click|screenshot|launched?|running|installed|geladen|gestartet|geöffnet|bildschirm|fenster)\b/i.test(normalized);
-  // `n8n` alone is the workflow product, not a server.  Only the explicit
-  // `n8n-server` form indicates an admin/ops target.  Bare `n8n` belongs
-  // to workflow_designer's scope.
-  const hasServerTarget = /\b(server|host|vm|vps|instance|container|containers|n8n-server|ssh)\b/i.test(normalized);
-  const hasServerAdminAction = /\b(ssh|docker|docker\s+ps|docker\s+compose|systemctl|journalctl|kubectl|podman|service\s+status|tail(?:\s+-f)?|ps\s+aux|df\s+-h|container|containers)\b/i.test(normalized)
-    || /\b(?:show|view|check|inspect|read|tail)\s+logs?\b/i.test(normalized)
-    || /(?:^|\s)(?:top|htop)(?=$|\s|[.,;:!?])/i.test(normalized);
-  const looksServiceTroubleshooting = (
-    /\b(logs?|health|healthy|unhealthy|restart|restarted|crash|crashed|failing|failed|failure|down|stopped|error|incident|debug|diagnos(?:e|ing|is)|investigat(?:e|ing|ion)|why)\b/i.test(normalized)
-      && /\b(server|host|vm|vps|instance|container|containers|n8n(?:-server)?|docker|systemctl|journalctl|service)\b/i.test(normalized)
-  ) || /\b(journalctl|docker\s+logs|systemctl\s+status|docker\s+compose\s+ps)\b/i.test(normalized);
-  const looksServerAdmin = !looksSecurityScan
-    && (hasServerAdminAction || (hasIpAddress && /\b(ssh|docker|systemctl|journalctl|kubectl|server|host|vm|container)\b/i.test(normalized)) || hasServerTarget)
-    && !hasDesktopKeyword
-    && !/\b(rdp|vnc|desktop|bildschirm|fenster|click|type|screenshot)\b/i.test(normalized);
-  const looksComputerUse = !looksSecurityScan
-    && !looksServerAdmin
-    && (hasDesktopKeyword || (hasIpAddress && hasDesktopAppContext));
-
-  const domainCount = [
-    looksWebTask || looksSourceHeavy || looksFresh,
-    looksDataHeavy,
-    looksVisualization,
-    looksDocumentDeliverable,
-  ].filter(Boolean).length;
-
-  const looksSourceGroundedDocumentWorkflow = looksDocumentDeliverable
-    && (looksSourceHeavy
-      || looksFresh
-      || looksResearchTask
-      || looksSynthesisHeavy
-      || domainCount >= 2
-      || /\b(compare|comparison|versus|vs\.?|vergleich|protocol|protocols|protokoll|protokolle|standard|standards)\b/i.test(normalized));
-
-  return {
-    looksBroad,
-    looksFresh,
-    looksSourceHeavy,
-    looksDocumentDeliverable,
-    looksResearchTask,
-    looksSourceGroundedDocumentWorkflow,
-    looksWebTask,
-    looksArtifactRender,
-    looksGroundedInput,
-    looksSequential,
-    looksVisualization,
-    looksDataHeavy,
-    looksExternalData,
-    looksSynthesisHeavy,
-    looksMultiStageEvidenceWorkflow,
-    looksRenderFromProvidedData,
-    looksBrowserLoginTask,
-    looksComputerUse,
-    looksServerAdmin,
-    looksServiceTroubleshooting,
-    domainCount,
-    prefersPlanner: looksSequential
-      || looksMultiStageEvidenceWorkflow
-      || looksSourceGroundedDocumentWorkflow
-      || (looksVisualization && (looksExternalData || looksDataHeavy))
-      || (looksSynthesisHeavy && domainCount >= 2)
-      || domainCount >= 3
-      || (looksBroad && domainCount >= 2),
-  };
-}
-
-function looksLikeDurableMemoryTask(task: string): boolean {
-  const normalized = task.trim().toLowerCase();
-  if (!normalized) return false;
-
-  const hasMemoryVerb = /\b(remember|save|store|persist|record|note|take a note|save this|remember this|memorize|merk dir|speicher(?:e|n)?|notier(?:e|en)?|merke|festhalten)\b/i.test(normalized);
-  const hasMemoryDestination = /\b(memory|workspace memory|user memory|persistent memory|durable memory|future session|future sessions|future tasks?|for later|preferences?|user info(?:rmation)?|user identity|operator|main user|portfolio|website url|public website|public url)\b/i.test(normalized);
-
-  return hasMemoryVerb && hasMemoryDestination;
-}
-
-function looksLikeLiveSingleShotWebTask(task: string): boolean {
-  const normalized = task.trim().toLowerCase();
-  if (!normalized) return false;
-
-  const liveLookup = /\b(news|headlines?|weather|forecast|live score|scores?|lottery|lotto|eurojackpot|stock quote|stock price|exchange rate|fx rate|breaking news|aktuelle nachrichten|schlagzeilen|wetter|gewinnzahlen|b[öo]rsen|aktienkurs)\b/i.test(normalized);
-  const browserWorkflow = /\b(browser|website|web\s?site|webseite|page|url|screenshot|snapshot|login|sign[ -]?in|form|click|navigate|open\s+the\s+website|capture\s+a\s+page|prüf(?:e|en)?[\s,]+ob\s+ich\s+neue\s+nachrichten|pruef(?:e|en)?[\s,]+ob\s+ich\s+neue\s+nachrichten)\b|\b[a-z0-9-]+\.(?:com|de|org|net|io|ai)\b/i.test(normalized);
-
-  return liveLookup || browserWorkflow;
-}
-
-function resolveExplicitDelegationAgentOverride(request: DelegationRequest, ctx: ToolContext): string | null {
-  const requested = request.agentName?.trim();
-  if (requested !== "web_task_coordinator") return null;
-  if (looksLikeLiveSingleShotWebTask(request.routingQuery ?? request.task)) return null;
-
-  const task = request.routingQuery ?? request.task;
-  const signals = analyzeHeuristicRoutingQuery(task);
-  const looksProductVerification = /\b(datasheet|spec(?:s|ification)?|pricing|price|availability|distributors?|mouser|digikey|farnell|tme|component|components?|parts?|module|modules?|evaluation board|known issues?|reviews?|improvements?|product suggestions?|component recommendations?)\b/i.test(task);
-  const candidates = [
-    (signals.prefersPlanner || signals.looksSourceGroundedDocumentWorkflow || signals.looksMultiStageEvidenceWorkflow || looksProductVerification)
-      ? "mission_coordinator"
-      : null,
-    (signals.looksResearchTask || signals.looksSourceHeavy || looksProductVerification)
-      ? "researcher"
-      : null,
-  ].filter((value): value is string => Boolean(value));
-
-  const validation = sanitizeDelegationAgentList(candidates, ctx);
-  return validation.valid.find((name) => name !== requested) ?? null;
-}
-
-function getPinnedAgentForTask(task: string): string | null {
-  const signals = analyzeHeuristicRoutingQuery(task);
-  if (signals.looksServerAdmin) {
-    return signals.looksServiceTroubleshooting ? "ops_triage" : "shell_agent";
-  }
-  if (signals.looksComputerUse) {
-    return "computer_use_agent";
-  }
-  return null;
-}
-
-function resolvePinnedDelegationAgent(task: string, ctx: ToolContext): string | null {
-  const pinned = getPinnedAgentForTask(task);
-  if (!pinned) return null;
-  const validation = sanitizeDelegationAgentList([pinned], ctx);
-  return validation.valid[0] ?? null;
-}
-
-function buildCoordinatorMatchedTerms(signals: HeuristicRoutingSignals): string[] {
-  return [
-    "web",
-    "research",
-    ...(signals.looksBroad ? ["guide"] : []),
-  ];
-}
-
-function buildMissionCoordinatorMatchedTerms(signals: HeuristicRoutingSignals): string[] {
-  return [
-    "coordination",
-    "parallel",
-    ...(signals.looksDocumentDeliverable ? ["report"] : []),
-    ...(signals.looksSequential ? ["dependencies"] : []),
-    ...(signals.looksVisualization ? ["visualization"] : []),
-    ...(signals.looksDataHeavy ? ["analysis"] : []),
-    ...(signals.looksExternalData ? ["research"] : []),
-    ...(signals.looksSynthesisHeavy ? ["synthesis"] : []),
-    "quality",
-  ];
-}
-
-function buildPlannerMatchedTerms(signals: HeuristicRoutingSignals): string[] {
-  return [
-    "planning",
-    "workflow",
-    ...(signals.looksSequential ? ["dependencies"] : []),
-    ...(signals.looksBroad ? ["roadmap"] : []),
-    ...(signals.looksSynthesisHeavy ? ["coordination"] : []),
-  ];
-}
-
-function buildChartDesignerMatchedTerms(signals: HeuristicRoutingSignals): string[] {
-  return [
-    ...(signals.looksGroundedInput ? ["verified"] : []),
-    ...(signals.looksVisualization ? ["chart"] : []),
-    ...(signals.looksDataHeavy ? ["data"] : []),
-    "artifact",
-  ];
-}
-
-function shouldPreferWebTaskCoordinator(query: string, ctx: ToolContext, exclude: string[]): boolean {
-  const signals = analyzeHeuristicRoutingQuery(query);
-  if (!(signals.looksWebTask || signals.looksSourceHeavy || signals.looksFresh)) {
-    return false;
-  }
-
-  if (signals.looksBrowserLoginTask) {
-    return false;
-  }
-
-  if (signals.looksSourceGroundedDocumentWorkflow) {
-    return false;
-  }
-
-  if (signals.looksMultiStageEvidenceWorkflow && !signals.looksWebTask) {
-    return false;
-  }
-
-  if (exclude.includes("web_task_coordinator")) {
-    return false;
-  }
-
-  if (ctx.allowedAgents && !ctx.allowedAgents.includes("web_task_coordinator")) {
-    return false;
-  }
-
-  return Boolean(getConfig().subAgents["web_task_coordinator"]);
-}
-
-function shouldPreferProjectPlanner(query: string, ctx: ToolContext, exclude: string[]): boolean {
-  const signals = analyzeHeuristicRoutingQuery(query);
-  if (!signals.prefersPlanner) {
-    return false;
-  }
-
-  if (exclude.includes("project_planner")) {
-    return false;
-  }
-
-  if (ctx.allowedAgents && !ctx.allowedAgents.includes("project_planner")) {
-    return false;
-  }
-
-  const planner = getConfig().subAgents["project_planner"];
-  if (!planner) {
-    return false;
-  }
-
-  const tools = planner.tools ?? [];
-  return tools.includes("delegate_to_agent") || tools.includes("swarm_delegate") || tools.includes("parallel_delegate") || tools.includes("run_task_graph");
-}
-
-function shouldPreferMissionCoordinator(query: string, ctx: ToolContext, exclude: string[]): boolean {
-  const signals = analyzeHeuristicRoutingQuery(query);
-
-  if (!(signals.prefersPlanner || signals.looksSourceGroundedDocumentWorkflow)) {
-    return false;
-  }
-
-  if (signals.looksRenderFromProvidedData) {
-    return false;
-  }
-
-  if (
-    signals.looksGroundedInput
-    && signals.looksDocumentDeliverable
-    && !signals.looksWebTask
-    && !signals.looksFresh
-    && !signals.looksExternalData
-  ) {
-    return false;
-  }
-
-  if (exclude.includes("mission_coordinator")) {
-    return false;
-  }
-
-  if (ctx.allowedAgents && !ctx.allowedAgents.includes("mission_coordinator")) {
-    return false;
-  }
-
-  const coordinator = getConfig().subAgents["mission_coordinator"];
-  if (!coordinator) {
-    return false;
-  }
-
-  const tools = coordinator.tools ?? [];
-  return tools.includes("delegate_to_agent") || tools.includes("swarm_delegate") || tools.includes("parallel_delegate") || tools.includes("run_task_graph");
 }
 
 export interface AgentRoutingCandidate {
@@ -548,11 +220,6 @@ function compareRoutingResults(
   return left.name.localeCompare(right.name);
 }
 
-function looksLikeNavigationSpecialist(cfg: { description: string; capabilities?: string[]; tags?: string[] }): boolean {
-  const combined = `${cfg.description} ${(cfg.capabilities ?? []).join(" ")} ${(cfg.tags ?? []).join(" ")}`.toLowerCase();
-  return /(navigation|distance|travel time|travel|fahrzeit|reisezeit|entfernung|route planning|\broute\b)/.test(combined);
-}
-
 // Circuit breaker: if an agent fails ≥60% of its last 10 calls (min 3 samples),
 // its circuit is "open" and it is excluded from routing until outcomes improve.
 const CIRCUIT_LOOKBACK = 10;
@@ -581,42 +248,6 @@ function computeOutcomeBoost(agentName: string, workspacePath: string): number {
     relevant.length;
   // Neutral (0.5 win rate) → 0, perfect → +0.125, all failures → -0.125
   return (successRate - 0.5) * 0.25;
-}
-
-/**
- * Compute a GPU-affinity score adjustment for an agent.
- *
- * Rules (Stage 9 GPU-aware routing):
- *   - If the agent declares gpuTier "none" and the query contains compute-heavy
- *     terms, it gets a small negative adjustment to yield to GPU-capable peers.
- *   - If the agent declares gpuPreferred: true and the query looks compute-heavy,
- *     it gets a small positive boost.
- *   - If an agent declares a minVramMb > 0, that metadata is surfaced in search
- *     results so operators know the requirement (routing cannot enforce VRAM at
- *     runtime without hardware introspection).
- */
-const GPU_HEAVY_QUERY_TERMS = [
-  "embed", "embedding", "transcribe", "speech", "audio", "image", "generate image",
-  "vision", "ocr", "stable diffusion", "whisper", "llava", "gpu", "cuda", "vram",
-  "neural", "inference", "model weights", "fine-tune", "fine tune",
-];
-
-function computeGpuAffinityAdjustment(
-  query: string,
-  cfg: { compute?: { gpuPreferred?: boolean; gpuTier?: string } | null },
-  poolHasGpuAgents: boolean,
-): number {
-  const lq = query.toLowerCase();
-  const isComputeHeavy = GPU_HEAVY_QUERY_TERMS.some(t => lq.includes(t));
-  if (!isComputeHeavy) return 0;
-
-  const gpuTier = cfg.compute?.gpuTier ?? "none";
-  if (cfg.compute?.gpuPreferred && gpuTier !== "none") return 0.06; // prefer GPU-capable agents
-  // Only penalize non-GPU agents when there is at least one GPU-capable peer —
-  // otherwise the penalty lowers everyone's score equally and pushes the router
-  // toward ephemeral agent generation unnecessarily.
-  if (gpuTier === "none" && poolHasGpuAgents) return -0.04;
-  return 0;
 }
 
 /** Shared stop-word set for query shortening — covers the most common
@@ -695,7 +326,6 @@ export async function resolveAgentRouting(
   },
 ): Promise<AgentRoutingResolution> {
   const raw = query.trim();
-  const vulnerabilityResearchIntent = /\b(cve|cvss|vulnerability|vulnerabilities|advisory|advisories|exploit(?:-db)?|nvd|patch(?:es| status)?|threat intelligence)\b/i.test(raw);
   const minConfidence = opts?.minConfidence ?? "medium";
   // The qualification floor is computed AFTER we know whether semantic
   // search produced results (see further down), since the floor depends
@@ -718,7 +348,6 @@ export async function resolveAgentRouting(
     const excludedAgents = new Set(opts.excludeAgents);
     entries = entries.filter(([name]) => !excludedAgents.has(name));
   }
-  const availableEntries = new Map(entries);
 
   // Filter out agents whose circuit breaker is open
   const trippedAgents: string[] = entries
@@ -779,9 +408,6 @@ export async function resolveAgentRouting(
     minScore = confidenceThreshold(minConfidence);
   }
 
-  // Pre-compute whether any agent in the pool declares GPU capability, so the
-  // GPU-affinity penalty is only applied when a GPU-capable peer actually exists.
-  const poolHasGpuAgents = entries.some(([, cfg]) => cfg.compute?.gpuPreferred && (cfg.compute?.gpuTier ?? "none") !== "none");
   // G32: Task-class keywords for outcome-weighted routing multiplier
   const queryKeywords = extractTaskKeywords(raw);
 
@@ -797,16 +423,9 @@ export async function resolveAgentRouting(
       const combinedScore = computeHybridRoutingScore(keywordMatch.score, semanticScore, usedSemanticSearch);
 
       const outcomeBoost = usedSemanticSearch ? 0 : computeOutcomeBoost(name, config.workspacePath);
-      const intentReinforcement = usedSemanticSearch ? 0 : computeAgentIntentAdjustment(raw, cfg, [
-        ...keywordMatch.matchedTerms,
-        ...(cfg.capabilities ?? []),
-        ...(cfg.tags ?? []),
-      ]) * 0.25;
-      const taskShapeAdjustment = usedSemanticSearch ? 0 : computeAgentTaskShapeAdjustment(raw, cfg);
-      const gpuAdjustment = usedSemanticSearch ? 0 : computeGpuAffinityAdjustment(raw, cfg, poolHasGpuAgents);
       // G32: Multiply by historical outcome weight (±20% max, requires ≥25 samples)
       const outcomeMultiplier = usedSemanticSearch ? 1 : computeOutcomeRoutingMultiplier(name, queryKeywords, config.workspacePath);
-      const boostedScore = Math.max(0, Math.min(1, (combinedScore + outcomeBoost + intentReinforcement + taskShapeAdjustment + gpuAdjustment) * outcomeMultiplier));
+      const boostedScore = Math.max(0, Math.min(1, (combinedScore + outcomeBoost) * outcomeMultiplier));
       return {
         name,
         cfg,
@@ -845,238 +464,7 @@ export async function resolveAgentRouting(
       .sort(compareRoutingResults);
   }
 
-  if (vulnerabilityResearchIntent) {
-    ranked = ranked
-      .map((result) => {
-        if (!looksLikeNavigationSpecialist(result.cfg) || result.matchedTerms.length > 0) {
-          return result;
-        }
-        return {
-          ...result,
-          combinedScore: Math.min(result.combinedScore, 0.2),
-        };
-      })
-      .sort(compareRoutingResults);
-  }
-
-  const preferenceSignals = analyzeHeuristicRoutingQuery(raw);
-  // Workflow / automation / n8n / webhook-design queries are
-  // workflow_designer's primary scope.  Without an explicit signal here,
-  // queries like "design an n8n workflow" or "create an automation
-  // pipeline" get pulled by project_planner ("design"/"create" + the
-  // generic plan-shape match) or mission_coordinator (multi-stage feel).
-  const looksWorkflowDesign = /\b(n8n|webhook|webhooks|workflow|workflows|automation|automatisierung|integration|integrations|integrieren?)\b/i.test(raw)
-    && /\b(design|designed|build|create|automate|automates|automating|wire|wiring|connect|connects|trigger|triggers|generate|generates|architecture)\b/i.test(raw);
-  // Evidence authorship: writing a paper / report / brief from already-
-  // collected notes / citations / sources.  This is paper_author's scope,
-  // not mission_coordinator's — the user has already done the gathering,
-  // so a multi-stage workflow is wrong.  Triggers on (write|draft|author|
-  // compose|prepare) + (paper|report|brief|review|article) + a grounded-
-  // input phrase (collected|provided|given|attached|verified|existing|...).
-  const looksEvidenceAuthoring = /\b(write|draft|author|compose|prepare)\b/i.test(raw)
-    && /\b(paper|papers|report|reports|brief|briefs|review|article|articles)\b/i.test(raw)
-    // Require an EXPLICIT grounded marker — the gathering is already done.
-    // "from the collected notes", "using the existing evidence", "based on
-    // the provided citations" all qualify.  "current sources" / "with
-    // citations" alone do NOT (those imply the user wants the agent to
-    // gather first, which is mission_coordinator's territory).
-    && /\b(collected|provided|given|attached|verified|existing|saved|prior|earlier)\b/i.test(raw)
-    && /\b(notes|citations?|evidence|findings|sources|data|material|materials|research)\b/i.test(raw);
-  // Documentation / release-notes / spec / reference lookups are
-  // researcher's primary scope.  Without this heuristic, queries with
-  // "latest" + "release notes" pull web_task_coordinator via the
-  // freshnessNewsIntent boost even though they're documentation tasks,
-  // and pure "find official documentation" queries fall to incidental
-  // matchers (prompt_optimizer, channel_operator) because researcher's
-  // raw keyword score doesn't beat them in keyword-only mode.
-  const looksDocumentationLookup = /\b(find|search|look\s*up|lookup|get|locate|fetch|gather)\b/i.test(raw)
-    && /\b(official\s+documentation|official\s+docs|api\s+docs?|api\s+documentation|api\s+reference|release\s+notes|specifications?|spec|specs|reference\s+(?:for|on)|documentation\s+for|docs\s+for)\b/i.test(raw);
-  // Single-shot code + data analysis (e.g. "create a Python script that
-  // reads a CSV and computes averages") is data_analyst / coder territory,
-  // not mission_coordinator's.  Suppresses the multi-stage workflow
-  // preference when the query is clearly one-shot specialist work.
-  const looksSingleShotCodeData = /\b(create|write|build|implement|generate)\b/i.test(raw)
-    && /\b(python|typescript|javascript|node|bash|go|rust|sql|script|function|program|module|class|notebook)\b/i.test(raw)
-    && /\b(csv|json|spreadsheet|xlsx|tsv|excel|dataframe|pandas|sql\s+table)\b/i.test(raw)
-    && !/\b(first|then|after|workflow|pipeline\s+that|multi-step|step\s+by\s+step|orchestrate)\b/i.test(raw);
-  // Image / screenshot / document analysis is media_analyst's scope —
-  // not browser_agent (which is interactive web work) and not data_analyst
-  // (tabular).  Triggers on direct "analyse this X" or "extract from X"
-  // shapes where X is an image/screenshot/PDF/document.
-  const looksMediaAnalysis = (
-    /\b(analy[sz]e|analy[sz]ing|inspect|interpret|describe|recognize|recognise|read|extract)\b/i.test(raw)
-    && /\b(screenshot|screenshots|image|images|picture|pictures|photo|photos|bild|bilder|screen\s?cap|pdf|pdfs|document|documents|dokument|dokumente|chart|charts|diagram|diagrams)\b/i.test(raw)
-  ) || /\b(extract\s+(?:the\s+)?(?:text|content)\s+from|ocr|optical\s+character\s+recognition)\b/i.test(raw);
-  // Freshness lookups owned by web_task_coordinator: news, weather, live
-  // scores, lottery results, stock quotes — anything that's a one-shot
-  // current-state query (vs. a sourced/citation-grade research task,
-  // which goes to researcher).  Includes German equivalents so DE
-  // queries route the same way as EN ones.
-  const looksNewsTask = /\b(news|updates?|headlines|breaking|nachrichten|neuigkeiten|meldungen|trends|schlagzeilen|weather|wetter|forecast|vorhersage|score|scores|spielstand|live|ergebnisse|lottery|lotto|jackpot|eurojackpot|stocks?|aktien|b[oö]rse|markets?)\b/i.test(raw);
-  // `screenshot` / `snapshot` alone (without a browser/page/url context)
-  // is media_analyst's territory ("analyse this screenshot") — don't
-  // pull browser_agent in just because the query mentions a screenshot.
-  const looksBrowserEvidenceTask = /\b(browser|website|web\s?site|webseite|page|url|playwright|open\s+the\s+website|capture\s+a\s+page)\b/i.test(raw)
-    || (/\b(screenshot|snapshot)\b/i.test(raw)
-        && /\b(browser|website|page|url|portal|dashboard|playwright|navigate|capture\s+a\s+page|of\s+the\s+(?:website|page|portal|dashboard))\b/i.test(raw));
-  const sourceGroundedDocumentWorkflowInSearch = preferenceSignals.looksSourceGroundedDocumentWorkflow
-    && !(preferenceSignals.looksGroundedInput
-      && !preferenceSignals.looksFresh
-      && !preferenceSignals.looksExternalData
-      && !preferenceSignals.looksWebTask);
-  const preferMissionInSearch = preferenceSignals.looksMultiStageEvidenceWorkflow
-    || sourceGroundedDocumentWorkflowInSearch
-    || (preferenceSignals.looksSequential
-      && (preferenceSignals.looksVisualization || preferenceSignals.looksExternalData || preferenceSignals.looksSourceHeavy || preferenceSignals.looksDataHeavy));
-  const preferWebCoordinatorInSearch = !preferenceSignals.looksMultiStageEvidenceWorkflow
-    && !sourceGroundedDocumentWorkflowInSearch
-    && !preferenceSignals.looksBrowserLoginTask
-    && !preferenceSignals.looksDataHeavy
-    && !preferenceSignals.looksVisualization
-    && !preferenceSignals.looksDocumentDeliverable
-    // Source-heavy queries (release notes, official documentation, specs,
-    // citations, references) are researcher's territory.  When the query
-    // looks source-heavy AND has no real "freshness" or "web task"
-    // signal, drop the wtc preference so researcher wins on its keyword
-    // strength rather than getting bumped to second place by the
-    // preferredNames re-sort.
-    && (preferenceSignals.looksWebTask
-      || (preferenceSignals.looksFresh && !preferenceSignals.looksSourceHeavy));
-  const preferProjectPlannerInSearch = preferenceSignals.prefersPlanner
-    && !preferMissionInSearch
-    && !preferenceSignals.looksSourceHeavy
-    && !preferenceSignals.looksFresh
-    && !preferenceSignals.looksExternalData
-    && !preferenceSignals.looksVisualization
-    && !preferenceSignals.looksDataHeavy;
-  const preferredNames = [
-    preferenceSignals.looksServerAdmin
-      ? (preferenceSignals.looksServiceTroubleshooting ? "ops_triage" : "shell_agent")
-      : null,
-    vulnerabilityResearchIntent ? "security_researcher" : null,
-    preferenceSignals.looksComputerUse ? "computer_use_agent" : null,
-    looksBrowserEvidenceTask && !preferMissionInSearch ? "browser_agent" : null,
-    preferenceSignals.looksBrowserLoginTask ? "browser_agent" : null,
-    preferenceSignals.looksRenderFromProvidedData ? "chart_designer" : null,
-    // Suppress mission_coordinator when the query is paper_author's
-    // (writing from already-collected notes / citations) or a one-shot
-    // code+data task (data_analyst / coder territory) — the multi-stage
-    // workflow shape is wrong for both.
-    (preferMissionInSearch && !looksEvidenceAuthoring && !looksSingleShotCodeData) ? "mission_coordinator" : null,
-    looksEvidenceAuthoring ? "paper_author" : null,
-    looksSingleShotCodeData ? "data_analyst" : null,
-    // Documentation / release-notes / spec lookups are researcher's primary
-    // scope — pre-empt wtc and prompt_optimizer for these queries.
-    looksDocumentationLookup ? "researcher" : null,
-    // Workflow_designer first when n8n/webhook/automation-design shape
-    // hits — keeps project_planner from grabbing "design an n8n workflow"
-    // or "create an automation pipeline" via the generic plan-shape match.
-    looksWorkflowDesign ? "workflow_designer" : null,
-    looksMediaAnalysis ? "media_analyst" : null,
-    // Either signal is enough to put wtc above researcher in the
-    // preferredNames bump.  looksNewsTask covers freshness lookups
-    // (weather, scores, lottery, breaking) where wtc is the actual
-    // owner; researcher stays the fallback if wtc isn't in the catalog.
-    (preferWebCoordinatorInSearch || looksNewsTask) ? "web_task_coordinator" : null,
-    (preferWebCoordinatorInSearch || looksNewsTask) ? "researcher" : null,
-    // Suppress project_planner when the query is workflow_designer's —
-    // "design an n8n workflow" hits prefersPlanner via "design" but
-    // belongs to workflow_designer.
-    (preferProjectPlannerInSearch && !looksWorkflowDesign) ? "project_planner" : null,
-  ].filter((value): value is string => Boolean(value));
-
-  const maybeAppendHeuristicCandidate = (name: string, score: number, matchedTerms: string[]) => {
-    const existing = ranked.find((candidate) => candidate.name === name);
-    if (existing) {
-      // Boost existing candidate if heuristic score is higher
-      if (score > existing.combinedScore) {
-        existing.combinedScore = score;
-        existing.matchedTerms = [...new Set([...existing.matchedTerms, ...matchedTerms])];
-      }
-      return;
-    }
-    const cfg = availableEntries.get(name);
-    if (!cfg) {
-      return;
-    }
-    ranked.push({
-      name,
-      cfg,
-      matchedTerms,
-      combinedScore: score,
-    });
-  };
-
-  if (preferenceSignals.looksServerAdmin) {
-    maybeAppendHeuristicCandidate(
-      preferenceSignals.looksServiceTroubleshooting ? "ops_triage" : "shell_agent",
-      0.78,
-      preferenceSignals.looksServiceTroubleshooting
-        ? ["server", "ops", "logs", "containers"]
-        : ["server", "ssh", "shell", "docker"],
-    );
-  }
-  if (vulnerabilityResearchIntent) {
-    maybeAppendHeuristicCandidate("security_researcher", 0.82, ["security", "cve", "vulnerability"]);
-  }
-  if (preferenceSignals.looksComputerUse) {
-    maybeAppendHeuristicCandidate("computer_use_agent", 0.75, ["computer", "desktop", "automation"]);
-  }
-  if (looksBrowserEvidenceTask && !preferMissionInSearch) {
-    maybeAppendHeuristicCandidate("browser_agent", 0.78, ["browser", "website", "snapshot"]);
-  }
-  if (preferenceSignals.looksBrowserLoginTask) {
-    maybeAppendHeuristicCandidate("browser_agent", 0.8, ["browser", "login", "form", "credentials"]);
-  }
-  if (preferenceSignals.looksRenderFromProvidedData) {
-    maybeAppendHeuristicCandidate("chart_designer", 0.72, buildChartDesignerMatchedTerms(preferenceSignals));
-  }
-  if (preferMissionInSearch) {
-    maybeAppendHeuristicCandidate("mission_coordinator", 0.72, buildMissionCoordinatorMatchedTerms(preferenceSignals));
-  }
-  if (preferWebCoordinatorInSearch) {
-    maybeAppendHeuristicCandidate("web_task_coordinator", 0.72, buildCoordinatorMatchedTerms(preferenceSignals));
-    maybeAppendHeuristicCandidate("researcher", 0.72, ["research", "sources", "web"]);
-  }
-  if (looksNewsTask) {
-    // Freshness/news queries are web_task_coordinator's primary scope —
-    // bump its heuristic score clearly above the routing floor so an
-    // operator's `skillMatchThreshold: 0.75` recognizes it as a strong
-    // catalog match.  researcher stays at 0.72 (the floor) so it shows up
-    // as a fallback candidate but doesn't bypass strict thresholds when
-    // it's the only candidate (in which case ephemeral spawn is preferred).
-    maybeAppendHeuristicCandidate("web_task_coordinator", 0.82, ["web", "news", "research"]);
-    maybeAppendHeuristicCandidate("researcher", 0.72, ["research", "news", "sources"]);
-  }
-  if (preferProjectPlannerInSearch && !looksWorkflowDesign) {
-    maybeAppendHeuristicCandidate("project_planner", 0.72, buildPlannerMatchedTerms(preferenceSignals));
-  }
-  if (looksWorkflowDesign) {
-    maybeAppendHeuristicCandidate("workflow_designer", 0.82, ["n8n", "workflow", "automation", "webhook"]);
-  }
-  if (looksMediaAnalysis) {
-    maybeAppendHeuristicCandidate("media_analyst", 0.82, ["image", "media", "extract", "analyse", "screenshot"]);
-  }
-  if (looksEvidenceAuthoring) {
-    maybeAppendHeuristicCandidate("paper_author", 0.85, ["paper", "evidence", "citations", "notes"]);
-  }
-  if (looksDocumentationLookup) {
-    maybeAppendHeuristicCandidate("researcher", 0.85, ["documentation", "official", "spec", "research"]);
-  }
-  if (looksSingleShotCodeData) {
-    maybeAppendHeuristicCandidate("data_analyst", 0.82, ["data", "csv", "python", "analysis"]);
-  }
-
   ranked = ranked.sort(compareRoutingResults).slice(0, 5);
-
-  for (const preferredName of preferredNames) {
-    const preferredCandidate = ranked.find((candidate) => candidate.name === preferredName);
-    if (!preferredCandidate) {
-      continue;
-    }
-    ranked = [preferredCandidate, ...ranked.filter((candidate) => candidate.name !== preferredName)];
-    break;
-  }
 
   const gated = ranked.filter((result) => result.combinedScore >= minScore);
   const weakCandidates = ranked
@@ -2420,8 +1808,10 @@ function shouldAcceptPartialDelegation(
     return true;
   }
 
-  const looksComputerUse = agentName === "computer_use_agent" || analyzeHeuristicRoutingQuery(task).looksComputerUse;
-  if (!looksComputerUse) {
+  // Structural gate only: a computer-use partial counts when the agent that ran
+  // is the computer-use specialist (or it actually invoked a computer_* tool).
+  // The task-text keyword sniff was removed — routing/acceptance must not read topic words.
+  if (agentName !== "computer_use_agent") {
     return false;
   }
 
@@ -2734,12 +2124,11 @@ function sanitizeDelegationAgentList(agentNames: string[] | undefined, ctx: Tool
 }
 
 function maybeEnrichServerDelegationContext(agentName: string, task: string, context: string | undefined): string | undefined {
+  // Structural gate: only the server-execution specialists get SSH-target enrichment.
+  // The agent has already been selected, so we no longer keyword-sniff the task text
+  // to decide whether this "looks like" server admin — the configured-node alias match
+  // below (against real node names/hosts) is what scopes the addition.
   if (!SERVER_EXECUTION_AGENT_NAMES.has(agentName)) {
-    return context;
-  }
-
-  const signals = analyzeHeuristicRoutingQuery(`${task}\n${context ?? ""}`);
-  if (!signals.looksServerAdmin) {
     return context;
   }
 
@@ -2817,9 +2206,6 @@ async function routeAgentCandidates(query: string, ctx: ToolContext, exclude: st
       if (agentCfgIsMetaFactory(cfg)) excluded.add(name);
     }
   }
-  const preferMissionCoordinator = shouldPreferMissionCoordinator(query, ctx, exclude);
-  const preferWebTaskCoordinator = shouldPreferWebTaskCoordinator(query, ctx, exclude);
-  const preferProjectPlanner = shouldPreferProjectPlanner(query, ctx, exclude);
   const medium = await resolveAgentRouting(query, {
     minConfidence: "medium",
     allowedAgents: ctx.allowedAgents,
@@ -2845,150 +2231,15 @@ async function routeAgentCandidates(query: string, ctx: ToolContext, exclude: st
     }
   }
 
-  // Deduplicate by name, exclude already-attempted agents
+  // Deduplicate by name, exclude already-attempted agents. Order is the pure
+  // semantic + structural ranking from resolveAgentRouting — no keyword-driven
+  // coordinator preference re-sort.
   const seen = new Set<string>();
-  const routed = candidates.filter(c => {
+  return candidates.filter(c => {
     if (excluded.has(c.name) || seen.has(c.name)) return false;
     seen.add(c.name);
     return true;
   });
-
-  const { candidates: heuristicCandidates, boosts: heuristicBoosts } = buildHeuristicRoutingCandidates(query, ctx, excluded, seen);
-
-  // Apply heuristic score boosts to routed candidates that were already seen
-  for (const [name, boost] of heuristicBoosts) {
-    const existing = routed.find(c => c.name === name);
-    if (existing && boost.score > existing.score) {
-      existing.score = boost.score;
-      existing.matchedTerms = [...new Set([...existing.matchedTerms, ...boost.matchedTerms])];
-    }
-  }
-
-  const mergedCandidates = [...routed, ...heuristicCandidates]
-    .sort((left, right) => {
-      if (right.score !== left.score) {
-        return right.score - left.score;
-      }
-      if (right.matchedTerms.length !== left.matchedTerms.length) {
-        return right.matchedTerms.length - left.matchedTerms.length;
-      }
-      return left.name.localeCompare(right.name);
-    });
-
-  const preferredCoordinators = [
-    preferMissionCoordinator ? "mission_coordinator" : null,
-    preferWebTaskCoordinator ? "web_task_coordinator" : null,
-    preferProjectPlanner ? "project_planner" : null,
-  ].filter((value): value is string => Boolean(value));
-
-  for (const preferredCoordinator of preferredCoordinators) {
-    const coordinatorCandidate = mergedCandidates.find((candidate) => candidate.name === preferredCoordinator);
-    if (coordinatorCandidate) {
-      return [coordinatorCandidate, ...mergedCandidates.filter((candidate) => candidate.name !== coordinatorCandidate.name)];
-    }
-  }
-
-  return mergedCandidates;
-}
-
-function buildHeuristicRoutingCandidates(
-  query: string,
-  ctx: ToolContext,
-  excluded: Set<string>,
-  seen: Set<string>,
-): { candidates: AgentRoutingCandidate[]; boosts: Map<string, { score: number; matchedTerms: string[] }> } {
-  const normalized = query.trim().toLowerCase();
-  if (!normalized) return { candidates: [], boosts: new Map() };
-
-  const config = getConfig();
-  const defaultModel = config.agents.defaults.model.primary;
-  const heuristicCandidates: AgentRoutingCandidate[] = [];
-  const heuristicBoosts = new Map<string, { score: number; matchedTerms: string[] }>();
-  const signals = analyzeHeuristicRoutingQuery(normalized);
-  const vulnerabilityResearchIntent = /\b(cve|cvss|vulnerability|vulnerabilities|advisory|advisories|exploit(?:-db)?|nvd|patch(?:es| status)?|threat intelligence)\b/i.test(normalized);
-  const looksNewsTask = /\b(news|updates?|nachrichten|neuigkeiten|meldungen|trends)\b/i.test(normalized);
-  const looksBrowserEvidenceTask = /\b(browser|website|web\s?site|webseite|page|url|screenshot|snapshot|playwright|open\s+the\s+website|capture\s+a\s+page)\b/i.test(normalized);
-
-  const maybeAdd = (name: string, score: number, matchedTerms: string[]) => {
-    if (excluded.has(name)) return;
-    if (ctx.allowedAgents && !ctx.allowedAgents.includes(name)) return;
-    const cfg = config.subAgents[name];
-    if (!cfg) return;
-    if (seen.has(name)) {
-      // Agent already in routed candidates — record boost request so the
-      // caller can apply it to the existing entry.
-      heuristicBoosts.set(name, { score, matchedTerms });
-      return;
-    }
-    seen.add(name);
-    heuristicCandidates.push(toCandidate(name, cfg, score, matchedTerms, defaultModel, config.workspacePath));
-  };
-
-  if (signals.looksComputerUse) {
-    maybeAdd("computer_use_agent", 0.75, ["computer", "desktop", "automation"]);
-  }
-
-  if (vulnerabilityResearchIntent) {
-    maybeAdd("security_researcher", 0.82, ["security", "cve", "vulnerability"]);
-  }
-
-  if (looksBrowserEvidenceTask && !shouldPreferMissionCoordinator(normalized, ctx, [...excluded])) {
-    maybeAdd("browser_agent", 0.78, ["browser", "website", "snapshot"]);
-  }
-
-  if (signals.looksBrowserLoginTask) {
-    maybeAdd("browser_agent", 0.8, ["browser", "login", "form", "credentials"]);
-  }
-
-  if (signals.looksServerAdmin) {
-    maybeAdd(
-      signals.looksServiceTroubleshooting ? "ops_triage" : "shell_agent",
-      0.78,
-      signals.looksServiceTroubleshooting
-        ? ["server", "ops", "logs", "containers"]
-        : ["server", "ssh", "shell", "docker"],
-    );
-  }
-
-  if (shouldPreferMissionCoordinator(normalized, ctx, [...excluded])) {
-    maybeAdd("mission_coordinator", 0.72, buildMissionCoordinatorMatchedTerms(signals));
-  }
-
-  if (signals.looksWebTask && (signals.looksBroad || signals.looksFresh || signals.looksSourceHeavy)) {
-    maybeAdd("web_task_coordinator", 0.72, buildCoordinatorMatchedTerms(signals));
-    maybeAdd("researcher", 0.72, ["research", "sources", "web"]);
-  }
-
-  if (looksNewsTask) {
-    maybeAdd("web_task_coordinator", 0.72, ["web", "news", "research"]);
-    maybeAdd("researcher", 0.72, ["research", "news", "sources"]);
-  }
-
-  if (shouldPreferProjectPlanner(normalized, ctx, [...excluded])) {
-    maybeAdd("project_planner", 0.72, buildPlannerMatchedTerms(signals));
-  }
-
-  if (signals.looksRenderFromProvidedData) {
-    maybeAdd("chart_designer", 0.72, buildChartDesignerMatchedTerms(signals));
-  }
-
-  // Boost browser_agent when the task explicitly mentions Playwright, browser automation,
-  // or cookie handling — avoid sending these to researcher which only has web_fetch.
-  if (/\b(playwright|browser.?agent|cookie.?consent|cookie.?banner|interactive|js.?rendered|javascript.?heavy)\b/i.test(normalized)) {
-    maybeAdd("browser_agent", 0.72, ["browser", "playwright", "interactive"]);
-  }
-
-  // Boost web_task_coordinator for web data tasks that need coordinated retrieval + charting
-  if (signals.looksVisualization && (signals.looksExternalData || signals.looksDataHeavy) && !signals.looksRenderFromProvidedData) {
-    maybeAdd("web_task_coordinator", 0.72, ["web", "data", "chart", "coordination"]);
-  }
-
-  if ((signals.looksSourceHeavy && /\b(citation|citations|reference|references|bibliograph|paper|papers|report|reports|brief|briefs)\b/i.test(normalized))
-    || /\b(wcag|spec|specification|standard|guideline|guidelines)\b/i.test(normalized)) {
-    maybeAdd("researcher", 0.56, ["official", "sources"]);
-  }
-
-  return { candidates: heuristicCandidates, boosts: heuristicBoosts };
 }
 
 // ─── Architect fallback ───────────────────────────────────────────────────────
@@ -3266,10 +2517,6 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
 
   const taskId = request.taskId ?? reusableTask?.id ?? `task_${Object.keys(ensureSwarmState(ctx, request.task).tasks).length + 1}`;
   const taskState = getOrCreateSwarmTask(ctx, taskId, title, request.dependsOn ?? [], signature);
-  const explicitAgentOverride = resolveExplicitDelegationAgentOverride(request, ctx);
-  const pinnedAgentName = !request.agentName
-    ? resolvePinnedDelegationAgent(request.routingQuery ?? request.task, ctx)
-    : null;
   const attemptedAgents: string[] = [];
 
   // Operator stopped this turn — do NOT start a fresh delegation. The orchestrator
@@ -3351,9 +2598,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   });
 
   let candidateQueue = uniqueNames([
-    explicitAgentOverride ?? "",
     request.agentName ?? "",
-    pinnedAgentName ?? "",
     ...(request.fallbackAgents ?? []),
   ]);
   let biddingTried = false;
@@ -3371,22 +2616,6 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
     | undefined;
   /** Routing metadata for agents that were auto-selected by resolveAgentRouting. */
   const routingCandidateMap = new Map<string, RoutingSelectionReason>();
-
-  if (pinnedAgentName) {
-    routingCandidateMap.set(pinnedAgentName, {
-      confidence: "high",
-      matchedTerms: ["memory", "productivity"],
-      score: 0.9,
-    });
-  }
-
-  if (explicitAgentOverride) {
-    routingCandidateMap.set(explicitAgentOverride, {
-      confidence: "high",
-      matchedTerms: ["source-grounded", "research", "web-task-redirect"],
-      score: 0.86,
-    });
-  }
 
   if (!ctx._turnAgentCounts) ctx._turnAgentCounts = new Map();
 
@@ -3627,33 +2856,12 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         }
       }
 
-      // ── Step 2: heuristic coordinator fallbacks ─────────────────────────
-      if (candidateQueue.length === 0) {
-        if (attemptedAgents.length > 0 && shouldPreferMissionCoordinator(request.routingQuery ?? request.task, ctx, attemptedAgents)) {
-          routingCandidateMap.set("mission_coordinator", {
-            confidence: "medium",
-            matchedTerms: buildMissionCoordinatorMatchedTerms(analyzeHeuristicRoutingQuery(request.routingQuery ?? request.task)),
-            score: 0.68,
-          });
-          candidateQueue.push("mission_coordinator");
-        }
-      }
-
-      if (candidateQueue.length === 0) {
-        if (attemptedAgents.length > 0 && shouldPreferWebTaskCoordinator(request.routingQuery ?? request.task, ctx, attemptedAgents)) {
-          routingCandidateMap.set("web_task_coordinator", {
-            confidence: "medium",
-            matchedTerms: buildCoordinatorMatchedTerms(analyzeHeuristicRoutingQuery(request.routingQuery ?? request.task)),
-            score: 0.62,
-          });
-          candidateQueue.push("web_task_coordinator");
-        }
-      }
-
-      // ── Step 3: autonomous bidding (last resort — 125ms window) ─────────
-      // Only when both routing and heuristics came up empty. Bidding is the
+      // ── Step 2: autonomous bidding (last resort — 125ms window) ─────────
+      // Only when semantic + structural routing came up empty. Bidding is the
       // correct fallback for tasks that require a dynamic peer-elected agent
-      // not represented in the static catalog.
+      // not represented in the static catalog. (The keyword-driven coordinator
+      // re-injection that used to sit here was removed — routing is purely
+      // semantic + structural now.)
       if (candidateQueue.length === 0 && usesAutonomousBidding && isAutonomousBiddingStarted() && !biddingTried) {
         biddingTried = true;
         const rawBids = await collectTaskBids(taskId, DEFAULT_AUTONOMOUS_BID_WINDOW_MS);
@@ -4814,13 +4022,9 @@ registerTool({
     } catch (err) {
       log.debug({ err, agentName }, "Ephemeral semantic tool search failed — falling back to grantable-tool validation");
     }
-    const toolSignals = analyzeHeuristicRoutingQuery(toolSearchQuery);
-    if (toolSignals.looksFresh || toolSignals.looksSourceHeavy || toolSignals.looksResearchTask || toolSignals.looksExternalData) {
-      semanticToolMatches = ["web_search", "web_fetch", ...semanticToolMatches]
-        .filter((toolName) => GRANTABLE_TOOLS.has(toolName))
-        .filter((toolName, index, list) => list.indexOf(toolName) === index)
-        .slice(0, 8);
-    }
+    // Tool selection for ephemeral agents is driven purely by the semantic
+    // tool search above (searchToolsByEmbedding over the task/description/prompt).
+    // The keyword-based web_search/web_fetch injection was removed.
     let tools = requestedTools.filter(t => GRANTABLE_TOOLS.has(t));
     const rejected = requestedTools.filter(t => !GRANTABLE_TOOLS.has(t));
 
@@ -5521,8 +4725,7 @@ registerTool({
       return { success: false, output: "", error: "task is required" };
     }
 
-    const pinnedAgentName = !requestedAgentName ? getPinnedAgentForTask(task) : null;
-    const rawAgentName = requestedAgentName || pinnedAgentName || "";
+    const rawAgentName = requestedAgentName || "";
     const primaryValidation = sanitizeDelegationAgentList(rawAgentName ? [rawAgentName] : undefined, ctx);
     const agentName = primaryValidation.valid[0] ?? "";
 
@@ -5549,14 +4752,6 @@ registerTool({
     const fallbackAgents = fallbackValidation.valid.length > 0
       ? fallbackValidation.valid
       : undefined;
-
-    if (pinnedAgentName && pinnedAgentName !== requestedAgentName) {
-      logAudit("delegate_agent_pinned", {
-        requestedAgentName: requestedAgentName || null,
-        pinnedAgentName,
-        taskPreview: summarizeText(task, 120),
-      }, { sessionId: ctx.sessionId });
-    }
 
     const enrichedContext = agentName
       ? maybeEnrichServerDelegationContext(agentName, task, context)
