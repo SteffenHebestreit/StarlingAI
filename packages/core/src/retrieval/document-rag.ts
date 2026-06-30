@@ -216,6 +216,26 @@ export async function retrieveDocumentContext(
 }
 
 /**
+ * In-scope document inventory (metadata only), INDEPENDENT of query relevance. Cheap:
+ * one (cached) `/documents` list + a scope-membership filter — no embedding, no rerank.
+ *
+ * Why this exists: content-relevance retrieval can't surface that a document EXISTS when
+ * the question doesn't semantically match its chunks. An existence/access question ("do
+ * you have my CV?") reranks every CV chunk negative, so `retrieveDocumentContext` returns
+ * [] and the model wrongly concludes "no documents on file". This returns the in-scope
+ * titles so a userOwnFacts turn can honestly acknowledge the documents it holds even when
+ * no excerpt matched the specific query.
+ */
+export async function listInScopeDocuments(ctx: RagScopeContext): Promise<EngramDocumentInfo[]> {
+  if (!engramConfigured()) return [];
+  const scopeSources = new Set(activeScopeSources(ctx));
+  if (scopeSources.size === 0) return [];
+  const docs = await engramListDocuments();
+  if (!docs || docs.length === 0) return [];
+  return docs.filter((d) => d.sources.some((s) => scopeSources.has(s)));
+}
+
+/**
  * Format retrieved chunks as an injectable context block, capped at
  * maxContextChars. Returns "" when there is nothing to inject.
  */

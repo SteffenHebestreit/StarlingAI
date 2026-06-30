@@ -15,7 +15,7 @@
  * than asserting a confirmed-empty result it did not actually establish.
  */
 import { searchMemoryRecords } from "../memory/service.js";
-import { retrieveDocumentContext } from "../retrieval/document-rag.js";
+import { listInScopeDocuments, retrieveDocumentContext } from "../retrieval/document-rag.js";
 
 function truncate(value: string, max: number): string {
   const flat = value.replace(/\s+/g, " ").trim();
@@ -42,6 +42,11 @@ export interface RenderProfileOpts {
   /** Whether the per-turn RAG actually injected a document context this turn — drives the
    *  confirmed-empty marker when docsHandledElsewhere is set. */
   documentsAlreadyInjected?: boolean;
+  /** In-scope documents the user HAS on file (titles), independent of query relevance. When
+   *  no excerpt reached the model this turn but this list is non-empty, the confirmed-empty
+   *  marker becomes an honest "you have these documents on file" note instead of "found
+   *  nothing" — so an existence/access question never falsely denies holding the user's CV. */
+  availableDocuments?: ReadonlyArray<{ title?: string; documentId?: string }>;
 }
 
 /**
@@ -55,7 +60,7 @@ export function renderUserProfileEvidence(
   chunks: ReadonlyArray<{ title?: string; documentId: string; text: string }> | null,
   opts: RenderProfileOpts = {},
 ): string {
-  const { docsHandledElsewhere = false, documentsAlreadyInjected = false } = opts;
+  const { docsHandledElsewhere = false, documentsAlreadyInjected = false, availableDocuments } = opts;
   // Both sources unavailable (only meaningful when this prefetch owns the doc lookup).
   if (records === null && chunks === null && !docsHandledElsewhere) return "";
 
@@ -80,6 +85,21 @@ export function renderUserProfileEvidence(
     // would be noise (and would wrongly claim "found nothing").
     const docsFound = docsHandledElsewhere ? documentsAlreadyInjected : !!(chunks && chunks.length > 0);
     if (docsFound) return "";
+    // The user HAS documents on file, but no excerpt ranked relevant to THIS question (an
+    // existence/access question reranks every CV chunk negative). Tell the model the docs
+    // EXIST so it never falsely denies access — but withhold their content (none matched),
+    // so it can't fabricate from titles alone.
+    if (availableDocuments && availableDocuments.length > 0) {
+      const titles = availableDocuments
+        .map((d) => d.title?.trim() || d.documentId?.slice(0, 8) || "document")
+        .join(", ");
+      return "[USER PROFILE EVIDENCE — retrieved this turn]\n"
+        + `The user HAS documents on file in their library: ${titles}. A profile lookup ran THIS turn, but no `
+        + "excerpt from them ranked as relevant to this specific question — so you have their TITLES, not their "
+        + "matched content, right now. Do NOT claim you have no access to the user's CV / documents — you DO have "
+        + "them. Do NOT invent their contents. Acknowledge the document(s) by name; if you need their content, ask "
+        + "the user to point to the relevant part or rephrase so the right section can be retrieved.";
+    }
     return "[USER PROFILE EVIDENCE — retrieved this turn]\n"
       + "A profile lookup ran THIS turn over the user's stored memory and the documents attached to this "
       + "conversation, and found NOTHING on file about their background, skills, experience, or projects. "
@@ -118,8 +138,24 @@ export async function buildUserProfileEvidence(
       ? Promise.resolve(null)
       : retrieveDocumentContext(buildProfileBiasedQuery(query), { sessionId, ...(userId ? { userId } : {}) }).catch(() => null),
   ]);
+
+  // When NO document excerpt reached the model this turn (the per-turn RAG injected nothing,
+  // or our own retrieval matched nothing — e.g. an existence/access question reranks the CV
+  // chunks negative), look up whether the user nonetheless HAS documents on file. This lets
+  // the confirmed-empty marker honestly acknowledge the CV instead of denying access to it.
+  const docsReachedModel = opts.skipDocRetrieval ? opts.documentsAlreadyInjected === true : !!(chunks && chunks.length > 0);
+  const hasMemory = !!(records && records.length > 0);
+  let availableDocuments: { title?: string; documentId: string }[] | undefined;
+  if (!docsReachedModel && !hasMemory) {
+    const inventory = await listInScopeDocuments({ sessionId, ...(userId ? { userId } : {}) }).catch(() => []);
+    if (inventory.length > 0) {
+      availableDocuments = inventory.map((d) => ({ ...(d.title ? { title: d.title } : {}), documentId: d.id }));
+    }
+  }
+
   return renderUserProfileEvidence(records, chunks, {
     docsHandledElsewhere: opts.skipDocRetrieval === true,
     documentsAlreadyInjected: opts.documentsAlreadyInjected === true,
+    ...(availableDocuments && availableDocuments.length > 0 ? { availableDocuments } : {}),
   });
 }

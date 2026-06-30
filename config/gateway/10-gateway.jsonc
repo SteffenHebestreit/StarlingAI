@@ -45,6 +45,15 @@
   "receptionist": {
     "enabled": true,
     "maxResponseChars": 400,
-    "alwaysEscalateTerms": []
+    "alwaysEscalateTerms": [],
+    // vLLM "Confidence" — let the fast desk ATTEMPT a confident direct answer for a
+    // clearly-direct, self-contained question (≤ confidenceAttemptMaxChars) instead of
+    // staying smalltalk-only. The Stage-0 gate still escalates ANY turn with a task /
+    // research / freshness / source-sensitive / user-own-facts signal BEFORE the relaxed
+    // gate (so it never short-circuits the citation/profile guards), and the micro-call
+    // self-scores confidence and escalates on any doubt. Saves a full-prompt round-trip
+    // on easy factual questions.
+    "confidenceAttempt": true,
+    "confidenceAttemptMaxChars": 400
   }
 }

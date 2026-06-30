@@ -788,6 +788,37 @@ export function prependUnverifiedSourceCaveat(answer: string, userMessage: strin
   return `${caveat}\n\n${answer}`;
 }
 
+/**
+ * STRUCTURAL, language-free detection of source citations in an answer: a markdown link to an
+ * http(s) URL, or a bare http(s) URL. The citation-honesty guard uses this to catch an answer
+ * that presents URL citations without any real retrieval having run this turn (the audited
+ * "7 fabricated 404 URLs" case, session 1303e254). NO language/phrase matching: a fabricated
+ * link is a fabricated link in any language, and an honest answer that merely says "laut den
+ * Datenblättern" / "según las fuentes" with no URL is NOT flagged (it has no clickable 404 to
+ * strip). The false "verified" framing is corrected by the prepended caveat, not by hunting
+ * verification phrases. Pure/exported.
+ */
+export function answerPresentsSourceCitations(text: string): boolean {
+  return /\[[^\]]+\]\(\s*https?:\/\//i.test(text)
+    || /\bhttps?:\/\/\S+/i.test(text);
+}
+
+/**
+ * Remove fabricated URL citations from an answer that ran NO real retrieval: a markdown link
+ * to a URL becomes its plain label (drops the clickable 404) and bare URLs are removed. NEVER
+ * empties the answer — only the offending links are stripped; the body's substance survives,
+ * and the honest unverified caveat (prependUnverifiedSourceCaveat) is prepended separately to
+ * correct any "verified" framing. STRUCTURAL/language-free — no phrase neutralization. Pure.
+ */
+export function stripFabricatedCitations(text: string): string {
+  return text
+    .replace(/\[([^\]]+)\]\(\s*https?:\/\/[^)]*\)/g, "$1")            // [label](404url) → label
+    .replace(/\bhttps?:\/\/[^\s)\]]+/g, "")                           // bare URLs removed
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 /** Pull the prior turn's topic + answer from history so a contextless follow-up
  *  ("validate your response") can be delegated with the real subject folded in. */
 function extractPriorTurnContext(
@@ -5761,9 +5792,17 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         continue;
       }
 
+      // A run_workflow that returned workflowNotFound is a NO-OP routing miss, not executed
+      // orchestration — but _turnToolCallCounts is bumped for every call regardless of success,
+      // so counting the raw run_workflow call here made a failed workflow masquerade as real
+      // orchestration. That poisoned boolean disabled the entire honesty chain (research
+      // enforcement, the unverified caveat, the source-sensitive backstop) for a sourceSensitive
+      // turn — letting an answer with fabricated 404 citations + a false "verified against N
+      // sources" claim ship with ZERO web/research execution (audit 1303e254). Use only the
+      // honest "real execution" signals: a real delegation, or a run_workflow that actually
+      // SUCCEEDED (workflowRunCompletedThisTurn, set on result.success).
       const currentTurnHasExecutableOrchestration = _turnDelegationCount > 0
-        || workflowRunCompletedThisTurn
-        || ((_turnToolCallCounts.get("run_workflow") ?? 0) > 0);
+        || workflowRunCompletedThisTurn;
 
       if (!releasedAfterRoutingNudge && requiresArtifactDelegation && !currentTurnHasExecutableOrchestration) {
         if (!delegatedResearchRetryUsed) {
@@ -6023,6 +6062,36 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           sourceSensitive: initialDynamicGuidance?.sourceSensitive ?? false,
           freshnessSensitive: initialDynamicGuidance?.freshnessSensitive ?? false,
         }, { sessionId: session.id, severity: "warn" });
+      }
+
+      // Citation-honesty guard (orchestration.citationHonestyGuard, default-off, eval-gated):
+      // a sourceSensitive turn that ran NO real web/research execution but whose answer carries
+      // URL citations is FABRICATING sources (audit 1303e254: 7 invented 404 URLs, zero
+      // delegation, only a failed run_workflow). Strip the fabricated URLs + prepend the honest
+      // unverified caveat so no 404 link ever ships and any "verified" framing is corrected.
+      // Detection + strip are STRUCTURAL (URL shape, language-free — works for EN/DE/FR/…); the
+      // gate is the HONEST execution signals (a real delegation, a SUCCESSFUL workflow, a direct
+      // web tool, shared findings), NOT the orchestration flag, so a genuinely-researched answer
+      // keeps its citations. Never empties the answer.
+      if (getConfig().orchestration?.citationHonestyGuard === true
+        && initialDynamicGuidance?.sourceSensitive === true
+        && answerPresentsSourceCitations(finalResponse)) {
+        const isWebReachingTool = (t: string) => /^web_search/i.test(t) || /^web_fetch$/i.test(t) || /^browser_/i.test(t);
+        const webToolCalledDirectly = [..._turnToolCallCounts.keys()].some(isWebReachingTool);
+        const sharedFactsForCitation = await getSharedFactsEvidenceForFinalSynthesis(session.id);
+        const hadRealResearch = _turnDelegationCount > 0
+          || workflowRunCompletedThisTurn
+          || webToolCalledDirectly
+          || _turnShareFindingCount > 0
+          || (sharedFactsForCitation?.itemCount ?? 0) > 0;
+        if (!hadRealResearch) {
+          finalResponse = prependUnverifiedSourceCaveat(stripFabricatedCitations(finalResponse), userMessage);
+          guardrailEvents.push({ type: "guardrail_flagged", details: "fabricated_citations_stripped" });
+          logAudit("guardrail_flagged", {
+            type: "fabricated_citations_stripped",
+            sourceSensitive: true,
+          }, { sessionId: session.id, severity: "warn" });
+        }
       }
 
       // False-completion guard: the turn asked to CREATE or MODIFY an artifact, produced

@@ -38,6 +38,29 @@
     // longer depends on the local model choosing to call recall_context (which it does
     // NOT do reliably — toolCalls=0 on real turns). Enabled here to validate before
     // flipping the schema default.
-    "userProfilePrefetch": true
+    "userProfilePrefetch": true,
+
+    // Citation-honesty guard (audit 1303e254). A sourceSensitive turn that ran NO real
+    // web/research execution (no delegation, no SUCCESSFUL workflow, no direct web tool,
+    // no shared findings) but whose answer carries URL citations or "verified against N
+    // sources" claims is FABRICATING sources — the audited heat-pump answer shipped 7
+    // invented 404 links + "auf Basis von 7 Online-Quellen verifiziert" with zero retrieval.
+    // Strip the fabricated citations (links → plain label, bare URLs removed, the explicit
+    // verification claim neutralized) + prepend the honest unverified caveat, so no 404 link
+    // / false "verified" claim ever ships. Structural (language-free); never empties the
+    // answer. Watch the audit stream for guardrail_flagged{type:"fabricated_citations_stripped"}.
+    "citationHonestyGuard": true,
+
+    // vLLM "ReMoM" — quorum early-synthesis. parallel_delegate stops blocking on the slowest
+    // slice: once ceil(0.6*N) slices SUCCEED, stragglers get an 8s grace then abort, and
+    // synthesis proceeds on the quorum (partial share_finding evidence preserved). Cuts
+    // tail-latency on fan-outs; falls back to wait-for-all if fewer than the quorum succeed.
+    "quorumEarlySynthesis": true,
+
+    // vLLM "Fusion" — disagreement-as-signal. After a fan-out where ≥2 slices succeeded, a
+    // cheap routing-tier classifier checks whether their outputs CONFLICT; on disagreement it
+    // prepends a [SUB-AGENT DISAGREEMENT] marker so the orchestrator reconciles in synthesis
+    // instead of silently averaging conflicting answers. No-op when the slices agree.
+    "subAgentDisagreementVerify": true
   }
 }

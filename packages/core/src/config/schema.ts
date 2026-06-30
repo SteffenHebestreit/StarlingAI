@@ -1453,6 +1453,16 @@ export const OrchestrationSchema = z.object({
    *  tuned-prompt behavioural nudge, so it stays gated until a pass^k eval confirms it
    *  doesn't suppress legitimate direct answers. */
   freshnessHonestyGuard: z.boolean().default(false),
+  /** Citation-honesty guard: on a sourceSensitive turn that ran NO real web/research
+   *  execution (no delegation, no SUCCESSFUL workflow, no direct web tool, no shared
+   *  findings) but whose answer carries URL citations or "verified against N sources"
+   *  claims, strip the fabricated citations (markdown links → plain label, bare URLs
+   *  removed, the explicit verification claim neutralized) and prepend the honest
+   *  unverified caveat — so no invented 404 link or false "verified" claim ever ships
+   *  (audit 1303e254). Structural (URL detection is language-free); never empties the
+   *  answer. Default OFF — gated until a pass^k eval confirms it doesn't strip the
+   *  citations of a genuinely-researched answer. */
+  citationHonestyGuard: z.boolean().default(false),
   /** S1 of staged orchestration (docs/staged-orchestration.md): when true, the
    *  TERMINAL forced-synthesis call (forceSynthesis — invoked with no tools, so it
    *  cannot route or delegate) uses a compact synthesis-only system prompt

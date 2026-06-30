@@ -102,4 +102,29 @@ describe("renderUserProfileEvidence", () => {
     const out = renderUserProfileEvidence([], null, { docsHandledElsewhere: true, documentsAlreadyInjected: false });
     expect(out).toMatch(/found NOTHING/i);
   });
+
+  // Existence/access question: the CV reranks negative so no excerpt is injected, but the
+  // user DOES have documents on file — the marker must acknowledge them, never deny access,
+  // and must NOT leak/fabricate their content (only titles are known).
+  it("acknowledges documents on file when retrieval was empty but the corpus has the user's docs", () => {
+    const out = renderUserProfileEvidence([], null, {
+      docsHandledElsewhere: true,
+      documentsAlreadyInjected: false,
+      availableDocuments: [{ title: "CV_Hebestreit_2026.pdf" }, { title: "Projektliste_Hebestreit_2026.pdf" }],
+    });
+    expect(out).toMatch(/CV_Hebestreit_2026\.pdf/);
+    expect(out).toMatch(/Projektliste_Hebestreit_2026\.pdf/);
+    expect(out).toMatch(/Do NOT claim you have no access/i);
+    expect(out).toMatch(/Do NOT invent their contents/i);
+    expect(out).not.toMatch(/found NOTHING/i); // must NOT use the truly-empty wording
+  });
+
+  it("still emits the truly-empty marker when there are no documents on file at all", () => {
+    const out = renderUserProfileEvidence([], null, {
+      docsHandledElsewhere: true,
+      documentsAlreadyInjected: false,
+      availableDocuments: [],
+    });
+    expect(out).toMatch(/found NOTHING/i);
+  });
 });
