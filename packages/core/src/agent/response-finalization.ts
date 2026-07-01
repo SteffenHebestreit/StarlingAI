@@ -15,11 +15,6 @@
  */
 import { sanitizeAssistantContent, NARRATED_TOOL_TEXT_RE } from "./sanitize-response.js";
 import { looksLikeDegenerateRepetition, collapseRepeatedMarkdownSections } from "./text-dedup.js";
-import {
-  buildDynamicTurnGuidance,
-  WORKFLOW_HINT_TERMS,
-  WORKFLOW_REQUEST_PATTERNS,
-} from "./intent-classifier.js";
 import { DELEGATE_TOOL_RESULT_RE, looksLikeDelegateMetadata } from "./runtime-utils.js";
 
 export function sanitizeUserFacingAssistantResponse(value: string, toolIterations: number): string {
@@ -98,36 +93,11 @@ export function hasRecentUnresolvedDelegatedAction(history: readonly { role: str
   return false;
 }
 
-export function hasRecentWorkflowAuthoringMaintenanceContext(history: readonly { role: string; content?: string | null }[]): boolean {
-  let skippedCurrentUser = false;
-  let inspectedPriorUserMessages = 0;
-
-  for (const message of [...history].reverse()) {
-    if (message.role !== "user") continue;
-
-    const content = String(message.content ?? "").trim();
-    if (!content) continue;
-
-    if (!skippedCurrentUser) {
-      skippedCurrentUser = true;
-      continue;
-    }
-
-    inspectedPriorUserMessages += 1;
-    const normalized = content.toLowerCase();
-    const guidance = buildDynamicTurnGuidance(content);
-    const workflowLike = WORKFLOW_REQUEST_PATTERNS.some((pattern) => pattern.test(normalized))
-      || WORKFLOW_HINT_TERMS.some((term) => normalized.includes(term));
-
-    if (guidance?.swarmMaintenanceSensitive && workflowLike) {
-      return true;
-    }
-
-    if (inspectedPriorUserMessages >= 2) {
-      break;
-    }
-  }
-
+// De-lexicalized: this used prior-message keyword matching (WORKFLOW_* tables) gated by
+// `swarmMaintenanceSensitive`, which the de-lex hardwired to always-false — so the function
+// was already dead (always false). Kept as a stub (still wired through runtime.ts) until the
+// dead swarm-maintenance machinery is pruned; the keyword tables it depended on are gone.
+export function hasRecentWorkflowAuthoringMaintenanceContext(_history: readonly { role: string; content?: string | null }[]): boolean {
   return false;
 }
 

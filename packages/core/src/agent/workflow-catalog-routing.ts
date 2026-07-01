@@ -19,12 +19,6 @@
 import { childLogger } from "../logger.js";
 import { listAllJobs } from "../credentials/jobs.js";
 import { listAllScenes } from "../credentials/scenes.js";
-import {
-  WORKFLOW_HINT_TERMS,
-  WORKFLOW_ACTION_TERMS,
-  WORKFLOW_DELIVERABLE_HINT_TERMS,
-  WORKFLOW_REQUEST_PATTERNS,
-} from "./intent-classifier.js";
 
 const log = childLogger("agent:workflow-catalog-routing");
 
@@ -37,7 +31,9 @@ export interface WorkflowCatalogMatch {
 
 export interface WorkflowCatalogSignal {
   required: boolean;
-  reason: "explicit_request" | "catalog_match" | "uncertain_match" | "hint_terms" | "none";
+  // explicit_request + hint_terms were removed with the always-on keyword tables
+  // (de-lexicalization); only opt-in author-declared triggers produce a signal now.
+  reason: "catalog_match" | "uncertain_match" | "none";
   strongestMatch?: WorkflowCatalogMatch;
   /** Plausible but unconfirmed candidates — used to ASK the user instead of forcing routing. */
   uncertainCandidates?: WorkflowCatalogMatch[];
@@ -51,7 +47,9 @@ export interface ApprovedWorkflowFollowUp {
 }
 
 const RUN_CANDIDATE_RE = /(?:^|\n)\s*RUN_CANDIDATE:\s*(.+?)\s*$/im;
-const AFFIRMATIVE_WORKFLOW_APPROVAL_RE = /^\s*(?:yes|yeah|yep|sure|ok(?:ay)?|please do(?: that)?|do it|go ahead|run (?:it|that)|start (?:it|that)|ja|jep|klar|ja bitte|mach(?:\s+es)?|tu(?:\s+es)?|bitte(?:\s+(?:mach(?:\s+es)?|starte(?:\s+es)?|ausf(?:ü|ue)hren))?|starte(?:\s+es)?|ausf(?:ü|ue)hren(?:\s+bitte)?)\s*[.!?]*\s*$/i;
+// English-internal (de-lexicalized): a non-English affirmative is translated at the
+// boundary before it reaches this narrow n8n RUN_CANDIDATE approval detector.
+const AFFIRMATIVE_WORKFLOW_APPROVAL_RE = /^\s*(?:yes|yeah|yep|sure|ok(?:ay)?|please do(?: that)?|do it|go ahead|run (?:it|that)|start (?:it|that))\s*[.!?]*\s*$/i;
 
 function extractRunCandidateName(content: string | null | undefined): string | null {
   if (typeof content !== "string" || content.length === 0) return null;
@@ -287,56 +285,45 @@ export function isWorkflowCatalogToolName(toolName: string): boolean {
   return toolName === "search_workflows" || toolName === "run_workflow";
 }
 
-// ─── Workflow catalog detector (opt-in trigger model) ─────────────────────
+// ─── Workflow catalog detector (opt-in trigger model, de-lexicalized) ──────
 //
-// The previous detector scored token-overlap between the user message and a
-// concatenated `name + description + task + params` blob for every scene/job.
-// That design mis-fired constantly:
-//   • pasted iptables/wireguard configs dominated tokenisation
-//   • German function words (wir/ich/des/den/was/muss/tun) all looked like topic terms
-//   • topic words (`cluster`, `wireguard`, `tunnel`) legitimately overlap with infra
-//     scenes regardless of whether the user is asking how to *deploy* or how to *understand*
-//   • substring matches like `"sim"` ⊂ `"simplify"` and `"site"` ⊂ `"call sites"`
+// Routing here is OPT-IN + STRUCTURAL only. Scenes/jobs declare narrow triggers
+// in their own config; nothing else trips the guardrail. The earlier always-on
+// English keyword tables — an explicit-request regex (`WORKFLOW_REQUEST_PATTERNS`)
+// and a hint-term heuristic (`WORKFLOW_HINT_TERMS`/`_ACTION_TERMS`/`_DELIVERABLE_HINT_TERMS`)
+// — were REMOVED in the de-lexicalization: they matched raw user text on every turn and
+// mis-routed (e.g. "review the pentest *workflow* file" tripped the hint-term path).
 //
-// Replacement: scenes/jobs declare narrow opt-in triggers in their config.
-// Three layered signals drive the guardrail now:
-//   A. Explicit workflow request (e.g. "use the X scene", "run workflow Y") — already covered
-//      by `WORKFLOW_REQUEST_PATTERNS`.
+// Two layered signals remain:
 //   B. Author-declared triggers (`scene.triggers.patterns: [{ all: [regex, ...] }, ...]`).
 //      An entry matches when ALL of its `all` regexes match the message; ANY entry → match.
+//      Trigger regexes live in WORKSPACE config, so an author may write them in any language —
+//      that is their choice, not a core keyword table.
 //   C. Action-verb gate. Scenes marked `requiresActionVerb: true` only fire as a CONFIRMED
-//      intent when the message also contains an imperative/action verb. Without one, the
-//      match becomes an UNCERTAIN candidate — we ask the user instead of forcing routing.
+//      intent when the message also contains an (English) imperative/action verb. Without one,
+//      the match becomes an UNCERTAIN candidate — we ask the user instead of forcing routing.
 //
-// Anything without `triggers` is still discoverable via `search_workflows` by the LLM —
-// it just no longer trips the guardrail on its own. This is intentional: false positives
-// were dramatically worse than the recall loss on rare borderline phrasings.
+// A message that matches no author-declared trigger does NOT trip the guardrail — it stays
+// discoverable via the always-available search_workflows/run_workflow tools, which the
+// orchestrator invokes on its own judgment. An explicit "run the X workflow" request is now
+// handled by the LLM through those tools, not by a core keyword regex.
 
 /**
- * Action verbs (DE + EN) that signal the user wants something *done*, not
- * just explained. Used by `requiresActionVerb` triggers to distinguish
- * "wie konfiguriere ich X" (no verb of execution → uncertain) from
- * "konfiguriere X jetzt" (`konfiguriere` is action verb → confirmed).
+ * English action verbs that signal the user wants something *done*, not just
+ * explained. Used by `requiresActionVerb` triggers to distinguish an
+ * explanation ("what happens if I apply X" → uncertain unless the verb itself
+ * appears) from an imperative ("apply X now" → confirmed).
  *
- * NOTE: imperative/infinitive forms only. Question words like "wie/was/wer"
- * and modal+verb constructions ("wie konfiguriere ich") legitimately contain
- * an action stem; we still want those to count as "uncertain" when no other
- * imperative verb is present, so the user gets asked instead of force-routed.
+ * English-internal (de-lexicalized): a non-English message is translated at the
+ * boundary before it reaches this gate, so the verb list carries no per-language
+ * entries. Imperative/infinitive forms only.
  */
 const WORKFLOW_ACTION_VERB_PATTERN = new RegExp(
   "\\b(?:" + [
-    // English imperatives
     "apply", "deploy", "rollout", "roll\\s*out", "run", "execute", "provision",
     "scale", "migrate", "install", "uninstall", "update", "upgrade", "configure",
     "setup", "set\\s*up", "spin\\s*up", "tear\\s*down", "restart", "reboot",
     "create", "build", "publish", "release", "ship",
-    // German imperatives + verbal nouns
-    "ausroll(?:en|e)?", "anwend(?:en|e)?", "umsetz(?:en|e)?", "provisionier(?:en|e)?",
-    "skalier(?:en|e)?", "migrier(?:en|e)?", "installier(?:en|e)?", "deinstallier(?:en|e)?",
-    "aktualisier(?:en|e)?", "upgrade(?:n|t)?", "starte(?:n)?", "neu\\s*starte(?:n)?",
-    "richte\\s*ein", "einricht(?:en|e)?", "aufsetz(?:en|e)?", "anlegen", "erstell(?:en|e)?",
-    "baue(?:n)?", "ver(?:o|oe|ö)ffentlich(?:en|e)?", "ausf(?:u|ue|ü)hr(?:en|e)?",
-    "durchf(?:u|ue|ü)hr(?:en|e)?", "einspiel(?:en|e)?", "auspielen",
   ].join("|") + ")\\b",
   "i",
 );
@@ -393,72 +380,52 @@ function detectWorkflowCatalogSignal(userMessage: string): WorkflowCatalogSignal
   const trimmed = userMessage.trim();
   if (!trimmed) return { required: false, reason: "none" };
 
-  const normalized = userMessage.toLowerCase();
-
-  // Signal A: explicit workflow request — these are unambiguous.
-  if (WORKFLOW_REQUEST_PATTERNS.some((pattern) => pattern.test(normalized))) {
-    return { required: true, reason: "explicit_request" };
-  }
-
-  // Signal B: author-declared triggers + Signal C: action-verb gate.
+  // Opt-in only: a scene/job must declare its own `triggers` / `catalogTriggers`.
+  // No always-on keyword tables here anymore (see the de-lexicalization note above);
+  // an unmatched message stays discoverable via search_workflows/run_workflow.
   const candidates = compileWorkflowTriggerEntries();
-  if (candidates.length === 0) {
-    // No catalog triggers configured anywhere — fall through to hint-term heuristic only.
-  } else {
-    const hasActionVerb = WORKFLOW_ACTION_VERB_PATTERN.test(userMessage);
+  if (candidates.length === 0) return { required: false, reason: "none" };
 
-    const confirmedMatches: WorkflowCatalogMatch[] = [];
-    const uncertainMatches: WorkflowCatalogMatch[] = [];
+  const hasActionVerb = WORKFLOW_ACTION_VERB_PATTERN.test(userMessage);
 
-    for (const candidate of candidates) {
-      const matchedEntry = candidate.patternsCompiled.find((entryRegexes) =>
-        entryRegexes.every((rx) => rx.test(userMessage)),
-      );
-      if (!matchedEntry) continue;
-      const match: WorkflowCatalogMatch = {
-        name: candidate.name,
-        workflowType: candidate.workflowType,
-        score: 1,
-        matchedTerms: matchedEntry.map((rx) => rx.source.replace(/\\b/g, "").slice(0, 60)),
-      };
-      if (candidate.requiresActionVerb && !hasActionVerb) {
-        uncertainMatches.push(match);
-      } else {
-        confirmedMatches.push(match);
-      }
-    }
+  const confirmedMatches: WorkflowCatalogMatch[] = [];
+  const uncertainMatches: WorkflowCatalogMatch[] = [];
 
-    if (confirmedMatches.length > 0) {
-      // Prefer scenes over jobs at equal precision (jobs orchestrate scenes).
-      const strongestMatch = confirmedMatches.sort((left, right) => {
-        if (left.workflowType !== right.workflowType) return left.workflowType === "scene" ? -1 : 1;
-        return left.name.localeCompare(right.name);
-      })[0];
-      return { required: true, reason: "catalog_match", strongestMatch };
-    }
-
-    if (uncertainMatches.length > 0) {
-      // Don't FORCE routing — just suggest, and ask the user.
-      return {
-        required: true,
-        reason: "uncertain_match",
-        strongestMatch: uncertainMatches[0],
-        uncertainCandidates: uncertainMatches,
-      };
+  for (const candidate of candidates) {
+    const matchedEntry = candidate.patternsCompiled.find((entryRegexes) =>
+      entryRegexes.every((rx) => rx.test(userMessage)),
+    );
+    if (!matchedEntry) continue;
+    const match: WorkflowCatalogMatch = {
+      name: candidate.name,
+      workflowType: candidate.workflowType,
+      score: 1,
+      matchedTerms: matchedEntry.map((rx) => rx.source.replace(/\\b/g, "").slice(0, 60)),
+    };
+    if (candidate.requiresActionVerb && !hasActionVerb) {
+      uncertainMatches.push(match);
+    } else {
+      confirmedMatches.push(match);
     }
   }
 
-  // Last-resort heuristic: explicit workflow vocabulary in user prose
-  // (e.g. "show me available scenes", "list workflows"). Cheap and bounded —
-  // these terms are themselves narrow signals of intent.
-  const matchedHints = WORKFLOW_HINT_TERMS.filter((term) => normalized.includes(term));
-  const matchedDeliverableHints = WORKFLOW_DELIVERABLE_HINT_TERMS.filter((term) => normalized.includes(term));
-  if (
-    matchedHints.length >= 2
-    || (matchedHints.length === 1 && WORKFLOW_ACTION_TERMS.some((term) => normalized.includes(term)))
-    || matchedDeliverableHints.length >= 2
-  ) {
-    return { required: true, reason: "hint_terms" };
+  if (confirmedMatches.length > 0) {
+    // Prefer scenes over jobs at equal precision (jobs orchestrate scenes).
+    const strongestMatch = confirmedMatches.sort((left, right) => {
+      if (left.workflowType !== right.workflowType) return left.workflowType === "scene" ? -1 : 1;
+      return left.name.localeCompare(right.name);
+    })[0];
+    return { required: true, reason: "catalog_match", strongestMatch };
+  }
+
+  if (uncertainMatches.length > 0) {
+    // Don't FORCE routing — just suggest, and ask the user.
+    return {
+      required: true,
+      reason: "uncertain_match",
+      strongestMatch: uncertainMatches[0],
+      uncertainCandidates: uncertainMatches,
+    };
   }
 
   return { required: false, reason: "none" };
@@ -475,7 +442,7 @@ function buildWorkflowCatalogGuidance(signal: WorkflowCatalogSignal): string {
     return [
       "POSSIBLE WORKFLOW MATCH (UNCERTAIN):",
       `One or more reusable workflows might fit this request: ${candidates}.`,
-      "However, the message lacks a clear action verb (apply / deploy / run / ausrollen / anwenden / durchführen ...) — the user may just be asking for an explanation.",
+      "However, the message lacks a clear action verb (apply / deploy / run / provision / execute ...) — the user may just be asking for an explanation.",
       "Do NOT call run_workflow yet. Ask the user in ONE concise sentence (in their language) whether they want one of these workflows executed, or whether they just want an answer to their question.",
       "After they confirm, on the next turn either call run_workflow with the chosen workflow or answer normally.",
     ].join(" ");

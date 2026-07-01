@@ -94,19 +94,6 @@ describe("detectWorkflowCatalogSignal — opt-in trigger model", () => {
     expect(signal.strongestMatch?.name).toBe("infrastructure_change");
   });
 
-  it("CONFIRM-routes German 'kubernetes-rollout ausrollen'", async () => {
-    writeTempConfig({
-      agents: { defaults: { model: { primary: "lmstudio/qwen/qwen3.5-9b" } } },
-      scenes: { infrastructure_change: ACTION_REQUIRED_INFRA_SCENE },
-    });
-    const { detectWorkflowCatalogSignal } = await loadDetector();
-    const signal = detectWorkflowCatalogSignal(
-      "Bitte den Kubernetes-Rollout für den neuen Service ausrollen.",
-    );
-    expect(signal.required).toBe(true);
-    expect(signal.reason).toBe("catalog_match");
-  });
-
   it("returns 'uncertain_match' for ambiguous topic without action verb when scene requires it", async () => {
     writeTempConfig({
       agents: { defaults: { model: { primary: "lmstudio/qwen/qwen3.5-9b" } } },
@@ -141,12 +128,15 @@ describe("detectWorkflowCatalogSignal — opt-in trigger model", () => {
     const signal = detectWorkflowCatalogSignal(
       "deploy the apply terraform kubernetes ansible cluster",
     );
-    // Falls through to hint-term path; that path only trips on workflow-vocab terms
-    // (workflow / scene / job / playbook / ...), NOT on infra topic words.
+    // No author-declared trigger matches → no signal. (The de-lex removed the old
+    // always-on hint-term path that used to fire on workflow-vocab words.)
     expect(signal.required).toBe(false);
   });
 
-  it("still trips on explicit workflow request even without triggers", async () => {
+  it("does NOT trip on an explicit workflow request when no scene declares triggers (de-lex: LLM handles it via tools)", async () => {
+    // Signal A (the always-on WORKFLOW_REQUEST_PATTERNS regex) was removed in the
+    // de-lexicalization. An explicit "run the X workflow" request no longer trips the
+    // guardrail here — the orchestrator invokes search_workflows/run_workflow on its own.
     writeTempConfig({
       agents: { defaults: { model: { primary: "lmstudio/qwen/qwen3.5-9b" } } },
       scenes: {},
@@ -155,8 +145,8 @@ describe("detectWorkflowCatalogSignal — opt-in trigger model", () => {
     const signal = detectWorkflowCatalogSignal(
       "please run the source_backed_paper workflow now",
     );
-    expect(signal.required).toBe(true);
-    expect(signal.reason).toBe("explicit_request");
+    expect(signal.required).toBe(false);
+    expect(signal.reason).toBe("none");
   });
 
   it("CONFIRM-routes a 'researched presentation with verified images' request to sourced_presentation", async () => {
@@ -185,15 +175,19 @@ describe("detectWorkflowCatalogSignal — opt-in trigger model", () => {
     });
     const { detectWorkflowCatalogSignal } = await loadDetector();
 
-    // German request with the dative plural "Bildern" (the case the first regex draft missed).
+    // German request with the dative plural "Bildern": the workspace trigger regexes
+    // (Signal B, author-declared — may be written in German) still match the deck/image/
+    // source NOUNS, but the core action-verb gate is now English-only (de-lex). A German
+    // imperative ("Erstelle") no longer confirms, so this is an UNCERTAIN match — we ask the
+    // user. Boundary-translation to English is the path back to a confirmed catalog_match.
     const de = detectWorkflowCatalogSignal(
       "Erstelle mir eine Präsentation über die Architektur von Dresden mit Bildern, verifiziere die online-quellen und referenziere diese. Nutze reveal.js.",
     );
     expect(de.required).toBe(true);
-    expect(de.reason).toBe("catalog_match");
+    expect(de.reason).toBe("uncertain_match");
     expect(de.strongestMatch?.name).toBe("sourced_presentation");
 
-    // English request.
+    // English request confirms (English action verb "Build").
     const en = detectWorkflowCatalogSignal(
       "Build a reveal.js presentation about X with verified images and cited sources.",
     );
@@ -234,13 +228,14 @@ describe("detectWorkflowCatalogSignal — opt-in trigger model", () => {
       jobs: { sourced_presentation: SOURCED_PRESENTATION_JOB },
     });
     const { detectWorkflowCatalogSignal } = await loadDetector();
-    const de = detectWorkflowCatalogSignal(
-      "Erstelle mir eine Präsentation über die Architektur von Dresden mit Bildern, verifiziere die online-quellen und referenziere diese. Nutze reveal.js.",
+    // English request (de-lex: the action-verb gate is English-only) confirms against the JOB.
+    const signal = detectWorkflowCatalogSignal(
+      "Build a reveal.js presentation about Dresden with verified images and cited sources.",
     );
-    expect(de.required).toBe(true);
-    expect(de.reason).toBe("catalog_match");
-    expect(de.strongestMatch?.name).toBe("sourced_presentation");
-    expect(de.strongestMatch?.workflowType).toBe("job");
+    expect(signal.required).toBe(true);
+    expect(signal.reason).toBe("catalog_match");
+    expect(signal.strongestMatch?.name).toBe("sourced_presentation");
+    expect(signal.strongestMatch?.workflowType).toBe("job");
   });
 
   it("uncertain_match guidance asks the user instead of forcing routing", async () => {

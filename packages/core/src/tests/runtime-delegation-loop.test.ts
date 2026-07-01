@@ -2944,7 +2944,24 @@ describe("runtime delegated-loop regressions", () => {
     expect(prompt).toContain("Tool Use Discipline");
   });
 
-  it("forces a workflow catalog check before delegation on workflow-shaped requests", async () => {
+  it("forces a workflow catalog check before delegation on an opt-in catalog match", async () => {
+    // De-lex: the catalog check now fires only on an OPT-IN author-declared trigger
+    // (Signal B), not the removed always-on keyword regex. The enforcement behaviour
+    // (reject the pre-catalog delegate, require search_workflows first) is unchanged.
+    const freshRuntime = await loadFreshRuntimeForToolMode("hybrid", {
+      scenes: {
+        audit_export_report: {
+          description: "Export the session audit trail as a reusable report workflow.",
+          task: "Use the reusable audit-export workflow.",
+          triggers: {
+            patterns: [
+              { all: ["\\baudit\\b", "\\bexport\\b"] },
+            ],
+          },
+        },
+      },
+    });
+
     let llmCallCount = 0;
     streamMock.mockImplementation(() => {
       llmCallCount += 1;
@@ -2979,28 +2996,28 @@ describe("runtime delegated-loop regressions", () => {
       },
     }));
 
-    registerTool({
+    freshRuntime.registerTool({
       name: "delegate_to_agent",
       description: "Delegate to a specialist.",
       parameters: { type: "object", properties: {} },
       execute: delegateExecuteMock,
     });
-    registerTool({
+    freshRuntime.registerTool({
       name: "search_workflows",
       description: "Search reusable workflows.",
       parameters: { type: "object", properties: {} },
       execute: searchWorkflowsMock,
     });
 
-    const session = new AgentSession({
+    const session = new freshRuntime.AgentSession({
       channel: "test",
       workspacePath: "/workspace",
       systemPrompt: "You are a test agent.",
     });
 
-    const result = await runTurn({
+    const result = await freshRuntime.runTurn({
       session,
-      userMessage: "Find a reusable workflow or scene for the audit export and use the workflow catalog first.",
+      userMessage: "Export the audit trail for this session.",
     });
 
     expect(result.blocked).toBe(false);
@@ -3015,9 +3032,28 @@ describe("runtime delegated-loop regressions", () => {
     const toolMessages = session.getHistory().filter((message) => message.role === "tool");
     expect(toolMessages).toHaveLength(1);
     expect(toolMessages[0]?.content).toContain("Workflow catalog suggestions only");
+
+    freshRuntime.unregisterTool("delegate_to_agent");
+    freshRuntime.unregisterTool("search_workflows");
   });
 
   it("releases workflow-catalog enforcement after one nudge instead of blocking into an empty answer", async () => {
+    // De-lex: opt-in trigger (Signal B) drives the catalog check; the release-after-one-
+    // nudge never-empty behaviour is unchanged.
+    const freshRuntime = await loadFreshRuntimeForToolMode("hybrid", {
+      scenes: {
+        audit_export_report: {
+          description: "Export the session audit trail as a reusable report workflow.",
+          task: "Use the reusable audit-export workflow.",
+          triggers: {
+            patterns: [
+              { all: ["\\baudit\\b", "\\bexport\\b"] },
+            ],
+          },
+        },
+      },
+    });
+
     let llmCallCount = 0;
     streamMock.mockImplementation(() => {
       llmCallCount += 1;
@@ -3033,28 +3069,28 @@ describe("runtime delegated-loop regressions", () => {
     });
 
     const delegateExecuteMock = vi.fn(async () => ({ success: true, output: "audit export done" }));
-    registerTool({
+    freshRuntime.registerTool({
       name: "delegate_to_agent",
       description: "Delegate to a specialist.",
       parameters: { type: "object", properties: {} },
       execute: delegateExecuteMock,
     });
-    registerTool({
+    freshRuntime.registerTool({
       name: "search_workflows",
       description: "Search reusable workflows.",
       parameters: { type: "object", properties: {} },
       execute: vi.fn(async () => ({ success: true, output: "no exact match" })),
     });
 
-    const session = new AgentSession({
+    const session = new freshRuntime.AgentSession({
       channel: "test",
       workspacePath: "/workspace",
       systemPrompt: "You are a test agent.",
     });
 
-    const result = await runTurn({
+    const result = await freshRuntime.runTurn({
       session,
-      userMessage: "Find a reusable workflow or scene for the audit export and use the workflow catalog first.",
+      userMessage: "Export the audit trail for this session.",
     });
 
     // Soft nudge, then trust the model — never a hard block into an empty answer.
@@ -3065,6 +3101,9 @@ describe("runtime delegated-loop regressions", () => {
       expect.objectContaining({ type: "workflow_required", details: "workflow_catalog_check_rejected" }),
       expect.objectContaining({ type: "workflow_required", details: "workflow_catalog_check_released" }),
     ]));
+
+    freshRuntime.unregisterTool("delegate_to_agent");
+    freshRuntime.unregisterTool("search_workflows");
   });
 
   it("prefers reusable workflow execution for comparison-paper requests even without explicit workflow wording", async () => {
@@ -3426,7 +3465,9 @@ describe("runtime delegated-loop regressions", () => {
 
     const result = await freshRuntime.runTurn({
       session,
-      userMessage: "ja",
+      // De-lex: the approval detector is English-internal now; a German "ja" is
+      // boundary-translated to "yes" before it reaches the RUN_CANDIDATE follow-up.
+      userMessage: "yes",
     });
 
     expect(result.blocked).toBe(false);

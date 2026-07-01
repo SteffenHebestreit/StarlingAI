@@ -80,32 +80,12 @@ export function hasSubstantialInlineTechnicalContent(message: string): boolean {
   return INLINE_TECHNICAL_CONTENT_PATTERNS.some((pattern) => pattern.test(message));
 }
 
-// WORKFLOW_* tables are retained only because runtime.ts still imports them
-// (cascade); computeDynamicTurnGuidance no longer reads them, so they no longer
-// feed any routing flag here.
-export const WORKFLOW_HINT_TERMS = [
-  "catalog", "catalogue", "chain", "job", "jobs", "playbook", "playbooks",
-  "reusable", "reuse", "scene", "scenes", "worflow", "worflows", "workflow", "workflows",
-];
-
-export const WORKFLOW_ACTION_TERMS = [
-  "chain", "combine", "execute", "find", "launch", "list", "orchestrate",
-  "reuse", "run", "search", "show", "start", "trigger", "use",
-];
-
-export const WORKFLOW_DELIVERABLE_HINT_TERMS = [
-  "api", "brief", "broadcast", "compare", "comparison", "diagram", "dossier",
-  "inspection", "packet", "paper", "report", "research", "review", "suite",
-  "test", "tests", "visual",
-];
-
-export const WORKFLOW_REQUEST_PATTERNS = [
-  /\b(search|find|list|show|inspect|check)\b[\s\S]{0,80}\b(scene|scenes|job|jobs|workflow|workflows|playbook|playbooks|catalog|catalogue)\b/,
-  /\b(run|execute|start|launch|trigger|use|reuse|chain|combine|orchestrate)\b[\s\S]{0,80}\b(scene|scenes|job|jobs|workflow|workflows|playbook|playbooks)\b/,
-  /\b(scene|scenes|job|jobs|workflow|workflows|playbook|playbooks)\b[\s\S]{0,80}\b(run|execute|start|launch|trigger|use|reuse|chain|combine|orchestrate)\b/,
-  /\b(specific|existing|available|reusable)\b[\s\S]{0,40}\b(scene|job|workflow|playbook)\b/,
-  /\bchain\b[\s\S]{0,40}\b(them|these|workflows?|jobs?|scenes?)\b/,
-];
+// The WORKFLOW_* keyword tables (hint terms / action terms / deliverable-hint terms /
+// explicit-request regexes) were DELETED in the de-lexicalization: they were always-on
+// topic-keyword tables matched against raw user text every turn and mis-routed. Workflow
+// catalog routing is now OPT-IN only (scene/job author-declared triggers) — see
+// workflow-catalog-routing.ts. An explicit "run the X workflow" request is handled by the
+// LLM through the always-available search_workflows/run_workflow tools, not a core regex.
 
 // (Removed: WORKFLOW_DISCOVERY_STOP_WORDS.) The previous workflow-catalog detector
 // scored token overlap between the user message and a concatenated scene/job
