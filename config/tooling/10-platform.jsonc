@@ -25,7 +25,11 @@
       "engramBaseUrl": "http://engram:8088",
       "autoIngestAttachments": true,
       "injectContext": true,
-      "searchTimeoutMs": 25000,
+      // Doc-RAG search BLOCKS first-token, so keep this tight: a healthy engram answers a
+      // query in well under 1s. 25s meant a hung/unreachable engram stalled EVERY profile
+      // turn for 25s before the model even started (fresh-instance eval, session 9b0414e3).
+      // 8s is a fast-fail safety net — if engram genuinely needs longer, it is unhealthy.
+      "searchTimeoutMs": 8000,
       "retrievalTopK": 6,
       "candidateTopK": 30,
       "maxContextChars": 6000,

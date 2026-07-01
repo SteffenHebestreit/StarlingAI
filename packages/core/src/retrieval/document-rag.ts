@@ -176,26 +176,37 @@ export interface RetrievedChunk {
  * candidate top-k → post-filter to in-scope docs and the min score → trim to
  * retrievalTopK. Returns [] when nothing in scope (never leaks other scopes).
  */
-export async function retrieveDocumentContext(
+export interface DocumentRetrievalOutcome {
+  chunks: RetrievedChunk[];
+  /**
+   * True when engram was reached-for but FAILED (unreachable / timed out) — as distinct from a
+   * genuinely empty store or no in-scope match. The caller MUST NOT treat this as "the user has
+   * no documents on file" (engramListDocuments / engramSearch return null on failure, [] on empty).
+   */
+  retrievalFailed: boolean;
+}
+
+export async function retrieveDocumentContextWithStatus(
   query: string,
   ctx: RagScopeContext,
-): Promise<RetrievedChunk[]> {
-  if (!engramConfigured() || !query.trim()) return [];
+): Promise<DocumentRetrievalOutcome> {
+  if (!engramConfigured() || !query.trim()) return { chunks: [], retrievalFailed: false };
   const cfg = getConfig().retrieval.documentRag;
   const scopeSources = new Set(activeScopeSources(ctx));
-  if (scopeSources.size === 0) return [];
+  if (scopeSources.size === 0) return { chunks: [], retrievalFailed: false };
 
   const docs = await engramListDocuments();
-  if (!docs || docs.length === 0) return [];
+  if (docs === null) return { chunks: [], retrievalFailed: true };      // engram unreachable / timed out
+  if (docs.length === 0) return { chunks: [], retrievalFailed: false }; // genuinely no documents
 
   const inScope = new Map<string, EngramDocumentInfo>();
   for (const d of docs) {
     if (d.sources.some((s) => scopeSources.has(s))) inScope.set(d.id, d);
   }
-  if (inScope.size === 0) return [];
+  if (inScope.size === 0) return { chunks: [], retrievalFailed: false };
 
   const results = await engramSearch({ query, finalTopK: cfg.candidateTopK });
-  if (!results) return [];
+  if (results === null) return { chunks: [], retrievalFailed: true };   // search failed / timed out
 
   const filtered: RetrievedChunk[] = [];
   for (const r of results) {
@@ -212,7 +223,14 @@ export async function retrieveDocumentContext(
     });
     if (filtered.length >= cfg.retrievalTopK) break;
   }
-  return filtered;
+  return { chunks: filtered, retrievalFailed: false };
+}
+
+export async function retrieveDocumentContext(
+  query: string,
+  ctx: RagScopeContext,
+): Promise<RetrievedChunk[]> {
+  return (await retrieveDocumentContextWithStatus(query, ctx)).chunks;
 }
 
 /**
@@ -368,8 +386,21 @@ export async function augmentTurnWithDocuments(input: {
   const inlineBlock = buildInlineDocumentContext(ingestedDocs, cfg);
   if (inlineBlock) return { ingested, failed, contextBlock: inlineBlock };
 
-  const chunks = await retrieveDocumentContext(input.query, input.ctx);
+  const { chunks, retrievalFailed } = await retrieveDocumentContextWithStatus(input.query, input.ctx);
   let contextBlock = formatDocumentContext(chunks);
+
+  // Engram did not respond this turn (unreachable / timed out) and produced no context. Surface it
+  // so the model does NOT conflate a retrieval FAILURE with "the user has no documents on file"
+  // (fresh-instance eval session 9b0414e3: a hung engram made a CV question answer "I have no stored
+  // information about your background" — a false claim, since retrieval simply failed).
+  if (retrievalFailed && !contextBlock) {
+    return {
+      ingested,
+      failed,
+      contextBlock:
+        "[DOCUMENT RETRIEVAL UNAVAILABLE THIS TURN — the document store did not respond, so this is NOT evidence that the user has no documents, CV, or profile on file. Do NOT tell the user that nothing is stored about them; say their stored documents could not be retrieved right now and offer to retry or let them paste the content.]",
+    };
+  }
 
   // When documents were just attached, always note them (even if same-turn
   // retrieval surfaced little) so the assistant knows the content is indexed and
