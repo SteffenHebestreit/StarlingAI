@@ -437,6 +437,115 @@ describe("runtime delegated-loop regressions", () => {
     ]));
   });
 
+  it("does NOT force research when a specifics-dense answer was grounded via search_documents this turn", async () => {
+    // Run repro (session d9ed5ea2 t4): a document-grounded CV answer — retrieved via an EXPLICIT
+    // search_documents call, not auto-RAG (documentRagFoundDocs stays false) — was force-delegated to a
+    // 0-iteration researcher. The specifics are SOURCED from the attached doc, so the guard must exclude
+    // the turn. Structural: keyed on the per-turn search_documents tool-call count, no keyword table.
+    const freshRuntime = await loadFreshRuntimeForToolMode("orchestration_only", {
+      orchestration: { ungroundedFactualAnswerGuard: true },
+    });
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createToolCallStream("doc_1", "search_documents", { query: "candidate roles and experience" });
+      }
+      // Specifics-dense answer sourced from the retrieved document (fact-shape tokens: years, %, €).
+      return createTextStream(
+        "Aus dem beigefügten Lebenslauf: 2018–2024 als Senior Engineer tätig, davor 3 Jahre als Consultant. "
+        + "Führte 12 Projekte, steigerte den Durchsatz um 40 %, verwaltete ein Budget von 250.000 EUR. "
+        + "Diese Angaben stammen direkt aus dem Dokument und fassen die Kernpunkte des Profils zusammen.",
+      );
+    });
+    const searchDocsMock = vi.fn(async () => ({
+      success: true,
+      output: "CV: Senior Engineer 2018–2024, 12 projects, +40% throughput, €250k budget.",
+      metadata: {},
+    }));
+    freshRuntime.registerTool({
+      name: "search_documents",
+      description: "Search attached documents (RAG).",
+      parameters: { type: "object", properties: {} },
+      execute: searchDocsMock,
+    });
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true, output: "researcher output", metadata: { agentName: "researcher", delegationSucceeded: true },
+    }));
+    freshRuntime.registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    const session = new freshRuntime.AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const result = await freshRuntime.runTurn({ session, userMessage: "Fasse den Werdegang aus meinem Lebenslauf zusammen." });
+
+    expect(result.blocked).toBe(false);
+    expect(result.guardrailEvents ?? []).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ details: "tool_free_research_answer_rejected" }),
+    ]));
+    expect(delegateExecuteMock).not.toHaveBeenCalled();  // NOT force-delegated to a researcher
+    expect(result.response).toContain("40 %");            // the grounded answer shipped unchanged
+
+    freshRuntime.unregisterTool("search_documents");
+    freshRuntime.unregisterTool("delegate_to_agent");
+  });
+
+  it("does NOT force research when a specifics-dense answer was grounded via recall_context this turn", async () => {
+    // The userOwnFacts sibling: profile facts retrieved via recall_context are legitimate grounding, so a
+    // specifics-dense "about me" answer must not be force-researched (private profile isn't on the web).
+    const freshRuntime = await loadFreshRuntimeForToolMode("orchestration_only", {
+      orchestration: { ungroundedFactualAnswerGuard: true },
+    });
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createToolCallStream("rc_1", "recall_context", { query: "user profile and background" });
+      }
+      return createTextStream(
+        "Laut deinem Profil: seit 2015 als Lead Developer tätig, betreust 8 Repositories, "
+        + "reduziertest die Build-Zeit um 35 %, dein Team umfasst 6 Personen. "
+        + "Diese Informationen stammen aus deinem hinterlegten Profil und fassen deinen Hintergrund zusammen.",
+      );
+    });
+    const recallMock = vi.fn(async () => ({
+      success: true,
+      output: "Profile: Lead Developer since 2015, 8 repos, -35% build time, team of 6.",
+      metadata: {},
+    }));
+    freshRuntime.registerTool({
+      name: "recall_context",
+      description: "Recall stored profile/memory/skill context.",
+      parameters: { type: "object", properties: {} },
+      execute: recallMock,
+    });
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true, output: "researcher output", metadata: { agentName: "researcher", delegationSucceeded: true },
+    }));
+    freshRuntime.registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    const session = new freshRuntime.AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const result = await freshRuntime.runTurn({ session, userMessage: "Was weißt du über meinen beruflichen Hintergrund?" });
+
+    expect(result.blocked).toBe(false);
+    expect(result.guardrailEvents ?? []).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ details: "tool_free_research_answer_rejected" }),
+    ]));
+    expect(delegateExecuteMock).not.toHaveBeenCalled();
+    expect(result.response).toContain("35 %");
+
+    freshRuntime.unregisterTool("recall_context");
+    freshRuntime.unregisterTool("delegate_to_agent");
+  });
+
   it("forces synthesis after delegated clarification evidence instead of re-delegating", async () => {
     const { agentName, task, delegatedOutput } = fixtures.identicalLoop;
 

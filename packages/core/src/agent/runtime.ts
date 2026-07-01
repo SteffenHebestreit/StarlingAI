@@ -2590,9 +2590,19 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       // answer is legitimately grounded, not memory-recited; forcing web research on it would find
       // nothing (private CV is not on the web) and REPLACE a correct grounded answer with a worse one —
       // the exact turn the userOwnFacts prompt guidance tells the model to answer from the retrieved CV.
+      // ALSO exclude when the model itself RETRIEVED grounding content this turn via a document/profile
+      // tool: search_documents (attached-file RAG) or recall_context (memory/profile facts). Those are
+      // CONTENT-retrieval calls, so the specifics are sourced, not fabricated — the over-fire the run
+      // repro'd (session d9ed5ea2 t4: a correct search_documents-grounded CV answer force-delegated to a
+      // 0-iteration researcher). list_documents is deliberately NOT excluded — listing filenames is not
+      // content grounding, so a bare list must not license unsourced specifics. Purely structural
+      // (per-turn tool-call counts already tracked in _turnToolCallCounts); this can only make the guard
+      // fire LESS, never more.
       const requiresUngroundedFactualResearch = getConfig().orchestration?.ungroundedFactualAnswerGuard === true
         && activeMainAssistantToolMode === "orchestration_only"
         && !documentRagFoundDocs
+        && (_turnToolCallCounts.get("search_documents") ?? 0) === 0
+        && (_turnToolCallCounts.get("recall_context") ?? 0) === 0
         && _turnShareFindingCount === 0
         && looksLikeUnsourcedSpecificClaims(rawResponse);
       if (!releasedAfterRoutingNudge && (requiresDelegatedResearch || requiresUrlFetch || requiresUngroundedFactualResearch) && !currentTurnHasExecutableOrchestration) {
