@@ -66,6 +66,16 @@ describe("runtime turn guidance", () => {
     expect(buildDynamicTurnGuidance("write me a short haiku about the sea", "orchestration_only")?.sourceSensitive ?? false).toBe(false);
   });
 
+  it("keeps the structural actionable-URL signal (a URL must be FETCHED, language-independent)", () => {
+    // containsActionableUrl is one of the FEW signals the de-lexicalization explicitly KEPT:
+    // a URL is a language-independent structural marker (fetch it, don't ask the user to paste).
+    // Regression fence for the deleted keyword URL tests — asserts the STRUCTURAL signal, not
+    // the removed sourceSensitive flag.
+    const guidance = buildDynamicTurnGuidance("take a look at this and summarize it https://example.com/report", "orchestration_only");
+    expect(guidance).not.toBeNull();
+    expect(guidance?.prompt).toContain("A URL is present in the request");
+  });
+
   it("treats assistant naming as a durable personality change to persist this turn", () => {
     // Observed live: "dein Name ist ab jetzt Luna" was acknowledged but not
     // stored until the user separately said to remember it. Naming the

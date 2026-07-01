@@ -204,6 +204,75 @@ afterEach(() => {
 });
 
 describe("runtime delegated-loop regressions", () => {
+  it("recovers delegated evidence and never returns empty when the parent LLM stream errors after tool work", async () => {
+    // De-lexicalized regression for the llm_error_evidence_backstop path: a GENERAL
+    // error-handling + never-empty invariant (not source-sensitive). A neutral English
+    // task delegates, the specialist returns partial evidence, then the parent LLM stream
+    // throws. The catch-block backstop (runtime.ts) must recover that evidence into a
+    // NON-blocked final answer rather than surfacing a bare LLM error. Replaces a deleted
+    // test whose only failure was a source-sensitive scenario (now a dead gate).
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createDelegateToolCallStream("delegate_before_error", {
+          agentName: "mission_coordinator",
+          task: "Draft the portable ESP32 recorder deliverable.",
+        });
+      }
+      return createThrowingStream("context window overflow after delegation");
+    });
+
+    const recoveredArtifactEvidence = [
+      "Delegated result from mission_coordinator — PARTIAL PROGRESS (TIMEOUT).",
+      "Observed evidence:",
+      "Recovered evidence snippets from completed tools:",
+      "- Saved artifact workspace/esp32-recorder-project/README.md (486 chars) via write_file."
+        + " Preview: # ESP32 5-microphone array recorder — a flat, battery-powered capture device for OTA transcription.",
+    ].join("\n");
+
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: recoveredArtifactEvidence,
+      metadata: {
+        agentName: "mission_coordinator",
+        attemptedAgents: ["mission_coordinator"],
+        delegationSucceeded: true,
+        delegationOutcome: "partial",
+        terminalState: "timeout",
+      },
+    }));
+
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await runTurn({
+      session,
+      userMessage: "Draft the portable ESP32 recorder deliverable.",
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.performance?.finishReason).toBe("llm_error_evidence_backstop");
+    expect(result.response).toContain("workspace/esp32-recorder-project/README.md");
+    expect(result.response).toContain("5-microphone array");
+    expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
+    expect(streamMock).toHaveBeenCalledTimes(2);
+
+    const transcript = session.toTranscript();
+    expect(transcript.at(-1)?.role).toBe("assistant");
+    expect(transcript.at(-1)?.content).toContain("workspace/esp32-recorder-project/README.md");
+  });
+
   it("forces synthesis after delegated clarification evidence instead of re-delegating", async () => {
     const { agentName, task, delegatedOutput } = fixtures.identicalLoop;
 
