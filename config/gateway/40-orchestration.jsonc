@@ -51,6 +51,26 @@
     // answer. Watch the audit stream for guardrail_flagged{type:"fabricated_citations_stripped"}.
     "citationHonestyGuard": true,
 
+    // Proactive complement to citationHonestyGuard (session 29796f86: a full fabricated job
+    // posting from a pasted URL that was never fetched, + the false "Ich habe die Ausschreibung
+    // geladen", with zero web_fetch/delegate). When the user's message STRUCTURALLY carries an
+    // actionable http(s) URL and the model tries to answer tool-free in orchestration_only mode,
+    // reject once and force a real fetch (reuses the nudge → auto-research → grounded-synthesis
+    // path; never dead-ends). Purely structural — a host/topic/language-agnostic URL regex, no
+    // keyword table. Enabled for the fresh-instance pass^k eval; watch guardrail/audit for the
+    // forced-fetch retry + guardrail_flagged{type:"url_content_unverified_no_fetch"}.
+    "urlFetchEnforcement": true,
+
+    // Failed-research honesty backstop. When real orchestration RAN this turn and FAILED
+    // (forced-synthesis fired / a delegation failed / a partial source-sensitive delegation),
+    // don't ship a confident training-data answer as if the research had succeeded — re-anchor
+    // in whatever evidence was recovered, or replace a non-transparent draft with an honest
+    // "the research did not complete" note. Fires off STRUCTURAL turn-state failure-signals only
+    // (no topic/keyword classifier — the old sourceSensitive gate is dead post-de-lex). Enabled
+    // for the fresh-instance eval; include a non-source-sensitive failure (e.g. a timed-out code
+    // delegation) to confirm it doesn't overwrite a legitimately-useful partial answer.
+    "failedResearchHonestyBackstop": true,
+
     // vLLM "ReMoM" — quorum early-synthesis. parallel_delegate stops blocking on the slowest
     // slice: once ceil(0.6*N) slices SUCCEED, stragglers get an 8s grace then abort, and
     // synthesis proceeds on the quorum (partial share_finding evidence preserved). Cuts
