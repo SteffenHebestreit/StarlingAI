@@ -2,6 +2,7 @@
   // Primary agents — require special infrastructure setup (pentest/Kali tooling, browser/desktop automation, infra ops, mail/calendar services, platform self-modification).
   "subAgents": {
     "pentest_coordinator": {
+      "role": "coordinator",
       "description": "Penetration-testing engagement orchestrator: plans an authorized offensive-security assessment and drives the phased pentest swarm (recon_agent, web_auditor_agent, network_auditor_agent, exploit_agent, report_writer_agent) through recon, vulnerability analysis, web/network auditing, approval-gated exploitation, and reporting. Sets the engagement scope via pentest_set_scope (requires written authorization + target IPs/CIDRs/hosts) which unlocks active scanning. Also handles pentest-swarm MAINTENANCE: updating the pentest specialists' prompts, approved-tool lists, methodology SOP, and report structure. Distinct from the read-only researcher's CVE/advisory desk research and from infrastructure/ops agents — this agent commands live offensive tooling against in-scope systems. Example queries: 'run an authorized pentest against 10.0.0.0/24', 'starte einen Penetrationstest gegen den Webserver', 'plan and coordinate a security assessment of example.com', 'führe einen autorisierten Sicherheitstest durch', 'update the pentest swarm's methodology and approved tools', 'verbessere die Prompts der Pentest-Agenten'.",
       "capabilities": ["pentest engagement coordination", "offensive security orchestration", "engagement scope authorization", "pentest phase sequencing", "pentest swarm maintenance", "pentest methodology governance", "approved-tool selection governance"],
       "tags": ["pentest", "security", "offensive", "engagement", "scope", "authorization", "orchestration", "methodology"],
@@ -129,6 +130,7 @@
       ]
     },
     "pentest_qa_validator": {
+      "role": "reviewer",
       "description": "Pentest finding-validation gate that runs before report_writer_agent assembles the final report. Reviews the shared pentest findings for false positives (banner-only matches, inapplicable scanner defaults), CVSS v3.1 score accuracy against the described vector/impact, evidence quality (is there concrete tool output proving the vuln?), reproduction-step specificity, and coverage gaps (open ports/services/endpoints found in recon but never tested). Pentest-specific QA — distinct from the general quality_supervisor/qa_guard and from source_verifier's citation checks. Example queries: 'validate the pentest findings before reporting', 'prüfe die Findings auf False Positives und CVSS-Genauigkeit', 'check which discovered services were never tested', 'Evidenz und Schweregrad der Sicherheitsfunde gegenprüfen'.",
       "capabilities": ["pentest finding validation", "false positive detection", "cvss score review", "evidence quality audit", "reproduction-step review", "coverage gap analysis"],
       "tags": ["pentest", "qa", "validation", "false-positive", "cvss", "coverage", "security"],
@@ -326,6 +328,7 @@
       ]
     },
     "devops_coordinator": {
+      "role": "coordinator",
       "description": "CI/CD release coordinator that ORCHESTRATES a deployment end to end by sequencing other agents: checks GitHub CI is green on the head SHA (github_check_runs_list) and dispatches deploy workflows (github_actions_trigger), then delegates health checks to ops_triage, the actual rollout/provisioning to infrastructure_agent, the change-set review to git_developer, policy clearance to policy_compliance_reviewer, and post-deploy smoke tests to qa_guard. Owns environment promotion (staging→prod), canary/blue-green rollouts, and rollback decisions (smallest safe scope, prod changes require confirmation). It coordinates rather than running the low-level commands itself. Example queries: 'promote the v2.3 build from staging to production', 'rolle das Deployment auf die vorherige Version zurück', 'run a canary rollout with health checks', 'coordinate the blue-green switchover', 'Umgebungspromotion mit Freigabeprüfung'.",
       "capabilities": ["ci/cd release orchestration", "environment promotion", "rollback decision-making", "canary and blue-green coordination", "github actions dispatch", "ci status gating", "post-deploy verification coordination"],
       "tags": ["devops", "cicd", "release", "deployment", "pipeline", "rollback", "promote", "canary", "blue-green", "coordination"],

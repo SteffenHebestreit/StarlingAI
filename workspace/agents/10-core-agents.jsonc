@@ -2,6 +2,7 @@
   // Core agents — everyday essentials: orchestration/planning + bread-and-butter execution and review.
   "subAgents": {
     "mission_coordinator": {
+      "role": "coordinator",
       "description": "Execution coordinator that runs a multi-area deliverable end to end: partitions the request into parallel specialist slices, sequences dependent steps via a task graph, routes drafting to an author specialist, and runs a final quality pass before synthesizing one merged result. Selected by the multi-area SHAPE of a request — any deliverable that decomposes into roughly 3 or more distinct sub-topics or logistics dimensions and needs cross-topic synthesis (sourced reports, comparison briefs, how-to-build guides, recommendation memos, multi-section trip/plan deliverables). It orchestrates other agents and holds no file-writing tools itself. Different from project_planner, which only produces the plan and hands it here for execution; from web_task_coordinator, which handles single freshness lookups with no synthesis; and from devops_coordinator, which is scoped to CI/CD rollouts. Route single-domain lookups to one specialist. Example queries: 'coordinate a multi-agent research and drafting mission', 'orchestriere die parallele Quellenrecherche und Zusammenführung', 'plan a multi-section guide that spans several sub-topics', 'run the dependency graph for the audit and synthesize the findings', 'produce a sourced report from parallel sub-agent findings'.",
       "capabilities": ["multi-agent mission execution", "parallel slice partitioning", "task-graph dependency sequencing", "cross-topic result synthesis", "drafting handoff to author specialists", "final quality gating", "acceptance-checklist tracking", "ephemeral agent spin-up"],
       "tags": ["coordination", "orchestration", "parallel", "task-graph", "dependencies", "synthesis", "quality-gate", "acceptance", "mission", "multi-area", "execution"],
@@ -38,6 +39,7 @@
       ]
     },
     "web_task_coordinator": {
+      "role": "coordinator",
       "description": "Coordinator for freshness-only live web lookups that need NO cross-topic synthesis: today's breaking news and headlines, the weather forecast, live sports scores, lottery results, and current stock quotes. It delegates one or two live retrievals to researcher or browser_agent and relays the latest values. Scope is a single real-time fact, not a deliverable — multi-area or sourced/comparison work goes to mission_coordinator, and a deep single-topic source hunt goes straight to researcher. Example queries: 'what's in the news today', 'weather forecast for Berlin tomorrow', 'welches Spiel hat Bayern gestern gespielt', 'aktuelle Schlagzeilen zur Klimakonferenz', 'live score of the Chelsea match', 'was sagen heute die Börsen', 'Lottozahlen von gestern'.",
       "capabilities": ["breaking news lookup", "weather forecast lookup", "live sports scores", "lottery results", "current stock quotes", "real-time single-fact retrieval", "live browser orchestration"],
       "tags": ["news", "headlines", "weather", "live", "freshness", "scores", "lottery", "stocks", "realtime", "current-events"],
@@ -65,6 +67,7 @@
       ]
     },
     "project_planner": {
+      "role": "planner",
       "description": "Planning-only specialist that turns a complex goal into a structured execution plan: phased task breakdown, dependency ordering, a timeline with milestones, and acceptance criteria — then hands the plan to mission_coordinator for execution. It plans; it does not run specialists, gather evidence, or build artifacts itself. Use when the user wants the roadmap/plan, not the finished work. Example queries: 'plan the Q2 product launch in phases', 'erstelle eine Roadmap für das Migrationsprojekt', 'break down the refactor into dependency-ordered tasks', 'Aufgabenliste mit Abhängigkeiten für das Redesign', 'draft a delivery timeline with acceptance criteria', 'Projektplan mit Meilensteinen und Lieferobjekten'.",
       "capabilities": ["phased project planning", "task breakdown", "roadmapping", "milestone definition", "timeline estimation", "dependency ordering", "acceptance-criteria definition", "execution handoff to coordinator"],
       "tags": ["planning", "project", "roadmap", "milestones", "timeline", "task-breakdown", "phases", "acceptance-criteria"],
@@ -333,6 +336,7 @@
       ]
     },
     "quality_supervisor": {
+      "role": "reviewer",
       "description": "Read-only acceptance gate that judges whether a finished draft, artifact, or merged answer actually met the request and its acceptance criteria, then decides whether one more targeted corrective pass is justified and which specialist should run it. It checks completeness, internal consistency, and whether claims are grounded in the provided evidence — it does NOT run tests (qa_guard), audit citations line-by-line against sources (source_verifier), or screen against compliance/approval policy (policy_compliance_reviewer), and it never supplies external facts from its own knowledge. Example queries: 'review the drafted report against the original brief', 'prüfe ob der Entwurf die Anforderungen erfüllt', 'is this answer complete or should we rerun?', 'identify any gaps before we ship', 'Qualitätsgate vor Auslieferung durchführen'.",
       "capabilities": ["acceptance-criteria review", "deliverable completeness check", "internal-consistency check", "grounding check against provided evidence", "gap analysis", "rerun-vs-ship gating", "next-specialist recommendation"],
       "tags": ["quality-gate", "acceptance", "completeness", "consistency", "gap-analysis", "ship-or-rerun", "deliverable-review"],
@@ -352,6 +356,7 @@
       ]
     },
     "qa_guard": {
+      "role": "reviewer",
       "description": "Verification specialist that actually RUNS code to prove a change works: executes the test suite (vitest/jest/pytest and similar) via shell, reproduces a reported bug, and confirms a fix end-to-end, reporting confirmed-vs-partial-vs-unverified results. It runs tests and reproductions, unlike quality_supervisor which only reads and judges a draft, and unlike code_analyst which reads source without executing it. Example queries: 'run the test suite and report failures', 'verify that the fix for bug X actually works', 'reproduziere den Fehler im Checkout-Flow', 'run vitest for the changed files', 'prüfe ob die Implementierung die Akzeptanzkriterien erfüllt'.",
       "capabilities": ["test-suite execution", "bug reproduction", "fix verification", "regression checking", "acceptance-criteria verification by running checks"],
       "tags": ["qa", "run-tests", "test-execution", "regression", "bug-reproduction", "fix-verification", "vitest", "pytest"],
