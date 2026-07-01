@@ -126,27 +126,47 @@ export function userMessageCarriesActionableUrl(userMessage: string): boolean {
  * longer matches and no longer double-counts against the year regex. Consumed by the
  * ungroundedFactualAnswerGuard force-research gate. Pure/exported.
  */
-export function looksLikeUnsourcedSpecificClaims(text: string): boolean {
-  const t = text ?? "";
-  if (t.trim().length < 400) return false;
-  const categories: Record<string, RegExp> = {
-    percent: /\d[\d.,]*\s?%/g,                                                       // 3,75 %
-    currency: /[€$£¥]\s?\d[\d.,]*|\b\d[\d.,]*\s?(?:eur|usd|gbp|jpy|chf)\b/gi,        // currency amounts
-    unit: /\b\d[\d.,]*\s?(?:mm|cm|km|kg|mg|ghz|mhz|khz|hz|mah|ma|kw|kwh|wh|nm|px|mb|gb|tb|fps|rpm|°c|°f)\b/gi,
-    voltage: /\b\d[\d.,]*\s?[VW]\b/g,                                                // volts/watts (case-sensitive)
-    year: /\b(?:19|20)\d{2}\b/g,                                                     // calendar years
-    date: /\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b/g,                                    // dd.mm.yyyy
-    code: /\b(?=[a-z0-9-]*[a-z])(?=[a-z0-9-]*\d)[a-z0-9]+(?:-[a-z0-9]+)*\b/gi,       // contiguous alnum w/ letter+digit: IM73A135V01
-  };
+const SPECIFICITY_CATEGORIES: Record<string, RegExp> = {
+  percent: /\d[\d.,]*\s?%/g,                                                       // 3,75 %
+  currency: /[€$£¥]\s?\d[\d.,]*|\b\d[\d.,]*\s?(?:eur|usd|gbp|jpy|chf)\b/gi,        // currency amounts
+  unit: /\b\d[\d.,]*\s?(?:mm|cm|km|kg|mg|ghz|mhz|khz|hz|mah|ma|kw|kwh|wh|nm|px|mb|gb|tb|fps|rpm|°c|°f)\b/gi,
+  voltage: /\b\d[\d.,]*\s?[VW]\b/g,                                                // volts/watts (case-sensitive)
+  year: /\b(?:19|20)\d{2}\b/g,                                                     // calendar years
+  date: /\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b/g,                                    // dd.mm.yyyy
+  code: /\b(?=[a-z0-9-]*[a-z])(?=[a-z0-9-]*\d)[a-z0-9]+(?:-[a-z0-9]+)*\b/gi,       // contiguous alnum w/ letter+digit: IM73A135V01
+};
+
+/** How many distinct fact-SHAPE tokens the text carries, and across how many distinct categories.
+ * String.matchAll works on a clone, so reusing the module-level global regexes across calls is safe. */
+function specificityProfile(text: string): { tokens: number; categories: number } {
   const tokens = new Set<string>();
   const categoriesHit = new Set<string>();
-  for (const [category, re] of Object.entries(categories)) {
-    for (const m of t.matchAll(re)) {
+  for (const [category, re] of Object.entries(SPECIFICITY_CATEGORIES)) {
+    for (const m of text.matchAll(re)) {
       tokens.add(m[0].toLowerCase());
       categoriesHit.add(category);
     }
   }
-  return tokens.size >= 4 && categoriesHit.size >= 2;
+  return { tokens: tokens.size, categories: categoriesHit.size };
+}
+
+export function looksLikeUnsourcedSpecificClaims(text: string): boolean {
+  const t = text ?? "";
+  if (t.trim().length < 400) return false;
+  const p = specificityProfile(t);
+  return p.tokens >= 4 && p.categories >= 2;
+}
+
+/**
+ * The answer ASSERTS concrete external specifics — ≥ `minTokens` fact-shape tokens (numbers with
+ * units, currencies, percentages, years, dates, part codes). Used by the SHORT-answer branch of the
+ * URL-not-fetched guard: a ~300-char fabricated page summary ("AI Engineer, 3+ Jahre, Remote, 90
+ * EUR/h, Start 2026") slips under the 400-char floor, yet it plainly asserts the page's content. An
+ * honest short "I couldn't fetch it — shall I?" carries no such specifics, so it is not flagged.
+ * Structural / language-free — reuses the same fact-shape categories, no keyword table. Pure/exported.
+ */
+export function answerAssertsSpecifics(text: string, minTokens = 2): boolean {
+  return specificityProfile(text ?? "").tokens >= minTokens;
 }
 
 /**

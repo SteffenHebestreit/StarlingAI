@@ -130,6 +130,26 @@ export const OrchestrationSchema = z.object({
    *  When off, control falls through to the acceptance-criteria arm exactly as before. Default OFF (it
    *  can re-synthesize an answer) — pass^k-gated. */
   evidenceAnchoringOnGatheredEvidence: z.boolean().default(false),
+  /** #5 (citation-honesty tightening): the URL-not-fetched caveat's 400-char floor lets a SHORT
+   *  fabricated page summary slip (a ~300-char answer that asserts the page's content but stays under
+   *  the floor). When true, ALSO fire the caveat on a shorter answer (≥150 chars) that structurally
+   *  ASSERTS specifics (answerAssertsSpecifics: ≥2 fact-shape tokens) — the honest short "couldn't
+   *  fetch it, shall I?" carries none and stays clear. Non-destructive (prepend-only). Modifies the
+   *  ENABLED citationHonestyGuard, so default OFF / pass^k-gated. */
+  urlNotFetchedShortAnswerGuard: z.boolean().default(false),
+  /** #6 (citation-honesty tightening): hadRealResearch counts SESSION-scoped shared facts, so a prior
+   *  turn's evidence blanket-passes THIS turn's fabricated URL citations. When true, the citation-strip
+   *  decision requires TURN-scoped research (delegation / successful workflow / direct web tool /
+   *  share_finding THIS turn) — a stale session fact no longer authorises this turn's links. Structural.
+   *  Modifies the ENABLED citationHonestyGuard (can strip more), so default OFF / pass^k-gated. */
+  citationTurnScopedResearch: z.boolean().default(false),
+  /** #8 (evidence-anchoring tightening): looksEvidenceAnchored's condition-1 bar is min(3, anchors) —
+   *  a long draft sharing only 3 generic tokens with the evidence is judged "anchored" even if it is
+   *  mostly fabricated prose reusing a few evidence nouns. When true, scale the required shared-token
+   *  count with draft length (3 + floor(len/1500)) so "demonstrably used the evidence" is proportional
+   *  to answer size. Purely structural (no keyword table). Feeds the enabled failedResearchHonestyBackstop
+   *  (can trigger more re-synthesis), so default OFF / pass^k-gated. */
+  evidenceAnchoringLengthScaled: z.boolean().default(false),
   /** S1 of staged orchestration (docs/staged-orchestration.md): when true, the
    *  TERMINAL forced-synthesis call (forceSynthesis — invoked with no tools, so it
    *  cannot route or delegate) uses a compact synthesis-only system prompt

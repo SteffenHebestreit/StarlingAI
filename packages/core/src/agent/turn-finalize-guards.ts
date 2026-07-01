@@ -241,7 +241,7 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
     const sharedFactsEvidence = await getSharedFactsEvidenceForFinalSynthesis(session.id);
     const recoveryEvidence = chooseBetterRecoveryEvidence(delegateEvidence, sharedFactsEvidence);
     if (recoveryEvidence) {
-      const finalResponseAnchored = looksEvidenceAnchored(stripPresentationFormatting(finalResponse), recoveryEvidence.evidence);
+      const finalResponseAnchored = looksEvidenceAnchored(stripPresentationFormatting(finalResponse), recoveryEvidence.evidence, getConfig().orchestration?.evidenceAnchoringLengthScaled === true);
       const finalResponseTransparent = looksLikeTransparentIncompleteReport(finalResponse);
       if (!finalResponseAnchored || !finalResponseTransparent) {
         finalResponse = await synthesizeSourceSensitiveEvidenceBackstop(session, provider, signal, recoveryEvidence.evidence)
@@ -382,7 +382,7 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
       ? await getSharedFactsEvidenceForFinalSynthesis(session.id)
       : null;
     let evidenceAnchoringRepairRan = false;
-    if (anchorEvidence && (anchorEvidence.itemCount ?? 0) > 0 && answerNeedsEvidenceAnchoringRepair(finalResponse, anchorEvidence.evidence)) {
+    if (anchorEvidence && (anchorEvidence.itemCount ?? 0) > 0 && answerNeedsEvidenceAnchoringRepair(finalResponse, anchorEvidence.evidence, getConfig().orchestration?.evidenceAnchoringLengthScaled === true)) {
       evidenceAnchoringRepairRan = true;
       const anchorInstruction = [
         "EVIDENCE-ANCHORING REPAIR:",
@@ -397,7 +397,7 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
       if (
         candidate
         && candidate.trim().length >= Math.min(200, Math.floor(finalResponse.trim().length * 0.5))
-        && looksEvidenceAnchored(stripPresentationFormatting(candidate), anchorEvidence.evidence)
+        && looksEvidenceAnchored(stripPresentationFormatting(candidate), anchorEvidence.evidence, getConfig().orchestration?.evidenceAnchoringLengthScaled === true)
       ) {
         finalResponse = candidate;
         guardrailEvents.push({ type: "guardrail_flagged", details: "qa_evidence_anchoring_repaired" });

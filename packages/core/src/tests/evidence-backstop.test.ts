@@ -353,6 +353,27 @@ describe("sharesEvidenceVocabulary — recovery-synthesis gate", () => {
     const UNRELATED = "Hier ist eine allgemeine Anleitung zum Backen eines Schokoladenkuchens mit Mehl, Zucker und Eiern, die ueberhaupt nichts mit dem gesammelten Beleg zu tun hat und keine einzige Quelle nennt.";
     expect(sharesEvidenceVocabulary(UNRELATED, EVIDENCE)).toBe(false);
   });
+
+  // #8 (evidenceAnchoringLengthScaled): a LONG draft that shares only a few evidence tokens is
+  // weakly anchored. Default (min(3, anchors)) accepts it; the length-scaled bar (3 + floor(len/1500))
+  // rejects it. Evidence is rich in spec tokens; the long draft names only three of them then drifts
+  // into unrelated number-free prose (so condition 2 passes but shared-vocab stays low).
+  // Evidence rich in distinct spec-code anchors (≥6) so the length-scaled bar (min(5, anchors)=5)
+  // can exceed what a weak draft shares.
+  const RICH_EVIDENCE = "Reference bill of materials: IM73A135V01 microphone, BMI270 IMU, BQ25895 charger, "
+    + "PCM1808 ADC, LIS3DH accelerometer, MAX98357 amplifier, released 2020, IP57 rated.";
+  // The draft names only THREE of the codes (all present in the evidence → condition 2 passes; all
+  // survive the anchor extractor, unlike short codes like "IP57") then drifts into unrelated
+  // number-free prose, so shared vocabulary stays at exactly 3.
+  const LONG_WEAK_DRAFT = "Das IM73A135V01 wird zusammen mit dem BMI270 und dem PCM1808 verbaut. "
+    + ("Ansonsten geht es hier vor allem um allgemeine Hinweise zur Handhabung, Pflege und Aufbewahrung, "
+      + "die mit den konkreten Belegen wenig zu tun haben und eher als lockere Erzaehlung gedacht sind. ").repeat(20);
+
+  it("length-scaled anchoring REJECTS a long draft that shares only a few evidence tokens", () => {
+    expect(LONG_WEAK_DRAFT.length).toBeGreaterThan(3000);
+    expect(looksEvidenceAnchored(LONG_WEAK_DRAFT, RICH_EVIDENCE)).toBe(true);         // default: min(3, anchors)
+    expect(looksEvidenceAnchored(LONG_WEAK_DRAFT, RICH_EVIDENCE, true)).toBe(false);  // scaled: needs more for its length
+  });
 });
 
 /**

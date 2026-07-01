@@ -65,7 +65,7 @@ export function sharesEvidenceVocabulary(draft: string, evidence: string): boole
   return false;
 }
 
-export function looksEvidenceAnchored(sourceSensitiveDraft: string, evidence: string): boolean {
+export function looksEvidenceAnchored(sourceSensitiveDraft: string, evidence: string, lengthScaled = false): boolean {
   // Two-condition anchor, topic-neutral. The original bug shipped a draft
   // that named the right part but flipped a spec ("I²S-Digital" against
   // evidence "analog differential") because the check counted only shared
@@ -90,13 +90,16 @@ export function looksEvidenceAnchored(sourceSensitiveDraft: string, evidence: st
   const anchors = sourceSensitiveEvidenceTokens(evidence);
   if (anchors.length === 0) return false;
 
-  // Condition 1: shared vocabulary.
+  // Condition 1: shared vocabulary. #8 (lengthScaled): a long draft sharing only 3 generic tokens is
+  // weakly anchored — scale the required hits with draft length (3 + floor(len/1500)) so "used the
+  // evidence" is proportional to answer size. Default (false) keeps the original min(3, anchors).
+  const requiredHits = Math.min(lengthScaled ? 3 + Math.floor(normalizedDraft.length / 1500) : 3, anchors.length);
   let sharedHits = 0;
   for (const anchor of anchors) {
     if (normalizedDraft.includes(anchor)) sharedHits += 1;
-    if (sharedHits >= Math.min(3, anchors.length)) break;
+    if (sharedHits >= requiredHits) break;
   }
-  if (sharedHits < Math.min(3, anchors.length)) return false;
+  if (sharedHits < requiredHits) return false;
 
   // Condition 2: every concrete spec token in the draft is grounded in
   // the evidence (positive match, or a mutually-negated match). Topic-

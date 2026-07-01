@@ -13,6 +13,7 @@ import {
   prependUnverifiedSourceCaveat,
   userMessageCarriesActionableUrl,
   prependUrlNotFetchedCaveat,
+  answerAssertsSpecifics,
 } from "./citation-honesty.js";
 
 export interface CitationHonestyGuardParams {
@@ -67,17 +68,32 @@ export async function applyCitationHonestyGuard(
     // presenting the page's content (session 29796f86: a fabricated job posting from a link that
     // was never fetched). The 400-char floor keeps an honest short "I couldn't fetch it — shall
     // I?" out of the net. Both triggers are STRUCTURAL + language-free.
-    const userGaveUrlToRead = userMessageCarriesActionableUrl(userMessage) && finalResponse.trim().length >= 400;
+    // #5 (urlNotFetchedShortAnswerGuard, default off): a SHORT fabricated summary slips the 400-char
+    // floor, so also fire when a ≥150-char answer structurally ASSERTS specifics (≥2 fact-shape
+    // tokens); an honest short "couldn't fetch it, shall I?" carries none. Non-destructive.
+    const trimmedLen = finalResponse.trim().length;
+    const userGaveUrlToRead = userMessageCarriesActionableUrl(userMessage)
+      && (trimmedLen >= 400
+        || (getConfig().orchestration?.urlNotFetchedShortAnswerGuard === true
+          && trimmedLen >= 150
+          && answerAssertsSpecifics(finalResponse)));
 
     if (presentsCitations || userGaveUrlToRead) {
       const isWebReachingTool = (t: string) => /^web_search/i.test(t) || /^web_fetch$/i.test(t) || /^browser_/i.test(t);
       const webToolCalledDirectly = [...turnToolCallCounts.keys()].some(isWebReachingTool);
       const sharedFactsForCitation = await getSharedFactsEvidenceForFinalSynthesis(sessionId);
-      const hadRealResearch = turnDelegationCount > 0
+      // TURN-scoped research signals (this turn actually retrieved something).
+      const hadTurnScopedResearch = turnDelegationCount > 0
         || workflowRunCompletedThisTurn
         || webToolCalledDirectly
-        || turnShareFindingCount > 0
-        || (sharedFactsForCitation?.itemCount ?? 0) > 0;
+        || turnShareFindingCount > 0;
+      // #6 (citationTurnScopedResearch, default off): by default a SESSION-scoped shared fact also
+      // counts as research — but a stale prior-turn fact should not authorise THIS turn's fabricated
+      // URL citations. When on, the citation strip requires turn-scoped research; the prose-caveat
+      // path keeps the lenient session check.
+      const sessionEvidenceCounts = getConfig().orchestration?.citationTurnScopedResearch !== true;
+      const hadRealResearch = hadTurnScopedResearch
+        || (sessionEvidenceCounts && (sharedFactsForCitation?.itemCount ?? 0) > 0);
 
       if (presentsCitations && !hadRealResearch) {
         finalResponse = prependUnverifiedSourceCaveat(stripFabricatedCitations(finalResponse), userMessage);

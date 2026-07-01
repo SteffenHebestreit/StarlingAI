@@ -8,6 +8,7 @@ import {
   userMessageCarriesActionableUrl,
   prependUrlNotFetchedCaveat,
   looksLikeUnsourcedSpecificClaims,
+  answerAssertsSpecifics,
 } from "../agent/citation-honesty.js";
 
 // The audited fabricated answer (session 1303e254, condensed): invented 404 links produced with
@@ -203,5 +204,26 @@ describe("looksLikeUnsourcedSpecificClaims — dense specifics without a keyword
     const prose = "The standard was ratified in 1998 and revised by 2015 after long review. " + "x".repeat(400);
     // Only the two years (one category) → below the 2-category bar.
     expect(looksLikeUnsourcedSpecificClaims(prose)).toBe(false);
+  });
+});
+
+// answerAssertsSpecifics (#5): the SHORT-answer branch of the URL-not-fetched guard. A ~300-char
+// fabricated page summary that asserts specifics must be catchable below the 400-char floor, but an
+// honest short "couldn't fetch it" must not.
+describe("answerAssertsSpecifics — short answer asserts page content", () => {
+  it("fires on a short fabricated page summary (≥2 fact-shape tokens)", () => {
+    expect(answerAssertsSpecifics(
+      "Die Ausschreibung sucht einen AI Engineer, 100 % Remote, Vergütung 90 EUR pro Stunde, Start 2026.",
+    )).toBe(true);
+  });
+
+  it("does NOT fire on an honest short 'could not fetch' reply (no specifics)", () => {
+    expect(answerAssertsSpecifics(
+      "Ich konnte die verlinkte Seite nicht abrufen. Soll ich es noch einmal versuchen?",
+    )).toBe(false);
+  });
+
+  it("respects a higher minTokens threshold", () => {
+    expect(answerAssertsSpecifics("Only one year here: 2026.", 2)).toBe(false); // 1 token < 2
   });
 });

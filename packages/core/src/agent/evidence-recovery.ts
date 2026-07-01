@@ -278,12 +278,13 @@ export function formatSourceSensitiveEvidenceBackstop(evidence: string): string 
 export function answerNeedsEvidenceAnchoringRepair(
   finalResponse: string,
   evidence: string | null | undefined,
+  lengthScaled = false,
 ): boolean {
   if (!evidence) return false;
   if (looksLikeWeakRecoveryEvidence(evidence)) return false;
   const draft = stripPresentationFormatting(finalResponse).trim();
   if (draft.length <= 200) return false;
-  return !looksEvidenceAnchored(draft, evidence);
+  return !looksEvidenceAnchored(draft, evidence, lengthScaled);
 }
 
 export async function synthesizeSourceSensitiveEvidenceBackstop(
