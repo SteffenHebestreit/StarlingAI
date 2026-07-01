@@ -273,6 +273,83 @@ describe("runtime delegated-loop regressions", () => {
     expect(transcript.at(-1)?.content).toContain("workspace/esp32-recorder-project/README.md");
   });
 
+  it("forces a real fetch when the user gives a URL and the model answers tool-free (urlFetchEnforcement)", async () => {
+    // Restores (structurally) the honesty enforcement the de-lex stripped: a URL in the user's
+    // message + a tool-free draft about its content → reject + force a fetch (live session 29796f86
+    // fabricated a job posting from a link it never fetched). Trigger is the STRUCTURAL URL regex
+    // (userMessageCarriesActionableUrl) + no-real-research gate — no topic/language keywords.
+    const freshRuntime = await loadFreshRuntimeForToolMode("orchestration_only", {
+      orchestration: { urlFetchEnforcement: true },
+    });
+
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        // The model tries to ANSWER the page's content without fetching it (the fabrication).
+        return createTextStream("## Projektübersicht\nRolle: AI Engineer\nAnforderungen: 3+ Jahre LLM, RAG, Fine-Tuning.\nIch habe die Ausschreibung geladen.");
+      }
+      if (llmCallCount === 2) {
+        return createDelegateToolCallStream("url_fetch_delegate", {
+          agentName: "researcher",
+          task: "Fetch and read the linked page, then report its contents.",
+        });
+      }
+      return createTextStream("Based on the fetched page, here is the grounded summary.");
+    });
+
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: "Fetched page: AI/Data Science Engineer role; requires 3+ years LLM/RAG, Python, Docker.",
+      metadata: { agentName: "researcher", attemptedAgents: ["researcher"], delegationSucceeded: true, delegationOutcome: "success", terminalState: "completed" },
+    }));
+    freshRuntime.registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    const session = new freshRuntime.AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await freshRuntime.runTurn({
+      session,
+      userMessage: "hier ist das projekt https://www.freelancermap.de/projekt/ai-data-science-engineer-llm-rag",
+    });
+
+    expect(result.blocked).toBe(false);
+    // The tool-free draft about the URL was REJECTED and a real fetch was forced.
+    expect(result.guardrailEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "delegation_required", details: "tool_free_research_answer_rejected" }),
+    ]));
+    expect(delegateExecuteMock).toHaveBeenCalled();                       // the URL was actually fetched
+    expect(result.response).not.toContain("Ich habe die Ausschreibung geladen"); // the fabricated draft did not ship
+
+    freshRuntime.unregisterTool("delegate_to_agent");
+  });
+
+  it("does NOT force a fetch when urlFetchEnforcement is off (default) — structural flag gate", async () => {
+    const freshRuntime = await loadFreshRuntimeForToolMode("orchestration_only", {}); // flag defaults off
+    streamMock.mockImplementation(() => createTextStream("A brief note that references https://example.com/x."));
+    const session = new freshRuntime.AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+    const result = await freshRuntime.runTurn({
+      session,
+      userMessage: "have a look at https://example.com/x",
+    });
+    expect(result.blocked).toBe(false);
+    expect(result.guardrailEvents ?? []).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ details: "tool_free_research_answer_rejected" }),
+    ]));
+  });
+
   it("forces synthesis after delegated clarification evidence instead of re-delegating", async () => {
     const { agentName, task, delegatedOutput } = fixtures.identicalLoop;
 

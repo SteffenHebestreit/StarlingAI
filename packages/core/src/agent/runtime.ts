@@ -187,6 +187,7 @@ export {
 // Pure honesty / source-caveat / synthesis-directive text helpers (god-file seam).
 import {
   buildSynthesisRequiredDirective,
+  userMessageCarriesActionableUrl,
 } from "./citation-honesty.js";
 
 // Re-export the originally-exported honesty helpers so existing imports from
@@ -1360,6 +1361,17 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
   const requiresArtifactDelegation = effectiveToolMode === "orchestration_only"
     && Boolean(initialDynamicGuidance?.artifactSensitive);
   const activeMainAssistantToolMode = effectiveToolMode ?? getConfig().agents.mainAssistant.toolMode;
+  // Structural URL-fetch enforcement (orchestration.urlFetchEnforcement, default off). A URL in
+  // the user's message means they handed the assistant a page to READ. The de-lex hardwired
+  // sourceSensitive off, which silently starved the force-fetch enforcement below and let the model
+  // invent a page's contents + claim it "loaded" the link (live session 29796f86). Re-arm it from a
+  // purely STRUCTURAL signal — a URL regex on the message, no topic/language keywords — so a
+  // tool-free answer about the page is rejected and a real fetch is forced (reusing the intact
+  // nudge → auto-delegate → grounded-synthesis path). Orchestration mode only (the orchestrator
+  // must delegate to fetch); hybrid/direct assistants read the URL with their own web tools.
+  const requiresUrlFetch = getConfig().orchestration?.urlFetchEnforcement === true
+    && activeMainAssistantToolMode === "orchestration_only"
+    && userMessageCarriesActionableUrl(userMessage);
   const requiresSwarmMaintenanceDelegation = activeMainAssistantToolMode !== "hybrid"
     && Boolean(initialDynamicGuidance?.swarmMaintenanceSensitive)
     && allowedToolNameSet.has("delegate_to_agent");
@@ -2563,7 +2575,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       }
 
       let autoResearchAnswer: string | null = null;
-      if (!releasedAfterRoutingNudge && requiresDelegatedResearch && !currentTurnHasExecutableOrchestration) {
+      if (!releasedAfterRoutingNudge && (requiresDelegatedResearch || requiresUrlFetch) && !currentTurnHasExecutableOrchestration) {
         if (!delegatedResearchRetryUsed) {
           delegatedResearchRetryUsed = true;
           const route: RequiredResearchFallbackRoute | null = requiredResearchFallbackRoute ?? buildRequiredResearchFallbackRoute(researchSubject, initialDynamicGuidance, allowedToolNameSet, opts.allowedAgents);
@@ -2571,7 +2583,18 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
             requiredResearchFallbackRoute = route;
             searchAgentsNoMatchFallbackPrompt ||= buildSearchAgentsNoMatchFallbackPrompt(route);
           }
-          delegatedResearchEnforcementPrompt = route
+          // URL-fetch path (structural URL trigger, no source-sensitive research classification):
+          // a GENERAL nudge that forces the page to be READ before answering — never overfit to a
+          // topic/host (any http(s) URL). The research path keeps its own nudge below.
+          delegatedResearchEnforcementPrompt = (requiresUrlFetch && !requiresDelegatedResearch)
+            ? [
+                "COMPLIANCE CORRECTION: The user's message references a web page by URL.",
+                "You have NOT fetched it this turn. Do NOT describe, summarize, quote, or evaluate the page's contents from memory — that is fabrication.",
+                "Delegate now (e.g. delegate_to_agent with researcher) to fetch and read the URL, THEN answer strictly from what it actually returns.",
+                "If you genuinely cannot fetch it, say so plainly instead of inventing its contents.",
+                "A tool-free answer that speaks to the URL's content is invalid for this turn.",
+              ].join(" ")
+            : route
             ? buildSearchAgentsNoMatchFallbackPrompt(route)
             : [
                 "COMPLIANCE CORRECTION: This request requires specialist-agent orchestration.",
@@ -2607,7 +2630,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
             tool: autoRoute.toolName,
             agent: autoRoute.label,
           }, { sessionId: session.id, severity: "warn" });
-          opts.onStatus?.({ phase: "guardrail", message: "Der Entwurf hat keine Recherche ausgeführt — ich hole jetzt belegte Quellen über einen Recherche-Spezialisten.", iteration: iterationCount });
+          opts.onStatus?.({ phase: "guardrail", message: "The draft ran no research — fetching sourced evidence via a research specialist now. / Der Entwurf hat keine Recherche ausgeführt — ich hole jetzt belegte Quellen über einen Spezialisten.", iteration: iterationCount });
           try {
             await executeTool(autoRoute.toolName, autoRoute.args, toolContext);
             _turnDelegationCount += 1;
@@ -2624,7 +2647,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
               signal,
               "WEB RESEARCH RESULTS — synthesize the final answer now. A research specialist gathered the findings below for the user's request. "
               + "Write the complete answer in the SAME language as the user's request, grounded ONLY in these findings and this conversation's tool results. "
-              + "Do not invent manufacturer, interface, pricing, part, or layout claims beyond the findings; mark anything the findings do not cover as still to verify.\n"
+              + "Do not invent any specifics — names, numbers, dates, sources, or claims — beyond the findings; mark anything the findings do not cover as still to verify.\n"
               + "Findings:\n" + recovery.evidence.slice(0, 6_000),
             );
             const candidate = synthesized ? sanitizeUserFacingAssistantResponse(synthesized, 0) : null;

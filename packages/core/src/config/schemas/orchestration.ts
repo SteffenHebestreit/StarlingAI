@@ -68,6 +68,17 @@ export const OrchestrationSchema = z.object({
    *  answer. Default OFF — gated until a pass^k eval confirms it doesn't strip the
    *  citations of a genuinely-researched answer. */
   citationHonestyGuard: z.boolean().default(false),
+  /** Proactive complement to citationHonestyGuard: when the user's message STRUCTURALLY
+   *  carries an http(s) URL (they handed the assistant a page to read) and the model tries
+   *  to answer tool-free, FORCE a real fetch — reuse the research-enforcement nudge →
+   *  auto-delegate → grounded-synthesis path so the page is actually read before answering,
+   *  instead of the model inventing its contents (live session 29796f86: a fabricated job
+   *  posting from a link that was never fetched). Trigger is fully structural (URL regex +
+   *  the no-real-research tool-call gate) — no topic/language keywords. Restores the honesty
+   *  enforcement the de-lex stripped when it hardwired sourceSensitive off. Default OFF,
+   *  pass^k-gated (forcing a fetch on every pasted link can over-fire on "here's a link for
+   *  later" messages). */
+  urlFetchEnforcement: z.boolean().default(false),
   /** S1 of staged orchestration (docs/staged-orchestration.md): when true, the
    *  TERMINAL forced-synthesis call (forceSynthesis — invoked with no tools, so it
    *  cannot route or delegate) uses a compact synthesis-only system prompt
