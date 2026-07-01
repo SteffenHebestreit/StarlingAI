@@ -87,6 +87,17 @@ export const OrchestrationSchema = z.object({
    *  which killed this backstop; restored here from STRUCTURAL failure-signals only (no keywords).
    *  Default OFF (it can replace an answer) — pass^k-gated. */
   failedResearchHonestyBackstop: z.boolean().default(false),
+  /** Terminal fabrication guard: a turn that RESEARCHED (produced ≥1 curated shared fact) but
+   *  produced NO artifact file, and whose answer INLINES a full HTML application document
+   *  (looksLikeInlinedAppDocument — the never-legit-inline structural signal), is the model
+   *  hand-writing the whole deliverable from training data and passing it off as the built,
+   *  "verified" result (audit 453a263e: a fabricated reveal.js deck after the build was stopped).
+   *  Replace it with the honest curated-facts fallback (real findings + sources, stating the file
+   *  was not built this turn). The de-lex hardwired sourceSensitive off, killing the guard; revived
+   *  here on PURELY STRUCTURAL signals — curated-facts count + zero attachments + a full inlined
+   *  HTML document — with NO bilingual wantsArtifact keyword gate. Default OFF (it replaces an
+   *  answer) — pass^k-gated. */
+  inlineArtifactFabricationGuard: z.boolean().default(false),
   /** S1 of staged orchestration (docs/staged-orchestration.md): when true, the
    *  TERMINAL forced-synthesis call (forceSynthesis — invoked with no tools, so it
    *  cannot route or delegate) uses a compact synthesis-only system prompt

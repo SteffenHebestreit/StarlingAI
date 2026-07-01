@@ -5,6 +5,7 @@ import {
   looksLikeRawWorkspaceToolDump,
   looksLikeArtifactCreationRequest,
   looksLikeInlinedArtifactFabrication,
+  looksLikeInlinedAppDocument,
 } from "../agent/runtime.js";
 
 /**
@@ -156,6 +157,43 @@ describe("looksLikeInlinedArtifactFabrication — inlined full deliverable", () 
     expect(looksLikeInlinedArtifactFabrication("Die Datei wurde erstellt: dresden/index.html.")).toBe(false);
     // A small inline code snippet (e.g. a config line) is not a fabricated full artifact.
     expect(looksLikeInlinedArtifactFabrication("Run this:\n\n```bash\nnpm run build\n```")).toBe(false);
+  });
+});
+
+// looksLikeInlinedAppDocument is the never-legit-inline signal the revived inline-artifact
+// fabrication guard (inlineArtifactFabricationGuard) fires on. Because that guard dropped the
+// bilingual `wantsArtifact` keyword scope-gate, the answer-side signal MUST be precise on its
+// own: a full HTML application document is never a legitimate inline answer, but a large
+// non-HTML code fence CAN be ("show me the reference implementation"), so — unlike the broader
+// looksLikeInlinedArtifactFabrication — this predicate must ignore big non-HTML fences.
+describe("looksLikeInlinedAppDocument — full HTML app document only (no keyword gate)", () => {
+  it("flags a full HTML document (fenced, bare, and truncated-mid-CSS)", () => {
+    const fenced = "Hier ist die App:\n\n```html\n<!DOCTYPE html>\n<html><head><style>"
+      + ".x{color:red}".repeat(200) + "</style></head><body><div id=\"app\"></div></body></html>\n```";
+    expect(looksLikeInlinedAppDocument(fenced)).toBe(true);
+    const bare = "<!DOCTYPE html>\n<html>\n<body>\n" + "<section>content</section>\n".repeat(80) + "</body>\n</html>";
+    expect(looksLikeInlinedAppDocument(bare)).toBe(true);
+    // Truncated by the completion cap (no closing </html>): the fenced-doctype clause still fires.
+    const truncated = "```html\n<!DOCTYPE html>\n<html><head><style>" + ".y{margin:0}".repeat(200) + "</style></head><body>";
+    expect(looksLikeInlinedAppDocument(truncated)).toBe(true);
+  });
+
+  it("does NOT flag a large non-HTML code fence (a legit reference-code answer)", () => {
+    const bigJsFence = "Here's a reference implementation:\n\n```ts\n"
+      + "export function score(items: number[]): number {\n  return items.reduce((a, b) => a + b, 0);\n}\n".repeat(60)
+      + "```";
+    expect(bigJsFence.length).toBeGreaterThan(1500);
+    expect(looksLikeInlinedAppDocument(bigJsFence)).toBe(false);
+    // The broader sibling WOULD flag this big fence — which is exactly why the keyword-gate-free
+    // guard uses the app-document predicate instead.
+    expect(looksLikeInlinedArtifactFabrication(bigJsFence)).toBe(true);
+  });
+
+  it("does NOT flag the honest curated-facts fallback or a short reply", () => {
+    expect(looksLikeInlinedAppDocument(
+      "Ich konnte die Datei nicht bauen. Belegte Fakten:\n- Der Zwinger wurde ab 1709 erbaut (Quelle: britannica.com).",
+    )).toBe(false);
+    expect(looksLikeInlinedAppDocument("Öffne die Datei dresden/index.html im Browser.")).toBe(false);
   });
 });
 

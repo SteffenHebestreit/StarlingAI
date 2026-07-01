@@ -66,7 +66,7 @@ import { buildEffectiveResearchSubject } from "./source-sensitive-delegation.js"
 import { looksLikeDegenerateRepetition, collapseRepeatedMarkdownSections, looksLikeDegenerateLineRepetition, collapseRepeatedLines } from "./text-dedup.js";
 import {
   classifyDeliverableIntent,
-  looksLikeInlinedArtifactFabrication,
+  looksLikeInlinedAppDocument,
 } from "./deliverable-intent.js";
 
 // Re-export the deliverable-intent module so existing imports from runtime.js
@@ -4058,22 +4058,25 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     }, { sessionId: session.id, channel: session.channel, severity: "warn" });
     presentableFinalMsg = buildResearchGatheredFallback(curated, deliverableIntent.wantsArtifact);
   }
-  // Fabricated-inline-artifact guard: on a source-sensitive artifact-creation turn that
-  // produced NO real artifact (the build was stopped/blocked/never ran), the model
-  // sometimes hand-writes the whole deliverable inline (a multi-KB <!DOCTYPE html> /
-  // fenced code block) from training data and presents it as the verified result (audit
-  // 453a263e: the operator Stopped mid-research, the auto-build was correctly blocked, and
-  // synthesis pasted a fabricated reveal.js deck repeating the Permoser→Neumann error + an
-  // invented source URL — no workspace file, false "verified" claim). Replace it with the
-  // honest curated-facts fallback: the verified findings + real sources, stating the file
-  // was not built this turn. Scoped to the no-artifact case so legit builds are untouched.
+  // Fabricated-inline-artifact guard: a turn that RESEARCHED (≥1 curated shared fact) but
+  // produced NO real artifact (the build was stopped/blocked/never ran) sometimes has the
+  // model hand-write the whole deliverable inline (a full <!DOCTYPE html> application
+  // document) from training data and present it as the verified result (audit 453a263e: the
+  // operator Stopped mid-research, the auto-build was correctly blocked, and synthesis pasted
+  // a fabricated reveal.js deck repeating the Permoser→Neumann error + an invented source URL
+  // — no workspace file, false "verified" claim). Replace it with the honest curated-facts
+  // fallback: the verified findings + real sources, stating the file was not built this turn.
+  // Trigger is PURELY STRUCTURAL — curated-facts count + zero attachments + no build ran + a
+  // full inlined HTML document (looksLikeInlinedAppDocument, the never-legit-inline signal, so
+  // no bilingual wantsArtifact keyword gate is needed to keep it precise). The de-lex hardwired
+  // sourceSensitive off, killing this guard; revived here without that dead gate. Default OFF
+  // (it replaces an answer) — pass^k-gated via inlineArtifactFabricationGuard.
   if (
-    !autoBuildFinalMsg
-    && initialDynamicGuidance?.sourceSensitive
-    && deliverableIntent.wantsArtifact
+    getConfig().orchestration?.inlineArtifactFabricationGuard === true
+    && !autoBuildFinalMsg
     && (terminalSharedFactsEvidence?.itemCount ?? 0) >= 1
     && collectTurnArtifactAttachments(session).length === 0
-    && looksLikeInlinedArtifactFabrication(presentableFinalMsg)
+    && looksLikeInlinedAppDocument(presentableFinalMsg)
   ) {
     const curatedForHonest = terminalSharedFactsEvidence
       && !looksLikeRawToolEvidenceDump(terminalSharedFactsEvidence.evidence)
