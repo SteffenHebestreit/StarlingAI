@@ -62,14 +62,16 @@ describe("research capability gate", () => {
     expect(taskRequiresExternalResearch("Draw a logo for the project")).toBe(false);
   });
 
-  it("flags general + German web-research tasks (audit 3ef67aef)", () => {
-    // The exact shape that was fabricated by a web-incapable agent: a German
-    // research/search verb + external web nouns (URL, Preis, Plattformen, Anbieter).
+  it("flags general web-research tasks that lack the SOURCE-SENSITIVE marker (audit 3ef67aef)", () => {
+    // The exact shape that was fabricated by a web-incapable agent: a research/search
+    // verb + external web nouns (URL, price, platforms, providers). De-lex: the gate is
+    // English-internal — a non-English delegation task is boundary-translated first, so
+    // these are the English (translated) equivalents of the original German 3ef67aef case.
     expect(taskRequiresExternalResearch(
-      "Recherchiere die besten verfügbaren Lernquellen und Plattformen für die iSAQB CPSA-F Prüfung. Suche nach Anbietern. Gib für jede Quelle: Name, URL, Preis.",
+      "Research the best available learning sources and platforms for the iSAQB CPSA-F exam. Search for providers. For each source give: name, URL, price.",
     )).toBe(true);
     expect(taskRequiresExternalResearch("find the best online courses with pricing")).toBe(true);
-    expect(taskRequiresExternalResearch("suche nach Anbietern und vergleiche die Preise online")).toBe(true);
+    expect(taskRequiresExternalResearch("search for providers and compare the prices online")).toBe(true);
   });
 
   it("does NOT misroute internal code/workspace lookups to the web researcher", () => {

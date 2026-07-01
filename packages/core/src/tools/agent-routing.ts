@@ -505,22 +505,25 @@ export function agentIsMetaFactory(agentName: string): boolean {
 }
 
 /** Phrases that explicitly ask the swarm to go online and validate/look up. */
-const SEARCH_ONLINE_TASK_RE = /\b(search online|search the web|web search|look (it|this) up online|validate (your |the |this )?answer|fact[- ]?check|im internet (such|recherchier)|recherchier[a-z]* online)\b/i;
+const SEARCH_ONLINE_TASK_RE = /\b(search online|search the web|web search|look (it|this) up online|validate (your |the |this )?answer|fact[- ]?check)\b/i;
 
-// A web-research task in the GENERAL (incl. German) shape the patterns above miss:
-// a search/research VERB together with an unambiguously EXTERNAL web noun (URL,
-// price, platform, provider, course, …). Audit 3ef67aef: a German "Recherchiere
-// die besten Lernquellen … Suche nach … URL, Preis, Quellen" task matched none of
-// the English patterns and the turn was not classified source-sensitive, so the
-// research-capability redirect never fired — swarm_delegate bidding then handed it
-// to web-INCAPABLE agents (quality_supervisor → … → productivity_agent) that
-// FABRICATED a sourced-looking resource list with zero web_search calls. Stays
-// high-precision: BOTH a verb AND an external noun must be present, and a workspace/
-// code marker (function, file, symbol, codebase) vetoes it so internal "find/search"
-// tasks (code_analyst's territory) are never misrouted to the web researcher.
-const WEB_RESEARCH_VERB_RE = /\b(?:research|recherch\w+|investigat\w+|ermittl\w+|such\w*|searche?s?|find|finde|look\s*up|gather|sammel\w+|zusammenstell\w+)\b/i;
-const EXTERNAL_WEB_NOUN_RE = /\b(?:url|urls|link|links|website|websites|webseite\w*|online|plattform\w*|platforms?|anbieter|providers?|vendors?|preis|preise|prices?|pricing|kurs|kurse|courses?|datasheets?|reviews?|bewertung\w*|lernquelle\w*|lernmaterial\w*)\b/i;
-const WORKSPACE_CODE_MARKER_RE = /\b(?:codebase|workspace|repository|repo|source\s*code|quellcode|funktion\w*|functions?|methods?|datei\w*|files?|symbols?|klasse\w*|class(?:es)?|modul\w*|modules?)\b/i;
+// A web-research task in the general shape the phrase list above misses: a search/
+// research VERB together with an unambiguously EXTERNAL web noun (URL, price,
+// platform, provider, course, …). Audit 3ef67aef: a research task that matched none
+// of the explicit phrases and was not classified source-sensitive slipped through, so
+// the research-capability redirect never fired — swarm_delegate bidding then handed it
+// to web-INCAPABLE agents that FABRICATED a sourced-looking resource list with zero
+// web_search calls. Stays high-precision: BOTH a verb AND an external noun must be
+// present, and a workspace/code marker (function, file, symbol, codebase) vetoes it so
+// internal "find/search" tasks (code_analyst's territory) are never misrouted.
+//
+// English-internal (de-lexicalized): a non-English delegation task is translated at the
+// boundary before it reaches this gate, so these carry no per-language entries. The
+// structural "SOURCE-SENSITIVE DELEGATION" marker (checked first in the function below)
+// stays the primary signal; this verb+noun shape is the English-only fallback.
+const WEB_RESEARCH_VERB_RE = /\b(?:research|investigat\w+|searche?s?|find|look\s*up|gather)\b/i;
+const EXTERNAL_WEB_NOUN_RE = /\b(?:url|urls|link|links|website|websites|online|platforms?|providers?|vendors?|prices?|pricing|courses?|datasheets?|reviews?)\b/i;
+const WORKSPACE_CODE_MARKER_RE = /\b(?:codebase|workspace|repository|repo|source\s*code|functions?|methods?|files?|symbols?|class(?:es)?|modules?)\b/i;
 
 /**
  * Whether a delegation task requires fresh external evidence. The authoritative
@@ -578,10 +581,11 @@ const EXECUTION_CAPABILITY_DETECTORS: Record<ExecutionCapability, RegExp> = {
   // Host/server command execution — concrete shell/system signals only.
   shell: /\b(?:ssh|sudo|systemctl|journalctl|crontab|kubectl|docker(?:\s|-compose|$)|chmod|chown|apt(?:-get)?|yum|dnf|pacman|ps aux|df -h|free -m|uptime|on the (?:server|host|remote machine|box)|shell command|bash command|run the command|restart the (?:service|daemon|container))\b|\.sh\b/i,
   // Run/execute code in a sandbox — require an explicit language or "sandbox",
-  // never bare "run a script" (ambiguous with a shell script).
-  code_exec: /\b(?:run|execute|laufen lassen|führe?\s+aus)\b[^.\n]{0,30}\b(?:javascript|typescript|js|ts|python|node(?:\.js)?)\b|\bin a sandbox\b|\bsandbox:/i,
+  // never bare "run a script" (ambiguous with a shell script). English-internal
+  // (de-lex): non-English tasks are boundary-translated before this gate sees them.
+  code_exec: /\b(?:run|execute)\b[^.\n]{0,30}\b(?:javascript|typescript|js|ts|python|node(?:\.js)?)\b|\bin a sandbox\b|\bsandbox:/i,
   // Interactive actions on a live website — strong transaction/login/form signals.
-  browser_interaction: /\b(?:log ?in|sign ?in|anmelden|einloggen|fill (?:in |out )?the form|formular ausf(?:ü|ue)llen|submit the form|formular absenden|add to cart|in den warenkorb|check ?out|book (?:a|the)\b|apply (?:for|to)\b|place (?:an|the) order|bestellung aufgeben)\b/i,
+  browser_interaction: /\b(?:log ?in|sign ?in|fill (?:in |out )?the form|submit the form|add to cart|check ?out|book (?:a|the)\b|apply (?:for|to)\b|place (?:an|the) order)\b/i,
 };
 
 function agentSatisfiesExecutionCapability(cfg: { tools?: string[] } | undefined, cap: ExecutionCapability): boolean {
