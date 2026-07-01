@@ -96,3 +96,30 @@ export function stripFabricatedCitations(text: string): string {
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
+
+/**
+ * The user's message this turn carried an actionable http(s) URL — they handed the assistant a
+ * page to READ. Structural / language-free (same regex family as intent-classifier's
+ * containsActionableUrl). Used by the URL-not-fetched honesty guard below.
+ */
+export function userMessageCarriesActionableUrl(userMessage: string): boolean {
+  return /\bhttps?:\/\/[^\s<>"'`)\]]+/i.test(userMessage ?? "");
+}
+
+/**
+ * Honest correction for the case where the user supplied a URL to read, the turn ran NO web
+ * fetch / delegation / research, yet the answer is substantial — i.e. it presented what the page
+ * "says" from imagination (session 29796f86: a full fabricated job posting + the false claim "Ich
+ * habe die Ausschreibung geladen", with zero web_fetch/delegate calls). Prepends a prominent
+ * bilingual warning; NEVER empties the answer (a false-positive only adds an honest note).
+ * Structural — no phrase matching. Pure.
+ */
+export function prependUrlNotFetchedCaveat(text: string): string {
+  const caveat =
+    "> ⚠️ **Die verlinkte Seite wurde in diesem Durchlauf NICHT abgerufen** — alle darauf bezogenen "
+    + "Angaben sind daher ungeprüft und möglicherweise erfunden. Bitte lass mich die Seite tatsächlich "
+    + "abrufen (Web-Recherche), bevor du dich auf den Inhalt verlässt.\n"
+    + "> _(The linked page was NOT fetched this turn — any details attributed to it are unverified and "
+    + "may be fabricated. Ask me to fetch it for a grounded answer.)_";
+  return `${caveat}\n\n${text.trim()}`;
+}

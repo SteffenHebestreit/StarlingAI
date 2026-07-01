@@ -4,6 +4,10 @@ import {
   stripFabricatedCitations,
   prependUnverifiedSourceCaveat,
 } from "../agent/runtime.js";
+import {
+  userMessageCarriesActionableUrl,
+  prependUrlNotFetchedCaveat,
+} from "../agent/citation-honesty.js";
 
 // The audited fabricated answer (session 1303e254, condensed): invented 404 links produced with
 // ZERO real retrieval. The harmful, language-free signal is the clickable URL, not any phrase.
@@ -83,5 +87,31 @@ describe("strip + caveat pipeline (what the guard ships)", () => {
     expect(shipped).not.toMatch(/https?:\/\//); // no fabricated link
     expect(shipped).toMatch(/Ungeprüft|NICHT mit aktuellen Online-Quellen/); // honest caveat on top corrects the framing
     expect(shipped).toMatch(/Viessmann/); // substance retained
+  });
+});
+
+// URL-not-fetched fabrication guard (session 29796f86): the user handed over a freelancermap URL,
+// the model wrote a full "Ich habe die Ausschreibung geladen" job posting, and made ZERO web
+// fetch / delegation calls — pure fabrication that the citation guard missed (the answer carried
+// no URL citation to strip). Structural, language-free: user-URL + no fetch + substantial answer.
+describe("userMessageCarriesActionableUrl (structural, language-free)", () => {
+  it("fires when the user's message contains an http(s) URL", () => {
+    expect(userMessageCarriesActionableUrl("hier ist das projekt https://www.freelancermap.de/projekt/x")).toBe(true);
+    expect(userMessageCarriesActionableUrl("check http://example.com please")).toBe(true);
+  });
+  it("does NOT fire on a message with no URL", () => {
+    expect(userMessageCarriesActionableUrl("hab ich die passenden Fähigkeiten?")).toBe(false);
+    expect(userMessageCarriesActionableUrl("")).toBe(false);
+  });
+});
+
+describe("prependUrlNotFetchedCaveat", () => {
+  it("prepends a prominent NOT-fetched warning on top and never empties the answer", () => {
+    const fabricated = "## Projektübersicht\nRolle: AI/Data Science Engineer\nAnforderungen: 3+ Jahre Erfahrung mit LLMs, Fine-Tuning, vLLM.";
+    const out = prependUrlNotFetchedCaveat(fabricated);
+    expect(out).toMatch(/NICHT abgerufen/);       // German warning
+    expect(out).toMatch(/NOT fetched/i);          // English warning
+    expect(out).toMatch(/Projektübersicht/);      // body retained
+    expect(out.indexOf("NICHT abgerufen")).toBeLessThan(out.indexOf("Projektübersicht")); // caveat is on top
   });
 });

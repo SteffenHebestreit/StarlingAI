@@ -11,6 +11,8 @@ import {
   answerPresentsSourceCitations,
   stripFabricatedCitations,
   prependUnverifiedSourceCaveat,
+  userMessageCarriesActionableUrl,
+  prependUrlNotFetchedCaveat,
 } from "./citation-honesty.js";
 
 export interface CitationHonestyGuardParams {
@@ -59,23 +61,42 @@ export async function applyCitationHonestyGuard(
   } = params;
   let finalResponse = params.finalResponse;
 
-  if (getConfig().orchestration?.citationHonestyGuard === true
-    && answerPresentsSourceCitations(finalResponse)) {
-    const isWebReachingTool = (t: string) => /^web_search/i.test(t) || /^web_fetch$/i.test(t) || /^browser_/i.test(t);
-    const webToolCalledDirectly = [...turnToolCallCounts.keys()].some(isWebReachingTool);
-    const sharedFactsForCitation = await getSharedFactsEvidenceForFinalSynthesis(sessionId);
-    const hadRealResearch = turnDelegationCount > 0
-      || workflowRunCompletedThisTurn
-      || webToolCalledDirectly
-      || turnShareFindingCount > 0
-      || (sharedFactsForCitation?.itemCount ?? 0) > 0;
-    if (!hadRealResearch) {
-      finalResponse = prependUnverifiedSourceCaveat(stripFabricatedCitations(finalResponse), userMessage);
-      guardrailEvents.push({ type: "guardrail_flagged", details: "fabricated_citations_stripped" });
-      logAudit("guardrail_flagged", {
-        type: "fabricated_citations_stripped",
-        trigger: "structural_url_citation_without_research",
-      }, { sessionId, severity: "warn" });
+  if (getConfig().orchestration?.citationHonestyGuard === true) {
+    const presentsCitations = answerPresentsSourceCitations(finalResponse);
+    // The user handed the assistant a URL to READ and the answer is substantial enough to be
+    // presenting the page's content (session 29796f86: a fabricated job posting from a link that
+    // was never fetched). The 400-char floor keeps an honest short "I couldn't fetch it — shall
+    // I?" out of the net. Both triggers are STRUCTURAL + language-free.
+    const userGaveUrlToRead = userMessageCarriesActionableUrl(userMessage) && finalResponse.trim().length >= 400;
+
+    if (presentsCitations || userGaveUrlToRead) {
+      const isWebReachingTool = (t: string) => /^web_search/i.test(t) || /^web_fetch$/i.test(t) || /^browser_/i.test(t);
+      const webToolCalledDirectly = [...turnToolCallCounts.keys()].some(isWebReachingTool);
+      const sharedFactsForCitation = await getSharedFactsEvidenceForFinalSynthesis(sessionId);
+      const hadRealResearch = turnDelegationCount > 0
+        || workflowRunCompletedThisTurn
+        || webToolCalledDirectly
+        || turnShareFindingCount > 0
+        || (sharedFactsForCitation?.itemCount ?? 0) > 0;
+
+      if (presentsCitations && !hadRealResearch) {
+        finalResponse = prependUnverifiedSourceCaveat(stripFabricatedCitations(finalResponse), userMessage);
+        guardrailEvents.push({ type: "guardrail_flagged", details: "fabricated_citations_stripped" });
+        logAudit("guardrail_flagged", {
+          type: "fabricated_citations_stripped",
+          trigger: "structural_url_citation_without_research",
+        }, { sessionId, severity: "warn" });
+      } else if (userGaveUrlToRead && !hadRealResearch) {
+        // A URL the user gave was never fetched (no delegation / web tool / research this turn),
+        // yet the answer speaks to its content → the content is fabricated. Prepend the honest
+        // "not fetched" caveat so the invented page-content is never presented as authoritative.
+        finalResponse = prependUrlNotFetchedCaveat(finalResponse);
+        guardrailEvents.push({ type: "guardrail_flagged", details: "url_content_unverified_no_fetch" });
+        logAudit("guardrail_flagged", {
+          type: "url_content_unverified_no_fetch",
+          trigger: "structural_user_url_without_fetch",
+        }, { sessionId, severity: "warn" });
+      }
     }
   }
 
