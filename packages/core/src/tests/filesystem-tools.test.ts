@@ -282,3 +282,52 @@ describe("filesystem tools", () => {
     expect(result.error).toMatch(/workspace boundary/i);
   });
 });
+
+describe("write_file regeneration-churn detection (structural)", () => {
+  const bigA = "A".repeat(1200);       // ≥500 bytes, identical opening across overwrites
+  const bigB = "B".repeat(1200);       // a genuinely different replacement
+
+  it("commonPrefixLength measures the shared leading run, capped at the 2 KB sample", async () => {
+    const { commonPrefixLength } = await import("../tools/filesystem.js");
+    expect(commonPrefixLength("hello world", "hello there")).toBe(6);   // "hello " matches
+    expect(commonPrefixLength("abc", "xyz")).toBe(0);                    // diverge immediately
+    expect(commonPrefixLength("Z".repeat(5000), "Z".repeat(5000))).toBe(2048); // sampled, capped
+  });
+
+  it("does NOT churn on the FIRST overwrite of a substantial file", async () => {
+    const { evaluateWriteChurn } = await import("../tools/filesystem.js");
+    const tracker = { count: 0 };
+    const r = evaluateWriteChurn(bigA, bigA, tracker);
+    expect(r.churned).toBe(false);
+    expect(r.prefixPct).toBeGreaterThanOrEqual(90);
+    expect(tracker.count).toBe(1);
+  });
+
+  it("churns on the SECOND near-identical overwrite (regeneration from the top)", async () => {
+    const { evaluateWriteChurn } = await import("../tools/filesystem.js");
+    const tracker = { count: 0 };
+    evaluateWriteChurn(bigA, bigA, tracker);                 // 1st overwrite
+    const r = evaluateWriteChurn(bigA, bigA, tracker);       // 2nd near-identical overwrite
+    expect(r.churned).toBe(true);
+    expect(tracker.count).toBe(2);
+  });
+
+  it("never churns a genuinely DIFFERENT replacement (prefix diverges early) — no false nudge", async () => {
+    const { evaluateWriteChurn } = await import("../tools/filesystem.js");
+    const tracker = { count: 0 };
+    evaluateWriteChurn(bigA, bigB, tracker);                 // different content each time
+    const r = evaluateWriteChurn(bigA, bigB, tracker);
+    expect(r.churned).toBe(false);
+    expect(r.prefixPct).toBeLessThan(90);
+    expect(tracker.count).toBe(0);                           // divergent overwrites never count toward churn
+  });
+
+  it("never churns a small file (below the 500-byte substance floor)", async () => {
+    const { evaluateWriteChurn } = await import("../tools/filesystem.js");
+    const tracker = { count: 0 };
+    evaluateWriteChurn("short", "short", tracker);
+    const r = evaluateWriteChurn("short", "short", tracker);
+    expect(r.churned).toBe(false);
+    expect(tracker.count).toBe(0);
+  });
+});

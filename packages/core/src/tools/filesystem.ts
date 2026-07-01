@@ -3,6 +3,7 @@ import { basename, resolve, extname, join } from "node:path";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
 import { logAudit } from "../audit/logger.js";
+import { getConfig } from "../config/loader.js";
 import { GENERATED_SUBDIR, resolvePathWithinWorkspace, resolveWorkspaceWritePath } from "./workspace-path.js";
 
 const log = childLogger("tool:filesystem");
@@ -284,6 +285,36 @@ export function defaultWritePathForContent(content: string): string {
   return "output.txt";
 }
 
+/** Length of the shared leading run of two strings, sampled over the first 2 KB — a cheap,
+ *  content-agnostic "is this a regeneration of the same document?" signal for the write-churn
+ *  nudge. A file rebuilt from the top reproduces its opening identically; a genuinely different
+ *  replacement diverges early. */
+export function commonPrefixLength(a: string, b: string): number {
+  const n = Math.min(a.length, b.length, 2048);
+  let i = 0;
+  while (i < n && a.charCodeAt(i) === b.charCodeAt(i)) i++;
+  return i;
+}
+
+/** Pure write-churn decision for the regeneration nudge (orchestration.detectWriteChurnOverwrite).
+ *  A file rebuilt from the top after a completion-limit cut-off reproduces its opening identically,
+ *  so a substantial (≥500-byte) file whose OVERWRITE shares ≥90% of the first 2 KB is a regeneration,
+ *  not a genuine replacement. Mutates tracker.count (the caller persists it per turn+path, only for
+ *  regeneration-shaped overwrites) and churns on the 2nd such overwrite. Structural only — file size +
+ *  shared-prefix ratio + count; no content/topic inspection. */
+export function evaluateWriteChurn(
+  existing: string,
+  content: string,
+  tracker: { count: number },
+): { churned: boolean; prefixPct: number } {
+  const sampleLen = Math.min(existing.length, content.length, 2048);
+  if (existing.length < 500 || sampleLen === 0) return { churned: false, prefixPct: 0 };
+  const prefixPct = (100 * commonPrefixLength(existing, content)) / sampleLen;
+  if (prefixPct < 90) return { churned: false, prefixPct };
+  tracker.count += 1;
+  return { churned: tracker.count >= 2, prefixPct };
+}
+
 registerTool({
   name: "write_file",
   description: "Write content to a file within the workspace. For a normal-sized deliverable, pass the full content in one call (mode defaults to 'overwrite'). For a VERY LARGE single file (e.g. a 30 KB+ HTML page or reveal.js deck, a long report, a multi-thousand-line script) that the model cannot reliably emit in one completion, build it INCREMENTALLY: write the first chunk, then call write_file again with mode:'append' for each subsequent chunk until the file is complete — each chunk is appended verbatim with no overlap. This keeps every call bounded and avoids the single-giant-completion timeout on slow backends. Creates the file and parent directories if needed. mode:'overwrite' (default) replaces an existing file; mode:'append' adds to it (creating it if missing); mode:'create' fails if the file already exists.",
@@ -357,6 +388,36 @@ registerTool({
       return { success: false, output: "", error: `File already exists: ${relativePath} (use mode:"append" to add to it, or mode:"overwrite" to replace it)` };
     }
 
+    // write_file regeneration nudge (orchestration.detectWriteChurnOverwrite, default off): a builder that
+    // re-emits a file from the top after a completion-limit cut-off — instead of appending the remainder —
+    // shows up as repeated near-identical OVERWRITES of the same path (run 663ac153: a ~21-item block
+    // re-emitted 3×). Detect it structurally (per-turn overwrite count + ≥90% shared prefix over the first
+    // 2 KB; no content/topic heuristics) and attach a SOFT append nudge. Computed BEFORE the write (the old
+    // content is about to be replaced); a full replacement with different content diverges early and is
+    // never flagged. Never blocks the write — work is preserved.
+    let churnNudge = "";
+    if (mode === "overwrite" && fileExists && getConfig().orchestration?.detectWriteChurnOverwrite === true) {
+      try {
+        const existing = readFileSync(resolved, "utf-8");
+        if (!ctx._turnWriteChurnTracker) ctx._turnWriteChurnTracker = new Map();
+        const tracker = ctx._turnWriteChurnTracker.get(relativePath) ?? { count: 0 };
+        const churn = evaluateWriteChurn(existing, content, tracker);
+        ctx._turnWriteChurnTracker.set(relativePath, tracker);
+        if (churn.churned) {
+          churnNudge = `\n\nNOTE: '${relativePath}' has now been overwritten ${tracker.count}× this turn with near-identical`
+            + ` content (~${Math.round(churn.prefixPct)}% shared prefix). If you are rebuilding a file that was cut off`
+            + ` mid-write, append only the missing remainder with mode:"append" (or use edit_file for a targeted change)`
+            + ` instead of re-emitting the whole file from the top — regenerating risks the same cut-off and wastes tokens.`;
+          logAudit("guardrail_flagged", {
+            type: "write_file_churn_detected",
+            path: relativePath,
+            overwriteCount: tracker.count,
+            prefixMatchPct: Math.round(churn.prefixPct),
+          }, { sessionId: ctx.sessionId, severity: "warn" });
+        }
+      } catch { /* read failure — skip the nudge, never block the write */ }
+    }
+
     try {
       if (createDirs) {
         mkdirSync(resolve(resolved, ".."), { recursive: true });
@@ -377,7 +438,7 @@ registerTool({
         success: true,
         output: (appended
           ? `Appended ${content.length} chars to ${relativePath} (now ${fullContent.length} chars total)`
-          : `File ${verb}: ${relativePath} (${content.length} chars)`) + defaultedPathNote,
+          : `File ${verb}: ${relativePath} (${content.length} chars)`) + defaultedPathNote + churnNudge,
         metadata: {
           artifactKind: "workspace_file",
           path,

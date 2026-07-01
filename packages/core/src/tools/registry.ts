@@ -198,6 +198,15 @@ export interface ToolContext {
    * Iteration limits are lifted and the tool-dev-warden provides oversight instead.
    */
   _toolDevSessionId?: string;
+  /**
+   * Per-turn per-path overwrite tracker for the write_file regeneration nudge
+   * (orchestration.detectWriteChurnOverwrite). Keyed by workspace-relative path;
+   * counts near-identical overwrites so a builder that re-emits a file from the top
+   * (instead of appending the remainder after a completion-limit cut-off) gets a soft
+   * append nudge. Internal — lazily created by write_file. Stable across a turn's
+   * tool calls (same ToolContext), like _turnAgentCounts.
+   */
+  _turnWriteChurnTracker?: Map<string, { count: number }>;
 }
 
 export interface ToolResult {
