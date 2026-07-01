@@ -3653,17 +3653,19 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         // the final answer is a completion SUMMARY (paths + what was built), never
         // a relay of the documents' contents (audit 2445da2e).
         const synthesisArtifacts = collectTurnArtifactAttachments(session);
-        // Honesty floor (audit 0dc158ad): on a SOURCE-SENSITIVE turn whose research
-        // came back partial/cancelled/below the substance floor, the normal "copy the
-        // exact names and numbers from the evidence" directive oversells thin evidence
-        // and the model fabricates specifics (it claimed an analog mic has an I2S
-        // interface). Swap in an honesty directive on exactly that failure condition —
-        // structural trigger, only fires when evidence is thin, so good turns are
-        // untouched. Enforces the central "never made-up facts" rule.
+        // Honesty floor (audit 0dc158ad): on a turn whose research came back partial/
+        // cancelled/below the substance floor, the normal "copy the exact names and
+        // numbers from the evidence" directive oversells thin evidence and the model
+        // fabricates specifics (it claimed an analog mic has an I2S interface). Swap in an
+        // honesty directive on exactly that failure condition. The de-lex hardwired
+        // sourceSensitive off, killing this guard; restored here from PURELY STRUCTURAL
+        // signals — real orchestration ran this turn AND it came back junk/partial
+        // (findRecentJunkDelegationResult reads delegation-outcome metadata, no keywords) —
+        // so it only fires when evidence is thin and good turns are untouched.
         const partialEvidenceSynthesis =
           synthesisArtifacts.length === 0
-          && (getConfig().orchestration?.honestSynthesisOnPartialEvidence ?? true)
-          && !!initialDynamicGuidance?.sourceSensitive
+          && getConfig().orchestration?.honestSynthesisOnPartialEvidence === true
+          && _turnDelegationCount > 0
           && findRecentJunkDelegationResult(toolResultMessages) !== null;
         if (partialEvidenceSynthesis) {
           logAudit("guardrail_flagged", {

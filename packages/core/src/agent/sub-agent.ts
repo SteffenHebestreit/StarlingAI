@@ -3963,7 +3963,21 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
 
       // Process tool calls — repair any mangled tool names first
       for (const tc of response.tool_calls) normalizeToolCall(tc);
-      if (sourceSensitiveTask && cumulativeUsefulEvidenceBytes < 120 && substantiveEvidenceCount === 0 && !shareFindinCalledThisRun) {
+      // Force-real-research (orchestration.subAgentPreEvidenceResearchForce, default off): the
+      // de-lex hardwired the old sourceSensitiveTask gate off, so an evidence-starved research
+      // sub-agent could answer from training memory. Re-arm on the STRUCTURAL evidence-starvation
+      // signals already here + a CAPABILITY check (the sub-agent actually holds web/research tools),
+      // so a write-only renderer is never forced to research and no keyword classification is used.
+      const subAgentHasResearchTools = (effectiveToolNames ?? []).some(
+        (n) => n === "web_search" || n === "web_fetch" || n === "url_inspect" || n.startsWith("browser_"),
+      );
+      if (
+        getConfig().orchestration?.subAgentPreEvidenceResearchForce === true
+        && subAgentHasResearchTools
+        && cumulativeUsefulEvidenceBytes < 120
+        && substantiveEvidenceCount === 0
+        && !shareFindinCalledThisRun
+      ) {
         for (const tc of response.tool_calls) {
           enforceSourceSensitivePreEvidenceDelegation(tc, sanitizedTask, subSessionId, opts.agentName);
         }

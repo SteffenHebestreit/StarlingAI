@@ -110,6 +110,16 @@ export const OrchestrationSchema = z.object({
    *  HTML document — with NO bilingual wantsArtifact keyword gate. Default OFF (it replaces an
    *  answer) — pass^k-gated. */
   inlineArtifactFabricationGuard: z.boolean().default(false),
+  /** Sub-agent-level force-real-research (mirror of ungroundedFactualAnswerGuard, one layer down).
+   *  A researcher SUB-agent that has gathered essentially zero evidence this run (cumulative useful
+   *  bytes < 120, zero substantive evidence items, no share_finding) yet is about to answer is
+   *  fabricating a researched-looking answer with no retrieval. Force it to actually delegate/search
+   *  first. The de-lex hardwired the old sourceSensitiveTask gate off, killing this; restored here on
+   *  the EXISTING structural evidence-starvation signals PLUS a capability check — the sub-agent must
+   *  actually hold web/research tools (web_search/web_fetch/url_inspect/browser_*), so a write-only
+   *  renderer (a coder rendering a spec) is never forced to research. No topic/language keyword table.
+   *  Default OFF — it can force an extra delegation, so pass^k-gated. */
+  subAgentPreEvidenceResearchForce: z.boolean().default(false),
   /** S1 of staged orchestration (docs/staged-orchestration.md): when true, the
    *  TERMINAL forced-synthesis call (forceSynthesis — invoked with no tools, so it
    *  cannot route or delegate) uses a compact synthesis-only system prompt
@@ -216,11 +226,13 @@ export const OrchestrationSchema = z.object({
    *  0dc158ad: claimed an analog MEMS mic has an I2S interface). When true, that turn
    *  instead gets an honesty directive: assert a concrete fact only if it is verbatim
    *  in the evidence, mark everything else UNVERIFIED, never invent a value. Trigger is
-   *  structural (source-sensitive + partial/thin delegation), not topic-based, and only
-   *  fires on the failure condition, so it cannot regress a good-evidence turn. Default
-   *  ON — it enforces the central "never made-up facts" quality rule; flag exists so it
-   *  can be A/B'd / disabled if a model over-hedges. */
-  honestSynthesisOnPartialEvidence: z.boolean().default(true),
+   *  PURELY STRUCTURAL — real orchestration ran this turn AND it came back junk/partial
+   *  (findRecentJunkDelegationResult, delegation-outcome metadata; no keyword table) — and
+   *  only fires on the failure condition, so it cannot regress a good-evidence turn. The
+   *  de-lex hardwired the old sourceSensitive gate off, killing this guard; restored here
+   *  structurally. Default OFF (it was dead — flipped from a now-meaningless default-on) —
+   *  it changes the synthesis directive, so pass^k-gated like the sibling honesty guards. */
+  honestSynthesisOnPartialEvidence: z.boolean().default(false),
   /** Discovery prefetch (staged orchestration S4 — docs/staged-orchestration.md):
    *  when true, an escalated turn (one the receptionist fast-lane declined) runs
    *  agent discovery + workflow discovery CONCURRENTLY up-front and injects a compact,
