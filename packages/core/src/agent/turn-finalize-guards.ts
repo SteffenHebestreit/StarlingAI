@@ -18,6 +18,7 @@
 // severities, conditions, and ordering are byte-identical to the inline original.
 
 import { logAudit } from "../audit/logger.js";
+import { getConfig } from "../config/loader.js";
 import { effectiveOrchestration } from "../runtime/effort-context.js";
 import { executeTool, type ToolContext } from "../tools/registry.js";
 import { scanOutput } from "../guardrails/output.js";
@@ -53,7 +54,6 @@ import { applyCitationHonestyGuard } from "./turn-terminal-guards.js";
 import { findRecentDelegateEvidence } from "./interrupted-delegation-evidence.js";
 import {
   hasRecentSourceSensitivePartialDelegation,
-  hasRecentSparseSourceSensitiveMemoryReuse,
 } from "./source-sensitive-enforcement.js";
 import {
   getSharedFactsEvidenceForFinalSynthesis,
@@ -224,14 +224,17 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
     }
   }
 
+  // De-lexicalized restoration (orchestration.failedResearchHonestyBackstop, default off): this
+  // used to gate on initialDynamicGuidance?.sourceSensitive (now hardwired false). Re-armed from
+  // STRUCTURAL failure-signals only — real orchestration ran this turn AND it forced synthesis /
+  // a delegation failed / a partial delegation was detected. No keywords, no topic classification.
   if (
-    initialDynamicGuidance?.sourceSensitive
+    getConfig().orchestration?.failedResearchHonestyBackstop === true
     && currentTurnHasExecutableOrchestration
     && (
       ctx.forcedSynthesisFired
       || ctx.consecutiveDelegationFailures > 0
       || hasRecentSourceSensitivePartialDelegation(session.getHistory())
-      || hasRecentSparseSourceSensitiveMemoryReuse(session.getHistory(), userMessage)
     )
   ) {
     const delegateEvidence = findRecentDelegateEvidence(session.getHistory());
@@ -254,9 +257,11 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
       }
     } else if (!looksLikeTransparentIncompleteReport(finalResponse)) {
       finalResponse = [
-        "Die Recherche ist in diesem Lauf fehlgeschlagen, bevor belastbare Quellen- oder Tool-Evidenz vorlag.",
-        "Ich kann die angefragten Produkt-, Hersteller-, Schnittstellen-, Preis- und Layout-Aussagen deshalb nicht verifizieren, ohne Fakten zu erfinden.",
-        "Bitte starte die Recherche erneut oder reduziere den Umfang auf einen kleineren Teilbereich, damit ein Spezialist echte Quellen sammeln kann.",
+        "Research did not complete this run before verifiable source/tool evidence was gathered.",
+        "I will not state the requested specifics — names, numbers, dates, sources, or claims — without inventing facts, so I am leaving them out.",
+        "Please re-run the research, or narrow the scope, so a specialist can gather real evidence.",
+        "",
+        "Die Recherche ist in diesem Lauf fehlgeschlagen, bevor belastbare Evidenz vorlag — ich stelle die angefragten Detailangaben daher nicht auf, ohne Fakten zu erfinden. Bitte starte die Recherche erneut oder reduziere den Umfang.",
       ].join("\n\n");
       logAudit("guardrail_flagged", {
         type: "source_sensitive_final_answer_without_evidence_blocked",

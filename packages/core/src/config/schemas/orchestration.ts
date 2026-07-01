@@ -79,6 +79,14 @@ export const OrchestrationSchema = z.object({
    *  pass^k-gated (forcing a fetch on every pasted link can over-fire on "here's a link for
    *  later" messages). */
   urlFetchEnforcement: z.boolean().default(false),
+  /** Answer-side honesty backstop for a turn where real research RAN but failed/returned partial
+   *  (forced-synthesis fired, a delegation failed, or a partial-delegation was detected) and the
+   *  draft is NOT anchored to the recovered evidence: re-synthesize from that evidence, or — if no
+   *  evidence exists — replace the training-data draft with an honest "research did not complete"
+   *  message instead of shipping unverified specifics. The de-lex hardwired sourceSensitive off,
+   *  which killed this backstop; restored here from STRUCTURAL failure-signals only (no keywords).
+   *  Default OFF (it can replace an answer) — pass^k-gated. */
+  failedResearchHonestyBackstop: z.boolean().default(false),
   /** S1 of staged orchestration (docs/staged-orchestration.md): when true, the
    *  TERMINAL forced-synthesis call (forceSynthesis — invoked with no tools, so it
    *  cannot route or delegate) uses a compact synthesis-only system prompt
