@@ -87,6 +87,18 @@ export const OrchestrationSchema = z.object({
    *  which killed this backstop; restored here from STRUCTURAL failure-signals only (no keywords).
    *  Default OFF (it can replace an answer) — pass^k-gated. */
   failedResearchHonestyBackstop: z.boolean().default(false),
+  /** The GENERAL sibling of urlFetchEnforcement (the de-lex hardwired sourceSensitive/freshnessSensitive
+   *  off, which killed the general force-real-research invariant — only the URL sub-path was restored).
+   *  When true: an orchestration_only turn that answers tool-free (zero delegation/workflow/web-tool/
+   *  shared-finding this turn) with a SUBSTANTIAL, specifics-dense draft (looksLikeUnsourcedSpecificClaims
+   *  — a structural count of number+unit / currency / percent / year / date / part-code tokens, ≥4
+   *  distinct over a 400-char floor; NO topic/language keyword table) is reciting current/external
+   *  state from training memory as fact. Reject once and force a real research delegation via the intact
+   *  nudge → autoResearchOnRefusal → grounded-synthesis path (never dead-ends; a released draft still
+   *  gets the unverified caveat). Restores audits fe496ec5 ("news von heute" invented bulletin) /
+   *  bdbace34 (fabricated specs). Default OFF — it can convert a legitimate direct answer into a
+   *  delegation (latency), so pass^k-gated. */
+  ungroundedFactualAnswerGuard: z.boolean().default(false),
   /** Terminal fabrication guard: a turn that RESEARCHED (produced ≥1 curated shared fact) but
    *  produced NO artifact file, and whose answer INLINES a full HTML application document
    *  (looksLikeInlinedAppDocument — the never-legit-inline structural signal), is the model

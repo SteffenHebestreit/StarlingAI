@@ -107,6 +107,34 @@ export function userMessageCarriesActionableUrl(userMessage: string): boolean {
 }
 
 /**
+ * STRUCTURAL, language-free detector: a SUBSTANTIAL answer that asserts a DENSE cluster of hard,
+ * externally-verifiable specifics — numbers with units, currencies, percentages, calendar years,
+ * dates, and part/version-code tokens (e.g. "IM73A135V01", "3,75 %", "24.000", "0.95 mA", "3.3 V",
+ * "2026"). On an orchestration_only turn that ran ZERO research, such a draft is the model
+ * reciting current/external state from training memory and presenting it as fact — the general,
+ * no-URL sibling of the URL-fabrication case (audit fe496ec5: a fabricated "news von heute"
+ * bulletin — DAX 24.000 / EZB 3,75 % / IPCC / ESA figures, zero delegations; bdbace34: fabricated
+ * mic specs "0.95 mA at 3.3 V"). This is NOT a topic/language keyword table — it counts fact-SHAPE
+ * tokens (digits + universal units + code shapes), identical in any language. The ≥4 distinct-token
+ * threshold + 400-char floor keep it OFF ordinary prose explanations, which carry few such tokens.
+ * Consumed by the ungroundedFactualAnswerGuard force-research gate. Pure/exported.
+ */
+export function looksLikeUnsourcedSpecificClaims(text: string): boolean {
+  const t = text ?? "";
+  if (t.trim().length < 400) return false;
+  const hits = new Set<string>();
+  const add = (re: RegExp): void => { for (const m of t.matchAll(re)) hits.add(m[0].toLowerCase()); };
+  add(/\d[\d.,]*\s?%/g);                                                       // percentages: 3,75 %
+  add(/[€$£¥]\s?\d[\d.,]*|\b\d[\d.,]*\s?(?:eur|usd|gbp|jpy|chf)\b/gi);         // currency amounts
+  add(/\b\d[\d.,]*\s?(?:mm|cm|km|kg|mg|ghz|mhz|khz|hz|mah|ma|kw|kwh|wh|nm|px|mb|gb|tb|fps|rpm|°c|°f)\b/gi); // number+unit
+  add(/\b\d[\d.,]*\s?[VW]\b/g);                                                // volts/watts (case-sensitive to avoid prose "a"/"w")
+  add(/\b(?:19|20)\d{2}\b/g);                                                  // calendar years
+  add(/\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b/g);                                 // dd.mm.yyyy dates
+  add(/\b[a-z]{2,}[- ]?\d{2,}[a-z0-9-]*\b/gi);                                 // part/version codes: IM73A135V01
+  return hits.size >= 4;
+}
+
+/**
  * Honest correction for the case where the user supplied a URL to read, the turn ran NO web
  * fetch / delegation / research, yet the answer is substantial — i.e. it presented what the page
  * "says" from imagination (session 29796f86: a full fabricated job posting + the false claim "Ich

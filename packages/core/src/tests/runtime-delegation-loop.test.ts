@@ -350,6 +350,93 @@ describe("runtime delegated-loop regressions", () => {
     ]));
   });
 
+  it("forces research when a no-URL factual draft is specifics-dense and tool-free (ungroundedFactualAnswerGuard)", async () => {
+    // The GENERAL (no-URL) sibling of urlFetchEnforcement: a current-events/factual question answered
+    // tool-free from training memory with a specifics-dense draft (audit fe496ec5 "news von heute" →
+    // invented DAX/EZB bulletin, zero delegations). Trigger is the STRUCTURAL fact-shape token count
+    // (looksLikeUnsourcedSpecificClaims), no topic/language keyword table.
+    const freshRuntime = await loadFreshRuntimeForToolMode("orchestration_only", {
+      orchestration: { ungroundedFactualAnswerGuard: true },
+    });
+
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        // The model recites current state from memory (the fabrication) — dense with fact-shaped tokens.
+        return createTextStream(
+          "Aktuelle Nachrichten von heute, Stand 14:00 Uhr:\n"
+          + "- Der DAX schloss bei 24.000 Punkten, ein Plus von 1,2 % gegenüber dem Vortag.\n"
+          + "- Die EZB hält den Leitzins unverändert bei 3,75 % und signalisiert eine Pause.\n"
+          + "- Die NASA plant den Artemis-Start für 2026, das Budget liegt bei 4,1 Mrd USD.\n"
+          + "- Der Ölpreis der Sorte Brent liegt bei 82 USD pro Barrel, ein Rückgang von 0,8 %.\n"
+          + "- Der Goldpreis erreichte 2.150 USD je Feinunze, ein neues Jahreshoch für 2026.\n"
+          + "Diese Meldungen fassen die wichtigsten wirtschaftlichen Ereignisse des Tages zusammen und geben einen Überblick.",
+        );
+      }
+      if (llmCallCount === 2) {
+        return createDelegateToolCallStream("news_delegate", {
+          agentName: "researcher",
+          task: "Search for today's top news and report the sourced findings.",
+        });
+      }
+      return createTextStream("Based on the searched results, here is the grounded, sourced news summary.");
+    });
+
+    const delegateExecuteMock = vi.fn(async () => ({
+      success: true,
+      output: "Searched news: real headlines with sources gathered by the researcher.",
+      metadata: { agentName: "researcher", attemptedAgents: ["researcher"], delegationSucceeded: true, delegationOutcome: "success", terminalState: "completed" },
+    }));
+    freshRuntime.registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    const session = new freshRuntime.AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await freshRuntime.runTurn({
+      session,
+      userMessage: "was sind die neuesten nachrichten von heute?",
+    });
+
+    expect(result.blocked).toBe(false);
+    expect(result.guardrailEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "delegation_required", details: "tool_free_research_answer_rejected" }),
+    ]));
+    expect(delegateExecuteMock).toHaveBeenCalled();                 // real research was forced
+    expect(result.response).not.toContain("24.000");               // the fabricated bulletin did not ship
+
+    freshRuntime.unregisterTool("delegate_to_agent");
+  });
+
+  it("does NOT force research when ungroundedFactualAnswerGuard is off (default)", async () => {
+    const freshRuntime = await loadFreshRuntimeForToolMode("orchestration_only", {}); // flag defaults off
+    streamMock.mockImplementation(() => createTextStream(
+      "Aktuelle Lage: DAX 24.000 (+1,2 %), EZB-Zins 3,75 %, Artemis-Start 2026, Öl 82 USD. "
+      + "Diese Angaben fassen die wichtigsten Kennzahlen des Tages zusammen und geben einen kompakten Überblick über den Markt.",
+    ));
+    const session = new freshRuntime.AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+    const result = await freshRuntime.runTurn({
+      session,
+      userMessage: "was sind die neuesten nachrichten von heute?",
+    });
+    expect(result.blocked).toBe(false);
+    expect(result.guardrailEvents ?? []).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ details: "tool_free_research_answer_rejected" }),
+    ]));
+  });
+
   it("forces synthesis after delegated clarification evidence instead of re-delegating", async () => {
     const { agentName, task, delegatedOutput } = fixtures.identicalLoop;
 

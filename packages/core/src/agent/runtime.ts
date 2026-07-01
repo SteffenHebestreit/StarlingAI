@@ -188,6 +188,7 @@ export {
 import {
   buildSynthesisRequiredDirective,
   userMessageCarriesActionableUrl,
+  looksLikeUnsourcedSpecificClaims,
 } from "./citation-honesty.js";
 
 // Re-export the originally-exported honesty helpers so existing imports from
@@ -2575,7 +2576,19 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       }
 
       let autoResearchAnswer: string | null = null;
-      if (!releasedAfterRoutingNudge && (requiresDelegatedResearch || requiresUrlFetch) && !currentTurnHasExecutableOrchestration) {
+      // General force-real-research (orchestration.ungroundedFactualAnswerGuard, default off): the
+      // no-URL sibling of requiresUrlFetch. The de-lex hardwired sourceSensitive/freshnessSensitive
+      // off, so requiresDelegatedResearch is always false — a factual/current-events question can be
+      // answered tool-free from training memory and shipped as fact (audit fe496ec5: a fabricated
+      // "news von heute" bulletin, zero delegations). Re-arm from a STRUCTURAL draft signal: a
+      // substantial, specifics-dense tool-free draft (looksLikeUnsourcedSpecificClaims — a count of
+      // number+unit / currency / percent / year / date / code tokens, no topic/language keyword
+      // table). Reuses the same reject → autoResearchOnRefusal → grounded-synthesis path below, so it
+      // never dead-ends and a released draft still gets the unverified caveat.
+      const requiresUngroundedFactualResearch = getConfig().orchestration?.ungroundedFactualAnswerGuard === true
+        && activeMainAssistantToolMode === "orchestration_only"
+        && looksLikeUnsourcedSpecificClaims(rawResponse);
+      if (!releasedAfterRoutingNudge && (requiresDelegatedResearch || requiresUrlFetch || requiresUngroundedFactualResearch) && !currentTurnHasExecutableOrchestration) {
         if (!delegatedResearchRetryUsed) {
           delegatedResearchRetryUsed = true;
           const route: RequiredResearchFallbackRoute | null = requiredResearchFallbackRoute ?? buildRequiredResearchFallbackRoute(researchSubject, initialDynamicGuidance, allowedToolNameSet, opts.allowedAgents);

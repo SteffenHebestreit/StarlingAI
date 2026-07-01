@@ -7,6 +7,7 @@ import {
 import {
   userMessageCarriesActionableUrl,
   prependUrlNotFetchedCaveat,
+  looksLikeUnsourcedSpecificClaims,
 } from "../agent/citation-honesty.js";
 
 // The audited fabricated answer (session 1303e254, condensed): invented 404 links produced with
@@ -130,5 +131,46 @@ describe("prependUrlNotFetchedCaveat", () => {
     // Also dedupes against the sibling unverified banner.
     const withSibling = "> ⚠️ **Unverified:** This answer is based on general knowledge and was NOT verified against live web sources.\n\nBody.";
     expect(prependUrlNotFetchedCaveat(withSibling, "en")).toBe(withSibling);
+  });
+});
+
+// looksLikeUnsourcedSpecificClaims is the STRUCTURAL trigger for the general (no-URL) force-research
+// guard (ungroundedFactualAnswerGuard). It must fire on a specifics-dense fabricated bulletin in any
+// language but stay OFF ordinary prose — WITHOUT any topic/language keyword table.
+describe("looksLikeUnsourcedSpecificClaims — dense specifics without a keyword table", () => {
+  it("fires on a fabricated current-events bulletin (audit fe496ec5 shape, German)", () => {
+    const bulletin = "Aktuelle Nachrichten von heute, Stand 14:00 Uhr:\n"
+      + "- Der DAX schloss bei 24.000 Punkten, ein Plus von 1,2 % gegenüber dem Vortag.\n"
+      + "- Die EZB hält den Leitzins unverändert bei 3,75 % und signalisiert eine Pause.\n"
+      + "- Die NASA plant den Artemis-Start für 2026, das Budget liegt bei 4,1 Mrd USD.\n"
+      + "- Der Ölpreis der Sorte Brent liegt bei 82 USD pro Barrel, ein Rückgang von 0,8 %.\n"
+      + "- Der Goldpreis erreichte 2.150 USD je Feinunze, ein neues Jahreshoch für 2026.\n"
+      + "Diese Meldungen fassen die wichtigsten wirtschaftlichen Ereignisse des Tages zusammen und geben einen kompakten Überblick über die aktuelle Marktlage.";
+    expect(bulletin.trim().length).toBeGreaterThanOrEqual(400);
+    expect(looksLikeUnsourcedSpecificClaims(bulletin)).toBe(true);
+  });
+
+  it("fires on fabricated hardware specs (audit bdbace34 shape, English)", () => {
+    const specs = "The recommended microphone is the IM73A135V01 analog MEMS mic from the reference design. "
+      + "It draws 0.95 mA at 3.3 V, offers a 73 dB SNR, a frequency range up to 20 kHz, and a sensitivity around -38 dBV. "
+      + "Pair it with the BMI270 IMU, released in 2020, over I2C at 400 kHz on a compact 12 mm x 8 mm board. "
+      + "The BMI270 draws about 685 mA peak and supports output data rates up to 1.6 kHz in performance mode. "
+      + "This combination has been widely adopted since 2021 across many wearable and hearable reference kits.";
+    expect(specs.trim().length).toBeGreaterThanOrEqual(400);
+    expect(looksLikeUnsourcedSpecificClaims(specs)).toBe(true);
+  });
+
+  it("does NOT fire on ordinary prose explanation (few fact-shaped tokens)", () => {
+    const prose = "A transmission control protocol connection is established with a three-way handshake: "
+      + "the client sends a synchronize request, the server acknowledges it, and the client confirms. "
+      + "Once open, data flows reliably in order, with retransmission of anything lost, until either side "
+      + "closes the connection. It is the backbone of most reliable communication on the internet, and it "
+      + "trades a little latency for guaranteed delivery, which is why it underpins the web and email.";
+    expect(prose.trim().length).toBeGreaterThanOrEqual(400);
+    expect(looksLikeUnsourcedSpecificClaims(prose)).toBe(false);
+  });
+
+  it("does NOT fire on a short answer even if specifics-dense (400-char floor)", () => {
+    expect(looksLikeUnsourcedSpecificClaims("DAX 24.000, EZB 3,75 %, 2026, 82 USD.")).toBe(false);
   });
 });

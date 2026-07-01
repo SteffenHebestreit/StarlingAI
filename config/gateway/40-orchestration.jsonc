@@ -61,6 +61,18 @@
     // forced-fetch retry + guardrail_flagged{type:"url_content_unverified_no_fetch"}.
     "urlFetchEnforcement": true,
 
+    // General (no-URL) sibling of urlFetchEnforcement — the completeness sweep (wr555g3x4)
+    // found the de-lex also killed the GENERAL force-real-research invariant (only the URL
+    // sub-path was restored). A factual/current-events question answered tool-free with a
+    // specifics-dense draft (looksLikeUnsourcedSpecificClaims: >=4 number+unit/currency/
+    // percent/year/date/code tokens over a 400-char floor — a structural fact-SHAPE count,
+    // NO keyword table) is reciting current state from memory as fact (audit fe496ec5). Reject
+    // once and force a real research delegation. Enabled for the fresh-instance eval — WATCH for
+    // over-fire: it can convert a legitimate direct answer into an unnecessary delegation
+    // (guardrail_flagged{type:"tool_free_research_answer_rejected"}); flip false if it fires on
+    // general-knowledge questions that did not need research.
+    "ungroundedFactualAnswerGuard": true,
+
     // Failed-research honesty backstop. When real orchestration RAN this turn and FAILED
     // (forced-synthesis fired / a delegation failed / a partial source-sensitive delegation),
     // don't ship a confident training-data answer as if the research had succeeded — re-anchor
