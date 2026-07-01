@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildDelegationLoopResponse, buildModelVisibleToolResult, buildRepeatedOutputFingerprint, buildTemporalContextPrompt, classifyPostOrchestrationDisposition, getPerTurnToolCallLimit } from "../agent/runtime.js";
 import { AgentSession } from "../agent/session.js";
-import { buildDynamicTurnGuidance, buildLanguageInstructionForTurn, shouldDefaultToGermanForMessage, toSoftRoutingHint, looksMultiDomainResearch } from "../agent/intent-classifier.js";
+import { buildDynamicTurnGuidance, buildLanguageInstructionForTurn, toSoftRoutingHint, looksMultiDomainResearch } from "../agent/intent-classifier.js";
 
 describe("looksMultiDomainResearch", () => {
   it("treats short lookups/validations as single-domain", () => {
@@ -207,10 +207,11 @@ describe("runtime turn guidance", () => {
     expect(prompt).toContain("never fall back to older model memory");
   });
 
-  it("keeps clear longer messages in the user's language", () => {
-    expect(shouldDefaultToGermanForMessage("Can you help me debug this issue? ")).toBe(false);
-    expect(shouldDefaultToGermanForMessage("Kannst du mir beim Debuggen helfen?")).toBe(false);
+  it("instructs the model to reply in the user's own language (no German default)", () => {
+    // De-lex: the German-default guesser was deleted; language is decided by the LLM from
+    // the user's latest message. The per-turn instruction just echoes that rule.
     expect(buildLanguageInstructionForTurn("Can you help me debug this issue?")).toContain("Reply in the same language");
+    expect(buildLanguageInstructionForTurn("Kannst du mir beim Debuggen helfen?")).toContain("Reply in the same language");
   });
 
   it("enforces the documented per-turn cap for orchestration-heavy tools", () => {

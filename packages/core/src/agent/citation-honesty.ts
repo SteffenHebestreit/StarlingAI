@@ -1,22 +1,10 @@
-import { PRODUCT_RECOMMENDATION_PATTERNS } from "./intent-classifier.js";
+// isBroadSourceSensitiveAdvisoryRequest (a bilingual product/BOM/wiring/quality keyword scorer)
+// was DELETED in the de-lexicalization: it was a per-language keyword table and its only caller
+// (hasRecentSparseSourceSensitiveMemoryReuse) sat behind the always-false sourceSensitive gate.
 
 export function looksLikeTransparentIncompleteReport(text: string): boolean {
   const normalized = text.toLowerCase();
   return /\b(partial|incomplete|failed|failure|blocked|timed out|timeout|could not|unable|unverified|missing evidence|attempted)\b/.test(normalized);
-}
-
-export function isBroadSourceSensitiveAdvisoryRequest(userMessage: string): boolean {
-  const normalized = userMessage.trim().toLowerCase();
-  if (!normalized) return false;
-
-  let signals = 0;
-  if (PRODUCT_RECOMMENDATION_PATTERNS.some((pattern) => pattern.test(normalized))) signals += 1;
-  if (/\b(layout|wiring|schematic|verdrahtung|schaltplan|connect(?:ion)?|put all of it together|zusammenbauen|zusammenstecken)\b/i.test(normalized)) signals += 1;
-  if (/\b(what else do i need|what do i need|bom|bill of materials|parts list|st[üu]ckliste|bauteilliste|battery|usb-c|charger|charging module|buttons?)\b/i.test(normalized)) signals += 1;
-  if (/\b(improvement|improvements|improve|best quality|quality for transcription|transcription quality|verbesser(?:ung|ungen|e|n)?|beste qualit[äa]t)\b/i.test(normalized)) signals += 1;
-  if ((normalized.match(/\n/g) ?? []).length >= 4) signals += 1;
-
-  return signals >= 2;
 }
 
 /**

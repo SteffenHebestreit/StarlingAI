@@ -32,17 +32,10 @@ import { PRODUCT } from "../product/index.js";
 // signals (inline pasted technical content, an actionable URL) or durable-MEMORY
 // persistence (assistant naming / lasting preferences), not topic routing.
 
-// PRODUCT_RECOMMENDATION_PATTERNS is retained only because runtime.ts still
-// imports it (cascade); computeDynamicTurnGuidance no longer reads it, so it no
-// longer feeds any routing flag here.
-export const PRODUCT_RECOMMENDATION_PATTERNS = [
-  /\b(product suggestions?|component suggestions?|part suggestions?|module suggestions?|product recommendations?|component recommendations?)\b/,
-  /\b(produkt(?:e|vorschl[äa]ge|empfehlungen)|bauteil(?:e|vorschl[äa]ge|empfehlungen)|modul(?:e|vorschl[äa]ge|empfehlungen))\b/,
-  // The two hardcoded component-noun ordering patterns (esp32/lipo/mikrofon/…) were
-  // removed: they overfit to a single hardware-BOM build and are bilingual keyword
-  // bags. The generic "suggestions/recommendations" shape above carries routing recall
-  // without enumerating parts (see runtime-guidance.test.ts).
-];
+// PRODUCT_RECOMMENDATION_PATTERNS (a bilingual product/component-recommendation keyword table)
+// was DELETED in the de-lexicalization: it fed only the now-deleted, dead
+// isBroadSourceSensitiveAdvisoryRequest scorer. Product/deliverable fit is decided by the
+// swarm (roster + tools + the LLM's semantic read), never a core keyword table here.
 
 // ── Inline-content analytical detection ──────────────────────────────────────
 // When a user pastes substantial technical content inline (configs, code,
@@ -355,17 +348,9 @@ export function buildLanguageAndIdentityTurnGuidance(userMessage: string): strin
   return `Language and identity for this turn: ${languageInstruction} ${behaviorInstruction} ${nameInstruction}`;
 }
 
-/**
- * De-lexicalized: the hardcoded German-default language guesser
- * (AMBIGUOUS_SHORT_LANGUAGE_TOKENS + the short-message heuristic) was removed.
- * Language is decided by the LLM from the user's latest message in any language,
- * not by a keyword table that defaulted ambiguous/short openings to German.
- * Kept as an exported no-op (returns false) only because runtime-guidance.test.ts
- * imports it (cascade); a later pass removes it.
- */
-export function shouldDefaultToGermanForMessage(_userMessage: string): boolean {
-  return false;
-}
+// shouldDefaultToGermanForMessage (a short-message German-default language guesser) was
+// DELETED in the de-lexicalization. Language is decided by the LLM from the user's latest
+// message in any language — never a keyword table that defaulted ambiguous openings to German.
 
 export function buildLanguageInstructionForTurn(userMessage: string): string {
   const compactMessage = userMessage.trim().replace(/\s+/g, " ").slice(0, 280);

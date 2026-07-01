@@ -23,7 +23,6 @@ import {
   looksLikeDelegateMetadata,
 } from "./runtime-utils.js";
 import { buildSourceSensitiveOriginalRequestTask, deriveSourceSensitiveDelegationFocus, buildSourceSensitiveCoordinatorTask } from "./source-sensitive-delegation.js";
-import { isBroadSourceSensitiveAdvisoryRequest } from "./citation-honesty.js";
 import { chooseConfiguredAgent } from "./research-fallback-routing.js";
 import { stripUntrustedDelegationContext } from "./delegation-response-collapse.js";
 
@@ -80,28 +79,14 @@ export function hasRecentSourceSensitivePartialDelegation(
   return false;
 }
 
+// De-lexicalized: this keyed on isBroadSourceSensitiveAdvisoryRequest (a bilingual keyword
+// scorer, now deleted) and only ran inside the always-false `sourceSensitive` finalize-guard
+// branch (turn-finalize-guards.ts) — so it was already dead. Stubbed to return false until the
+// dead source-sensitive enforcement machinery is pruned in a dedicated hygiene pass.
 function hasRecentSparseSourceSensitiveMemoryReuse(
-  history: readonly { role: string; content?: string | null; metadata?: Record<string, unknown> }[],
-  userMessage: string,
+  _history: readonly { role: string; content?: string | null; metadata?: Record<string, unknown> }[],
+  _userMessage: string,
 ): boolean {
-  if (!isBroadSourceSensitiveAdvisoryRequest(userMessage)) return false;
-
-  const recent = [...history].reverse().slice(0, 12);
-
-  for (const message of recent) {
-    if (message.role !== "tool") continue;
-    const content = String(message.content ?? "");
-    const meta = message.metadata ?? {};
-    if (!DELEGATE_TOOL_RESULT_RE.test(content) && !looksLikeDelegateMetadata(meta)) continue;
-
-    const reusedFromSessionMemory = meta["reusedFromSessionMemory"] === true;
-    const factCount = typeof meta["factCount"] === "number" ? Number(meta["factCount"]) : 0;
-    const partialCount = typeof meta["partialCount"] === "number" ? Number(meta["partialCount"]) : 0;
-    if (reusedFromSessionMemory && factCount > 0 && factCount <= 3 && partialCount === 0) {
-      return true;
-    }
-  }
-
   return false;
 }
 
