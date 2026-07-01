@@ -120,6 +120,16 @@ export const OrchestrationSchema = z.object({
    *  renderer (a coder rendering a spec) is never forced to research. No topic/language keyword table.
    *  Default OFF — it can force an extra delegation, so pass^k-gated. */
   subAgentPreEvidenceResearchForce: z.boolean().default(false),
+  /** Universal grounding gate: a turn that delegated research SUCCESSFULLY can still ship a
+   *  training-data answer while the verified findings sit unused in shared facts (audit fe496ec5).
+   *  The de-lex hardwired the old sourceSensitive/freshnessSensitive gate off, killing the anchoring
+   *  repair inside riskGatedQA. When true, re-arm it on PURELY STRUCTURAL turn-state — real
+   *  orchestration ran this turn AND produced curated shared facts the answer does not reference
+   *  (the cheap deterministic answerNeedsEvidenceAnchoringRepair; no keyword table, no sourceSensitive
+   *  read) — running independent of the plan-derived risk tier so a plan-less research turn is covered.
+   *  When off, control falls through to the acceptance-criteria arm exactly as before. Default OFF (it
+   *  can re-synthesize an answer) — pass^k-gated. */
+  evidenceAnchoringOnGatheredEvidence: z.boolean().default(false),
   /** S1 of staged orchestration (docs/staged-orchestration.md): when true, the
    *  TERMINAL forced-synthesis call (forceSynthesis — invoked with no tools, so it
    *  cannot route or delegate) uses a compact synthesis-only system prompt

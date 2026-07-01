@@ -363,47 +363,52 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
       freshnessSensitive: initialDynamicGuidance?.freshnessSensitive ?? false,
       invokedApprovalGatedTool,
     });
-    if (risk === "high") {
-      if (initialDynamicGuidance?.sourceSensitive || initialDynamicGuidance?.freshnessSensitive) {
-        // Universal grounding gate (step 5). The failure-path backstop above only
-        // fires on a failed/partial run. For a source- OR freshness-sensitive turn
-        // that delegated SUCCESSFULLY, the answer was never cross-checked — so a
-        // training-data answer can ship while verified facts sit unused in shared
-        // findings (audit fe496ec5: fabricated news bulletin). Re-ground it if it
-        // references none of them. The check is CHEAP and deterministic
-        // (answerNeedsEvidenceAnchoringRepair) — the slow-model repair only fires
-        // when the draft is actually unanchored, so clean turns pay nothing.
-        const anchorEvidence = effectiveOrchestration().qaEvidenceAnchoring && !signal.aborted
-          ? await getSharedFactsEvidenceForFinalSynthesis(session.id)
-          : null;
-        if (anchorEvidence && answerNeedsEvidenceAnchoringRepair(finalResponse, anchorEvidence.evidence)) {
-          const anchorInstruction = [
-            "EVIDENCE-ANCHORING REPAIR:",
-            "Your previous answer did not reference the verified findings this run gathered. Re-write the answer so it is grounded in the findings below, in the SAME language as the user's request.",
-            "Use ONLY these findings plus this conversation's tool results. Do not invent manufacturer, interface, pricing, part, layout, or BOM claims. Mark anything the findings do not support as unverified/incomplete.",
-            "Keep it a concise, useful answer — do not dump raw tool traces or page snapshots.",
-            "Verified findings:",
-            anchorEvidence.evidence.trim(),
-          ].join("\n");
-          const reanchored = await ctx.forceSynthesis(session, provider, signal, anchorInstruction);
-          const candidate = reanchored ? sanitizeUserFacingAssistantResponse(reanchored, 0) : null;
-          if (
-            candidate
-            && candidate.trim().length >= Math.min(200, Math.floor(finalResponse.trim().length * 0.5))
-            && looksEvidenceAnchored(stripPresentationFormatting(candidate), anchorEvidence.evidence)
-          ) {
-            finalResponse = candidate;
-            guardrailEvents.push({ type: "guardrail_flagged", details: "qa_evidence_anchoring_repaired" });
-            logAudit("flow_verification_repaired", { reason: "unanchored_to_shared_findings", evidenceItems: anchorEvidence.itemCount }, { sessionId: session.id, severity: "warn" });
-          } else {
-            logAudit("flow_high_stakes_unverified", { reason: "answer_unanchored_repair_failed", evidenceItems: anchorEvidence.itemCount }, { sessionId: session.id, severity: "warn" });
-          }
-        } else {
-          logAudit("flow_verification_passed", {
-            reason: anchorEvidence ? "answer_anchored_to_shared_findings" : "covered_by_source_sensitive_backstop",
-          }, { sessionId: session.id, severity: "info" });
-        }
-      } else if (qaPlan && qaPlan.acceptanceCriteria.length > 0 && finalResponse.trim().length > 200 && !signal.aborted) {
+    // Universal grounding gate (orchestration.evidenceAnchoringOnGatheredEvidence, default off).
+    // A turn that delegated SUCCESSFULLY can still ship a training-data answer while the verified
+    // findings sit unused in shared facts (audit fe496ec5: fabricated news bulletin). The de-lex
+    // hardwired the old sourceSensitive/freshnessSensitive gate off, killing this. Re-arm on PURELY
+    // STRUCTURAL turn-state — real orchestration ran this turn AND produced curated shared facts the
+    // answer does not reference (the cheap deterministic answerNeedsEvidenceAnchoringRepair, evidence-
+    // token overlap; no keyword table, no sourceSensitive read). Runs independent of the plan-derived
+    // risk tier so a plan-less research turn is covered; when off, control falls through to the
+    // acceptance-criteria arm exactly as before.
+    const realOrchestrationRan = ctx.getTurnDelegationCount() > 0 || ctx.workflowRunCompletedThisTurn;
+    const anchorEvidence = (
+      getConfig().orchestration?.evidenceAnchoringOnGatheredEvidence === true
+      && effectiveOrchestration().qaEvidenceAnchoring
+      && realOrchestrationRan
+      && !signal.aborted
+    )
+      ? await getSharedFactsEvidenceForFinalSynthesis(session.id)
+      : null;
+    let evidenceAnchoringRepairRan = false;
+    if (anchorEvidence && (anchorEvidence.itemCount ?? 0) > 0 && answerNeedsEvidenceAnchoringRepair(finalResponse, anchorEvidence.evidence)) {
+      evidenceAnchoringRepairRan = true;
+      const anchorInstruction = [
+        "EVIDENCE-ANCHORING REPAIR:",
+        "Your previous answer did not reference the verified findings this run gathered. Re-write the answer so it is grounded in the findings below, in the SAME language as the user's request.",
+        "Use ONLY these findings plus this conversation's tool results. Do not invent any specifics — names, numbers, dates, sources, or claims — beyond them. Mark anything the findings do not support as unverified/incomplete.",
+        "Keep it a concise, useful answer — do not dump raw tool traces or page snapshots.",
+        "Verified findings:",
+        anchorEvidence.evidence.trim(),
+      ].join("\n");
+      const reanchored = await ctx.forceSynthesis(session, provider, signal, anchorInstruction);
+      const candidate = reanchored ? sanitizeUserFacingAssistantResponse(reanchored, 0) : null;
+      if (
+        candidate
+        && candidate.trim().length >= Math.min(200, Math.floor(finalResponse.trim().length * 0.5))
+        && looksEvidenceAnchored(stripPresentationFormatting(candidate), anchorEvidence.evidence)
+      ) {
+        finalResponse = candidate;
+        guardrailEvents.push({ type: "guardrail_flagged", details: "qa_evidence_anchoring_repaired" });
+        logAudit("flow_verification_repaired", { reason: "unanchored_to_shared_findings", evidenceItems: anchorEvidence.itemCount }, { sessionId: session.id, severity: "warn" });
+      } else {
+        logAudit("flow_high_stakes_unverified", { reason: "answer_unanchored_repair_failed", evidenceItems: anchorEvidence.itemCount }, { sessionId: session.id, severity: "warn" });
+      }
+    }
+
+    if (risk === "high" && !evidenceAnchoringRepairRan) {
+      if (qaPlan && qaPlan.acceptanceCriteria.length > 0 && finalResponse.trim().length > 200 && !signal.aborted) {
         acceptanceCriteriaQaRan = true;
         const verifyInstruction = "Before finalizing, verify your answer meets ALL of these acceptance criteria for the user's task:\n"
           + qaPlan.acceptanceCriteria.map((c, i) => `${i + 1}. ${c}`).join("\n")
