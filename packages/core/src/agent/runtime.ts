@@ -5,7 +5,6 @@
 import { getChatProvider, getChatProviderForTier, getChatProviderWithOverride } from "../providers/index.js";
 import { salvageToolCallArguments } from "../providers/lmstudio.js";
 import type { ChatProvider, LLMMessage, LLMResponse, StreamChunk } from "../providers/lmstudio.js";
-import { buildMemoryCapsule } from "./receptionist.js";
 import { assembleTurnSystemMessages } from "./turn-system-prompt.js";
 import { markOrchestratorActivity, markOrchestratorIdle } from "./cache-warmer.js";
 import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type SwarmState, type ToolContext } from "../tools/registry.js";
@@ -17,8 +16,6 @@ import {
   buildDeliverableConsistencyRepairInstruction,
   DELIVERABLE_CONSISTENCY_CRITERION,
 } from "./deliverable-consistency.js";
-import { prefetchCapabilityCandidates } from "./discovery-prefetch.js";
-import { buildUserProfileEvidence } from "./user-profile-prefetch.js";
 import { scanOutput } from "../guardrails/output.js";
 import { checkRateLimit } from "../guardrails/rate-limiter.js";
 import { logAudit } from "../audit/logger.js";
@@ -40,18 +37,13 @@ import {
 } from "./turn-oversight.js";
 import { childLogger } from "../logger.js";
 import type { AgentSession, SessionHistoryMessage } from "./session.js";
-import { splitOrchestrationModule } from "./session.js";
 import { classifyToolIntervention } from "./interventions.js";
 import { getMainAssistantToolNames, type MainAssistantToolMode } from "./default-tools.js";
 import { longRunningGenerationManager } from "./long-running-generation.js";
 import { turnSteeringManager } from "./turn-steering.js";
 import { registerSessionAbortController, deregisterSessionAbortController } from "./warden.js";
-import { formatFlowMemoryGuidance } from "./flow-memory.js";
-import { formatScopedMemoryGuidance } from "../memory/service.js";
-import { retrieveSkillGuidance } from "../skills/service.js";
 import { recordSkillOutcomeAsync, recordSkillHoldoutOutcomeAsync } from "../skills/store.js";
 import { maybeDistillSkillFromTurn } from "../skills/distiller.js";
-import { formatUserModelGuidance } from "../user-model/service.js";
 import { lookupTrajectory, writeTrajectory, invalidateTrajectory } from "../memory/trajectory-cache.js";
 import { graphMarkSessionRetrievalsUseful, graphMarkSessionRetrievalsUnhelpful } from "../memory/graph-service.js";
 import { artifactFileLooksTruncated } from "./sub-agent.js";
@@ -68,20 +60,13 @@ import { postProcessToolResult, type ToolResultPostProcessContext } from "./turn
 import { beginFactTurn } from "../swarm/memory.js";
 import {
   buildDynamicTurnGuidance,
-  buildLanguageAndIdentityTurnGuidance,
   toSoftRoutingHint,
-  looksMultiDomainResearch,
 } from "./intent-classifier.js";
 import { buildEffectiveResearchSubject } from "./source-sensitive-delegation.js";
 import { looksLikeDegenerateRepetition, collapseRepeatedMarkdownSections, looksLikeDegenerateLineRepetition, collapseRepeatedLines } from "./text-dedup.js";
 import {
   classifyDeliverableIntent,
   looksLikeInlinedArtifactFabrication,
-  extractInlineHtmlDocument,
-  looksLikeCompleteHtmlDocument,
-  stripLargeCodeFences,
-  looksLikeArtifactCreationRequest,
-  looksLikeComposedGuideRequest,
 } from "./deliverable-intent.js";
 
 // Re-export the deliverable-intent module so existing imports from runtime.js
@@ -202,8 +187,6 @@ export {
 // Pure honesty / source-caveat / synthesis-directive text helpers (god-file seam).
 import {
   buildSynthesisRequiredDirective,
-  answerPresentsSourceCitations,
-  stripFabricatedCitations,
 } from "./citation-honesty.js";
 
 // Re-export the originally-exported honesty helpers so existing imports from
@@ -245,8 +228,6 @@ export {
 // (god-file seam). The functions still called here are imported; the originally-exported
 // ones are re-exported so existing imports from runtime.js (tests) keep working.
 import {
-  stripLeadingReasoningPreamble,
-  looksLikeTruncatedCodeDeliverable,
   extractSingleRelayableDeliverable,
 } from "./deliverable-relay.js";
 
@@ -326,8 +307,6 @@ import {
 // there too (runtime.ts wraps each turn in runWithPhaseTimings()).
 import {
   runWithPhaseTimings,
-  measurePrompt,
-  compactBasePromptUnderPressure,
   buildTurnPerformanceMetrics,
 } from "./turn-metrics.js";
 
@@ -2751,7 +2730,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         runCorrectiveReroute,
         logWarn: (obj, msg) => log.warn(obj, msg),
       };
-      let finalResponse = await applyTerminalResponseGuards(terminalGuardCtx);
+      const finalResponse = await applyTerminalResponseGuards(terminalGuardCtx);
 
       persistAssistantTurnState(session, finalResponse, getTurnSwarmState());
 

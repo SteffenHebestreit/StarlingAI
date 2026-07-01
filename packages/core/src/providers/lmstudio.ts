@@ -199,7 +199,7 @@ export function salvageToolCallArguments(raw: string | undefined | null): Record
   // Drop reasoning blocks (<think>/<thought>, closed or unterminated) and any
   // markdown code-fence markers (```json / ```tool_call / ```) the model wrapped
   // around the JSON. We do NOT keep the reasoning here — only the arguments.
-  let s = raw
+  const s = raw
     .replace(/<(think|thought)>[\s\S]*?<\/\1>/gi, "")
     .replace(/<\/?(?:think|thought)>/gi, "")
     .replace(/```[a-zA-Z_]*\n?/g, "")

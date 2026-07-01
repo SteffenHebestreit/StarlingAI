@@ -16,9 +16,7 @@
  * runtime main-loop singleton, so the whole cluster moves cleanly out of
  * runtime.ts with no import cycle.
  */
-import type { LLMResponse } from "../providers/lmstudio.js";
 import { childLogger } from "../logger.js";
-import { logAudit } from "../audit/logger.js";
 import { listAllJobs } from "../credentials/jobs.js";
 import { listAllScenes } from "../credentials/scenes.js";
 import {
@@ -27,7 +25,6 @@ import {
   WORKFLOW_DELIVERABLE_HINT_TERMS,
   WORKFLOW_REQUEST_PATTERNS,
 } from "./intent-classifier.js";
-import { stableSerialize } from "./runtime-utils.js";
 
 const log = childLogger("agent:workflow-catalog-routing");
 
