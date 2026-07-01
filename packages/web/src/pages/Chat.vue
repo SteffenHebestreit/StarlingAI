@@ -357,6 +357,15 @@
               class="btn-grad px-4 py-2 rounded-xl text-sm font-semibold disabled:opacity-40">
               Send
             </button>
+            <!-- The floating steering bay (with its Stop button) is folded away while a question is
+                 pending, so surface Stop here to keep the abort path available. -->
+            <button
+              v-if="gateway.isLoading"
+              @click="gateway.cancelTurn()"
+              class="px-4 py-2 rounded-xl text-sm font-semibold shrink-0 bg-red-600/80 hover:bg-red-500/90 border border-red-400/40 text-white transition-colors"
+              title="Stop the current turn">
+              Stop
+            </button>
           </div>
         </div>
       </div>
@@ -397,10 +406,10 @@
 
     <!-- Input bay: a floating bottom panel (no layout impact at all);
          recedes into depth while idle, summoned by the launcher. -->
-    <div class="chat-input-bay-wrap" :class="composerOpen ? 'chat-input-bay-wrap--open' : ''">
+    <div class="chat-input-bay-wrap" :class="bayOpen ? 'chat-input-bay-wrap--open' : ''">
     <div
       class="chat-input-bay relative bg-gray-900/85 backdrop-blur-xl border border-purple-500/25 rounded-2xl px-5 py-4 shadow-2xl shadow-black/50"
-      :class="composerOpen ? '' : 'chat-input-bay--hidden'"
+      :class="bayOpen ? '' : 'chat-input-bay--hidden'"
       @focusin="composerFocused = true"
       @focusout="onComposerFocusOut"
     >
@@ -1464,6 +1473,11 @@ const compactComposer = computed(() => gateway.isLoading || analysing.value);
 // attachments, or a running turn keep it open.
 const composerOpen = ref(false);
 const composerFocused = ref(false);
+// While an ask_user question is pending, the QUESTION card IS the input surface (choices +
+// free-text + Send). The floating steering bay is disabled anyway, and being fixed/z-215 it
+// would float ON TOP of the QUESTION card and obscure its options — so fold it away until the
+// question is answered. The launcher stays hidden too (composerOpen is still true this turn).
+const bayOpen = computed(() => composerOpen.value && !gateway.pendingInputRequest);
 
 function openComposer(prefill?: string) {
   composerOpen.value = true;
