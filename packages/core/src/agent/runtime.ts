@@ -19,8 +19,6 @@ import {
 } from "./deliverable-consistency.js";
 import { prefetchCapabilityCandidates } from "./discovery-prefetch.js";
 import { buildUserProfileEvidence } from "./user-profile-prefetch.js";
-import { checkToolOutput } from "../guardrails/input.js";
-import { moderateToolResultText } from "../guardrails/moderation.js";
 import { scanOutput } from "../guardrails/output.js";
 import { checkRateLimit } from "../guardrails/rate-limiter.js";
 import { logAudit } from "../audit/logger.js";
@@ -63,6 +61,10 @@ import {
   runCorrectiveReroute as runCorrectiveRerouteImpl,
   type CorrectiveContext,
 } from "./turn-corrective.js";
+// Tool-output post-processing sub-phase of the main loop's per-tool-call body
+// (god-file seam): secret redaction → prompt-injection screen → moderation → sig
+// cache → callbacks → model-visible framing → append. Carries no loop control.
+import { postProcessToolResult, type ToolResultPostProcessContext } from "./turn-tool-execution.js";
 import { beginFactTurn } from "../swarm/memory.js";
 import {
   buildDynamicTurnGuidance,
@@ -3507,77 +3509,24 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         }
       }
 
-      // Redact any secrets that leaked into the tool output before the LLM ever sees it
-      // (DB error messages, SSH banners, etc. can echo credentials back).
-      const secretScan = scanOutput(resultText);
-      if (!secretScan.safe && secretScan.redacted) {
-        resultText = secretScan.redacted;
-        guardrailEvents.push({ type: "tool_output_secret_redacted", details: `${tc.name}:${(secretScan.detectedTypes ?? []).join(",")}` });
-        logAudit("output_redacted", {
-          surface: "tool_output",
-          tool: tc.name,
-          detectedTypes: secretScan.detectedTypes,
-        }, { sessionId: session.id, severity: "warn" });
-      }
-
-      // Prevent indirect prompt injection from tool output payloads
-      const outCheck = checkToolOutput(resultText);
-      if (!outCheck.allowed) {
-        const blockedIntervention = classifyToolIntervention({
-          toolName: tc.name,
-          success: false,
-          error: outCheck.reason,
-          outputBlocked: true,
-        });
-        logAudit("tool_output_blocked", {
-          tool: tc.name,
-          reason: outCheck.reason,
-          issueCode: blockedIntervention?.reasonCode,
-          intervention: blockedIntervention,
-        }, { sessionId: session.id, severity: "error" });
-        resultText = "Error: Tool output blocked by guardrails (suspicious payload detected).";
-        guardrailEvents.push({ type: "tool_output_blocked", details: tc.name });
-        if (blockedIntervention) opts.onIntervention?.(blockedIntervention);
-      } else if (intervention) {
-        opts.onIntervention?.(intervention);
-      }
-
-      if (outCheck.allowed) {
-        const moderatedToolResult = await moderateToolResultText(resultText);
-        if (moderatedToolResult?.blocked) {
-          logAudit("tool_output_blocked", {
-            tool: tc.name,
-            reason: `Model moderation blocked tool output: ${moderatedToolResult.summary}`,
-            categories: moderatedToolResult.categories,
-          }, { sessionId: session.id, severity: "error" });
-          resultText = "Error: Tool output blocked by model-backed guardrails.";
-          guardrailEvents.push({ type: "tool_output_model_blocked", details: tc.name });
-        } else if (moderatedToolResult?.flagged) {
-          guardrailEvents.push({ type: "tool_output_model_flagged", details: `${tc.name}: ${moderatedToolResult.summary}` });
-          logAudit("guardrail_flagged", {
-            type: "tool_output_model",
-            tool: tc.name,
-            categories: moderatedToolResult.categories,
-          }, { sessionId: session.id, severity: "warn" });
-        }
-      }
-
-      _lastToolCallSig.set(tc.name, {
-        args: argsSig,
-        result: resultText,
-        metadata: result.metadata,
-      });
-
-      if (opts.onToolResult) opts.onToolResult(tc.id, tc.name, resultText, result.metadata);
-
-      const modelVisibleResultText = buildModelVisibleToolResult(tc.name, resultText, result.metadata);
-
-      toolResultMessages.push({
-        role: "tool",
-        content: modelVisibleResultText,
-        tool_call_id: tc.id,
-        metadata: result.metadata,
-      });
+      // Tool-output post-processing sub-phase (secret redaction → prompt-injection
+      // screen → moderation → sig cache → callbacks → model-visible framing → append).
+      // Lifted verbatim into ./turn-tool-execution.ts; it mutates the shared collectors
+      // (guardrailEvents, _lastToolCallSig, toolResultMessages) and returns the final,
+      // possibly-redacted/blocked resultText so it reads back exactly as inline.
+      const toolResultPostProcessContext: ToolResultPostProcessContext = {
+        toolCall: tc,
+        result,
+        intervention,
+        argsSig,
+        session,
+        onIntervention: opts.onIntervention,
+        onToolResult: opts.onToolResult,
+        guardrailEvents,
+        lastToolCallSig: _lastToolCallSig,
+        toolResultMessages,
+      };
+      resultText = await postProcessToolResult(resultText, toolResultPostProcessContext);
 
       if (workflowExecutionCorrectionExhausted) {
         session.addMessages(toolResultMessages);
