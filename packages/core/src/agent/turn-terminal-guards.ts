@@ -90,7 +90,7 @@ export async function applyCitationHonestyGuard(
         // A URL the user gave was never fetched (no delegation / web tool / research this turn),
         // yet the answer speaks to its content → the content is fabricated. Prepend the honest
         // "not fetched" caveat so the invented page-content is never presented as authoritative.
-        finalResponse = prependUrlNotFetchedCaveat(finalResponse);
+        finalResponse = prependUrlNotFetchedCaveat(finalResponse, userMessage);
         guardrailEvents.push({ type: "guardrail_flagged", details: "url_content_unverified_no_fetch" });
         logAudit("guardrail_flagged", {
           type: "url_content_unverified_no_fetch",

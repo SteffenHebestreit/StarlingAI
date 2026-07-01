@@ -114,12 +114,28 @@ export function userMessageCarriesActionableUrl(userMessage: string): boolean {
  * bilingual warning; NEVER empties the answer (a false-positive only adds an honest note).
  * Structural — no phrase matching. Pure.
  */
-export function prependUrlNotFetchedCaveat(text: string): string {
-  const caveat =
+export function prependUrlNotFetchedCaveat(text: string, userMessage = ""): string {
+  // Dedupe: if a sibling unverified banner (prependUnverifiedSourceCaveat) or a prior copy of THIS
+  // banner already leads the answer, don't stack a second one — one honest caveat is enough. This
+  // matters when the mid-loop unverified caveat and this terminal caveat can co-fire on the same
+  // released-URL turn (both flags on). Sentinel-based, mirrors prependUnverifiedSourceCaveat.
+  if (
+    text.includes("NICHT abgerufen") || text.includes("NOT fetched this turn")
+    || text.includes("NICHT mit aktuellen Online-Quellen") || text.includes("NOT verified against live web sources")
+  ) {
+    return text;
+  }
+  const german = answerLooksGerman(userMessage) || answerLooksGerman(text);
+  const de =
     "> ⚠️ **Die verlinkte Seite wurde in diesem Durchlauf NICHT abgerufen** — alle darauf bezogenen "
     + "Angaben sind daher ungeprüft und möglicherweise erfunden. Bitte lass mich die Seite tatsächlich "
-    + "abrufen (Web-Recherche), bevor du dich auf den Inhalt verlässt.\n"
-    + "> _(The linked page was NOT fetched this turn — any details attributed to it are unverified and "
-    + "may be fabricated. Ask me to fetch it for a grounded answer.)_";
+    + "abrufen (Web-Recherche), bevor du dich auf den Inhalt verlässt.";
+  const en =
+    "> ⚠️ **The linked page was NOT fetched this turn** — any details attributed to it are unverified and "
+    + "may be fabricated. Ask me to fetch it for a grounded answer.";
+  // Bilingual, but lead with the user's language; the secondary line is parenthesized+italic.
+  const caveat = german
+    ? `${de}\n> _(${en.replace(/^> /, "")})_`
+    : `${en}\n> _(${de.replace(/^> /, "")})_`;
   return `${caveat}\n\n${text.trim()}`;
 }

@@ -114,4 +114,21 @@ describe("prependUrlNotFetchedCaveat", () => {
     expect(out).toMatch(/Projektübersicht/);      // body retained
     expect(out.indexOf("NICHT abgerufen")).toBeLessThan(out.indexOf("Projektübersicht")); // caveat is on top
   });
+
+  it("leads with the user's language (English message → English-primary banner)", () => {
+    const body = "The role is an AI/Data Science Engineer position requiring several years of LLM experience. " + "x".repeat(400);
+    const out = prependUrlNotFetchedCaveat(body, "Read this page for me: https://example.com/job and summarize it");
+    // English message → English line is primary (before the parenthesized German translation).
+    expect(out.indexOf("NOT fetched this turn")).toBeLessThan(out.indexOf("NICHT abgerufen"));
+    expect(out).toMatch(/The role is an AI\/Data Science Engineer/); // body retained
+  });
+
+  it("does not stack a second banner when one is already present (dedupe)", () => {
+    const already = prependUrlNotFetchedCaveat("Some substantial page summary. " + "y".repeat(400), "en message");
+    const out = prependUrlNotFetchedCaveat(already, "en message");
+    expect(out).toBe(already); // idempotent — no double caveat
+    // Also dedupes against the sibling unverified banner.
+    const withSibling = "> ⚠️ **Unverified:** This answer is based on general knowledge and was NOT verified against live web sources.\n\nBody.";
+    expect(prependUrlNotFetchedCaveat(withSibling, "en")).toBe(withSibling);
+  });
 });
