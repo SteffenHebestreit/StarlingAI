@@ -2585,8 +2585,15 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
       // number+unit / currency / percent / year / date / code tokens, no topic/language keyword
       // table). Reuses the same reject → autoResearchOnRefusal → grounded-synthesis path below, so it
       // never dead-ends and a released draft still gets the unverified caveat.
+      // EXCLUDE answers grounded in the user's OWN retrieved data — an attached CV/profile injected as
+      // [DOCUMENT CONTEXT] (documentRagFoundDocs) or shared findings this turn. Such a specifics-dense
+      // answer is legitimately grounded, not memory-recited; forcing web research on it would find
+      // nothing (private CV is not on the web) and REPLACE a correct grounded answer with a worse one —
+      // the exact turn the userOwnFacts prompt guidance tells the model to answer from the retrieved CV.
       const requiresUngroundedFactualResearch = getConfig().orchestration?.ungroundedFactualAnswerGuard === true
         && activeMainAssistantToolMode === "orchestration_only"
+        && !documentRagFoundDocs
+        && _turnShareFindingCount === 0
         && looksLikeUnsourcedSpecificClaims(rawResponse);
       if (!releasedAfterRoutingNudge && (requiresDelegatedResearch || requiresUrlFetch || requiresUngroundedFactualResearch) && !currentTurnHasExecutableOrchestration) {
         if (!delegatedResearchRetryUsed) {

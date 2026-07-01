@@ -173,4 +173,35 @@ describe("looksLikeUnsourcedSpecificClaims — dense specifics without a keyword
   it("does NOT fire on a short answer even if specifics-dense (400-char floor)", () => {
     expect(looksLikeUnsourcedSpecificClaims("DAX 24.000, EZB 3,75 %, 2026, 82 USD.")).toBe(false);
   });
+
+  // Regression (final-diff verify w5w8p7dqm): the old part-code regex matched prose "word number"
+  // pairs ("in 1998") and double-counted years, so a general-knowledge answer mentioning only a few
+  // years over-fired the ENABLED ⑤ guard. The category-diversity gate (≥2 distinct categories) fixes it.
+  it("does NOT fire on a general-knowledge answer carrying ONLY years (single category)", () => {
+    const history = "The company was founded in 1998 by a small team of engineers who wanted to build "
+      + "reliable tools. In 2004 it moved to a larger headquarters, and by 2008 it had opened offices "
+      + "abroad and hired across several countries. It went public in 2015 after years of steady, "
+      + "unglamorous growth, and in 2020 it restructured around three divisions to stay focused. "
+      + "Throughout its history it kept a reputation for careful, methodical engineering rather than "
+      + "chasing every passing trend, and that patience is often cited as the main reason it endured.";
+    expect(history.trim().length).toBeGreaterThanOrEqual(400);
+    expect(looksLikeUnsourcedSpecificClaims(history)).toBe(false); // years only → 1 category → no fire
+  });
+
+  it("does NOT fire on a general-knowledge answer carrying ONLY percentages (single category)", () => {
+    const stats = "Macronutrients each contribute differently to daily energy. In a balanced diet, carbohydrates "
+      + "typically make up about 50 % of intake, fats around 30 %, and protein close to 20 %. Fibre is counted "
+      + "within carbohydrates but is not fully digested, so its usable energy is lower. These proportions shift "
+      + "with activity level and goals, but the rough split is a common starting point for general guidance and "
+      + "everyday meal planning without any special medical considerations involved.";
+    expect(stats.trim().length).toBeGreaterThanOrEqual(400);
+    expect(looksLikeUnsourcedSpecificClaims(stats)).toBe(false); // percentages only → 1 category → no fire
+  });
+
+  it("does NOT match a prose 'word number' pair as a code token (regex tightening)", () => {
+    // "in 1998" / "by 2015" must NOT count as part-codes; a real contiguous alnum code still does.
+    const prose = "The standard was ratified in 1998 and revised by 2015 after long review. " + "x".repeat(400);
+    // Only the two years (one category) → below the 2-category bar.
+    expect(looksLikeUnsourcedSpecificClaims(prose)).toBe(false);
+  });
 });
