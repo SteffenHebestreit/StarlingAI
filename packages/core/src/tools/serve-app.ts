@@ -148,6 +148,7 @@ function serveAppImage(): string { return process.env["SAI_APP_NODE_IMAGE"]?.tri
 function serveAppDefaultPort(): number { return Number(process.env["SAI_APP_PORT"]) || 3000; }
 function serveAppHealthTimeoutMs(): number { return Number(process.env["SAI_APP_HEALTH_TIMEOUT_MS"]) || 180_000; }
 function serveAppMaxApps(): number { return Number(process.env["SAI_APP_MAX"]) || 5; }
+function serveAppPollIntervalMs(): number { return Number(process.env["SAI_APP_POLL_INTERVAL_MS"]) || 2000; }
 
 /** Reject absolute paths and any traversal so a served root stays in the workspace. */
 export function sanitizeAppRoot(root: string): string | null {
@@ -199,6 +200,24 @@ function defaultStartCommand(entry: string, internalPort: number): string {
   const safeEntry = entry.replace(/[^\w./-]/g, "");
   return `if [ -f package.json ]; then npm install --no-audit --no-fund --loglevel=error || exit 1; fi; `
     + `if [ -f package.json ] && grep -q '"start"' package.json; then exec npm start; else exec node ${safeEntry || "server.js"}; fi`;
+}
+
+/** Structural container-liveness probe used while waiting for an app to listen.
+ * "exited": the container is gone (--rm removed it after it exited) or reports Running=false.
+ * "unknown": a transient inspect error — the caller keeps polling (never a false early-fail).
+ * Lets the health-poll distinguish "still booting" from "crashed on boot" without any
+ * knowledge of WHAT the app is — purely docker state. */
+async function containerLiveness(name: string): Promise<"alive" | "exited" | "unknown"> {
+  const r = await dockerExec(["inspect", "-f", "{{.State.Running}}", name], { timeoutMs: 5000 })
+    .catch(() => ({ code: -1, stdout: "", stderr: "" }));
+  const combined = `${r.stdout} ${r.stderr}`.toLowerCase();
+  if (/no such (?:object|container)/.test(combined)) return "exited"; // removed by --rm after exit
+  if (r.code === 0) {
+    const state = r.stdout.trim().toLowerCase();
+    if (state === "false") return "exited"; // exited but not yet reaped
+    if (state === "true") return "alive";
+  }
+  return "unknown"; // transient inspect error — don't bail, keep polling
 }
 
 function appSummary(app: ServedApp): Record<string, unknown> {
@@ -262,24 +281,50 @@ async function startApp(args: Record<string, unknown>, ctx: ToolContext): Promis
     return { success: false, output: "", error: `Failed to launch app container: ${app.lastError}`, metadata: appSummary(app) };
   }
 
-  // Health-poll the app by container name on the shared network until it listens.
+  // Health-poll the app by container name on the shared network until it listens —
+  // but bail the moment its container EXITS. A --rm container that crashed on boot
+  // (or whose `npm install` couldn't reach the registry in the sandbox) is already
+  // gone; polling a dead name for the full timeout wastes minutes and then yields
+  // the misleading "bind 0.0.0.0:$PORT" diagnosis (the server never even ran).
+  // Liveness is structural docker state, so "still booting" ≠ "exited".
   const probeUrl = `http://${app.containerName}:${app.internalPort}/`;
   const deadline = Date.now() + serveAppHealthTimeoutMs();
   let healthy = false;
+  let containerExited = false;
   for (;;) {
     if (ctx.signal?.aborted) break;
     if (await healthProbe(probeUrl)) { healthy = true; break; }
+    if ((await containerLiveness(app.containerName)) === "exited") { containerExited = true; break; }
     if (Date.now() >= deadline) break;
-    await new Promise((r) => setTimeout(r, 2000));
+    await new Promise((r) => setTimeout(r, serveAppPollIntervalMs()));
   }
 
   if (!healthy) {
     const logs = await dockerExec(["logs", "--tail", "40", app.containerName], { timeoutMs: 8000 }).catch(() => ({ code: -1, stdout: "", stderr: "" }));
+    const logTail = (logs.stdout || logs.stderr || "").trim();
     app.status = "failed";
+    if (containerExited) {
+      // The start command RAN and the container EXITED before binding the port — a
+      // boot crash, or (most often in the sandbox) the default command's `npm install`
+      // step could not reach the registry. Name the real cause so the agent fixes the
+      // right thing instead of chasing the bind address for the full timeout.
+      const installsDeps = /npm\s+(?:install|ci)\b/.test(app.command);
+      const hint = installsDeps
+        ? "The start command runs `npm install`, which fails when the sandbox cannot reach the npm registry. Prefer a ZERO-DEPENDENCY server (Node's built-in `http` module — no package dependencies, no install) so it boots offline, or pass a `command` that skips the install."
+        : "The start command exited before the server listened — check for a boot crash (missing file, syntax error, unhandled exception, wrong entry).";
+      app.lastError = `App container exited during startup before it listened on port ${app.internalPort}. ${hint}`;
+      return {
+        success: false,
+        output: `App '${app.name}' container exited during startup — it never listened on port ${app.internalPort}.\n${hint}`
+          + (logTail ? `\nLast container logs:\n${logTail.slice(-1500)}` : "\n(No container logs — it was removed on exit.)"),
+        error: app.lastError,
+        metadata: appSummary(app),
+      };
+    }
     app.lastError = `App did not start listening on port ${app.internalPort} within ${Math.round(serveAppHealthTimeoutMs() / 1000)}s. Make sure the server binds 0.0.0.0:$PORT.`;
     return {
       success: false,
-      output: `App '${app.name}' launched but never became reachable.\nLast container logs:\n${(logs.stdout || logs.stderr || "(none)").slice(-1500)}`,
+      output: `App '${app.name}' launched but never became reachable.\nLast container logs:\n${(logTail || "(none)").slice(-1500)}`,
       error: app.lastError,
       metadata: appSummary(app),
     };

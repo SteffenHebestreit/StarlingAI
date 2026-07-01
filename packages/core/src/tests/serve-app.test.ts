@@ -70,6 +70,7 @@ describe("serve_app — lifecycle", () => {
     __resetServedAppsForTests();
     delete process.env["SAI_APP_HEALTH_TIMEOUT_MS"];
     delete process.env["SAI_APP_MAX"];
+    delete process.env["SAI_APP_POLL_INTERVAL_MS"];
   });
 
   it("start launches a container, health-checks it, and returns a /api/app/<id>/ preview path", async () => {
@@ -106,6 +107,47 @@ describe("serve_app — lifecycle", () => {
     expect(res.success).toBe(false);
     expect(res.metadata?.["status"]).toBe("failed");
     expect(res.output).toContain("listen EACCES");
+  });
+
+  it("fails FAST (not after the full timeout) when the app container exits during startup", async () => {
+    // Health timeout is 10 min, but a --rm container that crashed on boot is GONE —
+    // we must not poll a dead name that long. inspect reports it removed; we bail in seconds.
+    process.env["SAI_APP_HEALTH_TIMEOUT_MS"] = "600000";
+    process.env["SAI_APP_POLL_INTERVAL_MS"] = "5";
+    __setDockerExecForTests(async (args) => {
+      if (args[0] === "run") return { code: 0, stdout: "cid", stderr: "" };
+      if (args[0] === "inspect") return { code: 1, stdout: "", stderr: "Error: No such object: sai-app-xyz" };
+      if (args[0] === "logs") return { code: 1, stdout: "", stderr: "No such container" };
+      return { code: 0, stdout: "", stderr: "" };
+    });
+    __setHealthProbeForTests(async () => false);
+    const start = Date.now();
+    const res = await getTool("serve_app")!.execute({ action: "start", root: "generated/demo" }, ctx);
+    const elapsed = Date.now() - start;
+    expect(res.success).toBe(false);
+    expect(res.metadata?.["status"]).toBe("failed");
+    expect(res.output).toMatch(/exited during startup|never listened/i);
+    // Default command runs `npm install`, so the honest cause is named (not the bind hint).
+    expect(res.output).toMatch(/zero-dependency|npm install/i);
+    expect(String(res.error)).not.toMatch(/bind 0\.0\.0\.0/i);
+    expect(elapsed).toBeLessThan(5000); // fast-fail, NOT the 600s health timeout
+  });
+
+  it("keeps polling while the container is alive, then succeeds once it listens", async () => {
+    // A slow-but-healthy boot (Running=true) must NOT be mistaken for an exit.
+    process.env["SAI_APP_HEALTH_TIMEOUT_MS"] = "600000";
+    process.env["SAI_APP_POLL_INTERVAL_MS"] = "5";
+    __setDockerExecForTests(async (args) => {
+      if (args[0] === "run") return { code: 0, stdout: "cid", stderr: "" };
+      if (args[0] === "inspect") return { code: 0, stdout: "true\n", stderr: "" };
+      return { code: 0, stdout: "", stderr: "" };
+    });
+    let probes = 0;
+    __setHealthProbeForTests(async () => (++probes >= 3)); // not ready on the first two probes
+    const res = await getTool("serve_app")!.execute({ action: "start", root: "generated/demo" }, ctx);
+    expect(res.success).toBe(true);
+    expect(res.metadata?.["status"]).toBe("running");
+    expect(probes).toBeGreaterThanOrEqual(3);
   });
 
   it("rejects an unsafe root and a missing root", async () => {
