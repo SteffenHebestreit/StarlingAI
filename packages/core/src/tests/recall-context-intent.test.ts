@@ -30,17 +30,13 @@ describe("recall_context task-conditional scope", () => {
     return tool.execute(args, { sessionId: "recall-intent-test", workspacePath: ws() });
   }
 
-  it("classifies a research/validation query as the research plan", async () => {
-    const r = await run("search online and validate the latest 2026 info on this");
-    expect(r.success).toBe(true);
-    expect(r.metadata?.["recallIntent"]).toBe("research");
-  });
-
-  it("classifies a swarm-maintenance query as the maintenance plan", async () => {
-    const r = await run("improve the main assistant system prompt and sub-agent routing in the swarm");
-    expect(r.success).toBe(true);
-    expect(r.metadata?.["recallIntent"]).toBe("maintenance");
-  });
+  // De-lexicalization (cleanup/lean-base): deriveRecallPlan's "research" and
+  // "maintenance" branches key on buildDynamicTurnGuidance's sourceSensitive /
+  // freshnessSensitive / swarmMaintenanceSensitive flags, which the de-lex made
+  // default OFF. Those two plans are therefore unreachable now (every non-explicit
+  // query resolves to "general"), so the two tests that asserted the research /
+  // maintenance recall plans were removed. The "general" and "explicit" plans below
+  // still exercise the surviving structural behavior.
 
   it("falls back to the general plan for an ordinary query", async () => {
     const r = await run("what should we cook for dinner tonight");

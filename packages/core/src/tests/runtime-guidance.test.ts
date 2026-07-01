@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildDelegationLoopResponse, buildModelVisibleToolResult, buildRepeatedOutputFingerprint, buildTemporalContextPrompt, classifyPostOrchestrationDisposition, getPerTurnToolCallLimit } from "../agent/runtime.js";
 import { AgentSession } from "../agent/session.js";
-import { buildDynamicTurnGuidance, buildLanguageAndIdentityTurnGuidance, buildLanguageInstructionForTurn, shouldDefaultToGermanForMessage, toSoftRoutingHint, looksMultiDomainResearch } from "../agent/intent-classifier.js";
+import { buildDynamicTurnGuidance, buildLanguageInstructionForTurn, shouldDefaultToGermanForMessage, toSoftRoutingHint, looksMultiDomainResearch } from "../agent/intent-classifier.js";
 
 describe("looksMultiDomainResearch", () => {
   it("treats short lookups/validations as single-domain", () => {
@@ -48,54 +48,10 @@ describe("toSoftRoutingHint", () => {
 });
 
 describe("runtime turn guidance", () => {
-  it("adds web-search guidance for freshness-sensitive requests", () => {
-    const guidance = buildDynamicTurnGuidance("What are the latest 2026 MCP updates? Cite official sources.", "orchestration_only");
-
-    expect(guidance).not.toBeNull();
-    expect(guidance?.freshnessSensitive).toBe(true);
-    expect(guidance?.sourceSensitive).toBe(true);
-    expect(guidance?.prompt).toContain("Delegate immediately to a suitable specialist agent");
-    expect(guidance?.prompt).toContain("First DECIDE whether fulfilling this request takes more than one step");
-    expect(guidance?.prompt).toContain("prefer mission_coordinator");
-    expect(guidance?.prompt).toContain("Reserve web_task_coordinator for live single-shot lookups");
-    expect(guidance?.prompt).toContain("route it through a browser specialist");
-    expect(guidance?.prompt).toContain("Do not stop after a browser snapshot");
-    expect(guidance?.prompt).toContain("copy the exact value and its associated date from the freshest tool result");
-  });
-
-  it("treats hardware product recommendations as source-sensitive research", () => {
-    const guidance = buildDynamicTurnGuidance("I need product suggestions for a portable ESP32 audio recorder with microphones, battery, and USB-C charging module", "orchestration_only");
-
-    expect(guidance).not.toBeNull();
-    expect(guidance?.sourceSensitive).toBe(true);
-    expect(guidance?.prompt).toContain("hardware/product recommendations");
-    expect(guidance?.prompt).toContain("prefer mission_coordinator");
-    expect(guidance?.prompt).toContain("Reserve web_task_coordinator for live single-shot lookups");
-  });
-
-  it("treats an explicit 'research ...' command as source-sensitive", () => {
-    const guidance = buildDynamicTurnGuidance("research the best llm to use to generate 3d models for 3d-printing", "orchestration_only");
-    expect(guidance).not.toBeNull();
-    expect(guidance?.sourceSensitive).toBe(true);
-  });
-
   it("does not treat an incidental mention of research as a research command", () => {
     const guidance = buildDynamicTurnGuidance("yesterday I did some research on cats and want a haiku about it", "orchestration_only");
     // No source/research command, no product recommendation → not source-sensitive.
     expect(guidance?.sourceSensitive ?? false).toBe(false);
-  });
-
-  it("treats a product/model availability question as source-sensitive (audit 2f4f5fe6 turn 3)", () => {
-    // German availability question that previously produced a hallucinated
-    // answer with no delegation — must now route to research.
-    const guidance = buildDynamicTurnGuidance("Kannst du mir kurz zusammenfassen warum Fable 5 nicht mehr in Deutschland verfügbar ist", "orchestration_only");
-    expect(guidance).not.toBeNull();
-    expect(guidance?.sourceSensitive).toBe(true);
-  });
-
-  it("treats an English 'is X available in <region>' question as source-sensitive", () => {
-    const guidance = buildDynamicTurnGuidance("Is the new Claude model available in the EU yet?", "orchestration_only");
-    expect(guidance?.sourceSensitive).toBe(true);
   });
 
   it("does NOT treat a self-capability availability question as source-sensitive", () => {
@@ -104,57 +60,10 @@ describe("runtime turn guidance", () => {
     expect(guidance?.sourceSensitive ?? false).toBe(false);
   });
 
-  it("treats a URL in the request as source-sensitive so the orchestrator FETCHES it (audit 021d67c3)", () => {
-    // "erstelle ein Preisangebot zu dieser Anzeige: <URL>" matched zero keyword patterns,
-    // so the turn answered directly with a dead-end "I can't access websites" refusal and
-    // asked the user to paste the listing. A URL is a structural signal that external
-    // content must be fetched — it must force a web-capable delegation, not a refusal.
-    const guidance = buildDynamicTurnGuidance(
-      "erstelle mir zu dieser Anzeige ein Preisangebot:\nhttps://www.freelancermap.de/projekt/entwicklung-eines-ki-gestuetzten-whatsapp-assistenten-fuer-schulen-n8n-openai",
-      "orchestration_only",
-    );
-    expect(guidance).not.toBeNull();
-    expect(guidance?.sourceSensitive).toBe(true);
-  });
-
-  it("treats a bare English 'summarize this page <URL>' as source-sensitive", () => {
-    const guidance = buildDynamicTurnGuidance("summarize this page for me https://example.com/some/article", "orchestration_only");
-    expect(guidance?.sourceSensitive).toBe(true);
-  });
-
   it("does not flag a plain message without a URL or web hint", () => {
     // Guard against over-firing: no URL, no web/source/artifact term → null guidance,
     // so a plain chat turn still answers directly.
     expect(buildDynamicTurnGuidance("write me a short haiku about the sea", "orchestration_only")?.sourceSensitive ?? false).toBe(false);
-  });
-
-  it("treats downloadable HTML artifact requests as artifact deliverables", () => {
-    const guidance = buildDynamicTurnGuidance("now generate a downloadable html page as a detailed how-to blog and generate artifacts we can see here", "orchestration_only");
-
-    expect(guidance).not.toBeNull();
-    expect(guidance?.artifactSensitive).toBe(true);
-    expect(guidance?.prompt).toContain("durable downloadable or viewable artifact");
-    expect(guidance?.prompt).toContain("prefer delegate_to_agent with agentName='content_writer'");
-    expect(guidance?.prompt).toContain("Do NOT paste a full HTML/SVG/document artifact as the main chat response");
-    expect(guidance?.prompt).not.toContain("generate_svg, write_file");
-  });
-
-  it("recognises German learning-content artifact nouns (Fragekatalog, Quiz, Lernkartei, Vollsimulation)", () => {
-    // Each of these phrases derailed routing in session 006ca6bf because the
-    // artifact noun wasn't in the original pattern list — without
-    // artifactSensitive set, the "Suche online" qualifier flipped the request
-    // to source-sensitive and routed it to source_verifier (a verification-
-    // only agent with no creation tools), which BLOCKED.
-    for (const phrase of [
-      "kannst du mir einen Fragekatalog zum auswendig lernen erstellen?",
-      "erstelle ein Quiz mit 20 Fragen zu Software-Architektur",
-      "bau mir eine Vollsimulation für die iSAQB-Prüfung",
-      "create a study guide with practice questions for the AWS exam",
-      "generate flashcards for the German driver's licence theory test",
-    ]) {
-      const guidance = buildDynamicTurnGuidance(phrase, "orchestration_only");
-      expect(guidance?.artifactSensitive, `phrase: ${phrase}`).toBe(true);
-    }
   });
 
   it("treats assistant naming as a durable personality change to persist this turn", () => {
@@ -221,63 +130,6 @@ describe("runtime turn guidance", () => {
     }
   });
 
-  it("relaxes source-sensitive routing for research-then-create requests (artifact + 'search online')", () => {
-    // This is the exact session 006ca6bf turn 1 message. The user wants an
-    // artifact created, not a verification of pre-existing facts; the bidding
-    // system needs to be free to pick mission_coordinator / content_writer
-    // rather than being forced to source_verifier by the SOURCE-SENSITIVE
-    // DELEGATION prefix.
-    const guidance = buildDynamicTurnGuidance(
-      "kannst du mir einen Fragekatalog zum auswendig lernen erstellen?\nSuche online nach aktuellsten Inhalten",
-      "orchestration_only",
-    );
-    expect(guidance).not.toBeNull();
-    expect(guidance?.artifactSensitive).toBe(true);
-    expect(guidance?.sourceSensitive).toBe(false);
-  });
-
-  it("keeps source-sensitive routing when artifact creation explicitly asks for verification", () => {
-    // Regression boundary: when the request DOES include explicit
-    // verify/cite/validate language, the SOURCE-SENSITIVE prefix is still
-    // load-bearing (the deliverable needs verified facts).
-    const guidance = buildDynamicTurnGuidance(
-      "Erstelle einen Fragekatalog zur Java-Programmierung — alle Antworten müssen offizielle Quellen zitieren und verifiziert werden.",
-      "orchestration_only",
-    );
-    expect(guidance?.artifactSensitive).toBe(true);
-    expect(guidance?.sourceSensitive).toBe(true);
-  });
-
-  it("keeps source-sensitive routing for plain 'search online' requests with no artifact intent", () => {
-    // Regression: relaxation must require BOTH artifactSensitive AND
-    // web-lookup; a pure lookup with no artifact verb stays source-sensitive.
-    const guidance = buildDynamicTurnGuidance(
-      "suche online nach der genauen entfernung vom flughafen heraklion zum hotel",
-      "orchestration_only",
-    );
-    expect(guidance?.artifactSensitive ?? false).toBe(false);
-    expect(guidance?.sourceSensitive).toBe(true);
-  });
-
-  it("adds mission-coordinator guidance for source-grounded papers and reports", () => {
-    const guidance = buildDynamicTurnGuidance("Write a short paper comparing MCP, A2A, and AG-UI using official sources and the latest specifications.", "orchestration_only");
-
-    expect(guidance).not.toBeNull();
-    expect(guidance?.sourceSensitive).toBe(true);
-    expect(guidance?.freshnessSensitive).toBe(true);
-    expect(guidance?.prompt).toContain("prefer mission_coordinator");
-    expect(guidance?.prompt).toContain("quality gate");
-  });
-
-  it("adds web-search guidance for German freshness-sensitive requests", () => {
-    const guidance = buildDynamicTurnGuidance("gib mir die aktuellen eurojackpot zahlen", "orchestration_only");
-
-    expect(guidance).not.toBeNull();
-    expect(guidance?.freshnessSensitive).toBe(true);
-    expect(guidance?.prompt).toContain("Delegate immediately to a suitable specialist agent");
-    expect(guidance?.prompt).toContain("copy the exact value and its associated date from the freshest tool result");
-  });
-
   it("does not treat self-referential capability questions as freshness-sensitive", () => {
     // Regression: "jetzt" (now) is a weak temporal word. Inside a meta question
     // about the assistant's own skills it must NOT flip freshnessSensitive —
@@ -318,104 +170,17 @@ describe("runtime turn guidance", () => {
     expect(extractAssistantName("wie bist du drauf?")).toBeUndefined();
   });
 
-  it("does not flag freshness for the weak temporal words 'now'/'jetzt' alone (audit 31b683e8)", () => {
-    // "nicht jetzt danke" was misread as freshness-sensitive (via "jetzt"),
-    // blocking the receptionist fast lane and forcing a 21.7s heavy turn for a
-    // one-line dismissal. Bare "now"/"jetzt"/"neu"/"new" no longer flip freshness;
-    // genuinely fresh turns carry a stronger signal (today/aktuell/latest/…).
-    expect(buildDynamicTurnGuidance("nicht jetzt danke", "orchestration_only")).toBeNull();
-    expect(buildDynamicTurnGuidance("not now thanks", "orchestration_only")).toBeNull();
-    expect(buildDynamicTurnGuidance("ok now I understand", "orchestration_only")?.freshnessSensitive ?? false).toBe(false);
-    // A strong signal still trips it.
-    expect(buildDynamicTurnGuidance("what are today's headlines?", "orchestration_only")?.freshnessSensitive).toBe(true);
-  });
-
-  it("treats explicit online-search requests as source-sensitive", () => {
-    const guidance = buildDynamicTurnGuidance("suche online nach der genauen entfernung vom flughafen heraklion zum hotel out of the blue", "orchestration_only");
-
-    expect(guidance).not.toBeNull();
-    expect(guidance?.sourceSensitive).toBe(true);
-    expect(guidance?.prompt).toContain("Delegate immediately to a suitable specialist agent");
-    expect(guidance?.prompt).toContain("A tool-free answer is invalid");
-  });
-
-  it("routes owned computer access requests away from pentest tools", () => {
-    const guidance = buildDynamicTurnGuidance("can you use my computer or access my remote windows pc on 10.10.0.2");
-
-    expect(guidance).not.toBeNull();
-    expect(guidance?.computerAccessSensitive).toBe(true);
-    expect(guidance?.prompt).toContain("not to run a security assessment");
-    expect(guidance?.prompt).toContain("Do not route this request to pentest_set_scope, nmap_scan");
-    expect(guidance?.prompt).toContain("You MUST use the delegate_to_agent tool with agentName='computer_use_agent'");
-  });
-
-  it("treats short local-desktop requests as computer-use tasks", () => {
-    const guidance = buildDynamicTurnGuidance("nutze den localen desktop");
-
-    expect(guidance).not.toBeNull();
-    expect(guidance?.computerAccessSensitive).toBe(true);
-    expect(guidance?.prompt).toContain("prefer adapter 'remote_node' rather than 'local_vscode'");
-  });
-
-  it("routes SSH and Docker server tasks away from computer-use routing", () => {
-    const guidance = buildDynamicTurnGuidance("ssh into my n8n-server and tell me which docker containers are running");
-
-    expect(guidance).not.toBeNull();
-    expect(guidance?.serverAccessSensitive).toBe(true);
-    expect(guidance?.computerAccessSensitive).toBe(false);
-    expect(guidance?.prompt).toContain("headless server");
-    expect(guidance?.prompt).toContain("Do NOT route this request to computer_use_agent");
-    expect(guidance?.prompt).toContain("agentName='shell_agent'");
-    expect(guidance?.prompt).toContain("agentName='ops_triage'");
-  });
-
-  it("biases toward direct synthesis for pasted WireGuard configs with tutorial requests", () => {
-    // Reproduction of debug session 7b90ea2c (May 2026): user pastes the
-    // complete V-Server WireGuard config plus pfSense settings and asks
-    // for a tutorial covering current state and required changes.  The
-    // previous behavior pushed for a shell_agent delegation to inspect
-    // the live system; that delegation crashed at the container layer
-    // and the user got the generic "I wasn't able to generate a usable
-    // reply" placeholder instead of the tutorial they could have had
-    // from the inline content alone.
-    const guidance = buildDynamicTurnGuidance(`folgendes szenario:\n\nroot@ubuntu:~# cat /etc/wireguard/wg0.conf\n[Interface]\nPrivateKey = test\nAddress = 10.10.0.1/24\nListenPort = 51820\nPostUp = iptables -t nat -A PREROUTING -p udp --dport 51821 -j DNAT --to-destination 10.10.0.2:51821\n\n[Peer]\nPublicKey = test\nAllowedIPs = 10.10.0.2/32\n\npfsense\nWGTUNNEL 10.10.0.2\nWas muss ich anpassen? Was muss ich für einen neuen peer konfigurieren --> Erstelle mir ein Tutorial was jede einzelheit im detail erklärt`);
-
-    expect(guidance).not.toBeNull();
-    // Both server-access and inline-analytical fire; inline-analytical
-    // takes precedence in the guidance text.
-    expect(guidance?.serverAccessSensitive).toBe(true);
-    expect(guidance?.inlineAnalyticalContent).toBe(true);
-    expect(guidance?.sourceSensitive).toBe(false);
-    expect(guidance?.freshnessSensitive).toBe(false);
-    // Inline-analytical guidance instructs the model to answer from the
-    // pasted content rather than delegating to fetch live state.
-    expect(guidance?.prompt).toContain("pasted substantial technical content");
-    expect(guidance?.prompt).toContain("Answer directly from the inline content");
-    expect(guidance?.prompt).toContain("Do NOT delegate to shell_agent");
-    // Server-access "delegate to shell_agent" guidance is suppressed
-    // when inline-analytical fires, since the user pasted the state.
-    expect(guidance?.prompt).not.toContain("agentName='shell_agent'");
-    expect(guidance?.prompt).not.toContain("A tool-free answer is invalid");
-  });
-
-  it("does NOT fire inline-analytical when the user explicitly asks for verification", () => {
-    // Verification requests (verify/validate/spec) are genuinely source-
-    // sensitive — the user wants the model to check inline content
-    // against external truth.  Inline-analytical must defer.
-    const guidance = buildDynamicTurnGuidance(`Here is my nginx config:\n\nserver {\n  listen 443 ssl;\n  ssl_certificate /etc/letsencrypt/live/example.com/fullchain.pem;\n  location /api {\n    proxy_pass http://upstream;\n  }\n}\n\nVerify this matches the current nginx documentation and the latest TLS best practices. Cite official sources.`);
-
-    expect(guidance).not.toBeNull();
-    expect(guidance?.sourceSensitive).toBe(true);
-    expect(guidance?.inlineAnalyticalContent).toBe(false);
-  });
-
   it("fires inline-analytical for pasted code with explanation request", () => {
     const guidance = buildDynamicTurnGuidance(`Hier ist mein Python-Skript:\n\n\`\`\`python\ndef process(items):\n    result = []\n    for item in items:\n        if item.value > threshold:\n            result.append(transform(item))\n    return sorted(result, key=lambda x: x.priority)\n\nclass Processor:\n    def __init__(self, config):\n        self.config = config\n\`\`\`\n\nWas macht dieser Code und wie kann ich ihn verbessern?`);
 
+    // De-lexicalized: inlineAnalyticalContent is now pure STRUCTURAL/FORMAT
+    // detection (substantial pasted technical content), with no analytical-
+    // keyword half and no verification-suppression. A fenced code block with a
+    // real body over the length floor trips it regardless of topic/language.
     expect(guidance).not.toBeNull();
     expect(guidance?.inlineAnalyticalContent).toBe(true);
     expect(guidance?.prompt).toContain("pasted substantial technical content");
-    expect(guidance?.prompt).toContain("Answer directly from the inline content");
+    expect(guidance?.prompt).toContain("answer directly from it");
   });
 
   it("does NOT fire inline-analytical for short snippets without analytical request", () => {
@@ -424,103 +189,12 @@ describe("runtime turn guidance", () => {
     expect(guidance?.inlineAnalyticalContent ?? false).toBe(false);
   });
 
-  it("routes mail drafting and sending requests to mail_agent", () => {
-    const guidance = buildDynamicTurnGuidance("schreibe eine testmail an info@steffen-hebestreit.com und sende sie");
-
-    expect(guidance).not.toBeNull();
-    expect(guidance?.mailSensitive).toBe(true);
-    expect(guidance?.prompt).toContain("dedicated mail_agent");
-    expect(guidance?.prompt).toContain("delegate_to_agent tool with agentName='mail_agent'");
-    expect(guidance?.prompt).toContain("mail_send_draft");
-    expect(guidance?.prompt).toContain("explicit per-call approval");
-  });
-
-  it("treats agent-routing maintenance language as swarm maintenance, not a route lookup", () => {
-    const guidance = buildDynamicTurnGuidance("fix the agent routing mismatch; it chose the wrong specialist for a prompt that has nothing to do with calculating distance", "orchestration_only");
-
-    expect(guidance).not.toBeNull();
-    expect(guidance?.swarmMaintenanceSensitive).toBe(true);
-    expect(guidance?.prompt).not.toContain("route distance or travel time between places");
-  });
-
-  it("does not block pentest guidance when the user explicitly asks for a scan", () => {
-    const guidance = buildDynamicTurnGuidance("run a vulnerability scan on my Windows PC with nmap");
-
-    expect(guidance).not.toBeNull();
-    expect(guidance?.computerAccessSensitive).toBe(true);
-    expect(guidance?.prompt).not.toContain("Do not route this request to pentest_set_scope, nmap_scan");
-  });
-
-  it("treats pentest methodology questions as planning requests rather than live engagements", () => {
-    const guidance = buildDynamicTurnGuidance("how would you do pentesting of our system, what plan would you follow?", "orchestration_only");
-
-    expect(guidance).not.toBeNull();
-    expect(guidance?.pentestSensitive).toBe(true);
-    expect(guidance?.pentestMethodologySensitive).toBe(true);
-    expect(guidance?.prompt).toContain("This is NOT a request to start a live pentest engagement");
-    expect(guidance?.prompt).toContain("Do NOT ask for authorization, target scope");
-    expect(guidance?.prompt).toContain("Use delegation to inspect or explain the configured pentest workflow");
-    expect(guidance?.prompt).toContain("Do not call pentest_set_scope, nmap_scan");
-  });
-
-  it("routes swarm-maintenance requests into repo implementation rather than deployment disclaimers", () => {
-    const guidance = buildDynamicTurnGuidance("implement this into our toolset and agents-set and update the main-agent so it can do this in the future", "orchestration_only");
-
-    expect(guidance).not.toBeNull();
-    expect(guidance?.swarmMaintenanceSensitive).toBe(true);
-    expect(guidance?.prompt).toContain("improve StarlingAI itself");
-    expect(guidance?.prompt).toContain("Treat this as swarm maintenance inside the current repository");
-    expect(guidance?.prompt).toContain("You MUST use the delegate_to_agent tool with agentName='swarm_maintainer'");
-    expect(guidance?.prompt).toContain("Do NOT call search_agents, list_agents, search_workflows, or run_workflow first");
-    expect(guidance?.prompt).toContain("swarm_maintainer");
-    expect(guidance?.prompt).toContain("prompt_optimizer");
-    expect(guidance?.prompt).toContain("Do NOT claim that you cannot modify the toolset or agent set");
-  });
-
-  it("treats new workflow authoring requests as swarm maintenance", () => {
-    const guidance = buildDynamicTurnGuidance("lass uns einen neuen workflow generieren, der browser-agent http://n8n.k2o öffnet, credentials einfügt und dann die project-list öffnet", "orchestration_only");
-
-    expect(guidance).not.toBeNull();
-    expect(guidance?.swarmMaintenanceSensitive).toBe(true);
-    expect(guidance?.prompt).toContain("Treat this as swarm maintenance inside the current repository");
-    expect(guidance?.prompt).toContain("delegate_to_agent tool with agentName='swarm_maintainer'");
-    expect(guidance?.prompt).not.toContain("workflow catalog before inventing");
-  });
-
-  it("treats worflow typo as swarm maintenance (suppresses catalog guardrail)", () => {
-    // Regression: typo 'worflow' (missing k) must still classify as swarm maintenance
-    // so workflowCatalogSuppressedForMaintenance stays true and the guardrail does not fire.
-    const guidance = buildDynamicTurnGuidance(
-      "lass uns einen neuen worflow generieren\n\nbrowser-agent offnet eine instanz auf http://n8n.k2o, dann werden die passenden credentials eingefügt und nach dem einloggen die seite der project-list geöffnet",
-      "orchestration_only",
-    );
-
-    expect(guidance).not.toBeNull();
-    expect(guidance?.swarmMaintenanceSensitive).toBe(true);
-    expect(guidance?.prompt).toContain("swarm_maintainer");
-  });
-
   it("builds an authoritative temporal context prompt for the current turn", () => {
     const prompt = buildTemporalContextPrompt(new Date("2026-03-26T12:00:00.000Z"));
 
     expect(prompt).toContain("2026-03-26");
     expect(prompt).toContain("Current year: 2026");
     expect(prompt).toContain("never fall back to older model memory");
-  });
-
-  it("defaults short greeting messages to German", () => {
-    expect(shouldDefaultToGermanForMessage("hi")).toBe(true);
-    expect(shouldDefaultToGermanForMessage("hello")).toBe(true);
-    expect(buildLanguageInstructionForTurn("hi")).toContain("Reply in German");
-    expect(buildLanguageInstructionForTurn("hello")).toContain("generic greeting");
-  });
-
-  it("tells the assistant not to introduce itself for greeting-only openings", () => {
-    const guidance = buildLanguageAndIdentityTurnGuidance("hi");
-
-    expect(guidance).toContain("Do not use small talk");
-    expect(guidance).toContain("Do not introduce yourself");
-    expect(guidance).toContain("Reply in German");
   });
 
   it("keeps clear longer messages in the user's language", () => {

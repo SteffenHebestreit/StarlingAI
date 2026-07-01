@@ -35,8 +35,14 @@ afterEach(() => {
 
 const SMALLTALK = ["hi", "hello", "Guten Morgen", "wie geht's dir?", "danke dir!", "thanks!", "alles klar"];
 
+// De-lexicalization (cleanup/lean-base): the Stage-0 gate no longer detects
+// task intent from keywords — buildDynamicTurnGuidance's mail/task flags default
+// OFF, so a short request like "schreib eine E-Mail an den Chef" is no longer
+// escalated with reason "task-intent" at the deterministic gate (the micro-call
+// LLM is the arbiter for it now). That obsolete "task-intent" fixture was removed.
+// The gate still escalates on message SHAPE (not short + conversational), which
+// this structural fixture continues to verify.
 const NOT_SMALLTALK: Array<[string, string]> = [
-  ["schreib eine E-Mail an den Chef", "task-intent"],
   [
     "ich wollte dir einfach mal ganz in Ruhe und ausführlich erzählen wie entspannt der lange gemütliche Spaziergang am kleinen Waldsee für mich gewesen ist",
     "not-short-conversational",

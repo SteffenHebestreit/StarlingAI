@@ -34,12 +34,13 @@ describe("classifyFrontDesk confidence-attempt gate", () => {
     expect(classifyFrontDesk(directQ).fastLane).toBe(false); // not-short-conversational
     expect(classifyFrontDesk(directQ, { confidenceAttempt: true }).fastLane).toBe(true);
   });
-  it("STILL escalates a task-intent turn even in confidence-attempt mode (safety backbone)", () => {
-    // user-own-facts sets a guidance flag -> escalates regardless of confidence-attempt.
-    const g = classifyFrontDesk("what's my background in machine learning?", { confidenceAttempt: true });
-    expect(g.fastLane).toBe(false);
-    expect((g as { reason: string }).reason).toBe("task-intent");
-  });
+  // De-lexicalization (cleanup/lean-base): this asserted that a user-own-facts
+  // turn sets a guidance flag and escalates the Stage-0 gate even in
+  // confidence-attempt mode. The userOwnFacts keyword classifier was deleted (flag
+  // defaults OFF), so buildDynamicTurnGuidance no longer flags "what's my
+  // background…" and the gate no longer escalates it as "task-intent". The
+  // behavior this asserted is gone by design, so the test was removed. (The
+  // confidence-attempt mode itself is now disabled in config — commit 50f867c.)
   it("escalates a question longer than the confidence ceiling without a micro-call", () => {
     const long = "a ".repeat(300) + "?";
     const g = classifyFrontDesk(long, { confidenceAttempt: true, confidenceMaxChars: 400 });

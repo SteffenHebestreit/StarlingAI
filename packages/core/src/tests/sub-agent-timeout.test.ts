@@ -355,85 +355,15 @@ describe("sub-agent turn timeouts", () => {
     }
   }, 10000);
 
-  it("recovers usable snippets from mixed interrupted parallel output before returning a partial coordinator summary", async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-mixed-interrupted-evidence-"));
-    const configPath = join(tempDir, "starlingai.json");
-
-    writeFileSync(configPath, JSON.stringify({
-      subAgents: {
-        coordinator_agent: {
-          description: "Coordinator that delegates in parallel",
-          systemPrompt: "Coordinate the task and use tools.",
-          tools: ["parallel_delegate"],
-          maxIterations: 2,
-        },
-      },
-    }), "utf8");
-
-    process.env["SAI_CONFIG_PATH"] = configPath;
-    vi.resetModules();
-
-    const { registerTool, unregisterTool } = await import("../tools/registry.js");
-    registerTool({
-      name: "parallel_delegate",
-      description: "Run multiple delegated slices.",
-      parameters: { type: "object", properties: {} },
-      async execute() {
-        return {
-          success: true,
-          output: [
-            "**[researcher_a]** (failed): All candidate agents failed for task 'slice A'. Sub-agent error: Error: OpenAI-compatible request failed (model: qwen3.6-35b-a3b): Request timed out.",
-            "",
-            "---",
-            "",
-            "**[researcher_b]**:",
-            "Sub-agent 'researcher_b' timed out after 300000ms",
-            "Partial progress before interruption:",
-            "- parallel_1 [completed] Verified sync slice via researcher_b | Verified endpoint: http://internal-gateway:8787. Sync worker drains a local retry queue before OTA upload and preserves failed batches for later retry.",
-            "Recovered evidence snippets from completed tools:",
-            "- web_search: Verified endpoint: http://internal-gateway:8787. Sync worker drains a local retry queue before OTA upload and preserves failed batches for later retry.",
-          ].join("\n"),
-        };
-      },
-    });
-
-    completeMock
-      .mockResolvedValueOnce({
-        content: "",
-        tool_calls: [{
-          id: "parallel-mixed-1",
-          name: "parallel_delegate",
-          arguments: { tasks: [{ task: "Inspect the sync design." }, { task: "Inspect the retry behavior." }] },
-        }],
-        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
-        finishReason: "tool_calls",
-      })
-      .mockResolvedValueOnce({
-        content: "I'll continue by delegating another slice now.",
-        tool_calls: [],
-        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
-        finishReason: "stop",
-      });
-
-    try {
-      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
-      const result = await runSubAgentWithStats({
-        agentName: "coordinator_agent",
-        task: "Coordinate the integration review.",
-        parentSessionId: "parent-mixed-interrupted-evidence",
-        workspacePath: tempDir,
-      });
-
-      expect(result.output).toContain("Recovered evidence snippets from completed tools");
-      expect(result.output).toContain("http://internal-gateway:8787");
-      expect(result.output).toContain("local retry queue");
-      expect(result.output).not.toContain("All candidate agents failed");
-      expect(result.stats.outcome).toBe("partial");
-    } finally {
-      unregisterTool("parallel_delegate");
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  }, 10000);
+  // De-lexicalization (cleanup/lean-base): this asserted that a coordinator whose
+  // FINAL answer was the English continuation phrase "I'll continue by delegating
+  // another slice now." got that non-answer replaced by recovered tool evidence.
+  // recoverNoResponseAfterSubstantiveWork now triggers on the exact structural
+  // "Sub-agent produced no final response." sentinel only — the English
+  // planning-phrase sniff was removed by design. A real non-empty final answer is
+  // returned as-is, so the premise of this test no longer holds; it was removed.
+  // (The structural truncation-claim recovery path is still covered by the next
+  // test, which keys on looksLikeHallucinatedTruncationClaim, not a phrase list.)
 
   it("replaces truncation-claim synthesis with recovered parallel delegation evidence", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-truncation-recovery-"));
@@ -753,176 +683,10 @@ describe("sub-agent turn timeouts", () => {
     }
   }, 10000);
 
-  it("preserves all source-sensitive parallel delegation slices while anchoring them to the parent task", async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-source-parallel-"));
-    const configPath = join(tempDir, "starlingai.json");
-    const parentTask = "Use current sources to verify the exact ZX-9000 product manufacturer and interface before recommending parts.";
+  // De-lexicalized (cleanup/lean-base): sourceSensitiveTask = buildDynamicTurnGuidance(...).sourceSensitive is now always false, so the source-sensitive parallel-slice fan-out/anchoring path is unreachable. This keyword-gated test was removed.
 
-    writeFileSync(configPath, JSON.stringify({
-      subAgents: {
-        source_sensitive_coordinator: {
-          description: "Source-sensitive coordinator",
-          systemPrompt: "Coordinate source-sensitive research.",
-          tools: ["parallel_delegate"],
-          maxIterations: 2,
-        },
-        researcher_a: { description: "Researcher A", systemPrompt: "Research from sources.", tools: [], maxIterations: 1 },
-        researcher_b: { description: "Researcher B", systemPrompt: "Research from sources.", tools: [], maxIterations: 1 },
-        researcher_c: { description: "Researcher C", systemPrompt: "Research from sources.", tools: [], maxIterations: 1 },
-      },
-      orchestration: { maxParallelSlices: 3 },
-    }), "utf8");
 
-    process.env["SAI_CONFIG_PATH"] = configPath;
-    vi.resetModules();
-    await import("../tools/sub-agent.js");
-
-    const childPrompts: string[] = [];
-    let callIndex = 0;
-    completeMock.mockImplementation((messages: Array<{ role: string; content?: string }>) => {
-      callIndex += 1;
-      if (callIndex === 1) {
-        return Promise.resolve({
-          content: "",
-          tool_calls: [{
-            id: "parallel-1",
-            name: "parallel_delegate",
-            arguments: {
-              tasks: [
-                { agentName: "researcher_a", task: "Verify the VendorX ZX-9000 USB-C interface.", context: "VendorX is already confirmed." },
-                { agentName: "researcher_b", task: "Find ST ZX-9000 pricing and supplier data." },
-                { agentName: "researcher_c", task: "Prepare layout advice assuming I2S output." },
-              ],
-            },
-          }],
-          usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
-          finishReason: "tool_calls",
-        });
-      }
-
-      const prompt = messages.map((message) => message.content ?? "").join("\n");
-      if (prompt.includes("SOURCE-SENSITIVE DELEGATION SLICE")) {
-        childPrompts.push(prompt);
-      }
-
-      return Promise.resolve({
-        content: "Observed evidence: source-backed placeholder finding.",
-        tool_calls: [],
-        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
-        finishReason: "stop",
-      });
-    });
-
-    try {
-      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
-      const result = await runSubAgentWithStats({
-        agentName: "source_sensitive_coordinator",
-        task: parentTask,
-        parentSessionId: "parent-source-sensitive-parallel",
-        workspacePath: tempDir,
-      });
-
-      expect(result.output).toContain("Observed evidence");
-      expect(childPrompts).toHaveLength(3);
-      expect(new Set(childPrompts).size).toBe(3);
-      expect(childPrompts.join("\n")).toContain(parentTask);
-      expect(childPrompts.join("\n")).toContain("SLICE 1/3");
-      expect(childPrompts.join("\n")).toContain("SLICE 2/3");
-      expect(childPrompts.join("\n")).toContain("SLICE 3/3");
-      expect(childPrompts.join("\n")).toContain("Focus for this slice");
-      // Topic-agnostic, gather-framed verification focus (replaced the overfit per-topic buckets).
-      expect(childPrompts.join("\n")).toContain("gather and confirm every concrete fact");
-      expect(childPrompts.join("\n")).not.toContain("VendorX is already confirmed");
-      expect(childPrompts.join("\n")).not.toContain("ST ZX-9000");
-      expect(childPrompts.join("\n")).not.toContain("assuming I2S");
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  }, 10000);
-
-  it("collapses re-fan-out when the task already arrived sliced from upstream (no compounding tree)", async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-source-nested-"));
-    const configPath = join(tempDir, "starlingai.json");
-    // The coordinator's OWN task already carries an upstream cross-check slice
-    // label — i.e. an ancestor (orchestrator) already fanned this out. A second
-    // fan-out here would only spawn identical canonical copies and compound the
-    // tree 2→4→8, which is the runaway-latency failure mode.
-    const parentTask = "SOURCE-SENSITIVE DELEGATION SLICE 1/2:\n"
-      + "Use current sources to verify the exact ZX-9000 product manufacturer and interface before recommending parts.";
-
-    writeFileSync(configPath, JSON.stringify({
-      subAgents: {
-        source_sensitive_coordinator: {
-          description: "Source-sensitive coordinator",
-          systemPrompt: "Coordinate source-sensitive research.",
-          tools: ["parallel_delegate"],
-          maxIterations: 2,
-        },
-        researcher_a: { description: "Researcher A", systemPrompt: "Research from sources.", tools: [], maxIterations: 1 },
-        researcher_b: { description: "Researcher B", systemPrompt: "Research from sources.", tools: [], maxIterations: 1 },
-        researcher_c: { description: "Researcher C", systemPrompt: "Research from sources.", tools: [], maxIterations: 1 },
-      },
-      orchestration: { maxParallelSlices: 3 },
-    }), "utf8");
-
-    process.env["SAI_CONFIG_PATH"] = configPath;
-    vi.resetModules();
-    await import("../tools/sub-agent.js");
-
-    const allPrompts: string[] = [];
-    let callIndex = 0;
-    completeMock.mockImplementation((messages: Array<{ role: string; content?: string }>) => {
-      callIndex += 1;
-      if (callIndex === 1) {
-        return Promise.resolve({
-          content: "",
-          tool_calls: [{
-            id: "parallel-nested-1",
-            name: "parallel_delegate",
-            arguments: {
-              tasks: [
-                { agentName: "researcher_a", task: "Verify vendor identity from current sources." },
-                { agentName: "researcher_b", task: "Find pricing and supplier data." },
-                { agentName: "researcher_c", task: "Prepare layout advice." },
-              ],
-            },
-          }],
-          usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
-          finishReason: "tool_calls",
-        });
-      }
-      allPrompts.push(messages.map((message) => message.content ?? "").join("\n"));
-      return Promise.resolve({
-        content: "Observed evidence: source-backed placeholder finding.",
-        tool_calls: [],
-        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
-        finishReason: "stop",
-      });
-    });
-
-    try {
-      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
-      const result = await runSubAgentWithStats({
-        agentName: "source_sensitive_coordinator",
-        task: parentTask,
-        parentSessionId: "parent-already-sliced",
-        workspacePath: tempDir,
-      });
-
-      expect(result.output).toContain("Observed evidence");
-      // Collapsed to a single canonical child: exactly one dispatched child task
-      // carries the unlabelled header ("…DELEGATION:" — no SLICE), and no second
-      // or third re-fan-out slice was dispatched.
-      const collapsedChildPrompts = allPrompts.filter((p) => p.includes("SOURCE-SENSITIVE DELEGATION:"));
-      expect(collapsedChildPrompts).toHaveLength(1);
-      expect(allPrompts.join("\n")).not.toContain("SLICE 2/");
-      expect(allPrompts.join("\n")).not.toContain("SLICE 3/");
-      // The canonical request still reaches the single child.
-      expect(collapsedChildPrompts[0]).toContain("ZX-9000");
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  }, 10000);
+  // De-lexicalized: the nested source-sensitive re-fan-out collapse is gated on the now-always-false sourceSensitiveTask flag (wasAlreadySlicedUpstream is only reached from that path). Removed.
 
   it("blocks further delegation once a sub-agent is at the delegation depth ceiling", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-depth-ceiling-"));
@@ -996,185 +760,11 @@ describe("sub-agent turn timeouts", () => {
     }
   }, 10000);
 
-  it("caps source-sensitive parallel delegation fan-out at three slices before dispatch", async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-source-parallel-cap-"));
-    const configPath = join(tempDir, "starlingai.json");
-    const parentTask = "Use current sources to verify the exact ZX-9000 product manufacturer and interface before recommending parts.";
+  // De-lexicalized: source-sensitive parallel fan-out is gated on the now-always-false sourceSensitiveTask flag; the slice-cap path is unreachable. Removed.
 
-    writeFileSync(configPath, JSON.stringify({
-      subAgents: {
-        source_sensitive_coordinator: {
-          description: "Source-sensitive coordinator",
-          systemPrompt: "Coordinate source-sensitive research.",
-          tools: ["parallel_delegate"],
-          maxIterations: 2,
-        },
-        researcher_a: { description: "Researcher A", systemPrompt: "Research from sources.", tools: [], maxIterations: 1 },
-        researcher_b: { description: "Researcher B", systemPrompt: "Research from sources.", tools: [], maxIterations: 1 },
-        researcher_c: { description: "Researcher C", systemPrompt: "Research from sources.", tools: [], maxIterations: 1 },
-        researcher_d: { description: "Researcher D", systemPrompt: "Research from sources.", tools: [], maxIterations: 1 },
-      },
-      orchestration: { maxParallelSlices: 3 },
-    }), "utf8");
 
-    process.env["SAI_CONFIG_PATH"] = configPath;
-    vi.resetModules();
-    await import("../tools/sub-agent.js");
+  // De-lexicalized: the source-sensitive default-research-fallback rewrite is gated on the now-always-false sourceSensitiveTask flag. Removed.
 
-    const childPrompts: string[] = [];
-    let callIndex = 0;
-    completeMock.mockImplementation((messages: Array<{ role: string; content?: string }>) => {
-      callIndex += 1;
-      if (callIndex === 1) {
-        return Promise.resolve({
-          content: "",
-          tool_calls: [{
-            id: "parallel-cap-1",
-            name: "parallel_delegate",
-            arguments: {
-              tasks: [
-                { agentName: "researcher_a", task: "Verify vendor identity from current sources." },
-                { agentName: "researcher_b", task: "Verify interface evidence from current sources." },
-                { agentName: "researcher_c", task: "Verify package and analog front-end evidence from current sources." },
-                { agentName: "researcher_d", task: "Verify battery and charging BOM evidence from current sources." },
-              ],
-            },
-          }],
-          usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
-          finishReason: "tool_calls",
-        });
-      }
-
-      const prompt = messages.map((message) => message.content ?? "").join("\n");
-      if (prompt.includes("SOURCE-SENSITIVE DELEGATION SLICE")) {
-        childPrompts.push(prompt);
-      }
-
-      return Promise.resolve({
-        content: "Observed evidence: source-backed placeholder finding.",
-        tool_calls: [],
-        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
-        finishReason: "stop",
-      });
-    });
-
-    try {
-      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
-      const result = await runSubAgentWithStats({
-        agentName: "source_sensitive_coordinator",
-        task: parentTask,
-        parentSessionId: "parent-source-sensitive-parallel-cap",
-        workspacePath: tempDir,
-      });
-
-      expect(result.output).toContain("Observed evidence");
-      expect(childPrompts).toHaveLength(3);
-      expect(childPrompts.join("\n")).toContain("SLICE 1/3");
-      expect(childPrompts.join("\n")).toContain("SLICE 2/3");
-      expect(childPrompts.join("\n")).toContain("SLICE 3/3");
-      expect(childPrompts.join("\n")).not.toContain("SLICE 4/4");
-      expect(childPrompts.join("\n")).not.toContain("researcher_d");
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  }, 10000);
-
-  it("adds default research fallbacks before the first source-sensitive delegation escapes the coordinator", async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-source-fallback-"));
-    const configPath = join(tempDir, "starlingai.json");
-    const parentTask = "Use current sources to verify the exact ZX-9000 product manufacturer and interface before recommending parts.";
-
-    writeFileSync(configPath, JSON.stringify({
-      subAgents: {
-        source_sensitive_coordinator: {
-          description: "Source-sensitive coordinator",
-          systemPrompt: "Coordinate source-sensitive research.",
-          tools: ["delegate_to_agent"],
-          maxIterations: 2,
-        },
-        researcher: {
-          description: "Researcher",
-          systemPrompt: "Research from sources.",
-          tools: [],
-          maxIterations: 1,
-        },
-        mission_coordinator: {
-          description: "Fallback mission coordinator",
-          systemPrompt: "Coordinate fallback research.",
-          tools: [],
-          maxIterations: 1,
-        },
-      },
-    }), "utf8");
-
-    process.env["SAI_CONFIG_PATH"] = configPath;
-    vi.resetModules();
-    await import("../tools/sub-agent.js");
-
-    let callIndex = 0;
-    completeMock.mockImplementation(() => {
-      callIndex += 1;
-      if (callIndex === 1) {
-        return Promise.resolve({
-          content: "",
-          tool_calls: [{
-            id: "delegate-1",
-            name: "delegate_to_agent",
-            arguments: {
-              agentName: "researcher",
-              task: "Research the ST ZX-9000 from VendorX as an I2S-only product and prepare recommendations.",
-              context: "VendorX and I2S are already established facts.",
-            },
-          }],
-          usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
-          finishReason: "tool_calls",
-        });
-      }
-
-      return Promise.resolve({
-        content: "Observed evidence: source-backed placeholder finding.",
-        tool_calls: [],
-        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
-        finishReason: "stop",
-      });
-    });
-
-    const { subscribeToAudit } = await import("../audit/logger.js");
-    const auditEvents: Array<{ type: string; data: Record<string, unknown> }> = [];
-    const unsubscribe = subscribeToAudit((event) => {
-      auditEvents.push({ type: event.type, data: event.data as Record<string, unknown> });
-    });
-
-    try {
-      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
-      const result = await runSubAgentWithStats({
-        agentName: "source_sensitive_coordinator",
-        task: parentTask,
-        parentSessionId: "parent-source-sensitive-fallback",
-        workspacePath: tempDir,
-      });
-
-      expect(result.output).toContain("Observed evidence");
-
-      const delegateStartEvent = auditEvents.find(
-        (event) => event.type === "sub_agent_tool_call"
-          && event.data.tool === "delegate_to_agent"
-          && event.data.phase === "start",
-      );
-      expect(delegateStartEvent).toBeDefined();
-      expect(delegateStartEvent?.data.args).toMatchObject({
-        agentName: "researcher",
-        fallbackAgents: ["mission_coordinator"],
-      });
-      expect(String((delegateStartEvent?.data.args as Record<string, unknown>)?.["task"] ?? "")).toContain("SOURCE-SENSITIVE DELEGATION");
-      expect(String((delegateStartEvent?.data.args as Record<string, unknown>)?.["task"] ?? "")).toContain(parentTask);
-      expect(String((delegateStartEvent?.data.args as Record<string, unknown>)?.["task"] ?? "")).not.toContain("VendorX");
-      expect(String((delegateStartEvent?.data.args as Record<string, unknown>)?.["task"] ?? "")).not.toContain("I2S-only");
-    } finally {
-      unsubscribe();
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  }, 10000);
 
   // QUARANTINED (DEVPLAN P0): premise no longer matches the strip design. extractKeyFacts caps each
   // finding at 600 chars and cumulativeUsefulEvidenceBytes sums those, so a single web_fetch can
@@ -1923,93 +1513,8 @@ describe("sub-agent turn timeouts", () => {
     }
   });
 
-  it("reduces computer-use agents to read-only tools for observation tasks", async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-computer-observe-"));
-    const configPath = join(tempDir, "starlingai.json");
+  // De-lexicalized: task-keyword computer-use read-only tool narrowing was deleted (getEffectiveToolNames returns the full configured set). Removed.
 
-    writeFileSync(configPath, JSON.stringify({
-      subAgents: {
-        computer_use_agent: {
-          description: "Computer use agent",
-          systemPrompt: "Inspect the user's desktop.",
-          tools: [
-            "computer_list_nodes",
-            "computer_list_sessions",
-            "computer_session_start",
-            "computer_session_attach",
-            "computer_list_windows",
-            "computer_snapshot",
-            "computer_capture_region",
-            "computer_click",
-            "computer_type",
-            "computer_hotkey",
-          ],
-          maxIterations: 2,
-        },
-      },
-    }), "utf8");
-
-    process.env["SAI_CONFIG_PATH"] = configPath;
-    vi.resetModules();
-
-    const { registerTool, unregisterTool } = await import("../tools/registry.js");
-    const stubToolNames = [
-      "computer_list_nodes",
-      "computer_list_sessions",
-      "computer_session_start",
-      "computer_session_attach",
-      "computer_list_windows",
-      "computer_snapshot",
-      "computer_capture_region",
-      "computer_click",
-      "computer_type",
-      "computer_hotkey",
-    ];
-    for (const toolName of stubToolNames) {
-      registerTool({
-        name: toolName,
-        description: `Stub tool ${toolName}`,
-        parameters: { type: "object", properties: {} },
-        async execute() {
-          return { success: true, output: `${toolName} ok` };
-        },
-      });
-    }
-
-    completeMock.mockImplementationOnce(async (_messages: unknown, tools: unknown) => {
-      const toolNames = Array.isArray(tools)
-        ? (tools as Array<{ name?: string }>).map((tool) => tool.name).filter(Boolean)
-        : [];
-      expect(toolNames).toContain("computer_snapshot");
-      expect(toolNames).not.toContain("computer_click");
-      expect(toolNames).not.toContain("computer_type");
-      expect(toolNames).not.toContain("computer_hotkey");
-      return {
-        content: "snapshot reviewed",
-        tool_calls: [],
-        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
-        finishReason: "stop",
-      };
-    });
-
-    try {
-      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
-      const result = await runSubAgentWithStats({
-        agentName: "computer_use_agent",
-        task: "Take a screenshot of the remote PC and describe what is visible on screen.",
-        parentSessionId: "parent-observe",
-        workspacePath: tempDir,
-      });
-
-      expect(result.output).toBe("snapshot reviewed");
-      expect(completeMock).toHaveBeenCalledTimes(1);
-    } finally {
-      for (const toolName of stubToolNames) {
-        unregisterTool(toolName);
-      }
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
 
   it("treats maxIterationsOverride=0 as unlimited for delegated sub-agents", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-unlimited-iterations-"));
@@ -2195,122 +1700,8 @@ describe("sub-agent turn timeouts", () => {
     }
   });
 
-  it("rewrites source-sensitive discovery retries to delegate_to_agent after a no-match result", async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-no-match-fallback-"));
-    const configPath = join(tempDir, "starlingai.json");
+  // De-lexicalized: the source-sensitive discovery-retry rewrite is gated on the now-always-false sourceSensitiveTask flag. Removed.
 
-    writeFileSync(configPath, JSON.stringify({
-      subAgents: {
-        mission_coordinator: {
-          description: "Mission coordinator",
-          systemPrompt: "Coordinate source-sensitive work.",
-          tools: ["search_agents", "search_workflows", "delegate_to_agent"],
-          maxIterations: 3,
-        },
-        researcher: {
-          description: "Research specialist",
-          systemPrompt: "Research from sources.",
-          tools: ["read_file"],
-          maxIterations: 1,
-        },
-      },
-    }), "utf8");
-
-    process.env["SAI_CONFIG_PATH"] = configPath;
-    vi.resetModules();
-
-    const { registerTool, unregisterTool } = await import("../tools/registry.js");
-    const searchAgentsMock = vi.fn(async () => ({
-      success: true,
-      output: 'No agents matched "electronics hardware component selection circuit design embedded systems". Do not call search_agents again for this turn. Delegate without an agentName so autonomous routing can bid on the original task.',
-      metadata: { query: "electronics hardware component selection circuit design embedded systems", resultCount: 0 },
-    }));
-    const searchWorkflowsMock = vi.fn(async () => ({
-      success: true,
-      output: 'No workflows matched "hardware design electronics BOM circuit layout component selection" strongly enough. Fall back to search_agents or direct coordinator planning for this request shape.',
-      metadata: { workflowMatches: [] },
-    }));
-    const delegateExecuteMock = vi.fn(async (args: Record<string, unknown>) => ({
-      success: true,
-      output: "Delegated result from researcher — TASK COMPLETED.\nObserved evidence:\nGrounded component evidence.",
-      metadata: {
-        agentName: String(args["agentName"] ?? ""),
-        attemptedAgents: [String(args["agentName"] ?? "")],
-        delegationSucceeded: true,
-        terminalState: "completed",
-      },
-    }));
-
-    registerTool({
-      name: "search_agents",
-      description: "Mock search_agents",
-      parameters: { type: "object", properties: {} },
-      execute: searchAgentsMock,
-    });
-    registerTool({
-      name: "search_workflows",
-      description: "Mock search_workflows",
-      parameters: { type: "object", properties: {} },
-      execute: searchWorkflowsMock,
-    });
-    registerTool({
-      name: "delegate_to_agent",
-      description: "Mock delegate_to_agent",
-      parameters: { type: "object", properties: {} },
-      execute: delegateExecuteMock,
-    });
-
-    completeMock
-      .mockResolvedValueOnce({
-        content: "",
-        tool_calls: [
-          {
-            id: "search-1",
-            name: "search_agents",
-            arguments: { query: "electronics hardware component selection circuit design embedded systems" },
-          },
-          {
-            id: "workflow-1",
-            name: "search_workflows",
-            arguments: { query: "hardware design electronics BOM circuit layout component selection" },
-          },
-        ],
-        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
-        finishReason: "tool_calls",
-      })
-      .mockResolvedValueOnce({
-        content: "Grounded component evidence.",
-        tool_calls: [],
-        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
-        finishReason: "stop",
-      });
-
-    try {
-      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
-      const result = await runSubAgentWithStats({
-        agentName: "mission_coordinator",
-        task: "Use current sources to verify the exact microphone component choice and recommend a grounded PCB layout.",
-        parentSessionId: "parent-no-match-fallback",
-        workspacePath: tempDir,
-      });
-
-      expect(result.output).toContain("Grounded component evidence");
-      expect(searchAgentsMock).toHaveBeenCalledTimes(1);
-      expect(searchWorkflowsMock).not.toHaveBeenCalled();
-      expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
-      expect(result.stats.toolNames).toEqual(["search_agents", "delegate_to_agent"]);
-      const delegateArgs = delegateExecuteMock.mock.calls[0]?.[0] as Record<string, unknown>;
-      expect(delegateArgs["agentName"]).toBe("researcher");
-      expect(String(delegateArgs["taskTitle"])).toContain("Source-sensitive researcher task");
-      expect(String(delegateArgs["task"])).toContain("Use current sources to verify the exact microphone component choice");
-      expect(completeMock).toHaveBeenCalledTimes(2);
-    } finally {
-      unregisterTool("search_agents");
-      unregisterTool("search_workflows");
-      unregisterTool("delegate_to_agent");
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
 
   it("uses source-sensitive child task titles so fallback delegation does not collide with the running parent coordinator", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-child-task-title-"));
@@ -2392,125 +1783,8 @@ describe("sub-agent turn timeouts", () => {
     }
   });
 
-  it("caps repeated source-sensitive agent discovery after no-match fallback", async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-search-agent-cap-"));
-    const configPath = join(tempDir, "starlingai.json");
+  // De-lexicalized: the source-sensitive repeated-discovery cap is gated on the now-always-false sourceSensitiveTask flag. Removed.
 
-    writeFileSync(configPath, JSON.stringify({
-      subAgents: {
-        mission_coordinator: {
-          description: "Mission coordinator",
-          systemPrompt: "Coordinate source-sensitive work.",
-          tools: ["search_agents", "delegate_to_agent"],
-          maxIterations: 5,
-        },
-        researcher: {
-          description: "Research specialist",
-          systemPrompt: "Research from sources.",
-          tools: [],
-          maxIterations: 1,
-        },
-      },
-    }), "utf8");
-
-    process.env["SAI_CONFIG_PATH"] = configPath;
-    vi.resetModules();
-
-    const { registerTool, unregisterTool } = await import("../tools/registry.js");
-    const searchAgentsMock = vi.fn(async () => ({
-      success: true,
-      output: 'No agents matched "hardware electronics component selection". Do not call search_agents again for this turn.',
-      metadata: { query: "hardware electronics component selection", resultCount: 0, topResult: null, trippedAgents: ["researcher"] },
-    }));
-    const delegateExecuteMock = vi.fn(async () => ({
-      success: true,
-      output: "Task 'SOURCE-SENSITIVE DELEGATION: The user's original request below is the only canon...' is already running via mission_coordinator.",
-      metadata: { inFlight: true, reused: true },
-    }));
-
-    registerTool({
-      name: "search_agents",
-      description: "Mock search_agents",
-      parameters: { type: "object", properties: {} },
-      execute: searchAgentsMock,
-    });
-    registerTool({
-      name: "delegate_to_agent",
-      description: "Mock delegate_to_agent",
-      parameters: { type: "object", properties: {} },
-      execute: delegateExecuteMock,
-    });
-
-    completeMock
-      .mockResolvedValueOnce({
-        content: "",
-        tool_calls: [{
-          id: "search-1",
-          name: "search_agents",
-          arguments: { query: "hardware electronics component selection" },
-        }],
-        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
-        finishReason: "tool_calls",
-      })
-      .mockResolvedValueOnce({
-        content: "",
-        tool_calls: [{
-          id: "search-2",
-          name: "search_agents",
-          arguments: { query: "embedded systems firmware IoT" },
-        }],
-        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
-        finishReason: "tool_calls",
-      })
-      .mockResolvedValueOnce({
-        content: "",
-        tool_calls: [{
-          id: "search-3",
-          name: "search_agents",
-          arguments: { query: "audio microphone PCB design" },
-        }],
-        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
-        finishReason: "tool_calls",
-      })
-      .mockResolvedValueOnce({
-        content: "",
-        tool_calls: [{
-          id: "search-4",
-          name: "search_agents",
-          arguments: { query: "ESP32 embedded development firmware IoT" },
-        }],
-        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
-        finishReason: "tool_calls",
-      })
-      .mockResolvedValueOnce({
-        content: "No reliable evidence was gathered before discovery exhausted its limits.",
-        tool_calls: [],
-        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
-        finishReason: "stop",
-      });
-
-    try {
-      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
-      const result = await runSubAgentWithStats({
-        agentName: "mission_coordinator",
-        task: "Use current sources to verify hardware component recommendations.",
-        parentSessionId: "parent-search-agent-cap",
-        workspacePath: tempDir,
-      });
-
-      expect(searchAgentsMock).toHaveBeenCalledTimes(2);
-      expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
-      const fallbackArgs = (delegateExecuteMock.mock.calls as unknown[][])[0]?.[0] as Record<string, unknown>;
-      expect(fallbackArgs["agentName"]).toBeUndefined();
-      expect(String(fallbackArgs["taskTitle"])).toContain("Source-sensitive specialist task");
-      expect(result.stats.toolNames).toEqual(["search_agents", "delegate_to_agent", "search_agents", "search_agents"]);
-      expect(result.output).toContain("No reliable evidence was gathered");
-    } finally {
-      unregisterTool("search_agents");
-      unregisterTool("delegate_to_agent");
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
 
   it("does not rewrite search_agents after a workflow no-match in source-sensitive coordinator runs", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-workflow-no-match-agent-search-"));
@@ -2740,36 +2014,8 @@ describe("sub-agent turn timeouts", () => {
     }
   });
 
-  it("reduces mail_agent tools for simple inbox-read tasks", async () => {
-    const { getEffectiveToolNames } = await import("../agent/sub-agent.js");
+  // De-lexicalized: task-keyword mail read-only tool narrowing was deleted (getEffectiveToolNames returns the full configured set). Removed.
 
-    const toolNames = getEffectiveToolNames(
-      "mail_agent",
-      [
-        "mail_list_accounts",
-        "mail_list_mailboxes",
-        "mail_search",
-        "mail_read",
-        "mail_list_unread",
-        "mail_prepare_draft",
-        "mail_update_draft",
-        "mail_get_draft",
-        "mail_categorize",
-        "mail_send_draft",
-        "read_shared_facts",
-        "share_finding",
-      ],
-      "Check mal ob ich neue email bekommen habe",
-    );
-
-    expect(toolNames).toEqual([
-      "mail_list_accounts",
-      "mail_list_mailboxes",
-      "mail_search",
-      "mail_read",
-      "mail_list_unread",
-    ]);
-  });
 
   // DE-LEXICALIZATION: isExplicitUnreadMailInboxTask was deleted (keyword task
   // classifier). This test asserted keyword-driven behavior; it is skipped pending
@@ -2779,118 +2025,8 @@ describe("sub-agent turn timeouts", () => {
     // TODO(rewrite): assert the semantic/structural routing path, not task-text keywords.
   });
 
-  it("completes simple inbox checks through deterministic mail tools without invoking the LLM", async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-mail-deterministic-"));
-    const configPath = join(tempDir, "starlingai.json");
+  // De-lexicalized: the deterministic unread-mail fast path (isExplicitUnreadMailInboxTask keyword classifier + 'Unread messages found' output) was deleted. Removed.
 
-    writeFileSync(configPath, JSON.stringify({
-      agents: {
-        defaults: {
-          model: {
-            primary: "lmstudio/gemma-4-26b-a4b-it",
-            temperature: 0.1,
-            maxTokens: 1024,
-          },
-        },
-      },
-      subAgents: {
-        mail_agent: {
-          description: "Mail agent",
-          systemPrompt: "Use mail tools first.",
-          tools: [
-            "mail_list_accounts",
-            "mail_list_unread",
-            "mail_read",
-          ],
-          maxIterations: 2,
-        },
-      },
-    }), "utf8");
-
-    process.env["SAI_CONFIG_PATH"] = configPath;
-    vi.resetModules();
-
-    const { registerTool, unregisterTool } = await import("../tools/registry.js");
-
-    registerTool({
-      name: "mail_list_accounts",
-      description: "List mail accounts",
-      parameters: { type: "object", properties: {} },
-      async execute() {
-        return {
-          success: true,
-          output: "- work: user@example.com <user@example.com>",
-          metadata: { accounts: [{ id: "work", address: "user@example.com" }] },
-        };
-      },
-    });
-
-    registerTool({
-      name: "mail_list_unread",
-      description: "List unread messages",
-      parameters: { type: "object", properties: {} },
-      async execute() {
-        return {
-          success: true,
-          output: "- [work] Project Update from boss@example.com (INBOX#101 on 2026-04-03)",
-          metadata: {
-            messages: [{
-              accountId: "work",
-              mailbox: "INBOX",
-              uid: 101,
-              subject: "Project Update",
-              from: "boss@example.com",
-              date: "2026-04-03",
-            }],
-          },
-        };
-      },
-    });
-
-    registerTool({
-      name: "mail_read",
-      description: "Read a message",
-      parameters: { type: "object", properties: {} },
-      async execute() {
-        return {
-          success: true,
-          output: "Project Update body",
-          metadata: {
-            message: {
-              textBody: "Here is the latest project update with the next milestones and owners.",
-            },
-          },
-        };
-      },
-    });
-
-    completeMock.mockResolvedValue({
-      content: "should not be used",
-      tool_calls: [],
-      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
-      finishReason: "stop",
-    });
-
-    try {
-      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
-      const result = await runSubAgentWithStats({
-        agentName: "mail_agent",
-        task: "Check mal ob ich neue email bekommen habe",
-        parentSessionId: "parent-mail-2",
-        workspacePath: tempDir,
-      });
-
-      expect(result.output).toContain("Unread messages found: 1.");
-      expect(result.output).toContain("Project Update");
-      expect(result.stats.toolCount).toBe(3);
-      expect(completeMock).not.toHaveBeenCalled();
-    } finally {
-      unregisterTool("mail_list_accounts");
-      unregisterTool("mail_list_unread");
-      unregisterTool("mail_read");
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
 
   it("keeps mail_agent in-process when defaultContainerized is enabled", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-mail-no-container-"));
@@ -2936,58 +2072,18 @@ describe("sub-agent turn timeouts", () => {
       runSubAgentInContainer: runSubAgentInContainerMock,
     }));
 
-    const { registerTool, unregisterTool } = await import("../tools/registry.js");
-
-    registerTool({
-      name: "mail_list_accounts",
-      description: "List mail accounts",
-      parameters: { type: "object", properties: {} },
-      async execute() {
-        return {
-          success: true,
-          output: "- work: user@example.com <user@example.com>",
-          metadata: { accounts: [{ id: "work", address: "user@example.com" }] },
-        };
-      },
-    });
-
-    registerTool({
-      name: "mail_list_unread",
-      description: "List unread messages",
-      parameters: { type: "object", properties: {} },
-      async execute() {
-        return {
-          success: true,
-          output: "- [work] Project Update from boss@example.com (INBOX#101 on 2026-04-03)",
-          metadata: {
-            messages: [{
-              accountId: "work",
-              mailbox: "INBOX",
-              uid: 101,
-              subject: "Project Update",
-              from: "boss@example.com",
-              date: "2026-04-03",
-            }],
-          },
-        };
-      },
-    });
-
-    registerTool({
-      name: "mail_read",
-      description: "Read a message",
-      parameters: { type: "object", properties: {} },
-      async execute() {
-        return {
-          success: true,
-          output: "Project Update body",
-          metadata: {
-            message: {
-              textBody: "Here is the latest project update with the next milestones and owners.",
-            },
-          },
-        };
-      },
+    // De-lexicalization (cleanup/lean-base): the deterministic unread-mail fast
+    // path (keyword-classified, LLM-free) was deleted, so a mail_agent run now goes
+    // through the normal in-process LLM loop. The STILL-VALID behavior this test
+    // guards is that mail_agent — because its tools are gateway-bound service tools
+    // (mail_*) — is forced IN-PROCESS even when agents.defaultContainerized is true,
+    // so the container runner is never invoked. We drive the in-process loop with a
+    // stubbed LLM final answer and assert the container path was skipped.
+    completeMock.mockResolvedValue({
+      content: "You have 1 unread message: Project Update from boss@example.com.",
+      tool_calls: [],
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+      finishReason: "stop",
     });
 
     try {
@@ -2999,12 +2095,12 @@ describe("sub-agent turn timeouts", () => {
         workspacePath: tempDir,
       });
 
-      expect(result.output).toContain("Unread messages found: 1.");
+      // Ran in-process (the stubbed LLM answer surfaced) — the container runner
+      // was never called despite defaultContainerized: true.
+      expect(result.output).toContain("Project Update");
+      expect(completeMock).toHaveBeenCalled();
       expect(runSubAgentInContainerMock).not.toHaveBeenCalled();
     } finally {
-      unregisterTool("mail_list_accounts");
-      unregisterTool("mail_list_unread");
-      unregisterTool("mail_read");
       rmSync(tempDir, { recursive: true, force: true });
     }
   });

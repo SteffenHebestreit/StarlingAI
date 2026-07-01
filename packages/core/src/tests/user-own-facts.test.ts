@@ -5,32 +5,13 @@ import { renderUserProfileEvidence } from "../agent/user-profile-prefetch.js";
 const guidance = (msg: string) => buildDynamicTurnGuidance(msg, "orchestration_only");
 
 describe("userOwnFacts detection", () => {
-  it("fires on the audited German CV/Lead-Dev fit question", () => {
-    // The exact message that produced the toolCalls=0 admit-without-retrieve failure.
-    expect(guidance("Wäre ich eine gute Besetzung für GenAI-Projekte als Lead-Dev")?.userOwnFacts).toBe(true);
-  });
-
-  it("fires when the user asks about access to their own CV / project list", () => {
-    expect(guidance("Hast du keinen Zugriff auf mein CV oder Projektliste?")?.userOwnFacts).toBe(true);
-  });
-
-  it("fires on English self-referential background / skill / fit questions", () => {
-    expect(guidance("what's my background in machine learning?")?.userOwnFacts).toBe(true);
-    expect(guidance("do I have experience with Kubernetes?")?.userOwnFacts).toBe(true);
-    expect(guidance("would I be a good fit for this role?")?.userOwnFacts).toBe(true);
-    expect(guidance("habe ich genug Erfahrung als Lead-Dev?")?.userOwnFacts).toBe(true);
-  });
-
-  // Generalization guard (no overfit to the audited prompt's vocabulary): framings
-  // the example never used must still fire on the STRUCTURE, not on memorized words.
-  it("generalizes across vocabulary the audited prompt never used", () => {
-    expect(guidance("Bin ich qualifiziert für eine Data-Science-Stelle?")?.userOwnFacts).toBe(true); // adjective stem
-    expect(guidance("Do you know what skills I have?")?.userOwnFacts).toBe(true); // subject-after-verb "I have"
-    expect(guidance("What are my strengths as a developer?")?.userOwnFacts).toBe(true);
-    expect(guidance("Wie sieht mein beruflicher Werdegang aus?")?.userOwnFacts).toBe(true);
-    expect(guidance("Am I a strong candidate for a PM position?")?.userOwnFacts).toBe(true);
-    expect(guidance("Reicht meine Erfahrung für eine Architektenrolle?")?.userOwnFacts).toBe(true);
-  });
+  // De-lexicalization (cleanup/lean-base): the userOwnFacts keyword tables
+  // (FIRST_PERSON_SELF_PATTERNS / SELF_IDENTITY_CONTEXT_TERMS / SELF_FIT_QUALITY_PATTERNS)
+  // were deleted and the flag now DEFAULTS OFF — the swarm decides from the roster
+  // + tools + the LLM's semantic read whether a turn needs the user's own profile.
+  // The 5 "fires on <self-referential phrasing>" tests asserted that deleted keyword
+  // detection and were removed. The "does NOT fire" guards below still hold (the flag
+  // is off), so they stay as a regression fence against a keyword pile being re-added.
 
   it("does NOT fire on questions about the ASSISTANT's own capabilities", () => {
     expect(guidance("was kannst du alles?")?.userOwnFacts).toBeFalsy();
@@ -42,13 +23,6 @@ describe("userOwnFacts detection", () => {
     expect(guidance("what is my account balance?")?.userOwnFacts).toBeFalsy();
     expect(guidance("my code doesn't compile, fix it")?.userOwnFacts).toBeFalsy();
     expect(guidance("would I be able to deploy this today?")?.userOwnFacts).toBeFalsy();
-  });
-
-  it("injects a retrieve-first directive naming recall_context into the guidance prompt", () => {
-    const g = guidance("habe ich genug Erfahrung als Lead-Dev?");
-    expect(g?.userOwnFacts).toBe(true);
-    expect(g?.prompt).toMatch(/recall_context/);
-    expect(g?.prompt).toMatch(/invalid until you have looked|Never invent a profile/);
   });
 });
 
