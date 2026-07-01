@@ -47,8 +47,9 @@ export interface ApprovedWorkflowFollowUp {
 }
 
 const RUN_CANDIDATE_RE = /(?:^|\n)\s*RUN_CANDIDATE:\s*(.+?)\s*$/im;
-// English-internal (de-lexicalized): a non-English affirmative is translated at the
-// boundary before it reaches this narrow n8n RUN_CANDIDATE approval detector.
+// English-internal (de-lexicalized). NOTE: the planned boundary-translation layer that would
+// render a non-English affirmative to English first is NOT YET IMPLEMENTED — until it lands a
+// non-English "ja" is not recognized here (the n8n follow-up simply won't auto-run; harmless).
 const AFFIRMATIVE_WORKFLOW_APPROVAL_RE = /^\s*(?:yes|yeah|yep|sure|ok(?:ay)?|please do(?: that)?|do it|go ahead|run (?:it|that)|start (?:it|that))\s*[.!?]*\s*$/i;
 
 function extractRunCandidateName(content: string | null | undefined): string | null {
@@ -314,9 +315,11 @@ export function isWorkflowCatalogToolName(toolName: string): boolean {
  * explanation ("what happens if I apply X" → uncertain unless the verb itself
  * appears) from an imperative ("apply X now" → confirmed).
  *
- * English-internal (de-lexicalized): a non-English message is translated at the
- * boundary before it reaches this gate, so the verb list carries no per-language
- * entries. Imperative/infinitive forms only.
+ * English-internal (de-lexicalized): the verb list carries no per-language entries.
+ * NOTE: the boundary-translation layer that would render a non-English message to English
+ * before this gate is NOT YET IMPLEMENTED — until it lands, a non-English imperative fails
+ * the verb gate and an opt-in trigger match degrades to `uncertain` (ask the user), never a
+ * fabrication. Imperative/infinitive forms only.
  */
 const WORKFLOW_ACTION_VERB_PATTERN = new RegExp(
   "\\b(?:" + [

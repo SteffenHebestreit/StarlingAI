@@ -517,10 +517,12 @@ const SEARCH_ONLINE_TASK_RE = /\b(search online|search the web|web search|look (
 // present, and a workspace/code marker (function, file, symbol, codebase) vetoes it so
 // internal "find/search" tasks (code_analyst's territory) are never misrouted.
 //
-// English-internal (de-lexicalized): a non-English delegation task is translated at the
-// boundary before it reaches this gate, so these carry no per-language entries. The
-// structural "SOURCE-SENSITIVE DELEGATION" marker (checked first in the function below)
-// stays the primary signal; this verb+noun shape is the English-only fallback.
+// English-internal (de-lexicalized): these carry no per-language entries. The structural
+// "SOURCE-SENSITIVE DELEGATION" marker (checked first in the function below) stays the PRIMARY
+// signal and is language-independent, so it still fires for any language; this verb+noun shape
+// is the English-only fallback. NOTE: the boundary-translation layer that would render a
+// non-English task to English before this fallback is NOT YET IMPLEMENTED — until it lands, a
+// non-English task relies on the structural marker alone (the verb+noun fallback won't fire).
 const WEB_RESEARCH_VERB_RE = /\b(?:research|investigat\w+|searche?s?|find|look\s*up|gather)\b/i;
 const EXTERNAL_WEB_NOUN_RE = /\b(?:url|urls|link|links|website|websites|online|platforms?|providers?|vendors?|prices?|pricing|courses?|datasheets?|reviews?)\b/i;
 const WORKSPACE_CODE_MARKER_RE = /\b(?:codebase|workspace|repository|repo|source\s*code|functions?|methods?|files?|symbols?|class(?:es)?|modules?)\b/i;
@@ -581,8 +583,8 @@ const EXECUTION_CAPABILITY_DETECTORS: Record<ExecutionCapability, RegExp> = {
   // Host/server command execution — concrete shell/system signals only.
   shell: /\b(?:ssh|sudo|systemctl|journalctl|crontab|kubectl|docker(?:\s|-compose|$)|chmod|chown|apt(?:-get)?|yum|dnf|pacman|ps aux|df -h|free -m|uptime|on the (?:server|host|remote machine|box)|shell command|bash command|run the command|restart the (?:service|daemon|container))\b|\.sh\b/i,
   // Run/execute code in a sandbox — require an explicit language or "sandbox",
-  // never bare "run a script" (ambiguous with a shell script). English-internal
-  // (de-lex): non-English tasks are boundary-translated before this gate sees them.
+  // never bare "run a script" (ambiguous with a shell script). English-internal (de-lex);
+  // boundary-translation of non-English tasks is planned but NOT YET IMPLEMENTED.
   code_exec: /\b(?:run|execute)\b[^.\n]{0,30}\b(?:javascript|typescript|js|ts|python|node(?:\.js)?)\b|\bin a sandbox\b|\bsandbox:/i,
   // Interactive actions on a live website — strong transaction/login/form signals.
   browser_interaction: /\b(?:log ?in|sign ?in|fill (?:in |out )?the form|submit the form|add to cart|check ?out|book (?:a|the)\b|apply (?:for|to)\b|place (?:an|the) order)\b/i,
