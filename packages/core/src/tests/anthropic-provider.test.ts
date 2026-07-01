@@ -142,6 +142,38 @@ describe("model presets (Local ⇄ Claude switch)", () => {
     expect(applied.fallback).toBe("openrouter/minimax/minimax-m3");
   });
 
+  describe("modelPresetScope — how widely the preset applies", () => {
+    const scopedConfig = (scope: "all" | "unspecified" | "coordinator_qa") => makeConfig({
+      providers: { anthropic: { authToken: "sk-ant-oat01-token" } },
+      agents: { defaults: { activeModelPreset: "claude", modelPresetScope: scope } },
+    });
+    const localAgent = ModelConfigSchema.parse({ primary: "lmstudio/qwen3-32b" });
+    const CLAUDE = "anthropic/claude-sonnet-4-6";
+
+    it("'all' replaces every agent regardless of role or explicit model (back-compat)", () => {
+      expect(applyActiveModelPreset(localAgent, scopedConfig("all"),
+        { hasExplicitModel: true, role: "specialist" }).primary).toBe(CLAUDE);
+    });
+
+    it("'unspecified' keeps a sub-agent that named its own model, applies otherwise", () => {
+      const cfg = scopedConfig("unspecified");
+      expect(applyActiveModelPreset(localAgent, cfg, { hasExplicitModel: true, role: "specialist" }).primary).toBe("lmstudio/qwen3-32b");
+      expect(applyActiveModelPreset(localAgent, cfg, { hasExplicitModel: false, role: "specialist" }).primary).toBe(CLAUDE);
+      expect(applyActiveModelPreset(localAgent, cfg).primary).toBe(CLAUDE); // orchestrator (no ctx)
+    });
+
+    it("'coordinator_qa' applies only to coordinator/planner/reviewer + the orchestrator", () => {
+      const cfg = scopedConfig("coordinator_qa");
+      for (const role of ["coordinator", "planner", "reviewer"]) {
+        expect(applyActiveModelPreset(localAgent, cfg, { role }).primary).toBe(CLAUDE);
+      }
+      // execution specialists keep their own model even with no explicit override
+      expect(applyActiveModelPreset(localAgent, cfg, { hasExplicitModel: false, role: "specialist" }).primary).toBe("lmstudio/qwen3-32b");
+      expect(applyActiveModelPreset(localAgent, cfg, { role: "generator" }).primary).toBe("lmstudio/qwen3-32b");
+      expect(applyActiveModelPreset(localAgent, cfg).primary).toBe(CLAUDE); // orchestrator (no ctx)
+    });
+  });
+
   it("is a no-op when no preset is active or the name is unknown", () => {
     const base = ModelConfigSchema.parse({ primary: "lmstudio/qwen3-32b" });
     expect(applyActiveModelPreset(base, makeConfig())).toBe(base);

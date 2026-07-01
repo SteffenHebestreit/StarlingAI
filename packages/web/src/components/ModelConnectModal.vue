@@ -144,6 +144,30 @@
               Current: <span class="font-mono text-gray-400">{{ store.anthropicModel }}</span>
             </p>
             <p v-if="store.modelError" class="mt-1.5 text-[11px] text-red-300">{{ store.modelError }}</p>
+
+            <!-- Claude routing scope — how widely the header switch applies across the swarm. -->
+            <div class="mt-4 border-t border-white/10 pt-4">
+              <label class="block text-[12px] font-medium text-gray-300">Claude routing scope</label>
+              <p class="mt-0.5 text-[11px] text-gray-500">
+                When the header switch is on, which agents actually run on Claude.
+              </p>
+              <div class="mt-2 grid grid-cols-1 gap-1.5">
+                <button
+                  v-for="opt in scopeOptions"
+                  :key="opt.value"
+                  type="button"
+                  class="flex flex-col items-start rounded-lg border px-3 py-2 text-left transition disabled:opacity-50"
+                  :class="store.scope === opt.value
+                    ? 'border-orange-400/50 bg-orange-500/15 text-orange-100'
+                    : 'border-white/10 bg-gray-900 text-gray-300 hover:border-white/20'"
+                  :disabled="store.switching"
+                  @click="store.setScope(opt.value)"
+                >
+                  <span class="text-[12px] font-medium">{{ opt.label }}</span>
+                  <span class="text-[11px] text-gray-500">{{ opt.hint }}</span>
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -153,13 +177,19 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
-import { useModelPresetStore } from "@/stores/modelPreset";
+import { useModelPresetStore, type PresetScope } from "@/stores/modelPreset";
 
 const emit = defineEmits<{ close: []; connected: [] }>();
 
 const store = useModelPresetStore();
 const connected = computed(() => store.oauthConnected);
 const claudePresetExists = computed(() => store.presets.some((p) => p.name === "claude"));
+
+const scopeOptions: Array<{ value: PresetScope; label: string; hint: string }> = [
+  { value: "all", label: "All agents", hint: "The whole swarm runs on Claude." },
+  { value: "unspecified", label: "Unspecified models only", hint: "Agents that pin their own model keep it; everything else uses Claude." },
+  { value: "coordinator_qa", label: "Coordinator + QA only", hint: "Only the orchestrator, coordinators/planners and reviewers use Claude; specialists stay local." },
+];
 
 const code = ref("");
 const started = ref(false);

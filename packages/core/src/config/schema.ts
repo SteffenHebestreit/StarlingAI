@@ -1268,6 +1268,18 @@ export const ConfigSchema = z.object({
       /** Currently active preset name; unset = the configured local default.
        *  Persisted by the dashboard switch into the runtime overlay. */
       activeModelPreset: z.string().optional(),
+      /** How WIDELY the active preset (e.g. "claude") is applied across the swarm — the
+       *  granularity dial for the "Local ⇄ Claude" switch. Only meaningful when activeModelPreset
+       *  is set (unset = "off", pure local):
+       *   - "all" (default, back-compat): the preset replaces EVERY agent's model — the whole swarm
+       *     runs on the preset model.
+       *   - "unspecified": the preset applies to the orchestrator and any sub-agent that did NOT set
+       *     its own model; a sub-agent with an explicit `model.primary` keeps it.
+       *   - "coordinator_qa": the preset applies ONLY to the high-leverage reasoning roles — the main
+       *     orchestrator plus sub-agents whose role is coordinator / planner / reviewer (QA). Every
+       *     execution specialist (researcher, coder, …) stays on its own configured model.
+       *  Persisted by the dashboard switch into the runtime overlay alongside activeModelPreset. */
+      modelPresetScope: z.enum(["all", "unspecified", "coordinator_qa"]).default("all"),
     }).default({}),
     mainAssistant: MainAssistantConfigSchema.default({}),
     ephemeralGeneration: EphemeralGenerationSchema.default({}),

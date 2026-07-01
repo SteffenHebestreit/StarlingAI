@@ -2084,7 +2084,14 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // mergeAgentModelOverride drops undefined override keys so a partial
     // override (e.g. an ephemeral agent passing model:{temperature:0.3} with no
     // primary) cannot blank out the default primary (audit c33e65dd).
-    const baseModelConfig = applyActiveModelPreset(mergeAgentModelOverride(config.agents.defaults.model, agentCfg.model), config);
+    // Scope the preset (agents.defaults.modelPresetScope): a sub-agent that named its own model.primary
+    // is "explicit"; its role drives the coordinator_qa scope. mergeAgentModelOverride still merges the
+    // override — the scope only decides whether the preset then replaces it.
+    const baseModelConfig = applyActiveModelPreset(
+      mergeAgentModelOverride(config.agents.defaults.model, agentCfg.model),
+      config,
+      { hasExplicitModel: Boolean(agentCfg.model?.primary), role: agentCfg.role },
+    );
     // Overlay the active effort profile onto the resolved model config so delegated
     // sub-agents (in-host AND containerized — this flows into the container payload as
     // resolvedModelConfig) produce larger, more reasoned outputs at high/max effort.

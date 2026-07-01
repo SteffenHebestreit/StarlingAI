@@ -9,6 +9,8 @@ export interface ModelPresetDescriptor {
   implicit: boolean;
 }
 
+export type PresetScope = "all" | "unspecified" | "coordinator_qa";
+
 /**
  * The dashboard "Local ⇄ Claude" model switch. Mirrors the gateway's
  * GET/POST /api/models/preset: presets are named alternates for the default
@@ -23,6 +25,8 @@ export const useModelPresetStore = defineStore("modelPreset", () => {
   const activePrimary = ref<string | null>(null);
   const defaultPrimary = ref("");
   const presets = ref<ModelPresetDescriptor[]>([]);
+  // How widely the active preset applies: all | unspecified | coordinator_qa.
+  const scope = ref<PresetScope>("all");
   const loaded = ref(false);
   const switching = ref(false);
   const error = ref("");
@@ -45,11 +49,12 @@ export const useModelPresetStore = defineStore("modelPreset", () => {
     return (gateway.wsUrl ?? "ws://localhost:8765/ws").replace(/^ws/, "http").replace(/\/ws$/, "");
   }
 
-  function applyState(state: { active: string | null; activePrimary: string | null; defaultPrimary: string; presets: ModelPresetDescriptor[] }): void {
+  function applyState(state: { active: string | null; activePrimary: string | null; defaultPrimary: string; presets: ModelPresetDescriptor[]; scope?: PresetScope }): void {
     active.value = state.active;
     activePrimary.value = state.activePrimary;
     defaultPrimary.value = state.defaultPrimary;
     presets.value = state.presets;
+    if (state.scope) scope.value = state.scope;
     loaded.value = true;
   }
 
@@ -84,6 +89,32 @@ export const useModelPresetStore = defineStore("modelPreset", () => {
       }
       applyState(await res.json());
     } catch (err) {
+      error.value = String(err);
+    } finally {
+      switching.value = false;
+    }
+  }
+
+  /** Set how widely the active preset applies (all | unspecified | coordinator_qa). */
+  async function setScope(next: PresetScope): Promise<void> {
+    if (!gateway.token || switching.value) return;
+    const previous = scope.value;
+    scope.value = next; // optimistic
+    switching.value = true;
+    error.value = "";
+    try {
+      const res = await window.fetch(`${baseUrl()}/api/models/preset`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${gateway.token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ scope: next }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null) as { error?: string } | null;
+        throw new Error(body?.error ?? `HTTP ${res.status}`);
+      }
+      applyState(await res.json());
+    } catch (err) {
+      scope.value = previous; // revert on failure
       error.value = String(err);
     } finally {
       switching.value = false;
@@ -218,10 +249,10 @@ export const useModelPresetStore = defineStore("modelPreset", () => {
   }
 
   return {
-    active, activePrimary, defaultPrimary, presets, loaded, switching, error, available,
+    active, activePrimary, defaultPrimary, presets, scope, loaded, switching, error, available,
     oauthConnected, oauthExpiresAt, oauthBusy, oauthError,
     anthropicModel, anthropicModelChoices, modelSaving, modelError,
-    fetch, activate, fetchOAuthStatus, startOAuth, completeOAuth, disconnectOAuth,
+    fetch, activate, setScope, fetchOAuthStatus, startOAuth, completeOAuth, disconnectOAuth,
     fetchAnthropicModel, setAnthropicModel,
   };
 });

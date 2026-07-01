@@ -253,11 +253,39 @@ export function getActiveModelPreset(config: Config = getConfig()): { name: stri
   return { name, preset };
 }
 
+/** Context for scoping which agents the active preset applies to (agents.defaults.modelPresetScope).
+ *  Omitted at the orchestrator / infrastructure sites (they represent the coordinator path and are
+ *  always in scope); passed by the sub-agent construction site to scope by role / explicit model. */
+export interface PresetScopeContext {
+  /** The agent set its OWN model (agentCfg.model.primary) — respected under the "unspecified" scope. */
+  hasExplicitModel?: boolean;
+  /** The agent's role — under "coordinator_qa" the preset applies only to coordinator/planner/reviewer. */
+  role?: string;
+}
+
+/** Whether the active preset should replace THIS agent's model under the configured scope. No context
+ *  = the orchestrator/infrastructure path (the coordinator), which is always in scope. */
+function presetAppliesUnderScope(scope: string, ctx: PresetScopeContext | undefined): boolean {
+  switch (scope) {
+    case "unspecified":
+      // The orchestrator (no ctx) uses the shared default → in scope; a sub-agent that named its own
+      // model is out of scope.
+      return !ctx?.hasExplicitModel;
+    case "coordinator_qa":
+      if (!ctx) return true; // the main orchestrator IS the coordinator/planner
+      return ctx.role === "coordinator" || ctx.role === "planner" || ctx.role === "reviewer";
+    case "all":
+    default:
+      return true;
+  }
+}
+
 /** Overlay the active preset (if any) onto a resolved ModelConfig. Applied at
  *  every chat-provider construction site (orchestrator, sub-agents, tiers). */
-export function applyActiveModelPreset(modelConfig: ModelConfig, config: Config = getConfig()): ModelConfig {
+export function applyActiveModelPreset(modelConfig: ModelConfig, config: Config = getConfig(), scopeCtx?: PresetScopeContext): ModelConfig {
   const active = getActiveModelPreset(config);
   if (!active) return modelConfig;
+  if (!presetAppliesUnderScope(config.agents.defaults.modelPresetScope ?? "all", scopeCtx)) return modelConfig;
   const { preset } = active;
   if (modelConfig.primary === preset.primary) return modelConfig;
   return {

@@ -1993,6 +1993,7 @@ export function createGateway() {
       active: active?.name ?? null,
       activePrimary: active?.preset.primary ?? null,
       defaultPrimary: config.agents.defaults.model.primary,
+      scope: config.agents.defaults.modelPresetScope ?? "all",
       presets: listModelPresets(config),
     });
   });
@@ -2008,24 +2009,41 @@ export function createGateway() {
       return c.json({ error: "Invalid JSON body" }, 400);
     }
 
+    // Accepts { preset?: string | null, scope?: "all" | "unspecified" | "coordinator_qa" }.
+    // At least one field must be present; each is applied to the runtime overlay independently, so
+    // the scope can be changed without re-selecting the preset (and vice versa).
+    const hasPreset = typeof body === "object" && body !== null && "preset" in body;
+    const hasScope = typeof body === "object" && body !== null && "scope" in body;
+    if (!hasPreset && !hasScope) {
+      return c.json({ error: "Body must include 'preset' and/or 'scope'" }, 400);
+    }
     const requested = (body as { preset?: unknown }).preset;
-    if (requested !== null && typeof requested !== "string") {
-      return c.json({ error: "Body must be { preset: string | null }" }, 400);
+    if (hasPreset && requested !== null && typeof requested !== "string") {
+      return c.json({ error: "'preset' must be a string or null" }, 400);
+    }
+    const PRESET_SCOPES = ["all", "unspecified", "coordinator_qa"] as const;
+    const requestedScope = (body as { scope?: unknown }).scope;
+    if (hasScope && (typeof requestedScope !== "string" || !PRESET_SCOPES.includes(requestedScope as typeof PRESET_SCOPES[number]))) {
+      return c.json({ error: `'scope' must be one of ${PRESET_SCOPES.join(", ")}` }, 400);
     }
 
     const config = getConfig();
     const previous = config.agents.defaults.activeModelPreset ?? null;
-    if (typeof requested === "string" && !listModelPresets(config).some((p) => p.name === requested)) {
+    const previousScope = config.agents.defaults.modelPresetScope ?? "all";
+    if (hasPreset && typeof requested === "string" && !listModelPresets(config).some((p) => p.name === requested)) {
       return c.json({ error: `Unknown model preset '${requested}'` }, 400);
     }
 
     const updated = updateConfig((raw) => {
       const agents = (raw["agents"] as Record<string, unknown> | undefined) ?? {};
       const defaults = (agents["defaults"] as Record<string, unknown> | undefined) ?? {};
+      const nextDefaults = { ...defaults };
       // "" (falsy → no active preset) instead of delete: the runtime overlay is
       // a diff against the base config, so a deletion could not switch the
       // preset off if the base config ever sets one.
-      raw["agents"] = { ...agents, defaults: { ...defaults, activeModelPreset: requested ?? "" } };
+      if (hasPreset) nextDefaults["activeModelPreset"] = requested ?? "";
+      if (hasScope) nextDefaults["modelPresetScope"] = requestedScope;
+      raw["agents"] = { ...agents, defaults: nextDefaults };
     });
 
     const active = getActiveModelPreset(updated);
@@ -2033,12 +2051,15 @@ export function createGateway() {
       from: previous,
       to: active?.name ?? null,
       primary: active?.preset.primary ?? updated.agents.defaults.model.primary,
+      scopeFrom: previousScope,
+      scopeTo: updated.agents.defaults.modelPresetScope ?? "all",
     });
 
     return c.json({
       active: active?.name ?? null,
       activePrimary: active?.preset.primary ?? null,
       defaultPrimary: updated.agents.defaults.model.primary,
+      scope: updated.agents.defaults.modelPresetScope ?? "all",
       presets: listModelPresets(updated),
     });
   });
