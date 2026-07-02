@@ -69,6 +69,11 @@ export const BUILTIN_EFFORT_PROFILES: Record<EffortTier, EffortProfile> = {
     subAgentMaxIterations: 4,
     maxDelegationDepth: 2,
     maxDelegatedResultChars: 6_000,
+    // Effort-scaled child budget: a low-effort delegated specialist finishes fast (a low turn is
+    // "least work that answers it", so its children must be short too — else a leaf researcher gets
+    // the config default 600s under a 120s turn, run e3cf6c22). Doubles as the leaf timeout default
+    // via effectiveSubAgentTurnSloMs().
+    subAgentTurnSloMs: 90_000,
     reasoningEffort: "low",
     enableThinking: false,
     toolCapMultiplier: 0.5,

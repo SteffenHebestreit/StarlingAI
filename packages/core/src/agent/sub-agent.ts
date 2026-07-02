@@ -14,7 +14,7 @@
 import fs from "node:fs";
 import type { LLMMessage, ChatProvider } from "../providers/lmstudio.js";
 import { getConfig } from "../config/loader.js";
-import { currentEffortProfile, effectiveOrchestration } from "../runtime/effort-context.js";
+import { currentEffortProfile, effectiveOrchestration, effectiveSubAgentTurnSloMs } from "../runtime/effort-context.js";
 import { getToolsAsLLMDefs, rerankToolsForTask, executeTool, normalizeToolCall, type ToolContext, type SwarmState, type SwarmTaskState, type ToolResult } from "../tools/registry.js";
 import { isToolAllowed } from "../guardrails/tool-tiers.js";
 import { scanOutput } from "../guardrails/output.js";
@@ -1999,7 +1999,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
   // prior runs don't prematurely abort in-flight task graphs.
   const COORDINATOR_TOOL_NAMES = ["run_task_graph", "parallel_delegate", "run_workflow"];
   const isCoordinatorAgent = agentCfg.tools?.some((t: string) => COORDINATOR_TOOL_NAMES.includes(t)) ?? false;
-  const leafDefaultMs = config.agents.performance?.subAgentTurnSloMs ?? 60_000;
+  // Leaf timeout default now respects the ACTIVE effort profile (low → 90s, high → 600s, max → ~∞)
+  // instead of the flat config value — so a low-effort child is short, not the 600s that let a
+  // researcher plan for 10 min under a 120s turn (run e3cf6c22). effectiveSubAgentTurnSloMs falls back
+  // to config.agents.performance.subAgentTurnSloMs when no profile field applies (medium = identity).
+  const leafDefaultMs = effectiveSubAgentTurnSloMs() || 60_000;
   const coordinatorDefaultMs = Math.round(config.gateway.turnTimeoutMs * 0.85);
   // Per-agent turnTimeoutMs is `number | "unbound" | undefined`. "unbound"
   // disables the turn timeout entirely (no soft/hard deadline, no adaptive

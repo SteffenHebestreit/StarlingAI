@@ -250,6 +250,17 @@ export const OrchestrationSchema = z.object({
    *  delegations. A clamp can only REDUCE a timeout, so the sub-agent starts wrapping up in time to
    *  deliver a usable partial. Unbounded (0) budgets are left alone. Default OFF until pass^k eval. */
   clampSubAgentTimeoutToParent: z.boolean().default(false),
+  /** Exclude delegation-WAIT time from the parent turn's budget (runtime.ts + gateway/rpc.ts). The
+   *  turn timeout is meant to bound the ORCHESTRATOR's own work — but it was a flat wall-clock that
+   *  also counted the time the parent sat BLOCKED awaiting a delegated child, so a turn timed out
+   *  because its children did legitimate work (run e3cf6c22: a 120s turn spent ~48s just waiting for
+   *  researchers). When true, each delegation tool's blocked duration pushes BOTH timeout layers'
+   *  deadlines out (the runtime abort AND the gateway hard timeout), so the tier budget measures the
+   *  parent's own active time; children are bounded by their own effort-scaled budgets. Never past an
+   *  absolute wall-clock ceiling (a hung/unbound child can't run forever); max effort (no base
+   *  timeout) is unaffected. Default ON — the correct orchestration timing model; flip false to revert
+   *  to the flat wall-clock. */
+  excludeDelegationWaitFromTurnBudget: z.boolean().default(true),
   /** Max-effort turn oversight (turn-oversight.ts). At `max` effort agents run unbounded
    *  and the final-QA gate + never-empty watchdog are OFF, so a turn that keeps
    *  re-delegating a dying build can churn for minutes and deliver nothing. When true, a

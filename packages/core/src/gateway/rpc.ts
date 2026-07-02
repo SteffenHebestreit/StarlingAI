@@ -16,6 +16,7 @@ import {
 } from "../agent/session.js";
 import type { SessionTranscriptAttachment } from "../agent/session.js";
 import { runTurn, buildTimeoutDeliveryMessage } from "../agent/runtime.js";
+import { DELEGATION_WAIT_CEILING_MS, extendDeadlineForDelegationWait } from "../agent/delegation-budget.js";
 import { resolveEffortProfile, resolveEffortTier } from "../runtime/effort-context.js";
 import type { EffortTier } from "../config/schema.js";
 import { listAllScenes } from "../credentials/scenes.js";
@@ -724,9 +725,24 @@ export class RpcConnection {
           }
         };
 
+        // D5: the gateway's hard timeout must stay in lockstep with the runtime's delegation-wait
+        // exclusion — else it guillotines a turn whose runtime budget legitimately paused for a child.
+        // Track the deadline so onDelegationWaitMs can push it out by the same blocked duration, capped
+        // at the same absolute ceiling (+ synthesis grace so the runtime aborts + synthesizes first).
+        let gatewayDeadlineMs = 0;
+        let gatewayDeadlineCeilingMs = 0;
         if (effectiveTurnTimeoutMs > 0) {
+          const armedAt = Date.now();
+          gatewayDeadlineMs = armedAt + effectiveTurnTimeoutMs + TURN_TIMEOUT_SYNTHESIS_GRACE_MS;
+          gatewayDeadlineCeilingMs = armedAt + DELEGATION_WAIT_CEILING_MS + TURN_TIMEOUT_SYNTHESIS_GRACE_MS;
           timeoutHandle = setTimeout(endTimedOutSession, effectiveTurnTimeoutMs + TURN_TIMEOUT_SYNTHESIS_GRACE_MS);
         }
+        const extendGatewayDeadline = (ms: number): void => {
+          if (gatewayDeadlineMs <= 0 || timedOut || completed || ms <= 0) return;
+          gatewayDeadlineMs = extendDeadlineForDelegationWait(gatewayDeadlineMs, ms, gatewayDeadlineCeilingMs);
+          if (timeoutHandle) clearTimeout(timeoutHandle);
+          timeoutHandle = setTimeout(endTimedOutSession, Math.max(0, gatewayDeadlineMs - Date.now()));
+        };
 
         if (
           overrideFlags.autoApprove
@@ -760,6 +776,8 @@ export class RpcConnection {
           turnTimeoutOverrideMs: effectiveTurnTimeoutMs,
           enableThinking,
           effortTier,
+          // D5: keep the gateway hard-timeout in lockstep with the runtime's delegation-wait exclusion.
+          onDelegationWaitMs: extendGatewayDeadline,
           onChunk: (text) => {
             this.sendEvent({ type: "agent.chunk", data: { requestId, text } });
           },

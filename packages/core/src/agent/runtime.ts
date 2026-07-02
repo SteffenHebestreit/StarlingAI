@@ -204,6 +204,10 @@ export {
 // Terminal honesty/guard blocks that fire on the assembled finalResponse (god-file seam).
 import { applyTerminalResponseGuards, type TerminalGuardContext } from "./turn-finalize-guards.js";
 
+// D5 delegation-wait budget math (shared with the gateway hard-timeout layer; kept out of this
+// heavily-mocked module so gateway/rpc.ts can import it without going through runtime.js).
+import { DELEGATION_WAIT_CEILING_MS, extendDeadlineForDelegationWait } from "./delegation-budget.js";
+
 // Pure response/tool-call collapsing + delegation arg helpers (god-file seam).
 import {
   deriveDelegationTaskFromArgs,
@@ -992,6 +996,12 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
   }
 }
 
+/** Tools where the orchestrator BLOCKS awaiting delegated children — their wall-clock duration is the
+ *  "parent waiting for kids" time excluded from the turn budget by D5 (excludeDelegationWaitFromTurnBudget). */
+const DELEGATION_WAIT_TOOL_NAMES = new Set([
+  "delegate_to_agent", "swarm_delegate", "parallel_delegate", "run_task_graph", "run_workflow",
+]);
+
 async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
   const config = getConfig();
   // Per-turn timeout — inline override wins, then the active effort profile's timeout
@@ -1003,12 +1013,28 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
   const turnTimeoutMs = resolvedTurnTimeoutMs > 0 ? resolvedTurnTimeoutMs : undefined;
   const turnAbort = turnTimeoutMs ? new AbortController() : undefined;
   const inertAbort = new AbortController();
-  // Absolute deadline for this turn — captured at the moment the abort timer is armed so a delegated
-  // sub-agent can clamp its own timeout to the parent's REMAINING budget (D3). Undefined = no timeout.
-  const turnDeadlineMs = turnTimeoutMs ? Date.now() + turnTimeoutMs : undefined;
-  const timeoutHandle = turnAbort
+  const turnStartMs = Date.now();
+  // Absolute deadline for this turn — captured when the abort timer is armed so a delegated sub-agent
+  // can clamp to the parent's REMAINING budget (D3). MUTABLE: the delegation-wait exclusion (D5) pushes
+  // it out while the orchestrator is BLOCKED awaiting a child, but never past turnDeadlineCeilingMs.
+  let turnDeadlineMs = turnTimeoutMs ? turnStartMs + turnTimeoutMs : undefined;
+  const turnDeadlineCeilingMs = turnTimeoutMs ? turnStartMs + DELEGATION_WAIT_CEILING_MS : undefined;
+  let timeoutHandle = turnAbort && turnTimeoutMs
     ? setTimeout(() => turnAbort.abort(), turnTimeoutMs)
     : undefined;
+  // D5 (orchestration.excludeDelegationWaitFromTurnBudget): push the turn deadline out by `ms` (the
+  // wall-clock the orchestrator sat BLOCKED awaiting a delegated child) and re-arm the abort, so the
+  // tier budget bounds the parent's OWN work — not its children's. Bounded by the absolute ceiling;
+  // a no-op when there is no timeout (max effort). Returns the new deadline to mirror onto the ctx.
+  const extendTurnDeadlineForDelegationWait = (ms: number): number | undefined => {
+    if (!turnAbort || turnDeadlineMs === undefined || turnDeadlineCeilingMs === undefined || ms <= 0) {
+      return turnDeadlineMs;
+    }
+    turnDeadlineMs = extendDeadlineForDelegationWait(turnDeadlineMs, ms, turnDeadlineCeilingMs);
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+    timeoutHandle = setTimeout(() => turnAbort.abort(), Math.max(0, turnDeadlineMs - Date.now()));
+    return turnDeadlineMs;
+  };
 
   // Warden abort: allows the Warden to cancel this turn mid-flight on severe anomalies.
   const wardenAbort = new AbortController();
@@ -1036,7 +1062,10 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
     // reasoning/prompt/iteration knobs pick it up without threading a parameter
     // through every helper.
     const out = await runWithEffortContext(opts.effortTier, () =>
-      _runTurn(opts, signal, turnAbort?.signal ?? inertAbort.signal, turnDeadlineMs));
+      _runTurn(opts, signal, turnAbort?.signal ?? inertAbort.signal, {
+        deadlineMs: turnDeadlineMs,
+        extendForDelegationWait: extendTurnDeadlineForDelegationWait,
+      }));
     return finalizeTurnOutput(out, sessionId);
   } catch (err) {
     // A thrown/aborted turn (provider hard-timeout, the per-turn timeout abort, a
@@ -1068,7 +1097,12 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
 // ./turn-prepare.ts (god-file seam). They thread state explicitly and depend on
 // no main-loop closure. Imported above; _runTurn calls them exactly as before.
 
-async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal: AbortSignal, turnDeadlineMs?: number): Promise<TurnOutput> {
+async function _runTurn(
+  opts: RunTurnOptions,
+  signal: AbortSignal,
+  timeoutSignal: AbortSignal,
+  turnBudget?: { deadlineMs?: number; extendForDelegationWait: (ms: number) => number | undefined },
+): Promise<TurnOutput> {
   const { session, userMessage } = opts;
   const guardrailEvents: TurnOutput["guardrailEvents"] = [];
   const turnStartedAt = Date.now();
@@ -1237,7 +1271,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     turnTimeoutOverrideMs: opts.turnTimeoutOverrideMs,
     onSwarmState: opts.onSwarmState,
     signal,
-    _turnDeadlineMs: turnDeadlineMs,
+    _turnDeadlineMs: turnBudget?.deadlineMs,
     _workflowExecutionStack: opts._workflowExecutionStack,
     swarmState: {
       objective: userMessage,
@@ -3348,6 +3382,19 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
         turnUsedSwarmTools = true;
       }
       toolExecutionTimeMs += toolDurationMs;
+      // D5: the orchestrator was BLOCKED for toolDurationMs awaiting this delegation's children —
+      // exclude that from the turn budget by pushing BOTH timeout layers' deadlines out (the runtime
+      // abort here, the gateway hard timeout via onDelegationWaitMs), so the tier budget bounds the
+      // parent's own work, not its children's (run e3cf6c22). Bounded by the absolute ceiling.
+      if (
+        DELEGATION_WAIT_TOOL_NAMES.has(tc.name)
+        && toolDurationMs > 0
+        && getConfig().orchestration?.excludeDelegationWaitFromTurnBudget !== false
+      ) {
+        const extendedDeadline = turnBudget?.extendForDelegationWait(toolDurationMs);
+        if (extendedDeadline !== undefined) toolContext._turnDeadlineMs = extendedDeadline;
+        opts.onDelegationWaitMs?.(toolDurationMs);
+      }
       const intervention = classifyToolIntervention({
         toolName: tc.name,
         success: result.success,

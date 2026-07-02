@@ -40,6 +40,10 @@ export interface RunTurnOptions {
   onComputerSessionState?: (sessionState: { computerSessionId: string; state: string; [key: string]: unknown }) => void;
   onIntervention?: (notice: InterventionNotice) => void;
   onSwarmState?: (state: SwarmState) => void;
+  /** D5: called with the wall-clock ms the orchestrator spent BLOCKED in a delegation tool. The
+   *  gateway uses it to push its own hard-timeout out by the same amount, so the delegation-wait
+   *  exclusion (orchestration.excludeDelegationWaitFromTurnBudget) holds at BOTH timeout layers. */
+  onDelegationWaitMs?: (ms: number) => void;
   approvalCallback?: (toolName: string, args: Record<string, unknown>) => Promise<boolean>;
   inputCallback?: (question: string, choices?: string[], timeoutMs?: number) => Promise<string>;
   signal?: AbortSignal;
