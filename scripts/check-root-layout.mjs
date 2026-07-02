@@ -16,6 +16,7 @@ const allowedFiles = new Set([
   ".mcp.json",
   "CONTRIBUTING.md",
   "docker-compose.computer.yml",
+  "docker-compose.gpu.yml",
   "docker-compose.model-servers.yml",
   "docker-compose.ollama.yml",
   "docker-compose.yml",
