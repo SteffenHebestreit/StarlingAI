@@ -67,6 +67,39 @@ export function prependUnverifiedSourceCaveat(answer: string, userMessage: strin
 }
 
 /**
+ * Honest correction for a turn that DID NOT FINISH NORMALLY — a forced synthesis emitted from an
+ * early-return path that bypasses the terminal honesty guards. Two such paths exist: the internal
+ * TIMEOUT cut-off, and the max-effort OVERSIGHT FLOOR (a stuck turn force-delivered). Those guards
+ * never run there, and are fooled anyway by a partial run's thin shared findings, so a from-memory
+ * partial can ship fabricated specifics dressed up as "verified against sources" (session e3cf6c22: a
+ * full "Verifiziert gegen [URLs]" paper written after a cancelled task graph). The abnormal finish IS
+ * proof the work is incomplete/unverified, so prepend a prominent bilingual banner unconditionally —
+ * the model claiming partial-then-fabricating is exactly why a prompt instruction alone ("be explicit
+ * about what was completed") is not enough. NEVER empties the answer. Sentinel-deduped so it never
+ * stacks. Cause-neutral wording (fits timeout + oversight). Structural — no phrase matching. Pure.
+ */
+export function prependTurnIncompleteCaveat(text: string): string {
+  if (text.includes("nicht vollständig abgeschlossen") || text.includes("did not finish normally")) {
+    return text;
+  }
+  const german = answerLooksGerman(text);
+  const de =
+    "> ⚠️ **Dieser Durchlauf wurde nicht vollständig abgeschlossen** — der Inhalt unten ist ein "
+    + "UNVOLLSTÄNDIGER Entwurf aus nicht abgeschlossener Arbeit und wurde NICHT gegen Quellen verifiziert. "
+    + "Behandle alle konkreten Angaben (Daten, Zahlen, Maße, Quellen- und „verifiziert“-Aussagen) als unbestätigt. "
+    + "Für das vollständige, geprüfte Ergebnis bitte mit höherer Effort-Stufe (medium/high) oder längerem Timeout erneut ausführen.";
+  const en =
+    "> ⚠️ **This run did not finish normally** — the content below is an INCOMPLETE draft from unfinished "
+    + "work and was NOT verified against sources. Treat every specific (dates, figures, dimensions, and any "
+    + "source or \"verified\" claims) as unconfirmed. Re-run at a higher effort tier (medium/high) or with a "
+    + "longer timeout for the full, verified result.";
+  const caveat = german
+    ? `${de}\n> _(${en.replace(/^> /, "")})_`
+    : `${en}\n> _(${de.replace(/^> /, "")})_`;
+  return `${caveat}\n\n${text.trim()}`;
+}
+
+/**
  * STRUCTURAL, language-free detection of source citations in an answer: a markdown link to an
  * http(s) URL, or a bare http(s) URL. The citation-honesty guard uses this to catch an answer
  * that presents URL citations without any real retrieval having run this turn (the audited

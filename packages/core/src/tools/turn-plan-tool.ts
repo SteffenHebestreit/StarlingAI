@@ -11,9 +11,22 @@ import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
+import { currentEffortTier } from "../runtime/effort-context.js";
 import { normalizeTurnPlan, persistTurnPlan, countParallelWidth, renderTurnPlan, type TurnPlan } from "../agent/turn-plan.js";
 
 const log = childLogger("tool:record_plan");
+
+/** D4: a large, high-risk, multi-delegate plan cannot finish inside the LOW-effort budget (~2 min) —
+ * the fan-out gets cancelled and the turn back-fills a degraded, unverified answer (run e3cf6c22).
+ * Pure/exported: fires only when the effort tier is "low", the plan is high-risk, and it has ≥3
+ * delegate steps. Structural (effort tier + riskTier + delegate-step count), no topic/keyword matching. */
+export function shouldWarnLowEffortBigPlan(
+  effortTier: string | undefined,
+  riskTier: string,
+  delegateStepCount: number,
+): boolean {
+  return effortTier === "low" && riskTier === "high" && delegateStepCount >= 3;
+}
 
 registerTool({
   name: "record_plan",
@@ -88,13 +101,22 @@ registerTool({
     if (delegateStepCount > 0) {
       execParts.push(`run the ${delegateStepCount} delegate step${delegateStepCount === 1 ? "" : "s"} — parallel_delegate for genuinely independent work, delegate_to_agent or run_task_graph otherwise`);
     }
+    // D4 (session e3cf6c22): a large, high-risk, multi-delegate plan cannot finish inside the
+    // LOW-effort budget (~2 min) — the fan-out gets cancelled and the turn back-fills a degraded,
+    // unverified answer. Warn the orchestrator UP FRONT so it sets expectations with the user instead
+    // of silently attempting a doomed run. Structural (delegate-step count + riskTier + effort tier);
+    // no topic/keyword matching. Advisory only — it never blocks the plan.
+    const budgetWarning = shouldWarnLowEffortBigPlan(currentEffortTier(), plan.riskTier, delegateStepCount)
+      ? ` ⚠️ BUDGET NOTE: ${delegateStepCount} delegate steps at HIGH risk under LOW effort (~2 min budget) — this will very likely NOT finish in time. Prefer telling the user to re-run at a higher effort tier (medium/high) or with a longer --timeout; if you proceed anyway, keep the scope tight and make any partial result's limitations explicit in your final answer.`
+      : "";
     return {
       success: true,
       output: `Plan recorded (${plan.steps.length} step${plan.steps.length === 1 ? "" : "s"}, risk: ${plan.riskTier}). `
         + (execParts.length > 0
           ? `Recording a plan is NOT execution. Now CALL the orchestration tools to ${execParts.join(", and ")}. Do NOT write the final answer until those steps have actually run; a tool-free answer after only record_plan does not satisfy this plan.`
-          : `Now execute it and make sure the final answer meets the acceptance criteria.`),
-      metadata: { stepCount: plan.steps.length, riskTier: plan.riskTier, wide: plan.wide },
+          : `Now execute it and make sure the final answer meets the acceptance criteria.`)
+        + budgetWarning,
+      metadata: { stepCount: plan.steps.length, riskTier: plan.riskTier, wide: plan.wide, ...(budgetWarning ? { budgetWarning: true } : {}) },
     };
   },
 });

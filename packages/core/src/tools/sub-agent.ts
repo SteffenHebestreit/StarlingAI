@@ -2109,6 +2109,9 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         _turnAgentRepeatLimitOverrides: ctx._turnAgentRepeatLimitOverrides,
         _turnTotalDelegationLimitOverride: ctx._turnTotalDelegationLimitOverride,
         _workflowExecutionStack: ctx._workflowExecutionStack,
+        // D3: propagate the parent turn's absolute deadline so the specialist clamps its hard timeout
+        // to the remaining budget (orchestration.clampSubAgentTimeoutToParent).
+        _turnDeadlineMs: ctx._turnDeadlineMs,
         // E18: Soft deadline — give the specialist 70% of its effective timeout so
         // it starts wrapping up before the hard timeout fires.
         softDeadlineMs: (() => {
@@ -2122,7 +2125,12 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           // "unbound" (no numeric budget) → push the soft deadline effectively
           // out of reach so it never fires for long-running agents.
           const effective = typeof raw === "number" ? raw : Number.MAX_SAFE_INTEGER;
-          return Date.now() + Math.floor(effective * 0.70);
+          const softMs = Date.now() + Math.floor(effective * 0.70);
+          // D3: don't let the wrap-up nudge land AFTER the parent turn's hard deadline (else it never
+          // fires and the specialist is guillotined mid-flight). Clamp when the clamp flag is on.
+          return (getConfig().orchestration?.clampSubAgentTimeoutToParent === true && typeof ctx._turnDeadlineMs === "number")
+            ? Math.min(softMs, ctx._turnDeadlineMs)
+            : softMs;
         })(),
       };
 

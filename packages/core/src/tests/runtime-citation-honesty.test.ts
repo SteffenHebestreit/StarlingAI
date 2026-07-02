@@ -9,6 +9,7 @@ import {
   prependUrlNotFetchedCaveat,
   looksLikeUnsourcedSpecificClaims,
   answerAssertsSpecifics,
+  prependTurnIncompleteCaveat,
 } from "../agent/citation-honesty.js";
 
 // The audited fabricated answer (session 1303e254, condensed): invented 404 links produced with
@@ -225,5 +226,33 @@ describe("answerAssertsSpecifics — short answer asserts page content", () => {
 
   it("respects a higher minTokens threshold", () => {
     expect(answerAssertsSpecifics("Only one year here: 2026.", 2)).toBe(false); // 1 token < 2
+  });
+});
+
+describe("prependTurnIncompleteCaveat (timeout-path honesty stamp)", () => {
+  // Session e3cf6c22: a cancelled task graph timed out, then a from-memory paper shipped stamped
+  // "Verifiziert gegen [URLs]" via the internal-timeout synthesis path, which bypasses the terminal
+  // guards. The caveat is prepended unconditionally there — the timeout IS proof the work is unverified.
+  const GERMAN_FAB = "# Die Architektur Dresdens\n**Quellen:** Verifiziert gegen der-dresdner-zwinger.de. "
+    + "Der Zwinger entstand 1709 bis 1728, das Kronentor 1714, der Hof misst 106 × 107 Meter.";
+
+  it("prepends a prominent, unverified/incomplete banner and preserves the body", () => {
+    const out = prependTurnIncompleteCaveat(GERMAN_FAB);
+    expect(out).toMatch(/nicht vollständig abgeschlossen/); // German lead (answer is German)
+    expect(out).toMatch(/did not finish normally/);         // bilingual secondary line
+    expect(out).toMatch(/NICHT gegen Quellen verifiziert/);
+    expect(out).toContain("Der Zwinger entstand 1709");     // original body kept, never emptied
+    expect(out.indexOf("abgeschlossen")).toBeLessThan(out.indexOf("Die Architektur")); // caveat is FIRST
+  });
+
+  it("leads in English for an unambiguously English answer", () => {
+    const out = prependTurnIncompleteCaveat("The Zwinger dates to the early 1700s; its crown gate opened in 1714. Sources confirm these figures.");
+    expect(out.indexOf("did not finish normally")).toBeLessThan(out.indexOf("nicht vollständig abgeschlossen"));
+  });
+
+  it("is idempotent — never stacks a second banner", () => {
+    const once = prependTurnIncompleteCaveat(GERMAN_FAB);
+    const twice = prependTurnIncompleteCaveat(once);
+    expect(twice).toBe(once);
   });
 });

@@ -230,6 +230,26 @@ export const OrchestrationSchema = z.object({
    *  an actionable reuse instruction. Structural (artifact paths), no topic/keyword tables; advisory
    *  only (an agent may still author a genuinely new variant). Default OFF until pass^k eval. */
   crossAgentArtifactReuse: z.boolean().default(false),
+  /** run_task_graph failure visibility for the honesty backstop (runtime.ts
+   *  classifyPostOrchestrationDisposition). A task graph that returns failed/blocked nodes emits
+   *  "Task graph finished with incomplete status" and carries {completed,failed,blocked} metadata —
+   *  but the classifier only matched the success string "Task graph completed", so a FAILED graph was
+   *  invisible (disposition → none) and the failed-research honesty backstop never armed; the turn
+   *  then synthesized a confident from-memory answer as if the research had succeeded (run e3cf6c22).
+   *  When true, the classifier recognizes an incomplete graph and, when any node failed or was blocked,
+   *  classifies the turn as a delegation failure so the backstop re-anchors / adds the honest note.
+   *  Structural (metadata arrays + harness status string, no topic/keywords). Default OFF until pass^k
+   *  eval confirms it doesn't over-fire on graphs that failed only a non-essential node. */
+  taskGraphFailureDisposition: z.boolean().default(false),
+  /** Clamp a sub-agent's turn timeout to the PARENT turn's remaining budget (sub-agent.ts). A leaf
+   *  agent's timeout derives from its own config / the gateway timeout, ignoring how much of the parent
+   *  turn is left — so a researcher was handed 600s under a 120s low-effort turn, planned for 10 min,
+   *  and was then guillotined with nothing usable (run e3cf6c22). When true, a delegated sub-agent's
+   *  hard timeout (and soft wrap-up deadline) is capped at max(floor, parentDeadline − now), threaded as
+   *  an absolute epoch-ms deadline (ToolContext._turnDeadlineMs) that propagates through nested
+   *  delegations. A clamp can only REDUCE a timeout, so the sub-agent starts wrapping up in time to
+   *  deliver a usable partial. Unbounded (0) budgets are left alone. Default OFF until pass^k eval. */
+  clampSubAgentTimeoutToParent: z.boolean().default(false),
   /** Max-effort turn oversight (turn-oversight.ts). At `max` effort agents run unbounded
    *  and the final-QA gate + never-empty watchdog are OFF, so a turn that keeps
    *  re-delegating a dying build can churn for minutes and deliver nothing. When true, a

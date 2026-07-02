@@ -1819,6 +1819,27 @@ function stripHallucinatedToolTags(text: string): string {
   return stripped.trim();
 }
 
+/** Floor for the parent-remaining-budget clamp (orchestration.clampSubAgentTimeoutToParent): even
+ * when the parent turn is nearly out of time, give a delegated sub-agent at least this long so it can
+ * synthesize a usable partial rather than instantly aborting. The parent's abort signal still caps
+ * the true wall-clock, so this cannot exceed the turn's hard deadline. */
+const SUB_AGENT_MIN_CLAMP_MS = 30_000;
+
+/** Pure clamp for D3: a sub-agent must never be handed more time than the parent turn has LEFT.
+ * Returns `min(resolvedMs, max(floorMs, deadlineMs - nowMs))` — never larger than the resolved
+ * timeout (a clamp only reduces), never below the floor (so a nearly-exhausted turn still lets the
+ * specialist synthesize a partial). No deadline, or an unbounded (≤0) resolved budget, passes through
+ * unchanged. Pure/exported for direct unit testing. */
+export function clampSubAgentTimeoutToRemaining(
+  resolvedMs: number,
+  deadlineMs: number | undefined,
+  nowMs: number,
+  floorMs: number = SUB_AGENT_MIN_CLAMP_MS,
+): number {
+  if (typeof deadlineMs !== "number" || resolvedMs <= 0) return resolvedMs;
+  return Math.min(resolvedMs, Math.max(floorMs, deadlineMs - nowMs));
+}
+
 export interface SubAgentRunOptions {
   agentName: string;
   task: string;
@@ -1860,6 +1881,9 @@ export interface SubAgentRunOptions {
   _turnTotalDelegationLimitOverride?: number;
   /** Active reusable workflow execution stack for nested workflow/self-reentry guards. Internal. */
   _workflowExecutionStack?: string[];
+  /** Absolute epoch-ms deadline of the PARENT turn, propagated so this sub-agent can clamp its own
+   * timeout to the remaining budget (orchestration.clampSubAgentTimeoutToParent). Internal. */
+  _turnDeadlineMs?: number;
   /** Inline config — bypasses config lookup (used by agent_factory for ephemeral agents) */
   inlineConfig?: import("../config/schema.js").SubAgentConfig;
   /**
@@ -1994,7 +2018,15 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     ?? (agentUnbounded ? 0 : agentTurnTimeoutMs)
     ?? adaptiveTimeout?.timeoutMs
     ?? defaultTimeoutMs;
-  const turnTimeoutMs = resolvedTurnTimeoutMs && resolvedTurnTimeoutMs > 0 ? resolvedTurnTimeoutMs : undefined;
+  // D3 (orchestration.clampSubAgentTimeoutToParent, default off): never hand a sub-agent more time
+  // than the parent turn has LEFT. A leaf researcher was given 600s under a 120s turn, planned for
+  // 10 min, then got guillotined with nothing usable (run e3cf6c22). Clamp to the remaining budget
+  // with a small floor so a nearly-exhausted turn still lets the specialist synthesize a partial. An
+  // unbounded budget (0) is left alone. A clamp can only REDUCE the timeout.
+  const effectiveTurnTimeoutMs = config.orchestration?.clampSubAgentTimeoutToParent === true
+    ? clampSubAgentTimeoutToRemaining(resolvedTurnTimeoutMs, opts._turnDeadlineMs, Date.now())
+    : resolvedTurnTimeoutMs;
+  const turnTimeoutMs = effectiveTurnTimeoutMs && effectiveTurnTimeoutMs > 0 ? effectiveTurnTimeoutMs : undefined;
   const sanitizedTask = sanitizeSubAgentTask(agentCfg.tools, opts.task);
   const sourceSensitiveTask = buildDynamicTurnGuidance(sanitizedTask)?.sourceSensitive === true;
   // Fix 4: detect when this task was routed via the no-specialist-match
@@ -2313,6 +2345,9 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       _turnAgentRepeatLimitOverrides: opts._turnAgentRepeatLimitOverrides,
       _turnTotalDelegationLimitOverride: opts._turnTotalDelegationLimitOverride,
       _workflowExecutionStack: opts._workflowExecutionStack,
+      // Propagate the parent turn's deadline so this sub-agent's OWN delegations clamp to the same
+      // remaining budget (D3). Inherited unchanged — nothing can run past the turn's hard abort.
+      _turnDeadlineMs: opts._turnDeadlineMs,
       signal,
     };
 

@@ -189,6 +189,7 @@ import {
   buildSynthesisRequiredDirective,
   userMessageCarriesActionableUrl,
   looksLikeUnsourcedSpecificClaims,
+  prependTurnIncompleteCaveat,
 } from "./citation-honesty.js";
 
 // Re-export the originally-exported honesty helpers so existing imports from
@@ -826,17 +827,35 @@ const USER_INTERACTION_CUE_RE = /\b(please confirm|confirm .* before|approval re
 
 type PostOrchestrationDisposition = "continue" | "synthesize" | "ask_user" | "failure" | "none";
 
+/** D2: a run_task_graph tool result carries {completed,failed,blocked} arrays. It is a failure when
+ * the result is a genuine graph (has a `completed` array) and ANY node failed or was blocked — such a
+ * graph did NOT deliver its objective. Pure/exported for direct unit testing; the classifier only
+ * consults it when orchestration.taskGraphFailureDisposition is on. */
+export function taskGraphResultIsFailure(metadata: Record<string, unknown>): boolean {
+  if (!Array.isArray(metadata["completed"])) return false;
+  const failed = Array.isArray(metadata["failed"]) && (metadata["failed"] as unknown[]).length > 0;
+  const blocked = Array.isArray(metadata["blocked"]) && (metadata["blocked"] as unknown[]).length > 0;
+  return failed || blocked;
+}
+
 export function classifyPostOrchestrationDisposition(
   toolResultMessages: Array<LLMMessage & { metadata?: Record<string, unknown> }>,
 ): PostOrchestrationDisposition {
+  // D2 (run e3cf6c22): a run_task_graph with failed/blocked nodes emits "Task graph finished with
+  // incomplete status" (tool-result-format.ts) — the success-only "Task graph completed" match below
+  // misses it, so a FAILED graph was dropped from disposition entirely (→ none) and the failed-research
+  // honesty backstop never armed. When the flag is on, recognize the incomplete-graph result too.
+  const taskGraphFailureDisposition = getConfig().orchestration?.taskGraphFailureDisposition === true;
   const orchestrationResults = toolResultMessages.filter((message) => {
     const text = typeof message.content === "string" ? message.content : "";
     const isWorkflowExecutionResult = /^Workflow\s+.+\s+\[[^\]]+\]\s+(blocked|completed)\./i.test(text);
+    const isIncompleteTaskGraph = taskGraphFailureDisposition && text.includes("Task graph finished with incomplete status");
     return text.includes("Observed evidence:")
       && (
         text.includes("Delegated result from")
         || text.includes("Parallel delegation completed")
         || text.includes("Task graph completed")
+        || isIncompleteTaskGraph
         || isWorkflowExecutionResult
         || text.includes("Ephemeral agent ")
       );
@@ -876,6 +895,16 @@ export function classifyPostOrchestrationDisposition(
     }
 
     if (/^Ephemeral agent .+ failed\./m.test(text)) {
+      return "failure";
+    }
+
+    // D2: a run_task_graph result carries {completed,failed,blocked} arrays. A graph with ANY failed
+    // or blocked node did NOT deliver its objective — classify as a delegation failure so the
+    // failed-research honesty backstop arms (else the turn synthesizes a confident from-memory answer
+    // as if the graph had succeeded). Structural (metadata arrays), gated. The completed-array check
+    // scopes this to genuine graph results, and a fully-successful graph (empty failed+blocked) falls
+    // through to the normal success handling below.
+    if (taskGraphFailureDisposition && taskGraphResultIsFailure(metadata)) {
       return "failure";
     }
 
@@ -974,6 +1003,9 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
   const turnTimeoutMs = resolvedTurnTimeoutMs > 0 ? resolvedTurnTimeoutMs : undefined;
   const turnAbort = turnTimeoutMs ? new AbortController() : undefined;
   const inertAbort = new AbortController();
+  // Absolute deadline for this turn — captured at the moment the abort timer is armed so a delegated
+  // sub-agent can clamp its own timeout to the parent's REMAINING budget (D3). Undefined = no timeout.
+  const turnDeadlineMs = turnTimeoutMs ? Date.now() + turnTimeoutMs : undefined;
   const timeoutHandle = turnAbort
     ? setTimeout(() => turnAbort.abort(), turnTimeoutMs)
     : undefined;
@@ -1004,7 +1036,7 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
     // reasoning/prompt/iteration knobs pick it up without threading a parameter
     // through every helper.
     const out = await runWithEffortContext(opts.effortTier, () =>
-      _runTurn(opts, signal, turnAbort?.signal ?? inertAbort.signal));
+      _runTurn(opts, signal, turnAbort?.signal ?? inertAbort.signal, turnDeadlineMs));
     return finalizeTurnOutput(out, sessionId);
   } catch (err) {
     // A thrown/aborted turn (provider hard-timeout, the per-turn timeout abort, a
@@ -1036,7 +1068,7 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
 // ./turn-prepare.ts (god-file seam). They thread state explicitly and depend on
 // no main-loop closure. Imported above; _runTurn calls them exactly as before.
 
-async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal: AbortSignal): Promise<TurnOutput> {
+async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal: AbortSignal, turnDeadlineMs?: number): Promise<TurnOutput> {
   const { session, userMessage } = opts;
   const guardrailEvents: TurnOutput["guardrailEvents"] = [];
   const turnStartedAt = Date.now();
@@ -1205,6 +1237,7 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
     turnTimeoutOverrideMs: opts.turnTimeoutOverrideMs,
     onSwarmState: opts.onSwarmState,
     signal,
+    _turnDeadlineMs: turnDeadlineMs,
     _workflowExecutionStack: opts._workflowExecutionStack,
     swarmState: {
       objective: userMessage,
@@ -1538,7 +1571,12 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
           "The request timed out mid-turn. Using ONLY the tool results gathered so far, write the most useful partial response you can. Be explicit about what was completed and what was not.",
         );
         if (synthesized) {
-          const finalResponse = sanitizeUserFacingAssistantResponse(synthesized, iterationCount) || synthesized;
+          // This early-return timeout path does NOT reach applyTerminalResponseGuards below, so a
+          // from-memory partial can ship fabricated "verified against sources" specifics unchecked
+          // (session e3cf6c22). The timeout firing is itself proof the work is incomplete/unverified —
+          // stamp it honestly, unconditionally (structural, no topic/keyword matching).
+          const cleaned = sanitizeUserFacingAssistantResponse(synthesized, iterationCount) || synthesized;
+          const finalResponse = prependTurnIncompleteCaveat(cleaned);
           persistAssistantTurnState(session, finalResponse, getTurnSwarmState());
           if (opts.onChunk) opts.onChunk(finalResponse);
           const performance = buildTurnPerformanceMetrics({
@@ -1699,7 +1737,12 @@ async function _runTurn(opts: RunTurnOptions, signal: AbortSignal, timeoutSignal
             + "If a file was produced but is incomplete, say so plainly and give its path. Be explicit about what is done and what is not. Do NOT paste large code blocks.",
           );
           if (synthesized) {
-            const finalResponse = sanitizeUserFacingAssistantResponse(synthesized, iterationCount) || synthesized;
+            // Same guard-bypass hole as the timeout path: this early return does NOT reach
+            // applyTerminalResponseGuards, so a stuck-turn from-memory synthesis could ship fabricated
+            // "verified" specifics. The forced floor delivery is itself proof the work is incomplete —
+            // stamp it honestly (cause-neutral caveat, structural).
+            const cleaned = sanitizeUserFacingAssistantResponse(synthesized, iterationCount) || synthesized;
+            const finalResponse = prependTurnIncompleteCaveat(cleaned);
             persistAssistantTurnState(session, finalResponse, getTurnSwarmState());
             if (opts.onChunk) opts.onChunk(finalResponse);
             const performance = buildTurnPerformanceMetrics({

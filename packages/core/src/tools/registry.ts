@@ -199,6 +199,14 @@ export interface ToolContext {
    */
   _toolDevSessionId?: string;
   /**
+   * Absolute epoch-ms deadline for this turn (Date.now() + the resolved turn timeout, at the
+   * moment the turn's abort timer is armed). When set, sub-agent delegation clamps a specialist's
+   * timeout to the parent's REMAINING budget (orchestration.clampSubAgentTimeoutToParent) so it is
+   * never handed more time than the turn has left. Propagates unchanged through nested delegations.
+   * Internal. Undefined when the turn has no timeout (unlimited / max effort).
+   */
+  _turnDeadlineMs?: number;
+  /**
    * Per-turn per-path overwrite tracker for the write_file regeneration nudge
    * (orchestration.detectWriteChurnOverwrite). Keyed by workspace-relative path;
    * counts near-identical overwrites so a builder that re-emits a file from the top
