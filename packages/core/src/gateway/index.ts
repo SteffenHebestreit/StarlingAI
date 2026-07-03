@@ -5116,7 +5116,8 @@ export function createGateway() {
     // Attribute the connection (and its sessions) to the authenticated user so
     // document-RAG user scope + RBAC key on the same identity as REST uploads.
     const connUserId = typeof payload.sub === "string" ? payload.sub : undefined;
-    const conn = new RpcConnection(ws, connUserId);
+    const connRole = typeof payload.role === "string" ? payload.role : undefined;
+    const conn = new RpcConnection(ws, connUserId, connRole);
 
     ws.on("message", async (raw) => {
       await conn.handleMessage(raw.toString());

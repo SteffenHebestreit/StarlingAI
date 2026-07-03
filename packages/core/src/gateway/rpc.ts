@@ -14,7 +14,8 @@ import {
   resolveSession,
   listSessions,
 } from "../agent/session.js";
-import type { SessionTranscriptAttachment } from "../agent/session.js";
+import type { SessionTranscriptAttachment, SessionSummary } from "../agent/session.js";
+import { roleRank } from "./auth.js";
 import { runTurn, buildTimeoutDeliveryMessage } from "../agent/runtime.js";
 import { DELEGATION_WAIT_CEILING_MS, extendDeadlineForDelegationWait } from "../agent/delegation-budget.js";
 import { resolveEffortProfile, resolveEffortTier } from "../runtime/effort-context.js";
@@ -296,17 +297,46 @@ export class RpcConnection {
    *  Sessions are attributed to this so document-RAG user scope + per-user RBAC
    *  match the same identity uploads use. Undefined only if the token had no sub. */
   private readonly connUserId: string | undefined;
+  /** Authenticated role (JWT `role` claim); operators may manage any session. */
+  private readonly connRole: string | undefined;
 
-  constructor(ws: WebSocket, connUserId?: string) {
+  constructor(ws: WebSocket, connUserId?: string, connRole?: string) {
     this.connId = randomUUID();
     this.ws = ws;
     this.connUserId = connUserId;
+    this.connRole = connRole;
     this.sendEvent({ type: "hello-ok", data: {
       connId: this.connId,
       version: "0.1.0",
-      sessions: listSessions({ includeArchived: true }),
+      sessions: this.visibleSessions(),
     }});
     log.info({ connId: this.connId }, "RPC connection established");
+  }
+
+  /** Operators (instance admins) may access any session. */
+  private isSessionAdmin(): boolean {
+    return !!this.connRole && roleRank(this.connRole) >= roleRank("operator");
+  }
+
+  /**
+   * Whether this connection may read/mutate the given session. Enforced so one
+   * authenticated user cannot get/delete/archive/reset/rewind/resume another
+   * user's (or another connection's) session by id. No-ops for auth-off / no-sub
+   * connections (no identity to enforce) and for operators; unknown/unowned
+   * sessions fall through to each handler's normal not-found path.
+   */
+  private canAccessSession(sid: string): boolean {
+    if (!this.connUserId || this.isSessionAdmin()) return true;
+    const rec = getSessionRecord(sid);
+    if (!rec || rec.userId === undefined) return true;
+    return rec.userId === this.connUserId;
+  }
+
+  /** Session list scoped to what this connection may see (own + unowned; all for operators). */
+  private visibleSessions(): SessionSummary[] {
+    const all = listSessions({ includeArchived: true });
+    if (!this.connUserId || this.isSessionAdmin()) return all;
+    return all.filter((s) => s.userId === undefined || s.userId === this.connUserId);
   }
 
   async handleMessage(raw: string): Promise<void> {
@@ -374,6 +404,7 @@ export class RpcConnection {
 
       case "session.end": {
         const sid = String(params["sessionId"] ?? this.activeSessionId ?? "");
+        if (sid && !this.canAccessSession(sid)) throw new Error(`Session not found: ${sid}`);
         archiveSession(sid);
         if (this.activeSessionId === sid) this.activeSessionId = null;
         return { ended: true };
@@ -381,6 +412,7 @@ export class RpcConnection {
 
       case "session.archive": {
         const sid = String(params["sessionId"] ?? this.activeSessionId ?? "");
+        if (sid && !this.canAccessSession(sid)) throw new Error(`Session not found: ${sid}`);
         const archived = archiveSession(sid);
         if (this.activeSessionId === sid) this.activeSessionId = null;
         return { archived, sessionId: sid };
@@ -388,6 +420,7 @@ export class RpcConnection {
 
       case "session.delete": {
         const sid = String(params["sessionId"] ?? this.activeSessionId ?? "");
+        if (sid && !this.canAccessSession(sid)) throw new Error(`Session not found: ${sid}`);
         const deleted = deleteSession(sid);
         if (this.activeSessionId === sid) this.activeSessionId = null;
         return { deleted, sessionId: sid };
@@ -395,6 +428,7 @@ export class RpcConnection {
 
       case "session.get": {
         const sid = String(params["sessionId"] ?? this.activeSessionId ?? "");
+        if (sid && !this.canAccessSession(sid)) throw new Error(`Session not found: ${sid}`);
         const limitRaw = params["limit"];
         const beforeMessageId = typeof params["beforeMessageId"] === "string" && params["beforeMessageId"].trim()
           ? String(params["beforeMessageId"])
@@ -416,10 +450,11 @@ export class RpcConnection {
       }
 
       case "session.list":
-        return listSessions({ includeArchived: true });
+        return this.visibleSessions();
 
       case "session.updateSettings": {
         const sid = String(params["sessionId"] ?? this.activeSessionId ?? "");
+        if (sid && !this.canAccessSession(sid)) throw new Error(`Session not found: ${sid}`);
         const session = getSessionRecord(sid);
         if (!session) throw new Error(`Session not found: ${sid}`);
         const patch: { effort?: EffortTier; turnTimeoutSecOverride?: number } = {};
@@ -442,12 +477,14 @@ export class RpcConnection {
 
       case "session.reset": {
         const sid = String(params["sessionId"] ?? this.activeSessionId ?? "");
+        if (sid && !this.canAccessSession(sid)) throw new Error(`Session not found: ${sid}`);
         getSessionRecord(sid)?.reset();
         return { reset: true };
       }
 
       case "session.rewind": {
         const sid = String(params["sessionId"] ?? this.activeSessionId ?? "");
+        if (sid && !this.canAccessSession(sid)) throw new Error(`Session not found: ${sid}`);
         const historyIndex = Number(params["historyIndex"] ?? -1);
         if (!Number.isInteger(historyIndex) || historyIndex < 0) {
           throw new Error("session.rewind requires a non-negative integer historyIndex");
@@ -496,6 +533,9 @@ export class RpcConnection {
 
       case "chat.send": {
         const sessionId = String(params["sessionId"] ?? this.activeSessionId ?? "");
+        // Don't let a caller drive a turn on another user's existing session
+        // (a not-yet-created session id falls through — it will be owned by them).
+        if (sessionId && !this.canAccessSession(sessionId)) throw new Error(`Session not found: ${sessionId}`);
         let message = String(params["message"] ?? "");
         const displayContent = typeof params["displayContent"] === "string" ? String(params["displayContent"]).trim() : undefined;
         const userAttachments = normalizeChatAttachmentMetadata(params["attachments"]);
