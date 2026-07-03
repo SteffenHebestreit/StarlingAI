@@ -2293,15 +2293,24 @@ export function createGateway() {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
     const user = await authenticatedUser(c.req.header("Authorization"));
+    const sessionId = c.req.query("sessionId") ?? "";
     try {
-      const [{ engramListDocuments }, { listRegistry }, { parseScopeFromSource }] = await Promise.all([
+      const [{ engramListDocuments }, { listRegistry }, { parseScopeFromSource, callerManageableSources }] = await Promise.all([
         import("../retrieval/engram.js"),
         import("../retrieval/document-registry.js"),
         import("../retrieval/document-rag.js"),
       ]);
       const docs = await engramListDocuments();
       const registry = await listRegistry();
-      const documents = (docs ?? []).map((d) => ({
+      // Multi-user mode: never list another user's / another session's documents.
+      // Legacy single-operator mode (auth disabled) keeps the flat instance-wide view.
+      const inScope = getConfig().auth.enabled
+        ? (() => {
+            const manageable = callerManageableSources({ userId: user?.username, sessionId });
+            return (docs ?? []).filter((d) => d.sources.some((s) => manageable.has(s)));
+          })()
+        : (docs ?? []);
+      const documents = inScope.map((d) => ({
         id: d.id,
         title: d.title ?? null,
         chunkCount: d.chunkCount,
@@ -2382,9 +2391,29 @@ export function createGateway() {
     const scopeRaw = c.req.query("scope");
     const scope = scopeRaw && ["session", "user", "workspace"].includes(scopeRaw) ? scopeRaw as "session" | "user" | "workspace" : undefined;
     const sessionId = c.req.query("sessionId") ?? "";
+    const ctx = { sessionId, ...(user?.username ? { userId: user.username } : {}) };
     try {
-      const { forgetDocument } = await import("../retrieval/document-rag.js");
-      const ok = await forgetDocument(id, scope, { sessionId, ...(user?.username ? { userId: user.username } : {}) });
+      const { forgetDocument, callerManageableSources, resolveScopeSource, parseScopeFromSource } =
+        await import("../retrieval/document-rag.js");
+      // Multi-user mode: a caller may only delete document references in scopes it
+      // owns — never wipe another user's copy, and never blanket-delete every scope
+      // of a shared document. Legacy single-operator mode keeps the flat behavior.
+      if (getConfig().auth.enabled) {
+        const { engramListDocuments } = await import("../retrieval/engram.js");
+        const docs = await engramListDocuments();
+        const doc = docs?.find((d) => d.id === id);
+        const manageable = callerManageableSources({ userId: user?.username, sessionId });
+        const owned = doc ? doc.sources.filter((s) => manageable.has(s)) : [];
+        if (!doc || owned.length === 0) return c.json({ error: "Document not found" }, 404);
+        const targets = scope
+          ? (() => { const t = resolveScopeSource(scope, ctx); return t && owned.includes(t) ? [scope] : []; })()
+          : owned.map((s) => parseScopeFromSource(s)).filter((s): s is "session" | "user" | "workspace" => !!s);
+        if (targets.length === 0) return c.json({ error: "Document not found" }, 404);
+        let removed = false;
+        for (const sc of targets) removed = (await forgetDocument(id, sc, ctx)) || removed;
+        return removed ? c.json({ id, removed: true, scope: scope ?? "owned" }) : c.json({ error: "Document not found or RAG unavailable" }, 502);
+      }
+      const ok = await forgetDocument(id, scope, ctx);
       return ok ? c.json({ id, removed: true, scope: scope ?? "all" }) : c.json({ error: "Document not found or RAG unavailable" }, 502);
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
@@ -2394,8 +2423,23 @@ export function createGateway() {
   app.get("/api/documents/:id/file", async (c) => {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const user = await authenticatedUser(c.req.header("Authorization"));
+    const sessionId = c.req.query("sessionId") ?? "";
     const id = c.req.param("id");
     try {
+      // Multi-user mode: don't stream another user's / another session's file bytes.
+      if (getConfig().auth.enabled) {
+        const [{ engramListDocuments }, { callerManageableSources }] = await Promise.all([
+          import("../retrieval/engram.js"),
+          import("../retrieval/document-rag.js"),
+        ]);
+        const docs = await engramListDocuments();
+        const doc = docs?.find((d) => d.id === id);
+        const manageable = callerManageableSources({ userId: user?.username, sessionId });
+        if (!doc || !doc.sources.some((s) => manageable.has(s))) {
+          return c.json({ error: "No original file is stored for this document" }, 404);
+        }
+      }
       const { getRegistryFileEntry } = await import("../retrieval/document-registry.js");
       const entry = await getRegistryFileEntry(id);
       if (!entry?.relativePath) return c.json({ error: "No original file is stored for this document" }, 404);

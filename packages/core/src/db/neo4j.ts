@@ -47,8 +47,27 @@ export function isGraphDbAvailable(): boolean {
   // an eager driver attempt here, `_available` stays `false` forever — the
   // schema bootstrap short-circuits, no graph operation ever runs, and the
   // dashboard reports "MemGraph offline" even when MEMGRAPH_URL is wired.
+  //
+  // `_available` starts optimistic (a driver object can be created without a
+  // live server) so the first query is attempted, then becomes TRUTHFUL from
+  // real query outcomes: runCypher flips it false on a connectivity error and
+  // back true on any successful round-trip. This lets callers distinguish
+  // "graph is empty" from "graph is down" once traffic has flowed.
   if (!_driver) getGraphDriver();
   return _available && _driver !== null;
+}
+
+/**
+ * A driver-side connectivity failure (server unreachable / connection dropped),
+ * as opposed to a Cypher/semantic error. Used to keep `_available` honest.
+ */
+export function isConnectivityError(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  if (typeof code === "string" && /ServiceUnavailable|SessionExpired|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN/.test(code)) {
+    return true;
+  }
+  const msg = err instanceof Error ? err.message : String(err);
+  return /ServiceUnavailable|SessionExpired|Could not perform discovery|Failed to connect|connection (?:refused|closed|reset|timed out)|ECONNREFUSED/i.test(msg);
 }
 
 /**
@@ -79,14 +98,18 @@ export async function runCypher(
   const coerced = coerceIntParams(params);
 
   try {
-    if (opts.autoCommit) {
-      return await session.run(cypher, coerced);
-    }
-    const result = opts.write
-      ? await session.executeWrite(tx => tx.run(cypher, coerced))
-      : await session.executeRead(tx => tx.run(cypher, coerced));
+    const result = opts.autoCommit
+      ? await session.run(cypher, coerced)
+      : opts.write
+        ? await session.executeWrite(tx => tx.run(cypher, coerced))
+        : await session.executeRead(tx => tx.run(cypher, coerced));
+    _available = true; // a real query round-tripped → server is genuinely reachable
     return result;
   } catch (err) {
+    if (isConnectivityError(err)) {
+      _available = false; // stop reporting UP; callers can now tell down from empty
+      log.warn({ err }, "MemGraph appears unreachable — marking graph DB unavailable");
+    }
     log.error({ err, cypher: cypher.slice(0, 200) }, "Cypher query failed");
     throw err;
   } finally {
@@ -94,17 +117,17 @@ export async function runCypher(
   }
 }
 
-function coerceIntParams(params: Record<string, unknown>): Record<string, unknown> {
+export function coerceIntParams(params: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [key, val] of Object.entries(params)) {
+    // Coerce only TOP-LEVEL scalar integers (the `LIMIT $n` / `SKIP $n` / integer
+    // timestamp case). Deliberately NOT array elements: an embedding vector passed
+    // as `$embedding` contains integer-valued components (0.0, 1.0, -1.0) that must
+    // stay floats — coercing them to Bolt Integers produces a mixed int/float vector
+    // and silently corrupts similarity search. List params in our queries are string
+    // ids (`WHERE m.id IN $ids`) or float vectors, never integers needing coercion.
     if (typeof val === "number" && Number.isFinite(val) && Number.isInteger(val)) {
       out[key] = neo4j.int(val);
-    } else if (Array.isArray(val)) {
-      out[key] = val.map((item) =>
-        typeof item === "number" && Number.isFinite(item) && Number.isInteger(item)
-          ? neo4j.int(item)
-          : item,
-      );
     } else {
       out[key] = val;
     }

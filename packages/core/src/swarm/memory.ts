@@ -637,17 +637,41 @@ export async function resetSharedMemoryForTests(): Promise<void> {
   _redisReady = false;
 }
 
+/**
+ * Cache key for a session's fact-embedding set. Keyed on both the fact entries AND
+ * the embedding model: a model change (different vector dimension) must invalidate
+ * stale vectors, else cosine similarity mixes dimensions → NaN. Each [key, value]
+ * pair is JSON-serialized so keys or values containing ':' or newlines cannot
+ * collide into an identical signature. Pure + exported for testing.
+ */
+export function factEmbeddingSignature(entries: Array<[string, string]>, embeddingModel: string): string {
+  return (
+    `${embeddingModel}\n` +
+    entries
+      .slice()
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, value]) => JSON.stringify([key, value]))
+      .join("\n")
+  );
+}
+
+/**
+ * An embed batch is usable for the fact cache only when it returned exactly one
+ * non-empty vector per input. A short / partial response must never be cached (the
+ * signature would match next call and permanently serve poisoned vectors, silently
+ * disabling semantic fact retrieval). Pure + exported for testing.
+ */
+export function isUsableEmbeddingBatch(vectors: Array<Float32Array | null | undefined>, expectedCount: number): boolean {
+  return vectors.length === expectedCount && vectors.every((v) => !!v && v.length > 0);
+}
+
 async function buildFactEmbeddingCache(
   sessionId: string,
   entries: Array<[string, string]>,
   provider: LMStudioProvider,
   embeddingModel: string,
 ): Promise<Array<{ key: string; value: string; vector: Float32Array }>> {
-  const signature = entries
-    .slice()
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([key, value]) => `${key}:${value}`)
-    .join("\n");
+  const signature = factEmbeddingSignature(entries, embeddingModel);
 
   const cached = _factEmbeddingCache.get(sessionId);
   if (cached && cached.signature === signature) {
@@ -656,6 +680,13 @@ async function buildFactEmbeddingCache(
 
   const documents = entries.map(([key, value]) => `${key}: ${value}`);
   const vectors = await provider.embed(documents, embeddingModel);
+  // A short / partial embed response (fewer vectors than inputs, or an empty vector)
+  // must NOT be cached: the signature would match on the next call and permanently
+  // serve poisoned vectors, silently disabling semantic fact retrieval. Throw so the
+  // caller falls back to keyword search and the embed is retried next time.
+  if (!isUsableEmbeddingBatch(vectors, documents.length)) {
+    throw new Error(`embed returned ${vectors.length}/${documents.length} usable vectors for shared-fact cache`);
+  }
   const prepared = entries.map(([key, value], index) => ({
     key,
     value,

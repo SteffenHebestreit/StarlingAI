@@ -7,6 +7,7 @@ import {
   buildInlineDocumentContext,
   activeScopeSources,
   resolveScopeSource,
+  callerManageableSources,
   type RetrievedChunk,
 } from "../retrieval/document-rag.js";
 
@@ -175,5 +176,33 @@ describe("buildInlineDocumentContext (audit ef9bd480 — inline a small attached
     const out = buildInlineDocumentContext(two, { inlineSmallDocuments: true, inlineThresholdChars: 20000 });
     expect(out!).toContain("[Doc: A — full text]");
     expect(out!).toContain("[Doc: B — full text]");
+  });
+});
+
+describe("callerManageableSources — document management scope isolation", () => {
+  beforeEach(() => mockDocRagConfig({ workspaceName: "acme" }));
+  afterEach(() => vi.restoreAllMocks());
+
+  it("always includes the shared workspace corpus", () => {
+    const set = callerManageableSources({});
+    expect(set.has("workspace:acme")).toBe(true);
+    expect(set.size).toBe(1);
+  });
+
+  it("adds the caller's own user + session corpora when known", () => {
+    const set = callerManageableSources({ userId: "alice", sessionId: "sess-1" });
+    expect([...set].sort()).toEqual(["session:sess-1", "user:alice", "workspace:acme"]);
+  });
+
+  it("never exposes another user's or another session's sources", () => {
+    const alice = callerManageableSources({ userId: "alice", sessionId: "s-a" });
+    // Documents owned by bob / a different session must not intersect alice's set.
+    expect(alice.has("user:bob")).toBe(false);
+    expect(alice.has("session:s-b")).toBe(false);
+    // The gateway filter is `doc.sources.some(s => manageable.has(s))`:
+    const bobDoc = ["user:bob"];
+    const sharedDoc = ["workspace:acme", "user:bob"];
+    expect(bobDoc.some((s) => alice.has(s))).toBe(false);
+    expect(sharedDoc.some((s) => alice.has(s))).toBe(true); // shared workspace copy still visible
   });
 });

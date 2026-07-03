@@ -70,6 +70,24 @@ export function activeScopeSources(ctx: RagScopeContext): string[] {
   return sources;
 }
 
+/**
+ * Source tokens a caller may MANAGE (list / download / delete) through the
+ * documents API. Distinct from {@link activeScopeSources}, which governs
+ * retrieval *injection* and is gated by the includeUserDocs/includeWorkspaceDocs
+ * toggles: management visibility is about ownership, not those retrieval knobs.
+ * A caller may always manage the shared workspace corpus, plus — when known —
+ * their own user corpus and the named session's corpus. Used by the gateway to
+ * stop one authenticated user from listing, downloading, or deleting another
+ * user's (or another session's) documents. Pure + exported for testing.
+ */
+export function callerManageableSources(opts: { userId?: string; sessionId?: string }): Set<string> {
+  const cfg = getConfig().retrieval.documentRag;
+  const sources = new Set<string>([workspaceSource(cfg.workspaceName)]);
+  if (opts.userId) sources.add(userSource(opts.userId));
+  if (opts.sessionId) sources.add(sessionSource(opts.sessionId));
+  return sources;
+}
+
 export interface IngestDocumentResult {
   documentId: string;
   chunkCount: number;

@@ -25,7 +25,7 @@ import { searchSessions } from "../agent/session-search.js";
 import { searchSharedFacts } from "../swarm/memory.js";
 import { retrieveSkillGuidance } from "../skills/service.js";
 import { buildDynamicTurnGuidance } from "../agent/intent-classifier.js";
-import { retrieveDocumentContext } from "../retrieval/document-rag.js";
+import { retrieveDocumentContextWithStatus } from "../retrieval/document-rag.js";
 import { childLogger } from "../logger.js";
 
 const log = childLogger("tool:recall-context");
@@ -206,7 +206,7 @@ registerTool({
       // question. No-op (returns []) when engram is unconfigured or nothing is in
       // scope, so this section self-skips exactly like the others.
       try {
-        const chunks = await retrieveDocumentContext(query, {
+        const { chunks, retrievalFailed } = await retrieveDocumentContextWithStatus(query, {
           sessionId: ctx.sessionId,
           ...(ctx.userId ? { userId: ctx.userId } : {}),
         });
@@ -218,6 +218,17 @@ registerTool({
               const label = chunk.title?.trim() || chunk.documentId.slice(0, 8);
               return `- **${label}**: ${truncate(chunk.text, 220)}`;
             }).join("\n"),
+          );
+        } else if (retrievalFailed) {
+          // Engram was unreachable this turn — surface it so the model does NOT conflate a
+          // retrieval FAILURE with "the user has no documents on file" (the CV / own-facts
+          // false negative: an uploaded profile exists but a hung engram returned nothing).
+          meta["documentsRetrievalFailed"] = true;
+          sectionMap.set("documents",
+            "## Attached documents\n"
+            + "_The document store did not respond this turn, so any attached files (e.g. an uploaded "
+            + "CV / profile) could not be read. Do NOT assume none exist — say the store was unavailable "
+            + "and offer to retry rather than answering as if there is no document._",
           );
         }
       } catch (err) {

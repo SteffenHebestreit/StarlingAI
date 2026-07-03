@@ -453,15 +453,23 @@ export async function graphPromoteFact(
       MERGE (s)-[:PRODUCED]->(m)
     `, { id, content, agentName, key, sessionId, now }, { write: true });
 
-    // If the content changed, record the supersession
+    // If the content changed, record the supersession. The fact uses a STABLE id
+    // (one node per agent+key), so the MERGE above overwrote the content in place —
+    // there is no separate prior-version node to link a SUPERSEDES edge to. Capture
+    // the audit trail as properties on the same node instead: the prior value, when
+    // it was replaced, and a monotonic revision counter.
+    //
+    // (The previous query MATCHed two aliases by the SAME id, so both bound to the
+    // one node; `oldFact.updatedAt <> $now` was therefore always false and it
+    // silently did nothing — no SUPERSEDES edge, no validTo, ever.)
     if (hadPrevious) {
+      const previousContent = String(existing[0]?.["existingContent"] ?? "");
       await runCypher(`
-        MATCH (newFact:MemoryRecord {id: $id})
-        MATCH (oldFact:MemoryRecord {id: $id})
-        WHERE newFact.updatedAt = $now AND oldFact.updatedAt <> $now
-        MERGE (newFact)-[:SUPERSEDES {ts: $now, reason: 'fact updated by agent'}]->(oldFact)
-        SET oldFact.validTo = $now
-      `, { id, now }, { write: true });
+        MATCH (m:MemoryRecord {id: $id})
+        SET m.previousContent = $previousContent,
+            m.supersededAt    = $now,
+            m.revision        = coalesce(m.revision, 0) + 1
+      `, { id, previousContent, now }, { write: true });
     }
   } catch (err) {
     log.warn({ err, key, agentName }, "FACT graph promotion failed");
