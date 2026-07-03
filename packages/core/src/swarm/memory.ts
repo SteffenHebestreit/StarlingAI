@@ -301,6 +301,44 @@ export async function clearTurnPlan(sessionId: string): Promise<void> {
   _turnPlans.delete(sessionId);
 }
 
+// ── Task-graph ledger slot ───────────────────────────────────────────────────
+// A reserved per-session slot holding the durable task-graph ledger (JSON blob:
+// node-key → completed-node entry), used by orchestration.durableTaskGraph so a
+// re-issued graph can reuse nodes a prior (timed-out) turn already completed.
+// Same shape as the turn-plan slot: kept OUT of the facts hash (never surfaces
+// in shared-facts dumps), Redis with in-process fallback, session TTL. The
+// entry/key semantics live in swarm/task-graph-ledger.ts — this is storage only.
+const GRAPH_LEDGER_VALUE_MAX = 64_000; // chars — bounded blob, entries capped upstream
+const graphLedgerKey = (sid: string) => `starlingai:mem:${sid}:graphledger`;
+const _graphLedgers = new Map<string, string>();
+
+export async function writeTaskGraphLedgerBlob(sessionId: string, json: string): Promise<void> {
+  const safeVal = json.slice(0, GRAPH_LEDGER_VALUE_MAX);
+  const redis = await getRedis();
+  if (redis) {
+    try {
+      await (redis as { set: (k: string, v: string) => Promise<void> }).set(graphLedgerKey(sessionId), safeVal);
+      await (redis as { expire: (k: string, ttl: number) => Promise<void> }).expire(graphLedgerKey(sessionId), SESSION_TTL_S);
+      return;
+    } catch (err) {
+      log.warn({ err }, "writeTaskGraphLedgerBlob Redis failed — using in-process");
+    }
+  }
+  _graphLedgers.set(sessionId, safeVal);
+}
+
+export async function readTaskGraphLedgerBlob(sessionId: string): Promise<string | null> {
+  const redis = await getRedis();
+  if (redis) {
+    try {
+      return await (redis as { get: (k: string) => Promise<string | null> }).get(graphLedgerKey(sessionId));
+    } catch (err) {
+      log.warn({ err }, "readTaskGraphLedgerBlob Redis failed — using in-process");
+    }
+  }
+  return _graphLedgers.get(sessionId) ?? null;
+}
+
 export async function searchSharedFacts(
   sessionId: string,
   query: string,
@@ -591,6 +629,7 @@ export async function resetSharedMemoryForTests(): Promise<void> {
   _messages.clear();
   _factEmbeddingCache.clear();
   _factKeysThisTurn.clear();
+  _graphLedgers.clear();
   if (_redis) {
     try { await (_redis as { quit: () => Promise<void> }).quit(); } catch { /* ignore */ }
   }

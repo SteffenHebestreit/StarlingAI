@@ -176,6 +176,7 @@ export type CoreAuditEventType =
   | "delegation_halted_operator_stop"
   | "delegation_halted_partial_evidence"
   | "delegation_coordinator_recursion_blocked"
+  | "delegation_result_reused"
   | "flow_plan_recorded"
   | "flow_verification_passed"
   | "flow_verification_repaired"

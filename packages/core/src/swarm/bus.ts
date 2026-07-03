@@ -32,6 +32,7 @@ export type SwarmEventType =
   | "graph_started"   // task graph execution started
   | "graph_node_ready"   // a graph node's dependencies are satisfied, execution starting
   | "graph_node_blocked" // a graph node is blocked due to failed dependency
+  | "graph_node_reused"  // a node was satisfied from the durable ledger (prior completed run) without re-executing
   | "graph_completed"    // task graph execution finished
   // Tool development & self-improvement events
   | "tool_dev_session_started"    // a tool dev sandbox session started

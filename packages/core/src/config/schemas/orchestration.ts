@@ -260,6 +260,17 @@ export const OrchestrationSchema = z.object({
    *  Structural (metadata arrays + harness status string, no topic/keywords). Default OFF until pass^k
    *  eval confirms it doesn't over-fire on graphs that failed only a non-essential node. */
   taskGraphFailureDisposition: z.boolean().default(false),
+  /** Durable task-graph node reuse (swarm/task-graph-ledger.ts). run_task_graph node state is
+   *  in-memory only, so a turn that dies mid-graph loses every COMPLETED node and a retry re-runs
+   *  the whole graph — including expensive research/build nodes that already succeeded. When true,
+   *  each completed node's distilled result + artifact refs are recorded in a per-session ledger
+   *  (Redis slot, session TTL) keyed by a structural node hash (id + task text + sorted deps); a
+   *  re-issued graph satisfies hash-matching nodes from the ledger without re-executing them
+   *  (strictly conservative — reuse can only SKIP re-execution, never double-fire a side-effectful
+   *  node; a re-plan that changes a node's task text invalidates its entry naturally). Downstream
+   *  context still flows from the original run's shared facts. Default OFF until pass^k eval
+   *  (behavioral: a retried graph now reuses prior results instead of re-running). */
+  durableTaskGraph: z.boolean().default(false),
   /** Clamp a sub-agent's turn timeout to the PARENT turn's remaining budget (sub-agent.ts). A leaf
    *  agent's timeout derives from its own config / the gateway timeout, ignoring how much of the parent
    *  turn is left — so a researcher was handed 600s under a 120s low-effort turn, planned for 10 min,

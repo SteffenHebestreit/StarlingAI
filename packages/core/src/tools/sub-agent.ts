@@ -73,6 +73,7 @@ import { announceAgentCapability } from "../swarm/capabilities.js";
 import { clearTaskBids, collectTaskBids, DEFAULT_AUTONOMOUS_BID_WINDOW_MS, isAutonomousBiddingStarted } from "../swarm/bidding.js";
 import { acquireTaskLock, releaseTaskLock } from "../swarm/locks.js";
 import { formatSharedContextForPrompt, appendPartialResult, extractFactsFromOutput, writeSharedFact, searchSharedFacts, searchPartialResults, readAllFacts, currentTurnFactKeys } from "../swarm/memory.js";
+import { computeTaskGraphNodeKey, readTaskGraphLedger, recordCompletedTaskGraphNode } from "../swarm/task-graph-ledger.js";
 import { deriveSharedSessionId } from "./memory.js";
 import { graphPromoteFact } from "../memory/graph-service.js";
 import { recordCapabilityGap } from "../agent/self-improve.js";
@@ -2660,6 +2661,42 @@ registerTool({
       },
     });
 
+    // Durable node reuse (orchestration.durableTaskGraph): satisfy nodes a prior run of
+    // this session already completed (structural hash match) from the ledger instead of
+    // re-executing them. Conservative by construction — only ever SKIPS work that already
+    // succeeded; downstream context still flows from the original run's shared facts.
+    const durableLedgerEnabled = effectiveOrchestration().durableTaskGraph;
+    const durableLedger = durableLedgerEnabled ? await readTaskGraphLedger(ctx.sessionId) : {};
+    const nodeLedgerKeys = new Map(rawNodes.map((node) => [node.id, computeTaskGraphNodeKey(node)]));
+    const reused = new Set<string>();
+    if (durableLedgerEnabled) {
+      for (const node of rawNodes) {
+        const hit = durableLedger[nodeLedgerKeys.get(node.id)!];
+        if (!hit) continue;
+        remaining.delete(node.id);
+        completed.add(node.id);
+        reused.add(node.id);
+        const task = getOrCreateSwarmTask(ctx, node.id, node.title ?? summarizeText(node.task, 80), node.dependsOn ?? []);
+        task.status = "completed";
+        task.output = hit.output;
+        for (const artifact of hit.artifacts ?? []) {
+          graphArtifacts.push(artifact);
+        }
+        emitSwarmEvent("graph_node_reused", {
+          sessionId: ctx.sessionId,
+          taskId: node.id,
+          data: { graphId, completedAt: hit.completedAt },
+        });
+        logAudit("delegation_result_reused", {
+          graphId,
+          nodeId: node.id,
+          source: "task_graph_ledger",
+          completedAt: hit.completedAt,
+        }, { sessionId: ctx.sessionId, severity: "info" });
+      }
+      if (reused.size > 0) publishSwarmState(ctx);
+    }
+
     const active = new Map<string, Promise<{ node: TaskGraphNodeInput; result: ToolResult }>>();
 
     const blockFailedDependents = () => {
@@ -2748,12 +2785,22 @@ registerTool({
       if (result.success) {
         completed.add(node.id);
         const arts = result.metadata?.["artifacts"];
+        const nodeArtifacts: Record<string, unknown>[] = [];
         if (Array.isArray(arts)) {
           for (const artifact of arts) {
             if (artifact && typeof artifact === "object") {
               graphArtifacts.push(artifact as Record<string, unknown>);
+              nodeArtifacts.push(artifact as Record<string, unknown>);
             }
           }
+        }
+        if (durableLedgerEnabled) {
+          await recordCompletedTaskGraphNode(ctx.sessionId, nodeLedgerKeys.get(node.id)!, {
+            nodeId: node.id,
+            output: result.output,
+            completedAt: new Date().toISOString(),
+            ...(nodeArtifacts.length > 0 ? { artifacts: nodeArtifacts } : {}),
+          });
         }
       } else {
         failed.add(node.id);
@@ -2777,7 +2824,8 @@ registerTool({
 
     const summary = rawNodes.map((node) => {
       const task = swarmState.tasks[node.id];
-      return `- ${node.id} [${task?.status ?? "unknown"}] ${task?.selectedAgent ?? node.agentName ?? "unassigned"}`;
+      const reusedMark = reused.has(node.id) ? " (reused prior completed result)" : "";
+      return `- ${node.id} [${task?.status ?? "unknown"}] ${task?.selectedAgent ?? node.agentName ?? "unassigned"}${reusedMark}`;
     }).join("\n");
 
     return {
@@ -2787,6 +2835,7 @@ registerTool({
         completed: [...completed],
         failed: [...failed],
         blocked: [...blocked],
+        ...(reused.size > 0 ? { reused: [...reused] } : {}),
         swarmState,
         ...(graphArtifacts.length > 0 ? { artifacts: graphArtifacts } : {}),
       },
