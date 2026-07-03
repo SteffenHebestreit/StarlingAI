@@ -27,6 +27,7 @@ import {
   agentIsMetaFactory,
   pickResearchFallbackAgent,
   filterCandidatesByExecutionCapability,
+  explicitAgentsCoverTaskExecution,
   countRoutingQueryContentTokens,
   shortenOverspecifiedRoutingQuery,
   uniqueNames,
@@ -75,6 +76,7 @@ export {
   agentCfgIsMetaFactory,
   requiredExecutionCapabilities,
   filterCandidatesByExecutionCapability,
+  explicitAgentsCoverTaskExecution,
   type AgentRoutingCandidate,
   type AgentRoutingResolution,
 } from "./agent-routing.js";
@@ -1659,7 +1661,21 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       requestedAgents: candidateQueue,
     }, { sessionId: ctx.sessionId });
   }
-  if (!isArtifactRenderDelegation && taskRequiresExternalResearch(request.task) && candidateQueue.length > 0) {
+  // An EXPLICIT delegation to an agent that genuinely covers the task's execution/interaction
+  // capability (browser login, shell, sandboxed code) is real execution work — never hijack it to a
+  // research agent, even when the task text trips the web-research word shape. Session 8815a45e: an
+  // explicit computer_use_agent login ("...auf der Website freelancermap.de anmelden... sicheren
+  // Credential-Lookup...") was redirected to `researcher` because "Website" + "Credential-Lookup"
+  // matched taskRequiresExternalResearch; the tool-less researcher then returned a first-person
+  // refusal that was relayed verbatim to the user. This narrows the redirect (never widens it):
+  // the render-agent anti-fabrication case still fires (writers hold no execution capability).
+  const explicitCoversExecution = explicitAgentRequested
+    && explicitAgentsCoverTaskExecution(
+      candidateQueue,
+      request.task,
+      (name) => renderCfgConfig.subAgents[name] ?? renderCfgPromoted[name],
+    );
+  if (!isArtifactRenderDelegation && !explicitCoversExecution && taskRequiresExternalResearch(request.task) && candidateQueue.length > 0) {
     const capable = candidateQueue.filter((name) => agentIsResearchCapable(name));
     if (capable.length === 0) {
       const fallback = pickResearchFallbackAgent(attemptedAgents);

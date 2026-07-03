@@ -6,6 +6,7 @@ import {
   taskRequiresExternalResearch,
   requiredExecutionCapabilities,
   filterCandidatesByExecutionCapability,
+  explicitAgentsCoverTaskExecution,
 } from "../tools/sub-agent.js";
 
 /**
@@ -160,5 +161,48 @@ describe("execution capability gate", () => {
       .toEqual(["content_writer", "researcher"]);
     expect(filterCandidatesByExecutionCapability(["content_writer"], "ssh into the box", lookup).kept)
       .toEqual(["content_writer"]);
+  });
+});
+
+/**
+ * Explicit-delegation execution guard (regression: session 8815a45e, 2026-07-02). An explicit
+ * delegate_to_agent(computer_use_agent) for an interactive login was HIJACKED to `researcher` by
+ * the research-capability redirect, because the German task text ("...auf der Website
+ * freelancermap.de anmelden... sicheren Credential-Lookup...") tripped taskRequiresExternalResearch
+ * — "Website" is an external web noun and "Lookup" matches the look\s*up verb. The tool-less
+ * researcher then returned a first-person "I cannot do this with my tools" refusal that was relayed
+ * verbatim to the user. The guard withholds the redirect when the explicitly-named agent genuinely
+ * covers the task's execution capability, so a real login goes to the browser/computer specialist.
+ */
+describe("explicit-delegation execution guard (research-redirect false positive)", () => {
+  const tools: Record<string, { tools?: string[] }> = {
+    computer_use_agent: { tools: ["computer_list_nodes", "computer_type_credential", "get_site_credentials"] },
+    browser_agent: { tools: ["browser_navigate", "site_fill_credentials", "get_site_credentials"] },
+    researcher: { tools: ["web_search", "web_fetch", "url_inspect"] },
+    content_writer: { tools: ["generate_presentation", "generate_document", "write_file"] },
+  };
+  const lookup = (name: string) => tools[name];
+  // The exact failing shape: an interactive login whose wording trips the web-research classifier.
+  const loginTask =
+    "Melde dich auf der Website freelancermap.de mit einem vorhandenen Account an. Navigiere zur Login-Seite und nutze den sicheren Credential-Lookup, dann fülle die Login-Felder aus und sende das Formular ab.";
+
+  it("confirms the false positive: the login task text trips taskRequiresExternalResearch", () => {
+    expect(taskRequiresExternalResearch(loginTask)).toBe(true); // "Website" + "Lookup"
+    expect(requiredExecutionCapabilities(loginTask)).toContain("browser_interaction"); // "Login"
+  });
+
+  it("covers the login for an explicit browser/computer specialist → redirect withheld", () => {
+    expect(explicitAgentsCoverTaskExecution(["computer_use_agent"], loginTask, lookup)).toBe(true);
+    expect(explicitAgentsCoverTaskExecution(["browser_agent"], loginTask, lookup)).toBe(true);
+  });
+
+  it("does NOT cover it for a research-only / writer agent (anti-fabrication redirect still fires)", () => {
+    expect(explicitAgentsCoverTaskExecution(["researcher"], loginTask, lookup)).toBe(false);
+    expect(explicitAgentsCoverTaskExecution(["content_writer"], loginTask, lookup)).toBe(false);
+  });
+
+  it("returns false when the task needs no execution capability, so it never widens the redirect", () => {
+    expect(explicitAgentsCoverTaskExecution(["computer_use_agent"], "research the best providers online with pricing", lookup)).toBe(false);
+    expect(explicitAgentsCoverTaskExecution([], loginTask, lookup)).toBe(false);
   });
 });

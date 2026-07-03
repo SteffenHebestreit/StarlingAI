@@ -638,6 +638,27 @@ export function filterCandidatesByExecutionCapability(
   return { kept, dropped: uniqueNames(dropped), capabilities };
 }
 
+/**
+ * Whether an EXPLICIT delegation's named agents genuinely cover the execution/interaction
+ * capability the task requires (browser login, shell command, sandboxed code). Protects an
+ * explicit, capable pick from the research-capability redirect: an interactive login sent to a
+ * browser/computer specialist is real execution work, NOT a research-fabrication risk — even when
+ * the task text happens to trip the web-research word shape (session 8815a45e: an explicit
+ * computer_use_agent login was hijacked to `researcher` because "Website" + "Credential-Lookup"
+ * matched taskRequiresExternalResearch, and the tool-less researcher returned a first-person
+ * refusal that was relayed verbatim to the user). Returns false when the task needs no execution
+ * capability, so it never widens the redirect — it only withholds it for genuine execution picks.
+ */
+export function explicitAgentsCoverTaskExecution(
+  names: string[],
+  task: string,
+  lookup: (name: string) => { tools?: string[] } | undefined,
+): boolean {
+  const caps = requiredExecutionCapabilities(task);
+  if (caps.length === 0 || names.length === 0) return false;
+  return caps.every((cap) => names.some((name) => agentSatisfiesExecutionCapability(lookup(name), cap)));
+}
+
 /** De-duplicate a list of agent names, trimming and dropping blanks, order-preserving. */
 export function uniqueNames(values: string[]): string[] {
   const seen = new Set<string>();
