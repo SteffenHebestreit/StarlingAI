@@ -149,8 +149,14 @@ const CIRCUIT_LOOKBACK = 10;
 const CIRCUIT_MIN_SAMPLES = 3;
 const CIRCUIT_FAILURE_THRESHOLD = 0.60;
 
+// Read a wide GLOBAL window before filtering per-agent: readRecentOutcomes returns the last-N
+// across ALL agents, so a low-traffic agent's own recent calls get drowned out of a small window
+// by a busy pool — its circuit could then never open (or its boost never compute) despite a real
+// failure streak. 200 gives ~4x headroom so an agent's last CIRCUIT_LOOKBACK calls survive churn.
+const OUTCOME_READ_WINDOW = 200;
+
 export function isCircuitOpen(agentName: string, workspacePath: string): boolean {
-  const outcomes = readRecentOutcomes(workspacePath, 50);
+  const outcomes = readRecentOutcomes(workspacePath, OUTCOME_READ_WINDOW);
   const recent = outcomes.filter(o => o.agent === agentName).slice(-CIRCUIT_LOOKBACK);
   if (recent.length < CIRCUIT_MIN_SAMPLES) return false;
   const failures = recent.filter(o => o.outcome === "failure").length;
@@ -162,7 +168,7 @@ export function isCircuitOpen(agentName: string, workspacePath: string): boolean
  * Range: approximately [-0.125, +0.125]. Returns 0 when no history exists.
  */
 function computeOutcomeBoost(agentName: string, workspacePath: string): number {
-  const outcomes = readRecentOutcomes(workspacePath, 50);
+  const outcomes = readRecentOutcomes(workspacePath, OUTCOME_READ_WINDOW);
   const relevant = outcomes.filter(o => o.agent === agentName);
   if (relevant.length === 0) return 0;
   const successRate =

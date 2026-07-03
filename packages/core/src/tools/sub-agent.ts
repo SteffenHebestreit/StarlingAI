@@ -1117,8 +1117,11 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   // auto-build runs once facts exist).
   const renderCfgConfig = getConfig();
   const renderCfgPromoted = readPromotedAgents(renderCfgConfig.workspacePath);
+  // Pure over the (constant-here) task text — compute once and reuse across the render/redirect
+  // block instead of re-running the regex classifier three times on the delegation hot path.
+  const requiresExternalResearch = taskRequiresExternalResearch(request.task);
   let renderHasGatheredFacts = true;
-  if (taskRequiresExternalResearch(request.task)) {
+  if (requiresExternalResearch) {
     try {
       const facts = await readAllFacts(deriveSharedSessionId(ctx.sessionId));
       renderHasGatheredFacts = Object.keys(facts).length > 0;
@@ -1130,7 +1133,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
     && candidateQueue.length > 0
     && candidateQueue.every((name) =>
       isArtifactRenderTask(request.task, renderCfgConfig.subAgents[name] ?? renderCfgPromoted[name]));
-  if (isArtifactRenderDelegation && taskRequiresExternalResearch(request.task)) {
+  if (isArtifactRenderDelegation && requiresExternalResearch) {
     logAudit("delegation_render_research_redirect_skipped", {
       taskTitle: title,
       requestedAgents: candidateQueue,
@@ -1150,7 +1153,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       request.task,
       (name) => renderCfgConfig.subAgents[name] ?? renderCfgPromoted[name],
     );
-  if (!isArtifactRenderDelegation && !explicitCoversExecution && taskRequiresExternalResearch(request.task) && candidateQueue.length > 0) {
+  if (!isArtifactRenderDelegation && !explicitCoversExecution && requiresExternalResearch && candidateQueue.length > 0) {
     const capable = candidateQueue.filter((name) => agentIsResearchCapable(name));
     if (capable.length === 0) {
       const fallback = pickResearchFallbackAgent(attemptedAgents);
@@ -1449,13 +1452,16 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       }
       continue;
     }
-    ctx._turnAgentCounts.set(candidate, prevCalls + 1);
-
-    attemptedAgents.push(candidate);
-
+    // Skip a candidate this turn's scope forbids BEFORE consuming its per-agent budget or marking
+    // it attempted — otherwise a disallowed agent burns per-turn state it never actually ran on
+    // (and pollutes the attemptedAgents diagnostic with an agent that was never tried).
     if (ctx.allowedAgents && !ctx.allowedAgents.includes(candidate)) {
       continue;
     }
+
+    ctx._turnAgentCounts.set(candidate, prevCalls + 1);
+
+    attemptedAgents.push(candidate);
 
     const startedAt = new Date().toISOString();
     taskState.status = "running";

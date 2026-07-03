@@ -1369,6 +1369,27 @@ describe("circuit breaker", () => {
       rmSync(tempDir, { recursive: true, force: true });
     }
   });
+
+  it("still trips a failing agent whose own calls were drowned out of a small window by a busy pool (regression)", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-circuit-"));
+    try {
+      const dir = join(tempDir, PRODUCT.stateDirName);
+      mkdirSync(dir, { recursive: true });
+      const file = join(dir, "agent_outcomes.ndjson");
+      const entry = (outcome: "success" | "failure", agent = "researcher"): OutcomeEntry => ({
+        ts: new Date().toISOString(), agent, task: "t",
+        outcome, iterations: 1, totalTokens: 100,
+      });
+      // researcher fails 10x, THEN 60 OTHER agents each log a call — more than the old global-50
+      // window, so researcher's failures would scroll out (filter → 0 samples → circuit stays
+      // wrongly closed). The wider per-read window keeps researcher's own last-10 in view → trips.
+      for (let i = 0; i < 10; i++) appendFileSync(file, JSON.stringify(entry("failure")) + "\n");
+      for (let i = 0; i < 60; i++) appendFileSync(file, JSON.stringify(entry("success", `other_agent_${i}`)) + "\n");
+      expect(isCircuitOpen("researcher", tempDir)).toBe(true);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("shortenOverspecifiedRoutingQuery", () => {

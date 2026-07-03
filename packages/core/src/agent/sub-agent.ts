@@ -1945,7 +1945,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // mediating the content.
     let a2aContext = "";
     try {
-      const pending = await consumeAgentMessages(subSessionId, opts.agentName);
+      // Read from the ROOT session bucket the WRITE side targets: send_agent_message writes via
+      // deriveSharedSessionId(ctx.sessionId) (→ root), so draining the per-run CHILD subSessionId
+      // here found nothing and peer messages were silently lost. deriveRootSessionId is identical
+      // to that write-side derivation, so read and write now hit the same bucket.
+      const pending = await consumeAgentMessages(deriveRootSessionId(subSessionId), opts.agentName);
       if (pending.length > 0) {
         a2aContext = `\n\n## Pending messages from peer agents\n${pending
           .map((m) => {

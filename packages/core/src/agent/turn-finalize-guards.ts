@@ -604,10 +604,15 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
     }
   }
 
-  if (!outputScan.safe && outputScan.redacted) {
-    finalResponse = outputScan.redacted;
-    guardrailEvents.push({ type: "output_redacted", details: (outputScan.detectedTypes ?? []).join(", ") });
-    logAudit("output_redacted", { types: outputScan.detectedTypes }, { sessionId: session.id, severity: "warn" });
+  // Rescan the CURRENT finalResponse, not the precomputed raw outputScan: synthesis / QA loop /
+  // backstop / corrective-build may have rewritten the text since it was scanned, so reusing
+  // outputScan.redacted would (a) REVERT every improvement to the redacted RAW draft and (b) MISS
+  // a secret a late guard introduced (the raw scan never saw it). Matches the local rescans above.
+  const finalScan = scanOutput(finalResponse);
+  if (!finalScan.safe && finalScan.redacted) {
+    finalResponse = finalScan.redacted;
+    guardrailEvents.push({ type: "output_redacted", details: (finalScan.detectedTypes ?? []).join(", ") });
+    logAudit("output_redacted", { types: finalScan.detectedTypes }, { sessionId: session.id, severity: "warn" });
   }
 
   // Zero-work fabrication guard (audit 45d5bae9): a turn that requested NO tool
