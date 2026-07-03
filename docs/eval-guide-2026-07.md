@@ -62,8 +62,26 @@ EHOSTUNREACH/ENETUNREACH).
 Staged orchestration S1/S3/S4 (`leanSynthesisPrompt`, `qaDeliveryLoop`+2 rounds,
 `discoveryPrefetch`), honesty guards (`freshnessHonestyGuard`, `citationHonestyGuard`,
 `urlFetchEnforcement`, `ungroundedFactualAnswerGuard`, `failedResearchHonestyBackstop`),
-`userProfilePrefetch`, vLLM-inspired (`quorumEarlySynthesis`, `subAgentDisagreementVerify`),
-efficiency (`detectWriteChurnOverwrite`, `crossAgentArtifactReuse`).
+vLLM-inspired (`quorumEarlySynthesis`, `subAgentDisagreementVerify`), efficiency
+(`detectWriteChurnOverwrite`, `crossAgentArtifactReuse`).
+
+**`userProfilePrefetch` was DISABLED (was inert).** A third adversarial review found it gates on
+a `userOwnFacts` turn signal the de-lexicalization hardwired to `false` (`intent-classifier.ts:269`),
+so enabling it did nothing — the eval would have tested dead code. To actually use it, a structural
+`userOwnFacts` signal must be restored in `computeDynamicTurnGuidance` (and added to its `flags`
+object). Left `false` until then.
+
+### Bugs fixed by the third review (shard flags)
+- **quorumEarlySynthesis:** the straggler-grace timer was never cleared (leaked a live timer per
+  fan-out); an already-aborted parent turn was ignored (launched N fresh sub-agents on a cancelled
+  turn). Both fixed.
+- **subAgentDisagreementVerify:** the verdict parser matched "DISAGREE" anywhere, so a chatty
+  "AGREE — they do not disagree" reply spuriously injected a reconcile marker — now anchored to
+  the leading verdict token.
+- **discoveryPrefetch:** the capsule could recommend a meta/factory agent the coordinator can't
+  auto-delegate to — now filtered out.
+- **urlFetchEnforcement:** forced a needless fetch when the user pasted the page body alongside its
+  URL — now exempt when substantial inline content is present.
 
 ## 4. What to watch across the run (north-star lens)
 

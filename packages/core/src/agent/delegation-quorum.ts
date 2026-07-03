@@ -22,8 +22,8 @@ export interface QuorumOptions<T> {
   onAbandon: (index: number) => T;
   /** Aborting this signal aborts every still-running slice. */
   parentSignal?: AbortSignal;
-  /** Injectable timer (tests). Defaults to setTimeout. */
-  setTimeoutFn?: (cb: () => void, ms: number) => void;
+  /** Injectable timer (tests). Defaults to setTimeout. May return a handle to cancel. */
+  setTimeoutFn?: (cb: () => void, ms: number) => unknown;
 }
 
 export async function awaitQuorum<T>(
@@ -36,7 +36,15 @@ export async function awaitQuorum<T>(
   const onParentAbort = (): void => { for (const a of aborts) a.abort(); };
   opts.parentSignal?.addEventListener("abort", onParentAbort, { once: true });
 
-  const schedule = opts.setTimeoutFn ?? ((cb: () => void, ms: number): void => { setTimeout(cb, ms); });
+  // Already-cancelled parent: adding an "abort" listener to an already-aborted signal never fires,
+  // so without this a pre-aborted turn would still launch N fresh sub-agents. Abandon every slice.
+  if (opts.parentSignal?.aborted) {
+    onParentAbort();
+    opts.parentSignal.removeEventListener("abort", onParentAbort);
+    return runners.map((_, i) => opts.onAbandon(i));
+  }
+
+  const schedule = opts.setTimeoutFn ?? ((cb: () => void, ms: number): unknown => setTimeout(cb, ms));
   const k = Math.max(1, Math.min(opts.k, n));
   let succeeded = 0;
   let settled = 0;
@@ -58,8 +66,12 @@ export async function awaitQuorum<T>(
   if (settled < n) {
     await new Promise<void>((res) => {
       let done = false;
-      const finish = (): void => { if (!done) { done = true; res(); } };
-      schedule(finish, opts.graceMs);
+      let handle: unknown;
+      // Clear the grace timer when the stragglers settle first (the common fast case) so it does
+      // not stay armed for the full graceMs after awaitQuorum returns — a live ref'd timer per
+      // quorum-with-stragglers fan-out otherwise delays clean event-loop idle.
+      const finish = (): void => { if (!done) { done = true; clearTimeout(handle as ReturnType<typeof setTimeout>); res(); } };
+      handle = schedule(finish, opts.graceMs);
       void Promise.allSettled(tasks).then(finish);
     });
   }

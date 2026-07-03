@@ -17,6 +17,7 @@
  */
 
 import { resolveAgentRouting } from "../tools/sub-agent.js";
+import { agentIsMetaFactory } from "../tools/agent-routing.js";
 import { searchWorkflowCandidates } from "../tools/workflow-catalog.js";
 
 function oneLine(text: string | undefined, max: number): string {
@@ -83,11 +84,17 @@ export async function prefetchCapabilityCandidates(
     searchWorkflowCandidates(q, { limit: maxWorkflows, semanticOutlier: true }).catch(() => []),
   ]);
 
-  const agents = (agentRes?.results ?? []).slice(0, maxAgents).map((candidate) => ({
-    name: candidate.name,
-    description: candidate.description,
-    confidence: candidate.confidence,
-  }));
+  const agents = (agentRes?.results ?? [])
+    // Drop meta/factory agents (agent_factory): UNDIRECTED routing/bidding never picks them, so
+    // suggesting one in the capsule steers the coordinator toward a delegation it cannot make
+    // (it would waste a cycle minting a bespoke agent). Mirrors the routing/bidding exclusion.
+    .filter((candidate) => !agentIsMetaFactory(candidate.name))
+    .slice(0, maxAgents)
+    .map((candidate) => ({
+      name: candidate.name,
+      description: candidate.description,
+      confidence: candidate.confidence,
+    }));
   const workflows = (workflowRes ?? []).slice(0, maxWorkflows).map((workflow) => ({
     name: workflow.name,
     workflowType: workflow.workflowType,

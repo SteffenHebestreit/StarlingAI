@@ -36,9 +36,15 @@
     // documents (CV/profile in the personal OR workspace library) up-front and injects
     // the evidence — or an authoritative confirmed-empty marker. Deterministic: it no
     // longer depends on the local model choosing to call recall_context (which it does
-    // NOT do reliably — toolCalls=0 on real turns). Enabled here to validate before
-    // flipping the schema default.
-    "userProfilePrefetch": true,
+    // NOT do reliably — toolCalls=0 on real turns).
+    //
+    // DISABLED (2026-07): this flag is currently INERT — it gates on a userOwnFacts turn
+    // signal that the de-lexicalization hardwired to false (intent-classifier.ts:269), so the
+    // prefetch never fires no matter the flag. Enabling it made the eval test dead code. Leave
+    // false until a STRUCTURAL userOwnFacts signal is restored in computeDynamicTurnGuidance
+    // (and added to its `flags` object so the function doesn't early-return null). See
+    // docs/eval-guide-2026-07.md.
+    "userProfilePrefetch": false,
 
     // Citation-honesty guard (audit 1303e254). A sourceSensitive turn that ran NO real
     // web/research execution (no delegation, no SUCCESSFUL workflow, no direct web tool,

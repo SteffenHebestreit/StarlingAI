@@ -38,7 +38,11 @@ export function buildDisagreementCheckMessages(outputs: ReadonlyArray<{ label: s
 
 export function parseDisagreementVerdict(raw: string): { disagree: boolean; detail: string } {
   const text = (raw ?? "").trim();
-  const m = text.match(/\bDISAGREE\b\s*:?\s*(.*)/i);
+  // Anchor to the LEADING verdict token — the classifier is told to reply with the verdict FIRST
+  // ("AGREE" / "DISAGREE: …"). Matching "DISAGREE" anywhere false-positived on chatty local-model
+  // replies like "AGREE — they do not disagree", spuriously injecting a reconcile marker. Anything
+  // that does not lead with DISAGREE is treated as agree (fail-open, consistent with the module).
+  const m = text.match(/^(?:verdict[:\s-]*)?DISAGREE\b\s*:?\s*(.*)/i);
   if (m) return { disagree: true, detail: (m[1] ?? "").replace(/\s+/g, " ").trim().slice(0, 240) };
   return { disagree: false, detail: "" };
 }

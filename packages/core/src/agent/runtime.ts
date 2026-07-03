@@ -1440,7 +1440,12 @@ async function _runTurn(
   // must delegate to fetch); hybrid/direct assistants read the URL with their own web tools.
   const requiresUrlFetch = getConfig().orchestration?.urlFetchEnforcement === true
     && activeMainAssistantToolMode === "orchestration_only"
-    && userMessageCarriesActionableUrl(userMessage);
+    && userMessageCarriesActionableUrl(userMessage)
+    // Exempt a message that also PASTED substantial inline content (the page body alongside its
+    // URL): the answer can be grounded in what the user already handed over, so forcing a re-fetch
+    // is a needless delegation. Structural (same inline-content signal answered-from elsewhere);
+    // can only make the guard fire LESS, never more.
+    && !initialDynamicGuidance?.inlineAnalyticalContent;
   const requiresSwarmMaintenanceDelegation = activeMainAssistantToolMode !== "hybrid"
     && Boolean(initialDynamicGuidance?.swarmMaintenanceSensitive)
     && allowedToolNameSet.has("delegate_to_agent");

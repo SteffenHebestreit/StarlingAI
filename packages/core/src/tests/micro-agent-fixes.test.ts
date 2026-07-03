@@ -95,6 +95,16 @@ describe("awaitQuorum", () => {
     expect(results[1]!.id).toBe(-1); // onError, not onAbandon
     expect(results[2]!.id).toBe(-1);
   });
+
+  it("abandons every slice WITHOUT launching when the parent is already aborted (regression)", async () => {
+    let launched = 0;
+    const ac = new AbortController();
+    ac.abort(); // parent cancelled before awaitQuorum is even called
+    const runners = [0, 1, 2].map((id) => () => { launched += 1; return Promise.resolve<R>({ ok: true, id }); });
+    const results = await awaitQuorum<R>(runners, { ...opts(2, immediate), parentSignal: ac.signal });
+    expect(launched).toBe(0);                       // no fresh sub-agent work on a cancelled turn
+    expect(results.map((r) => r.id)).toEqual([-2, -2, -2]); // all onAbandon placeholders
+  });
 });
 
 // ── Fix 6: disagreement-as-signal ─────────────────────────────────────────────
@@ -111,6 +121,14 @@ describe("disagreement-as-signal helpers", () => {
     expect(d.disagree).toBe(true);
     expect(d.detail).toMatch(/\$40.*\$55/);
     expect(parseDisagreementVerdict("disagree: prices differ").disagree).toBe(true);
+  });
+  it("does NOT false-positive on a chatty AGREE that mentions the word 'disagree' (regression)", () => {
+    // A verbose local model reply must not spuriously inject a reconcile marker: the verdict is
+    // anchored to the LEADING token, so an embedded "disagree" in an AGREE reply is ignored.
+    expect(parseDisagreementVerdict("AGREE — the two outputs do not disagree on anything").disagree).toBe(false);
+    expect(parseDisagreementVerdict("They agree; there is no disagreement here.").disagree).toBe(false);
+    // a leading (optionally "Verdict:"-prefixed) DISAGREE is still detected
+    expect(parseDisagreementVerdict("Verdict: DISAGREE: output 1 says A, output 2 says B").disagree).toBe(true);
   });
   it("builds a 2-message check carrying the slice outputs", () => {
     const msgs = buildDisagreementCheckMessages([{ label: "a", text: "x" }, { label: "b", text: "y" }]);
