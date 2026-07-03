@@ -100,6 +100,30 @@ export function prependTurnIncompleteCaveat(text: string): string {
 }
 
 /**
+ * Caveat for a QA-gate PASS that carried no verifiable evidence (orchestration.qaEvidenceRequired).
+ * Unlike prependTurnIncompleteCaveat, the run DID finish normally — the honest gap is only that the
+ * reviewer could not ground its PASS in a concrete tool-result/artifact fact, so the answer must not
+ * be presented as QA-confirmed. Same structural bilingual shape (language chosen by answerLooksGerman,
+ * both languages emitted so a third-language reader still gets it) and sentinel-phrase dedup. Pure.
+ */
+export function prependUnverifiedQaCaveat(text: string): string {
+  if (text.includes("nicht gegen konkrete Nachweise") || text.includes("not confirmed against concrete evidence")) {
+    return text;
+  }
+  const german = answerLooksGerman(text);
+  const de =
+    "> ⚠️ **Nicht verifiziert** — die Qualitätsprüfung hat diese Antwort NICHT gegen konkrete Nachweise "
+    + "(Tool-Ergebnisse, Artefakte) bestätigt. Behandle konkrete Angaben (Daten, Zahlen, Quellen) als unbestätigt.";
+  const en =
+    "> ⚠️ **Unverified** — the QA check did NOT confirm this answer against concrete evidence "
+    + "(tool results, artifacts). Treat specific claims (dates, figures, sources) as unconfirmed.";
+  const caveat = german
+    ? `${de}\n> _(${en.replace(/^> /, "")})_`
+    : `${en}\n> _(${de.replace(/^> /, "")})_`;
+  return `${caveat}\n\n${text.trim()}`;
+}
+
+/**
  * STRUCTURAL, language-free detection of source citations in an answer: a markdown link to an
  * http(s) URL, or a bare http(s) URL. The citation-honesty guard uses this to catch an answer
  * that presents URL citations without any real retrieval having run this turn (the audited

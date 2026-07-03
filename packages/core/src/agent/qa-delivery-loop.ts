@@ -20,6 +20,11 @@ export interface QaVerdict {
   pass: boolean;
   /** Concrete flaws to fix, when pass=false (fed to the improvement pass). */
   flaws?: string;
+  /** The concrete, verifiable ground the reviewer cited for a PASS (a tool-result
+   *  fact, artifact property, probe output). Empty/absent for a bare "PASS" or an
+   *  unparseable fail-open pass — the signal that distinguishes an evidence-backed
+   *  verdict from a rubber stamp. Consumed only when requireEvidence is on. */
+  evidence?: string;
 }
 
 /**
@@ -28,15 +33,34 @@ export interface QaVerdict {
  * with the trailing text as the flaws; anything unparseable fails OPEN (passes) so
  * reviewer noise never blocks delivery. Pure + deterministic so it is unit-tested
  * directly; the runtime's model-backed check is a thin wrapper over a model call + this.
+ *
+ * Evidence extraction: when the reviewer is asked to justify a PASS, it replies
+ * `PASS — evidence: <ground>` (also accepts `PASS (evidence: …)` / `PASS: evidence …`).
+ * The trailing ground is captured into `evidence`; a bare `PASS` has none. This is
+ * inert unless the caller opts into requireEvidence — a bare PASS still passes.
  */
 export function parseQaVerdict(text: string): QaVerdict {
   const trimmed = (text ?? "").trim();
   const failIdx = trimmed.toUpperCase().indexOf("FAIL");
   // No explicit FAIL → pass. This covers a clean "PASS" AND an unparseable/empty
   // verdict (fail open: reviewer noise must never block delivery).
-  if (failIdx === -1) return { pass: true };
+  if (failIdx === -1) return { pass: true, ...extractVerdictEvidence(trimmed) };
   const flaws = trimmed.slice(failIdx).replace(/^FAIL[:\s-]*/i, "").trim();
   return { pass: false, flaws: flaws || "One or more acceptance criteria are unmet." };
+}
+
+/** Pull a `PASS — evidence: <ground>` justification out of a passing verdict. Returns
+ *  `{ evidence }` only when a non-empty ground is present; `{}` for a bare PASS. Pure. */
+function extractVerdictEvidence(passText: string): { evidence?: string } {
+  const m = /\bevidence\b\s*[:\-–—]?\s*(.+)$/is.exec(passText);
+  // Trim a trailing bracket left by the `PASS (evidence: …)` parenthetical form.
+  const ground = m?.[1]?.replace(/\s+/g, " ").replace(/[)\]\s]+$/, "").trim();
+  return ground && ground.length >= 3 ? { evidence: ground } : {};
+}
+
+/** Whether a passing verdict carries a usable evidence justification. Pure/exported for tests. */
+export function verdictHasEvidence(verdict: QaVerdict): boolean {
+  return typeof verdict.evidence === "string" && verdict.evidence.trim().length >= 3;
 }
 
 export interface QaDeliveryDeps {
@@ -56,6 +80,12 @@ export interface QaDeliveryDeps {
   escalate?: (answer: string, flaws: string, criteria: string[]) => Promise<string | null>;
   /** Max improvement rounds (>=1). Each round is one check + one repair call. */
   maxRounds: number;
+  /** When true, a PASS that carries no verifiable evidence is not trusted: the answer
+   *  still SHIPS (fail-open preserved), but the result is marked `unverified` so the
+   *  caller can stamp an honesty caveat instead of presenting it as QA-confirmed. This
+   *  kills the rubber-stamp pass (a weak reviewer emitting a bare/parroted "PASS")
+   *  without ever blocking delivery. Off by default → exact prior behavior. */
+  requireEvidence?: boolean;
 }
 
 export interface QaDeliveryResult {
@@ -67,6 +97,11 @@ export interface QaDeliveryResult {
   passed: boolean;
   /** True if at least one round used the coordinator escalation path. */
   escalated: boolean;
+  /** True when the answer ships but its PASS was not backed by verifiable evidence
+   *  (only possible under requireEvidence). The answer is still delivered; the caller
+   *  should stamp an honesty caveat rather than claim QA confirmation. Always false
+   *  when requireEvidence is off. */
+  unverified: boolean;
 }
 
 /**
@@ -81,7 +116,7 @@ export async function runQaDeliveryLoop(
   const maxRounds = Math.max(1, Math.floor(deps.maxRounds));
   // No acceptance criteria → nothing to check against; ship as-is.
   if (!criteria || criteria.length === 0 || !answer.trim()) {
-    return { answer, rounds: 0, passed: true, escalated: false };
+    return { answer, rounds: 0, passed: true, escalated: false, unverified: false };
   }
 
   let current = answer;
@@ -96,10 +131,13 @@ export async function runQaDeliveryLoop(
       verdict = await deps.check(current, criteria);
     } catch {
       // Check failed → fail open, ship the current answer.
-      return { answer: current, rounds: round, passed: true, escalated };
+      return { answer: current, rounds: round, passed: true, escalated, unverified: false };
     }
     if (verdict.pass) {
-      return { answer: current, rounds: round, passed: true, escalated };
+      // Evidence gate: a PASS with no verifiable ground is not trusted — ship it, but
+      // mark it unverified so the caller stamps a caveat instead of claiming QA passed.
+      const unverified = !!deps.requireEvidence && !verdictHasEvidence(verdict);
+      return { answer: current, rounds: round, passed: true, escalated, unverified };
     }
 
     const useEscalate = cheapImproveExhausted && !!deps.escalate;
@@ -115,7 +153,7 @@ export async function runQaDeliveryLoop(
     else cheapImproveExhausted = true;
     // Repair failed or produced nothing usable → stop; ship the best so far.
     if (!improved || !improved.trim()) {
-      return { answer: current, rounds: round + 1, passed: false, escalated };
+      return { answer: current, rounds: round + 1, passed: false, escalated, unverified: false };
     }
     current = improved;
   }
@@ -125,5 +163,5 @@ export async function runQaDeliveryLoop(
   // would only refine an audit-only boolean at the cost of one whole slow-model call
   // per turn. Report passed=false (we never got a confirming PASS within budget).
   const finalPass = false;
-  return { answer: current, rounds: maxRounds, passed: finalPass, escalated };
+  return { answer: current, rounds: maxRounds, passed: finalPass, escalated, unverified: false };
 }

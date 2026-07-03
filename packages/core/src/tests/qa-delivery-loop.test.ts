@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { runQaDeliveryLoop, parseQaVerdict, type QaDeliveryDeps } from "../agent/qa-delivery-loop.js";
+import { runQaDeliveryLoop, parseQaVerdict, verdictHasEvidence, type QaDeliveryDeps } from "../agent/qa-delivery-loop.js";
 
 const CRITERIA = ["names a winner", "cites sources"];
 
@@ -16,7 +16,7 @@ describe("runQaDeliveryLoop", () => {
   it("ships immediately with no criteria (nothing to check)", async () => {
     const check = vi.fn();
     const r = await runQaDeliveryLoop("answer", [], deps({ check }));
-    expect(r).toEqual({ answer: "answer", rounds: 0, passed: true, escalated: false });
+    expect(r).toEqual({ answer: "answer", rounds: 0, passed: true, escalated: false, unverified: false });
     expect(check).not.toHaveBeenCalled();
   });
 
@@ -162,5 +162,61 @@ describe("parseQaVerdict (runtime verdict parser)", () => {
   it("fails OPEN (passes) on empty or unparseable reviewer noise", () => {
     expect(parseQaVerdict("")).toEqual({ pass: true });
     expect(parseQaVerdict("hmm, hard to say")).toEqual({ pass: true });
+  });
+
+  it("captures a PASS — evidence: <ground> justification, but a bare PASS carries none", () => {
+    const withEv = parseQaVerdict("PASS — evidence: the served app returned HTTP 200 on /api/health");
+    expect(withEv.pass).toBe(true);
+    expect(withEv.evidence).toBe("the served app returned HTTP 200 on /api/health");
+    expect(verdictHasEvidence(withEv)).toBe(true);
+    // accepts the parenthetical and colon shapes too
+    expect(parseQaVerdict("PASS (evidence: file quiz.html has a closing </html> tag)").evidence)
+      .toBe("file quiz.html has a closing </html> tag");
+    // a bare PASS (or unparseable pass) has no evidence
+    expect(verdictHasEvidence(parseQaVerdict("PASS"))).toBe(false);
+    expect(verdictHasEvidence(parseQaVerdict("looks fine to me"))).toBe(false);
+    // a FAIL is unaffected by the evidence branch
+    expect(parseQaVerdict("FAIL: no evidence of a winner").pass).toBe(false);
+  });
+});
+
+describe("runQaDeliveryLoop — no-PASS-without-evidence invariant (qaEvidenceRequired)", () => {
+  it("marks a PASS lacking evidence as unverified but STILL ships it (fail-open preserved)", async () => {
+    const r = await runQaDeliveryLoop("the answer", CRITERIA, deps({
+      check: async () => ({ pass: true }), // bare pass, no evidence
+      requireEvidence: true,
+    }));
+    expect(r.passed).toBe(true);        // never blocks delivery
+    expect(r.answer).toBe("the answer"); // ships unchanged
+    expect(r.unverified).toBe(true);     // but flagged for a caveat
+  });
+
+  it("an evidence-backed PASS is trusted (not unverified)", async () => {
+    const r = await runQaDeliveryLoop("the answer", CRITERIA, deps({
+      check: async () => ({ pass: true, evidence: "web_fetch returned the 2026 spec table with all 5 rows" }),
+      requireEvidence: true,
+    }));
+    expect(r.passed).toBe(true);
+    expect(r.unverified).toBe(false);
+  });
+
+  it("is inert when requireEvidence is off: a bare PASS is a clean pass (backward compatible)", async () => {
+    const r = await runQaDeliveryLoop("the answer", CRITERIA, deps({
+      check: async () => ({ pass: true }),
+    }));
+    expect(r.unverified).toBe(false);
+  });
+
+  it("never marks a FAIL→improve→pass path unverified when the final pass has evidence", async () => {
+    let calls = 0;
+    const r = await runQaDeliveryLoop("v0", CRITERIA, deps({
+      check: async () => (++calls > 1 ? { pass: true, evidence: "artifact written to /out/report.md (4.2KB)" } : { pass: false, flaws: "thin" }),
+      improve: async () => "v1",
+      requireEvidence: true,
+      maxRounds: 3,
+    }));
+    expect(r.answer).toBe("v1");
+    expect(r.passed).toBe(true);
+    expect(r.unverified).toBe(false);
   });
 });

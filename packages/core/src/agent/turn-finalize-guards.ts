@@ -49,6 +49,7 @@ import { looksLikeRawSharedFactsDump } from "./runtime-evidence-dump.js";
 import {
   looksLikeTransparentIncompleteReport,
   prependUnverifiedSourceCaveat,
+  prependUnverifiedQaCaveat,
 } from "./citation-honesty.js";
 import { applyCitationHonestyGuard } from "./turn-terminal-guards.js";
 import { findRecentDelegateEvidence } from "./interrupted-delegation-evidence.js";
@@ -72,6 +73,7 @@ interface QaDeliveryGateResult {
   rounds: number;
   passed: boolean;
   escalated: boolean;
+  unverified: boolean;
 }
 
 /** Structural result shape of runDeliverableConsistencyGate (declared locally). */
@@ -147,6 +149,7 @@ export interface TerminalGuardContext {
     criteria: string[],
     maxRounds: number,
     escalate?: (current: string, flaws: string, crit: string[]) => Promise<string | null>,
+    requireEvidence?: boolean,
   ) => Promise<QaDeliveryGateResult>;
   runDeliverableConsistencyGate: (
     session: AgentSession,
@@ -496,6 +499,7 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
         session, provider, signal, finalResponse, criteria,
         effectiveOrchestration().qaDeliveryLoopMaxRounds,
         qaEscalate,
+        effectiveOrchestration().qaEvidenceRequired,
       ));
       if (gate.changed) {
         finalResponse = gate.answer;
@@ -508,14 +512,22 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
         }
         guardrailEvents.push({ type: "guardrail_flagged", details: gate.escalated ? "qa_delivery_loop_escalated" : "qa_delivery_loop_improved" });
       }
+      // No-PASS-without-evidence (orchestration.qaEvidenceRequired): the answer PASSED but the
+      // reviewer cited no verifiable ground — ship it (fail-open preserved) with an honesty
+      // caveat rather than presenting it as QA-confirmed. Runs after any improve()/redaction.
+      if (gate.unverified) {
+        finalResponse = prependUnverifiedQaCaveat(finalResponse);
+        guardrailEvents.push({ type: "guardrail_flagged", details: "qa_delivery_loop_unverified" });
+      }
       logAudit("flow_verification_passed", {
         reason: "qa_delivery_loop",
         rounds: gate.rounds,
         passed: gate.passed,
+        unverified: gate.unverified,
         improved: gate.changed,
         escalated: gate.escalated,
         acceptanceCriteria: criteria.length,
-      }, { sessionId: session.id, severity: gate.changed ? "warn" : "info" });
+      }, { sessionId: session.id, severity: gate.changed || gate.unverified ? "warn" : "info" });
     }
   }
 

@@ -184,6 +184,15 @@ export const OrchestrationSchema = z.object({
    *  so it stays gated until pass^k shows the quality lift beats the latency. Requires
    *  qaDeliveryLoop. */
   qaDeliveryLoopEscalateToCoordinator: z.boolean().default(false),
+  /** No-PASS-without-evidence invariant for the QA delivery gate. When true, the reviewer is
+   *  asked to justify a PASS with a concrete verifiable ground (a tool-result fact / artifact
+   *  property), and a PASS carrying no such evidence is treated as UNVERIFIED: the answer still
+   *  SHIPS (the gate's fail-open invariant is preserved) but an honesty caveat is stamped instead
+   *  of presenting it as QA-confirmed. Kills the rubber-stamp pass — a weak local reviewer echoing
+   *  a bare "PASS" no longer certifies a possibly-fabricated answer. Structural (evidence present
+   *  or not), not topic-based. Default OFF: changes the reviewer prompt + adds a caveat path, so it
+   *  stays gated until the user's pass^k eval confirms the honesty lift. Requires qaDeliveryLoop. */
+  qaEvidenceRequired: z.boolean().default(false),
   /** Deliverable self-consistency gate (audit 17f53ed0). The acceptance-criteria QA gates
    *  (riskGatedQA / qaDeliveryLoop) only run on plan-bearing turns and check GROUNDING +
    *  criteria coverage — neither checks whether the deliverable's OWN figures and arithmetic

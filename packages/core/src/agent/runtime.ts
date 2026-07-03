@@ -4363,11 +4363,18 @@ async function runQaDeliveryGate(
   criteria: string[],
   maxRounds: number,
   escalate?: (current: string, flaws: string, crit: string[]) => Promise<string | null>,
-): Promise<{ answer: string; changed: boolean; rounds: number; passed: boolean; escalated: boolean }> {
+  requireEvidence = false,
+): Promise<{ answer: string; changed: boolean; rounds: number; passed: boolean; escalated: boolean; unverified: boolean }> {
   const verdictProvider = getChatProviderForTier("synthesis") ?? provider;
 
   const check = async (current: string, crit: string[]): Promise<QaVerdict> => {
     if (signal.aborted) return { pass: true }; // fail open on abort
+    // No-PASS-without-evidence (orchestration.qaEvidenceRequired): ask the reviewer to
+    // ground a PASS in a concrete verifiable fact. A PASS with no evidence is downgraded
+    // to "unverified" (ships with a caveat) by the loop — killing rubber-stamp passes.
+    const passLine = requireEvidence
+      ? "Reply on a SINGLE line. If every criterion is fully met and the answer is internally consistent, reply exactly: PASS — evidence: <one concrete verifiable fact from the answer's tool results / artifacts that proves the criteria are met>. A PASS with no such concrete evidence will NOT be trusted."
+      : "Reply on a SINGLE line. If every criterion is fully met and the answer is internally consistent, reply exactly: PASS";
     const instruction = [
       "You are a strict QA reviewer. Judge ONLY whether the ANSWER below satisfies EVERY acceptance criterion for the user's task. Do not rewrite it.",
       "Acceptance criteria:",
@@ -4376,7 +4383,7 @@ async function runQaDeliveryGate(
       "ANSWER:",
       current,
       "",
-      "Reply on a SINGLE line. If every criterion is fully met and the answer is internally consistent, reply exactly: PASS",
+      passLine,
       "Otherwise reply: FAIL: <one concise sentence naming each unmet criterion / concrete flaw>.",
     ].join("\n");
     const messages: LLMMessage[] = [
@@ -4406,13 +4413,14 @@ async function runQaDeliveryGate(
     return candidate;
   };
 
-  const result = await runQaDeliveryLoop(answer, criteria, { check, improve, maxRounds, ...(escalate ? { escalate } : {}) });
+  const result = await runQaDeliveryLoop(answer, criteria, { check, improve, maxRounds, requireEvidence, ...(escalate ? { escalate } : {}) });
   return {
     answer: result.answer,
     changed: result.answer.trim() !== answer.trim(),
     rounds: result.rounds,
     passed: result.passed,
     escalated: result.escalated,
+    unverified: result.unverified,
   };
 }
 
