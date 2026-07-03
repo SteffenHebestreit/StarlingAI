@@ -604,7 +604,7 @@ describe("runtime delegated-loop regressions", () => {
         forcedSynthesisFired: true,
         finishReason: "synthesis_required_tool_call_rejected",
       }),
-      expect.objectContaining({ severity: "warn" }),
+      expect.objectContaining({ severity: "info" }),
     );
 
     const toolMessages = session.getHistory().filter((message) => message.role === "tool");
@@ -666,7 +666,7 @@ describe("runtime delegated-loop regressions", () => {
         forcedSynthesisFired: true,
         finishReason: "user_response_required_tool_call_rejected",
       }),
-      expect.objectContaining({ severity: "warn" }),
+      expect.objectContaining({ severity: "info" }),
     );
 
     const toolMessages = session.getHistory().filter((message) => message.role === "tool");
@@ -774,7 +774,7 @@ describe("runtime delegated-loop regressions", () => {
         finalAnswerLength: "synthesized".length,
         toolIterations: 1,
       }),
-      expect.objectContaining({ severity: "warn" }),
+      expect.objectContaining({ severity: "info" }),
     );
   });
 

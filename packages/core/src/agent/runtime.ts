@@ -1993,12 +1993,12 @@ async function _runTurn(
         logAudit("turn_performance", { ...performance, usage: totalUsage }, {
           sessionId: session.id,
           channel: session.channel,
-          severity: "warn",
+          severity: "info",
         });
         logAudit("message_sent", { length: finalResponse.length, toolCalls: iterationCount, usage: totalUsage, performance }, {
           sessionId: session.id,
           channel: session.channel,
-          severity: "warn",
+          severity: "info",
         });
         logAudit("turn_scorecard", {
           delegationCount: _turnDelegationCount,
@@ -2008,7 +2008,7 @@ async function _runTurn(
           finalAnswerLength: finalResponse.length,
           toolIterations: iterationCount,
           finishReason: "llm_error_evidence_backstop",
-        }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+        }, { sessionId: session.id, channel: session.channel, severity: "info" });
         return {
           response: finalResponse,
           toolCallsExecuted: iterationCount,
@@ -3120,13 +3120,13 @@ async function _runTurn(
           logAudit("turn_performance", { ...performance, usage: totalUsage }, {
             sessionId: session.id,
             channel: session.channel,
-            severity: "warn",
+            severity: "info",
           });
 
           logAudit("message_sent", { length: finalResponse.length, toolCalls: iterationCount, usage: totalUsage, performance }, {
             sessionId: session.id,
             channel: session.channel,
-            severity: "warn",
+            severity: "info",
           });
 
           // F29: Per-turn quality scorecard (delegate-loop-terminated path)
@@ -3138,7 +3138,7 @@ async function _runTurn(
             finalAnswerLength: finalResponse.length,
             toolIterations: iterationCount,
             finishReason: "delegate_loop_terminated",
-          }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+          }, { sessionId: session.id, channel: session.channel, severity: "info" });
 
           return {
             response: finalResponse,
@@ -3593,13 +3593,13 @@ async function _runTurn(
             logAudit("turn_performance", { ...performance, usage: totalUsage }, {
               sessionId: session.id,
               channel: session.channel,
-              severity: "warn",
+              severity: "info",
             });
 
             logAudit("message_sent", { length: finalResponse.length, toolCalls: iterationCount, usage: totalUsage, performance }, {
               sessionId: session.id,
               channel: session.channel,
-              severity: "warn",
+              severity: "info",
             });
 
             // F29: Per-turn quality scorecard (identical-output loop terminated path)
@@ -3611,7 +3611,7 @@ async function _runTurn(
               finalAnswerLength: finalResponse.length,
               toolIterations: iterationCount,
               finishReason: "delegate_loop_terminated",
-            }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+            }, { sessionId: session.id, channel: session.channel, severity: "info" });
 
             return {
               response: finalResponse,
@@ -4234,12 +4234,12 @@ async function _runTurn(
   logAudit("turn_performance", { ...performance, usage: totalUsage }, {
     sessionId: session.id,
     channel: session.channel,
-    severity: "warn",
+    severity: "info",
   });
   logAudit("message_sent", { length: finalMsg.length, toolCalls: iterationCount, usage: totalUsage, performance }, {
     sessionId: session.id,
     channel: session.channel,
-    severity: "warn",
+    severity: "info",
   });
   logAudit("turn_scorecard", {
     delegationCount: _turnDelegationCount,
@@ -4249,7 +4249,7 @@ async function _runTurn(
     finalAnswerLength: finalMsg.length,
     toolIterations: iterationCount,
     finishReason: terminalFinishReason,
-  }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+  }, { sessionId: session.id, channel: session.channel, severity: "info" });
   return {
     response: finalMsg,
     toolCallsExecuted: iterationCount,
