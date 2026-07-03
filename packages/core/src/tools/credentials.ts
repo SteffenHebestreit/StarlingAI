@@ -12,7 +12,7 @@
  *                         the values.
  */
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
-import { resolveSiteCredential } from "../credentials/sites.js";
+import { lookupSiteCredential, siteCredentialMissMessage } from "../credentials/sites.js";
 import { callPlaywrightTool } from "./multimodal.js";
 import { childLogger } from "../logger.js";
 import { logAudit } from "../audit/logger.js";
@@ -92,14 +92,16 @@ registerTool({
       return { success: false, output: "", error: "hostname is required" };
     }
 
-    const cred = resolveSiteCredential(hostname, ctx.sessionId, ctx.userId);
-    if (!cred) {
+    const lookup = lookupSiteCredential(hostname, ctx.sessionId, ctx.userId);
+    if (lookup.status !== "resolved") {
       return {
         success: false,
         output: "",
-        error: `No credentials found for '${hostname}'. Add them via the dashboard (Settings → Site Credentials) or in the config file.`,
+        error: siteCredentialMissMessage(lookup, hostname),
+        metadata: { credentialLookupStatus: lookup.status },
       };
     }
+    const cred = lookup.credential;
 
     // SECURITY: Never expose username or password to the LLM
     const lines = [
@@ -174,14 +176,16 @@ registerTool({
       return { success: false, output: "", error: "hostname is required" };
     }
 
-    const cred = resolveSiteCredential(hostname, ctx.sessionId, ctx.userId);
-    if (!cred) {
+    const lookup = lookupSiteCredential(hostname, ctx.sessionId, ctx.userId);
+    if (lookup.status !== "resolved") {
       return {
         success: false,
         output: "",
-        error: `No credentials found for '${hostname}'. Configure them in Settings → Site Credentials first.`,
+        error: siteCredentialMissMessage(lookup, hostname),
+        metadata: { credentialLookupStatus: lookup.status },
       };
     }
+    const cred = lookup.credential;
 
     const hintUsernameRef = args["usernameRef"] ? String(args["usernameRef"]).trim() : undefined;
     const hintPasswordRef = args["passwordRef"] ? String(args["passwordRef"]).trim() : undefined;

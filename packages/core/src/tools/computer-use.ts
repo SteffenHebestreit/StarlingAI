@@ -15,7 +15,7 @@ import { childLogger } from "../logger.js";
 import { logAudit } from "../audit/logger.js";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { canAccessResource } from "../guardrails/resource-access.js";
-import { resolveSiteCredential } from "../credentials/sites.js";
+import { lookupSiteCredential, siteCredentialMissMessage } from "../credentials/sites.js";
 import {
   computerSessionManager,
   type ComputerSession,
@@ -1489,10 +1489,11 @@ registerTool({
         return fail("field must be 'username' or 'password'");
       }
 
-      const cred = resolveSiteCredential(hostname, ctx.sessionId, ctx.userId);
-      if (!cred) {
-        return fail(`No credentials found for '${hostname}'. Configure them in Settings → Site Credentials first.`);
+      const lookup = lookupSiteCredential(hostname, ctx.sessionId, ctx.userId);
+      if (lookup.status !== "resolved") {
+        return fail(siteCredentialMissMessage(lookup, hostname));
       }
+      const cred = lookup.credential;
 
       const { sessionId } = requireActiveSession(args["sessionId"] as string | undefined, ctx.sessionId);
       enforcePacing(sessionId);

@@ -56,11 +56,26 @@ export interface StoredSiteCredentialRecord {
 
 // ─── Resolve credentials for a hostname ──────────────────────────────────────
 
-export function resolveSiteCredential(
+/**
+ * Why a lookup produced no usable credential. `resolveSiteCredential` collapses all
+ * three misses to `null`; tools that talk to the user should use `lookupSiteCredential`
+ * and report the true reason. Session 8815a45e: a stored freelancermap.de credential
+ * was RBAC-denied for the calling user, but the tool reported "No credentials found —
+ * add them via the dashboard", contradicting the user (who HAD stored it) and sending
+ * the whole turn chain hunting a phantom missing entry. `unresolved` is the env-var /
+ * secret-ref drift class ("$VAR" not set in the gateway env) — also NOT "not found".
+ */
+export type SiteCredentialLookup =
+  | { status: "resolved"; credential: ResolvedSiteCredential }
+  | { status: "denied"; hostname: string }
+  | { status: "unresolved"; hostname: string }
+  | { status: "not_found" };
+
+export function lookupSiteCredential(
   hostname: string,
   sessionId?: string,
   userId?: string,
-): ResolvedSiteCredential | null {
+): SiteCredentialLookup {
   const host = normalizeHost(hostname);
 
   // 1. Check config file (higher precedence)
@@ -70,25 +85,28 @@ export function resolveSiteCredential(
     const [matchedHost, configEntry] = configMatch;
     if (!canAccessResource(userId, { allowedUsers: (configEntry as { allowedUsers?: string[] }).allowedUsers })) {
       logAudit("guardrail_flagged", { type: "credential_access_denied", hostname: matchedHost, source: "config" }, { sessionId, severity: "warn" });
-      return null;
+      return { status: "denied", hostname: matchedHost };
     }
     const password = resolvePasswordRef(configEntry.password, matchedHost);
     if (!password) {
       log.warn({ host: matchedHost }, "Site credential in config but password could not be resolved");
-      return null;
+      return { status: "unresolved", hostname: matchedHost };
     }
     logAudit("credential_accessed", { hostname: matchedHost, source: "config" }, { sessionId });
     return {
-      hostname: matchedHost,
-      username: configEntry.username,
-      password,
-      loginUrl: configEntry.loginUrl,
-      urls: configEntry.urls,
-      usernameSelector: configEntry.usernameSelector,
-      passwordSelector: configEntry.passwordSelector,
-      submitSelector: configEntry.submitSelector,
-      notes: configEntry.notes,
-      source: "config",
+      status: "resolved",
+      credential: {
+        hostname: matchedHost,
+        username: configEntry.username,
+        password,
+        loginUrl: configEntry.loginUrl,
+        urls: configEntry.urls,
+        usernameSelector: configEntry.usernameSelector,
+        passwordSelector: configEntry.passwordSelector,
+        submitSelector: configEntry.submitSelector,
+        notes: configEntry.notes,
+        source: "config",
+      },
     };
   }
 
@@ -97,25 +115,53 @@ export function resolveSiteCredential(
   if (stored) {
     if (!canAccessResource(userId, { allowedUsers: stored.allowedUsers })) {
       logAudit("guardrail_flagged", { type: "credential_access_denied", hostname: stored.hostname, source: "store" }, { sessionId, severity: "warn" });
-      return null;
+      return { status: "denied", hostname: stored.hostname };
     }
     const resolvedUsername = resolveStoredCredentialRef(stored.username, stored.hostname, "username");
     const resolvedPassword = resolveStoredCredentialRef(stored.password, stored.hostname, "password");
     if (!resolvedUsername || !resolvedPassword) {
       log.warn({ host: stored.hostname }, "Stored site credential could not be fully resolved");
-      return null;
+      return { status: "unresolved", hostname: stored.hostname };
     }
 
     logAudit("credential_accessed", { hostname: stored.hostname, source: "store" }, { sessionId });
     return {
-      ...stored,
-      username: resolvedUsername,
-      password: resolvedPassword,
-      source: "store",
+      status: "resolved",
+      credential: {
+        ...stored,
+        username: resolvedUsername,
+        password: resolvedPassword,
+        source: "store",
+      },
     };
   }
 
-  return null;
+  return { status: "not_found" };
+}
+
+export function resolveSiteCredential(
+  hostname: string,
+  sessionId?: string,
+  userId?: string,
+): ResolvedSiteCredential | null {
+  const result = lookupSiteCredential(hostname, sessionId, userId);
+  return result.status === "resolved" ? result.credential : null;
+}
+
+/**
+ * Honest, user-facing error for a credential lookup miss. Distinguishes "exists but
+ * this user may not use it" and "exists but its secret reference is broken" from a
+ * genuine "not stored" — only the last should tell the user to add credentials.
+ */
+export function siteCredentialMissMessage(result: SiteCredentialLookup, requestedHostname: string): string {
+  switch (result.status) {
+    case "denied":
+      return `A credential for '${result.hostname}' exists but is restricted to specific users and is not available to the current user. Ask the owner to add your user to its allowedUsers (Settings → Site Credentials) — do NOT re-add the credential.`;
+    case "unresolved":
+      return `A credential for '${result.hostname}' is configured but its secret reference could not be resolved (missing environment variable or secret-store entry — run 'sai env-check'). The entry exists; fix the reference instead of re-adding it.`;
+    default:
+      return `No credentials found for '${requestedHostname}'. Add them via the dashboard (Settings → Site Credentials) or in the config file.`;
+  }
 }
 
 export function hasConfigSiteCredential(hostname: string): boolean {

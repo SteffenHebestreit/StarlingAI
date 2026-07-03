@@ -174,3 +174,86 @@ describe("site credential resolution", () => {
     }
   });
 });
+
+/**
+ * Honest lookup-miss reporting (regression: session 8815a45e, 2026-07-02). A configured
+ * freelancermap.de credential was RBAC-denied for the calling user, but the tools reported
+ * "No credentials found — add them via the dashboard", contradicting the user (who HAD
+ * stored it) and sending three delegation attempts hunting a phantom missing entry.
+ * lookupSiteCredential must distinguish denied / unresolved-secret-ref / not_found, and the
+ * user-facing message must never say "not found" for an entry that exists.
+ */
+describe("site credential lookup-miss honesty", () => {
+  afterEach(async () => {
+    delete process.env["SAI_CONFIG_PATH"];
+    delete process.env["FM_PASSWORD"];
+    vi.resetModules();
+    const configLoader = await import("../config/loader.js");
+    configLoader.resetConfigForTests();
+  });
+
+  async function withSitesConfig(entry: Record<string, unknown>, run: (sites: typeof import("../credentials/sites.js")) => void | Promise<void>) {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sites-miss-"));
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({ sites: { "freelancermap.de": entry } }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+    try {
+      await run(await import("../credentials/sites.js"));
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }
+
+  it("reports 'denied' (not 'not found') when the entry exists but the user is not allowed", async () => {
+    process.env["FM_PASSWORD"] = "pw";
+    await withSitesConfig(
+      { username: "u@example.com", password: "$FM_PASSWORD", allowedUsers: ["steffen"] },
+      (sites) => {
+        const result = sites.lookupSiteCredential("freelancermap.de", "sess-1", "admin");
+        expect(result.status).toBe("denied");
+        const msg = sites.siteCredentialMissMessage(result, "freelancermap.de");
+        expect(msg).toContain("restricted");
+        expect(msg).not.toContain("No credentials found");
+        // Back-compat wrapper still collapses to null.
+        expect(sites.resolveSiteCredential("freelancermap.de", "sess-1", "admin")).toBeNull();
+      },
+    );
+  });
+
+  it("still resolves for an allowed user and with auth disabled (no userId)", async () => {
+    process.env["FM_PASSWORD"] = "pw";
+    await withSitesConfig(
+      { username: "u@example.com", password: "$FM_PASSWORD", allowedUsers: ["steffen"] },
+      (sites) => {
+        expect(sites.lookupSiteCredential("freelancermap.de", "sess-1", "steffen").status).toBe("resolved");
+        expect(sites.lookupSiteCredential("freelancermap.de", "sess-1", undefined).status).toBe("resolved");
+      },
+    );
+  });
+
+  it("reports 'unresolved' (env-var drift class) when the entry exists but its secret ref is broken", async () => {
+    // FM_PASSWORD deliberately NOT set — the "$VAR resolves from gateway env" gotcha.
+    await withSitesConfig(
+      { username: "u@example.com", password: "$FM_PASSWORD" },
+      (sites) => {
+        const result = sites.lookupSiteCredential("freelancermap.de", "sess-1", "admin");
+        expect(result.status).toBe("unresolved");
+        const msg = sites.siteCredentialMissMessage(result, "freelancermap.de");
+        expect(msg).toContain("could not be resolved");
+        expect(msg).not.toContain("No credentials found");
+      },
+    );
+  });
+
+  it("reports a genuine miss as 'not_found' with the add-it guidance", async () => {
+    await withSitesConfig(
+      { username: "u@example.com", password: "pw-literal" },
+      (sites) => {
+        const result = sites.lookupSiteCredential("unknown-site.example", "sess-1", "admin");
+        expect(result.status).toBe("not_found");
+        expect(sites.siteCredentialMissMessage(result, "unknown-site.example")).toContain("No credentials found");
+      },
+    );
+  });
+});
