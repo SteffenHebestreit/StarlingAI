@@ -1101,7 +1101,13 @@ export function createGateway() {
   // request time so the operator can flip the flag without a restart.
 
   app.post("/api/auth/login", async (c) => {
-    const ip = c.req.header("X-Forwarded-For") ?? "unknown";
+    // Rate-limit identity: the real transport peer (spoof-proof, stamped by the
+    // node bridge) by default; only trust the client-controlled X-Forwarded-For
+    // when explicitly opted in for a reverse-proxy deployment.
+    const peer = c.req.header("x-gateway-peer-addr") ?? "unknown";
+    const ip = getConfig().auth.trustProxyHeader
+      ? (c.req.header("X-Forwarded-For")?.split(",")[0]?.trim() || peer)
+      : peer;
     const rate = checkAuthRateLimit(ip);
     if (!rate.allowed) {
       return c.json({ error: "Too many failed attempts. Try again later." }, 429);
@@ -1129,10 +1135,14 @@ export function createGateway() {
         return c.json({ error: "Invalid username or password" }, 401);
       }
       clearAuthFailures(ip);
+      // Merge the provider's free-form claims FIRST and strip reserved security
+      // keys, so a malicious/compromised extension provider cannot override the
+      // authoritative `role` (privilege escalation) or `sub` in the minted JWT.
+      const { role: _ignoredRole, sub: _ignoredSub, ...safeClaims } = providerUser.claims ?? {};
       const token = await createToken(providerUser.id, {
+        ...safeClaims,
         role: providerUser.role,
         ...(providerUser.displayName ? { displayName: providerUser.displayName } : {}),
-        ...(providerUser.claims ?? {}),
       });
       logAudit("auth_success", { username: providerUser.username, role: providerUser.role }, { userId: providerUser.id });
       return c.json({
@@ -1192,6 +1202,11 @@ export function createGateway() {
   app.get("/api/auth/users", async (c) => {
     const user = await authenticatedUser(c.req.header("Authorization"));
     if (!user) return c.json({ error: "Unauthorized" }, 401);
+    // User management is operator-only (matches POST/DELETE); a read-only viewer
+    // must not enumerate the full account roster.
+    if (!userHasRole(user, "operator")) {
+      return c.json({ error: "Operator role required" }, 403);
+    }
     const users = getConfig().auth.users.map((u) => ({
       username: u.username,
       displayName: u.displayName,
@@ -3456,7 +3471,10 @@ export function createGateway() {
       const records = scope === "user"
         ? listUserMemoryRecords(cfg.workspacePath)
         : listWorkspaceMemoryRecords(cfg.workspacePath);
-      const limit = Math.max(1, Math.min(500, Number(c.req.query("limit") ?? 200)));
+      const limitRaw = Number(c.req.query("limit") ?? 200);
+      // A non-numeric ?limit=abc → NaN → slice(0, NaN) silently returns ZERO records;
+      // fall back to the default instead (mirrors sub-agent-routes.ts / health.ts).
+      const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(500, Math.trunc(limitRaw))) : 200;
       const query = (c.req.query("query") ?? "").toLowerCase().trim();
       const filtered = query
         ? records.filter((r) => r.content?.toLowerCase().includes(query)
@@ -3529,7 +3547,14 @@ export function createGateway() {
         return c.json({ available: false, nodes: [], edges: [], note: "MemGraph is offline. Set MEMGRAPH_URL and start the memgraph service to enable the knowledge-graph view." });
       }
       const labelFilter = (c.req.query("label") ?? "").trim();
-      const limit = Math.max(10, Math.min(500, Number(c.req.query("limit") ?? 150)));
+      // The label is string-interpolated into the Cypher template (node labels
+      // cannot be a bound parameter), so restrict it to a bare identifier — any
+      // injection payload necessarily contains characters outside this set.
+      if (labelFilter && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(labelFilter)) {
+        return c.json({ error: "Invalid label filter" }, 400);
+      }
+      const limitRaw = Number(c.req.query("limit") ?? 150);
+      const limit = Number.isFinite(limitRaw) ? Math.max(10, Math.min(500, Math.trunc(limitRaw))) : 150;
       // Pull a label-scoped (or global) sample of nodes plus their immediate
       // neighbours. The visualization is a rendered bird's-eye view, not the
       // full graph — operators that need deeper queries should use graph_query.
@@ -4303,6 +4328,13 @@ export function createGateway() {
     return c.json(listPendingApprovals());
   });
 
+  // Constant-time approval-secret comparison, mirroring the webhook-key checks
+  // above. The length pre-check both provides the timing guard and keeps
+  // timingSafeEqual from throwing on unequal-length buffers.
+  const approvalSecretMatches = (expected: string, provided: string): boolean =>
+    expected.length > 0 && expected.length === provided.length &&
+    timingSafeEqual(Buffer.from(expected), Buffer.from(provided));
+
   app.get("/api/approval/:approvalId", async (c) => {
     const id = c.req.param("approvalId");
     const approved = c.req.query("approved") === "true";
@@ -4314,7 +4346,7 @@ export function createGateway() {
     }
 
     // Verify secret if one was set (slack/outbound_webhook channels always set one)
-    if (pending.secret && pending.secret !== secret) {
+    if (pending.secret && !approvalSecretMatches(pending.secret, secret)) {
       return c.html("<html><body><h2>Invalid approval secret.</h2></body></html>", 403);
     }
 
@@ -4342,7 +4374,7 @@ export function createGateway() {
     // valid operator JWT (the dashboard — so detached scene/job runs can be
     // approved from the UI without knowing the per-approval secret).
     const operatorAuthed = bearer && await verifyToken(bearer);
-    if (!operatorAuthed && pending.secret && pending.secret !== (bodySecret || bearer)) {
+    if (!operatorAuthed && pending.secret && !approvalSecretMatches(pending.secret, bodySecret || bearer)) {
       return c.json({ error: "Invalid approval secret" }, 403);
     }
 
@@ -4929,9 +4961,15 @@ export function createGateway() {
 
     // ── Delegate all other requests to Hono ───────────────────────────────────
     const method = req.method ?? "GET";
+    // Stamp the REAL transport peer address into a trusted header the client
+    // cannot forge (any inbound value is deleted first), so rate limiters can
+    // key on it instead of the spoofable X-Forwarded-For.
+    const forwardedHeaders: Record<string, string> = { ...(req.headers as Record<string, string>) };
+    delete forwardedHeaders["x-gateway-peer-addr"];
+    forwardedHeaders["x-gateway-peer-addr"] = req.socket.remoteAddress ?? "unknown";
     const honoReq = new Request(requestUrl, {
       method,
-      headers: req.headers as Record<string, string>,
+      headers: forwardedHeaders,
       body: method === "GET" || method === "HEAD" ? undefined : Readable.toWeb(req),
       duplex: method === "GET" || method === "HEAD" ? undefined : "half",
     } as RequestInit & { duplex?: "half" });

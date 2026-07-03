@@ -404,7 +404,17 @@ function float32ToBase64(v: Float32Array): string {
 
 function base64ToFloat32(s: string): Float32Array {
   const buf = Buffer.from(s, "base64");
-  return new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
+  // A corrupt/truncated cache entry can decode to a non-multiple-of-4 length. The
+  // zero-copy view constructor would silently TRUNCATE that into a shorter vector
+  // (cosineSimilarity then reads past its end → NaN scores → flattened routing).
+  // Reject it so the degeneracy guard routes it to re-embed. Also copy into an
+  // owned, 4-aligned ArrayBuffer so the view never aliases a pooled Buffer whose
+  // byteOffset is not 4-aligned (which would throw a RangeError).
+  if (buf.byteLength === 0 || buf.byteLength % 4 !== 0) {
+    throw new Error(`corrupt embedding vector: ${buf.byteLength} bytes is not a multiple of 4`);
+  }
+  const copy = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+  return new Float32Array(copy);
 }
 
 function loadEmbeddingCache(model: string): Record<string, PersistedEmbeddingEntry> {
@@ -480,11 +490,16 @@ async function _buildAgentIndexInner(
   const unchanged = entries.length - toEmbed.length;
   if (toEmbed.length === 0) {
     // Everything is cached — restore index directly without any HTTP calls
-    _index = entries.map(([name, cfg]) => ({
-      agentName: name,
-      description: cfg.description,
-      vector: base64ToFloat32(cachedAgents[name]!.vector),
-    }));
+    _index = entries.flatMap(([name, cfg]) => {
+      // Skip (rather than abort the whole build on) a stray corrupt cache entry;
+      // the degeneracy guard above already re-embeds these, so this is defensive.
+      try {
+        return [{ agentName: name, description: cfg.description, vector: base64ToFloat32(cachedAgents[name]!.vector) }];
+      } catch (err) {
+        log.warn({ err, agent: name }, "skipping corrupt cached embedding entry");
+        return [];
+      }
+    });
     // Live endpoint probe: the index loaded ENTIRELY from the on-disk cache, so NO live embed
     // happened this load. If the configured model has since been unloaded/removed from the
     // endpoint, blindly setting `_available = true` would be a lie — every query embed would
@@ -549,7 +564,12 @@ async function _buildAgentIndexInner(
   _index = entries.flatMap(([name, cfg]) => {
     const entry = updatedCache[name];
     if (!entry) return [];
-    return [{ agentName: name, description: cfg.description, vector: base64ToFloat32(entry.vector) }];
+    try {
+      return [{ agentName: name, description: cfg.description, vector: base64ToFloat32(entry.vector) }];
+    } catch (err) {
+      log.warn({ err, agent: name }, "skipping corrupt cached embedding entry");
+      return [];
+    }
   });
 
   const embeddedCount = Object.keys(updatedCache).length - unchanged;

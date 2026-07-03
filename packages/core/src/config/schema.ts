@@ -298,6 +298,14 @@ export type AuthRole = z.infer<typeof AuthRoleSchema>;
 export const AuthSchema = z.object({
   enabled: z.boolean().default(false),
   users: z.array(AuthUserSchema).default([]),
+  /**
+   * Trust the client-supplied `X-Forwarded-For` header for the login
+   * brute-force rate-limit identity. Leave FALSE (the default) for a directly
+   * exposed gateway — otherwise an attacker rotates the header to dodge the
+   * limiter. Set TRUE only when the gateway sits behind a reverse proxy that
+   * overwrites XFF; the limiter then keys on the left-most (client) hop.
+   */
+  trustProxyHeader: z.boolean().default(false),
 });
 
 export type AuthUser = z.infer<typeof AuthUserSchema>;
@@ -405,6 +413,16 @@ export const FederationSchema = z.object({
     enabled: z.boolean().default(false),
     /** How often to refresh the discovered-peer set, in ms.  Default 5 min. */
     intervalMs: z.number().int().min(30_000).max(86_400_000).default(300_000),
+    /**
+     * Allow discovered peer URLs to resolve to private / loopback / link-local
+     * hosts. Leave FALSE (default) so a malicious peer cannot advertise an
+     * internal address (e.g. 169.254.169.254 or 10.x) and make this instance
+     * fetch it with a valid minted token (SSRF amplification). Set TRUE only for
+     * a fully-trusted LAN mesh.
+     */
+    allowPrivateHosts: z.boolean().default(false),
+    /** Hard cap on the number of peers a single discovery pass may add. */
+    maxDiscoveredPeers: z.number().int().min(0).max(1000).default(50),
   }).default({}),
 });
 

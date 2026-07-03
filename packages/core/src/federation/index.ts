@@ -229,6 +229,32 @@ export function invalidatePeerCapability(peerId: string): void {
   _capabilityCache.delete(peerId);
 }
 
+/** True for hosts that must not be fetched from a peer-supplied URL (SSRF guard). */
+export function isPrivateOrLoopbackHost(hostname: string): boolean {
+  const h = hostname.toLowerCase().replace(/^\[|\]$/g, ""); // strip IPv6 brackets
+  if (h === "localhost" || h.endsWith(".localhost") || h === "::1" || h === "0.0.0.0") return true;
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+  if (m) {
+    const a = Number(m[1]), b = Number(m[2]);
+    if (a === 0 || a === 127) return true;                     // "this" network / loopback
+    if (a === 10) return true;                                 // private
+    if (a === 172 && b >= 16 && b <= 31) return true;          // private
+    if (a === 192 && b === 168) return true;                   // private
+    if (a === 169 && b === 254) return true;                   // link-local incl. 169.254.169.254 metadata
+  }
+  if (h.startsWith("fc") || h.startsWith("fd") || h.startsWith("fe80")) return true; // IPv6 ULA / link-local
+  return false;
+}
+
+/** A peer-advertised URL is only followable if it is http(s) and (unless opted-in) a public host. */
+export function isSafePeerUrl(rawUrl: string, allowPrivate: boolean): boolean {
+  let parsed: URL;
+  try { parsed = new URL(rawUrl); } catch { return false; }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+  if (!allowPrivate && isPrivateOrLoopbackHost(parsed.hostname)) return false;
+  return true;
+}
+
 /**
  * Transitive peer discovery — ask each currently-known peer "who else do you
  * talk to?", probe each new candidate with `/api/federation/health`, and add
@@ -258,7 +284,16 @@ export async function discoverPeersTransitively(): Promise<{ probed: number; add
       const body = (await res.json()) as { peers?: FederationPeerConfig[] };
       for (const p of body.peers ?? []) {
         if (!p.id || !p.url) continue;
+        // A peer's advertised list is untrusted input: validate the id, reject
+        // non-http(s) / private-host URLs (SSRF amplification via a minted token),
+        // and honor a hard cap so one pass can't add unbounded peers.
+        if (!/^[a-z0-9_-]+$/i.test(p.id) || p.id.length > 64) continue;
         if (seen.has(p.id)) continue;
+        if (!isSafePeerUrl(p.url, config.discovery.allowPrivateHosts)) {
+          log.warn({ peerId: p.id, peerUrl: p.url }, "discovery: rejected unsafe peer URL");
+          continue;
+        }
+        if (_discoveredPeers.size + candidates.length >= config.discovery.maxDiscoveredPeers) break;
         seen.add(p.id);
         candidates.push({ id: p.id, url: p.url, tags: p.tags ?? [] });
       }

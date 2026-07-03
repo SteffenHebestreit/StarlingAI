@@ -99,6 +99,12 @@ export function mountFederationRoutes(app: Hono): void {
       logAudit("federation_auth_failed", { route: "delegate" }, { severity: "warn" });
       return c.json({ error: "Unauthorized" }, 401);
     }
+    // A token minted for health/capabilities must not authorize code-executing
+    // delegation — the `purpose` claim is otherwise decorative.
+    if (verified.purpose !== "delegate") {
+      logAudit("federation_auth_failed", { route: "delegate", reason: "wrong-purpose", purpose: verified.purpose }, { severity: "warn" });
+      return c.json({ error: "token purpose does not permit delegation" }, 403);
+    }
 
     let body: DelegateBody;
     try {

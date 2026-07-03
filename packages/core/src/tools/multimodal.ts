@@ -138,14 +138,24 @@ registerTool({
       }
 
       const body = await parseUpstreamJsonResponse(response, "Transcription returned a non-JSON response");
-      const segments = Array.isArray(body["segments"])
-        ? body["segments"].map(segment => {
+      // Hoist a nested { result: {...} } envelope so a backend that wraps its payload
+      // doesn't make `result` an OBJECT that String()-coerces to "[object Object]"
+      // and ships as a bogus successful transcript.
+      const payload = unwrapConversionResult(body);
+      const segments = Array.isArray(payload["segments"])
+        ? payload["segments"].map(segment => {
             if (typeof segment === "string") return segment;
-            if (segment && typeof segment === "object" && "text" in segment) return String(segment["text"] ?? "");
+            if (segment && typeof segment === "object" && "text" in segment) return String((segment as Record<string, unknown>)["text"] ?? "");
             return "";
           }).filter(Boolean).join(" ").trim()
         : "";
-      const text = String(body["text"] ?? body["transcription"] ?? body["result"] ?? segments ?? "").trim();
+      // Only accept a STRING transcript candidate — a non-string `result`/`text` must
+      // fall through to segments or an honest failure, never coerce to "[object Object]".
+      const firstString = (...vals: unknown[]): string => {
+        for (const v of vals) if (typeof v === "string" && v.trim()) return v;
+        return "";
+      };
+      const text = (firstString(payload["text"], payload["transcription"], payload["result"]) || segments).trim();
       if (!text) return fail(`No transcript was returned for ${path}`);
 
       return {
@@ -153,8 +163,8 @@ registerTool({
         output: text,
         metadata: {
           path,
-          language: body["language"] ?? body["detected_language"] ?? body["lang"],
-          duration: body["duration"] ?? body["processing_time"],
+          language: payload["language"] ?? payload["detected_language"] ?? payload["lang"],
+          duration: payload["duration"] ?? payload["processing_time"],
         },
       };
     } catch (error) {

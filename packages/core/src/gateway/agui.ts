@@ -28,6 +28,7 @@ const log = childLogger("gateway:agui");
 // ─── Event helpers ────────────────────────────────────────────────────────────
 
 function sseEvent(res: ServerResponse, event: Record<string, unknown>): void {
+  if (res.writableEnded) return; // never write after the stream closed (post-timeout/disconnect)
   const data = JSON.stringify(event);
   res.write(`data: ${data}\n\n`);
 }
@@ -79,7 +80,7 @@ export async function handleAguiStream(
   };
 
   const handleTurnTimeout = () => {
-    if (timedOut) return;
+    if (timedOut || res.writableEnded) return; // already handled / stream already closed
     timedOut = true;
     abortController.abort();
     archiveSession(session.id);
@@ -89,7 +90,6 @@ export async function handleAguiStream(
       message: "Turn exceeded the timeout window and did not finish synthesis. Session archived.",
     });
   };
-  timeoutHandle = setTimeout(handleTurnTimeout, turnTimeoutMs + TURN_TIMEOUT_SYNTHESIS_GRACE_MS);
 
   // Handle client disconnect
   res.on("close", () => {
@@ -98,7 +98,11 @@ export async function handleAguiStream(
     log.debug({ runId }, "AG-UI client disconnected");
   });
 
-  timeoutHandle = setTimeout(handleTurnTimeout, turnTimeoutMs);
+  // A SINGLE turn-timeout timer (+GRACE for synthesis), armed after the close
+  // handler so disconnect cleanup is wired first. A second timer here previously
+  // overwrote the handle and orphaned the first, which then fired after a normal
+  // completion — spuriously archiving the session and writing to a closed stream.
+  timeoutHandle = setTimeout(handleTurnTimeout, turnTimeoutMs + TURN_TIMEOUT_SYNTHESIS_GRACE_MS);
 
   try {
     let textStarted = false;

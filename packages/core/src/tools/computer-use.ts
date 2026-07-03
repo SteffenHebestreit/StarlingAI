@@ -448,6 +448,11 @@ registerTool({
   async execute(args, ctx) {
     let effectiveNodeId: string | undefined;
     let adapter: ComputerSessionAdapter | undefined;
+    // Ad-hoc connections write a transient node into the shared singleton config so
+    // createAdapter() can resolve it during initialization; track it so a `finally`
+    // can remove it on EVERY exit path (success, reuse early-return, error) instead
+    // of leaking one entry per distinct host:port forever.
+    let adHocNodeIdForCleanup: string | undefined;
     try {
       const cuCfg = requireEnabled();
       const nodeId = args["node"] ? String(args["node"]) : undefined;
@@ -482,6 +487,11 @@ registerTool({
         }
         const defaultPort = adHocAdapter === "remote_rdp" ? 3389 : 5900;
         const port = typeof args["port"] === "number" ? args["port"] : defaultPort;
+        if (!Number.isInteger(port) || port < 1 || port > 65535) {
+          return fail(
+            `Invalid port ${String(args["port"])} for ad-hoc ${adHocAdapter} connection — must be an integer in 1..65535.`,
+          );
+        }
 
         // SECURITY: credentials are never accepted from the LLM.
         // Ad-hoc connections use no credentials; for authenticated access,
@@ -501,6 +511,7 @@ registerTool({
         // Write into config.nodes temporarily so createAdapter() resolves it
         if (!cuCfg.nodes) (cuCfg as unknown as Record<string, unknown>).nodes = {};
         cuCfg.nodes[adHocNodeId] = transientNode;
+        adHocNodeIdForCleanup = adHocNodeId;
         adapter = adHocAdapter;
       } else {
         // ── Legacy adapter-level resolution ───────────────────────────────
@@ -615,6 +626,14 @@ registerTool({
           "\nDo NOT retry the same connection — ask the user to verify the target machine first."
         : "";
       return fail(msg + hint);
+    } finally {
+      // The transient ad-hoc node is only needed during createAdapter(); the adapter
+      // instance is cached on the session afterwards (and reconnect reuses it), so
+      // remove the config entry here to prevent an unbounded host:port-keyed leak.
+      if (adHocNodeIdForCleanup) {
+        const nodes = getComputerUseConfig()?.nodes;
+        if (nodes) delete nodes[adHocNodeIdForCleanup];
+      }
     }
   },
 });
@@ -954,10 +973,10 @@ registerTool({
     },
     required: ["description"],
   },
-  async execute(args) {
+  async execute(args, ctx) {
     try {
       requireEnabled();
-      const { sessionId } = requireActiveSession(args["sessionId"] as string | undefined);
+      const { sessionId } = requireActiveSession(args["sessionId"] as string | undefined, ctx.sessionId);
       const description = String(args["description"]);
       const timeoutMs = Number(args["timeoutMs"] ?? 30_000);
 
@@ -1159,10 +1178,10 @@ registerTool({
     },
     required: ["localPath"],
   },
-  async execute(args) {
+  async execute(args, ctx) {
     try {
       requireEnabled();
-      const { sessionId } = requireActiveSession(args["sessionId"] as string | undefined);
+      const { sessionId } = requireActiveSession(args["sessionId"] as string | undefined, ctx.sessionId);
 
       const localPath = String(args["localPath"]);
       const targetPath = args["targetPath"] ? String(args["targetPath"]) : undefined;
@@ -1191,10 +1210,10 @@ registerTool({
     },
     required: ["remotePath"],
   },
-  async execute(args) {
+  async execute(args, ctx) {
     try {
       requireEnabled();
-      const { sessionId } = requireActiveSession(args["sessionId"] as string | undefined);
+      const { sessionId } = requireActiveSession(args["sessionId"] as string | undefined, ctx.sessionId);
 
       const remotePath = String(args["remotePath"]);
       const localPath = args["localPath"] ? String(args["localPath"]) : undefined;

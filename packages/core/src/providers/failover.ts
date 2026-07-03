@@ -69,10 +69,13 @@ function parseModelId(providerModel: string): string {
   return parts.length > 1 ? parts.slice(1).join("/") : providerModel;
 }
 
-function errorText(error: unknown): string {
+export function errorText(error: unknown): string {
   const raw = error instanceof Error ? error.message : String(error);
-  // Redact API keys that may appear in error messages
-  return raw.replace(/\b(sk-|gsk_|key-)[a-zA-Z0-9]{10,}\b/g, "$1***");
+  // Redact API keys that may appear in error messages. Capture the prefix +
+  // separator and allow hyphens in the body so MULTI-SEGMENT modern keys
+  // (sk-ant-api03-…, sk-ant-oat01-…, sk-proj-…) are covered too — the old
+  // [a-zA-Z0-9]{10,} run stopped at the first hyphen and left them un-redacted.
+  return raw.replace(/\b(sk|gsk|key)([-_])[A-Za-z0-9-]{6,}/g, "$1$2***");
 }
 
 function isTransientProviderError(error: unknown): boolean {

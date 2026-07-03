@@ -66,14 +66,39 @@ export async function handleFederationDelegateStream(
     jsonError(res, 401, { error: "Unauthorized" });
     return true;
   }
+  // A token minted for health/capabilities must not authorize code-executing
+  // delegation — the `purpose` claim is otherwise decorative.
+  if (verified.purpose !== "delegate") {
+    logAudit("federation_auth_failed", { route: "delegate-stream", reason: "wrong-purpose", purpose: verified.purpose }, { severity: "warn" });
+    jsonError(res, 403, { error: "token purpose does not permit delegation" });
+    return true;
+  }
 
-  // Buffer the request body — same shape as the non-streaming endpoint.
-  // Collect Buffers and decode once: per-chunk toString() corrupts a multi-byte
-  // UTF-8 char split across TCP chunks.
-  const rawChunks: Buffer[] = [];
-  req.on("data", (chunk: Buffer) => { rawChunks.push(chunk); });
-  await new Promise<void>((resolve) => req.on("end", () => resolve()));
-  const raw = Buffer.concat(rawChunks).toString("utf8");
+  // Buffer the request body — same shape as the non-streaming endpoint. Bounded
+  // by gateway.maxBodyBytes (an authenticated peer must not exhaust memory) and
+  // resolved on EVERY teardown event: awaiting only "end" wedges the handler and
+  // leaks req/res forever if the client resets mid-upload. Collect Buffers and
+  // decode once — per-chunk toString() corrupts a multi-byte UTF-8 char split
+  // across TCP chunks.
+  const maxBytes = getConfig().gateway.maxBodyBytes;
+  const readResult = await new Promise<{ ok: true; raw: string } | { ok: false; reason: "too_large" | "read_error" }>((resolve) => {
+    const rawChunks: Buffer[] = [];
+    let size = 0;
+    req.on("data", (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > maxBytes) { req.destroy(); resolve({ ok: false, reason: "too_large" }); return; }
+      rawChunks.push(chunk);
+    });
+    req.on("end", () => resolve({ ok: true, raw: Buffer.concat(rawChunks).toString("utf8") }));
+    req.on("error", () => resolve({ ok: false, reason: "read_error" }));
+    req.on("aborted", () => resolve({ ok: false, reason: "read_error" }));
+  });
+  if (!readResult.ok) {
+    logAudit("federation_request_failed", { peer: verified.issuer, reason: readResult.reason, streaming: true }, { severity: "warn" });
+    jsonError(res, readResult.reason === "too_large" ? 413 : 400, { error: readResult.reason === "too_large" ? "Request body too large" : "invalid request body" });
+    return true;
+  }
+  const raw = readResult.raw;
 
   let body: DelegateStreamBody;
   try {

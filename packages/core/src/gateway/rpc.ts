@@ -82,12 +82,15 @@ interface GatewayEvent {
 }
 
 interface PendingApproval {
+  /** The turn (chat.send requestId) that armed this prompt, so a turn timeout can drain only its own. */
+  requestId: string;
   resolve: (approved: boolean) => void;
   reject: (err: Error) => void;
   timeout: ReturnType<typeof setTimeout>;
 }
 
 interface PendingInputRequest {
+  requestId: string;
   resolve: (answer: string) => void;
   timeout: ReturnType<typeof setTimeout>;
 }
@@ -685,6 +688,23 @@ export class RpcConnection {
           timedOut = true;
           ac.abort();
           cleanupTurn();
+          // Settle + clear any approval/input prompts THIS turn armed, so their
+          // minutes-long timers and map entries don't leak past archival and the
+          // runtime await parked in the tool layer unblocks. Mirrors close()'s
+          // resolve(false)/resolve("") sweep; scoped to this requestId so a
+          // concurrent turn's prompts on the same connection are untouched.
+          for (const [id, pending] of this.pendingApprovals) {
+            if (pending.requestId !== requestId) continue;
+            clearTimeout(pending.timeout);
+            this.pendingApprovals.delete(id);
+            pending.resolve(false);
+          }
+          for (const [id, pending] of this.pendingInputRequests) {
+            if (pending.requestId !== requestId) continue;
+            clearTimeout(pending.timeout);
+            this.pendingInputRequests.delete(id);
+            pending.resolve("");
+          }
           if (this.activeSessionId === session.id) this.activeSessionId = null;
           // Never dead-end into an empty bubble (audit b6f8336e, 0dc158ad turn 2):
           // the hard timeout aborts the runtime before synthesis, so recover the
@@ -879,7 +899,7 @@ export class RpcConnection {
                 log.warn({ approvalId, toolName }, "Approval timed out — denying");
                 reject(new Error(`Tool '${toolName}' approval timed out (no response within ${formatApprovalTimeout(approvalTimeoutMs)})`));
               }, approvalTimeoutMs);
-              this.pendingApprovals.set(approvalId, { resolve, reject, timeout });
+              this.pendingApprovals.set(approvalId, { requestId, resolve, reject, timeout });
             });
           },
           inputCallback: async (question, choices, timeoutMs = 120_000) => {
@@ -892,7 +912,7 @@ export class RpcConnection {
                 log.warn({ inputId }, "User input timed out — returning empty string");
                 resolve("");
               }, timeoutMs);
-              this.pendingInputRequests.set(inputId, { resolve, timeout });
+              this.pendingInputRequests.set(inputId, { requestId, resolve, timeout });
             });
           },
         }).then(output => {
