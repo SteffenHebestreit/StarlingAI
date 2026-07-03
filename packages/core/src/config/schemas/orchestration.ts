@@ -193,6 +193,16 @@ export const OrchestrationSchema = z.object({
    *  or not), not topic-based. Default OFF: changes the reviewer prompt + adds a caveat path, so it
    *  stays gated until the user's pass^k eval confirms the honesty lift. Requires qaDeliveryLoop. */
   qaEvidenceRequired: z.boolean().default(false),
+  /** Tool-equipped, clean-context QA judge (slice 2 of the evidence work). When the delivery
+   *  gate runs on a turn that produced inspectable artifacts (files / served URLs), the verdict
+   *  comes from a FRESH-context sub-agent holding read-only inspection tools (read_file,
+   *  verify_app, url_inspect) that must OPEN each artifact before judging — instead of a bare
+   *  model call rating the answer's prose (which certifies truncated apps and dead URLs on
+   *  confident narration). Uses the qaEvidenceRequired verdict contract; falls back to the
+   *  prose check on any error and never blocks delivery. Default OFF (adds one bounded
+   *  sub-agent run per QA'd artifact turn on the slow local stack); pass^k before default-on.
+   *  Requires qaDeliveryLoop. */
+  qaToolJudge: z.boolean().default(false),
   /** Deliverable self-consistency gate (audit 17f53ed0). The acceptance-criteria QA gates
    *  (riskGatedQA / qaDeliveryLoop) only run on plan-bearing turns and check GROUNDING +
    *  criteria coverage — neither checks whether the deliverable's OWN figures and arithmetic

@@ -46,7 +46,8 @@ import { recordSkillOutcomeAsync, recordSkillHoldoutOutcomeAsync } from "../skil
 import { maybeDistillSkillFromTurn } from "../skills/distiller.js";
 import { lookupTrajectory, writeTrajectory, invalidateTrajectory } from "../memory/trajectory-cache.js";
 import { graphMarkSessionRetrievalsUseful, graphMarkSessionRetrievalsUnhelpful } from "../memory/graph-service.js";
-import { artifactFileLooksTruncated } from "./sub-agent.js";
+import { artifactFileLooksTruncated, runSubAgent } from "./sub-agent.js";
+import { collectJudgeableArtifactRefs, runQaToolJudgeCheck } from "./qa-tool-judge.js";
 import { join } from "node:path";
 import {
   runCorrectiveBuild as runCorrectiveBuildImpl,
@@ -4367,8 +4368,47 @@ async function runQaDeliveryGate(
 ): Promise<{ answer: string; changed: boolean; rounds: number; passed: boolean; escalated: boolean; unverified: boolean }> {
   const verdictProvider = getChatProviderForTier("synthesis") ?? provider;
 
+  // Tool-equipped clean-context judge (orchestration.qaToolJudge): when this turn produced
+  // inspectable artifacts, the verdict comes from a FRESH-context sub-agent that must OPEN
+  // them (read_file/verify_app/url_inspect) instead of rating the answer's prose. Bounded
+  // (one run, capped iterations/timeout), read-only tools, and fail-open: any error falls
+  // back to the prose check below. Uses the same evidence-bearing verdict contract, so a
+  // judge that never inspected anything yields a bare PASS → the requireEvidence gate
+  // downgrades it to unverified like any other rubber stamp.
+  const toolJudgeRefs = effectiveOrchestration().qaToolJudge
+    ? collectJudgeableArtifactRefs(collectTurnArtifactAttachments(session))
+    : [];
+  const toolJudgeCheck = async (current: string, crit: string[]): Promise<QaVerdict> =>
+    runQaToolJudgeCheck(current, crit, toolJudgeRefs, async (task, allowedTools) =>
+      runSubAgent({
+        agentName: "qa_tool_judge",
+        task,
+        parentSessionId: session.id,
+        workspacePath: session.getWorkspacePath(),
+        userId: session.userId,
+        signal,
+        maxIterationsOverride: 5,
+        turnTimeoutOverrideMs: 120_000,
+        inlineConfig: {
+          description: "Independent QA verifier with read-only inspection tools (fresh context)",
+          capabilities: [],
+          tags: [],
+          systemPrompt: "You are a rigorous, independent QA verifier. Inspect every deliverable with your tools BEFORE judging; never trust the answer's own claims. Output ONLY the single-line verdict you were asked for.",
+          tools: [...allowedTools],
+          maxIterations: 5,
+          container: { disabled: true, enabled: false, image: "starlingai/agent-worker:dev", memoryMb: 512, cpus: 0.5, timeoutMs: 60_000 },
+        },
+      }));
+
   const check = async (current: string, crit: string[]): Promise<QaVerdict> => {
     if (signal.aborted) return { pass: true }; // fail open on abort
+    if (toolJudgeRefs.length > 0) {
+      try {
+        return await toolJudgeCheck(current, crit);
+      } catch (err) {
+        log.debug({ err, sessionId: session.id }, "qa tool judge failed — falling back to prose verdict");
+      }
+    }
     // No-PASS-without-evidence (orchestration.qaEvidenceRequired): ask the reviewer to
     // ground a PASS in a concrete verifiable fact. A PASS with no evidence is downgraded
     // to "unverified" (ships with a caveat) by the loop — killing rubber-stamp passes.
