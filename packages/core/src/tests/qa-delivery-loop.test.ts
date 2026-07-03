@@ -178,6 +178,25 @@ describe("parseQaVerdict (runtime verdict parser)", () => {
     // a FAIL is unaffected by the evidence branch
     expect(parseQaVerdict("FAIL: no evidence of a winner").pass).toBe(false);
   });
+
+  it("a leading-PASS verdict stays a PASS even when its evidence tail contains 'fail' (regression)", () => {
+    // Evidence-bearing verdicts routinely mention fail/failures/failed — the parser must not
+    // flip them to FAIL on a bare substring match. A leading PASS is a pass regardless of tail.
+    for (const v of [
+      "PASS — evidence: the test suite reported 0 failures",
+      "PASS — evidence: served app returned 0 failed requests",
+      "PASS — evidence: the build did not fail and all 10 questions render",
+    ]) {
+      const parsed = parseQaVerdict(v);
+      expect(parsed.pass).toBe(true);
+      expect(verdictHasEvidence(parsed)).toBe(true);
+    }
+    // A real FAIL (not leading with PASS) is still detected, incl. after a prefix.
+    expect(parseQaVerdict("FAIL: app crashes on load").pass).toBe(false);
+    expect(parseQaVerdict("Verdict - FAIL: criterion 2 unmet").pass).toBe(false);
+    // "failures" without a leading PASS or a FAIL token does not false-fail (word boundary).
+    expect(parseQaVerdict("the run had zero failures overall").pass).toBe(true);
+  });
 });
 
 describe("runQaDeliveryLoop — no-PASS-without-evidence invariant (qaEvidenceRequired)", () => {

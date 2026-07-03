@@ -47,7 +47,7 @@ import { maybeDistillSkillFromTurn } from "../skills/distiller.js";
 import { lookupTrajectory, writeTrajectory, invalidateTrajectory } from "../memory/trajectory-cache.js";
 import { graphMarkSessionRetrievalsUseful, graphMarkSessionRetrievalsUnhelpful } from "../memory/graph-service.js";
 import { artifactFileLooksTruncated, runSubAgent } from "./sub-agent.js";
-import { collectJudgeableArtifactRefs, runQaToolJudgeCheck } from "./qa-tool-judge.js";
+import { collectJudgeableArtifactRefs, runQaToolJudgeCheck, type QaJudgeArtifactRef } from "./qa-tool-judge.js";
 import { join } from "node:path";
 import {
   runCorrectiveBuild as runCorrectiveBuildImpl,
@@ -4375,11 +4375,13 @@ async function runQaDeliveryGate(
   // back to the prose check below. Uses the same evidence-bearing verdict contract, so a
   // judge that never inspected anything yields a bare PASS → the requireEvidence gate
   // downgrades it to unverified like any other rubber stamp.
-  const toolJudgeRefs = effectiveOrchestration().qaToolJudge
-    ? collectJudgeableArtifactRefs(collectTurnArtifactAttachments(session))
-    : [];
-  const toolJudgeCheck = async (current: string, crit: string[]): Promise<QaVerdict> =>
-    runQaToolJudgeCheck(current, crit, toolJudgeRefs, async (task, allowedTools) =>
+  const qaToolJudgeOn = effectiveOrchestration().qaToolJudge;
+  // Enabling qaToolJudge forces evidence discipline on its OWN: an uninspected bare PASS from the
+  // judge must still be downgraded to unverified, which previously only happened if the separate
+  // qaEvidenceRequired flag was also on — contradicting the judge's contract. OR them here.
+  const effectiveRequireEvidence = requireEvidence || qaToolJudgeOn;
+  const toolJudgeCheck = async (current: string, crit: string[], refs: QaJudgeArtifactRef[]): Promise<QaVerdict> =>
+    runQaToolJudgeCheck(current, crit, refs, async (task, allowedTools) =>
       runSubAgent({
         agentName: "qa_tool_judge",
         task,
@@ -4402,17 +4404,23 @@ async function runQaDeliveryGate(
 
   const check = async (current: string, crit: string[]): Promise<QaVerdict> => {
     if (signal.aborted) return { pass: true }; // fail open on abort
+    // Recompute the artifact refs EACH round from the live session, so a coordinator-escalation
+    // round that rebuilt the deliverable to a new artifact path is inspected — not the superseded
+    // originals frozen at gate entry.
+    const toolJudgeRefs = qaToolJudgeOn
+      ? collectJudgeableArtifactRefs(collectTurnArtifactAttachments(session))
+      : [];
     if (toolJudgeRefs.length > 0) {
       try {
-        return await toolJudgeCheck(current, crit);
+        return await toolJudgeCheck(current, crit, toolJudgeRefs);
       } catch (err) {
         log.debug({ err, sessionId: session.id }, "qa tool judge failed — falling back to prose verdict");
       }
     }
-    // No-PASS-without-evidence (orchestration.qaEvidenceRequired): ask the reviewer to
-    // ground a PASS in a concrete verifiable fact. A PASS with no evidence is downgraded
+    // No-PASS-without-evidence (orchestration.qaEvidenceRequired / implied by qaToolJudge): ask the
+    // reviewer to ground a PASS in a concrete verifiable fact. A PASS with no evidence is downgraded
     // to "unverified" (ships with a caveat) by the loop — killing rubber-stamp passes.
-    const passLine = requireEvidence
+    const passLine = effectiveRequireEvidence
       ? "Reply on a SINGLE line. If every criterion is fully met and the answer is internally consistent, reply exactly: PASS — evidence: <one concrete verifiable fact from the answer's tool results / artifacts that proves the criteria are met>. A PASS with no such concrete evidence will NOT be trusted."
       : "Reply on a SINGLE line. If every criterion is fully met and the answer is internally consistent, reply exactly: PASS";
     const instruction = [
@@ -4453,7 +4461,7 @@ async function runQaDeliveryGate(
     return candidate;
   };
 
-  const result = await runQaDeliveryLoop(answer, criteria, { check, improve, maxRounds, requireEvidence, ...(escalate ? { escalate } : {}) });
+  const result = await runQaDeliveryLoop(answer, criteria, { check, improve, maxRounds, requireEvidence: effectiveRequireEvidence, ...(escalate ? { escalate } : {}) });
   return {
     answer: result.answer,
     changed: result.answer.trim() !== answer.trim(),

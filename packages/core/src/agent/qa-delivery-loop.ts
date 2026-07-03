@@ -41,11 +41,17 @@ export interface QaVerdict {
  */
 export function parseQaVerdict(text: string): QaVerdict {
   const trimmed = (text ?? "").trim();
-  const failIdx = trimmed.toUpperCase().indexOf("FAIL");
-  // No explicit FAIL → pass. This covers a clean "PASS" AND an unparseable/empty
-  // verdict (fail open: reviewer noise must never block delivery).
-  if (failIdx === -1) return { pass: true, ...extractVerdictEvidence(trimmed) };
-  const flaws = trimmed.slice(failIdx).replace(/^FAIL[:\s-]*/i, "").trim();
+  // A verdict that LEADS with PASS is a pass regardless of any "fail" in its evidence tail —
+  // evidence-bearing verdicts ("PASS — evidence: 0 failures", "...the build did not fail") very
+  // commonly contain the word. Only when it does NOT lead with PASS do we look for a FAIL token,
+  // matched at a WORD BOUNDARY (so "failures"/"failed" inside a garbled reply don't false-fail),
+  // still allowing a prefix ("Verdict - FAIL: …"). extractVerdictEvidence pulls the ground.
+  if (/^pass\b/i.test(trimmed)) return { pass: true, ...extractVerdictEvidence(trimmed) };
+  const failMatch = /\bFAIL\b/i.exec(trimmed);
+  // No explicit FAIL → pass. Covers an unparseable/empty verdict (fail open: reviewer noise
+  // must never block delivery).
+  if (!failMatch) return { pass: true, ...extractVerdictEvidence(trimmed) };
+  const flaws = trimmed.slice(failMatch.index).replace(/^FAIL[:\s-]*/i, "").trim();
   return { pass: false, flaws: flaws || "One or more acceptance criteria are unmet." };
 }
 

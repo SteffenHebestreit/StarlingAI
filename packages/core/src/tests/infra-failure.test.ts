@@ -22,7 +22,16 @@ describe("infra-failure breaker", () => {
     expect(extractInfraFailureSignature(
       "Remote access service request failed (500): connect ECONNREFUSED 10.10.0.2:5900 Troubleshooting: ...",
     )).toBe("ECONNREFUSED 10.10.0.2:5900");
-    expect(extractInfraFailureSignature("read ETIMEDOUT")).toBe("ETIMEDOUT");
+    expect(extractInfraFailureSignature("connect EHOSTUNREACH 10.10.0.2")).toBe("EHOSTUNREACH 10.10.0.2");
+  });
+
+  it("does NOT trip on TRANSIENT stream errnos — a live-but-stalled backend must not be permanently blocked", () => {
+    // ETIMEDOUT/ECONNRESET/EAI_AGAIN/EPIPE are recoverable: two in a row must NOT terminally
+    // short-circuit the family for the whole run (the breaker has no cooldown/probe).
+    expect(extractInfraFailureSignature("read ETIMEDOUT")).toBeNull();
+    expect(extractInfraFailureSignature("Error: read ECONNRESET browser-vnc")).toBeNull();
+    expect(extractInfraFailureSignature("getaddrinfo EAI_AGAIN registry.example")).toBeNull();
+    expect(extractInfraFailureSignature("write EPIPE")).toBeNull();
   });
 
   it("returns null for non-infra failures so ordinary errors never trip the breaker", () => {

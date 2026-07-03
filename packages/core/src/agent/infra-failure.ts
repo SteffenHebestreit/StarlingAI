@@ -20,7 +20,13 @@
 /** Consecutive identical infra failures of one family before the family is blocked. */
 export const INFRA_FAILURE_BLOCK_THRESHOLD = 2;
 
-const ERRNO_RE = /\b(ENOTFOUND|ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH|ETIMEDOUT|EAI_AGAIN|EPIPE)\b(?:\s+([\w.:-]+))?/;
+// Only errnos that are TERMINAL for the rest of a run — the target host/port genuinely cannot be
+// reached and that will not change mid-run: a name that does not resolve, nothing listening on the
+// port, no route to the host/network. TRANSIENT stream errors (ETIMEDOUT, ECONNRESET, EAI_AGAIN,
+// EPIPE) are deliberately EXCLUDED — a live-but-momentarily-stalled backend returning two of those
+// in a row must NOT be permanently short-circuited for the run (the breaker has no cooldown/probe),
+// and the provider layer (lmstudio isRetryableStreamError) already classifies those as retryable.
+const ERRNO_RE = /\b(ENOTFOUND|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH)\b(?:\s+([\w.:-]+))?/;
 
 /**
  * Normalized "errno + target" signature for a network/transport failure, or null

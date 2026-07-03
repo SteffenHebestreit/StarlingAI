@@ -64,6 +64,14 @@ describe("D5 — extendDeadlineForDelegationWait (exclude child-wait from the tu
     expect(extendDeadlineForDelegationWait(base, 0, ceiling)).toBe(base);
     expect(extendDeadlineForDelegationWait(base, -100, ceiling)).toBe(base);
   });
+  it("NEVER shortens a deadline that already exceeds the ceiling (regression: turnTimeout > 30-min ceiling)", () => {
+    // An operator/effort profile set a turn timeout above the 30-min ceiling, so the deadline
+    // starts already past `ceiling`. The first delegation wait must NOT clip it back to the
+    // ceiling (that inverted the feature — SHORTENED the turn instead of extending it).
+    const over = base + 1_200_000; // 20 min past base, i.e. beyond the 10-min `ceiling` here
+    expect(extendDeadlineForDelegationWait(over, 60_000, ceiling)).toBe(over); // honored as its own floor
+    expect(extendDeadlineForDelegationWait(over, 60_000, ceiling)).toBeGreaterThanOrEqual(over);
+  });
   it("exposes a 30-minute default ceiling constant", () => {
     expect(DELEGATION_WAIT_CEILING_MS).toBe(1_800_000);
   });

@@ -2319,6 +2319,23 @@ registerTool({
         for (const artifact of hit.artifacts ?? []) {
           graphArtifacts.push(artifact);
         }
+        // Re-hydrate the shared channel for the reused node, exactly as a fresh execution would
+        // (appendPartialResult + FACT extraction). Without this, a downstream dependent that is
+        // NOT reused (its task text changed) re-executes with the reused node's output missing from
+        // its context — the injected partial-results window is only the last few and the original
+        // partial can have scrolled out — producing an ungrounded answer while the graph reports
+        // success. This makes reuse indistinguishable from re-execution for downstream context.
+        await appendPartialResult({
+          sessionId: ctx.sessionId,
+          taskId: node.id,
+          agentName: node.agentName ?? hit.nodeId,
+          content: summarizeText(hit.output, 1200),
+          ts: hit.completedAt,
+        });
+        for (const [k, v] of Object.entries(extractFactsFromOutput(hit.output))) {
+          await writeSharedFact(ctx.sessionId, k, v);
+          graphPromoteFact(k, v, node.agentName ?? hit.nodeId, ctx.sessionId).catch(() => {});
+        }
         emitSwarmEvent("graph_node_reused", {
           sessionId: ctx.sessionId,
           taskId: node.id,
