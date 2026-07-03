@@ -15,7 +15,7 @@ import fs from "node:fs";
 import type { LLMMessage, ChatProvider } from "../providers/lmstudio.js";
 import { getConfig } from "../config/loader.js";
 import { currentEffortProfile, effectiveOrchestration, effectiveSubAgentTurnSloMs } from "../runtime/effort-context.js";
-import { getToolsAsLLMDefs, rerankToolsForTask, executeTool, normalizeToolCall, type ToolContext, type SwarmState, type SwarmTaskState, type ToolResult } from "../tools/registry.js";
+import { getToolsAsLLMDefs, rerankToolsForTask, executeTool, normalizeToolCall, type ToolContext, type SwarmState, type ToolResult } from "../tools/registry.js";
 import { isToolAllowed } from "../guardrails/tool-tiers.js";
 import { scanOutput } from "../guardrails/output.js";
 import { neutralizeToolResultFraming } from "../guardrails/input.js";
@@ -80,20 +80,14 @@ import {
 } from "./infra-failure.js";
 import {
   PASSTHROUGH_DELEGATION_MIN_BYTES,
-  WORKFLOW_OUTPUT_PASSTHROUGH_AUXILIARY_TOOL_NAMES,
   truncateToolAuditText,
-  formatSwarmProgressForInterruption,
-  stripToolResultLabel,
-  stripInterruptedProgressPrefix,
   looksLikeInterruptedEvidenceBoilerplate,
-  collectInterruptedEvidenceSnippets,
   extractUsefulInterruptedToolEvidence,
   buildInterruptedSubAgentOutput,
   resolveInterruptedEvidenceSnippets,
   looksLikeTimeoutLikeError,
   maybePreferWorkflowOutput,
   hasDeliverableArtifact,
-  formatArtifactEvidenceSnippets,
   classifyInterruptedOutcome,
   buildArtifactCompletionOutput,
   stripHallucinatedToolTags,

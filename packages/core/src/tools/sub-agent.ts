@@ -38,26 +38,14 @@ import {
 import {
   looksLikePlanningOnlyResult,
   WORKSPACE_MUTATION_TASK_RE,
-  WORKSPACE_MUTATION_CONTEXT_RE,
-  WORKSPACE_MUTATION_TOOL_NAMES,
-  READ_ONLY_CONTEXT_TOOL_NAMES,
-  looksLikeWorkspaceMutationTask,
-  hasWorkspaceMutationTool,
-  usedOnlyReadOnlyContextTools,
-  looksLikeRawWorkspaceConfigDump,
-  looksLikeReadOnlyMutationMiss,
   ARTIFACT_PRODUCING_TOOLS,
-  PRODUCTIVE_COORDINATOR_TOOLS,
-  looksLikeArtifactDeliverableMiss,
   agentCfgCanFulfillArtifactTask,
-  looksLikeFailureResult,
   looksLikeInfrastructureFailure,
   looksLikeOnlyFailureStubs,
   partialResultHasSubstantiveEvidence,
   classifyDelegationResult,
   isNarrativeOnlyDeliverableFailure,
   formatArtifactReferencesForSharedContext,
-  type DelegationClassification,
 } from "./delegation-artifact-classification.js";
 // Re-export the classifiers external modules/tests import via "./sub-agent.js" so the god-file
 // extraction stays call-site-transparent (ephemeral-agent-factory, source-sensitive-delegation, tests).
@@ -74,7 +62,6 @@ export {
   type DelegationClassification,
 } from "./delegation-artifact-classification.js";
 import { extractInlineHtmlDocument, looksLikeCompleteHtmlDocument } from "../agent/deliverable-intent.js";
-import { looksLikeContainerLevelFailure, looksLikeModelTemplateArtifact } from "../agent/container-failure.js";
 import { getConfig } from "../config/loader.js";
 import { getEmbeddingSearchStatus } from "../providers/embeddings.js";
 import { getEmbeddingProvider, getChatProviderForTier, getChatProvider } from "../providers/index.js";
