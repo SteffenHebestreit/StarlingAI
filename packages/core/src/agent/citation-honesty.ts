@@ -79,7 +79,12 @@ export function prependUnverifiedSourceCaveat(answer: string, userMessage: strin
  * stacks. Cause-neutral wording (fits timeout + oversight). Structural — no phrase matching. Pure.
  */
 export function prependTurnIncompleteCaveat(text: string): string {
-  if (text.includes("nicht vollständig abgeschlossen") || text.includes("did not finish normally")) {
+  // Dedup ONLY on the distinctive English sentinel (always emitted alongside the German half).
+  // The German banner fragment "nicht vollständig abgeschlossen" is an ordinary German collocation —
+  // an honest German partial admitting incompleteness ("Die Recherche wurde nicht vollständig
+  // abgeschlossen") would otherwise trip it and SKIP this mandatory honesty banner on exactly the
+  // guard-bypassing early-return path it protects. "did not finish normally" is robotic/distinctive.
+  if (text.includes("did not finish normally")) {
     return text;
   }
   const german = answerLooksGerman(text);
@@ -107,7 +112,11 @@ export function prependTurnIncompleteCaveat(text: string): string {
  * both languages emitted so a third-language reader still gets it) and sentinel-phrase dedup. Pure.
  */
 export function prependUnverifiedQaCaveat(text: string): string {
-  if (text.includes("nicht gegen konkrete Nachweise") || text.includes("not confirmed against concrete evidence")) {
+  // Dedup on a distinctive English phrase that EXACTLY matches the emitted banner (always present,
+  // since both languages are emitted). The prior sentinels matched neither the emitted text
+  // ("not confirmed" vs emitted "did NOT confirm") nor its case ("nicht" vs emitted "NICHT"), so
+  // dedup never fired and a second call double-stamped.
+  if (text.includes("did NOT confirm this answer against concrete evidence")) {
     return text;
   }
   const german = answerLooksGerman(text);
@@ -146,9 +155,13 @@ export function answerPresentsSourceCitations(text: string): boolean {
  * correct any "verified" framing. STRUCTURAL/language-free — no phrase neutralization. Pure.
  */
 export function stripFabricatedCitations(text: string): string {
+  // /i on BOTH URL passes so they cover every scheme casing answerPresentsSourceCitations accepts
+  // (also /i): a mixed-case "HTTPS://"/"Http://" (LLMs emit these at sentence start) otherwise
+  // TRIGGERED the guard but SURVIVED the strip — a fabricated clickable 404 shipped while the audit
+  // recorded a successful strip.
   return text
-    .replace(/\[([^\]]+)\]\(\s*https?:\/\/[^)]*\)/g, "$1")            // [label](404url) → label
-    .replace(/\bhttps?:\/\/[^\s)\]]+/g, "")                           // bare URLs removed
+    .replace(/\[([^\]]+)\]\(\s*https?:\/\/[^)]*\)/gi, "$1")           // [label](404url) → label
+    .replace(/\bhttps?:\/\/[^\s)\]]+/gi, "")                          // bare URLs removed
     .replace(/[ \t]{2,}/g, " ")
     .replace(/\n{3,}/g, "\n\n")
     .trim();

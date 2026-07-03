@@ -374,6 +374,23 @@ describe("sharesEvidenceVocabulary — recovery-synthesis gate", () => {
     expect(looksEvidenceAnchored(LONG_WEAK_DRAFT, RICH_EVIDENCE)).toBe(true);         // default: min(3, anchors)
     expect(looksEvidenceAnchored(LONG_WEAK_DRAFT, RICH_EVIDENCE, true)).toBe(false);  // scaled: needs more for its length
   });
+
+  // Condition-2 grounding fixes (adversarial review, session 05c01363):
+  it("word-boundary grounding REJECTS a version token that is only a SUBSTRING of an evidence token", () => {
+    const evidence = "Firmware version v2.10 runs on the ESP32 board with the IM73A135V01 microphone, the BMI270 IMU, and the PCM1808 ADC.";
+    const grounded = "The IM73A135V01 microphone, the BMI270 IMU, and the PCM1808 ADC all run firmware v2.10 on the ESP32 board with careful power sequencing throughout the enclosure.";
+    const fabricated = "The IM73A135V01 microphone, the BMI270 IMU, and the PCM1808 ADC all run firmware v2.1 on the ESP32 board with careful power sequencing throughout the enclosure.";
+    expect(looksEvidenceAnchored(grounded, evidence)).toBe(true);     // v2.10 present verbatim
+    expect(looksEvidenceAnchored(fabricated, evidence)).toBe(false);  // v2.1 ⊄ "v2.10" at a word boundary (was: substring-accepted)
+  });
+
+  it("pure-numeric grounding REJECTS a fabricated 4-digit year absent from the evidence", () => {
+    const evidence = "The IM73A135V01 microphone, the BMI270 IMU, and the PCM1808 ADC were released in 2020 per the datasheet.";
+    const grounded = "The IM73A135V01 microphone, the BMI270 IMU, and the PCM1808 ADC were all released in 2020 according to the manufacturer overview and remain in production.";
+    const fabricated = "The IM73A135V01 microphone, the BMI270 IMU, and the PCM1808 ADC were all released in 2027 according to the manufacturer overview and remain in production.";
+    expect(looksEvidenceAnchored(grounded, evidence)).toBe(true);     // 2020 in evidence
+    expect(looksEvidenceAnchored(fabricated, evidence)).toBe(false);  // 2027 absent — was previously ignored (pure-numeric dropped)
+  });
 });
 
 /**

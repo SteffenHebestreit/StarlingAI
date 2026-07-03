@@ -48,6 +48,7 @@ import { sanitizeUserFacingAssistantResponse } from "./response-finalization.js"
 import { looksLikeRawSharedFactsDump } from "./runtime-evidence-dump.js";
 import {
   looksLikeTransparentIncompleteReport,
+  looksLikeUnsourcedSpecificClaims,
   prependUnverifiedSourceCaveat,
   prependUnverifiedQaCaveat,
 } from "./citation-honesty.js";
@@ -258,7 +259,12 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
           finalResponseTransparent,
         }, { sessionId: session.id, severity: "warn" });
       }
-    } else if (!looksLikeTransparentIncompleteReport(finalResponse)) {
+    } else if (!looksLikeTransparentIncompleteReport(finalResponse) || looksLikeUnsourcedSpecificClaims(finalResponse)) {
+      // Mirror the two-factor logic of the recovery-evidence branch above: a single common word
+      // ("failed", "attempted", "unable") must NOT alone mark an answer "transparent" and skip the
+      // honest block — a from-memory fabrication that name-drops one while still dumping a dense
+      // cluster of unsourced specifics (looksLikeUnsourcedSpecificClaims: ≥4 fact-shape tokens over
+      // ≥2 categories) is exactly what must be blocked here.
       finalResponse = [
         "Research did not complete this run before verifiable source/tool evidence was gathered.",
         "I will not state the requested specifics — names, numbers, dates, sources, or claims — without inventing facts, so I am leaving them out.",

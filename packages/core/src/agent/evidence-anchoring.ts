@@ -109,11 +109,20 @@ export function looksEvidenceAnchored(sourceSensitiveDraft: string, evidence: st
   const normalizedEvidence = evidence.toLowerCase();
   const specTokens = extractSpecTokensFromDraft(normalizedDraft);
   for (const token of specTokens) {
-    if (normalizedEvidence.includes(token)) continue;
+    if (evidenceGroundsToken(normalizedEvidence, token)) continue;
     if (isClaimNegatedIn(normalizedDraft, token) && isClaimNegatedIn(normalizedEvidence, token)) continue;
     return false;
   }
   return true;
+}
+
+/** Whether a draft spec token is grounded in the evidence at a WORD BOUNDARY — not a raw
+ *  substring. `includes` accepted a fabricated "v2.1" against evidence "v2.10", or "ip68" inside a
+ *  part number "xip6800"; draft tokens are already extracted with \b, so the evidence side must
+ *  match with \b too. The token starts/ends on alphanumerics (per the extraction regex), so \b is safe. */
+function evidenceGroundsToken(normalizedEvidence: string, token: string): boolean {
+  const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`\\b${escaped}\\b`).test(normalizedEvidence);
 }
 
 /**
@@ -141,17 +150,19 @@ function extractSpecTokensFromDraft(normalizedDraft: string): string[] {
   for (const match of normalizedDraft.matchAll(/\b[a-zA-Z0-9][a-zA-Z0-9._-]{3,}\b/g)) {
     const raw = match[0];
     if (seen.has(raw)) continue;
-    // Must contain a letter (excludes pure numerics like "2024" — those
-    // are caught by the spec-token check too, but only when paired with a
-    // unit in the original pipeline; for this simpler test we treat them
-    // separately below).
-    if (!/[a-z]/.test(raw)) continue;
     if (stopwords.has(raw)) continue;
-    // Hyphenated / underscored compound tokens with at least one digit OR
-    // a part-code shape (all-caps with digits). Pure lowercase 4-letter
-    // prose words are also excluded by the stoplist above.
-    const looksLikeSpec = /[-_]/.test(raw) || /[a-z].*\d|\d.*[a-z]/.test(raw);
-    if (!looksLikeSpec) continue;
+    if (/[a-z]/.test(raw)) {
+      // Letter-bearing spec: a hyphen/underscore compound ("i2s-digital") or a letter+digit
+      // code shape ("IM73A135V01"). A pure lowercase prose word (no digit, no hyphen) is not a spec.
+      const looksLikeSpec = /[-_]/.test(raw) || /[a-z].*\d|\d.*[a-z]/.test(raw);
+      if (!looksLikeSpec) continue;
+    } else {
+      // Pure-numeric: a fabricated concrete number (a year "2027", a price "4999", a dotted
+      // version "12.5.1") is one of the most common hallucination shapes and was previously
+      // dropped entirely (the "treated separately below" that never existed). Keep a 4+ digit
+      // run as a groundable spec token; short counts (≤3 digits) stay out — too ambiguous/common.
+      if (raw.replace(/[.,\-_]/g, "").length < 4) continue;
+    }
     seen.add(raw);
     tokens.push(raw);
   }
@@ -164,12 +175,14 @@ function extractSpecTokensFromDraft(normalizedDraft: string): string[] {
  * we rely on is that the marker is a single token preceding the claim; we do
  * not encode any domain vocabulary.
  */
+// Latin-script only: isClaimNegatedIn tokenizes with a Latin character class, so CJK markers
+// were unreachable dead entries (every CJK codepoint is a separator, so they never landed in the
+// word list). Dropped so the list reflects actual capability rather than implying CJK coverage.
 const NEGATION_MARKERS = [
   "not", "no", "non", "nor", "without", "neither",
   "kein", "keine", "keinen", "keinem", "keiner", "keines",
   "nicht", "nie", "niemals", "ohne",
   "ne", "pas", "aucun", "aucune", "sans", "ni",
-  "否定", "不是", "无", "不", "没有",
 ];
 
 /**

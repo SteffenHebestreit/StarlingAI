@@ -10,6 +10,7 @@ import {
   looksLikeUnsourcedSpecificClaims,
   answerAssertsSpecifics,
   prependTurnIncompleteCaveat,
+  prependUnverifiedQaCaveat,
 } from "../agent/citation-honesty.js";
 
 // The audited fabricated answer (session 1303e254, condensed): invented 404 links produced with
@@ -76,6 +77,15 @@ describe("stripFabricatedCitations (structural, language-free)", () => {
     const out = stripFabricatedCitations(fr);
     expect(out).not.toMatch(/https?:\/\//);
     expect(out).toMatch(/Prix vérifiés/); // body (incl. the claim) is untouched; the caveat corrects framing
+  });
+
+  it("strips a MIXED-CASE scheme too (regression: trigger was case-insensitive, strip was not)", () => {
+    // answerPresentsSourceCitations matches HTTPS://Http:// case-insensitively, so the strip must
+    // too — otherwise a fabricated clickable 404 with a capitalized scheme triggered the guard but
+    // survived the strip (LLMs emit these at sentence start).
+    const out = stripFabricatedCitations("Verified against 7 sources: [Datasheet](HTTPS://Fake.example/spec) and Http://fake.example/x.");
+    expect(out).not.toMatch(/https?:\/\//i); // no surviving link in ANY casing
+    expect(out).toMatch(/Datasheet/); // label preserved
   });
 
   it("is a no-op on an answer that has no fabricated URLs", () => {
@@ -254,5 +264,26 @@ describe("prependTurnIncompleteCaveat (timeout-path honesty stamp)", () => {
     const once = prependTurnIncompleteCaveat(GERMAN_FAB);
     const twice = prependTurnIncompleteCaveat(once);
     expect(twice).toBe(once);
+  });
+
+  it("still STAMPS an honest German partial whose prose contains 'nicht vollständig abgeschlossen' (regression)", () => {
+    // The most idiomatic German incompleteness admission contains the banner's own German
+    // fragment. Deduping on it silently skipped the mandatory honesty banner on exactly the
+    // guard-bypassing path it protects. Dedup is now on the distinctive English sentinel only.
+    const honestPartial = "Die Recherche wurde nicht vollständig abgeschlossen; die bestätigten Preise lauten: 12.999 €.";
+    const out = prependTurnIncompleteCaveat(honestPartial);
+    expect(out).toMatch(/did not finish normally/); // banner WAS added
+    expect(out).not.toBe(honestPartial);
+    expect(out.indexOf("did not finish normally")).toBeLessThan(out.indexOf("Die Recherche"));
+    // and it stays idempotent once the real banner is present
+    expect(prependTurnIncompleteCaveat(out)).toBe(out);
+  });
+});
+
+describe("prependUnverifiedQaCaveat (idempotency regression)", () => {
+  it("does NOT double-stamp — the dedup sentinel matches the emitted banner text + case", () => {
+    const once = prependUnverifiedQaCaveat("Die Antwort mit Zahlen: 42 und 2026.");
+    expect(once).toMatch(/did NOT confirm this answer against concrete evidence/);
+    expect(prependUnverifiedQaCaveat(once)).toBe(once); // second call is a no-op
   });
 });
