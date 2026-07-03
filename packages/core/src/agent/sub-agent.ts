@@ -70,6 +70,14 @@ import {
   sanitizeSubAgentTask,
 } from "./sub-agent-prompt-guidance.js";
 import { mergeAgentModelOverride, applyEffortModelOverlay } from "./sub-agent-model-config.js";
+import {
+  extractInfraFailureSignature,
+  liveToolFamily,
+  updateInfraFailureStreak,
+  buildInfraFamilyBlockedMessage,
+  INFRA_FAILURE_BLOCK_THRESHOLD,
+  type InfraFailureStreak,
+} from "./infra-failure.js";
 // Re-export pure helpers that were extracted from this module so existing
 // importers (and tests) of "../agent/sub-agent.js" keep working unchanged.
 export { mergeAgentModelOverride, applyEffortModelOverlay } from "./sub-agent-model-config.js";
@@ -2535,6 +2543,12 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // so the loop-stop fires after 2 in a row.
     const NO_PROGRESS_DELEGATION_FAILURE_RE = /per-agent delegation cap exhausted|already been delegated to its per-turn maximum|already delegated to its per-turn maximum|has been called \d+ times this run \(limit/i;
     const approvalBlockedTools = new Map<string, string>();
+    // Backend-unreachable breaker for live-state tool families (browser_*/computer_*):
+    // they are dedup-exempt, so a dead backend (ENOTFOUND browser-vnc, session 8815a45e)
+    // was hammered for the whole iteration budget. Two consecutive same-signature
+    // infra failures block the family for the rest of the run. See agent/infra-failure.ts.
+    const infraFailureStreaks = new Map<string, InfraFailureStreak>();
+    const infraBlockedFamilies = new Map<string, string>();
     let requiredResearchFallbackRoute: SubAgentRequiredResearchFallbackRoute | null = null;
     // Track tools stripped by the evidence-cap mechanism so that blocked
     // calls to those tools are classified as "evidence_cap_enforced" rather
@@ -4171,6 +4185,33 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           continue;
         }
 
+        // Backend-unreachable family breaker (see infraFailureStreaks above).
+        const tcFamily = liveToolFamily(tc.name);
+        const blockedFamilySig = tcFamily ? infraBlockedFamilies.get(tcFamily) : undefined;
+        if (tcFamily && blockedFamilySig) {
+          const blockedMessage = buildInfraFamilyBlockedMessage(tcFamily, blockedFamilySig);
+          emitSubAgentToolAudit({
+            agentName: opts.agentName,
+            tool: tc.name,
+            phase: "done",
+            args: tc.arguments,
+            toolCallId: tc.id,
+            errorText: blockedMessage,
+            skippedReason: "backend_unreachable",
+          });
+          logAudit(
+            "sub_agent_tool_blocked",
+            { agentName: opts.agentName, tool: tc.name, reason: "backend_unreachable", signature: blockedFamilySig },
+            { sessionId: subSessionId, severity: "warn" },
+          );
+          toolResults.push({
+            role: "tool",
+            content: blockedMessage,
+            tool_call_id: tc.id,
+          });
+          continue;
+        }
+
         // Delegation depth ceiling — block further nesting at/over the limit.
         if (delegationDepthExceeded && isDelegationToolName(tc.name)) {
           const nudge = `You are already ${currentDelegationDepth} delegation levels deep (limit ${maxDelegationDepth}). `
@@ -4504,6 +4545,33 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             { agentName: opts.agentName, tool: tc.name, reason: "approval_gate_unresolved" },
             { sessionId: subSessionId, severity: "warn" },
           );
+        }
+
+        // Backend-unreachable streak accounting for live-state families. A success
+        // clears the family's streak; a same-signature infra failure increments it,
+        // and at the threshold the family is blocked for the rest of the run.
+        {
+          const family = liveToolFamily(tc.name);
+          if (family && !infraBlockedFamilies.has(family)) {
+            if (result.success) {
+              infraFailureStreaks.delete(family);
+            } else {
+              const signature = extractInfraFailureSignature(result.error ?? resultContent);
+              if (signature) {
+                const streak = updateInfraFailureStreak(infraFailureStreaks.get(family), signature);
+                infraFailureStreaks.set(family, streak);
+                if (streak.count >= INFRA_FAILURE_BLOCK_THRESHOLD) {
+                  infraBlockedFamilies.set(family, signature);
+                  resultContent += `\n\n[BACKEND UNREACHABLE] ${buildInfraFamilyBlockedMessage(family, signature)}`;
+                  logAudit(
+                    "sub_agent_tool_blocked",
+                    { agentName: opts.agentName, tool: tc.name, reason: "backend_unreachable", signature },
+                    { sessionId: subSessionId, severity: "warn" },
+                  );
+                }
+              }
+            }
+          }
         }
 
         // Redact any secrets leaked into the tool output before the sub-agent sees it.
