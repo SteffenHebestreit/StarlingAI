@@ -5,13 +5,26 @@
  * external services.  Request bodies, headers, and query parameters
  * are fully configurable.
  */
-import { resolve as dnsResolve } from "node:dns/promises";
+import { lookup as dnsLookup } from "node:dns/promises";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
 import { isPrivateHost } from "./web.js";
 
 const log = childLogger("tool:http-request");
 const MAX_RESPONSE_BODY = 64_000; // truncate large bodies
+const MAX_REDIRECTS = 5;
+
+/** SSRF predicate: private by literal OR by DNS (all address families, incl. IPv6). */
+async function hostIsBlocked(host: string): Promise<boolean> {
+  if (isPrivateHost(host)) return true;
+  try {
+    const records = await dnsLookup(host, { all: true });
+    if (records.some((r) => isPrivateHost(r.address))) return true;
+  } catch {
+    /* DNS failure — IP literal / offline resolver; non-fatal */
+  }
+  return false;
+}
 
 registerTool({
   name: "http_request",
@@ -63,22 +76,9 @@ registerTool({
       return { success: false, output: "", error: "URL must start with http:// or https://" };
     }
 
-    // SSRF guard — reject loopback, RFC1918, link-local, and cloud-metadata targets.
-    // Also DNS-resolve to catch hostnames that point at internal IPs.
+    let originOrigin: string;
     try {
-      const parsed = new URL(url);
-      const host = parsed.hostname.toLowerCase();
-      if (isPrivateHost(host)) {
-        return { success: false, output: "", error: "Requesting private/internal network addresses is not allowed" };
-      }
-      try {
-        const addrs = await dnsResolve(host);
-        if (addrs.some((addr) => isPrivateHost(addr))) {
-          return { success: false, output: "", error: "Requesting private/internal network addresses is not allowed" };
-        }
-      } catch {
-        // DNS failure is non-fatal — could be an IP literal or unavailable resolver.
-      }
+      originOrigin = new URL(url).origin;
     } catch {
       return { success: false, output: "", error: "Invalid URL" };
     }
@@ -101,12 +101,33 @@ registerTool({
     try {
       log.info({ url, method, sessionId: ctx.sessionId }, "http_request executing");
 
-      const response = await fetch(url, {
-        method,
-        headers,
-        body: ["GET", "HEAD", "OPTIONS"].includes(method) ? undefined : body,
-        signal: controller.signal,
-      });
+      // Follow redirects manually so we can (a) re-run the SSRF guard on EVERY hop
+      // (a public URL can 30x-redirect to an internal host) and (b) DROP the caller's
+      // headers when a hop crosses origins, so Authorization / X-Api-Key can't leak
+      // to a third-party host. The single timer bounds the whole chain.
+      let current = url;
+      let currentHeaders = headers;
+      let response: Response;
+      for (let hop = 0; ; hop++) {
+        const host = new URL(current).hostname;
+        if (await hostIsBlocked(host)) {
+          clearTimeout(timer);
+          return { success: false, output: "", error: "Requesting private/internal network addresses is not allowed" };
+        }
+        response = await fetch(current, {
+          method,
+          headers: currentHeaders,
+          body: ["GET", "HEAD", "OPTIONS"].includes(method) ? undefined : body,
+          signal: controller.signal,
+          redirect: "manual",
+        });
+        if (response.status < 300 || response.status >= 400 || !response.headers.has("location")) break;
+        if (hop >= MAX_REDIRECTS) { clearTimeout(timer); return { success: false, output: "", error: "Too many redirects" }; }
+        const next = new URL(response.headers.get("location")!, current);
+        if (!/^https?:$/i.test(next.protocol)) { clearTimeout(timer); return { success: false, output: "", error: "Redirect to a non-http(s) scheme is not allowed" }; }
+        if (next.origin !== originOrigin) currentHeaders = new Headers(); // strip caller headers cross-origin
+        current = next.toString();
+      }
 
       clearTimeout(timer);
 

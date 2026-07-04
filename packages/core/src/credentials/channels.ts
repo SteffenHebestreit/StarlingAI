@@ -98,7 +98,7 @@ export function getConfiguredChannelTypes(): ChannelType[] {
   });
 }
 
-const SECRET_FIELDS = ["botToken", "appToken", "signingSecret", "token", "appSecret", "accessToken", "imapPassword", "smtpPassword"] as const;
+const SECRET_FIELDS = ["botToken", "appToken", "signingSecret", "token", "appSecret", "accessToken", "verifyToken", "imapPassword", "smtpPassword"] as const;
 
 export function redactChannelSecrets<T extends object>(config: T): T {
   const redacted = { ...config } as T & Partial<Record<(typeof SECRET_FIELDS)[number], unknown>>;

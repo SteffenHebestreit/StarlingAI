@@ -2,7 +2,7 @@ import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
 import type { Config } from "../config/schema.js";
-import { resolve as dnsResolve } from "node:dns/promises";
+import { lookup as dnsLookup } from "node:dns/promises";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, posix } from "node:path";
 import { analyzeImageBytes, callPlaywrightTool, extractDocumentBytesToMarkdown } from "./multimodal.js";
@@ -249,24 +249,16 @@ registerTool({
       return { success: false, output: "", error: "URL must start with http:// or https://" };
     }
 
-    // Block private/internal IPs (SSRF prevention)
+    // Block private/internal IPs (SSRF prevention). safeFetch below re-checks every
+    // redirect hop; this up-front check gives a clean tool error on the initial host.
+    let initialHost: string;
     try {
-      const parsed = new URL(url);
-      const host = parsed.hostname.toLowerCase();
-      if (isPrivateHost(host)) {
-        return { success: false, output: "", error: "Fetching private/internal network addresses is not allowed" };
-      }
-      // DNS resolution check — prevents DNS rebinding and hostname tricks
-      try {
-        const addrs = await dnsResolve(host);
-        if (addrs.some(addr => isPrivateHost(addr))) {
-          return { success: false, output: "", error: "Fetching private/internal network addresses is not allowed" };
-        }
-      } catch {
-        // DNS failure — allow through (could be IP literal or unavailable resolver)
-      }
+      initialHost = new URL(url).hostname;
     } catch {
       return { success: false, output: "", error: "Invalid URL" };
+    }
+    if (await hostIsBlocked(initialHost)) {
+      return { success: false, output: "", error: "Fetching private/internal network addresses is not allowed" };
     }
 
     try {
@@ -276,7 +268,7 @@ registerTool({
       let contentType = "";
       let nativeFetchText: string | null = null;
       try {
-        const res = await fetchWithTimeout(url, 12000, {
+        const res = await safeFetch(url, 12000, {
           headers: {
             "User-Agent": "Mozilla/5.0 (compatible; StarlingAI/0.1; +https://starlingai.io)",
             "Accept": "text/html,application/xhtml+xml,application/json,text/plain,*/*",
@@ -363,7 +355,7 @@ registerTool({
 
       // Last resort: native fetch even if content seems thin
       try {
-        const res = await fetchWithTimeout(url, 15000, {
+        const res = await safeFetch(url, 15000, {
           headers: {
             "User-Agent": "StarlingAI/0.1 (research assistant)",
             "Accept": "text/html,application/xhtml+xml,text/plain,*/*",
@@ -480,19 +472,13 @@ function absolutizeUrl(candidate: string, baseUrl: string): string | null {
 
 /** SSRF guard shared with web_fetch: reject private/internal hosts (literal + DNS). */
 async function imageHostIsBlocked(url: string): Promise<boolean> {
+  let host: string;
   try {
-    const host = new URL(url).hostname.toLowerCase();
-    if (isPrivateHost(host)) return true;
-    try {
-      const addrs = await dnsResolve(host);
-      if (addrs.some((addr) => isPrivateHost(addr))) return true;
-    } catch {
-      // DNS failure — allow through (IP literal or unavailable resolver), same as web_fetch.
-    }
+    host = new URL(url).hostname;
   } catch {
     return true; // unparseable URL
   }
-  return false;
+  return hostIsBlocked(host);
 }
 
 type ImageFetchOutcome =
@@ -501,7 +487,7 @@ type ImageFetchOutcome =
   | { kind: "miss"; status: number; contentType: string };
 
 async function fetchImageOnce(url: string): Promise<ImageFetchOutcome> {
-  const res = await fetchWithTimeout(url, 20000, {
+  const res = await safeFetch(url, 20000, {
     headers: { "User-Agent": IMAGE_FETCH_UA, "Accept": "image/*,text/html;q=0.9,*/*;q=0.8" },
   });
   const contentType = res.headers.get("content-type") ?? "";
@@ -729,7 +715,7 @@ function pdfFilenameFromUrl(url: string): string {
 async function fetchAndExtractPdf(url: string, maxLength: number, shareSuffix: string): Promise<ToolResult> {
   let bytes: Uint8Array;
   try {
-    const res = await fetchWithTimeout(url, 20000, {
+    const res = await safeFetch(url, 20000, {
       headers: { "User-Agent": "StarlingAI/0.1 (research assistant)", "Accept": "application/pdf,*/*" },
     });
     if (!res.ok) return { success: false, output: "", error: `HTTP ${res.status} from ${url}` };
@@ -767,14 +753,76 @@ async function fetchWithTimeout(url: string, ms: number, init?: RequestInit): Pr
   }
 }
 
+/**
+ * SSRF predicate: true when a host is private/internal by literal OR by DNS
+ * resolution. Uses dns.lookup(all) so BOTH A and AAAA records are checked — a
+ * resolve4-only check let an IPv6-only host that maps to a private address slip
+ * past. A resolver failure (IP literal / offline resolver) is non-fatal, matching
+ * the original guard.
+ */
+async function hostIsBlocked(host: string): Promise<boolean> {
+  const h = host.toLowerCase();
+  if (isPrivateHost(h)) return true;
+  try {
+    const records = await dnsLookup(h, { all: true });
+    if (records.some((r) => isPrivateHost(r.address))) return true;
+  } catch {
+    /* DNS failure — allow through (IP literal / unavailable resolver) */
+  }
+  return false;
+}
+
+/**
+ * fetch() that re-runs the SSRF guard on EVERY redirect hop. The plain guard only
+ * validated the initial URL, so a public URL that 30x-redirected to 169.254.169.254
+ * or an internal host bypassed it. Follows redirects manually, re-checking each
+ * Location target's host (and its DNS) before the next request. Only for
+ * user/LLM-supplied URLs — NOT the configured (trusted) search backends.
+ */
+async function safeFetch(url: string, ms: number, init?: RequestInit, maxRedirects = 5): Promise<Response> {
+  let current = url;
+  for (let hop = 0; hop <= maxRedirects; hop++) {
+    let host: string;
+    try {
+      host = new URL(current).hostname;
+    } catch {
+      throw new Error("Invalid URL");
+    }
+    if (await hostIsBlocked(host)) {
+      throw new Error("Fetching private/internal network addresses is not allowed");
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), ms);
+    let res: Response;
+    try {
+      res = await fetch(current, { ...init, signal: controller.signal, redirect: "manual" });
+    } finally {
+      clearTimeout(timer);
+    }
+    if (res.status >= 300 && res.status < 400 && res.headers.has("location")) {
+      const next = new URL(res.headers.get("location")!, current).toString();
+      if (!/^https?:\/\//i.test(next)) throw new Error("Redirect to a non-http(s) scheme is not allowed");
+      current = next;
+      continue;
+    }
+    return res;
+  }
+  throw new Error("Too many redirects");
+}
+
 export function isPrivateHost(host: string): boolean {
-  // Strip IPv6 brackets if present
-  const h = host.replace(/^\[|\]$/g, "");
+  // Strip IPv6 brackets if present; lowercase so IPv6 hextets match case-insensitively.
+  const h = host.replace(/^\[|\]$/g, "").toLowerCase();
 
   // Loopback
   if (h === "localhost" || h === "127.0.0.1" || h === "::1") return true;
   // Unspecified / any-address
   if (h === "0.0.0.0" || h === "::") return true;
+  // IPv6 Unique-Local Addresses fc00::/7 (fc00–fdff first hextet). The 4-hex-digit
+  // hextet + colon shape avoids over-blocking public hostnames like "fcbarcelona.com".
+  if (/^f[cd][0-9a-f]{2}:/.test(h)) return true;
+  // IPv6 link-local fe80::/10 (fe80–febf first hextet)
+  if (/^fe[89ab][0-9a-f]:/.test(h)) return true;
   // IPv6-mapped IPv4 loopback (::ffff:127.0.0.1)
   if (/^::ffff:127\./i.test(h)) return true;
   // IPv6-mapped private ranges

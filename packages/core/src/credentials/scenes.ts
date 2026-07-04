@@ -168,6 +168,13 @@ export function saveScene(name: string, input: SceneInput): void {
   if (!name.match(/^[a-z0-9_-]+$/i)) {
     throw new Error("Scene name must only contain letters, numbers, underscores, and hyphens");
   }
+  // Match SceneConfigSchema.min(16): a too-short raw webhookKey could never satisfy
+  // the trigger's length-guarded timing-safe compare, so it would be a silently
+  // unauthenticatable secret. A `$ENV_VAR` reference is exempt — the RESOLVED value
+  // is what auth compares.
+  if (input.webhookKey && !input.webhookKey.startsWith("$") && input.webhookKey.length < 16) {
+    throw new Error("webhookKey must be at least 16 characters (or a $ENV_VAR reference)");
+  }
   setCredential(SCENE_DESCRIPTION_KEY(name), input.description);
   setCredential(SCENE_TASK_KEY(name), input.task);
   if (input.webhookKey) {

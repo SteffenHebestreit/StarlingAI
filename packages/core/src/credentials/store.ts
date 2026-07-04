@@ -2,7 +2,7 @@
  * AES-256-GCM encrypted credential store.
  * All secrets are encrypted at rest — never stored in plaintext.
  */
-import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes, scryptSync } from "node:crypto";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve, dirname } from "node:path";
@@ -74,6 +74,10 @@ type CredentialStore = Record<string, string>;
 
 // In-memory cache: load once, invalidate on write
 let _cache: CredentialStore | null = null;
+// True when the on-disk store EXISTS but could not be decrypted (wrong key / rotated
+// salt). We still serve reads as empty, but must NEVER overwrite the file (that would
+// destroy the recoverable ciphertext = every stored credential).
+let _loadFailed = false;
 
 function loadStore(): CredentialStore {
   if (_cache) return _cache;
@@ -84,19 +88,33 @@ function loadStore(): CredentialStore {
   try {
     const raw = readFileSync(STORE_PATH);
     _cache = JSON.parse(decrypt(raw)) as CredentialStore;
+    _loadFailed = false;
     return _cache;
   } catch (err) {
-    log.error({ err }, "Failed to decrypt credential store — starting empty");
+    _loadFailed = true;
+    log.error({ err }, "Failed to decrypt credential store — refusing to overwrite existing ciphertext");
     _cache = {};
     return _cache;
   }
 }
 
 function saveStore(store: CredentialStore): void {
+  // Fail closed: if the file exists but never decrypted, a write here would wipe ALL
+  // other credentials. Back up the ciphertext and refuse instead of destroying it.
+  if (_loadFailed && existsSync(STORE_PATH)) {
+    const backup = `${STORE_PATH}.corrupt-${Date.now()}`;
+    try { if (!existsSync(backup)) writeFileSync(backup, readFileSync(STORE_PATH), { mode: 0o600 }); } catch { /* best effort */ }
+    throw new Error(
+      `Credential store could not be decrypted (wrong SAI_MASTER_KEY or missing/rotated .salt). ` +
+      `Refusing to overwrite ${STORE_PATH} to avoid destroying existing credentials. ` +
+      `A backup was written to ${backup}. Restore the correct key/salt, then retry.`,
+    );
+  }
   mkdirSync(dirname(STORE_PATH), { recursive: true });
   const encrypted = encrypt(JSON.stringify(store));
   writeFileSync(STORE_PATH, encrypted, { mode: 0o600 });
   _cache = store;
+  _loadFailed = false;
 }
 
 export function setCredential(name: string, value: string): void {
@@ -107,8 +125,13 @@ export function setCredential(name: string, value: string): void {
 }
 
 export function getCredential(name: string): string | undefined {
-  // Check env first (Docker secrets / env injection takes priority)
-  const envKey = `SAI_SECRET_${name.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`;
+  // Check env first (Docker secrets / env injection takes priority). The readable
+  // slug alone is LOSSY — "a-b", "a_b", "a.b" all collapse to SAI_SECRET_A_B and would
+  // alias to one env var (returning the wrong credential), so append a short hash of
+  // the exact name to keep distinct names from colliding.
+  const slug = name.toUpperCase().replace(/[^A-Z0-9]/g, "_");
+  const suffix = createHash("sha256").update(name).digest("hex").slice(0, 8);
+  const envKey = `SAI_SECRET_${slug}_${suffix}`;
   if (process.env[envKey]) return process.env[envKey];
 
   const store = loadStore();
