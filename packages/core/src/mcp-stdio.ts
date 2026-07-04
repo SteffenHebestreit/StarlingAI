@@ -65,7 +65,8 @@ async function main(): Promise<void> {
   // Pre-warm so the first ListTools request is fast.
   await warmToolEmbeddings().catch(() => undefined);
 
-  const server = createStarlingMcpServer({ caller: "stdio" });
+  // stdio is a local, trusted entry point (the operator launched it) → operator role.
+  const server = createStarlingMcpServer({ caller: "stdio", role: "operator" });
   const transport = new StdioServerTransport();
   await server.connect(transport);
 

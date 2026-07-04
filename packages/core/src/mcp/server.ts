@@ -35,7 +35,8 @@ import { randomUUID } from "node:crypto";
 import { getConfig } from "../config/loader.js";
 import { getAllTools, executeTool, type ToolHandler } from "../tools/registry.js";
 import { ToolTier, getToolTier } from "../guardrails/tool-tiers.js";
-import { runSubAgentWithStats } from "../agent/sub-agent.js";
+import { runSubAgentWithStats, type SubAgentRunResult } from "../agent/sub-agent.js";
+import { userHasRole, type AuthRole } from "../gateway/auth.js";
 import { listAllScenes, type SceneSummary } from "../credentials/scenes.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
@@ -55,6 +56,23 @@ interface AdvertisedTool {
 interface ExposeContext {
   /** Identity attached to audit entries — "http", "stdio", or a session id. */
   caller: string;
+  /** Authenticated role. Mirrors the REST RBAC: viewers may call read-only tools
+   *  but not mutating tools, sub-agent delegations, or scenes. Defaults to
+   *  "operator" for trusted local (stdio / no-auth) callers. */
+  role: AuthRole;
+}
+
+/** Operators may run mutating tools / sub-agents / scenes; viewers are read-only. Exported for testing. */
+export function isMcpOperator(ctx: ExposeContext): boolean {
+  return userHasRole({ username: ctx.caller, role: ctx.role }, "operator");
+}
+
+/** A sub-agent/scene run that did not finish cleanly must surface to the MCP client
+ *  as a protocol error, not a bare successful result. Exported for testing. */
+export function mcpSubAgentFailed(run: SubAgentRunResult): boolean {
+  const outcome = run.stats.outcome;
+  const terminal = run.stats.terminalState;
+  return outcome === "failure" || (terminal !== undefined && terminal !== "completed");
 }
 
 /**
@@ -274,6 +292,10 @@ async function runNativeToolCall(
   if (expose.exposeTools.length > 0 && !exposeToolSet.has(name)) {
     return errorResult(`Tool '${name}' is not in mcp.expose.exposeTools`);
   }
+  // RBAC: a read-only viewer may call Tier-0 tools but not mutating (Tier 1+) ones.
+  if (getToolTier(name).tier !== ToolTier.ZERO_READ_ONLY && !isMcpOperator(ctx)) {
+    return errorResult(`Tool '${name}' requires the operator role`);
+  }
 
   const sessionId = `mcp:${ctx.caller}:${randomUUID()}`;
   const result = await executeTool(name, args, {
@@ -297,6 +319,8 @@ async function runAgentCall(
   const config = getConfig();
   const expose = config.mcp.expose;
   if (!expose.enabled) return errorResult("MCP server is disabled");
+  // Delegations always run mutating swarm work → operator-only.
+  if (!isMcpOperator(ctx)) return errorResult("Delegating to a sub-agent requires the operator role");
   if (expose.exposeAgents.length > 0 && !expose.exposeAgents.includes(agentName)) {
     return errorResult(`Agent '${agentName}' is not exposed via MCP`);
   }
@@ -318,7 +342,8 @@ async function runAgentCall(
   });
 
   return {
-    isError: false,
+    // A failed / timed-out / max-iterations run must not be reported as success.
+    isError: mcpSubAgentFailed(run),
     content: [{ type: "text", text: run.output }],
   };
 }
@@ -331,6 +356,8 @@ async function runSceneCall(
   const config = getConfig();
   const expose = config.mcp.expose;
   if (!expose.enabled) return errorResult("MCP server is disabled");
+  // Scenes always run mutating swarm work → operator-only.
+  if (!isMcpOperator(ctx)) return errorResult("Running a scene requires the operator role");
   if (expose.exposeScenes.length > 0 && !expose.exposeScenes.includes(sceneName)) {
     return errorResult(`Scene '${sceneName}' is not exposed via MCP`);
   }
@@ -338,17 +365,25 @@ async function runSceneCall(
   const scene = listAllScenes().find((s) => s.name === sceneName);
   if (!scene) return errorResult(`Scene '${sceneName}' is not configured`);
 
-  // Render the scene's task template with the provided params.  Missing
-  // params fall back to the scene's declared default; unknown args are
-  // ignored so an MCP client cannot smuggle template variables.
+  // Render the scene's task template with the provided params.  Missing params fall
+  // back to the scene's declared default; a no-default param that is omitted is
+  // REJECTED (rather than leaving a literal {{param}} in the task) so the runtime
+  // guard matches the advertised required-param schema.  Unknown args are ignored so
+  // an MCP client cannot smuggle template variables.
   const params: Record<string, string> = {};
+  const missingRequired: string[] = [];
   for (const [paramName, param] of Object.entries(scene.params ?? {})) {
     const provided = args[paramName];
     if (typeof provided === "string" && provided.length > 0) {
       params[paramName] = provided;
     } else if (param.default !== undefined) {
       params[paramName] = param.default;
+    } else {
+      missingRequired.push(paramName);
     }
+  }
+  if (missingRequired.length > 0) {
+    return errorResult(`Scene '${sceneName}' is missing required param(s): ${missingRequired.join(", ")}`);
   }
   const renderedTask = renderTemplate(scene.task, params);
   const context = typeof args["context"] === "string" ? args["context"] : undefined;
@@ -378,7 +413,7 @@ async function runSceneCall(
   });
 
   return {
-    isError: false,
+    isError: mcpSubAgentFailed(run),
     content: [{ type: "text", text: run.output }],
   };
 }

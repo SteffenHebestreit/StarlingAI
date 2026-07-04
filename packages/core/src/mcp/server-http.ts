@@ -25,7 +25,7 @@ import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { randomUUID } from "node:crypto";
 
 import { getConfig } from "../config/loader.js";
-import { verifyToken, extractBearerToken } from "../gateway/auth.js";
+import { verifyToken, extractBearerToken, normalizeRole, type AuthRole } from "../gateway/auth.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { createStarlingMcpServer } from "./server.js";
@@ -63,6 +63,9 @@ export async function handleMcpHttpRequest(
   // Auth — JWT from Authorization or the `?token=` query parameter (the
   // streamable HTTP client SDKs vary; both forms are widely supported).
   let caller = "anonymous";
+  // No-auth (trusted local socket) callers get operator; authed callers get their
+  // token's role so the MCP RBAC matches the REST gate (viewers → read-only).
+  let role: AuthRole = "operator";
   if (expose.http.requireAuth) {
     const headerToken = req.headers["authorization"]
       ? extractBearerToken(req.headers["authorization"] as string)
@@ -81,6 +84,7 @@ export async function handleMcpHttpRequest(
       return true;
     }
     caller = (verified as { sub?: string }).sub ?? "authenticated";
+    role = normalizeRole((verified as { role?: unknown }).role);
   }
 
   const sessionHeader = req.headers["mcp-session-id"];
@@ -104,12 +108,21 @@ export async function handleMcpHttpRequest(
   let session = sessionId ? _sessions.get(sessionId) : undefined;
 
   if (!session) {
+    // A present-but-unknown session id is stale / torn-down / forged — never mint a
+    // session for it, or an attacker can grow _sessions without bound (the orphan
+    // transport is never initialized, so its onclose never fires and it leaks a live
+    // connected Server forever). A real initialize POST carries NO session-id header.
+    if (sessionId) {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Unknown MCP session" }));
+      return true;
+    }
     if (req.method !== "POST" && req.method !== "GET") {
       res.writeHead(405, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "Method not allowed for new MCP session" }));
       return true;
     }
-    session = await createHttpSession(caller);
+    session = await createHttpSession(caller, role);
   }
 
   try {
@@ -124,9 +137,9 @@ export async function handleMcpHttpRequest(
   return true;
 }
 
-async function createHttpSession(caller: string): Promise<McpHttpSession> {
+async function createHttpSession(caller: string, role: AuthRole): Promise<McpHttpSession> {
   const generatedId = randomUUID();
-  const server = createStarlingMcpServer({ caller });
+  const server = createStarlingMcpServer({ caller, role });
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: () => generatedId,
   });

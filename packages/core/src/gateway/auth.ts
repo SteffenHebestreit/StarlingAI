@@ -171,7 +171,7 @@ export interface AuthenticatedUser {
   displayName?: string;
 }
 
-function normalizeRole(value: unknown): AuthRole {
+export function normalizeRole(value: unknown): AuthRole {
   if (typeof value === "string" && (value in BUILTIN_ROLE_RANKS || getExtensionRole(value))) return value;
   // Unknown / missing role claims default to operator — matches the legacy
   // single-operator behavior so unupgraded tokens keep working until expiry.

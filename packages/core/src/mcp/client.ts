@@ -18,6 +18,8 @@ const execFileAsync = promisify(execFile);
 const MCP_CONTAINER_LABEL = "starlingai.managed=mcp";
 const MCP_SERVER_LABEL_PREFIX = "starlingai.mcp.server=";
 const MCP_CONTAINER_NAME_PREFIX = "starlingai-mcp-";
+/** Cap the legacy HTTP transport's buffered response so a hostile endpoint can't OOM us. */
+const LEGACY_HTTP_MAX_BODY_BYTES = 8 * 1024 * 1024;
 
 export interface McpTool {
   name: string;
@@ -40,19 +42,23 @@ export async function connectMcpServer(
   const transport = buildTransport(serverName, config, runtime?.containerName);
   const client = new Client({ name: "starlingai", version: "0.1.0" }, { capabilities: {} });
 
+  let tools: McpTool[];
   try {
     await client.connect(transport);
+    // listTools() must be INSIDE the try: once connect() succeeds the transport is
+    // live, so a listTools failure has to tear down the client AND the docker
+    // container — otherwise both leak (a connected Server + a running container).
+    const toolsResult = await client.listTools();
+    tools = (toolsResult.tools ?? []).map(t => ({
+      name: t.name,
+      description: t.description ?? "",
+      inputSchema: (t.inputSchema ?? { type: "object", properties: {} }) as Record<string, unknown>,
+    }));
   } catch (err) {
+    try { await client.close(); } catch { /* transport may not be open */ }
     if (runtime) await forceRemoveDockerContainer(runtime.containerName);
     throw err;
   }
-
-  const toolsResult = await client.listTools();
-  const tools: McpTool[] = (toolsResult.tools ?? []).map(t => ({
-    name: t.name,
-    description: t.description ?? "",
-    inputSchema: (t.inputSchema ?? { type: "object", properties: {} }) as Record<string, unknown>,
-  }));
 
   log.info({ serverName, toolCount: tools.length, tools: tools.map(t => t.name) }, "MCP server connected");
 
@@ -199,6 +205,8 @@ async function forceRemoveDockerContainer(containerRef: string): Promise<void> {
  * Used to connect to Docker Desktop's `socat TCP-LISTEN:<port> EXEC:docker mcp gateway run` bridge.
  */
 class TcpClientTransport implements Transport {
+  /** Cap a single unterminated line so a server can't grow buf without bound → OOM. */
+  private static readonly MAX_BUFFER_BYTES = 16 * 1024 * 1024;
   private socket?: Socket;
   private buf = "";
 
@@ -219,6 +227,13 @@ class TcpClientTransport implements Transport {
       sock.setEncoding("utf8");
       sock.on("data", (chunk: string) => {
         this.buf += chunk;
+        if (this.buf.length > TcpClientTransport.MAX_BUFFER_BYTES) {
+          const err = new Error(`MCP TCP receive buffer exceeded ${TcpClientTransport.MAX_BUFFER_BYTES} bytes without a newline delimiter`);
+          this.buf = "";
+          this.onerror?.(err);
+          sock.destroy(err); // triggers the "close" handler → onclose cleanup
+          return;
+        }
         const lines = this.buf.split("\n");
         this.buf = lines.pop() ?? "";
         for (const line of lines) {
@@ -266,6 +281,10 @@ class LegacyHttpJsonRpcClientTransport implements Transport {
   }
 
   async send(message: JSONRPCMessage): Promise<void> {
+    // Bound a hung request (the SDK's own 60s timeout can't abort THIS leaked fetch)
+    // and cap the buffered body so a hostile/broken endpoint can't OOM the process.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(new Error("legacy MCP request timeout")), 55_000);
     try {
       const response = await fetch(this.url, {
         method: "POST",
@@ -276,6 +295,7 @@ class LegacyHttpJsonRpcClientTransport implements Transport {
           ...(this.sessionId ? { "Mcp-Session-Id": this.sessionId } : {}),
         },
         body: JSON.stringify(message),
+        signal: controller.signal,
       });
 
       const nextSessionId = response.headers.get("Mcp-Session-Id")?.trim();
@@ -283,7 +303,14 @@ class LegacyHttpJsonRpcClientTransport implements Transport {
         this.sessionId = nextSessionId;
       }
 
+      const declared = Number(response.headers.get("content-length") ?? "");
+      if (Number.isFinite(declared) && declared > LEGACY_HTTP_MAX_BODY_BYTES) {
+        throw new Error(`Legacy MCP endpoint response body too large (Content-Length ${declared} > ${LEGACY_HTTP_MAX_BODY_BYTES})`);
+      }
       const bodyText = await response.text();
+      if (bodyText.length > LEGACY_HTTP_MAX_BODY_BYTES) {
+        throw new Error(`Legacy MCP endpoint response exceeded ${LEGACY_HTTP_MAX_BODY_BYTES} bytes`);
+      }
       if (!bodyText.trim()) {
         // A compliant empty body is valid only for a JSON-RPC *notification* (a
         // message with no id), which legitimately gets a 202/204 with no payload
@@ -310,6 +337,8 @@ class LegacyHttpJsonRpcClientTransport implements Transport {
       const wrapped = error instanceof Error ? error : new Error(String(error));
       this.onerror?.(wrapped);
       throw wrapped;
+    } finally {
+      clearTimeout(timer);
     }
   }
 
