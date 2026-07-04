@@ -20,6 +20,7 @@ import { registerMemoryGraphRoutes } from "./memory-graph-routes.js";
 import { registerSessionDashboardRoutes } from "./session-dashboard-routes.js";
 import { registerModelPresetRoutes } from "./model-preset-routes.js";
 import { registerSecurityConfigRoutes } from "./security-config-routes.js";
+import { registerCheckpointRoutes } from "./checkpoint-routes.js";
 import { mountFederationRoutes } from "./federation-router.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { handleFederationDelegateStream } from "./federation-stream.js";
@@ -68,7 +69,6 @@ import { turnSteeringManager } from "../agent/turn-steering.js";
 import { getLoadedDynamicTools, listPromotionCandidates, approvePromotion, rejectPromotion, getDynamicToolStats } from "../tools/dynamic-tools.js";
 import { listCapabilityGaps } from "../agent/self-improve.js";
 import { getWardenAlerts } from "../agent/warden.js";
-import { listCheckpoints, resumeCheckpoint, completeCheckpoint } from "../swarm/checkpoints.js";
 import { ModelConfigSchema, MultimodalSchema, RetrievalRerankerSchema, OrchestrationSchema, SkillLibrarySchema, ToolPipelineSchema, DocumentRagSchema, EffortSchema, EFFORT_TIERS } from "../config/schema.js";
 import { getMcpConnections } from "../mcp/registry.js";
 import {
@@ -3934,38 +3934,8 @@ export function createGateway() {
     return c.json({ gaps });
   });
 
-  // ── Long-running task checkpoints ─────────────────────────────────────────
-  app.get("/api/checkpoints", async (c) => {
-    const token = extractBearerToken(c.req.header("Authorization"));
-    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
-
-    const statusParam = c.req.query("status");
-    const agentName = c.req.query("agentName");
-    const validStatuses = ["active", "paused", "resumed", "completed", "failed"] as const;
-    type CS = typeof validStatuses[number];
-    const status = validStatuses.includes(statusParam as CS) ? (statusParam as CS) : undefined;
-    return c.json({ checkpoints: listCheckpoints({ status, agentName }) });
-  });
-
-  app.post("/api/checkpoints/:taskId/resume", async (c) => {
-    const token = extractBearerToken(c.req.header("Authorization"));
-    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
-
-    const taskId = c.req.param("taskId");
-    const cp = resumeCheckpoint(taskId);
-    if (!cp) return c.json({ error: "Checkpoint not found or not in paused state" }, 404);
-    return c.json({ checkpoint: cp });
-  });
-
-  app.post("/api/checkpoints/:taskId/complete", async (c) => {
-    const token = extractBearerToken(c.req.header("Authorization"));
-    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
-
-    const taskId = c.req.param("taskId");
-    const ok = completeCheckpoint(taskId);
-    if (!ok) return c.json({ error: "Checkpoint not found" }, 404);
-    return c.json({ success: true, taskId });
-  });
+  // ── Long-running task checkpoint routes — extracted to ./checkpoint-routes.ts ──
+  registerCheckpointRoutes(app);
 
   app.get("/api/channels", async (c) => {
     const token = extractBearerToken(c.req.header("Authorization"));
