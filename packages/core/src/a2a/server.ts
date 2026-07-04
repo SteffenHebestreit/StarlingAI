@@ -37,6 +37,9 @@ const log = childLogger("a2a:server");
 
 /** In-memory task store.  Single-node by design — federation/A2A clients hit one instance. */
 const _tasks = new Map<string, A2ATask>();
+/** Resolved caller (JWT sub / shared-bearer) that submitted each task, kept OFF the
+ *  wire A2ATask so tasks/get can enforce per-caller ownership without leaking it. */
+const _taskOwners = new Map<string, string>();
 const TASK_RETENTION_MS = 30 * 60_000;
 
 /** Match a path against the A2A surface; returns true when handled. */
@@ -130,6 +133,15 @@ async function handleJsonRpcRequest(req: IncomingMessage, res: ServerResponse): 
         }
         const task = _tasks.get(params.id);
         if (!task) return respondError(res, id, A2A_ERROR.TASK_NOT_FOUND);
+        // Per-caller ownership: don't let one authenticated caller read another
+        // caller's task output/history by id. Shared-bearer callers all resolve to
+        // the same synthetic id, so they still match. Reuse TASK_NOT_FOUND to avoid
+        // disclosing that the task exists.
+        const owner = _taskOwners.get(params.id);
+        if (owner !== undefined && owner !== caller) {
+          logAudit("a2a_request_failed", { method: "tasks/get", caller, reason: "task_owner_mismatch" }, { severity: "warn" });
+          return respondError(res, id, A2A_ERROR.TASK_NOT_FOUND);
+        }
         result = task;
         break;
       }
@@ -147,9 +159,11 @@ async function handleJsonRpcRequest(req: IncomingMessage, res: ServerResponse): 
     log.error({ err, method: rpc.method }, "A2A request threw");
     logAudit("a2a_request_failed", { method: rpc.method, caller, reason: String(err) }, { severity: "warn" });
     res.writeHead(500, { "Content-Type": "application/json" });
+    // Don't leak internal error detail to the remote caller; full detail is already
+    // captured in the log + audit above.
     res.end(JSON.stringify({
       jsonrpc: "2.0",
-      error: { ...A2A_ERROR.INTERNAL, data: { message: String(err) } },
+      error: A2A_ERROR.INTERNAL,
       id,
     }));
     return true;
@@ -185,6 +199,10 @@ async function handleTasksSend(params: A2ATasksSendParams, caller: string): Prom
   }
 
   const taskId = params.id ?? randomUUID();
+  // A caller-supplied id must not clobber (or reveal) another caller's existing task.
+  if (params.id && _tasks.has(taskId)) {
+    throw new Error("task id already exists");
+  }
   const sessionId = params.sessionId ?? `a2a-in:${randomUUID()}`;
   const userText = params.message.parts.map((p) => p.text).join("\n").trim();
   const context =
@@ -199,6 +217,7 @@ async function handleTasksSend(params: A2ATasksSendParams, caller: string): Prom
     history: [params.message],
   };
   _tasks.set(taskId, initialTask);
+  _taskOwners.set(taskId, caller);
   scheduleTaskExpiry(taskId);
 
   try {
@@ -208,6 +227,10 @@ async function handleTasksSend(params: A2ATasksSendParams, caller: string): Prom
       context,
       parentSessionId: sessionId,
       workspacePath: config.workspacePath,
+      // Scope per-user resource guards (mail/credentials/compute) to the caller. A
+      // machine "shared-bearer" caller carries no user identity, so it is correctly
+      // denied user-restricted resources while still reaching shared ones.
+      userId: caller === "anonymous" ? undefined : caller,
     });
 
     const finalTask: A2ATask = {
@@ -236,7 +259,8 @@ async function handleTasksSend(params: A2ATasksSendParams, caller: string): Prom
       sessionId,
       status: {
         state: "failed",
-        message: { role: "agent", parts: [{ type: "text", text: String(err) }] },
+        // Generic remote-facing message; full detail stays in the audit log below.
+        message: { role: "agent", parts: [{ type: "text", text: "Task failed due to an internal error." }] },
         timestamp: new Date().toISOString(),
       },
       history: [params.message],
@@ -372,6 +396,6 @@ function readBody(req: IncomingMessage, maxBytes: number): Promise<string> {
 }
 
 function scheduleTaskExpiry(taskId: string): void {
-  const timer = setTimeout(() => _tasks.delete(taskId), TASK_RETENTION_MS);
+  const timer = setTimeout(() => { _tasks.delete(taskId); _taskOwners.delete(taskId); }, TASK_RETENTION_MS);
   timer.unref();
 }

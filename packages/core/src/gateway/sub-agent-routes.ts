@@ -9,7 +9,8 @@
 import type { Hono } from "hono";
 import { z } from "zod";
 import { getConfig } from "../config/loader.js";
-import { verifyToken, extractBearerToken } from "./auth.js";
+import { verifyToken, extractBearerToken, authenticatedUser, userHasRole } from "./auth.js";
+import type { Context } from "hono";
 import { childLogger } from "../logger.js";
 import { PRODUCT } from "../product/index.js";
 import { resolveAgentRouting } from "../tools/sub-agent.js";
@@ -25,6 +26,18 @@ import {
 const log = childLogger("gateway:sub-agent-routes");
 
 export function registerSubAgentRoutes(app: Hono): void {
+    // State-changing routes (model hot-patch, personality, flow-memory) require the
+    // operator role — a read-only viewer must not mutate persisted swarm state or
+    // redirect LLM traffic. Returns a 401/403 Response to short-circuit, or null when
+    // authorized. (Pre-Wave-B tokens with no role claim normalize to "operator", so
+    // legacy operator tokens keep working.)
+    const requireOperator = async (c: Context): Promise<Response | null> => {
+      const user = await authenticatedUser(c.req.header("Authorization"));
+      if (!user) return c.json({ error: "Unauthorized" }, 401);
+      if (!userHasRole(user, "operator")) return c.json({ error: "Operator role required" }, 403);
+      return null;
+    };
+
     const MainAssistantPersonalityRequestSchema = MainAssistantPersonalityEditableSchema.extend({
       reason: z.string().trim().min(1).max(400).optional(),
     });
@@ -75,8 +88,8 @@ export function registerSubAgentRoutes(app: Hono): void {
   });
 
   app.patch("/api/agents/:name/model", async (c) => {
-    const token = extractBearerToken(c.req.header("Authorization"));
-    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const denied = await requireOperator(c);
+    if (denied) return denied;
     const name = c.req.param("name");
     const cfg = getConfig();
     const agent = cfg.subAgents?.[name];
@@ -159,8 +172,8 @@ export function registerSubAgentRoutes(app: Hono): void {
   });
 
   app.post("/api/flow-memory", async (c) => {
-    const token = extractBearerToken(c.req.header("Authorization"));
-    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const denied = await requireOperator(c);
+    if (denied) return denied;
 
     let body: unknown;
     try {
@@ -195,8 +208,8 @@ export function registerSubAgentRoutes(app: Hono): void {
   });
 
   app.put("/api/personality", async (c) => {
-    const token = extractBearerToken(c.req.header("Authorization"));
-    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const denied = await requireOperator(c);
+    if (denied) return denied;
 
     try {
       const body = await c.req.json<Record<string, unknown>>();
@@ -213,8 +226,8 @@ export function registerSubAgentRoutes(app: Hono): void {
   });
 
   app.post("/api/personality/reset", async (c) => {
-    const token = extractBearerToken(c.req.header("Authorization"));
-    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const denied = await requireOperator(c);
+    if (denied) return denied;
     return c.json(resetMainAssistantPersonality("user", "Reset from dashboard"));
   });
 }

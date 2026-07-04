@@ -89,16 +89,38 @@ function countAttachmentLeaves(node?: BodyNode | null): number {
   return n;
 }
 
-/** Transfer-decode a fetched body part to text (base64 / quoted-printable / raw). */
-function decodeBodyPart(buf: Buffer, encoding?: string): string {
+/** Map a MIME charset label to a Node Buffer encoding, defaulting to utf8. */
+function normalizeCharset(cs?: string): BufferEncoding {
+  const c = (cs ?? "").toLowerCase().replace(/[^a-z0-9]/g, ""); // "utf-8" → "utf8"
+  if (c === "utf8" || c === "") return "utf8";
+  if (c === "usascii" || c === "ascii") return "ascii";
+  if (c === "latin1" || c === "iso88591" || c === "88591") return "latin1";
+  if (c === "utf16le" || c === "ucs2" || c === "utf16") return "utf16le";
+  return "utf8"; // unknown label (windows-1252, iso-8859-15, …): best-effort, no extra dep
+}
+
+/** Transfer-decode a fetched body part to text (base64 / quoted-printable / raw), applying the part charset. */
+function decodeBodyPart(buf: Buffer, encoding?: string, charset?: string): string {
   const enc = (encoding ?? "").toLowerCase();
-  if (enc === "base64") return Buffer.from(buf.toString("ascii"), "base64").toString("utf8");
+  const cs = normalizeCharset(charset);
+  if (enc === "base64") return Buffer.from(buf.toString("ascii"), "base64").toString(cs);
   if (enc === "quoted-printable") {
-    return buf.toString("utf8")
-      .replace(/=\r?\n/g, "")
-      .replace(/=([0-9A-Fa-f]{2})/g, (_, h: string) => String.fromCharCode(parseInt(h, 16)));
+    // Read as latin1 so every raw octet maps 1:1, strip soft line breaks, rebuild the
+    // raw byte stream, then decode with the real charset. Decoding as utf8 up front
+    // (the old path) mojibaked every multi-byte char (e.g. "caf=C3=A9" → garbage).
+    const s = buf.toString("latin1").replace(/=\r?\n/g, "");
+    const bytes: number[] = [];
+    for (let i = 0; i < s.length; i++) {
+      if (s[i] === "=" && /^[0-9A-Fa-f]{2}$/.test(s.substr(i + 1, 2))) {
+        bytes.push(parseInt(s.substr(i + 1, 2), 16));
+        i += 2;
+      } else {
+        bytes.push(s.charCodeAt(i) & 0xff);
+      }
+    }
+    return Buffer.from(bytes).toString(cs);
   }
-  return buf.toString("utf8");
+  return buf.toString(cs);
 }
 
 /** Strip tags from an html-only preview so it reads as prose. */
@@ -217,7 +239,7 @@ export class MailAccountClient {
 
       // Pass 1 — envelope + bodyStructure only (no source): from/to/cc/subject/date,
       // attachment count, and which part holds the text body.
-      interface Meta { uid: number; envelope: Record<string, unknown> | undefined; attachmentCount: number; textPart?: string; textEncoding?: string; textIsHtml: boolean }
+      interface Meta { uid: number; envelope: Record<string, unknown> | undefined; attachmentCount: number; textPart?: string; textEncoding?: string; textCharset?: string; textIsHtml: boolean }
       const metas: Meta[] = [];
       for await (const message of this.client!.fetch(recentUids, { uid: true, envelope: true, bodyStructure: true }, { uid: true })) {
         const leaf = firstTextLeaf(message.bodyStructure as unknown as BodyNode);
@@ -227,6 +249,7 @@ export class MailAccountClient {
           attachmentCount: countAttachmentLeaves(message.bodyStructure as unknown as BodyNode),
           textPart: leaf?.part,
           textEncoding: leaf?.encoding,
+          textCharset: leaf?.parameters?.["charset"] ?? undefined,
           textIsHtml: (leaf?.type ?? "").toLowerCase() === "text/html",
         });
       }
@@ -240,7 +263,7 @@ export class MailAccountClient {
           const meta = metas.find((m) => m.uid === message.uid);
           if (!meta?.textPart) continue;
           const buf = message.bodyParts?.get(meta.textPart);
-          if (buf) previewByUid.set(message.uid, previewText(decodeBodyPart(buf, meta.textEncoding), meta.textIsHtml));
+          if (buf) previewByUid.set(message.uid, previewText(decodeBodyPart(buf, meta.textEncoding, meta.textCharset), meta.textIsHtml));
         }
       }
 

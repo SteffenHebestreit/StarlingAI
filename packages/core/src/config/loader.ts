@@ -176,7 +176,15 @@ function readRawConfigFile(path: string, kind: "base" | "mutable"): Record<strin
     logger.info({ path, kind }, "Loaded config file");
     return raw;
   } catch (err) {
-    logger.error({ err, path, kind }, "Failed to parse config file — using defaults");
+    // A corrupt BASE shard must be fatal: silently returning {} makes Zod backfill
+    // defaults, so a single syntax typo would boot the gateway with a section
+    // reverted to defaults (e.g. auth/providers) instead of failing fast. A corrupt
+    // MUTABLE runtime overlay stays non-fatal so a bad hot-write can't brick boot.
+    if (kind === "base") {
+      logger.error({ err, path, kind }, "Failed to parse config file — refusing to boot with partial config");
+      throw new Error(`Invalid configuration: failed to parse ${path}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    logger.error({ err, path, kind }, "Failed to parse mutable config overlay — ignoring overlay");
     return {};
   }
 }
@@ -440,7 +448,11 @@ function mergeEnvOverrides(raw: Record<string, unknown>): Record<string, unknown
       ...computerUse,
       ...(env["SAI_COMPUTER_USE_ENABLED"]
         ? {
-            enabled: !["0", "false", "False", "FALSE"].includes(env["SAI_COMPUTER_USE_ENABLED"]),
+            // Truthy ALLOWLIST (fail-closed): only 1/true/yes/on (any case, trimmed)
+            // enable this privileged capability. The old blocklist enabled it for
+            // every value except four exact strings, so `disabled`/`no`/`FaLsE`/typos
+            // silently turned it ON.
+            enabled: ["1", "true", "yes", "on"].includes(env["SAI_COMPUTER_USE_ENABLED"].trim().toLowerCase()),
           }
         : {}),
       adapters: {

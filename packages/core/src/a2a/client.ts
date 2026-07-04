@@ -18,6 +18,7 @@ import { getConfig } from "../config/loader.js";
 import type { SubAgentConfig } from "../config/schema.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
+import { isSafePeerUrl } from "../federation/index.js";
 import {
   A2A_PROTOCOL_VERSION,
   type A2AAgentCard,
@@ -27,6 +28,50 @@ import {
 } from "./protocol.js";
 
 const log = childLogger("a2a:client");
+
+/** Agent cards / task results are KBs; cap responses so a hostile peer can't OOM us. */
+const A2A_MAX_BODY_BYTES = 8 * 1024 * 1024;
+
+/** Refuse to fetch a peer URL that isn't an http(s) public host (SSRF / metadata guard). */
+function assertSafeA2AUrl(rawUrl: string): void {
+  if (!isSafePeerUrl(rawUrl, false)) {
+    throw new Error(`A2A URL is not an allowed http(s) public endpoint: ${rawUrl}`);
+  }
+}
+
+/** Parsed URL origin, or null when unparseable. */
+function safeOrigin(rawUrl: string): string | null {
+  try { return new URL(rawUrl).origin; } catch { return null; }
+}
+
+/** Read a JSON response with a hard byte cap so a peer can't exhaust memory. */
+async function readJsonCapped<T>(res: Response, maxBytes = A2A_MAX_BODY_BYTES): Promise<T> {
+  const declared = Number(res.headers.get("content-length") ?? "");
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    throw new Error(`A2A response body too large (Content-Length ${declared} > ${maxBytes})`);
+  }
+  const reader = res.body?.getReader();
+  if (!reader) {
+    const txt = await res.text();
+    if (txt.length > maxBytes) throw new Error(`A2A response body too large (${txt.length} > ${maxBytes})`);
+    return JSON.parse(txt) as T;
+  }
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) {
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        throw new Error(`A2A response body exceeded ${maxBytes} bytes; aborting`);
+      }
+      chunks.push(value);
+    }
+  }
+  return JSON.parse(Buffer.concat(chunks.map((c) => Buffer.from(c))).toString("utf8")) as T;
+}
 
 interface RegisteredPeer {
   id: string;
@@ -51,6 +96,7 @@ export function listA2APeers(): RegisteredPeer[] {
 }
 
 export async function startA2AClient(): Promise<void> {
+  stopA2AClient(); // clear any prior refresh timer so repeated calls don't leak intervals
   const config = getConfig();
   if (!config.a2a.enabled) return;
 
@@ -97,13 +143,14 @@ async function refreshPeer(
   let lastError: string | undefined;
 
   try {
+    assertSafeA2AUrl(cardUrl);
     const headers: Record<string, string> = { Accept: "application/json" };
     if (bearerToken) headers["Authorization"] = `Bearer ${resolveSecret(bearerToken)}`;
     const res = await fetch(cardUrl, { headers, signal: AbortSignal.timeout(10_000) });
     if (!res.ok) {
       lastError = `HTTP ${res.status}`;
     } else {
-      card = (await res.json()) as A2AAgentCard;
+      card = await readJsonCapped<A2AAgentCard>(res);
       if (card.protocolVersion && card.protocolVersion !== A2A_PROTOCOL_VERSION) {
         log.warn(
           { peer: id, expected: A2A_PROTOCOL_VERSION, got: card.protocolVersion },
@@ -119,11 +166,27 @@ async function refreshPeer(
   const previousAgentNames = new Set(previous?.virtualAgents ?? []);
   const skills = card?.skills ?? [];
 
+  // The RPC endpoint the BEARER TOKEN gets sent to. The admin-configured `url` is
+  // trusted; the peer-advertised `card.url` is not — only honor it when it's a safe
+  // public host AND same-origin as the configured peer, so a compromised peer can't
+  // redirect our credential to an attacker/internal host.
+  const derivedEndpoint = `${url.replace(/\/$/, "")}/a2a/v1`;
+  let rpcEndpoint = derivedEndpoint;
+  if (card?.url) {
+    const configuredOrigin = safeOrigin(url);
+    const cardOrigin = safeOrigin(card.url);
+    if (isSafePeerUrl(card.url, false) && configuredOrigin && cardOrigin === configuredOrigin) {
+      rpcEndpoint = card.url;
+    } else {
+      log.warn({ peer: id, advertised: card.url }, "A2A: ignoring peer-advertised card.url (unsafe or cross-origin); using configured endpoint");
+    }
+  }
+
   const virtualAgents: string[] = [];
   if (card) {
     for (const skill of skills) {
       const name = `${A2A_AGENT_PREFIX}${id}__${skill.id}`;
-      registerVirtualAgent(name, id, skill, card.url ?? `${url}/a2a/v1`, bearerToken);
+      registerVirtualAgent(name, id, skill, rpcEndpoint, bearerToken);
       virtualAgents.push(name);
       previousAgentNames.delete(name);
     }
@@ -280,6 +343,7 @@ async function sendA2ATask(
     },
   };
 
+  assertSafeA2AUrl(rpcUrl);
   const res = await fetch(rpcUrl, {
     method: "POST",
     headers,
@@ -290,7 +354,7 @@ async function sendA2ATask(
     throw new Error(`A2A peer returned HTTP ${res.status}`);
   }
 
-  const body = (await res.json()) as A2AJsonRpcResponse<A2ATask>;
+  const body = await readJsonCapped<A2AJsonRpcResponse<A2ATask>>(res);
   if (body.error) {
     throw new Error(`${body.error.code} ${body.error.message}`);
   }
@@ -300,7 +364,12 @@ async function sendA2ATask(
     const reason = result.status.message?.parts?.[0]?.text ?? "unknown failure";
     throw new Error(reason);
   }
-  const text = result.artifacts?.flatMap((m) => m.parts.map((p) => p.text)).join("\n");
+  // Guard a peer that omits `parts` (or parts lacking `text`) — otherwise a missing
+  // field throws a TypeError surfaced as a bare "A2A delegation failed".
+  const text = result.artifacts
+    ?.flatMap((m) => (m.parts ?? []).map((p) => p?.text ?? ""))
+    .filter(Boolean)
+    .join("\n");
   return text ?? "";
 }
 

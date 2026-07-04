@@ -271,18 +271,28 @@ export class GmailQueryParser {
       return Object.assign({}, ...criteria);
     }
 
-    const merged: Record<string, unknown> = {};
-    for (const criterion of criteria) {
-      for (const [key, value] of Object.entries(criterion)) {
-        if (!(key in merged)) {
-          merged[key] = value;
-        }
-      }
-    }
-    return merged;
+    // imapflow has no AND operator and a plain object cannot carry duplicate keys,
+    // so colliding same-key criteria (a multi-word body search, or two from:/subject:
+    // terms) previously kept only the FIRST value per key and silently dropped the
+    // rest → the search returned the wrong emails. Express A AND B AND … via
+    // De Morgan — NOT( NOT A OR NOT B OR … ) — using imapflow's supported not/or.
+    return { not: { or: criteria.map((criterion) => ({ not: criterion })) } };
   }
 
   private static parseDate(value: string): Date {
+    // Gmail relative durations: newer_than:7d / older_than:1m / older_than:1y.
+    // `new Date("7d")` is an Invalid Date, which corrupts the IMAP SINCE/BEFORE
+    // criterion — compute now minus the duration instead.
+    const relative = value.match(/^(\d+)([dmy])$/i);
+    if (relative) {
+      const amount = Number.parseInt(relative[1] ?? "0", 10);
+      const unit = (relative[2] ?? "d").toLowerCase();
+      const date = new Date();
+      if (unit === "d") date.setDate(date.getDate() - amount);
+      else if (unit === "m") date.setMonth(date.getMonth() - amount); // Gmail: months, not minutes
+      else date.setFullYear(date.getFullYear() - amount); // "y": years
+      return date;
+    }
     const normalized = value.replace(/\//g, "-");
     const date = new Date(normalized);
     if (!Number.isNaN(date.getTime())) return date;

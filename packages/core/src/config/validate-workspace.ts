@@ -24,6 +24,7 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import JSON5 from "json5";
 import { ConfigSchema } from "./schema.js";
+import { validateComputerUseConfig } from "./computer-use-schema.js";
 import { NON_CONFIG_WORKSPACE_ZONES } from "../tools/workspace-path.js";
 
 export interface WorkspaceValidationResult {
@@ -177,6 +178,17 @@ export function validateWorkspaceConfig(workspacePath: string, knownToolNames: S
     for (const issue of result.error.issues) {
       const path = issue.path.length > 0 ? issue.path.join(".") : "(root)";
       schemaErrors.push(`${path}: ${issue.message}`);
+    }
+  }
+
+  // Second stage, mirroring the loader: computerUse is a Zod pass-through, so its
+  // real structural checks live in the Joi schema the loader runs at boot. Without
+  // this an invalid computerUse block validates "ok" here but crashes the gateway.
+  if (merged["computerUse"] !== undefined) {
+    try {
+      validateComputerUseConfig(merged["computerUse"]);
+    } catch (err) {
+      schemaErrors.push(err instanceof Error ? err.message : String(err));
     }
   }
 
