@@ -423,6 +423,53 @@ describe("config loader mutable overlay", () => {
     }
   });
 
+  it("keeps a base-shard key REMOVED via updateConfig removed across reloads (tombstone)", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-config-tombstone-"));
+    const configDir = join(tempDir, "starling_config");
+    const overlayPath = join(configDir, "runtime", "runtime.overrides.json");
+    mkdirSync(join(configDir, "providers"), { recursive: true });
+
+    // Base shard defines an optional provider block.
+    writeFileSync(join(configDir, "providers", "10-core.json"), JSON.stringify({
+      providers: {
+        lmstudio: { baseUrl: "http://lm:1234/v1", apiKey: "lm-studio", timeoutMs: 30_000, maxRetries: 3 },
+      },
+    }, null, 2), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configDir;
+    vi.resetModules();
+    const configLoader = await import("../config/loader.js");
+
+    try {
+      expect(configLoader.loadConfig().providers.lmstudio?.baseUrl).toBe("http://lm:1234/v1");
+
+      // Delete the base-shard key through updateConfig.
+      const updated = configLoader.updateConfig((raw) => {
+        delete (raw["providers"] as Record<string, unknown>)["lmstudio"];
+      });
+      expect(updated.providers.lmstudio).toBeUndefined();
+
+      // The overlay records an explicit tombstone (not just an absence).
+      const overlay = JSON5.parse(readFileSync(overlayPath, "utf8")) as { providers?: Record<string, unknown> };
+      expect(overlay.providers?.["lmstudio"]).toBe("__sai_deleted__");
+
+      // The deletion SURVIVES a reload (previously the base merge silently re-added it).
+      configLoader.resetConfigForTests();
+      expect(configLoader.loadConfig().providers.lmstudio).toBeUndefined();
+
+      // Re-adding it through a later update overrides the tombstone.
+      const readded = configLoader.updateConfig((raw) => {
+        (raw["providers"] as Record<string, unknown>)["lmstudio"] = { baseUrl: "http://lm2:1234/v1", apiKey: "k", timeoutMs: 30_000, maxRetries: 3 };
+      });
+      expect(readded.providers.lmstudio?.baseUrl).toBe("http://lm2:1234/v1");
+      configLoader.resetConfigForTests();
+      expect(configLoader.loadConfig().providers.lmstudio?.baseUrl).toBe("http://lm2:1234/v1");
+    } finally {
+      configLoader.resetConfigForTests();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("ships a pentest coordinator prompt that forbids false start claims", () => {
     const rootConfigPath = resolve(process.cwd(), "../../starlingai.example.json");
     const raw = JSON5.parse(readFileSync(rootConfigPath, "utf8")) as {

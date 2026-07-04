@@ -24,8 +24,17 @@ const DEFAULT_CONFIG_FILE_NAME = PRODUCT.configFileName;
 const DEFAULT_CONFIG_DIRECTORY_NAME = "config";
 const DEFAULT_WORKSPACE_DIRECTORY_NAME = "workspace";
 const LEGACY_CONFIG_DIRECTORY_NAMES = ["starling_config", "starling-config"];
-const DEFAULT_RUNTIME_DIRECTORY_NAME = "runtime";
+export const DEFAULT_RUNTIME_DIRECTORY_NAME = "runtime";
 const DEFAULT_RUNTIME_OVERLAY_FILE_NAME = "runtime.overrides.json";
+
+/**
+ * Sentinel written into the mutable overlay to record that updateConfig removed a
+ * key present in a base shard. A plain `null` would be ambiguous (null is a valid
+ * configured value), so use a distinctive string that cannot collide with real JSON.
+ * Honored ONLY when applying the mutable overlay (applyMutableOverlay) — never in
+ * base+workspace shard merging, so one shard can't silently null out another's key.
+ */
+const CONFIG_TOMBSTONE = "__sai_deleted__";
 
 const CONFIG_SOURCE = resolveConfigSource();
 
@@ -148,7 +157,7 @@ function getEffectiveRawConfig(): Record<string, unknown> {
   }
 
   const mutableRaw = readRawConfigFile(CONFIG_SOURCE.mutablePath, "mutable");
-  return mergeConfigObjects(baseRaw, mutableRaw);
+  return applyMutableOverlay(baseRaw, mutableRaw);
 }
 
 function getBaseRawConfig(): Record<string, unknown> {
@@ -249,6 +258,31 @@ function mergeConfigObjects(base: Record<string, unknown>, overlay: Record<strin
   return merged;
 }
 
+/**
+ * Merge the MUTABLE overlay onto the base, honoring CONFIG_TOMBSTONE markers so a
+ * key that updateConfig removed from a base shard stays removed across reloads.
+ * Distinct from mergeConfigObjects (which never deletes) so tombstone semantics are
+ * confined to the runtime overlay and can't leak into base+workspace shard merging.
+ */
+function applyMutableOverlay(base: Record<string, unknown>, overlay: Record<string, unknown>): Record<string, unknown> {
+  const merged: Record<string, unknown> = { ...base };
+
+  for (const [key, value] of Object.entries(overlay)) {
+    if (value === CONFIG_TOMBSTONE) {
+      delete merged[key];
+      continue;
+    }
+    const baseValue = merged[key];
+    if (isPlainObject(baseValue) && isPlainObject(value)) {
+      merged[key] = applyMutableOverlay(baseValue, value);
+      continue;
+    }
+    merged[key] = value;
+  }
+
+  return merged;
+}
+
 function writeCompiledConfig(config: Config): void {
   if (CONFIG_SOURCE.baseType !== "directory") return;
 
@@ -280,6 +314,17 @@ function buildOverlayConfig(base: Record<string, unknown>, updated: Record<strin
 
     if (!deepEqual(baseValue, updatedValue)) {
       overlay[key] = updatedValue;
+    }
+  }
+
+  // A base-shard key the mutator REMOVED won't appear in `updated`, so it produces
+  // no overlay entry above and would be silently re-added by the base merge on the
+  // next reload. Record an explicit tombstone so the removal survives. (Nested
+  // objects whose keys were all removed yield an all-tombstone nestedOverlay, which
+  // is non-empty and so is still emitted by the guard above.)
+  for (const key of Object.keys(base)) {
+    if (!Object.prototype.hasOwnProperty.call(updated, key)) {
+      overlay[key] = CONFIG_TOMBSTONE;
     }
   }
 

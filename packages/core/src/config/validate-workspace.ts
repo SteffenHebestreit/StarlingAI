@@ -25,6 +25,7 @@ import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import JSON5 from "json5";
 import { ConfigSchema } from "./schema.js";
 import { validateComputerUseConfig } from "./computer-use-schema.js";
+import { DEFAULT_RUNTIME_DIRECTORY_NAME } from "./loader.js";
 import { NON_CONFIG_WORKSPACE_ZONES } from "../tools/workspace-path.js";
 
 export interface WorkspaceValidationResult {
@@ -109,6 +110,11 @@ function collectShardPaths(directory: string): string[] {
         // Mirror the loader: working zones (generated/, uploads/, tools/) hold
         // agent output and dynamic-tool bundles, never config shards.
         if (depth === 0 && NON_CONFIG_WORKSPACE_ZONES.has(entry.name)) continue;
+        // The runtime overlay (runtime/runtime.overrides.json) is NOT a base shard:
+        // the loader excludes it from the base sweep and applies it LAST on top.
+        // Sweeping it here as an ordinary shard would merge it at the wrong
+        // precedence, so the validator's merged view would diverge from what runs.
+        if (depth === 0 && entry.name === DEFAULT_RUNTIME_DIRECTORY_NAME) continue;
         visit(next, depth + 1);
         continue;
       }
