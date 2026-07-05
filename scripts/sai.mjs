@@ -285,7 +285,7 @@ function wipeFlatFileMemory() {
 
 // Files attached to chats are persisted under the workspace `uploads/` bind mount
 // (NOT a docker volume), then ingested into the engram document-RAG store. The
-// engram graph itself lives in the gc-engram-neo4j-* volumes (removed by
+// engram store itself lives in the engram-data volume (removed by
 // `down -v`), but these original files survive on the host — wipe them too so a
 // clean slate doesn't leave orphaned document content behind.
 const UPLOAD_ZONES = [
@@ -330,7 +330,7 @@ async function cmdStop() {
   if (values.volumes) {
     // `down -v` cleared the DB-backed memory (Redis session facts, MemGraph
     // knowledge graph, Postgres agent store + pgvector embeddings, QuestDB research
-    // notes) AND the document-RAG graph DB (engram's gc-engram-neo4j-* volumes) +
+    // notes) AND the document-RAG store (engram's engram-data volume) +
     // the reranker model cache. The flat-file durable memory + learned skills and
     // the uploaded attachment files survive on the host bind mount, so wipe those
     // here for a real clean slate.
@@ -354,7 +354,7 @@ async function cmdWipe() {
   loadDotEnv();
 
   hdr(`Wipe ${PRODUCT.name} runtime data (containers stay up; config + credentials untouched)`);
-  info("Clears: Redis (sessions/swarm/ephemeral), Postgres (audit, agent data, scene jobs, vector embeddings = pgvector RAG), QuestDB (telemetry + research notes), MemGraph (knowledge graph), engram (document-RAG graph) + its uploaded source files, and the audit-log mirror.");
+  info("Clears: Redis (sessions/swarm/ephemeral), Postgres (audit, agent data, scene jobs, vector embeddings = pgvector RAG), QuestDB (telemetry + research notes), MemGraph (knowledge graph), engram (document-RAG store) + its uploaded source files, and the audit-log mirror.");
   if (!values.yes) {
     warn("This permanently deletes that data. Re-run to proceed:  pnpm sai wipe --yes");
     warn("For a full clean slate (volumes + flat-file memory/skills) use:  pnpm sai stop --volumes");
@@ -397,11 +397,23 @@ async function cmdWipe() {
   // MemGraph — drop every node + relationship.
   dcExec("MemGraph cleared", "memgraph", `sh -lc "echo 'MATCH (n) DETACH DELETE n;' | mgconsole"`);
 
-  // engram — drop the whole document-RAG graph (chunks, keywords, doc nodes) from
-  // its Neo4j store. Recreated lazily on the next ingest.
-  const engramPw = process.env.ENGRAM_NEO4J_PASSWORD || "engram";
-  // cypher-shell isn't on PATH in the neo4j image — use its full bin path.
-  dcExec("engram document-RAG graph cleared", "engram-neo4j", `sh -lc "echo 'MATCH (n) DETACH DELETE n;' | /var/lib/neo4j/bin/cypher-shell -u neo4j -p ${engramPw} --non-interactive"`);
+  // engram — under the embedded engramdb backend (STORE_BACKEND=engramdb) the store
+  // is an in-process vector+BM25+graph snapshotted to a single pickle at ENGRAMDB_PATH
+  // inside the engram-data volume — there is NO engram-neo4j service. (The old
+  // cypher-shell wipe targeted that non-existent service, so dcExec always swallowed
+  // the error and engram was silently never cleared.) Delete the snapshot and restart
+  // engram so it reloads an empty store; the in-memory store would otherwise re-snapshot
+  // the still-populated data back to disk. If engram isn't running (the `rag` profile is
+  // off by default) both steps skip cleanly — there is nothing to clear.
+  const engramDbPath = process.env.ENGRAM_ENGRAMDB_PATH || "/data/engramdb.pkl";
+  dcExec("engram store snapshot removed", "engram", `sh -lc "rm -f '${engramDbPath}'"`);
+  try {
+    execSync("docker compose restart engram", { stdio: ["ignore", "pipe", "pipe"] });
+    ok("engram document-RAG store cleared (reloaded empty)");
+  } catch (err) {
+    const detail = (err.stderr?.toString() || err.message || "").split("\n").find(Boolean) || "not running";
+    warn(`engram document-RAG store — reload skipped (${detail.slice(0, 120)})`);
+  }
 
   // On-disk audit-log mirror on the gateway data volume.
   dcExec("Audit log mirror cleared", "gateway", `sh -lc ": > /data/audit.jsonl"`);
