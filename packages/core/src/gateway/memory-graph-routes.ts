@@ -1,9 +1,11 @@
 /**
  * Memory + knowledge-graph inspector routes for the operator UI under /memory.
  *
- *   GET  /api/memory/entries   — durable memory records (filter + paginate)
- *   GET  /api/memory/curation  — duplicate/stale report + nudge (read-only)
- *   POST /api/memory/curate    — compact duplicate memory records (apply)
+ *   GET    /api/memory/entries       — durable memory records (filter + paginate)
+ *   PATCH  /api/memory/entries/:key  — edit one durable record (subject/content/tags/kind)
+ *   DELETE /api/memory/entries/:key  — permanently delete one durable record
+ *   GET    /api/memory/curation      — duplicate/stale report + nudge (read-only)
+ *   POST   /api/memory/curate        — compact duplicate memory records (apply)
  *   GET  /api/graph/labels     — MemGraph node-label histogram
  *   GET  /api/graph/overview   — label-scoped node+edge sample for the graph view
  *
@@ -39,6 +41,51 @@ export function registerMemoryGraphRoutes(app: Hono): void {
         : records;
       const paged = filtered.slice(0, limit);
       return c.json({ scope, total: filtered.length, returned: paged.length, records: paged });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
+  // ── Per-entry mutation (operator UI: edit / delete one durable record) ──────
+  // Auth-gated (same bar as POST /api/memory/curate in this file). Scope-aware:
+  // ?scope=user targets the user memory store, anything else the workspace store.
+  app.patch("/api/memory/entries/:key", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const scope = c.req.query("scope") === "user" ? "user" : "workspace";
+    const key = c.req.param("key");
+    try {
+      const body = await c.req.json<{ content?: unknown; subject?: unknown; tags?: unknown; kind?: unknown }>();
+      const patch: { content?: string; subject?: string; tags?: string[]; kind?: string } = {};
+      if (typeof body.content === "string") patch.content = body.content;
+      if (typeof body.subject === "string") patch.subject = body.subject;
+      if (Array.isArray(body.tags)) patch.tags = body.tags.filter((t): t is string => typeof t === "string");
+      if (typeof body.kind === "string") patch.kind = body.kind;
+      const { updateWorkspaceMemoryRecord, updateUserMemoryRecord } = await import("../memory/service.js");
+      const cfg = getConfig();
+      const record = scope === "user"
+        ? updateUserMemoryRecord(cfg.workspacePath, key, patch)
+        : updateWorkspaceMemoryRecord(cfg.workspacePath, key, patch);
+      if (!record) return c.json({ error: "Memory entry not found" }, 404);
+      return c.json({ scope, record });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
+  app.delete("/api/memory/entries/:key", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const scope = c.req.query("scope") === "user" ? "user" : "workspace";
+    const key = c.req.param("key");
+    try {
+      const { deleteWorkspaceMemoryRecord, deleteUserMemoryRecord } = await import("../memory/service.js");
+      const cfg = getConfig();
+      const deleted = scope === "user"
+        ? deleteUserMemoryRecord(cfg.workspacePath, key)
+        : deleteWorkspaceMemoryRecord(cfg.workspacePath, key);
+      if (!deleted) return c.json({ error: "Memory entry not found" }, 404);
+      return c.json({ scope, key, deleted: true });
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
     }

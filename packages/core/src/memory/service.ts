@@ -470,6 +470,121 @@ export function listUserMemoryRecords(workspacePath: string): MemoryRecord[] {
   return readUserMemoryRecords(workspacePath);
 }
 
+/** Fields an operator may edit on an existing durable memory record from the UI. */
+export interface UpdateDurableMemoryPatch {
+  content?: string;
+  subject?: string;
+  tags?: string[];
+  kind?: string;
+}
+
+/**
+ * Edit an existing durable memory record in place (operator/dashboard action).
+ * Preserves id / createdAt / source; patches subject / content / tags / kind;
+ * re-embeds and refreshes the graph node when the indexable text changed.
+ * Returns the updated record, or null when no active record with that key exists.
+ */
+export function updateWorkspaceMemoryRecord(
+  workspacePath: string,
+  key: string,
+  patch: UpdateDurableMemoryPatch,
+): MemoryRecord | null {
+  return updateDurableMemoryRecordByKey("workspace", workspacePath, key, patch);
+}
+
+export function updateUserMemoryRecord(
+  workspacePath: string,
+  key: string,
+  patch: UpdateDurableMemoryPatch,
+): MemoryRecord | null {
+  return updateDurableMemoryRecordByKey("user", workspacePath, key, patch);
+}
+
+/** Permanently delete a durable memory record by key (operator/dashboard action).
+ *  Returns true when a file was removed, false when nothing matched. */
+export function deleteWorkspaceMemoryRecord(workspacePath: string, key: string): boolean {
+  return deleteDurableMemoryRecordByKey("workspace", workspacePath, key);
+}
+
+export function deleteUserMemoryRecord(workspacePath: string, key: string): boolean {
+  return deleteDurableMemoryRecordByKey("user", workspacePath, key);
+}
+
+function updateDurableMemoryRecordByKey(
+  scope: DurableMemoryScope,
+  workspacePath: string,
+  key: string,
+  patch: UpdateDurableMemoryPatch,
+): MemoryRecord | null {
+  const dir = memoryDirForScope(scope, workspacePath);
+  const filePath = join(dir, `${safeKey(key)}.json`);
+  if (!existsSync(filePath)) return null;
+  let existing: StoredWorkspaceMemoryRecord | null;
+  try { existing = parseStoredWorkspaceMemory(readFileSync(filePath, "utf-8")); } catch { return null; }
+  if (!existing || existing.supersededAt) return null;
+
+  const now = new Date().toISOString();
+  const nextSubject = patch.subject !== undefined && patch.subject.trim()
+    ? patch.subject.trim()
+    : (existing.subject ?? existing.key);
+  const nextContent = patch.content !== undefined && patch.content.trim()
+    ? patch.content.trim()
+    : existing.content;
+  const nextTags = patch.tags !== undefined ? normalizeTags(patch.tags) : (existing.tags ?? []);
+  const nextKind = patch.kind !== undefined
+    ? (normalizeKind(patch.kind) ?? existing.kind ?? "note")
+    : (existing.kind ?? "note");
+
+  const prevIndex = `${existing.subject ?? ""}\n${existing.content}`;
+  const nextIndex = `${nextSubject}\n${nextContent}`;
+  const textChanged = prevIndex !== nextIndex;
+
+  const updated: StoredWorkspaceMemoryRecord = {
+    ...existing,
+    subject: nextSubject,
+    content: nextContent,
+    tags: nextTags,
+    kind: nextKind,
+    updatedAt: now,
+  };
+  // Drop the stale vector when the indexable text changed so retrieval never
+  // matches the old wording; the async refresh below writes a fresh one.
+  if (textChanged) delete updated.embedding;
+
+  writeFileSync(filePath, JSON.stringify(updated, null, 2), "utf-8");
+  const cacheKey = _cacheKey(scope, dir);
+  _bumpCacheVersion(cacheKey);
+  const result = workspaceStoredToRecord(updated);
+
+  // Fan the (possibly re-computed) vector out to the graph node, mirroring the
+  // store path. Both are best-effort and never block the edit.
+  if (textChanged && isEmbeddingAvailable()) {
+    const embedPromise = _refreshDurableEmbedding(filePath, cacheKey, nextIndex);
+    void upsertMemoryToGraph(result, undefined, undefined, embedPromise)
+      .catch((err) => log.debug({ err }, "Graph write-through failed (edit)"));
+  } else {
+    void upsertMemoryToGraph(result, undefined, undefined, existing.embedding)
+      .catch((err) => log.debug({ err }, "Graph write-through failed (edit)"));
+  }
+  return result;
+}
+
+function deleteDurableMemoryRecordByKey(
+  scope: DurableMemoryScope,
+  workspacePath: string,
+  key: string,
+): boolean {
+  const dir = memoryDirForScope(scope, workspacePath);
+  const filePath = join(dir, `${safeKey(key)}.json`);
+  if (!existsSync(filePath)) return false;
+  rmSync(filePath, { force: true });
+  _bumpCacheVersion(_cacheKey(scope, dir));
+  // The MemGraph write-through node (if any) is intentionally left in place —
+  // there is no durable→graph delete path, and an orphaned node is harmless to
+  // the read-only inspector view.
+  return true;
+}
+
 function readDurableMemoryRecords(scope: DurableMemoryScope, workspacePath: string): MemoryRecord[] {
   return _readDurableCached(scope, workspacePath).records;
 }

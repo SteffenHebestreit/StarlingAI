@@ -178,15 +178,115 @@
             <span class="memory-card__owner">{{ record.ownerType }}:{{ record.ownerId }}</span>
             <span class="memory-card__date">{{ formatDate(record.updatedAt) }}</span>
           </header>
-          <h3 class="memory-card__subject">{{ record.subject || record.key || record.id }}</h3>
-          <p class="memory-card__content">{{ record.content }}</p>
-          <footer v-if="record.tags && record.tags.length > 0" class="memory-card__tags">
-            <span v-for="tag in record.tags" :key="tag" class="memory-card__tag">{{ tag }}</span>
-          </footer>
+
+          <!-- Inline editor -->
+          <template v-if="editingKey && editingKey === record.key">
+            <input
+              v-model="editSubject"
+              class="memory-controls__input memory-edit__field"
+              placeholder="Subject"
+            />
+            <textarea
+              v-model="editContent"
+              rows="4"
+              class="memory-controls__input memory-edit__field memory-edit__textarea"
+              placeholder="Content"
+            />
+            <input
+              v-model="editTags"
+              class="memory-controls__input memory-edit__field"
+              placeholder="Comma-separated tags"
+            />
+            <div class="memory-card__actions">
+              <button
+                class="memory-card__btn memory-card__btn--save"
+                :disabled="savingEdit || !editContent.trim()"
+                @click="saveEdit(record)"
+              >{{ savingEdit ? "Saving…" : "Save" }}</button>
+              <button class="memory-card__btn" :disabled="savingEdit" @click="cancelEdit()">Cancel</button>
+            </div>
+          </template>
+
+          <!-- Read view -->
+          <template v-else>
+            <h3 class="memory-card__subject">{{ record.subject || record.key || record.id }}</h3>
+            <p class="memory-card__content">{{ record.content }}</p>
+            <footer v-if="record.tags && record.tags.length > 0" class="memory-card__tags">
+              <span v-for="tag in record.tags" :key="tag" class="memory-card__tag">{{ tag }}</span>
+            </footer>
+            <div class="memory-card__actions">
+              <template v-if="confirmDeleteKey && confirmDeleteKey === record.key">
+                <span class="memory-card__confirm">Delete permanently?</span>
+                <button
+                  class="memory-card__btn memory-card__btn--danger"
+                  :disabled="deletingKey === record.key"
+                  @click="deleteRecord(record)"
+                >{{ deletingKey === record.key ? "Deleting…" : "Confirm" }}</button>
+                <button class="memory-card__btn" @click="confirmDeleteKey = null">Cancel</button>
+              </template>
+              <template v-else>
+                <button
+                  class="memory-card__btn"
+                  :disabled="!record.key"
+                  :title="record.key ? 'Edit this entry' : 'This entry has no key and cannot be edited'"
+                  @click="startEdit(record)"
+                >Edit</button>
+                <button
+                  class="memory-card__btn memory-card__btn--danger"
+                  :disabled="!record.key"
+                  @click="confirmDeleteKey = record.key ?? null"
+                >Delete</button>
+              </template>
+            </div>
+          </template>
         </article>
       </div>
       <div v-if="memoryTotal > memoryRecords.length" class="memory-page__notice memory-page__notice--info">
         Showing {{ memoryRecords.length }} of {{ memoryTotal }} matching entries.
+      </div>
+    </section>
+
+    <!-- Assistant personality tab -->
+    <section v-if="activeTab === 'personality'" class="memory-page__panel">
+      <div class="memory-controls">
+        <button class="memory-controls__refresh" :disabled="personality.loading" @click="personality.fetch()">
+          {{ personality.loading ? "Loading…" : "Refresh" }}
+        </button>
+        <RouterLink to="/settings" class="memory-controls__refresh memory-controls__refresh--link">
+          Edit in Settings →
+        </RouterLink>
+      </div>
+      <div v-if="personality.error" class="memory-page__notice memory-page__notice--error">{{ personality.error }}</div>
+      <div v-else-if="!personality.profile && !personality.loading" class="memory-page__notice">
+        No assistant personality saved yet. It is written by <code>assistant_personality_update</code>
+        (the assistant's own name, voice, and quirks) and fully editable on the Settings page. This is a
+        separate store from the durable memory records in the Memory Store tab.
+      </div>
+      <div v-else-if="personality.profile" class="memory-list">
+        <article class="memory-card">
+          <header class="memory-card__header">
+            <span class="memory-card__kind">personality</span>
+            <span class="memory-card__scope">assistant</span>
+            <span class="memory-card__owner">rev {{ personality.profile.revision }}</span>
+            <span class="memory-card__owner">by {{ personality.profile.updatedBy }}</span>
+            <span class="memory-card__date">{{ formatDate(personality.profile.updatedAt) }}</span>
+          </header>
+          <h3 class="memory-card__subject">{{ personality.profile.identity.name || "Unnamed assistant" }}</h3>
+          <p class="memory-card__content">{{ personality.profile.identity.core }}</p>
+
+          <template v-for="group in personalityGroups" :key="group.label">
+            <div v-if="group.items.length > 0" class="personality-group">
+              <span class="personality-group__label">{{ group.label }}</span>
+              <ul class="personality-group__list">
+                <li v-for="(item, i) in group.items" :key="group.label + i">{{ item }}</li>
+              </ul>
+            </div>
+          </template>
+
+          <footer v-if="personality.profile.reason" class="memory-card__tags">
+            <span class="memory-card__tag">reason: {{ personality.profile.reason }}</span>
+          </footer>
+        </article>
       </div>
     </section>
   </div>
@@ -197,6 +297,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import cytoscape, { type Core, type ElementDefinition } from "cytoscape";
 import fcose from "cytoscape-fcose";
 import { useGatewayStore } from "@/stores/gateway";
+import { usePersonalityStore } from "@/stores/personality";
 
 cytoscape.use(fcose);
 
@@ -236,14 +337,19 @@ interface GraphLabelEntry {
 }
 
 const gateway = useGatewayStore();
+const personality = usePersonalityStore();
 
 const tabs = [
-  { id: "graph", label: "Knowledge Graph" },
   { id: "memory", label: "Memory Store" },
+  { id: "personality", label: "Personality" },
+  { id: "graph", label: "Knowledge Graph" },
   { id: "facts", label: "Session Facts" },
 ] as const;
 
-const activeTab = ref<typeof tabs[number]["id"]>("graph");
+// Open on the Memory Store — the durable records users mean by "memory". The
+// Knowledge Graph tab is empty whenever MemGraph isn't running, which previously
+// made a freshly-opened page look like it had "no entries".
+const activeTab = ref<typeof tabs[number]["id"]>("memory");
 
 // ── Knowledge graph state ────────────────────────────────────────────────
 const cyContainer = ref<HTMLElement | null>(null);
@@ -266,6 +372,29 @@ const memoryError = ref<string | null>(null);
 const memoryRecords = ref<MemoryRecord[]>([]);
 const memoryTotal = ref<number>(0);
 let memoryQueryTimer: ReturnType<typeof setTimeout> | null = null;
+
+// ── Per-entry edit / delete state ─────────────────────────────────────────
+const editingKey = ref<string | null>(null);
+const editSubject = ref<string>("");
+const editContent = ref<string>("");
+const editTags = ref<string>("");
+const savingEdit = ref(false);
+const confirmDeleteKey = ref<string | null>(null);
+const deletingKey = ref<string | null>(null);
+
+// Flatten the assistant personality profile into labelled list groups for display.
+const personalityGroups = computed<Array<{ label: string; items: string[] }>>(() => {
+  const p = personality.profile;
+  if (!p) return [];
+  return [
+    { label: "Tone", items: p.voice.tone },
+    { label: "Style", items: p.voice.style },
+    { label: "Quirks", items: p.voice.quirks },
+    { label: "Collaboration defaults", items: p.collaboration.defaults },
+    { label: "Avoidances", items: p.collaboration.avoidances },
+    { label: "Growth notes", items: p.growth.notes },
+  ];
+});
 
 interface CurationReport {
   totalRecords: number;
@@ -509,6 +638,70 @@ function onMemoryQueryChange(): void {
   memoryQueryTimer = setTimeout(() => { void loadMemory(); }, 250);
 }
 
+function startEdit(record: MemoryRecord): void {
+  if (!record.key) return;
+  confirmDeleteKey.value = null;
+  editingKey.value = record.key;
+  editSubject.value = record.subject ?? "";
+  editContent.value = record.content ?? "";
+  editTags.value = (record.tags ?? []).join(", ");
+}
+
+function cancelEdit(): void {
+  editingKey.value = null;
+}
+
+async function saveEdit(record: MemoryRecord): Promise<void> {
+  if (!record.key || !editContent.value.trim()) return;
+  savingEdit.value = true;
+  memoryError.value = null;
+  try {
+    const params = new URLSearchParams({ scope: memoryScope.value });
+    const res = await fetch(`${apiBase()}/api/memory/entries/${encodeURIComponent(record.key)}?${params}`, {
+      method: "PATCH",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({
+        subject: editSubject.value,
+        content: editContent.value,
+        tags: editTags.value.split(",").map((t) => t.trim()).filter(Boolean),
+      }),
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`HTTP ${res.status}: ${body.slice(0, 200)}`);
+    }
+    editingKey.value = null;
+    await Promise.all([loadMemory(), loadCuration()]);
+  } catch (err) {
+    memoryError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    savingEdit.value = false;
+  }
+}
+
+async function deleteRecord(record: MemoryRecord): Promise<void> {
+  if (!record.key) return;
+  deletingKey.value = record.key;
+  memoryError.value = null;
+  try {
+    const params = new URLSearchParams({ scope: memoryScope.value });
+    const res = await fetch(`${apiBase()}/api/memory/entries/${encodeURIComponent(record.key)}?${params}`, {
+      method: "DELETE",
+      headers: authHeaders(),
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`HTTP ${res.status}: ${body.slice(0, 200)}`);
+    }
+    confirmDeleteKey.value = null;
+    await Promise.all([loadMemory(), loadCuration()]);
+  } catch (err) {
+    memoryError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    deletingKey.value = null;
+  }
+}
+
 function formatDate(iso: string): string {
   if (!iso) return "—";
   try {
@@ -523,6 +716,8 @@ watch(activeTab, (tab) => {
     nextTick(() => { void loadGraph(); });
   } else if (tab === "facts") {
     if (factsSessionId.value.trim() && !factsLoaded.value) void loadSharedFacts();
+  } else if (tab === "personality") {
+    if (!personality.profile) void personality.fetch();
   } else {
     void loadMemory();
     void loadCuration();
@@ -530,7 +725,7 @@ watch(activeTab, (tab) => {
 });
 
 onMounted(async () => {
-  await Promise.all([loadGraphLabels(), loadMemory(), loadCuration()]);
+  await Promise.all([loadGraphLabels(), loadMemory(), loadCuration(), personality.fetch()]);
   await nextTick();
   void loadGraph();
 });
@@ -540,8 +735,6 @@ onBeforeUnmount(() => {
   cy?.destroy();
   cy = null;
 });
-
-void computed; // silence unused-import lint without needing to remove it
 </script>
 
 <style scoped>
@@ -894,6 +1087,80 @@ void computed; // silence unused-import lint without needing to remove it
   border: 1px solid rgba(56, 189, 248, 0.32);
   border-radius: 999px;
   padding: 0.05rem 0.5rem;
+}
+
+/* ── Per-card edit / delete controls ────────────────────────────────────── */
+.memory-card__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin-top: 0.6rem;
+}
+
+.memory-card__btn {
+  appearance: none;
+  background: rgba(31, 41, 55, 0.55);
+  color: rgb(209 213 219);
+  border: 1px solid rgba(168, 85, 247, 0.25);
+  border-radius: 0.5rem;
+  padding: 0.25rem 0.7rem;
+  font-size: 0.76rem;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.memory-card__btn:hover:not(:disabled) { background: rgba(168, 85, 247, 0.2); }
+.memory-card__btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.memory-card__btn--save {
+  background: rgba(52, 211, 153, 0.18);
+  color: rgb(167 243 208);
+  border-color: rgba(52, 211, 153, 0.4);
+}
+
+.memory-card__btn--danger {
+  background: rgba(248, 113, 113, 0.14);
+  color: rgb(254 202 202);
+  border-color: rgba(248, 113, 113, 0.4);
+}
+
+.memory-card__btn--danger:hover:not(:disabled) { background: rgba(248, 113, 113, 0.26); }
+
+.memory-card__confirm {
+  font-size: 0.76rem;
+  color: rgb(254 202 202);
+  margin-right: 0.2rem;
+}
+
+.memory-edit__field { margin-top: 0.4rem; width: 100%; }
+.memory-edit__textarea { resize: vertical; min-height: 5rem; font: inherit; }
+
+/* ── Personality tab groups ─────────────────────────────────────────────── */
+.memory-controls__refresh--link {
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+}
+
+.personality-group { margin-top: 0.65rem; }
+
+.personality-group__label {
+  display: block;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: rgb(196 181 253);
+  margin-bottom: 0.2rem;
+}
+
+.personality-group__list {
+  margin: 0;
+  padding-left: 1.1rem;
+  display: grid;
+  gap: 0.15rem;
+  font-size: 0.83rem;
+  color: rgb(229 231 235);
 }
 
 /* ── Session shared-facts badges ────────────────────────────────────────── */

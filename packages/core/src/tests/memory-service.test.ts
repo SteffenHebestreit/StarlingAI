@@ -7,10 +7,16 @@ import { appendFlowMemoryEntry } from "../agent/flow-memory.js";
 import {
   compactUserMemoryRecords,
   compactWorkspaceMemoryRecords,
+  deleteUserMemoryRecord,
+  deleteWorkspaceMemoryRecord,
+  listUserMemoryRecords,
+  listWorkspaceMemoryRecords,
   promoteMemoryRecords,
   searchMemoryRecords,
   storeUserMemoryRecord,
   storeWorkspaceMemoryRecord,
+  updateUserMemoryRecord,
+  updateWorkspaceMemoryRecord,
 } from "../memory/service.js";
 import { resetSharedMemoryForTests, writeSharedFact } from "../swarm/memory.js";
 
@@ -256,5 +262,88 @@ describe("memory service", () => {
     const result = compactUserMemoryRecords(workspacePath);
     expect(result.scope).toBe("user");
     expect(result.removed).toBe(1);
+  });
+
+  it("edits a workspace memory record in place and reflects it in the listing", () => {
+    const workspacePath = mkdtempSync(join(tmpdir(), "starlingai-memory-service-"));
+    dirs.push(workspacePath);
+
+    storeWorkspaceMemoryRecord(workspacePath, {
+      key: "deploy_target",
+      subject: "Deploy target",
+      content: "Ship to the homelab box.",
+      kind: "note",
+      tags: ["ops"],
+    });
+
+    const updated = updateWorkspaceMemoryRecord(workspacePath, "deploy_target", {
+      content: "Ship to the managed cloud cluster instead.",
+      tags: ["ops", "cloud"],
+      subject: "Deploy target (revised)",
+    });
+
+    expect(updated).not.toBeNull();
+    expect(updated?.content).toBe("Ship to the managed cloud cluster instead.");
+    expect(updated?.subject).toBe("Deploy target (revised)");
+    expect(updated?.tags).toEqual(["ops", "cloud"]);
+
+    // The read path (what the memory page consumes) must show the edited value.
+    const listed = listWorkspaceMemoryRecords(workspacePath);
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.content).toBe("Ship to the managed cloud cluster instead.");
+    expect(listed[0]?.key).toBe("deploy_target");
+  });
+
+  it("returns null when editing a memory key that does not exist", () => {
+    const workspacePath = mkdtempSync(join(tmpdir(), "starlingai-memory-service-"));
+    dirs.push(workspacePath);
+
+    const missing = updateWorkspaceMemoryRecord(workspacePath, "nope", { content: "x" });
+    expect(missing).toBeNull();
+  });
+
+  it("deletes a workspace memory record and removes it from the listing", () => {
+    const workspacePath = mkdtempSync(join(tmpdir(), "starlingai-memory-service-"));
+    dirs.push(workspacePath);
+
+    storeWorkspaceMemoryRecord(workspacePath, {
+      key: "throwaway",
+      subject: "Throwaway",
+      content: "This should be deletable.",
+      kind: "note",
+    });
+    expect(listWorkspaceMemoryRecords(workspacePath)).toHaveLength(1);
+
+    const deleted = deleteWorkspaceMemoryRecord(workspacePath, "throwaway");
+    expect(deleted).toBe(true);
+    expect(listWorkspaceMemoryRecords(workspacePath)).toHaveLength(0);
+
+    // Deleting again is a no-op that reports nothing was removed.
+    expect(deleteWorkspaceMemoryRecord(workspacePath, "throwaway")).toBe(false);
+  });
+
+  it("deletes a user-scoped memory record via the user store path", () => {
+    const workspacePath = mkdtempSync(join(tmpdir(), "starlingai-memory-service-"));
+    const userMemoryPath = mkdtempSync(join(tmpdir(), "starlingai-user-memory-"));
+    dirs.push(workspacePath, userMemoryPath);
+    process.env["SAI_USER_MEMORY_PATH"] = userMemoryPath;
+
+    storeUserMemoryRecord(workspacePath, {
+      key: "temp_pref",
+      subject: "Temp preference",
+      content: "Delete me from the user store.",
+      kind: "preference",
+    });
+    expect(listUserMemoryRecords(workspacePath)).toHaveLength(1);
+
+    // Edit through the user-scoped path before deleting.
+    const edited = updateUserMemoryRecord(workspacePath, "temp_pref", {
+      content: "Actually keep me a moment longer.",
+    });
+    expect(edited?.content).toBe("Actually keep me a moment longer.");
+    expect(listUserMemoryRecords(workspacePath)[0]?.content).toBe("Actually keep me a moment longer.");
+
+    expect(deleteUserMemoryRecord(workspacePath, "temp_pref")).toBe(true);
+    expect(listUserMemoryRecords(workspacePath)).toHaveLength(0);
   });
 });
