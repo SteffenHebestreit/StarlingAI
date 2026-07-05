@@ -249,19 +249,62 @@
     <!-- Assistant personality tab -->
     <section v-if="activeTab === 'personality'" class="memory-page__panel">
       <div class="memory-controls">
-        <button class="memory-controls__refresh" :disabled="personality.loading" @click="personality.fetch()">
+        <button class="memory-controls__refresh" :disabled="personality.loading || pEditing" @click="personality.fetch()">
           {{ personality.loading ? "Loading…" : "Refresh" }}
         </button>
+        <button
+          v-if="personality.profile && !pEditing"
+          class="memory-controls__refresh"
+          :disabled="personality.saving"
+          @click="startPersonalityEdit()"
+        >Edit</button>
         <RouterLink to="/settings" class="memory-controls__refresh memory-controls__refresh--link">
-          Edit in Settings →
+          Full editor in Settings →
         </RouterLink>
       </div>
       <div v-if="personality.error" class="memory-page__notice memory-page__notice--error">{{ personality.error }}</div>
       <div v-else-if="!personality.profile && !personality.loading" class="memory-page__notice">
         No assistant personality saved yet. It is written by <code>assistant_personality_update</code>
-        (the assistant's own name, voice, and quirks) and fully editable on the Settings page. This is a
+        (the assistant's own name, voice, and quirks) and editable here or on the Settings page. This is a
         separate store from the durable memory records in the Memory Store tab.
       </div>
+
+      <!-- Inline editor (reuses the same PUT /api/personality the Settings page uses) -->
+      <div v-else-if="pEditing" class="memory-list">
+        <article class="memory-card">
+          <header class="memory-card__header">
+            <span class="memory-card__kind">personality</span>
+            <span class="memory-card__scope">editing</span>
+            <span class="memory-card__owner">rev {{ personality.profile?.revision }}</span>
+          </header>
+          <label class="personality-group__label" for="p-name">Name</label>
+          <input id="p-name" v-model="pForm.name" class="memory-controls__input memory-edit__field" placeholder="e.g. Luna" />
+          <label class="personality-group__label" for="p-core">Core identity</label>
+          <textarea id="p-core" v-model="pForm.core" rows="3" class="memory-controls__input memory-edit__field memory-edit__textarea" placeholder="Core identity and overall vibe for the assistant." />
+          <label class="personality-group__label" for="p-tone">Tone <span class="personality-hint">(one per line)</span></label>
+          <textarea id="p-tone" v-model="pForm.toneText" rows="3" class="memory-controls__input memory-edit__field memory-edit__textarea" placeholder="Direct and plainspoken." />
+          <label class="personality-group__label" for="p-style">Style <span class="personality-hint">(one per line)</span></label>
+          <textarea id="p-style" v-model="pForm.styleText" rows="3" class="memory-controls__input memory-edit__field memory-edit__textarea" placeholder="Lead with the decisive tradeoff." />
+          <label class="personality-group__label" for="p-quirks">Quirks <span class="personality-hint">(one per line)</span></label>
+          <textarea id="p-quirks" v-model="pForm.quirksText" rows="3" class="memory-controls__input memory-edit__field memory-edit__textarea" placeholder="Dry humor when it helps." />
+          <label class="personality-group__label" for="p-defaults">Collaboration defaults <span class="personality-hint">(one per line)</span></label>
+          <textarea id="p-defaults" v-model="pForm.defaultsText" rows="3" class="memory-controls__input memory-edit__field memory-edit__textarea" placeholder="Lead with the decisive tradeoff before listing options." />
+          <label class="personality-group__label" for="p-avoidances">Avoidances <span class="personality-hint">(one per line)</span></label>
+          <textarea id="p-avoidances" v-model="pForm.avoidancesText" rows="3" class="memory-controls__input memory-edit__field memory-edit__textarea" placeholder="Do not become flattering, theatrical, or vague." />
+          <label class="personality-group__label" for="p-growth">Growth notes <span class="personality-hint">(one per line)</span></label>
+          <textarea id="p-growth" v-model="pForm.growthText" rows="3" class="memory-controls__input memory-edit__field memory-edit__textarea" placeholder="Stable lessons the assistant should carry forward." />
+          <label class="personality-group__label" for="p-reason">Reason for this change <span class="personality-hint">(optional)</span></label>
+          <input id="p-reason" v-model="pForm.reason" class="memory-controls__input memory-edit__field" placeholder="Why this durable personality change matters." />
+          <div class="memory-card__actions">
+            <button class="memory-card__btn memory-card__btn--save" :disabled="personality.saving || !pForm.core.trim()" @click="savePersonalityEdit()">
+              {{ personality.saving ? "Saving…" : "Save" }}
+            </button>
+            <button class="memory-card__btn" :disabled="personality.saving" @click="cancelPersonalityEdit()">Cancel</button>
+          </div>
+        </article>
+      </div>
+
+      <!-- Read view -->
       <div v-else-if="personality.profile" class="memory-list">
         <article class="memory-card">
           <header class="memory-card__header">
@@ -395,6 +438,68 @@ const personalityGroups = computed<Array<{ label: string; items: string[] }>>(()
     { label: "Growth notes", items: p.growth.notes },
   ];
 });
+
+// ── Inline personality editing (reuses the personality store's PUT save) ────
+const pEditing = ref(false);
+const pForm = ref({
+  name: "",
+  core: "",
+  toneText: "",
+  styleText: "",
+  quirksText: "",
+  defaultsText: "",
+  avoidancesText: "",
+  growthText: "",
+  reason: "",
+});
+
+function linesToList(text: string): string[] {
+  return text.split("\n").map((line) => line.trim()).filter(Boolean);
+}
+
+function startPersonalityEdit(): void {
+  const p = personality.profile;
+  if (!p) return;
+  pForm.value = {
+    name: p.identity.name ?? "",
+    core: p.identity.core ?? "",
+    toneText: (p.voice.tone ?? []).join("\n"),
+    styleText: (p.voice.style ?? []).join("\n"),
+    quirksText: (p.voice.quirks ?? []).join("\n"),
+    defaultsText: (p.collaboration.defaults ?? []).join("\n"),
+    avoidancesText: (p.collaboration.avoidances ?? []).join("\n"),
+    growthText: (p.growth.notes ?? []).join("\n"),
+    reason: "",
+  };
+  pEditing.value = true;
+}
+
+function cancelPersonalityEdit(): void {
+  pEditing.value = false;
+}
+
+async function savePersonalityEdit(): Promise<void> {
+  const f = pForm.value;
+  if (!f.core.trim()) return;
+  // Send every field back — the PUT replaces the whole profile, so omitting a
+  // list would wipe it. personality.save() catches its own errors into
+  // personality.error; only leave edit mode when the save actually succeeded.
+  await personality.save({
+    identity: { core: f.core.trim(), name: f.name.trim() || undefined },
+    voice: {
+      tone: linesToList(f.toneText),
+      style: linesToList(f.styleText),
+      quirks: linesToList(f.quirksText),
+    },
+    collaboration: {
+      defaults: linesToList(f.defaultsText),
+      avoidances: linesToList(f.avoidancesText),
+    },
+    growth: { notes: linesToList(f.growthText) },
+    ...(f.reason.trim() ? { reason: f.reason.trim() } : {}),
+  });
+  if (!personality.error) pEditing.value = false;
+}
 
 interface CurationReport {
   totalRecords: number;
@@ -1161,6 +1266,13 @@ onBeforeUnmount(() => {
   gap: 0.15rem;
   font-size: 0.83rem;
   color: rgb(229 231 235);
+}
+
+.personality-hint {
+  text-transform: none;
+  letter-spacing: 0;
+  color: rgb(120 128 145);
+  font-size: 0.92em;
 }
 
 /* ── Session shared-facts badges ────────────────────────────────────────── */
