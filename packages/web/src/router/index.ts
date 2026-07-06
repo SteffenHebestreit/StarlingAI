@@ -14,6 +14,7 @@ const router = createRouter({
     { path: "/memory", component: () => import("@/pages/MemoryInspector.vue") },
     { path: "/skills", component: () => import("@/pages/Skills.vue") },
     { path: "/documents", component: () => import("@/pages/Documents.vue") },
+    { path: "/knowledge", component: () => import("@/pages/KnowledgeBases.vue") },
     { path: "/catalog", component: () => import("@/pages/Agents.vue") },
     { path: "/federation", component: () => import("@/pages/Federation.vue") },
     { path: "/users", component: () => import("@/pages/Users.vue") },

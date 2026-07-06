@@ -73,6 +73,7 @@ import "./timeseries.js";
 import "./research-scratch.js";
 import "./rag.js";
 import "./documents.js";
+import "./knowledge-bases.js";
 import "./sql.js";
 import "./spreadsheet.js";
 import "./pdf-forms.js";

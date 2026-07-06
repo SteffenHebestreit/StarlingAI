@@ -63,6 +63,29 @@
       // cross-session/cross-user doc isolation (0-leak) + no recall regression on
       // in-scope docs.
       "serverSideScopeFilter": true
+    },
+    // Knowledge bases: named corpora recursively crawled from documentation sites
+    // (wikis, standards like W3C/WAI, product manuals) into engram under kb:<id>
+    // sources, then queried with search_knowledge_base. Requires documentRag above.
+    // The crawler is deterministic (no LLM in the loop): bounded BFS with robots.txt
+    // respect, per-host politeness, and the web_fetch SSRF guard. Defaults below are
+    // the safety rails; per-KB bounds (maxPages/maxDepth/patterns) live on each KB.
+    "knowledgeBases": {
+      "enabled": true,
+      "userAgent": "StarlingAI-KBCrawler/1.0",
+      "defaultMaxPages": 150,
+      "maxPagesCap": 1000,
+      "defaultMaxDepth": 4,
+      "maxDepthCap": 8,
+      "concurrency": 2,
+      "requestDelayMs": 300,
+      "pageTimeoutMs": 15000,
+      "maxPageBytes": 2000000,
+      "maxCrawlMs": 1800000,
+      "maxConcurrentCrawls": 2,
+      // Allow crawling private/internal hosts (RFC1918, *.internal). OFF applies the
+      // SSRF guard per redirect hop. Turn ON only to index a trusted internal wiki.
+      "allowPrivateHosts": false
     }
   },
   "computerUse": {

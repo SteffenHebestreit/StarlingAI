@@ -45,6 +45,11 @@ export const ALWAYS_AVAILABLE_MAIN_TOOL_NAMES = [
   // disabled or engram is unreachable.
   "search_documents",
   "list_documents",
+  // Knowledge bases (crawled documentation corpora): discovery + scoped
+  // retrieval are always offered, mirroring the documents pair above. No-op
+  // when documentRag/knowledgeBases is disabled.
+  "list_knowledge_bases",
+  "search_knowledge_base",
   // Flat agent capability directory so the assistant can answer "what agents do
   // you have / what can they do" without a semantic query (search_agents and
   // list_agents both require one and never dump the catalog).
@@ -66,6 +71,9 @@ export const DIRECT_MAIN_TOOL_NAMES = [
   // Ingest a workspace file into / remove a document from the engram library.
   "ingest_document",
   "forget_document",
+  // Build/maintain crawled knowledge bases (background crawl of a docs site).
+  "create_knowledge_base",
+  "manage_knowledge_base",
   "transcribe_audio",
   "synthesize_speech",
   "list_tts_voices",

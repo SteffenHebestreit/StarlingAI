@@ -110,10 +110,55 @@ export const DocumentRagSchema = z.object({
 });
 export type DocumentRagConfig = z.infer<typeof DocumentRagSchema>;
 
+/**
+ * Knowledge Bases — named, workspace-shared corpora built by recursively
+ * crawling a documentation site (wiki, tutorial, standard) into the engram
+ * document store under a per-KB `kb:<id>` source token. The crawler is
+ * deterministic (no LLM in the loop): bounded BFS over in-scope links with
+ * robots.txt respect, per-host politeness delay, and the same SSRF guard as
+ * web_fetch. Requires documentRag (engram) — every KB operation no-ops
+ * gracefully when that is disabled. This block holds the crawler's global
+ * safety rails; per-KB bounds (maxPages/maxDepth/patterns) live on each KB
+ * record and are clamped to the caps here.
+ */
+export const KnowledgeBasesSchema = z.object({
+  /** Master switch for the KB surface (tools + routes). The hard dependency is
+   *  retrieval.documentRag.enabled — with that off, KBs are inert regardless. */
+  enabled: z.boolean().default(true),
+  /** User-Agent for crawl requests (sites use it for rate/robots policy). */
+  userAgent: z.string().min(1).default("StarlingAI-KBCrawler/1.0"),
+  /** Default page budget for a KB when none is specified at creation. */
+  defaultMaxPages: z.number().int().min(1).max(5000).default(150),
+  /** Hard cap on any KB's page budget (create/update requests are clamped). */
+  maxPagesCap: z.number().int().min(1).max(20000).default(1000),
+  /** Default link depth from the seed URLs (0 = seeds only). */
+  defaultMaxDepth: z.number().int().min(0).max(20).default(4),
+  /** Hard cap on any KB's link depth. */
+  maxDepthCap: z.number().int().min(0).max(20).default(8),
+  /** Concurrent page fetches within one crawl (keep small — politeness). */
+  concurrency: z.number().int().min(1).max(8).default(2),
+  /** Minimum interval between two requests to the SAME host. */
+  requestDelayMs: z.number().int().min(0).max(60000).default(300),
+  /** Per-page fetch timeout. */
+  pageTimeoutMs: z.number().int().min(1000).max(120000).default(15000),
+  /** Pages larger than this are skipped (pre-checked via Content-Length when present). */
+  maxPageBytes: z.number().int().min(10000).max(50_000_000).default(2_000_000),
+  /** Wall-clock budget for one crawl run; the crawl stops gracefully (partial corpus is kept). */
+  maxCrawlMs: z.number().int().min(10000).max(24 * 3600_000).default(1_800_000),
+  /** How many KBs may crawl at the same time in this process. */
+  maxConcurrentCrawls: z.number().int().min(1).max(8).default(2),
+  /** Allow crawling private/internal hosts (RFC1918, *.internal …). OFF = the
+   *  web_fetch SSRF guard applies per redirect hop. Turn on ONLY for instances
+   *  that need to index an internal wiki and trust their operators. */
+  allowPrivateHosts: z.boolean().default(false),
+});
+export type KnowledgeBasesConfig = z.infer<typeof KnowledgeBasesSchema>;
+
 export const RetrievalSchema = z.object({
   reranker: RetrievalRerankerSchema.default({}),
   search: RetrievalSearchSchema.default({}),
   documentRag: DocumentRagSchema.default({}),
+  knowledgeBases: KnowledgeBasesSchema.default({}),
 });
 
 export type RetrievalSearchConfig = z.infer<typeof RetrievalSearchSchema>;

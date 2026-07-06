@@ -89,6 +89,7 @@ Every agent runs in an isolated Docker container with `--cap-drop ALL`, `--read-
 - **Reusable Workflows** — Scenes and multi-step jobs can be discovered with `search_workflows` and executed inline with `run_workflow`, so recurring packets do not have to be replanned from scratch.
 - **Collective Memory** — Agents share facts and partial results via a semantic memory layer backed by embeddings. Knowledge built by one agent is available to all.
 - **Document RAG** — Files attached to a conversation are extracted to Markdown by the file-conversion service and indexed into the [engram](https://github.com/SteffenHebestreit/engram) graph-RAG store (chunk → keywords/summary → multi-channel embeddings → graph). Relevant excerpts are auto-retrieved and injected as context per turn, with a cross-encoder rerank (`bge-reranker-v2-m3` via a TEI sidecar). Scope is the conversation by default, extendable to the user's or the workspace's shared library from settings.
+- **Knowledge Bases** — Named corpora crawled from documentation sites (`create_knowledge_base`) into the engram store via a bounded, robots-respecting, SSRF-guarded crawler, then queried with `search_knowledge_base` — excerpts cite their source page URLs. See [docs/knowledge-bases.md](docs/knowledge-bases.md).
 - **Bounded Self-Improvement** — The swarm can improve prompts, user memory, flow memory, sub-agent definitions, and approved tool assignments for sub-agents, but only inside guarded, non-secret, non-crucial configuration boundaries.
 - **Federated Swarms** — Instances delegate work to one another over HMAC-signed, short-lived, peer-scoped tokens. Each side keeps full control of its own tool tiers and approval policies — federation never bypasses local guardrails.
 - **Open Interoperability** — StarlingAI both speaks and serves the open agent protocols: an MCP server (HTTP + stdio) exposes its tools to other clients, and a public A2A protocol (server + client) lets external agents collaborate with the swarm.
@@ -257,6 +258,7 @@ Model wiring is environment-driven (the setup wizard writes these to `.env`): `S
 | [docs/channels.md](docs/channels.md) | Channel capability matrix and delivery model |
 | [docs/channel-setup.md](docs/channel-setup.md) | Channel onboarding and configuration walkthrough |
 | [docs/mail-service.md](docs/mail-service.md) | Headless mail-service architecture and API |
+| [docs/knowledge-bases.md](docs/knowledge-bases.md) | Crawled documentation corpora: crawler scope/safety, storage, retrieval, config, and API |
 | [docs/security.md](docs/security.md) | Auth, credential storage, sandboxing, and audit behavior |
 | [docs/tool-tiers.md](docs/tool-tiers.md) | Hard-coded tool permission tiers and approval rules |
 | [docs/forking.md](docs/forking.md) | Fork StarlingAI into a specialized swarm and stay rebase-clean with upstream |

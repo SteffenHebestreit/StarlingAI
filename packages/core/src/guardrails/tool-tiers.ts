@@ -630,6 +630,30 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  list_knowledge_bases: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "List crawled knowledge bases with status/size, or one KB's crawl progress detail",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  search_knowledge_base: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Scoped graph-RAG search over one crawled knowledge base, excerpts cite source page URLs",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  create_knowledge_base: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Create a knowledge base and recursively crawl a documentation site into engram (background, bounded, SSRF-guarded)",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  manage_knowledge_base: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Re-crawl, cancel a crawl, or delete a knowledge base and its indexed pages",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
   graph_upsert_entity: {
     tier: ToolTier.ONE_WRITE,
     description: "Create or update a node in the MemGraph knowledge graph",

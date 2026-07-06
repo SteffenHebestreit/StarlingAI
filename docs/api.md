@@ -380,6 +380,43 @@ The audit-only Markdown export is the lighter-weight companion. It keeps the ses
 }
 ```
 
+### Knowledge Bases
+
+Named corpora crawled from documentation sites into the engram document store, then queried by agents with citations — see [Knowledge Bases](knowledge-bases.md) for the crawler, storage, and retrieval model. All routes require a Bearer token; the mutating routes (`POST`, `PATCH`, `DELETE`) are **operator-only** via the route policy. Crawls run in the background — the create/crawl routes return immediately and clients poll `GET` for the progress persisted in the KB record.
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| `GET` | `/api/knowledge-bases` | `{ knowledgeBases: [summary], enabled, ragConfigured }` |
+| `POST` | `/api/knowledge-bases` | create (and by default start crawling) a KB → `201` |
+| `GET` | `/api/knowledge-bases/:id` | detail + page list (≤1000, URL-sorted) + live `crawling` flag |
+| `PATCH` | `/api/knowledge-bases/:id` | update any create field except `id` → `{ knowledgeBase }` |
+| `POST` | `/api/knowledge-bases/:id/crawl` | start a (re-)crawl → `{ id, crawlStarted: true }`; `409` if one is already running or the concurrent-crawl limit is hit |
+| `POST` | `/api/knowledge-bases/:id/cancel` | request cooperative cancellation → `{ id, cancelRequested: true }`; `409` when no crawl is running |
+| `DELETE` | `/api/knowledge-bases/:id` | delete the KB and its engram documents → `{ id, removed: true, documentsRemoved, documentsFailed }` |
+
+`POST /api/knowledge-bases` accepts:
+
+```json
+{
+  "name": "W3C Accessibility Docs",
+  "seedUrls": ["https://www.w3.org/WAI/WCAG22/"],
+  "id": "optional-slug",
+  "description": "optional",
+  "maxPages": 150,
+  "maxDepth": 4,
+  "includePatterns": ["optional regexes that widen the seed-path scope"],
+  "excludePatterns": ["optional regexes that veto URLs"],
+  "sameOriginOnly": true,
+  "respectRobots": true,
+  "ambientRetrieval": false,
+  "crawlNow": true
+}
+```
+
+and returns `201` with `{ "id": "w3c-accessibility-docs", "crawlStarted": true }` (plus `crawlError` when the KB was created but the crawl could not start). Validation errors return `400 { "error": "..." }`: `name` and 1–20 http(s) `seedUrls` are required, `id` must be a slug (lowercase letters, digits, hyphens, max 63 chars), patterns must be valid regexes, and `sameOriginOnly: false` requires non-empty `includePatterns`. `maxPages`/`maxDepth` are clamped to the `retrieval.knowledgeBases` caps.
+
+Each summary carries `id`, `name`, `description?`, `seedUrls`, `status` (`idle` | `crawling` | `ready` | `failed`), `ambientRetrieval`, `pageCount`, `chunkCount`, `maxPages`, `maxDepth`, `createdAt`, `updatedAt`, and `lastCrawl?` (the crawl-stats object with `pagesVisited` / `pagesIngested` / `pagesSkippedUnchanged` / `pagesFailed`, plus `currentUrl` and `queueRemaining` while running and `stopReason` / `error` when finished). The detail route adds `includePatterns`, `excludePatterns`, `sameOriginOnly`, `respectRobots`, `createdBy`, the `pages` array (`{ url, title, chunkCount, lastIngestedAt }`), and `pagesTruncated`.
+
 ### Multimodal
 
 These authenticated routes provide the backend bridge for the multimodal stack used here: `fastapi_mcp_template` for file and image ingestion, Qwen3-ASR for speech-to-text, browser-side wake listening modeled after `wake-word-detection`, and `tts-stt-playground` for Qwen3-TTS speech synthesis and cloning.

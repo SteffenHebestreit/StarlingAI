@@ -37,6 +37,7 @@ const GRANTABLE_TOOLS = new Set([
   "parallel_delegate",
   "workspace_search",
   "web_search", "web_fetch",
+  "list_knowledge_bases", "search_knowledge_base",
   "shell_exec", "run_script",
   "mcp__playwright__browser_navigate", "mcp__playwright__browser_click",
   "mcp__playwright__browser_type", "mcp__playwright__browser_snapshot",

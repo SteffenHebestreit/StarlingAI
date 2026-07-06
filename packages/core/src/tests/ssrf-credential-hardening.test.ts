@@ -24,6 +24,14 @@ describe("isPrivateHost — IPv6 private ranges (WEB-3)", () => {
       expect(isPrivateHost(h)).toBe(false);
     }
   });
+
+  it("blocks the whole loopback 127.0.0.0/8, not just 127.0.0.1", () => {
+    for (const h of ["127.0.0.2", "127.1.2.3", "127.255.255.254"]) {
+      expect(isPrivateHost(h)).toBe(true);
+    }
+    // A public hostname that merely starts with "127" (not a dotted-quad) is fine.
+    expect(isPrivateHost("127apps.com")).toBe(false);
+  });
 });
 
 describe("redactChannelSecrets — masks the WhatsApp verifyToken (CRED-2)", () => {

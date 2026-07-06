@@ -500,6 +500,7 @@ const allNavEntries: NavEntry[] = [
   { kind: "leaf", to: "/memory", label: "Memory" },
   { kind: "leaf", to: "/skills", label: "Skills" },
   { kind: "leaf", to: "/documents", label: "Documents" },
+  { kind: "leaf", to: "/knowledge", label: "Knowledge" },
   { kind: "leaf", to: "/catalog", label: "Agents" },
   {
     kind: "group",

@@ -28,14 +28,18 @@ export function registerDocumentRoutes(app: Hono): void {
       ]);
       const docs = await engramListDocuments();
       const registry = await listRegistry();
+      // Knowledge-base pages live in engram under kb:<id> sources but are managed
+      // through /api/knowledge-bases (crawler-owned lifecycle) — hide documents
+      // that exist ONLY as KB pages so a 500-page crawl doesn't flood this list.
+      const withoutKbOnly = (docs ?? []).filter((d) => !(d.sources.length > 0 && d.sources.every((s) => s.startsWith("kb:"))));
       // Multi-user mode: never list another user's / another session's documents.
       // Legacy single-operator mode (auth disabled) keeps the flat instance-wide view.
       const inScope = getConfig().auth.enabled
         ? (() => {
             const manageable = callerManageableSources({ userId: user?.username, sessionId });
-            return (docs ?? []).filter((d) => d.sources.some((s) => manageable.has(s)));
+            return withoutKbOnly.filter((d) => d.sources.some((s) => manageable.has(s)));
           })()
-        : (docs ?? []);
+        : withoutKbOnly;
       const documents = inScope.map((d) => ({
         id: d.id,
         title: d.title ?? null,

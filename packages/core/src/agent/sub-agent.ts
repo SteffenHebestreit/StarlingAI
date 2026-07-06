@@ -875,6 +875,11 @@ const SUB_AGENT_PER_TOOL_CAPS: Partial<Record<string, number>> = {
   computer_snapshot: 8,
   web_search: 14,
   web_fetch: 16,
+  // KB retrieval can honestly loop like web_search; lifecycle calls cannot.
+  search_knowledge_base: 12,
+  list_knowledge_bases: 4,
+  create_knowledge_base: 2,
+  manage_knowledge_base: 3,
   search_workflows: 2,
   search_agents: 2,
   list_agents: 2,

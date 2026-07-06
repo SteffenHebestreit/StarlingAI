@@ -8,6 +8,13 @@
  *   - session:<id>     — documents attached in this conversation (always active)
  *   - user:<id>        — the user's personal corpus (active when includeUserDocs)
  *   - workspace:<name> — the workspace-shared corpus (active when includeWorkspaceDocs)
+ *   - kb:<id>          — a crawled knowledge base (active per-turn only when that
+ *                        KB opted into ambientRetrieval; always queryable explicitly
+ *                        via search_knowledge_base — see knowledge-bases.ts)
+ *
+ * `kb:` sources are deliberately NOT a DocumentScope: their documents are
+ * created/removed by the crawler and managed through the /api/knowledge-bases
+ * lifecycle, never through the documents API or ingest/forget tools.
  *
  * Everything degrades gracefully: when engram is disabled/unreachable, ingest
  * returns an error object and retrieval returns [].
@@ -239,6 +246,15 @@ export async function retrieveDocumentContextWithStatus(
   const scopeSources = new Set(activeScopeSources(ctx));
   if (scopeSources.size === 0) return { chunks: [], retrievalFailed: false, lowConfidence: false };
 
+  // Knowledge bases opted into ambient retrieval join the turn's scope union.
+  // Only THIS retrieval path — existence inventories (listInScopeDocuments,
+  // list_documents) stay user-document-shaped; KB corpora are listed via
+  // list_knowledge_bases instead of flooding those views with crawled pages.
+  try {
+    const { ambientKbSources } = await import("./knowledge-bases.js");
+    for (const s of await ambientKbSources()) scopeSources.add(s);
+  } catch { /* KB registry unreadable — ambient KBs just don't join this turn */ }
+
   const docs = await engramListDocuments();
   if (docs === null) return { chunks: [], retrievalFailed: true, lowConfidence: false };      // engram unreachable / timed out
   if (docs.length === 0) return { chunks: [], retrievalFailed: false, lowConfidence: false }; // genuinely no documents
@@ -288,6 +304,67 @@ export async function retrieveDocumentContext(
   ctx: RagScopeContext,
 ): Promise<RetrievedChunk[]> {
   return (await retrieveDocumentContextWithStatus(query, ctx)).chunks;
+}
+
+/** A retrieved KB chunk, enriched with the crawled page's URL for citation. */
+export interface KbRetrievedChunk extends RetrievedChunk {
+  url?: string;
+}
+
+export interface KbSearchOutcome {
+  chunks: KbRetrievedChunk[];
+  retrievalFailed: boolean;
+  lowConfidence: boolean;
+}
+
+/**
+ * Retrieval scoped to ONE knowledge base (`kb:<id>` source). The server-side
+ * `sources` filter is always sent here (older engram ignores the unknown field)
+ * and the client post-filter against the KB's own page registry stays on as
+ * defense-in-depth — the same two-layer discipline as the main scope path.
+ * Chunks come back with the source page URL so answers can cite the site.
+ */
+export async function searchKnowledgeBase(
+  kb: import("./knowledge-bases.js").KnowledgeBaseRecord,
+  query: string,
+  topK?: number,
+): Promise<KbSearchOutcome> {
+  if (!engramConfigured() || !query.trim()) return { chunks: [], retrievalFailed: false, lowConfidence: false };
+  const cfg = getConfig().retrieval.documentRag;
+  const limit = Math.max(1, Math.min(topK ?? cfg.retrievalTopK, 20));
+
+  const pagesByDocId = new Map<string, { url: string; title?: string }>();
+  for (const page of Object.values(kb.pages ?? {})) {
+    pagesByDocId.set(page.documentId, { url: page.url, ...(page.title ? { title: page.title } : {}) });
+  }
+  if (pagesByDocId.size === 0) return { chunks: [], retrievalFailed: false, lowConfidence: false };
+
+  const { kbSource } = await import("./knowledge-bases.js");
+  const outcome = await engramSearchDetailed({
+    query,
+    finalTopK: Math.max(cfg.candidateTopK, limit * 3),
+    sources: [kbSource(kb.id)],
+  });
+  if (outcome === null) return { chunks: [], retrievalFailed: true, lowConfidence: false };
+  const lowConfidence = isLowRetrievalConfidence(outcome.meta, cfg);
+
+  const chunks: KbRetrievedChunk[] = [];
+  for (const r of outcome.results) {
+    const page = pagesByDocId.get(r.documentId);
+    if (!page) continue; // off-KB hit (older engram without the sources filter)
+    if (r.rerankScore < cfg.minRerankScore) continue;
+    chunks.push({
+      chunkId: r.chunkId,
+      documentId: r.documentId,
+      ...(page.title ? { title: page.title } : {}),
+      source: kbSource(kb.id),
+      url: page.url,
+      text: r.text,
+      score: r.rerankScore || r.fusedScore,
+    });
+    if (chunks.length >= limit) break;
+  }
+  return { chunks, retrievalFailed: false, lowConfidence };
 }
 
 /**

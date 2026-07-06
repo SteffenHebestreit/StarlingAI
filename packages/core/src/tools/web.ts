@@ -827,6 +827,9 @@ export function isPrivateHost(host: string): boolean {
   if (/^::ffff:127\./i.test(h)) return true;
   // IPv6-mapped private ranges
   if (/^::ffff:(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(h)) return true;
+  // Loopback 127.0.0.0/8 (dotted form) — the literal check above only caught
+  // 127.0.0.1, so 127.0.0.2 … 127.255.255.255 (all loopback) slipped through.
+  if (h.startsWith("127.")) return true;
   // RFC 1918 private ranges
   if (h.startsWith("10.")) return true;
   if (h.startsWith("192.168.")) return true;

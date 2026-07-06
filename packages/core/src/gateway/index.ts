@@ -13,6 +13,7 @@ import { verifyToken, extractBearerToken, checkAuthRateLimit, recordAuthFailure,
 import { registerSubAgentRoutes } from "./sub-agent-routes.js";
 import { registerSkillLibraryRoutes } from "./skill-routes.js";
 import { registerDocumentRoutes } from "./document-routes.js";
+import { registerKnowledgeBaseRoutes } from "./knowledge-base-routes.js";
 import { registerMemoryGraphRoutes } from "./memory-graph-routes.js";
 import { registerSessionDashboardRoutes } from "./session-dashboard-routes.js";
 import { registerWorkspaceRoutes } from "./workspace-routes.js";
@@ -1924,6 +1925,9 @@ export function createGateway() {
 
   // ── Document RAG management routes — extracted to ./document-routes.ts ─────
   registerDocumentRoutes(app);
+
+  // ── Knowledge bases (crawled documentation corpora) — ./knowledge-base-routes.ts ──
+  registerKnowledgeBaseRoutes(app);
 
   // ── Skill Library inspector — routes extracted to ./skill-routes.ts ─────
   registerSkillLibraryRoutes(app);

@@ -108,6 +108,8 @@
         "web_search",
         "web_fetch",
         "url_inspect",
+        "list_knowledge_bases",
+        "search_knowledge_base",
         "read_shared_facts",
         "share_finding",
         "read_file",
