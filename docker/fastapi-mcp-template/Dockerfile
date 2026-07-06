@@ -1,7 +1,13 @@
 FROM python:3.11-slim
 
 ARG FASTAPI_MCP_TEMPLATE_REPO=https://github.com/SteffenHebestreit/fastapi_mcp_template.git
-ARG FASTAPI_MCP_TEMPLATE_REF=main
+# Pinned to an immutable commit SHA — NOT the moving `main`. `git clone --branch`
+# rejects a SHA and, worse, Docker caches the clone layer so tracking `main` silently
+# freezes the image on whatever commit first built (we were stuck a commit behind). The
+# fetch-by-SHA below accepts a SHA/tag/branch and a ref bump actually re-fetches. To
+# update: bump this to the new upstream HEAD. 958dc13 = "Harden and reshape into a
+# file-extraction-for-LLM service" (2026, upstream main HEAD).
+ARG FASTAPI_MCP_TEMPLATE_REF=958dc13ec87751694117fe3f5a85b624f539e2b6
 ARG ENABLED_TOOLS=file_converter
 ARG ENABLE_TESTS=false
 ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
@@ -38,7 +44,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-RUN git clone --depth 1 --branch "${FASTAPI_MCP_TEMPLATE_REF}" "${FASTAPI_MCP_TEMPLATE_REPO}" /app
+# Shallow fetch of the exact ref. `git fetch origin <ref>` accepts a commit SHA (GitHub
+# allows fetching a reachable SHA), a tag, or a branch — unlike `clone --branch`, which
+# rejects a SHA. Mirrors docker/engram/Dockerfile.
+RUN git init -q /app \
+    && cd /app \
+    && git remote add origin "${FASTAPI_MCP_TEMPLATE_REPO}" \
+    && git fetch --depth 1 origin "${FASTAPI_MCP_TEMPLATE_REF}" \
+    && git checkout -q FETCH_HEAD
 
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 

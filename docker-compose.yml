@@ -167,6 +167,11 @@ services:
     build:
       context: .
       dockerfile: docker/fastapi-mcp-template/Dockerfile
+      # Pinned to an immutable upstream commit (see the Dockerfile note — tracking `main`
+      # silently froze the image on a cached clone). Bump FASTAPI_MCP_TEMPLATE_REF in .env
+      # to update; changing the value re-fetches.
+      args:
+        FASTAPI_MCP_TEMPLATE_REF: ${FASTAPI_MCP_TEMPLATE_REF:-958dc13ec87751694117fe3f5a85b624f539e2b6}
     image: starlingai/fastapi-mcp-template:dev
     restart: unless-stopped
     environment:
