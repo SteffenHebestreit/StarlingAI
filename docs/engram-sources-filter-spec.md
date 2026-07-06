@@ -1,5 +1,17 @@
 # engram feature spec: read-side `sources` scope filter (for engram vNEXT)
 
+> **IMPLEMENTED 2026-07-06** on the local engram branch `feat/sources-scope-filter`
+> (commit `049cec2`, clone at `f:/tmp/engram-sources-filter`, based on v0.8.0):
+> full engram test suite 250 passed / 13 skipped, ruff clean, live-verified over
+> HTTP (scoped / bare-string / unknown-source / unscoped probes + the existing
+> 5-endpoint contract regression-free). One refinement over the spec below: reads
+> take the filter as a pre-resolved `doc_ids` kwarg (resolved once per query via
+> the new `Store.source_document_ids`), passed only when active — pre-`sources`
+> Store implementations keep working unscoped and fail loudly when actually
+> scoped. `nearest_chunks` (ingest dedup) deliberately takes NO sources filter:
+> cross-scope content dedup is the feature. Awaiting maintainer push + release,
+> then the StarlingAI pin bump activates `serverSideScopeFilter`.
+
 **Consumer:** StarlingAI Phase 2 (docs/engram-reevaluation-2026-07.md §5/§6) — server-side
 scope isolation for document search, chosen over `tenant_id` stamping (decision 2026-07-06).
 
