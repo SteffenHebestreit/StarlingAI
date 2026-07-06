@@ -113,4 +113,40 @@ describe("AG-UI streaming", () => {
       rmSync(tempDir, { recursive: true, force: true });
     }
   });
+
+  it("runs the turn under the requested sessionId + authenticated userId (document-RAG scope)", async () => {
+    // Regression: handleAguiStream previously called createSession without the
+    // requested sessionId or a userId, so session/user-scoped documents dropped
+    // out of retrieval (a doc uploaded under session:S / user:U was invisible to
+    // that AG-UI turn — only workspace scope worked). The turn's session must
+    // carry both so activeScopeSources includes session:S and user:U.
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agui-scope-"));
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      gateway: { jwtSecret: "a".repeat(32), turnTimeoutMs: 30_000 },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+
+    let seenSessionId: string | undefined;
+    let seenUserId: string | undefined;
+    vi.doMock("../agent/runtime.js", () => ({
+      runTurn: vi.fn(async (opts: Record<string, unknown>) => {
+        const session = opts["session"] as { id: string; userId?: string };
+        seenSessionId = session.id;
+        seenUserId = session.userId;
+        (opts["onChunk"] as ((t: string) => void) | undefined)?.("ok");
+        return { response: "ok", toolCallsExecuted: 0, guardrailEvents: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 }, blocked: false };
+      }),
+    }));
+
+    try {
+      const { handleAguiStream } = await import("../gateway/agui.js");
+      const res = new FakeResponse();
+      await handleAguiStream(res as never, { sessionId: "sess-scope-1", message: "hi" }, "alice");
+      expect(seenSessionId).toBe("sess-scope-1");
+      expect(seenUserId).toBe("alice");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
 });

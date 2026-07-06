@@ -38,6 +38,7 @@ function sseEvent(res: ServerResponse, event: Record<string, unknown>): void {
 export async function handleAguiStream(
   res: ServerResponse,
   body: { sessionId?: string; message: string },
+  userId?: string,
 ): Promise<void> {
   const { message, sessionId } = body;
 
@@ -58,10 +59,19 @@ export async function handleAguiStream(
   const runId       = randomUUID();
   const messageId   = randomUUID();
 
-  // Get or create session — try Redis fallback for cross-instance routing
+  // Get or create session — try Redis fallback for cross-instance routing.
+  // Create it UNDER the requested id (so session-scoped documents uploaded with
+  // that sessionId are in retrieval scope) and attribute it to the authenticated
+  // user (so the document-RAG user scope + RBAC match the identity uploads use),
+  // mirroring the RPC session.create path. Without both, AG-UI turns ran under a
+  // fresh random session with no userId, dropping session/user document scope.
   let session = sessionId ? await resolveSession(sessionId) : undefined;
   if (!session) {
-    session = createSession({ channel: "webchat:agui" });
+    session = createSession({
+      ...(sessionId ? { sessionId } : {}),
+      channel: "webchat:agui",
+      ...(userId ? { userId } : {}),
+    });
   }
 
   const turnTimeoutMs = getConfig().gateway.turnTimeoutMs;

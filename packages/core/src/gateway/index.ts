@@ -3545,7 +3545,11 @@ export function createGateway() {
           // multi-byte UTF-8 char split across TCP chunks (umlaut mojibake).
           const rawBody = Buffer.concat(bodyChunks).toString("utf8");
           const body = JSON.parse(rawBody) as { sessionId?: string; message: string };
-          await handleAguiStream(res, body);
+          // Server-derived identity (from the verified token) so the turn's session
+          // carries userId — document-RAG user scope + RBAC then match the caller's
+          // uploads, exactly as the RPC chat path does.
+          const aguiUser = await authenticatedUser(`Bearer ${token}`);
+          await handleAguiStream(res, body, aguiUser?.username);
         } catch {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Invalid JSON body" }));
