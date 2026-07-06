@@ -42,7 +42,21 @@
       // whole workspace) are otherwise invisible to retrieval — the assistant cannot
       // see them via recall_context, the per-turn RAG, or the profile prefetch.
       "includeWorkspaceDocs": true,
-      "workspaceName": "workspace"
+      "workspaceName": "workspace",
+      // ── July 2026 engram-flag eval round (docs/engram-reevaluation-2026-07.md §5) ──
+      // CRAG confidence demotion: when engram reports weak retrieval confidence
+      // (score_gap < threshold), the injected [DOCUMENT CONTEXT] is framed as
+      // possibly-relevant instead of authoritative. Demote-only — excerpts are never
+      // suppressed, the retrieval-failure/existence honesty notes are untouched.
+      // WATCH: false-negative class ("you have no CV") must NOT reappear; the demoted
+      // framing should show only on genuinely weak matches.
+      "confidenceDemotion": true,
+      // Server-side scope filter: /search carries the active scope sources so the
+      // engram store filters in-store (engram feat/sources-scope-filter, pinned
+      // @049cec2). The client post-filter stays on as defense-in-depth. WATCH:
+      // cross-session/cross-user doc isolation (0-leak) + no recall regression on
+      // in-scope docs.
+      "serverSideScopeFilter": true
     }
   },
   "computerUse": {

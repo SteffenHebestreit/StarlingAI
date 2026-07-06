@@ -37,6 +37,33 @@ fail-open and reversible by deleting the lines.
 "durableTaskGraph": true,
 ```
 
+**Engram flags** — added to `config/tooling/10-platform.jsonc` under `retrieval.documentRag`
+(docs/engram-reevaluation-2026-07.md §5). Both fail-safe and reversible by deleting the lines.
+
+```jsonc
+// CRAG confidence demotion: on a weak engram retrieval-confidence signal (score_gap
+// below threshold), the injected [DOCUMENT CONTEXT] is framed "possibly-relevant —
+// verify" instead of "authoritative". DEMOTE-ONLY: excerpts are never suppressed, the
+// retrieval-failure / existence honesty notes are untouched. WATCH: the "you have no
+// CV/documents" false-negative must NOT reappear; the demoted framing shows only on
+// genuinely weak matches (with a tiny corpus score_gap is null → no demotion, expected).
+"confidenceDemotion": true,
+// Server-side scope filter: /search carries the active scope sources so the engram store
+// filters in-store (engram feat/sources-scope-filter, pinned @049cec2). The client
+// post-filter stays on as defense-in-depth. WATCH: 0 cross-session/cross-user doc leakage
+// + no recall regression on in-scope docs.
+"serverSideScopeFilter": true,
+```
+
+**Pre-eval technical validation (2026-07-06, this session):** engram-level 0-leak PROVEN
+(direct `/search` probe: a scope-set of `[session:X, user:admin, workspace:workspace]`
+returns only the in-scope doc; an unknown source → empty, fail-closed) and workspace-scoped
+retrieval works end-to-end with both flags ON (answer returned the planted canary). The
+flags are demote-only / additive-with-a-client-backstop, so neither can cause harm. NOT yet
+observed live: the demoted framing and full session-isolation end-to-end — both blocked by
+the AG-UI-path gap in §5. Run the pass^k confirmation through the **dashboard (RPC `chat.send`)
+path**, which threads session + user scope correctly.
+
 ## 2. Bugs fixed since the last round (28f8aa5) — why re-testing matters
 
 A 14-agent adversarial review of the eval-pending code found and fixed 7 confirmed bugs
@@ -103,3 +130,14 @@ object). Left `false` until then.
 - The freelancermap.de credential exists but is RBAC-restricted: add `admin` to its
   `allowedUsers` (Settings → Site Credentials) — do NOT re-add the credential. The tools now
   report denied/unresolved/not-found honestly.
+- **NEW (2026-07-06) — AG-UI `/api/chat/stream` document-scope gap (separate from any flag).**
+  Driving a turn through the REST AG-UI endpoint retrieves **workspace**-scoped docs but NOT
+  **session**- or **user**-scoped ones, and the per-turn `[DOCUMENT CONTEXT]` auto-injection
+  never fires there (the agent still finds workspace docs via the `search_documents` tool).
+  Root cause: `gateway/agui.ts` `handleAguiStream` calls `runTurn({ session, userMessage })`
+  **without threading `userId`**, and the session scope isn't reaching the tool's
+  `RagScopeContext` — so `activeScopeSources` drops `session:<id>` / `user:<id>` and keeps only
+  `workspace:<name>`. The dashboard's WS **RPC `chat.send`** path threads both correctly, so
+  this only affects the AG-UI REST entrypoint and any eval harness built on it. Fix candidate:
+  pass the authenticated `userId` + confirm `session.id` reaches `ragCtx` in the AG-UI path;
+  add a regression test. Until then, run doc-RAG evals through the RPC path.
