@@ -184,7 +184,41 @@ if (ingestedId) {
   }
 }
 
-// 6. DELETE — scoped ref-drop first (the client's soft path), then hard delete to leave no residue.
+// 6. Sources scope-filter (engram feat/sources-scope-filter, > v0.8.0): server-side
+//    document-level scoping — what the serverSideScopeFilter flag depends on. Adaptive:
+//    a server that ignores the `sources` field (pre-release) gets a warn + skip, a
+//    supporting server gets the full isolation matrix asserted.
+try {
+  const T_A = "srcprobe-alpha-91c4", T_B = "srcprobe-beta-77d2";
+  await req("POST", "/documents", { text: `scope probe A. token ${T_A}.`, source: "smoke:scope-a", document_id: "smoke-src-a" }, 120000);
+  await req("POST", "/documents", { text: `scope probe B. token ${T_B}.`, source: "smoke:scope-b", document_id: "smoke-src-b" }, 120000);
+  const scoped = await req("POST", "/search", {
+    query: `token ${T_A} ${T_B}`, sources: ["smoke:scope-a"], tuning: { final_top_k: 10 },
+  }, 60000);
+  const docsOf = (r) => new Set((r.json?.results ?? []).map((x) => String(x?.document_id ?? "")));
+  const got = docsOf(scoped);
+  if (got.has("smoke-src-b")) {
+    warn("server ignores the `sources` filter (pre-sources engram) — serverSideScopeFilter would be inert; skipping isolation assertions");
+  } else if (!scoped.ok) {
+    fail(`sources-scoped /search → HTTP ${scoped.status}`);
+  } else {
+    if (got.has("smoke-src-a") && !got.has("smoke-src-b")) ok("sources filter isolates scopes (a in, b out)");
+    else fail(`sources filter returned wrong set: ${[...got].join(",") || "(empty)"}`);
+    const none = await req("POST", "/search", { query: `token ${T_A}`, sources: ["smoke:scope-nope"], tuning: { final_top_k: 5 } }, 60000);
+    if (none.ok && (none.json?.results ?? []).length === 0) ok("unknown source fails closed (empty, HTTP 200)");
+    else fail(`unknown source → HTTP ${none.status} with ${(none.json?.results ?? []).length} result(s)`);
+    const both = await req("POST", "/search", { query: `token ${T_A} ${T_B}`, tuning: { final_top_k: 10 } }, 60000);
+    const allGot = docsOf(both);
+    if (allGot.has("smoke-src-a") && allGot.has("smoke-src-b")) ok("unscoped search still sees both scopes");
+    else fail("unscoped search lost a probe document");
+  }
+  await req("DELETE", "/documents/smoke-src-a");
+  await req("DELETE", "/documents/smoke-src-b");
+} catch (err) {
+  fail(`sources-filter probe threw: ${err?.message ?? err}`);
+}
+
+// 7. DELETE — scoped ref-drop first (the client's soft path), then hard delete to leave no residue.
 if (ingestedId) {
   try {
     const scoped = await req("DELETE", `/documents/${encodeURIComponent(ingestedId)}?source=${encodeURIComponent(SOURCE)}`);
