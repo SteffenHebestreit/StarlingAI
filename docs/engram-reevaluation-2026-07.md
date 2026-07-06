@@ -1,5 +1,16 @@
 # Engram Re-Evaluation (July 2026): from doc-RAG to agent-memory?
 
+> **Update 2026-07-06 (post-analysis):** the maintainer released **v0.7.0** (3-layer
+> restructure, `ENGRAM_MODE`, PPR removed, `HYDE_ENABLED` default → false), **v0.7.1**
+> (CI-green patch) and **v0.8.0** ("name-complete": package `app` → `engram`, per-layer
+> pip extras) — answering open question §8.1. StarlingAI's pin was bumped
+> `d81a488` → **`v0.8.0`** (Dockerfile entrypoint updated to `engram.interfaces.main:app`;
+> an explicitly-set `STORE_BACKEND` still wins over `ENGRAM_MODE`, so our compose env is
+> unchanged; the HTTP contract of the five endpoints we call verified unchanged through the
+> v0.8.0 CHANGELOG + config module). The Phase 0b endpoint smoke test runs at the next
+> `rag`-profile build. Phases 1–3 (CRAG demotion / scope-sets / invalidation) remain
+> flag-gated pending eval, per §5.
+
 ## TL;DR
 
 - **What engram is now:** the same document-RAG engine StarlingAI already runs, re-labeled by its v0.6.0 CHANGELOG as "the agent-memory pivot" — but that is a *repositioning plus additive write-path capabilities on an intact RAG read path*, **not** a fork, rewrite, or a new kind of memory. `main` is the only branch; the README still leads with "A retrieval engine for agents."

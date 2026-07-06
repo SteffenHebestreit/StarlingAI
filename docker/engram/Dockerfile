@@ -1,5 +1,6 @@
-# engram graph-RAG service — built from the upstream repo, run against the
-# project's Neo4j (with GDS), LM Studio embeddings/LLM, and the TEI reranker.
+# engram agent-memory / document-RAG service — built from the upstream repo, run
+# against the embedded engramdb store, the primary model server's embeddings/LLM,
+# and the shared TEI-format reranker sidecar.
 # Mirrors the docker/fastapi-mcp-template pattern: clone a pinned ref + install.
 FROM python:3.12-slim AS base
 
@@ -8,14 +9,18 @@ ARG ENGRAM_REPO=https://github.com/SteffenHebestreit/engram.git
 # so the build is reproducible AND a bump actually re-clones (Docker caches the fetch layer,
 # so tracking `main` would silently freeze on whatever version first built). The fetch below
 # accepts a SHA, tag, or branch. To update engram: bump this to the new SHA/tag (or pass
-# --build-arg ENGRAM_REF=…); prefer a release tag once one is cut.
+# --build-arg ENGRAM_REF=…). NOTE: upstream git TAGS are the version truth — the GitHub
+# Releases page and the API's own version string lag behind them.
 #
-# Currently pinned to a post-v0.5.0 `main` commit that adds the SEPARATE fast extraction model
-# path (EXTRACTION_LLM_MODEL/_API_BASE/_MAX_TOKENS/_MIN_CHARS), EXTRACTION_RESPONSE_FORMAT
-# (json_schema = guaranteed-valid JSON + reasoning suppression on LM Studio), EXTRACTION_EXTRA_BODY
-# (serving-specific reasoning controls), and flips METADATA_EXTRACTOR's default to `yake`.
-# API+env compatible with our client; the new fields fall back to today's behaviour when unset.
-ARG ENGRAM_REF=d81a488295c2443a9de42b98d411634207c3dd3d
+# v0.8.0 ("name-complete"): package renamed app→engram (CMD below tracks the upstream
+# Dockerfile's canonical `engram.interfaces.main:app`). Carries the v0.6.0 agent-memory
+# pivot (tenant_id scope-sets, POST /documents/{id}/invalidate, top_rerank_score/score_gap
+# retrieval confidence, near-dup contradiction guard) and the v0.7.0 3-layer restructure
+# (ENGRAM_MODE; an explicitly-set STORE_BACKEND still wins; PPR removed; HYDE_ENABLED now
+# defaults FALSE per upstream's own no-measured-lift benchmarks). The HTTP request/response
+# contract of the five endpoints our client calls is unchanged; rollback ref =
+# d81a488295c2443a9de42b98d411634207c3dd3d (the previous post-v0.5.0 pin).
+ARG ENGRAM_REF=v0.8.0
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -47,4 +52,4 @@ EXPOSE 8088
 HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=5 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8088/health')" || exit 1
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8088"]
+CMD ["uvicorn", "engram.interfaces.main:app", "--host", "0.0.0.0", "--port", "8088"]
