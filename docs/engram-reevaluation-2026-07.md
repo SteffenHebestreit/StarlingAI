@@ -269,3 +269,41 @@ An adversarial pass fact-checked every engram endpoint/tool/version claim agains
 - Whether `tuning.final_top_k` remains honored end-to-end in the deployed image (it is still a source-level tunable, so this is a smoke test, not a likely break) — *(unverified — confirm in repo)*.
 - engramdb persistence/snapshot semantics for the `invalidated_at` marker across a restart — *(unverified — confirm in repo)*.
 - Whether the `b1` quant flip is genuinely quality-neutral on StarlingAI's own document set — *(unverified — confirm via isolated eval)*.
+## CRAG tuning (added 2026-07-06, from the live flag eval)
+
+Measured the shipped **Qwen3-Reranker-0.6B** (`RERANKER_FORMAT=tei`) live: `rerank_score`
+is a **raw logit**, not a `[0,1]` probability, and it varies widely with query phrasing.
+Representative values on a small ops-docs corpus:
+
+| Query | top `rerank_score` | `score_gap` |
+|---|---|---|
+| "communication problems this quarter" (strong) | **+10.4** | 0.7 |
+| "how can we improve reliability" | +2.9 | **0.10** |
+| "communication and coordination issues" (vaguer) | +0.4 | 0.38 |
+| "what should we do about the timeline" | −1.0 | 0.71 |
+| "what is the capital of France" (irrelevant) | **−10.8** | 0.10 |
+
+Consequences for the two demotion signals:
+
+- **`confidenceMinScoreGap` (near-tie):** `score_gap` rarely drops below the 0.05 default
+  even for an irrelevant query (the reranker still separates the top two), so this signal
+  fires seldom. It is a real but weak signal — keep it low, do not rely on it alone.
+- **`confidenceMinTopRerank` (weak best hit):** this is the signal that actually tracks
+  relevance (strong ≫ 0, irrelevant ≪ 0), which is why the old `[0,1]` schema clamp was a
+  bug — a logit threshold can't live in `[0,1]`. **Fixed:** the field is now nullable and
+  unclamped (`null` = disabled). But the *value* is a per-corpus / per-reranker tuning
+  decision, and it **interacts with `minRerankScore`**: `minRerankScore = 0` already drops
+  every negative-logit chunk, so a `confidenceMinTopRerank = 0` demotion is unreachable (the
+  chunks it would caveat are gone). Two coherent tunings, to pick during the pass^k eval on a
+  labeled corpus:
+  1. **Keep `minRerankScore = 0`, set `confidenceMinTopRerank` positive** (e.g. 2–3): drop
+     clearly-irrelevant (negative) chunks as today, and demote *weakly-positive* hits.
+  2. **Lower `minRerankScore` below 0, set `confidenceMinTopRerank = 0`**: keep weak
+     (negative) chunks but frame them "verify", letting the model see-and-caveat instead of
+     dropping — pairs with the existence path so "I have docs but they don't answer this"
+     stays honest.
+
+Shipped state: `confidenceDemotion = true`, `confidenceMinScoreGap = 0.05`,
+`confidenceMinTopRerank = null` (disabled) — the mechanism is correct and safe; enable and
+tune the top-rerank threshold against a real corpus. The demote-vs-suppress guarantee and the
+retrieval-failure / existence honesty notes hold regardless of the thresholds.

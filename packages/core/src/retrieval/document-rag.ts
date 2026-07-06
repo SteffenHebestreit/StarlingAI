@@ -220,11 +220,13 @@ export interface DocumentRetrievalOutcome {
  */
 export function isLowRetrievalConfidence(
   meta: EngramSearchMeta | null | undefined,
-  cfg: { confidenceDemotion: boolean; confidenceMinScoreGap: number; confidenceMinTopRerank: number },
+  cfg: { confidenceDemotion: boolean; confidenceMinScoreGap: number; confidenceMinTopRerank: number | null },
 ): boolean {
   if (!cfg.confidenceDemotion || !meta) return false;
   if (meta.scoreGap !== null && meta.scoreGap < cfg.confidenceMinScoreGap) return true;
-  if (cfg.confidenceMinTopRerank > 0 && meta.topRerankScore !== null && meta.topRerankScore < cfg.confidenceMinTopRerank) return true;
+  // top_rerank threshold is reranker-range-specific (logit vs sigmoid); null disables it.
+  // A reported score BELOW the threshold = the best hit is weak/irrelevant → demote.
+  if (cfg.confidenceMinTopRerank !== null && meta.topRerankScore !== null && meta.topRerankScore < cfg.confidenceMinTopRerank) return true;
   return false;
 }
 

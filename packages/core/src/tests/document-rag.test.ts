@@ -170,7 +170,7 @@ describe("formatDocumentContext", () => {
 });
 
 describe("isLowRetrievalConfidence (CRAG Phase 1 — docs/engram-reevaluation-2026-07.md)", () => {
-  const cfgOn = { confidenceDemotion: true, confidenceMinScoreGap: 0.05, confidenceMinTopRerank: 0 };
+  const cfgOn = { confidenceDemotion: true, confidenceMinScoreGap: 0.05, confidenceMinTopRerank: null as number | null };
 
   it("is false when the flag is off, whatever the signals say", () => {
     expect(isLowRetrievalConfidence({ topRerankScore: 0.01, scoreGap: 0.0 }, { ...cfgOn, confidenceDemotion: false })).toBe(false);
@@ -187,12 +187,19 @@ describe("isLowRetrievalConfidence (CRAG Phase 1 — docs/engram-reevaluation-20
     expect(isLowRetrievalConfidence({ topRerankScore: null, scoreGap: 0.5 }, cfgOn)).toBe(false);
   });
 
-  it("top_rerank threshold is disabled at 0 and only demotes when explicitly set", () => {
-    expect(isLowRetrievalConfidence({ topRerankScore: 0.01, scoreGap: null }, cfgOn)).toBe(false); // 0 = disabled
-    const withTopRerank = { ...cfgOn, confidenceMinTopRerank: 0.3 };
-    expect(isLowRetrievalConfidence({ topRerankScore: 0.1, scoreGap: null }, withTopRerank)).toBe(true);
-    expect(isLowRetrievalConfidence({ topRerankScore: 0.9, scoreGap: null }, withTopRerank)).toBe(false);
-    expect(isLowRetrievalConfidence({ topRerankScore: null, scoreGap: null }, withTopRerank)).toBe(false);
+  it("top_rerank threshold is disabled at null and demotes below the threshold when set", () => {
+    // null = disabled: a very low top score alone does not demote
+    expect(isLowRetrievalConfidence({ topRerankScore: -10.7, scoreGap: 0.5 }, cfgOn)).toBe(false);
+    // logit-range threshold (the shipped Qwen reranker): demote below the decision boundary
+    const logit = { ...cfgOn, confidenceMinTopRerank: 0 };
+    expect(isLowRetrievalConfidence({ topRerankScore: -10.7, scoreGap: 0.5 }, logit)).toBe(true);  // clearly irrelevant
+    expect(isLowRetrievalConfidence({ topRerankScore: 2.9, scoreGap: 0.5 }, logit)).toBe(false);   // clearly relevant
+    // sigmoid-range threshold still works (unclamped, any real value allowed)
+    const sigmoid = { ...cfgOn, confidenceMinTopRerank: 0.3 };
+    expect(isLowRetrievalConfidence({ topRerankScore: 0.1, scoreGap: 0.5 }, sigmoid)).toBe(true);
+    expect(isLowRetrievalConfidence({ topRerankScore: 0.9, scoreGap: 0.5 }, sigmoid)).toBe(false);
+    // a null score never demotes even with a threshold set
+    expect(isLowRetrievalConfidence({ topRerankScore: null, scoreGap: 0.5 }, logit)).toBe(false);
   });
 });
 

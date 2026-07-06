@@ -81,11 +81,14 @@ export const DocumentRagSchema = z.object({
    *  check (the gap is never < 0). NOTE: engram computes the signal over its GLOBAL result
    *  set, pre scope-filter — see the caveat at the isLowRetrievalConfidence call site. */
   confidenceMinScoreGap: z.number().min(0).max(1).default(0.05),
-  /** Demote when the response-level `top_rerank_score` is BELOW this. 0 = disabled (the
-   *  default). The 0..1 bound assumes a sigmoid/normalized reranker score; a raw-logit
-   *  reranker (scores can be negative/above 1) cannot express a meaningful threshold here
-   *  and must leave this disabled — rely on the score_gap check instead. */
-  confidenceMinTopRerank: z.number().min(0).max(1).default(0),
+  /** Demote when the response-level `top_rerank_score` is BELOW this. null = disabled
+   *  (the default). The range is RERANKER-SPECIFIC and this is unclamped: the shipped
+   *  Qwen3-Reranker emits raw LOGITS (clearly-relevant hits ≈ +2..+3, clearly-irrelevant
+   *  ≈ −10), so a threshold near 0 demotes anything the reranker scores below its decision
+   *  boundary; a sigmoid/normalized reranker would use a value in [0,1]. This is the signal
+   *  that actually catches "confidently irrelevant" results (a low top score), whereas
+   *  score_gap only catches near-ties — set it per your reranker. */
+  confidenceMinTopRerank: z.number().nullable().default(null),
   /** Send the active scope sources as a server-side `sources` filter on engram /search
    *  (docs/engram-sources-filter-spec.md — requires an engram release that implements it;
    *  older servers ignore the unknown field, so this is a safe no-op against them). The
