@@ -209,16 +209,14 @@ services:
       dockerfile: docker/engram/Dockerfile
       # Engram version to clone+build. THIS is the effective ref (it overrides the Dockerfile
       # ARG default). Override to bump (e.g. ENGRAM_REF=v0.9.0 in .env); changing the value
-      # re-fetches (the git layer is otherwise cached). Pinned to the v0.8.0 release
-      # ("name-complete": app→engram package rename; carries the v0.6.0 agent-memory pivot —
-      # tenant_id scope-sets, document invalidation, retrieval-confidence — and the v0.7.0
-      # restructure). The HTTP contract of the five endpoints our client calls is unchanged;
-      # the new optional /search fields are ignored until the CRAG flag lands. Server-side
-      # default flips inherited by this bump: HYDE_ENABLED now false (upstream's own
-      # benchmarks: no measured lift), PPR removed (was never active on engramdb).
-      # Rollback ref: d81a488295c2443a9de42b98d411634207c3dd3d.
+      # re-fetches (the git layer is otherwise cached). Pinned to the published
+      # feat/sources-scope-filter tip (post-v0.8.0): adds the server-side `sources`
+      # scope filter that retrieval.documentRag.serverSideScopeFilter consumes
+      # (docs/engram-sources-filter-spec.md); everything else is the v0.8.0 contract
+      # (see the Dockerfile note). Re-pin to the next release tag when it is cut.
+      # Rollback ref: v0.8.0.
       args:
-        ENGRAM_REF: ${ENGRAM_REF:-v0.8.0}
+        ENGRAM_REF: ${ENGRAM_REF:-049cec2a600f1be1d3931a4fc84b33a963cb4c81}
     image: starlingai/engram:dev
     restart: unless-stopped
     environment:
