@@ -636,6 +636,8 @@ export interface ManagedDocument {
   chunkCount: number;
   createdAt: string | null;
   hasFile: boolean;
+  /** Marked outdated (engram invalidation) — retrieval skips it; re-upload reinstates. */
+  invalidated?: boolean;
   scopes: ManagedDocumentScope[];
 }
 export interface DocumentListResponse {
@@ -2612,6 +2614,15 @@ export const useGatewayStore = defineStore("gateway", () => {
     return await response.json() as { documentId: string; title: string; scope: string; chunkCount: number };
   }
 
+  async function invalidateDocument(id: string, sessionId?: string): Promise<void> {
+    const q = sessionId ? `?${new URLSearchParams({ sessionId })}` : "";
+    const response = await authorizedFetch(`/api/documents/${encodeURIComponent(id)}/invalidate${q}`, { method: "POST" });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({})) as { error?: string };
+      throw new Error(body.error ?? `Mark-outdated failed (HTTP ${response.status})`);
+    }
+  }
+
   async function deleteDocument(id: string, scope?: string, sessionId?: string): Promise<void> {
     const q = new URLSearchParams();
     if (scope) q.set("scope", scope);
@@ -2963,6 +2974,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     getDocumentRagConfig,
     saveDocumentRagConfig,
     listDocuments,
+    invalidateDocument,
     uploadDocument,
     deleteDocument,
     fetchDocumentFileBlob,

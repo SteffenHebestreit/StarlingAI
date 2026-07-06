@@ -33,6 +33,11 @@ export interface DocumentRegistryEntry {
   size?: number;
   chunkCount?: number;
   ingestedAt: string;
+  /** Set when the document was marked outdated via engram invalidation (doc-level —
+   *  stamped on every entry of the document). Cleared by re-ingest (which reinstates
+   *  the document in engram). engram's GET /documents does not expose the marker, so
+   *  this is what the management UI badges from. */
+  invalidatedAt?: string;
 }
 
 function registryPath(): string {
@@ -70,12 +75,45 @@ export async function registerDocument(entry: DocumentRegistryEntry): Promise<vo
     await withLock(async () => {
       const entries = await readRegistry();
       const idx = entries.findIndex((e) => e.documentId === entry.documentId && e.source === entry.source);
-      if (idx >= 0) entries[idx] = { ...entries[idx], ...entry };
-      else entries.push(entry);
+      if (idx >= 0) {
+        const merged = { ...entries[idx], ...entry };
+        // Re-ingest reinstates an invalidated document in engram, so a fresh
+        // registration clears the stale marker unless the caller re-asserts it.
+        if (!entry.invalidatedAt) delete merged.invalidatedAt;
+        entries[idx] = merged;
+      } else {
+        entries.push(entry);
+      }
+      // A re-ingest reinstates the whole document — clear the doc-level marker
+      // from its OTHER scope entries too (the marker is stamped doc-wide).
+      if (!entry.invalidatedAt) {
+        for (const e of entries) {
+          if (e.documentId === entry.documentId && e.invalidatedAt) delete e.invalidatedAt;
+        }
+      }
       await writeRegistry(entries);
     });
   } catch (err) {
     log.warn({ err, documentId: entry.documentId }, "failed to register document");
+  }
+}
+
+/** Stamp every entry of a document as invalidated (doc-level marker). */
+export async function markDocumentInvalidated(documentId: string, at = new Date().toISOString()): Promise<void> {
+  try {
+    await withLock(async () => {
+      const entries = await readRegistry();
+      let changed = false;
+      for (const e of entries) {
+        if (e.documentId === documentId && e.invalidatedAt !== at) {
+          e.invalidatedAt = at;
+          changed = true;
+        }
+      }
+      if (changed) await writeRegistry(entries);
+    });
+  } catch (err) {
+    log.warn({ err, documentId }, "failed to mark document invalidated");
   }
 }
 

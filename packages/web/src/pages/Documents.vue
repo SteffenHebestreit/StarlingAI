@@ -59,7 +59,10 @@
         <ul v-else class="doc-list">
           <li v-for="row in group.rows" :key="row.doc.id + row.entry.source" class="doc-row">
             <div class="doc-row__main">
-              <div class="doc-row__title" :title="row.doc.title ?? row.doc.id">📄 {{ row.doc.title ?? row.doc.id.slice(0, 12) }}</div>
+              <div class="doc-row__title" :title="row.doc.title ?? row.doc.id">
+                📄 {{ row.doc.title ?? row.doc.id.slice(0, 12) }}
+                <span v-if="row.doc.invalidated" class="doc-outdated-badge" title="Marked outdated — retrieval skips this document; re-upload the file to reinstate it.">outdated</span>
+              </div>
               <div class="doc-row__meta">
                 {{ row.doc.chunkCount }} chunk{{ row.doc.chunkCount === 1 ? "" : "s" }}
                 <span v-if="row.entry.size"> · {{ formatBytes(row.entry.size) }}</span>
@@ -69,6 +72,13 @@
             </div>
             <div class="doc-row__actions">
               <button v-if="row.doc.hasFile" @click="viewDocument(row.doc)" :disabled="busyId === row.doc.id" class="btn-ghost px-3 py-1 rounded-lg text-xs">View</button>
+              <button
+                v-if="!row.doc.invalidated"
+                @click="markOutdated(row)"
+                :disabled="busyId === row.doc.id"
+                class="doc-outdate px-3 py-1 rounded-lg text-xs"
+                title="Keep the document stored but stop retrieval from using it (all scopes). Re-upload to reinstate."
+              >{{ busyId === row.doc.id ? "…" : "Mark outdated" }}</button>
               <button @click="removeDocument(row)" :disabled="busyId === row.doc.id" class="doc-remove px-3 py-1 rounded-lg text-xs">
                 {{ busyId === row.doc.id ? "…" : "Remove" }}
               </button>
@@ -195,6 +205,24 @@ async function viewDocument(doc: ManagedDocument) {
   }
 }
 
+async function markOutdated(row: DocRow) {
+  const label = row.doc.title ?? row.doc.id.slice(0, 12);
+  const multi = row.doc.scopes.length > 1;
+  const msg = `Mark “${label}” as outdated?${multi ? " This affects EVERY scope holding it." : ""} ` +
+    "The document stays stored (and viewable), but retrieval stops using it. Re-uploading the same file reinstates it.";
+  if (!window.confirm(msg)) return;
+  busyId.value = row.doc.id;
+  try {
+    const sid = row.entry.scope === "session" ? row.entry.source.replace(/^session:/, "") : currentSessionId.value ?? undefined;
+    await gateway.invalidateDocument(row.doc.id, sid);
+    await reload();
+  } catch (e) {
+    loadError.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    busyId.value = null;
+  }
+}
+
 async function removeDocument(row: DocRow) {
   const label = row.doc.title ?? row.doc.id.slice(0, 12);
   const multi = row.doc.scopes.length > 1;
@@ -247,5 +275,8 @@ onMounted(() => {
 .doc-row__actions { display: flex; gap: 0.4rem; shrink: 0; }
 .doc-remove { border: 1px solid rgba(248, 113, 113, 0.4); color: #fca5a5; background: rgba(248, 113, 113, 0.08); transition: background 0.15s; }
 .doc-remove:hover { background: rgba(248, 113, 113, 0.18); }
+.doc-outdate { border: 1px solid rgba(245, 158, 11, 0.4); color: #fcd9a8; background: rgba(245, 158, 11, 0.08); transition: background 0.15s; }
+.doc-outdate:hover { background: rgba(245, 158, 11, 0.18); }
+.doc-outdated-badge { font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.05em; border: 1px solid rgba(245, 158, 11, 0.45); color: #fcd9a8; background: rgba(245, 158, 11, 0.12); border-radius: 999px; padding: 0.05rem 0.5rem; margin-left: 0.4rem; vertical-align: middle; }
 .empty-state { color: var(--muted, #9aa4b2); font-size: 0.9rem; padding: 2rem; text-align: center; }
 </style>

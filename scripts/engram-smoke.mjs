@@ -148,7 +148,43 @@ try {
   fail(`POST /search threw: ${err?.message ?? err}`);
 }
 
-// 5. DELETE — scoped ref-drop first (the client's soft path), then hard delete to leave no residue.
+// 5. Invalidation lifecycle (v0.6.0+): invalidate → default-valid search drops the doc →
+//    re-ingest reinstates → search surfaces it again. Phase 3 (mark-outdated UX) depends on this.
+if (ingestedId) {
+  try {
+    const inv = await req("POST", `/documents/${encodeURIComponent(ingestedId)}/invalidate`);
+    if (!inv.ok) {
+      fail(`POST /documents/{id}/invalidate → HTTP ${inv.status} (pre-v0.6.0 server?)`);
+    } else {
+      ok("POST /documents/{id}/invalidate");
+      const gone = await req("POST", "/search", { query: `magic token ${TOKEN}`, tuning: { final_top_k: 5 } }, 60000);
+      const stillThere = Array.isArray(gone.json?.results)
+        && gone.json.results.some((r) => String(r?.document_id ?? "") === ingestedId);
+      if (stillThere) fail("invalidated document still surfaced by a default-valid search");
+      else ok("default-valid search drops the invalidated document");
+
+      const re = await req("POST", "/documents", {
+        text: `StarlingAI smoke canary document. The magic token is ${TOKEN}. `
+          + "It verifies that ingest, listing, search, and delete keep the shapes the gateway client maps.",
+        source: SOURCE,
+        title: "StarlingAI smoke canary",
+        document_id: DOC_ID,
+      }, 120000);
+      if (!re.ok) fail(`reinstating re-ingest → HTTP ${re.status}`);
+      else {
+        const back = await req("POST", "/search", { query: `magic token ${TOKEN}`, tuning: { final_top_k: 5 } }, 60000);
+        const surfaced = Array.isArray(back.json?.results)
+          && back.json.results.some((r) => String(r?.document_id ?? "") === ingestedId);
+        if (surfaced) ok("re-ingest reinstates the document (search surfaces it again)");
+        else fail("re-ingested document not surfaced — reinstate-by-re-ingest contract broken");
+      }
+    }
+  } catch (err) {
+    fail(`invalidation lifecycle threw: ${err?.message ?? err}`);
+  }
+}
+
+// 6. DELETE — scoped ref-drop first (the client's soft path), then hard delete to leave no residue.
 if (ingestedId) {
   try {
     const scoped = await req("DELETE", `/documents/${encodeURIComponent(ingestedId)}?source=${encodeURIComponent(SOURCE)}`);

@@ -1,8 +1,9 @@
 /**
- * Document RAG management routes — list / upload / view / remove files ingested
- * into the engram document library across the three scopes (session / user /
- * workspace). Removing a document updates the RAG (engram delete) AND deletes the
- * persisted original file.
+ * Document RAG management routes — list / upload / view / remove / mark-outdated
+ * files ingested into the engram document library across the three scopes
+ * (session / user / workspace). Removing a document updates the RAG (engram
+ * delete) AND deletes the persisted original file; marking it outdated (engram
+ * invalidation) is non-destructive and reversible by re-ingest.
  *
  * Extracted verbatim from gateway/index.ts (god-file seam). Every route is
  * auth-gated and, in multi-user mode (`auth.enabled`), scope-filtered to the
@@ -41,6 +42,9 @@ export function registerDocumentRoutes(app: Hono): void {
         chunkCount: d.chunkCount,
         createdAt: d.createdAt ?? null,
         hasFile: registry.some((e) => e.documentId === d.id && e.relativePath),
+        // engram's list endpoint does not expose the invalidation marker — the
+        // registry stamp (set by POST /:id/invalidate below) is the UI's view of it.
+        invalidated: registry.some((e) => e.documentId === d.id && e.invalidatedAt),
         scopes: d.sources.map((src) => {
           const reg = registry.find((e) => e.documentId === d.id && e.source === src);
           return {
@@ -103,6 +107,41 @@ export function registerDocumentRoutes(app: Hono): void {
         chunkCount: outcome.result.chunkCount,
         keywords: outcome.result.keywords,
       });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
+  // Mark a document OUTDATED (engram invalidation) — non-destructive: chunks stay
+  // stored, default-valid searches stop surfacing them, re-ingest reinstates. This is
+  // deliberately a SEPARATE verb from DELETE (per-scope ref-drop): invalidation is
+  // doc-GLOBAL and hits every scope holding the document, so in multi-user mode the
+  // caller must own EVERY source of the document (sole owner) — a partial owner may
+  // only ref-drop their own scope via DELETE.
+  app.post("/api/documents/:id/invalidate", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const user = await authenticatedUser(c.req.header("Authorization"));
+    const id = c.req.param("id");
+    const sessionId = c.req.query("sessionId") ?? "";
+    try {
+      const { invalidateDocument, callerManageableSources } = await import("../retrieval/document-rag.js");
+      if (getConfig().auth.enabled) {
+        const { engramListDocuments } = await import("../retrieval/engram.js");
+        const docs = await engramListDocuments();
+        const doc = docs?.find((d) => d.id === id);
+        const manageable = callerManageableSources({ userId: user?.username, sessionId });
+        const owned = doc ? doc.sources.filter((s) => manageable.has(s)) : [];
+        // No visible stake → same not-found shape as DELETE (no existence disclosure).
+        if (!doc || owned.length === 0) return c.json({ error: "Document not found" }, 404);
+        if (owned.length < doc.sources.length) {
+          return c.json({ error: "Document is shared with scopes you do not own — remove it from your own scope instead" }, 403);
+        }
+      }
+      const ok = await invalidateDocument(id);
+      return ok
+        ? c.json({ id, invalidated: true })
+        : c.json({ error: "Document not found or RAG unavailable" }, 502);
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
     }

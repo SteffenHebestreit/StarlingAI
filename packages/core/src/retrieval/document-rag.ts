@@ -20,6 +20,7 @@ import {
   engramSearchDetailed,
   engramListDocuments,
   engramDeleteDocument,
+  engramInvalidateDocument,
   type EngramDocumentInfo,
   type EngramSearchMeta,
 } from "./engram.js";
@@ -494,6 +495,31 @@ export function parseScopeFromSource(source: string): DocumentScope | undefined 
  * keeping the registry and the persisted original files in sync with engram.
  * Returns true when engram accepted the delete.
  */
+/**
+ * Mark a document OUTDATED (engram invalidation) — the non-destructive sibling of
+ * forgetDocument. Reconciliation of the two delete models (docs/engram-reevaluation-2026-07.md
+ * Phase 3): they are different verbs, not competitors. forgetDocument = "remove this
+ * document from MY scope" (per-source ref-drop; the document survives in other scopes;
+ * last ref removes chunks + persisted file). invalidateDocument = "this CONTENT is
+ * superseded" — doc-level, hits every scope at once, chunks stay stored for audit,
+ * default-valid searches stop surfacing them, and re-ingesting the same content
+ * reinstates it. Files and source refs are deliberately NOT touched (reinstate needs
+ * the original, and scope membership is unchanged). Ownership policy lives at the
+ * gateway route (doc-global action → caller must own every source, or auth off).
+ */
+export async function invalidateDocument(documentId: string): Promise<boolean> {
+  if (!engramConfigured()) return false;
+  const ok = await engramInvalidateDocument(documentId);
+  if (!ok) return false;
+  try {
+    const { markDocumentInvalidated } = await import("./document-registry.js");
+    await markDocumentInvalidated(documentId);
+  } catch (err) {
+    log.warn({ err, documentId }, "registry invalidation mark failed");
+  }
+  return true;
+}
+
 export async function forgetDocument(
   documentId: string,
   scope: DocumentScope | undefined,

@@ -258,6 +258,25 @@ export async function engramListDocuments(): Promise<EngramDocumentInfo[] | null
 }
 
 /**
+ * Mark a document superseded (POST /documents/{id}/invalidate, engram ≥ v0.6.0).
+ * Non-destructive: chunks stay stored but default-valid searches stop surfacing
+ * them; re-ingesting the same content reinstates the document. Returns false on
+ * failure or pre-v0.6.0 servers (404), so callers degrade gracefully.
+ */
+export async function engramInvalidateDocument(documentId: string): Promise<boolean> {
+  if (!engramConfigured() || !documentId) return false;
+  try {
+    const res = await engramFetch(`/documents/${encodeURIComponent(documentId)}/invalidate`, { method: "POST" }, 15000);
+    if (res.ok) invalidateEngramDocListCache(); // retrieval-effective state changed
+    else log.warn({ status: res.status, documentId }, "engram invalidate failed");
+    return res.ok;
+  } catch (err) {
+    log.warn({ err, documentId }, "engram invalidate error");
+    return false;
+  }
+}
+
+/**
  * Delete a document (DELETE /documents/{id}). With `source`, only drops that
  * source reference (the document survives if other sources still hold it);
  * without it, hard-removes the document and all chunks.
