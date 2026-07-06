@@ -52,8 +52,13 @@ export const DocumentRagSchema = z.object({
   retrievalTopK: z.number().int().min(1).max(20).default(6),
   /** engram final_top_k requested before the scope post-filter (kept generous so in-scope chunks survive). */
   candidateTopK: z.number().int().min(4).max(100).default(30),
-  /** Drop retrieved chunks whose engram rerank score is below this (0 = keep all). */
-  minRerankScore: z.number().min(0).max(1).default(0),
+  /** Drop retrieved chunks whose engram rerank score is below this. RANGE IS
+   *  RERANKER-SPECIFIC (unclamped): for a sigmoid/[0,1] reranker 0 keeps all; the shipped
+   *  Qwen3-Reranker emits raw LOGITS (relevant ≫ 0, irrelevant ≪ 0; measured live), so 0
+   *  acts as a relevance cut (drops negatives) and a NEGATIVE floor (e.g. −8) keeps weak
+   *  but non-garbage chunks — see docs/engram-reevaluation-2026-07.md "CRAG tuning", where
+   *  this interacts with confidenceMinTopRerank. Default 0. */
+  minRerankScore: z.number().default(0),
   /** Cap on the total characters of injected document context per turn. */
   maxContextChars: z.number().int().min(500).max(50000).default(6000),
   /** Reuse-the-whole-doc fix (audit ef9bd480): when a file attached THIS turn is small
