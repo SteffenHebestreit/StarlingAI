@@ -170,7 +170,13 @@
       "playwright": {
         "transport": "docker",
         "image": "mcp/playwright:latest",
-        "network": "starlingai_starlingai-public",
+        // Must be the EXPLICIT network name (no compose project-prefix): the
+        // starlingai-public network is declared `name: starlingai-public` in
+        // docker-compose.yml so raw `docker run --network` can attach to it.
+        // The prefixed form `starlingai_starlingai-public` does not exist, so the
+        // MCP docker child exited immediately with "Connection closed" and every
+        // browser_* tool failed with "Playwright MCP server is not connected".
+        "network": "starlingai-public",
         "args": ["--cdp-endpoint", "http://browser-vnc:9222"],
         "autoStart": true
       },

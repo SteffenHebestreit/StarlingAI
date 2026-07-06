@@ -38,6 +38,12 @@ const GRANTABLE_TOOLS = new Set([
   "workspace_search",
   "web_search", "web_fetch",
   "list_knowledge_bases", "search_knowledge_base",
+  // Native live-site inspection + read-only web audits, so a temporary agent
+  // spun up for an ad-hoc "evaluate site X (optionally against knowledge base Y)"
+  // task can actually inspect the running page — not just fetch its HTML. All
+  // tier-0 read-only. (browser_navigate/snapshot are the gateway's own Playwright
+  // wrappers; the mcp__playwright__* entries below are the separate MCP path.)
+  "browser_navigate", "browser_snapshot", "browser_axe_audit", "lighthouse_audit",
   "shell_exec", "run_script",
   "mcp__playwright__browser_navigate", "mcp__playwright__browser_click",
   "mcp__playwright__browser_type", "mcp__playwright__browser_snapshot",
