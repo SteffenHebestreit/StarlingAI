@@ -12,16 +12,15 @@ ARG ENGRAM_REPO=https://github.com/SteffenHebestreit/engram.git
 # --build-arg ENGRAM_REF=…). NOTE: upstream git TAGS are the version truth — the GitHub
 # Releases page and the API's own version string lag behind them.
 #
-# Pinned to the feat/sources-scope-filter tip (post-v0.8.0): adds the read-side
-# `sources` document-level scope filter on POST /search + the MCP search tool —
-# what retrieval.documentRag.serverSideScopeFilter consumes (docs/
+# Pinned to the v0.9.0 release tag: adds the read-side `sources` document-level
+# scope filter on POST /search + the MCP search tool — what
+# retrieval.documentRag.serverSideScopeFilter consumes (docs/
 # engram-sources-filter-spec.md). Everything from v0.8.0 is included: app→engram
 # rename (CMD below = the upstream Dockerfile's canonical entrypoint), the v0.6.0
 # agent-memory pivot (tenant_id scope-sets, invalidation, retrieval confidence,
 # near-dup contradiction guard), the v0.7.0 restructure (explicit STORE_BACKEND
-# still wins over ENGRAM_MODE; PPR removed; HYDE default off). Re-pin to the next
-# release tag when it is cut. Rollback ref = v0.8.0 (tag).
-ARG ENGRAM_REF=049cec2a600f1be1d3931a4fc84b33a963cb4c81
+# still wins over ENGRAM_MODE; PPR removed; HYDE default off). Rollback ref = v0.8.0.
+ARG ENGRAM_REF=v0.9.0
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

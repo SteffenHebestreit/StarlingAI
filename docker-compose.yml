@@ -208,15 +208,14 @@ services:
       context: .
       dockerfile: docker/engram/Dockerfile
       # Engram version to clone+build. THIS is the effective ref (it overrides the Dockerfile
-      # ARG default). Override to bump (e.g. ENGRAM_REF=v0.9.0 in .env); changing the value
-      # re-fetches (the git layer is otherwise cached). Pinned to the published
-      # feat/sources-scope-filter tip (post-v0.8.0): adds the server-side `sources`
-      # scope filter that retrieval.documentRag.serverSideScopeFilter consumes
+      # ARG default). Override to bump (e.g. ENGRAM_REF=v0.10.0 in .env); changing the value
+      # re-fetches (the git layer is otherwise cached). Pinned to the v0.9.0 release tag:
+      # adds the server-side `sources` scope filter that
+      # retrieval.documentRag.serverSideScopeFilter consumes
       # (docs/engram-sources-filter-spec.md); everything else is the v0.8.0 contract
-      # (see the Dockerfile note). Re-pin to the next release tag when it is cut.
-      # Rollback ref: v0.8.0.
+      # (see the Dockerfile note). Rollback ref: v0.8.0.
       args:
-        ENGRAM_REF: ${ENGRAM_REF:-049cec2a600f1be1d3931a4fc84b33a963cb4c81}
+        ENGRAM_REF: ${ENGRAM_REF:-v0.9.0}
     image: starlingai/engram:dev
     restart: unless-stopped
     environment:
