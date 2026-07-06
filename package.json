@@ -24,6 +24,7 @@
     "config:audit-prompts": "node scripts/audit-agent-prompts.mjs",
     "token": "node scripts/sai.mjs token",
     "health": "node scripts/sai.mjs health",
+    "engram:smoke": "node scripts/engram-smoke.mjs",
     "build": "pnpm -r build",
     "security:pack": "pnpm --filter @starlingai/core security:pack",
     "dev": "pnpm -r --parallel dev",
