@@ -240,6 +240,41 @@ describe("retrieveDocumentContextWithStatus confidence threading", () => {
   });
 });
 
+describe("serverSideScopeFilter (engram sources-filter spec pre-wiring)", () => {
+  const docs = [{ id: "docA", title: "A", sources: ["session:s1"], chunkCount: 1 }];
+  const hits = [
+    { chunkId: "c1", documentId: "docA", text: "hit", summary: "", keywords: [], origin: "vector", graphDistance: 0, graphProximity: 0, retrievalScore: 0.8, medianScore: 0, fusedScore: 0.8, rerankScore: 0.8 },
+  ];
+
+  it("does NOT send sources when the flag is off (default)", async () => {
+    const spy = mockDocRagConfig({});
+    vi.spyOn(engram, "engramListDocuments").mockResolvedValue(docs);
+    const searchSpy = mockSearch(hits);
+    await retrieveDocumentContextWithStatus("q", { sessionId: "s1" });
+    expect(searchSpy).toHaveBeenCalledTimes(1);
+    expect(searchSpy.mock.calls[0]![0]).not.toHaveProperty("sources");
+    spy.mockRestore();
+  });
+
+  it("sends the active scope sources when the flag is on, and the post-filter still applies", async () => {
+    const spy = mockDocRagConfig({ serverSideScopeFilter: true, includeUserDocs: true });
+    vi.spyOn(engram, "engramListDocuments").mockResolvedValue([
+      ...docs,
+      { id: "docB", title: "B", sources: ["session:other"], chunkCount: 1 },
+    ]);
+    const searchSpy = mockSearch([
+      ...hits,
+      // Simulate a non-conforming server leaking an off-scope hit: the client
+      // post-filter (defense-in-depth) must still drop it.
+      { chunkId: "c9", documentId: "docB", text: "leak", summary: "", keywords: [], origin: "vector", graphDistance: 0, graphProximity: 0, retrievalScore: 0.9, medianScore: 0, fusedScore: 0.9, rerankScore: 0.9 },
+    ]);
+    const outcome = await retrieveDocumentContextWithStatus("q", { sessionId: "s1", userId: "u1" });
+    expect(searchSpy.mock.calls[0]![0]).toMatchObject({ sources: ["session:s1", "user:u1"] });
+    expect(outcome.chunks.map((c) => c.documentId)).toEqual(["docA"]); // leak dropped client-side
+    spy.mockRestore();
+  });
+});
+
 describe("buildInlineDocumentContext (audit ef9bd480 — inline a small attached doc whole)", () => {
   const offer = [{ title: "ANGEBOT.PDF", text: "Testing & QA 20 Std 1.900€\nZwischensumme 248 Std\nGesamtpreis 40.000€" }];
 

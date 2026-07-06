@@ -160,6 +160,9 @@ export async function engramSearchDetailed(input: {
   query: string;
   finalTopK?: number;
   tuning?: Record<string, unknown>;
+  /** Server-side source scope-set filter (docs/engram-sources-filter-spec.md). Engram
+   *  releases without the feature ignore the unknown field — safe to send speculatively. */
+  sources?: string[];
 }): Promise<EngramSearchOutcome | null> {
   if (!engramConfigured()) return null;
   const query = input.query.trim();
@@ -172,7 +175,11 @@ export async function engramSearchDetailed(input: {
       "/search",
       {
         method: "POST",
-        body: JSON.stringify({ query, ...(Object.keys(tuning).length > 0 ? { tuning } : {}) }),
+        body: JSON.stringify({
+          query,
+          ...(input.sources && input.sources.length > 0 ? { sources: input.sources } : {}),
+          ...(Object.keys(tuning).length > 0 ? { tuning } : {}),
+        }),
       },
       cfg.searchTimeoutMs,
     );

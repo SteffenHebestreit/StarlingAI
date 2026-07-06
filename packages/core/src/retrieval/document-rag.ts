@@ -246,7 +246,14 @@ export async function retrieveDocumentContextWithStatus(
   }
   if (inScope.size === 0) return { chunks: [], retrievalFailed: false, lowConfidence: false };
 
-  const outcome = await engramSearchDetailed({ query, finalTopK: cfg.candidateTopK });
+  // Server-side scope filter (flag-gated): send the active sources so a spec-implementing
+  // engram filters in the store. The client post-filter below ALWAYS stays on — it is the
+  // defense-in-depth layer and carries the per-document metadata the injection needs.
+  const outcome = await engramSearchDetailed({
+    query,
+    finalTopK: cfg.candidateTopK,
+    ...(cfg.serverSideScopeFilter ? { sources: [...scopeSources] } : {}),
+  });
   if (outcome === null) return { chunks: [], retrievalFailed: true, lowConfidence: false };   // search failed / timed out
   const results = outcome.results;
   // CAVEAT: engram computes the confidence meta over its GLOBAL result set, while the

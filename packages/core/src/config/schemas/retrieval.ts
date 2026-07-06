@@ -86,6 +86,13 @@ export const DocumentRagSchema = z.object({
    *  reranker (scores can be negative/above 1) cannot express a meaningful threshold here
    *  and must leave this disabled — rely on the score_gap check instead. */
   confidenceMinTopRerank: z.number().min(0).max(1).default(0),
+  /** Send the active scope sources as a server-side `sources` filter on engram /search
+   *  (docs/engram-sources-filter-spec.md — requires an engram release that implements it;
+   *  older servers ignore the unknown field, so this is a safe no-op against them). The
+   *  client-side scope post-filter stays on regardless as defense-in-depth; the server
+   *  filter adds 0-leak enforcement in the store + stops candidateTopK being wasted on
+   *  off-scope hits. Default OFF pending the engram release + the combined eval. */
+  serverSideScopeFilter: z.boolean().default(false),
   /** Settings toggle: also search the current user's personal document corpus (`user:<id>`). */
   includeUserDocs: z.boolean().default(false),
   /** Settings toggle: also search the workspace-shared document corpus (`workspace:<name>`). */
