@@ -252,7 +252,10 @@ export async function retrieveDocumentContextWithStatus(
   // list_knowledge_bases instead of flooding those views with crawled pages.
   try {
     const { ambientKbSources } = await import("./knowledge-bases.js");
-    for (const s of await ambientKbSources()) scopeSources.add(s);
+    // Scope-aware: only ambient KBs THIS caller may access join the union.
+    for (const s of await ambientKbSources({ ...(ctx.userId ? { userId: ctx.userId } : {}), ...(ctx.sessionId ? { sessionId: ctx.sessionId } : {}) })) {
+      scopeSources.add(s);
+    }
   } catch { /* KB registry unreadable — ambient KBs just don't join this turn */ }
 
   const docs = await engramListDocuments();

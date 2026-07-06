@@ -74,6 +74,8 @@ export const DIRECT_MAIN_TOOL_NAMES = [
   // Build/maintain crawled knowledge bases (background crawl of a docs site).
   "create_knowledge_base",
   "manage_knowledge_base",
+  // Apply a KB to a task via its single-use worker agent (grounded, cited).
+  "use_knowledge_base",
   "transcribe_audio",
   "synthesize_speech",
   "list_tts_voices",

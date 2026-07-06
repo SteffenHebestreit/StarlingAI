@@ -16,6 +16,8 @@ import {
   kbDocumentId,
   ambientKbSources,
   invalidateAmbientKbCache,
+  callerCanAccessKb,
+  filterAccessibleKbs,
   type CreateKnowledgeBaseInput,
   type KnowledgeBaseRecord,
 } from "../retrieval/knowledge-bases.js";
@@ -364,6 +366,8 @@ describe("toSummary", () => {
       seedUrls: ["https://example.com/docs/"],
       status: "ready",
       ambientRetrieval: false,
+      scope: "workspace", // legacy record without a scope field normalizes to workspace
+      hasWorker: false,
       pageCount: 3,
       chunkCount: 5,
       maxPages: 100,
@@ -374,5 +378,192 @@ describe("toSummary", () => {
     expect("pages" in summary).toBe(false);
     expect(summary.description).toBeUndefined();
     expect(summary.lastCrawl).toBeUndefined();
+  });
+});
+
+// ── Scoping (session / user / workspace), mirroring documents + memory ────────
+
+describe("callerCanAccessKb + filterAccessibleKbs", () => {
+  const ws = { scope: "workspace" as const };
+  const legacy = {}; // no scope field at all → treated as workspace
+  const userOwned = { scope: "user" as const, ownerId: "u1" };
+  const userNoOwner = { scope: "user" as const }; // user scope, unassigned owner
+  const sess = { scope: "session" as const, sessionId: "s1" };
+
+  it("workspace and legacy (scope-less) KBs are visible to everyone, incl. an empty context", () => {
+    expect(callerCanAccessKb(ws, {})).toBe(true);
+    expect(callerCanAccessKb(ws, { userId: "u9", sessionId: "s9" })).toBe(true);
+    expect(callerCanAccessKb(legacy, {})).toBe(true); // scope undefined normalizes to workspace
+  });
+
+  it("a user KB is visible only to its owner (different/absent userId → hidden)", () => {
+    expect(callerCanAccessKb(userOwned, { userId: "u1" })).toBe(true);
+    expect(callerCanAccessKb(userOwned, { userId: "u2" })).toBe(false);
+    expect(callerCanAccessKb(userOwned, {})).toBe(false);
+  });
+
+  it("a user KB with NO owner stays visible (single-user / unassigned corpus)", () => {
+    expect(callerCanAccessKb(userNoOwner, {})).toBe(true);
+    expect(callerCanAccessKb(userNoOwner, { userId: "whoever" })).toBe(true);
+  });
+
+  it("a session KB is visible only to the matching session (absent sessionId → hidden)", () => {
+    expect(callerCanAccessKb(sess, { sessionId: "s1" })).toBe(true);
+    expect(callerCanAccessKb(sess, { sessionId: "s2" })).toBe(false);
+    expect(callerCanAccessKb(sess, {})).toBe(false);
+    expect(callerCanAccessKb(sess, { userId: "s1" })).toBe(false); // a userId is not a session match
+  });
+
+  it("filterAccessibleKbs keeps only the caller's accessible KBs", () => {
+    const all = [ws, userOwned, userNoOwner, sess];
+    expect(filterAccessibleKbs(all, { userId: "u1" })).toEqual([ws, userOwned, userNoOwner]);
+    expect(filterAccessibleKbs(all, { sessionId: "s1" })).toEqual([ws, userNoOwner, sess]);
+    expect(filterAccessibleKbs(all, {})).toEqual([ws, userNoOwner]);
+  });
+});
+
+describe("createKnowledgeBase — scope + worker", () => {
+  it("defaults to workspace scope with no owner/session stamps", async () => {
+    const kb = await createOk();
+    expect(kb.scope).toBe("workspace");
+    expect(kb.ownerId).toBeUndefined();
+    expect(kb.sessionId).toBeUndefined();
+  });
+
+  it("requires a sessionId for session scope and an ownerId for user scope", async () => {
+    expectError(
+      await createKnowledgeBase({ name: "S", seedUrls: ["https://example.com/"], scope: "session" }),
+      /session-scoped knowledge bases require a sessionId/,
+    );
+    expectError(
+      await createKnowledgeBase({ name: "U", seedUrls: ["https://example.com/"], scope: "user" }),
+      /user-scoped knowledge bases require an authenticated user/,
+    );
+  });
+
+  it("stamps ONLY the matching scope's identity — a user KB carries ownerId, not sessionId", async () => {
+    const kb = await createOk({ name: "User KB", scope: "user", ownerId: "u1", sessionId: "sess-1" });
+    expect(kb.scope).toBe("user");
+    expect(kb.ownerId).toBe("u1");
+    expect(kb.sessionId).toBeUndefined(); // the session stamp is not applied to a user KB
+  });
+
+  it("stamps ONLY the matching scope's identity — a session KB carries sessionId, not ownerId", async () => {
+    const kb = await createOk({ name: "Session KB", scope: "session", ownerId: "u1", sessionId: "sess-1" });
+    expect(kb.scope).toBe("session");
+    expect(kb.sessionId).toBe("sess-1");
+    expect(kb.ownerId).toBeUndefined();
+  });
+
+  it("keeps a valid worker template (instructions trimmed, tools deduped, model/limits kept)", async () => {
+    const kb = await createOk({
+      name: "Worker KB",
+      worker: {
+        instructions: "  audit against the KB  ",
+        tools: ["web_fetch", "web_fetch", "browser_axe_audit"],
+        model: { primary: "lmstudio/qwen/qwen3.5-9b", temperature: 0.2, maxTokens: 4096 },
+        maxIterations: 4,
+        timeoutMs: 120_000,
+      },
+    });
+    expect(kb.worker).toEqual({
+      instructions: "audit against the KB",
+      tools: ["web_fetch", "browser_axe_audit"],
+      model: { primary: "lmstudio/qwen/qwen3.5-9b", temperature: 0.2, maxTokens: 4096 },
+      maxIterations: 4,
+      timeoutMs: 120_000,
+    });
+  });
+
+  it("drops an empty (or whitespace-only) worker to undefined", async () => {
+    expect((await createOk({ name: "Empty Worker", worker: {} })).worker).toBeUndefined();
+    expect((await createOk({ name: "Blank Instr", worker: { instructions: "   " } })).worker).toBeUndefined();
+  });
+
+  it("rejects an over-long worker.instructions and too many worker.tools", async () => {
+    expectError(
+      await createKnowledgeBase({ name: "Big", seedUrls: ["https://example.com/"], worker: { instructions: "x".repeat(8001) } }),
+      /worker\.instructions exceeds 8000 characters/,
+    );
+    const tools = Array.from({ length: 21 }, (_, i) => `tool_${i}`);
+    expectError(
+      await createKnowledgeBase({ name: "ManyTools", seedUrls: ["https://example.com/"], worker: { tools } }),
+      /worker\.tools may have at most 20 entries/,
+    );
+  });
+});
+
+describe("updateKnowledgeBase — scope re-stamp + worker", () => {
+  it("user→session clears ownerId and sets sessionId (and requires one)", async () => {
+    const kb = await createOk({ name: "US KB", scope: "user", ownerId: "u1" });
+    // switching to session with no sessionId available is rejected (not persisted)
+    expectError(await updateKnowledgeBase(kb.id, { scope: "session" }), /session scope requires a sessionId/);
+    expect((await getKnowledgeBase(kb.id))?.scope).toBe("user");
+
+    const res = await updateKnowledgeBase(kb.id, { scope: "session", sessionId: "sess-9" });
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.value.scope).toBe("session");
+    expect(res.value.sessionId).toBe("sess-9");
+    expect(res.value.ownerId).toBeUndefined();
+  });
+
+  it("session→user clears sessionId and sets ownerId", async () => {
+    const kb = await createOk({ name: "SU KB", scope: "session", sessionId: "sess-1" });
+    const res = await updateKnowledgeBase(kb.id, { scope: "user", ownerId: "u2" });
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.value.scope).toBe("user");
+    expect(res.value.ownerId).toBe("u2");
+    expect(res.value.sessionId).toBeUndefined();
+  });
+
+  it("→workspace clears both the owner and the session stamp", async () => {
+    const kb = await createOk({ name: "WS KB", scope: "user", ownerId: "u1" });
+    const res = await updateKnowledgeBase(kb.id, { scope: "workspace" });
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.value.scope).toBe("workspace");
+    expect(res.value.ownerId).toBeUndefined();
+    expect(res.value.sessionId).toBeUndefined();
+  });
+
+  it("rejects an invalid scope", async () => {
+    const kb = await createOk();
+    expectError(await updateKnowledgeBase(kb.id, { scope: "public" as never }), /scope must be one of/);
+  });
+
+  it("replaces the worker template and clears it with worker:null", async () => {
+    const kb = await createOk({ name: "Worker Upd", worker: { instructions: "first" } });
+    const replaced = await updateKnowledgeBase(kb.id, { worker: { instructions: "second", tools: ["web_fetch"] } });
+    expect(replaced.ok).toBe(true);
+    if (replaced.ok) expect(replaced.value.worker).toEqual({ instructions: "second", tools: ["web_fetch"] });
+    const cleared = await updateKnowledgeBase(kb.id, { worker: null });
+    expect(cleared.ok).toBe(true);
+    if (cleared.ok) expect(cleared.value.worker).toBeUndefined();
+  });
+});
+
+describe("toSummary — scope + hasWorker", () => {
+  const base = (over: Partial<KnowledgeBaseRecord>): KnowledgeBaseRecord => {
+    const now = new Date().toISOString();
+    return {
+      id: "k", name: "K", seedUrls: ["https://example.com/"],
+      maxPages: 10, maxDepth: 2, sameOriginOnly: true, respectRobots: true, ambientRetrieval: false,
+      createdAt: now, updatedAt: now, status: "ready", pages: {}, ...over,
+    };
+  };
+
+  it("reflects a user scope + ownerId", () => {
+    const s = toSummary(base({ scope: "user", ownerId: "u1" }));
+    expect(s.scope).toBe("user");
+    expect(s.ownerId).toBe("u1");
+  });
+
+  it("hasWorker is true only when the worker has instructions or tools", () => {
+    expect(toSummary(base({ worker: { instructions: "do X" } })).hasWorker).toBe(true);
+    expect(toSummary(base({ worker: { tools: ["web_fetch"] } })).hasWorker).toBe(true);
+    expect(toSummary(base({ worker: { model: { temperature: 0.1 } } })).hasWorker).toBe(false); // model-only ≠ usable worker
+    expect(toSummary(base({})).hasWorker).toBe(false);
   });
 });

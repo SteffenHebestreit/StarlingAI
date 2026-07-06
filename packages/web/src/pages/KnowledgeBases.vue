@@ -51,6 +51,14 @@
             </label>
           </div>
           <label class="knowledge-page__field">
+            <span class="knowledge-page__label">Scope <span class="knowledge-page__hint">(who can see &amp; search it)</span></span>
+            <select v-model="form.scope" class="input-box knowledge-page__scope-select">
+              <option value="workspace">Workspace (shared with everyone)</option>
+              <option value="user">Personal (only you)</option>
+              <option v-if="currentSessionId" value="session">Current session</option>
+            </select>
+          </label>
+          <label class="knowledge-page__field">
             <span class="knowledge-page__label">Seed URLs <span class="knowledge-page__hint">(one per line)</span></span>
             <textarea v-model="form.seedUrlsText" rows="3" class="input-box knowledge-page__textarea" placeholder="https://vuejs.org/guide/" />
           </label>
@@ -93,6 +101,21 @@
                 <span>Ambient retrieval <span class="knowledge-page__hint">(include in every turn's document context)</span></span>
               </label>
             </div>
+
+            <div class="knowledge-page__worker-block">
+              <div class="knowledge-page__worker-head">
+                <span class="knowledge-page__label">Worker <span class="knowledge-page__hint">(optional)</span></span>
+                <span class="knowledge-page__hint">The single-use agent that USES this KB when you ask <code>use {{ form.id.trim() || "<id>" }} to …</code> in chat.</span>
+              </div>
+              <label class="knowledge-page__field">
+                <span class="knowledge-page__label">Worker instructions <span class="knowledge-page__hint">(how to apply this KB to a task — blank = default worker)</span></span>
+                <textarea v-model="form.workerInstructions" rows="3" class="input-box knowledge-page__textarea" placeholder="e.g. Answer only from this knowledge base and cite the page URLs you used." />
+              </label>
+              <label class="knowledge-page__field">
+                <span class="knowledge-page__label">Worker tools <span class="knowledge-page__hint">(one tool per line — KB search is always granted)</span></span>
+                <textarea v-model="form.workerToolsText" rows="2" class="input-box knowledge-page__textarea knowledge-page__textarea--mono" placeholder="web_fetch&#10;browser_navigate" />
+              </label>
+            </div>
           </div>
 
           <div class="knowledge-page__form-actions">
@@ -117,6 +140,8 @@
             <h3 class="knowledge-page__card-title">{{ kb.name }}</h3>
             <span class="knowledge-page__chip knowledge-page__chip--id" :title="`engram source: kb:${kb.id}`">{{ kb.id }}</span>
             <span class="knowledge-page__chip" :class="statusChipClass(kb.status)">{{ kb.status }}</span>
+            <span class="knowledge-page__chip" :class="scopeChipClass(kb.scope)" :title="scopeTitle(kb)">{{ kb.scope }}</span>
+            <span v-if="kb.hasWorker" class="knowledge-page__chip knowledge-page__chip--worker" title="Has a worker template — ask “use <id> to …” in chat to run it">worker</span>
             <span v-if="kb.ambientRetrieval" class="knowledge-page__chip knowledge-page__chip--ambient" title="Included in every turn's document context">ambient</span>
           </div>
           <div class="knowledge-page__card-actions">
@@ -200,6 +225,8 @@
 
             <!-- Config recap -->
             <div class="knowledge-page__detail-config">
+              <span>scope: {{ detail.knowledgeBase.scope }}</span>
+              <span v-if="detail.knowledgeBase.ownerId">owner: {{ detail.knowledgeBase.ownerId }}</span>
               <span>same-origin: {{ detail.knowledgeBase.sameOriginOnly ? "yes" : "no" }}</span>
               <span>robots.txt: {{ detail.knowledgeBase.respectRobots ? "respected" : "ignored" }}</span>
               <span v-if="detail.knowledgeBase.createdBy">created by {{ detail.knowledgeBase.createdBy }}</span>
@@ -209,6 +236,37 @@
               <span v-if="detail.knowledgeBase.excludePatterns.length" :title="detail.knowledgeBase.excludePatterns.join('\n')">
                 {{ detail.knowledgeBase.excludePatterns.length }} exclude pattern{{ detail.knowledgeBase.excludePatterns.length === 1 ? "" : "s" }}
               </span>
+            </div>
+
+            <!-- Worker template -->
+            <div class="knowledge-page__worker-block">
+              <div class="knowledge-page__worker-head">
+                <span class="knowledge-page__label">Worker template</span>
+                <span class="knowledge-page__hint">The single-use agent that uses this KB. Blank = a default worker (KB search + read-only web/site inspection).</span>
+              </div>
+              <label class="knowledge-page__field">
+                <span class="knowledge-page__label">Instructions</span>
+                <textarea v-model="editWorkerInstructions" rows="3" class="input-box knowledge-page__textarea" placeholder="How the worker should apply this KB to a task." />
+              </label>
+              <label class="knowledge-page__field">
+                <span class="knowledge-page__label">Tools <span class="knowledge-page__hint">(one per line — KB search is always granted)</span></span>
+                <textarea v-model="editWorkerToolsText" rows="2" class="input-box knowledge-page__textarea knowledge-page__textarea--mono" placeholder="web_fetch" />
+              </label>
+              <div class="knowledge-page__form-actions">
+                <button class="btn-grad px-4 py-2 rounded-xl text-sm" :disabled="workerSaving" @click="saveWorker(detail.knowledgeBase)">
+                  {{ workerSaving ? "Saving…" : "Save worker" }}
+                </button>
+                <button
+                  class="btn-ghost px-3 py-2 rounded-xl text-sm"
+                  :disabled="workerSaving || (!editWorkerInstructions.trim() && !editWorkerToolsText.trim() && !detail.knowledgeBase.hasWorker)"
+                  @click="clearWorker(detail.knowledgeBase)"
+                >Clear</button>
+              </div>
+              <div v-if="workerError" class="text-sm text-red-400">{{ workerError }}</div>
+              <div v-else-if="workerNote" class="text-sm text-emerald-300">{{ workerNote }}</div>
+              <div class="knowledge-page__worker-usage">
+                To use this KB, ask in chat: <code>use {{ detail.knowledgeBase.id }} to …</code> — it runs this KB's worker.
+              </div>
             </div>
 
             <!-- Pages list -->
@@ -249,8 +307,28 @@ import { useGatewayStore } from "@/stores/gateway";
 
 const gateway = useGatewayStore();
 
+// Current chat session — needed so session-scoped KBs are visible/manageable
+// (the gateway derives the session access context from the ?sessionId= query).
+const currentSessionId = computed(() => gateway.currentSessionId);
+
+/** Append the current sessionId to a KB endpoint so session-scoped KBs resolve. */
+function withSession(path: string): string {
+  const sid = currentSessionId.value;
+  if (!sid) return path;
+  return `${path}${path.includes("?") ? "&" : "?"}sessionId=${encodeURIComponent(sid)}`;
+}
+
 // ── API shapes (mirror gateway/knowledge-base-routes.ts) ────────────────────
 type KbStatus = "idle" | "crawling" | "ready" | "failed";
+type KbScope = "session" | "user" | "workspace";
+
+interface KbWorkerSpec {
+  instructions?: string;
+  tools?: string[];
+  model?: { primary?: string; temperature?: number; maxTokens?: number };
+  maxIterations?: number;
+  timeoutMs?: number;
+}
 
 interface KbCrawlStats {
   startedAt: string;
@@ -273,6 +351,9 @@ interface KbSummary {
   seedUrls: string[];
   status: KbStatus;
   ambientRetrieval: boolean;
+  scope: KbScope;
+  ownerId?: string;
+  hasWorker: boolean;
   pageCount: number;
   chunkCount: number;
   maxPages: number;
@@ -288,6 +369,7 @@ interface KbDetailInfo extends KbSummary {
   sameOriginOnly: boolean;
   respectRobots: boolean;
   createdBy: string | null;
+  worker: KbWorkerSpec | null;
 }
 
 interface KbPage {
@@ -317,7 +399,7 @@ async function refreshList(quiet = false): Promise<void> {
     loadError.value = "";
   }
   try {
-    const res = await gateway.authorizedFetch("/api/knowledge-bases");
+    const res = await gateway.authorizedFetch(withSession("/api/knowledge-bases"));
     const data = await res.json() as { knowledgeBases: KbSummary[]; enabled: boolean; ragConfigured: boolean };
     kbs.value = Array.isArray(data.knowledgeBases) ? data.knowledgeBases : [];
     enabled.value = data.enabled !== false;
@@ -346,6 +428,7 @@ function emptyForm() {
     name: "",
     id: "",
     description: "",
+    scope: "workspace" as KbScope,
     seedUrlsText: "",
     maxPagesText: "",
     maxDepthText: "",
@@ -353,6 +436,8 @@ function emptyForm() {
     excludeText: "",
     respectRobots: true,
     ambientRetrieval: false,
+    workerInstructions: "",
+    workerToolsText: "",
   };
 }
 const form = ref(emptyForm());
@@ -382,15 +467,21 @@ async function submitCreate(): Promise<void> {
   const seedUrls = linesToList(form.value.seedUrlsText);
   if (!name) { createError.value = "Name is required."; return; }
   if (seedUrls.length === 0) { createError.value = "At least one seed URL is required."; return; }
+  if (form.value.scope === "session" && !currentSessionId.value) {
+    createError.value = "Open a chat first to create a session-scoped knowledge base.";
+    return;
+  }
 
   creating.value = true;
   try {
     const body: Record<string, unknown> = {
       name,
       seedUrls,
+      scope: form.value.scope,
       respectRobots: form.value.respectRobots,
       ambientRetrieval: form.value.ambientRetrieval,
     };
+    if (form.value.scope === "session" && currentSessionId.value) body["sessionId"] = currentSessionId.value;
     if (form.value.description.trim()) body["description"] = form.value.description.trim();
     const id = form.value.id.trim().toLowerCase();
     if (id) body["id"] = id;
@@ -402,6 +493,14 @@ async function submitCreate(): Promise<void> {
     if (include.length > 0) body["includePatterns"] = include;
     const exclude = linesToList(form.value.excludeText);
     if (exclude.length > 0) body["excludePatterns"] = exclude;
+    const workerInstructions = form.value.workerInstructions.trim();
+    const workerTools = linesToList(form.value.workerToolsText);
+    if (workerInstructions || workerTools.length > 0) {
+      body["worker"] = {
+        ...(workerInstructions ? { instructions: workerInstructions } : {}),
+        ...(workerTools.length > 0 ? { tools: workerTools } : {}),
+      };
+    }
 
     const res = await gateway.authorizedFetch("/api/knowledge-bases", {
       method: "POST",
@@ -447,19 +546,19 @@ async function runAction(kb: KbSummary, action: () => Promise<void>): Promise<vo
 
 function recrawl(kb: KbSummary): void {
   void runAction(kb, async () => {
-    await gateway.authorizedFetch(`/api/knowledge-bases/${encodeURIComponent(kb.id)}/crawl`, { method: "POST" });
+    await gateway.authorizedFetch(withSession(`/api/knowledge-bases/${encodeURIComponent(kb.id)}/crawl`), { method: "POST" });
   });
 }
 
 function cancelCrawl(kb: KbSummary): void {
   void runAction(kb, async () => {
-    await gateway.authorizedFetch(`/api/knowledge-bases/${encodeURIComponent(kb.id)}/cancel`, { method: "POST" });
+    await gateway.authorizedFetch(withSession(`/api/knowledge-bases/${encodeURIComponent(kb.id)}/cancel`), { method: "POST" });
   });
 }
 
 function toggleAmbient(kb: KbSummary): void {
   void runAction(kb, async () => {
-    await gateway.authorizedFetch(`/api/knowledge-bases/${encodeURIComponent(kb.id)}`, {
+    await gateway.authorizedFetch(withSession(`/api/knowledge-bases/${encodeURIComponent(kb.id)}`), {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ambientRetrieval: !kb.ambientRetrieval }),
@@ -469,7 +568,7 @@ function toggleAmbient(kb: KbSummary): void {
 
 function deleteKb(kb: KbSummary): void {
   void runAction(kb, async () => {
-    const res = await gateway.authorizedFetch(`/api/knowledge-bases/${encodeURIComponent(kb.id)}`, { method: "DELETE" });
+    const res = await gateway.authorizedFetch(withSession(`/api/knowledge-bases/${encodeURIComponent(kb.id)}`), { method: "DELETE" });
     const data = await res.json() as { removed: boolean; documentsRemoved: number; documentsFailed: number };
     confirmDeleteId.value = null;
     if (expandedId.value === kb.id) {
@@ -488,17 +587,37 @@ const detailLoading = ref(false);
 const detailError = ref("");
 const pageFilter = ref("");
 
+// Worker template edit state. Seeded from the detail response the first time a
+// KB's detail loads, then owned by the user — quiet polls (which fire during a
+// live crawl) must not clobber an in-progress edit, so the draft is re-seeded
+// only when workerInitializedFor changes (open a different KB, or after a save).
+const editWorkerInstructions = ref("");
+const editWorkerToolsText = ref("");
+const workerInitializedFor = ref<string | null>(null);
+const workerSaving = ref(false);
+const workerError = ref("");
+const workerNote = ref("");
+
+function seedWorkerDraft(worker: KbWorkerSpec | null): void {
+  editWorkerInstructions.value = worker?.instructions ?? "";
+  editWorkerToolsText.value = (worker?.tools ?? []).join("\n");
+}
+
 async function loadDetail(id: string, quiet = false): Promise<void> {
   if (!quiet) {
     detailLoading.value = true;
     detailError.value = "";
   }
   try {
-    const res = await gateway.authorizedFetch(`/api/knowledge-bases/${encodeURIComponent(id)}`);
+    const res = await gateway.authorizedFetch(withSession(`/api/knowledge-bases/${encodeURIComponent(id)}`));
     const data = await res.json() as KbDetail;
     if (expandedId.value === id) {
       detail.value = data;
       detailError.value = ""; // any successful fetch (incl. a quiet poll) clears a stale error
+      if (workerInitializedFor.value !== id) {
+        seedWorkerDraft(data.knowledgeBase.worker);
+        workerInitializedFor.value = id;
+      }
     }
   } catch (e) {
     if (!quiet && expandedId.value === id) detailError.value = e instanceof Error ? e.message : String(e);
@@ -512,12 +631,49 @@ function toggleDetail(kb: KbSummary): void {
     expandedId.value = null;
     detail.value = null;
     detailError.value = "";
+    workerInitializedFor.value = null;
     return;
   }
   expandedId.value = kb.id;
   detail.value = null;
   pageFilter.value = "";
+  workerInitializedFor.value = null;
+  workerError.value = "";
+  workerNote.value = "";
   void loadDetail(kb.id);
+}
+
+async function saveWorker(kb: KbSummary): Promise<void> {
+  workerSaving.value = true;
+  workerError.value = "";
+  workerNote.value = "";
+  try {
+    const instructions = editWorkerInstructions.value.trim();
+    const tools = linesToList(editWorkerToolsText.value);
+    // Empty → send worker:null so the backend clears the template.
+    const worker: KbWorkerSpec | null = instructions || tools.length > 0
+      ? { ...(instructions ? { instructions } : {}), ...(tools.length > 0 ? { tools } : {}) }
+      : null;
+    await gateway.authorizedFetch(withSession(`/api/knowledge-bases/${encodeURIComponent(kb.id)}`), {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ worker }),
+    });
+    workerNote.value = worker ? "Worker template saved." : "Worker template cleared.";
+    workerInitializedFor.value = null; // re-seed the draft from the persisted value
+    await refreshList(true);
+    if (expandedId.value === kb.id) await loadDetail(kb.id, true);
+  } catch (e) {
+    workerError.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    workerSaving.value = false;
+  }
+}
+
+function clearWorker(kb: KbSummary): void {
+  editWorkerInstructions.value = "";
+  editWorkerToolsText.value = "";
+  void saveWorker(kb);
 }
 
 const filteredPages = computed<KbPage[]>(() => {
@@ -566,6 +722,22 @@ function statusChipClass(status: KbStatus): string {
     case "ready": return "knowledge-page__chip--ready";
     case "failed": return "knowledge-page__chip--failed";
     default: return "knowledge-page__chip--idle";
+  }
+}
+
+function scopeChipClass(scope: KbScope): string {
+  switch (scope) {
+    case "user": return "knowledge-page__chip--scope-user";
+    case "session": return "knowledge-page__chip--scope-session";
+    default: return "knowledge-page__chip--scope-workspace";
+  }
+}
+
+function scopeTitle(kb: KbSummary): string {
+  switch (kb.scope) {
+    case "user": return kb.ownerId ? `Personal knowledge base of ${kb.ownerId}` : "Personal knowledge base";
+    case "session": return "Only the conversation that created it can see this knowledge base";
+    default: return "Shared with everyone on this instance";
   }
 }
 
@@ -632,6 +804,12 @@ watch(() => gateway.connected, (connected) => {
 .knowledge-page__toggles { display: flex; gap: 1.25rem; flex-wrap: wrap; }
 .knowledge-page__check { display: flex; align-items: center; gap: 0.45rem; font-size: 0.82rem; color: rgb(209 213 219); cursor: pointer; }
 .knowledge-page__form-actions { display: flex; gap: 0.6rem; align-items: center; }
+.knowledge-page__scope-select { max-width: 20rem; }
+.knowledge-page__worker-block { display: flex; flex-direction: column; gap: 0.6rem; padding: 0.75rem; border: 1px solid rgba(255,255,255,0.08); border-radius: 0.75rem; }
+.knowledge-page__worker-head { display: flex; flex-direction: column; gap: 0.15rem; }
+.knowledge-page__worker-head code { font-family: var(--font-mono, monospace); font-size: 0.9em; }
+.knowledge-page__worker-usage { font-size: 0.75rem; color: var(--muted, #9aa4b2); }
+.knowledge-page__worker-usage code { font-family: var(--font-mono, monospace); font-size: 0.9em; color: rgb(209 213 219); }
 
 /* ── KB cards ──────────────────────────────────────────────────────────── */
 .knowledge-page__card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.75rem; flex-wrap: wrap; }
@@ -649,6 +827,10 @@ watch(() => gateway.connected, (connected) => {
 .knowledge-page__chip--ready { border-color: rgba(52, 211, 153, 0.4); color: rgb(167 243 208); background: rgba(52, 211, 153, 0.1); }
 .knowledge-page__chip--failed { border-color: rgba(248, 113, 113, 0.4); color: rgb(254 202 202); background: rgba(248, 113, 113, 0.1); }
 .knowledge-page__chip--ambient { border-color: rgba(var(--accent-purple, 168, 85, 247), 0.45); color: rgb(233 213 255); background: rgba(var(--accent-purple, 168, 85, 247), 0.12); }
+.knowledge-page__chip--worker { border-color: rgba(129, 140, 248, 0.45); color: rgb(199 210 254); background: rgba(129, 140, 248, 0.12); }
+.knowledge-page__chip--scope-workspace { border-color: rgba(148, 163, 184, 0.4); color: rgb(203 213 225); background: rgba(148, 163, 184, 0.1); }
+.knowledge-page__chip--scope-user { border-color: rgba(56, 189, 248, 0.4); color: rgb(186 230 253); background: rgba(56, 189, 248, 0.1); }
+.knowledge-page__chip--scope-session { border-color: rgba(251, 191, 36, 0.4); color: rgb(253 230 138); background: rgba(251, 191, 36, 0.1); }
 
 .knowledge-page__desc { font-size: 0.85rem; color: rgb(209 213 219); margin-top: 0.5rem; }
 .knowledge-page__meta { font-size: 0.75rem; color: var(--muted, #9aa4b2); margin-top: 0.4rem; }

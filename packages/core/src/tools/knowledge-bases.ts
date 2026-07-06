@@ -15,11 +15,21 @@
  * retrieval.knowledgeBases is disabled.
  */
 import { getConfig } from "../config/loader.js";
-import { registerTool, type ToolResult } from "./registry.js";
+import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { engramConfigured } from "../retrieval/engram.js";
+import { callerCanAccessKb, type KbAccessContext } from "../retrieval/knowledge-bases.js";
 
 function fail(error: string): ToolResult {
   return { success: false, output: "", error };
+}
+
+/** Scope identity for KB access control, derived from the tool context. An
+ *  ephemeral KB worker carries the originating conversation session in
+ *  kbAccessSessionId (its own sessionId is a rewritten per-run sub-session that
+ *  would never match a session-scoped KB), so prefer it when present. */
+function accessCtx(ctx: ToolContext): KbAccessContext {
+  const sessionId = ctx.kbAccessSessionId ?? ctx.sessionId;
+  return { ...(ctx.userId ? { userId: ctx.userId } : {}), ...(sessionId ? { sessionId } : {}) };
 }
 
 function kbUnavailableReason(): string | null {
@@ -55,39 +65,42 @@ registerTool({
     },
     required: [],
   },
-  async execute(args): Promise<ToolResult> {
+  async execute(args, ctx): Promise<ToolResult> {
     const unavailable = kbUnavailableReason();
     if (unavailable) return fail(unavailable);
     const { listKnowledgeBases, getKnowledgeBase, toSummary } = await import("../retrieval/knowledge-bases.js");
     const { isCrawlActive } = await import("../retrieval/kb-crawler.js");
+    const who = accessCtx(ctx);
 
     const idOrName = String(args["knowledge_base"] ?? "").trim();
     if (idOrName) {
       const kb = await getKnowledgeBase(idOrName, { isCrawlActive });
-      if (!kb) return fail(`No knowledge base matches "${idOrName}". Call list_knowledge_bases without arguments to see what exists.`);
+      // Same not-found shape whether it is absent or out-of-scope (no existence disclosure).
+      if (!kb || !callerCanAccessKb(kb, who)) return fail(`No knowledge base matches "${idOrName}". Call list_knowledge_bases without arguments to see what exists.`);
       const s = toSummary(kb);
       const lines = [
-        `${s.name} (id: ${s.id}) — status: ${s.status}`,
+        `${s.name} (id: ${s.id}) — status: ${s.status} — scope: ${s.scope}`,
         ...(s.description ? [s.description] : []),
         `Seeds: ${s.seedUrls.join(", ")}`,
         `Pages: ${s.pageCount} (${s.chunkCount} chunks) — bounds: ${s.maxPages} pages, depth ${s.maxDepth}`,
         `Ambient retrieval: ${s.ambientRetrieval ? "on (joins every turn's document context)" : "off (query explicitly via search_knowledge_base)"}`,
+        `Worker: ${s.hasWorker ? "custom template configured (use_knowledge_base runs it)" : "default (KB retrieval + web/site inspection)"}`,
         `Last crawl: ${describeCrawl(s.lastCrawl)}`,
       ];
-      return { success: true, output: lines.join("\n"), metadata: { id: s.id, status: s.status, pageCount: s.pageCount } };
+      return { success: true, output: lines.join("\n"), metadata: { id: s.id, status: s.status, scope: s.scope, pageCount: s.pageCount } };
     }
 
-    const kbs = await listKnowledgeBases({ isCrawlActive });
+    const kbs = (await listKnowledgeBases({ isCrawlActive })).filter((kb) => callerCanAccessKb(kb, who));
     if (kbs.length === 0) {
       return {
         success: true,
-        output: "No knowledge bases exist yet. Create one from a documentation site with create_knowledge_base.",
+        output: "No knowledge bases available to you yet. Create one from a documentation site with create_knowledge_base.",
         metadata: { count: 0 },
       };
     }
     const lines = kbs.map((kb) => {
       const s = toSummary(kb);
-      return `- ${s.name} (id: ${s.id}) — ${s.status}, ${s.pageCount} pages${s.description ? ` — ${s.description}` : ""}`;
+      return `- ${s.name} (id: ${s.id}) — ${s.status}, ${s.pageCount} pages, ${s.scope} scope${s.description ? ` — ${s.description}` : ""}`;
     });
     return { success: true, output: `${kbs.length} knowledge base(s):\n${lines.join("\n")}`, metadata: { count: kbs.length } };
   },
@@ -110,7 +123,7 @@ registerTool({
     },
     required: ["knowledge_base", "query"],
   },
-  async execute(args): Promise<ToolResult> {
+  async execute(args, ctx): Promise<ToolResult> {
     const unavailable = kbUnavailableReason();
     if (unavailable) return fail(unavailable);
     const idOrName = String(args["knowledge_base"] ?? "").trim();
@@ -121,7 +134,7 @@ registerTool({
     const { getKnowledgeBase } = await import("../retrieval/knowledge-bases.js");
     const { isCrawlActive } = await import("../retrieval/kb-crawler.js");
     const kb = await getKnowledgeBase(idOrName, { isCrawlActive });
-    if (!kb) return fail(`No knowledge base matches "${idOrName}". Call list_knowledge_bases to see what exists.`);
+    if (!kb || !callerCanAccessKb(kb, accessCtx(ctx))) return fail(`No knowledge base matches "${idOrName}". Call list_knowledge_bases to see what exists.`);
     if (Object.keys(kb.pages).length === 0) {
       return fail(
         kb.status === "crawling"
@@ -176,6 +189,9 @@ registerTool({
       max_depth: { type: "number", description: "Link depth from the seeds (default from settings)." },
       include_patterns: { type: "array", items: { type: "string" }, description: "Optional regexes that WIDEN the crawl scope beyond the seed paths." },
       exclude_patterns: { type: "array", items: { type: "string" }, description: "Optional regexes for URLs to never crawl." },
+      scope: { type: "string", enum: ["session", "user", "workspace"], description: "Visibility: session (this chat), user (your library), or workspace (shared, default)." },
+      worker_instructions: { type: "string", description: "Optional: instructions for the temporary 'worker' agent that use_knowledge_base spins up to apply this KB to a task." },
+      worker_tools: { type: "array", items: { type: "string" }, description: "Optional: extra tools the worker should have (beyond the always-granted KB retrieval tools), e.g. browser_axe_audit, browser_navigate." },
     },
     required: ["name", "seed_urls"],
   },
@@ -184,6 +200,11 @@ registerTool({
     if (unavailable) return fail(unavailable);
     const { createKnowledgeBase } = await import("../retrieval/knowledge-bases.js");
     const { startKbCrawl } = await import("../retrieval/kb-crawler.js");
+
+    const scope = ["session", "user", "workspace"].includes(String(args["scope"] ?? "")) ? String(args["scope"]) as "session" | "user" | "workspace" : "workspace";
+    const workerInstructions = args["worker_instructions"] ? String(args["worker_instructions"]) : undefined;
+    const workerTools = Array.isArray(args["worker_tools"]) ? (args["worker_tools"] as string[]) : undefined;
+    const worker = workerInstructions || workerTools ? { ...(workerInstructions ? { instructions: workerInstructions } : {}), ...(workerTools ? { tools: workerTools } : {}) } : undefined;
 
     const created = await createKnowledgeBase({
       name: String(args["name"] ?? ""),
@@ -194,6 +215,10 @@ registerTool({
       ...(Number.isFinite(Number(args["max_depth"])) ? { maxDepth: Number(args["max_depth"]) } : {}),
       ...(Array.isArray(args["include_patterns"]) ? { includePatterns: args["include_patterns"] as string[] } : {}),
       ...(Array.isArray(args["exclude_patterns"]) ? { excludePatterns: args["exclude_patterns"] as string[] } : {}),
+      scope,
+      ...(ctx.userId ? { ownerId: ctx.userId } : {}),
+      ...(ctx.sessionId ? { sessionId: ctx.sessionId } : {}),
+      ...(worker ? { worker } : {}),
       ...(ctx.userId ? { createdBy: ctx.userId } : {}),
     });
     if (!created.ok) return fail(created.error);
@@ -234,7 +259,7 @@ registerTool({
     },
     required: ["knowledge_base", "action"],
   },
-  async execute(args): Promise<ToolResult> {
+  async execute(args, ctx): Promise<ToolResult> {
     const unavailable = kbUnavailableReason();
     if (unavailable) return fail(unavailable);
     const idOrName = String(args["knowledge_base"] ?? "").trim();
@@ -244,7 +269,7 @@ registerTool({
     const { getKnowledgeBase } = await import("../retrieval/knowledge-bases.js");
     const { startKbCrawl, cancelKbCrawl, deleteKnowledgeBase, isCrawlActive } = await import("../retrieval/kb-crawler.js");
     const kb = await getKnowledgeBase(idOrName, { isCrawlActive });
-    if (!kb) return fail(`No knowledge base matches "${idOrName}".`);
+    if (!kb || !callerCanAccessKb(kb, accessCtx(ctx))) return fail(`No knowledge base matches "${idOrName}".`);
 
     switch (action) {
       case "recrawl": {
@@ -271,5 +296,83 @@ registerTool({
       default:
         return fail(`Unknown action "${action}" — use recrawl, cancel, or delete.`);
     }
+  },
+});
+
+// ── use_knowledge_base ────────────────────────────────────────────────────────
+
+// Tools the worker ALWAYS gets, regardless of its template, so it can actually
+// query the KB. A KB with no worker template also gets the read-only web/site
+// inspection defaults so "evaluate site X against this KB" works out of the box.
+const WORKER_ALWAYS_TOOLS = ["search_knowledge_base", "list_knowledge_bases"];
+const WORKER_DEFAULT_TOOLS = ["search_knowledge_base", "list_knowledge_bases", "web_fetch", "browser_navigate", "browser_snapshot", "browser_axe_audit", "lighthouse_audit"];
+
+registerTool({
+  name: "use_knowledge_base",
+  description:
+    "Apply a knowledge base to a task by spinning up a single-use temporary agent — the KB's own 'worker' — that is granted the KB's retrieval tools (and any extra tools configured on the KB) and runs your task grounded in that knowledge, citing source pages. Use this for 'use knowledge base X to do Y' (e.g. 'use w3c-accessibility to audit https://example.com'): it is more reliable than delegating to a general specialist because the worker is purpose-configured for this KB.",
+  embeddingDescription:
+    "use apply knowledge base to evaluate audit analyze a target with a temporary worker agent grounded in the corpus; Wissensdatenbank anwenden auswerten",
+  parameters: {
+    type: "object",
+    properties: {
+      knowledge_base: { type: "string", description: "Knowledge base id or name." },
+      task: { type: "string", description: "What the worker should do, grounded in this KB (include any target URL/subject)." },
+    },
+    required: ["knowledge_base", "task"],
+  },
+  async execute(args, ctx): Promise<ToolResult> {
+    const unavailable = kbUnavailableReason();
+    if (unavailable) return fail(unavailable);
+    const idOrName = String(args["knowledge_base"] ?? "").trim();
+    const task = String(args["task"] ?? "").trim();
+    if (!idOrName) return fail("knowledge_base is required");
+    if (!task) return fail("task is required");
+
+    const { getKnowledgeBase } = await import("../retrieval/knowledge-bases.js");
+    const { isCrawlActive } = await import("../retrieval/kb-crawler.js");
+    const kb = await getKnowledgeBase(idOrName, { isCrawlActive });
+    if (!kb || !callerCanAccessKb(kb, accessCtx(ctx))) return fail(`No knowledge base matches "${idOrName}". Call list_knowledge_bases to see what exists.`);
+    if (Object.keys(kb.pages).length === 0) {
+      return fail(
+        kb.status === "crawling"
+          ? `Knowledge base "${kb.id}" is still crawling and has no indexed pages yet — poll list_knowledge_bases until it is ready.`
+          : `Knowledge base "${kb.id}" has no indexed pages (status: ${kb.status}); crawl it first (manage_knowledge_base action=recrawl).`,
+      );
+    }
+
+    const worker = kb.worker;
+    const requestedTools = worker?.tools?.length ? [...WORKER_ALWAYS_TOOLS, ...worker.tools] : WORKER_DEFAULT_TOOLS;
+    const systemPrompt =
+      (worker?.instructions?.trim() ||
+        `You are a single-use worker for the "${kb.name}" knowledge base. Ground everything you do in that knowledge base: call search_knowledge_base (knowledge_base="${kb.id}") for the relevant material before making claims, and cite the source page URLs it returns. If the task is to evaluate or audit a live target, inspect it with your granted tools (e.g. browser_axe_audit / browser_navigate / web_fetch) and map each concrete finding back to the knowledge base with a cited source URL. Be honest about what you could not verify; never invent findings.`) +
+      `\n\n(Knowledge base id for search_knowledge_base: "${kb.id}".)`;
+
+    const { runEphemeralWorker } = await import("./ephemeral-agent-factory.js");
+    const run = await runEphemeralWorker({
+      agentName: `kb_${kb.id}_worker`,
+      task,
+      context: `Knowledge base: ${kb.name} (id: ${kb.id})${kb.description ? ` — ${kb.description}` : ""}. Pages indexed: ${Object.keys(kb.pages).length}.`,
+      systemPrompt,
+      requestedTools,
+      alwaysGrantTools: WORKER_ALWAYS_TOOLS,
+      ...(worker?.model ? { model: worker.model } : {}),
+      ...(worker?.maxIterations ? { maxIterations: worker.maxIterations } : {}),
+      ...(worker?.timeoutMs ? { timeoutMs: worker.timeoutMs } : {}),
+      // Thread the ORIGINATING session so the worker can reach a session-scoped
+      // KB (its own sub-session id would never match kb.sessionId). Safe: the
+      // caller already passed the access check above, and this only re-grants the
+      // caller's own session scope, never another's.
+      ...(accessCtx(ctx).sessionId ? { kbAccessSessionId: accessCtx(ctx).sessionId } : {}),
+      ctx,
+    });
+    if (!run.success) return fail(`The knowledge-base worker could not run: ${run.output}`);
+
+    const note = run.rejectedTools.length > 0 ? `\n\n[Note: worker tools ${run.rejectedTools.join(", ")} were not grantable and were skipped.]` : "";
+    return {
+      success: true,
+      output: `Worker result (grounded in "${kb.name}"):\n\n${run.output}${note}`,
+      metadata: { kbId: kb.id, grantedTools: run.grantedTools, rejectedTools: run.rejectedTools },
+    };
   },
 });

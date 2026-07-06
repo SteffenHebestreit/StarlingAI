@@ -110,6 +110,15 @@ export interface ToolContext {
    */
   userId?: string;
   /**
+   * Owning conversation session for knowledge-base scope checks, when this run is
+   * an ephemeral KB worker. A sub-agent's `sessionId` is rewritten to a per-run
+   * `sub:<parent>:<agent>:<ts>` id, which never matches a session-scoped KB's
+   * owning session — so use_knowledge_base threads the ORIGINATING session here
+   * and the KB tools' access check prefers it over the derived sessionId. Unset
+   * for normal turns (KB access then uses sessionId as usual).
+   */
+  kbAccessSessionId?: string;
+  /**
    * Workspace visibility zone for this execution. "generated" (sub-agent default)
    * confines file tools to the working zones (generated/ + uploads/) via the
    * request context consulted in workspace-path.ts; "full" / undefined exposes

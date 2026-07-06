@@ -45,6 +45,39 @@ export type KnowledgeBaseStatus = "idle" | "crawling" | "ready" | "failed";
 
 export type CrawlStopReason = "completed" | "maxPages" | "timeout" | "cancelled" | "error";
 
+/**
+ * Visibility scope of a knowledge base — the same three-scope model as documents
+ * and memory (retrieval/document-rag.ts DocumentScope):
+ *   - session:   only the conversation that created it (ephemeral, per-chat)
+ *   - user:      the creating user's personal corpus, across their chats
+ *   - workspace: shared with everyone on the instance (the default)
+ * The engram source token stays `kb:<id>` (unique per KB); isolation is enforced
+ * at the registry-ACL layer (callerCanAccessKb) since every KB search targets
+ * exactly one KB's source and the ambient union only includes accessible KBs.
+ */
+export type KbScope = "session" | "user" | "workspace";
+
+/**
+ * Per-KB "worker" template — the ephemeral agent that knows how to USE this
+ * knowledge base. Managed alongside the knowledge itself (scoped the same way),
+ * so "use this KB for task T" instantiates a single-use temporary agent from
+ * this spec rather than relying on the orchestrator guessing which specialist to
+ * route to. All fields optional; unset falls back to a sensible default worker
+ * (KB retrieval + read-only web/site inspection). `tools` are filtered against
+ * the ephemeral-agent grantable set at instantiation; the KB's own retrieval
+ * tools are always granted regardless.
+ */
+export interface KbWorkerSpec {
+  /** System-prompt instructions for the worker (how to apply this KB to a task). */
+  instructions?: string;
+  /** Extra tools the worker should have (beyond the always-granted KB retrieval tools). */
+  tools?: string[];
+  /** Model hints for the worker run. */
+  model?: { primary?: string; temperature?: number; maxTokens?: number };
+  maxIterations?: number;
+  timeoutMs?: number;
+}
+
 export interface KbCrawlStats {
   startedAt: string;
   finishedAt?: string;
@@ -99,6 +132,15 @@ export interface KnowledgeBaseRecord {
    *  false: KBs are queried explicitly (search_knowledge_base) to keep ambient
    *  turn context lean. */
   ambientRetrieval: boolean;
+  /** Visibility scope (default "workspace" — legacy records written before scoping
+   *  have no field and are treated as workspace). Governs who can see/search/manage it. */
+  scope?: KbScope;
+  /** Owning user (set when scope === "user") — access is restricted to this user. */
+  ownerId?: string;
+  /** Owning session (set when scope === "session") — access is restricted to this conversation. */
+  sessionId?: string;
+  /** The ephemeral agent that works with this KB (see KbWorkerSpec). */
+  worker?: KbWorkerSpec;
   createdBy?: string;
   createdAt: string;
   updatedAt: string;
@@ -118,6 +160,9 @@ export interface KnowledgeBaseSummary {
   seedUrls: string[];
   status: KnowledgeBaseStatus;
   ambientRetrieval: boolean;
+  scope: KbScope;
+  ownerId?: string;
+  hasWorker: boolean;
   pageCount: number;
   chunkCount: number;
   maxPages: number;
@@ -125,6 +170,37 @@ export interface KnowledgeBaseSummary {
   createdAt: string;
   updatedAt: string;
   lastCrawl?: KbCrawlStats;
+}
+
+/** Identity used for KB access control (mirrors documents' callerManageableSources). */
+export interface KbAccessContext {
+  userId?: string;
+  sessionId?: string;
+}
+
+/**
+ * True when the caller may see/search/manage this KB. Workspace KBs are visible
+ * to everyone; user KBs only to their owner; session KBs only to the owning
+ * conversation. In single-user mode (no auth) userId is undefined and user KBs
+ * created without an owner remain visible — matching the documents model where
+ * the flat instance-wide view applies when auth is disabled.
+ */
+export function callerCanAccessKb(kb: Pick<KnowledgeBaseRecord, "scope" | "ownerId" | "sessionId">, ctx: KbAccessContext): boolean {
+  switch (kb.scope ?? "workspace") { // legacy records (no scope) are workspace-shared
+    case "workspace":
+      return true;
+    case "user":
+      return !kb.ownerId || kb.ownerId === ctx.userId;
+    case "session":
+      return !!ctx.sessionId && kb.sessionId === ctx.sessionId;
+    default:
+      return false;
+  }
+}
+
+/** Filter a list of KBs to those the caller may access. */
+export function filterAccessibleKbs<T extends Pick<KnowledgeBaseRecord, "scope" | "ownerId" | "sessionId">>(kbs: T[], ctx: KbAccessContext): T[] {
+  return kbs.filter((kb) => callerCanAccessKb(kb, ctx));
 }
 
 function storePath(): string {
@@ -178,6 +254,9 @@ export function toSummary(kb: KnowledgeBaseRecord): KnowledgeBaseSummary {
     seedUrls: kb.seedUrls,
     status: kb.status,
     ambientRetrieval: kb.ambientRetrieval,
+    scope: kb.scope ?? "workspace",
+    ...(kb.ownerId ? { ownerId: kb.ownerId } : {}),
+    hasWorker: !!kb.worker && (!!kb.worker.instructions || (kb.worker.tools?.length ?? 0) > 0),
     pageCount: pages.length,
     chunkCount: pages.reduce((n, p) => n + (p.chunkCount ?? 0), 0),
     maxPages: kb.maxPages,
@@ -186,6 +265,47 @@ export function toSummary(kb: KnowledgeBaseRecord): KnowledgeBaseSummary {
     updatedAt: kb.updatedAt,
     ...(kb.lastCrawl ? { lastCrawl: kb.lastCrawl } : {}),
   };
+}
+
+const KB_SCOPES: KbScope[] = ["session", "user", "workspace"];
+const MAX_WORKER_TOOLS = 20;
+const MAX_WORKER_INSTRUCTIONS = 8000;
+
+/** Validate + normalize a worker template. Returns undefined for an empty spec. */
+function validateWorker(worker: unknown): KbResult<KbWorkerSpec | undefined> {
+  if (worker === undefined || worker === null) return { ok: true, value: undefined };
+  if (typeof worker !== "object") return { ok: false, error: "worker must be an object" };
+  const w = worker as Record<string, unknown>;
+  const spec: KbWorkerSpec = {};
+  if (w["instructions"] !== undefined) {
+    const instr = String(w["instructions"] ?? "").trim();
+    if (instr.length > MAX_WORKER_INSTRUCTIONS) return { ok: false, error: `worker.instructions exceeds ${MAX_WORKER_INSTRUCTIONS} characters` };
+    if (instr) spec.instructions = instr;
+  }
+  if (w["tools"] !== undefined) {
+    if (!Array.isArray(w["tools"])) return { ok: false, error: "worker.tools must be an array of tool names" };
+    const tools = [...new Set(w["tools"].map((t) => String(t ?? "").trim()).filter(Boolean))];
+    if (tools.length > MAX_WORKER_TOOLS) return { ok: false, error: `worker.tools may have at most ${MAX_WORKER_TOOLS} entries` };
+    if (tools.length) spec.tools = tools;
+  }
+  if (w["maxIterations"] !== undefined) {
+    const n = Number(w["maxIterations"]);
+    if (Number.isFinite(n)) spec.maxIterations = Math.min(10, Math.max(1, Math.trunc(n)));
+  }
+  if (w["timeoutMs"] !== undefined) {
+    const n = Number(w["timeoutMs"]);
+    if (Number.isFinite(n)) spec.timeoutMs = Math.min(600_000, Math.max(60_000, Math.trunc(n)));
+  }
+  if (w["model"] !== undefined && w["model"] !== null) {
+    if (typeof w["model"] !== "object") return { ok: false, error: "worker.model must be an object" };
+    const m = w["model"] as Record<string, unknown>;
+    const model: KbWorkerSpec["model"] = {};
+    if (typeof m["primary"] === "string" && m["primary"].trim()) model.primary = m["primary"].trim();
+    if (typeof m["temperature"] === "number") model.temperature = m["temperature"];
+    if (typeof m["maxTokens"] === "number") model.maxTokens = m["maxTokens"];
+    if (Object.keys(model).length) spec.model = model;
+  }
+  return { ok: true, value: Object.keys(spec).length ? spec : undefined };
 }
 
 const ID_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
@@ -214,6 +334,14 @@ export interface CreateKnowledgeBaseInput {
   sameOriginOnly?: boolean;
   respectRobots?: boolean;
   ambientRetrieval?: boolean;
+  /** Visibility scope (default "workspace"). session requires sessionId; user requires ownerId. */
+  scope?: KbScope;
+  /** Owner identity, used to stamp ownership for user-scoped KBs (and attribution). */
+  ownerId?: string;
+  /** Session identity, used to stamp ownership for session-scoped KBs. */
+  sessionId?: string;
+  /** Per-KB worker template. */
+  worker?: KbWorkerSpec;
   createdBy?: string;
 }
 
@@ -290,6 +418,13 @@ export async function createKnowledgeBase(input: CreateKnowledgeBaseInput): Prom
     return { ok: false, error: "sameOriginOnly=false requires non-empty includePatterns — otherwise the crawl frontier is unbounded" };
   }
 
+  const worker = validateWorker(input.worker);
+  if (!worker.ok) return worker;
+
+  const scope: KbScope = input.scope && KB_SCOPES.includes(input.scope) ? input.scope : "workspace";
+  if (scope === "session" && !input.sessionId) return { ok: false, error: "session-scoped knowledge bases require a sessionId" };
+  if (scope === "user" && !input.ownerId) return { ok: false, error: "user-scoped knowledge bases require an authenticated user (ownerId)" };
+
   const now = new Date().toISOString();
   const record: KnowledgeBaseRecord = {
     id,
@@ -303,6 +438,10 @@ export async function createKnowledgeBase(input: CreateKnowledgeBaseInput): Prom
     sameOriginOnly,
     respectRobots: input.respectRobots !== false,
     ambientRetrieval: input.ambientRetrieval === true,
+    scope,
+    ...(scope === "user" && input.ownerId ? { ownerId: input.ownerId } : {}),
+    ...(scope === "session" && input.sessionId ? { sessionId: input.sessionId } : {}),
+    ...(worker.value ? { worker: worker.value } : {}),
     ...(input.createdBy ? { createdBy: input.createdBy } : {}),
     createdAt: now,
     updatedAt: now,
@@ -371,6 +510,12 @@ export interface UpdateKnowledgeBaseInput {
   sameOriginOnly?: boolean;
   respectRobots?: boolean;
   ambientRetrieval?: boolean;
+  /** Change visibility scope. session→needs sessionId; user→needs ownerId (passed alongside). */
+  scope?: KbScope;
+  ownerId?: string;
+  sessionId?: string;
+  /** Replace the worker template (null clears it). */
+  worker?: KbWorkerSpec | null;
 }
 
 export async function updateKnowledgeBase(id: string, patch: UpdateKnowledgeBaseInput): Promise<KbResult<KnowledgeBaseRecord>> {
@@ -412,6 +557,30 @@ export async function updateKnowledgeBase(id: string, patch: UpdateKnowledgeBase
     if (patch.sameOriginOnly !== undefined) kb.sameOriginOnly = patch.sameOriginOnly;
     if (patch.respectRobots !== undefined) kb.respectRobots = patch.respectRobots;
     if (patch.ambientRetrieval !== undefined) kb.ambientRetrieval = patch.ambientRetrieval;
+    if (patch.worker !== undefined) {
+      if (patch.worker === null) delete kb.worker;
+      else {
+        const worker = validateWorker(patch.worker);
+        if (!worker.ok) return worker;
+        if (worker.value) kb.worker = worker.value;
+        else delete kb.worker;
+      }
+    }
+    if (patch.scope !== undefined) {
+      if (!KB_SCOPES.includes(patch.scope)) return { ok: false as const, error: `scope must be one of ${KB_SCOPES.join(", ")}` };
+      // Re-stamp ownership for the new scope; clear the stamps that no longer apply.
+      if (patch.scope === "session") {
+        const sid = patch.sessionId ?? kb.sessionId;
+        if (!sid) return { ok: false as const, error: "session scope requires a sessionId" };
+        kb.scope = "session"; kb.sessionId = sid; delete kb.ownerId;
+      } else if (patch.scope === "user") {
+        const oid = patch.ownerId ?? kb.ownerId;
+        if (!oid) return { ok: false as const, error: "user scope requires an ownerId" };
+        kb.scope = "user"; kb.ownerId = oid; delete kb.sessionId;
+      } else {
+        kb.scope = "workspace"; delete kb.ownerId; delete kb.sessionId;
+      }
+    }
 
     if (!kb.sameOriginOnly && !kb.includePatterns?.length) {
       return { ok: false as const, error: "sameOriginOnly=false requires non-empty includePatterns" };
@@ -453,23 +622,36 @@ export async function removeKnowledgeBaseRecord(id: string): Promise<KnowledgeBa
 }
 
 // Ambient-source cache: retrieval-path reads happen per turn, so keep a
-// short-TTL snapshot of the ready+ambient KB source tokens instead of
-// re-reading the manifest file on every turn. Busted on every local write
-// (inside writeStore); the TTL covers writes from OTHER processes.
+// short-TTL snapshot of the ready+ambient KB descriptors instead of re-reading
+// the manifest file on every turn. Descriptors (not just source tokens) are
+// cached because the per-turn access filter (scope/owner/session) is applied
+// per CALL — two callers in the same TTL window can see different in-scope KBs.
+// Busted on every local write (inside writeStore); the TTL covers writes from
+// OTHER processes.
+interface AmbientKbDescriptor { id: string; scope: KbScope; ownerId?: string; sessionId?: string }
 const AMBIENT_TTL_MS = 5_000;
-let _ambientCache: { storedAt: number; sources: string[] } | null = null;
+let _ambientCache: { storedAt: number; descriptors: AmbientKbDescriptor[] } | null = null;
 
 export function invalidateAmbientKbCache(): void {
   _ambientCache = null;
 }
 
-/** Source tokens of KBs opted into ambient per-turn retrieval (status ready). */
-export async function ambientKbSources(): Promise<string[]> {
+/**
+ * Source tokens of KBs opted into ambient per-turn retrieval (status ready)
+ * that THIS caller may access. Workspace ambient KBs join every turn; a user's
+ * ambient KB only joins their own turns; a session's ambient KB only that
+ * conversation's turns.
+ */
+export async function ambientKbSources(ctx: KbAccessContext = {}): Promise<string[]> {
   const kbCfg = getConfig().retrieval.knowledgeBases;
   if (!kbCfg.enabled) return [];
-  if (_ambientCache && Date.now() - _ambientCache.storedAt <= AMBIENT_TTL_MS) return _ambientCache.sources;
-  const kbs = await readStore();
-  const sources = kbs.filter((k) => k.ambientRetrieval && k.status === "ready").map((k) => kbSource(k.id));
-  _ambientCache = { storedAt: Date.now(), sources };
-  return sources;
+  let descriptors = _ambientCache && Date.now() - _ambientCache.storedAt <= AMBIENT_TTL_MS ? _ambientCache.descriptors : null;
+  if (!descriptors) {
+    const kbs = await readStore();
+    descriptors = kbs
+      .filter((k) => k.ambientRetrieval && k.status === "ready")
+      .map((k) => ({ id: k.id, scope: k.scope ?? "workspace", ...(k.ownerId ? { ownerId: k.ownerId } : {}), ...(k.sessionId ? { sessionId: k.sessionId } : {}) }));
+    _ambientCache = { storedAt: Date.now(), descriptors };
+  }
+  return descriptors.filter((d) => callerCanAccessKb(d, ctx)).map((d) => kbSource(d.id));
 }

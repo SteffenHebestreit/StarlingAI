@@ -654,6 +654,12 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  use_knowledge_base: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Run a knowledge base's single-use worker agent on a task, grounded in that KB (may inspect live targets and write outputs)",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
   graph_upsert_entity: {
     tier: ToolTier.ONE_WRITE,
     description: "Create or update a node in the MemGraph knowledge graph",

@@ -1,8 +1,19 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import * as loaderModule from "../config/loader.js";
 import * as engram from "../retrieval/engram.js";
 import { searchKnowledgeBase } from "../retrieval/document-rag.js";
-import { kbDocumentId, type KnowledgeBaseRecord } from "../retrieval/knowledge-bases.js";
+import {
+  kbDocumentId,
+  ambientKbSources,
+  invalidateAmbientKbCache,
+  createKnowledgeBase,
+  mutateKnowledgeBase,
+  kbSource,
+  type KnowledgeBaseRecord,
+} from "../retrieval/knowledge-bases.js";
 
 // searchKnowledgeBase — KB-scoped retrieval with engram mocked, mirroring
 // document-rag.test.ts's config + engram spy approach.
@@ -184,5 +195,76 @@ describe("searchKnowledgeBase", () => {
     expect(outcome.lowConfidence).toBe(true);
     expect(outcome.chunks).toHaveLength(1); // chunks still returned
     expect(outcome.retrievalFailed).toBe(false);
+  });
+});
+
+// ── ambientKbSources — the per-turn [DOCUMENT CONTEXT] union, scope-filtered ──
+// Runs over a real temp-workspace registry (the manifest, not engram): the
+// per-caller access filter is applied to a short-TTL descriptor snapshot, so the
+// SAME snapshot yields different in-scope sets for different callers. The module
+// cache must be invalidated per test (it persists across temp workspaces).
+
+describe("ambientKbSources — scope filtering", () => {
+  let workspacePath: string;
+
+  beforeEach(() => {
+    workspacePath = mkdtempSync(join(tmpdir(), "starlingai-kb-ambient-"));
+    const realConfig = loaderModule.getConfig();
+    vi.spyOn(loaderModule, "getConfig").mockReturnValue({
+      ...realConfig,
+      workspacePath,
+      retrieval: {
+        ...realConfig.retrieval,
+        knowledgeBases: { ...realConfig.retrieval.knowledgeBases, enabled: true },
+      },
+    } as typeof realConfig);
+    invalidateAmbientKbCache(); // module-level snapshot must not leak across temp workspaces
+  });
+
+  afterEach(() => {
+    rmSync(workspacePath, { recursive: true, force: true });
+  });
+
+  /** Create a KB and mark it ready (ambient eligibility needs status "ready"). */
+  async function ready(input: Parameters<typeof createKnowledgeBase>[0]): Promise<string> {
+    const res = await createKnowledgeBase(input);
+    if (!res.ok) throw new Error(res.error);
+    await mutateKnowledgeBase(res.value.id, (r) => { r.status = "ready"; });
+    return res.value.id;
+  }
+
+  it("returns only ready + ambient + accessible KBs, filtered per caller from one snapshot", async () => {
+    const wsId = await ready({ name: "WS Ambient", seedUrls: ["https://example.com/a"], ambientRetrieval: true });
+    const userId = await ready({ name: "User Ambient", seedUrls: ["https://example.com/b"], ambientRetrieval: true, scope: "user", ownerId: "u1" });
+    const sessId = await ready({ name: "Session Ambient", seedUrls: ["https://example.com/c"], ambientRetrieval: true, scope: "session", sessionId: "s1" });
+    // ready but ambient OFF — never joins the union
+    await ready({ name: "WS Explicit", seedUrls: ["https://example.com/d"], ambientRetrieval: false });
+    // ambient ON but NOT ready — excluded
+    const notReady = await createKnowledgeBase({ name: "Crawling Ambient", seedUrls: ["https://example.com/e"], ambientRetrieval: true });
+    expect(notReady.ok).toBe(true);
+
+    // Owner of the user KB, inside its session → sees all three ambient-ready KBs.
+    expect((await ambientKbSources({ userId: "u1", sessionId: "s1" })).sort())
+      .toEqual([kbSource(wsId), kbSource(userId), kbSource(sessId)].sort());
+
+    // Same cached descriptor snapshot, different caller → different in-scope set.
+    expect((await ambientKbSources({ userId: "u1" })).sort())
+      .toEqual([kbSource(wsId), kbSource(userId)].sort()); // no session → session KB drops
+
+    expect(await ambientKbSources({ userId: "u2", sessionId: "s2" }))
+      .toEqual([kbSource(wsId)]); // foreign user + foreign session → workspace only
+
+    expect(await ambientKbSources({})).toEqual([kbSource(wsId)]); // anonymous → workspace only
+  });
+
+  it("a user-scoped ambient KB still needs to be ready, and only its owner ever sees it", async () => {
+    const created = await createKnowledgeBase({ name: "User Not Ready", seedUrls: ["https://example.com/x"], ambientRetrieval: true, scope: "user", ownerId: "u1" });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    // idle → not ambient-eligible yet, even for the owner
+    expect(await ambientKbSources({ userId: "u1" })).toEqual([]);
+    await mutateKnowledgeBase(created.value.id, (r) => { r.status = "ready"; });
+    expect(await ambientKbSources({ userId: "u1" })).toEqual([kbSource(created.value.id)]);
+    expect(await ambientKbSources({ userId: "u2" })).toEqual([]); // owner-only, even when ready
   });
 });

@@ -880,6 +880,8 @@ const SUB_AGENT_PER_TOOL_CAPS: Partial<Record<string, number>> = {
   list_knowledge_bases: 4,
   create_knowledge_base: 2,
   manage_knowledge_base: 3,
+  use_knowledge_base: 3, // spawns a worker sub-agent — keep it delegate-tight
+
   search_workflows: 2,
   search_agents: 2,
   list_agents: 2,
@@ -1445,6 +1447,10 @@ export interface SubAgentRunOptions {
   /** Authenticated user that owns the parent turn — propagated so sub-agents
    * enforce the same per-user resource access (mail, credentials, compute). */
   userId?: string;
+  /** Owning conversation session for KB scope checks (ephemeral KB workers only) —
+   * propagated onto the sub-agent's ToolContext so its KB access resolves against
+   * the originating session rather than its rewritten per-run sub-session id. */
+  kbAccessSessionId?: string;
   allowedAgents?: string[];
   signal?: AbortSignal;
   approvalCallback?: (toolName: string, args: Record<string, unknown>) => Promise<boolean>;
@@ -1923,6 +1929,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // to the whole workspace via workspaceAccess:"full" in their agent config.
       workspaceScope: agentCfg.workspaceAccess === "full" ? "full" : "generated",
       userId: opts.userId,
+      ...(opts.kbAccessSessionId ? { kbAccessSessionId: opts.kbAccessSessionId } : {}),
       currentAgentName: opts.agentName,
       allowedAgents: opts.allowedAgents,
       allowedTools: effectiveToolNames,

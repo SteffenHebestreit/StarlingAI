@@ -313,6 +313,121 @@ function maybePromoteEphemeral(
  * Returns null if the LLM call or spec validation fails so the caller can
  * handle the hard-failure case gracefully.
  */
+/** Partition a requested tool list into the grantable ones and the rejected ones. */
+export function partitionGrantableTools(names: string[]): { tools: string[]; rejected: string[] } {
+  const seen = new Set<string>();
+  const tools: string[] = [];
+  const rejected: string[] = [];
+  for (const n of names) {
+    const name = String(n ?? "").trim();
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    if (GRANTABLE_TOOLS.has(name)) tools.push(name);
+    else rejected.push(name);
+  }
+  return { tools, rejected };
+}
+
+/**
+ * Instantiate and run a single-use ephemeral "worker" agent from an explicit
+ * spec (used by use_knowledge_base to run a KB's per-KB worker template — no LLM
+ * architect step, no routing). Requested tools are filtered to the grantable
+ * set; `alwaysGrantTools` are unioned in first so the caller can guarantee core
+ * tools (e.g. a KB's retrieval tools). Runs in-process (container disabled) so
+ * gateway-bound tools (Playwright, web, KB retrieval) resolve. Returns the run
+ * result; never throws for a normal agent failure.
+ */
+export async function runEphemeralWorker(input: {
+  agentName: string;
+  task: string;
+  context?: string;
+  systemPrompt: string;
+  requestedTools: string[];
+  alwaysGrantTools?: string[];
+  model?: { primary?: string; temperature?: number; maxTokens?: number };
+  maxIterations?: number;
+  timeoutMs?: number;
+  /** Owning conversation session for KB scope checks — threaded onto the worker's
+   * ToolContext so a session-scoped KB is reachable from inside the worker (whose
+   * own sessionId is a rewritten per-run sub-session id). */
+  kbAccessSessionId?: string;
+  ctx: ToolContext;
+}): Promise<{ success: boolean; output: string; grantedTools: string[]; rejectedTools: string[] }> {
+  const requested = [...(input.alwaysGrantTools ?? []), ...input.requestedTools];
+  const { tools, rejected } = partitionGrantableTools(requested);
+  if (tools.length === 0) {
+    return { success: false, output: "the worker has no grantable tools", grantedTools: [], rejectedTools: rejected };
+  }
+
+  const agentName = `ephemeral:${String(input.agentName || "kb_worker").trim().replace(/\W+/g, "_").slice(0, 64)}`;
+  const maxIter = Math.min(10, Math.max(1, input.maxIterations ?? 6));
+  const resolvedTimeoutMs = input.timeoutMs !== undefined ? Math.min(600_000, Math.max(60_000, input.timeoutMs)) : undefined;
+
+  // Validate model.primary against configured models (reject hallucinated ids).
+  let modelPrimary: string | undefined;
+  if (input.model?.primary) {
+    const cfg = getConfig();
+    const configured = new Set<string>([cfg.agents.defaults.model.primary]);
+    if (cfg.agents.defaults.model.fallback) configured.add(cfg.agents.defaults.model.fallback);
+    for (const a of Object.values(cfg.subAgents)) {
+      if (a.model?.primary) configured.add(a.model.primary);
+      if (a.model?.fallback) configured.add(a.model.fallback);
+    }
+    if (configured.has(input.model.primary)) modelPrimary = input.model.primary;
+  }
+  const hasModel = modelPrimary || input.model?.temperature !== undefined || input.model?.maxTokens !== undefined;
+
+  const inlineConfig = {
+    description: input.agentName,
+    capabilities: [],
+    tags: [],
+    systemPrompt: input.systemPrompt,
+    tools,
+    maxIterations: maxIter,
+    model: hasModel ? {
+      ...(modelPrimary ? { primary: modelPrimary } : {}),
+      ...(input.model?.temperature !== undefined ? { temperature: input.model.temperature } : {}),
+      ...(input.model?.maxTokens !== undefined ? { maxTokens: input.model.maxTokens } : {}),
+    } : undefined,
+    ...(resolvedTimeoutMs !== undefined ? { turnTimeoutMs: resolvedTimeoutMs } : {}),
+    container: { disabled: true, enabled: false, image: "starlingai/agent-worker:dev", memoryMb: 512, cpus: 0.5, timeoutMs: 60_000 },
+  };
+
+  let runResult;
+  try {
+    runResult = await runSubAgentWithStats({
+      agentName,
+      task: input.task,
+      ...(input.context ? { context: input.context } : {}),
+      parentSessionId: input.ctx.sessionId,
+      workspacePath: input.ctx.workspacePath,
+      ...(input.ctx.userId ? { userId: input.ctx.userId } : {}),
+      ...(input.kbAccessSessionId ? { kbAccessSessionId: input.kbAccessSessionId } : {}),
+      ...(input.ctx.signal ? { signal: input.ctx.signal } : {}),
+      ...(input.ctx.approvalCallback ? { approvalCallback: input.ctx.approvalCallback } : {}),
+      ...(input.ctx.humanInLoopSteps ? { humanInLoopSteps: input.ctx.humanInLoopSteps } : {}),
+      inlineConfig,
+      ...(input.ctx._workflowExecutionStack ? { _workflowExecutionStack: input.ctx._workflowExecutionStack } : {}),
+    });
+  } catch (err) {
+    return { success: false, output: `worker run error: ${err instanceof Error ? err.message : String(err)}`, grantedTools: tools, rejectedTools: rejected };
+  }
+
+  // Derive success from the run outcome instead of hardcoding true, mirroring
+  // runArchitectFallback — otherwise a worker that errors, times out, hits the
+  // iteration cap, or returns nothing is mislabeled as a grounded success (the
+  // caller's `if (!success)` guard would be dead code).
+  const out = (runResult.output ?? "").trim();
+  const terminalState = runResult.stats?.terminalState;
+  const outcome = runResult.stats?.outcome;
+  const success =
+    out.length > 0 &&
+    outcome !== "failure" &&
+    (terminalState === undefined || terminalState === "completed" || (terminalState === "max_iterations" && !looksLikeFailureResult(out)));
+
+  return { success, output: out || "the worker produced no output", grantedTools: tools, rejectedTools: rejected };
+}
+
 export async function runArchitectFallback(task: string, ctx: ToolContext): Promise<ToolResult | null> {
   const config = getConfig();
   const settings = getEphemeralGenerationSettings();

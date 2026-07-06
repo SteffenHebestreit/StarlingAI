@@ -193,25 +193,92 @@ registerTool({
   },
 });
 
+function tryJsonObject(text: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(text);
+    return parsed && typeof parsed === "object" ? parsed as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Extract the first balanced JSON object/array from arbitrary text, honoring
+ * string literals and escapes so braces inside strings don't miscount. Returns
+ * the substring (unparsed) or null.
+ */
+function extractBalancedJson(text: string): string | null {
+  const start = text.search(/[{[]/);
+  if (start < 0) return null;
+  const open = text[start]!;
+  const close = open === "{" ? "}" : "]";
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i]!;
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === "\\") esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') inStr = true;
+    else if (ch === open) depth++;
+    else if (ch === close) {
+      depth--;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
+/**
+ * Parse the JSON return value out of a Playwright MCP browser_evaluate response.
+ * Modern @playwright/mcp echoes the executed code in a ```js fence and then
+ * prints the return value after a "Result" marker (older builds returned bare
+ * JSON or a ```json fence or a quoted string). Try, in order: the whole thing,
+ * an explicit ```json fence, the value after a Result marker, the text with all
+ * code fences stripped, and finally a balanced-JSON extraction from each — so
+ * the echoed function body's own braces never get parsed as the result.
+ */
 function parsePlaywrightJson(raw: string): Record<string, unknown> | null {
   const trimmed = raw.trim();
   if (!trimmed) return null;
-  // Playwright MCP sometimes wraps the evaluate result in backtick fences or
-  // quoted JSON strings. Strip common wrappers before parsing.
-  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]+?)\s*```/);
-  const candidate = fenced ? fenced[1]! : trimmed;
-  try {
-    return JSON.parse(candidate);
-  } catch {
-    // ignore
+
+  const candidates: string[] = [trimmed];
+
+  const jsonFence = trimmed.match(/```json\s*([\s\S]+?)\s*```/i);
+  if (jsonFence?.[1]) candidates.push(jsonFence[1]);
+
+  // Content after a "Result" / "### Result" / "- Result:" marker.
+  const resultMatch = trimmed.match(/(?:^|\n)[#\-\s]*result\s*:?\s*\n?([\s\S]+)$/i);
+  if (resultMatch?.[1]) {
+    candidates.push(resultMatch[1]);
+    const innerFence = resultMatch[1].match(/```(?:json)?\s*([\s\S]+?)\s*```/);
+    if (innerFence?.[1]) candidates.push(innerFence[1]);
   }
-  const quoted = candidate.match(/^\s*"(.+)"\s*$/s);
-  if (quoted) {
-    try {
-      return JSON.parse(quoted[1]!.replace(/\\"/g, '"').replace(/\\n/g, "\n"));
-    } catch {
-      // fallthrough
+
+  // Text with all fenced code blocks removed (drops the echoed js function).
+  candidates.push(trimmed.replace(/```[\s\S]*?```/g, " "));
+
+  for (const c of candidates) {
+    const s = c.trim();
+    if (!s) continue;
+    const direct = tryJsonObject(s);
+    if (direct) return direct;
+    const extracted = extractBalancedJson(s);
+    if (extracted) {
+      const parsed = tryJsonObject(extracted);
+      if (parsed) return parsed;
     }
+  }
+
+  // Legacy: whole response is a quoted JSON string.
+  const quoted = trimmed.match(/^\s*"(.+)"\s*$/s);
+  if (quoted?.[1]) {
+    const unescaped = tryJsonObject(quoted[1].replace(/\\"/g, '"').replace(/\\n/g, "\n"));
+    if (unescaped) return unescaped;
   }
   return null;
 }

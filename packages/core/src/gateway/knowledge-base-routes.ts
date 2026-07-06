@@ -9,7 +9,7 @@
  * the background — POST returns immediately and the UI polls GET for the
  * progress persisted in the KB record.
  */
-import type { Hono } from "hono";
+import type { Hono, Context } from "hono";
 import { verifyToken, extractBearerToken, authenticatedUser } from "./auth.js";
 import { registerRoutePolicies } from "./route-policies.js";
 import { getConfig } from "../config/loader.js";
@@ -28,15 +28,24 @@ export function registerKnowledgeBaseRoutes(app: Hono): void {
     return Boolean(token && await verifyToken(token));
   };
 
+  // Caller identity for KB scope access control. In multi-user mode the username
+  // owns user-scoped KBs; sessionId (query param) owns session-scoped KBs.
+  const kbAccessCtx = async (c: Context): Promise<{ userId?: string; sessionId?: string }> => {
+    const user = await authenticatedUser(c.req.header("Authorization"));
+    const sessionId = c.req.query("sessionId");
+    return { ...(user?.username ? { userId: user.username } : {}), ...(sessionId ? { sessionId } : {}) };
+  };
+
   app.get("/api/knowledge-bases", async (c) => {
     if (!await authorized(c.req.header("Authorization"))) return c.json({ error: "Unauthorized" }, 401);
     try {
-      const [{ listKnowledgeBases, toSummary }, { isCrawlActive }, { engramConfigured }] = await Promise.all([
+      const [{ listKnowledgeBases, toSummary, filterAccessibleKbs }, { isCrawlActive }, { engramConfigured }] = await Promise.all([
         import("../retrieval/knowledge-bases.js"),
         import("../retrieval/kb-crawler.js"),
         import("../retrieval/engram.js"),
       ]);
-      const kbs = await listKnowledgeBases({ isCrawlActive });
+      const who = await kbAccessCtx(c);
+      const kbs = filterAccessibleKbs(await listKnowledgeBases({ isCrawlActive }), who);
       return c.json({
         knowledgeBases: kbs.map(toSummary),
         enabled: getConfig().retrieval.knowledgeBases.enabled,
@@ -50,12 +59,12 @@ export function registerKnowledgeBaseRoutes(app: Hono): void {
   app.get("/api/knowledge-bases/:id", async (c) => {
     if (!await authorized(c.req.header("Authorization"))) return c.json({ error: "Unauthorized" }, 401);
     try {
-      const [{ getKnowledgeBase, toSummary }, { isCrawlActive }] = await Promise.all([
+      const [{ getKnowledgeBase, toSummary, callerCanAccessKb }, { isCrawlActive }] = await Promise.all([
         import("../retrieval/knowledge-bases.js"),
         import("../retrieval/kb-crawler.js"),
       ]);
       const kb = await getKnowledgeBase(c.req.param("id"), { isCrawlActive });
-      if (!kb) return c.json({ error: "Knowledge base not found" }, 404);
+      if (!kb || !callerCanAccessKb(kb, await kbAccessCtx(c))) return c.json({ error: "Knowledge base not found" }, 404);
       const pages = Object.values(kb.pages)
         .sort((a, b) => (a.url < b.url ? -1 : 1))
         .slice(0, 1000)
@@ -68,6 +77,7 @@ export function registerKnowledgeBaseRoutes(app: Hono): void {
           sameOriginOnly: kb.sameOriginOnly,
           respectRobots: kb.respectRobots,
           createdBy: kb.createdBy ?? null,
+          worker: kb.worker ?? null,
         },
         pages,
         pagesTruncated: Object.keys(kb.pages).length > 1000,
@@ -87,6 +97,8 @@ export function registerKnowledgeBaseRoutes(app: Hono): void {
         import("../retrieval/knowledge-bases.js"),
         import("../retrieval/kb-crawler.js"),
       ]);
+      const scope = ["session", "user", "workspace"].includes(String(body["scope"] ?? "")) ? String(body["scope"]) as "session" | "user" | "workspace" : undefined;
+      const sessionId = typeof body["sessionId"] === "string" ? body["sessionId"] : undefined;
       const created = await createKnowledgeBase({
         name: String(body["name"] ?? ""),
         seedUrls: Array.isArray(body["seedUrls"]) ? (body["seedUrls"] as string[]) : [],
@@ -99,6 +111,10 @@ export function registerKnowledgeBaseRoutes(app: Hono): void {
         ...(typeof body["sameOriginOnly"] === "boolean" ? { sameOriginOnly: body["sameOriginOnly"] } : {}),
         ...(typeof body["respectRobots"] === "boolean" ? { respectRobots: body["respectRobots"] } : {}),
         ...(typeof body["ambientRetrieval"] === "boolean" ? { ambientRetrieval: body["ambientRetrieval"] } : {}),
+        ...(scope ? { scope } : {}),
+        ...(user?.username ? { ownerId: user.username } : {}),
+        ...(sessionId ? { sessionId } : {}),
+        ...(body["worker"] !== undefined ? { worker: body["worker"] as never } : {}),
         ...(user?.username ? { createdBy: user.username } : {}),
       });
       if (!created.ok) return c.json({ error: created.error }, 400);
@@ -118,9 +134,13 @@ export function registerKnowledgeBaseRoutes(app: Hono): void {
 
   app.patch("/api/knowledge-bases/:id", async (c) => {
     if (!await authorized(c.req.header("Authorization"))) return c.json({ error: "Unauthorized" }, 401);
+    const user = await authenticatedUser(c.req.header("Authorization"));
     try {
       const body = await c.req.json<Record<string, unknown>>();
-      const { updateKnowledgeBase } = await import("../retrieval/knowledge-bases.js");
+      const { updateKnowledgeBase, getKnowledgeBase, callerCanAccessKb, toSummary } = await import("../retrieval/knowledge-bases.js");
+      const existing = await getKnowledgeBase(c.req.param("id"));
+      if (!existing || !callerCanAccessKb(existing, await kbAccessCtx(c))) return c.json({ error: "Knowledge base not found" }, 404);
+      const scope = ["session", "user", "workspace"].includes(String(body["scope"] ?? "")) ? String(body["scope"]) as "session" | "user" | "workspace" : undefined;
       const updated = await updateKnowledgeBase(c.req.param("id"), {
         ...(body["name"] !== undefined ? { name: String(body["name"]) } : {}),
         ...(body["description"] !== undefined ? { description: String(body["description"]) } : {}),
@@ -132,18 +152,31 @@ export function registerKnowledgeBaseRoutes(app: Hono): void {
         ...(typeof body["sameOriginOnly"] === "boolean" ? { sameOriginOnly: body["sameOriginOnly"] } : {}),
         ...(typeof body["respectRobots"] === "boolean" ? { respectRobots: body["respectRobots"] } : {}),
         ...(typeof body["ambientRetrieval"] === "boolean" ? { ambientRetrieval: body["ambientRetrieval"] } : {}),
+        ...(scope ? { scope } : {}),
+        ...(user?.username ? { ownerId: user.username } : {}),
+        ...(typeof body["sessionId"] === "string" ? { sessionId: body["sessionId"] } : {}),
+        ...(body["worker"] !== undefined ? { worker: (body["worker"] as never) } : {}),
       });
       if (!updated.ok) return c.json({ error: updated.error }, updated.error.includes("not found") ? 404 : 400);
-      const { toSummary } = await import("../retrieval/knowledge-bases.js");
       return c.json({ knowledgeBase: toSummary(updated.value) });
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
     }
   });
 
+  // Access-gate a lifecycle action (crawl/cancel/delete) on an owned/visible KB.
+  const requireAccess = async (c: Context): Promise<boolean> => {
+    const id = c.req.param("id");
+    if (!id) return false;
+    const { getKnowledgeBase, callerCanAccessKb } = await import("../retrieval/knowledge-bases.js");
+    const kb = await getKnowledgeBase(id);
+    return !!kb && callerCanAccessKb(kb, await kbAccessCtx(c));
+  };
+
   app.post("/api/knowledge-bases/:id/crawl", async (c) => {
     if (!await authorized(c.req.header("Authorization"))) return c.json({ error: "Unauthorized" }, 401);
     try {
+      if (!await requireAccess(c)) return c.json({ error: "Knowledge base not found" }, 404);
       const { startKbCrawl } = await import("../retrieval/kb-crawler.js");
       const started = await startKbCrawl(c.req.param("id"));
       return started.ok
@@ -157,6 +190,7 @@ export function registerKnowledgeBaseRoutes(app: Hono): void {
   app.post("/api/knowledge-bases/:id/cancel", async (c) => {
     if (!await authorized(c.req.header("Authorization"))) return c.json({ error: "Unauthorized" }, 401);
     try {
+      if (!await requireAccess(c)) return c.json({ error: "Knowledge base not found" }, 404);
       const { cancelKbCrawl } = await import("../retrieval/kb-crawler.js");
       const cancelled = await cancelKbCrawl(c.req.param("id"));
       return cancelled
@@ -170,6 +204,7 @@ export function registerKnowledgeBaseRoutes(app: Hono): void {
   app.delete("/api/knowledge-bases/:id", async (c) => {
     if (!await authorized(c.req.header("Authorization"))) return c.json({ error: "Unauthorized" }, 401);
     try {
+      if (!await requireAccess(c)) return c.json({ error: "Knowledge base not found" }, 404);
       const { deleteKnowledgeBase } = await import("../retrieval/kb-crawler.js");
       const result = await deleteKnowledgeBase(c.req.param("id"));
       if (!result.ok) return c.json({ error: result.error }, 404);

@@ -384,15 +384,17 @@ The audit-only Markdown export is the lighter-weight companion. It keeps the ses
 
 Named corpora crawled from documentation sites into the engram document store, then queried by agents with citations — see [Knowledge Bases](knowledge-bases.md) for the crawler, storage, and retrieval model. All routes require a Bearer token; the mutating routes (`POST`, `PATCH`, `DELETE`) are **operator-only** via the route policy. Crawls run in the background — the create/crawl routes return immediately and clients poll `GET` for the progress persisted in the KB record.
 
+Each KB has a **visibility scope** (`workspace` default, or `user`/`session` — see [Scope](knowledge-bases.md#scope)). The list and every `:id` route are **access-filtered** to the caller: workspace KBs are visible to all, user KBs to their owner (`ownerId`, taken from the token), and session KBs to the conversation that presents the owning `sessionId`. Pass `?sessionId=<id>` as a query param on the list/detail/lifecycle routes to act on session-scoped KBs. A KB the caller cannot access returns `404` (the same shape as a missing one — no existence disclosure).
+
 | Method | Path | Notes |
 | --- | --- | --- |
-| `GET` | `/api/knowledge-bases` | `{ knowledgeBases: [summary], enabled, ragConfigured }` |
-| `POST` | `/api/knowledge-bases` | create (and by default start crawling) a KB → `201` |
-| `GET` | `/api/knowledge-bases/:id` | detail + page list (≤1000, URL-sorted) + live `crawling` flag |
-| `PATCH` | `/api/knowledge-bases/:id` | update any create field except `id` → `{ knowledgeBase }` |
-| `POST` | `/api/knowledge-bases/:id/crawl` | start a (re-)crawl → `{ id, crawlStarted: true }`; `409` if one is already running or the concurrent-crawl limit is hit |
-| `POST` | `/api/knowledge-bases/:id/cancel` | request cooperative cancellation → `{ id, cancelRequested: true }`; `409` when no crawl is running |
-| `DELETE` | `/api/knowledge-bases/:id` | delete the KB and its engram documents → `{ id, removed: true, documentsRemoved, documentsFailed }` |
+| `GET` | `/api/knowledge-bases` | accessible KBs → `{ knowledgeBases: [summary], enabled, ragConfigured }`; `?sessionId=` includes session KBs |
+| `POST` | `/api/knowledge-bases` | create (and by default start crawling) a KB → `201`; body may set `scope`/`sessionId`/`worker` (`ownerId` comes from the token) |
+| `GET` | `/api/knowledge-bases/:id` | detail (incl. `scope`/`ownerId`/`hasWorker`/`worker`) + page list (≤1000, URL-sorted) + live `crawling` flag; `404` when not accessible |
+| `PATCH` | `/api/knowledge-bases/:id` | update any create field except `id` (incl. `scope`/`sessionId`/`worker`) → `{ knowledgeBase }`; `404` when not accessible |
+| `POST` | `/api/knowledge-bases/:id/crawl` | start a (re-)crawl → `{ id, crawlStarted: true }`; `409` if one is already running or the concurrent-crawl limit is hit; `404` when not accessible |
+| `POST` | `/api/knowledge-bases/:id/cancel` | request cooperative cancellation → `{ id, cancelRequested: true }`; `409` when no crawl is running; `404` when not accessible |
+| `DELETE` | `/api/knowledge-bases/:id` | delete the KB and its engram documents → `{ id, removed: true, documentsRemoved, documentsFailed }`; `404` when not accessible |
 
 `POST /api/knowledge-bases` accepts:
 
@@ -409,13 +411,22 @@ Named corpora crawled from documentation sites into the engram document store, t
   "sameOriginOnly": true,
   "respectRobots": true,
   "ambientRetrieval": false,
+  "scope": "workspace",
+  "sessionId": "required only for scope=session",
+  "worker": {
+    "instructions": "how the worker applies this KB to a task",
+    "tools": ["browser_axe_audit", "browser_navigate"],
+    "model": { "primary": "optional-configured-model-id", "temperature": 0.1, "maxTokens": 6144 },
+    "maxIterations": 6,
+    "timeoutMs": 300000
+  },
   "crawlNow": true
 }
 ```
 
-and returns `201` with `{ "id": "w3c-accessibility-docs", "crawlStarted": true }` (plus `crawlError` when the KB was created but the crawl could not start). Validation errors return `400 { "error": "..." }`: `name` and 1–20 http(s) `seedUrls` are required, `id` must be a slug (lowercase letters, digits, hyphens, max 63 chars), patterns must be valid regexes, and `sameOriginOnly: false` requires non-empty `includePatterns`. `maxPages`/`maxDepth` are clamped to the `retrieval.knowledgeBases` caps.
+and returns `201` with `{ "id": "w3c-accessibility-docs", "crawlStarted": true }` (plus `crawlError` when the KB was created but the crawl could not start). `scope` is one of `session`/`user`/`workspace` (default `workspace`); `ownerId` is **always** taken from the auth token, never the body. `worker` is the [`KbWorkerSpec`](knowledge-bases.md#kbworkerspec) — all fields optional (`instructions` ≤ 8000 chars, `tools` ≤ 20, `maxIterations` clamped 1–10, `timeoutMs` clamped 60000–600000); on `PATCH`, `worker: null` clears the template. Validation errors return `400 { "error": "..." }`: `name` and 1–20 http(s) `seedUrls` are required, `id` must be a slug (lowercase letters, digits, hyphens, max 63 chars), patterns must be valid regexes, `sameOriginOnly: false` requires non-empty `includePatterns`, `scope: "session"` requires a `sessionId`, and `scope: "user"` requires an authenticated user. `maxPages`/`maxDepth` are clamped to the `retrieval.knowledgeBases` caps.
 
-Each summary carries `id`, `name`, `description?`, `seedUrls`, `status` (`idle` | `crawling` | `ready` | `failed`), `ambientRetrieval`, `pageCount`, `chunkCount`, `maxPages`, `maxDepth`, `createdAt`, `updatedAt`, and `lastCrawl?` (the crawl-stats object with `pagesVisited` / `pagesIngested` / `pagesSkippedUnchanged` / `pagesFailed`, plus `currentUrl` and `queueRemaining` while running and `stopReason` / `error` when finished). The detail route adds `includePatterns`, `excludePatterns`, `sameOriginOnly`, `respectRobots`, `createdBy`, the `pages` array (`{ url, title, chunkCount, lastIngestedAt }`), and `pagesTruncated`.
+Each summary carries `id`, `name`, `description?`, `seedUrls`, `status` (`idle` | `crawling` | `ready` | `failed`), `ambientRetrieval`, `scope` (`session` | `user` | `workspace`), `ownerId?`, `hasWorker`, `pageCount`, `chunkCount`, `maxPages`, `maxDepth`, `createdAt`, `updatedAt`, and `lastCrawl?` (the crawl-stats object with `pagesVisited` / `pagesIngested` / `pagesSkippedUnchanged` / `pagesFailed`, plus `currentUrl` and `queueRemaining` while running and `stopReason` / `error` when finished). The detail route adds `includePatterns`, `excludePatterns`, `sameOriginOnly`, `respectRobots`, `createdBy`, `worker` (the full `KbWorkerSpec` or `null`), the `pages` array (`{ url, title, chunkCount, lastIngestedAt }`), and `pagesTruncated`.
 
 ### Multimodal
 
