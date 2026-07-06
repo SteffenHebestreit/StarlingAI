@@ -68,6 +68,24 @@ export const DocumentRagSchema = z.object({
   /** Max total extracted chars across THIS turn's freshly-attached docs to inline in full.
    *  Above this the lean semantic-retrieval path is used instead. */
   inlineThresholdChars: z.number().int().min(1000).max(50000).default(12000),
+  /** CRAG-style confidence demotion (docs/engram-reevaluation-2026-07.md Phase 1). When ON
+   *  and the engram /search response reports LOW retrieval confidence, the injected
+   *  [DOCUMENT CONTEXT] block is framed as "possibly relevant — verify before relying on it"
+   *  instead of authoritative. It NEVER suppresses the block or the retrieval-failure /
+   *  attached-documents honesty notes; on older engram servers (no confidence fields) or
+   *  when engram reports null, framing is unchanged. Default OFF pending eval. */
+  confidenceDemotion: z.boolean().default(false),
+  /** Demote when the response-level `score_gap` (normalized top-two margin, 0..1; null under
+   *  3 results) is BELOW this. A small gap = the top hits are near-indistinguishable, a weak
+   *  relevance signal. Only consulted when engram reports a non-null gap; 0 disables this
+   *  check (the gap is never < 0). NOTE: engram computes the signal over its GLOBAL result
+   *  set, pre scope-filter — see the caveat at the isLowRetrievalConfidence call site. */
+  confidenceMinScoreGap: z.number().min(0).max(1).default(0.05),
+  /** Demote when the response-level `top_rerank_score` is BELOW this. 0 = disabled (the
+   *  default). The 0..1 bound assumes a sigmoid/normalized reranker score; a raw-logit
+   *  reranker (scores can be negative/above 1) cannot express a meaningful threshold here
+   *  and must leave this disabled — rely on the score_gap check instead. */
+  confidenceMinTopRerank: z.number().min(0).max(1).default(0),
   /** Settings toggle: also search the current user's personal document corpus (`user:<id>`). */
   includeUserDocs: z.boolean().default(false),
   /** Settings toggle: also search the workspace-shared document corpus (`workspace:<name>`). */

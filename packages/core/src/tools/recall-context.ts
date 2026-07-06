@@ -205,6 +205,9 @@ registerTool({
       // CV / profile / project list becomes visible to a "would I be a good fit"
       // question. No-op (returns []) when engram is unconfigured or nothing is in
       // scope, so this section self-skips exactly like the others.
+      // `lowConfidence` (CRAG Phase 1) is deliberately NOT threaded here: this
+      // section's framing is neutral bullets (no "authoritative" claim), so there
+      // is nothing to demote — the flag targets the [DOCUMENT CONTEXT] injection.
       try {
         const { chunks, retrievalFailed } = await retrieveDocumentContextWithStatus(query, {
           sessionId: ctx.sessionId,

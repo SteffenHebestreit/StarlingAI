@@ -3,8 +3,10 @@ import * as loaderModule from "../config/loader.js";
 import * as engram from "../retrieval/engram.js";
 import {
   retrieveDocumentContext,
+  retrieveDocumentContextWithStatus,
   formatDocumentContext,
   buildInlineDocumentContext,
+  isLowRetrievalConfidence,
   activeScopeSources,
   resolveScopeSource,
   callerManageableSources,
@@ -40,6 +42,14 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+/** Stub the detailed search (what document-rag calls); meta defaults to the
+ *  pre-v0.6.0 shape (both confidence fields absent → null). */
+function mockSearch(results: engram.EngramSearchResult[] | null, meta?: Partial<engram.EngramSearchMeta>) {
+  return vi.spyOn(engram, "engramSearchDetailed").mockResolvedValue(
+    results === null ? null : { results, meta: { topRerankScore: null, scoreGap: null, ...meta } },
+  );
+}
+
 describe("scope sources", () => {
   it("session-only by default", () => {
     const spy = mockDocRagConfig({});
@@ -69,7 +79,7 @@ describe("retrieveDocumentContext scope filtering", () => {
       { id: "docB", title: "B", sources: ["session:other"], chunkCount: 2 },
       { id: "docC", title: "C", sources: ["user:u1"], chunkCount: 2 },
     ]);
-    vi.spyOn(engram, "engramSearch").mockResolvedValue([
+    mockSearch([
       { chunkId: "c1", documentId: "docB", text: "off-scope", summary: "", keywords: [], origin: "vector", graphDistance: 0, graphProximity: 0, retrievalScore: 0.9, medianScore: 0, fusedScore: 0.9, rerankScore: 0.9 },
       { chunkId: "c2", documentId: "docA", text: "in-scope hit", summary: "", keywords: [], origin: "vector", graphDistance: 0, graphProximity: 0, retrievalScore: 0.8, medianScore: 0, fusedScore: 0.8, rerankScore: 0.8 },
       { chunkId: "c3", documentId: "docC", text: "user-scope (off unless toggled)", summary: "", keywords: [], origin: "vector", graphDistance: 0, graphProximity: 0, retrievalScore: 0.7, medianScore: 0, fusedScore: 0.7, rerankScore: 0.7 },
@@ -87,7 +97,7 @@ describe("retrieveDocumentContext scope filtering", () => {
       { id: "docA", title: "A", sources: ["session:s1"], chunkCount: 1 },
       { id: "docC", title: "C", sources: ["user:u1"], chunkCount: 1 },
     ]);
-    vi.spyOn(engram, "engramSearch").mockResolvedValue([
+    mockSearch([
       { chunkId: "c3", documentId: "docC", text: "user", summary: "", keywords: [], origin: "vector", graphDistance: 0, graphProximity: 0, retrievalScore: 0.7, medianScore: 0, fusedScore: 0.7, rerankScore: 0.7 },
     ]);
     const chunks = await retrieveDocumentContext("q", { sessionId: "s1", userId: "u1" });
@@ -97,7 +107,7 @@ describe("retrieveDocumentContext scope filtering", () => {
 
   it("returns [] when no documents are in scope (never searches other scopes)", async () => {
     const spy = mockDocRagConfig({});
-    const searchSpy = vi.spyOn(engram, "engramSearch");
+    const searchSpy = vi.spyOn(engram, "engramSearchDetailed");
     vi.spyOn(engram, "engramListDocuments").mockResolvedValue([
       { id: "docB", title: "B", sources: ["session:other"], chunkCount: 2 },
     ]);
@@ -112,7 +122,7 @@ describe("retrieveDocumentContext scope filtering", () => {
     vi.spyOn(engram, "engramListDocuments").mockResolvedValue([
       { id: "docA", title: "A", sources: ["session:s1"], chunkCount: 3 },
     ]);
-    vi.spyOn(engram, "engramSearch").mockResolvedValue([
+    mockSearch([
       { chunkId: "c1", documentId: "docA", text: "weak", summary: "", keywords: [], origin: "vector", graphDistance: 0, graphProximity: 0, retrievalScore: 0.4, medianScore: 0, fusedScore: 0.4, rerankScore: 0.4 },
       { chunkId: "c2", documentId: "docA", text: "strong", summary: "", keywords: [], origin: "vector", graphDistance: 0, graphProximity: 0, retrievalScore: 0.9, medianScore: 0, fusedScore: 0.9, rerankScore: 0.9 },
       { chunkId: "c3", documentId: "docA", text: "also strong", summary: "", keywords: [], origin: "vector", graphDistance: 0, graphProximity: 0, retrievalScore: 0.8, medianScore: 0, fusedScore: 0.8, rerankScore: 0.8 },
@@ -138,6 +148,94 @@ describe("formatDocumentContext", () => {
     const out = formatDocumentContext(chunks);
     expect(out).toContain("Doc1");
     expect(out).not.toContain("Doc2"); // second block exceeds the cap
+    spy.mockRestore();
+  });
+
+  it("demotes the framing (never the excerpts) when lowConfidence is set", () => {
+    const spy = mockDocRagConfig({});
+    const chunks: RetrievedChunk[] = [
+      { chunkId: "c1", documentId: "d1", title: "Doc1", text: "the excerpt body", score: 0.9 },
+    ];
+    const normal = formatDocumentContext(chunks);
+    expect(normal).toContain("authoritative source context");
+
+    const demoted = formatDocumentContext(chunks, { lowConfidence: true });
+    expect(demoted).toContain("retrieval confidence for this query was LOW");
+    expect(demoted).not.toContain("authoritative source context");
+    expect(demoted).toContain("the excerpt body");            // excerpts always included
+    expect(demoted).toContain("Do NOT conclude");             // anti-false-negative instruction
+    expect(formatDocumentContext([], { lowConfidence: true })).toBe(""); // still '' when empty
+    spy.mockRestore();
+  });
+});
+
+describe("isLowRetrievalConfidence (CRAG Phase 1 — docs/engram-reevaluation-2026-07.md)", () => {
+  const cfgOn = { confidenceDemotion: true, confidenceMinScoreGap: 0.05, confidenceMinTopRerank: 0 };
+
+  it("is false when the flag is off, whatever the signals say", () => {
+    expect(isLowRetrievalConfidence({ topRerankScore: 0.01, scoreGap: 0.0 }, { ...cfgOn, confidenceDemotion: false })).toBe(false);
+  });
+
+  it("is false on null meta / null fields (older engram, <3 results) — null never demotes", () => {
+    expect(isLowRetrievalConfidence(null, cfgOn)).toBe(false);
+    expect(isLowRetrievalConfidence(undefined, cfgOn)).toBe(false);
+    expect(isLowRetrievalConfidence({ topRerankScore: null, scoreGap: null }, cfgOn)).toBe(false);
+  });
+
+  it("demotes on a reported score_gap below the threshold, not above", () => {
+    expect(isLowRetrievalConfidence({ topRerankScore: null, scoreGap: 0.01 }, cfgOn)).toBe(true);
+    expect(isLowRetrievalConfidence({ topRerankScore: null, scoreGap: 0.5 }, cfgOn)).toBe(false);
+  });
+
+  it("top_rerank threshold is disabled at 0 and only demotes when explicitly set", () => {
+    expect(isLowRetrievalConfidence({ topRerankScore: 0.01, scoreGap: null }, cfgOn)).toBe(false); // 0 = disabled
+    const withTopRerank = { ...cfgOn, confidenceMinTopRerank: 0.3 };
+    expect(isLowRetrievalConfidence({ topRerankScore: 0.1, scoreGap: null }, withTopRerank)).toBe(true);
+    expect(isLowRetrievalConfidence({ topRerankScore: 0.9, scoreGap: null }, withTopRerank)).toBe(false);
+    expect(isLowRetrievalConfidence({ topRerankScore: null, scoreGap: null }, withTopRerank)).toBe(false);
+  });
+});
+
+describe("retrieveDocumentContextWithStatus confidence threading", () => {
+  const docs = [{ id: "docA", title: "A", sources: ["session:s1"], chunkCount: 1 }];
+  const hits = [
+    { chunkId: "c1", documentId: "docA", text: "hit", summary: "", keywords: [], origin: "vector", graphDistance: 0, graphProximity: 0, retrievalScore: 0.8, medianScore: 0, fusedScore: 0.8, rerankScore: 0.8 },
+  ];
+
+  it("reports lowConfidence when the flag is on and the gap is weak", async () => {
+    const spy = mockDocRagConfig({ confidenceDemotion: true, confidenceMinScoreGap: 0.05, confidenceMinTopRerank: 0 });
+    vi.spyOn(engram, "engramListDocuments").mockResolvedValue(docs);
+    mockSearch(hits, { scoreGap: 0.01 });
+    const outcome = await retrieveDocumentContextWithStatus("q", { sessionId: "s1" });
+    expect(outcome.lowConfidence).toBe(true);
+    expect(outcome.chunks).toHaveLength(1); // chunks still returned — demote, never suppress
+    expect(outcome.retrievalFailed).toBe(false);
+    spy.mockRestore();
+  });
+
+  it("stays false with the flag off (default) and on pre-v0.6.0 servers (null meta fields)", async () => {
+    const flagOff = mockDocRagConfig({ confidenceDemotion: false });
+    vi.spyOn(engram, "engramListDocuments").mockResolvedValue(docs);
+    mockSearch(hits, { scoreGap: 0.01 });
+    expect((await retrieveDocumentContextWithStatus("q", { sessionId: "s1" })).lowConfidence).toBe(false);
+    flagOff.mockRestore();
+    vi.restoreAllMocks();
+    vi.spyOn(engram, "engramConfigured").mockReturnValue(true);
+
+    const flagOn = mockDocRagConfig({ confidenceDemotion: true });
+    vi.spyOn(engram, "engramListDocuments").mockResolvedValue(docs);
+    mockSearch(hits); // meta defaults: both null
+    expect((await retrieveDocumentContextWithStatus("q", { sessionId: "s1" })).lowConfidence).toBe(false);
+    flagOn.mockRestore();
+  });
+
+  it("search failure reports retrievalFailed, never lowConfidence", async () => {
+    const spy = mockDocRagConfig({ confidenceDemotion: true });
+    vi.spyOn(engram, "engramListDocuments").mockResolvedValue(docs);
+    mockSearch(null);
+    const outcome = await retrieveDocumentContextWithStatus("q", { sessionId: "s1" });
+    expect(outcome.retrievalFailed).toBe(true);
+    expect(outcome.lowConfidence).toBe(false);
     spy.mockRestore();
   });
 });

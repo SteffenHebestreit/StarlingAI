@@ -17,10 +17,11 @@ import { childLogger } from "../logger.js";
 import {
   engramConfigured,
   engramIngest,
-  engramSearch,
+  engramSearchDetailed,
   engramListDocuments,
   engramDeleteDocument,
   type EngramDocumentInfo,
+  type EngramSearchMeta,
 } from "./engram.js";
 
 const log = childLogger("retrieval:document-rag");
@@ -199,32 +200,60 @@ export interface DocumentRetrievalOutcome {
   /**
    * True when engram was reached-for but FAILED (unreachable / timed out) — as distinct from a
    * genuinely empty store or no in-scope match. The caller MUST NOT treat this as "the user has
-   * no documents on file" (engramListDocuments / engramSearch return null on failure, [] on empty).
+   * no documents on file" (engramListDocuments / engramSearchDetailed return null on failure, [] on empty).
    */
   retrievalFailed: boolean;
+  /**
+   * True when the confidenceDemotion flag is ON and engram's response-level confidence
+   * signals (top_rerank_score / score_gap, v0.6.0+) fell below the configured thresholds —
+   * the retrieved excerpts should be framed as possibly-relevant, not authoritative.
+   * Always false when the flag is off, on older servers, or when engram reports null.
+   */
+  lowConfidence: boolean;
+}
+
+/**
+ * CRAG-style confidence gate (docs/engram-reevaluation-2026-07.md Phase 1). Pure —
+ * exported for tests. Demotes ONLY on a positive signal: a null field (older engram,
+ * <3 results, engram down) never demotes, and the flag must be on.
+ */
+export function isLowRetrievalConfidence(
+  meta: EngramSearchMeta | null | undefined,
+  cfg: { confidenceDemotion: boolean; confidenceMinScoreGap: number; confidenceMinTopRerank: number },
+): boolean {
+  if (!cfg.confidenceDemotion || !meta) return false;
+  if (meta.scoreGap !== null && meta.scoreGap < cfg.confidenceMinScoreGap) return true;
+  if (cfg.confidenceMinTopRerank > 0 && meta.topRerankScore !== null && meta.topRerankScore < cfg.confidenceMinTopRerank) return true;
+  return false;
 }
 
 export async function retrieveDocumentContextWithStatus(
   query: string,
   ctx: RagScopeContext,
 ): Promise<DocumentRetrievalOutcome> {
-  if (!engramConfigured() || !query.trim()) return { chunks: [], retrievalFailed: false };
+  if (!engramConfigured() || !query.trim()) return { chunks: [], retrievalFailed: false, lowConfidence: false };
   const cfg = getConfig().retrieval.documentRag;
   const scopeSources = new Set(activeScopeSources(ctx));
-  if (scopeSources.size === 0) return { chunks: [], retrievalFailed: false };
+  if (scopeSources.size === 0) return { chunks: [], retrievalFailed: false, lowConfidence: false };
 
   const docs = await engramListDocuments();
-  if (docs === null) return { chunks: [], retrievalFailed: true };      // engram unreachable / timed out
-  if (docs.length === 0) return { chunks: [], retrievalFailed: false }; // genuinely no documents
+  if (docs === null) return { chunks: [], retrievalFailed: true, lowConfidence: false };      // engram unreachable / timed out
+  if (docs.length === 0) return { chunks: [], retrievalFailed: false, lowConfidence: false }; // genuinely no documents
 
   const inScope = new Map<string, EngramDocumentInfo>();
   for (const d of docs) {
     if (d.sources.some((s) => scopeSources.has(s))) inScope.set(d.id, d);
   }
-  if (inScope.size === 0) return { chunks: [], retrievalFailed: false };
+  if (inScope.size === 0) return { chunks: [], retrievalFailed: false, lowConfidence: false };
 
-  const results = await engramSearch({ query, finalTopK: cfg.candidateTopK });
-  if (results === null) return { chunks: [], retrievalFailed: true };   // search failed / timed out
+  const outcome = await engramSearchDetailed({ query, finalTopK: cfg.candidateTopK });
+  if (outcome === null) return { chunks: [], retrievalFailed: true, lowConfidence: false };   // search failed / timed out
+  const results = outcome.results;
+  // CAVEAT: engram computes the confidence meta over its GLOBAL result set, while the
+  // chunks injected below are the scope post-filtered subset — off-scope hits can skew
+  // the signal either way. Framing-only impact (demote-never-suppress), resolved when
+  // tenant_id scope-sets retire the post-filter (re-eval doc Phase 2); factor into the eval.
+  const lowConfidence = isLowRetrievalConfidence(outcome.meta, cfg);
 
   const filtered: RetrievedChunk[] = [];
   for (const r of results) {
@@ -241,7 +270,7 @@ export async function retrieveDocumentContextWithStatus(
     });
     if (filtered.length >= cfg.retrievalTopK) break;
   }
-  return { chunks: filtered, retrievalFailed: false };
+  return { chunks: filtered, retrievalFailed: false, lowConfidence };
 }
 
 export async function retrieveDocumentContext(
@@ -274,8 +303,16 @@ export async function listInScopeDocuments(ctx: RagScopeContext): Promise<Engram
 /**
  * Format retrieved chunks as an injectable context block, capped at
  * maxContextChars. Returns "" when there is nothing to inject.
+ *
+ * `lowConfidence` (CRAG Phase 1) only DEMOTES the framing sentence — the
+ * excerpts themselves are always included. Suppressing the block on low
+ * confidence would regress the "you have no CV/documents" false-negative the
+ * retrieval-failure + attached-documents notes exist to prevent.
  */
-export function formatDocumentContext(chunks: RetrievedChunk[]): string {
+export function formatDocumentContext(
+  chunks: RetrievedChunk[],
+  opts?: { lowConfidence?: boolean },
+): string {
   if (chunks.length === 0) return "";
   const cfg = getConfig().retrieval.documentRag;
   const parts: string[] = [];
@@ -288,11 +325,11 @@ export function formatDocumentContext(chunks: RetrievedChunk[]): string {
     parts.push(block);
     total += block.length;
   }
-  return (
-    "Relevant excerpts retrieved from documents attached to this conversation. " +
-    "Treat them as authoritative source context when answering, and cite the document name:\n\n" +
-    parts.join("\n\n---\n\n")
-  );
+  const framing = opts?.lowConfidence
+    ? "Excerpts retrieved from documents attached to this conversation — retrieval confidence for this query was LOW, so treat them as possibly-relevant material rather than authoritative answers: verify against the cited document (search_documents) before relying on specifics, cite the document name for anything you do use, and say so plainly if they do not actually answer the question. Do NOT conclude from weak matches that the information is absent:\n\n"
+    : "Relevant excerpts retrieved from documents attached to this conversation. " +
+      "Treat them as authoritative source context when answering, and cite the document name:\n\n";
+  return framing + parts.join("\n\n---\n\n");
 }
 
 /**
@@ -404,8 +441,8 @@ export async function augmentTurnWithDocuments(input: {
   const inlineBlock = buildInlineDocumentContext(ingestedDocs, cfg);
   if (inlineBlock) return { ingested, failed, contextBlock: inlineBlock };
 
-  const { chunks, retrievalFailed } = await retrieveDocumentContextWithStatus(input.query, input.ctx);
-  let contextBlock = formatDocumentContext(chunks);
+  const { chunks, retrievalFailed, lowConfidence } = await retrieveDocumentContextWithStatus(input.query, input.ctx);
+  let contextBlock = formatDocumentContext(chunks, { lowConfidence });
 
   // Engram did not respond this turn (unreachable / timed out) and produced no context. Surface it
   // so the model does NOT conflate a retrieval FAILURE with "the user has no documents on file"

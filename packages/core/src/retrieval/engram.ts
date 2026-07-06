@@ -138,16 +138,29 @@ export async function engramIngest(input: {
   }
 }
 
+/** Response-level retrieval-confidence signals (engram ≥ v0.6.0; null on older servers
+ *  or when engram itself reports null — e.g. score_gap needs ≥ 3 results). */
+export interface EngramSearchMeta {
+  topRerankScore: number | null;
+  scoreGap: number | null;
+}
+
+export interface EngramSearchOutcome {
+  results: EngramSearchResult[];
+  meta: EngramSearchMeta;
+}
+
 /**
- * Search (POST /search). Returns the pipeline-ranked results, or null on
- * failure. `finalTopK` maps to engram's per-request `final_top_k` tuning; pass a
- * generous value when a scope post-filter will trim the results afterwards.
+ * Search (POST /search). Returns the pipeline-ranked results plus the
+ * response-level confidence meta, or null on failure. `finalTopK` maps to
+ * engram's per-request `final_top_k` tuning; pass a generous value when a
+ * scope post-filter will trim the results afterwards.
  */
-export async function engramSearch(input: {
+export async function engramSearchDetailed(input: {
   query: string;
   finalTopK?: number;
   tuning?: Record<string, unknown>;
-}): Promise<EngramSearchResult[] | null> {
+}): Promise<EngramSearchOutcome | null> {
   if (!engramConfigured()) return null;
   const query = input.query.trim();
   if (!query) return null;
@@ -167,9 +180,13 @@ export async function engramSearch(input: {
       log.warn({ status: res.status }, "engram search failed");
       return null;
     }
-    const body = await res.json() as { results?: Array<Record<string, unknown>> };
+    const body = await res.json() as {
+      results?: Array<Record<string, unknown>>;
+      top_rerank_score?: unknown;
+      score_gap?: unknown;
+    };
     const results = Array.isArray(body.results) ? body.results : [];
-    return results.map((r): EngramSearchResult => ({
+    const mapped = results.map((r): EngramSearchResult => ({
       chunkId: String(r["chunk_id"] ?? ""),
       documentId: String(r["document_id"] ?? ""),
       text: String(r["text"] ?? ""),
@@ -183,6 +200,13 @@ export async function engramSearch(input: {
       fusedScore: Number(r["fused_score"] ?? 0),
       rerankScore: Number(r["rerank_score"] ?? 0),
     }));
+    return {
+      results: mapped,
+      meta: {
+        topRerankScore: typeof body.top_rerank_score === "number" ? body.top_rerank_score : null,
+        scoreGap: typeof body.score_gap === "number" ? body.score_gap : null,
+      },
+    };
   } catch (err) {
     log.warn({ err }, "engram search error");
     return null;
