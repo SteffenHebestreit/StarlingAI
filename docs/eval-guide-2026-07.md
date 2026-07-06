@@ -55,14 +55,17 @@ fail-open and reversible by deleting the lines.
 "serverSideScopeFilter": true,
 ```
 
-**Pre-eval technical validation (2026-07-06, this session):** engram-level 0-leak PROVEN
-(direct `/search` probe: a scope-set of `[session:X, user:admin, workspace:workspace]`
-returns only the in-scope doc; an unknown source → empty, fail-closed) and workspace-scoped
-retrieval works end-to-end with both flags ON (answer returned the planted canary). The
-flags are demote-only / additive-with-a-client-backstop, so neither can cause harm. NOT yet
-observed live: the demoted framing and full session-isolation end-to-end — both blocked by
-the AG-UI-path gap in §5. Run the pass^k confirmation through the **dashboard (RPC `chat.send`)
-path**, which threads session + user scope correctly.
+**Validation (2026-07-06, this session) — PASS end-to-end.** After the AG-UI scope fix
+(§5, now resolved), the full flag eval passes: session A's canary never leaks into session B
+(0-leak isolation through the whole stack), the in-scope document is retrieved + `[DOCUMENT
+CONTEXT]` injected, a strong match keeps the authoritative framing (`confidenceDemotion` does
+not over-fire), and the existence question is answered honestly (no "you have no documents"
+false-negative). One expected caveat: with a tiny (2-doc) corpus engram returns
+`score_gap: null` (needs ≥3 results), so the demoted framing does not appear — re-verify the
+demotion wording on a larger corpus. engram-level 0-leak was also proven directly (a
+`/search` probe with `[session:X, user:admin, workspace:workspace]` returns only the in-scope
+doc; unknown source → empty). Both flags are safe and validated; still run your own pass^k for
+the behavioral-quality signal.
 
 ## 2. Bugs fixed since the last round (28f8aa5) — why re-testing matters
 
@@ -130,7 +133,7 @@ object). Left `false` until then.
 - The freelancermap.de credential exists but is RBAC-restricted: add `admin` to its
   `allowedUsers` (Settings → Site Credentials) — do NOT re-add the credential. The tools now
   report denied/unresolved/not-found honestly.
-- **NEW (2026-07-06) — AG-UI `/api/chat/stream` document-scope gap (separate from any flag).**
+- **FIXED (2026-07-06, `d1d7473`) — AG-UI `/api/chat/stream` document-scope gap (was separate from any flag).**
   Driving a turn through the REST AG-UI endpoint retrieves **workspace**-scoped docs but NOT
   **session**- or **user**-scoped ones, and the per-turn `[DOCUMENT CONTEXT]` auto-injection
   never fires there (the agent still finds workspace docs via the `search_documents` tool).
