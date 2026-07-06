@@ -371,7 +371,12 @@ registerTool({
     const note = run.rejectedTools.length > 0 ? `\n\n[Note: worker tools ${run.rejectedTools.join(", ")} were not grantable and were skipped.]` : "";
     return {
       success: true,
-      output: `Worker result (grounded in "${kb.name}"):\n\n${run.output}${note}`,
+      // Anti-embellishment: the worker already inspected the target and grounded
+      // in the KB, so the orchestrator must RELAY these findings, not re-derive or
+      // add to them. Without this, an orchestrator was observed to fabricate
+      // specific violations on top of a worker's honest "0 violations" result.
+      output:
+        `Worker result (grounded in "${kb.name}") — relay these findings to the user as-is; do NOT add, infer, or invent any finding the worker did not report, and do NOT claim files were written that the worker did not create:\n\n${run.output}${note}`,
       metadata: { kbId: kb.id, grantedTools: run.grantedTools, rejectedTools: run.rejectedTools },
     };
   },
