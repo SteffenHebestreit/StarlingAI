@@ -55,6 +55,19 @@ ENV LOG_LEVEL=info
 # Gateway runtime
 FROM runtime-base AS runtime
 
+# NOTE: the gateway deliberately runs as root. Running it as an unprivileged user
+# (USER node) was tried and backed out: the gateway owns its credential store,
+# audit log, and caches under the host-bind zones /workspace/.starlingai and /app,
+# whose files are root-created (credentials.enc is mode 600 root) — a non-root
+# gateway can't even READ the connected Claude token, and can't write audit/cache.
+# Reconciling that would require chowning host-bind state and is fragile (any root
+# write re-breaks it). The real blast-radius reduction here comes from
+# docker-socket-proxy: the raw docker socket is NOT mounted (see docker-compose.yml),
+# so a gateway compromise — root or not — can no longer reach the host docker
+# control plane or spawn escape-shaped containers (privileged / host-ns / host
+# bind / socket bind are all rejected at the proxy). Gateway uid does not change
+# that, and the gateway's secrets live in its own process env regardless of uid.
+
 HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -sf http://127.0.0.1:8765/healthz || exit 1
 

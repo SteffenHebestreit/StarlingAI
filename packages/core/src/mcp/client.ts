@@ -6,7 +6,7 @@ import { execFile } from "node:child_process";
 import { createConnection, type Socket } from "node:net";
 import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
@@ -134,6 +134,20 @@ export async function cleanupConfiguredDockerMcpContainers(configs: McpServerCon
 
 // ─── Transport builders ───────────────────────────────────────────────────────
 
+/**
+ * Env for a spawned `docker` CLI (docker / docker-exec transports). The MCP SDK's
+ * default stdio env does NOT inherit DOCKER_HOST/DOCKER_API_VERSION, so once the
+ * gateway talks to the daemon through the filtering socket-proxy over TCP (rather
+ * than a mounted /var/run/docker.sock), the CLI would fail to find any daemon.
+ * Forward those two vars explicitly on top of the sanitized default env.
+ */
+function dockerCliEnv(): Record<string, string> {
+  const env: Record<string, string> = { ...getDefaultEnvironment() };
+  if (process.env.DOCKER_HOST) env.DOCKER_HOST = process.env.DOCKER_HOST;
+  if (process.env.DOCKER_API_VERSION) env.DOCKER_API_VERSION = process.env.DOCKER_API_VERSION;
+  return env;
+}
+
 function buildTransport(serverName: string, config: McpServerConfig, containerName?: string): Transport {
   switch (config.transport) {
     case "stdio":
@@ -160,7 +174,7 @@ function buildTransport(serverName: string, config: McpServerConfig, containerNa
         ...(config.args ?? []),
       ];
       assertSafeDockerRunArgs(dockerArgs, `mcp:${serverName}`); // belt + suspenders over the config check
-      return new StdioClientTransport({ command: "docker", args: dockerArgs });
+      return new StdioClientTransport({ command: "docker", args: dockerArgs, env: dockerCliEnv() });
     }
 
     case "docker-exec": {
@@ -168,6 +182,7 @@ function buildTransport(serverName: string, config: McpServerConfig, containerNa
       return new StdioClientTransport({
         command: "docker",
         args: ["exec", "-i", config.container, ...(config.args.length ? config.args : [])],
+        env: dockerCliEnv(),
       });
     }
 

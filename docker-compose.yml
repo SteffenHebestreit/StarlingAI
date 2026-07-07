@@ -74,6 +74,13 @@ services:
       - SAI_MAIL_SERVICE_TOKEN=${SAI_MAIL_SERVICE_TOKEN:-}
       - SAI_COMPUTER_REMOTE_URL=${SAI_COMPUTER_REMOTE_URL:-http://computer-remote:8890}
       - SAI_WORKSPACE_MOUNT_SOURCE=${SAI_WORKSPACE_MOUNT_SOURCE:-}
+      # Talk to the Docker Engine API ONLY through the filtering socket-proxy over
+      # TCP — never the raw /var/run/docker.sock (which is no longer mounted here).
+      # The proxy default-denies escape-shaped containers; the gateway's own docker
+      # spawns (container-runner, serve_app) inherit this via process.env, and the
+      # MCP docker/docker-exec transports forward it explicitly (mcp/client.ts).
+      - DOCKER_HOST=tcp://docker-socket-proxy:2375
+      - DOCKER_API_VERSION=1.55
       - SAI_WORKSPACE_CONFIG_PATH=/workspace/workspace
       - SAI_N8N_SSH_PASSWORD=${SAI_N8N_SSH_PASSWORD}
       - SAI_WIN_WORKSTATION_RDP_CREDENTIALS=${SAI_WIN_WORKSTATION_RDP_CREDENTIALS}
@@ -81,7 +88,10 @@ services:
       - gc-data:/data
       - ./starlingai.json:/config/starlingai.json:ro
       - .:/workspace
-      - /var/run/docker.sock:/var/run/docker.sock  # For sandbox + container agent execution (rw)
+      # NOTE: the raw docker socket is deliberately NOT mounted here anymore. All
+      # sandbox/sub-agent/serve_app container ops go through docker-socket-proxy
+      # over TCP (DOCKER_HOST above), so a gateway compromise can't reach the host
+      # docker control plane directly. See the docker-socket-proxy service below.
     networks:
       - starlingai-internal
       - starlingai-public
@@ -104,12 +114,58 @@ services:
         condition: service_healthy
       questdb:
         condition: service_healthy
+      docker-socket-proxy:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://127.0.0.1:8765/healthz"]
       interval: 15s
       timeout: 5s
       retries: 3
       start_period: 15s
+
+  # ── Filtering docker-socket proxy ─────────────────────────────────────────
+  # The ONLY container that touches /var/run/docker.sock. The gateway reaches the
+  # Docker Engine API through this over TCP (never the raw socket). It default-
+  # denies every endpoint except a minimal allow-list and body-inspects
+  # /containers/create + /exec to refuse escape-shaped containers (host/socket/
+  # secret binds, --privileged, host namespaces, dangerous caps, unconfined
+  # profiles). Internal-only network, never published — reachability is the
+  # control. Logic + tests in docker/docker-socket-proxy/ (filter.mjs, bind-policy.mjs).
+  docker-socket-proxy:
+    build:
+      context: .
+      dockerfile: docker/docker-socket-proxy/Dockerfile
+    image: starlingai/docker-socket-proxy:dev
+    restart: unless-stopped
+    read_only: true
+    mem_limit: ${SAI_PROXY_MEM_LIMIT:-128m}
+    memswap_limit: ${SAI_PROXY_MEM_LIMIT:-128m}
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+    environment:
+      - NODE_ENV=production
+      - DOCKER_API_VERSION=1.55
+      # Seed the bind allow-list from the SAME host path the gateway uses to build
+      # workspace binds (resolveDockerWorkspaceMountSource), so the two cannot drift.
+      # Extra prefixes (comma/newline separated) via SAI_PROXY_ALLOWED_BIND_SOURCES.
+      - SAI_WORKSPACE_MOUNT_SOURCE=${SAI_WORKSPACE_MOUNT_SOURCE:-}
+      - SAI_PROXY_ALLOWED_BIND_SOURCES=${SAI_PROXY_ALLOWED_BIND_SOURCES:-}
+    volumes:
+      # :ro on the socket file prevents replacing the inode; API traffic still flows
+      # (socket I/O is not a filesystem write). This is the host's docker control plane.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - starlingai-internal   # internal-only; NEVER add starlingai-public or a ports: mapping
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get({host:'127.0.0.1',port:2375,path:'/_ping'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
 
   computer-remote:
     build:
