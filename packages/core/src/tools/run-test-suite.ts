@@ -10,9 +10,8 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
-import { resolveDockerWorkspaceMountSource, buildProtectedZoneReadonlyArgs } from "./workspace-mount.js";
+import { resolveDockerWorkspaceMountSource } from "./workspace-mount.js";
 import { assertSafeDockerRunArgs } from "./docker-safety.js";
-import { currentWorkspaceScope } from "../runtime/request-context.js";
 
 const log = childLogger("tool:run-test-suite");
 const execFileAsync = promisify(execFile);
@@ -117,7 +116,6 @@ registerTool({
         : "/workspace";
 
     const workspaceMountSource = resolveDockerWorkspaceMountSource(ctx.workspacePath);
-    const protectedZoneArgs = buildProtectedZoneReadonlyArgs(workspaceMountSource, currentWorkspaceScope());
 
     const dockerArgs = [
       "run", "--rm",
@@ -128,7 +126,6 @@ registerTool({
       "--cap-drop=ALL",
       "--security-opt=no-new-privileges",
       "-v", `${workspaceMountSource}:/workspace`,
-      ...protectedZoneArgs,               // live-config zones read-only for scoped agents
       "-w", workdir,
       SANDBOX_IMAGE,
       "sh", "-lc", fullCommand,

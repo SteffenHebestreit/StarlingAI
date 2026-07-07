@@ -1,6 +1,3 @@
-import { existsSync } from "node:fs";
-import { isAbsolute } from "node:path";
-
 const DEFAULT_WORKSPACE_VOLUME = process.env["SAI_SANDBOX_WORKSPACE_VOLUME"] ?? "gc-workspace";
 
 interface DockerWorkspaceMountOptions {
@@ -37,40 +34,14 @@ export function resolveDockerWorkspaceMountSource(
  */
 export const PROTECTED_WORKSPACE_ZONES: readonly string[] = ["agents", "jobs", "scenes", "tools"] as const;
 
-/**
- * Build `-v …:ro` overlay args that re-mount the protected config zones READ-ONLY
- * on top of the writable /workspace mount, so a scope-confined agent's shell/test
- * command can read but never mutate live config (generated/ + uploads/ stay
- * writable). Returns [] when:
- *   - scope is "full" (core/maintenance agents legitimately edit config), or
- *   - the mount source is a named volume, not an absolute host path (can't overlay
- *     a volume subpath — a no-op rather than a broken `docker run`), or
- *   - the zone directory doesn't exist under the source.
- * Docker applies the more-specific nested mount, so the overlay wins over the RW
- * parent. Pure/deterministic given the filesystem — exported for testing.
- */
-export function buildProtectedZoneReadonlyArgs(
-  mountSource: string,
-  scope: "full" | "generated" | undefined,
-  opts: { existenceRoot?: string; mountRoot?: string } = {},
-): string[] {
-  if (scope === "full") return [];
-  // Overlaying a subpath requires a real host path; named volumes are skipped.
-  if (!isAbsolute(mountSource)) return [];
-  const mountRoot = opts.mountRoot ?? "/workspace";
-  // Zone existence is checked against a GATEWAY-VISIBLE path (the workspacePath),
-  // NOT the mount source: the mount source is the HOST path the docker daemon
-  // resolves for `-v`, which the containerized gateway process cannot stat — so
-  // checking it would make this a silent no-op in the real deployment. The zones
-  // sit at the same relative position under both, so we stat via existenceRoot
-  // and bind via mountSource.
-  const checkRoot = (opts.existenceRoot ?? mountSource).replace(/[/\\]+$/, "");
-  const src = mountSource.replace(/[/\\]+$/, "");
-  const args: string[] = [];
-  for (const zone of PROTECTED_WORKSPACE_ZONES) {
-    if (existsSync(`${checkRoot}/${zone}`)) {
-      args.push("-v", `${src}/${zone}:${mountRoot}/${zone}:ro`);
-    }
-  }
-  return args;
-}
+/* NOTE: a read-only overlay of these config zones INTO the shell/test sandbox was
+ * considered as extra defense-in-depth, but it is deployment-layout fragile — the
+ * sandbox mount source is the host workspace/repo path and its /workspace mapping
+ * varies (e.g. the repo root can be the mount source, putting the zones at
+ * /workspace/workspace/<zone>), so a naive overlay produces a wrong/empty mount.
+ * The write-allowlist is therefore enforced where it is robust and layout-
+ * independent: write_file re-roots scope-confined agents into generated/
+ * (workspace-path.ts, so they cannot address the config zones at all), live-config
+ * authoring goes ONLY through the dedicated validated/approval-gated tools
+ * (swarm_define_agent / _save_scene / _save_job), and assertSafeDockerRunArgs
+ * bounds every gateway-issued docker run. */
