@@ -244,6 +244,69 @@ export function classifyTurnRisk(signals: TurnRiskSignals): TurnRiskTier {
   return "low";
 }
 
+export interface PlanContinuationInput {
+  /** The plan the orchestrator recorded this turn (null when none). */
+  plan: TurnPlan | null;
+  /** Successful delegations/workflows completed so far this turn (progress proxy). */
+  executedDelegations: number;
+  /** The per-turn delegate cap (loop backstop — never continue past it). */
+  delegationCap: number;
+  /** True when the just-finished orchestration SUCCEEDED (disposition === synthesize).
+   *  We only extend a plan on progress, never after a failure. */
+  lastDelegationSucceeded: boolean;
+  /** orchestration.planDrivenContinuation — off ⇒ identity (today's behavior). */
+  enabled: boolean;
+}
+
+export interface PlanContinuationDecision {
+  /** True ⇒ keep orchestrating this turn (execute the next planned deliverable)
+   *  instead of synthesizing / relaying after the first delegation. */
+  continue: boolean;
+  /** Delegations executed so far (progress). */
+  done: number;
+  /** Total deliverable-producing steps the plan declared. */
+  total: number;
+}
+
+/**
+ * Decide whether a multi-step recorded plan should keep executing instead of
+ * synthesizing after the first delegation. THE fix for the truncation defect
+ * (audit 763394da): a 3-deliverable request (paper → slides → speaker notes)
+ * recorded a 4-step plan but shipped only the paper, because the post-
+ * orchestration disposition defaulted to "synthesize" after one delegation and
+ * never consulted the plan.
+ *
+ * Bounded so it cannot loop: it only fires when a genuine multi-step plan exists,
+ * the last delegation SUCCEEDED, fewer delegations have run than the plan has
+ * steps, AND we are strictly under the per-turn delegate cap (the existing
+ * runaway-loop backstop). Each continuation leads to either another delegation
+ * (progress, monotone toward the cap) or a final answer (the turn ends normally),
+ * so it terminates. Purely structural (step count vs delegation count); no
+ * topic/keyword inspection.
+ */
+export function decidePlanContinuation(input: PlanContinuationInput): PlanContinuationDecision {
+  const { plan, executedDelegations, delegationCap, lastDelegationSucceeded, enabled } = input;
+  const total = plan?.steps.length ?? 0;
+  const noContinue: PlanContinuationDecision = { continue: false, done: executedDelegations, total };
+  if (!enabled || !plan || !lastDelegationSucceeded) return noContinue;
+  if (total < 2) return noContinue;                          // single-deliverable plan → synthesize as before
+  if (executedDelegations >= total) return noContinue;       // every planned step has run
+  if (executedDelegations >= delegationCap) return noContinue; // loop backstop: never exceed the delegate cap
+  return { continue: true, done: executedDelegations, total };
+}
+
+/** The [CONTINUE PLAN] directive shown to the orchestrator when a multi-step plan
+ *  still has un-produced deliverables. Names the whole plan + progress so the model
+ *  picks the next un-done step itself (delegation↔step order is not assumed). */
+export function renderPlanContinuationDirective(plan: TurnPlan, done: number, total: number): string {
+  return (
+    `[CONTINUE PLAN] You recorded a ${total}-step plan and have completed ${done} of them this turn — the remaining deliverables are NOT done yet. ` +
+    "Do NOT synthesize a final answer or stop until every planned deliverable has actually been produced (each has its own completed tool result this turn), or you hit a genuine blocker you must ask the user about. " +
+    "Execute the NEXT not-yet-done step now via the appropriate tool. Do NOT repeat a step already completed, and do NOT claim a later step is done without its tool result.\n" +
+    renderTurnPlan(plan)
+  );
+}
+
 /** Compact human-readable rendering of a plan (for QA prompts / context). */
 export function renderTurnPlan(plan: TurnPlan): string {
   const lines = [`Objective: ${plan.objective}`];

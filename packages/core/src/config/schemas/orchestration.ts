@@ -26,6 +26,45 @@ export const OrchestrationSchema = z.object({
    *  entirely. Source-sensitive turns reuse the existing evidence backstop.
    *  Default: true. */
   riskGatedQA: z.boolean().default(true),
+  /** Plan-driven continuation (audit 763394da). The post-orchestration disposition
+   *  defaults to "synthesize" after the FIRST successful delegation and never
+   *  consults the recorded plan — so a multi-deliverable request (e.g. "1) paper
+   *  2) slides 3) speaker notes") that recorded a 4-step plan shipped only the
+   *  paper and dropped the rest. When true, a turn that recorded a plan with ≥2
+   *  steps keeps orchestrating (a [CONTINUE PLAN] directive naming the remaining
+   *  deliverables) until every planned step has an actual completed tool result
+   *  this turn, instead of synthesizing after step 1. Bounded by the per-turn
+   *  delegate cap and only extends on SUCCESS (never after a failure), so it
+   *  cannot loop. Purely structural (plan step count vs delegations run); no
+   *  topic/keywords. Default OFF — it changes when a turn stops orchestrating, so
+   *  it stays gated until a pass^k eval confirms it doesn't over-run single-
+   *  deliverable turns. */
+  planDrivenContinuation: z.boolean().default(false),
+  /** Autonomous-mode anti-refusal (audit 763394da). `--auto` sets autoApprove
+   *  (auto-approve tool calls) but does NOT tell the model "execute autonomously,
+   *  don't ask" — so an --auto multi-step build was met with a clarifying question
+   *  + "I can't create files" refusal AND a false "I gathered and verified"
+   *  claim with zero tool calls. When true, an autoApprove turn that must
+   *  orchestrate (a recorded plan, or a required-research/required-artifact task)
+   *  and tries to answer tool-free is rejected once and forced to emit the first
+   *  tool call (reusing the routing-nudge/forceToolChoice path) instead of
+   *  dead-ending in a question/refusal. Structural (autoApprove flag + must-
+   *  orchestrate + zero tool calls); no topic/keywords. Default OFF — behavioral,
+   *  pass^k-gated. */
+  autonomousModeAntiRefusal: z.boolean().default(false),
+  /** Unverified-sourced-deliverable caveat (audit 763394da). A "verify against
+   *  online sources / cite / verified image URLs" request produced a citation-
+   *  bearing paper written from the model's memory with fabricated publishers and
+   *  zero verified image URLs, presented as verified. When true, a turn whose
+   *  final answer OR produced artifact structurally carries source claims (a
+   *  references section, ≥2 URLs, or an explicit "verified/verifiziert" claim) but
+   *  ran ZERO real research this turn (no research/browser delegation, no
+   *  successful workflow, no direct web tool, no shared findings) gets an honest
+   *  caveat prepended: the sources/images were NOT independently verified this
+   *  turn. Non-destructive (prepend-only; never empties or blocks). Structural
+   *  (citation-shape + zero-research), no topic keywords. Default OFF — it stamps
+   *  a caveat onto an answer, so pass^k-gated. */
+  unverifiedSourcedDeliverableCaveat: z.boolean().default(false),
   /** Runtime oversight: when true, a sub-agent gathering evidence is checked at
    *  evidence boundaries against the turn's recorded plan acceptance criteria using
    *  the cheap routing-tier model; once the goal is already satisfied it is

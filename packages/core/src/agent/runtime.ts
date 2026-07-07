@@ -9,7 +9,7 @@ import { assembleTurnSystemMessages } from "./turn-system-prompt.js";
 import { markOrchestratorActivity, markOrchestratorIdle } from "./cache-warmer.js";
 import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type SwarmState, type ToolContext } from "../tools/registry.js";
 import { isToolAllowed } from "../guardrails/tool-tiers.js";
-import { loadTurnPlan } from "./turn-plan.js";
+import { loadTurnPlan, decidePlanContinuation, renderPlanContinuationDirective } from "./turn-plan.js";
 import { runQaDeliveryLoop, parseQaVerdict, type QaVerdict } from "./qa-delivery-loop.js";
 import {
   buildDeliverableConsistencyCheckMessages,
@@ -201,6 +201,8 @@ export {
   answerPresentsSourceCitations,
   stripFabricatedCitations,
 } from "./citation-honesty.js";
+
+import { toolNameIsExternalRetrieval, metadataShowsExternalRetrieval } from "./citation-honesty.js";
 
 // Terminal honesty/guard blocks that fire on the assembled finalResponse (god-file seam).
 import { applyTerminalResponseGuards, type TerminalGuardContext } from "./turn-finalize-guards.js";
@@ -1329,6 +1331,11 @@ async function _runTurn(
   let _turnDelegationCount = 0;
   let _turnShareFindingCount = 0;
   let _forcedSynthesisFired = false;
+  // #2 (audit 763394da): true once any tool that actually retrieves EXTERNAL sources ran
+  // this turn (orchestrator-direct or inside a delegated sub-agent). The honest research
+  // signal for applyUnverifiedSourcedDeliverableCaveat — a write-only delegation that
+  // fabricates citations from memory never sets it.
+  let _turnHadExternalRetrieval = false;
   // Final-response QA gate: at most ONE corrective build per turn (shared latch across both
   // finalization paths — normal-stop and forced-terminal).
   let qaCorrectiveBuildUsed = false;
@@ -1888,8 +1895,20 @@ async function _runTurn(
       // then rejects and re-runs. Gated on !delegatedResearchRetryUsed so it releases the
       // moment the routing-nudge fallback path takes over (no dead-end), and on
       // _turnDelegationCount===0 so the model can synthesize freely once a specialist ran.
+      // #3 (audit 763394da): `--auto` (autoApprove) means "run autonomously" — a
+      // tool-free clarifying question / "I can't create files" refusal (plus a
+      // false "I gathered and verified" claim with zero tool calls) is never an
+      // acceptable answer to an --auto artifact build. When autonomousModeAntiRefusal
+      // is on, an autoApprove turn whose deliverable-intent classifier saw an
+      // artifact request also forces the first tool call, even if the narrower
+      // requiresArtifactDelegation signal did not fire. Structural (autoApprove +
+      // wantsArtifact); no topic/keywords.
+      const autonomousArtifactBuild =
+        (getConfig().orchestration?.autonomousModeAntiRefusal ?? false)
+        && opts.autoApprove === true
+        && deliverableIntent.wantsArtifact;
       const mustOrchestrateBeforeAnswering =
-        (requiresDelegatedResearch || requiresArtifactDelegation || workflowCatalogRequired || requiresMaintenanceDelegation)
+        (requiresDelegatedResearch || requiresArtifactDelegation || workflowCatalogRequired || requiresMaintenanceDelegation || autonomousArtifactBuild)
         && !inWorkflowStep
         && !delegatedResearchRetryUsed
         && _turnDelegationCount === 0
@@ -2850,6 +2869,7 @@ async function _runTurn(
         turnToolCallCounts: _turnToolCallCounts,
         turnShareFindingCount: _turnShareFindingCount,
         workflowRunCompletedThisTurn,
+        turnHadExternalRetrieval: _turnHadExternalRetrieval,
         releasedWithoutResearchEvidence,
         autoResearchAnswer,
         outputScan,
@@ -3384,6 +3404,15 @@ async function _runTurn(
       const toolStartedAt = Date.now();
       const result = await executeTool(tc.name, tc.arguments, toolContext);
       const toolDurationMs = Date.now() - toolStartedAt;
+      // #2 (audit 763394da): record whether ANY tool that actually retrieves external
+      // sources ran this turn — the orchestrator called one directly, OR a delegated
+      // sub-agent used one (its result metadata carries bytesByTool). The honest signal
+      // for the unverified-sourced-deliverable caveat, distinguishing a real research
+      // agent from content_writer writing a cited paper from memory.
+      if (!_turnHadExternalRetrieval && result.success
+        && (toolNameIsExternalRetrieval(tc.name) || metadataShowsExternalRetrieval(result.metadata))) {
+        _turnHadExternalRetrieval = true;
+      }
       if (PERSISTED_SWARM_STATE_TOOL_NAMES.has(tc.name)) {
         turnUsedSwarmTools = true;
       }
@@ -3692,6 +3721,33 @@ async function _runTurn(
       const disposition = classifyPostOrchestrationDisposition(toolResultMessages);
       if (disposition === "synthesize") {
         _consecutiveDelegationFailures = 0;
+        // #1 (audit 763394da): before synthesizing/relaying after a successful
+        // delegation, honor a recorded MULTI-step plan — a 3-deliverable request
+        // (paper → slides → notes) must not ship only the paper. Bounded by the
+        // per-turn delegate cap and only extends on success, so it cannot loop.
+        if (getConfig().orchestration?.planDrivenContinuation ?? false) {
+          const continuationPlan = await loadTurnPlan(session.id);
+          const delegateCap = getConfig().orchestration?.perTurnCaps?.["delegate_to_agent"] ?? 5;
+          const planDecision = decidePlanContinuation({
+            plan: continuationPlan,
+            executedDelegations: _turnDelegationCount,
+            delegationCap: delegateCap,
+            lastDelegationSucceeded: true,
+            enabled: true,
+          });
+          if (planDecision.continue && continuationPlan) {
+            logAudit("guardrail_flagged", {
+              type: "plan_driven_continuation",
+              done: planDecision.done,
+              total: planDecision.total,
+            }, { sessionId: session.id, channel: session.channel, severity: "info" });
+            session.addMessage({
+              role: "system",
+              content: renderPlanContinuationDirective(continuationPlan, planDecision.done, planDecision.total),
+            });
+            continue;
+          }
+        }
         // Cost-center 2 (audit 5d51862f): if this turn's ONLY orchestration was a single
         // delegation that returned a complete, presentable deliverable, surface it directly
         // instead of paying for a SECOND full synthesis pass on the slow local model (which

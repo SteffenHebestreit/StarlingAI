@@ -34,8 +34,9 @@ const FORMAT_EXTENSION: Record<DocumentFormat | "pdf" | "mermaid", string> = {
 registerTool({
   name: "generate_document",
   description:
-    "Generate and save a workspace document as Markdown, text, HTML, or JSON. " +
-    "Use this for reports, handoff notes, briefs, and exportable artifacts.",
+    "Save a workspace document as Markdown, text, HTML, or JSON. " +
+    "Use this for reports, handoff notes, briefs, and exportable artifacts. " +
+    "You MUST supply the complete document text in `content` — this tool writes exactly what you pass, it does not author content itself.",
   embeddingDescription: "Generate, create, produce a document, report, brief, artifact. Dokument erstellen, Bericht generieren, Markdown speichern, Artefakt produzieren. Final deliverable, downloadable report.",
   parameters: {
     type: "object",
@@ -46,7 +47,7 @@ registerTool({
       },
       content: {
         type: "string",
-        description: "Main document body. This can be plain text or Markdown-like text.",
+        description: "REQUIRED. The full document body — the complete text you want written (plain text, Markdown, HTML, or JSON per `format`). This tool saves exactly what you pass here and does NOT generate content on its own, so a title/format without content writes nothing.",
       },
       format: {
         type: "string",
@@ -72,7 +73,7 @@ registerTool({
     const format = normalizeDocumentFormat(args["format"]);
     const overwrite = Boolean(args["overwrite"] ?? true);
 
-    if (!content.trim()) return fail("content is required");
+    if (!content.trim()) return fail("content is required: pass the FULL document text in the `content` field (the complete markdown/text/html/json to write). This tool saves what you provide; it does not author the document. Retry with content populated.");
     if (!format) return fail("format must be one of: markdown, text, html, json");
 
     const resolvedOutput = resolveOutputPath({
@@ -162,7 +163,7 @@ registerTool({
     const pageSize = normalizePdfPageSize(args["page_size"]);
     const overwrite = Boolean(args["overwrite"] ?? true);
 
-    if (!content.trim()) return fail("content is required");
+    if (!content.trim()) return fail("content is required: pass the FULL document text in the `content` field (the complete markdown/text/html/json to write). This tool saves what you provide; it does not author the document. Retry with content populated.");
     if (!pageSize) return fail("page_size must be either 'A4' or 'Letter'");
 
     const resolvedOutput = resolveOutputPath({
