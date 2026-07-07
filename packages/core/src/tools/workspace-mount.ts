@@ -52,16 +52,24 @@ export const PROTECTED_WORKSPACE_ZONES: readonly string[] = ["agents", "jobs", "
 export function buildProtectedZoneReadonlyArgs(
   mountSource: string,
   scope: "full" | "generated" | undefined,
-  mountRoot = "/workspace",
+  opts: { existenceRoot?: string; mountRoot?: string } = {},
 ): string[] {
   if (scope === "full") return [];
   // Overlaying a subpath requires a real host path; named volumes are skipped.
   if (!isAbsolute(mountSource)) return [];
+  const mountRoot = opts.mountRoot ?? "/workspace";
+  // Zone existence is checked against a GATEWAY-VISIBLE path (the workspacePath),
+  // NOT the mount source: the mount source is the HOST path the docker daemon
+  // resolves for `-v`, which the containerized gateway process cannot stat — so
+  // checking it would make this a silent no-op in the real deployment. The zones
+  // sit at the same relative position under both, so we stat via existenceRoot
+  // and bind via mountSource.
+  const checkRoot = (opts.existenceRoot ?? mountSource).replace(/[/\\]+$/, "");
+  const src = mountSource.replace(/[/\\]+$/, "");
   const args: string[] = [];
   for (const zone of PROTECTED_WORKSPACE_ZONES) {
-    const src = `${mountSource.replace(/[/\\]+$/, "")}/${zone}`;
-    if (existsSync(src)) {
-      args.push("-v", `${src}:${mountRoot}/${zone}:ro`);
+    if (existsSync(`${checkRoot}/${zone}`)) {
+      args.push("-v", `${src}/${zone}:${mountRoot}/${zone}:ro`);
     }
   }
   return args;

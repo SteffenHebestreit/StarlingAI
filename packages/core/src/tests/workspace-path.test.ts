@@ -146,4 +146,12 @@ describe("buildProtectedZoneReadonlyArgs — shell/test sandbox config-zone prot
     expect(buildProtectedZoneReadonlyArgs("gc-workspace", "generated")).toEqual([]);
     expect(buildProtectedZoneReadonlyArgs("gc-workspace", undefined)).toEqual([]);
   });
+
+  it("checks zone existence via existenceRoot (gateway view) but binds the mount source (host path)", () => {
+    const args = buildProtectedZoneReadonlyArgs("/host/repo/workspace", "generated", { existenceRoot: root });
+    const joined = args.join(" ");
+    expect(joined).toContain("/host/repo/workspace/agents:/workspace/agents:ro");
+    expect(joined).toContain("/host/repo/workspace/scenes:/workspace/scenes:ro");
+    expect(joined).not.toContain("/workspace/jobs:");
+  });
 });
