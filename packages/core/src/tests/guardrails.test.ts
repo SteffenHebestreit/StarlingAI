@@ -122,6 +122,43 @@ describe("scanOutput", () => {
     const r = scanOutput(`Your token: ${jwt}`);
     expect(r.detectedTypes).toContain("jwt_token");
   });
+
+  describe("known-value redaction (our own env secrets)", () => {
+    it("redacts the literal value of a secret-named env var even with no recognizable format", async () => {
+      const { refreshSecretValueCache } = await import("../guardrails/output.js");
+      const prev = process.env["SAI_TEST_JWT_SECRET"];
+      process.env["SAI_TEST_JWT_SECRET"] = "plain-boring-signing-value-9c1f";
+      refreshSecretValueCache();
+      try {
+        // A shape scanner would miss this — it has no sk-/JWT/PEM format.
+        const r = scanOutput("For debugging, the signing secret is plain-boring-signing-value-9c1f right now.");
+        expect(r.safe).toBe(false);
+        expect(r.detectedTypes).toContain("env_secret_value");
+        expect(r.redacted).toContain("[REDACTED:secret]");
+        expect(r.redacted).not.toContain("plain-boring-signing-value-9c1f");
+      } finally {
+        if (prev === undefined) delete process.env["SAI_TEST_JWT_SECRET"];
+        else process.env["SAI_TEST_JWT_SECRET"] = prev;
+        refreshSecretValueCache();
+      }
+    });
+
+    it("does NOT redact non-secret env values (ports, model ids) or short values", async () => {
+      const { refreshSecretValueCache } = await import("../guardrails/output.js");
+      const saved = { port: process.env["SAI_TEST_PORT"], pw: process.env["SAI_TEST_SHORT_PASSWORD"] };
+      process.env["SAI_TEST_PORT"] = "8765";                 // secret-name? no → ignored
+      process.env["SAI_TEST_SHORT_PASSWORD"] = "abc";        // secret-name yes, but < min length → ignored
+      refreshSecretValueCache();
+      try {
+        const r = scanOutput("The port is 8765 and the value abc is fine to show.");
+        expect(r.safe).toBe(true);
+      } finally {
+        if (saved.port === undefined) delete process.env["SAI_TEST_PORT"]; else process.env["SAI_TEST_PORT"] = saved.port;
+        if (saved.pw === undefined) delete process.env["SAI_TEST_SHORT_PASSWORD"]; else process.env["SAI_TEST_SHORT_PASSWORD"] = saved.pw;
+        refreshSecretValueCache();
+      }
+    });
+  });
 });
 
 // ── Tool tiers ───────────────────────────────────────────────────────────────

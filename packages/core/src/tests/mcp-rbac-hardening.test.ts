@@ -31,3 +31,33 @@ describe("mcpSubAgentFailed — surface non-clean runs as errors (MCPS-3)", () =
     expect(mcpSubAgentFailed(run("success", "max_iterations"))).toBe(true);
   });
 });
+
+import { assertSafeMcpDockerConfig } from "../mcp/client.js";
+
+describe("assertSafeMcpDockerConfig — docker MCP isolation guard", () => {
+  it("rejects the docker socket, host root, and sensitive host mounts", () => {
+    const bad = [
+      ["/var/run/docker.sock:/var/run/docker.sock"],
+      ["/:/host"],
+      ["/etc:/etc"],
+      ["/root/.ssh:/keys"],
+      ["/var/run/something.sock:/s"],
+      ["./.env:/app/.env"],
+      ["/home/user/proj/.starlingai:/state"],
+      ["/data/credentials.enc:/c"],
+    ];
+    for (const mounts of bad) {
+      expect(() => assertSafeMcpDockerConfig({ mounts }, "srv")).toThrow(/refused/);
+    }
+  });
+
+  it("rejects --network=host", () => {
+    expect(() => assertSafeMcpDockerConfig({ network: "host" }, "srv")).toThrow(/network/);
+  });
+
+  it("allows a benign dedicated data mount and a named network", () => {
+    expect(() => assertSafeMcpDockerConfig({ mounts: ["/srv/mcp-data:/data:ro"], network: "starlingai-public" }, "srv")).not.toThrow();
+    expect(() => assertSafeMcpDockerConfig({ mounts: [], network: "none" }, "srv")).not.toThrow();
+    expect(() => assertSafeMcpDockerConfig({}, "srv")).not.toThrow();
+  });
+});

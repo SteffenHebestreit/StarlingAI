@@ -15,6 +15,37 @@ import { childLogger } from "../logger.js";
 
 const log = childLogger("mcp:client");
 const execFileAsync = promisify(execFile);
+
+/**
+ * Reject a docker-transport MCP server whose config would break container
+ * isolation and hand it host-root / host-secret access. Fail CLOSED — an unsafe
+ * mount or network turns a mere config entry into a full-host compromise
+ * (mounting the docker socket = root-equivalent; mounting host root or the repo =
+ * reading .env / credentials.enc; --network=host = the host's network stack).
+ * Exported for testing.
+ */
+export function assertSafeMcpDockerConfig(config: { mounts?: string[]; network?: string }, serverName: string): void {
+  const net = config.network?.trim().toLowerCase();
+  if (net === "host" || net === "container:host") {
+    throw new Error(`MCP server "${serverName}" is refused: network "${config.network}" would share the host network namespace.`);
+  }
+  for (const mount of config.mounts ?? []) {
+    const source = String(mount).split(":")[0]?.trim() ?? "";
+    const lower = source.toLowerCase().replace(/\\/g, "/");
+    const forbidden =
+      /docker\.sock/.test(lower) ||                                  // docker socket = host root
+      lower === "/" || lower === "" ||                               // whole host FS
+      /^\/(etc|root|home|var|proc|sys|boot|dev)(\/|$)/.test(lower) || // sensitive host dirs
+      lower.startsWith("/var/run") ||                                // sockets (docker/podman/etc.)
+      /(^|\/)\.env(\.|$)/.test(lower) ||                             // .env files
+      /(^|\/)\.starlingai(\/|$)/.test(lower) ||                      // credentials.enc / state
+      /credential/.test(lower);                                     // any credential store
+    if (forbidden) {
+      throw new Error(`MCP server "${serverName}" is refused: mount "${mount}" targets a sensitive host path (docker socket, host root, /etc, /var/run, .env, or credentials). Remove it or mount a dedicated data directory instead.`);
+    }
+  }
+}
+
 const MCP_CONTAINER_LABEL = "starlingai.managed=mcp";
 const MCP_SERVER_LABEL_PREFIX = "starlingai.mcp.server=";
 const MCP_CONTAINER_NAME_PREFIX = "starlingai-mcp-";
@@ -112,6 +143,8 @@ function buildTransport(serverName: string, config: McpServerConfig, containerNa
       });
 
     case "docker": {
+      // Fail closed on isolation-breaking mounts/network before we ever docker run.
+      assertSafeMcpDockerConfig(config, serverName);
       // Spawn a fresh container and pipe stdio to MCP
       const dockerArgs = [
         "run", "--rm", "-i",
