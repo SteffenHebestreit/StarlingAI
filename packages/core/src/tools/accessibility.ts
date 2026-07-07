@@ -83,6 +83,9 @@ registerTool({
 
     try {
       if (url) {
+        const { checkUrlSsrf } = await import("./web.js");
+        const blocked = await checkUrlSsrf(url);
+        if (blocked) return { success: false, output: "", error: `Refusing to audit that URL: ${blocked}.` };
         await callPlaywrightTool("browser_navigate", { url });
       }
       if (waitForSelector) {

@@ -60,6 +60,23 @@ describe("serve_app — pure helpers", () => {
     expect(args.slice(-3)).toEqual(["sh", "-lc", "node server.js"]);
     expect(args).toContain("--security-opt"); // no-new-privileges hardening
   });
+
+  it("buildServeRunArgs isolates agent-authored code: drops all caps, read-only root, tmpfs /tmp, npm-writable HOME", () => {
+    const app: ServedApp = {
+      id: "abc123", name: "demo", containerName: "sai-app-abc123", runtime: "node-express",
+      internalPort: 3000, network: "starlingai-public", image: "node:22-alpine",
+      root: "generated/demo", command: "npm start", status: "starting", startedAt: Date.now(), sessionId: "s",
+    };
+    const args = buildServeRunArgs(app, "/host/ws/generated/demo");
+    const joined = args.join(" ");
+    expect(joined).toContain("--cap-drop ALL");
+    expect(args).toContain("--read-only");
+    expect(joined).toContain("--tmpfs /tmp");         // writable tmp under the read-only root
+    expect(joined).toContain("HOME=/tmp");            // npm/home writes land on the tmpfs, not root fs
+    expect(joined).toContain("npm_config_cache=/tmp/.npm");
+    // The app dir stays a writable mount so `npm install` (node_modules) still works.
+    expect(joined).toContain("/host/ws/generated/demo:/app");
+  });
 });
 
 describe("serve_app — lifecycle", () => {

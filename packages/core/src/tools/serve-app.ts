@@ -184,10 +184,21 @@ export function buildServeRunArgs(app: ServedApp, hostAppDir: string): string[] 
     "--cpus", "1",
     "--pids-limit", "256",
     "--security-opt", "no-new-privileges",
+    // Isolation parity with the shell sandbox: agent-authored server code runs
+    // with NO Linux capabilities and a read-only root filesystem. The app can
+    // still write its own mounted dir (/app, for `npm install` → node_modules)
+    // and a tmpfs /tmp; HOME + the npm cache are pointed at /tmp so npm works
+    // under the read-only root. (Root user is kept because /app is owned by the
+    // gateway uid — dropping all caps + read-only is the meaningful hardening.)
+    "--cap-drop", "ALL",
+    "--read-only",
+    "--tmpfs", "/tmp:size=256m,exec",
     "-w", "/app",
     "-e", `PORT=${app.internalPort}`,
     "-e", "HOST=0.0.0.0",
     "-e", "NODE_ENV=production",
+    "-e", "HOME=/tmp",
+    "-e", "npm_config_cache=/tmp/.npm",
     "-v", `${hostAppDir}:/app`,
     app.image,
     "sh", "-lc", app.command,

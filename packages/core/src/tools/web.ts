@@ -773,6 +773,30 @@ async function hostIsBlocked(host: string): Promise<boolean> {
 }
 
 /**
+ * Shared SSRF gate for tools that hand a URL to an out-of-process fetcher which
+ * has no guard of its own (the Playwright browser, which sits on the service
+ * network and could otherwise be pointed at http://engram, http://10.x, or a
+ * cloud-metadata endpoint and read the response back via a snapshot). Rejects
+ * non-http(s) schemes and any host that resolves to a private/internal address.
+ * Returns a reason string when blocked, or null when the URL is allowed.
+ */
+export async function checkUrlSsrf(rawUrl: string): Promise<string | null> {
+  let url: URL;
+  try {
+    url = new URL(String(rawUrl));
+  } catch {
+    return "invalid URL";
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    return "only http(s) URLs are allowed";
+  }
+  if (await hostIsBlocked(url.hostname)) {
+    return "requesting private/internal network addresses is not allowed";
+  }
+  return null;
+}
+
+/**
  * fetch() that re-runs the SSRF guard on EVERY redirect hop. The plain guard only
  * validated the initial URL, so a public URL that 30x-redirected to 169.254.169.254
  * or an internal host bypassed it. Follows redirects manually, re-checking each

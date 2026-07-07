@@ -44,3 +44,30 @@ describe("redactChannelSecrets — masks the WhatsApp verifyToken (CRED-2)", () 
     expect(out["phoneNumberId"]).toBe("15551234567");
   });
 });
+
+import { checkUrlSsrf } from "../tools/web.js";
+
+describe("checkUrlSsrf — shared URL guard for browser/out-of-process fetchers", () => {
+  it("blocks non-http(s) schemes and invalid URLs", async () => {
+    expect(await checkUrlSsrf("file:///etc/passwd")).toMatch(/http/);
+    expect(await checkUrlSsrf("ftp://example.com")).toMatch(/http/);
+    expect(await checkUrlSsrf("not a url")).toMatch(/invalid/);
+  });
+
+  it("blocks internal/private hosts (literal)", async () => {
+    for (const u of [
+      "http://localhost:9222",
+      "http://127.0.0.1/",
+      "http://10.10.0.2/admin",
+      "http://192.168.1.1/",
+      "http://169.254.169.254/latest/meta-data/",
+      "http://engram.internal/",
+    ]) {
+      expect(await checkUrlSsrf(u)).toMatch(/private|internal/);
+    }
+  });
+
+  it("allows a normal public https URL", async () => {
+    expect(await checkUrlSsrf("https://example.com/page")).toBeNull();
+  });
+});

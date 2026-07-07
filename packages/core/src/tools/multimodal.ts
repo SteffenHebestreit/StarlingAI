@@ -437,6 +437,7 @@ registerBrowserTool({
     required: ["url"],
   },
   mcpToolName: "browser_navigate",
+  guardUrlArg: "url",
 });
 
 registerBrowserTool({
@@ -538,12 +539,24 @@ function registerBrowserTool(input: {
   description: string;
   parameters: Record<string, unknown>;
   mcpToolName: string;
+  /** Name of a URL argument to SSRF-guard before handing it to Playwright. The
+   *  browser sits on the service network with no guard of its own, so a URL that
+   *  resolves to an internal/private host is refused (see web.ts checkUrlSsrf). */
+  guardUrlArg?: string;
 }): void {
   registerTool({
     name: input.name,
     description: input.description,
     parameters: input.parameters,
     async execute(args) {
+      if (input.guardUrlArg) {
+        const raw = args[input.guardUrlArg];
+        if (typeof raw === "string" && raw.trim()) {
+          const { checkUrlSsrf } = await import("./web.js");
+          const blocked = await checkUrlSsrf(raw);
+          if (blocked) return fail(`Refusing to navigate the browser: ${blocked}.`);
+        }
+      }
       try {
         const output = await callPlaywrightTool(input.mcpToolName, args);
         return { success: true, output, metadata: { server: "playwright", tool: input.mcpToolName } };
