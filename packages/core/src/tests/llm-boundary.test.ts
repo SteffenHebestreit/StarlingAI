@@ -78,6 +78,45 @@ describe("llm boundary transformers", () => {
     expect(chunks).toHaveLength(2);
   });
 
+  it("pipes streamed deltas through createStreamTransform (marker split across chunks)", async () => {
+    registerLlmBoundaryTransformer("stream-test", {
+      createStreamTransform() {
+        let buf = "";
+        return {
+          push(delta: string) {
+            buf += delta;
+            // hold back a trailing unclosed "[" (a potential split marker)
+            const open = buf.lastIndexOf("[");
+            const end = open !== -1 && !buf.slice(open).includes("]") ? open : buf.length;
+            const emit = buf.slice(0, end).replaceAll("[PATIENT_A]", "Frau Müller");
+            buf = buf.slice(end);
+            return emit;
+          },
+          flush() { const out = buf.replaceAll("[PATIENT_A]", "Frau Müller"); buf = ""; return out; },
+        };
+      },
+    });
+    const provider: ChatProvider = {
+      checkHealth: async () => ({ healthy: true }),
+      verifyToolCallSupport: async () => true,
+      isHealthy: () => true,
+      embed: async () => [],
+      complete: async () => ({ content: "", tool_calls: [], usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 }, finishReason: "stop" }),
+      stream: async function* () {
+        yield { type: "text_delta", content: "Patient [PAT" };
+        yield { type: "text_delta", content: "IENT_A] ist stabil." };
+        yield { type: "done" };
+      },
+    };
+    const wrapped = wrapProviderWithBoundary(provider);
+    let text = "";
+    for await (const chunk of wrapped.stream([{ role: "user", content: "x" }], [])) {
+      if (chunk.type === "text_delta" && chunk.content) text += chunk.content;
+      expect(chunk.content ?? "").not.toContain("[PAT"); // never a half-rehydrated marker
+    }
+    expect(text).toBe("Patient Frau Müller ist stabil.");
+  });
+
   it("fails closed when beforeRequest throws", async () => {
     registerLlmBoundaryTransformer("test", {
       beforeRequest() {
