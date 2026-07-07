@@ -134,6 +134,27 @@ describe("extension tool tiers", () => {
       ),
     ).toThrow(/FOUR_BLOCKED/);
   });
+
+  it("fail-closes an in-process tool that FALSELY declares requiresSandbox", async () => {
+    const { registerTool, executeTool } = await import("../tools/registry.js");
+    // An extension/plugin registering a sandbox-claiming tier for an in-process execute.
+    registerExtensionToolTier(
+      "ext_fake_sandboxed",
+      { tier: ToolTier.TWO_EXECUTE, description: "claims sandbox but runs in-process", requiresPerCallApproval: false, requiresSandbox: true },
+      "evil",
+    );
+    let ran = false;
+    registerTool({
+      name: "ext_fake_sandboxed",
+      description: "x",
+      parameters: { type: "object", properties: {} },
+      async execute() { ran = true; return { success: true, output: "did host stuff" }; },
+    });
+    const res = await executeTool("ext_fake_sandboxed", {}, { sessionId: "t", workspacePath: "/tmp/ws" } as never);
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/requiresSandbox|sandbox isolation/i);
+    expect(ran).toBe(false); // the in-process execute was NEVER called
+  });
 });
 
 describe("extension loader (reference extension)", () => {

@@ -1749,16 +1749,21 @@ export function getToolTier(toolName: string): ToolTierDef {
     };
   }
 
-  // Plugin SDK tools: plugin__<plugin-name>__<tool-name>  → Tier 2,
-  // per-call approval, sandboxed.  Plugins are third-party code loaded from
-  // the configured plugins directory; even when the operator trusts the
-  // author the runtime treats them like any other Tier 2 execute tool.
+  // Plugin SDK tools: plugin__<plugin-name>__<tool-name>  → Tier 2, per-call
+  // approval. Plugins are third-party JS loaded from the plugins directory and
+  // execute IN-PROCESS (plugin/loader.ts wires their execute directly), so they
+  // do NOT get sandbox isolation — requiresSandbox is false so the tier reflects
+  // reality (executeTool fail-closes any in-process tool that falsely claims a
+  // sandbox). Per-call approval is the real containment: the operator authorizes
+  // every plugin invocation, and the plugin runs with no more authority than any
+  // other in-process tool. (Genuine sandboxing of plugin code would require
+  // running it in an isolated worker/container — tracked separately.)
   if (/^plugin__[a-z][a-z0-9_-]{0,32}__[a-z][a-z0-9_]{0,48}$/i.test(toolName)) {
     return {
       tier: ToolTier.TWO_EXECUTE,
       description: `Plugin tool: ${toolName}`,
       requiresPerCallApproval: true,
-      requiresSandbox: true,
+      requiresSandbox: false,
     };
   }
 

@@ -236,6 +236,19 @@ export interface ToolResult {
 
 const _registry = new Map<string, ToolHandler>();
 
+/**
+ * The ONLY tools permitted to carry `requiresSandbox` — the built-ins that
+ * genuinely spawn a locked-down `docker run` for the untrusted work. executeTool
+ * fail-closes any other tool that declares requiresSandbox (a plugin/extension
+ * that would run in-process while claiming isolation). Kept in lockstep with the
+ * requiresSandbox:true entries in guardrails/tool-tiers.ts TOOL_TIER_MAP.
+ */
+export const SELF_SANDBOXING_TOOLS: ReadonlySet<string> = new Set([
+  "shell_exec", "run_script", "run_test_suite",
+  "git_commit", "git_checkout", "git_tag", "git_push", "git_clone",
+  "tool_dev_start", "tool_dev_test",
+]);
+
 export function registerTool(handler: ToolHandler): void {
   if (!isToolAllowed(handler.name)) {
     throw new Error(`Cannot register blocked tool: ${handler.name}`);
@@ -556,11 +569,19 @@ export async function executeTool(
     return { success: false, output: "", error: `Tool '${name}' is not registered.${hint}` };
   }
 
-  // Tier 2+ require sandbox — enforce here
-  if (def.requiresSandbox) {
-    // Sandbox enforcement happens inside the shell/browser tool implementations
-    // We mark the context so the tool knows it MUST sandbox
-    context = { ...context, workspacePath: context.workspacePath };
+  // requiresSandbox is a REAL, fail-closed contract — not documentation.
+  // These built-ins genuinely dispatch the untrusted work into a locked-down
+  // `docker run` (see shell.ts / git.ts / run-test-suite.ts / tool-develop.ts).
+  // ANY other tool whose tier declares requiresSandbox — a plugin or extension
+  // registering an in-process execute — is making a FALSE isolation claim: it
+  // would run with full gateway authority while advertising a sandbox. Refuse
+  // it (fail closed) so the flag can never mislead an operator or bypass review.
+  if (def.requiresSandbox && !SELF_SANDBOXING_TOOLS.has(name)) {
+    return {
+      success: false,
+      output: "",
+      error: `Tool '${name}' declares requiresSandbox but has no sandboxed execution path — refused. A tool that runs in-process must not claim sandbox isolation; route its untrusted work through shell_exec/run_script, or register it at a non-sandbox tier.`,
+    };
   }
 
   // Per-call approval:

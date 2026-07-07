@@ -209,12 +209,14 @@ describe("plugin SDK loader", () => {
 });
 
 describe("plugin SDK tier-tier mapping", () => {
-  it("plugin__<plugin>__<tool> resolves to Tier 2 with sandbox + per-call approval", async () => {
+  it("plugin__<plugin>__<tool> resolves to Tier 2 with per-call approval and NO false sandbox claim", async () => {
     const { getToolTier, ToolTier } = await import("../guardrails/tool-tiers.js");
     const def = getToolTier("plugin__example__do_thing");
     expect(def.tier).toBe(ToolTier.TWO_EXECUTE);
     expect(def.requiresPerCallApproval).toBe(true);
-    expect(def.requiresSandbox).toBe(true);
+    // Plugins execute in-process; requiresSandbox must be false so the tier is
+    // honest and executeTool does not fail-close them as a false sandbox claim.
+    expect(def.requiresSandbox).toBe(false);
   });
 
   it("malformed plugin__ names fall back to BLOCKED", async () => {
