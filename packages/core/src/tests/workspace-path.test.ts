@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { resolve } from "node:path";
 import { resolvePathWithinWorkspace, resolveWorkspaceWritePath, GENERATED_SUBDIR } from "../tools/workspace-path.js";
 import { runWithRequestContext } from "../runtime/request-context.js";
@@ -91,5 +91,59 @@ describe("workspace zoning — scope-confined path resolution", () => {
     expect(full.relativePath).toBe("README.md");
     const unscoped = resolvePathWithinWorkspace("README.md", WS);
     expect(unscoped.relativePath).toBe("README.md");
+  });
+});
+
+import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { buildProtectedZoneReadonlyArgs, PROTECTED_WORKSPACE_ZONES } from "../tools/workspace-mount.js";
+
+describe("write-zoning: scope-confined agents cannot write live-config zones via file tools", () => {
+  it("re-roots a scoped agent's write to a config zone into generated/ (deny-by-reroot)", () => {
+    for (const zone of PROTECTED_WORKSPACE_ZONES) {
+      runWithRequestContext({ workspaceScope: "generated" }, () => {
+        const r = resolveWorkspaceWritePath(`${zone}/50-authored-evil.jsonc`, WS);
+        // The write never lands in the live config zone — it's rooted under generated/.
+        expect(r.relativePath).toBe(`generated/${zone}/50-authored-evil.jsonc`);
+        expect(r.relativePath.startsWith(`${zone}/`)).toBe(false);
+      });
+    }
+  });
+
+  it("a 'full' (maintenance) agent writes config zones literally", () => {
+    runWithRequestContext({ workspaceScope: "full" }, () => {
+      const r = resolveWorkspaceWritePath("agents/50-authored-ok.jsonc", WS);
+      expect(r.relativePath).toBe("agents/50-authored-ok.jsonc");
+    });
+  });
+});
+
+describe("buildProtectedZoneReadonlyArgs — shell/test sandbox config-zone protection", () => {
+  let root: string;
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "sai-ws-"));
+    // create only two of the zones so we prove existence-gating
+    mkdirSync(join(root, "agents"), { recursive: true });
+    mkdirSync(join(root, "scenes"), { recursive: true });
+  });
+  afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+  it("remounts existing config zones read-only for a scope-confined agent", () => {
+    const args = buildProtectedZoneReadonlyArgs(root, "generated");
+    expect(args).toContain("-v");
+    expect(args.join(" ")).toContain(`${root}/agents:/workspace/agents:ro`);
+    expect(args.join(" ")).toContain(`${root}/scenes:/workspace/scenes:ro`);
+    // jobs/tools don't exist here → not mounted (no broken docker run)
+    expect(args.join(" ")).not.toContain("/workspace/jobs:");
+  });
+
+  it("is a no-op for a 'full' maintenance agent", () => {
+    expect(buildProtectedZoneReadonlyArgs(root, "full")).toEqual([]);
+  });
+
+  it("is a no-op for a named-volume mount source (can't overlay a volume subpath)", () => {
+    expect(buildProtectedZoneReadonlyArgs("gc-workspace", "generated")).toEqual([]);
+    expect(buildProtectedZoneReadonlyArgs("gc-workspace", undefined)).toEqual([]);
   });
 });

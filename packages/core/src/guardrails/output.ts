@@ -79,10 +79,6 @@ export function refreshSecretValueCache(): void {
   _secretValuesCache = null;
 }
 
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 export function scanOutput(output: string): OutputScanResult {
   if (!output) return { safe: true };
 

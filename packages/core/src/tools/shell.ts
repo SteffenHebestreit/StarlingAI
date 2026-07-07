@@ -6,7 +6,8 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
-import { resolveDockerWorkspaceMountSource } from "./workspace-mount.js";
+import { resolveDockerWorkspaceMountSource, buildProtectedZoneReadonlyArgs } from "./workspace-mount.js";
+import { currentWorkspaceScope } from "../runtime/request-context.js";
 
 const log = childLogger("tool:shell");
 const execFileAsync = promisify(execFile);
@@ -69,6 +70,9 @@ registerTool({
 
     const workspaceMountSource = resolveDockerWorkspaceMountSource(ctx.workspacePath);
     const wrappedCommand = buildSandboxCommand(command, workdir);
+    // Live-config zones (agents/scenes/jobs/tools) are read-only for scope-confined
+    // agents — only the dedicated authoring tools may change them, never raw shell.
+    const protectedZoneArgs = buildProtectedZoneReadonlyArgs(workspaceMountSource, currentWorkspaceScope());
 
     const dockerArgs = [
       "run", "--rm",
@@ -81,6 +85,7 @@ registerTool({
       "--cap-drop=ALL",                   // Drop all capabilities
       "--security-opt=no-new-privileges",
       "-v", `${workspaceMountSource}:/workspace`,
+      ...protectedZoneArgs,               // config zones re-mounted read-only
       "-w", workdir,
       ...envArgs,
       SANDBOX_IMAGE,
@@ -201,6 +206,7 @@ registerTool({
     }
 
     const workspaceMountSource = resolveDockerWorkspaceMountSource(ctx.workspacePath);
+    const protectedZoneArgs = buildProtectedZoneReadonlyArgs(workspaceMountSource, currentWorkspaceScope());
 
     const dockerArgs = [
       "run", "--rm",
@@ -213,6 +219,7 @@ registerTool({
       "--cap-drop=ALL",
       "--security-opt=no-new-privileges",
       "-v", `${workspaceMountSource}:/workspace`,
+      ...protectedZoneArgs,               // config zones re-mounted read-only
       "-w", "/workspace",
       ...envArgs,
       SANDBOX_IMAGE,
