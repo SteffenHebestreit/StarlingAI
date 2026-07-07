@@ -12,6 +12,7 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import type { McpServerConfig } from "../config/schema.js";
 import { childLogger } from "../logger.js";
+import { assertSafeDockerRunArgs } from "../tools/docker-safety.js";
 
 const log = childLogger("mcp:client");
 const execFileAsync = promisify(execFile);
@@ -158,6 +159,7 @@ function buildTransport(serverName: string, config: McpServerConfig, containerNa
         config.image,
         ...(config.args ?? []),
       ];
+      assertSafeDockerRunArgs(dockerArgs, `mcp:${serverName}`); // belt + suspenders over the config check
       return new StdioClientTransport({ command: "docker", args: dockerArgs });
     }
 

@@ -21,6 +21,7 @@
 
 import { spawn } from "node:child_process";
 import { childLogger } from "../logger.js";
+import { assertSafeDockerRunArgs } from "../tools/docker-safety.js";
 import type { SubAgentRunOptions } from "./sub-agent.js";
 import type { SubAgentConfig, ModelConfig } from "../config/schema.js";
 import { emitSwarmEvent } from "../swarm/bus.js";
@@ -211,6 +212,16 @@ export async function runSubAgentInContainer(
   const startedAt = Date.now();
 
   return new Promise((resolve) => {
+    // Defense-in-depth: never spawn a sub-agent container with escape-shaped flags.
+    try {
+      assertSafeDockerRunArgs(dockerArgs, "sub-agent");
+    } catch (err) {
+      resolve({
+        output: `Sub-agent container refused: ${err instanceof Error ? err.message : String(err)}`,
+        metrics: { containerRuntimeMs: 0, heartbeatSupported: false },
+      });
+      return;
+    }
     const proc = spawn("docker", dockerArgs, {
       stdio: ["pipe", "pipe", "pipe"],
     });

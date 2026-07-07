@@ -13,6 +13,7 @@ import { promisify } from "node:util";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
 import { resolveDockerWorkspaceMountSource } from "./workspace-mount.js";
+import { assertSafeDockerRunArgs } from "./docker-safety.js";
 
 const log = childLogger("tool:git");
 const execFileAsync = promisify(execFile);
@@ -46,6 +47,7 @@ async function runGitInSandbox(
   ];
 
   try {
+    assertSafeDockerRunArgs(dockerArgs, "git");
     const { stdout, stderr } = await execFileAsync("docker", dockerArgs, {
       timeout: EXEC_TIMEOUT_MS,
       maxBuffer: MAX_OUTPUT_BYTES,

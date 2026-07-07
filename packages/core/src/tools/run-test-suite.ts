@@ -11,6 +11,7 @@ import { promisify } from "node:util";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
 import { resolveDockerWorkspaceMountSource, buildProtectedZoneReadonlyArgs } from "./workspace-mount.js";
+import { assertSafeDockerRunArgs } from "./docker-safety.js";
 import { currentWorkspaceScope } from "../runtime/request-context.js";
 
 const log = childLogger("tool:run-test-suite");
@@ -136,6 +137,7 @@ registerTool({
     log.info({ suite, command: fullCommand, workdir, sessionId: ctx.sessionId }, "run_test_suite starting");
 
     try {
+      assertSafeDockerRunArgs(dockerArgs, "run_test_suite");
       const { stdout, stderr } = await execFileAsync("docker", dockerArgs, {
         timeout: timeoutMs,
         maxBuffer: MAX_OUTPUT_BYTES,

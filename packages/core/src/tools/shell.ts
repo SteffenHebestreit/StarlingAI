@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
 import { resolveDockerWorkspaceMountSource, buildProtectedZoneReadonlyArgs } from "./workspace-mount.js";
+import { assertSafeDockerRunArgs } from "./docker-safety.js";
 import { currentWorkspaceScope } from "../runtime/request-context.js";
 
 const log = childLogger("tool:shell");
@@ -95,6 +96,7 @@ registerTool({
     log.info({ command: command.substring(0, 200), sessionId: ctx.sessionId }, "shell_exec starting");
 
     try {
+      assertSafeDockerRunArgs(dockerArgs, "shell");
       const { stdout, stderr } = await execFileAsync("docker", dockerArgs, {
         timeout: EXEC_TIMEOUT_MS,
         maxBuffer: MAX_OUTPUT_BYTES,
@@ -229,6 +231,7 @@ registerTool({
     log.info({ script: scriptPath, sessionId: ctx.sessionId }, "run_script starting");
 
     try {
+      assertSafeDockerRunArgs(dockerArgs, "shell");
       const { stdout, stderr } = await execFileAsync("docker", dockerArgs, {
         timeout: EXEC_TIMEOUT_MS,
         maxBuffer: MAX_OUTPUT_BYTES,

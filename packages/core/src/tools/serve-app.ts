@@ -20,6 +20,7 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { resolveDockerWorkspaceMountSource } from "./workspace-mount.js";
+import { assertSafeDockerRunArgs } from "./docker-safety.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 
@@ -282,7 +283,9 @@ async function startApp(args: Record<string, unknown>, ctx: ToolContext): Promis
   const hostAppDir = `${resolveDockerWorkspaceMountSource(ctx.workspacePath).replace(/[/\\]+$/, "")}/${root}`;
   logAudit("serve_app_started", { id, container: app.containerName, root, network: app.network, image: app.image }, { sessionId: ctx.sessionId, severity: "warn" });
 
-  const run = await dockerExec(buildServeRunArgs(app, hostAppDir), { timeoutMs: 60_000 });
+  const serveRunArgs = buildServeRunArgs(app, hostAppDir);
+  assertSafeDockerRunArgs(serveRunArgs, "serve_app");
+  const run = await dockerExec(serveRunArgs, { timeoutMs: 60_000 });
   if (run.code !== 0) {
     app.status = "failed";
     app.lastError = (run.stderr || run.stdout || "docker run failed").trim().slice(0, 600);
