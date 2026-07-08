@@ -23,8 +23,6 @@ An index of the `docs/` folder. **Reference** docs are evergreen and kept curren
 | [channel-setup.md](channel-setup.md) | Step-by-step channel configuration |
 | [forking.md](forking.md) | Forking / self-hosting the project |
 | [fork-boilerplate-plan.md](fork-boilerplate-plan.md) | Boilerplate plan for a downstream fork |
-| [eval-guide-2026-07.md](eval-guide-2026-07.md) | Current flag-eval round — what to enable, what to watch |
-| [honesty-restoration-2026-07.md](honesty-restoration-2026-07.md) | Honesty-guard restoration + how to eval it (companion to the eval guide) |
 
 ## Point-in-time analysis (snapshots — not maintained)
 
@@ -32,6 +30,5 @@ An index of the `docs/` folder. **Reference** docs are evergreen and kept curren
 |-----|------------------|
 | [staged-orchestration.md](staged-orchestration.md) | Staged small-prompt orchestration pipeline design (referenced by `runtime.ts`) |
 | [engram-reevaluation-2026-07.md](engram-reevaluation-2026-07.md) | Engram (document-RAG) re-evaluation + adoption decision (referenced by `retrieval/*`) |
-| architecture-research-2026-07.json | Architecture research dump — backs the flags in the current eval round |
 
-> Point-in-time docs are retained as a record of the reasoning behind shipped changes (`staged-orchestration` and `engram-reevaluation` are cited by code comments). They are not kept in sync with the code; when a fact here disagrees with the schema/source, the code wins. The July eval-round docs above graduate to removable once that `pass^k` eval is run.
+> These two are retained because code comments cite them as decision-records. They are not kept in sync with the code; when a fact here disagrees with the schema/source, the code wins.
