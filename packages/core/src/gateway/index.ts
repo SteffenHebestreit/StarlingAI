@@ -10,6 +10,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { getConfig, updateConfig } from "../config/loader.js";
 import { verifyToken, extractBearerToken, checkAuthRateLimit, recordAuthFailure, clearAuthFailures, authenticatedUser, userHasRole, hashPassword, verifyPassword, createToken, type AuthRole } from "./auth.js";
+import { runWithRequestContext } from "../runtime/request-context.js";
 import { registerSubAgentRoutes } from "./sub-agent-routes.js";
 import { registerSkillLibraryRoutes } from "./skill-routes.js";
 import { registerDocumentRoutes } from "./document-routes.js";
@@ -148,6 +149,15 @@ export function createGateway() {
       return c.json({ error: `Requires role: ${policy.roles.join(" | ")}` }, 403);
     }
     return next();
+  });
+  // Establish the per-user request context so /api routes resolve user-scoped
+  // stores (durable memory, dialectic user-model, personality override) to the
+  // authenticated user. Only under active multi-user auth; a plain no-op for
+  // single-operator / auth-disabled installs (userScopedDir also gates on this).
+  app.use("/api/*", async (c, next) => {
+    if (!getConfig().auth?.enabled) return next();
+    const user = await authenticatedUser(c.req.header("Authorization"));
+    return runWithRequestContext({ userId: user?.username }, () => next());
   });
   const turnTimeoutMs = config.gateway.turnTimeoutMs;
   const currentMultimodalConfig = () => getConfig().multimodal;

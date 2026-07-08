@@ -28,6 +28,7 @@ import {
   effectiveOrchestratorMaxToolIterations,
   currentEffortTier,
 } from "../runtime/effort-context.js";
+import { runWithRequestContext } from "../runtime/request-context.js";
 import {
   classifyTurnProgress,
   buildTurnOversightPrompt,
@@ -987,9 +988,17 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
   // in-flight warm-up so it never queues ahead of this turn); re-arm on completion.
   markOrchestratorActivity();
   try {
+    // Run the ENTIRE turn under the authenticated user's request context so that
+    // prompt assembly, personality, the user-model, and durable memory all see the
+    // ambient userId and resolve to that user's per-user store (multi-user auth).
+    // When auth is off the session has no userId → single shared path (back-compat).
+    // The per-tool wrap in tools/registry.ts re-sets the same userId for each tool.
     // Establish a fresh per-turn phase-timing store, then run the turn inside it so
     // timedPhase() calls anywhere in the turn record into THIS turn's map.
-    return await runWithPhaseTimings(() => runTurnImpl(opts));
+    return await runWithRequestContext(
+      { userId: opts.session.userId },
+      () => runWithPhaseTimings(() => runTurnImpl(opts)),
+    );
   } finally {
     markOrchestratorIdle();
   }

@@ -21,6 +21,7 @@ import {
   loadMainAssistantPersonality,
   resetMainAssistantPersonality,
   saveMainAssistantPersonality,
+  clearMainAssistantPersonalityOverride,
 } from "../personality/service.js";
 
 const log = childLogger("gateway:sub-agent-routes");
@@ -228,6 +229,12 @@ export function registerSubAgentRoutes(app: Hono): void {
   app.post("/api/personality/reset", async (c) => {
     const denied = await requireOperator(c);
     if (denied) return denied;
+    // Under multi-user auth, "reset" clears the caller's personality OVERRIDE so
+    // they fall back to the global persona. With no override (single-operator, or
+    // already on the global), reset the base persona to the built-in default.
+    if (clearMainAssistantPersonalityOverride()) {
+      return c.json(loadMainAssistantPersonality());
+    }
     return c.json(resetMainAssistantPersonality("user", "Reset from dashboard"));
   });
 }

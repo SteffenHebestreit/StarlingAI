@@ -21,7 +21,10 @@ import {
   compactWorkspaceMemoryRecords,
   compactUserMemoryRecords,
   refreshMissingDurableEmbeddings,
+  userMemoryBaseDir,
 } from "./service.js";
+import { runWithRequestContext } from "../runtime/request-context.js";
+import { listUserScopeSegments } from "../runtime/user-scope.js";
 
 const log = childLogger("memory:driver");
 
@@ -62,13 +65,25 @@ export async function runMemoryConsolidationSweep(workspacePath: string): Promis
   _sweepInFlight = true;
   try {
     // 1. Compact near-duplicates (merges tags, keeps the strongest copy).
-    for (const compact of [compactWorkspaceMemoryRecords, compactUserMemoryRecords]) {
+    // Workspace scope has no per-user dimension.
+    try {
+      const r = compactWorkspaceMemoryRecords(workspacePath, {});
+      result.merged += r.merged;
+      result.removed += r.removed;
+    } catch (err) {
+      log.debug({ err }, "Workspace compaction step skipped — non-critical");
+    }
+    // User scope is partitioned per authenticated user — sweep the shared/base
+    // bucket AND each per-user bucket (each in that user's request context so the
+    // store resolves to their directory). Per-user buckets also self-maintain via
+    // inline compaction on write; this is the idle backstop.
+    for (const userId of [undefined, ...listUserScopeSegments(userMemoryBaseDir())]) {
       try {
-        const r = compact(workspacePath, {});
+        const r = runWithRequestContext({ userId }, () => compactUserMemoryRecords(workspacePath, {}));
         result.merged += r.merged;
         result.removed += r.removed;
       } catch (err) {
-        log.debug({ err }, "Compaction step skipped — non-critical");
+        log.debug({ err, userId }, "User compaction step skipped — non-critical");
       }
     }
     // 2. Backfill embeddings for records that have none (no-op without a provider).

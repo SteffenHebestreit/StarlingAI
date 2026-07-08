@@ -12,6 +12,7 @@ import { logAudit } from "../audit/logger.js";
 import { isEmbeddingAvailable, computeQueryEmbedding, computeTextEmbeddings, cosineSimilarity } from "../providers/embeddings.js";
 
 import { PRODUCT } from "../product/index.js";
+import { userScopedDir } from "../runtime/user-scope.js";
 
 const log = childLogger("memory:service");
 
@@ -1060,11 +1061,18 @@ function normalizeTags(values: string[] | undefined): string[] {
   return tags;
 }
 
+/** Base dir for the durable USER scope, BEFORE per-user partitioning. Background
+ *  sweeps enumerate `<base>/users/*` from here; normal reads/writes go through
+ *  memoryDirForScope which appends the ambient user's segment. */
+export function userMemoryBaseDir(): string {
+  const override = process.env["SAI_USER_MEMORY_PATH"]?.trim();
+  return override ? resolve(override) : resolve(homedir(), PRODUCT.stateDirName, "user-memory");
+}
+
 function memoryDirForScope(scope: DurableMemoryScope, workspacePath: string): string {
-  if (scope === "user") {
-    const override = process.env["SAI_USER_MEMORY_PATH"]?.trim();
-    return override ? resolve(override) : resolve(homedir(), PRODUCT.stateDirName, "user-memory");
-  }
+  // The 'user' scope is partitioned per authenticated user (multi-user auth);
+  // it stays at the single shared base when no userId is present (auth-off).
+  if (scope === "user") return userScopedDir(userMemoryBaseDir());
   return resolve(workspacePath, MEMORY_SUBDIR);
 }
 

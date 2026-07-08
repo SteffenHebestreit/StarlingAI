@@ -2,7 +2,7 @@ import { ToolTier, getToolTier, isToolAllowed } from "../guardrails/tool-tiers.j
 import type { LLMToolDef } from "../providers/lmstudio.js";
 import { computeQueryEmbedding, cosineSimilarity, isEmbeddingAvailable } from "../providers/embeddings.js";
 import { withSpan } from "../observability/tracing.js";
-import { runWithRequestContext } from "../runtime/request-context.js";
+import { runWithRequestContext, currentUserId } from "../runtime/request-context.js";
 import { childLogger } from "../logger.js";
 import { isToolDisabled, resolveToolGroup } from "./groups.js";
 
@@ -643,7 +643,10 @@ export async function executeTool(
           // identity forwarding, workspace-path zone enforcement) without threading
           // them through every call signature.
           return await runWithRequestContext(
-            { userId: context.userId, workspaceScope: context.workspaceScope },
+            // Fall back to the ambient turn userId so a delegated sub-agent whose
+            // ToolContext didn't thread userId still resolves per-user stores to
+            // the owning user (never clobber the turn's userId to undefined).
+            { userId: context.userId ?? currentUserId(), workspaceScope: context.workspaceScope },
             () => handler.execute(args, context),
           );
         } catch (err) {

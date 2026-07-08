@@ -1,10 +1,11 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { z } from "zod";
 import { childLogger } from "../logger.js";
 
 import { PRODUCT } from "../product/index.js";
+import { userScopedDir } from "../runtime/user-scope.js";
 
 const log = childLogger("personality");
 
@@ -134,11 +135,27 @@ const DEFAULT_MAIN_ASSISTANT_PERSONALITY: MainAssistantPersonalityEditable = Obj
   },
 });
 
-function resolvePersonalityStorePath(): string {
-  const baseDir = process.env["SAI_USER_MEMORY_PATH"]?.trim()
+function personalityBaseDir(): string {
+  return process.env["SAI_USER_MEMORY_PATH"]?.trim()
     ? resolve(process.env["SAI_USER_MEMORY_PATH"])
     : resolve(homedir(), PRODUCT.stateDirName, "state");
-  return resolve(baseDir, MAIN_ASSISTANT_PERSONALITY_FILENAME);
+}
+
+/** The GLOBAL personality — the shared default persona for the instance. */
+function globalPersonalityPath(): string {
+  return resolve(personalityBaseDir(), MAIN_ASSISTANT_PERSONALITY_FILENAME);
+}
+
+/** The per-user OVERRIDE path for the ambient authenticated user; equals the
+ *  global path when no user is authenticated (single-operator / auth-off). */
+function resolvePersonalityStorePath(): string {
+  return resolve(userScopedDir(personalityBaseDir()), MAIN_ASSISTANT_PERSONALITY_FILENAME);
+}
+
+/** True when the ambient user has their own personality override on disk. */
+function hasPersonalityOverride(): boolean {
+  const perUser = resolvePersonalityStorePath();
+  return perUser !== globalPersonalityPath() && existsSync(perUser);
 }
 
 function cloneDefaultPersonality(): MainAssistantPersonalityEditable {
@@ -243,8 +260,7 @@ function withMetadata(
   });
 }
 
-function persistProfile(profile: MainAssistantPersonalityProfile): void {
-  const filePath = resolvePersonalityStorePath();
+function persistProfile(profile: MainAssistantPersonalityProfile, filePath: string = resolvePersonalityStorePath()): void {
   mkdirSync(dirname(filePath), { recursive: true });
   writeFileSync(filePath, JSON.stringify(profile, null, 2), "utf8");
 }
@@ -254,8 +270,14 @@ export function getDefaultMainAssistantPersonality(): MainAssistantPersonalityPr
 }
 
 export function loadMainAssistantPersonality(): MainAssistantPersonalityProfile {
-  const filePath = resolvePersonalityStorePath();
-  if (!existsSync(filePath)) return getDefaultMainAssistantPersonality();
+  // Resolve order: the ambient user's per-user override → the global personality
+  // → the built-in default. A logged-in user with no override sees the global.
+  const perUserPath = resolvePersonalityStorePath();
+  const globalPath = globalPersonalityPath();
+  const filePath = existsSync(perUserPath) ? perUserPath
+    : existsSync(globalPath) ? globalPath
+    : null;
+  if (!filePath) return getDefaultMainAssistantPersonality();
 
   try {
     const raw = readFileSync(filePath, "utf8");
@@ -266,7 +288,7 @@ export function loadMainAssistantPersonality(): MainAssistantPersonalityProfile 
       const raw = readFileSync(filePath, "utf8");
       const parsed = JSON.parse(raw) as unknown;
       const migrated = migrateLegacyProfile(LegacyMainAssistantPersonalityProfileSchema.parse(parsed));
-      persistProfile(migrated);
+      persistProfile(migrated, filePath); // rewrite the same (global or per-user) file
       log.info({ filePath }, "Migrated legacy main assistant personality profile to schema version 2");
       return migrated;
     } catch {
@@ -278,7 +300,7 @@ export function loadMainAssistantPersonality(): MainAssistantPersonalityProfile 
 
 export function saveMainAssistantPersonality(
   input: MainAssistantPersonalityEditable,
-  options: { updatedBy?: MainAssistantPersonalityActor; reason?: string; revisionBase?: number } = {},
+  options: { updatedBy?: MainAssistantPersonalityActor; reason?: string; revisionBase?: number; global?: boolean } = {},
 ): MainAssistantPersonalityProfile {
   const revisionBase = typeof options.revisionBase === "number" ? Math.max(0, options.revisionBase) : 0;
   const profile = withMetadata(input, {
@@ -287,8 +309,21 @@ export function saveMainAssistantPersonality(
     updatedBy: options.updatedBy ?? "user",
     reason: options.reason,
   });
-  persistProfile(profile);
+  // Under multi-user auth a save creates/updates the ambient user's OVERRIDE;
+  // `global:true` (or no authenticated user) writes the shared global persona.
+  persistProfile(profile, options.global ? globalPersonalityPath() : resolvePersonalityStorePath());
   return profile;
+}
+
+/**
+ * Remove the ambient user's personality override so they fall back to the global
+ * persona. Returns false when there is no per-user override to clear (auth-off /
+ * no override on disk). The global personality is never deleted here.
+ */
+export function clearMainAssistantPersonalityOverride(): boolean {
+  if (!hasPersonalityOverride()) return false;
+  rmSync(resolvePersonalityStorePath(), { force: true });
+  return true;
 }
 
 type NormalizedPersonalityUpdate = {
