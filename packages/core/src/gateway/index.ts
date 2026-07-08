@@ -935,6 +935,14 @@ export function createGateway() {
   // Routes are mounted unconditionally; behavior gates on auth.enabled at
   // request time so the operator can flip the flag without a restart.
 
+  // Public (pre-auth) endpoint so the login screen can pick the right default tab.
+  // With multi-user auth OFF there are no accounts — username/password login only
+  // 503s — so the client should default to the token tab. Exposes nothing sensitive
+  // (just whether account login is available).
+  app.get("/api/auth/mode", (c) => {
+    return c.json({ authEnabled: getConfig().auth.enabled === true });
+  });
+
   app.post("/api/auth/login", async (c) => {
     // Rate-limit identity: the real transport peer (spoof-proof, stamped by the
     // node bridge) by default; only trust the client-controlled X-Forwarded-For

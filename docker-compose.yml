@@ -31,8 +31,8 @@ services:
       - .env
     environment:
       - NODE_ENV=production
-      - SAI_JWT_SECRET=${SAI_JWT_SECRET}
-      - SAI_MASTER_KEY=${SAI_MASTER_KEY}
+      - SAI_JWT_SECRET=${SAI_JWT_SECRET:?run pnpm sai start first — it generates .env; bare docker compose up is unsupported}
+      - SAI_MASTER_KEY=${SAI_MASTER_KEY:?run pnpm sai start first — it generates .env; bare docker compose up is unsupported}
       # Primary model provider — any OpenAI-compatible server (LM Studio, Ollama, vLLM,
       # llama.cpp, LocalAI, OpenRouter, …). Set SAI_PRIMARY_MODEL_URL/KEY in .env to point at
       # yours; SAI_LMSTUDIO_URL/API_KEY remain as back-compat aliases. The host.docker.internal
@@ -590,7 +590,7 @@ services:
     environment:
       - POSTGRES_DB=starlingai
       - POSTGRES_USER=starlingai
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?run pnpm sai start first — it generates .env; bare docker compose up is unsupported}
     volumes:
       - gc-postgres-data:/var/lib/postgresql/data
     networks:

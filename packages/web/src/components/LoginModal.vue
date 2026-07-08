@@ -138,11 +138,30 @@ function onKeydown(event: KeyboardEvent): void {
   if (event.key === "Escape" && props.dismissible) close();
 }
 
-onMounted(() => window.addEventListener("keydown", onKeydown));
+type Mode = "password" | "token";
+// Default to the token tab — the single-operator (auth-disabled) setup has no
+// accounts, so username/password login would only 503. detectAuthMode() flips to
+// the password tab when the gateway reports multi-user auth is on.
+const mode = ref<Mode>("token");
+
+async function detectAuthMode(): Promise<void> {
+  try {
+    const apiBase = apiBaseFromWsUrl(wsUrl.value);
+    const res = await fetch(`${apiBase}/api/auth/mode`, { method: "GET" });
+    if (!res.ok) return;
+    const body = await res.json() as { authEnabled?: boolean };
+    mode.value = body.authEnabled ? "password" : "token";
+  } catch {
+    // Gateway unreachable — keep the token default; surfaced clearly on submit.
+  }
+}
+
+onMounted(() => {
+  window.addEventListener("keydown", onKeydown);
+  void detectAuthMode();
+});
 onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown));
 
-type Mode = "password" | "token";
-const mode = ref<Mode>("password");
 const usernameInput = ref("");
 const passwordInput = ref("");
 const tokenInput = ref(gateway.authFailed ? "" : gateway.token);
@@ -197,6 +216,11 @@ async function submit(): Promise<void> {
       gateway.wsUrl = wsUrl.value;
       gateway.connect();
     }
+  } catch (err) {
+    // A thrown fetch (or JSON parse) means we never reached the gateway — the most
+    // common first-run cause. Without this the error was swallowed and the form
+    // just silently stopped, giving the user no idea the gateway was unreachable.
+    errorMessage.value = `Can't reach the gateway at ${apiBaseFromWsUrl(wsUrl.value)}. Is it running? (${err instanceof Error ? err.message : String(err)})`;
   } finally {
     submitting.value = false;
   }

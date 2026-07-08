@@ -205,6 +205,44 @@ describe("gateway HTTP bridge", () => {
     }
   }, gatewayTestTimeoutMs);
 
+  it("exposes GET /api/auth/mode unauthenticated so the login screen can pick its default tab", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-authmode-"));
+    const port = 18300 + Math.floor(Math.random() * 1000);
+    const configPath = join(tempDir, "starlingai.json");
+
+    // auth disabled (the single-operator default): there are no accounts, so the
+    // client must land on the token tab — the endpoint must say so WITHOUT a token.
+    writeFileSync(configPath, JSON.stringify({
+      gateway: { port, jwtSecret: "z".repeat(32) },
+      auth: { enabled: false, users: [] },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    delete process.env["SAI_JWT_SECRET"];
+    process.env["SAI_MASTER_KEY"] = "m".repeat(32);
+    process.env["SAI_CRED_STORE"] = join(tempDir, PRODUCT.stateDirName, "credentials.enc");
+    process.env["SAI_AUDIT_LOG"] = join(tempDir, PRODUCT.stateDirName, "audit.jsonl");
+
+    vi.resetModules();
+
+    const { createGateway } = await import("../gateway/index.js");
+    const gateway = createGateway();
+    await gateway.start();
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    try {
+      await waitForHealth(`${baseUrl}/healthz`);
+      // No Authorization header — this route is intentionally public.
+      const res = await fetch(`${baseUrl}/api/auth/mode`);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ authEnabled: false });
+    } finally {
+      await gateway.stop();
+      await flushAuditLogForTests();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, gatewayTestTimeoutMs);
+
   it("rejects dashboard writes to config-owned resources and preserves stored site credential refs", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-settings-"));
     const port = 19000 + Math.floor(Math.random() * 1000);
