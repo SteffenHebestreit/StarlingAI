@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { logAudit } from "../audit/logger.js";
 import { requestApprovalViaChannel } from "../approval/index.js";
 import { archiveSession, createSession } from "../agent/session.js";
 import { runSubAgentWithStats } from "../agent/sub-agent.js";
@@ -503,6 +504,37 @@ function intersectAllowedAgents(parent: string[] | undefined, child: string[] | 
   return child.filter((agentName) => parent.includes(agentName));
 }
 
+/**
+ * Resolve the agent scope for a nested workflow scene/step (audit 470bf200). A
+ * scene/step's OWN declared agents are the workflow author's explicit, trusted
+ * config. When this workflow runs NESTED under another with a narrower scope (a
+ * research scene force-ran a presentation job whose "verify images" step declares
+ * image_sourcer — absent from the research scope), the scope intersection went
+ * empty and the whole job HARD-CRASHED, discarding completed steps. Since a fixed
+ * declared agent is static author intent (not a runtime escalation to an arbitrary
+ * agent), honor the declared agents that actually exist in config instead of
+ * crashing. Pure/exported so the decision is unit-tested.
+ *   - result.agents  — the effective scope to run the scene/step under
+ *   - result.widened — true when we fell back to the declared agents (audit-logged)
+ *   - result.invalidDeclaration — true when the scene/step declares agents but NONE
+ *     exist in config (a real config error the caller surfaces)
+ */
+export function resolveWorkflowScope(
+  parentAllowed: string[] | undefined,
+  declaredAllowed: string[] | undefined,
+  configuredAgents: Record<string, unknown>,
+): { agents: string[] | undefined; widened: boolean; invalidDeclaration: boolean } {
+  const intersected = intersectAllowedAgents(parentAllowed, declaredAllowed);
+  if (!declaredAllowed?.length || (intersected?.length ?? 0) > 0) {
+    return { agents: intersected, widened: false, invalidDeclaration: false };
+  }
+  const declaredValid = declaredAllowed.filter((agentName) => configuredAgents[agentName]);
+  if (declaredValid.length === 0) {
+    return { agents: [], widened: false, invalidDeclaration: true };
+  }
+  return { agents: declaredValid, widened: true, invalidDeclaration: false };
+}
+
 function mergeHumanInLoopSteps(parent: string[] | undefined, child: string[] | undefined): string[] | undefined {
   const merged = new Set<string>([...(parent ?? []), ...(child ?? [])]);
   return merged.size > 0 ? [...merged] : undefined;
@@ -859,7 +891,18 @@ async function runSceneInline(
   const mergedParams = mergeSceneParams(scene, params);
   const enrichedWorkflowContext = buildWorkflowParamContext(scene.task, mergedParams, workflowContext, ctx.swarmState?.objective);
   const task = appendWorkflowContext(applyTemplate(scene.task, mergedParams), enrichedWorkflowContext);
-  const allowedAgents = intersectAllowedAgents(ctx.allowedAgents, scene.allowedAgents);
+  const sceneScope = resolveWorkflowScope(ctx.allowedAgents, scene.allowedAgents, getConfig().subAgents);
+  if (sceneScope.invalidDeclaration) {
+    throw new Error(`Workflow '${scene.name}' declares no configured agent (${(scene.allowedAgents ?? []).join(", ")}).`);
+  }
+  const allowedAgents = sceneScope.agents;
+  if (sceneScope.widened) {
+    logAudit("guardrail_flagged", {
+      type: "workflow_scene_scope_widened_to_declared_agents",
+      scene: scene.name,
+      agents: allowedAgents,
+    }, { sessionId: ctx.sessionId, severity: "info" });
+  }
   const mergedHumanInLoopSteps = mergeHumanInLoopSteps(ctx.humanInLoopSteps, scene.humanInLoopSteps);
   const approvalCallback = resolveWorkflowApprovalCallback(scene, ctx);
   const workflowExecutionStack = [
@@ -868,9 +911,6 @@ async function runSceneInline(
   ];
   const workflowTaskId = `workflow:scene:${scene.name}`;
   ensureWorkflowSwarmState(ctx, task, workflowTaskId, scene.name);
-  if (scene.allowedAgents?.length && allowedAgents?.length === 0) {
-    throw new Error(`Workflow '${scene.name}' is restricted to agents that are not available in the current scope.`);
-  }
 
   const session = createSession({
     sessionId: `workflow:${ctx.sessionId}:${scene.name}:${randomUUID()}`,
@@ -1028,10 +1068,26 @@ async function runJobInline(
     let toolCallsExecuted = 0;
     let executedSteps = 0;
 
-    for (const [index, step] of steps.entries()) {
-      const allowedAgents = intersectAllowedAgents(ctx.allowedAgents, step.allowedAgents);
-      if (step.allowedAgents?.length && allowedAgents?.length === 0) {
-        throw new Error(`Workflow '${job.name}' step '${step.label}' is restricted to agents that are not available in the current scope.`);
+    for (const step of steps) {
+      // A step's OWN declared agents are the job author's trusted config. When this job
+      // runs NESTED under a narrower parent scope (audit 470bf200: a research SCENE
+      // force-ran this presentation JOB whose "verify images" step declares image_sourcer),
+      // the scope intersection went empty and the WHOLE job hard-crashed, discarding all
+      // completed steps. resolveWorkflowScope honors the step's declared config-valid
+      // agents instead of crashing (a fixed declared agent is static author intent, not a
+      // runtime escalation).
+      const stepScope = resolveWorkflowScope(ctx.allowedAgents, step.allowedAgents, getConfig().subAgents);
+      if (stepScope.invalidDeclaration) {
+        throw new Error(`Workflow '${job.name}' step '${step.label}' declares no configured agent (${(step.allowedAgents ?? []).join(", ")}).`);
+      }
+      const allowedAgents = stepScope.agents;
+      if (stepScope.widened) {
+        logAudit("guardrail_flagged", {
+          type: "workflow_step_scope_widened_to_declared_agents",
+          job: job.name,
+          step: step.label,
+          agents: allowedAgents,
+        }, { sessionId: ctx.sessionId, severity: "info" });
       }
 
       // Append the workflow context (which carries the ORIGINAL request, i.e. the topic)

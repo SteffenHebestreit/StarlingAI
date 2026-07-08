@@ -16,6 +16,7 @@ import {
   toolNameIsExternalRetrieval,
   mentionsSourceVerification,
 } from "../agent/citation-honesty.js";
+import { resolveWorkflowScope } from "../tools/workflow-catalog.js";
 
 function plan(nSteps: number): TurnPlan {
   return {
@@ -97,5 +98,36 @@ describe("#2 mentionsSourceVerification (the verification demand/claim)", () => 
   it("does not fire on a plain non-sourced request", () => {
     expect(mentionsSourceVerification("Schreib mir ein kurzes Gedicht über den Herbst.")).toBe(false);
     expect(mentionsSourceVerification("Refactor this function to use a map.")).toBe(false);
+  });
+});
+
+describe("nested-workflow scope (audit 470bf200 — the sourced_presentation image-step crash)", () => {
+  const cfg = { image_sourcer: {}, researcher: {}, content_writer: {}, mission_coordinator: {} } as Record<string, unknown>;
+  it("honors a step's declared agent when the nested parent scope excludes it (was a hard crash)", () => {
+    // deep_research scene scope (no image_sourcer) nested a job step declaring image_sourcer.
+    const r = resolveWorkflowScope(["mission_coordinator", "researcher", "paper_author"], ["image_sourcer"], cfg);
+    expect(r.invalidDeclaration).toBe(false);
+    expect(r.widened).toBe(true);
+    expect(r.agents).toEqual(["image_sourcer"]);
+  });
+  it("normal intersection is unchanged when it is non-empty (no widening)", () => {
+    const r = resolveWorkflowScope(["researcher", "image_sourcer"], ["image_sourcer"], cfg);
+    expect(r.widened).toBe(false);
+    expect(r.agents).toEqual(["image_sourcer"]);
+  });
+  it("top-level (no parent scope) passes the declared agents through untouched", () => {
+    const r = resolveWorkflowScope(undefined, ["image_sourcer"], cfg);
+    expect(r.widened).toBe(false);
+    expect(r.agents).toEqual(["image_sourcer"]);
+  });
+  it("flags a real config error: a step declaring only NON-configured agents", () => {
+    const r = resolveWorkflowScope(["researcher"], ["ghost_agent"], cfg);
+    expect(r.invalidDeclaration).toBe(true);
+    expect(r.agents).toEqual([]);
+  });
+  it("widening keeps only the config-valid subset of declared agents", () => {
+    const r = resolveWorkflowScope(["researcher"], ["image_sourcer", "ghost_agent"], cfg);
+    expect(r.widened).toBe(true);
+    expect(r.agents).toEqual(["image_sourcer"]);
   });
 });
