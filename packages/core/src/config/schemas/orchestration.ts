@@ -52,19 +52,6 @@ export const OrchestrationSchema = z.object({
    *  orchestrate + zero tool calls); no topic/keywords. Default OFF — behavioral,
    *  pass^k-gated. */
   autonomousModeAntiRefusal: z.boolean().default(false),
-  /** Unverified-sourced-deliverable caveat (audit 763394da). A "verify against
-   *  online sources / cite / verified image URLs" request produced a citation-
-   *  bearing paper written from the model's memory with fabricated publishers and
-   *  zero verified image URLs, presented as verified. When true, a turn whose
-   *  final answer OR produced artifact structurally carries source claims (a
-   *  references section, ≥2 URLs, or an explicit "verified/verifiziert" claim) but
-   *  ran ZERO real research this turn (no research/browser delegation, no
-   *  successful workflow, no direct web tool, no shared findings) gets an honest
-   *  caveat prepended: the sources/images were NOT independently verified this
-   *  turn. Non-destructive (prepend-only; never empties or blocks). Structural
-   *  (citation-shape + zero-research), no topic keywords. Default OFF — it stamps
-   *  a caveat onto an answer, so pass^k-gated. */
-  unverifiedSourcedDeliverableCaveat: z.boolean().default(false),
   /** Runtime oversight: when true, a sub-agent gathering evidence is checked at
    *  evidence boundaries against the turn's recorded plan acceptance criteria using
    *  the cheap routing-tier model; once the goal is already satisfied it is

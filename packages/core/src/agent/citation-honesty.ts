@@ -147,52 +147,6 @@ export function answerPresentsSourceCitations(text: string): boolean {
     || /\bhttps?:\/\/\S+/i.test(text);
 }
 
-/** A tool name that reaches EXTERNAL sources (retrieval), as opposed to a write/render tool. */
-const EXTERNAL_RETRIEVAL_TOOL_RE = /^(web_search|web_fetch|url_inspect|browser_|search_knowledge_base|fetch_content|kb_)/i;
-
-/**
- * Did any tool that ACTUALLY retrieves external sources run this turn? Reads a
- * delegation/workflow result's `bytesByTool`/tool-usage metadata (sub-agent tool
- * usage the orchestrator can't otherwise see) plus the orchestrator's own tool
- * names. THE signal the unverified-sourced-deliverable caveat needs: a delegation
- * to a write-only agent (content_writer wrote a cited paper from memory, even
- * calling share_finding) trips the coarse "a delegation ran ⇒ research ran" proxy,
- * but its bytesByTool holds only write_file/generate_document/share_finding — no
- * web/browser tool — so it is correctly seen as NON-retrieval. Structural /
- * language-free (tool-name shapes only). Pure/exported.
- */
-export function metadataShowsExternalRetrieval(metadata: unknown): boolean {
-  if (!metadata || typeof metadata !== "object") return false;
-  const m = metadata as Record<string, unknown>;
-  const toolBags = [m["bytesByTool"], m["toolsUsed"], m["bytesTool"]];
-  for (const bag of toolBags) {
-    if (bag && typeof bag === "object" && !Array.isArray(bag)) {
-      if (Object.keys(bag as Record<string, unknown>).some((k) => EXTERNAL_RETRIEVAL_TOOL_RE.test(k))) return true;
-    }
-    if (Array.isArray(bag) && bag.some((k) => typeof k === "string" && EXTERNAL_RETRIEVAL_TOOL_RE.test(k))) return true;
-  }
-  return false;
-}
-
-/** True if an ORCHESTRATOR-level tool name reaches external sources. */
-export function toolNameIsExternalRetrieval(toolName: string): boolean {
-  return EXTERNAL_RETRIEVAL_TOOL_RE.test(toolName);
-}
-
-/**
- * The user asked for the answer's SOURCES to be verified / cited (or the answer
- * itself claims it was verified against sources). Detects the explicit
- * verification demand-or-claim the unverified-sourced-deliverable caveat keys on
- * — a paper "verified against 10 sources" with zero retrieval is the failure.
- * Verification is inherently a claim about sourcing, so this matches a SMALL set
- * of cross-language sourcing/verification roots (verif* covers verify/verifizieren/
- * vérifier; quellen/sources/referenz/reference/zitier/cite/beleg) rather than a
- * topic table. Pure/exported.
- */
-export function mentionsSourceVerification(text: string): boolean {
-  return /\bverif|verifi[zc]|zitier|\bcit(e|ation|ing)\b|\bquellen?\b|\bsources?\b|referenz|\breference|\bbeleg/i.test(text ?? "");
-}
-
 /**
  * Remove fabricated URL citations from an answer that ran NO real retrieval: a markdown link
  * to a URL becomes its plain label (drops the clickable 404) and bare URLs are removed. NEVER

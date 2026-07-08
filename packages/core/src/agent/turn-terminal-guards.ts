@@ -14,7 +14,6 @@ import {
   userMessageCarriesActionableUrl,
   prependUrlNotFetchedCaveat,
   answerAssertsSpecifics,
-  mentionsSourceVerification,
 } from "./citation-honesty.js";
 
 export interface CitationHonestyGuardParams {
@@ -117,46 +116,5 @@ export async function applyCitationHonestyGuard(
     }
   }
 
-  return { finalResponse };
-}
-
-/**
- * Unverified-sourced-deliverable caveat (orchestration.unverifiedSourcedDeliverableCaveat,
- * audit 763394da). A "verify against online sources / cite / verified image URLs" request
- * produced a cited paper written from the model's memory — fabricated publishers, zero
- * verified image URLs — presented as "verified against 10 sources". The citation-honesty
- * guard above did NOT catch it: the turn DID delegate (to content_writer) and that agent
- * even called share_finding, so the coarse "a delegation/share_finding ran ⇒ research ran"
- * signal read TRUE. This guard uses the HONEST signal instead — did any tool that actually
- * retrieves external sources run this turn (turnHadExternalRetrieval, computed from each
- * delegation's bytesByTool metadata + the orchestrator's own tool names). When source
- * verification was demanded/claimed (user message or answer) yet NO real retrieval happened,
- * prepend the honest unverified caveat. Non-destructive (prepend-only; never empties/blocks).
- * Structural retrieval signal; the verification-mention is a small cross-language sourcing-root
- * match (verification is inherently about sourcing). Returns the (possibly caveated) response.
- */
-export function applyUnverifiedSourcedDeliverableCaveat(params: {
-  finalResponse: string;
-  userMessage: string;
-  sessionId: string;
-  /** Any tool that reaches external sources ran this turn (orchestrator or any sub-agent). */
-  turnHadExternalRetrieval: boolean;
-  guardrailEvents: Array<{ type: string; details: string }>;
-}): { finalResponse: string } {
-  let finalResponse = params.finalResponse;
-  if (getConfig().orchestration?.unverifiedSourcedDeliverableCaveat !== true) return { finalResponse };
-  if (params.turnHadExternalRetrieval) return { finalResponse };            // real retrieval happened → trust it
-  if (finalResponse.trim().length < 200) return { finalResponse };          // a short honest note is fine
-  const verificationInPlay =
-    mentionsSourceVerification(params.userMessage)
-    || mentionsSourceVerification(finalResponse)
-    || answerPresentsSourceCitations(finalResponse);
-  if (!verificationInPlay) return { finalResponse };
-  finalResponse = prependUnverifiedSourceCaveat(finalResponse, params.userMessage);
-  params.guardrailEvents.push({ type: "guardrail_flagged", details: "unverified_sourced_deliverable" });
-  logAudit("guardrail_flagged", {
-    type: "unverified_sourced_deliverable",
-    trigger: "sourced_deliverable_without_external_retrieval",
-  }, { sessionId: params.sessionId, severity: "warn" });
   return { finalResponse };
 }

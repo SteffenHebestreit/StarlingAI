@@ -202,8 +202,6 @@ export {
   stripFabricatedCitations,
 } from "./citation-honesty.js";
 
-import { toolNameIsExternalRetrieval, metadataShowsExternalRetrieval } from "./citation-honesty.js";
-
 // Terminal honesty/guard blocks that fire on the assembled finalResponse (god-file seam).
 import { applyTerminalResponseGuards, type TerminalGuardContext } from "./turn-finalize-guards.js";
 
@@ -1331,11 +1329,6 @@ async function _runTurn(
   let _turnDelegationCount = 0;
   let _turnShareFindingCount = 0;
   let _forcedSynthesisFired = false;
-  // #2 (audit 763394da): true once any tool that actually retrieves EXTERNAL sources ran
-  // this turn (orchestrator-direct or inside a delegated sub-agent). The honest research
-  // signal for applyUnverifiedSourcedDeliverableCaveat — a write-only delegation that
-  // fabricates citations from memory never sets it.
-  let _turnHadExternalRetrieval = false;
   // Final-response QA gate: at most ONE corrective build per turn (shared latch across both
   // finalization paths — normal-stop and forced-terminal).
   let qaCorrectiveBuildUsed = false;
@@ -2869,7 +2862,6 @@ async function _runTurn(
         turnToolCallCounts: _turnToolCallCounts,
         turnShareFindingCount: _turnShareFindingCount,
         workflowRunCompletedThisTurn,
-        turnHadExternalRetrieval: _turnHadExternalRetrieval,
         releasedWithoutResearchEvidence,
         autoResearchAnswer,
         outputScan,
@@ -3404,15 +3396,6 @@ async function _runTurn(
       const toolStartedAt = Date.now();
       const result = await executeTool(tc.name, tc.arguments, toolContext);
       const toolDurationMs = Date.now() - toolStartedAt;
-      // #2 (audit 763394da): record whether ANY tool that actually retrieves external
-      // sources ran this turn — the orchestrator called one directly, OR a delegated
-      // sub-agent used one (its result metadata carries bytesByTool). The honest signal
-      // for the unverified-sourced-deliverable caveat, distinguishing a real research
-      // agent from content_writer writing a cited paper from memory.
-      if (!_turnHadExternalRetrieval && result.success
-        && (toolNameIsExternalRetrieval(tc.name) || metadataShowsExternalRetrieval(result.metadata))) {
-        _turnHadExternalRetrieval = true;
-      }
       if (PERSISTED_SWARM_STATE_TOOL_NAMES.has(tc.name)) {
         turnUsedSwarmTools = true;
       }

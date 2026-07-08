@@ -11,11 +11,6 @@ import {
   renderPlanContinuationDirective,
   type TurnPlan,
 } from "../agent/turn-plan.js";
-import {
-  metadataShowsExternalRetrieval,
-  toolNameIsExternalRetrieval,
-  mentionsSourceVerification,
-} from "../agent/citation-honesty.js";
 import { resolveWorkflowScope } from "../tools/workflow-catalog.js";
 
 function plan(nSteps: number): TurnPlan {
@@ -60,44 +55,6 @@ describe("#1 decidePlanContinuation", () => {
     expect(dir).toContain("CONTINUE PLAN");
     expect(dir).toContain("completed 1 of them");
     expect(dir).toContain("step 4"); // the plan is rendered so the model can pick the next step
-  });
-});
-
-describe("#2 external-retrieval signal (honest research detection)", () => {
-  it("a write-only content_writer delegation is NOT retrieval (the exact fooling case)", () => {
-    // content_writer's bytesByTool from audit 763394da — no web/browser tool.
-    const meta = { bytesByTool: { read_shared_facts: 47, generate_document: 26, write_file: 54, share_finding: 185 } };
-    expect(metadataShowsExternalRetrieval(meta)).toBe(false);
-  });
-  it("a researcher delegation that used web tools IS retrieval", () => {
-    expect(metadataShowsExternalRetrieval({ bytesByTool: { web_search: 900, web_fetch: 4200, share_finding: 50 } })).toBe(true);
-    expect(metadataShowsExternalRetrieval({ bytesByTool: { "browser_navigate": 10 } })).toBe(true);
-    expect(metadataShowsExternalRetrieval({ toolsUsed: ["read_file", "url_inspect"] })).toBe(true);
-  });
-  it("orchestrator-level web tool names are retrieval; write/render tools are not", () => {
-    expect(toolNameIsExternalRetrieval("web_fetch")).toBe(true);
-    expect(toolNameIsExternalRetrieval("browser_snapshot")).toBe(true);
-    expect(toolNameIsExternalRetrieval("search_knowledge_base")).toBe(true);
-    expect(toolNameIsExternalRetrieval("generate_document")).toBe(false);
-    expect(toolNameIsExternalRetrieval("write_file")).toBe(false);
-    expect(toolNameIsExternalRetrieval("delegate_to_agent")).toBe(false);
-  });
-  it("handles absent/garbage metadata", () => {
-    expect(metadataShowsExternalRetrieval(null)).toBe(false);
-    expect(metadataShowsExternalRetrieval({})).toBe(false);
-    expect(metadataShowsExternalRetrieval("nope")).toBe(false);
-  });
-});
-
-describe("#2 mentionsSourceVerification (the verification demand/claim)", () => {
-  it("catches the Zwinger request + the paper's false 'verified sources' framing", () => {
-    expect(mentionsSourceVerification("Verifiziere deine Inhalte gegen online-quellen und referenziere diese.")).toBe(true);
-    expect(mentionsSourceVerification("Vollständige Quellenliste mit 10 verifizierten Quellen.")).toBe(true);
-    expect(mentionsSourceVerification("Please cite your sources and verify them.")).toBe(true);
-  });
-  it("does not fire on a plain non-sourced request", () => {
-    expect(mentionsSourceVerification("Schreib mir ein kurzes Gedicht über den Herbst.")).toBe(false);
-    expect(mentionsSourceVerification("Refactor this function to use a map.")).toBe(false);
   });
 });
 

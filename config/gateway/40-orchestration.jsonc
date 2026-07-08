@@ -142,13 +142,5 @@
     // request forces the first tool call (existing forceToolChoice path), so a tool-free refusal
     // can't happen. No-op when the model already delegates (e.g. the Opus run). Structural.
     "autonomousModeAntiRefusal": true
-
-    // NOTE: unverifiedSourcedDeliverableCaveat is deliberately NOT enabled here yet. Its
-    // retrieval signal (turnHadExternalRetrieval) reads the top-level delegation's bytesByTool,
-    // which does NOT propagate web-tool usage from a NESTED researcher (mission_coordinator ->
-    // researcher -> web_fetch). On run 6d3b6ca4 real research DID happen two levels deep, but the
-    // main orchestrator's delegate result carried no web-tool metadata, so the caveat would
-    // FALSE-POSITIVE on a genuinely-researched answer. Enable only after the signal is threaded
-    // through nested delegations.
   }
 }

@@ -52,7 +52,7 @@ import {
   prependUnverifiedSourceCaveat,
   prependUnverifiedQaCaveat,
 } from "./citation-honesty.js";
-import { applyCitationHonestyGuard, applyUnverifiedSourcedDeliverableCaveat } from "./turn-terminal-guards.js";
+import { applyCitationHonestyGuard } from "./turn-terminal-guards.js";
 import { findRecentDelegateEvidence } from "./interrupted-delegation-evidence.js";
 import {
   hasRecentSourceSensitivePartialDelegation,
@@ -116,10 +116,6 @@ export interface TerminalGuardContext {
   readonly turnToolCallCounts: Map<string, number>;
   readonly turnShareFindingCount: number;
   readonly workflowRunCompletedThisTurn: boolean;
-  /** #2 (audit 763394da): any tool that actually retrieves EXTERNAL sources ran this turn
-   *  (orchestrator-direct or inside a delegated sub-agent). Honest research signal for
-   *  applyUnverifiedSourcedDeliverableCaveat — a write-only delegation never sets it. */
-  readonly turnHadExternalRetrieval: boolean;
   readonly releasedWithoutResearchEvidence: boolean;
   readonly autoResearchAnswer: string | null;
 
@@ -316,20 +312,6 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
     turnDelegationCount: ctx.getTurnDelegationCount(),
     workflowRunCompletedThisTurn: ctx.workflowRunCompletedThisTurn,
     turnShareFindingCount: ctx.turnShareFindingCount,
-    guardrailEvents,
-  }));
-
-  // #2 (audit 763394da): a "verify against online sources / cite / verified image URLs"
-  // request produced a cited paper written from memory (fabricated publishers, zero
-  // verified image URLs) presented as verified. The citation guard above is fooled — the
-  // turn DID delegate (content_writer) and that agent called share_finding — so it uses the
-  // HONEST retrieval signal (turnHadExternalRetrieval, from each delegation's bytesByTool)
-  // and caveats a sourced deliverable that ran no real retrieval. Non-destructive.
-  ({ finalResponse } = applyUnverifiedSourcedDeliverableCaveat({
-    finalResponse,
-    userMessage,
-    sessionId: session.id,
-    turnHadExternalRetrieval: ctx.turnHadExternalRetrieval,
     guardrailEvents,
   }));
 
