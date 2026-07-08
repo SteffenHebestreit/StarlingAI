@@ -35,6 +35,16 @@ jobs:
       - name: Install dependencies
         run: pnpm install --no-frozen-lockfile
 
+      # Security gate: fail on any HIGH or CRITICAL advisory in PRODUCTION deps.
+      # --prod ignores dev-only tooling noise; the bar is deliberately "high" so
+      # moderate/low transitives (mostly build tooling) don't block CI. Keep this
+      # green by bumping the flagged dep, or — for a transitive with no fixed
+      # release reachable from the parent — adding a scoped pnpm.overrides entry
+      # (see the root package.json overrides block). xlsx tracks the SheetJS CDN
+      # build because the npm registry ships no patched xlsx.
+      - name: Security audit (prod, high+critical)
+        run: pnpm audit --prod --audit-level=high
+
       # Root layout guard + per-package typecheck (tsc / vue-tsc).
       - name: Typecheck
         run: pnpm check
