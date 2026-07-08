@@ -15,8 +15,12 @@ services:
     # gateway`).
     mem_limit: ${SAI_GATEWAY_MEM_LIMIT:-4g}
     memswap_limit: ${SAI_GATEWAY_MEM_LIMIT:-4g}
+    # Fork-bomb backstop: a runaway scene cannot exhaust host PIDs.
+    pids_limit: ${SAI_GATEWAY_PIDS_LIMIT:-4096}
     ports:
-      - "8765:8765"   # WebSocket + REST
+      # Published on localhost by default (secure). For remote access set
+      # SAI_BIND_HOST=0.0.0.0 in .env AND enable multi-user auth (auth.enabled).
+      - "${SAI_BIND_HOST:-127.0.0.1}:8765:8765"   # WebSocket + REST
     # Load the full .env so every `$VAR` referenced by config (sites, channels,
     # scene/job webhook keys, credential refs) resolves at runtime. Without this
     # the gateway only sees the hand-listed `environment:` vars below, so any new
@@ -207,7 +211,7 @@ services:
     mem_limit: ${SAI_WEB_MEM_LIMIT:-256m}
     memswap_limit: ${SAI_WEB_MEM_LIMIT:-256m}
     ports:
-      - "3001:3000"   # Host 3001 → container 3000 (3000 already in use on host)
+      - "${SAI_BIND_HOST:-127.0.0.1}:3001:3000"   # Host 3001 → container 3000
     networks:
       - starlingai-public
     depends_on:
@@ -279,6 +283,7 @@ services:
         ENGRAM_REF: ${ENGRAM_REF:-v0.9.0}
     image: starlingai/engram:dev
     restart: unless-stopped
+    mem_limit: ${SAI_ENGRAM_MEM_LIMIT:-2g}
     environment:
       # Embedded engram-db backend — in-process vector + BM25 + native-adjacency graph,
       # no Neo4j server, fastest backend at every scale (f16 = lossless ranking, ½ memory).
@@ -483,11 +488,14 @@ services:
       - computer-desktop
     restart: unless-stopped
     ports:
-      - "${VNC_HOST_PORT:-5901}:5901"
+      - "${SAI_BIND_HOST:-127.0.0.1}:${VNC_HOST_PORT:-5901}:5901"
     environment:
       - VNC_RESOLUTION=${VNC_RESOLUTION:-1920x1080}
       - VNC_COLOR_DEPTH=${VNC_COLOR_DEPTH:-24}
       - VNC_PASSWORD=${VNC_PASSWORD:-starling}
+      # Passed through so the entrypoint can refuse to boot with the default
+      # password when the VNC port is published to a non-loopback interface.
+      - SAI_BIND_HOST=${SAI_BIND_HOST:-127.0.0.1}
     networks:
       - starlingai-internal
     healthcheck:
@@ -578,6 +586,7 @@ services:
     # unified semantic/RAG vector store (db/vector-store.ts).
     image: pgvector/pgvector:pg16
     restart: unless-stopped
+    mem_limit: ${SAI_POSTGRES_MEM_LIMIT:-1g}
     environment:
       - POSTGRES_DB=starlingai
       - POSTGRES_USER=starlingai
@@ -606,6 +615,7 @@ services:
   searxng:
     image: searxng/searxng:latest
     restart: unless-stopped
+    mem_limit: ${SAI_SEARXNG_MEM_LIMIT:-512m}
     environment:
       - SEARXNG_BASE_URL=http://searxng:8080/
       - SEARXNG_SECRET=${SEARXNG_SECRET:-starlingai-internal-searxng-key}
@@ -624,6 +634,7 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    mem_limit: ${SAI_REDIS_MEM_LIMIT:-512m}
     command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
     volumes:
       - gc-redis-data:/data
@@ -643,7 +654,7 @@ services:
     image: starlingai/tutorials:dev
     restart: unless-stopped
     ports:
-      - "3002:80"
+      - "${SAI_BIND_HOST:-127.0.0.1}:3002:80"
     networks:
       - starlingai-public
     healthcheck:
@@ -656,6 +667,7 @@ services:
   memgraph:
     image: memgraph/memgraph-mage
     restart: unless-stopped
+    mem_limit: ${SAI_MEMGRAPH_MEM_LIMIT:-2g}
     command: >-
       --log-level=WARNING
       --storage-wal-enabled=true
@@ -679,6 +691,7 @@ services:
   questdb:
     image: questdb/questdb:8.2.1
     restart: unless-stopped
+    mem_limit: ${SAI_QUESTDB_MEM_LIMIT:-1g}
     environment:
       - QDB_PG_ENABLED=false   # disable Postgres wire (HTTP API only)
       - QDB_HTTP_BIND_TO=0.0.0.0:9000

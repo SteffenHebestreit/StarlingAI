@@ -66,6 +66,24 @@ EOF
 RUN cat <<'ENTRY' > /usr/local/bin/entrypoint.sh
 #!/bin/sh
 set -e
+# Refuse to boot with the well-known default VNC password when the desktop port
+# is published to a non-loopback interface — that combination is a trivial
+# remote-desktop takeover. On localhost-only (the default) the demo password is
+# allowed but warned about. Changing VNC_PASSWORD also requires updating
+# computerUse.nodes.desktop.credentials in config so the swarm can still connect.
+VNC_PW="${VNC_PASSWORD:-starling}"
+case "${SAI_BIND_HOST:-127.0.0.1}" in
+  127.0.0.1|localhost|::1) BOUND_LOCAL=1 ;;
+  *) BOUND_LOCAL=0 ;;
+esac
+if [ "$VNC_PW" = "starling" ]; then
+  if [ "$BOUND_LOCAL" = "0" ]; then
+    echo "FATAL: VNC desktop is bound to a non-loopback interface (SAI_BIND_HOST=${SAI_BIND_HOST}) with the default password 'starling'." >&2
+    echo "       Set a strong VNC_PASSWORD (and the matching computerUse.nodes.desktop.credentials in config) before exposing it." >&2
+    exit 1
+  fi
+  echo "WARNING: VNC desktop is using the default password 'starling' — safe only because the port is bound to localhost. Set VNC_PASSWORD before exposing it via SAI_BIND_HOST." >&2
+fi
 python3 -c "
 import os, struct, sys
 pw = os.environ.get('VNC_PASSWORD', 'starling').encode('latin-1')[:8].ljust(8, b'\x00')
