@@ -15,13 +15,17 @@ are organized, and the separation-of-concerns rules that keep the swarm predicta
 `config/` then `workspace/` and deep-merges them into the root `starlingai.json` that the runtime
 loads. Because build is glob-based, the file layout below is free to evolve — add or rename role
 shards without touching the loader. `config split` is the inverse (regenerate shards from a monolith)
-and is kept consistent with this layout via `AGENT_ROLE_FILES` in `scripts/config-layout.mjs`.
+via the `AGENT_ROLE_FILES` map in `scripts/config-layout.mjs`. **Note:** that map (and its
+`SCENE_CATEGORY_FILES` / `JOB_CATEGORY_FILES` companions) has diverged from the hand-maintained
+`workspace/` layout — it targets a different shard set (`21-orchestration.jsonc` … `29-platform.jsonc`)
+with a roster that includes agents not present on disk — so `config split` is **not** a safe
+round-trip today; reconcile the map before relying on it.
 
 **Deploy:** `sai start --build` (rebuilds core + regenerates `starlingai.json`).
 
 ## 2. Agents — `workspace/agents/`
 
-Wrapper keys matter: `10-core-agents.jsonc` uses `"agents"` (the **main assistant** + `defaults` +
+Wrapper keys matter: `00-platform.jsonc` uses `"agents"` (the **main assistant** + `defaults` +
 `ephemeralGeneration` + `rateLimit` — platform config, *not* sub-agents). **Every sub-agent shard
 uses `"subAgents"`.**
 
@@ -74,10 +78,12 @@ approval-gated. New tool code → `tool_developer`; never invent tool names in a
 - **"Workflow"** is the umbrella term for scenes + jobs surfaced through `search_workflows` /
   `run_workflow`.
 
-Both `scenes/` and `jobs/` are **sharded by category** (same numbering on each side):
-`10-research.jsonc` · `20-content-media.jsonc` · `30-engineering-data.jsonc` ·
-`40-ops-comms.jsonc`. `build` globs them; `config split` reshards them via
-`SCENE_CATEGORY_FILES` / `JOB_CATEGORY_FILES` (unmapped → `90-uncategorized.jsonc`).
+Both `scenes/` and `jobs/` are **sharded by tier**: `10-core-scenes.jsonc` · `20-primary-scenes.jsonc` ·
+`30-secondary-scenes.jsonc` · `40-capability-codev.jsonc` · `50-profile-fit.jsonc` (scenes), and
+`10-core-jobs.jsonc` · `20-primary-jobs.jsonc` · `30-secondary-jobs.jsonc` · `40-capability-codev.jsonc`
+(jobs — no `50-` shard). `build` globs them; `config split` reshards via `SCENE_CATEGORY_FILES` /
+`JOB_CATEGORY_FILES` in `scripts/config-layout.mjs`, but those maps have diverged from the on-disk
+tier shards (see §1) and are not a safe round-trip today.
 
 Scenes encode the **same separation of concerns** via `allowedAgents` — the canonical pipeline is
 **gather → author → review**:
@@ -109,7 +115,10 @@ shard does not require touching them.
 
 Durable memory lives as one JSON file per key under `<workspace>/.starlingai/memory/` (workspace
 scope) and `SAI_USER_MEMORY_PATH` / `~/.starlingai/user-memory/` (user scope); skills are already
-portable `SKILL.md`. The **memory vault** (`packages/core/src/memory/vault.ts`) mirrors all of that
+portable `SKILL.md`. Under `auth.enabled` the user-scope stores (user memory, the dialectic
+user-model, and the personality override) are partitioned per authenticated user to
+`<base>/users/<userId>/` (`runtime/user-scope.ts`); with auth disabled — the default — they stay at
+the single shared path unchanged. The **memory vault** (`packages/core/src/memory/vault.ts`) mirrors all of that
 into an **Obsidian-style Markdown vault** so a human can review, correct, and git/iCloud back up agent
 memory in a plain-Markdown tool they trust — the same "Obsidian is the reviewable layer; memory stays
 the execution context" split, but the **export is deterministic code** (never the slow local model),

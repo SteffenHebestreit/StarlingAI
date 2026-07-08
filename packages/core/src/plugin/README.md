@@ -42,13 +42,18 @@ exist for IDE completion + type-checking and don't add runtime behavior.
 - **Tool name**: `^[a-z][a-z0-9_]{1,48}$`. Bare names that match a built-in
   tool (e.g. `read_file`, `web_search`) are rejected at load time and emit a
   `tier_escalation_attempt` audit event.
+- **Name must match the basename**: the plugin `name` must exactly equal its
+  directory name (or single-file basename). A mismatch is rejected at load with
+  a `plugin_tool_rejected` audit event.
 
 ## Tier policy
 
-All plugin tools register at **Tier 2** — sandboxed execution, per-call
-approval. The plugin author can't override this. If a tool needs higher
-privileges, it cannot be a plugin: it must ship as a first-party tool with
-explicit tier mapping in `tool-tiers.ts`.
+All plugin tools register at **Tier 2** — per-call approval. Plugin code runs
+**in-process** with no sandbox isolation (`requiresSandbox` is false); the
+per-call operator approval is the containment, not process/container isolation.
+The plugin author can't override this. If a tool needs higher privileges, it
+cannot be a plugin: it must ship as a first-party tool with explicit tier
+mapping in `tool-tiers.ts`.
 
 ## Where do plugins live?
 
@@ -67,6 +72,15 @@ Each plugin is either:
 A broken plugin's load failure is logged + audited as
 `plugin_tool_rejected` and does **not** abort the gateway; the next plugin
 is tried.
+
+## Hot-reload
+
+The loader watches the plugins directory (500ms debounce). New plugin files are
+picked up live (tools registered) and removed files are unregistered (emitting a
+`plugin_unloaded` audit event) — no gateway restart needed. Editing an existing
+file's code **in place** does require a gateway restart, because ESM modules are
+cached once imported; adding a new file (e.g. bumping the directory name) is the
+supported workflow for a live code change.
 
 ## Disabling plugins
 

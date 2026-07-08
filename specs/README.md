@@ -12,7 +12,7 @@ Both specs are OpenAPI 3.1. They describe paths, parameters, auth, and response 
 - Gateway runtime schemas: [`packages/core/src/config/`](../packages/core/src/config/) and [`packages/core/src/gateway/`](../packages/core/src/gateway/)
 - Mail-service runtime schemas: [`packages/mail-service/src/`](../packages/mail-service/src/)
 
-WebSocket RPC (`ws://${host}:${port}/ws?token=<jwt>` on the gateway) is not covered by OpenAPI; see the JSON-RPC 2.0 method catalog in [`../docs/api.md`](../docs/api.md).
+WebSocket RPC (`ws://${host}:${port}/ws?token=<jwt>` on the gateway) is not covered by OpenAPI; see the WebSocket RPC method catalog in [`../docs/api.md`](../docs/api.md).
 
 ## Using the specs
 

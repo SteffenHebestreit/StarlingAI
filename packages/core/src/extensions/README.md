@@ -19,7 +19,11 @@ What a manifest can declare:
 | `tools`          | Tools with explicit tiers (0–3), grouped under the extension name for config-driven disabling |
 | `auditEvents`    | Audit events, namespaced `<name>.<event>`                        |
 | `roles`          | Auth roles + badge metadata, surfaced via `GET /api/product`     |
+| `authProvider`   | Credential backend for the core `/api/auth` routes; one per process |
+| `toolKeywords`   | Embedding-reranker routing keywords for domain vocabulary (pattern → keywords) |
+| `llmBoundary`    | LLM-boundary transformer for provider-bound messages / model responses |
 | `guardrails`     | `checkInput` / `checkOutput` hooks appended after built-ins      |
+| `routePolicies`  | Declarative RBAC: role-name lists per gateway route pattern      |
 | `registerRoutes` | Gateway routes (mounted after core routes; prefix `/api/<name>/`)|
 | `configSchema`   | Zod schema validating the `extensions.<name>` config slice       |
 | `boot`/`shutdown`| Lifecycle hooks (db schema init, knowledge loads, teardown)      |

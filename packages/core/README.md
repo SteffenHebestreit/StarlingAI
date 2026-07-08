@@ -11,6 +11,7 @@ The core runtime of StarlingAI — the agent swarm gateway, the tool registry, t
 | `src/index.ts` | Gateway, swarm bus, runtime, channels, tools | `pnpm dev` · `pnpm start` |
 | `src/computer-remote-main.ts` | Sidecar for `remote_vnc`/`remote_rdp`/`remote_ssh` | `pnpm dev:computer-remote` |
 | `src/scene-worker-main.ts` | Out-of-process scene job worker (drains the shared job queue) | `pnpm dev:scene-worker` |
+| `src/mcp-stdio.ts` | MCP stdio server (exposes tools over the Model Context Protocol) | `pnpm dev:mcp-stdio` · `pnpm start:mcp-stdio` |
 
 All four are built into `dist/` by `pnpm build` and shipped as part of the `starlingai/gateway` Docker image (for the main gateway) or run directly on a host for the computer-use sidecars.
 
@@ -37,7 +38,11 @@ The source tree under `src/` is organized by concern. Each directory owns a runt
 | `retrieval/` | RAG pipeline — chunking strategies, reranking (BM25 + semantic), citation assembly |
 | `runtime/` | Status snapshots, component health, job-trigger schedule, ephemeral store (Redis + Postgres), model-endpoint sync, graph jobs |
 | `swarm/` | Autonomous bidding engine, swarm bus (Redis Pub/Sub with in-process fallback), distributed locks, checkpoints, bidder worker |
-| `tools/` | ~40 built-in tools (filesystem, shell, SSH, web, computer-use, browser, workflow, etc.); tool registry; dynamic tool hot-loading |
+| `skills/` | Self-authored procedural skill library — distiller, driver, service, and store |
+| `user-model/` | Dialectic user model (evolving profile of the operator) |
+| `federation/` | Cross-instance HMAC-signed delegation between StarlingAI instances |
+| `observability/` | OpenTelemetry tracing, health checks, cost/recovery metrics, secret-hygiene, event-loop monitoring |
+| `tools/` | A large built-in tool catalog (~270 tool names: filesystem, shell, SSH, web, browser, computer-use, knowledge-base, workflow, etc.); tool registry; dynamic tool hot-loading |
 
 Shared utilities live at the package root: `logger.ts` (pino child loggers), `scripts/` (smoke tests and evaluation CLIs).
 

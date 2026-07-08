@@ -78,9 +78,9 @@
           <div class="callout-icon">💡</div>
           <div class="callout-body">
             <strong>Think of scenes as missions and jobs as mission packets.</strong>
-            Examples in the default workspace include <code>browser_inspection</code>,
+            Examples in the default workspace include <code>deep_research</code>,
             <code>source_backed_paper</code>, and the multi-step job
-            <code>source_grounded_paper_packet</code>.
+            <code>daily_ops_brief</code>.
           </div>
         </div>
       </div>
@@ -105,17 +105,20 @@
           <div class="code-block-header"><span class="code-lang">jsonc</span><button class="copy-btn">Copy</button></div>
           <pre><code>{
   scenes: {
-    browser_inspection: {
-      description: "Open a website, capture evidence, and summarize what is visible",
-      task: "Use web_task_coordinator first when the page may be JS-rendered, multi-step, or ambiguous. Delegate browser_agent to capture browser evidence, then use vision_browser_analyst or evidence_analyst and finish with summarizer.",
+    deep_research: {
+      description: "Build a source-backed research dossier or design guide on a topic, with optional Mermaid visualizations",
+      task: "Run mission_coordinator. Phase 1 - researcher gathers authoritative sources and publishes structured share_finding records. Phase 2 - evidence_analyst reconciles the ledger and resolves conflicts. Phase 3 - paper_author drafts the dossier per the requested deliverable shape, then quality_supervisor runs one acceptance pass.",
       allowedAgents: [
-        "web_task_coordinator",
-        "browser_agent",
-        "vision_browser_analyst",
+        "mission_coordinator",
+        "researcher",
         "evidence_analyst",
+        "paper_author",
+        "quality_supervisor",
         "summarizer"
       ],
-      humanInLoopSteps: ["site_fill_credentials"]
+      params: {
+        deliverable: { description: "Preferred output shape (dossier, design guide, comparison memo, etc.)", default: "source-backed dossier with Mermaid diagrams where useful" }
+      }
     }
   }
 }</code></pre>
@@ -133,10 +136,10 @@
           <div class="code-block-header"><span class="code-lang">chat</span><button class="copy-btn">Copy</button></div>
           <pre><code>Create a source-grounded paper comparing the latest MCP and A2A protocol guidance.
 
-/run browser_inspection
+/run deep_research
 
 # With variables:
-/run browser_inspection targetUrl=https://example.com inspectionGoal="verify the login form and capture evidence"</code></pre>
+/run deep_research deliverable="comparison memo" audience="engineering leadership"</code></pre>
         </div>
 
         <div class="callout">
@@ -153,30 +156,38 @@
           <pre><code>curl -X POST \
   "http://localhost:8765/api/scenes/daily_report/run?key=$SCENE_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"vars": {"recipientEmail": "steffen@example.com"}}'</code></pre>
+  -d '{"params": {"recipientEmail": "steffen@example.com"}}'</code></pre>
         </div>
 
         <div class="callout">
           <div class="callout-icon">ℹ️</div>
           <div class="callout-body">
-            Get your <code>SCENE_KEY</code> from the dashboard under
-            <strong>Settings → Scenes → API Keys</strong>. Keep it secret — it can trigger
-            any scene in your instance.
+            The <code>?key=</code> value is the scene's own <code>webhookKey</code>, set on the
+            scene definition (e.g. <code>webhookKey: "$SCENE_APPLY_JOBS_KEY"</code>) and resolved
+            from your environment — it authorizes that one scene, not the whole instance. You can
+            also pass it via the <code>X-Scene-Key</code> header. Alternatively, authenticate with an
+            operator <strong>Bearer token</strong> (<code>Authorization: Bearer &lt;token&gt;</code>)
+            instead of a key. Keep any key secret.
           </div>
         </div>
 
         <h3>3. From the dashboard</h3>
         <p>
-          Navigate to <strong>Settings → Scenes</strong>, find your scene, and click the
-          <strong>Run</strong> button. You can provide variable values via the run dialog.
+          Open the <strong>Chat</strong> page and use the scene dropdown in the composer — each
+          scene shows a <strong>▶</strong> trigger. Click it to launch that scene, which runs
+          under your authenticated user. The <strong>Settings → Scenes</strong> panel is for
+          creating, editing, and deleting scenes (there is no Run button there).
         </p>
       </div>
 
       <!-- Built-in scene catalog -->
       <div class="section">
-        <div class="section-title">Built-in scenes (workspace/scenes/10-scenes.jsonc)</div>
+        <div class="section-title">Built-in scenes (workspace/scenes/)</div>
         <p>
-          The default workspace ships 27 scenes covering research, code, infrastructure, monitoring, content, and operational workflows.
+          The default workspace ships 22 scenes covering research, content, code review, security, operations, and presentation workflows,
+          split across five shards under <code>workspace/scenes/</code>
+          (<code>10-core-scenes.jsonc</code>, <code>20-primary-scenes.jsonc</code>, <code>30-secondary-scenes.jsonc</code>,
+          <code>40-capability-codev.jsonc</code>, <code>50-profile-fit.jsonc</code>).
           Trigger any of them by phrasing your request naturally — the orchestrator matches against scene descriptions automatically — or invoke explicitly with <code>/run &lt;name&gt;</code>.
         </p>
 
@@ -186,32 +197,33 @@
               <tr><th>Scene</th><th>Purpose</th></tr>
             </thead>
             <tbody>
-              <tr><td><code>browser_inspection</code></td><td>Open a website, capture Playwright evidence, summarize what is visible or blocked</td></tr>
-              <tr><td><code>apply_jobs</code></td><td>Browser-assisted application workflow for one approved freelance lead (HITL on credential fill)</td></tr>
-              <tr><td><code>n8n_project_list</code> · <code>n8n_run_workflow</code></td><td>Open n8n, list available workflows, then start a confirmed one</td></tr>
-              <tr><td><code>deep_research</code></td><td>Multi-phase deep-research mission with evidence indexing, optional Mermaid visuals, and a final quality gate</td></tr>
+              <tr><td colspan="2" style="padding-top:0.9rem;color:var(--muted);font-size:0.85em;letter-spacing:0.02em;"><strong>Core</strong> — <code>10-core-scenes.jsonc</code></td></tr>
               <tr><td><code>source_backed_paper</code></td><td>Produce a paper or report grounded in official sources and verified citations</td></tr>
-              <tr><td><code>meeting_briefing_packet</code></td><td>Concise meeting brief or handoff packet from attached material and prior findings</td></tr>
-              <tr><td><code>code_review</code></td><td>Inspect changes, analyze quality, optionally post the verdict as a GitHub PR comment</td></tr>
-              <tr><td><code>software_bug_fix</code></td><td>Diagnose → minimal fix → test → optional PR open (HITL on push + pr_create)</td></tr>
-              <tr><td><code>code_refactor</code></td><td>Behaviour-preserving refactor with test verification → optional PR open</td></tr>
-              <tr><td><code>release_notes_draft</code></td><td>Keep-a-Changelog notes from git history; optional GitHub Release publish</td></tr>
-              <tr><td><code>api_test_suite</code></td><td>Test and validate API endpoints with structured request/response analysis</td></tr>
-              <tr><td><code>multi_channel_broadcast</code></td><td>Coordinated message across Slack/Discord/Telegram/email with platform-specific formatting</td></tr>
-              <tr><td><code>security_audit</code></td><td>CVE research + static code analysis + compliance check → prioritized risk report</td></tr>
-              <tr><td><code>incident_response</code></td><td>Triage live incident, gather diagnostic evidence, identify root cause, capture postmortem material</td></tr>
-              <tr><td><code>infrastructure_change</code></td><td>Plan → compliance review → human-approved apply → verify (HITL on terraform_exec, ansible_*, kubectl_apply, helm_*, ssh_exec)</td></tr>
-              <tr><td><code>database_migration</code></td><td>Inspect schema → author idempotent migration → compliance gate → approved apply (HITL on sql_query writes)</td></tr>
-              <tr><td><code>monitoring_setup</code></td><td>Author Prometheus rules / Grafana dashboards / alert rules with HITL on every apply</td></tr>
-              <tr><td><code>data_pipeline_review</code></td><td>Schema quality, null rates, anomaly detection → data quality report</td></tr>
-              <tr><td><code>competitive_analysis</code></td><td>Multi-competitor parallel research → comparison table + visual brief</td></tr>
-              <tr><td><code>content_creation</code></td><td>Research → draft → quality-check audience-ready content (blog, newsletter, docs, microsite)</td></tr>
-              <tr><td><code>onboarding_packet</code></td><td>Gather resources → translate → structured onboarding doc with quick-reference table</td></tr>
-              <tr><td><code>accessibility_audit</code></td><td>WCAG 2.2 browser-driven audit → structured issue report</td></tr>
-              <tr><td><code>translation_task</code></td><td>Document/message translation with optional QA spot-check</td></tr>
-              <tr><td><code>calendar_scheduling</code></td><td>Check availability → book event → channel confirmation</td></tr>
-              <tr><td><code>contract_review</code></td><td>Intake → clause inventory → risk table → negotiation points (legal analysis only — requires human review)</td></tr>
-              <tr><td><code>feature_planning</code></td><td>User stories + Gherkin acceptance criteria + dependency graph + task breakdown</td></tr>
+              <tr><td><code>verified_research_brief</code></td><td>Concise fact-checked research brief with named sources and explicit unresolved uncertainties</td></tr>
+              <tr><td><code>deep_research</code></td><td>Multi-phase source-backed research dossier or design guide, with optional Mermaid visuals and a final quality gate</td></tr>
+              <tr><td><code>competitive_analysis</code></td><td>Research and compare multiple competitors or products into a decision-oriented comparison brief</td></tr>
+              <tr><td><code>content_creation</code></td><td>Research and draft audience-ready content (blog posts, newsletters, product copy, documentation)</td></tr>
+              <tr><td><code>code_review</code></td><td>Structured review of recent code changes → merge-readiness report</td></tr>
+              <tr><td><code>reviewed_deliverable</code></td><td>Build any deliverable and run it through a parallel reviewer panel (correctness + completeness + safety) with one bounded revision pass before shipping</td></tr>
+              <tr><td colspan="2" style="padding-top:0.9rem;color:var(--muted);font-size:0.85em;letter-spacing:0.02em;"><strong>Primary</strong> — <code>20-primary-scenes.jsonc</code></td></tr>
+              <tr><td><code>security_audit</code></td><td>Current security risk digest from authoritative advisories, CVEs, and supporting evidence</td></tr>
+              <tr><td><code>incident_response</code></td><td>Triage a live or recent incident, collect root-cause evidence, produce a structured internal incident summary</td></tr>
+              <tr><td><code>multi_channel_broadcast</code></td><td>Deliver a prepared summary, report link, or status update to one or more configured channels</td></tr>
+              <tr><td colspan="2" style="padding-top:0.9rem;color:var(--muted);font-size:0.85em;letter-spacing:0.02em;"><strong>Secondary</strong> — <code>30-secondary-scenes.jsonc</code></td></tr>
+              <tr><td><code>release_notes_draft</code></td><td>Draft release notes from repository history for a version or ref range</td></tr>
+              <tr><td><code>onboarding_packet</code></td><td>Build a structured onboarding packet for a topic, project, or new team member</td></tr>
+              <tr><td><code>meeting_briefing_packet</code></td><td>Concise meeting brief or handoff packet from attached material, prior findings, and project context</td></tr>
+              <tr><td><code>deck_research</code></td><td>Gather and cite the factual evidence for a slide deck or brief — facts only (internal research step of the deck pipeline)</td></tr>
+              <tr><td><code>deck_images</code></td><td>Source, verify, and locally save real free-license images for a slide deck (internal image step of the deck pipeline)</td></tr>
+              <tr><td><code>deck_paper</code></td><td>Write the source-cited paper with verified images embedded, from already-verified facts (deck-pipeline build step)</td></tr>
+              <tr><td><code>deck_slides</code></td><td>Build the reveal.js HTML deck plus per-slide speaker notes from already-verified facts and saved images (deck-pipeline build step)</td></tr>
+              <tr><td><code>validate_image</code></td><td>Verify candidate image URLs are reachable and actually depict the requested subject (per-URL VERIFIED / REJECTED / UNVERIFIED verdict)</td></tr>
+              <tr><td><code>apply_jobs</code></td><td>Run one browser-assisted freelance application from the n8n application table (HITL on credential fill)</td></tr>
+              <tr><td><code>data_pipeline_review</code></td><td>Inspect files or databases for schema quality, completeness, anomalies, and actionable data-quality issues</td></tr>
+              <tr><td colspan="2" style="padding-top:0.9rem;color:var(--muted);font-size:0.85em;letter-spacing:0.02em;"><strong>Capability co-dev</strong> — <code>40-capability-codev.jsonc</code></td></tr>
+              <tr><td><code>capture_capability</code></td><td>Capture a just-built, verified capability as durable, reusable machinery (sub-agent, scene, optional job, and skill)</td></tr>
+              <tr><td colspan="2" style="padding-top:0.9rem;color:var(--muted);font-size:0.85em;letter-spacing:0.02em;"><strong>Profile fit</strong> — <code>50-profile-fit.jsonc</code></td></tr>
+              <tr><td><code>profile_fit_assessment</code></td><td>Assess whether the user's own background fits a role or job posting from their retrieved CV/profile → structured fit deliverable</td></tr>
             </tbody>
           </table>
         </div>
@@ -269,16 +281,16 @@
           <div class="code-block-header"><span class="code-lang">json5</span><button class="copy-btn">Copy</button></div>
           <pre><code>{
   jobs: {
-    source_grounded_paper_packet: {
-      description: "Collect evidence, then draft a source-grounded paper",
+    daily_ops_brief: {
+      description: "Prepare a verified brief and then distribute it through the configured channels",
       steps: [
         {
-          scene: "deep_research",
-          label: "Collect and reconcile evidence"
+          scene: "source_backed_paper",
+          label: "Research and verify"
         },
         {
-          scene: "source_backed_paper",
-          label: "Draft source-grounded paper"
+          scene: "multi_channel_broadcast",
+          label: "Broadcast summary"
         }
       ]
     }

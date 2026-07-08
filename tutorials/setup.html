@@ -450,8 +450,13 @@ LOG_LEVEL=info</code></pre>
                 <tr><td><code>gateway</code></td><td>8765</td><td>Core engine — WebSocket API, agent orchestration, channel adapters</td></tr>
                 <tr><td><code>web</code></td><td>3001</td><td>Dashboard UI for managing agents, scenes, and channels</td></tr>
                 <tr><td><code>computer-remote</code></td><td>8890</td><td>Remote access sidecar for SSH, VNC, and RDP-backed computer workflows</td></tr>
+                <tr><td><code>docker-socket-proxy</code></td><td>internal</td><td>Filtering Docker-socket proxy — the only container that touches <code>/var/run/docker.sock</code>; the gateway reaches the Docker API through it</td></tr>
                 <tr><td><code>postgres</code></td><td>internal</td><td>Persistent storage for audit logs and configuration</td></tr>
                 <tr><td><code>redis</code></td><td>internal</td><td>Session cache, rate limiting, and inter-service pub/sub</td></tr>
+                <tr><td><code>memgraph</code></td><td>internal (7687)</td><td>Graph memory database — entity relationships and knowledge graphs (gateway boot dependency)</td></tr>
+                <tr><td><code>questdb</code></td><td>internal (9000)</td><td>Time-series database — telemetry, metrics, and event timelines (gateway boot dependency)</td></tr>
+                <tr><td><code>searxng</code></td><td>internal (8080)</td><td>Self-hosted web-search backend for <code>web_search</code></td></tr>
+                <tr><td><code>browser-vnc</code></td><td>internal</td><td>Headed Chrome sidecar for human-in-the-loop browser handoff</td></tr>
                 <tr><td><code>mail-service</code></td><td>5020</td><td>Mail account sync, drafting support, and inbox automation backend</td></tr>
                 <tr><td><code>fastapi-mcp-template</code></td><td>internal</td><td>File-to-Markdown conversion (MCP tool)</td></tr>
                 <tr><td><code>tutorials</code></td><td>3002</td><td>This documentation site</td></tr>
@@ -459,7 +464,7 @@ LOG_LEVEL=info</code></pre>
             </table>
 
             <h3>Optional services</h3>
-            <p>The default stack now includes the dashboard, gateway, mail-service, computer-remote, file conversion service, and tutorials. External STT, TTS, and image-generation endpoints remain optional and can be configured later in Settings.</p>
+            <p>The default stack brings up the dashboard, gateway, mail-service, computer-remote, file conversion service, and tutorials, plus the supporting infrastructure — the graph memory DB (memgraph), time-series telemetry DB (questdb), self-hosted search backend (searxng), headed browser sidecar (browser-vnc), and the filtering docker-socket-proxy. See the container table above for the full list. External STT, TTS, and image-generation endpoints remain optional and can be configured later in Settings.</p>
             <div class="code-block">
               <div class="code-block-header"><span class="code-lang">bash</span><button class="copy-btn">Copy</button></div>
               <pre><code># Start the optional Kali pentest sidecar

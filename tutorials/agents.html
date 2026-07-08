@@ -56,7 +56,7 @@
       <!-- Hero -->
       <div class="page-hero">
         <h1>🤖 Agents</h1>
-        <p class="tagline">StarlingAI ships 40+ specialist agents plus ephemeral fallback. The swarm can match reusable workflows first, then route to the right specialist set automatically.</p>
+        <p class="tagline">StarlingAI ships 40+ specialist agents, and coordinators can spin up on-demand ephemeral specialists via <code>create_ephemeral_agent</code>. The swarm can match reusable workflows first, then route to the right specialist set automatically.</p>
       </div>
 
       <!-- How routing works -->
@@ -117,7 +117,7 @@
       <!-- Agent reference table -->
       <div class="section">
         <div class="section-title">Representative specialist roster</div>
-        <p>Most default specialists now run on <code>lmstudio/qwen3.6-35b-a3b</code>. The full catalog lives under <code>workspace/agents</code>; the table below shows representative roles that reflect the current defaults and routing behavior.</p>
+        <p>Most default specialists now run on <code>lmstudio/qwen/qwen3.6-35b-a3b</code>. The full catalog lives under <code>workspace/agents</code>; the table below shows representative roles that reflect the current defaults and routing behavior.</p>
 
         <div class="agent-table-wrap">
           <table class="agent-table">
@@ -215,14 +215,14 @@
                 <td>Backed by the dedicated mail-service and approval-gated sending flows</td>
               </tr>
               <tr>
-                <td><span class="agent-name">productivity_agent</span></td>
-                <td>Notes, reminders, timers, and durable memory maintenance</td>
-                <td>Best for lightweight follow-up workflows inside the workspace</td>
+                <td><span class="agent-name">notification_agent</span></td>
+                <td>Outbound status messages, alerts, and broadcasts to chat/messaging channels</td>
+                <td>Fires one-way notifications to Telegram, Slack, Discord, and alert email with per-platform formatting; not inbox management (that's <code>mail_agent</code>)</td>
               </tr>
               <tr>
-                <td><span class="agent-name">agent_architect</span></td>
-                <td>Ephemeral specialist creation when no catalog match clears the threshold</td>
-                <td>Fallback path, not the first option when an existing specialist or workflow already fits</td>
+                <td><span class="agent-name">calendar_agent</span></td>
+                <td>Calendar and contacts management across CalDAV/CardDAV providers</td>
+                <td>Manages appointments, meetings, tasks, and address-book contacts (Nextcloud, Fastmail, Radicale, Baikal, iCloud)</td>
               </tr>
             </tbody>
           </table>
@@ -260,12 +260,12 @@
   subAgents: {
     researcher: {
       model: {
-        primary: "lmstudio/qwen3.6-35b-a3b"
+        primary: "lmstudio/qwen/qwen3.6-35b-a3b"
       }
     },
     summarizer: {
       model: {
-        primary: "lmstudio/qwen3.6-35b-a3b",
+        primary: "lmstudio/qwen/qwen3.6-35b-a3b",
         maxTokens: 2048
       }
     }
@@ -286,14 +286,16 @@
       <div class="section">
         <div class="section-title">Embedding model (better routing)</div>
         <p>
-          By default the orchestrator uses keyword matching to route queries. Installing a dedicated embedding
-          model in LM Studio enables semantic search — significantly improving routing accuracy.
+          An embedding model ships configured by default (<code>lmstudio/text-embedding-qwen3-embedding-0.6b</code>),
+          so semantic routing is already active out of the box — the orchestrator uses hybrid semantic scoring, not
+          plain keyword matching. This section explains how to swap that model or point it at a dedicated endpoint.
         </p>
 
         <h3>Recommended embedding model</h3>
         <p>
-          Search for <code>text-embedding-qwen3-embedding-0.6b</code> in LM Studio's Discover tab, download it,
-          and load it alongside your main model. Then update your config:
+          The default is <code>text-embedding-qwen3-embedding-0.6b</code>. To use it (or verify it is loaded),
+          search for it in LM Studio's Discover tab, download it, and load it alongside your main model. To swap
+          or repoint it, update your config:
         </p>
 
         <div class="code-block">
@@ -302,7 +304,7 @@
   "agents": {
     "defaults": {
       "model": {
-        "embeddingModel": "text-embedding-qwen3-embedding-0.6b",
+        "embeddingModel": "lmstudio/text-embedding-qwen3-embedding-0.6b",
         "embeddingBaseUrl": "http://host.docker.internal:1234/v1"
       }
     }

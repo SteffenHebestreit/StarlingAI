@@ -22,7 +22,7 @@ A pure frontend. There is no backend code in this package; the app consumes the 
 | Directory | Contents |
 |---|---|
 | `src/components/` | Reusable presentational components (chat bubbles, audit rows, approval prompts, artifact previews, dashboard widgets) |
-| `src/pages/` | Route-level views (Chat, Settings, Audit, Swarm dashboard, Scenes, Workflows, Tutorials, etc.) |
+| `src/pages/` | Route-level views (Chat, Settings/Agents, Audit, Swarm dashboard, Jobs, Sessions, Memory, Skills, Documents, Knowledge Bases, Users, Cost, etc.) |
 | `src/router/` | Vue Router config and route guards |
 | `src/stores/` | Pinia stores for auth, session, audit stream, channel state, live config |
 | `src/App.vue` / `src/main.ts` | App shell and bootstrap |
@@ -56,7 +56,7 @@ The build output is consumed by the Docker image that serves the dashboard at po
 
 ## Auth
 
-The app expects a JWT in localStorage (key `sai.token`). Get one from `pnpm sai token` or from the token printed at the end of `pnpm sai start`. The login modal accepts the token and persists it.
+The app expects a JWT in localStorage (key `gc_token`). Get one from `pnpm sai token` or from the token printed at the end of `pnpm sai start`. The login modal accepts the token and persists it.
 
 ## Reverse proxy / custom domain
 

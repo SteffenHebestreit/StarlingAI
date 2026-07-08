@@ -69,10 +69,11 @@
           all without leaving your self-hosted stack.
         </p>
         <p>
-          These tools are available to any agent that is granted them in <code>starlingai.json</code>. Three
-          pre-configured specialists — <code>media_analyst</code>, <code>transcription_agent</code>, and
-          <code>voice_narrator</code> — are included in the default agent catalog and can be used immediately
-          once the services they depend on are configured.
+          These tools are available to any agent that is granted them in <code>starlingai.json</code>. The
+          shipped <code>document_intake</code> agent already bundles the extraction and analysis tools
+          (<code>extract_file_content</code>, <code>transcribe_audio</code>, and <code>analyze_image</code>),
+          so it can be used immediately once the services they depend on are configured. For speech synthesis,
+          grant <code>synthesize_speech</code> (and <code>list_tts_voices</code>) to an agent of your own.
         </p>
 
         <div class="callout">
@@ -112,7 +113,7 @@
               <td><code>multimodal.tts.baseUrl</code></td>
             </tr>
             <tr>
-              <td><code>analyse_image</code></td>
+              <td><code>analyze_image</code></td>
               <td>Answers questions about an image using a vision-capable LLM</td>
               <td><code>multimodal.files.visionModel</code></td>
             </tr>
@@ -201,7 +202,7 @@ pnpm sai start
 {
   "tool": "transcribe_audio",
   "input": {
-    "filePath": "/workspace/recordings/meeting_2026-03-17.wav",
+    "path": "/workspace/recordings/meeting_2026-03-17.wav",
     "language": "en"
   }
 }
@@ -216,8 +217,8 @@ pnpm sai start
 }</code></pre>
         </div>
 
-        <h3>Using the transcription_agent</h3>
-        <p>The pre-built specialist handles the full workflow — transcribing and saving the result to <code>/workspace/transcripts/</code>:</p>
+        <h3>Using the document_intake agent</h3>
+        <p>The shipped <code>document_intake</code> agent is granted <code>transcribe_audio</code> and handles the full workflow — transcribing and saving a clean transcript:</p>
         <div class="code-block">
           <div class="code-block-header"><span class="code-lang">text</span><button class="copy-btn">Copy</button></div>
           <pre><code>Transcribe /workspace/recordings/meeting_2026-03-17.wav and save a clean transcript.</code></pre>
@@ -265,7 +266,7 @@ curl https://tts.example.com/voices</code></pre>
         </div>
 
         <h3>Choosing a voice</h3>
-        <p>Ask the <code>voice_narrator</code> agent to list voices and pick the best one for your content:</p>
+        <p>Grant an agent the <code>synthesize_speech</code> and <code>list_tts_voices</code> tools, then ask it to list voices and pick the best one for your content:</p>
         <div class="code-block">
           <div class="code-block-header"><span class="code-lang">text</span><button class="copy-btn">Copy</button></div>
           <pre><code>Read out the following article in a calm, professional voice and save it as /workspace/audio/article.wav:
@@ -278,7 +279,7 @@ curl https://tts.example.com/voices</code></pre>
       <div class="section">
         <div class="section-title">Image analysis</div>
         <p>
-          The <code>analyse_image</code> tool passes an image (file path or URL) and a question to a
+          The <code>analyze_image</code> tool passes an image (file path or URL) and a question to a
           vision-capable LLM model. The model is configured through <code>multimodal.files.visionModel</code>;
           it must be loaded in LM Studio or another provider that accepts OpenAI-compatible vision requests.
         </p>
@@ -295,10 +296,10 @@ curl https://tts.example.com/voices</code></pre>
           <div class="code-block-header"><span class="code-lang">json</span><button class="copy-btn">Copy</button></div>
           <pre><code>// Agent tool call
 {
-  "tool": "analyse_image",
+  "tool": "analyze_image",
   "input": {
-    "imagePath": "/workspace/screenshots/dashboard.png",
-    "question": "List every UI element visible and note any error states."
+    "path": "/workspace/screenshots/dashboard.png",
+    "prompt": "List every UI element visible and note any error states."
   }
 }
 
@@ -308,7 +309,7 @@ curl https://tts.example.com/voices</code></pre>
 }</code></pre>
         </div>
 
-        <h3>Using the media_analyst</h3>
+        <h3>Using the document_intake agent</h3>
         <div class="code-block">
           <div class="code-block-header"><span class="code-lang">text</span><button class="copy-btn">Copy</button></div>
           <pre><code>Analyse the chart in /workspace/exports/q1-results.png and extract the revenue figures for each month.</code></pre>
@@ -321,7 +322,7 @@ curl https://tts.example.com/voices</code></pre>
         <p>
           The <code>extract_file_content</code> tool converts binary documents to readable Markdown text.
           It can be backed either by a <strong>REST service</strong> (e.g. MarkItDown, Docling) or by a
-          <strong>MCP server</strong> that exposes a <code>convert_to_markdown</code> tool.
+          <strong>MCP server</strong> that exposes a <code>file_to_markdown</code> tool (the default, configurable via <code>multimodal.files.toolName</code>).
         </p>
 
         <h3>Supported file types</h3>
@@ -344,7 +345,7 @@ curl https://tts.example.com/voices</code></pre>
 {
   "tool": "extract_file_content",
   "input": {
-    "filePath": "/workspace/docs/contract_v3.pdf"
+    "path": "/workspace/docs/contract_v3.pdf"
   }
 }
 
@@ -396,25 +397,33 @@ curl https://tts.example.com/voices</code></pre>
             </tr>
           </thead>
           <tbody>
-            <tr><td><code>mcp__playwright__browser_navigate</code></td><td>Navigate to a URL</td></tr>
-            <tr><td><code>mcp__playwright__browser_snapshot</code></td><td>Capture accessibility snapshot of the current page</td></tr>
-            <tr><td><code>mcp__playwright__browser_screenshot</code></td><td>Save a PNG screenshot</td></tr>
-            <tr><td><code>mcp__playwright__browser_click</code></td><td>Click an element by selector or text</td></tr>
-            <tr><td><code>mcp__playwright__browser_type</code></td><td>Type text into an input field</td></tr>
-            <tr><td><code>mcp__playwright__browser_select</code></td><td>Select a dropdown option</td></tr>
-            <tr><td><code>mcp__playwright__browser_wait_for</code></td><td>Wait for a selector or URL pattern</td></tr>
+            <tr><td><code>browser_navigate</code></td><td>Navigate to a URL</td></tr>
+            <tr><td><code>browser_snapshot</code></td><td>Capture accessibility snapshot of the current page</td></tr>
+            <tr><td><code>browser_screenshot</code></td><td>Save a PNG screenshot</td></tr>
+            <tr><td><code>browser_click</code></td><td>Click an element by selector or text</td></tr>
+            <tr><td><code>browser_type</code></td><td>Type text into an input field</td></tr>
+            <tr><td><code>browser_select_option</code></td><td>Select a dropdown option</td></tr>
+            <tr><td><code>browser_wait_for</code></td><td>Wait for a selector or URL pattern</td></tr>
           </tbody>
         </table>
 
-        <h3>Enabling Playwright MCP</h3>
+        <h3>Playwright MCP configuration</h3>
+        <p>
+          The Playwright MCP server is <strong>bundled and auto-started</strong> — you do not add it yourself.
+          It runs as a Docker transport that drives the shared <code>browser-vnc</code> Chrome over CDP, so the
+          browser the swarm controls is the same one an operator can take over in the dashboard:
+        </p>
         <div class="code-block">
           <div class="code-block-header"><span class="code-lang">json5</span><button class="copy-btn">Copy</button></div>
           <pre><code>{
   "mcp": {
     "servers": {
       "playwright": {
-        "command": "npx",
-        "args": ["-y", "@playwright/mcp@latest"]
+        "transport": "docker",
+        "image": "mcp/playwright:latest",
+        "network": "starlingai-public",
+        "args": ["--cdp-endpoint", "http://browser-vnc:9222"],
+        "autoStart": true
       }
     }
   }
@@ -444,7 +453,7 @@ curl https://tts.example.com/voices</code></pre>
             <tr><td><code>GET</code></td><td><code>/api/multimodal/config</code></td><td>Read current multimodal configuration</td></tr>
             <tr><td><code>PUT</code></td><td><code>/api/multimodal/config</code></td><td>Update multimodal configuration live</td></tr>
             <tr><td><code>GET</code></td><td><code>/api/multimodal/status</code></td><td>Health check for all multimodal services</td></tr>
-            <tr><td><code>POST</code></td><td><code>/api/tools/file_to_markdown</code></td><td>Convert uploaded file to Markdown</td></tr>
+            <tr><td><code>POST</code></td><td><code>/api/multimodal/file-to-markdown</code></td><td>Convert uploaded file to Markdown</td></tr>
             <tr><td><code>POST</code></td><td><code>/api/multimodal/transcribe</code></td><td>Transcribe an uploaded audio file</td></tr>
             <tr><td><code>GET</code></td><td><code>/api/multimodal/voices</code></td><td>List saved voices, built-in speakers, and TTS models</td></tr>
             <tr><td><code>POST</code></td><td><code>/api/multimodal/voices/save</code></td><td>Upload a reusable voice sample to a qwen-compatible TTS backend</td></tr>
@@ -473,10 +482,10 @@ curl https://tts.example.com/voices</code></pre>
         <div class="section-title">Tips &amp; best practices</div>
         <ul>
           <li>
-            <strong>Use the built-in specialists first.</strong> The <code>media_analyst</code>,
-            <code>transcription_agent</code>, and <code>voice_narrator</code> agents are pre-configured
-            with the right tool grants and system prompts. Grant them to scenes rather than writing custom
-            agents unless your use-case is genuinely different.
+            <strong>Reuse the shipped document_intake agent.</strong> The <code>document_intake</code> agent is
+            pre-configured with the extraction, transcription, and image-analysis tool grants and a matching
+            system prompt. Grant it to scenes rather than writing a custom agent unless your use-case is
+            genuinely different.
           </li>
           <li>
             <strong>Keep audio files on the workspace volume.</strong> Agents running inside Docker containers
@@ -484,13 +493,13 @@ curl https://tts.example.com/voices</code></pre>
             mounted there.
           </li>
           <li>
-            <strong>Vision queries are model-dependent.</strong> The quality of <code>analyse_image</code>
-            results depends entirely on the vision model you have loaded. Qwen3.5-35B is vision-enabled
-            and works well for general-purpose visual QA without requiring a separate vision model.
+            <strong>Vision queries are model-dependent.</strong> The quality of <code>analyze_image</code>
+            results depends entirely on the vision model you have loaded. Qwen3.6-35B (<code>qwen3.6-35b-a3b</code>)
+            is vision-enabled and works well for general-purpose visual QA without requiring a separate vision model.
           </li>
           <li>
             <strong>Large documents may need chunking.</strong> <code>extract_file_content</code> returns the
-            full document text. For very large PDFs, ask the <code>media_analyst</code> to summarise or extract
+            full document text. For very large PDFs, ask the <code>document_intake</code> agent to extract
             specific sections rather than returning everything at once.
           </li>
           <li>

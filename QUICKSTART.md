@@ -99,7 +99,7 @@ Paste the generated JWT into the dashboard login modal. Regenerate one any time 
 Configuration lives in two zones — operator-owned `config/` and agent-tunable `workspace/` — which compile into `starlingai.json`. Edit the source files, then run `pnpm sai config build` (and restart the gateway). Start with:
 
 - `config/providers/10-providers.jsonc` — point LM Studio or another provider at your reachable endpoint.
-- `workspace/agents/10-core-agents.jsonc` — `agents.defaults.model` and `embeddingModel` for the swarm.
+- `workspace/agents/00-platform.jsonc` — `agents.defaults.model` and `embeddingModel` for the swarm.
 - `config/gateway/10-gateway.jsonc` — gateway port, bind host, session and turn timeouts, CORS allowlist.
 - `config/tooling/10-platform.jsonc` — retrieval, computer-use, pentest, and MCP servers (keep only what you need).
 - `config/channels/10-channels.jsonc` and `config/integrations/` — messaging channels, sites, approval channels, and webhooks.

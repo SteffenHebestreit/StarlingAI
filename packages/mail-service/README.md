@@ -16,6 +16,8 @@ Base URL: `http://${host}:${port}` — default `http://0.0.0.0:5020`.
 
 Auth (optional): set `SAI_MAIL_SERVICE_TOKEN`; clients pass `Authorization: Bearer <token>`. When unset, the service runs unauthenticated (only safe on a private Docker network).
 
+Per-user access: the gateway forwards the authenticated user via the `X-Sai-User` header (derived from the verified JWT; the shared service token bounds trust to the gateway). Account-scoped routes return `403` when that user is not in an account's `allowedUsers` list (see below). No header — single-user or auth-disabled — is always allowed.
+
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/health` | Liveness probe; returns `{ ok: true, accounts: <count> }` |
@@ -57,6 +59,7 @@ The service is configured through two channels:
       "id": "work",
       "address": "alice@example.com",
       "displayName": "Work email",
+      "allowedUsers": ["alice"],
       "imap": {
         "host": "imap.example.com",
         "port": 993,
@@ -88,6 +91,7 @@ The service is configured through two channels:
 ```
 
 - Any string value prefixed with `$` is resolved against the process environment at load time — use this to keep secrets out of the config file.
+- `allowedUsers` is an optional array of usernames. Empty or omitted = the account is shared with all users; when set, only those authenticated users (matched against the `X-Sai-User` header) may access the account — others get `403`.
 - `caldav` and `carddav` are optional. Accounts without them return `422` from the matching routes.
 - `imap.port` defaults to `993` / `secure: true`; `smtp.port` defaults to `587` / `secure: false` (STARTTLS).
 
@@ -108,6 +112,7 @@ The service is configured through two channels:
 | `src/index.ts` | Entrypoint — loads config, starts Hono server |
 | `src/app.ts` | Hono app wiring; mounts account, message, draft, calendar, contacts routes |
 | `src/config.ts` | Config loader + Zod schema; env-var reference resolution |
+| `src/account-access.ts` | Per-user account access control (`allowedUsers` + `X-Sai-User`); resolves accounts, 403 on denied user |
 | `src/imap-client.ts` | IMAP session pool (via imapflow) |
 | `src/smtp-client.ts` | SMTP transport (via nodemailer) |
 | `src/dav-client.ts` | CalDAV + CardDAV client (via tsdav) |

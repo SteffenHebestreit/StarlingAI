@@ -6,7 +6,7 @@ This directory holds configuration that the **agent swarm can self-tune** at run
 
 | Folder | What it configures |
 |---|---|
-| `agents/` | Main assistant settings + sub-agent definitions, **sharded by role** (`21-orchestration`, `22-research-analysis`, `23-authoring-content`, …) |
+| `agents/` | Main assistant settings + sub-agent definitions, **sharded by tier** (`00-platform`, `10-core-agents`, `20-primary-agents`, `30-secondary-agents`) |
 | `jobs/` | Operator-managed reusable job definitions exposed by the dashboard/API |
 | `scenes/` | Named workflow / mission definitions |
 | `tools/` | Swarm-invented dynamic tool bundles (JSON) — written only by the tool-development pipeline (sandbox-tested + approved), hot-loaded into the registry as `selfdev__*` tools |
@@ -47,9 +47,9 @@ StarlingAI has two reusable workflow layers:
 - `scenes/`: one reusable workflow prompt or mission template
 - `jobs/`: an ordered chain of scenes with optional triggers
 
-Create a scene when you want one reusable orchestration pattern with a stable goal, stable allowed agents, and optional templated params. Scenes are sharded by category under `workspace/scenes/` (`10-research`, `20-content-media`, `30-engineering-data`, `40-ops-comms`) — add yours to the best-fit shard.
+Create a scene when you want one reusable orchestration pattern with a stable goal, stable allowed agents, and optional templated params. Scenes are sharded under `workspace/scenes/` (`10-core-scenes`, `20-primary-scenes`, `30-secondary-scenes`, `40-capability-codev`, `50-profile-fit`) — add yours to the best-fit shard.
 
-Create a job when you want multiple scenes to run in sequence. Jobs are sharded by the same categories under `workspace/jobs/`.
+Create a job when you want multiple scenes to run in sequence. Jobs are sharded under `workspace/jobs/` (`10-core-jobs`, `20-primary-jobs`, `30-secondary-jobs`, `40-capability-codev`).
 
 Scene checklist:
 

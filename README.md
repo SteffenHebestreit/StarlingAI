@@ -88,7 +88,7 @@ Every agent runs in an isolated Docker container with `--cap-drop ALL`, `--read-
 - **Parallel Delegation** — Independent sub-tasks run concurrently. Task graphs handle complex dependencies with per-node fallbacks.
 - **Reusable Workflows** — Scenes and multi-step jobs can be discovered with `search_workflows` and executed inline with `run_workflow`, so recurring packets do not have to be replanned from scratch.
 - **Collective Memory** — Agents share facts and partial results via a semantic memory layer backed by embeddings. Knowledge built by one agent is available to all.
-- **Document RAG** — Files attached to a conversation are extracted to Markdown by the file-conversion service and indexed into the [engram](https://github.com/SteffenHebestreit/engram) graph-RAG store (chunk → keywords/summary → multi-channel embeddings → graph). Relevant excerpts are auto-retrieved and injected as context per turn, with a cross-encoder rerank (`bge-reranker-v2-m3` via a TEI sidecar). Scope is the conversation by default, extendable to the user's or the workspace's shared library from settings.
+- **Document RAG** — Files attached to a conversation are extracted to Markdown by the file-conversion service and indexed into the [engram](https://github.com/SteffenHebestreit/engram) graph-RAG store (chunk → keywords/summary → multi-channel embeddings → graph). Relevant excerpts are auto-retrieved and injected as context per turn, with a cross-encoder rerank (`Qwen/Qwen3-Reranker-0.6B` via the shared reranker sidecar). Scope is the conversation by default, extendable to the user's or the workspace's shared library from settings.
 - **Knowledge Bases** — Named corpora crawled from documentation sites (`create_knowledge_base`) into the engram store via a bounded, robots-respecting, SSRF-guarded crawler, then queried with `search_knowledge_base` — excerpts cite their source page URLs. See [docs/knowledge-bases.md](docs/knowledge-bases.md).
 - **Bounded Self-Improvement** — The swarm can improve prompts, user memory, flow memory, sub-agent definitions, and approved tool assignments for sub-agents, but only inside guarded, non-secret, non-crucial configuration boundaries.
 - **Federated Swarms** — Instances delegate work to one another over HMAC-signed, short-lived, peer-scoped tokens. Each side keeps full control of its own tool tiers and approval policies — federation never bypasses local guardrails.
@@ -173,12 +173,13 @@ If you expose the gateway directly on a separate origin instead of going through
 ### Optional services
 
 ```bash
+pnpm sai start --rag               # include document-RAG stack (engram + reranker)
 pnpm sai start --pentest           # include Kali Linux pentest service
 pnpm sai start --computer-desktop  # include VNC desktop for computer-use
 pnpm sai start --all               # all remaining optional services
 ```
 
-**Document RAG services.** Document RAG adds three containers — `engram` (graph-RAG API), `engram-neo4j` (graph store with the GDS plugin), and `reranker` (a CPU HuggingFace TEI sidecar serving `bge-reranker-v2-m3`). They come up with the normal `sai start` / `docker compose up`. The reranker downloads its model (~2 GB) on first start, and `engram` points its embeddings + extraction LLM at the same primary model endpoint as the gateway (`SAI_PRIMARY_MODEL_URL`). See [`.env.example`](.env.example) for the `ENGRAM_*` / `RERANKER_MODEL` overrides. The gateway degrades gracefully if these are absent.
+**Document RAG services.** Document RAG adds two containers — `engram` (graph-RAG API, using the in-process `engramdb` backend — vector + BM25 + native-adjacency graph, no Neo4j) and `reranker` (a GPU-first, CPU-fallback custom sentence-transformers CrossEncoder sidecar serving `Qwen/Qwen3-Reranker-0.6B` in the TEI `/rerank` format). Both sit behind the `rag` compose profile (off by default) — enable them with `pnpm sai start --rag` (or persist `SAI_ENABLE_RAG=1` in `.env`); a plain `sai start` / `docker compose up` does not start them. The reranker downloads its model (~1.4 GB) on first start, and `engram` points its embeddings + extraction LLM at the same primary model endpoint as the gateway (`SAI_PRIMARY_MODEL_URL`). See [`.env.example`](.env.example) for the `ENGRAM_*` / `RERANKER_MODEL` overrides. The gateway degrades gracefully if these are absent.
 
 ### Other CLI commands
 

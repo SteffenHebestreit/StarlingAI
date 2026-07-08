@@ -37,6 +37,7 @@
         <a class="nav-link nav-indent" href="discord.html"><span class="nav-icon">🎮</span> Discord</a>
         <a class="nav-link nav-indent" href="whatsapp.html"><span class="nav-icon">📱</span> WhatsApp</a>
         <a class="nav-link nav-indent" href="email.html"><span class="nav-icon">📧</span> Email</a>
+        <span class="nav-link nav-indent"><span class="nav-icon">🔒</span> Signal</span>
       </div>
     </nav>
   </aside>
@@ -122,6 +123,14 @@
               <td>~10 min</td>
               <td>Async workflows, formal communication, reports</td>
             </tr>
+            <tr>
+              <td>
+                <span class="channel-badge signal">🔒 Signal</span>
+              </td>
+              <td><span class="diff-medium">Medium</span></td>
+              <td>~20 min</td>
+              <td>Privacy-focused messaging, secure DMs</td>
+            </tr>
           </tbody>
         </table>
       </div>
@@ -158,12 +167,19 @@
             <div class="card-arrow" style="color:var(--ch-whatsapp);">Setup guide →</div>
           </a>
 
-          <a class="nav-card ch-email" href="email.html" style="grid-column:1/-1;max-width:50%;">
+          <a class="nav-card ch-email" href="email.html">
             <div class="card-icon">📧</div>
             <div class="card-title">Email</div>
             <div class="card-desc">Connect any IMAP/SMTP account. Works with Gmail, Outlook, Yahoo, and custom mail servers.</div>
             <div class="card-arrow" style="color:var(--ch-email);">Setup guide →</div>
           </a>
+
+          <div class="nav-card ch-signal">
+            <div class="card-icon">🔒</div>
+            <div class="card-title">Signal</div>
+            <div class="card-desc">Bridge a registered Signal account via signal-cli. Config keys: <code>account</code> (phone number) and <code>signalCliPath</code>. Supports pairing and <code>dmPolicy</code>.</div>
+            <div class="card-arrow" style="color:var(--muted);">Configured in starlingai.json</div>
+          </div>
         </div>
       </div>
 
@@ -171,8 +187,11 @@
       <div class="section">
         <div class="section-title">DM policy — controlling who can message your bot</div>
         <p>
-          Every channel has a <code>dmPolicy</code> setting that controls which users can send messages
-          to your agents. Set it via the dashboard or in <code>starlingai.json</code>.
+          The Slack, Discord, WhatsApp, Email, and Signal channels each have a <code>dmPolicy</code> setting
+          that controls which users can send messages to your agents. Set it via the dashboard or in
+          <code>starlingai.json</code>. <strong>Telegram is the exception</strong> — it has no
+          <code>dmPolicy</code> (its DM handling is always open) and instead restricts access with a
+          numeric <code>allowedUserIds</code> list.
         </p>
 
         <table class="policy-table">
@@ -195,8 +214,8 @@
             <tr>
               <td><code>allowlist</code></td>
               <td>
-                Only user IDs listed in <code>allowedUsers</code> can send messages.
-                All other messages are silently ignored.
+                Only sender IDs listed in <code>allowFrom</code> can send messages
+                (use <code>"*"</code> to allow everyone). All other messages are silently ignored.
               </td>
               <td><span class="tag tag-blue">Good for teams</span></td>
             </tr>
@@ -226,12 +245,12 @@
   "channels": {
     "telegram": {
       "enabled": true,
-      "dmPolicy": "pairing"
+      "allowedUserIds": [123456789, 987654321]
     },
     "slack": {
       "enabled": true,
       "dmPolicy": "allowlist",
-      "allowedUsers": ["U012AB3CD", "U987ZY6WX"]
+      "allowFrom": ["U012AB3CD", "U987ZY6WX"]
     }
   }
 }</code></pre>
@@ -241,7 +260,7 @@
           <div class="callout-icon">ℹ️</div>
           <div class="callout-body">
             For <strong>pairing mode</strong>: the pairing code is printed to gateway logs on startup.
-            Run <code>docker compose logs gateway | grep "Pairing code"</code> to find it.
+            Run <code>docker compose logs gateway | grep -i "pairing code"</code> to find it.
           </div>
         </div>
       </div>
