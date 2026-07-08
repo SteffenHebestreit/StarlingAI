@@ -415,12 +415,20 @@ export async function main() {
     `${PRODUCT.name} ready — ws://localhost:${config.gateway.port}/ws`
   );
 
-  // Print a login token to the logs on first start so the user can access the dashboard
-  try {
-    const token = await createToken("admin", { role: "admin" });
-    log.info(`\n${"─".repeat(60)}\nGateway token (copy to dashboard login):\n${token}\n${"─".repeat(60)}`);
-  } catch {
-    log.warn("Could not generate login token — ensure SAI_JWT_SECRET is set");
+  // Single-operator convenience: when multi-user auth is OFF, print a bootstrap
+  // admin token so the operator can reach the dashboard. When auth is ENABLED, do
+  // NOT mint a standing max-privilege token — it would bypass the whole RBAC/user
+  // system and can't be revoked without rotating the JWT secret (which logs
+  // everyone out). Operators log in with a configured account instead.
+  if (getConfig().auth?.enabled !== true) {
+    try {
+      const token = await createToken("admin", { role: "admin" });
+      log.info(`\n${"─".repeat(60)}\nGateway token (auth is OFF — copy to dashboard login):\n${token}\n${"─".repeat(60)}`);
+    } catch {
+      log.warn("Could not generate login token — ensure SAI_JWT_SECRET is set");
+    }
+  } else {
+    log.info("Multi-user auth is enabled — log in with a configured account (no bootstrap token is printed).");
   }
 }
 

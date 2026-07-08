@@ -1,7 +1,7 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { readRecentOutcomes } from "../agent/outcomes.js";
 import { readFlowMemoryEntries } from "../agent/flow-memory.js";
 import { readAllFacts } from "../swarm/memory.js";
@@ -552,7 +552,7 @@ function updateDurableMemoryRecordByKey(
   // matches the old wording; the async refresh below writes a fresh one.
   if (textChanged) delete updated.embedding;
 
-  writeFileSync(filePath, JSON.stringify(updated, null, 2), "utf-8");
+  atomicWriteFile(filePath, JSON.stringify(updated, null, 2));
   const cacheKey = _cacheKey(scope, dir);
   _bumpCacheVersion(cacheKey);
   const result = workspaceStoredToRecord(updated);
@@ -680,7 +680,7 @@ function storeDurableMemoryRecord(
   // instead of re-reading + re-parsing the whole scope dir on every write.
   const priorRecords = readDurableMemoryRecords(scope, workspacePath);
 
-  writeFileSync(filePath, JSON.stringify(stored, null, 2), "utf-8");
+  atomicWriteFile(filePath, JSON.stringify(stored, null, 2));
   _bumpCacheVersion(cacheKey);
   const result = workspaceStoredToRecord(stored);
 
@@ -729,7 +729,7 @@ async function _refreshDurableEmbedding(filePath: string, cacheKey: string, text
       const parsed = parseStoredWorkspaceMemory(readFileSync(filePath, "utf-8"));
       if (parsed && `${parsed.subject ?? ""}\n${parsed.content}` === text) {
         const updated: StoredWorkspaceMemoryRecord = { ...parsed, embedding: Array.from(vec) };
-        writeFileSync(filePath, JSON.stringify(updated, null, 2), "utf-8");
+        atomicWriteFile(filePath, JSON.stringify(updated, null, 2));
         _bumpCacheVersion(cacheKey);
       }
     }
@@ -780,7 +780,7 @@ function supersedeOlderSubjectFacts(
       let stored: StoredWorkspaceMemoryRecord | null;
       try { stored = parseStoredWorkspaceMemory(readFileSync(path, "utf-8")); } catch { continue; }
       if (!stored || stored.supersededAt) continue;
-      writeFileSync(path, JSON.stringify({ ...stored, supersededAt: now }, null, 2), "utf-8");
+      atomicWriteFile(path, JSON.stringify({ ...stored, supersededAt: now }, null, 2));
       changed = true;
       logAudit("memory_fact_superseded", {
         scope,
@@ -832,7 +832,7 @@ export async function refreshMissingDurableEmbeddings(
           if (!existsSync(item.path)) continue;
           const current = parseStoredWorkspaceMemory(readFileSync(item.path, "utf-8"));
           if (!current || (Array.isArray(current.embedding) && current.embedding.length > 0)) continue;
-          writeFileSync(item.path, JSON.stringify({ ...current, embedding: Array.from(vec) }, null, 2), "utf-8");
+          atomicWriteFile(item.path, JSON.stringify({ ...current, embedding: Array.from(vec) }, null, 2));
           refreshed++;
         } catch { /* skip */ }
       }
@@ -1059,6 +1059,22 @@ function normalizeTags(values: string[] | undefined): string[] {
     tags.push(tag);
   }
   return tags;
+}
+
+/** Crash-safe write: write to a temp file in the same dir, then atomically rename
+ *  over the target — so a crash mid-write can never truncate a durable record and
+ *  silently drop the user's stored fact/preference/decision (the plain writeFileSync
+ *  it replaces left a half-written JSON that failed to parse on next read). Same
+ *  proven pattern as the skills store (skills/store.ts). */
+function atomicWriteFile(filePath: string, content: string): void {
+  const tmp = resolve(dirname(filePath), `.${Date.now()}-${Math.random().toString(36).slice(2)}.tmp`);
+  try {
+    writeFileSync(tmp, content, "utf-8");
+    renameSync(tmp, filePath);
+  } catch (err) {
+    try { rmSync(tmp, { force: true }); } catch { /* best-effort temp cleanup */ }
+    throw err;
+  }
 }
 
 /** Base dir for the durable USER scope, BEFORE per-user partitioning. Background
