@@ -2,6 +2,8 @@
 
 *A single control-panel reference: every lever to **extend** what the swarm can do, **adjust** how it behaves, and the **self-learning** loops it runs on its own — with the exact config key / tool / page for each.*
 
+*Companion: [`memory-context-overview.md`](./memory-context-overview.md) covers the data plane — memory stores, knowledge/RAG, and context assembly across session/workspace/user scopes.*
+
 Current as of 2026-07-08. Config keys cite `packages/core/src/config/schema.ts` (and `schemas/*.ts`) which is the source of truth — line numbers drift, key names don't.
 
 ---
