@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { canAccessResource, filterAccessibleResources, resourceDeniedMessage } from "../guardrails/resource-access.js";
+import * as configLoader from "../config/loader.js";
 
 /**
  * Per-user resource ownership guard. Backwards-compatible: shared resources and
@@ -36,6 +37,33 @@ describe("canAccessResource", () => {
     ];
     expect(filterAccessibleResources("alice", accounts).map((a) => a.id)).toEqual(["shared", "alice-only"]);
     expect(filterAccessibleResources(undefined, accounts).map((a) => a.id)).toEqual(["shared", "alice-only", "bob-only"]);
+  });
+});
+
+describe("canAccessResource under multi-user auth", () => {
+  afterEach(() => vi.restoreAllMocks());
+  function mockAuth(enabled: boolean): void {
+    vi.spyOn(configLoader, "getConfig").mockReturnValue(
+      { auth: { enabled } } as unknown as ReturnType<typeof configLoader.getConfig>,
+    );
+  }
+
+  it("fails CLOSED for a bound resource with no requesting user when auth is ON", () => {
+    mockAuth(true);
+    expect(canAccessResource(undefined, { allowedUsers: ["alice"] })).toBe(false);
+  });
+
+  it("still allows a bound resource with no user when auth is OFF (back-compat)", () => {
+    mockAuth(false);
+    expect(canAccessResource(undefined, { allowedUsers: ["alice"] })).toBe(true);
+  });
+
+  it("still shares unbound resources and enforces the allow-list under auth", () => {
+    mockAuth(true);
+    expect(canAccessResource(undefined, { allowedUsers: [] })).toBe(true);
+    expect(canAccessResource("bob", {})).toBe(true);
+    expect(canAccessResource("alice", { allowedUsers: ["alice"] })).toBe(true);
+    expect(canAccessResource("bob", { allowedUsers: ["alice"] })).toBe(false);
   });
 });
 

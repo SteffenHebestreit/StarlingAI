@@ -6,14 +6,19 @@
  * resource to specific users via an `allowedUsers` list; this helper is the
  * single decision point every tool uses to enforce that binding.
  *
- * Rules (fail-OPEN only for the backwards-compatible single-user case):
+ * Rules:
  * - allowedUsers empty / unset  → shared resource, everyone may use it.
- * - requesting userId undefined  → single-user / token mode (auth disabled),
- *                                  no scoping to enforce → allow.
- * - otherwise                    → allow IFF allowedUsers includes the user.
+ *   (Unbound is shared BY DESIGN; private-by-default would need a per-resource
+ *   owner model — a separate feature.)
+ * - allowedUsers set + userId undefined:
+ *     · multi-user auth OFF → single-operator / token mode, allow (back-compat).
+ *     · multi-user auth ON  → FAIL CLOSED: a restricted resource must never leak
+ *       to an unauthenticated / user-less caller under active auth.
+ * - allowedUsers set + userId present → allow IFF allowedUsers includes the user.
  *
  * Usernames are compared case-insensitively (auth lowercases usernames).
  */
+import { getConfig } from "../config/loader.js";
 
 export interface OwnedResource {
   /** Usernames permitted to use this resource. Empty/undefined = shared. */
@@ -22,8 +27,8 @@ export interface OwnedResource {
 
 export function canAccessResource(userId: string | undefined, resource: OwnedResource | undefined | null): boolean {
   const allowed = resource?.allowedUsers;
-  if (!allowed || allowed.length === 0) return true; // shared resource
-  if (!userId) return true;                          // auth disabled / single-user
+  if (!allowed || allowed.length === 0) return true; // shared / unbound resource
+  if (!userId) return getConfig().auth?.enabled !== true; // bound + no user: closed under auth, open when off
   const u = userId.toLowerCase();
   return allowed.some((a) => a.toLowerCase() === u);
 }
