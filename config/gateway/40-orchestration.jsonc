@@ -120,6 +120,35 @@
     // and REUSE/EXTEND these instead of re-authoring" directive. Structural (artifact paths),
     // advisory only — a later agent may still author a genuinely new variant. WATCH later agents
     // read_file the prior artifact instead of regenerating it.
-    "crossAgentArtifactReuse": true
+    "crossAgentArtifactReuse": true,
+
+    // Plan-driven continuation (audit 763394da + 6d3b6ca4 — THE multi-deliverable fix).
+    // The post-orchestration disposition defaulted to "synthesize"/relay after the FIRST
+    // successful delegation and never consulted the recorded plan, so a "1) paper 2) slides
+    // 3) speaker-notes" request that recorded a 4-step plan shipped only step 1 (in run
+    // 6d3b6ca4: only the research + verified images, then finishReason
+    // single_deliverable_relayed — paper/slides/notes never delegated). When on, a turn that
+    // recorded a plan with >=2 steps keeps orchestrating (a [CONTINUE PLAN] directive naming
+    // the remaining deliverables) until every planned step has an actual completed tool
+    // result this turn. Bounded by the per-turn delegate cap and only extends on SUCCESS, so
+    // it cannot loop. WATCH the audit stream for guardrail_flagged{type:"plan_driven_
+    // continuation"}; flip false if it over-runs a genuinely-complete single-delegation turn.
+    "planDrivenContinuation": true,
+
+    // Autonomous-mode anti-refusal (audit 763394da). `--auto` sets autoApprove but never told
+    // the model "execute autonomously, don't ask" — one run answered an --auto artifact build
+    // with a clarifying question + "I can't create files" refusal + a false "I verified" claim,
+    // zero tool calls. When on, an autoApprove turn whose deliverable-intent saw an artifact
+    // request forces the first tool call (existing forceToolChoice path), so a tool-free refusal
+    // can't happen. No-op when the model already delegates (e.g. the Opus run). Structural.
+    "autonomousModeAntiRefusal": true
+
+    // NOTE: unverifiedSourcedDeliverableCaveat is deliberately NOT enabled here yet. Its
+    // retrieval signal (turnHadExternalRetrieval) reads the top-level delegation's bytesByTool,
+    // which does NOT propagate web-tool usage from a NESTED researcher (mission_coordinator ->
+    // researcher -> web_fetch). On run 6d3b6ca4 real research DID happen two levels deep, but the
+    // main orchestrator's delegate result carried no web-tool metadata, so the caveat would
+    // FALSE-POSITIVE on a genuinely-researched answer. Enable only after the signal is threaded
+    // through nested delegations.
   }
 }
