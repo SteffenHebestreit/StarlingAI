@@ -5,6 +5,8 @@ import { join, resolve } from "node:path";
 import * as configLoader from "../config/loader.js";
 import { runWithRequestContext } from "../runtime/request-context.js";
 import { userScopedDir, safeUserSegment } from "../runtime/user-scope.js";
+import { userHasRole, roleRank } from "../gateway/auth.js";
+import type { AuthenticatedUser } from "../gateway/auth.js";
 import {
   loadMainAssistantPersonality,
   saveMainAssistantPersonality,
@@ -61,6 +63,23 @@ describe("user-scope partitioning", () => {
   it("accepts an explicit userId for background sweeps", () => {
     mockAuth(true);
     expect(userScopedDir(base, "carol")).toBe(resolve(base, "users", "carol"));
+  });
+});
+
+describe("role hierarchy (admin > operator > viewer)", () => {
+  const asUser = (role: string): AuthenticatedUser => ({ username: "u", role });
+
+  it("ranks admin above operator above viewer", () => {
+    expect(roleRank("admin")).toBeGreaterThan(roleRank("operator"));
+    expect(roleRank("operator")).toBeGreaterThan(roleRank("viewer"));
+  });
+
+  it("admin satisfies operator and admin; operator does not satisfy admin", () => {
+    expect(userHasRole(asUser("admin"), "operator")).toBe(true);
+    expect(userHasRole(asUser("admin"), "admin")).toBe(true);
+    expect(userHasRole(asUser("operator"), "operator")).toBe(true);
+    expect(userHasRole(asUser("operator"), "admin")).toBe(false);
+    expect(userHasRole(asUser("viewer"), "operator")).toBe(false);
   });
 });
 

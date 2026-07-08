@@ -38,6 +38,15 @@ export function registerSubAgentRoutes(app: Hono): void {
       if (!userHasRole(user, "operator")) return c.json({ error: "Operator role required" }, 403);
       return null;
     };
+    // Editing/resetting the SHARED global personality is an instance-wide admin
+    // action under multi-user auth (a regular operator only edits their own
+    // per-user override). Auth off → single operator → allowed.
+    const requireGlobalAdmin = async (c: Context): Promise<Response | null> => {
+      if (!getConfig().auth?.enabled) return null;
+      const user = await authenticatedUser(c.req.header("Authorization"));
+      if (!userHasRole(user, "admin")) return c.json({ error: "Admin role required to manage the global personality" }, 403);
+      return null;
+    };
 
     const MainAssistantPersonalityRequestSchema = MainAssistantPersonalityEditableSchema.extend({
       reason: z.string().trim().min(1).max(400).optional(),
@@ -211,13 +220,19 @@ export function registerSubAgentRoutes(app: Hono): void {
   app.put("/api/personality", async (c) => {
     const denied = await requireOperator(c);
     if (denied) return denied;
-
+    // ?scope=global edits the SHARED persona (admin); default edits the caller's override.
+    const wantGlobal = c.req.query("scope") === "global";
+    if (wantGlobal) {
+      const adminDenied = await requireGlobalAdmin(c);
+      if (adminDenied) return adminDenied;
+    }
     try {
       const body = await c.req.json<Record<string, unknown>>();
       const parsed = MainAssistantPersonalityRequestSchema.parse(body);
       const profile = saveMainAssistantPersonality(parsed, {
         updatedBy: "user",
         reason: parsed.reason,
+        global: wantGlobal,
         revisionBase: loadMainAssistantPersonality().revision,
       });
       return c.json(profile);
@@ -229,9 +244,15 @@ export function registerSubAgentRoutes(app: Hono): void {
   app.post("/api/personality/reset", async (c) => {
     const denied = await requireOperator(c);
     if (denied) return denied;
-    // Under multi-user auth, "reset" clears the caller's personality OVERRIDE so
-    // they fall back to the global persona. With no override (single-operator, or
-    // already on the global), reset the base persona to the built-in default.
+    // ?scope=global resets the SHARED persona to default (admin).
+    if (c.req.query("scope") === "global") {
+      const adminDenied = await requireGlobalAdmin(c);
+      if (adminDenied) return adminDenied;
+      return c.json(resetMainAssistantPersonality("user", "Reset global from dashboard", { global: true }));
+    }
+    // Otherwise "reset" clears the caller's OVERRIDE → fall back to the global
+    // persona. With no override (single-operator, or already global), reset the
+    // base persona to the built-in default.
     if (clearMainAssistantPersonalityOverride()) {
       return c.json(loadMainAssistantPersonality());
     }

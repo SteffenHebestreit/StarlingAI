@@ -433,12 +433,14 @@ export function setMainAssistantName(
 export function resetMainAssistantPersonality(
   actor: MainAssistantPersonalityActor = "system",
   reason = "Reset to default personality",
+  options: { global?: boolean } = {},
 ): MainAssistantPersonalityProfile {
   const current = loadMainAssistantPersonality();
   return saveMainAssistantPersonality(cloneDefaultPersonality(), {
     updatedBy: actor,
     reason,
     revisionBase: current.revision,
+    global: options.global,
   });
 }
 

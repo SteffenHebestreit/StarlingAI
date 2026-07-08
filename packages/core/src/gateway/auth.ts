@@ -148,15 +148,16 @@ export function extractBearerToken(authHeader: string | null | undefined): strin
 }
 
 /**
- * Role identifier. Upstream ships "operator" (full access) and "viewer"
- * (read-only); core extensions register additional roles (with ranks) via
- * their manifest — see extension/index.ts. Unknown role claims normalize to
- * "operator" for pre-Wave-B token compatibility.
+ * Role identifier. Upstream ships "viewer" (read-only), "operator" (full
+ * per-user access), and "admin" (operator + instance-wide administration, e.g.
+ * editing the shared global personality). Core extensions register additional
+ * roles (with ranks) via their manifest — see extension/index.ts. Unknown role
+ * claims normalize to "operator" for pre-Wave-B token compatibility.
  */
 export type AuthRole = string;
 
 /** Built-in role ranks; extension roles carry their own rank in the registry. */
-const BUILTIN_ROLE_RANKS: Record<string, number> = { viewer: 10, operator: 50 };
+const BUILTIN_ROLE_RANKS: Record<string, number> = { viewer: 10, operator: 50, admin: 90 };
 
 /** Rank for any known role name; unknown roles rank as -1 (never sufficient). */
 export function roleRank(role: string): number {
