@@ -30,10 +30,8 @@ An index of the `docs/` folder. **Reference** docs are evergreen and kept curren
 
 | Doc | What it captured |
 |-----|------------------|
-| [improvement-roadmap-2026-06.md](improvement-roadmap-2026-06.md) | 62-item ranked improvement roadmap (June 2026 audit) |
-| [capability-codevelopment-roadmap-2026-06.md](capability-codevelopment-roadmap-2026-06.md) | Roadmap for human+swarm co-development of a full-stack capability |
-| [staged-orchestration.md](staged-orchestration.md) | Staged small-prompt orchestration pipeline design |
-| [engram-reevaluation-2026-07.md](engram-reevaluation-2026-07.md) | Engram (document-RAG) re-evaluation + adoption decision |
-| architecture-research-2026-07.json | 900K-token architecture research dump (companion to the eval guide) |
+| [staged-orchestration.md](staged-orchestration.md) | Staged small-prompt orchestration pipeline design (referenced by `runtime.ts`) |
+| [engram-reevaluation-2026-07.md](engram-reevaluation-2026-07.md) | Engram (document-RAG) re-evaluation + adoption decision (referenced by `retrieval/*`) |
+| architecture-research-2026-07.json | Architecture research dump — backs the flags in the current eval round |
 
-> Point-in-time docs are retained as a record of the reasoning behind shipped changes. They are not kept in sync with the code; when a fact here disagrees with the schema/source, the code wins.
+> Point-in-time docs are retained as a record of the reasoning behind shipped changes (`staged-orchestration` and `engram-reevaluation` are cited by code comments). They are not kept in sync with the code; when a fact here disagrees with the schema/source, the code wins. The July eval-round docs above graduate to removable once that `pass^k` eval is run.
