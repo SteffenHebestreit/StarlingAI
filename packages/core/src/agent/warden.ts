@@ -266,10 +266,6 @@ export function clearSessionDegraded(sessionId: string): void {
   _degradedSessions.delete(sessionId);
 }
 
-export function _resetDegradedSessionsForTests(): void {
-  _degradedSessions.clear();
-}
-
 export function startWarden(): void {
   if (_wardenInterval) return;
 

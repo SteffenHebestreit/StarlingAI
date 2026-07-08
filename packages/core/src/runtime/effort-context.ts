@@ -216,10 +216,3 @@ export function effectiveOrchestratorMaxToolIterations(): number | undefined {
     ? Number.MAX_SAFE_INTEGER
     : p.orchestratorMaxToolIterations;
 }
-
-/** Apply the active profile's tool-cap multiplier to a base per-call/per-turn cap. */
-export function effectiveToolCap(baseLimit: number): number {
-  const mult = currentEffortProfile()?.toolCapMultiplier;
-  if (mult === undefined || mult === 1) return baseLimit;
-  return Math.max(1, Math.round(baseLimit * mult));
-}

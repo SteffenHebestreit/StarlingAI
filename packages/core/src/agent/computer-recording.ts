@@ -8,7 +8,7 @@
  * Format: One JSON line per event, ordered by `ts`.
  */
 
-import { mkdir, appendFile, readFile } from "node:fs/promises";
+import { mkdir, appendFile } from "node:fs/promises";
 import { resolve, dirname } from "node:path";
 import { getConfig } from "../config/loader.js";
 import { childLogger } from "../logger.js";
@@ -146,32 +146,6 @@ export async function stopRecording(sessionId: string): Promise<RecordingMeta | 
   return meta;
 }
 
-/**
- * Load a recording file and parse all events.
- */
-export async function loadRecording(filePath: string): Promise<RecordingEvent[]> {
-  const content = await readFile(filePath, "utf-8");
-  const lines = content.trim().split("\n").filter(Boolean);
-  return lines.map(line => JSON.parse(line) as RecordingEvent);
-}
-
-/**
- * List all active recordings.
- */
-export function listActiveRecordings(): Array<{ sessionId: string; filePath: string; eventCount: number }> {
-  return Array.from(_activeRecordings.entries()).map(([sessionId, info]) => ({
-    sessionId,
-    filePath: info.filePath,
-    eventCount: info.eventCount,
-  }));
-}
-
-/**
- * Reset for tests.
- */
-export function resetRecordingsForTests(): void {
-  _activeRecordings.clear();
-}
 
 // ── Internal ──────────────────────────────────────────────────────────────────
 

@@ -115,11 +115,6 @@ const DOCKER_UNREACHABLE_PATTERNS = /cannot connect to the docker daemon|is the 
 const DOCKER_UNREACHABLE_COOLDOWN_MS = 60_000;
 let _lastDockerUnreachableAt = 0;
 
-/** Test-only — reset the cooldown so successive tests can each observe the alert. */
-export function resetDockerUnreachableCooldownForTests(): void {
-  _lastDockerUnreachableAt = 0;
-}
-
 function reportDockerUnreachable(
   agentName: string,
   parentSessionId: string,

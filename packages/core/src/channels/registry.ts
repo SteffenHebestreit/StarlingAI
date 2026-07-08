@@ -192,15 +192,6 @@ export async function runChannelHealthChecks(): Promise<void> {
   }
 }
 
-export async function stopAllChannels(): Promise<void> {
-  for (const [type, entry] of _channels) {
-    if (entry.running && entry.stop) {
-      try { await entry.stop(); } catch (err) { log.error({ err, type }, "Error stopping channel"); }
-      setChannelStopped(type);
-    }
-  }
-}
-
 function createBaseMetrics(existing?: ChannelMetrics): ChannelMetrics {
   return {
     delivered: existing?.delivered ?? 0,

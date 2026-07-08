@@ -43,11 +43,6 @@ export function registerExtensionToolKeywords(rules: Array<{ pattern: RegExp; ke
   EXTENSION_KEYWORD_RULES.push(...rules);
 }
 
-/** Test hook. */
-export function _resetExtensionToolKeywordsForTests(): void {
-  EXTENSION_KEYWORD_RULES.length = 0;
-}
-
 const TOOL_KEYWORD_RULES: Array<{ pattern: RegExp; keywords: string[] }> = [
   // The web_search/web_fetch rule used to inject ["news","updates","latest",
   // "current","release notes"] into every agent that owns a web tool.  That
@@ -647,106 +642,6 @@ export async function searchByEmbedding(
     scheduleEmbeddingRetry();
     return [];
   }
-}
-
-/**
- * Symmetric counterpart to `searchToolsByEmbedding` in the tool registry.
- * One scored helper that callers (search_agents tool, dashboard surfaces,
- * capability-gap matchers) can share instead of re-implementing cosine
- * walks against the agent index.
- *
- * Auto-resolves the embedding provider via the most-recent `buildAgentIndex`
- * call so callers don't have to thread it. Falls back to keyword token
- * overlap on description + capabilities + tags when embeddings are
- * unavailable, so unit tests + offline operators still get useful output.
- *
- * Note: this returns the *raw* embedding-similarity ranking. The
- * `search_agents` tool layers richer routing heuristics
- * (looksFresh / looksWebTask / preferred-name bumps) on top via
- * `resolveAgentRouting` — that path stays the user-facing one. This helper
- * is for surfaces that want the bare scored list.
- */
-export async function searchAgentsByEmbedding(
-  query: string,
-  topN = 8,
-  opts?: { excludeAgents?: Iterable<string> },
-): Promise<{ agentName: string; description: string; score: number; mode: "embedding" | "keyword" | "empty" }[]> {
-  const trimmed = query.trim();
-  if (!trimmed) return [];
-  const exclude = opts?.excludeAgents ? new Set(opts.excludeAgents) : null;
-
-  if (_available && _index.length > 0 && _lastProvider && _embeddingModel) {
-    try {
-      const queryVector = await getOrComputeQueryEmbedding(trimmed, _lastProvider, _embeddingModel);
-      if (queryVector) {
-        const ranked = _index
-          .filter((entry) => !exclude || !exclude.has(entry.agentName))
-          .map((entry) => ({
-            agentName: entry.agentName,
-            description: entry.description,
-            score: cosineSimilarity(queryVector, entry.vector),
-            mode: "embedding" as const,
-          }))
-          .sort((a, b) => b.score - a.score)
-          .slice(0, topN);
-        if (ranked.length > 0) return ranked;
-      }
-    } catch (err) {
-      recordEmbeddingFailure(err);
-      log.warn({ err }, "Agent embedding search failed — falling back to keyword");
-      scheduleEmbeddingRetry();
-    }
-  }
-
-  // Keyword fallback — token overlap on description + capabilities + tags.
-  const subAgents = _lastSubAgents ?? {};
-  const entries = Object.entries(subAgents).filter(
-    ([name]) => !exclude || !exclude.has(name),
-  );
-  if (entries.length === 0) return [];
-
-  const q = trimmed.toLowerCase();
-  const queryTokens = q.split(/\s+/).filter((t) => t.length > 2);
-
-  const ranked = entries
-    .map(([name, cfg]) => {
-      const text = [
-        name,
-        cfg.description ?? "",
-        ...(cfg.capabilities ?? []),
-        ...(cfg.tags ?? []),
-        cfg.domain ?? "",
-        cfg.role ?? "",
-      ]
-        .join(" ")
-        .toLowerCase();
-      let score = 0;
-      if (text.includes(q)) score = 1;
-      else if (queryTokens.length > 0) {
-        const hits = queryTokens.filter((token) => text.includes(token)).length;
-        score = hits / queryTokens.length;
-      }
-      return {
-        agentName: name,
-        description: cfg.description ?? "",
-        score,
-        mode: "keyword" as const,
-      };
-    })
-    .filter((entry) => entry.score > 0)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, topN);
-
-  return ranked;
-}
-
-export function rebuildAgentIndex(
-  subAgents: Record<string, SubAgentConfig>,
-  provider: LMStudioProvider
-): void {
-  if (!_embeddingModel) return;
-  clearEmbeddingQueryCache();
-  buildAgentIndex(subAgents, provider, _embeddingModel).catch(() => undefined);
 }
 
 export function isEmbeddingAvailable(): boolean {

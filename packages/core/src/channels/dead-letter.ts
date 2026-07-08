@@ -40,10 +40,6 @@ export function appendDeadLetter(entry: DeadLetterEntry): void {
   }
 }
 
-export function getDeadLetterFilePath(): string {
-  return getDeadLetterPath();
-}
-
 export function readDeadLetters(opts?: { limit?: number; channel?: string }): DeadLetterEntry[] {
   try {
     const filePath = getDeadLetterPath();

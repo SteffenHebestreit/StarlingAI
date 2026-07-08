@@ -76,11 +76,6 @@ export function findRoutePolicy(method: string, path: string): (RoutePolicy & { 
   return null;
 }
 
-/** All registered policies (diagnostics). */
-export function listRoutePolicies(): ReadonlyArray<RoutePolicy & { source: string }> {
-  return _policies;
-}
-
 /** Test hook. */
 export function _resetRoutePoliciesForTests(): void {
   _policies.length = 0;

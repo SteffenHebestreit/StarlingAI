@@ -43,12 +43,6 @@ function isReplay(messageId: string): boolean {
   return false;
 }
 
-export function resetWhatsappReplayWindowForTests(): void {
-  _seenMessageIds.clear();
-}
-
-export function getWhatsappPairingCode(): string { return PAIRING_CODE; }
-
 export function verifyWhatsappSignature(appSecret: string, rawBody: string, signature: string): boolean {
   const expected = `sha256=${createHmac("sha256", appSecret).update(rawBody).digest("hex")}`;
   try {

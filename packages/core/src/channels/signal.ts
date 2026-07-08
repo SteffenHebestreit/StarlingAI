@@ -51,19 +51,7 @@ const defaultSignalCliExecutor: SignalCliExecutor = async (binaryPath, args, tim
   return { stdout, stderr };
 };
 
-let signalCliExecutor: SignalCliExecutor = defaultSignalCliExecutor;
-
-export function setSignalCliExecutorForTests(executor?: SignalCliExecutor): void {
-  signalCliExecutor = executor ?? defaultSignalCliExecutor;
-}
-
-export function resetSignalReplayWindowForTests(): void {
-  _seenMessageIds.clear();
-}
-
-export function getSignalPairingCode(): string {
-  return PAIRING_CODE;
-}
+const signalCliExecutor: SignalCliExecutor = defaultSignalCliExecutor;
 
 export async function startSignalChannel(): Promise<(() => Promise<void>) | null> {
   const config = getConfig();

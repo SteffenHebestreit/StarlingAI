@@ -437,10 +437,6 @@ export function isCrawlActive(kbId: string): boolean {
   return activeCrawls.has(kbId);
 }
 
-export function activeCrawlCount(): number {
-  return activeCrawls.size;
-}
-
 export type StartCrawlResult = { ok: true } | { ok: false; error: string };
 
 /**

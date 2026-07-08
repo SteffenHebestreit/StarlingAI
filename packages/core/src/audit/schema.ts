@@ -145,6 +145,7 @@ export type CoreAuditEventType =
   | "gap_confirmed_closed"
   | "self_improvement_dev_started"
   | "self_improvement_completed"
+  | "self_improvement_deploy_failed"
   | "skill_authored"
   | "skill_distilled"
   | "skill_patched"

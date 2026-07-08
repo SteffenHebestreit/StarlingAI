@@ -231,10 +231,6 @@ export async function listComputerSessionWindows(sessionId: ComputerSessionId): 
   return getComputerAdapter(sessionId).listWindows();
 }
 
-export async function getComputerSessionHealth(sessionId: ComputerSessionId): Promise<boolean> {
-  return getComputerAdapter(sessionId).isHealthy();
-}
-
 export function getComputerAdapter(sessionId: ComputerSessionId): ComputerAdapter {
   const adapter = activeAdapters.get(sessionId);
   if (!adapter) {

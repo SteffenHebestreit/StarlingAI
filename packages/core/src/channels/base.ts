@@ -94,14 +94,6 @@ export function resetChannelIngressForTests(): void {
 
 const _sessions = new Map<string, string>(); // key → sessionId
 
-export function getChannelSession(key: string): string | undefined {
-  return _sessions.get(key);
-}
-
-export function setChannelSession(key: string, sessionId: string): void {
-  _sessions.set(key, sessionId);
-}
-
 export function deleteChannelSession(key: string): void {
   const sid = _sessions.get(key);
   if (sid) {

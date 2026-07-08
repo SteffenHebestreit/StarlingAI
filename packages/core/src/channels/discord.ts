@@ -35,8 +35,6 @@ interface GatewayPayload {
   t?: string | null;
 }
 
-export function getDiscordPairingCode(): string { return PAIRING_CODE; }
-
 /** Send a Discord message via REST API */
 async function discordSend(token: string, channelId: string, content: string): Promise<void> {
   // Discord has a 2000 char limit per message

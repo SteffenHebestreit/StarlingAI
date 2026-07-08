@@ -19,6 +19,7 @@ import { isGraphDbAvailable, runCypher, toPlainRecords } from "../db/neo4j.js";
 import { isQuestDbAvailable, questQuery } from "../db/questdb.js";
 import { getTelemetryWriteHealth } from "./telemetry.js";
 import { browserSessionManager } from "../agent/browser-session.js";
+import { engramConfigured, engramHealth } from "../retrieval/engram.js";
 
 const log = childLogger("health-checks");
 
@@ -202,6 +203,26 @@ async function checkBrowserVnc(): Promise<SubsystemCheck> {
     : { name: "browser_vnc", status: "degraded", detail: "browser-vnc container unreachable on its websockify port" };
 }
 
+/**
+ * engram RAG is an optional enhancement (maintainer-homelab-pinned by default, inert
+ * on most installs). Probe it only when configured, and report a configured-but-
+ * unreachable service as `degraded` rather than `unavailable` so a down RAG
+ * sidecar never flips the whole gateway to 503.
+ */
+async function checkEngram(): Promise<SubsystemCheck> {
+  if (!engramConfigured()) {
+    return { name: "engram", status: "ok", detail: "not configured (RAG enhancement off)" };
+  }
+  try {
+    const ok = await engramHealth();
+    return ok
+      ? { name: "engram", status: "ok", detail: "reachable" }
+      : { name: "engram", status: "degraded", detail: "configured but health probe failed" };
+  } catch (err) {
+    return { name: "engram", status: "degraded", detail: summarize(err) };
+  }
+}
+
 /** Run all subsystem probes in parallel and aggregate. */
 export async function runSubsystemChecks(): Promise<SubsystemHealth> {
   const checks = await Promise.all([
@@ -212,6 +233,7 @@ export async function runSubsystemChecks(): Promise<SubsystemHealth> {
     checkGraph(),
     checkTelemetry(),
     checkBrowserVnc(),
+    checkEngram(),
   ]);
   const healthy = checks.every((c) => c.status !== "unavailable");
   const degraded = checks.some((c) => c.status === "degraded");

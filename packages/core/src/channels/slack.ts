@@ -24,8 +24,6 @@ const log = childLogger("channel:slack");
 // Startup pairing code
 const PAIRING_CODE = Math.random().toString(36).slice(2, 10).toUpperCase();
 
-export function getSlackPairingCode(): string { return PAIRING_CODE; }
-
 /** Verify Slack request signature */
 function verifySlackSignature(signingSecret: string, timestamp: string, rawBody: string, signature: string): boolean {
   const base = `v0:${timestamp}:${rawBody}`;

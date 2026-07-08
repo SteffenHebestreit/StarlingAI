@@ -104,12 +104,6 @@ export function listCronJobs(): ScheduledJob[] {
   return [..._jobs.values()].map(toPublic);
 }
 
-/** Get a single job by ID. */
-export function getCronJob(id: string): ScheduledJob | undefined {
-  const job = _jobs.get(id);
-  return job ? toPublic(job) : undefined;
-}
-
 /** Stop all cron jobs (e.g. on shutdown). */
 export function stopAllCronJobs(): void {
   for (const job of _jobs.values()) {

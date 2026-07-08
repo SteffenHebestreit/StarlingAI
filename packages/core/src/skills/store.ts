@@ -533,14 +533,6 @@ export function recordSkillOutcome(
   persistSkill(workspacePath, skill.frontmatter, skill.body, skill.meta);
 }
 
-export function recordSkillViewed(workspacePath: string, slug: string): void {
-  const skill = getSkill(workspacePath, slug);
-  if (!skill) return;
-  skill.meta.views += 1;
-  skill.meta.lastViewedAt = new Date().toISOString();
-  persistSkillMeta(workspacePath, skill.meta);
-}
-
 /** Sync counterpart of recordSkillHoldoutOutcomeAsync (used off the hot path). */
 export function recordSkillHoldoutOutcome(
   workspacePath: string,
@@ -552,13 +544,6 @@ export function recordSkillHoldoutOutcome(
   skill.meta.holdoutUses = (skill.meta.holdoutUses ?? 0) + 1;
   if (outcome === "success") skill.meta.holdoutSuccesses = (skill.meta.holdoutSuccesses ?? 0) + 1;
   persistSkillMeta(workspacePath, skill.meta);
-}
-
-export function setSkillEmbedding(workspacePath: string, slug: string, embedding: number[]): void {
-  const skill = getSkill(workspacePath, slug);
-  if (!skill) return;
-  skill.meta.embedding = embedding;
-  persistSkill(workspacePath, skill.frontmatter, skill.body, skill.meta);
 }
 
 // ── Async, non-blocking variants (hot path) ──────────────────────────────────

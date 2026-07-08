@@ -133,7 +133,3 @@ export function syncWebhookTools(): void {
     throw err;
   }
 }
-
-export function registerWebhookTools(): void {
-  syncWebhookTools();
-}

@@ -30,7 +30,7 @@ import {
   markRejected,
   type ToolDevSession,
 } from "./tool-dev-session.js";
-import { deployApprovedTool, type DynamicToolDefinition } from "../tools/dynamic-tools.js";
+import { deployApprovedTool, rollbackDynamicTool, type DynamicToolDefinition } from "../tools/dynamic-tools.js";
 
 const log = childLogger("self-improve");
 
@@ -292,8 +292,23 @@ export function completeImprovement(
     devSessionId: session.id,
   };
 
-  // Deploy the tool
-  deployApprovedTool(def);
+  // Deploy the tool. If registration throws, roll back any partial registration
+  // so a failed deploy can't leave an orphaned/broken tool in the registry —
+  // previously a throwing deployApprovedTool had no cleanup path.
+  try {
+    deployApprovedTool(def);
+  } catch (err) {
+    rollbackDynamicTool(session.toolName);
+    logAudit("self_improvement_deploy_failed", {
+      toolName: session.toolName,
+      devSessionId: session.id,
+      error: err instanceof Error ? err.message : String(err),
+    }, {
+      sessionId: session.sessionId,
+      severity: "error",
+    });
+    throw err;
+  }
   markApproved(session.id);
   updateGapStatusForSession(session.id, "deployed");
 
@@ -366,11 +381,6 @@ export function stopSelfImprovementDriver(): void {
     clearInterval(_driverInterval);
     _driverInterval = null;
   }
-}
-
-/** Exposed for tests — trigger one driver sweep synchronously. */
-export async function processSelfImprovementDriverNow(): Promise<void> {
-  await processProposedGaps();
 }
 
 /** Max back-off delay between driver retries for a single gap (1 hour). */

@@ -7,7 +7,6 @@
  * Store key format:  channel:<type>:config  →  JSON string of partial channel config
  */
 import { getCredential, setCredential, deleteCredential } from "./store.js";
-import { getConfig } from "../config/loader.js";
 import { childLogger } from "../logger.js";
 
 const log = childLogger("credentials:channels");
@@ -88,14 +87,6 @@ export function getEffectiveChannelConfig<T extends Record<string, unknown>>(typ
 
 export function getChannelConfigSource(type: ChannelType): "config" | "store" {
   return getStoredChannelConfig(type) ? "store" : "config";
-}
-
-export function getConfiguredChannelTypes(): ChannelType[] {
-  const channels = getConfig().channels;
-  return CHANNEL_TYPES.filter((type) => {
-    const effective = getEffectiveChannelConfig(type, channels[type]);
-    return Boolean(effective.enabled);
-  });
 }
 
 const SECRET_FIELDS = ["botToken", "appToken", "signingSecret", "token", "appSecret", "accessToken", "verifyToken", "imapPassword", "smtpPassword"] as const;

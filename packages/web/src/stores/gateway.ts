@@ -525,10 +525,6 @@ function extractToolAttachments(name: string, metadata: unknown): ChatAttachment
   return attachments;
 }
 
-function extractCompletedThinkingBlocks(text: string): string {
-  return (text.match(THINKING_BLOCK_RE) ?? []).join("\n\n").trim();
-}
-
 function extractVisibleAssistantContent(
   content: string | null | undefined,
   toolCalls?: ChatMessage["toolCalls"],

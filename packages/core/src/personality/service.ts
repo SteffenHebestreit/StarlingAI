@@ -436,23 +436,3 @@ export function formatMainAssistantPersonalityGuidance(): string {
 
   return sections.join("\n");
 }
-
-export function deleteMainAssistantPersonalityForTests(): void {
-  const filePath = resolvePersonalityStorePath();
-  if (existsSync(filePath)) {
-    try {
-      writeFileSync(filePath, "", "utf8");
-    } catch {
-      // ignored; tests usually clean the temp directory instead
-    }
-  }
-}
-
-export function personalityStoreExists(): boolean {
-  return existsSync(resolvePersonalityStorePath());
-}
-
-export function readRawMainAssistantPersonalityForTests(): string | undefined {
-  const filePath = resolvePersonalityStorePath();
-  return existsSync(filePath) ? readFileSync(filePath, "utf8") : undefined;
-}

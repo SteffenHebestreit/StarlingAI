@@ -52,10 +52,6 @@ const loaded: WebExtension[] = Object.entries(modules)
   .map(([, mod]) => mod.default)
   .filter((ext): ext is WebExtension => Boolean(ext && typeof ext.name === "string"));
 
-export function listWebExtensions(): readonly WebExtension[] {
-  return loaded;
-}
-
 /** All extension routes, for the router to spread before its catch-all. */
 export function extensionRoutes(): RouteRecordRaw[] {
   return loaded.flatMap((ext) => ext.routes ?? []);

@@ -350,6 +350,18 @@ export async function main() {
     } catch {
       // best-effort
     }
+    try {
+      const { stopMemoryConsolidationDriver } = await import("./memory/driver.js");
+      stopMemoryConsolidationDriver();
+    } catch {
+      // best-effort
+    }
+    try {
+      const { stopAnthropicTokenRefresher } = await import("./providers/anthropic-oauth.js");
+      stopAnthropicTokenRefresher();
+    } catch {
+      // best-effort
+    }
     const { stopPeerDiscovery } = await import("./federation/index.js");
     stopPeerDiscovery();
     try {
@@ -385,6 +397,12 @@ export async function main() {
     stopAllCronJobs();
     await flushAuditLog();
     await closeSessionRedis();
+    try {
+      const { closeRedis } = await import("./guardrails/redis-client.js");
+      await closeRedis();
+    } catch {
+      // best-effort
+    }
     await shutdownTracing();
     process.exit(0);
   };

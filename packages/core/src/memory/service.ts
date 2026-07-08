@@ -1060,10 +1060,6 @@ function normalizeTags(values: string[] | undefined): string[] {
   return tags;
 }
 
-function memoryDir(workspacePath: string): string {
-  return memoryDirForScope("workspace", workspacePath);
-}
-
 function memoryDirForScope(scope: DurableMemoryScope, workspacePath: string): string {
   if (scope === "user") {
     const override = process.env["SAI_USER_MEMORY_PATH"]?.trim();
@@ -1093,10 +1089,6 @@ function replaceDurableRecord(records: MemoryRecord[], updated: MemoryRecord): v
     return;
   }
   records.push(updated);
-}
-
-function findWorkspaceDuplicate(records: MemoryRecord[], candidate: MemoryRecord): MemoryRecord | null {
-  return findDurableMemoryDuplicate(records, candidate);
 }
 
 function findDurableMemoryDuplicate(records: MemoryRecord[], candidate: MemoryRecord): MemoryRecord | null {

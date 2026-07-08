@@ -68,16 +68,6 @@ export async function formatSharedFactsForFinalSynthesis(sessionId: string, maxC
   }
 }
 
-export async function hasSharedFactsForFinalSynthesis(sessionId: string): Promise<boolean> {
-  try {
-    const facts = await readAllFacts(sessionId);
-    return Object.values(facts).some((value) => value.trim().length >= 80);
-  } catch (err) {
-    log.debug({ err, sessionId }, "Failed to check shared findings for final synthesis");
-    return false;
-  }
-}
-
 // True when most non-empty lines of an evidence blob are raw-tool junk — used to
 // reject a long raw dump in favour of concise curated findings.
 export function evidenceIsMostlyJunk(evidence: string): boolean {

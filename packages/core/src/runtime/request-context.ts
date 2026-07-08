@@ -29,11 +29,6 @@ export function runWithRequestContext<T>(ctx: RequestContext, fn: () => T): T {
   return storage.run(ctx, fn);
 }
 
-/** The active request context, if any. */
-export function currentRequestContext(): RequestContext | undefined {
-  return storage.getStore();
-}
-
 /** Convenience: the user that owns the active tool execution, if any. */
 export function currentUserId(): string | undefined {
   return storage.getStore()?.userId;

@@ -1060,10 +1060,6 @@ function refreshTemporalContext(prompt: string): string {
   return prompt.replace(/Today's date:[^\n]*/g, currentDatePromptLine());
 }
 
-function hasSubAgent(config: ReturnType<typeof getConfig>, name: string): boolean {
-  return Boolean(config.subAgents?.[name]);
-}
-
 const MANAGED_DEFAULT_PROMPT_PREFIX = "You are the main assistant inside StarlingAI";
 const LEGACY_MANAGED_DEFAULT_PROMPT_PREFIX = "You are StarlingAI, a pragmatic AI assistant";
 

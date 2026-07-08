@@ -61,6 +61,7 @@ import { getConcurrencySnapshot, getGlobalConcurrencySnapshot } from "../swarm/c
 import { isSwarmBusConnected } from "../swarm/bus.js";
 import { getAgentCapabilitySnapshot } from "../swarm/capabilities.js";
 import { getBidderWorkerStatus } from "../swarm/bidder-worker.js";
+import { getSceneJobWorkerStatus } from "../agent/scene-worker.js";
 import { getAgentMessageBacklogSnapshot, readAllFacts } from "../swarm/memory.js";
 import { deriveSharedSessionId } from "../tools/memory.js";
 import { turnSteeringManager } from "../agent/turn-steering.js";
@@ -253,10 +254,6 @@ export function createGateway() {
   }
 
   // upstream-HTTP + MCP-response helpers extracted to ./upstream-http.ts
-
-  async function checkSttHealth(baseUrl: string, apiKey: string | undefined, timeoutMs: number, model: string): Promise<{ ok: boolean; status?: number; error?: string }> {
-    return checkSttHealthByApi("auto", baseUrl, apiKey, timeoutMs, model);
-  }
 
   async function checkSttHealthByApi(api: "auto" | "openai-compatible" | "transcribe-only", baseUrl: string, apiKey: string | undefined, timeoutMs: number, model: string): Promise<{ ok: boolean; status?: number; error?: string }> {
     if (!multimodalServiceConfigured(baseUrl)) {
@@ -3364,6 +3361,7 @@ export function createGateway() {
     return c.json({
       bus: { connected: busConnected, mode: busConnected ? "redis" : "in-process" },
       bidderWorker: getBidderWorkerStatus(),
+      sceneWorker: getSceneJobWorkerStatus(),
       capabilities,
       directMessages,
       concurrency,

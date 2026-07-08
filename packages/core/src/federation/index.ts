@@ -224,11 +224,6 @@ export async function fetchPeerCapability(peerId: string, options: { force?: boo
   return capability;
 }
 
-/** Drop the cached capability snapshot for a peer (e.g. after auth failure). */
-export function invalidatePeerCapability(peerId: string): void {
-  _capabilityCache.delete(peerId);
-}
-
 /** True for hosts that must not be fetched from a peer-supplied URL (SSRF guard). */
 export function isPrivateOrLoopbackHost(hostname: string): boolean {
   const h = hostname.toLowerCase().replace(/^\[|\]$/g, ""); // strip IPv6 brackets

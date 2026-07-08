@@ -29,7 +29,6 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { EventEmitter } from "node:events";
 import { childLogger } from "../logger.js";
 import { emitSwarmEvent, onSwarmEvent, isSwarmBusConnected, type SwarmEvent } from "./bus.js";
 import { announceAgentCapability } from "./capabilities.js";
@@ -268,14 +267,6 @@ let _unsubscribe: (() => void) | null = null;
 let _pruneInterval: ReturnType<typeof setInterval> | null = null;
 let _started = false;
 
-const _emitter = new EventEmitter();
-
-/** Emitted when the bidder worker starts. */
-export function onBidderReady(handler: () => void): () => void {
-  _emitter.on("ready", handler);
-  return () => _emitter.off("ready", handler);
-}
-
 /**
  * Start the long-running bidder worker.
  *
@@ -326,7 +317,6 @@ export async function startBidderWorker(
 
   const mode = isSwarmBusConnected() ? "Redis" : "in-process";
   log.info({ workerId: WORKER_ID, mode, agents: _agentIndex.length }, "Bidder worker started");
-  _emitter.emit("ready");
 }
 
 /**

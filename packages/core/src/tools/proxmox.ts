@@ -693,10 +693,6 @@ function normalizeApiUrl(apiUrl: string): string {
   return `${trimmed}/api2/json`;
 }
 
-function normalizeTimeout(value: unknown): number {
-  return normalizeExecutionTimeout(value, DEFAULT_TIMEOUT_MS);
-}
-
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
