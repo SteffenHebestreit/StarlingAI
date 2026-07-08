@@ -342,7 +342,7 @@ function findHostAlias(hostname: string, candidates: string[]): string | null {
   const wwwMatch = candidates.find(c => normalizeHost(c) === host);
   if (wwwMatch) return wwwMatch;
 
-  // Allow short aliases like "n8n" to match configured hosts such as "n8n.k2o".
+  // Allow short aliases like "app" to match configured hosts such as "app.internal".
   if (!host.includes(".")) {
     const prefixMatches = candidates
       .map((candidate) => normalizeHost(candidate))

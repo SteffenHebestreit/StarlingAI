@@ -143,11 +143,11 @@
       // ── Example: Windows PC via VNC ──
       // "win-workstation": {
       //   "adapter": "remote_vnc",
-      //   "host": "10.10.0.2",
+      //   "host": "192.0.2.10",
       //   "port": 5900,
       //   "protocol": "vnc",
       //   "credentials": "vnc-password",
-      //   "label": "Windows PC (10.10.0.2)",
+      //   "label": "Windows PC (192.0.2.10)",
       //   // Restrict this node to specific users (matches auth.users[].username).
       //   // Empty/omitted = shared. Ignored when auth.enabled is false.
       //   "allowedUsers": ["alice"]
@@ -156,18 +156,18 @@
       // ── Example: Windows PC via RDP ──
       // "win-rdp": {
       //   "adapter": "remote_rdp",
-      //   "host": "10.10.0.2",
+      //   "host": "192.0.2.10",
       //   "port": 3389,
       //   "protocol": "rdp",
       //   "credentials": "Administrator:password",
       //   "displayResolution": "1920x1080",
-      //   "label": "Windows RDP (10.10.0.2)"
+      //   "label": "Windows RDP (192.0.2.10)"
       // }
       //,
       // ── Example: Linux server via SSH ──
       // "linux-server": {
       //   "adapter": "remote_ssh",
-      //   "host": "10.10.0.5",
+      //   "host": "192.0.2.20",
       //   "port": 22,
       //   "username": "admin",
       //   "credentials": "/home/agent/.ssh/id_rsa",
@@ -880,7 +880,7 @@
       "params": {
         "n8nSite": {
           "description": "Stored site credential key for the internal n8n application table",
-          "default": "n8n.k2o"
+          "default": "server.example.com"
         },
         "freelancermapSite": {
           "description": "Stored site credential key for the external freelance platform",

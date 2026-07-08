@@ -494,7 +494,7 @@ export const McpDockerRunServerSchema = z.object({
   env: z.record(z.string()).optional(),
   mounts: z.array(z.string()).default([]),
   network: z.string().optional(),
-  /** Extra host mappings injected as --add-host=host:ip (e.g. ["n8n.k2o:192.168.1.50"]) */
+  /** Extra host mappings injected as --add-host=host:ip (e.g. ["myhost.internal:192.168.1.50"]) */
   addHosts: z.array(z.string()).default([]),
   autoStart: z.boolean().default(true),
 });

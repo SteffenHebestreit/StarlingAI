@@ -290,7 +290,7 @@ services:
       # The default (host.docker.internal:1234) reaches a model server — LM Studio,
       # Ollama, llama.cpp, vLLM, OpenRouter — running on the Docker HOST. Override
       # SAI_PRIMARY_MODEL_URL in .env to point engram + the gateway at a model server on
-      # another machine (e.g. a homelab box at http://10.10.0.x:1234/v1).
+      # another machine (e.g. a homelab box at http://192.0.2.x:1234/v1).
       # To embed on the local GPU sidecar instead (e.g. external provider flaky), set
       # ENGRAM_EMBEDDING_API_BASE=http://reranker:80/v1 and
       # RERANKER_EMBED_MODEL=Qwen/Qwen3-Embedding-0.6B in .env (see the reranker svc).
@@ -596,7 +596,7 @@ services:
   # ── Redis (sessions + rate limiting) ─────────────────────────────────────
   # ── Web search (SearXNG) ──────────────────────────────────────────────────
   # Self-hosted metasearch backend for the web_search tool. Previously the stack
-  # relied on an EXTERNAL instance (SEARXNG_BASE_URL=http://search.k2o); this makes
+  # relied on an EXTERNAL instance (SEARXNG_BASE_URL=http://searxng.example.com); this makes
   # the stack self-contained. JSON format + GET method are enabled, and the bot
   # limiter disabled, in docker/searxng/settings.yml (the web_search client needs
   # all three). On starlingai-public so it can reach search engines on the internet

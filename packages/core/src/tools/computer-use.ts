@@ -1479,7 +1479,7 @@ registerTool({
     properties: {
       hostname: {
         type: "string",
-        description: "The site or service hostname to resolve credentials for (e.g. 'github.com', 'n8n.k2o')",
+        description: "The site or service hostname to resolve credentials for (e.g. 'github.com', 'app.example.com')",
       },
       field: {
         type: "string",

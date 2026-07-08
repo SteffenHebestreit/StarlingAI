@@ -4,7 +4,7 @@
       "backend": "searxng",
       // Endpoint comes from the SEARXNG_BASE_URL env (docker-compose defaults it to
       // the bundled self-hosted service, http://searxng:8080). Set SEARXNG_BASE_URL
-      // in .env to point at an external instance instead (e.g. http://search.k2o).
+      // in .env to point at an external instance instead (e.g. http://searxng.example.com).
       "timeoutMs": 15000
     },
     // Cross-encoder reranker (the `reranker` GPU sidecar serving Qwen3-Reranker-0.6B,
@@ -103,35 +103,38 @@
       "label": "Remote access sidecar"
     },
     "nodes": {
+      // The bundled ephemeral VNC desktop (starts with the `computer-desktop` profile).
       "desktop": {
         "adapter": "remote_vnc",
         "host": "computer-desktop",
         "port": 5901,
         "protocol": "vnc",
         "credentials": "starling",
-        "label": "Ephemeral VNC desktop",
-        "allowedUsers": ["Steffen"]
-      },
-      "win-workstation": {
-        "adapter": "remote_rdp",
-        "host": "10.10.0.2",
-        "port": 3389,
-        "protocol": "rdp",
-        "credentials": "$SAI_WIN_WORKSTATION_RDP_CREDENTIALS",
-        "displayResolution": "1920x1080",
-        "label": "Windows PC (10.10.0.2)",
-        "allowedUsers": ["Steffen"]
-      },
-      "n8n-server": {
-        "adapter": "remote_ssh",
-        "host": "n8n.k2o",
-        "port": 22,
-        "username": "Steffen",
-        "authMethod": "password",
-        "credentials": "$SAI_N8N_SSH_PASSWORD",
-        "label": "n8n-server",
-        "allowedUsers": ["Steffen"]
+        "label": "Ephemeral VNC desktop"
       }
+      // Add your own remote machines below. Bind each to specific accounts with
+      // `allowedUsers` under multi-user auth, and store passwords as secrets
+      // ($ENV or secret:...), never inline. Example RDP + SSH nodes:
+      // ,"win-workstation": {
+      //   "adapter": "remote_rdp",
+      //   "host": "192.0.2.10",
+      //   "port": 3389,
+      //   "protocol": "rdp",
+      //   "credentials": "$SAI_WIN_WORKSTATION_RDP_CREDENTIALS",
+      //   "displayResolution": "1920x1080",
+      //   "label": "Windows workstation",
+      //   "allowedUsers": ["alice"]
+      // }
+      // ,"example-server": {
+      //   "adapter": "remote_ssh",
+      //   "host": "server.example.com",
+      //   "port": 22,
+      //   "username": "admin",
+      //   "authMethod": "password",
+      //   "credentials": "$SAI_EXAMPLE_SSH_PASSWORD",
+      //   "label": "Example SSH server",
+      //   "allowedUsers": ["alice"]
+      // }
     },
     "recordingEnabled": true
   },

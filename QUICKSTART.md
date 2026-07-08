@@ -128,7 +128,7 @@ Gateway-side configuration:
 	"nodes": {
 		"win-rdp": {
 			"adapter": "remote_rdp",
-			"host": "10.10.0.2",
+			"host": "192.0.2.10",
 			"port": 3389,
 			"protocol": "rdp",
 			"credentials": "Administrator:password",
