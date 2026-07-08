@@ -36,6 +36,9 @@ describe("config loader mutable overlay", () => {
     delete process.env["SAI_PRIMARY_MODEL_URL"];
     delete process.env["SAI_PRIMARY_MODEL_KEY"];
     delete process.env["SAI_PRIMARY_MODEL"];
+    delete process.env["SAI_FALLBACK_MODEL"];
+    delete process.env["SAI_EMBEDDING_MODEL"];
+    delete process.env["SAI_ROUTING_MODEL"];
     vi.restoreAllMocks();
     vi.resetModules();
 
@@ -315,6 +318,60 @@ describe("config loader mutable overlay", () => {
       expect(config.agents.defaults.model.primary).toBe("ollama/qwen2.5:7b");
       // Sibling fields under the same model block are preserved.
       expect(config.agents.defaults.model.temperature).toBe(0.4);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("SAI_PRIMARY_MODEL seeds fallback too (single-model backend has no separate fallback)", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-config-fallback-"));
+    const baseConfigPath = join(tempDir, "starlingai.json");
+    writeFileSync(baseConfigPath, JSON.stringify({
+      agents: { defaults: { model: {
+        primary: "lmstudio/qwen/qwen3.6-35b-a3b",
+        fallback: "lmstudio/qwen/qwen3.6-35b-a3b",
+      } } },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = baseConfigPath;
+    process.env["SAI_PRIMARY_MODEL"] = "anthropic/claude-sonnet-4-6";
+    vi.resetModules();
+    const configLoader = await import("../config/loader.js");
+    try {
+      const model = configLoader.loadConfig().agents.defaults.model;
+      expect(model.primary).toBe("anthropic/claude-sonnet-4-6");
+      // The Qwen fallback would point Anthropic at a model it doesn't serve — follow primary.
+      expect(model.fallback).toBe("anthropic/claude-sonnet-4-6");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("overrides fallback / embedding / routing tiers from their own env vars (empty = disable)", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-config-tiers-"));
+    const baseConfigPath = join(tempDir, "starlingai.json");
+    writeFileSync(baseConfigPath, JSON.stringify({
+      agents: { defaults: { model: {
+        primary: "lmstudio/qwen/qwen3.6-35b-a3b",
+        fallback: "lmstudio/qwen/qwen3.6-35b-a3b",
+        embeddingModel: "lmstudio/text-embedding-qwen3-embedding-0.6b",
+        tiers: { routing: "lmstudio/qwen/qwen3.5-9b" },
+      } } },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = baseConfigPath;
+    process.env["SAI_PRIMARY_MODEL"] = "anthropic/claude-sonnet-4-6";
+    process.env["SAI_FALLBACK_MODEL"] = "anthropic/claude-haiku-4-6";
+    process.env["SAI_EMBEDDING_MODEL"] = ""; // disable vector embeddings (RAG → keyword)
+    process.env["SAI_ROUTING_MODEL"] = ""; // disable the fast-lane
+    vi.resetModules();
+    const configLoader = await import("../config/loader.js");
+    try {
+      const model = configLoader.loadConfig().agents.defaults.model;
+      expect(model.primary).toBe("anthropic/claude-sonnet-4-6");
+      // Explicit fallback override wins over the primary-seeded default.
+      expect(model.fallback).toBe("anthropic/claude-haiku-4-6");
+      // Empty string means "disable this tier", not "leave the pinned Qwen id".
+      expect(model.embeddingModel).toBe("");
+      expect(model.tiers?.routing).toBe("");
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

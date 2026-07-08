@@ -455,17 +455,45 @@ function mergeEnvOverrides(raw: Record<string, unknown>): Record<string, unknown
       anthropic: { ...ant, authToken: env["ANTHROPIC_AUTH_TOKEN"] || env["CLAUDE_CODE_OAUTH_TOKEN"] },
     };
   }
-  // Default/primary agent model id. SAI_PRIMARY_MODEL is canonical; SAI_DEFAULT_MODEL is the
-  // back-compat alias. Lets the guided setup wizard pin the default model from .env alone
-  // (Docker-only first-run, where hand-editing config shards isn't an option).
+  // Agent model tiers from env, so a Docker-only / wizard install can pin the WHOLE
+  // model config (not just primary) without hand-editing config shards. Previously
+  // only `primary` was overridable, which silently broke non-Qwen backends: the
+  // fallback, embedding, and routing-tier ids stayed pinned to the maintainer's
+  // Qwen models, so document RAG / semantic memory (embeddings) and the fast-lane
+  // (routing) hit models the chosen endpoint doesn't serve.
+  //   SAI_PRIMARY_MODEL   — canonical (SAI_DEFAULT_MODEL is the back-compat alias);
+  //                         also seeds `fallback` unless SAI_FALLBACK_MODEL is set,
+  //                         since a single-model backend has no separate fallback.
+  //   SAI_FALLBACK_MODEL  — overrides fallback explicitly.
+  //   SAI_EMBEDDING_MODEL — overrides the embedding model; set EMPTY to disable
+  //                         vector embeddings (RAG degrades to keyword) instead of
+  //                         pinning a model the endpoint lacks.
+  //   SAI_ROUTING_MODEL   — overrides the routing tier; set EMPTY to disable the
+  //                         fast-lane (turns take the full path).
+  // For the tier overrides an empty string is meaningful ("disable"), so they gate
+  // on presence (!== undefined), not truthiness.
   const primaryModel = env["SAI_PRIMARY_MODEL"] ?? env["SAI_DEFAULT_MODEL"];
-  if (primaryModel) {
+  const fallbackModel = env["SAI_FALLBACK_MODEL"];
+  const embeddingModel = env["SAI_EMBEDDING_MODEL"];
+  const routingModel = env["SAI_ROUTING_MODEL"];
+  if (primaryModel || fallbackModel !== undefined || embeddingModel !== undefined || routingModel !== undefined) {
     const agents = (raw["agents"] as Record<string, unknown> | undefined) ?? {};
     const defaults = (agents["defaults"] as Record<string, unknown> | undefined) ?? {};
     const model = (defaults["model"] as Record<string, unknown> | undefined) ?? {};
+    const nextModel: Record<string, unknown> = { ...(model as object) };
+    if (primaryModel) {
+      nextModel["primary"] = primaryModel;
+      if (fallbackModel === undefined) nextModel["fallback"] = primaryModel;
+    }
+    if (fallbackModel !== undefined) nextModel["fallback"] = fallbackModel;
+    if (embeddingModel !== undefined) nextModel["embeddingModel"] = embeddingModel;
+    if (routingModel !== undefined) {
+      const tiers = (model["tiers"] as Record<string, unknown> | undefined) ?? {};
+      nextModel["tiers"] = { ...(tiers as object), routing: routingModel };
+    }
     raw["agents"] = {
       ...(agents as object),
-      defaults: { ...(defaults as object), model: { ...(model as object), primary: primaryModel } },
+      defaults: { ...(defaults as object), model: nextModel },
     };
   }
   if (env["TELEGRAM_BOT_TOKEN"]) {

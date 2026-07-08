@@ -147,8 +147,10 @@ async function main() {
           "Run a local model with Ollama — no API key, pulled + managed for me",
         ]);
 
-    // Reset prior backend wiring so re-running cleanly switches backends.
-    for (const k of ["SAI_MODEL_BACKEND", "SAI_OLLAMA_MODEL"]) delete env[k];
+    // Reset prior backend wiring so re-running cleanly switches backends. Includes
+    // the model-tier overrides so a switch away from a backend that disabled them
+    // (Anthropic/Ollama) restores the config defaults for the next backend.
+    for (const k of ["SAI_MODEL_BACKEND", "SAI_OLLAMA_MODEL", "SAI_FALLBACK_MODEL", "SAI_EMBEDDING_MODEL", "SAI_ROUTING_MODEL"]) delete env[k];
 
     if (backendChoice === 1) {
       // Anthropic (Claude) — best for constrained hardware: zero local VRAM.
@@ -164,7 +166,15 @@ async function main() {
       else warn("No key entered — set ANTHROPIC_API_KEY in .env (or use the dashboard switch) before delegating.");
       env.SAI_PRIMARY_MODEL = `anthropic/${model}`;
       env.SAI_MODEL_BACKEND = "anthropic";
+      // Anthropic serves no local embedding or small routing-tier model, and the
+      // config defaults pin those to Qwen ids on the LM Studio endpoint — which
+      // Anthropic can't serve. Disable both (empty) so document-RAG degrades to
+      // keyword search and the fast-lane uses the full path, instead of erroring
+      // every turn against a model that isn't there. (fallback follows primary.)
+      env.SAI_EMBEDDING_MODEL = "";
+      env.SAI_ROUTING_MODEL = "";
       ok(`Model backend: Anthropic (${env.SAI_PRIMARY_MODEL})`);
+      warn("Vector document-RAG + the routing fast-lane are OFF for Anthropic (no local embedding/routing model). Point SAI_EMBEDDING_MODEL / SAI_ROUTING_MODEL in .env at a local endpoint to enable them.");
     } else if (backendChoice === 2) {
       // Local Ollama (overlay-managed). Provider stays "lmstudio" pointing at
       // Ollama's OpenAI-compatible endpoint; the served id is the pulled tag.
@@ -176,7 +186,15 @@ async function main() {
       env.SAI_PRIMARY_MODEL_URL = "http://ollama:11434/v1";
       env.SAI_PRIMARY_MODEL_KEY = "ollama";
       env.SAI_PRIMARY_MODEL = `lmstudio/${tag}`;
+      // The config defaults pin the embedding + routing tiers to specific Qwen ids
+      // this fresh Ollama won't have pulled. Disable both (RAG → keyword, fast-lane
+      // → full path) so they degrade gracefully instead of erroring; pull an
+      // embedding model (e.g. nomic-embed-text) and set SAI_EMBEDDING_MODEL to
+      // lmstudio/<tag> to turn vector RAG back on. (fallback follows primary.)
+      env.SAI_EMBEDDING_MODEL = "";
+      env.SAI_ROUTING_MODEL = "";
       ok(`Model backend: local Ollama (${tag}) — the launcher adds docker-compose.ollama.yml`);
+      warn("Embedding + routing tiers disabled for Ollama (pinned Qwen ids aren't pulled). Set SAI_EMBEDDING_MODEL / SAI_ROUTING_MODEL in .env once you pull suitable models.");
     } else {
       // Primary provider — ANY OpenAI-compatible server. host.docker.internal reaches one on
       // THIS Docker host; a remote/homelab box needs its IP; hosted aggregators use their URL.
@@ -209,6 +227,11 @@ async function main() {
       env.SAI_PRIMARY_MODEL = `lmstudio/${model}`;
       env.SAI_MODEL_BACKEND = "openai-compatible";
       ok(`Model backend: ${url} (${env.SAI_PRIMARY_MODEL})`);
+      // The embedding + routing tiers keep their config defaults (Qwen ids on this
+      // same endpoint) — correct for an LM Studio box running the Qwen stack, but
+      // a generic provider may not serve them. Leave them as-is (don't guess) and
+      // tell the operator how to override if their endpoint lacks those models.
+      info("Embedding + routing tiers use the config defaults (Qwen: text-embedding-qwen3-embedding-0.6b / qwen3.5-9b). If this endpoint doesn't serve them, set SAI_EMBEDDING_MODEL / SAI_ROUTING_MODEL in .env (empty to disable) so RAG + the fast-lane don't error.");
     }
 
     // ── 3. optional chat channel ─────────────────────────────────────────────
