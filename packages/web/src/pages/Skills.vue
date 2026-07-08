@@ -4,11 +4,12 @@
       <div>
         <h1 class="skills-page__title">Skill Library</h1>
         <p class="skills-page__subtitle">
-          Reusable procedures the swarm authored from successful work. Drafts graduate to
-          <strong>active</strong> after they succeed in real use; consistently reliable skills are promoted to
-          workflow scenes. Configure authoring on the Settings → Agents page.
+          Reusable procedures. The swarm authors them automatically from successful work (drafts graduate to
+          <strong>active</strong> once they succeed in real use; reliable ones are promoted to workflow scenes) —
+          or write one by hand with <strong>New skill</strong>. Configure auto-authoring on the Settings → Agents page.
         </p>
       </div>
+      <button class="skills-page__new" @click="openCreate()">+ New skill</button>
     </header>
 
     <section class="skills-page__panel">
@@ -40,8 +41,8 @@
       <div v-if="error" class="skills-page__notice skills-page__notice--error">{{ error }}</div>
       <div v-else-if="skills.length === 0 && !loading" class="skills-page__notice">
         No skills yet. The swarm authors them automatically after successful multi-step turns (when
-        <code>skillLibrary.autoAuthor</code> is on), or an agent can author one explicitly with
-        <code>record_skill</code>.
+        <code>skillLibrary.autoAuthor</code> is on), an agent can author one with <code>record_skill</code>,
+        or you can write one now with <strong>+ New skill</strong>.
       </div>
 
       <div class="skills-list">
@@ -68,6 +69,7 @@
             <pre>{{ skill.body }}</pre>
           </details>
           <footer class="skill-card__actions">
+            <button class="skill-card__btn" @click="openEdit(skill)">Edit</button>
             <button
               v-if="skill.status !== 'archived'"
               class="skill-card__btn"
@@ -78,6 +80,60 @@
         </article>
       </div>
     </section>
+
+    <!-- Create / edit modal -->
+    <div v-if="showModal" class="skill-modal__scrim" @click.self="closeModal()">
+      <div class="skill-modal" role="dialog" aria-modal="true">
+        <h2 class="skill-modal__title">{{ editingSlug ? "Edit skill" : "New skill" }}</h2>
+        <div v-if="modalError" class="skills-page__notice skills-page__notice--error">{{ modalError }}</div>
+        <div class="skill-modal__grid">
+          <label class="skill-modal__field">
+            <span>Name</span>
+            <input v-model="form.name" type="text" placeholder="Build a reveal.js deck from research" />
+          </label>
+          <label class="skill-modal__field">
+            <span>Status</span>
+            <select v-model="form.status">
+              <option value="active">Active (usable now)</option>
+              <option value="draft">Draft</option>
+            </select>
+          </label>
+          <label class="skill-modal__field skill-modal__field--full">
+            <span>When to use <em>— the trigger condition</em></span>
+            <input v-model="form.whenToUse" type="text" placeholder="When the user asks for a slide deck backed by sources" />
+          </label>
+          <label class="skill-modal__field skill-modal__field--full">
+            <span>Description <em>— one-line summary</em></span>
+            <input v-model="form.description" type="text" placeholder="What this procedure accomplishes" />
+          </label>
+          <label class="skill-modal__field skill-modal__field--full">
+            <span>Procedure <em>— Markdown: the steps &amp; pitfalls</em></span>
+            <textarea v-model="form.procedure" rows="10" placeholder="1. …&#10;2. …"></textarea>
+          </label>
+          <label class="skill-modal__field">
+            <span>Tags <em>— comma-separated</em></span>
+            <input v-model="form.tags" type="text" placeholder="presentation, research" />
+          </label>
+          <label class="skill-modal__field">
+            <span>Agents <em>— comma-separated, advisory</em></span>
+            <input v-model="form.agents" type="text" placeholder="researcher, content_writer" />
+          </label>
+          <label class="skill-modal__field skill-modal__field--full">
+            <span>Tools <em>— comma-separated, advisory</em></span>
+            <input v-model="form.tools" type="text" placeholder="web_search, generate_document" />
+          </label>
+        </div>
+        <p class="skill-modal__hint">
+          Guidance only — a skill never runs code or grants tools; the agents/tools you list are advisory hints for retrieval.
+        </p>
+        <div class="skill-modal__actions">
+          <button class="skill-card__btn" @click="closeModal()" :disabled="saving">Cancel</button>
+          <button class="skills-controls__refresh" @click="saveSkill()" :disabled="saving">
+            {{ saving ? "Saving…" : (editingSlug ? "Save changes" : "Create skill") }}
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -113,6 +169,23 @@ const query = ref<string>("");
 const loading = ref(false);
 const error = ref<string | null>(null);
 let queryTimer: ReturnType<typeof setTimeout> | null = null;
+
+interface SkillForm {
+  name: string;
+  whenToUse: string;
+  description: string;
+  procedure: string;
+  tags: string;
+  agents: string;
+  tools: string;
+  status: "draft" | "active";
+}
+const emptyForm = (): SkillForm => ({ name: "", whenToUse: "", description: "", procedure: "", tags: "", agents: "", tools: "", status: "active" });
+const showModal = ref(false);
+const editingSlug = ref<string | null>(null);
+const saving = ref(false);
+const modalError = ref<string | null>(null);
+const form = ref<SkillForm>(emptyForm());
 
 function apiBase(): string {
   return gateway.wsUrl.replace(/^ws/, "http").replace(/\/ws$/, "");
@@ -175,6 +248,77 @@ function onQueryChange(): void {
   queryTimer = setTimeout(() => { void loadSkills(); }, 250);
 }
 
+function splitList(v: string): string[] {
+  return v.split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+function openCreate(): void {
+  editingSlug.value = null;
+  modalError.value = null;
+  form.value = emptyForm();
+  showModal.value = true;
+}
+
+function openEdit(skill: SkillRecord): void {
+  editingSlug.value = skill.slug;
+  modalError.value = null;
+  form.value = {
+    name: skill.name,
+    whenToUse: skill.whenToUse ?? "",
+    description: skill.description,
+    procedure: skill.body ?? "",
+    tags: (skill.tags ?? []).join(", "),
+    agents: (skill.agents ?? []).join(", "),
+    tools: (skill.tools ?? []).join(", "),
+    status: skill.status === "draft" ? "draft" : "active",
+  };
+  showModal.value = true;
+}
+
+function closeModal(): void {
+  showModal.value = false;
+}
+
+async function saveSkill(): Promise<void> {
+  const f = form.value;
+  if (!f.name.trim() || !f.description.trim() || !f.procedure.trim()) {
+    modalError.value = "Name, description, and procedure are required.";
+    return;
+  }
+  saving.value = true;
+  modalError.value = null;
+  try {
+    const payload = {
+      name: f.name.trim(),
+      description: f.description.trim(),
+      whenToUse: f.whenToUse.trim(),
+      procedure: f.procedure,
+      tags: splitList(f.tags),
+      agents: splitList(f.agents),
+      tools: splitList(f.tools),
+      status: f.status,
+    };
+    const url = editingSlug.value
+      ? `${apiBase()}/api/skills/${encodeURIComponent(editingSlug.value)}`
+      : `${apiBase()}/api/skills`;
+    const res = await fetch(url, {
+      method: editingSlug.value ? "PUT" : "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({})) as { error?: string };
+      throw new Error(body.error || `HTTP ${res.status}`);
+    }
+    showModal.value = false;
+    await loadSkills();
+  } catch (err) {
+    modalError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    saving.value = false;
+  }
+}
+
 function formatDate(iso: string): string {
   if (!iso) return "—";
   try { return new Date(iso).toLocaleString(); } catch { return iso; }
@@ -194,9 +338,28 @@ onMounted(() => { void loadSkills(); });
 }
 
 .skills-page__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
   padding: 1.25rem 1.5rem 0.75rem;
   border-bottom: 1px solid rgba(168, 85, 247, 0.18);
 }
+
+.skills-page__new {
+  flex: 0 0 auto;
+  appearance: none;
+  background: rgba(168, 85, 247, 0.22);
+  color: rgb(243 232 255);
+  border: 1px solid rgba(168, 85, 247, 0.45);
+  border-radius: 999px;
+  padding: 0.4rem 1rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.skills-page__new:hover { background: rgba(168, 85, 247, 0.32); }
 
 .skills-page__title {
   font-size: 1.4rem;
@@ -406,4 +569,77 @@ onMounted(() => { void loadSkills(); });
 .skill-card__btn:hover { background: rgba(168, 85, 247, 0.15); }
 .skill-card__btn--danger { border-color: rgba(248, 113, 113, 0.4); color: rgb(254 202 202); }
 .skill-card__btn--danger:hover { background: rgba(127, 29, 29, 0.3); }
+
+/* Create / edit modal */
+.skill-modal__scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: rgba(2, 4, 10, 0.62);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+}
+
+.skill-modal {
+  width: min(48rem, 100%);
+  max-height: 88vh;
+  overflow-y: auto;
+  background: rgba(15, 18, 30, 0.98);
+  border: 1px solid rgba(168, 85, 247, 0.3);
+  border-radius: 1rem;
+  padding: 1.25rem 1.4rem 1.4rem;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+}
+
+.skill-modal__title { margin: 0 0 0.75rem; font-size: 1.15rem; color: rgb(243 232 255); }
+
+.skill-modal__grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.7rem 0.9rem;
+}
+
+.skill-modal__field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.8rem;
+  color: rgb(203 213 225);
+}
+.skill-modal__field--full { grid-column: 1 / -1; }
+.skill-modal__field em { color: rgb(148 163 184); font-style: normal; font-size: 0.92em; }
+
+.skill-modal__field input,
+.skill-modal__field select,
+.skill-modal__field textarea {
+  appearance: none;
+  background: rgba(31, 41, 55, 0.6);
+  color: rgb(229 231 235);
+  border: 1px solid rgba(168, 85, 247, 0.25);
+  border-radius: 0.55rem;
+  padding: 0.4rem 0.7rem;
+  font-size: 0.85rem;
+  font-family: inherit;
+}
+.skill-modal__field textarea {
+  resize: vertical;
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.skill-modal__hint { margin: 0.7rem 0 0; font-size: 0.76rem; color: rgb(148 163 184); }
+
+.skill-modal__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.6rem;
+  margin-top: 1rem;
+}
+
+@media (max-width: 640px) {
+  .skill-modal__grid { grid-template-columns: 1fr; }
+}
 </style>

@@ -9,9 +9,22 @@ import type { Hono } from "hono";
 import { getConfig } from "../config/loader.js";
 import { verifyToken, extractBearerToken } from "./auth.js";
 
+/** Coerce a JSON body value to a trimmed non-empty string list, or undefined when absent. */
+function toStringArray(v: unknown): string[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  return v.filter((x): x is string => typeof x === "string").map((x) => x.trim()).filter(Boolean);
+}
+
+/** Only human-selectable statuses are accepted from the manual create/edit UI. */
+function normalizeSkillStatus(v: unknown): "draft" | "active" | undefined {
+  return v === "draft" || v === "active" ? v : undefined;
+}
+
 export function registerSkillLibraryRoutes(app: Hono): void {
   // ── Skill Library inspector ───────────────────────────────────────────────
   // GET  /api/skills                 — list skills (filter by status/query)
+  // POST /api/skills                 — create a skill by hand (origin "manual")
+  // PUT  /api/skills/:slug           — edit an existing skill's full content
   // GET  /api/skills/:slug/history   — inspect mutation history
   // POST /api/skills/:slug/patch     — exact-string patch SKILL.md/support file
   // POST /api/skills/:slug/rollback  — restore a history entry
@@ -66,6 +79,80 @@ export function registerSkillLibraryRoutes(app: Hono): void {
       }));
       return c.json({ total: records.length, records });
     } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
+  // POST /api/skills — create a new skill by hand from the Skill Library UI.
+  // Reuses the same validated writeSkill path as the record_skill tool (incl. the
+  // credential-shaped-content guard); origin "manual". Rejects a slug collision so
+  // "create" can never silently overwrite an existing skill (use PUT to edit).
+  app.post("/api/skills", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    if (!getConfig().skillLibrary.enabled) return c.json({ error: "Skill Library is disabled" }, 409);
+    let body: Record<string, unknown>;
+    try { body = await c.req.json() as Record<string, unknown>; } catch { return c.json({ error: "Invalid JSON body" }, 400); }
+    try {
+      const { getSkill, writeSkill, slugifySkillName } = await import("../skills/store.js");
+      const cfg = getConfig();
+      const name = typeof body["name"] === "string" ? body["name"].trim() : "";
+      const description = typeof body["description"] === "string" ? body["description"].trim() : "";
+      const procedure = typeof body["procedure"] === "string" ? body["procedure"].trim() : "";
+      if (!name || !description || !procedure) return c.json({ error: "name, description, and procedure are required" }, 400);
+      const slug = slugifySkillName(name);
+      if (!slug) return c.json({ error: "name must contain at least one alphanumeric character" }, 400);
+      if (getSkill(cfg.workspacePath, slug)) return c.json({ error: `A skill "${slug}" already exists — edit it instead` }, 409);
+      const skill = writeSkill(cfg.workspacePath, {
+        name,
+        description,
+        procedure,
+        whenToUse: typeof body["whenToUse"] === "string" ? body["whenToUse"].trim() : undefined,
+        tags: toStringArray(body["tags"]),
+        agents: toStringArray(body["agents"]),
+        tools: toStringArray(body["tools"]),
+        status: normalizeSkillStatus(body["status"]) ?? "active",
+        origin: "manual",
+      });
+      return c.json({ slug: skill.frontmatter.slug, name: skill.frontmatter.name, version: skill.frontmatter.version, status: skill.frontmatter.status });
+    } catch (err) {
+      if (err instanceof Error && err.name === "SkillCredentialError") return c.json({ error: err.message }, 400);
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
+  // PUT /api/skills/:slug — edit an existing skill's full content (name/description/
+  // whenToUse/body/tags/agents/tools/status). Content changes bump the version and
+  // preserve outcome stats + creation time (writeSkill upserts by slug).
+  app.put("/api/skills/:slug", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    if (!getConfig().skillLibrary.enabled) return c.json({ error: "Skill Library is disabled" }, 409);
+    let body: Record<string, unknown>;
+    try { body = await c.req.json() as Record<string, unknown>; } catch { return c.json({ error: "Invalid JSON body" }, 400); }
+    try {
+      const { getSkill, writeSkill } = await import("../skills/store.js");
+      const cfg = getConfig();
+      const slug = c.req.param("slug");
+      if (!getSkill(cfg.workspacePath, slug)) return c.json({ error: "Skill not found" }, 404);
+      const name = typeof body["name"] === "string" ? body["name"].trim() : "";
+      const description = typeof body["description"] === "string" ? body["description"].trim() : "";
+      const procedure = typeof body["procedure"] === "string" ? body["procedure"].trim() : "";
+      if (!name || !description || !procedure) return c.json({ error: "name, description, and procedure are required" }, 400);
+      const skill = writeSkill(cfg.workspacePath, {
+        slug,
+        name,
+        description,
+        procedure,
+        whenToUse: typeof body["whenToUse"] === "string" ? body["whenToUse"].trim() : undefined,
+        tags: toStringArray(body["tags"]),
+        agents: toStringArray(body["agents"]),
+        tools: toStringArray(body["tools"]),
+        status: normalizeSkillStatus(body["status"]),
+      });
+      return c.json({ slug: skill.frontmatter.slug, name: skill.frontmatter.name, version: skill.frontmatter.version, status: skill.frontmatter.status });
+    } catch (err) {
+      if (err instanceof Error && err.name === "SkillCredentialError") return c.json({ error: err.message }, 400);
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
     }
   });
