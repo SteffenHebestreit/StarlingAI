@@ -82,11 +82,29 @@ When multi-user auth is enabled (`auth.enabled: true` with accounts in `auth.use
 
 Semantics (backwards compatible):
 
-- **Empty / omitted** `allowedUsers` → the resource is **shared** (every authenticated user may use it).
-- **No requesting user** (auth disabled / single-operator token mode, or system/automated access such as inbound mail polling and scheduled jobs) → **unscoped**, access allowed. So the `allowedUsers` lists are inert until `auth.enabled` is true.
+- **Empty / omitted** `allowedUsers` → the resource is **shared** (every authenticated user may use it). Unbound-is-shared is by design; private-by-default would need a per-resource owner model.
+- **No requesting user** + an **unbound** resource → allowed (the `allowedUsers` lists are inert until `auth.enabled`).
+- **No requesting user** + a **bound** resource → allowed only when `auth.enabled: false` (single-operator / token mode). Under active multi-user auth a bound resource **fails closed** rather than leak to a user-less caller.
 - Otherwise → access is allowed only if the user's username appears in the list (compared case-insensitively).
 
 Enforcement is centralized: the gateway threads the authenticated user into tool execution and forwards it to the mail-service (`X-Sai-User` header); a restricted mail account returns 403 and a restricted node/credential is treated as not-found (no existence leak). See `guardrails/resource-access.ts` and the mail-service `account-access.ts`. Tool tiers, sandboxing, and approval gates remain global and are not affected by `allowedUsers`.
+
+## Per-User Data Isolation
+
+When `auth.enabled` is true, durable **user-scope** stores are partitioned per authenticated user so different logins never share personal data:
+
+| Store | Partitioning |
+|-------|--------------|
+| Durable user memory | `<base>/users/<userId>/` (`memoryDirForScope('user')` → `userScopedDir`) |
+| Dialectic user-model | per-user file under the same base |
+| Personality | global default + per-user **override** (resolve order: override → global → built-in) |
+| Graph L0 memory | user-scope nodes carry `m.tenant`; L0 retrieval filters by the reader's tenant (and includes it in the cache key) |
+
+The whole turn — and every `/api/*` route — runs under the authenticated user's request context (`runWithRequestContext({ userId })`), and a delegated sub-agent inherits it, so prompt-assembly, memory, user-model, and personality all resolve to the caller. **`userScopedDir` gates on `auth.enabled` AND a present userId**, so single-operator / auth-off installs keep their original single shared path (fully back-compatible). **Workspace**-scope stores (durable workspace memory, skills, flow-memory) stay intentionally shared per project.
+
+Editing the shared **global** personality under auth requires the **`admin`** role (rank 90 > operator 50 > viewer 10); a regular operator only edits their own override (`PUT`/`POST /api/personality?scope=global`).
+
+Remaining gaps (acceptable for trusted-operator deployments): the graph's non-L0 rerank signals and the `graph_*` tools still operate on a shared instance graph. See `docs/memory-context-overview.md` §6 for the full account.
 
 ## Secret-Safe Login Automation
 
