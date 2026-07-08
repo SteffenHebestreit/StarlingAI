@@ -23,9 +23,9 @@ The spine of all of it is **scope**:
 |---|---|---|---|
 | **Session** | one conversation (Redis, 4h facts / 7d record) | shared-facts, partial-results, agent messages, checkpoints, history | **`sessionId`** (strong) |
 | **Workspace** | durable, per-project | durable memory, skills, flow-memory, agent outcomes, trajectory cache, graph nodes | **workspace directory** (no user partition) |
-| **User** | durable, cross-workspace | user preferences, dialectic user model, personality | **a single filesystem path** (⚠ *not* per-account — see [§6](#6-multi-user-isolation--the-honest-account)) |
+| **User** | durable, cross-workspace | user preferences, dialectic user model, personality | **per authenticated user** under multi-user auth (`<base>/users/<id>/`); single shared path when auth is off — see [§6](#6-multi-user-isolation--the-honest-account) |
 
-> ⚠ **Read [§6](#6-multi-user-isolation--the-honest-account) before any multi-user deployment.** "User" scope today means *per-instance-operator*, not per-account — the only subsystems with real per-user partitioning are the RAG stores.
+> **Multi-user note:** user-scope stores (memory, user-model, personality) are **partitioned per authenticated user**; session facts and RAG documents/KBs are too. **Workspace**-scope stores stay intentionally shared per project. See [§6](#6-multi-user-isolation--the-honest-account) for the full isolation account (and the remaining credential/graph gaps).
 
 ---
 
@@ -123,11 +123,12 @@ Several soft nudges also ride here, all eval-gated default-OFF: `splitOrchestrat
 
 **What's genuinely isolated:**
 - **Session** — the strong boundary. Everything is `sessionId`-namespaced; `deriveSharedSessionId` collapses `sub:`/`sub:sub:` agent ids to the **root** session so all agents in one turn share one bucket but never cross into another session; `_factKeysThisTurn` scopes delegation-reuse to the *current* turn (no stale prior-turn facts). No known cross-session leak.
-- **RAG stores** — the **only** subsystems with real per-user/per-session partitioning: engram source tokens (`user:`/`session:`/`workspace:`/`kb:`) with gateway RBAC (`callerManageableSources`/`callerCanAccessKb`) + an always-on client post-filter; pgvector `metadata.sessionId`. A user cannot list/download/delete another user's or another session's documents.
+- **User-scope durable stores** *(as of the per-user partitioning fix)* — under active multi-user auth, **durable user memory, the dialectic user-model, and the personality are keyed per authenticated user** at `<base>/users/<userId>/`. The whole turn (and every `/api/*` route) runs under `runWithRequestContext({userId})`, so prompt-assembly, memory, user-model, and personality all resolve to the caller; a delegated sub-agent inherits the same userId (never writes to the shared bucket). Personality is *global default + per-user override* (override → global → built-in). `userScopedDir` gates on `auth.enabled` **and** a present userId, so single-operator / auth-off installs keep their original single path unchanged.
+- **RAG stores** — engram source tokens (`user:`/`session:`/`workspace:`/`kb:`) with gateway RBAC (`callerManageableSources`/`callerCanAccessKb`) + an always-on client post-filter; pgvector `metadata.sessionId`. A user cannot list/download/delete another user's or another session's documents.
 
-**What's shared, not isolated (by design — a one-operator assumption):**
-- **Workspace** durable memory, skills, flow-memory, agent outcomes, trajectory cache, and graph nodes are a **single shared store per workspace directory** — every user of that workspace reads/writes the same records.
-- **User** durable memory, the user model, and personality are each a **single filesystem path, not keyed by authenticated `userId`**. All authenticated users on one instance share them. The one guard: `resolveDurableWriteScope` **downgrades** a `scope:'user'` write with no `ctx.userId` to workspace scope (so anonymous prefs don't pollute the user bucket) — but two different *authenticated* users still write into the same bucket.
+**What's shared, not isolated (by design):**
+- **Workspace** durable memory, skills, flow-memory, agent outcomes, trajectory cache, and graph nodes are a **single shared store per workspace directory** — every user of that workspace reads/writes the same records. This is intentional: a workspace is a shared project, not a personal space.
+- The **global default personality** — until a user saves their own override, everyone sees the shared persona. Editing the shared default while auth is on is intentionally not exposed to Wave-A users (everyone is an operator); it belongs with Wave-B roles.
 
 **Guards that fail open (know before relying on them):**
 - `canAccessResource(allowedUsers)` on credential/mail/compute stores: empty/unset `allowedUsers` = shared to all, and `undefined userId` (token/anon/auth-off) = allowed. It only restricts a resource **explicitly bound** to users under active multi-user auth.
@@ -136,7 +137,7 @@ Several soft nudges also ride here, all eval-gated default-OFF: `splitOrchestrat
 
 **Fixed by the security waves:** ~90 adversarial-review bugs including cross-user memory leaks; the anonymous-write downgrade; document-RAG RBAC + post-filter + engram v0.9.0 server-side sources filter; the 2+-level sub-agent session-id propagation fix; the cross-turn facts guard; secret-value redaction so credentials never enter transcripts.
 
-**Bottom line:** StarlingAI is *session-tenant-safe* and *RAG-document-tenant-safe* today, but the **flat durable user/workspace stores assume one operator per instance.** True per-account isolation of durable memory/personality would need those stores keyed by `userId` (and MemGraph nodes to carry a tenant) — a real item if multi-user goes beyond trusted co-operators.
+**Bottom line:** StarlingAI is *session-*, *RAG-document-*, and now *user-scope-durable-tenant-safe* — session facts, RAG documents/KBs, **and** durable user memory / user-model / personality are all partitioned per authenticated user. **Workspace**-scope stores remain intentionally shared per project. The remaining cross-user gaps are narrower: the credential/mail/compute `canAccessResource` guard still fails open, and MemGraph nodes still carry no `tenant_id` (memory-graph rerank/L0 is a shared graph). Those are the real items before exposing multi-user to *untrusted* accounts.
 
 ---
 
