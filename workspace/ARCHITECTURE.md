@@ -14,12 +14,13 @@ are organized, and the separation-of-concerns rules that keep the swarm predicta
 `node scripts/sai.mjs config build` (alias `pnpm config:build`) **globs every `*.jsonc` shard** in
 `config/` then `workspace/` and deep-merges them into the root `starlingai.json` that the runtime
 loads. Because build is glob-based, the file layout below is free to evolve — add or rename role
-shards without touching the loader. `config split` is the inverse (regenerate shards from a monolith)
-via the `AGENT_ROLE_FILES` map in `scripts/config-layout.mjs`. **Note:** that map (and its
-`SCENE_CATEGORY_FILES` / `JOB_CATEGORY_FILES` companions) has diverged from the hand-maintained
-`workspace/` layout — it targets a different shard set (`21-orchestration.jsonc` … `29-platform.jsonc`)
-with a roster that includes agents not present on disk — so `config split` is **not** a safe
-round-trip today; reconcile the map before relying on it.
+shards without touching the loader. `config split` is the inverse (regenerate shards from a monolith):
+it **derives placements from the current on-disk shards** (falling back to the hardcoded seed maps in
+`scripts/config-layout.mjs` only for a fresh migration), routes any unrecognized top-level key to
+`config/misc/90-uncategorized.jsonc`, and so is **content-lossless** (verified via a split→build
+round-trip). Two caveats: it re-emits plain JSON, so it **strips all JSONC comments**, and it
+overwrites the whole tree — so it **refuses to run against an existing layout without `--force`**.
+Normal editing is hand-editing shards + `sai config build`; reserve `split` for migrating a flat config.
 
 **Deploy:** `sai start --build` (rebuilds core + regenerates `starlingai.json`).
 
@@ -81,9 +82,8 @@ approval-gated. New tool code → `tool_developer`; never invent tool names in a
 Both `scenes/` and `jobs/` are **sharded by tier**: `10-core-scenes.jsonc` · `20-primary-scenes.jsonc` ·
 `30-secondary-scenes.jsonc` · `40-capability-codev.jsonc` · `50-profile-fit.jsonc` (scenes), and
 `10-core-jobs.jsonc` · `20-primary-jobs.jsonc` · `30-secondary-jobs.jsonc` · `40-capability-codev.jsonc`
-(jobs — no `50-` shard). `build` globs them; `config split` reshards via `SCENE_CATEGORY_FILES` /
-`JOB_CATEGORY_FILES` in `scripts/config-layout.mjs`, but those maps have diverged from the on-disk
-tier shards (see §1) and are not a safe round-trip today.
+(jobs — no `50-` shard). `build` globs them; `config split` reproduces this layout by deriving each
+scene/job's shard from the current files (see §1), so it round-trips the on-disk tiers.
 
 Scenes encode the **same separation of concerns** via `allowedAgents` — the canonical pipeline is
 **gather → author → review**:

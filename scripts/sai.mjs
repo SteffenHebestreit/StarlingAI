@@ -430,9 +430,8 @@ async function cmdConfig() {
   if (subCommand === "build") {
     await run("node", ["scripts/config-layout.mjs", "build"]);
   } else if (subCommand === "split") {
-    const sourceArg = restArgs[1] || undefined;
-    const args = ["scripts/config-layout.mjs", "split"];
-    if (sourceArg) args.push(sourceArg);
+    // Forward any source file + flags (e.g. --force) to the layout script.
+    const args = ["scripts/config-layout.mjs", "split", ...restArgs.slice(1)];
     await run("node", args);
   } else {
     fail("Usage: sai config <build|split>");
