@@ -341,6 +341,15 @@ export const CostSchema = z.object({
     dailyUsd: z.number().min(0).default(0),
     monthlyUsd: z.number().min(0).default(0),
   }).default({}),
+  /**
+   * Hard-stop enforcement. When true (and `enabled`), a new turn is REFUSED once
+   * the current day's or month's priced spend has reached the corresponding hard
+   * budget (dailyUsd / monthlyUsd) — the user gets a clear "budget reached"
+   * message instead of the request running. Default false preserves the historical
+   * alert-only behavior (audit `cost_budget_threshold` events still fire either
+   * way). Only the non-zero budgets gate; a $0 budget for a scope never blocks.
+   */
+  enforce: z.boolean().default(false),
 });
 
 export type CostModelRate = z.infer<typeof CostModelRateSchema>;

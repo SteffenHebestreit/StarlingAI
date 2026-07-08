@@ -232,6 +232,7 @@ export type CoreAuditEventType =
   | "plugin_tool_rejected"
   // Cost governance
   | "cost_budget_threshold"
+  | "cost_budget_blocked"
   // Tool embedding warm-up (Stage 12 / Open Interop)
   | "tool_embeddings_warmed"
   // MCP client (consumed servers) — runtime registry

@@ -19,6 +19,7 @@ import { tryReceptionistFastLane } from "./receptionist.js";
 import { checkInput } from "../guardrails/input.js";
 import { moderateInputText } from "../guardrails/moderation.js";
 import { checkRateLimit } from "../guardrails/rate-limiter.js";
+import { getBudgetGateStatus } from "../observability/cost.js";
 import { logAudit } from "../audit/logger.js";
 import { getConfig } from "../config/loader.js";
 import { childLogger } from "../logger.js";
@@ -48,14 +49,40 @@ export function blocked(reason: string, swarmState?: SwarmState, performance?: T
 /**
  * Phase 1 — Rate-limit check. Returns the blocked TurnOutput when the limit is
  * exceeded (caller returns it), else null (continue the turn).
+ *
+ * The limiter keys on the authenticated USER when multi-user auth is on, so a
+ * single account cannot multiply its request budget by opening N sessions
+ * (multi-tab, multiple channels). With auth off there is no userId, so it falls
+ * back to the session id — the historical per-session behavior, unchanged.
  */
 export async function prepareRateLimit(session: AgentSession): Promise<TurnOutput | null> {
-  const rl = await checkRateLimit(session.id, "request");
+  const subject = session.userId ?? session.id;
+  const rl = await checkRateLimit(subject, "request");
   if (!rl.allowed) {
     logAudit("rate_limited", { remaining: 0, resetAt: rl.resetAt }, { sessionId: session.id });
     return blocked("Rate limit exceeded. Please wait before sending another message.");
   }
   return null;
+}
+
+/**
+ * Phase 1b — Cost hard-budget gate. When cost enforcement is enabled and the
+ * day's/month's priced spend has reached the hard budget, refuse the turn with a
+ * clear message instead of running (and paying for) another request. No-op unless
+ * `cost.enabled && cost.enforce` — the default alert-only deployment continues
+ * exactly as before.
+ */
+export function prepareCostBudget(session: AgentSession): TurnOutput | null {
+  const gate = getBudgetGateStatus();
+  if (!gate.blocked) return null;
+  logAudit("cost_budget_blocked", {
+    scope: gate.scope, spend: gate.spend, budget: gate.budget, currency: gate.currency,
+  }, { sessionId: session.id, severity: "error" });
+  const scopeWord = gate.scope === "monthly" ? "monthly" : "daily";
+  return blocked(
+    `The ${scopeWord} cost budget has been reached (${gate.currency} ${gate.spend} of ${gate.budget}). ` +
+    `New requests are paused until spend resets or an operator raises the limit.`,
+  );
 }
 
 /**

@@ -119,6 +119,7 @@ export { buildModelVisibleToolResult } from "./tool-result-format.js";
 import {
   blocked,
   prepareRateLimit,
+  prepareCostBudget,
   prepareInputGuardrails,
   recordUserTurnMessage,
   prepareReceptionistFastLane,
@@ -1134,6 +1135,10 @@ async function _runTurn(
   // ── Rate limit check ──────────────────────────────────────────────────────
   const rateLimited = await prepareRateLimit(session);
   if (rateLimited) return rateLimited;
+
+  // ── Cost hard-budget gate (no-op unless cost.enforce) ─────────────────────
+  const budgetBlocked = prepareCostBudget(session);
+  if (budgetBlocked) return budgetBlocked;
 
   // ── Input guardrail ───────────────────────────────────────────────────────
   const inputBlocked = await prepareInputGuardrails(userMessage, session, guardrailEvents);

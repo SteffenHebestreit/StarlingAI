@@ -371,3 +371,67 @@ describe("cost aggregator — projection", () => {
     expect(proj.projectedMonthlyCost).toBeCloseTo(90, 5);
   });
 });
+
+describe("cost aggregator — budget enforcement gate", () => {
+  let tempDir: string;
+
+  afterEach(async () => {
+    delete process.env["SAI_CONFIG_PATH"];
+    delete process.env["SAI_AUDIT_LOG"];
+    rmSync(tempDir, { recursive: true, force: true });
+    const cost = await import("../observability/cost.js");
+    cost._resetCostStateForTests();
+    const configLoader = await import("../config/loader.js");
+    configLoader.resetConfigForTests();
+  });
+
+  // 1M completion tokens of claude-sonnet-4 ($15 / 1M completion) = $15 of spend.
+  async function spend15(): Promise<typeof import("../observability/cost.js")> {
+    const cost = await import("../observability/cost.js");
+    cost._injectEventForTests(makeSubAgentEvent({ promptTokens: 0, completionTokens: 1_000_000, model: "claude-sonnet-4" }));
+    return cost;
+  }
+
+  it("does NOT block when enforce is off, even over the hard budget (alert-only default)", async () => {
+    tempDir = writeCostConfig({ cost: { enabled: true, currency: "USD", enforce: false, budgets: { dailyUsd: 10 } } });
+    vi.resetModules();
+    const cost = await spend15();
+    expect(cost.getBudgetGateStatus().blocked).toBe(false);
+  });
+
+  it("blocks when enforce is on and daily spend has reached the hard budget", async () => {
+    tempDir = writeCostConfig({ cost: { enabled: true, currency: "USD", enforce: true, budgets: { dailyUsd: 10 } } });
+    vi.resetModules();
+    const cost = await spend15();
+    const gate = cost.getBudgetGateStatus();
+    expect(gate.blocked).toBe(true);
+    expect(gate.scope).toBe("daily");
+    expect(gate.spend).toBeCloseTo(15, 5);
+    expect(gate.budget).toBe(10);
+  });
+
+  it("does NOT block when spend is under the daily budget", async () => {
+    tempDir = writeCostConfig({ cost: { enabled: true, currency: "USD", enforce: true, budgets: { dailyUsd: 100 } } });
+    vi.resetModules();
+    const cost = await spend15();
+    expect(cost.getBudgetGateStatus().blocked).toBe(false);
+  });
+
+  it("blocks on the monthly budget when daily is disabled (0 = no limit)", async () => {
+    tempDir = writeCostConfig({ cost: { enabled: true, currency: "USD", enforce: true, budgets: { dailyUsd: 0, monthlyUsd: 10 } } });
+    vi.resetModules();
+    const cost = await spend15();
+    const gate = cost.getBudgetGateStatus();
+    expect(gate.blocked).toBe(true);
+    expect(gate.scope).toBe("monthly");
+  });
+
+  it("never blocks when cost tracking itself is disabled", async () => {
+    tempDir = writeCostConfig({ cost: { enabled: false, currency: "USD", enforce: true, budgets: { dailyUsd: 1 } } });
+    vi.resetModules();
+    const cost = await import("../observability/cost.js");
+    // enabled:false means events are ignored, so spend stays 0 and the gate is inert either way.
+    cost._injectEventForTests(makeSubAgentEvent({ promptTokens: 0, completionTokens: 1_000_000, model: "claude-sonnet-4" }));
+    expect(cost.getBudgetGateStatus().blocked).toBe(false);
+  });
+});

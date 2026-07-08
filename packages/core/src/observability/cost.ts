@@ -206,6 +206,52 @@ export function getCostProjection(windowDays = 7): CostProjection {
   };
 }
 
+// ── Budget enforcement gate ────────────────────────────────────────────────────
+
+export interface BudgetGateStatus {
+  /** True when a hard budget has been reached and enforcement is on. */
+  blocked: boolean;
+  scope?: "daily" | "monthly";
+  spend?: number;
+  budget?: number;
+  currency?: string;
+}
+
+const NOT_BLOCKED: BudgetGateStatus = { blocked: false };
+
+/**
+ * Pre-turn cost gate. Returns `{ blocked: true, ... }` when cost tracking AND
+ * enforcement are both enabled and the current day's OR month's priced spend has
+ * reached the corresponding hard budget. A $0 budget for a scope is "no limit"
+ * and never blocks. Alert-only deployments (`enforce: false`) always return
+ * not-blocked — the audit thresholds still fire independently. Pure read of the
+ * in-process rollups; no side effects, safe to call on every turn.
+ */
+export function getBudgetGateStatus(now: Date = new Date()): BudgetGateStatus {
+  const cfg = getConfig().cost;
+  if (!cfg.enabled || !cfg.enforce) return NOT_BLOCKED;
+
+  const today = formatDay(now);
+  // Daily takes precedence — it is the tighter window and resets sooner.
+  if (cfg.budgets.dailyUsd > 0) {
+    const spend = _byDay.get(today)?.estimatedCost ?? 0;
+    if (spend >= cfg.budgets.dailyUsd) {
+      return { blocked: true, scope: "daily", spend: round2(spend), budget: cfg.budgets.dailyUsd, currency: cfg.currency };
+    }
+  }
+  if (cfg.budgets.monthlyUsd > 0) {
+    const monthKey = today.slice(0, 7);
+    let monthSpend = 0;
+    for (const [day, bucket] of _byDay) {
+      if (day.startsWith(monthKey)) monthSpend += bucket.estimatedCost;
+    }
+    if (monthSpend >= cfg.budgets.monthlyUsd) {
+      return { blocked: true, scope: "monthly", spend: round2(monthSpend), budget: cfg.budgets.monthlyUsd, currency: cfg.currency };
+    }
+  }
+  return NOT_BLOCKED;
+}
+
 // ── Event ingestion ──────────────────────────────────────────────────────────
 
 function handleEvent(event: AuditEvent): void {
