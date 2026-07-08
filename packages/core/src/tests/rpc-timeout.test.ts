@@ -376,7 +376,7 @@ describe("rpc timeout cleanup", () => {
       }));
 
       expect(capturedApprovalCallback).toBeDefined();
-      const approvalPromise = capturedApprovalCallback!("site_fill_credentials", { hostname: "n8n.k2o" });
+      const approvalPromise = capturedApprovalCallback!("site_fill_credentials", { hostname: "app.example.com" });
       const approvalRejection = approvalPromise.catch((err: unknown) => err);
 
       const approvalEvent = sent.find((event) => event["type"] === "agent.approval_needed");

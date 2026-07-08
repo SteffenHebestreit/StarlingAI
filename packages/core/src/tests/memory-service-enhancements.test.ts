@@ -104,7 +104,7 @@ describe("memory service — LRU + decay + embedding", () => {
     storeWorkspaceMemoryRecord(ws, {
       key: "operator_profile",
       subject: "Operator profile",
-      content: "Steffen is the operator and main user of the system.",
+      content: "testuser is the operator and main user of the system.",
       kind: "fact",
     }, {
       agentName: "productivity_agent",

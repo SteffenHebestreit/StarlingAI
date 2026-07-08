@@ -88,7 +88,7 @@ describe("stripMarkdownForSpeech", () => {
 
 Der Workflow wurde erstellt. Folgende Schritte:
 
-- Browser öffnet http://n8n.k2o
+- Browser öffnet http://app.example.com
 - Credentials werden eingefügt
 - Login wird durchgeführt
 
@@ -98,7 +98,7 @@ Der Workflow wurde erstellt. Folgende Schritte:
     expect(result).not.toMatch(/^\s*-\s/m);
     expect(result).not.toContain("**");
     expect(result).toContain("Ergebnis");
-    expect(result).toContain("Browser öffnet http://n8n.k2o");
+    expect(result).toContain("Browser öffnet http://app.example.com");
     expect(result).toContain("Hinweis");
   });
 });

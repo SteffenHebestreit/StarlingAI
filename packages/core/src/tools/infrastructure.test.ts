@@ -420,9 +420,9 @@ describe("infrastructure tools", () => {
         nodes: {
           "n8n-server": {
             adapter: "remote_ssh",
-            host: "n8n.k2o",
+            host: "app.example.com",
             port: 22,
-            username: "Steffen",
+            username: "testuser",
             authMethod: "password",
             credentials: "$SAI_N8N_SSH_PASSWORD",
           },
@@ -462,7 +462,7 @@ describe("infrastructure tools", () => {
         "-T",
         "-p",
         "22",
-        "Steffen@n8n.k2o",
+        "testuser@app.example.com",
         "docker ps",
       ]));
       expect(args).not.toContain("BatchMode=yes");

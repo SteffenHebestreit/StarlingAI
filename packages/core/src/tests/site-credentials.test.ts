@@ -25,12 +25,12 @@ describe("site credential resolution", () => {
 
     writeFileSync(configPath, JSON.stringify({
       sites: {
-        "n8n.k2o": {
-          username: "info@steffen-hebestreit.com",
+        "app.example.com": {
+          username: "user@example.com",
           password: "$N8N_PASSWORD",
-          loginUrl: "http://n8n.k2o/",
+          loginUrl: "http://app.example.com/",
           urls: {
-            "analyzed-project-table": "http://n8n.k2o/projects/table",
+            "analyzed-project-table": "http://app.example.com/projects/table",
           },
         },
       },
@@ -42,17 +42,17 @@ describe("site credential resolution", () => {
 
     try {
       const sites = await import("../credentials/sites.js");
-      const resolved = sites.resolveSiteCredential("n8n");
+      const resolved = sites.resolveSiteCredential("app");
 
       expect(resolved).toMatchObject({
-        hostname: "n8n.k2o",
-        username: "info@steffen-hebestreit.com",
+        hostname: "app.example.com",
+        username: "user@example.com",
         password: "super-secret",
-        loginUrl: "http://n8n.k2o/",
+        loginUrl: "http://app.example.com/",
         source: "config",
       });
-      expect(resolved?.urls?.["analyzed-project-table"]).toBe("http://n8n.k2o/projects/table");
-      expect(sites.hasConfigSiteCredential("n8n")).toBe(true);
+      expect(resolved?.urls?.["analyzed-project-table"]).toBe("http://app.example.com/projects/table");
+      expect(sites.hasConfigSiteCredential("app")).toBe(true);
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
@@ -64,10 +64,10 @@ describe("site credential resolution", () => {
 
     writeFileSync(configPath, JSON.stringify({
       sites: {
-        "n8n.k2o": {
-          username: "info@steffen-hebestreit.com",
+        "app.example.com": {
+          username: "user@example.com",
           password: "$N8N_PASSWORD",
-          loginUrl: "http://n8n.k2o/login",
+          loginUrl: "http://app.example.com/login",
           usernameSelector: "#email",
           passwordSelector: "#password",
           submitSelector: "button[type=submit]",
@@ -88,18 +88,18 @@ describe("site credential resolution", () => {
 
       const result = await executeTool(
         "get_site_credentials",
-        { hostname: "n8n" },
+        { hostname: "app" },
         { sessionId: "session-credentials", workspacePath: tempDir },
       );
 
       expect(result.success).toBe(true);
-      expect(result.output).toContain("**Site:** n8n.k2o");
+      expect(result.output).toContain("**Site:** app.example.com");
       expect(result.output).toContain("site_fill_credentials");
       expect(result.output).toContain("**Username selector:** `#email`");
-      expect(result.output).not.toContain("info@steffen-hebestreit.com");
+      expect(result.output).not.toContain("user@example.com");
       expect(result.output).not.toContain("super-secret");
       expect(result.metadata).toMatchObject({
-        hostname: "n8n.k2o",
+        hostname: "app.example.com",
         hasLoginUrl: true,
         hasSelectors: true,
         source: "config",
@@ -121,23 +121,23 @@ describe("site credential resolution", () => {
     try {
       const sites = await import("../credentials/sites.js");
 
-      sites.saveSiteCredential("n8n.k2o", {
+      sites.saveSiteCredential("app.example.com", {
         username: "$N8N_USERNAME",
         password: "$N8N_KEY",
-        loginUrl: "http://n8n.k2o/signin",
+        loginUrl: "http://app.example.com/signin",
       });
 
-      expect(sites.getStoredSiteCredentialRecord("n8n.k2o")).toMatchObject({
-        hostname: "n8n.k2o",
+      expect(sites.getStoredSiteCredentialRecord("app.example.com")).toMatchObject({
+        hostname: "app.example.com",
         username: "$N8N_USERNAME",
         password: "$N8N_KEY",
       });
 
-      expect(sites.resolveSiteCredential("n8n")).toMatchObject({
-        hostname: "n8n.k2o",
+      expect(sites.resolveSiteCredential("app")).toMatchObject({
+        hostname: "app.example.com",
         username: "admin@n8n.local",
         password: "super-secret-from-env",
-        loginUrl: "http://n8n.k2o/signin",
+        loginUrl: "http://app.example.com/signin",
         source: "store",
       });
     } finally {

@@ -47,7 +47,7 @@ describe("computer tools", () => {
         nodes: {
           desktop: {
             adapter: "remote_vnc",
-            host: "10.10.0.2",
+            host: "192.0.2.10",
             port: 5901,
             protocol: "vnc",
             credentials: "starling",
@@ -155,7 +155,7 @@ describe("computer tools", () => {
       enabled: true,
       adapters: {
         remote_node: {
-          baseUrl: "http://10.10.0.2:8877",
+          baseUrl: "http://192.0.2.10:8877",
           authToken: "token-value",
           timeoutMs: 12000,
           label: "Windows host",
@@ -163,7 +163,7 @@ describe("computer tools", () => {
       },
     });
 
-    expect(config.adapters.remote_node?.baseUrl).toBe("http://10.10.0.2:8877");
+    expect(config.adapters.remote_node?.baseUrl).toBe("http://192.0.2.10:8877");
     expect(config.adapters.remote_node?.timeoutMs).toBe(12000);
     expect(config.adapters.remote_node?.label).toBe("Windows host");
   });

@@ -1945,7 +1945,7 @@ describe("sub-agent turn timeouts", () => {
         "<tool_call>",
         "<function=mcp_playwright_browser_navigate>",
         "<parameter=url>",
-        "https://steffen-hebestreit.com/swagger-ui.html",
+        "https://example.com/swagger-ui.html",
         "</parameter>",
         "</function>",
         "</tool_call>",

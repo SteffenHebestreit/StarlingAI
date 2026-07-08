@@ -666,7 +666,7 @@ describe("workflow catalog tools", () => {
       scenes: {
         credentialed_browser_table_read: {
           description: "Open a known site, log in with stored credentials, then read a protected table.",
-          task: "Use browser_agent to open http://n8n.k2o. Call get_site_credentials first to retrieve the login URL and named URLs. Do NOT use web_search. Then use site_fill_credentials to log in and open the named project-list URL.",
+          task: "Use browser_agent to open http://app.example.com. Call get_site_credentials first to retrieve the login URL and named URLs. Do NOT use web_search. Then use site_fill_credentials to log in and open the named project-list URL.",
           allowedAgents: ["browser_agent"],
           params: {
             navigationTimeout: {
@@ -744,7 +744,7 @@ describe("workflow catalog tools", () => {
 
       const bootstrapCall = (runSubAgentWithStatsMock.mock.calls as any[])[0]?.[0] as Record<string, any> | undefined;
       expect(bootstrapCall?.agentName).toBe("browser_agent");
-      expect(bootstrapCall?.task).toContain("Open http://n8n.k2o.");
+      expect(bootstrapCall?.task).toContain("Open http://app.example.com.");
       expect(bootstrapCall?.task).not.toContain("Use browser_agent");
       expect(bootstrapCall?.context).toContain("Do NOT use web_search");
       expect(bootstrapCall?.context).toContain("Call get_site_credentials first");
@@ -777,7 +777,7 @@ describe("workflow catalog tools", () => {
       scenes: {
         apply_jobs: {
           description: "Run one browser-assisted freelance application from the n8n application table.",
-          task: "Use browser_agent to apply for one job from n8n.k2o and freelancermap.de.",
+          task: "Use browser_agent to apply for one job from app.example.com and freelancermap.de.",
           allowedAgents: ["browser_agent"],
         },
       },
@@ -864,7 +864,7 @@ describe("workflow catalog tools", () => {
       scenes: {
         credentialed_browser_approval: {
           description: "Open a known site and require approval before stored credentials are submitted.",
-          task: "Use browser_agent to open http://n8n.k2o and then call site_fill_credentials.",
+          task: "Use browser_agent to open http://app.example.com and then call site_fill_credentials.",
           allowedAgents: ["browser_agent"],
           humanInLoopSteps: ["site_fill_credentials"],
           approvalChannel: "slack-approvals",
@@ -886,7 +886,7 @@ describe("workflow catalog tools", () => {
     const runTurnMock = vi.fn();
     const requestApprovalViaChannelMock = vi.fn(async () => true);
     const runSubAgentWithStatsMock = vi.fn(async (opts: { approvalCallback?: (toolName: string, args: Record<string, unknown>) => Promise<boolean> }) => {
-      const approved = await opts.approvalCallback?.("site_fill_credentials", { hostname: "n8n.k2o" });
+      const approved = await opts.approvalCallback?.("site_fill_credentials", { hostname: "app.example.com" });
       return {
         output: `approval: ${String(approved)}`,
         stats: {
@@ -946,7 +946,7 @@ describe("workflow catalog tools", () => {
       expect(requestApprovalViaChannelMock).toHaveBeenCalledWith(
         "slack-approvals",
         "site_fill_credentials",
-        { hostname: "n8n.k2o" },
+        { hostname: "app.example.com" },
         "credentialed_browser_approval",
         60_000,
       );
@@ -965,7 +965,7 @@ describe("workflow catalog tools", () => {
       scenes: {
         credentialed_browser_approval: {
           description: "Open a known site and require approval before stored credentials are submitted.",
-          task: "Use browser_agent to open http://n8n.k2o and then call site_fill_credentials.",
+          task: "Use browser_agent to open http://app.example.com and then call site_fill_credentials.",
           allowedAgents: ["browser_agent"],
           humanInLoopSteps: ["site_fill_credentials"],
         },

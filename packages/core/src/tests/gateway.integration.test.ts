@@ -1504,13 +1504,13 @@ describe("gateway HTTP bridge", () => {
         req.on("end", () => {
           const body = Buffer.concat(chunks).toString("utf8");
           expect(body).toContain('name="name"');
-          expect(body).toContain("Steffen Voice");
+          expect(body).toContain("testuser Voice");
           expect(body).toContain('name="lang"');
           expect(body).toContain("English");
           expect(body).toContain('name="ref_text"');
           expect(body).toContain("Hallo aus dem Beispielclip");
           res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ status: "ok", voice_id: "saved-steffen", name: "Steffen Voice", ref_text: "hello from the saved profile" }));
+          res.end(JSON.stringify({ status: "ok", voice_id: "saved-steffen", name: "testuser Voice", ref_text: "hello from the saved profile" }));
         });
         return;
       }
@@ -1629,7 +1629,7 @@ describe("gateway HTTP bridge", () => {
       expect(voicesBody.speakers).toContain("Vivian");
 
       const saveVoiceForm = new FormData();
-      saveVoiceForm.append("name", "Steffen Voice");
+      saveVoiceForm.append("name", "testuser Voice");
       saveVoiceForm.append("language", "English");
       saveVoiceForm.append("referenceText", "Hallo aus dem Beispielclip");
       saveVoiceForm.append("file", new File([new Uint8Array([5, 6, 7, 8])], "voice.wav", { type: "audio/wav" }));
@@ -1640,7 +1640,7 @@ describe("gateway HTTP bridge", () => {
       });
       expect(saveVoiceResponse.status).toBe(200);
       const saveVoiceBody = await saveVoiceResponse.json() as { voice_id: string; name: string };
-      expect(saveVoiceBody).toMatchObject({ voice_id: "saved-steffen", name: "Steffen Voice" });
+      expect(saveVoiceBody).toMatchObject({ voice_id: "saved-steffen", name: "testuser Voice" });
 
       const ttsResponse = await fetch(`${baseUrl}/api/multimodal/tts`, {
         method: "POST",

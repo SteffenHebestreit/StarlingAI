@@ -31,7 +31,7 @@ describe("loadMailServiceConfig", () => {
   accounts: [
     {
       id: "work",
-      address: "bundeswehr@steffen-hebestreit.com",
+      address: "user@example.com",
       displayName: "Work",
       imap: {
         host: "imap.strato.de",
@@ -46,7 +46,7 @@ describe("loadMailServiceConfig", () => {
         secure: false,
         user: "$MAIL_WORK_USER",
         pass: "$MAIL_WORK_PASS",
-        from: "OTL Hebestreit <bundeswehr@steffen-hebestreit.com>"
+        from: "Test User <user@example.com>"
       }
     },
   ],
@@ -54,7 +54,7 @@ describe("loadMailServiceConfig", () => {
 `, "utf8");
 
     process.env["SAI_MAIL_SERVICE_CONFIG_PATH"] = configPath;
-    process.env["MAIL_WORK_USER"] = "bundeswehr@steffen-hebestreit.com";
+    process.env["MAIL_WORK_USER"] = "user@example.com";
     process.env["MAIL_WORK_PASS"] = "secret-pass";
 
     try {
@@ -62,15 +62,15 @@ describe("loadMailServiceConfig", () => {
       expect(config.accounts).toHaveLength(1);
       expect(config.accounts[0]).toMatchObject({
         id: "work",
-        address: "bundeswehr@steffen-hebestreit.com",
+        address: "user@example.com",
         imap: {
           host: "imap.strato.de",
-          user: "bundeswehr@steffen-hebestreit.com",
+          user: "user@example.com",
           pass: "secret-pass",
         },
         smtp: {
           host: "smtp.strato.de",
-          user: "bundeswehr@steffen-hebestreit.com",
+          user: "user@example.com",
           pass: "secret-pass",
         },
       });
@@ -87,7 +87,7 @@ describe("loadMailServiceConfig", () => {
   accounts: [
     {
       id: "work",
-      address: "bundeswehr@steffen-hebestreit.com",
+      address: "user@example.com",
       imap: {
         host: "imap.strato.com",
         port: 993,
@@ -108,7 +108,7 @@ describe("loadMailServiceConfig", () => {
 `, "utf8");
 
     process.env["SAI_MAIL_SERVICE_CONFIG_PATH"] = configPath;
-    process.env["MAIL_WORK_USER"] = "bundeswehr@steffen-hebestreit.com";
+    process.env["MAIL_WORK_USER"] = "user@example.com";
     delete process.env["MAIL_WORK_PASS"];
 
     try {

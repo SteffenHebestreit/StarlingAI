@@ -2204,7 +2204,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const result = await runTurn({
       session,
-      userMessage: "versuche es noch einmal und vergiss nicht \"Steffen\" wird in Camelcase geschrieben",
+      userMessage: "versuche es noch einmal und vergiss nicht \"testuser\" wird in Camelcase geschrieben",
     });
 
     expect(result.blocked).toBe(false);
@@ -3483,7 +3483,7 @@ describe("runtime delegated-loop regressions", () => {
           params: {
             targetUrl: {
               description: "Initial URL to open",
-              default: "http://n8n.k2o",
+              default: "http://app.example.com",
             },
             projectListUrlHint: {
               description: "Labels for the project-list destination",
@@ -3950,7 +3950,7 @@ describe("runtime delegated-loop regressions", () => {
       if (llmCallCount === 1) {
         return createDelegateToolCallStream("workflow_authoring_followup_delegate_1", {
           agentName: "swarm_maintainer",
-          task: "Create a new workflow that opens http://n8n.k2o, uses the matching site-data credentials to log in, and opens the project list.",
+          task: "Create a new workflow that opens http://app.example.com, uses the matching site-data credentials to log in, and opens the project list.",
         });
       }
       return createTextStream("I delegated the workflow creation to swarm_maintainer.");

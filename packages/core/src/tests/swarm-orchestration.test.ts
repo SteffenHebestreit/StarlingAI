@@ -2159,7 +2159,7 @@ describe("swarm orchestration tools", () => {
 
     const result = await delegate!.execute({
       agentName: "computer_use_agent",
-      task: "Access the remote Windows machine at IP 10.10.0.2.",
+      task: "Access the remote Windows machine at IP 192.0.2.10.",
     }, {
       sessionId: "session-explicit-agent-failure",
       workspacePath: "/workspace",

@@ -20,9 +20,9 @@ describe("infra-failure breaker", () => {
       "### Error Error: getaddrinfo ENOTFOUND browser-vnc Call log: - <ws preparing> retrieving websocket url from http://browser-vnc:9222",
     )).toBe("ENOTFOUND browser-vnc");
     expect(extractInfraFailureSignature(
-      "Remote access service request failed (500): connect ECONNREFUSED 10.10.0.2:5900 Troubleshooting: ...",
-    )).toBe("ECONNREFUSED 10.10.0.2:5900");
-    expect(extractInfraFailureSignature("connect EHOSTUNREACH 10.10.0.2")).toBe("EHOSTUNREACH 10.10.0.2");
+      "Remote access service request failed (500): connect ECONNREFUSED 192.0.2.10:5900 Troubleshooting: ...",
+    )).toBe("ECONNREFUSED 192.0.2.10:5900");
+    expect(extractInfraFailureSignature("connect EHOSTUNREACH 192.0.2.10")).toBe("EHOSTUNREACH 192.0.2.10");
   });
 
   it("does NOT trip on TRANSIENT stream errnos — a live-but-stalled backend must not be permanently blocked", () => {
@@ -56,9 +56,9 @@ describe("infra-failure breaker", () => {
     streak = updateInfraFailureStreak(streak, "ENOTFOUND browser-vnc");
     expect(streak.count).toBe(INFRA_FAILURE_BLOCK_THRESHOLD);
     // Probing a DIFFERENT target/protocol restarts the streak (VNC → RDP is legitimate).
-    const reset = updateInfraFailureStreak(streak, "ECONNREFUSED 10.10.0.2:3389");
+    const reset = updateInfraFailureStreak(streak, "ECONNREFUSED 192.0.2.10:3389");
     expect(reset.count).toBe(1);
-    expect(reset.signature).toBe("ECONNREFUSED 10.10.0.2:3389");
+    expect(reset.signature).toBe("ECONNREFUSED 192.0.2.10:3389");
   });
 
   it("blocked message names the family, the signature, and forbids retries", () => {
