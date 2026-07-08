@@ -42,7 +42,6 @@ import { getMainAssistantToolNames, type MainAssistantToolMode } from "./default
 import { longRunningGenerationManager } from "./long-running-generation.js";
 import { turnSteeringManager } from "./turn-steering.js";
 import { registerSessionAbortController, deregisterSessionAbortController } from "./warden.js";
-import { lookupTrajectory } from "../memory/trajectory-cache.js";
 import { artifactFileLooksTruncated, runSubAgent } from "./sub-agent.js";
 import { collectJudgeableArtifactRefs, runQaToolJudgeCheck, type QaJudgeArtifactRef } from "./qa-tool-judge.js";
 import { join } from "node:path";
@@ -58,7 +57,6 @@ import { postProcessToolResult, type ToolResultPostProcessContext } from "./turn
 import { beginFactTurn } from "../swarm/memory.js";
 import {
   buildDynamicTurnGuidance,
-  toSoftRoutingHint,
 } from "./intent-classifier.js";
 import { buildEffectiveResearchSubject } from "./source-sensitive-delegation.js";
 import { looksLikeDegenerateRepetition, collapseRepeatedMarkdownSections, looksLikeDegenerateLineRepetition, collapseRepeatedLines } from "./text-dedup.js";
@@ -185,7 +183,6 @@ export {
 // Pure honesty / source-caveat / synthesis-directive text helpers (god-file seam).
 import {
   buildSynthesisRequiredDirective,
-  userMessageCarriesActionableUrl,
   looksLikeUnsourcedSpecificClaims,
   prependTurnIncompleteCaveat,
 } from "./citation-honesty.js";
@@ -203,6 +200,8 @@ export {
 import { applyTerminalResponseGuards, type TerminalGuardContext } from "./turn-finalize-guards.js";
 // Clean-success terminal tail (god-file seam).
 import { finalizeSuccessfulTurn } from "./turn-success-finalize.js";
+// Turn-setup spans lifted out of runTurnImpl (god-file seam).
+import { lookupTrajectoryInjection, computeTurnEnforcementSignals } from "./turn-setup.js";
 
 // D5 delegation-wait budget math (shared with the gateway hard-timeout layer; kept out of this
 // heavily-mocked module so gateway/rpc.ts can import it without going through runtime.js).
@@ -1389,71 +1388,21 @@ async function _runTurn(
   // than falling back to training-data hallucinations.
   let _sharedFindingsSystemMessage = "";
   const FULLY_BLOCKED_ITERATION_THRESHOLD = 2;
-  // Soft routing enforcement (Flaw 2): when on, the routing-class enforcement
-  // prompts (maintenance / workflow-catalog / search-no-match) are injected as
-  // advisory hints rather than hard "You MUST … this turn" gates, and the hard
-  // search_agents tool-removal gate is relaxed. Anti-hallucination (source-
-  // sensitive research) and correctness (unresolved clarification) enforcement
-  // stay hard. Default off — flipping it on changes tuned routing behavior and
-  // should be gated on live-model eval.
-  const softRoutingEnforcement = getConfig().agents.performance.softRoutingEnforcement === true;
-  const applyRoutingTone = (text: string): string =>
-    softRoutingEnforcement && text ? toSoftRoutingHint(text) : text;
-  // A workflow-channel session is a scoped scene/job STEP: the author already wrote its
-  // task (which names the exact agent) and its allowedAgents. The top-level source-sensitive
-  // TASK rewrite must NOT fire here — it re-frames the step's delegation as a generic "WEB
-  // RESEARCH TASK" and appends researcher/mission_coordinator fallbacks the step forbids,
-  // so e.g. the image step gets routed to researcher and hard-fails (audit 158f1435). The
-  // research-routing NUDGE stays on, but its fallback route is now allowedAgents-aware
-  // (buildRequiredResearchFallbackRoute) so it targets the step's OWN agent, never an agent
-  // outside the scene. The TOP-LEVEL launching turn (user channel) keeps full enforcement.
-  const inWorkflowStep = session.channel === "workflow";
-  // Anti-hallucination: a freshness- OR source-sensitive turn must run real
-  // research — never a tool-free answer from training memory. Freshness used to
-  // be exempted (advisory-only) because its keyword heuristic was a false-positive
-  // magnet (weak terms "jetzt"/"now"). Those weak terms were removed from
-  // FRESHNESS_HINT_TERMS, so the flag is now high-precision (heute, aktuell, news,
-  // latest, current, recent, today, neueste, year) and a query carrying one that
-  // the model answers tool-free is fabricating current state (audit fe496ec5:
-  // "news von heute" → a 2.5KB invented bulletin — DAX 24.000, EZB 3,75 %, IPCC,
-  // ESA Artemis, all hallucinated, zero delegations). The model still gets to
-  // answer first; this only catches a tool-free draft and routes it through the
-  // re-nudge → autoResearchOnRefusal path, which ends with REAL searched results
-  // and never dead-ends empty. (`trustModelRouting` governs only soft routing
-  // nudges now; it no longer exempts this correctness gate.)
-  const requiresDelegatedResearch = effectiveToolMode === "orchestration_only"
-    && Boolean(
-      initialDynamicGuidance?.sourceSensitive
-      || initialDynamicGuidance?.freshnessSensitive,
-    );
-  const requiresArtifactDelegation = effectiveToolMode === "orchestration_only"
-    && Boolean(initialDynamicGuidance?.artifactSensitive);
-  const activeMainAssistantToolMode = effectiveToolMode ?? getConfig().agents.mainAssistant.toolMode;
-  // Structural URL-fetch enforcement (orchestration.urlFetchEnforcement, default off). A URL in
-  // the user's message means they handed the assistant a page to READ. The de-lex hardwired
-  // sourceSensitive off, which silently starved the force-fetch enforcement below and let the model
-  // invent a page's contents + claim it "loaded" the link (live session 29796f86). Re-arm it from a
-  // purely STRUCTURAL signal — a URL regex on the message, no topic/language keywords — so a
-  // tool-free answer about the page is rejected and a real fetch is forced (reusing the intact
-  // nudge → auto-delegate → grounded-synthesis path). Orchestration mode only (the orchestrator
-  // must delegate to fetch); hybrid/direct assistants read the URL with their own web tools.
-  const requiresUrlFetch = getConfig().orchestration?.urlFetchEnforcement === true
-    && activeMainAssistantToolMode === "orchestration_only"
-    && userMessageCarriesActionableUrl(userMessage)
-    // Exempt a message that also PASTED substantial inline content (the page body alongside its
-    // URL): the answer can be grounded in what the user already handed over, so forcing a re-fetch
-    // is a needless delegation. Structural (same inline-content signal answered-from elsewhere);
-    // can only make the guard fire LESS, never more.
-    && !initialDynamicGuidance?.inlineAnalyticalContent;
-  const requiresSwarmMaintenanceDelegation = activeMainAssistantToolMode !== "hybrid"
-    && Boolean(initialDynamicGuidance?.swarmMaintenanceSensitive)
-    && allowedToolNameSet.has("delegate_to_agent");
-  const requiresMaintenanceFollowUpDelegation = recentWorkflowAuthoringMaintenanceContext
-    && (allowedToolNameSet.has("delegate_to_agent")
-      || allowedToolNameSet.has("parallel_delegate")
-      || allowedToolNameSet.has("run_task_graph")
-      || allowedToolNameSet.has("create_ephemeral_agent"));
-  const requiresMaintenanceDelegation = requiresSwarmMaintenanceDelegation || requiresMaintenanceFollowUpDelegation;
+  // Turn routing/enforcement signals (softRouting, must-orchestrate gates, URL-fetch,
+  // maintenance) derived to computeTurnEnforcementSignals in turn-setup.ts (god-file
+  // seam) — the rationale/audit refs for each flag live there now.
+  const {
+    softRoutingEnforcement, applyRoutingTone, inWorkflowStep, requiresDelegatedResearch,
+    requiresArtifactDelegation, activeMainAssistantToolMode, requiresUrlFetch,
+    requiresSwarmMaintenanceDelegation, requiresMaintenanceDelegation,
+  } = computeTurnEnforcementSignals({
+    effectiveToolMode,
+    initialDynamicGuidance,
+    channel: session.channel,
+    allowedToolNameSet,
+    userMessage,
+    recentWorkflowAuthoringMaintenanceContext,
+  });
   let delegatedResearchRetryUsed = false;
   let delegatedResearchEnforcementPrompt = "";
   let maintenanceDelegationRetryUsed = false;
@@ -1563,40 +1512,15 @@ async function _runTurn(
     "You have reached the tool-call limit for this turn. Using ONLY the information gathered in the tool results above, write a complete, useful response to the original request. Do NOT call any more tools. If data is incomplete, acknowledge it and provide the best answer possible with what you have.";
   let terminalFinishReason = "max_tool_iterations";
   // ── G33: Trajectory cache lookup ─────────────────────────────────────────
-  // Before the first LLM call, check if we have a cached trajectory for a
-  // semantically similar recent query.  If yes, inject it as extra system context
-  // so the model can decide whether to reuse or re-research the evidence.
-  let trajectoryInjectionContext = "";
-  let injectedTrajectoryIdentity: { normalizedQuery: string; finishedAt: string } | null = null;
-  try {
-    const cachedHit = await lookupTrajectory(
-      userMessage,
-      session.getWorkspacePath(),
-      initialDynamicGuidance?.freshnessSensitive ?? false,
-    );
-    const cachedTrajectory = cachedHit?.entry ?? null;
-    if (cachedTrajectory && cachedTrajectory.finalAnswer.length > 50) {
-      const evidence = cachedTrajectory.sharedFindings.length > 0
-        ? `\n\nEvidence gathered:\n${cachedTrajectory.sharedFindings.slice(0, 5).map(f => `• ${f.slice(0, 300)}`).join("\n")}`
-        : "";
-      trajectoryInjectionContext =
-        `[CACHED RECENT EVIDENCE — verify before reuse, cached at ${cachedTrajectory.finishedAt}]\n${cachedTrajectory.finalAnswer.slice(0, 1500)}${evidence}`;
-      injectedTrajectoryIdentity = {
-        normalizedQuery: cachedTrajectory.normalizedQuery,
-        finishedAt: cachedTrajectory.finishedAt,
-      };
-      logAudit(
-        "trajectory_cache_hit",
-        {
-          similarity: Number(cachedHit!.similarity.toFixed(3)),
-          ageMs: Date.now() - new Date(cachedTrajectory.finishedAt).getTime(),
-          findingsCount: cachedTrajectory.sharedFindings.length,
-          finalAnswerChars: cachedTrajectory.finalAnswer.length,
-        },
-        { sessionId: session.id, channel: session.channel },
-      );
-    }
-  } catch { /* best-effort — never block the turn */ }
+  // Cached-trajectory injection (semantic recent-query reuse) lifted to
+  // lookupTrajectoryInjection in turn-setup.ts (god-file seam).
+  const { trajectoryInjectionContext, injectedTrajectoryIdentity } = await lookupTrajectoryInjection({
+    userMessage,
+    workspacePath: session.getWorkspacePath(),
+    freshnessSensitive: initialDynamicGuidance?.freshnessSensitive ?? false,
+    sessionId: session.id,
+    channel: session.channel,
+  });
 
   // ── Main agent loop ───────────────────────────────────────────────────────
   while (iterationCount < maxToolIterations) {
