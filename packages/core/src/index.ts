@@ -410,6 +410,18 @@ export async function main() {
   process.on("SIGINT", () => void shutdown("SIGINT"));
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
+  // Survive a stray un-awaited rejection instead of letting it crash the whole
+  // gateway (and every in-flight turn). A rejection is logged with context and
+  // swallowed; an uncaught exception is logged then triggers a graceful shutdown
+  // (the process is in an unknown state, so exit diagnosably rather than limp on).
+  process.on("unhandledRejection", (reason) => {
+    log.error({ err: reason instanceof Error ? reason : new Error(String(reason)) }, "Unhandled promise rejection — swallowed to keep the gateway alive");
+  });
+  process.on("uncaughtException", (err) => {
+    log.fatal({ err }, "Uncaught exception — shutting down gracefully");
+    void shutdown("uncaughtException");
+  });
+
   log.info(
     { wsPort: config.gateway.port },
     `${PRODUCT.name} ready — ws://localhost:${config.gateway.port}/ws`
