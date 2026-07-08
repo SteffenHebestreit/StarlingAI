@@ -36,6 +36,19 @@ import type { MemoryRecord } from "./service.js";
 import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
 import { getEmbeddingProvider } from "../providers/index.js";
+import { currentUserId } from "../runtime/request-context.js";
+
+/**
+ * Per-user tenant for graph partitioning: the authenticated userId when
+ * multi-user auth is on, else null (single-operator — no partitioning, fully
+ * back-compat). Only the 'user' scope is tenant-partitioned; workspace / session
+ * / agent scopes stay shared. Pass the record's scope on WRITE (tenant only for
+ * user-scope nodes); omit on READ to get the current reader's tenant.
+ */
+function graphUserTenant(scope?: string): string | null {
+  if (scope !== undefined && scope !== "user") return null;
+  return getConfig().auth?.enabled === true ? (currentUserId() ?? null) : null;
+}
 
 const log = childLogger("memory:graph");
 
@@ -77,6 +90,7 @@ export async function upsertMemoryToGraph(
       SET m.content     = $content,
           m.kind        = $kind,
           m.scope       = $scope,
+          m.tenant      = $tenant,
           m.domain      = $domain,
           m.topic       = $topic,
           m.importance  = coalesce(m.importance, 0.5),
@@ -88,6 +102,8 @@ export async function upsertMemoryToGraph(
       content: record.content.slice(0, 2000),
       kind: record.kind,
       scope: record.scope,
+      // Per-user tenant for 'user'-scope nodes (multi-user auth); null otherwise.
+      tenant: graphUserTenant(record.scope),
       domain,
       topic,
       createdAt: record.createdAt,
@@ -205,7 +221,10 @@ export async function graphL0Layer(
 ): Promise<string> {
   if (!isGraphDbAvailable()) return "";
 
-  const cacheKey = `${domain ?? ""} ${maxChars}`;
+  // Tenant MUST be in the cache key — else one user's cached L0 block would be
+  // served to another user under multi-user auth.
+  const tenant = graphUserTenant();
+  const cacheKey = `${domain ?? ""} ${maxChars} ${tenant ?? ""}`;
   const cached = _graphL0Cache.get(cacheKey);
   if (cached && Date.now() - cached.storedAt <= GRAPH_L0_CACHE_TTL_MS) return cached.content;
 
@@ -213,13 +232,14 @@ export async function graphL0Layer(
     const queryPromise = runCypher(`
       MATCH (m:MemoryRecord)
       WHERE m.kind IN ['decision', 'preference']
-        AND m.scope IN ['workspace', 'user']
+        AND (m.scope = 'workspace'
+             OR (m.scope = 'user' AND ($tenant IS NULL OR m.tenant = $tenant)))
         AND (m.validTo IS NULL OR m.validTo > $now)
         AND ($domain IS NULL OR m.domain = $domain OR m.domain IS NULL)
       RETURN m.id AS id, m.kind AS kind, m.content AS content
       ORDER BY m.importance DESC, m.updatedAt DESC
       LIMIT 5
-    `, { domain: domain ?? null, now: new Date().toISOString() }).catch(() => null); // swallow a late rejection after timeout
+    `, { domain: domain ?? null, now: new Date().toISOString(), tenant }).catch(() => null); // swallow a late rejection after timeout
     const result = await Promise.race([
       queryPromise,
       new Promise<typeof _GRAPH_L0_TIMEOUT>((resolve) => {
