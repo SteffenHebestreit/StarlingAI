@@ -1,5 +1,5 @@
-import { readFileSync, writeFileSync, appendFileSync, readdirSync, statSync, mkdirSync, existsSync, unlinkSync } from "node:fs";
-import { basename, resolve, extname, join, relative } from "node:path";
+import { readFileSync, writeFileSync, appendFileSync, readdirSync, statSync, mkdirSync, existsSync, unlinkSync, realpathSync } from "node:fs";
+import { basename, resolve, extname, join, relative, isAbsolute } from "node:path";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
 import { logAudit } from "../audit/logger.js";
@@ -90,9 +90,12 @@ const SENSITIVE_READ_PATTERNS: RegExp[] = [
   /(^|\/)\.jwt_secret$/,
 ];
 
-/** True when a workspace-relative path points at a secret / VCS-internal file. */
+/** True when a workspace-relative path points at a secret / VCS-internal file.
+ *  Matched case-INSENSITIVELY: the repo is bind-mounted from Windows/macOS hosts whose
+ *  Docker Desktop mounts are case-insensitive, so `.ENV` resolves to the real `.env` —
+ *  a case-sensitive denylist would wave it straight through. */
 export function isSensitiveWorkspacePath(relativePath: string): boolean {
-  const rel = relativePath.replace(/\\/g, "/").replace(/^\.\//, "");
+  const rel = relativePath.replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
   if (rel === ".env.example") return false; // public template
   return SENSITIVE_READ_PATTERNS.some((re) => re.test(rel));
 }
@@ -100,9 +103,19 @@ export function isSensitiveWorkspacePath(relativePath: string): boolean {
 function guardPath(path: string, workspacePath: string): { safe: boolean; resolved: string } {
   try {
     const { resolved } = resolvePathWithinWorkspace(path, workspacePath);
-    // Bounded to the workspace, but still refuse secrets / VCS internals.
+    // Refuse secrets / VCS internals — on the lexical path AND, when the target exists,
+    // its realpath, so a planted symlink (e.g. generated/notes.txt -> ../.env) can't
+    // alias a denied file or escape the workspace under an innocent name.
     if (isSensitiveWorkspacePath(relative(workspacePath, resolved))) {
       return { safe: false, resolved };
+    }
+    let real: string | null = null;
+    try { real = realpathSync(resolved); } catch { /* not created yet — the lexical check stands */ }
+    if (real !== null) {
+      const realRel = relative(workspacePath, real);
+      if (realRel.startsWith("..") || isAbsolute(realRel) || isSensitiveWorkspacePath(realRel)) {
+        return { safe: false, resolved };
+      }
     }
     return { safe: true, resolved };
   } catch {

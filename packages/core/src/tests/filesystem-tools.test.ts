@@ -11,7 +11,31 @@ describe("filesystem tools", () => {
     writeFileSync(join(tempDir, "uploads", "screenshot.png"), Buffer.from("89504e470d0a1a0a", "hex"));
     writeFileSync(join(tempDir, "workspace-config.jsonc"), "{\n  // pentest shard comment\n  \"enabled\": true\n}\n");
     writeFileSync(join(tempDir, "protocol-map.mmd"), "graph TD\n  MCP --> Tools\n");
+    writeFileSync(join(tempDir, ".env"), "SAI_JWT_SECRET=supersecret\n");
+    writeFileSync(join(tempDir, ".env.example"), "SAI_JWT_SECRET=changeme\n");
     await import("../tools/filesystem.js");
+  });
+
+  it("read_file refuses .env case-insensitively (the case-mount bypass this fixes)", async () => {
+    const { getTool } = await import("../tools/registry.js");
+    const read = getTool("read_file")!;
+    // .env is denied; on a case-insensitive host mount `.ENV`/`.Env` resolve to the same
+    // real file, so the denylist must match regardless of case and never leak the secret.
+    for (const p of [".env", ".ENV", ".Env"]) {
+      const r = await read.execute({ path: p }, { sessionId: "s", workspacePath: tempDir });
+      expect(r.success).toBe(false);
+      expect(r.output).not.toContain("supersecret");
+    }
+  });
+
+  it("isSensitiveWorkspacePath flags secrets/VCS internals case-insensitively", async () => {
+    const { isSensitiveWorkspacePath } = await import("../tools/filesystem.js");
+    for (const p of [".env", ".ENV", ".env.production", ".git/config", ".GIT/config", ".starlingai/credentials.enc", "sub/.STARLINGAI/x", "credentials.enc", ".jwt_secret"]) {
+      expect(isSensitiveWorkspacePath(p)).toBe(true);
+    }
+    for (const p of [".env.example", "src/index.ts", "uploads/a.png", "notes.md"]) {
+      expect(isSensitiveWorkspacePath(p)).toBe(false);
+    }
   });
 
   it("reads jsonc files used by workspace agent shards", async () => {

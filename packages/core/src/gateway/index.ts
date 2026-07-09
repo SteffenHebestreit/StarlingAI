@@ -3692,9 +3692,28 @@ export function createGateway() {
       }
 
       const agentName = decodeURIComponent(a2aMatch[1]!);
+      // Bound the buffered body so any authenticated caller can't stream an unbounded
+      // JSON-RPC payload and exhaust gateway memory (the last raw handler that lacked
+      // the cap the public A2A / federation surfaces already enforce). A JSON-RPC
+      // task message is small; the standard body limit is ample.
+      const a2aMaxBytes = getConfig().gateway.maxBodyBytes ?? 1_048_576;
       const bodyChunks: Buffer[] = [];
-      req.on("data", (chunk: Buffer) => { bodyChunks.push(chunk); });
+      let a2aBodyBytes = 0;
+      let a2aBodyAborted = false;
+      req.on("data", (chunk: Buffer) => {
+        if (a2aBodyAborted) return;
+        a2aBodyBytes += chunk.length;
+        if (a2aBodyBytes > a2aMaxBytes) {
+          a2aBodyAborted = true;
+          res.writeHead(413, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32600, message: "Request body too large" }, id: null }));
+          req.destroy();
+          return;
+        }
+        bodyChunks.push(chunk);
+      });
       req.on("end", async () => {
+        if (a2aBodyAborted) return;
         let rpcId: unknown = null;
         try {
           // Decode once over the full body (per-chunk toString() corrupts UTF-8

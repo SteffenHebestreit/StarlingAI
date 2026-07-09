@@ -13,9 +13,11 @@
  * forget a document).
  */
 import { readFile } from "node:fs/promises";
-import { basename, extname } from "node:path";
+import { realpathSync } from "node:fs";
+import { basename, extname, relative } from "node:path";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { resolvePathWithinWorkspace } from "./workspace-path.js";
+import { isSensitiveWorkspacePath } from "./filesystem.js";
 import { engramConfigured } from "../retrieval/engram.js";
 import {
   ingestDocumentBytes,
@@ -86,6 +88,15 @@ registerTool({
     let bytes: Buffer;
     try {
       const { resolved } = resolvePathWithinWorkspace(path, ctx.workspacePath);
+      // Same secret-exfil guard read_file enforces: ingest_document must not pull
+      // .env / .starlingai / .git / credential files into the searchable document
+      // library (where search_documents would return their contents). Checked on the
+      // lexical path and, when it exists, the realpath (symlink defense).
+      let realRel: string | null = null;
+      try { realRel = relative(ctx.workspacePath, realpathSync(resolved)); } catch { /* not-yet-existing handled by readFile below */ }
+      if (isSensitiveWorkspacePath(relative(ctx.workspacePath, resolved)) || (realRel !== null && isSensitiveWorkspacePath(realRel))) {
+        return fail(`Refusing to ingest a protected path: ${path}`);
+      }
       bytes = await readFile(resolved);
     } catch (err) {
       return fail(`Failed to read ${path}: ${err instanceof Error ? err.message : String(err)}`);
