@@ -46,7 +46,7 @@ export interface RenderProfileOpts {
    *  no excerpt reached the model this turn but this list is non-empty, the confirmed-empty
    *  marker becomes an honest "you have these documents on file" note instead of "found
    *  nothing" — so an existence/access question never falsely denies holding the user's CV. */
-  availableDocuments?: ReadonlyArray<{ title?: string; documentId?: string }>;
+  availableDocuments?: ReadonlyArray<{ title?: string; documentId?: string; invalidated?: boolean }>;
 }
 
 /**
@@ -91,7 +91,12 @@ export function renderUserProfileEvidence(
     // so it can't fabricate from titles alone.
     if (availableDocuments && availableDocuments.length > 0) {
       const titles = availableDocuments
-        .map((d) => d.title?.trim() || d.documentId?.slice(0, 8) || "document")
+        .map((d) => {
+          const name = d.title?.trim() || d.documentId?.slice(0, 8) || "document";
+          // An outdated document is on file but its content is permanently un-retrievable
+          // until re-uploaded — say so, so the model doesn't imply it can still be read.
+          return d.invalidated ? `${name} (marked outdated — content not retrievable)` : name;
+        })
         .join(", ");
       return "[USER PROFILE EVIDENCE — retrieved this turn]\n"
         + `The user HAS documents on file in their library: ${titles}. A profile lookup ran THIS turn, but no `
@@ -149,7 +154,7 @@ export async function buildUserProfileEvidence(
   if (!docsReachedModel && !hasMemory) {
     const inventory = await listInScopeDocuments({ sessionId, ...(userId ? { userId } : {}) }).catch(() => []);
     if (inventory.length > 0) {
-      availableDocuments = inventory.map((d) => ({ ...(d.title ? { title: d.title } : {}), documentId: d.id }));
+      availableDocuments = inventory.map((d) => ({ ...(d.title ? { title: d.title } : {}), documentId: d.id, ...(d.invalidated ? { invalidated: true } : {}) }));
     }
   }
 

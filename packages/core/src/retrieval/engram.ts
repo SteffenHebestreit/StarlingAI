@@ -50,6 +50,10 @@ export interface EngramDocumentInfo {
   sources: string[];
   createdAt?: string;
   chunkCount: number;
+  /** Marked outdated via POST /documents/:id/invalidate: still LISTED (so existence
+   *  inventories stay honest) but its CONTENT is excluded from all retrieval. engram's
+   *  list endpoint does not expose this — it's joined in from the local registry stamp. */
+  invalidated?: boolean;
 }
 
 /** True when document RAG is enabled and an engram base URL is configured. */

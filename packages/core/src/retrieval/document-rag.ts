@@ -387,7 +387,27 @@ export async function listInScopeDocuments(ctx: RagScopeContext): Promise<Engram
   if (scopeSources.size === 0) return [];
   const docs = await engramListDocuments();
   if (!docs || docs.length === 0) return [];
-  return docs.filter((d) => d.sources.some((s) => scopeSources.has(s)));
+  return annotateInvalidated(docs.filter((d) => d.sources.some((s) => scopeSources.has(s))));
+}
+
+/**
+ * Join the local registry's invalidation stamp onto engram's document list. engram's list
+ * endpoint doesn't expose the marker, so without this an outdated document appears NORMAL in
+ * every existence inventory (list_documents, the userOwnFacts prefetch) while all content
+ * search over it returns empty — the model then asserts it has a doc it can never read, the
+ * exact presence/absence contradiction the invalidation feature exists to avoid.
+ */
+async function annotateInvalidated(docs: EngramDocumentInfo[]): Promise<EngramDocumentInfo[]> {
+  if (docs.length === 0) return docs;
+  try {
+    const { listRegistry } = await import("./document-registry.js");
+    const registry = await listRegistry();
+    const invalidated = new Set(registry.filter((e) => e.invalidatedAt).map((e) => e.documentId));
+    if (invalidated.size === 0) return docs;
+    return docs.map((d) => (invalidated.has(d.id) ? { ...d, invalidated: true } : d));
+  } catch {
+    return docs; // registry unavailable — fall back to the un-annotated list
+  }
 }
 
 /**
@@ -454,7 +474,7 @@ export async function listScopedDocuments(ctx: RagScopeContext): Promise<EngramD
   const scopeSources = new Set(activeScopeSources(ctx));
   const docs = await engramListDocuments();
   if (!docs) return [];
-  return docs.filter((d) => d.sources.some((s) => scopeSources.has(s)));
+  return annotateInvalidated(docs.filter((d) => d.sources.some((s) => scopeSources.has(s))));
 }
 
 /** Minimal attachment shape needed for auto-ingest (subset of SessionTranscriptAttachment). */

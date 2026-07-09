@@ -93,6 +93,17 @@ describe("renderUserProfileEvidence", () => {
     expect(out).not.toMatch(/found NOTHING/i); // must NOT use the truly-empty wording
   });
 
+  it("flags an outdated (invalidated) document so the model doesn't imply it can read it", () => {
+    const out = renderUserProfileEvidence([], null, {
+      docsHandledElsewhere: true,
+      documentsAlreadyInjected: false,
+      availableDocuments: [{ title: "old-resume.pdf", invalidated: true }, { title: "current-resume.pdf" }],
+    });
+    expect(out).toMatch(/old-resume\.pdf \(marked outdated — content not retrievable\)/);
+    expect(out).toMatch(/current-resume\.pdf/);
+    expect(out).not.toMatch(/current-resume\.pdf \(marked outdated/); // the fresh doc is NOT flagged
+  });
+
   it("still emits the truly-empty marker when there are no documents on file at all", () => {
     const out = renderUserProfileEvidence([], null, {
       docsHandledElsewhere: true,

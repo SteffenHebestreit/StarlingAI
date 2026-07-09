@@ -174,8 +174,15 @@ registerTool({
     if (docs.length === 0) {
       return { success: true, output: "No documents have been ingested into this conversation's library yet.", metadata: { count: 0 } };
     }
-    const lines = docs.map((d) => `- ${d.title?.trim() || d.id.slice(0, 12)} (${d.chunkCount} chunks) [${d.sources.join(", ")}]`);
-    return { success: true, output: `${docs.length} document(s):\n${lines.join("\n")}`, metadata: { count: docs.length } };
+    // An invalidated ("marked outdated") document is still LISTED but its content is
+    // excluded from all retrieval — flag it so the model never asserts it can read a doc
+    // that search_documents will always return empty for.
+    const lines = docs.map((d) => {
+      const base = `- ${d.title?.trim() || d.id.slice(0, 12)} (${d.chunkCount} chunks) [${d.sources.join(", ")}]`;
+      return d.invalidated ? `${base} — MARKED OUTDATED: content not retrievable (re-upload to reinstate)` : base;
+    });
+    const outdated = docs.filter((d) => d.invalidated).length;
+    return { success: true, output: `${docs.length} document(s)${outdated ? ` (${outdated} marked outdated — not retrievable)` : ""}:\n${lines.join("\n")}`, metadata: { count: docs.length, outdated } };
   },
 });
 
