@@ -339,7 +339,10 @@ export async function main() {
   });
 
   // Graceful shutdown
-  const shutdown = async (signal: string) => {
+  let shuttingDown = false;
+  const shutdown = async (signal: string, exitCode = 0) => {
+    if (shuttingDown) return; // re-entrancy guard: a second signal / a throw mid-shutdown must not restart it
+    shuttingDown = true;
     log.info({ signal }, "Shutting down...");
     clearInterval(healthInterval);
     stopCacheWarmer();
@@ -408,7 +411,7 @@ export async function main() {
       // best-effort
     }
     await shutdownTracing();
-    process.exit(0);
+    process.exit(exitCode);
   };
 
   process.on("SIGINT", () => void shutdown("SIGINT"));
@@ -423,7 +426,14 @@ export async function main() {
   });
   process.on("uncaughtException", (err) => {
     log.fatal({ err }, "Uncaught exception — shutting down gracefully");
-    void shutdown("uncaughtException");
+    // A hard deadline guards against shutdown hanging (e.g. gateway.stop() waiting on a
+    // wedged socket). And if the graceful shutdown itself rejects — plausible precisely
+    // when the process just had an uncaught exception that left a subsystem broken — do
+    // NOT let that rejection be swallowed by the unhandledRejection handler above (which
+    // would leave the process alive in exactly the unknown state this handler exists to
+    // avoid). Force a non-zero exit instead.
+    setTimeout(() => process.exit(1), 10_000).unref();
+    shutdown("uncaughtException", 1).catch(() => process.exit(1));
   });
 
   log.info(
