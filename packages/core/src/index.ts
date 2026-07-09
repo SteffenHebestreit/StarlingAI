@@ -246,6 +246,10 @@ export async function main() {
   // so ended sessions don't accumulate unbounded in the store + Redis.
   startSessionPruner();
 
+  // Ensure the upload bucket exists when using S3 storage (SeaweedFS starts empty).
+  // Fire-and-forget so a slow/absent object store never blocks boot.
+  void import("./storage/object-store.js").then(({ ensureUploadBucket }) => ensureUploadBucket()).catch(() => undefined);
+
   // Prompt-cache warm-keeper (agents.performance.promptCacheWarmKeeper, default off):
   // keep the orchestrator's base-prompt KV prefix warm during idle so the first turn
   // after boot / a delegating turn doesn't pay the cold prefill. No-op when disabled.

@@ -536,6 +536,32 @@ function mergeEnvOverrides(raw: Record<string, unknown>): Record<string, unknown
       ...(Object.keys(nextOidc).length ? { oidc: nextOidc } : {}),
     };
   }
+  // Upload storage + malware scanning from env (Docker-first / bundled default).
+  // The bundled compose sets SAI_STORAGE_BACKEND=s3 + SAI_UPLOAD_SCAN=true; keys
+  // are kept as $ENV refs so they never land in the compiled config.
+  const truthy = (v?: string) => ["1", "true", "yes", "on"].includes((v ?? "").trim().toLowerCase());
+  if (env["SAI_STORAGE_BACKEND"] || env["SAI_S3_ENDPOINT"] || env["SAI_UPLOAD_SCAN"] || env["SAI_CLAMD_HOST"]) {
+    const storage = (raw["storage"] as Record<string, unknown> | undefined) ?? {};
+    const s3 = (storage["s3"] as Record<string, unknown> | undefined) ?? {};
+    const scan = (storage["scan"] as Record<string, unknown> | undefined) ?? {};
+    const nextS3: Record<string, unknown> = { ...(s3 as object) };
+    if (env["SAI_S3_ENDPOINT"]) nextS3["endpoint"] = env["SAI_S3_ENDPOINT"];
+    if (env["SAI_S3_REGION"]) nextS3["region"] = env["SAI_S3_REGION"];
+    if (env["SAI_S3_BUCKET"]) nextS3["bucket"] = env["SAI_S3_BUCKET"];
+    if (env["SAI_S3_ACCESS_KEY_ID"]) nextS3["accessKeyId"] = "$SAI_S3_ACCESS_KEY_ID";
+    if (env["SAI_S3_SECRET_ACCESS_KEY"]) nextS3["secretAccessKey"] = "$SAI_S3_SECRET_ACCESS_KEY";
+    if (env["SAI_S3_FORCE_PATH_STYLE"] !== undefined) nextS3["forcePathStyle"] = truthy(env["SAI_S3_FORCE_PATH_STYLE"]);
+    const nextScan: Record<string, unknown> = { ...(scan as object) };
+    if (env["SAI_UPLOAD_SCAN"] !== undefined) nextScan["enabled"] = truthy(env["SAI_UPLOAD_SCAN"]);
+    if (env["SAI_CLAMD_HOST"]) nextScan["clamdHost"] = env["SAI_CLAMD_HOST"];
+    if (env["SAI_CLAMD_PORT"]) nextScan["clamdPort"] = Number(env["SAI_CLAMD_PORT"]);
+    raw["storage"] = {
+      ...(storage as object),
+      ...(env["SAI_STORAGE_BACKEND"] ? { backend: env["SAI_STORAGE_BACKEND"] === "s3" ? "s3" : "local" } : {}),
+      ...(Object.keys(nextS3).length ? { s3: nextS3 } : {}),
+      ...(Object.keys(nextScan).length ? { scan: nextScan } : {}),
+    };
+  }
   if (env["SAI_COMPUTER_USE_ENABLED"] || env["SAI_COMPUTER_REMOTE_NODE_URL"] || env["SAI_COMPUTER_REMOTE_NODE_TOKEN"] || env["SAI_COMPUTER_REMOTE_NODE_LABEL"]) {
     const computerUse = (raw["computerUse"] as Record<string, unknown> | undefined) ?? {};
     const adapters = (computerUse["adapters"] as Record<string, unknown> | undefined) ?? {};

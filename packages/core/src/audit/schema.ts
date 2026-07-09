@@ -233,6 +233,9 @@ export type CoreAuditEventType =
   // Cost governance
   | "cost_budget_threshold"
   | "cost_budget_blocked"
+  // Upload malware scanning
+  | "upload_infected"
+  | "upload_scan_failed"
   // Tool embedding warm-up (Stage 12 / Open Interop)
   | "tool_embeddings_warmed"
   // MCP client (consumed servers) — runtime registry

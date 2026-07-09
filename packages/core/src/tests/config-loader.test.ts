@@ -40,6 +40,7 @@ describe("config loader mutable overlay", () => {
     delete process.env["SAI_EMBEDDING_MODEL"];
     delete process.env["SAI_ROUTING_MODEL"];
     for (const k of ["SAI_AUTH_PROVIDER", "SAI_OIDC_ISSUER", "SAI_OIDC_CLIENT_ID", "SAI_OIDC_CLIENT_SECRET", "SAI_OIDC_PUBLIC_URL", "SAI_OIDC_A2A_ENABLED"]) delete process.env[k];
+    for (const k of ["SAI_STORAGE_BACKEND", "SAI_S3_ENDPOINT", "SAI_S3_BUCKET", "SAI_S3_REGION", "SAI_S3_ACCESS_KEY_ID", "SAI_S3_SECRET_ACCESS_KEY", "SAI_S3_FORCE_PATH_STYLE", "SAI_UPLOAD_SCAN", "SAI_CLAMD_HOST", "SAI_CLAMD_PORT"]) delete process.env[k];
     vi.restoreAllMocks();
     vi.resetModules();
 
@@ -400,6 +401,35 @@ describe("config loader mutable overlay", () => {
       // of the compiled config; oidc.ts resolves it from env at runtime.
       expect(auth.oidc?.clientSecret).toBe("$SAI_OIDC_CLIENT_SECRET");
       expect(auth.oidc?.a2a.enabled).toBe(true);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("enables S3 upload storage + scanning from SAI_STORAGE_* / SAI_S3_* / SAI_UPLOAD_SCAN env", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-config-storage-"));
+    const baseConfigPath = join(tempDir, "starlingai.json");
+    writeFileSync(baseConfigPath, JSON.stringify({ gateway: { port: 8765 } }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = baseConfigPath;
+    process.env["SAI_STORAGE_BACKEND"] = "s3";
+    process.env["SAI_S3_ENDPOINT"] = "http://seaweedfs:8333";
+    process.env["SAI_S3_BUCKET"] = "uploads";
+    process.env["SAI_S3_ACCESS_KEY_ID"] = "AKIA-value";
+    process.env["SAI_S3_SECRET_ACCESS_KEY"] = "secret-value";
+    process.env["SAI_UPLOAD_SCAN"] = "true";
+    process.env["SAI_CLAMD_HOST"] = "clamav";
+    vi.resetModules();
+    const configLoader = await import("../config/loader.js");
+    try {
+      const storage = configLoader.loadConfig().storage;
+      expect(storage.backend).toBe("s3");
+      expect(storage.s3.endpoint).toBe("http://seaweedfs:8333");
+      expect(storage.s3.bucket).toBe("uploads");
+      // Keys are kept as $ENV REFS, not the raw values.
+      expect(storage.s3.accessKeyId).toBe("$SAI_S3_ACCESS_KEY_ID");
+      expect(storage.s3.secretAccessKey).toBe("$SAI_S3_SECRET_ACCESS_KEY");
+      expect(storage.scan.enabled).toBe(true);
+      expect(storage.scan.clamdHost).toBe("clamav");
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
