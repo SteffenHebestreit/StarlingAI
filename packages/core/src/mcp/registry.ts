@@ -11,6 +11,8 @@ import { getConfig } from "../config/loader.js";
 import { childLogger } from "../logger.js";
 import { logAudit } from "../audit/logger.js";
 import { markRuntimeComponentAttempt, markRuntimeComponentFailure, markRuntimeComponentSuccess } from "../runtime/status.js";
+import { withSpan, traceContextCarrier, genAi } from "../observability/tracing.js";
+import { SpanKind } from "@opentelemetry/api";
 
 const log = childLogger("mcp:registry");
 
@@ -139,13 +141,34 @@ function _registerBridgedTool(
       description: `[MCP:${serverName}] ${description}`,
       parameters: inputSchema,
       async execute(args) {
-        const runCall = async (connection: McpClientConnection) => {
-          const result = await connection.client.callTool({ name: mcpToolName, arguments: args });
-          const output = (result.content as Array<{ type: string; text?: string }>)
-            .map(c => (c.type === "text" ? (c.text ?? "") : JSON.stringify(c)))
-            .join("\n");
-          return { success: true as const, output, metadata: { mcpServer: serverName, mcpTool: mcpToolName } };
-        };
+        const runCall = async (connection: McpClientConnection) =>
+          // Wrap the remote call in its own span so an external MCP server's
+          // latency is visible in the trace even if it ignores `_meta`, and
+          // propagate W3C trace context via `params._meta` (the same mechanism
+          // MCP itself uses for progress tokens) so a trace-aware MCP server can
+          // stitch its spans into ours. `traceContextCarrier()` returns undefined
+          // when tracing is off, so nothing is added on the default path.
+          withSpan(
+            "mcp.tools/call",
+            {
+              "mcp.server.name": serverName,
+              "mcp.tool.name": mcpToolName,
+              ...genAi.toolAttributes(mcpToolName),
+            },
+            async () => {
+              const meta = traceContextCarrier();
+              const result = await connection.client.callTool({
+                name: mcpToolName,
+                arguments: args,
+                ...(meta ? { _meta: meta } : {}),
+              });
+              const output = (result.content as Array<{ type: string; text?: string }>)
+                .map(c => (c.type === "text" ? (c.text ?? "") : JSON.stringify(c)))
+                .join("\n");
+              return { success: true as const, output, metadata: { mcpServer: serverName, mcpTool: mcpToolName } };
+            },
+            SpanKind.CLIENT,
+          );
         // Re-fetch connection in case of reconnect
         const live = _connections.get(serverName) ?? conn;
         try {

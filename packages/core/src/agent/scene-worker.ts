@@ -20,6 +20,7 @@ import {
   type SceneJobProgress,
 } from "./jobs.js";
 import { requestApprovalViaChannel } from "../approval/index.js";
+import { buildApprovalIdempotencyKey } from "../approval/durable-store.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { publishNotification } from "../runtime/notifications.js";
@@ -321,7 +322,7 @@ async function runWorkflowJob(
       userMessage: step.task,
       allowedAgents: step.allowedAgents,
       humanInLoopSteps: step.humanInLoopSteps,
-      approvalCallback: buildApprovalCallback(job, controller, counters, step.approvalChannel),
+      approvalCallback: buildApprovalCallback(job, controller, counters, step.approvalChannel, `step${index}`),
       signal: controller.signal,
       ...buildTurnStreamingHooks(job, counters, {
         totalSteps: steps.length,
@@ -483,6 +484,9 @@ function buildApprovalCallback(
   controller: AbortController,
   counters: { toolCallsRequested: number; toolCallsCompleted: number; approvalsRequested: number; subAgentsStarted: number },
   approvalChannelOverride?: string,
+  /** Stable per-step scope (e.g. "step2") so two distinct gated steps that call
+   *  the same tool with the same args don't share a durable approval decision. */
+  approvalScope?: string,
 ): ((toolName: string, args: Record<string, unknown>) => Promise<boolean>) | undefined {
   const approvalChannel = approvalChannelOverride ?? job.payload.approvalChannel;
   if (!approvalChannel || !job.payload.humanInLoopSteps?.length) return undefined;
@@ -512,8 +516,12 @@ function buildApprovalCallback(
       sticky: true,
     });
 
+    // Stable key (job + step + tool + args) so a durable decision made before a
+    // restart is honoured when this step re-runs, instead of re-prompting the
+    // human — and two distinct gated steps never share one decision.
+    const idempotencyKey = buildApprovalIdempotencyKey(job.id, toolName, args, approvalScope);
     const approved = await raceAgainstAbort(
-      requestApprovalViaChannel(approvalChannel, toolName, args, job.sceneName, job.payload.approvalTimeoutMs),
+      requestApprovalViaChannel(approvalChannel, toolName, args, job.sceneName, job.payload.approvalTimeoutMs, idempotencyKey),
       controller.signal,
     );
 

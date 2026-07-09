@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
+import { SpanKind } from "@opentelemetry/api";
 import { childLogger } from "../logger.js";
 import { emitSwarmEvent, onSwarmEvent, type SwarmEvent } from "./bus.js";
+import { withLinkedSpan, spanLinkFromCarrier } from "../observability/tracing.js";
 
 const log = childLogger("swarm:bidding");
 const INSTANCE_ID = randomUUID();
@@ -116,36 +118,48 @@ async function emitAutonomousBids(event: SwarmEvent): Promise<void> {
   const allowedAgents = normalizeStringArray(event.data?.["allowedAgents"]);
   const excludedAgents = new Set(normalizeStringArray(event.data?.["excludeAgents"]));
 
-  try {
-    const { resolveAgentRouting } = await import("../tools/sub-agent.js");
-    const resolution = await resolveAgentRouting(query, {
-      minConfidence: "low",
-      allowedAgents: allowedAgents.length > 0 ? allowedAgents : undefined,
-    });
+  // Consume span LINKED to the announcing span (concurrent producer→consumer
+  // across the bus, so a link — not parent/child — is the honest causal edge).
+  // The task_bid events emitted inside inherit this span's context, carrying the
+  // chain forward. No-op passthrough when tracing is disabled.
+  await withLinkedSpan(
+    "swarm.autonomous_bid",
+    { "starlingai.swarm.task_id": event.taskId },
+    [spanLinkFromCarrier(event.trace)],
+    async () => {
+      try {
+        const { resolveAgentRouting } = await import("../tools/sub-agent.js");
+        const resolution = await resolveAgentRouting(query, {
+          minConfidence: "low",
+          allowedAgents: allowedAgents.length > 0 ? allowedAgents : undefined,
+        });
 
-    const candidates = [...resolution.results, ...resolution.weakCandidates]
-      .filter(candidate => !excludedAgents.has(candidate.name))
-      .sort((left, right) => right.score - left.score)
-      .slice(0, MAX_BIDS_PER_TASK);
+        const candidates = [...resolution.results, ...resolution.weakCandidates]
+          .filter(candidate => !excludedAgents.has(candidate.name))
+          .sort((left, right) => right.score - left.score)
+          .slice(0, MAX_BIDS_PER_TASK);
 
-    for (const candidate of candidates) {
-      emitSwarmEvent("task_bid", {
-        sessionId: event.sessionId,
-        taskId: event.taskId,
-        task: event.task,
-        agentName: candidate.name,
-        data: {
-          dispatchMode: "autonomous_bidding",
-          score: Number(candidate.score.toFixed(4)),
-          confidence: candidate.confidence,
-          matchedTerms: candidate.matchedTerms,
-          bidderInstance: INSTANCE_ID,
-        },
-      });
-    }
-  } catch (err) {
-    log.debug({ err, taskId: event.taskId }, "Failed to emit autonomous bids");
-  }
+        for (const candidate of candidates) {
+          emitSwarmEvent("task_bid", {
+            sessionId: event.sessionId,
+            taskId: event.taskId,
+            task: event.task,
+            agentName: candidate.name,
+            data: {
+              dispatchMode: "autonomous_bidding",
+              score: Number(candidate.score.toFixed(4)),
+              confidence: candidate.confidence,
+              matchedTerms: candidate.matchedTerms,
+              bidderInstance: INSTANCE_ID,
+            },
+          });
+        }
+      } catch (err) {
+        log.debug({ err, taskId: event.taskId }, "Failed to emit autonomous bids");
+      }
+    },
+    SpanKind.CONSUMER,
+  );
 }
 
 async function handleEvent(event: SwarmEvent): Promise<void> {

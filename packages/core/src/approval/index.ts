@@ -11,9 +11,11 @@
 import { randomUUID } from "node:crypto";
 import { getConfig } from "../config/loader.js";
 import { createPendingApproval } from "./store.js";
+import { durableApprovalsEnabled, lookupApprovalDecision } from "./durable-store.js";
 import { sendSlackApproval } from "./channels/slack.js";
 import { sendOutboundWebhookApproval } from "./channels/outbound-webhook.js";
 import { sendSyncWebhookApproval } from "./channels/sync-webhook.js";
+import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 
 const log = childLogger("approval");
@@ -30,7 +32,8 @@ export async function requestApprovalViaChannel(
   toolName: string,
   args: Record<string, unknown>,
   sceneName?: string,
-  approvalTimeoutMs?: number
+  approvalTimeoutMs?: number,
+  idempotencyKey?: string,
 ): Promise<boolean> {
   const config = getConfig();
   const channelConfig = config.approvalChannels?.[channelName];
@@ -40,11 +43,26 @@ export async function requestApprovalViaChannel(
     return false;
   }
 
+  // Durable decision cache (opt-in, async channels): if this exact approval
+  // (stable job+tool+args key) was already decided — including under a different
+  // id before a gateway restart — honour that decision instead of re-prompting.
+  // Fail-closed: an expired/absent decision falls through to a fresh prompt.
+  if (durableApprovalsEnabled() && idempotencyKey && (channelConfig.type === "slack" || channelConfig.type === "outbound_webhook")) {
+    const cached = lookupApprovalDecision(idempotencyKey);
+    if (cached !== undefined) {
+      logAudit("approval_resolved", {
+        toolName, sceneName, approved: cached, reason: "durable_decision_reused",
+      }, { severity: cached ? "info" : "warn" });
+      log.info({ toolName, sceneName, approved: cached }, "Reused durable approval decision (no re-prompt)");
+      return cached;
+    }
+  }
+
   switch (channelConfig.type) {
     case "slack": {
       const secret = randomUUID();
       const { id, promise } = createPendingApproval({
-        toolName, args, sceneName, secret,
+        toolName, args, sceneName, secret, idempotencyKey,
         timeoutMs: approvalTimeoutMs ?? channelConfig.timeoutMs,
       });
       await sendSlackApproval(id, secret, toolName, args, sceneName, channelConfig);
@@ -63,7 +81,7 @@ export async function requestApprovalViaChannel(
         secret = envVal;
       }
       const { id, promise } = createPendingApproval({
-        toolName, args, sceneName, secret,
+        toolName, args, sceneName, secret, idempotencyKey,
         timeoutMs: approvalTimeoutMs ?? channelConfig.timeoutMs,
       });
       await sendOutboundWebhookApproval(id, secret, toolName, args, sceneName, channelConfig);

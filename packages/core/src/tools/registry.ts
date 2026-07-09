@@ -1,7 +1,7 @@
 import { ToolTier, getToolTier, isToolAllowed } from "../guardrails/tool-tiers.js";
 import type { LLMToolDef } from "../providers/lmstudio.js";
 import { computeQueryEmbedding, cosineSimilarity, isEmbeddingAvailable } from "../providers/embeddings.js";
-import { withSpan } from "../observability/tracing.js";
+import { withSpan, genAi } from "../observability/tracing.js";
 import { runWithRequestContext, currentUserId } from "../runtime/request-context.js";
 import { childLogger } from "../logger.js";
 import { isToolDisabled, resolveToolGroup } from "./groups.js";
@@ -617,10 +617,14 @@ export async function executeTool(
 
   // Span the tool call so traces show how a turn fanned out across tools.
   // Attributes intentionally exclude args (privacy + payload size); the
-  // result is summarized via success / error length only.
+  // result is summarized via success / error length only. We dual-emit the
+  // native `starlingai.*` attrs AND the standard `gen_ai.*` semconv attrs (with
+  // the `execute_tool {name}` span name) so a GenAI-aware backend renders this
+  // as a tool call — additive, our own dashboards are unaffected.
   return withSpan(
-    `tool ${name}`,
+    genAi.toolSpanName(name),
     {
+      ...genAi.toolAttributes(name),
       "starlingai.tool.name": name,
       "starlingai.tool.tier": def.tier,
       "starlingai.session.id": context.sessionId,
