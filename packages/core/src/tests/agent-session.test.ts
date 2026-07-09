@@ -739,6 +739,33 @@ describe("archived-session pruning", () => {
     archiveSession(s.id);
     expect(pruneArchivedSessions(0)).toBe(0);
   });
+
+  it("keeps IDLE-archived user chats on the long idle-retention, not the short ephemera TTL", async () => {
+    // Regression: idle-archived conversations were reclaimed on the 1h TTL, so a chat
+    // merely idle for a day was permanently deleted an hour later. Idle archives now use
+    // a separate retention (default 0 = keep forever); ephemeral/manual archives still
+    // age out on ttlMs.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-18T00:00:00Z"));
+    const { createSession: mk, archiveSession, getSessionRecord, pruneArchivedSessions, resetSessionsForTests: reset } = await import("../agent/session.js");
+    reset();
+
+    const idleChat = mk({ channel: "webchat", workspacePath: "/workspace" });
+    archiveSession(idleChat.id, "idle");           // a real conversation that went idle
+    const ephemeral = mk({ channel: "scene", workspacePath: "/workspace" });
+    archiveSession(ephemeral.id);                  // default "manual" — worker ephemera
+
+    vi.setSystemTime(new Date("2026-06-20T00:00:00Z")); // +48h
+
+    // Short ttl reclaims the ephemeral archive; the idle chat survives (idleRetention 0).
+    pruneArchivedSessions(60 * 60 * 1000, 0);
+    expect(getSessionRecord(ephemeral.id)).toBeUndefined(); // ephemeral pruned on ttl
+    expect(getSessionRecord(idleChat.id)).toBeDefined();    // idle chat kept (retention 0)
+
+    // A positive idle-retention (24h) finally reclaims the 48h-idle chat.
+    pruneArchivedSessions(60 * 60 * 1000, 24 * 60 * 60 * 1000);
+    expect(getSessionRecord(idleChat.id)).toBeUndefined();
+  });
 });
 describe("archiveIdleSessions — reclaim abandoned active sessions", () => {
   afterEach(() => { resetSessionsForTests(); });

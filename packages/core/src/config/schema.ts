@@ -1419,11 +1419,18 @@ export const ConfigSchema = z.object({
     maxToolIterations: z.number().int().min(1).max(100).default(20),
     /** Session pruning check interval in ms */
     sessionPruneIntervalMs: z.number().int().min(10_000).max(600_000).default(60_000),
-    /** Auto-archive a still-active session after this long with no activity, so the
-     *  pruner can then reclaim it (otherwise abandoned sessions are never archived
-     *  and leak forever). Generous by default — a turn touches on activity and is
-     *  capped well under this, so a live turn is never mistaken for idle. */
-    sessionIdleArchiveMs: z.number().int().min(60_000).default(86_400_000), // 24h
+    /** Auto-archive a still-active session after this long with no activity, so it
+     *  drops out of the hot active set (otherwise abandoned sessions accumulate in
+     *  memory). Generous by default — a turn touches on activity and is capped well
+     *  under this, so a live turn is never mistaken for idle. Set to 0 to disable
+     *  idle archival entirely (the value is honored: 0/negative turns it off). */
+    sessionIdleArchiveMs: z.number().int().refine((v) => v <= 0 || v >= 60_000, "must be 0 (disabled) or at least 60000ms").default(86_400_000), // 24h
+    /** Retention for sessions archived because they went IDLE (real user conversations).
+     *  These are NOT reclaimed on the short ephemera TTL (gateway.sessionTtlMs) — a chat
+     *  merely idle for a day must not be permanently deleted an hour later. Default 0 =
+     *  keep idle-archived conversations indefinitely (the user can clear them manually);
+     *  set a positive value to auto-delete them after that long. */
+    sessionIdleRetentionMs: z.number().int().refine((v) => v <= 0 || v >= 3_600_000, "must be 0 (keep forever) or at least 3600000ms").default(0),
     /** Latency SLO and prompt budget thresholds */
     performance: z.object({
       /** Max orchestrator turn duration before a turn_slo_breach alert fires (ms). Default 2 min. */

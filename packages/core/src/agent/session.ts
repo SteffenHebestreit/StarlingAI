@@ -50,6 +50,9 @@ export interface SessionSettings {
   turnTimeoutSecOverride?: number;
 }
 
+/** Why a session was archived — drives which retention the pruner applies. */
+export type ArchivedReason = "idle" | "manual";
+
 export interface AgentSessionOptions {
   sessionId?: string;
   channel: string;
@@ -126,6 +129,7 @@ export interface PersistedSessionRecord {
   createdAt: string;
   updatedAt: string;
   archivedAt?: string;
+  archivedReason?: ArchivedReason;
   systemPrompt: string;
   workspacePath: string;
   turnCount: number;
@@ -151,6 +155,11 @@ export class AgentSession {
   private turnCount = 0;
   private updatedAt: Date;
   private archivedAt?: Date;
+  /** Why this session was archived. "idle" = auto-archived by the idle sweep (a real
+   *  user conversation that went quiet — kept on the long idle-retention, never the
+   *  short ephemera TTL). "manual" = explicit user/system archival or ephemeral
+   *  scene/job/workflow-worker cleanup (reclaimed on gateway.sessionTtlMs). */
+  private archivedReason?: ArchivedReason;
   private endLogged = false;
   /** Serialised byte length of the tool schemas sent to the LLM for the current turn.
    *  Updated by the runtime each turn before the LLM loop starts so
@@ -172,6 +181,7 @@ export class AgentSession {
     createdAt?: Date;
     updatedAt?: Date;
     archivedAt?: Date;
+    archivedReason?: ArchivedReason;
     turnCount?: number;
     history?: SessionHistoryMessage[];
     earlierSummary?: string;
@@ -185,6 +195,7 @@ export class AgentSession {
     this.systemPrompt = opts.systemPrompt ?? defaultSystemPrompt(this.workspacePath);
     this.updatedAt = opts.updatedAt ?? this.createdAt;
     this.archivedAt = opts.archivedAt;
+    this.archivedReason = opts.archivedReason;
     this.turnCount = opts.turnCount ?? 0;
     this.history = opts.history ? [...opts.history] : [];
     this.earlierSummary = opts.earlierSummary ?? "";
@@ -212,6 +223,7 @@ export class AgentSession {
       createdAt: new Date(record.createdAt),
       updatedAt: new Date(record.updatedAt),
       archivedAt: record.archivedAt ? new Date(record.archivedAt) : undefined,
+      archivedReason: record.archivedReason,
       turnCount: record.turnCount,
       history: record.history,
       earlierSummary: record.earlierSummary,
@@ -446,9 +458,14 @@ export class AgentSession {
     log.info({ sessionId: this.id, turns: this.turnCount }, "Session ended");
   }
 
-  archive(): void {
+  getArchivedReason(): ArchivedReason | undefined {
+    return this.archivedReason;
+  }
+
+  archive(reason: ArchivedReason = "manual"): void {
     if (this.archivedAt) return;
     this.archivedAt = new Date();
+    this.archivedReason = reason;
     this.touch(this.archivedAt);
     this.end();
     persistSessionStore(this);
@@ -463,6 +480,7 @@ export class AgentSession {
       createdAt: this.createdAt.toISOString(),
       updatedAt: this.updatedAt.toISOString(),
       archivedAt: this.archivedAt?.toISOString(),
+      ...(this.archivedReason ? { archivedReason: this.archivedReason } : {}),
       systemPrompt: this.systemPrompt,
       workspacePath: this.workspacePath,
       turnCount: this.turnCount,
@@ -809,10 +827,10 @@ export function getSessionRecord(id: string): AgentSession | undefined {
   return _sessions.get(id);
 }
 
-export function archiveSession(id: string): boolean {
+export function archiveSession(id: string, reason: ArchivedReason = "manual"): boolean {
   const session = _sessions.get(id);
   if (!session || session.isArchived()) return false;
-  session.archive();
+  session.archive(reason);
   // Fire-and-forget: harvest durable-worthy session facts into long-term
   // workspace memory before the session's short-term facts age out. Dynamic
   // import keeps the memory layer out of the session module's load graph.
@@ -859,30 +877,37 @@ export function getAllSessions(opts?: { includeArchived?: boolean }): AgentSessi
 
 let _sessionPrunerTimer: ReturnType<typeof setInterval> | null = null;
 
-/** Delete archived sessions older than `ttlMs`. Active sessions are never pruned.
- *  Returns the number deleted. A non-positive ttl disables pruning (returns 0). */
-export function pruneArchivedSessions(ttlMs: number): number {
-  if (!(ttlMs > 0)) return 0;
-  const cutoff = Date.now() - ttlMs;
+/** Delete archived sessions past their retention. Two classes with separate windows:
+ *  ephemeral/explicitly-archived sessions (scene/job/workflow workers, one-shots, user
+ *  archive) age out on the short `ttlMs` (gateway.sessionTtlMs), while IDLE-archived real
+ *  user conversations use the generous `idleRetentionMs` (agents.sessionIdleRetentionMs;
+ *  0 = keep indefinitely) so a chat merely idle for a day is NOT permanently deleted an
+ *  hour later. Active sessions are never pruned. A non-positive window disables that
+ *  class. Returns the number deleted. */
+export function pruneArchivedSessions(ttlMs: number, idleRetentionMs = 0): number {
+  const now = Date.now();
   let pruned = 0;
   for (const session of [..._sessions.values()]) {
     if (!session.isArchived()) continue;
     const archivedAt = session.getArchivedAt()?.getTime();
-    if (archivedAt !== undefined && archivedAt < cutoff) {
+    if (archivedAt === undefined) continue;
+    const retention = session.getArchivedReason() === "idle" ? idleRetentionMs : ttlMs;
+    if (!(retention > 0)) continue; // this class's retention is disabled (keep forever)
+    if (archivedAt < now - retention) {
       deleteSession(session.id);
       pruned += 1;
     }
   }
-  if (pruned > 0) log.info({ pruned, ttlMs }, "Pruned aged archived sessions");
+  if (pruned > 0) log.info({ pruned, ttlMs, idleRetentionMs }, "Pruned aged archived sessions");
   return pruned;
 }
 
-/** Archive still-active sessions with no activity for longer than `idleMs`, so the
- *  pruner can then reclaim them — otherwise a session that is abandoned (rather
- *  than explicitly closed) is never archived and leaks forever. A live turn keeps
- *  the session fresh via touch() and is capped well under the (generous) idle
- *  window, so it is never mistaken for idle. A non-positive idleMs disables this.
- *  Returns the number archived. */
+/** Archive still-active sessions with no activity for longer than `idleMs` so they drop
+ *  out of the hot active set. Marked "idle" so the pruner keeps them on the generous
+ *  idle-retention (a real conversation), NOT the short ephemera TTL. A live turn keeps
+ *  the session fresh via touch() and is capped well under the (generous) idle window, so
+ *  it is never mistaken for idle. A non-positive idleMs disables this. Returns the number
+ *  archived. */
 export function archiveIdleSessions(idleMs: number): number {
   if (!(idleMs > 0)) return 0;
   const cutoff = Date.now() - idleMs;
@@ -890,7 +915,7 @@ export function archiveIdleSessions(idleMs: number): number {
   for (const session of [..._sessions.values()]) {
     if (session.isArchived()) continue;
     if (session.getUpdatedAt().getTime() < cutoff) {
-      archiveSession(session.id);
+      archiveSession(session.id, "idle");
       archived += 1;
     }
   }
@@ -907,10 +932,11 @@ export function startSessionPruner(): void {
   const intervalMs = config.agents?.sessionPruneIntervalMs ?? 60_000;
   const ttlMs = config.gateway?.sessionTtlMs ?? 3_600_000;
   const idleArchiveMs = config.agents?.sessionIdleArchiveMs ?? 86_400_000;
+  const idleRetentionMs = config.agents?.sessionIdleRetentionMs ?? 0;
   _sessionPrunerTimer = setInterval(() => {
     try {
-      archiveIdleSessions(idleArchiveMs); // idle active sessions → archived
-      pruneArchivedSessions(ttlMs);       // aged archived sessions → deleted
+      archiveIdleSessions(idleArchiveMs);          // idle active user chats → archived (kept)
+      pruneArchivedSessions(ttlMs, idleRetentionMs); // aged EPHEMERAL archives → deleted; idle chats kept per idleRetentionMs
     } catch (err) { log.warn({ err }, "session pruner tick failed"); }
   }, intervalMs);
   _sessionPrunerTimer.unref?.();
