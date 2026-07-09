@@ -139,6 +139,23 @@ describe("receptionist — micro-call", () => {
     expect(control.escalateReason).toBe("model-escalated");
   });
 
+  it("escalates a fast-lane answer that asserts external-world specifics (structural belt)", async () => {
+    // The 9b routing model answered a source-sensitive question despite its prompt: the
+    // answer asserts named-fact-shape specifics (a fee + a year), so the structural belt
+    // must escalate it to the verifiable full path rather than ship it unvalidated.
+    const fabricated = await runReceptionist(
+      "how much is the annual fee for the Acme Pro plan?",
+      { complete: async () => "The Acme Pro plan costs 90 EUR per year and was last updated in 2026." },
+    );
+    expect(fabricated.handled).toBe(false);
+    expect(fabricated.escalateReason).toBe("asserts-specifics");
+
+    // In-scope fast-lane answers (greeting / about-you / definition) carry no fact-shape
+    // tokens and are still handled directly.
+    const greeting = await runReceptionist("hi there", { complete: async () => "Hi! I'm your assistant — how can I help today?" });
+    expect(greeting.handled).toBe(true);
+  });
+
   it("redacts a leaked secret and escalates on empty/over-long/throw", async () => {
     const leaked = "Sure! Your key is sk-abcdefghijklmnopqrstuvwxyz1234567890ABCD by the way.";
     const red = await runReceptionist("hi", { complete: async () => leaked });

@@ -25,6 +25,7 @@
 import { getConfig } from "../config/loader.js";
 import { getChatProviderForTier } from "../providers/index.js";
 import { scanOutput } from "../guardrails/output.js";
+import { answerAssertsSpecifics } from "./citation-honesty.js";
 import { buildDynamicTurnGuidance } from "./intent-classifier.js";
 import { getReceptionistEscalateTerms, getReceptionistPersonaLines } from "./receptionist-policy.js";
 import { listUserMemoryRecords, listWorkspaceMemoryRecords } from "../memory/service.js";
@@ -166,6 +167,18 @@ export async function runReceptionist(
   const maxChars = deps.maxResponseChars ?? 400;
   if (text.length > maxChars) {
     return { handled: false, escalateReason: "response-too-long" };
+  }
+
+  // Structural belt: the fast-lane returns BEFORE the full honesty chain (up-front
+  // source-sensitivity classifier + post-draft judges), so a small routing model that
+  // answered a source-sensitive question despite its prompt would otherwise ship totally
+  // unvalidated. Refuse to keep a fast-lane answer that ASSERTS external-world specifics
+  // (≥2 named-fact-shape tokens: prices/rates/stats/years/dates/part-codes) and escalate
+  // to the full, verifiable path instead. Greeting / small-talk / about-you / definition /
+  // calculation answers — the fast-lane's documented scope — carry no such tokens, so their
+  // coverage is unaffected. Structural + language-independent, no keyword table.
+  if (answerAssertsSpecifics(text)) {
+    return { handled: false, escalateReason: "asserts-specifics" };
   }
 
   // Output guardrail — the same secret-scan + extension hooks the full path runs
