@@ -206,7 +206,13 @@ const CURRENCY_SYMBOLS = "€$£¥₹₩₽₺₪₴฿₫₦₱";
 // Inline currency codes/abbreviations that appear on EITHER side of the amount ("kr. 2,50" / "82 USD").
 // Curated to distinctive currency tokens to avoid colliding with common words / unit abbreviations
 // (e.g. "ft" is left to the imperial UNIT category, not Hungarian forint).
-const CURRENCY_CODES = "kr|dkk|sek|nok|isk|øre|zł|pln|kč|czk|huf|ron|bgn|uah|rub|try|eur|usd|gbp|jpy|chf|cny|cad|aud|nzd|mxn|brl|zar|krw|sgd|hkd|inr|ils";
+const CURRENCY_CODES = "kr|dkk|sek|nok|isk|øre|zł|pln|kč|czk|huf|bgn|uah|rub|eur|usd|gbp|jpy|chf|cny|aud|nzd|mxn|brl|zar|krw|sgd|hkd|inr|ils";
+// ISO codes that are ALSO common English words: "TRY" (Turkish lira vs "try N"), "CAD" (Canadian
+// dollar vs computer-aided design), "RON" (Romanian leu vs a name). Matched ONLY in their uppercase
+// currency-code form via (?-i:…), so lowercase prose ("try 2 threads", "ron said 3 times") isn't
+// counted as a monetary token — the same case-sensitive discipline the voltage [VW] branch uses.
+// (?-i:…) locally disables the currency regex's global `i` flag for this group.
+const CURRENCY_CODES_UPPER = "TRY|CAD|RON";
 // Abbreviated metric/tech PLUS spelled-out volume/mass/imperial units (common in prose and in
 // non-English answers, e.g. "1,5 Liter"). Multi-char only — bare single letters (l/g/t/m/w) are
 // omitted to avoid prose false positives; the ≥2-category / ≥4-token gate is the real filter.
@@ -218,8 +224,8 @@ const SPECIFICITY_CATEGORIES: Record<string, RegExp> = {
   percent: /\d[\d.,]*\s?%/g,                                                       // 3,75 %
   currency: new RegExp(
     `[${CURRENCY_SYMBOLS}]\\s?\\d[\\d.,]*`                                         // €5 / $ 1,200
-    + `|\\b(?:${CURRENCY_CODES})\\.?\\s?\\d[\\d.,]*`                               // kr. 2,50 / USD 5
-    + `|\\d[\\d.,]*\\s?(?:${CURRENCY_CODES})\\b`,                                  // 2,50 kr / 82 USD
+    + `|\\b(?:${CURRENCY_CODES}|(?-i:${CURRENCY_CODES_UPPER}))\\.?\\s?\\d[\\d.,]*` // kr. 2,50 / USD 5 / TRY 5 (not "try 5")
+    + `|\\d[\\d.,]*\\s?(?:${CURRENCY_CODES}|(?-i:${CURRENCY_CODES_UPPER}))\\b`,    // 2,50 kr / 82 USD / 82 TRY
     "gi",
   ),
   unit: new RegExp(`\\b\\d[\\d.,]*\\s?(?:${UNIT_TOKENS})\\b`, "gi"),               // 1,5 Liter / 20 kHz

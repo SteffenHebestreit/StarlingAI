@@ -186,6 +186,23 @@ describe("looksLikeUnsourcedSpecificClaims — dense specifics without a keyword
     expect(looksLikeUnsourcedSpecificClaims("DAX 24.000, EZB 3,75 %, 2026, 82 USD.")).toBe(false);
   });
 
+  // Regression: the currency vocabulary included "try"/"cad"/"ron" case-INSENSITIVELY, so common
+  // English prose ("try 2 threads") counted as Turkish-lira tokens and force-researched a legit
+  // coding answer. Those ISO codes now match only in uppercase (real currency-code form).
+  it("does NOT count lowercase 'try N' prose as currency, but keeps uppercase TRY", () => {
+    // Prose "try N" carries no fact-shape tokens now → not flagged.
+    expect(answerAssertsSpecifics("You could try 2 threads or try 4 threads to speed it up.", 1)).toBe(false);
+    // A real uppercase currency-code mention still counts.
+    expect(answerAssertsSpecifics("The deposit is TRY 250 today.", 1)).toBe(true);
+    expect(answerAssertsSpecifics("It ships for 82 CAD.", 1)).toBe(true);
+    // A ≥400-char coding answer with "try N" prose plus one real metric + one year stays UNDER the
+    // ≥4-token / ≥2-category gate (currency tokens no longer inflate it).
+    const coding = "Benchmark it yourself: try 2 threads, then try 4 threads on your machine — I saw about a "
+      + "30% throughput gain since 2023 on a similar workload, but it depends heavily on your CPU and IO. ".repeat(4);
+    expect(coding.trim().length).toBeGreaterThanOrEqual(400);
+    expect(looksLikeUnsourcedSpecificClaims(coding)).toBe(false);
+  });
+
   // Regression (final-diff verify w5w8p7dqm): the old part-code regex matched prose "word number"
   // pairs ("in 1998") and double-counted years, so a general-knowledge answer mentioning only a few
   // years over-fired the ENABLED ⑤ guard. The category-diversity gate (≥2 distinct categories) fixes it.
