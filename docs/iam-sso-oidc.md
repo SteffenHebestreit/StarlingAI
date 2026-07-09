@@ -45,6 +45,23 @@ The IdP's roles (Keycloak: `realm_access.roles`) map to ours in `auth.oidc.roleM
 }
 ```
 
+### Session lifetime & revocation lag (important)
+
+After a successful SSO login the gateway mints **its own** session JWT (24 h) from the IdP's
+validated claims, and every subsequent request is authorized from that token's claims — the
+gateway does **not** re-introspect the IdP or re-derive the role per request.
+
+Consequence: **disabling or role-changing an OIDC user in the IdP (e.g. Keycloak) does NOT take
+effect immediately** — the existing StarlingAI session keeps its access (and its role frozen at
+login) until that token expires, up to the full 24 h lifetime. This differs from the built-in
+username/password provider, where deleting a user or changing their role in `auth.users[]` is
+enforced on the very next request.
+
+There is no logout/blocklist endpoint (logout is a client-side token drop), so a leaked or
+outstanding OIDC session token cannot be force-invalidated short of rotating `SAI_JWT_SECRET`
+(which logs everyone out). If prompt off-boarding matters for your deployment, shorten the IdP's
+access-token / session lifetime accordingly and treat the 24 h ceiling as the worst-case lag.
+
 ## Bundled Keycloak (turnkey dev IdP)
 
 An optional, preconfigured Keycloak ships in the compose file under the `keycloak` profile:

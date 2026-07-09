@@ -215,6 +215,10 @@ export async function authenticatedUser(authHeader: string | null | undefined): 
     // token was minted from IdP claims validated at the OIDC callback, so those
     // claims are authoritative — fall through to the token-claims path below rather
     // than rejecting for "no local account".
+    // TRADEOFF: unlike the builtin path above, this does NOT re-check a live store, so
+    // disabling/role-changing an OIDC user in the IdP only takes effect when their token
+    // expires (≤ TTL), not immediately. Documented in docs/iam-sso-oidc.md ("revocation
+    // lag"); shorten the OIDC token lifetime if prompt off-boarding matters.
     if (getConfig().auth.provider !== "oidc") {
       const record = getConfig().auth.users.find((u) => u.username === username);
       if (!record) return null; // account deleted from config
