@@ -3,6 +3,7 @@
  * Imports the proxy's pure logic (docker/docker-socket-proxy/*.mjs) directly.
  */
 import { describe, it, expect } from "vitest";
+import net from "node:net";
 // @ts-expect-error — plain .mjs, no types
 import { isAllowedBindSource, parseAllowedPrefixes } from "../../../../docker/docker-socket-proxy/bind-policy.mjs";
 import {
@@ -11,6 +12,8 @@ import {
   parseRequestHead, buildRequestHead, headerValue,
   // @ts-expect-error — plain .mjs, no types
 } from "../../../../docker/docker-socket-proxy/filter.mjs";
+// @ts-expect-error — plain .mjs, no types
+import { spliceHijack } from "../../../../docker/docker-socket-proxy/server.mjs";
 
 // The legit workspace source on this deployment (Docker Desktop translates F:\StarlingAI).
 const PREFIXES = parseAllowedPrefixes("F:\\StarlingAI", "/run/desktop/mnt/host/f/StarlingAI");
@@ -179,5 +182,100 @@ describe("sanitizeExecBody", () => {
     expect(() => sanitizeExecBody({ Cmd: ["true"], AttachStdin: true })).not.toThrow();
     expect(() => sanitizeExecBody({ Privileged: true, Cmd: ["sh"] })).toThrow(/Privileged not allowed/);
     expect(() => sanitizeExecBody({ User: "root", Cmd: ["sh"] })).toThrow(/User override not allowed/);
+  });
+});
+
+describe("spliceHijack — pipelined-request smuggling blocked, real hijack preserved", () => {
+  const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+  // A connected TCP socket pair on loopback: [remote end we drive, local end handed to spliceHijack].
+  function socketPair(): Promise<[net.Socket, net.Socket]> {
+    return new Promise((resolve, reject) => {
+      let a: net.Socket;
+      const srv = net.createServer((serverSide) => { srv.close(); resolve([a, serverSide]); });
+      srv.on("error", reject);
+      srv.listen(0, "127.0.0.1", () => { a = net.connect((srv.address() as net.AddressInfo).port, "127.0.0.1"); });
+    });
+  }
+
+  // Fake dockerd that records everything it receives; `respond(sock)` fires on the first chunk.
+  function makeDaemon(respond: (sock: net.Socket) => void): Promise<{ srv: net.Server; port: number; received: Buffer[]; }> {
+    const received: Buffer[] = [];
+    const srv = net.createServer((sock) => {
+      let answered = false;
+      sock.on("data", (d) => { received.push(d); if (!answered) { answered = true; respond(sock); } });
+    });
+    return new Promise((resolve) => srv.listen(0, "127.0.0.1", () => resolve({ srv, port: (srv.address() as net.AddressInfo).port, received })));
+  }
+
+  const headersOf = (rawHead: Buffer) =>
+    parseRequestHead(rawHead.slice(0, rawHead.indexOf("\r\n\r\n")).toString("latin1")).headers;
+
+  const SMUGGLED =
+    "POST /v1.45/containers/create HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: 62\r\n\r\n" +
+    '{"Image":"x","HostConfig":{"Privileged":true,"Binds":["/:/h"]}}';
+
+  it("drops a request pipelined after a non-hijacking exec-start (Detach:true → 200)", async () => {
+    const daemon = await makeDaemon((sock) => {
+      sock.write("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 0\r\n\r\n");
+      sock.end();
+    });
+    const [, clientSide] = await socketPair();
+    const rawHead = Buffer.from(
+      `POST /v1.45/exec/${"a".repeat(64)}/start HTTP/1.1\r\nHost: docker\r\nConnection: keep-alive\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n`,
+      "latin1",
+    );
+    const rest = Buffer.from('{"Detach":true}' + SMUGGLED, "latin1");
+    spliceHijack(clientSide, headersOf(rawHead), rawHead, rest, () => net.connect(daemon.port, "127.0.0.1"));
+    await sleep(200);
+    const got = Buffer.concat(daemon.received).toString("latin1");
+    expect(got).toContain("/exec/");             // the exec-start itself is forwarded
+    expect(got).toContain('{"Detach":true}');    // with exactly its declared body
+    expect(got).not.toContain("containers/create"); // the smuggled 2nd request never reaches the daemon
+    expect(got).not.toContain("Privileged");
+    daemon.srv.close();
+  });
+
+  it("bounds the forwarded body to Content-Length even when the client over-sends", async () => {
+    const daemon = await makeDaemon((sock) => { sock.write("HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: 0\r\n\r\n"); sock.end(); });
+    const [, clientSide] = await socketPair();
+    const rawHead = Buffer.from(
+      `POST /v1.45/exec/${"c".repeat(64)}/start HTTP/1.1\r\nHost: docker\r\nContent-Length: 2\r\n\r\n`,
+      "latin1",
+    );
+    // Body is "{}" (2 bytes); everything after is a smuggled create the daemon must never see.
+    const rest = Buffer.from("{}" + SMUGGLED, "latin1");
+    spliceHijack(clientSide, headersOf(rawHead), rawHead, rest, () => net.connect(daemon.port, "127.0.0.1"));
+    await sleep(200);
+    const got = Buffer.concat(daemon.received).toString("latin1");
+    expect(got).not.toContain("containers/create");
+    daemon.srv.close();
+  });
+
+  it("splices both directions on a real hijack (101 UPGRADED): stdin reaches the daemon, stream reaches the client", async () => {
+    let daemonSock: net.Socket | undefined;
+    const daemon = await makeDaemon((sock) => {
+      daemonSock = sock;
+      sock.write("HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.raw-stream\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n");
+    });
+    const [attacker, clientSide] = await socketPair();
+    const clientChunks: Buffer[] = [];
+    attacker.on("data", (d) => clientChunks.push(d));
+    const rawHead = Buffer.from(
+      `POST /v1.45/exec/${"b".repeat(64)}/start HTTP/1.1\r\nHost: docker\r\nUpgrade: tcp\r\nConnection: Upgrade\r\nContent-Type: application/json\r\nContent-Length: 16\r\n\r\n`,
+      "latin1",
+    );
+    spliceHijack(clientSide, headersOf(rawHead), rawHead, Buffer.from('{"Detach":false}', "latin1"), () => net.connect(daemon.port, "127.0.0.1"));
+    await sleep(120);
+    expect(Buffer.concat(clientChunks).toString("latin1")).toContain("101 UPGRADED");
+    // Post-upgrade the connection is a raw stream: stdin must now flow client→daemon.
+    attacker.write("STDIN_PAYLOAD");
+    await sleep(120);
+    expect(Buffer.concat(daemon.received).toString("latin1")).toContain("STDIN_PAYLOAD");
+    // ...and daemon→client output must flow.
+    daemonSock?.write("STREAMED_OUT");
+    await sleep(120);
+    expect(Buffer.concat(clientChunks).toString("latin1")).toContain("STREAMED_OUT");
+    daemon.srv.close();
   });
 });
