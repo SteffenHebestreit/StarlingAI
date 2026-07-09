@@ -32,6 +32,13 @@ describe("buildUngroundedClaimJudgeMessages", () => {
     expect(msgs[1]!.content).toContain("…[truncated]");
     expect(String(msgs[1]!.content).length).toBeLessThan(6_000);
   });
+
+  it("weighs the SUBJECT (concept in principle vs specific real-world scheme), not the phrasing", () => {
+    const content = String(buildUngroundedClaimJudgeMessages("q", "d")[0]!.content).toLowerCase();
+    expect(content).toContain("judge the subject");
+    expect(content).toContain("in principle");        // concept side → no
+    expect(content).toContain("specific real-world");  // real-world scheme side → yes
+  });
 });
 
 describe("parseUngroundedClaimVerdict — fail-safe toward NOT triggering", () => {
@@ -111,6 +118,22 @@ describe("buildSourceSensitiveQuestionJudgeMessages", () => {
     const a = buildSourceSensitiveQuestionJudgeMessages("q1");
     const b = buildSourceSensitiveQuestionJudgeMessages("q2");
     expect(a[0]!.content).toBe(b[0]!.content);
+  });
+
+  // Regression (audit c88851e8): the classifier returned upfront_source_sensitive_clear on
+  // "wie funktioniert das pfand-system in dänemark?" — a false negative from the blanket "unsure → no"
+  // treating a named country's scheme like a general "how does X work" concept. The prompt must now
+  // discriminate on the SUBJECT (specific real-world scheme → yes; general concept → no), semantically,
+  // with NO topic keyword table.
+  it("discriminates the SUBJECT (specific real-world scheme vs general concept), not the phrasing", () => {
+    const content = String(buildSourceSensitiveQuestionJudgeMessages("q")[0]!.content).toLowerCase();
+    expect(content).toContain("judge the subject");
+    expect(content).toContain("particular real thing"); // the 'yes' side: a named real scheme/institution
+    expect(content).toContain("in principle");          // the 'no' side: a general concept
+    // No topic/keyword table for the repro itself.
+    expect(content).not.toContain("pfand");
+    expect(content).not.toContain("denmark");
+    expect(content).not.toContain("deposit");
   });
 
   it("round-trips: a model keying on 'how a specific real system works' says yes; a creative task says no", async () => {

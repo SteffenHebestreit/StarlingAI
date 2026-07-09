@@ -41,6 +41,7 @@ export function buildUngroundedClaimJudgeMessages(userMessage: string, draft: st
     "The draft was written WITHOUT any web search, document lookup, or other tool call this turn — it is purely from the model's memory.",
     "Decide ONE thing: does the draft state SPECIFIC, CHECKABLE claims about the external world AS IF they were established fact — for example a named real organisation / operator / company / product / brand, a concrete price / fee / amount, a rate or statistic, a law or regulation, a date, or the specific mechanism of how a PARTICULAR real-world system, service, or place actually works — the kind of claim that would need a source to trust and could be wrong if recited from memory?",
     "Answer 'yes' if the draft leans on such specific external facts. Answer 'no' if the draft is general knowledge, reasoning, a definition, an opinion, advice, a calculation, code, small talk, or is about content the user themselves provided.",
+    "Judge the SUBJECT, not the phrasing: describing how a general concept works in principle (a hash map, a network protocol, photosynthesis, a physical law) is 'no'; describing how a specific real-world scheme or institution works, or citing its operator / prices / rules, is 'yes'.",
     "When you are genuinely unsure, answer 'no' — do not over-trigger on ordinary explanations.",
     "Reply with EXACTLY one line and nothing else: 'VERDICT: yes' or 'VERDICT: no'.",
   ].join("\n");
@@ -58,15 +59,19 @@ export function buildUngroundedClaimJudgeMessages(userMessage: string, draft: st
  * runtime set the sourceSensitive signal BEFORE the model drafts, so the turn researches FIRST
  * (requiresDelegatedResearch → suppress the throwaway draft + force orchestration) instead of
  * "answer, then research". Same VERDICT contract, so parseUngroundedClaimVerdict handles the reply.
- * Deliberately conservative ("unsure → no") to avoid force-delegating ordinary general-knowledge
- * turns. Pure / language-independent — no topic keyword table.
+ * Discriminates on the SUBJECT (a specific real-world scheme/institution → yes; a general concept
+ * that works the same everywhere → no), NOT on the "how does X work" phrasing — the earlier version's
+ * blanket "unsure → no" false-negatived a named country's deposit scheme (audit c88851e8:
+ * upfront_source_sensitive_clear on exactly the source-sensitive repro). Pure / language-independent —
+ * a semantic boundary the model applies in any language, NOT a topic keyword table.
  */
 export function buildSourceSensitiveQuestionJudgeMessages(userMessage: string): LLMMessage[] {
   const system = [
     "You are a routing classifier inside an AI assistant. You see the user's message BEFORE any answer is written.",
-    "Decide ONE thing: to answer this well, would the assistant have to assert SPECIFIC, checkable facts about the external world — a named real organisation / operator / company / product / brand, a concrete price / fee / amount, a rate or statistic, a law or regulation, a date, current or recent events, or exactly how a PARTICULAR real-world system, service, or place actually works — the kind of thing that should be verified against a source rather than recited from memory?",
-    "Answer 'yes' if answering depends on such specific external facts (they should be researched first). Answer 'no' for general knowledge, concepts, definitions, reasoning, opinions, advice, maths, code, writing tasks, small talk, or questions about the user's own provided content or about the assistant itself.",
-    "When you are genuinely unsure, answer 'no'.",
+    "Decide ONE thing: to answer this well, would the assistant have to assert SPECIFIC, checkable real-world facts it cannot be sure are correct or current from memory — a named real organisation / operator / company / brand, a price / fee / amount, a rate or statistic, a law or regulation, a date or current event, or how a SPECIFIC real-world system, scheme, market, service, or place actually works and is run right now?",
+    "Answer 'yes' for those. In particular, a question about how a PARTICULAR real thing works — a named country's, company's, or institution's system, scheme, product, or market — IS source-sensitive: its operator, amounts, and rules must be verified rather than recalled, and they differ by place and change over time.",
+    "Answer 'no' only when it is answerable from STABLE general knowledge or reasoning: how something works IN PRINCIPLE (an algorithm, a protocol, a mathematical or scientific concept, a natural or physical process), a definition, an opinion, advice, a calculation, code, a writing task, small talk, or the user's own content or the assistant itself.",
+    "The phrase 'how does X work' appears in BOTH cases, so judge the SUBJECT, not the phrasing: a general concept (a hash map, a network protocol, photosynthesis) is 'no'; a specific real-world scheme or institution is 'yes'.",
     "Reply with EXACTLY one line and nothing else: 'VERDICT: yes' or 'VERDICT: no'.",
   ].join("\n");
   return [
