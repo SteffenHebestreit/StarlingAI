@@ -357,6 +357,45 @@ export type AuthConfig = z.infer<typeof AuthSchema>;
 export type OidcConfig = z.infer<typeof OidcConfigSchema>;
 
 /**
+ * Upload storage. `backend: "local"` keeps files on the gateway's disk under
+ * `<workspace>/uploads/` (the legacy default). `backend: "s3"` stores them in any
+ * S3-compatible object store — the bundled SeaweedFS, or a real AWS S3 bucket by
+ * pointing `s3` at it (same API, so it's a drop-in swap). Keys/endpoint are $ENV
+ * refs. `forcePathStyle` must be true for SeaweedFS/MinIO, false for AWS S3.
+ */
+export const S3StorageSchema = z.object({
+  endpoint: z.string().optional(),           // e.g. http://seaweedfs:8333; omit for real AWS S3
+  region: z.string().default("us-east-1"),
+  bucket: z.string().min(1).default("starlingai-uploads"),
+  accessKeyId: z.string().optional(),        // $ENV ref
+  secretAccessKey: z.string().optional(),    // $ENV ref
+  forcePathStyle: z.boolean().default(true), // SeaweedFS/MinIO need path-style; AWS uses false
+});
+
+/**
+ * Anti-malware scanning of uploads via ClamAV (clamd INSTREAM). When `enabled`,
+ * every upload is scanned BEFORE it is stored or ingested; an infected file is
+ * rejected. `mode: "sync"` blocks the upload request until the verdict.
+ */
+export const UploadScanSchema = z.object({
+  enabled: z.boolean().default(false),
+  mode: z.enum(["sync"]).default("sync"),
+  clamdHost: z.string().default("clamav"),
+  clamdPort: z.number().int().min(1).max(65535).default(3310),
+  timeoutMs: z.number().int().min(1000).default(30_000),
+  /** Files larger than this skip the scan (clamd has its own StreamMaxLength; keep in sync). */
+  maxScanBytes: z.number().int().min(0).default(104_857_600), // 100 MB
+});
+
+export const StorageSchema = z.object({
+  backend: z.enum(["local", "s3"]).default("local"),
+  s3: S3StorageSchema.default({}),
+  scan: UploadScanSchema.default({}),
+});
+
+export type StorageConfig = z.infer<typeof StorageSchema>;
+
+/**
  * Cost governance.  When `enabled` is true the gateway aggregates token
  * usage from `sub_agent_completed` and `turn_performance` audit events,
  * prices each entry against the configured per-model rate card, and
@@ -1503,6 +1542,7 @@ export const ConfigSchema = z.object({
   /** Computer use configuration — validated separately by Joi, passed through by Zod. */
   computerUse: z.record(z.unknown()).default({}),
   auth: AuthSchema.default({}),
+  storage: StorageSchema.default({}),
   cost: CostSchema.default({}),
   tracing: TracingSchema.default({}),
   federation: FederationSchema.default({}),
