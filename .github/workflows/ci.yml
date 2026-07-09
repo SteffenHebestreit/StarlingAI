@@ -80,3 +80,20 @@ jobs:
       # they reach a container). DEVPLAN P1 will extend this into a drift diff.
       - name: Config builds cleanly
         run: pnpm config:build
+
+  # Secret-scanning gate: catch a committed .env / token / private key before it
+  # reaches history. Full-history scan (fetch-depth 0) so a secret added in ANY
+  # commit on the PR/branch is caught, not just the tip. Runs in parallel with
+  # `verify`. Rules + allowlist live in .gitleaks.toml at the repo root.
+  secret-scan:
+    name: secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,34 @@
+# gitleaks configuration — secret-scanning gate (CI: .github/workflows/ci.yml).
+# Extends the built-in ruleset; the allowlist below suppresses false positives on
+# intentional placeholder/example values so a real leak still stands out.
+#
+# NOTE: on push/PR events gitleaks scans the pushed/PR commit range, not all
+# history. A full-history scan may surface secrets from PRE-SCRUB commits (e.g. the
+# personal token that lived in the deleted smoke-two-turn.ps1 before the PII scrub);
+# those are historical and the referenced secret should be treated as rotated.
+
+title = "StarlingAI gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Placeholders, examples, and documentation — not real secrets."
+paths = [
+  '''\.env\.example$''',
+  '''.*\.example\.(json|jsonc|ya?ml|env)$''',
+  '''docs/.*''',
+  '''tutorials/.*''',
+  '''QUICKSTART\.md$''',
+  '''README\.md$''',
+  # Test fixtures deliberately embed dummy credentials/tokens.
+  '''packages/.*/src/tests/.*''',
+  '''packages/.*/src/.*\.test\.ts$''',
+]
+regexes = [
+  # Obvious non-secret placeholders used throughout config/docs/tests.
+  '''(?i)(your-|example|placeholder|changeme|change-me|dummy|test|sk-ant-your|xxxx+)''',
+  '''\$\{[A-Z0-9_]+\}''',            # unresolved ${ENV_VAR} references
+  '''\$[A-Z][A-Z0-9_]+''',          # bare $ENV_VAR secret references in config
+  '''starlingai-internal-searxng-key''', # shipped placeholder (replaced at setup)
+]
