@@ -1,5 +1,12 @@
 <template>
-  <canvas ref="canvasEl" style="display:block;width:100%;height:100%;" />
+  <!-- Static radial-gradient stand-in shown when WebGL is unavailable, so the
+       decorative orb slot never renders as a blank hole. -->
+  <div
+    v-if="webglUnavailable"
+    aria-hidden="true"
+    style="width:100%;height:100%;border-radius:50%;background:radial-gradient(circle at 50% 45%, rgba(148,163,255,0.35), rgba(88,101,242,0.12) 45%, transparent 70%);"
+  />
+  <canvas v-show="!webglUnavailable" ref="canvasEl" style="display:block;width:100%;height:100%;" />
 </template>
 
 <script setup lang="ts">
@@ -632,17 +639,29 @@ function handleVisibilityChange() {
 }
 
 // ─── Lifecycle ────────────────────────────────────────────────────────────────
+// True when WebGL context creation fails (old browser, disabled/blocklisted GPU,
+// headless). The orb is purely decorative, so we degrade to a transparent canvas
+// instead of throwing out of onMounted (which, with no app error boundary, would
+// blank the whole dashboard). The template can key a CSS fallback off this.
+const webglUnavailable = ref(false);
+
 onMounted(() => {
   const canvas = canvasEl.value!;
   const w = canvas.clientWidth  || 400;
   const h = canvas.clientHeight || 400;
 
-  renderer = new THREE.WebGLRenderer({
-    canvas,
-    alpha: true,
-    antialias: false,
-    powerPreference: "high-performance",
-  });
+  try {
+    renderer = new THREE.WebGLRenderer({
+      canvas,
+      alpha: true,
+      antialias: false,
+      powerPreference: "high-performance",
+    });
+  } catch (err) {
+    webglUnavailable.value = true;
+    console.warn("OrbCanvas: WebGL unavailable — skipping the animated orb.", err);
+    return; // skip all 3D setup + the animation loop; onUnmounted's renderer?.dispose() stays safe
+  }
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
   renderer.setSize(w, h, false);
 

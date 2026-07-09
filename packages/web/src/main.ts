@@ -72,6 +72,12 @@ router.afterEach(() => {
 });
 
 const app = createApp(App);
+// App-level error boundary: a thrown render/lifecycle error in one component is
+// logged and contained here instead of tearing down the whole dashboard. (Vue
+// still unmounts the failing subtree, but sibling views keep working.)
+app.config.errorHandler = (err, _instance, info) => {
+  console.error(`[vue] unhandled component error (${info}):`, err);
+};
 const pinia = createPinia();
 app.use(pinia);
 app.use(router);

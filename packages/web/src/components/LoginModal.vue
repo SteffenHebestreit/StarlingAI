@@ -48,8 +48,9 @@
 
       <form @submit.prevent="submit" class="space-y-6">
         <div>
-          <label class="block text-xs font-medium text-gray-400 mb-2 uppercase tracking-wider">Gateway URL</label>
+          <label for="login-gateway-url" class="block text-xs font-medium text-gray-400 mb-2 uppercase tracking-wider">Gateway URL</label>
           <input
+            id="login-gateway-url"
             v-model="wsUrl"
             type="text"
             class="input-line"
@@ -60,8 +61,9 @@
 
         <template v-if="mode === 'password'">
           <div>
-            <label class="block text-xs font-medium text-gray-400 mb-2 uppercase tracking-wider">Username</label>
+            <label for="login-username" class="block text-xs font-medium text-gray-400 mb-2 uppercase tracking-wider">Username</label>
             <input
+              id="login-username"
               v-model="usernameInput"
               type="text"
               class="input-line"
@@ -72,8 +74,9 @@
             />
           </div>
           <div>
-            <label class="block text-xs font-medium text-gray-400 mb-2 uppercase tracking-wider">Password</label>
+            <label for="login-password" class="block text-xs font-medium text-gray-400 mb-2 uppercase tracking-wider">Password</label>
             <input
+              id="login-password"
               v-model="passwordInput"
               type="password"
               class="input-line"
@@ -85,8 +88,9 @@
 
         <template v-else>
           <div>
-            <label class="block text-xs font-medium text-gray-400 mb-2 uppercase tracking-wider">Token</label>
+            <label for="login-token" class="block text-xs font-medium text-gray-400 mb-2 uppercase tracking-wider">Token</label>
             <input
+              id="login-token"
               v-model="tokenInput"
               type="password"
               class="input-line"
