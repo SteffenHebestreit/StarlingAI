@@ -19,6 +19,7 @@ import {
   type Span,
   type Tracer,
   type Attributes,
+  type Link,
 } from "@opentelemetry/api";
 import { childLogger } from "../logger.js";
 import type { TracingConfig } from "../config/schema.js";
@@ -172,6 +173,104 @@ export async function withExtractedContext<T>(
 export function setSpanAttributes(attrs: Attributes): void {
   if (!_enabled) return;
   trace.getActiveSpan()?.setAttributes(attrs);
+}
+
+// ── GenAI semantic conventions (experimental) ────────────────────────────────
+//
+// We DUAL-EMIT: every tool / sub-agent span keeps its native `starlingai.*`
+// attributes AND these standard OpenTelemetry `gen_ai.*` attributes (plus a
+// semconv-shaped span name) so a GenAI-aware OTLP backend — Langfuse, Grafana
+// Tempo, the .NET Aspire dashboard — renders our tool calls and sub-agent runs
+// as first-class agent/tool operations, while our own dashboards keep querying
+// the `starlingai.*` attributes unchanged. Additive only; nothing is removed.
+//
+// Pinned to one semconv revision because the `gen_ai.*` namespace is still
+// experimental and has renamed attributes between releases — bump deliberately.
+export const GEN_AI_SEMCONV_VERSION = "1.30.0";
+
+export const genAi = {
+  /** Span name for a tool invocation: `execute_tool {tool}` (semconv). */
+  toolSpanName: (tool: string): string => `execute_tool ${tool}`,
+  /** Span name for an agent invocation: `invoke_agent {agent}` (semconv). */
+  agentSpanName: (agent: string): string => `invoke_agent ${agent}`,
+  /** `gen_ai.*` attributes for a tool-execution span. */
+  toolAttributes: (tool: string): Attributes => ({
+    "gen_ai.operation.name": "execute_tool",
+    "gen_ai.tool.name": tool,
+  }),
+  /** `gen_ai.*` attributes for an agent-invocation span. */
+  agentAttributes: (agent: string): Attributes => ({
+    "gen_ai.operation.name": "invoke_agent",
+    "gen_ai.agent.name": agent,
+  }),
+  /** `gen_ai.usage.*` token attributes (set once the run's usage is known). */
+  usageAttributes: (inputTokens: number, outputTokens: number): Attributes => ({
+    "gen_ai.usage.input_tokens": inputTokens,
+    "gen_ai.usage.output_tokens": outputTokens,
+  }),
+};
+
+/**
+ * Serialize the current trace context into a fresh plain object (W3C
+ * `traceparent` / `tracestate` keys). Unlike `injectTraceContext` this does not
+ * mutate a headers map — it returns a small carrier suitable for embedding in a
+ * non-HTTP transport (an MCP `tools/call` `_meta` field, a swarm-bus event
+ * envelope). Returns `undefined` when tracing is disabled or there is no active
+ * context to propagate, so callers can spread it conditionally.
+ */
+export function traceContextCarrier(): Record<string, string> | undefined {
+  if (!_enabled) return undefined;
+  const carrier: Record<string, string> = {};
+  propagation.inject(context.active(), carrier);
+  return Object.keys(carrier).length > 0 ? carrier : undefined;
+}
+
+/**
+ * Build an OpenTelemetry span Link from a trace-context carrier produced by
+ * `traceContextCarrier()` (e.g. one carried on a swarm-bus event). Returns
+ * `undefined` when tracing is disabled or the carrier holds no usable context,
+ * so it can be dropped from a links array.
+ */
+export function spanLinkFromCarrier(carrier: Record<string, string> | undefined): Link | undefined {
+  if (!_enabled || !carrier) return undefined;
+  const sc = trace.getSpanContext(propagation.extract(context.active(), carrier));
+  return sc ? { context: sc } : undefined;
+}
+
+/**
+ * Like `withSpan`, but attaches `links` — causal edges to spans that are NOT
+ * this span's parent. This is the right model for concurrent producer→consumer
+ * flows across the async swarm bus, where forcing parent/child nesting would
+ * misrepresent the causality. Undefined links (tracing off / unparseable
+ * carrier) are dropped. Errors propagate after being recorded on the span.
+ */
+export async function withLinkedSpan<T>(
+  name: string,
+  attrs: Attributes,
+  links: Array<Link | undefined>,
+  fn: (span: Span) => Promise<T>,
+  kind: SpanKind = SpanKind.INTERNAL,
+): Promise<T> {
+  if (!_enabled) {
+    const active = trace.getActiveSpan();
+    if (active) return fn(active);
+    return fn(getTracer().startSpan(name, { kind, attributes: attrs }));
+  }
+  const validLinks = links.filter((l): l is Link => l !== undefined);
+  const tracer = getTracer();
+  return tracer.startActiveSpan(name, { kind, attributes: attrs, links: validLinks }, async (span) => {
+    try {
+      const result = await fn(span);
+      span.setStatus({ code: SpanStatusCode.OK });
+      return result;
+    } catch (err) {
+      span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
+      span.recordException(err as Error);
+      throw err;
+    } finally {
+      span.end();
+    }
+  });
 }
 
 /** Test-only: reset internal state so initTracing can run again. */

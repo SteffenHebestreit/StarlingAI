@@ -21,7 +21,7 @@ import { scanOutput } from "../guardrails/output.js";
 import { neutralizeToolResultFraming } from "../guardrails/input.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
-import { withSpan } from "../observability/tracing.js";
+import { withSpan, genAi } from "../observability/tracing.js";
 import { runSubAgentInContainer } from "./container-runner.js";
 import { looksLikeContainerLevelFailure, looksLikeModelTemplateArtifact, looksLikeProviderErrorEcho, looksLikeHallucinatedTruncationClaim } from "./container-failure.js";
 import { appendOutcome, computeAdaptiveSubAgentTimeoutMs, extractTaskKeywords } from "./outcomes.js";
@@ -1534,9 +1534,13 @@ export interface SubAgentRunResult {
 }
 
 export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<SubAgentRunResult> {
+  // Dual-emit native `starlingai.*` attrs AND standard `gen_ai.*` semconv attrs
+  // (with the `invoke_agent {name}` span name + token usage) so a GenAI-aware
+  // backend renders this as an agent invocation — additive, nothing removed.
   return withSpan(
-    `sub_agent ${opts.agentName}`,
+    genAi.agentSpanName(opts.agentName),
     {
+      ...genAi.agentAttributes(opts.agentName),
       "starlingai.agent.name": opts.agentName,
       "starlingai.session.parent": opts.parentSessionId,
       "starlingai.task.preview": opts.task.slice(0, 240),
@@ -1549,6 +1553,7 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
         span.setAttribute("starlingai.agent.terminalState", result.stats.terminalState);
       }
       span.setAttribute("starlingai.agent.tokens", result.stats.usage.totalTokens);
+      span.setAttributes(genAi.usageAttributes(result.stats.usage.promptTokens, result.stats.usage.completionTokens));
       return result;
     },
   );

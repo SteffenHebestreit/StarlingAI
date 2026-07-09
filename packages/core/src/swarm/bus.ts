@@ -12,6 +12,7 @@
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
 import { childLogger } from "../logger.js";
+import { traceContextCarrier } from "../observability/tracing.js";
 
 const log = childLogger("swarm:bus");
 
@@ -58,7 +59,23 @@ export interface SwarmEvent {
   taskId?: string;
   task?: string;         // first 120 chars of the task description
   data?: Record<string, unknown>;
+  /** W3C trace-context carrier (traceparent/tracestate), stamped only on the
+   *  causal bidding-chain events so a consumer can open a span LINKED to the
+   *  producer's span. Absent when tracing is disabled or for high-volume
+   *  event types (heartbeats etc.) that would blow up trace cardinality. */
+  trace?: Record<string, string>;
 }
+
+/** Event types that form the causal delegation/bidding chain — the only ones
+ *  we stamp with trace context (announce → bid → claim → complete). Heartbeats
+ *  (agent_capability_announce), graph-node churn, and tool-dev events are
+ *  deliberately excluded: they are high-volume and would explode span links. */
+const CAUSAL_TRACE_EVENT_TYPES: ReadonlySet<SwarmEventType> = new Set<SwarmEventType>([
+  "task_announced",
+  "task_bid",
+  "task_claimed",
+  "task_completed",
+]);
 
 // ── Internal state ──────────────────────────────────────────────────────────
 
@@ -146,6 +163,16 @@ export function emitSwarmEvent(
     // Truncate task description to avoid bloating Redis messages
     ...(payload.task && { task: payload.task.slice(0, 120) }),
   };
+
+  // Stamp trace context on causal-chain events so a consumer can span-LINK back
+  // to this producer. Never let a serialization hiccup break delegation — the
+  // bus contract is "delegation never fails due to bus unavailability".
+  if (!event.trace && CAUSAL_TRACE_EVENT_TYPES.has(type)) {
+    try {
+      const carrier = traceContextCarrier();
+      if (carrier) event.trace = carrier;
+    } catch { /* tracing is best-effort — never block the emit */ }
+  }
 
   // Always emit locally first
   _emitter.emit("event", event);
