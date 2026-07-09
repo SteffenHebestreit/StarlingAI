@@ -760,7 +760,7 @@ async function fetchWithTimeout(url: string, ms: number, init?: RequestInit): Pr
  * past. A resolver failure (IP literal / offline resolver) is non-fatal, matching
  * the original guard.
  */
-async function hostIsBlocked(host: string): Promise<boolean> {
+export async function hostIsBlocked(host: string): Promise<boolean> {
   const h = host.toLowerCase();
   if (isPrivateHost(h)) return true;
   try {

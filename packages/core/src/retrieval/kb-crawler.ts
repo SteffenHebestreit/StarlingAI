@@ -24,7 +24,6 @@
  * page document ids are stable and unchanged pages are skipped by hash.
  */
 import { createHash } from "node:crypto";
-import { lookup as dnsLookup } from "node:dns/promises";
 import { getConfig } from "../config/loader.js";
 import { childLogger } from "../logger.js";
 import { engramConfigured, engramIngest, engramDeleteDocument } from "./engram.js";
@@ -309,18 +308,12 @@ export function isAllowedByRobots(rules: RobotsRules, url: string): boolean {
 // ── guarded fetch ─────────────────────────────────────────────────────────────
 
 async function hostIsBlocked(host: string): Promise<boolean> {
-  // Lazy import: web.ts registers tools as an import side effect; keep that out
-  // of module-load order here (same pattern as document-rag → multimodal).
-  const { isPrivateHost } = await import("../tools/web.js");
-  const h = host.toLowerCase();
-  if (isPrivateHost(h)) return true;
-  try {
-    const records = await dnsLookup(h, { all: true });
-    if (records.some((r) => isPrivateHost(r.address))) return true;
-  } catch {
-    /* DNS failure — allow through (IP literal / unavailable resolver), matching web_fetch */
-  }
-  return false;
+  // Reuse web_fetch's single SSRF host guard (isPrivateHost + all-records DNS re-check)
+  // rather than a byte-copy, so hardening it once (e.g. resolve-and-pin against DNS
+  // rebinding) covers the recursive crawler too. Lazy import: web.ts registers tools as an
+  // import side effect; keep that out of module-load order (same pattern as document-rag).
+  const { hostIsBlocked: webHostIsBlocked } = await import("../tools/web.js");
+  return webHostIsBlocked(host);
 }
 
 interface CrawlFetchResult {
