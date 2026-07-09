@@ -255,10 +255,19 @@ async function getJwks(): Promise<ReturnType<typeof createRemoteJWKSet>> {
 export async function verifyInboundA2aToken(token: string): Promise<JWTPayload | null> {
   try {
     const cfg = oidcConfig();
+    // Fail CLOSED without an audience gate: a token validated on signature + issuer ALONE
+    // would accept ANY realm-signed token (including a human user's own access/ID token) as
+    // an A2A caller — audience confusion. Config validation already requires a2a.audience
+    // when a2a.enabled, so this is a defense-in-depth backstop that also guards any code
+    // path that reaches here with an unset audience.
+    if (!cfg.a2a.audience || !cfg.a2a.audience.trim()) {
+      log.warn("Inbound A2A rejected — auth.oidc.a2a.audience is not configured (required to distinguish peer service tokens from human tokens)");
+      return null;
+    }
     const jwks = await getJwks();
     const { payload } = await jwtVerify(token, jwks, {
       issuer: cfg.issuer,
-      ...(cfg.a2a.audience ? { audience: cfg.a2a.audience } : {}),
+      audience: cfg.a2a.audience,
     });
     return payload;
   } catch (err) {

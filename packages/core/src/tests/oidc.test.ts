@@ -31,3 +31,20 @@ describe("oidc role mapping", () => {
     expect(mapRole(c, ["anything"])).toBeNull();
   });
 });
+
+describe("oidc A2A audience requirement (prevents audience confusion)", () => {
+  const base = { issuer: "https://kc.example.com/realms/sai", clientId: "sai", roleMapping: {} };
+
+  it("rejects a config that enables A2A without an audience", () => {
+    // Without an audience, ANY realm-signed token (incl. a human's) would authorize A2A —
+    // so enabling a2a without an audience must fail config validation.
+    expect(() => OidcConfigSchema.parse({ ...base, a2a: { enabled: true } })).toThrow(/audience is required/i);
+    expect(() => OidcConfigSchema.parse({ ...base, a2a: { enabled: true, audience: "  " } })).toThrow(/audience is required/i);
+  });
+
+  it("accepts A2A with an audience, and A2A disabled with none", () => {
+    expect(() => OidcConfigSchema.parse({ ...base, a2a: { enabled: true, audience: "sai-a2a" } })).not.toThrow();
+    expect(() => OidcConfigSchema.parse({ ...base, a2a: { enabled: false } })).not.toThrow();
+    expect(() => OidcConfigSchema.parse(base)).not.toThrow(); // a2a omitted entirely
+  });
+});

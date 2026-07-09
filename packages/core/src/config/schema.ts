@@ -323,9 +323,16 @@ export const OidcConfigSchema = z.object({
    *  JWKS. Peers must trust the same issuer. */
   a2a: z.object({
     enabled: z.boolean().default(false),
-    /** Audience requested for / required on A2A service tokens. */
+    /** Audience requested for / required on A2A service tokens. REQUIRED when enabled:
+     *  without it, verifyInboundA2aToken would accept ANY realm-signed token with a
+     *  matching issuer — including a human user's own access/ID token — as an A2A caller
+     *  (audience confusion). The audience is the boundary that distinguishes peer service
+     *  tokens from ordinary human tokens. */
     audience: z.string().optional(),
-  }).default({}),
+  }).default({}).refine(
+    (a) => !a.enabled || (typeof a.audience === "string" && a.audience.trim() !== ""),
+    { message: "auth.oidc.a2a.audience is required when auth.oidc.a2a.enabled is true (prevents A2A audience confusion)" },
+  ),
   /** DEV ONLY: skip TLS certificate verification for the gateway's OUTBOUND OIDC
    *  requests (discovery, token exchange, JWKS) — e.g. a Keycloak behind an
    *  internal/self-signed CA the gateway container doesn't trust. Scoped to OIDC
