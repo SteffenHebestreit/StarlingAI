@@ -14,6 +14,7 @@ import { resolvePathWithinWorkspace } from "../tools/workspace-path.js";
 import { getServedApp, injectBaseHref } from "../tools/serve-app.js";
 import { buildContentDisposition } from "./content-disposition.js";
 import { childLogger } from "../logger.js";
+import { logAudit } from "../audit/logger.js";
 
 const log = childLogger("gateway:workspace");
 
@@ -213,11 +214,29 @@ export function registerWorkspaceRoutes(app: Hono): void {
     }
 
     try {
-      await mkdir(targetDir, { recursive: true });
       const buffer = new Uint8Array(await uploadedFile.arrayBuffer());
+
+      // Fail-closed virus scan BEFORE the file lands in the workspace volume that agents
+      // and the /api/workspace/file serve endpoint read from — the same "every upload is
+      // scanned" contract the document/attachment handlers enforce. This path writes to
+      // the workspace (not the object store) by design, so it scans in place rather than
+      // routing through scanAndStoreUpload. Infected → 422; scanner down/errored → 503.
+      const relativePath = `${subdir}/${safeName}`;
+      try {
+        const { scanBytes } = await import("../storage/scanner.js");
+        const verdict = await scanBytes(buffer);
+        if (!verdict.clean) {
+          logAudit("upload_infected", { key: relativePath, signature: verdict.signature ?? "unknown", route: "workspace/upload" }, { severity: "warn" });
+          return c.json({ error: `Upload rejected — malware detected (${verdict.signature ?? "unknown"}).` }, 422);
+        }
+      } catch (err) {
+        logAudit("upload_scan_failed", { key: relativePath, error: err instanceof Error ? err.message : String(err), route: "workspace/upload" }, { severity: "error" });
+        return c.json({ error: "Upload scanning is temporarily unavailable — please try again." }, 503);
+      }
+
+      await mkdir(targetDir, { recursive: true });
       await writeFile(targetPath, buffer);
 
-      const relativePath = `${subdir}/${safeName}`;
       return c.json({
         workspacePath: `${workspaceRoot}/${subdir}/${safeName}`,
         relativePath,

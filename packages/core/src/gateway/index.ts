@@ -220,9 +220,10 @@ export function createGateway() {
   app.use("*", async (c, next) => {
     const contentLength = c.req.header("Content-Length");
     const maxMultimodalBodyBytes = currentMultimodalConfig().maxUploadBytes ?? maxBodyBytes;
-    // File uploads (/api/multimodal/* and the document-RAG upload) get the larger
-    // multimodal limit; everything else stays on the small JSON-body limit.
-    const isUpload = c.req.path.startsWith("/api/multimodal/") || c.req.path === "/api/documents";
+    // File uploads (/api/multimodal/*, the document-RAG upload, and the workspace
+    // upload) get the larger multimodal limit; everything else stays on the small
+    // JSON-body limit.
+    const isUpload = c.req.path.startsWith("/api/multimodal/") || c.req.path === "/api/documents" || c.req.path === "/api/workspace/upload";
     const limit = isUpload ? maxMultimodalBodyBytes : maxBodyBytes;
     if (contentLength && Number(contentLength) > limit) {
       return c.json({ error: "Request body too large" }, 413);
