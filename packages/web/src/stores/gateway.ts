@@ -700,6 +700,12 @@ export const useGatewayStore = defineStore("gateway", () => {
 
   const connected = ref(false);
   const connecting = ref(false);
+  // True when the gateway reports the primary model endpoint is unreachable (a
+  // local LM Studio/Ollama that isn't running yet) — the dashboard shows a banner
+  // so a fresh install doesn't just fail every turn with an unexplained empty answer.
+  const modelUnreachable = ref(false);
+  let lastModelHealthAt = 0;
+  const MODEL_HEALTH_INTERVAL_MS = 30_000;
   const currentSessionId = useStorage<string | null>("gc_current_session_id", null);
   const sessions = ref<GatewaySession[]>([]);
   const scenes = ref<SceneInfo[]>([]);
@@ -1027,10 +1033,26 @@ export const useGatewayStore = defineStore("gateway", () => {
     });
   }
 
+  // Poll the authed subsystem health for the primary-model reachability signal.
+  // Failures to reach the health endpoint are ignored (connection issues surface
+  // elsewhere) — only a definitive "unavailable" from the gateway flips the flag.
+  async function checkModelHealth(): Promise<void> {
+    lastModelHealthAt = Date.now();
+    try {
+      const res = await authorizedFetch("/api/health/subsystems");
+      const report = await res.json() as { checks?: Array<{ name: string; status: string }> };
+      const model = report.checks?.find((c) => c.name === "primary_model");
+      if (model) modelUnreachable.value = model.status === "unavailable";
+    } catch { /* leave the flag as-is */ }
+  }
+
   function startHeartbeat(): void {
     stopHeartbeat();
+    void checkModelHealth(); // immediate check on (re)connect
     heartbeatTimer = setInterval(async () => {
       if (!connected.value || !ws || ws.readyState !== WebSocket.OPEN) return;
+      // Throttled model-health poll (much slower than the heartbeat itself).
+      if (Date.now() - lastModelHealthAt > MODEL_HEALTH_INTERVAL_MS) void checkModelHealth();
       if (pendingRequestId.value || heartbeatInFlight) return;
       heartbeatInFlight = true;
       try {
@@ -2911,6 +2933,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     wsUrl,
     connected,
     connecting,
+    modelUnreachable,
     authFailed,
     currentSessionId,
     sessions,

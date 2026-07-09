@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { rerankCandidates, type RerankerCandidate } from "../retrieval/reranker.js";
+import { rerankCandidates, _resetRerankerCircuitForTests, type RerankerCandidate } from "../retrieval/reranker.js";
 import * as loaderModule from "../config/loader.js";
 
 const CANDIDATES: RerankerCandidate[] = [
@@ -21,6 +21,7 @@ function withRerankerConfig(reranker: Record<string, unknown>) {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  _resetRerankerCircuitForTests();
 });
 
 describe("rerankCandidates", () => {
@@ -99,6 +100,60 @@ describe("rerankCandidates", () => {
     expect(scores).not.toBeNull();
     expect(scores!.get("b")).toBeCloseTo(0.95, 5);
     expect(scores!.get("a")).toBeCloseTo(0.2, 5);
+    spy.mockRestore();
+  });
+});
+
+describe("rerankCandidates — circuit breaker", () => {
+  it("stops calling the reranker after repeated failures, then retries post-cooldown", async () => {
+    _resetRerankerCircuitForTests();
+    const spy = withRerankerConfig({ enabled: true, mode: "tei", baseUrl: "http://reranker:80", timeoutMs: 50 });
+    // Reranker unreachable: every attempt throws (network refusal / abort).
+    const fetchMock = vi.fn(async () => { throw new Error("ECONNREFUSED"); });
+    vi.stubGlobal("fetch", fetchMock);
+
+    // 3 consecutive failures open the circuit (threshold = 3).
+    for (let i = 0; i < 3; i++) {
+      expect(await rerankCandidates("q", CANDIDATES)).toBeNull();
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+
+    // Circuit now OPEN — further calls short-circuit without touching fetch.
+    expect(await rerankCandidates("q", CANDIDATES)).toBeNull();
+    expect(await rerankCandidates("q", CANDIDATES)).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(3); // no new attempts while open
+
+    spy.mockRestore();
+  });
+
+  it("a success resets the failure count", async () => {
+    _resetRerankerCircuitForTests();
+    const spy = withRerankerConfig({ enabled: true, mode: "tei", baseUrl: "http://reranker:80", timeoutMs: 50 });
+    let calls = 0;
+    const fetchMock = vi.fn(async () => {
+      calls += 1;
+      if (calls <= 2) throw new Error("ECONNREFUSED"); // 2 failures (below threshold)
+      return new Response(JSON.stringify([{ index: 0, score: 3 }, { index: 1, score: 1 }]), {
+        status: 200, headers: { "content-type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await rerankCandidates("q", CANDIDATES); // fail 1
+    await rerankCandidates("q", CANDIDATES); // fail 2
+    const ok = await rerankCandidates("q", CANDIDATES); // success → resets counter
+    expect(ok).not.toBeNull();
+
+    // Two more failures would NOT open the circuit yet (counter was reset by the success).
+    calls = 0; // force failures again
+    const failMock = vi.fn(async () => { throw new Error("ECONNREFUSED"); });
+    vi.stubGlobal("fetch", failMock);
+    await rerankCandidates("q", CANDIDATES);
+    await rerankCandidates("q", CANDIDATES);
+    await rerankCandidates("q", CANDIDATES); // 3rd consecutive fail → opens now
+    await rerankCandidates("q", CANDIDATES); // short-circuited
+    expect(failMock).toHaveBeenCalledTimes(3);
+
     spy.mockRestore();
   });
 });

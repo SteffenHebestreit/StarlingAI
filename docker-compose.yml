@@ -91,6 +91,12 @@ services:
     volumes:
       - gc-data:/data
       - ./starlingai.json:/config/starlingai.json:ro
+      # The repo IS the workspace: the self-improvement agents (swarm_maintainer,
+      # git_developer) edit config/workspace shards and run git here, so this mount
+      # is intentionally broad. Secrets + VCS internals that live inside it (.env,
+      # .starlingai/credentials.enc, .git) are NOT reachable by the swarm's file
+      # tools — read_file/list refuse them via a denylist (tools/filesystem.ts
+      # isSensitiveWorkspacePath), so prompt injection can't exfiltrate them.
       - .:/workspace
       # NOTE: the raw docker socket is deliberately NOT mounted here anymore. All
       # sandbox/sub-agent/serve_app container ops go through docker-socket-proxy

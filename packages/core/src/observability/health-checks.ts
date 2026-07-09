@@ -223,11 +223,57 @@ async function checkEngram(): Promise<SubsystemCheck> {
   }
 }
 
+/**
+ * Primary chat-model reachability. The #1 first-run confusion is a stack that
+ * boots "healthy" while the model endpoint (a local LM Studio / Ollama the user
+ * hasn't started yet) is unreachable — so every turn fails with an empty answer
+ * and no explanation. Actively probe the OpenAI-compatible endpoint's /models so
+ * the dashboard can surface "no model endpoint reachable — connect a provider".
+ * Hosted providers (Anthropic) are not probed (reachability is a given; a bad key
+ * surfaces on the first turn), so we never false-alarm on them.
+ */
+async function checkPrimaryModel(): Promise<SubsystemCheck> {
+  try {
+    const [{ resolveProviderEndpoint }, { getConfig }] = await Promise.all([
+      import("../providers/index.js"),
+      import("../config/loader.js"),
+    ]);
+    const cfg = getConfig();
+    const endpoint = resolveProviderEndpoint(cfg.agents.defaults.model, cfg);
+    if (endpoint.providerId === "anthropic") {
+      return { name: "primary_model", status: "ok", detail: "hosted provider (Anthropic) — not actively probed" };
+    }
+    const baseUrl = endpoint.baseUrl?.replace(/\/$/, "");
+    if (!baseUrl) {
+      return { name: "primary_model", status: "unavailable", detail: "no model endpoint reachable — connect a provider" };
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3000);
+    try {
+      const res = await fetch(`${baseUrl}/models`, {
+        headers: endpoint.apiKey ? { Authorization: `Bearer ${endpoint.apiKey}` } : {},
+        signal: controller.signal,
+      });
+      // Any HTTP response means the endpoint is UP. 401/403 = up but the key is
+      // rejected (degraded, not down). 404 (no /models route) still proves reach.
+      if (res.status === 401 || res.status === 403) {
+        return { name: "primary_model", status: "degraded", detail: `endpoint reachable but rejected the API key (${res.status})` };
+      }
+      return { name: "primary_model", status: "ok", detail: `${endpoint.model} endpoint reachable (${res.status})` };
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch (err) {
+    return { name: "primary_model", status: "unavailable", detail: `no model endpoint reachable — connect a provider (${summarize(err)})` };
+  }
+}
+
 /** Run all subsystem probes in parallel and aggregate. */
 export async function runSubsystemChecks(): Promise<SubsystemHealth> {
   const checks = await Promise.all([
     Promise.resolve(checkEventLoop()),
     Promise.resolve(checkProviderActivity()),
+    checkPrimaryModel(),
     checkEmbeddings(),
     checkVectorStore(),
     checkGraph(),

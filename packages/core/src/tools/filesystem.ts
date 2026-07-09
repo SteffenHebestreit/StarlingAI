@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync, appendFileSync, readdirSync, statSync, mkdirSync, existsSync, unlinkSync } from "node:fs";
-import { basename, resolve, extname, join } from "node:path";
+import { basename, resolve, extname, join, relative } from "node:path";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
 import { logAudit } from "../audit/logger.js";
@@ -76,9 +76,34 @@ const MIME_TYPES: Record<string, string> = {
   ".zip": "application/zip",
 };
 
+// Secrets + VCS internals that live INSIDE the workspace (the repo is bind-mounted
+// as the workspace so the swarm can self-improve) but must never be read back by a
+// file tool — prompt injection could otherwise coax read_file/search into
+// exfiltrating them. The gateway process already holds the .env values it needs via
+// env_file, and git operations use git COMMANDS, not raw object reads, so nothing
+// legitimate is lost. `.env.example` is the shipped public template — allowed.
+const SENSITIVE_READ_PATTERNS: RegExp[] = [
+  /^\.env(\..+)?$/,             // .env, .env.local, .env.production, …
+  /(^|\/)\.starlingai(\/|$)/,   // credential store, jwt secret, audit log, durable memory
+  /(^|\/)\.git(\/|$)/,          // VCS internals (objects, refs, hooks, config)
+  /(^|\/)credentials\.enc$/,
+  /(^|\/)\.jwt_secret$/,
+];
+
+/** True when a workspace-relative path points at a secret / VCS-internal file. */
+export function isSensitiveWorkspacePath(relativePath: string): boolean {
+  const rel = relativePath.replace(/\\/g, "/").replace(/^\.\//, "");
+  if (rel === ".env.example") return false; // public template
+  return SENSITIVE_READ_PATTERNS.some((re) => re.test(rel));
+}
+
 function guardPath(path: string, workspacePath: string): { safe: boolean; resolved: string } {
   try {
     const { resolved } = resolvePathWithinWorkspace(path, workspacePath);
+    // Bounded to the workspace, but still refuse secrets / VCS internals.
+    if (isSensitiveWorkspacePath(relative(workspacePath, resolved))) {
+      return { safe: false, resolved };
+    }
     return { safe: true, resolved };
   } catch {
     return { safe: false, resolved: resolve(workspacePath, path.replace(/^\//, "")) };

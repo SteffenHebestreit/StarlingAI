@@ -331,3 +331,36 @@ describe("write_file regeneration-churn detection (structural)", () => {
     expect(tracker.count).toBe(0);
   });
 });
+describe("filesystem tools — sensitive-path denylist (#9)", () => {
+  const tempDir = mkdtempSync(join(tmpdir(), "starlingai-fs-denylist-"));
+
+  beforeAll(async () => {
+    writeFileSync(join(tempDir, ".env"), "SAI_JWT_SECRET=supersecret\nPOSTGRES_PASSWORD=hunter2\n");
+    mkdirSync(join(tempDir, ".starlingai"), { recursive: true });
+    writeFileSync(join(tempDir, ".starlingai", "credentials.enc"), "encrypted-blob");
+    writeFileSync(join(tempDir, "notes.md"), "public notes\n");
+    await import("../tools/filesystem.js");
+  });
+
+  it("read_file refuses secrets/VCS internals but allows normal files", async () => {
+    const { getTool } = await import("../tools/registry.js");
+    const read = getTool("read_file")!;
+    const ctx = { sessionId: "s-denylist", workspacePath: tempDir };
+    expect((await read.execute({ path: ".env" }, ctx)).success).toBe(false);
+    expect((await read.execute({ path: ".starlingai/credentials.enc" }, ctx)).success).toBe(false);
+    // Normal workspace files are unaffected.
+    expect((await read.execute({ path: "notes.md" }, ctx)).success).toBe(true);
+  });
+
+  it("isSensitiveWorkspacePath classifies secrets, VCS internals, and the public template", async () => {
+    const { isSensitiveWorkspacePath } = await import("../tools/filesystem.js");
+    expect(isSensitiveWorkspacePath(".env")).toBe(true);
+    expect(isSensitiveWorkspacePath(".env.local")).toBe(true);
+    expect(isSensitiveWorkspacePath(".starlingai/credentials.enc")).toBe(true);
+    expect(isSensitiveWorkspacePath(".starlingai/memory/user/x.json")).toBe(true);
+    expect(isSensitiveWorkspacePath(".git/config")).toBe(true);
+    expect(isSensitiveWorkspacePath(".env.example")).toBe(false); // public template
+    expect(isSensitiveWorkspacePath("src/index.ts")).toBe(false);
+    expect(isSensitiveWorkspacePath("workspace/agents/00-platform.jsonc")).toBe(false);
+  });
+});

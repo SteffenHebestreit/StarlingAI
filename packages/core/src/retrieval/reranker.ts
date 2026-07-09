@@ -3,6 +3,37 @@ import { childLogger } from "../logger.js";
 
 const log = childLogger("retrieval:reranker");
 
+// ── Circuit breaker ────────────────────────────────────────────────────────────
+// When the reranker sidecar is absent/unhealthy (the common case on a no-GPU
+// install, where the `reranker` service only runs under the rag profile), every
+// rerank call would otherwise eat the full timeout (default 15s) before falling
+// back — stalling FIRST TOKEN on every document-RAG query. After a short run of
+// failures we stop attempting for a cooldown; the first success closes it again.
+const RERANKER_FAILURE_THRESHOLD = 3;
+const RERANKER_COOLDOWN_MS = 60_000;
+let _consecutiveFailures = 0;
+let _circuitOpenUntil = 0;
+
+function recordRerankerSuccess(): void {
+  _consecutiveFailures = 0;
+  _circuitOpenUntil = 0;
+}
+
+function recordRerankerFailure(now: number): void {
+  _consecutiveFailures += 1;
+  if (_consecutiveFailures >= RERANKER_FAILURE_THRESHOLD && _circuitOpenUntil <= now) {
+    _circuitOpenUntil = now + RERANKER_COOLDOWN_MS;
+    log.warn({ failures: _consecutiveFailures, cooldownMs: RERANKER_COOLDOWN_MS },
+      "Reranker circuit opened — skipping rerank (keeping base order) until cooldown elapses");
+  }
+}
+
+/** Test-only: reset the circuit-breaker state. */
+export function _resetRerankerCircuitForTests(): void {
+  _consecutiveFailures = 0;
+  _circuitOpenUntil = 0;
+}
+
 export interface RerankerCandidate {
   id: string;
   title: string;
@@ -30,15 +61,23 @@ export async function rerankCandidates(
   const reranker = getConfig().retrieval.reranker;
   if (!reranker.enabled || candidates.length < 2) return null;
 
+  // Circuit open → skip the (stalling) call and keep base order until cooldown.
+  const now = Date.now();
+  if (now < _circuitOpenUntil) return null;
+
   const limited = candidates.slice(0, reranker.topK);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), reranker.timeoutMs);
 
   try {
-    return reranker.mode === "llm"
+    const result = reranker.mode === "llm"
       ? await rerankViaLlm(query, limited, reranker, controller.signal)
       : await rerankViaTei(query, limited, reranker, controller.signal);
+    recordRerankerSuccess();
+    return result;
   } catch (error) {
+    // Thrown = timeout (abort) or network refusal — the stall/unreachable signal.
+    recordRerankerFailure(Date.now());
     log.warn({ error, mode: reranker.mode }, "Reranker unavailable — keeping base routing order");
     return null;
   } finally {

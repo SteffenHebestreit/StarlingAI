@@ -5,6 +5,19 @@
     <div class="bg-orb bg-orb-1" aria-hidden="true" />
     <div class="bg-orb bg-orb-2" aria-hidden="true" />
 
+    <!-- Model-unreachable banner: the gateway can't reach the configured model
+         endpoint (e.g. a local LM Studio / Ollama that isn't running yet), so turns
+         would fail with an unexplained empty answer. Auto-clears once it's up. -->
+    <div
+      v-if="gateway.modelUnreachable"
+      role="alert"
+      class="relative z-20 shrink-0 border-b border-amber-500/40 bg-amber-500/15 px-4 py-2 text-center text-sm text-amber-100 backdrop-blur-lg"
+    >
+      No model endpoint reachable — the swarm can't answer until a provider is connected.
+      Start your local model server (LM&nbsp;Studio / Ollama) or set a provider in
+      <code class="font-mono">.env</code>; this clears automatically once it responds.
+    </div>
+
     <!-- Header -->
     <header class="app-header relative z-10 shrink-0 px-3 py-3 backdrop-blur-lg sm:px-5">
 

@@ -114,27 +114,45 @@ interface StoredWorkspaceMemoryRecord {
 }
 
 // ── LRU cache for durable memory reads ────────────────────────────────────
-// Keyed on `${scope}:${dir}` — invalidated whenever the dir mtime changes
-// (file add/remove) or when `storeDurableMemoryRecord` explicitly bumps the
-// version (covers in-place overwrites where dir mtime may not move).
+// Keyed on `${scope}:${dir}`. Validity is a filesystem FINGERPRINT (json file
+// count + newest mtime + total bytes), computed by statting the record files.
+// A per-process version counter used to cover in-place overwrites, but it was
+// invisible to a SECOND process (another gateway sharing the volume): its dir
+// mtime may not move on an in-place file rewrite, so it served stale memory.
+// The fingerprint moves whenever any file is added, removed, or overwritten —
+// by this process OR another — so the cache invalidates correctly cross-process.
+// storeDurableMemoryRecord also drops the entry immediately on write.
 
 interface DurableCacheEntry {
-  mtimeMs: number;
-  version: number;
+  fingerprint: string;
   records: MemoryRecord[];
   embeddings: Map<string, Float32Array>;
 }
 
 const _durableCache = new Map<string, DurableCacheEntry>();
-const _durableVersionBump = new Map<string, number>();
 
 function _cacheKey(scope: DurableMemoryScope, dir: string): string {
   return `${scope}:${dir}`;
 }
 
-function _bumpCacheVersion(key: string): void {
-  _durableVersionBump.set(key, (_durableVersionBump.get(key) ?? 0) + 1);
+/** Drop the cached entry so the next read re-scans (called right after a write). */
+function _invalidateDurableCache(key: string): void {
   _durableCache.delete(key);
+}
+
+/** Cheap change-detector over a dir's json record files: `count:newestMtimeMs:totalBytes`.
+ *  Stat-only (no content reads); an in-place overwrite bumps a file's mtime and/or size. */
+function _computeDurableFingerprint(dir: string, files: string[]): string {
+  let newestMtimeMs = 0;
+  let totalBytes = 0;
+  for (const f of files) {
+    try {
+      const st = statSync(resolve(dir, f));
+      if (st.mtimeMs > newestMtimeMs) newestMtimeMs = st.mtimeMs;
+      totalBytes += st.size;
+    } catch { /* file vanished mid-scan — ignore */ }
+  }
+  return `${files.length}:${newestMtimeMs}:${totalBytes}`;
 }
 
 // ── Auto-compaction tracking ──────────────────────────────────────────────
@@ -554,7 +572,7 @@ function updateDurableMemoryRecordByKey(
 
   atomicWriteFile(filePath, JSON.stringify(updated, null, 2));
   const cacheKey = _cacheKey(scope, dir);
-  _bumpCacheVersion(cacheKey);
+  _invalidateDurableCache(cacheKey);
   const result = workspaceStoredToRecord(updated);
 
   // Fan the (possibly re-computed) vector out to the graph node, mirroring the
@@ -579,7 +597,7 @@ function deleteDurableMemoryRecordByKey(
   const filePath = join(dir, `${safeKey(key)}.json`);
   if (!existsSync(filePath)) return false;
   rmSync(filePath, { force: true });
-  _bumpCacheVersion(_cacheKey(scope, dir));
+  _invalidateDurableCache(_cacheKey(scope, dir));
   // The MemGraph write-through node (if any) is intentionally left in place —
   // there is no durable→graph delete path, and an orphaned node is harmless to
   // the read-only inspector view.
@@ -593,22 +611,21 @@ function readDurableMemoryRecords(scope: DurableMemoryScope, workspacePath: stri
 function _readDurableCached(scope: DurableMemoryScope, workspacePath: string): DurableCacheEntry {
   const dir = memoryDirForScope(scope, workspacePath);
   if (!existsSync(dir)) {
-    return { mtimeMs: 0, version: 0, records: [], embeddings: new Map() };
+    return { fingerprint: "", records: [], embeddings: new Map() };
   }
 
   const key = _cacheKey(scope, dir);
-  const expectedVersion = _durableVersionBump.get(key) ?? 0;
-  let mtimeMs = 0;
-  try { mtimeMs = statSync(dir).mtimeMs; } catch { /* ignore */ }
+  const files = readdirSync(dir).filter((f) => f.endsWith(".json"));
+  const fingerprint = _computeDurableFingerprint(dir, files);
 
   const cached = _durableCache.get(key);
-  if (cached && cached.mtimeMs === mtimeMs && cached.version === expectedVersion) {
+  if (cached && cached.fingerprint === fingerprint) {
     return cached;
   }
 
   const records: MemoryRecord[] = [];
   const embeddings = new Map<string, Float32Array>();
-  for (const file of readdirSync(dir).filter((f) => f.endsWith(".json"))) {
+  for (const file of files) {
     try {
       const stored = parseStoredWorkspaceMemory(readFileSync(resolve(dir, file), "utf-8"));
       if (!stored) continue;
@@ -622,15 +639,14 @@ function _readDurableCached(scope: DurableMemoryScope, workspacePath: string): D
     } catch { /* skip malformed */ }
   }
 
-  const entry: DurableCacheEntry = { mtimeMs, version: expectedVersion, records, embeddings };
+  const entry: DurableCacheEntry = { fingerprint, records, embeddings };
   _durableCache.set(key, entry);
   return entry;
 }
 
 /** Internal — exposed for tests. Clears all in-process caches. */
 export function _clearDurableMemoryCaches(): void {
-  _durableCache.clear();
-  _durableVersionBump.clear();
+  _durableCache.clear();
   _writeCounters.clear();
 }
 
@@ -681,7 +697,7 @@ function storeDurableMemoryRecord(
   const priorRecords = readDurableMemoryRecords(scope, workspacePath);
 
   atomicWriteFile(filePath, JSON.stringify(stored, null, 2));
-  _bumpCacheVersion(cacheKey);
+  _invalidateDurableCache(cacheKey);
   const result = workspaceStoredToRecord(stored);
 
   // Temporal supersession: a new fact about the same explicit subject (with
@@ -730,7 +746,7 @@ async function _refreshDurableEmbedding(filePath: string, cacheKey: string, text
       if (parsed && `${parsed.subject ?? ""}\n${parsed.content}` === text) {
         const updated: StoredWorkspaceMemoryRecord = { ...parsed, embedding: Array.from(vec) };
         atomicWriteFile(filePath, JSON.stringify(updated, null, 2));
-        _bumpCacheVersion(cacheKey);
+        _invalidateDurableCache(cacheKey);
       }
     }
     return vec;
@@ -789,7 +805,7 @@ function supersedeOlderSubjectFacts(
         bySupersedingKey: freshKey,
       }, { severity: "info" });
     }
-    if (changed) _bumpCacheVersion(cacheKey);
+    if (changed) _invalidateDurableCache(cacheKey);
   } catch (err) {
     log.debug({ err }, "Subject supersession skipped — non-critical");
   }
@@ -837,7 +853,7 @@ export async function refreshMissingDurableEmbeddings(
         } catch { /* skip */ }
       }
     }
-    if (refreshed > 0) _bumpCacheVersion(_cacheKey(scope, dir));
+    if (refreshed > 0) _invalidateDurableCache(_cacheKey(scope, dir));
     results.push({ scope, refreshed });
   }
   return results;
