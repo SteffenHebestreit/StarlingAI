@@ -210,9 +210,16 @@ export async function authenticatedUser(authHeader: string | null | undefined): 
       if (!record) return null; // account removed/disabled in the extension store
       return { username, role: normalizeRole(record.role), displayName: record.displayName };
     }
-    const record = getConfig().auth.users.find((u) => u.username === username);
-    if (!record) return null; // account deleted from config
-    return { username, role: normalizeRole(record.role), displayName: record.displayName };
+    // OIDC users are authenticated by the external IdP and are NOT in auth.users[]
+    // (that store backs only the builtin username/password provider). Their session
+    // token was minted from IdP claims validated at the OIDC callback, so those
+    // claims are authoritative — fall through to the token-claims path below rather
+    // than rejecting for "no local account".
+    if (getConfig().auth.provider !== "oidc") {
+      const record = getConfig().auth.users.find((u) => u.username === username);
+      if (!record) return null; // account deleted from config
+      return { username, role: normalizeRole(record.role), displayName: record.displayName };
+    }
   }
 
   return {

@@ -12,7 +12,8 @@
  * for inbound JWKS validation. Discovery is lazy + cached per issuer+clientId.
  */
 import * as oidc from "openid-client";
-import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
+import { Agent, fetch as undiciFetch } from "undici";
+import { createRemoteJWKSet, jwtVerify, customFetch as joseCustomFetch, type JWTPayload } from "jose";
 import { getConfig } from "../config/loader.js";
 import { resolveSecretRef } from "../tools/infrastructure-shared.js";
 import { childLogger } from "../logger.js";
@@ -40,13 +41,38 @@ function oidcConfig(): OidcConfig {
   return cfg;
 }
 
+// DEV-only: a fetch bound to an undici dispatcher that skips TLS verification,
+// used ONLY for OIDC requests when auth.oidc.insecureSkipTlsVerify is set (e.g. a
+// Keycloak behind an internal/self-signed CA the container doesn't trust). Scoped
+// here via customFetch — it never affects the process's other TLS traffic.
+let _insecureDispatcher: Agent | null = null;
+function insecureOidcFetch(): typeof undiciFetch {
+  if (!_insecureDispatcher) _insecureDispatcher = new Agent({ connect: { rejectUnauthorized: false } });
+  const dispatcher = _insecureDispatcher;
+  return ((input, init) => undiciFetch(input, { ...init, dispatcher })) as typeof undiciFetch;
+}
+
 /** Discover (and cache) the issuer configuration for the active OIDC settings. */
 export async function getOidcDiscovery(): Promise<oidc.Configuration> {
   const cfg = oidcConfig();
   const clientSecret = cfg.clientSecret ? resolveSecretRef(cfg.clientSecret) : undefined;
   const key = `${cfg.issuer}|${cfg.clientId}`;
   if (_discovery && _discovery.key === key) return _discovery.config;
-  const config = await oidc.discovery(new URL(cfg.issuer), cfg.clientId, clientSecret);
+  const insecure = cfg.insecureSkipTlsVerify;
+  const config = await oidc.discovery(
+    new URL(cfg.issuer),
+    cfg.clientId,
+    clientSecret,
+    undefined,
+    // @ts-expect-error undici fetch is fetch-compatible; the type signatures differ slightly
+    insecure ? { [oidc.customFetch]: insecureOidcFetch() } : undefined,
+  );
+  if (insecure) {
+    // Reuse the insecure fetch for the token + JWKS requests the Configuration makes.
+    // @ts-expect-error undici fetch is fetch-compatible; the type signatures differ slightly
+    config[oidc.customFetch] = insecureOidcFetch();
+    log.warn({ issuer: cfg.issuer }, "OIDC TLS verification DISABLED (auth.oidc.insecureSkipTlsVerify) — DEV ONLY");
+  }
   _discovery = { key, config };
   log.info({ issuer: cfg.issuer, clientId: cfg.clientId }, "OIDC issuer discovered");
   return config;
@@ -212,7 +238,11 @@ async function getJwks(): Promise<ReturnType<typeof createRemoteJWKSet>> {
   const jwksUri = config.serverMetadata().jwks_uri;
   if (!jwksUri) throw new Error("OIDC issuer advertises no jwks_uri");
   if (_jwks && _jwks.key === jwksUri) return _jwks.jwks;
-  const jwks = createRemoteJWKSet(new URL(jwksUri));
+  const jwks = createRemoteJWKSet(
+    new URL(jwksUri),
+    // @ts-expect-error undici fetch is fetch-compatible; the type signatures differ slightly
+    oidcConfig().insecureSkipTlsVerify ? { [joseCustomFetch]: insecureOidcFetch() } : undefined,
+  );
   _jwks = { key: jwksUri, jwks };
   return jwks;
 }

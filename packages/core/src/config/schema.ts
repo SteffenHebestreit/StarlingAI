@@ -326,6 +326,13 @@ export const OidcConfigSchema = z.object({
     /** Audience requested for / required on A2A service tokens. */
     audience: z.string().optional(),
   }).default({}),
+  /** DEV ONLY: skip TLS certificate verification for the gateway's OUTBOUND OIDC
+   *  requests (discovery, token exchange, JWKS) — e.g. a Keycloak behind an
+   *  internal/self-signed CA the gateway container doesn't trust. Scoped to OIDC
+   *  calls via a custom fetch; it does NOT disable TLS validation globally.
+   *  Default false; never enable for an internet-facing IdP. Prefer trusting the
+   *  CA (NODE_EXTRA_CA_CERTS) in production. */
+  insecureSkipTlsVerify: z.boolean().default(false),
 });
 
 /**
