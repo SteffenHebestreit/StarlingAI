@@ -216,6 +216,32 @@ describe("looksLikeUnsourcedSpecificClaims — dense specifics without a keyword
     // Only the two years (one category) → below the 2-category bar.
     expect(looksLikeUnsourcedSpecificClaims(prose)).toBe(false);
   });
+
+  // Regression (session 57c99128): a specifics-dense DK-deposit-system answer shipped tool-free with
+  // fabricated specifics (wrong operator, invented deposit amounts). It slipped the guard because the
+  // fact-shape vocabulary was $-and-abbreviated-metric-only: Danish "kr." amounts and spelled-out
+  // "Liter" counted as ZERO tokens, leaving just "90 %" (1 token / 1 category). International currency
+  // (kr) + spelled-out volume (Liter) now register, so it clears the ≥4-token / ≥2-category gate.
+  it("fires on a non-$/non-metric-abbrev specifics-dense answer (kr amounts + spelled-out Liter)", () => {
+    const pfand = "## Das dänische Pfandsystem (Pant)\n"
+      + "Dänemark hat eines der effizientesten Pfandsysteme weltweit – die Rücklaufquote liegt bei über 90 %.\n"
+      + "Einweg-Flaschen und -Dosen aus Plastik oder Metall (meist 0,3–1,5 Liter) sind pfandpflichtig.\n"
+      + "Einweg: typisch kr. 2,50 oder kr. 3,00 pro Stück. Mehrweg: typisch kr. 3,00–8,00 pro Flasche.\n"
+      + "Das System läuft über den zentralen Anbieter, und jeder Händler ist gesetzlich verpflichtet, "
+      + "Pfandflaschen an einem Automaten in nahezu jedem Supermarkt zurückzunehmen.";
+    expect(pfand.trim().length).toBeGreaterThanOrEqual(400);
+    // percent (90 %) + currency (kr. 2,50 / kr. 3,00) + unit (1,5 Liter) → ≥4 tokens across 3 categories.
+    expect(looksLikeUnsourcedSpecificClaims(pfand)).toBe(true);
+  });
+
+  it("recognizes symbol-less currencies in either position without over-firing on prose", () => {
+    // A single stray unit/currency token in ordinary prose must still stay under the multi-token gate.
+    const prose = "Wir sind gestern etwa 5 km gelaufen und haben unterwegs eine Pause gemacht, um die "
+      + "Aussicht zu genießen und kurz durchzuatmen, bevor wir den restlichen Weg entspannt fortsetzten "
+      + "und schließlich zufrieden und ein wenig erschöpft wieder zu Hause ankamen. " + "x".repeat(300);
+    expect(prose.trim().length).toBeGreaterThanOrEqual(400);
+    expect(looksLikeUnsourcedSpecificClaims(prose)).toBe(false); // one unit token → 1 category → no fire
+  });
 });
 
 // answerAssertsSpecifics (#5): the SHORT-answer branch of the URL-not-fetched guard. A ~300-char

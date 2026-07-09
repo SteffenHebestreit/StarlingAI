@@ -196,10 +196,33 @@ export function userMessageCarriesActionableUrl(userMessage: string): boolean {
  * longer matches and no longer double-counts against the year regex. Consumed by the
  * ungroundedFactualAnswerGuard force-research gate. Pure/exported.
  */
+// The currency/unit vocabularies are deliberately INTERNATIONAL: the detector claims to be
+// language-independent ("identical in any language"), so it must not privilege $/€/abbreviated-
+// metric over the rest of the world. A prior $-and-metric-only vocabulary counted a Danish-krone,
+// spelled-out-"Liter" answer as a single token ("90 %") and let it slip the ungrounded-answer guard
+// (a fabricated DK deposit-system explanation shipped with zero research). These are fact-SHAPE
+// tokens, not topic keywords — no subject/language term is encoded.
+const CURRENCY_SYMBOLS = "€$£¥₹₩₽₺₪₴฿₫₦₱";
+// Inline currency codes/abbreviations that appear on EITHER side of the amount ("kr. 2,50" / "82 USD").
+// Curated to distinctive currency tokens to avoid colliding with common words / unit abbreviations
+// (e.g. "ft" is left to the imperial UNIT category, not Hungarian forint).
+const CURRENCY_CODES = "kr|dkk|sek|nok|isk|øre|zł|pln|kč|czk|huf|ron|bgn|uah|rub|try|eur|usd|gbp|jpy|chf|cny|cad|aud|nzd|mxn|brl|zar|krw|sgd|hkd|inr|ils";
+// Abbreviated metric/tech PLUS spelled-out volume/mass/imperial units (common in prose and in
+// non-English answers, e.g. "1,5 Liter"). Multi-char only — bare single letters (l/g/t/m/w) are
+// omitted to avoid prose false positives; the ≥2-category / ≥4-token gate is the real filter.
+const UNIT_TOKENS = "mm|cm|km|kg|mg|ghz|mhz|khz|hz|mah|ma|kw|kwh|wh|nm|px|mb|gb|tb|fps|rpm|°c|°f"
+  + "|liter|litre|liters|litres|ml|cl|dl|hl|oz|lb|lbs|gal|gallon|gallons|inch|inches|mile|miles"
+  + "|meter|metre|meters|metres|gram|grams|tonne|tonnes";
+
 const SPECIFICITY_CATEGORIES: Record<string, RegExp> = {
   percent: /\d[\d.,]*\s?%/g,                                                       // 3,75 %
-  currency: /[€$£¥]\s?\d[\d.,]*|\b\d[\d.,]*\s?(?:eur|usd|gbp|jpy|chf)\b/gi,        // currency amounts
-  unit: /\b\d[\d.,]*\s?(?:mm|cm|km|kg|mg|ghz|mhz|khz|hz|mah|ma|kw|kwh|wh|nm|px|mb|gb|tb|fps|rpm|°c|°f)\b/gi,
+  currency: new RegExp(
+    `[${CURRENCY_SYMBOLS}]\\s?\\d[\\d.,]*`                                         // €5 / $ 1,200
+    + `|\\b(?:${CURRENCY_CODES})\\.?\\s?\\d[\\d.,]*`                               // kr. 2,50 / USD 5
+    + `|\\d[\\d.,]*\\s?(?:${CURRENCY_CODES})\\b`,                                  // 2,50 kr / 82 USD
+    "gi",
+  ),
+  unit: new RegExp(`\\b\\d[\\d.,]*\\s?(?:${UNIT_TOKENS})\\b`, "gi"),               // 1,5 Liter / 20 kHz
   voltage: /\b\d[\d.,]*\s?[VW]\b/g,                                                // volts/watts (case-sensitive)
   year: /\b(?:19|20)\d{2}\b/g,                                                     // calendar years
   date: /\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b/g,                                    // dd.mm.yyyy
