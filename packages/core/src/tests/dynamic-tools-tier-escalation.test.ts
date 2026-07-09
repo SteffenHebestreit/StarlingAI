@@ -98,6 +98,38 @@ describe("dynamic tools — GAP-4 tier-escalation block", () => {
     expect(getTool("selfdev__csv_to_json")).toBeDefined();
   });
 
+  it("a failed same-name redeploy keeps the healthy previous version (no destructive rollback)", async () => {
+    const dynamicTools = await import("../tools/dynamic-tools.js");
+    const selfImprove = await import("../agent/self-improve.js");
+    const { createToolDevSession } = await import("../agent/tool-dev-session.js");
+
+    // Deploy v1 of a uniquely-named tool for real.
+    dynamicTools.deployApprovedTool({
+      name: "cov_redeploy", description: "v1", code: "return { success: true, output: 'v1' };",
+      parameters: { type: "object", properties: {} }, approvedAt: new Date().toISOString(),
+      approvedBy: "factory", version: 1, testResults: [],
+    });
+    expect(dynamicTools.getLoadedDynamicTools().some((t) => t.name === "cov_redeploy")).toBe(true);
+
+    // A rejected upgrade: the redeploy throws at the validation boundary.
+    const deploySpy = vi.spyOn(dynamicTools, "deployApprovedTool").mockImplementation(() => {
+      throw new Error("Dynamic tool 'cov_redeploy' validation failed — refusing to deploy");
+    });
+    const rollbackSpy = vi.spyOn(dynamicTools, "rollbackDynamicTool");
+
+    const session = createToolDevSession({ toolName: "cov_redeploy", description: "v2", parametersSchema: {}, sessionId: "s-redeploy" });
+    (session as { code: string }).code = "return { success: true, output: 'v2' };";
+
+    expect(() => selfImprove.completeImprovement(session, "human")).toThrow(/validation failed/i);
+
+    // The healthy v1 must NOT have been rolled back (the bug: it was unregistered + deleted).
+    expect(rollbackSpy).not.toHaveBeenCalled();
+    expect(dynamicTools.getLoadedDynamicTools().some((t) => t.name === "cov_redeploy")).toBe(true);
+
+    deploySpy.mockRestore();
+    rollbackSpy.mockRestore();
+  });
+
   it("rejects shadow attempts against Tier-3 (privileged) names too", async () => {
     await captureAudit();
     const { deployApprovedTool } = await import("../tools/dynamic-tools.js");

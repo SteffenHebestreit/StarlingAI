@@ -30,7 +30,7 @@ import {
   markRejected,
   type ToolDevSession,
 } from "./tool-dev-session.js";
-import { deployApprovedTool, rollbackDynamicTool, type DynamicToolDefinition } from "../tools/dynamic-tools.js";
+import { deployApprovedTool, rollbackDynamicTool, getLoadedDynamicTools, type DynamicToolDefinition } from "../tools/dynamic-tools.js";
 
 const log = childLogger("self-improve");
 
@@ -292,13 +292,17 @@ export function completeImprovement(
     devSessionId: session.id,
   };
 
-  // Deploy the tool. If registration throws, roll back any partial registration
-  // so a failed deploy can't leave an orphaned/broken tool in the registry —
-  // previously a throwing deployApprovedTool had no cleanup path.
+  // Deploy the tool. deployApprovedTool validates + writes the bundle BEFORE it touches
+  // the registry, so a throwing deploy leaves any previously-deployed version fully
+  // intact. Roll back ONLY a FRESH tool this deploy might have partially created — NOT
+  // the healthy previous version of a same-name REDEPLOY (rolling that back would delete
+  // a working tool from the running system just because a rejected upgrade was refused,
+  // e.g. on a tier-escalation / base-name-shadow validation failure).
+  const hadPreviousVersion = getLoadedDynamicTools().some((t) => t.name === session.toolName);
   try {
     deployApprovedTool(def);
   } catch (err) {
-    rollbackDynamicTool(session.toolName);
+    if (!hadPreviousVersion) rollbackDynamicTool(session.toolName);
     logAudit("self_improvement_deploy_failed", {
       toolName: session.toolName,
       devSessionId: session.id,
