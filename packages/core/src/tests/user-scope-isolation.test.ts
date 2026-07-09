@@ -30,10 +30,19 @@ const editable = (name: string) => ({
 describe("user-scope partitioning", () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it("safeUserSegment sanitizes filesystem-unsafe characters", () => {
-    expect(safeUserSegment("alice")).toBe("alice");
-    expect(safeUserSegment("a/b@c..d")).toBe("a_b_c__d");
-    expect(safeUserSegment("   ")).toBe("_");
+  it("safeUserSegment is filesystem-safe, injective, and readable-prefixed", () => {
+    // Segment = a sanitized readable prefix + a hash of the RAW id.
+    expect(safeUserSegment("alice")).toMatch(/^alice-[0-9a-f]{16}$/);
+    expect(safeUserSegment("a/b@c..d")).toMatch(/^a_b_c__d-[0-9a-f]{16}$/);
+    expect(safeUserSegment("   ")).toMatch(/^u-[0-9a-f]{16}$/); // empty prefix → "u"
+    // Deterministic.
+    expect(safeUserSegment("alice")).toBe(safeUserSegment("alice"));
+    // INJECTIVE: distinct-but-similar valid ids that the old lossy replace collapsed to one
+    // bucket now map to DISTINCT buckets (the fix — no more cross-user memory/persona leak).
+    expect(safeUserSegment("alice.smith")).not.toBe(safeUserSegment("alice_smith"));
+    expect(safeUserSegment("first.last")).not.toBe(safeUserSegment("first@last"));
+    // Never a Windows reserved device name.
+    expect(safeUserSegment("CON")).not.toMatch(/^CON$/i);
   });
 
   const base = resolve("/tmp/sai-scope-base"); // normalized once (cross-platform)
@@ -45,14 +54,15 @@ describe("user-scope partitioning", () => {
     });
   });
 
-  it("auth ON + userId partitions into <base>/users/<id>", () => {
+  it("auth ON + userId partitions into <base>/users/<segment>", () => {
     mockAuth(true);
     runWithRequestContext({ userId: "alice" }, () => {
-      expect(userScopedDir(base)).toBe(resolve(base, "users", "alice"));
+      expect(userScopedDir(base)).toBe(resolve(base, "users", safeUserSegment("alice")));
     });
-    runWithRequestContext({ userId: "bob" }, () => {
-      expect(userScopedDir(base)).toBe(resolve(base, "users", "bob"));
-    });
+    // Distinct users get distinct buckets.
+    const a = runWithRequestContext({ userId: "alice" }, () => userScopedDir(base));
+    const b = runWithRequestContext({ userId: "bob" }, () => userScopedDir(base));
+    expect(a).not.toBe(b);
   });
 
   it("auth ON without an authenticated user falls back to the shared path", () => {
@@ -62,7 +72,16 @@ describe("user-scope partitioning", () => {
 
   it("accepts an explicit userId for background sweeps", () => {
     mockAuth(true);
-    expect(userScopedDir(base, "carol")).toBe(resolve(base, "users", "carol"));
+    expect(userScopedDir(base, "carol")).toBe(resolve(base, "users", safeUserSegment("carol")));
+  });
+
+  it("uses a pre-resolved segment VERBATIM (sweep round-trip must not double-hash)", () => {
+    mockAuth(true);
+    const segment = safeUserSegment("dave"); // an existing on-disk bucket name
+    runWithRequestContext({ userScopeSegment: segment }, () => {
+      // Resolves to that exact bucket — NOT safeUserSegment(segment) (a double hash).
+      expect(userScopedDir(base)).toBe(resolve(base, "users", segment));
+    });
   });
 });
 
@@ -107,7 +126,7 @@ describe("personality: global default + per-user override", () => {
       // 3. Alice saves her own override.
       saveMainAssistantPersonality(editable("Alice"), { updatedBy: "user" });
       expect(loadMainAssistantPersonality().identity.name).toBe("Alice");
-      expect(existsSync(join(dir, "users", "alice", "main-assistant-personality.json"))).toBe(true);
+      expect(existsSync(join(dir, "users", safeUserSegment("alice"), "main-assistant-personality.json"))).toBe(true);
     });
 
     // 4. Bob still sees the global persona — Alice's override is isolated.

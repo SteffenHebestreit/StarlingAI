@@ -77,13 +77,16 @@ export async function runMemoryConsolidationSweep(workspacePath: string): Promis
     // bucket AND each per-user bucket (each in that user's request context so the
     // store resolves to their directory). Per-user buckets also self-maintain via
     // inline compaction on write; this is the idle backstop.
-    for (const userId of [undefined, ...listUserScopeSegments(userMemoryBaseDir())]) {
+    for (const segment of [undefined, ...listUserScopeSegments(userMemoryBaseDir())]) {
       try {
-        const r = runWithRequestContext({ userId }, () => compactUserMemoryRecords(workspacePath, {}));
+        // Pass the on-disk segment VERBATIM (not as a userId that safeUserSegment would
+        // re-hash) so each existing per-user bucket is swept exactly once; `undefined` is
+        // the shared/base bucket.
+        const r = runWithRequestContext(segment ? { userScopeSegment: segment } : {}, () => compactUserMemoryRecords(workspacePath, {}));
         result.merged += r.merged;
         result.removed += r.removed;
       } catch (err) {
-        log.debug({ err, userId }, "User compaction step skipped — non-critical");
+        log.debug({ err, segment }, "User compaction step skipped — non-critical");
       }
     }
     // 2. Backfill embeddings for records that have none (no-op without a provider).

@@ -20,6 +20,14 @@ export interface RequestContext {
    * the whole workspace (runtime internals, core agents, gateway endpoints).
    */
   workspaceScope?: "full" | "generated";
+  /**
+   * A PRE-RESOLVED on-disk user-scope segment (already the exact `<base>/users/<segment>`
+   * directory name). Set by background sweeps that enumerate existing per-user buckets so
+   * userScopedDir targets that bucket VERBATIM instead of re-deriving it from a userId —
+   * safeUserSegment is a lossy hash and must never be applied to its own output. Takes
+   * precedence over userId for user-scope path resolution.
+   */
+  userScopeSegment?: string;
 }
 
 const storage = new AsyncLocalStorage<RequestContext>();
@@ -37,4 +45,9 @@ export function currentUserId(): string | undefined {
 /** Convenience: the workspace zone of the active tool execution, if any. */
 export function currentWorkspaceScope(): "full" | "generated" | undefined {
   return storage.getStore()?.workspaceScope;
+}
+
+/** Convenience: a pre-resolved on-disk user-scope segment, if a sweep set one. */
+export function currentUserScopeSegment(): string | undefined {
+  return storage.getStore()?.userScopeSegment;
 }
