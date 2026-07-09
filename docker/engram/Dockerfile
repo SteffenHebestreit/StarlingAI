@@ -14,8 +14,7 @@ ARG ENGRAM_REPO=https://github.com/SteffenHebestreit/engram.git
 #
 # Pinned to the v0.9.0 release tag: adds the read-side `sources` document-level
 # scope filter on POST /search + the MCP search tool — what
-# retrieval.documentRag.serverSideScopeFilter consumes (docs/
-# engram-sources-filter-spec.md). Everything from v0.8.0 is included: app→engram
+# retrieval.documentRag.serverSideScopeFilter consumes. Everything from v0.8.0 is included: app→engram
 # rename (CMD below = the upstream Dockerfile's canonical entrypoint), the v0.6.0
 # agent-memory pivot (tenant_id scope-sets, invalidation, retrieval confidence,
 # near-dup contradiction guard), the v0.7.0 restructure (explicit STORE_BACKEND

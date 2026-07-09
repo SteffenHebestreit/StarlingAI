@@ -95,8 +95,8 @@ export const DocumentRagSchema = z.object({
    *  score_gap only catches near-ties — set it per your reranker. */
   confidenceMinTopRerank: z.number().nullable().default(null),
   /** Send the active scope sources as a server-side `sources` filter on engram /search
-   *  (docs/engram-sources-filter-spec.md — requires an engram release that implements it;
-   *  older servers ignore the unknown field, so this is a safe no-op against them). The
+   *  (requires an engram release that implements it — v0.9.0+; older servers ignore the
+   *  unknown field, so this is a safe no-op against them). The
    *  client-side scope post-filter stays on regardless as defense-in-depth; the server
    *  filter adds 0-leak enforcement in the store + stops candidateTopK being wasted on
    *  off-scope hits. Default OFF pending the engram release + the combined eval. */

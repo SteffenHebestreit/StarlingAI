@@ -424,7 +424,7 @@ Two distinct retrieval paths share one cross-encoder reranker:
 
 **Lightweight RAG (`rag_*` tools).** `rag_ingest` / `rag_search` / `rag_forget` chunk + embed arbitrary inline text into the unified pgvector store (`db/vector-store.ts`), session- or globally-scoped. Used to keep a large pasted document or attachment out of the live context window and pull back only the relevant chunks.
 
-**Document RAG (`retrieval.documentRag`, engram).** Graph-RAG over attached/uploaded files, backed by the [engram](https://github.com/SteffenHebestreit/engram) service (API `:8088`) and its own Neo4j (with the Graph Data Science plugin for personalized-PageRank graph proximity). The flow:
+**Document RAG (`retrieval.documentRag`, engram).** Graph-RAG over attached/uploaded files, backed by the [engram](https://github.com/SteffenHebestreit/engram) service (API `:8088`, pinned v0.9.0) with its embedded engramdb store (f16 vectors + native graph adjacency — **no Neo4j**; the earlier personalized-PageRank stage was removed upstream in v0.7.0). Reranking runs through the shared Qwen3-Reranker sidecar. The flow:
 
 1. **Extract** — a file attached to a turn is converted to Markdown by the file-conversion service (`multimodal.files` → fastapi-mcp-template `file_to_markdown`).
 2. **Ingest** — the Markdown is posted to engram `POST /documents` with a scope `source` token (`session:<id>`, `user:<id>`, or `workspace:<name>`). engram chunks it, extracts keywords/summary via the LLM, builds multi-channel embeddings, and links chunks in the graph. Documents are reference-counted by source and deduped by content hash, so re-attaching the same file is idempotent.

@@ -164,8 +164,8 @@ export async function engramSearchDetailed(input: {
   query: string;
   finalTopK?: number;
   tuning?: Record<string, unknown>;
-  /** Server-side source scope-set filter (docs/engram-sources-filter-spec.md). Engram
-   *  releases without the feature ignore the unknown field — safe to send speculatively. */
+  /** Server-side source scope-set filter (engram v0.9.0+). Engram releases without the
+   *  feature ignore the unknown field — safe to send speculatively. */
   sources?: string[];
 }): Promise<EngramSearchOutcome | null> {
   if (!engramConfigured()) return null;

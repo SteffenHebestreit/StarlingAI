@@ -58,8 +58,8 @@
       "confidenceDemotion": true,
       "confidenceMinTopRerank": null,
       // Server-side scope filter: /search carries the active scope sources so the
-      // engram store filters in-store (engram feat/sources-scope-filter, pinned
-      // @049cec2). The client post-filter stays on as defense-in-depth. WATCH:
+      // engram store filters in-store (engram v0.9.0+). The client post-filter stays
+      // on as defense-in-depth. WATCH:
       // cross-session/cross-user doc isolation (0-leak) + no recall regression on
       // in-scope docs.
       "serverSideScopeFilter": true
