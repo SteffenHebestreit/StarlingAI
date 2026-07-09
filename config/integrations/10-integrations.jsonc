@@ -18,22 +18,26 @@
     }
   },
   "sites": {
+    // Stored site logins for browser-driven automation. `password` is a SECRET
+    // reference ($ENV or secret:...), never a literal value. Under multi-user auth,
+    // bind a site to specific accounts with `allowedUsers` (omit/empty = shared).
     "github.com": {
       "username": "your-username",
       "password": "$GITHUB_PASSWORD",
-      "loginUrl": "https://github.com/login",
-      "allowedUsers": ["Steffen"]
-    },
-    "app.example.com": {
-      "username": "ops@example.com",
-      "password": "secret:app_example_password",
-      "loginUrl": "https://app.example.com/login",
-      "urls": {
-        "dashboard": "https://app.example.com/dashboard"
-      },
-      "notes": "Use the local account rather than SSO.",
-      "allowedUsers": ["Steffen"]
+      "loginUrl": "https://github.com/login"
     }
+    // A richer entry with named URLs + operator notes the agent should know:
+    // ,"app.example.com": {
+    //   "username": "you@example.com",
+    //   "password": "$APP_EXAMPLE_PASSWORD",
+    //   "loginUrl": "https://app.example.com/login",
+    //   "urls": {
+    //     "dashboard": "https://app.example.com/",
+    //     "projects": "https://app.example.com/projects"
+    //   },
+    //   "notes": "Any UI hints the browser agent needs when driving this site.",
+    //   "allowedUsers": ["alice"]
+    // }
   },
   "approvalChannels": {
     "slack-approvals": {
