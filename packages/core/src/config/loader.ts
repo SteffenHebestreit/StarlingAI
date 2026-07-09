@@ -525,9 +525,15 @@ function mergeEnvOverrides(raw: Record<string, unknown>): Record<string, unknown
     if (env["SAI_OIDC_CLIENT_ID"]) nextOidc["clientId"] = env["SAI_OIDC_CLIENT_ID"];
     if (env["SAI_OIDC_CLIENT_SECRET"]) nextOidc["clientSecret"] = "$SAI_OIDC_CLIENT_SECRET";
     if (env["SAI_OIDC_PUBLIC_URL"]) nextOidc["publicUrl"] = env["SAI_OIDC_PUBLIC_URL"];
-    if (env["SAI_OIDC_A2A_ENABLED"]) {
-      const on = ["1", "true", "yes", "on"].includes(env["SAI_OIDC_A2A_ENABLED"].trim().toLowerCase());
-      nextOidc["a2a"] = { ...((oidc["a2a"] as object | undefined) ?? {}), enabled: on };
+    if (env["SAI_OIDC_A2A_ENABLED"] || env["SAI_OIDC_A2A_AUDIENCE"]) {
+      const a2a: Record<string, unknown> = { ...((oidc["a2a"] as Record<string, unknown> | undefined) ?? {}) };
+      if (env["SAI_OIDC_A2A_ENABLED"]) {
+        a2a["enabled"] = ["1", "true", "yes", "on"].includes(env["SAI_OIDC_A2A_ENABLED"].trim().toLowerCase());
+      }
+      // Required when a2a.enabled (audience confusion guard) — expose it via env so an
+      // A2A-via-env setup can actually satisfy the config-validation requirement.
+      if (env["SAI_OIDC_A2A_AUDIENCE"]) a2a["audience"] = env["SAI_OIDC_A2A_AUDIENCE"];
+      nextOidc["a2a"] = a2a;
     }
     const isOidc = env["SAI_AUTH_PROVIDER"] === "oidc";
     raw["auth"] = {

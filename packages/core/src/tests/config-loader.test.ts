@@ -389,6 +389,7 @@ describe("config loader mutable overlay", () => {
     process.env["SAI_OIDC_CLIENT_ID"] = "starlingai";
     process.env["SAI_OIDC_CLIENT_SECRET"] = "super-secret-value";
     process.env["SAI_OIDC_A2A_ENABLED"] = "true";
+    process.env["SAI_OIDC_A2A_AUDIENCE"] = "starlingai-a2a"; // required when a2a is enabled
     vi.resetModules();
     const configLoader = await import("../config/loader.js");
     try {
@@ -401,7 +402,10 @@ describe("config loader mutable overlay", () => {
       // of the compiled config; oidc.ts resolves it from env at runtime.
       expect(auth.oidc?.clientSecret).toBe("$SAI_OIDC_CLIENT_SECRET");
       expect(auth.oidc?.a2a.enabled).toBe(true);
+      expect(auth.oidc?.a2a.audience).toBe("starlingai-a2a");
     } finally {
+      delete process.env["SAI_OIDC_A2A_ENABLED"];
+      delete process.env["SAI_OIDC_A2A_AUDIENCE"];
       rmSync(tempDir, { recursive: true, force: true });
     }
   });
