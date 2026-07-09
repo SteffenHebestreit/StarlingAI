@@ -15,6 +15,12 @@ coverage/
 # Runtime secrets and credentials
 starlingai.json
 config/mail/accounts.json
+# Local, machine-specific config overrides. A `*.local.jsonc` shard is loaded by the
+# config globber AFTER its numbered sibling (30-auth.jsonc < 30-auth.local.jsonc), so it
+# overrides — put deployment-specific secrets (e.g. a private OIDC issuer/clientId, dev
+# insecureSkipTlsVerify) in e.g. config/gateway/30-auth.local.jsonc instead of editing the
+# tracked shard, and they can never be committed by accident.
+config/**/*.local.jsonc
 
 # Runtime data directories (any location in the repo)
 **/.starlingai/

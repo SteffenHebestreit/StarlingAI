@@ -28,6 +28,12 @@ SAI_OIDC_CLIENT_SECRET=your-client-secret        # stored as a $ENV ref, never i
 SAI_OIDC_PUBLIC_URL=http://localhost:3001         # gateway public base; redirect = {this}/api/auth/oidc/callback
 ```
 
+> **Local overrides:** to keep a machine-specific OIDC block (private issuer/clientId, dev
+> `insecureSkipTlsVerify`) out of git, put it in `config/gateway/30-auth.local.jsonc` instead of
+> editing the tracked `30-auth.jsonc`. The config globber loads `*.local.jsonc` shards **after**
+> their numbered sibling (so they override), and `config/**/*.local.jsonc` is git-ignored — so a
+> stray `git add` can never commit it.
+
 ### Role mapping
 
 The IdP's roles (Keycloak: `realm_access.roles`) map to ours in `auth.oidc.roleMapping`. Most-privileged listed role wins; a user matching none falls back to `defaultRole`, or is **rejected** if that's unset (fail-closed).
