@@ -19,6 +19,7 @@ import { timingSafeEqual } from "node:crypto";
 import { getConfig } from "../config/loader.js";
 import { runSubAgentWithStats } from "../agent/sub-agent.js";
 import { verifyToken, extractBearerToken } from "../gateway/auth.js";
+import { verifyInboundA2aToken } from "../gateway/oidc.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { PRODUCT } from "../product/index.js";
@@ -293,11 +294,19 @@ async function authorizeInbound(req: IncomingMessage): Promise<AuthResult> {
       : { ok: false, caller: "anonymous" };
   }
 
-  // Otherwise, fall back to a regular gateway JWT — operators get full
-  // access; viewer tokens are accepted (tier policies still apply).
+  // Otherwise, accept a regular gateway JWT — operators get full access; viewer
+  // tokens are accepted (tier policies still apply).
   const verified = await verifyToken(token);
-  if (!verified) return { ok: false, caller: "anonymous" };
-  return { ok: true, caller: (verified as { sub?: string }).sub ?? "authenticated" };
+  if (verified) return { ok: true, caller: (verified as { sub?: string }).sub ?? "authenticated" };
+
+  // OIDC A2A: accept a PEER's IdP token, validated against the issuer's JWKS
+  // (signature + issuer + configured audience). Lets us trust other agents that
+  // authenticate against the same identity provider.
+  if (config.auth.provider === "oidc" && config.auth.oidc?.a2a.enabled) {
+    const claims = await verifyInboundA2aToken(token);
+    if (claims) return { ok: true, caller: typeof claims.sub === "string" ? claims.sub : "a2a-oidc" };
+  }
+  return { ok: false, caller: "anonymous" };
 }
 
 function resolveSecret(value: string): string {

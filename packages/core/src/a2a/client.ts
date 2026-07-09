@@ -19,6 +19,7 @@ import type { SubAgentConfig } from "../config/schema.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { isSafePeerUrl } from "../federation/index.js";
+import { getA2aServiceToken } from "../gateway/oidc.js";
 import {
   A2A_PROTOCOL_VERSION,
   type A2AAgentCard,
@@ -145,7 +146,8 @@ async function refreshPeer(
   try {
     assertSafeA2AUrl(cardUrl);
     const headers: Record<string, string> = { Accept: "application/json" };
-    if (bearerToken) headers["Authorization"] = `Bearer ${resolveSecret(bearerToken)}`;
+    const outboundBearer = await resolveOutboundBearer(bearerToken);
+    if (outboundBearer) headers["Authorization"] = `Bearer ${outboundBearer}`;
     const res = await fetch(cardUrl, { headers, signal: AbortSignal.timeout(10_000) });
     if (!res.ok) {
       lastError = `HTTP ${res.status}`;
@@ -328,7 +330,8 @@ async function sendA2ATask(
 ): Promise<string> {
   const config = getConfig();
   const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (bearerToken) headers["Authorization"] = `Bearer ${resolveSecret(bearerToken)}`;
+  const outboundBearer = await resolveOutboundBearer(bearerToken);
+  if (outboundBearer) headers["Authorization"] = `Bearer ${outboundBearer}`;
 
   const payload = {
     jsonrpc: "2.0",
@@ -376,4 +379,22 @@ async function sendA2ATask(
 function resolveSecret(value: string): string {
   if (value.startsWith("$")) return process.env[value.slice(1)] ?? "";
   return value;
+}
+
+/**
+ * The bearer to present to a peer agent. When OIDC A2A is enabled, prefer a fresh
+ * client-credentials service token (so peers can validate us against the shared
+ * IdP's JWKS); otherwise use the configured static bearer. Null when neither is
+ * available (the request goes out unauthenticated, as before).
+ */
+async function resolveOutboundBearer(bearerToken?: string): Promise<string | null> {
+  const auth = getConfig().auth;
+  if (auth.provider === "oidc" && auth.oidc?.a2a.enabled) {
+    try {
+      return await getA2aServiceToken();
+    } catch (err) {
+      log.warn({ err: err instanceof Error ? err.message : String(err) }, "A2A OIDC service token unavailable — falling back to static bearer");
+    }
+  }
+  return bearerToken ? resolveSecret(bearerToken) : null;
 }
