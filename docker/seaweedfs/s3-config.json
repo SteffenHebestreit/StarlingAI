@@ -1,0 +1,11 @@
+{
+  "identities": [
+    {
+      "name": "starlingai",
+      "credentials": [
+        { "accessKey": "starlingai", "secretKey": "starlingai-dev-secret" }
+      ],
+      "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+    }
+  ]
+}

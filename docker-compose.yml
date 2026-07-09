@@ -72,6 +72,21 @@ services:
       - FREELANCEMAP_PASSWORD=${FREELANCEMAP_PASSWORD:-}
       - SEARXNG_BASE_URL=${SEARXNG_BASE_URL:-http://searxng:8080}
       - BRAVE_API_KEY=${BRAVE_API_KEY:-}
+      # Upload storage (bundled SeaweedFS S3) + malware scanning (bundled ClamAV),
+      # both ON by default. To use real AWS S3: set SAI_S3_ENDPOINT= (empty),
+      # SAI_S3_REGION/BUCKET + real keys, SAI_S3_FORCE_PATH_STYLE=false. To keep
+      # files on local disk instead: SAI_STORAGE_BACKEND=local. To disable scanning:
+      # SAI_UPLOAD_SCAN=false.
+      - SAI_STORAGE_BACKEND=${SAI_STORAGE_BACKEND:-s3}
+      - SAI_S3_ENDPOINT=${SAI_S3_ENDPOINT:-http://seaweedfs:8333}
+      - SAI_S3_REGION=${SAI_S3_REGION:-us-east-1}
+      - SAI_S3_BUCKET=${SAI_S3_BUCKET:-starlingai-uploads}
+      - SAI_S3_ACCESS_KEY_ID=${SAI_S3_ACCESS_KEY_ID:-starlingai}
+      - SAI_S3_SECRET_ACCESS_KEY=${SAI_S3_SECRET_ACCESS_KEY:-starlingai-dev-secret}
+      - SAI_S3_FORCE_PATH_STYLE=${SAI_S3_FORCE_PATH_STYLE:-true}
+      - SAI_UPLOAD_SCAN=${SAI_UPLOAD_SCAN:-true}
+      - SAI_CLAMD_HOST=${SAI_CLAMD_HOST:-clamav}
+      - SAI_CLAMD_PORT=${SAI_CLAMD_PORT:-3310}
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - SAI_PENTEST_SERVICE_URL=${SAI_PENTEST_SERVICE_URL:-http://kali-pentest:5010}
       - SAI_MAIL_SERVICE_URL=${SAI_MAIL_SERVICE_URL:-http://mail-service:5020}
@@ -750,9 +765,52 @@ services:
       retries: 10
       start_period: 45s
 
+  # ── SeaweedFS (bundled S3-compatible object storage) ──────────────────────
+  # Upload storage via the S3 API. Internal-only (never published). To use real
+  # AWS S3 instead, point the gateway's SAI_S3_* at your bucket and drop this
+  # service — same API, drop-in swap. Single-node all-in-one; the S3 gateway
+  # listens on :8333 with the credentials in docker/seaweedfs/s3-config.json.
+  seaweedfs:
+    image: chrislusf/seaweedfs:3.80@sha256:1055999e08eed1789b0ae45d235126e4495e23d3fb9d6396293fd42539b1ae6a
+    restart: unless-stopped
+    command: ["server", "-s3", "-s3.config=/etc/seaweedfs/s3-config.json", "-dir=/data"]
+    volumes:
+      - ./docker/seaweedfs/s3-config.json:/etc/seaweedfs/s3-config.json:ro
+      - gc-seaweedfs-data:/data
+    networks:
+      - starlingai-internal
+    mem_limit: ${SAI_SEAWEEDFS_MEM_LIMIT:-512m}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8333/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ── ClamAV (bundled malware scanner) ──────────────────────────────────────
+  # clamd on :3310. Every upload is scanned before it is stored/ingested. The
+  # signature DB (~1 GB) loads on first start, so it's ~1-2 min before scans
+  # succeed — uploads fail CLOSED (503) until then, then work. Internal-only.
+  clamav:
+    image: clamav/clamav:1.4@sha256:86c2a50372da8522186cc8f68e23ebebe9782c7eac21439a6fece9e1a867d038
+    restart: unless-stopped
+    volumes:
+      - gc-clamav-data:/var/lib/clamav   # persist the signature DB across restarts
+    networks:
+      - starlingai-internal
+    mem_limit: ${SAI_CLAMAV_MEM_LIMIT:-2g}   # the signature DB is held in RAM
+    healthcheck:
+      test: ["CMD-SHELL", "clamdcheck.sh || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+
 volumes:
   gc-postgres-data:
   gc-redis-data:
+  gc-seaweedfs-data:
+  gc-clamav-data:
   gc-memgraph-data:
   gc-questdb-data:
   gc-data:

@@ -10,6 +10,7 @@ An index of the `docs/` folder. **Reference** docs are evergreen and kept curren
 | [api.md](api.md) | Gateway HTTP/WS API reference |
 | [security.md](security.md) | Security model — auth, RBAC, per-user data isolation, guardrails, sandboxing |
 | [iam-sso-oidc.md](iam-sso-oidc.md) | Pluggable identity — built-in accounts vs OpenID Connect (Keycloak) SSO + A2A machine auth |
+| [uploads-storage-scanning.md](uploads-storage-scanning.md) | Upload storage (S3-compatible / SeaweedFS / AWS S3) + ClamAV malware scanning |
 | [tool-tiers.md](tool-tiers.md) | Tool permission tiers (0 read → 4 blocked) and gating |
 | [swarm-tuning-overview.md](swarm-tuning-overview.md) | **Control panel:** every lever to extend/adjust the swarm + its self-learning loops |
 | [memory-context-overview.md](memory-context-overview.md) | **Data plane:** memory stores, knowledge/RAG, and context assembly across session/workspace/user scopes |
