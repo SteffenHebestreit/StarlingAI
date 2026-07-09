@@ -84,6 +84,28 @@ describe("cost aggregator — bucket math", () => {
     expect(summary.totalTokens).toBe(4500);
   });
 
+  it("rehydrates rollups from the audit log and excludes events at/after the start cutoff", async () => {
+    const cost = await import("../observability/cost.js");
+    const auditLog = process.env["SAI_AUDIT_LOG"]!;
+    const before = Date.now();
+    const past = new Date(before - 2 * 3_600_000).toISOString(); // 2h ago → replayed
+    const future = new Date(before + 3_600_000).toISOString();   // after cutoff → NOT replayed (would be a live event, avoids double-count)
+    writeFileSync(auditLog, [
+      JSON.stringify(makeSubAgentEvent({ promptTokens: 1000, completionTokens: 500, sessionId: "s1", timestamp: past })),
+      JSON.stringify(makeSubAgentEvent({ promptTokens: 2000, completionTokens: 1000, sessionId: "s2", timestamp: past })),
+      JSON.stringify(makeSubAgentEvent({ promptTokens: 9000, completionTokens: 9000, sessionId: "s3", timestamp: future })),
+      "not json — must be skipped",
+    ].join("\n") + "\n", "utf8");
+
+    // Fresh boot: memory is empty until we replay the persisted log.
+    expect(cost.getCostSummary(30).totalTokens).toBe(0);
+    await cost._rehydrateFromAuditLogForTests(before);
+
+    const summary = cost.getCostSummary(30);
+    expect(summary.totalTokens).toBe(4500); // only the two past events; the future one is excluded
+    expect(summary.bySession.find((s) => s.source === "s3")).toBeUndefined();
+  });
+
   it("rolls up by agent + by session + by model independently", async () => {
     const cost = await import("../observability/cost.js");
     cost.startCostAggregator();

@@ -129,13 +129,53 @@ export interface CostProjection {
 /** Start the aggregator.  Idempotent — safe to call from bootstrap and tests. */
 export function startCostAggregator(): void {
   if (_subscribeUnsub) return;
+  const startedAt = Date.now();
   _subscribeUnsub = subscribeToAudit(handleEvent);
+  // Rehydrate the day/month rollups from the persisted audit log so a restart doesn't
+  // silently reset the (potentially HARD) budget gate to $0 — the in-memory rings are
+  // otherwise empty on boot, so cost.enforce would re-open a spent monthly cap and a
+  // crash-looping gateway would never enforce it at all. Only events strictly BEFORE
+  // this start are replayed, so live events (which are also appended to the log) can't
+  // be double-counted. Best-effort + async: a missing log just means the gate starts cold.
+  void rehydrateFromAuditLog(startedAt).catch((err) =>
+    log.warn({ err: err instanceof Error ? err.message : String(err) }, "cost rehydration failed — budget gate starts from empty"));
   log.debug("Cost aggregator started — subscribed to audit bus");
+}
+
+/** Replay usage events from the persisted audit log into the in-memory rollups.
+ *  Streams the JSONL log line-by-line (bounded memory) and ingests only usage-bearing
+ *  events older than `before` and within the day-bucket retention window. */
+async function rehydrateFromAuditLog(before: number): Promise<void> {
+  if (!getConfig().cost.enabled) return;
+  const { resolveAuditLogPath } = await import("../audit/logger.js");
+  const { existsSync, createReadStream } = await import("node:fs");
+  const { createInterface } = await import("node:readline");
+  const path = resolveAuditLogPath();
+  if (!existsSync(path)) return;
+  const cutoff = before - DEFAULT_DAY_BUCKET_CAP * MS_PER_DAY;
+  const rl = createInterface({ input: createReadStream(path, { encoding: "utf-8" }), crlfDelay: Infinity });
+  let replayed = 0;
+  for await (const line of rl) {
+    if (!line) continue;
+    let event: AuditEvent;
+    try { event = JSON.parse(line) as AuditEvent; } catch { continue; }
+    if (event.type !== "turn_performance" && event.type !== "sub_agent_completed") continue;
+    const ts = new Date(event.timestamp).getTime();
+    if (!Number.isFinite(ts) || ts >= before || ts < cutoff) continue;
+    handleEvent(event, { rehydrate: true });
+    replayed++;
+  }
+  if (replayed > 0) log.info({ replayed }, "Cost aggregator rehydrated rollups from the audit log");
 }
 
 /** Stop the aggregator and detach the audit subscription. */
 export function stopCostAggregator(): void {
   if (_subscribeUnsub) { _subscribeUnsub(); _subscribeUnsub = null; }
+}
+
+/** Test-only — await a rehydration pass directly (startCostAggregator fires it async). */
+export function _rehydrateFromAuditLogForTests(before: number): Promise<void> {
+  return rehydrateFromAuditLog(before);
 }
 
 /** Test-only — wipe all bucket state. */
@@ -254,7 +294,7 @@ export function getBudgetGateStatus(now: Date = new Date()): BudgetGateStatus {
 
 // ── Event ingestion ──────────────────────────────────────────────────────────
 
-function handleEvent(event: AuditEvent): void {
+function handleEvent(event: AuditEvent, opts?: { rehydrate?: boolean }): void {
   const cfg = getConfig().cost;
   if (!cfg.enabled) return;
 
@@ -306,7 +346,8 @@ function handleEvent(event: AuditEvent): void {
     if (model) accumulate(getOrCreate(dayBucket.bySource, `model:${model}`), usage, cost);
   }
 
-  void maybeFireBudgetAlert(cfg, day);
+  // Don't re-fire historical budget alerts while replaying the audit log at boot.
+  if (!opts?.rehydrate) void maybeFireBudgetAlert(cfg, day);
 }
 
 function extractUsage(raw: unknown): { promptTokens: number; completionTokens: number; totalTokens: number } | null {
