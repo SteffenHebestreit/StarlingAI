@@ -96,6 +96,29 @@ describe("receptionist — fork policy hook", () => {
   });
 });
 
+// Regression (session a75e1c26): the fast lane answered "wie funktioniert das Pfandsystem in
+// Dänemark?" from the tiny routing model — a source-sensitive real-world question that bypasses
+// ALL the orchestrator's honesty guards. The smalltalk-only prompt licensed "simple general-
+// knowledge questions", which the model over-applied. The micro-call prompt must instead escalate
+// any real-world / how-a-specific-system-works question so it reaches the guarded orchestrator path.
+describe("receptionist — source-sensitivity in the micro-call prompt", () => {
+  it("smalltalk-only mode escalates real-world / how-it-works questions (the old general-knowledge loophole is gone)", () => {
+    const content = String(buildReceptionistMessages("Wie funktioniert das Pfandsystem in Dänemark?")[0]!.content);
+    expect(content).toContain(ESCALATE_SENTINEL);
+    expect(content).toContain("SOCIAL turns");               // only social/meta turns are self-handled
+    expect(content.toLowerCase()).toContain("real-world information");
+    expect(content.toLowerCase()).toContain("how something actually works");
+    expect(content.toLowerCase()).not.toContain("general-knowledge questions"); // loophole removed
+  });
+
+  it("confidence-attempt mode forbids answering specific real-world facts (no 'a fact, a simple explanation' invitation)", () => {
+    const content = String(buildReceptionistMessages("Wie funktioniert das Pfandsystem in Dänemark?", { confidenceAttempt: true })[0]!.content);
+    expect(content).toContain(ESCALATE_SENTINEL);
+    expect(content.toLowerCase()).toContain("specific real-world facts");
+    expect(content.toLowerCase()).not.toContain("a fact, a simple explanation");
+  });
+});
+
 describe("receptionist — micro-call", () => {
   it("never calls the model when the gate escalates", async () => {
     registerReceptionistPolicy("mfa", { escalateTerms: ["rezept"] });
