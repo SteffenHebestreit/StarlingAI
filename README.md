@@ -270,6 +270,9 @@ For setup guides, channel configuration, agent details, and more, see the **[int
 
 ## License
 
-[Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)](https://creativecommons.org/licenses/by-nc/4.0/)
+StarlingAI is **dual-licensed**:
 
-You are free to share and adapt the material for non-commercial purposes, as long as you give appropriate credit. Commercial use is not permitted without explicit written permission.
+- **Noncommercial use is free** under the [PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0/) — personal, hobby, research, and educational use at no cost. You may use, modify, and share it for any noncommercial purpose (see [`LICENSE`](LICENSE) for the full terms).
+- **Commercial use requires a paid license.** If you use StarlingAI in connection with commercial or revenue-generating activity, [contact the author](https://github.com/SteffenHebestreit/StarlingAI) to purchase a commercial license.
+
+Copyright © 2025–2026 Steffen Hebestreit.
