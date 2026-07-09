@@ -95,10 +95,11 @@ export function recordApprovalDecision(idempotencyKey: string, approved: boolean
 }
 
 /**
- * Look up a cached decision for a stable idempotency key. Returns the boolean
- * outcome only when a fresh (unexpired) decision from a PREVIOUS process exists;
- * returns undefined within the same process (so a live run always re-prompts) or
- * when absent/expired. Expired records are pruned on read.
+ * Look up a cached decision for a stable idempotency key. Returns the boolean outcome
+ * only when a fresh (unexpired) decision from a PREVIOUS process exists, and CONSUMES it
+ * (one-shot): the record is deleted and the key marked resolved, so a second lookup
+ * re-prompts. Returns undefined within the same process (so a live run always re-prompts),
+ * when absent/expired, or once already consumed. Expired records are pruned on read.
  */
 export function lookupApprovalDecision(idempotencyKey: string): boolean | undefined {
   if (!durableApprovalsEnabled()) return undefined;
@@ -112,6 +113,13 @@ export function lookupApprovalDecision(idempotencyKey: string): boolean | undefi
       try { unlinkSync(p); } catch { /* ignore */ }
       return undefined;
     }
+    // CONSUME the decision — one-shot cross-restart reuse. Mark it resolved for this
+    // process AND delete the file, so a SECOND identical gated call (later in this
+    // restarted run, or after a further restart) re-prompts a human instead of the one
+    // pre-restart grant silently auto-approving every identical call for the full TTL.
+    // That preserves the module's own invariant that a live run always re-prompts.
+    _resolvedThisSession.add(idempotencyKey);
+    try { unlinkSync(p); } catch { /* ignore */ }
     return rec.approved;
   } catch {
     try { unlinkSync(p); } catch { /* ignore */ }

@@ -86,6 +86,20 @@ describe("durable approvals (decision cache)", () => {
     expect(lookupApprovalDecision("other")).toBeUndefined();
   });
 
+  it("consumes a reused decision ONE-SHOT: a second identical gated call re-prompts", () => {
+    mockConfig(true);
+    const key = buildApprovalIdempotencyKey("jobC", "http_request", { url: "https://z" }, "step0");
+    recordApprovalDecision(key, true, "http_request");
+    simulateRestart();
+    expect(lookupApprovalDecision(key)).toBe(true);        // first post-restart call reuses the grant
+    expect(lookupApprovalDecision(key)).toBeUndefined();   // second call re-prompts (grant consumed)
+    // The decision file was deleted on consume: even a further restart (which clears the
+    // in-memory resolved-set) cannot resurrect it — proving the on-disk record is gone.
+    simulateRestart();
+    expect(lookupApprovalDecision(key)).toBeUndefined();
+    expect(readdirSync(approvalsDir()).filter((f) => f.startsWith("d_")).length).toBe(0);
+  });
+
   it("caches a GRANTED approval on resolve; a DENIAL is never cached (re-run re-prompts)", () => {
     mockConfig(true);
     const grantKey = buildApprovalIdempotencyKey("jobC", "http_request", { url: "https://ok" }, "step0");
