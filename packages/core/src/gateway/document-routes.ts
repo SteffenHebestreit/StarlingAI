@@ -82,17 +82,22 @@ export function registerDocumentRoutes(app: Hono): void {
     if (scope === "user" && !user?.username) return c.json({ error: "user scope requires authentication" }, 400);
 
     try {
-      const { writeFile, mkdir } = await import("node:fs/promises");
-      const { join, basename } = await import("node:path");
+      const { basename } = await import("node:path");
       const safe = basename(uploadedFile.name).replace(/[^\w.\-]+/g, "_").slice(-180) || "upload";
       // Scope-specific upload folder so files are grouped + cleaned with their scope.
       const dirKey = scope === "session" ? sessionId : scope === "user" ? `user-${user!.username}` : "workspace";
       const finalName = `${Date.now()}-${safe}`;
       const relativePath = `uploads/${dirKey}/${finalName}`;
-      const absDir = join(getConfig().workspacePath, "uploads", dirKey);
-      await mkdir(absDir, { recursive: true });
       const bytes = Buffer.from(await uploadedFile.arrayBuffer());
-      await writeFile(join(absDir, finalName), bytes);
+      const contentType = uploadedFile.type || "application/octet-stream";
+
+      // Scan for malware, then persist (object store or local disk). An infected
+      // file — or an unreachable scanner — is refused BEFORE it is stored or ingested.
+      const { scanAndStoreUpload } = await import("../storage/uploads.js");
+      const stored = await scanAndStoreUpload(relativePath, new Uint8Array(bytes), contentType, {
+        scope, filename: uploadedFile.name, ...(user?.username ? { userId: user.username } : {}),
+      });
+      if (!stored.ok) return c.json({ error: stored.error }, stored.status);
 
       const { ingestDocumentBytes } = await import("../retrieval/document-rag.js");
       const outcome = await ingestDocumentBytes({
@@ -211,10 +216,10 @@ export function registerDocumentRoutes(app: Hono): void {
       const { getRegistryFileEntry } = await import("../retrieval/document-registry.js");
       const entry = await getRegistryFileEntry(id);
       if (!entry?.relativePath) return c.json({ error: "No original file is stored for this document" }, 404);
-      const { resolvePathWithinWorkspace } = await import("../tools/workspace-path.js");
-      const { readFile } = await import("node:fs/promises");
-      const { resolved } = resolvePathWithinWorkspace(entry.relativePath, getConfig().workspacePath);
-      const bytes = await readFile(resolved);
+      // Read from the object store (S3/SeaweedFS) or local disk — same relative key.
+      const { getUpload } = await import("../storage/object-store.js");
+      const bytes = await getUpload(entry.relativePath);
+      if (!bytes) return c.json({ error: "No original file is stored for this document" }, 404);
       return new Response(new Uint8Array(bytes), {
         headers: {
           "Content-Type": entry.contentType || "application/octet-stream",

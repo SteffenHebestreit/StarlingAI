@@ -2015,20 +2015,23 @@ export function createGateway() {
     const sessionId = typeof rawSessionId === "string" && /^[\w-]{1,64}$/.test(rawSessionId) ? rawSessionId : "shared";
 
     try {
-      const { writeFile, mkdir } = await import("node:fs/promises");
-      const { join, basename } = await import("node:path");
+      const { basename } = await import("node:path");
       // Sanitize to a bare, safe filename (no traversal) and de-collide with a timestamp.
       const safe = basename(uploadedFile.name).replace(/[^\w.\-]+/g, "_").slice(-180) || "upload";
       const finalName = `${Date.now()}-${safe}`;
       const relativePath = `uploads/${sessionId}/${finalName}`;
-      const absDir = join(getConfig().workspacePath, "uploads", sessionId);
-      await mkdir(absDir, { recursive: true });
       const bytes = Buffer.from(await uploadedFile.arrayBuffer());
-      await writeFile(join(absDir, finalName), bytes);
+      const contentType = uploadedFile.type || "application/octet-stream";
+
+      // Scan for malware, then persist (object store or local disk). Infected /
+      // scanner-down => reject before the attachment is stored or used as context.
+      const { scanAndStoreUpload } = await import("../storage/uploads.js");
+      const stored = await scanAndStoreUpload(relativePath, new Uint8Array(bytes), contentType, { sessionId, filename: uploadedFile.name });
+      if (!stored.ok) return c.json({ error: stored.error }, stored.status);
       return c.json({
         filename: uploadedFile.name,
         relativePath,
-        contentType: uploadedFile.type || "application/octet-stream",
+        contentType,
         size: bytes.length,
       });
     } catch (err) {
