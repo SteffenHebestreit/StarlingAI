@@ -67,6 +67,8 @@ packages/core/tmp/
 packages/core/packages/
 # Stray test/scratch output
 test-output.txt
+# vitest json-reporter artifact (embeds an absolute machine path — never source)
+packages/core/.vitest-web-tools.json
 
 # Eval run reports (pnpm agents:evaluate / scenes:evaluate output) — run artifacts,
 # not source. Keep eval PLANS (agent-eval.jsonc) tracked; ignore the generated reports.

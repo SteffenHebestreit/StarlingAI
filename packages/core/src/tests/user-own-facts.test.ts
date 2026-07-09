@@ -84,10 +84,10 @@ describe("renderUserProfileEvidence", () => {
     const out = renderUserProfileEvidence([], null, {
       docsHandledElsewhere: true,
       documentsAlreadyInjected: false,
-      availableDocuments: [{ title: "CV_Hebestreit_2026.pdf" }, { title: "Projektliste_Hebestreit_2026.pdf" }],
+      availableDocuments: [{ title: "CV_2026.pdf" }, { title: "project-list-2026.pdf" }],
     });
-    expect(out).toMatch(/CV_Hebestreit_2026\.pdf/);
-    expect(out).toMatch(/Projektliste_Hebestreit_2026\.pdf/);
+    expect(out).toMatch(/CV_2026\.pdf/);
+    expect(out).toMatch(/project-list-2026\.pdf/);
     expect(out).toMatch(/Do NOT claim you have no access/i);
     expect(out).toMatch(/Do NOT invent their contents/i);
     expect(out).not.toMatch(/found NOTHING/i); // must NOT use the truly-empty wording
