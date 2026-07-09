@@ -142,10 +142,70 @@ describe("AG-UI streaming", () => {
     try {
       const { handleAguiStream } = await import("../gateway/agui.js");
       const res = new FakeResponse();
-      await handleAguiStream(res as never, { sessionId: "sess-scope-1", message: "hi" }, "alice");
+      await handleAguiStream(res as never, { sessionId: "sess-scope-1", message: "hi" }, { userId: "alice" });
       expect(seenSessionId).toBe("sess-scope-1");
       expect(seenUserId).toBe("alice");
     } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to drive a turn on another user's existing session under active auth", async () => {
+    // Regression: handleAguiStream resolved an existing session purely by id with no
+    // ownership check, so any authenticated caller who knew a victim's sessionId could
+    // run a turn AS the victim (their history + user-scoped memory/documents). Mirrors
+    // the RPC canAccessSession invariant. Operators may still access any session.
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agui-owner-"));
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      gateway: { jwtSecret: "a".repeat(32), turnTimeoutMs: 30_000 },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+
+    const ran = vi.fn(async () => ({ response: "ok", toolCallsExecuted: 0, guardrailEvents: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 }, blocked: false }));
+    vi.doMock("../agent/runtime.js", () => ({ runTurn: ran }));
+    // Force auth ON deterministically (overlay onto the real loaded config so session.js
+    // still sees every other field). Avoids depending on file-based auth resolution.
+    vi.doMock("../config/loader.js", async () => {
+      const actual = await vi.importActual<typeof import("../config/loader.js")>("../config/loader.js");
+      return {
+        ...actual,
+        getConfig: () => {
+          const cfg = actual.getConfig();
+          return { ...cfg, auth: { ...cfg.auth, enabled: true, provider: "builtin", users: [] } };
+        },
+      };
+    });
+
+    try {
+      const { handleAguiStream } = await import("../gateway/agui.js");
+
+      // alice creates her session (owned by alice) via the handler.
+      const resCreate = new FakeResponse();
+      await handleAguiStream(resCreate as never, { sessionId: "victim-sess", message: "hi" }, { userId: "alice", role: "viewer" });
+      expect(resCreate.statusCode).toBe(200);
+      expect(ran).toHaveBeenCalledTimes(1);
+
+      // A non-privileged "viewer" bob tries to drive it → opaque 404, turn never runs.
+      // (Instance operators/admins are trusted to access any session, mirroring RPC.)
+      const resBob = new FakeResponse();
+      await handleAguiStream(resBob as never, { sessionId: "victim-sess", message: "leak it" }, { userId: "bob", role: "viewer" });
+      expect(resBob.statusCode).toBe(404);
+      expect(ran).toHaveBeenCalledTimes(1);
+
+      // An admin (instance-wide) role may access any session.
+      const resAdmin = new FakeResponse();
+      await handleAguiStream(resAdmin as never, { sessionId: "victim-sess", message: "audit" }, { userId: "carol", role: "admin" });
+      expect(resAdmin.statusCode).toBe(200);
+      expect(ran).toHaveBeenCalledTimes(2);
+
+      // The owner may access her own session.
+      const resOwner = new FakeResponse();
+      await handleAguiStream(resOwner as never, { sessionId: "victim-sess", message: "mine" }, { userId: "alice", role: "viewer" });
+      expect(resOwner.statusCode).toBe(200);
+      expect(ran).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.unmock("../config/loader.js");
       rmSync(tempDir, { recursive: true, force: true });
     }
   });

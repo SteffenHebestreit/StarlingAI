@@ -19,6 +19,7 @@ import { archiveSession, createSession, resolveSession } from "../agent/session.
 import { runTurn } from "../agent/runtime.js";
 import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
+import { roleRank } from "./auth.js";
 import type { InterventionNotice } from "../agent/interventions.js";
 
 const TURN_TIMEOUT_SYNTHESIS_GRACE_MS = 65_000;
@@ -38,14 +39,39 @@ function sseEvent(res: ServerResponse, event: Record<string, unknown>): void {
 export async function handleAguiStream(
   res: ServerResponse,
   body: { sessionId?: string; message: string },
-  userId?: string,
+  caller?: { userId?: string; role?: string },
 ): Promise<void> {
   const { message, sessionId } = body;
+  const userId = caller?.userId;
 
   if (!message?.trim()) {
     res.writeHead(400, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "message is required" }));
     return;
+  }
+
+  // Get or create session — try Redis fallback for cross-instance routing.
+  // Create it UNDER the requested id (so session-scoped documents uploaded with
+  // that sessionId are in retrieval scope) and attribute it to the authenticated
+  // user (so the document-RAG user scope + RBAC match the identity uploads use),
+  // mirroring the RPC session.create path. Without both, AG-UI turns ran under a
+  // fresh random session with no userId, dropping session/user document scope.
+  let session = sessionId ? await resolveSession(sessionId) : undefined;
+
+  // Ownership gate (decided BEFORE we commit to the SSE 200 response): don't let a
+  // caller drive a turn on another user's existing session — the same invariant the
+  // RPC chat path enforces via canAccessSession. Operators may access any session;
+  // unowned sessions and auth-off deployments fall through. Opaque 404 to match the
+  // RPC not-found shape and avoid confirming the session id exists.
+  if (session && getConfig().auth?.enabled === true) {
+    const owner = session.userId;
+    const isAdmin = !!caller?.role && roleRank(caller.role) >= roleRank("operator");
+    if (owner !== undefined && owner !== userId && !isAdmin) {
+      log.warn({ sessionId: session.id, owner, caller: userId ?? "(none)" }, "AG-UI stream denied: session owned by another user");
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Session not found" }));
+      return;
+    }
   }
 
   // SSE headers
@@ -59,13 +85,6 @@ export async function handleAguiStream(
   const runId       = randomUUID();
   const messageId   = randomUUID();
 
-  // Get or create session — try Redis fallback for cross-instance routing.
-  // Create it UNDER the requested id (so session-scoped documents uploaded with
-  // that sessionId are in retrieval scope) and attribute it to the authenticated
-  // user (so the document-RAG user scope + RBAC match the identity uploads use),
-  // mirroring the RPC session.create path. Without both, AG-UI turns ran under a
-  // fresh random session with no userId, dropping session/user document scope.
-  let session = sessionId ? await resolveSession(sessionId) : undefined;
   if (!session) {
     session = createSession({
       ...(sessionId ? { sessionId } : {}),

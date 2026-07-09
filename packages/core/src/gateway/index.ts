@@ -157,7 +157,24 @@ export function createGateway() {
   // single-operator / auth-disabled installs (userScopedDir also gates on this).
   app.use("/api/*", async (c, next) => {
     if (!getConfig().auth?.enabled) return next();
-    const user = await authenticatedUser(c.req.header("Authorization"));
+    const authHeader = c.req.header("Authorization");
+    const user = await authenticatedUser(authHeader);
+    // Revocation enforcement across ALL /api routes, not just the ~11 authenticatedUser
+    // call sites: a validly-signed token whose account no longer resolves — a deleted or
+    // disabled user, or a role the store no longer grants — is rejected here so the many
+    // routes that gate on bare verifyToken cannot keep honoring a revoked token for its
+    // full ~24h TTL. A request with NO token falls through untouched, so public/pre-auth
+    // routes (login, /api/auth/mode, oidc, health) and each route's own 401 still work.
+    // Under active auth no standing token exists outside the user store (the bootstrap
+    // admin token is printed only with auth OFF), so this never rejects a legitimate
+    // operator token; OIDC tokens resolve via validated claims and are unaffected (their
+    // revocation lag is a separate, documented limitation).
+    if (!user) {
+      const token = extractBearerToken(authHeader);
+      if (token && await verifyToken(token)) {
+        return c.json({ error: "Unauthorized (account no longer valid)" }, 401);
+      }
+    }
     return runWithRequestContext({ userId: user?.username }, () => next());
   });
   const turnTimeoutMs = config.gateway.turnTimeoutMs;
@@ -3640,7 +3657,17 @@ export function createGateway() {
           // carries userId — document-RAG user scope + RBAC then match the caller's
           // uploads, exactly as the RPC chat path does.
           const aguiUser = await authenticatedUser(`Bearer ${token}`);
-          await handleAguiStream(res, body, aguiUser?.username);
+          // Under active auth a validly-signed token whose account no longer resolves
+          // (deleted/disabled) must not run a turn: otherwise it proceeds with
+          // userId=undefined and reads/writes the SHARED user-scope memory bucket. The
+          // Hono /api/* middleware enforces the same, but this stream is handled at the
+          // raw-Node layer before that middleware runs.
+          if (getConfig().auth?.enabled === true && !aguiUser) {
+            res.writeHead(401, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Unauthorized" }));
+            return;
+          }
+          await handleAguiStream(res, body, { userId: aguiUser?.username, role: aguiUser?.role });
         } catch {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Invalid JSON body" }));
