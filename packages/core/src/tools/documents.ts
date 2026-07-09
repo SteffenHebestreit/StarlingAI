@@ -21,7 +21,7 @@ import { isSensitiveWorkspacePath } from "./filesystem.js";
 import { engramConfigured } from "../retrieval/engram.js";
 import {
   ingestDocumentBytes,
-  retrieveDocumentContext,
+  retrieveDocumentContextWithStatus,
   listScopedDocuments,
   forgetDocument,
   type DocumentScope,
@@ -143,7 +143,13 @@ registerTool({
     const query = String(args["query"] ?? "").trim();
     if (!query) return fail("query is required");
 
-    const chunks = await retrieveDocumentContext(query, ragCtx(ctx));
+    const { chunks, retrievalFailed } = await retrieveDocumentContextWithStatus(query, ragCtx(ctx));
+    if (retrievalFailed) {
+      // The document store did not respond (unreachable / timed out). This is NOT evidence
+      // of absence — surface it as an outage so the model doesn't conclude the information
+      // isn't in the documents (the false-negative class the honesty guards exist to prevent).
+      return { success: false, output: "", error: "The document store did not respond — retrieval is temporarily unavailable. This is NOT evidence that the information is absent; do not conclude the documents lack it. Try again shortly." };
+    }
     if (chunks.length === 0) {
       return { success: true, output: "No relevant excerpts found in the attached documents.", metadata: { hits: 0 } };
     }
