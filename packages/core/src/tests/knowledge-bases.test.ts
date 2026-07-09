@@ -21,6 +21,7 @@ import {
   type CreateKnowledgeBaseInput,
   type KnowledgeBaseRecord,
 } from "../retrieval/knowledge-bases.js";
+import { requireOperator } from "../tools/knowledge-bases.js";
 
 let workspacePath: string;
 
@@ -565,5 +566,33 @@ describe("toSummary — scope + hasWorker", () => {
     expect(toSummary(base({ worker: { tools: ["web_fetch"] } })).hasWorker).toBe(true);
     expect(toSummary(base({ worker: { model: { temperature: 0.1 } } })).hasWorker).toBe(false); // model-only ≠ usable worker
     expect(toSummary(base({})).hasWorker).toBe(false);
+  });
+});
+
+describe("requireOperator — KB mutations are operator-only under active auth", () => {
+  const mockAuth = (auth: Record<string, unknown> | undefined) => {
+    const realConfig = loaderModule.getConfig();
+    vi.spyOn(loaderModule, "getConfig").mockReturnValue({ ...realConfig, auth } as typeof realConfig);
+  };
+  const ctx = (userRole?: string) =>
+    ({ sessionId: "s", workspacePath, ...(userRole ? { userRole } : {}) }) as unknown as import("../tools/registry.js").ToolContext;
+
+  it("allows when auth is disabled (single-operator back-compat)", async () => {
+    mockAuth({ enabled: false });
+    expect(await requireOperator(ctx("viewer"))).toBeNull();
+  });
+
+  it("allows when auth is on but no role was threaded (channel/token turn)", async () => {
+    mockAuth({ enabled: true, provider: "builtin", users: [] });
+    expect(await requireOperator(ctx(undefined))).toBeNull();
+  });
+
+  it("refuses a viewer, allows operator and admin, under active auth", async () => {
+    mockAuth({ enabled: true, provider: "builtin", users: [] });
+    const viewer = await requireOperator(ctx("viewer"));
+    expect(viewer?.success).toBe(false);
+    expect(viewer?.error).toMatch(/operator role/i);
+    expect(await requireOperator(ctx("operator"))).toBeNull();
+    expect(await requireOperator(ctx("admin"))).toBeNull();
   });
 });

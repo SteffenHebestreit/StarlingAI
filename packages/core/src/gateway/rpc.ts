@@ -396,6 +396,7 @@ export class RpcConnection {
           // document-RAG user scope + RBAC match the identity uploads use). The
           // server-derived identity wins over any client-supplied userId.
           userId: this.connUserId ?? (params["userId"] ? String(params["userId"]) : undefined),
+          ...(this.connRole ? { userRole: this.connRole } : {}),
           workspacePath,
         });
         this.activeSessionId = session.id;

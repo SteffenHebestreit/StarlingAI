@@ -90,6 +90,7 @@ export async function handleAguiStream(
       ...(sessionId ? { sessionId } : {}),
       channel: "webchat:agui",
       ...(userId ? { userId } : {}),
+      ...(caller?.role ? { userRole: caller.role } : {}),
     });
   }
 

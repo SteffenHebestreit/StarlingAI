@@ -54,6 +54,11 @@ export interface AgentSessionOptions {
   sessionId?: string;
   channel: string;
   userId?: string;
+  /** Authenticated role (JWT `role` claim) of the user that owns this session, when
+   *  under active multi-user auth. Threaded into the turn's ToolContext so tools can
+   *  gate mutating actions by role (e.g. operator-only knowledge-base management),
+   *  matching the REST/MCP surfaces. Undefined for auth-off / channel-originated turns. */
+  userRole?: string;
   systemPrompt?: string;
   workspacePath?: string;
   settings?: SessionSettings;
@@ -117,6 +122,7 @@ export interface PersistedSessionRecord {
   id: string;
   channel: string;
   userId?: string;
+  userRole?: string;
   createdAt: string;
   updatedAt: string;
   archivedAt?: string;
@@ -136,6 +142,7 @@ export class AgentSession {
   readonly id: string;
   readonly channel: string;
   readonly userId: string | undefined;
+  readonly userRole: string | undefined;
   readonly createdAt: Date;
 
   private history: SessionHistoryMessage[] = [];
@@ -172,6 +179,7 @@ export class AgentSession {
     this.id = opts.sessionId ?? randomUUID();
     this.channel = opts.channel;
     this.userId = opts.userId;
+    this.userRole = opts.userRole;
     this.createdAt = opts.createdAt ?? new Date();
     this.workspacePath = opts.workspacePath ?? getConfig().workspacePath;
     this.systemPrompt = opts.systemPrompt ?? defaultSystemPrompt(this.workspacePath);
@@ -198,6 +206,7 @@ export class AgentSession {
       sessionId: record.id,
       channel: record.channel,
       userId: record.userId,
+      userRole: record.userRole,
       systemPrompt: record.systemPrompt,
       workspacePath: record.workspacePath,
       createdAt: new Date(record.createdAt),
@@ -450,6 +459,7 @@ export class AgentSession {
       id: this.id,
       channel: this.channel,
       userId: this.userId,
+      ...(this.userRole ? { userRole: this.userRole } : {}),
       createdAt: this.createdAt.toISOString(),
       updatedAt: this.updatedAt.toISOString(),
       archivedAt: this.archivedAt?.toISOString(),

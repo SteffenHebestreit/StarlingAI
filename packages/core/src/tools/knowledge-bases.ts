@@ -38,6 +38,24 @@ function kbUnavailableReason(): string | null {
   return null;
 }
 
+/**
+ * Knowledge-base MUTATIONS (create / recrawl / cancel / delete) are operator-only,
+ * matching the REST routes (roles:["operator"]) and the MCP write-tier gate — so the
+ * chat tool surface can't bypass the boundary the other two surfaces enforce (a viewer
+ * could otherwise ask the orchestrator to crawl or permanently delete a shared KB).
+ * Returns a refusal ToolResult when the caller is below operator rank under active
+ * multi-user auth; null (allow) when auth is off or no role was threaded (channel/token
+ * turns), preserving single-operator back-compat. roleRank is resolved lazily to keep
+ * this leaf tool module off the gateway import graph at load time.
+ */
+export async function requireOperator(ctx: ToolContext): Promise<ToolResult | null> {
+  if (getConfig().auth?.enabled !== true) return null;
+  if (!ctx.userRole) return null;
+  const { roleRank } = await import("../gateway/auth.js");
+  if (roleRank(ctx.userRole) >= roleRank("operator")) return null;
+  return fail(`Managing knowledge bases (create, recrawl, cancel, delete) requires the operator role — your role is "${ctx.userRole}". Use search_knowledge_base / list_knowledge_bases to read existing ones, or ask an operator.`);
+}
+
 function describeCrawl(lastCrawl?: import("../retrieval/knowledge-bases.js").KbCrawlStats): string {
   if (!lastCrawl) return "never crawled";
   const parts = [
@@ -198,6 +216,8 @@ registerTool({
   async execute(args, ctx): Promise<ToolResult> {
     const unavailable = kbUnavailableReason();
     if (unavailable) return fail(unavailable);
+    const denied = await requireOperator(ctx);
+    if (denied) return denied;
     const { createKnowledgeBase } = await import("../retrieval/knowledge-bases.js");
     const { startKbCrawl } = await import("../retrieval/kb-crawler.js");
 
@@ -262,6 +282,8 @@ registerTool({
   async execute(args, ctx): Promise<ToolResult> {
     const unavailable = kbUnavailableReason();
     if (unavailable) return fail(unavailable);
+    const denied = await requireOperator(ctx);
+    if (denied) return denied;
     const idOrName = String(args["knowledge_base"] ?? "").trim();
     const action = String(args["action"] ?? "").trim();
     if (!idOrName) return fail("knowledge_base is required");

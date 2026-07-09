@@ -110,6 +110,13 @@ export interface ToolContext {
    */
   userId?: string;
   /**
+   * Authenticated role (JWT `role` claim) of the user that owns this turn, when under
+   * active multi-user auth. Tools gate mutating actions by role (e.g. operator-only
+   * knowledge-base create/manage) consistent with the REST + MCP surfaces. Undefined
+   * in auth-off / channel / token mode — treated as "no role gating" (back-compat).
+   */
+  userRole?: string;
+  /**
    * Owning conversation session for knowledge-base scope checks, when this run is
    * an ephemeral KB worker. A sub-agent's `sessionId` is rewritten to a per-run
    * `sub:<parent>:<agent>:<ts>` id, which never matches a session-scoped KB's

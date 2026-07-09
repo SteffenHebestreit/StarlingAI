@@ -1323,6 +1323,7 @@ async function _runTurn(
     sessionId: session.id,
     workspacePath: session.getWorkspacePath(),
     userId: session.userId,
+    userRole: session.userRole,
     approvalCallback: resolvedApprovalCallback,
     inputCallback: opts.inputCallback,
     onSubAgentProgress: opts.onSubAgentProgress,
