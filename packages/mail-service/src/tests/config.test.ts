@@ -79,6 +79,42 @@ describe("loadMailServiceConfig", () => {
     }
   });
 
+  it("resolves env references for ANY attribute (address, port, secure, allowedUsers) and coerces types", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "starlingai-mail-config-"));
+    const configPath = join(tempDir, "accounts.json");
+    writeFileSync(configPath, `{
+  accounts: [
+    {
+      id: "work",
+      address: "$MAIL_ADDR",
+      displayName: "$MAIL_NAME",
+      allowedUsers: ["$MAIL_OWNER"],
+      imap: { host: "$MAIL_HOST", port: "$MAIL_IMAP_PORT", secure: "$MAIL_SECURE", user: "$MAIL_ADDR", pass: "$MAIL_PASS" },
+      smtp: { host: "$MAIL_HOST", port: 587, secure: "false", user: "$MAIL_ADDR", pass: "$MAIL_PASS" }
+    }
+  ]
+}
+`, "utf8");
+    process.env["SAI_MAIL_SERVICE_CONFIG_PATH"] = configPath;
+    Object.assign(process.env, {
+      MAIL_ADDR: "user@example.com", MAIL_NAME: "Work", MAIL_OWNER: "alice",
+      MAIL_HOST: "imap.example.com", MAIL_IMAP_PORT: "993", MAIL_SECURE: "true", MAIL_PASS: "secret",
+    });
+    try {
+      const config = await loadMailServiceConfig();
+      const acct = config.accounts[0]!;
+      expect(acct.address).toBe("user@example.com"); // string field via env (passed .email())
+      expect(acct.displayName).toBe("Work");
+      expect(acct.allowedUsers).toEqual(["alice"]);
+      expect(acct.imap.port).toBe(993);              // coerced string→number
+      expect(acct.imap.secure).toBe(true);           // coerced string→boolean
+      expect(acct.smtp.secure).toBe(false);          // literal string→boolean
+    } finally {
+      for (const k of ["MAIL_ADDR", "MAIL_NAME", "MAIL_OWNER", "MAIL_HOST", "MAIL_IMAP_PORT", "MAIL_SECURE", "MAIL_PASS"]) delete process.env[k];
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("fails fast when a referenced mail credential env var is missing", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "starlingai-mail-config-"));
     const configPath = join(tempDir, "accounts.json");
