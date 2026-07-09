@@ -781,7 +781,10 @@ services:
       - starlingai-internal
     mem_limit: ${SAI_SEAWEEDFS_MEM_LIMIT:-512m}
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://localhost:8333/ || exit 1"]
+      # Hit the S3 API's /healthz (returns 200) on 127.0.0.1 — NOT `localhost`,
+      # which resolves to IPv6 ::1 in this image and is refused (S3 binds IPv4),
+      # and NOT `/`, which returns 403 for anonymous access and fails --spider.
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8333/healthz || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 5
