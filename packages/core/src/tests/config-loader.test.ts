@@ -39,6 +39,7 @@ describe("config loader mutable overlay", () => {
     delete process.env["SAI_FALLBACK_MODEL"];
     delete process.env["SAI_EMBEDDING_MODEL"];
     delete process.env["SAI_ROUTING_MODEL"];
+    for (const k of ["SAI_AUTH_PROVIDER", "SAI_OIDC_ISSUER", "SAI_OIDC_CLIENT_ID", "SAI_OIDC_CLIENT_SECRET", "SAI_OIDC_PUBLIC_URL", "SAI_OIDC_A2A_ENABLED"]) delete process.env[k];
     vi.restoreAllMocks();
     vi.resetModules();
 
@@ -372,6 +373,33 @@ describe("config loader mutable overlay", () => {
       // Empty string means "disable this tier", not "leave the pinned Qwen id".
       expect(model.embeddingModel).toBe("");
       expect(model.tiers?.routing).toBe("");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("enables OIDC SSO from SAI_AUTH_PROVIDER + SAI_OIDC_* env (secret kept as a ref)", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-config-oidc-"));
+    const baseConfigPath = join(tempDir, "starlingai.json");
+    writeFileSync(baseConfigPath, JSON.stringify({ gateway: { port: 8765 } }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = baseConfigPath;
+    process.env["SAI_AUTH_PROVIDER"] = "oidc";
+    process.env["SAI_OIDC_ISSUER"] = "http://keycloak:8080/realms/starlingai";
+    process.env["SAI_OIDC_CLIENT_ID"] = "starlingai";
+    process.env["SAI_OIDC_CLIENT_SECRET"] = "super-secret-value";
+    process.env["SAI_OIDC_A2A_ENABLED"] = "true";
+    vi.resetModules();
+    const configLoader = await import("../config/loader.js");
+    try {
+      const auth = configLoader.loadConfig().auth;
+      expect(auth.enabled).toBe(true);
+      expect(auth.provider).toBe("oidc");
+      expect(auth.oidc?.issuer).toBe("http://keycloak:8080/realms/starlingai");
+      expect(auth.oidc?.clientId).toBe("starlingai");
+      // The secret is stored as a $ENV REF, never the raw value — so it stays out
+      // of the compiled config; oidc.ts resolves it from env at runtime.
+      expect(auth.oidc?.clientSecret).toBe("$SAI_OIDC_CLIENT_SECRET");
+      expect(auth.oidc?.a2a.enabled).toBe(true);
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

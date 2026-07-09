@@ -1,0 +1,50 @@
+{
+  "realm": "starlingai",
+  "enabled": true,
+  "displayName": "StarlingAI",
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "roles": {
+    "realm": [
+      { "name": "admin", "description": "StarlingAI admin (maps to our admin role)" },
+      { "name": "operator", "description": "StarlingAI operator (read + act)" },
+      { "name": "viewer", "description": "StarlingAI viewer (read-only)" }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "starlingai",
+      "name": "StarlingAI",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "starlingai-dev-secret",
+      "standardFlowEnabled": true,
+      "serviceAccountsEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "redirectUris": [
+        "http://localhost:3001/*",
+        "http://localhost:8765/*",
+        "http://127.0.0.1:3001/*"
+      ],
+      "webOrigins": ["+"],
+      "attributes": {
+        "post.logout.redirect.uris": "+"
+      }
+    }
+  ],
+  "users": [
+    {
+      "username": "admin",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "StarlingAI",
+      "lastName": "Admin",
+      "email": "admin@starlingai.local",
+      "credentials": [
+        { "type": "password", "value": "admin", "temporary": false }
+      ],
+      "realmRoles": ["admin"]
+    }
+  ]
+}

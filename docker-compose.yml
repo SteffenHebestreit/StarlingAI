@@ -713,6 +713,43 @@ services:
       retries: 5
       start_period: 20s
 
+  # ── Keycloak (bundled OIDC identity provider) ─────────────────────────────
+  # Optional turnkey IdP for auth.provider=oidc. Start with:
+  #   docker compose --profile keycloak up
+  # Ships a preconfigured `starlingai` realm (client + admin/operator/viewer roles
+  # + an admin/admin demo user) via realm import. Published on the host as
+  # keycloak:8080 so the BROWSER and the GATEWAY share ONE issuer URL — add
+  #   127.0.0.1 keycloak
+  # to your hosts file, then set SAI_AUTH_PROVIDER=oidc +
+  # SAI_OIDC_ISSUER=http://keycloak:8080/realms/starlingai in .env.
+  # DEV MODE (start-dev, in-memory H2, HTTP): for production run Keycloak with a
+  # real database + TLS behind your reverse proxy, and rotate the client secret.
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.1@sha256:be6a86215213145bfb4fb3e2b3ab982a806d00262655abdcf3ffa6a38d241c7c
+    profiles:
+      - keycloak
+    restart: unless-stopped
+    command: ["start-dev", "--import-realm"]
+    environment:
+      - KC_BOOTSTRAP_ADMIN_USERNAME=${KEYCLOAK_ADMIN:-admin}
+      - KC_BOOTSTRAP_ADMIN_PASSWORD=${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      - KC_HTTP_ENABLED=true
+      - KC_HOSTNAME_STRICT=false
+      - KC_HEALTH_ENABLED=true
+    volumes:
+      - ./docker/keycloak/realm-starlingai.json:/opt/keycloak/data/import/realm-starlingai.json:ro
+    ports:
+      - "${SAI_BIND_HOST:-127.0.0.1}:8080:8080"
+    networks:
+      - starlingai-internal
+    mem_limit: ${SAI_KEYCLOAK_MEM_LIMIT:-1g}
+    healthcheck:
+      test: ["CMD-SHELL", "bash -lc ': >/dev/tcp/127.0.0.1/9000'"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 45s
+
 volumes:
   gc-postgres-data:
   gc-redis-data:

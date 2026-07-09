@@ -234,6 +234,37 @@ async function main() {
       info("Embedding + routing tiers use the config defaults (Qwen: text-embedding-qwen3-embedding-0.6b / qwen3.5-9b). If this endpoint doesn't serve them, set SAI_EMBEDDING_MODEL / SAI_ROUTING_MODEL in .env (empty to disable) so RAG + the fast-lane don't error.");
     }
 
+    // ── 2b. identity backend (built-in accounts vs OIDC/Keycloak SSO) ─────────
+    for (const k of ["SAI_AUTH_PROVIDER", "SAI_OIDC_ISSUER", "SAI_OIDC_CLIENT_ID", "SAI_OIDC_CLIENT_SECRET", "SAI_OIDC_PUBLIC_URL"]) delete env[k];
+    const iamChoice = NON_INTERACTIVE
+      ? ({ builtin: 0, oidc: 1 }[process.env.SAI_SETUP_IAM ?? "builtin"] ?? 0)
+      : await choose("How should users sign in?", [
+          "Built-in accounts — username + password, managed in the dashboard (current default)",
+          "Single sign-on via OpenID Connect (Keycloak or another IdP)",
+        ], 0);
+    if (iamChoice === 1) {
+      env.SAI_AUTH_PROVIDER = "oidc";
+      const issuer = NON_INTERACTIVE ? (process.env.SAI_SETUP_OIDC_ISSUER ?? "http://keycloak:8080/realms/starlingai")
+        : await ask("OIDC issuer URL", "http://keycloak:8080/realms/starlingai");
+      const clientId = NON_INTERACTIVE ? (process.env.SAI_SETUP_OIDC_CLIENT_ID ?? "starlingai")
+        : await ask("OIDC client id", "starlingai");
+      const clientSecret = NON_INTERACTIVE ? (process.env.SAI_SETUP_OIDC_CLIENT_SECRET ?? "")
+        : await ask("OIDC client secret (leave blank for a public client)");
+      const publicUrl = NON_INTERACTIVE ? (process.env.SAI_SETUP_OIDC_PUBLIC_URL ?? "http://localhost:3001")
+        : await ask("This gateway's public base URL (for the OIDC redirect)", "http://localhost:3001");
+      env.SAI_OIDC_ISSUER = issuer;
+      env.SAI_OIDC_CLIENT_ID = clientId;
+      if (clientSecret) env.SAI_OIDC_CLIENT_SECRET = clientSecret;
+      env.SAI_OIDC_PUBLIC_URL = publicUrl;
+      ok(`Identity: OIDC SSO (${issuer})`);
+      if (issuer.includes("keycloak:8080")) {
+        warn("Bundled Keycloak: run `docker compose --profile keycloak up`, and add `127.0.0.1 keycloak` to your hosts file so the browser + gateway share one issuer URL. Demo login: admin / admin (change it!).");
+      }
+      info("Map your IdP roles to admin/operator/viewer in config auth.oidc.roleMapping — the bundled Keycloak realm pre-creates realm roles named admin/operator/viewer.");
+    } else {
+      info("Identity: built-in accounts — enable multi-user auth and add users in the dashboard after first login.");
+    }
+
     // ── 3. optional chat channel ─────────────────────────────────────────────
     if (!NON_INTERACTIVE) {
       const wantTg = (await ask("Wire a Telegram bot now? Paste a bot token, or leave blank to skip")).trim();

@@ -513,6 +513,29 @@ function mergeEnvOverrides(raw: Record<string, unknown>): Record<string, unknown
       tts: env["SAI_MULTIMODAL_TTS_URL"] ? { ...tts, baseUrl: env["SAI_MULTIMODAL_TTS_URL"] } : tts,
     };
   }
+  // OIDC/SSO identity backend from env (Docker-first / setup wizard). Setting
+  // SAI_AUTH_PROVIDER=oidc turns auth ON and selects the OIDC provider; the
+  // SAI_OIDC_* vars fill auth.oidc. The client secret is stored as a $ENV REF
+  // (resolved at runtime), so it never lands in the compiled starlingai.json.
+  if (env["SAI_AUTH_PROVIDER"] || env["SAI_OIDC_ISSUER"]) {
+    const auth = (raw["auth"] as Record<string, unknown> | undefined) ?? {};
+    const oidc = (auth["oidc"] as Record<string, unknown> | undefined) ?? {};
+    const nextOidc: Record<string, unknown> = { ...(oidc as object) };
+    if (env["SAI_OIDC_ISSUER"]) nextOidc["issuer"] = env["SAI_OIDC_ISSUER"];
+    if (env["SAI_OIDC_CLIENT_ID"]) nextOidc["clientId"] = env["SAI_OIDC_CLIENT_ID"];
+    if (env["SAI_OIDC_CLIENT_SECRET"]) nextOidc["clientSecret"] = "$SAI_OIDC_CLIENT_SECRET";
+    if (env["SAI_OIDC_PUBLIC_URL"]) nextOidc["publicUrl"] = env["SAI_OIDC_PUBLIC_URL"];
+    if (env["SAI_OIDC_A2A_ENABLED"]) {
+      const on = ["1", "true", "yes", "on"].includes(env["SAI_OIDC_A2A_ENABLED"].trim().toLowerCase());
+      nextOidc["a2a"] = { ...((oidc["a2a"] as object | undefined) ?? {}), enabled: on };
+    }
+    const isOidc = env["SAI_AUTH_PROVIDER"] === "oidc";
+    raw["auth"] = {
+      ...(auth as object),
+      ...(isOidc ? { enabled: true, provider: "oidc" } : {}),
+      ...(Object.keys(nextOidc).length ? { oidc: nextOidc } : {}),
+    };
+  }
   if (env["SAI_COMPUTER_USE_ENABLED"] || env["SAI_COMPUTER_REMOTE_NODE_URL"] || env["SAI_COMPUTER_REMOTE_NODE_TOKEN"] || env["SAI_COMPUTER_REMOTE_NODE_LABEL"]) {
     const computerUse = (raw["computerUse"] as Record<string, unknown> | undefined) ?? {};
     const adapters = (computerUse["adapters"] as Record<string, unknown> | undefined) ?? {};
