@@ -1,7 +1,8 @@
-/* Only the default typeface (Clean) loads upfront. Every other typeface's
-   fonts are injected on demand by the theme store when selected (or when the
-   Appearance menu opens), so we don't ship 10 font families on first paint. */
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+/* The default typeface (Clean = Inter + JetBrains Mono) is self-hosted and bundled
+   via @fontsource — imported in main.ts BEFORE this file, so first paint makes no
+   third-party font request. Every other typeface's fonts are still injected on
+   demand by the theme store when selected (or when the Appearance menu opens), so
+   we don't ship 10 font families on first paint. */
 
 @tailwind base;
 @tailwind components;
