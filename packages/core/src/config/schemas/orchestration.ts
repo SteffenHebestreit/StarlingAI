@@ -505,6 +505,20 @@ export const OrchestrationSchema = z.object({
    *  operator dock before the orchestrator executes it. Off by default until the
    *  dock plan card is confirmed end-to-end. */
   planApproval: z.boolean().default(false),
+  /** Durable human-approval pause (async channels only). Every HITL approval is
+   *  normally an in-memory Promise resolver, so a gateway restart (deploy/reboot)
+   *  while a slack/webhook approval is outstanding — or a decision that legitimately
+   *  arrives hours later — silently auto-denies and the scene worker re-prompts on
+   *  the step re-run. When true, a scene/job approval routed through an async channel
+   *  (slack / outbound_webhook) persists its pending record to the on-disk state dir
+   *  (the same substrate as swarm checkpoints) and caches the DECISION keyed by a
+   *  stable idempotency key (job + tool + args). After a restart the re-run of the
+   *  step honours an already-made decision instead of re-prompting, and a late
+   *  callback still records the decision. Bounded + fail-closed: an unanswered
+   *  request still auto-denies at its timeout, and a cached decision expires (24h)
+   *  so a much-later re-run prompts fresh. Trivial webchat (ask_user) approvals keep
+   *  the cheap in-memory await, unchanged. Default OFF — behavioural, opt-in. */
+  durableApprovals: z.boolean().default(false),
   /** Per-call caps for regular researcher sub-agents.
    *  Keys are tool names; values override the built-in defaults.
    *  Built-in: web_search=14, web_fetch=16, write_file=3, … */
