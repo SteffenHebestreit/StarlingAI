@@ -225,6 +225,10 @@ export function registerWorkspaceRoutes(app: Hono): void {
       try {
         const { scanBytes } = await import("../storage/scanner.js");
         const verdict = await scanBytes(buffer);
+        if (verdict.oversize) {
+          logAudit("upload_oversize_rejected", { key: relativePath, size: buffer.length, route: "workspace/upload" }, { severity: "warn" });
+          return c.json({ error: "Upload rejected — the file is too large to virus-scan. Reduce its size, or raise storage.scan.maxScanBytes / disable storage.scan.rejectOverMaxBytes." }, 422);
+        }
         if (!verdict.clean) {
           logAudit("upload_infected", { key: relativePath, signature: verdict.signature ?? "unknown", route: "workspace/upload" }, { severity: "warn" });
           return c.json({ error: `Upload rejected — malware detected (${verdict.signature ?? "unknown"}).` }, 422);

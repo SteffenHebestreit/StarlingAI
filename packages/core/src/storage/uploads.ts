@@ -30,6 +30,10 @@ export async function scanAndStoreUpload(
   try {
     const verdict = await scanBytes(bytes);
     scanned = verdict.skipped !== true;
+    if (verdict.oversize) {
+      logAudit("upload_oversize_rejected", { key, size: bytes.length, ...meta }, { severity: "warn" });
+      return { ok: false, status: 422, error: "Upload rejected — the file is too large to virus-scan. Reduce its size, or (accepting the risk) raise storage.scan.maxScanBytes / disable storage.scan.rejectOverMaxBytes." };
+    }
     if (!verdict.clean) {
       logAudit("upload_infected", { key, signature: verdict.signature ?? "unknown", ...meta }, { severity: "warn" });
       return { ok: false, status: 422, error: `Upload rejected — malware detected (${verdict.signature ?? "unknown"}).` };

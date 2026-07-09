@@ -397,8 +397,14 @@ export const UploadScanSchema = z.object({
   clamdHost: z.string().default("clamav"),
   clamdPort: z.number().int().min(1).max(65535).default(3310),
   timeoutMs: z.number().int().min(1000).default(30_000),
-  /** Files larger than this skip the scan (clamd has its own StreamMaxLength; keep in sync). */
+  /** Files larger than this cannot be streamed to clamd (which has its own StreamMaxLength;
+   *  keep in sync). By default such a file is REJECTED (fail-closed) rather than stored
+   *  unscanned — see rejectOverMaxBytes. */
   maxScanBytes: z.number().int().min(0).default(104_857_600), // 100 MB
+  /** What to do with a file larger than maxScanBytes (unscannable). true (default) =
+   *  fail CLOSED: reject it, since an unscannable file can't be trusted. false = allow it
+   *  through unscanned (only for operators who accept that risk for large legitimate files). */
+  rejectOverMaxBytes: z.boolean().default(true),
 });
 
 export const StorageSchema = z.object({

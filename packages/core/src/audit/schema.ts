@@ -236,6 +236,7 @@ export type CoreAuditEventType =
   // Upload malware scanning
   | "upload_infected"
   | "upload_scan_failed"
+  | "upload_oversize_rejected"
   // Tool embedding warm-up (Stage 12 / Open Interop)
   | "tool_embeddings_warmed"
   // MCP client (consumed servers) — runtime registry

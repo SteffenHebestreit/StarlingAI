@@ -19,8 +19,10 @@ export interface ScanResult {
   clean: boolean;
   /** The matched signature name when infected. */
   signature?: string;
-  /** True when scanning was skipped (disabled, or over maxScanBytes). */
+  /** True when scanning was skipped (disabled, or over maxScanBytes with reject off). */
   skipped?: boolean;
+  /** True when the file was rejected because it exceeds maxScanBytes (unscannable). */
+  oversize?: boolean;
 }
 
 /**
@@ -32,7 +34,13 @@ export async function scanBytes(bytes: Uint8Array): Promise<ScanResult> {
   const cfg = getConfig().storage.scan;
   if (!cfg.enabled) return { clean: true, skipped: true };
   if (cfg.maxScanBytes > 0 && bytes.length > cfg.maxScanBytes) {
-    log.warn({ size: bytes.length, max: cfg.maxScanBytes }, "Upload exceeds maxScanBytes — skipping virus scan");
+    if (cfg.rejectOverMaxBytes) {
+      // Fail CLOSED: a file too large to stream to clamd can't be trusted, so refuse it
+      // rather than store it unscanned (the previous silent-pass behavior).
+      log.warn({ size: bytes.length, max: cfg.maxScanBytes }, "Upload exceeds maxScanBytes — rejecting (unscannable, fail-closed)");
+      return { clean: false, oversize: true };
+    }
+    log.warn({ size: bytes.length, max: cfg.maxScanBytes }, "Upload exceeds maxScanBytes — storing UNSCANNED (rejectOverMaxBytes is off)");
     return { clean: true, skipped: true };
   }
   return clamdInstream(bytes, cfg.clamdHost, cfg.clamdPort, cfg.timeoutMs);
