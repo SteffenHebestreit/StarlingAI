@@ -288,15 +288,59 @@ export const AuthUserSchema = z.object({
 export type AuthRole = z.infer<typeof AuthRoleSchema>;
 
 /**
- * Multi-user authentication (Wave A).  When `enabled` is false (the
- * default), the gateway keeps its single-operator behavior and prints a
- * bootstrap admin token on startup.  When enabled, login requires a
- * username + password from `users[]` and returns a JWT scoped to that
- * username (`sub` claim).  Wave A grants every authenticated user full
- * operator privileges; Wave B will introduce role-based scoping.
+ * Map external-IdP role/group names → our roles. Checked admin → operator →
+ * viewer (most-privileged wins); a user whose token carries none of the listed
+ * roles falls back to `defaultRole` (or is rejected when that is unset).
+ */
+export const OidcRoleMappingSchema = z.object({
+  admin: z.array(z.string()).default([]),
+  operator: z.array(z.string()).default([]),
+  viewer: z.array(z.string()).default([]),
+  defaultRole: AuthRoleSchema.optional(),
+}).default({});
+
+/**
+ * OpenID Connect provider (e.g. Keycloak). Used for SSO human login and, when
+ * `a2a.enabled`, machine-to-machine agent auth via the client-credentials grant.
+ * Discovery reads `{issuer}/.well-known/openid-configuration`.
+ */
+export const OidcConfigSchema = z.object({
+  issuer: z.string().url(),
+  clientId: z.string().min(1),
+  /** Client secret — a $ENV or secret: reference, never an inline value. Omit for a public client. */
+  clientSecret: z.string().optional(),
+  /** The gateway's public base URL; the OIDC redirect is `{publicUrl}/api/auth/oidc/callback`.
+   *  Falls back to gateway.publicUrl / the request origin when unset. */
+  publicUrl: z.string().url().optional(),
+  scopes: z.array(z.string()).default(["openid", "profile", "email"]),
+  /** Token claim carrying the username (e.g. preferred_username, email, sub). */
+  usernameClaim: z.string().default("preferred_username"),
+  /** Token claim path holding the user's roles (Keycloak: realm_access.roles). */
+  rolesClaim: z.string().default("realm_access.roles"),
+  roleMapping: OidcRoleMappingSchema,
+  /** Agent-to-agent (A2A) machine auth: request an OIDC client-credentials service
+   *  token for OUTBOUND peer calls and validate INBOUND peer tokens via the issuer's
+   *  JWKS. Peers must trust the same issuer. */
+  a2a: z.object({
+    enabled: z.boolean().default(false),
+    /** Audience requested for / required on A2A service tokens. */
+    audience: z.string().optional(),
+  }).default({}),
+});
+
+/**
+ * Authentication.  When `enabled` is false (the default), the gateway keeps its
+ * single-operator behavior and prints a bootstrap admin token on startup. When
+ * enabled, `provider` selects the identity backend:
+ *   - "builtin" — username + password from `users[]`, returning a JWT scoped to
+ *     that username (`sub` claim) with a role from the user record.
+ *   - "oidc"    — an external OpenID Connect provider (Keycloak) for SSO; the
+ *     login flow redirects to the IdP, maps its roles, and mints our session JWT.
  */
 export const AuthSchema = z.object({
   enabled: z.boolean().default(false),
+  provider: z.enum(["builtin", "oidc"]).default("builtin"),
+  oidc: OidcConfigSchema.optional(),
   users: z.array(AuthUserSchema).default([]),
   /**
    * Trust the client-supplied `X-Forwarded-For` header for the login
@@ -310,6 +354,7 @@ export const AuthSchema = z.object({
 
 export type AuthUser = z.infer<typeof AuthUserSchema>;
 export type AuthConfig = z.infer<typeof AuthSchema>;
+export type OidcConfig = z.infer<typeof OidcConfigSchema>;
 
 /**
  * Cost governance.  When `enabled` is true the gateway aggregates token

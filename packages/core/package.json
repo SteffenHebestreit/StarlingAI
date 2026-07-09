@@ -57,6 +57,7 @@
     "node-fetch": "^3.3.2",
     "nodemailer": "^9.0.1",
     "openai": "^4.89.0",
+    "openid-client": "^6.8.4",
     "pdf-lib": "^1.17.1",
     "pg": "^8.14.1",
     "pino": "^9.6.0",
