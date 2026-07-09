@@ -13,6 +13,7 @@ const allowedFiles = new Set([
   ".env.example",
   ".gitattributes",
   ".gitignore",
+  ".gitleaks.toml",
   ".mcp.json",
   "CONTRIBUTING.md",
   "docker-compose.computer.yml",

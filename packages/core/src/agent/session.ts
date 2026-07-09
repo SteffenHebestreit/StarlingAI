@@ -756,7 +756,7 @@ const SESSION_STORE_PATH = resolveSessionStorePath();
 
 loadPersistedSessions();
 
-export function createSession(opts: AgentSessionOptions): AgentSession {
+export function createSession(opts: AgentSessionOptions & { createdAt?: Date; updatedAt?: Date }): AgentSession {
   if (opts.sessionId) {
     const existing = _sessions.get(opts.sessionId);
     if (existing && !existing.isArchived()) {
@@ -766,7 +766,7 @@ export function createSession(opts: AgentSessionOptions): AgentSession {
 
   // Seed the effort tier from the configured global default when the caller did
   // not specify one, so new sessions inherit the operator's chosen baseline.
-  const seededOpts: AgentSessionOptions = opts.settings?.effort
+  const seededOpts: AgentSessionOptions & { createdAt?: Date; updatedAt?: Date } = opts.settings?.effort
     ? opts
     : { ...opts, settings: { ...opts.settings, effort: getConfig().effort?.default ?? "medium" } };
 
