@@ -1229,12 +1229,19 @@ async function _runTurn(
       try {
         const verdictRaw = (await classifierProvider.complete(buildSourceSensitiveQuestionJudgeMessages(userMessage), [], signal)).content ?? "";
         upfrontSourceSensitive = parseUngroundedClaimVerdict(verdictRaw);
-        if (upfrontSourceSensitive) {
-          logAudit("guardrail_flagged", { type: "upfront_source_sensitive_detected" }, { sessionId: session.id, severity: "info" });
-        }
+        // Always log the verdict (not just the positive case) so the audit shows the classifier RAN
+        // and what it decided — otherwise a silent "no" is indistinguishable from the classifier being
+        // absent/disabled, which made the "did it fire?" question undiagnosable from the audit.
+        logAudit("guardrail_flagged", {
+          type: upfrontSourceSensitive ? "upfront_source_sensitive_detected" : "upfront_source_sensitive_clear",
+        }, { sessionId: session.id, severity: "info" });
       } catch (err) {
         log.debug({ err, sessionId: session.id }, "Up-front source-sensitivity classifier failed — relying on post-draft guards");
       }
+    } else {
+      // No routing tier configured → the classifier can't run. Log it so a missing/mis-set routing
+      // model is distinguishable in the audit from the classifier running and returning "clear".
+      logAudit("guardrail_flagged", { type: "upfront_source_sensitive_no_routing_tier" }, { sessionId: session.id, severity: "info" });
     }
   }
   const effectiveToolMode: MainAssistantToolMode | undefined = detectedDynamicGuidance?.computerAccessSensitive && !detectedDynamicGuidance?.pentestSensitive

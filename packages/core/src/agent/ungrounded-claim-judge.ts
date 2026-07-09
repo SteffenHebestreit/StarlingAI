@@ -86,9 +86,16 @@ export function parseUngroundedClaimVerdict(raw: string): boolean {
   if (!text) return false;
   const marker = text.match(/VERDICT\s*:\s*(yes|no)/i);
   if (marker) return marker[1]!.toLowerCase() === "yes";
-  // No explicit marker → trust nothing. A bare "yes"/"no" as the entire reply is still honored so a
-  // terse routing model that drops the label is not silently ignored; anything longer without the
-  // marker is treated as unparseable → false.
-  if (/^(yes|ja|oui|sí|si)\b/i.test(text) && text.length <= 6) return true;
+  // A small routing model often drops the label and replies in prose ("Yes, because …" / "… so no").
+  // Fall back to the LAST standalone yes/no token — models state their conclusion at the END, so a
+  // reasoning trail that mentions "no" early but concludes "yes" resolves to the conclusion. This
+  // keeps a verbose reply from silently failing to NO (which would drop the signal and let the very
+  // draft this guards leak through). A reply with no yes/no token stays false (fail-safe). German
+  // ja/nein are honored since the assistant context is often German.
+  const tokens = [...text.matchAll(/\b(yes|no|ja|nein)\b/gi)];
+  if (tokens.length > 0) {
+    const last = tokens[tokens.length - 1]![1]!.toLowerCase();
+    return last === "yes" || last === "ja";
+  }
   return false;
 }

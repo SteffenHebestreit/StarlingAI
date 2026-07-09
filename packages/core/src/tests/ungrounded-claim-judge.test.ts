@@ -48,14 +48,19 @@ describe("parseUngroundedClaimVerdict — fail-safe toward NOT triggering", () =
 
   it("returns false on a missing/garbled marker or empty reply (no over-trigger on parse miss)", () => {
     expect(parseUngroundedClaimVerdict("")).toBe(false);
-    expect(parseUngroundedClaimVerdict("I think this answer looks mostly fine to me honestly")).toBe(false);
+    expect(parseUngroundedClaimVerdict("I think this answer looks mostly fine to me honestly")).toBe(false); // no yes/no token
     expect(parseUngroundedClaimVerdict("maybe?")).toBe(false);
   });
 
-  it("honors a terse bare 'yes' but not a long unlabeled affirmation", () => {
+  it("honors a bare OR trailing yes/no even without the VERDICT label (verbose small-model replies)", () => {
     expect(parseUngroundedClaimVerdict("yes")).toBe(true);
     expect(parseUngroundedClaimVerdict("ja")).toBe(true);
-    expect(parseUngroundedClaimVerdict("yes, this asserts several external facts about the operator")).toBe(false); // no marker, too long
+    // A small routing model that drops the label but concludes with yes/no is honored via the LAST
+    // token (models conclude at the end) — this is the reliability fix so the up-front classifier does
+    // not silently fail to NO on a verbose reply (audit 0b86d025: it never engaged).
+    expect(parseUngroundedClaimVerdict("This names a specific operator and prices, so yes")).toBe(true);
+    expect(parseUngroundedClaimVerdict("This is general knowledge, so no")).toBe(false);
+    expect(parseUngroundedClaimVerdict("There are no official sources cited, but it asserts an operator, therefore yes")).toBe(true);
   });
 });
 
