@@ -64,6 +64,15 @@ function writeEnv(env) {
   const body = Object.entries(env).map(([k, v]) => `${k}=${v}`).join("\n") + "\n";
   writeFileSync(ENV_FILE, body, { mode: 0o600 });
 }
+/** Keep the bundled SeaweedFS's own credential file in sync with the gateway's rotated S3
+ *  env, so the object store isn't left on the shipped `starlingai-dev-secret` default. The
+ *  committed file keeps that dev default as a template; this rewrites the LOCAL copy. */
+function syncSeaweedfsS3Config(accessKey, secretKey) {
+  const p = join(REPO_ROOT, "docker", "seaweedfs", "s3-config.json");
+  if (!existsSync(p)) return;
+  const cfg = { identities: [{ name: "starlingai", credentials: [{ accessKey, secretKey }], actions: ["Admin", "Read", "Write", "List", "Tagging"] }] };
+  writeFileSync(p, JSON.stringify(cfg, null, 2) + "\n");
+}
 
 // ── HS256 JWT minting (mirrors scripts/gen-token.mjs) ────────────────────────
 function b64url(value) {
@@ -135,6 +144,14 @@ async function main() {
     }
     if (!env.POSTGRES_PASSWORD) {
       env.POSTGRES_PASSWORD = randomBytes(24).toString("base64url"); changed = true; ok("Generated POSTGRES_PASSWORD");
+    }
+    // Object-store (bundled SeaweedFS) secret — rotate off the shipped dev default and keep
+    // SeaweedFS's own credential file in sync with the gateway's SAI_S3_* env.
+    if (!env.SAI_S3_SECRET_ACCESS_KEY || env.SAI_S3_SECRET_ACCESS_KEY === "starlingai-dev-secret") {
+      env.SAI_S3_ACCESS_KEY_ID = env.SAI_S3_ACCESS_KEY_ID || "starlingai";
+      env.SAI_S3_SECRET_ACCESS_KEY = randomBytes(24).toString("base64url");
+      syncSeaweedfsS3Config(env.SAI_S3_ACCESS_KEY_ID, env.SAI_S3_SECRET_ACCESS_KEY);
+      changed = true; ok("Generated SAI_S3_SECRET_ACCESS_KEY (object store) + synced SeaweedFS creds");
     }
     if (!changed) info("Secrets already present — preserving them.");
 
