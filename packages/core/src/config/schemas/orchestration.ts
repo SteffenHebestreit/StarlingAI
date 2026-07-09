@@ -158,6 +158,19 @@ export const OrchestrationSchema = z.object({
    *  — it adds a routing hop to every orchestration turn (including ones that don't need research) and
    *  can convert a legitimate direct answer into a delegation, so pass^k-gated. */
   upfrontSourceSensitiveClassifier: z.boolean().default(false),
+  /** Only ever show the user the VALIDATED response — never the intermediate tool-free draft. With
+   *  the honesty guards able to reject a draft and replace it with researched synthesis, streaming
+   *  the iteration-0 draft token-by-token shows the user an answer that may be discarded ("answer,
+   *  then research"). When true, the first response on an orchestration_only turn is BUFFERED, not
+   *  streamed: a draft that passes the guards is still delivered whole as the final message; a
+   *  rejected one never reaches the user, who sees only the researched/validated answer. The model
+   *  may still draft internally (cheap on the local model) and the draft is NOT used to seed the
+   *  research — the research task is built from the user's QUESTION and synthesis is grounded in the
+   *  gathered evidence, so the (possibly wrong) draft cannot bias the result. Trade-off: quick direct
+   *  answers no longer stream token-by-token — they appear at once after the turn resolves. Default
+   *  OFF (it changes the streaming UX for every orchestration turn); enable alongside the honesty
+   *  guards when "show only the validated answer" is the desired behaviour. */
+  suppressUnvalidatedDraftStreaming: z.boolean().default(false),
   /** Terminal fabrication guard: a turn that RESEARCHED (produced ≥1 curated shared fact) but
    *  produced NO artifact file, and whose answer INLINES a full HTML application document
    *  (looksLikeInlinedAppDocument — the never-legit-inline structural signal), is the model

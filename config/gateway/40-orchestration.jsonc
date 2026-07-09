@@ -100,6 +100,15 @@
     // general-knowledge/creative/coding turns that did not need research.
     "upfrontSourceSensitiveClassifier": true,
 
+    // Only ever SHOW the user the validated response, never the intermediate tool-free draft. The
+    // model may still draft internally (and the draft is NOT used to seed the research — that runs off
+    // the user's question), but the first response is BUFFERED instead of streamed: a draft that
+    // passes the guards is delivered whole; a rejected one is replaced by researched synthesis and the
+    // user only ever sees the validated answer. Trade-off: quick direct answers no longer stream
+    // token-by-token — they appear at once when the turn resolves. Enabled per the "only respond with
+    // the validated response" requirement.
+    "suppressUnvalidatedDraftStreaming": true,
+
     // Failed-research honesty backstop. When real orchestration RAN this turn and FAILED
     // (forced-synthesis fired / a delegation failed / a partial source-sensitive delegation),
     // don't ship a confident training-data answer as if the research had succeeded — re-anchor

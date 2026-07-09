@@ -1848,6 +1848,14 @@ async function _runTurn(
         || requiresArtifactDelegation
         || workflowCatalogRequired
         || requiresMaintenanceDelegation
+        // Only-show-validated-response (orchestration.suppressUnvalidatedDraftStreaming): the honesty
+        // guards can reject a tool-free draft and replace it with researched synthesis, so streaming
+        // the iteration-0 draft would show an answer that may be discarded. Buffer it instead — a
+        // passed draft is still delivered whole as the final message; a rejected one never reaches the
+        // user, who sees only the validated answer. Scoped to orchestration_only (where those guards
+        // live). Covers EVERY path (up-front classifier, post-draft guard, or a clean pass).
+        || (getConfig().orchestration?.suppressUnvalidatedDraftStreaming === true
+          && activeMainAssistantToolMode === "orchestration_only")
       );
       const chunkSink = iterationCount === 0 && !suppressInitialInlineStreaming ? opts.onChunk : undefined;
       if (!chunkSink) {
