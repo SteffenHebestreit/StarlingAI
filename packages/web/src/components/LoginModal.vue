@@ -29,6 +29,23 @@
         <p class="text-sm text-gray-500">{{ tabHint }}</p>
       </div>
 
+      <!-- OIDC/SSO: replace the form with a redirect to the identity provider. -->
+      <template v-if="provider === 'oidc'">
+        <div class="space-y-6">
+          <div>
+            <label for="login-gateway-url-sso" class="block text-xs font-medium text-gray-400 mb-2 uppercase tracking-wider">Gateway URL</label>
+            <input id="login-gateway-url-sso" v-model="wsUrl" type="text" class="input-line" :placeholder="defaultWsUrl" />
+          </div>
+          <button type="button" class="btn-grad w-full py-2.5 rounded-xl text-sm" @click="startSso">
+            Sign in with SSO
+          </button>
+          <p class="text-xs text-gray-500 text-center">
+            You'll be redirected to your identity provider to sign in.
+          </p>
+        </div>
+      </template>
+
+      <template v-else>
       <div class="flex gap-2 mb-5 text-xs">
         <button
           type="button"
@@ -117,6 +134,7 @@
       <p v-if="mode === 'token'" class="text-xs text-gray-600 text-center mt-6">
         Token location: <code class="text-gray-500 font-mono">~/.starlingai/token</code>
       </p>
+      </template>
     </div>
   </div>
 </template>
@@ -147,17 +165,26 @@ type Mode = "password" | "token";
 // accounts, so username/password login would only 503. detectAuthMode() flips to
 // the password tab when the gateway reports multi-user auth is on.
 const mode = ref<Mode>("token");
+// Identity backend reported by the gateway. "oidc" replaces the form with an
+// SSO redirect button.
+const provider = ref<"builtin" | "oidc">("builtin");
 
 async function detectAuthMode(): Promise<void> {
   try {
     const apiBase = apiBaseFromWsUrl(wsUrl.value);
     const res = await fetch(`${apiBase}/api/auth/mode`, { method: "GET" });
     if (!res.ok) return;
-    const body = await res.json() as { authEnabled?: boolean };
+    const body = await res.json() as { authEnabled?: boolean; provider?: "builtin" | "oidc" };
+    provider.value = body.provider === "oidc" ? "oidc" : "builtin";
     mode.value = body.authEnabled ? "password" : "token";
   } catch {
     // Gateway unreachable — keep the token default; surfaced clearly on submit.
   }
+}
+
+/** Redirect the browser to the gateway's OIDC login (which redirects to the IdP). */
+function startSso(): void {
+  window.location.href = `${apiBaseFromWsUrl(wsUrl.value)}/api/auth/oidc/login`;
 }
 
 onMounted(() => {

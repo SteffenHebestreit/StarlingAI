@@ -235,7 +235,45 @@ describe("gateway HTTP bridge", () => {
       // No Authorization header — this route is intentionally public.
       const res = await fetch(`${baseUrl}/api/auth/mode`);
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ authEnabled: false });
+      expect(await res.json()).toEqual({ authEnabled: false, provider: "builtin" });
+      // OIDC login is refused when the provider isn't 'oidc'.
+      const oidc = await fetch(`${baseUrl}/api/auth/oidc/login`, { redirect: "manual" });
+      expect(oidc.status).toBe(404);
+    } finally {
+      await gateway.stop();
+      await flushAuditLogForTests();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, gatewayTestTimeoutMs);
+
+  it("reports provider 'oidc' on /api/auth/mode so the login screen shows SSO", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-oidcmode-"));
+    const port = 18400 + Math.floor(Math.random() * 1000);
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      gateway: { port, jwtSecret: "z".repeat(32) },
+      auth: {
+        enabled: true,
+        provider: "oidc",
+        oidc: { issuer: "https://keycloak.example.com/realms/starlingai", clientId: "starlingai" },
+      },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    delete process.env["SAI_JWT_SECRET"];
+    process.env["SAI_MASTER_KEY"] = "m".repeat(32);
+    process.env["SAI_CRED_STORE"] = join(tempDir, PRODUCT.stateDirName, "credentials.enc");
+    process.env["SAI_AUDIT_LOG"] = join(tempDir, PRODUCT.stateDirName, "audit.jsonl");
+    vi.resetModules();
+
+    const { createGateway } = await import("../gateway/index.js");
+    const gateway = createGateway();
+    await gateway.start();
+    const baseUrl = `http://127.0.0.1:${port}`;
+    try {
+      await waitForHealth(`${baseUrl}/healthz`);
+      const res = await fetch(`${baseUrl}/api/auth/mode`);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ authEnabled: true, provider: "oidc" });
     } finally {
       await gateway.stop();
       await flushAuditLogForTests();

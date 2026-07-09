@@ -10,6 +10,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { getConfig, updateConfig } from "../config/loader.js";
 import { verifyToken, extractBearerToken, checkAuthRateLimit, recordAuthFailure, clearAuthFailures, authenticatedUser, userHasRole, hashPassword, verifyPassword, createToken, type AuthRole } from "./auth.js";
+import { buildLoginUrl, handleCallback, stashLoginState, takeLoginState, oidcPublicBase, OIDC_CALLBACK_PATH } from "./oidc.js";
 import { runWithRequestContext } from "../runtime/request-context.js";
 import { registerSubAgentRoutes } from "./sub-agent-routes.js";
 import { registerSkillLibraryRoutes } from "./skill-routes.js";
@@ -940,7 +941,56 @@ export function createGateway() {
   // 503s — so the client should default to the token tab. Exposes nothing sensitive
   // (just whether account login is available).
   app.get("/api/auth/mode", (c) => {
-    return c.json({ authEnabled: getConfig().auth.enabled === true });
+    const auth = getConfig().auth;
+    return c.json({
+      authEnabled: auth.enabled === true,
+      // The identity backend, so the login screen shows "Sign in with SSO" (oidc)
+      // vs the username/password + token form (builtin).
+      provider: auth.enabled ? auth.provider : "builtin",
+    });
+  });
+
+  // ── OIDC SSO (auth.provider = "oidc") ────────────────────────────────────
+  // Start: redirect the browser to the IdP (PKCE + state stashed server-side).
+  app.get("/api/auth/oidc/login", async (c) => {
+    const auth = getConfig().auth;
+    if (!auth.enabled || auth.provider !== "oidc") return c.json({ error: "OIDC login is not enabled" }, 404);
+    try {
+      const origin = new URL(c.req.url).origin;
+      const { url, codeVerifier, state } = await buildLoginUrl(origin);
+      stashLoginState(state, codeVerifier);
+      return c.redirect(url);
+    } catch (err) {
+      log.error({ err: err instanceof Error ? err.message : String(err) }, "OIDC login start failed");
+      return c.json({ error: "OIDC login unavailable — check the issuer configuration" }, 503);
+    }
+  });
+
+  // Callback: exchange the code, mint OUR session JWT (mapping IdP roles), and hand
+  // it to the SPA via the URL FRAGMENT (never the query — fragments aren't logged or
+  // sent to the server). The SPA reads it on load, stores it, clears the hash, connects.
+  app.get(OIDC_CALLBACK_PATH, async (c) => {
+    const auth = getConfig().auth;
+    const origin = new URL(c.req.url).origin;
+    const base = oidcPublicBase(origin);
+    if (!auth.enabled || auth.provider !== "oidc") return c.json({ error: "OIDC login is not enabled" }, 404);
+    const state = c.req.query("state");
+    const codeVerifier = state ? takeLoginState(state) : null;
+    if (!state || !codeVerifier) return c.json({ error: "Invalid or expired login state" }, 400);
+    try {
+      const query = new URL(c.req.url).searchParams.toString();
+      const currentUrl = `${base}${OIDC_CALLBACK_PATH}?${query}`;
+      const identity = await handleCallback(currentUrl, codeVerifier, state);
+      const token = await createToken(identity.username, {
+        role: identity.role,
+        ...(identity.displayName ? { displayName: identity.displayName } : {}),
+      });
+      logAudit("auth_success", { username: identity.username, role: identity.role, via: "oidc" }, { userId: identity.username });
+      return c.redirect(`${base}/#sai_token=${encodeURIComponent(token)}`);
+    } catch (err) {
+      log.warn({ err: err instanceof Error ? err.message : String(err) }, "OIDC callback failed");
+      return c.redirect(`${base}/#sai_error=${encodeURIComponent("SSO login failed")}`);
+    }
   });
 
   app.post("/api/auth/login", async (c) => {

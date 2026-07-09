@@ -585,6 +585,15 @@ async function enableBrowserNotifications(): Promise<void> {
 }
 
 onMounted(() => {
+  // OIDC/SSO return: the gateway hands our JWT back in the URL FRAGMENT (never the
+  // query — fragments aren't logged or sent to the server). Consume it into the
+  // token, then strip the hash so it doesn't linger in the address bar.
+  const hash = window.location.hash.replace(/^#/, "");
+  if (hash.includes("sai_token=") || hash.includes("sai_error=")) {
+    const ssoToken = new URLSearchParams(hash).get("sai_token");
+    if (ssoToken) gateway.token = ssoToken;
+    history.replaceState(null, "", window.location.pathname + window.location.search);
+  }
   notifications.syncPermission();
   if (gateway.token) {
     gateway.connect();

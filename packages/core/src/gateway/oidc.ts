@@ -69,10 +69,35 @@ export interface OidcLoginStart {
   state: string;
 }
 
-/** Redirect URI the IdP calls back — the configured publicUrl, else the request origin. */
+/** The gateway's public base URL (configured publicUrl, else the request origin). */
+export function oidcPublicBase(requestOrigin?: string): string {
+  return (oidcConfig().publicUrl ?? getConfig().gateway.publicUrl ?? requestOrigin ?? "").replace(/\/$/, "");
+}
+
+/** Redirect URI the IdP calls back — `{publicBase}/api/auth/oidc/callback`. */
 export function oidcRedirectUri(requestOrigin?: string): string {
-  const base = (oidcConfig().publicUrl ?? getConfig().gateway.publicUrl ?? requestOrigin ?? "").replace(/\/$/, "");
-  return `${base}${OIDC_CALLBACK_PATH}`;
+  return `${oidcPublicBase(requestOrigin)}${OIDC_CALLBACK_PATH}`;
+}
+
+// ── Login-state store (PKCE verifier + state survive the IdP redirect) ──────────
+// Keyed by the anti-CSRF `state`, which round-trips through the IdP, so no cookie
+// is needed. Short TTL; single-use (consumed on callback).
+interface LoginStateEntry { codeVerifier: string; createdAt: number; }
+const _loginStates = new Map<string, LoginStateEntry>();
+const LOGIN_STATE_TTL_MS = 600_000; // 10 minutes
+
+export function stashLoginState(state: string, codeVerifier: string): void {
+  const cutoff = Date.now() - LOGIN_STATE_TTL_MS;
+  for (const [k, v] of _loginStates) if (v.createdAt < cutoff) _loginStates.delete(k);
+  _loginStates.set(state, { codeVerifier, createdAt: Date.now() });
+}
+
+/** Consume the stored verifier for `state` (single-use). Null if missing/expired. */
+export function takeLoginState(state: string): string | null {
+  const entry = _loginStates.get(state);
+  if (!entry) return null;
+  _loginStates.delete(state);
+  return Date.now() - entry.createdAt > LOGIN_STATE_TTL_MS ? null : entry.codeVerifier;
 }
 
 /** Build the IdP login URL (PKCE S256 + anti-CSRF state). */
