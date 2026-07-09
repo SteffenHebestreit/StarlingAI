@@ -161,7 +161,9 @@ function splitTwoZone(sourceFile, { force = false } = {}) {
       "  `split` is a lossy one-time migration: it re-emits plain JSON (STRIPS every JSONC\n" +
       "  comment) and reshards the whole tree from starlingai.json.\n" +
       "  - To EDIT config: change the shard files directly, then `sai config build`.\n" +
-      "  - To force a re-split anyway (you WILL lose all comments): `sai config split --force`.",
+      "  - To force a re-split anyway (you WILL lose all JSONC comments; agent working\n" +
+      "    data — tools/, generated/, uploads/, .starlingai/, runtime/ — is preserved):\n" +
+      "    `sai config split --force`.",
     );
     process.exitCode = 1;
     return;
@@ -216,12 +218,17 @@ function splitTwoZone(sourceFile, { force = false } = {}) {
     writeShard(defaultConfigDir, join("misc", "90-uncategorized.jsonc"), leftover);
   }
 
-  // workspace/ zone — agent-mutable
-  // Preserve runtime.overrides.json if it exists
-  const overridesPath = join(defaultWorkspaceDir, "runtime", "runtime.overrides.json");
-  const existingOverrides = existsSync(overridesPath) ? readFileSync(overridesPath, "utf8") : null;
-
-  rmSync(defaultWorkspaceDir, { recursive: true, force: true });
+  // workspace/ zone — agent-mutable. Remove ONLY the config-shard zones this split
+  // rewrites (agents/scenes/jobs), NOT the whole workspace: a forced re-split must never
+  // destroy agent-mutable WORKING DATA that is its only copy — deployed dynamic-tool
+  // bundles (tools/), generated artifacts, uploads, the skill library + durable memory
+  // (.starlingai/), runtime overrides, and workspace docs. None of that is reconstructible
+  // from starlingai.json, so wiping it was an irreversible data loss the guard framed as
+  // "you only lose comments".
+  const CONFIG_SHARD_ZONES = ["agents", "scenes", "jobs"];
+  for (const zone of CONFIG_SHARD_ZONES) {
+    rmSync(join(defaultWorkspaceDir, zone), { recursive: true, force: true });
+  }
 
   // Platform agents block → its current shard (00-platform.jsonc by default).
   writeShard(defaultWorkspaceDir, join("agents", agentsBlockFile), { agents: source.agents });
@@ -230,11 +237,9 @@ function splitTwoZone(sourceFile, { force = false } = {}) {
   writeCategoryShards("scenes", "scenes", source.scenes ?? {}, scenePlacement);
   writeCategoryShards("jobs", "jobs", source.jobs ?? {}, jobPlacement);
 
-  // Restore runtime.overrides.json or create empty runtime/ dir
+  // runtime/ is no longer wiped, so runtime.overrides.json survives on its own; just
+  // ensure the dir exists for a fresh migration (flat config → two-zone, no workspace yet).
   mkdirSync(join(defaultWorkspaceDir, "runtime"), { recursive: true });
-  if (existingOverrides) {
-    writeFileSync(overridesPath, existingOverrides, "utf8");
-  }
 
   console.log(`[config-layout] Split into ${relative(repoRoot, defaultConfigDir)}/ + ${relative(repoRoot, defaultWorkspaceDir)}/`);
 }
