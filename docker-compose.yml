@@ -584,7 +584,7 @@ services:
     # pgvector image = stock PostgreSQL 16 + the `vector` extension (drop-in;
     # same PGDATA layout, so the existing volume upgrades in place). Backs the
     # unified semantic/RAG vector store (db/vector-store.ts).
-    image: pgvector/pgvector:pg16
+    image: pgvector/pgvector:pg16@sha256:1d533553fefe4f12e5d80c7b80622ba0c382abb5758856f52983d8789179f0fb
     restart: unless-stopped
     mem_limit: ${SAI_POSTGRES_MEM_LIMIT:-1g}
     environment:
@@ -613,7 +613,7 @@ services:
   # reach it at http://searxng:8080. To keep using an external instance instead,
   # set SEARXNG_BASE_URL in .env.
   searxng:
-    image: searxng/searxng:latest
+    image: searxng/searxng:latest@sha256:a87eb8a2b2b65243c431979938aec37d86534f278f44b8115970212a08c32f23
     restart: unless-stopped
     mem_limit: ${SAI_SEARXNG_MEM_LIMIT:-512m}
     environment:
@@ -632,7 +632,7 @@ services:
       start_period: 20s
 
   redis:
-    image: redis:7-alpine
+    image: redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
     restart: unless-stopped
     mem_limit: ${SAI_REDIS_MEM_LIMIT:-512m}
     command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
@@ -665,7 +665,7 @@ services:
 
   # ── MemGraph (graph database — agent memory, entity relationships, knowledge graphs) ──
   memgraph:
-    image: memgraph/memgraph-mage
+    image: memgraph/memgraph-mage:latest@sha256:0fedea16a63a46562afb80b8fffb5456b9e0e68c19177e40531ffa0df2ce7fca
     restart: unless-stopped
     mem_limit: ${SAI_MEMGRAPH_MEM_LIMIT:-2g}
     command: >-
@@ -689,7 +689,7 @@ services:
 
   # ── QuestDB (time-series — agent metrics, event timelines, research logs) ──
   questdb:
-    image: questdb/questdb:8.2.1
+    image: questdb/questdb:8.2.1@sha256:17148f1b0acd4903ee1ad656aa9de9b75d8d179bde2731b5df1d499fa17d978b
     restart: unless-stopped
     mem_limit: ${SAI_QUESTDB_MEM_LIMIT:-1g}
     environment:
