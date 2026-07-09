@@ -55,7 +55,12 @@
       "@grpc/grpc-js": "^1.14.4",
       "@grpc/proto-loader>protobufjs": "^7.6.1",
       "@opentelemetry/otlp-transformer>protobufjs": "^8.4.1",
-      "vitest": "3.2.6"
+      "vitest": "3.2.6",
+      "dompurify": "^3.4.11",
+      "@opentelemetry/core": "^2.8.0",
+      "qs": "^6.15.2",
+      "ip-address": "^10.1.1",
+      "follow-redirects": "^1.16.0"
     }
   }
 }
