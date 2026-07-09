@@ -90,8 +90,13 @@ export function computeTurnEnforcementSignals(params: {
   allowedToolNameSet: Set<string>;
   userMessage: string;
   recentWorkflowAuthoringMaintenanceContext: boolean;
+  /** Up-front source-sensitivity verdict (orchestration.upfrontSourceSensitiveClassifier). When the
+   *  classifier flagged this QUESTION as source-sensitive before the model drafted, treat it exactly
+   *  like guidance.sourceSensitive so requiresDelegatedResearch fires — the turn researches FIRST
+   *  (draft suppressed + orchestration forced) instead of drafting then being rejected post-hoc. */
+  upfrontSourceSensitive?: boolean;
 }): TurnEnforcementSignals {
-  const { effectiveToolMode, initialDynamicGuidance, channel, allowedToolNameSet, userMessage, recentWorkflowAuthoringMaintenanceContext } = params;
+  const { effectiveToolMode, initialDynamicGuidance, channel, allowedToolNameSet, userMessage, recentWorkflowAuthoringMaintenanceContext, upfrontSourceSensitive } = params;
   const softRoutingEnforcement = getConfig().agents.performance.softRoutingEnforcement === true;
   const applyRoutingTone = (text: string): string =>
     softRoutingEnforcement && text ? toSoftRoutingHint(text) : text;
@@ -108,7 +113,8 @@ export function computeTurnEnforcementSignals(params: {
   const requiresDelegatedResearch = effectiveToolMode === "orchestration_only"
     && Boolean(
       initialDynamicGuidance?.sourceSensitive
-      || initialDynamicGuidance?.freshnessSensitive,
+      || initialDynamicGuidance?.freshnessSensitive
+      || upfrontSourceSensitive,
     );
   const requiresArtifactDelegation = effectiveToolMode === "orchestration_only"
     && Boolean(initialDynamicGuidance?.artifactSensitive);

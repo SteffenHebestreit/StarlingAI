@@ -52,6 +52,30 @@ export function buildUngroundedClaimJudgeMessages(userMessage: string, draft: st
 }
 
 /**
+ * Build the UP-FRONT source-sensitivity classifier prompt. Unlike the post-draft judge above,
+ * this reads ONLY the user's question (no draft yet) and decides whether answering it will require
+ * asserting specific external-world facts that should be verified first. A positive verdict lets the
+ * runtime set the sourceSensitive signal BEFORE the model drafts, so the turn researches FIRST
+ * (requiresDelegatedResearch → suppress the throwaway draft + force orchestration) instead of
+ * "answer, then research". Same VERDICT contract, so parseUngroundedClaimVerdict handles the reply.
+ * Deliberately conservative ("unsure → no") to avoid force-delegating ordinary general-knowledge
+ * turns. Pure / language-independent — no topic keyword table.
+ */
+export function buildSourceSensitiveQuestionJudgeMessages(userMessage: string): LLMMessage[] {
+  const system = [
+    "You are a routing classifier inside an AI assistant. You see the user's message BEFORE any answer is written.",
+    "Decide ONE thing: to answer this well, would the assistant have to assert SPECIFIC, checkable facts about the external world — a named real organisation / operator / company / product / brand, a concrete price / fee / amount, a rate or statistic, a law or regulation, a date, current or recent events, or exactly how a PARTICULAR real-world system, service, or place actually works — the kind of thing that should be verified against a source rather than recited from memory?",
+    "Answer 'yes' if answering depends on such specific external facts (they should be researched first). Answer 'no' for general knowledge, concepts, definitions, reasoning, opinions, advice, maths, code, writing tasks, small talk, or questions about the user's own provided content or about the assistant itself.",
+    "When you are genuinely unsure, answer 'no'.",
+    "Reply with EXACTLY one line and nothing else: 'VERDICT: yes' or 'VERDICT: no'.",
+  ].join("\n");
+  return [
+    { role: "system", content: system },
+    { role: "user", content: userMessage },
+  ];
+}
+
+/**
  * Parse the judge reply. Fail-SAFE toward NOT triggering: only an explicit affirmative verdict
  * returns true. A missing/garbled marker, an error echo, or anything ambiguous returns false, so
  * the runtime simply falls back to the structural tier's decision instead of force-delegating a

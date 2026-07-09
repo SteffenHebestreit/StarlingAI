@@ -79,15 +79,26 @@
     // general-knowledge questions that did not need research.
     "ungroundedFactualAnswerGuard": true,
 
-    // SEMANTIC tier of the guard above. The structural counter only sees NUMBER-dense drafts; this
-    // catches prose/named-entity fabrication it is blind to (a wrong operator, or a confidently-wrong
-    // account of how a particular real system works — audit 57c99128, the DK deposit-scheme answer)
-    // via a cheap routing-tier LLM judge (agents.defaults.model.tiers.routing) on the tool-free draft.
-    // Enabled for the fresh-instance honesty eval — WATCH for over-fire: it adds one routing call per
-    // risky tool-free draft and can convert a legitimate direct answer into an unnecessary delegation
-    // (latency); observe guardrail_flagged{type:"semantic_ungrounded_factual_detected"} and flip false
-    // if it fires on general-knowledge answers that did not need research.
+    // SEMANTIC tier of the guard above (POST-DRAFT). Kept ON as the BACKSTOP for cases the UP-FRONT
+    // classifier below MISSES (false negatives): if a source-sensitive question slips past up-front, the
+    // model drafts, and this judge catches PROSE/named-entity fabrication the structural counter (numeric
+    // only) is blind to. Cost of the safety net: a 2nd routing call on a non-source-sensitive drafted turn
+    // (up-front already said no; this double-checks the draft), and a rare "answer, then research" ONLY
+    // when up-front missed AND this fires (the net doing its job). WATCH
+    // guardrail_flagged{type:"semantic_ungrounded_factual_detected"} — a high fire rate here means the
+    // up-front classifier is missing questions it should catch.
     "semanticUngroundedFactualGuard": true,
+
+    // UP-FRONT source-sensitivity classifier. The two guards above are POST-DRAFT: the model drafts a
+    // tool-free answer, it streams, and only THEN is it rejected and research forced — the user sees
+    // "answer, then research" (audit a75e1c26 follow-up). This classifies the QUESTION before the first
+    // model call (cheap routing tier), and on a positive verdict forces research FIRST (draft suppressed
+    // + orchestration forced) → "research, then answer". Enabled for the honesty eval — WATCH for
+    // over-fire: it adds a routing call to EVERY orchestration turn (incl. ones that don't need research)
+    // and can convert a legitimate direct answer into a delegation; observe
+    // guardrail_flagged{type:"upfront_source_sensitive_detected"} and flip false if it fires on
+    // general-knowledge/creative/coding turns that did not need research.
+    "upfrontSourceSensitiveClassifier": true,
 
     // Failed-research honesty backstop. When real orchestration RAN this turn and FAILED
     // (forced-synthesis fired / a delegation failed / a partial source-sensitive delegation),

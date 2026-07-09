@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   buildUngroundedClaimJudgeMessages,
+  buildSourceSensitiveQuestionJudgeMessages,
   parseUngroundedClaimVerdict,
   UNGROUNDED_JUDGE_MIN_CHARS,
 } from "../agent/ungrounded-claim-judge.js";
@@ -84,5 +85,35 @@ describe("judge round-trip with an injected model", () => {
     const complete = fakeModel(() => false);
     const verdict = parseUngroundedClaimVerdict(await complete(buildUngroundedClaimJudgeMessages("how does a hash map work?", draft)));
     expect(verdict).toBe(false);
+  });
+});
+
+// The UP-FRONT classifier reads the QUESTION (no draft) so the runtime can force research BEFORE the
+// model drafts — fixing the "answer, then research" ordering (audit a75e1c26 follow-up).
+describe("buildSourceSensitiveQuestionJudgeMessages", () => {
+  it("classifies the question (no draft) and asks for a one-line VERDICT", () => {
+    const msgs = buildSourceSensitiveQuestionJudgeMessages("Wie funktioniert das Pfandsystem in Dänemark?");
+    expect(msgs).toHaveLength(2);
+    expect(msgs[0]!.role).toBe("system");
+    expect(msgs[1]!.role).toBe("user");
+    expect(msgs[1]!.content).toBe("Wie funktioniert das Pfandsystem in Dänemark?"); // question only, no draft
+    expect(msgs[0]!.content).toMatch(/VERDICT: yes/);
+    expect(msgs[0]!.content).toMatch(/VERDICT: no/);
+    expect(String(msgs[0]!.content).toLowerCase()).toContain("before any answer is written");
+  });
+
+  it("is subject-independent (no topic keyword table)", () => {
+    const a = buildSourceSensitiveQuestionJudgeMessages("q1");
+    const b = buildSourceSensitiveQuestionJudgeMessages("q2");
+    expect(a[0]!.content).toBe(b[0]!.content);
+  });
+
+  it("round-trips: a model keying on 'how a specific real system works' says yes; a creative task says no", async () => {
+    const model = (assertsSourceSensitive: (q: string) => boolean) =>
+      (q: string) => `VERDICT: ${assertsSourceSensitive(q) ? "yes" : "no"}`;
+    const srcSensitive = model((q) => /pfand|deposit|system/i.test(q));
+    const creative = model(() => false);
+    expect(parseUngroundedClaimVerdict(srcSensitive(String(buildSourceSensitiveQuestionJudgeMessages("how does the deposit system work?")[1]!.content)))).toBe(true);
+    expect(parseUngroundedClaimVerdict(creative(String(buildSourceSensitiveQuestionJudgeMessages("write me a short poem")[1]!.content)))).toBe(false);
   });
 });

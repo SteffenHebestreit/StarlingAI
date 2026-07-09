@@ -192,6 +192,7 @@ import {
 // structural counter above is blind to). Pure builder + parser; the provider call lives inline.
 import {
   buildUngroundedClaimJudgeMessages,
+  buildSourceSensitiveQuestionJudgeMessages,
   parseUngroundedClaimVerdict,
   UNGROUNDED_JUDGE_MIN_CHARS,
 } from "./ungrounded-claim-judge.js";
@@ -1204,9 +1205,41 @@ async function _runTurn(
     detectedDynamicGuidance,
     priorDelegateEvidenceForFollowUp,
   );
+  // Up-front source-sensitivity classification (orchestration.upfrontSourceSensitiveClassifier,
+  // default off). The de-lex hardwired the sourceSensitive routing flag off, so a source-sensitive
+  // question (how a specific real system works, a named operator, a price/law) is only recognised
+  // AFTER the model drafts a tool-free answer — the post-draft guards then reject it and force
+  // research, so the user sees "answer, then research" (audit a75e1c26 follow-up). When on, a cheap
+  // routing-tier judge classifies the QUESTION up-front; a positive verdict feeds requiresDelegatedResearch,
+  // which BOTH suppresses the throwaway draft AND forces the model to orchestrate research FIRST —
+  // "research, then answer". Bounded: one routing-tier call per orchestration_only turn; skipped for a
+  // reuse-prior-evidence follow-up, a computer-access turn, or a document-RAG-grounded turn (that
+  // answer is grounded in the attached file, not memory). Fail-SAFE to off on any error — the
+  // post-draft guards remain the backstop.
+  let upfrontSourceSensitive = false;
+  if (
+    effectiveOrchestration().upfrontSourceSensitiveClassifier === true
+    && getConfig().agents.mainAssistant.toolMode === "orchestration_only"
+    && !reusePriorDelegateEvidenceForFollowUp
+    && !detectedDynamicGuidance?.computerAccessSensitive
+    && !documentRagFoundDocs
+  ) {
+    const classifierProvider = getChatProviderForTier("routing");
+    if (classifierProvider) {
+      try {
+        const verdictRaw = (await classifierProvider.complete(buildSourceSensitiveQuestionJudgeMessages(userMessage), [], signal)).content ?? "";
+        upfrontSourceSensitive = parseUngroundedClaimVerdict(verdictRaw);
+        if (upfrontSourceSensitive) {
+          logAudit("guardrail_flagged", { type: "upfront_source_sensitive_detected" }, { sessionId: session.id, severity: "info" });
+        }
+      } catch (err) {
+        log.debug({ err, sessionId: session.id }, "Up-front source-sensitivity classifier failed — relying on post-draft guards");
+      }
+    }
+  }
   const effectiveToolMode: MainAssistantToolMode | undefined = detectedDynamicGuidance?.computerAccessSensitive && !detectedDynamicGuidance?.pentestSensitive
     ? "delegate_only"
-    : ((detectedDynamicGuidance?.freshnessSensitive || (detectedDynamicGuidance?.sourceSensitive && !reusePriorDelegateEvidenceForFollowUp) || detectedDynamicGuidance?.artifactSensitive)
+    : ((detectedDynamicGuidance?.freshnessSensitive || ((detectedDynamicGuidance?.sourceSensitive || upfrontSourceSensitive) && !reusePriorDelegateEvidenceForFollowUp) || detectedDynamicGuidance?.artifactSensitive)
         ? "orchestration_only"
         : undefined);
   const initialDynamicGuidance = reusePriorDelegateEvidenceForFollowUp
@@ -1429,6 +1462,7 @@ async function _runTurn(
     allowedToolNameSet,
     userMessage,
     recentWorkflowAuthoringMaintenanceContext,
+    upfrontSourceSensitive,
   });
   let delegatedResearchRetryUsed = false;
   let delegatedResearchEnforcementPrompt = "";

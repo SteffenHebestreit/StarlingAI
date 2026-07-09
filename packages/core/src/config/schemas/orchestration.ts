@@ -141,6 +141,23 @@ export const OrchestrationSchema = z.object({
    *  per risky tool-free draft AND can convert a legitimate direct answer into a delegation (latency), so
    *  pass^k-gated alongside ungroundedFactualAnswerGuard. */
   semanticUngroundedFactualGuard: z.boolean().default(false),
+  /** UP-FRONT source-sensitivity classifier. The two ungrounded guards above are POST-DRAFT: the
+   *  model drafts a tool-free answer, it streams to the user, and only THEN is it rejected and
+   *  research forced — so the user sees "answer, then research" (audit a75e1c26 follow-up). When
+   *  this is true, a cheap routing-tier classifier (ungrounded-claim-judge.ts,
+   *  buildSourceSensitiveQuestionJudgeMessages) reads the QUESTION before the first model call; a
+   *  positive verdict sets the sourceSensitive signal so requiresDelegatedResearch fires, which BOTH
+   *  suppresses the throwaway draft AND forces the model to orchestrate research FIRST — i.e.
+   *  "research, then answer". This is the proper re-arming of the sourceSensitive routing flag the
+   *  de-lex hardwired off. Bounded/fail-safe: one routing-tier call per orchestration_only turn,
+   *  skipped for a reuse-prior-evidence follow-up, a computer-access turn, or a document-RAG-grounded
+   *  turn; on any classifier error it falls back to the post-draft guards. Primary mechanism for the
+   *  source-sensitive case (prevents the draft instead of catching it after); pairs with
+   *  semanticUngroundedFactualGuard as a post-draft BACKSTOP for questions this classifier misses —
+   *  running both is belt-and-suspenders, at the cost of a 2nd routing call on a drafted turn. Default OFF
+   *  — it adds a routing hop to every orchestration turn (including ones that don't need research) and
+   *  can convert a legitimate direct answer into a delegation, so pass^k-gated. */
+  upfrontSourceSensitiveClassifier: z.boolean().default(false),
   /** Terminal fabrication guard: a turn that RESEARCHED (produced ≥1 curated shared fact) but
    *  produced NO artifact file, and whose answer INLINES a full HTML application document
    *  (looksLikeInlinedAppDocument — the never-legit-inline structural signal), is the model
