@@ -29,6 +29,15 @@ function writeAuthConfig(extra: Record<string, unknown> = {}): string {
   return tempDir;
 }
 
+// A config user record for tokens minted directly in tests. authenticatedUser now
+// re-checks the live user store on every request, so a token's subject must exist
+// there — an absent/deleted user is (correctly) rejected. The password hash is a
+// dummy (login isn't exercised for these directly-minted tokens).
+const DUMMY_HASH = "$2b$10$0123456789abcdefghijklmno";
+function userRec(username: string, role: string, displayName?: string): Record<string, unknown> {
+  return { username, role, passwordHash: DUMMY_HASH, ...(displayName ? { displayName } : {}), createdAt: "2026-01-01T00:00:00Z" };
+}
+
 async function buildAuthApp(): Promise<Hono> {
   const auth = await import("../gateway/auth.js");
   const { getConfig, updateConfig } = await import("../config/loader.js");
@@ -247,7 +256,7 @@ describe("multi-user auth — /api/auth/me", () => {
 
   it("returns the current user when called with a valid token", async () => {
     const auth = await import("../gateway/auth.js");
-    tempDir = writeAuthConfig({ auth: { enabled: true, users: [] } });
+    tempDir = writeAuthConfig({ auth: { enabled: true, users: [userRec("alice", "operator", "Alice")] } });
     vi.resetModules();
     const auth2 = await import("../gateway/auth.js");
     const token = await auth2.createToken("alice", { role: "operator", displayName: "Alice" });
@@ -281,7 +290,7 @@ describe("multi-user auth — user creation", () => {
   });
 
   it("creates a user and persists the bcrypt hash to config", async () => {
-    tempDir = writeAuthConfig({ auth: { enabled: true, users: [] } });
+    tempDir = writeAuthConfig({ auth: { enabled: true, users: [userRec("admin", "operator")] } });
     vi.resetModules();
     const auth = await import("../gateway/auth.js");
     const actorToken = await auth.createToken("admin", { role: "operator" });
@@ -312,7 +321,7 @@ describe("multi-user auth — user creation", () => {
   });
 
   it("rejects passwords shorter than 8 chars", async () => {
-    tempDir = writeAuthConfig({ auth: { enabled: true, users: [] } });
+    tempDir = writeAuthConfig({ auth: { enabled: true, users: [userRec("admin", "operator")] } });
     vi.resetModules();
     const auth = await import("../gateway/auth.js");
     const actorToken = await auth.createToken("admin", { role: "operator" });
@@ -400,7 +409,7 @@ describe("multi-user auth Wave B — role gating", () => {
   });
 
   it("viewers cannot create users (403)", async () => {
-    tempDir = writeAuthConfig({ auth: { enabled: true, users: [] } });
+    tempDir = writeAuthConfig({ auth: { enabled: true, users: [userRec("eve", "viewer")] } });
     vi.resetModules();
     const auth = await import("../gateway/auth.js");
     const viewerToken = await auth.createToken("eve", { role: "viewer" });
@@ -417,7 +426,7 @@ describe("multi-user auth Wave B — role gating", () => {
   });
 
   it("operators can create viewer accounts via role parameter", async () => {
-    tempDir = writeAuthConfig({ auth: { enabled: true, users: [] } });
+    tempDir = writeAuthConfig({ auth: { enabled: true, users: [userRec("alice", "operator")] } });
     vi.resetModules();
     const auth = await import("../gateway/auth.js");
     const operatorToken = await auth.createToken("alice", { role: "operator" });
@@ -445,11 +454,12 @@ describe("multi-user auth Wave B — role gating", () => {
     expect(auth.userHasRole(null, "viewer")).toBe(false);
   });
 
-  it("legacy tokens without a role claim default to operator", async () => {
-    tempDir = writeAuthConfig({ auth: { enabled: true, users: [] } });
+  it("resolves a user's role from the live store, defaulting to operator", async () => {
+    // A stored user whose record omits an explicit role defaults to operator.
+    tempDir = writeAuthConfig({ auth: { enabled: true, users: [{ username: "legacy_admin", passwordHash: DUMMY_HASH, createdAt: "2026-01-01T00:00:00Z" }] } });
     vi.resetModules();
     const auth = await import("../gateway/auth.js");
-    // Mint a token with no role claim, mimicking pre-Wave-B tokens.
+    // Token carries no role claim; the role now comes from the live user record.
     const token = await auth.createToken("legacy_admin", {});
     const me = await auth.authenticatedUser(`Bearer ${token}`);
     expect(me?.role).toBe("operator");

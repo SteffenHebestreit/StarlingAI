@@ -3557,9 +3557,27 @@ export function createGateway() {
         return;
       }
 
+      // Cap the buffered body so an authenticated client can't stream an
+      // unbounded payload and exhaust gateway memory. Mirrors the Hono path's
+      // maxBodyBytes; the chat message allowance matches a multimodal upload.
+      const aguiMaxBytes = currentMultimodalConfig().maxUploadBytes ?? getConfig().gateway.maxBodyBytes ?? 1_048_576;
       const bodyChunks: Buffer[] = [];
-      req.on("data", (chunk: Buffer) => { bodyChunks.push(chunk); });
+      let aguiBodyBytes = 0;
+      let aguiBodyAborted = false;
+      req.on("data", (chunk: Buffer) => {
+        if (aguiBodyAborted) return;
+        aguiBodyBytes += chunk.length;
+        if (aguiBodyBytes > aguiMaxBytes) {
+          aguiBodyAborted = true;
+          res.writeHead(413, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Request body too large" }));
+          req.destroy();
+          return;
+        }
+        bodyChunks.push(chunk);
+      });
       req.on("end", async () => {
+        if (aguiBodyAborted) return;
         try {
           // Decode once over the full body — per-chunk toString() corrupts a
           // multi-byte UTF-8 char split across TCP chunks (umlaut mojibake).

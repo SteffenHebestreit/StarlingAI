@@ -867,15 +867,41 @@ export function pruneArchivedSessions(ttlMs: number): number {
   return pruned;
 }
 
-/** Start the periodic archived-session pruner (idempotent). Interval and TTL come
- *  from agents.sessionPruneIntervalMs and gateway.sessionTtlMs. */
+/** Archive still-active sessions with no activity for longer than `idleMs`, so the
+ *  pruner can then reclaim them — otherwise a session that is abandoned (rather
+ *  than explicitly closed) is never archived and leaks forever. A live turn keeps
+ *  the session fresh via touch() and is capped well under the (generous) idle
+ *  window, so it is never mistaken for idle. A non-positive idleMs disables this.
+ *  Returns the number archived. */
+export function archiveIdleSessions(idleMs: number): number {
+  if (!(idleMs > 0)) return 0;
+  const cutoff = Date.now() - idleMs;
+  let archived = 0;
+  for (const session of [..._sessions.values()]) {
+    if (session.isArchived()) continue;
+    if (session.getUpdatedAt().getTime() < cutoff) {
+      archiveSession(session.id);
+      archived += 1;
+    }
+  }
+  if (archived > 0) log.info({ archived, idleMs }, "Archived idle sessions");
+  return archived;
+}
+
+/** Start the periodic archived-session pruner (idempotent). Interval + TTLs come
+ *  from agents.sessionPruneIntervalMs, gateway.sessionTtlMs, and
+ *  agents.sessionIdleArchiveMs. */
 export function startSessionPruner(): void {
   if (_sessionPrunerTimer) return;
   const config = getConfig();
   const intervalMs = config.agents?.sessionPruneIntervalMs ?? 60_000;
   const ttlMs = config.gateway?.sessionTtlMs ?? 3_600_000;
+  const idleArchiveMs = config.agents?.sessionIdleArchiveMs ?? 86_400_000;
   _sessionPrunerTimer = setInterval(() => {
-    try { pruneArchivedSessions(ttlMs); } catch (err) { log.warn({ err }, "session pruner tick failed"); }
+    try {
+      archiveIdleSessions(idleArchiveMs); // idle active sessions → archived
+      pruneArchivedSessions(ttlMs);       // aged archived sessions → deleted
+    } catch (err) { log.warn({ err }, "session pruner tick failed"); }
   }, intervalMs);
   _sessionPrunerTimer.unref?.();
   log.info({ intervalMs, ttlMs }, "Session pruner started");

@@ -9,7 +9,7 @@ import { childLogger } from "../logger.js";
 import { logAudit } from "../audit/logger.js";
 
 import { PRODUCT } from "../product/index.js";
-import { getExtensionRole } from "../extension/index.js";
+import { getExtensionRole, getExtensionAuthProvider } from "../extension/index.js";
 
 const log = childLogger("gateway:auth");
 const BCRYPT_ROUNDS = 12;
@@ -195,8 +195,28 @@ export async function authenticatedUser(authHeader: string | null | undefined): 
   if (!token) return null;
   const payload = await verifyToken(token);
   if (!payload || typeof payload.sub !== "string") return null;
+  const username = payload.sub;
+
+  // Under active multi-user auth, re-check the account against the live user
+  // store on EVERY request — a signed token is only as good as an account that
+  // still exists. This makes deleting a user (or changing their role) take effect
+  // immediately, instead of the token staying valid for its full TTL (~24h). With
+  // auth disabled (single-operator) there is no user store, so the token's own
+  // claims are authoritative — the bootstrap/god-token path, unchanged.
+  if (getConfig().auth?.enabled === true) {
+    const provider = getExtensionAuthProvider();
+    if (provider) {
+      const record = provider.getUserById(username);
+      if (!record) return null; // account removed/disabled in the extension store
+      return { username, role: normalizeRole(record.role), displayName: record.displayName };
+    }
+    const record = getConfig().auth.users.find((u) => u.username === username);
+    if (!record) return null; // account deleted from config
+    return { username, role: normalizeRole(record.role), displayName: record.displayName };
+  }
+
   return {
-    username: payload.sub,
+    username,
     role: normalizeRole(payload["role"]),
     displayName: typeof payload["displayName"] === "string" ? (payload["displayName"] as string) : undefined,
   };

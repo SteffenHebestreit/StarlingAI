@@ -1014,12 +1014,18 @@ const DELEGATION_WAIT_TOOL_NAMES = new Set([
 async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
   const config = getConfig();
   // Per-turn timeout — inline override wins, then the active effort profile's timeout
-  // (0 = unlimited), then config, then default 15 min. An explicit override of 0
-  // disables the timeout entirely. (The gateway normally folds the profile timeout
-  // into turnTimeoutOverrideMs already; this fallback covers non-gateway callers.)
+  // (0 = "unleashed"), then config, then default 15 min. (The gateway normally folds
+  // the profile timeout into turnTimeoutOverrideMs already; this fallback covers
+  // non-gateway callers.)
   const effortProfileTimeout = resolveEffortProfile(opts.effortTier).turnTimeoutMs;
   const resolvedTurnTimeoutMs = opts.turnTimeoutOverrideMs ?? effortProfileTimeout ?? config.gateway?.turnTimeoutMs ?? 1_800_000;
-  const turnTimeoutMs = resolvedTurnTimeoutMs > 0 ? resolvedTurnTimeoutMs : undefined;
+  // A non-positive resolved timeout (the `max` effort profile ships 0, an explicit
+  // override of 0, or config 0) is treated as "as long as it needs" — but NOT truly
+  // unbounded: a genuinely stuck turn must eventually release its session + abort
+  // controllers instead of pinning them forever. 24h is far beyond any legitimate
+  // turn, so it never interferes with real work while still bounding the leak.
+  const MAX_TURN_CEILING_MS = 86_400_000;
+  const turnTimeoutMs = resolvedTurnTimeoutMs > 0 ? resolvedTurnTimeoutMs : MAX_TURN_CEILING_MS;
   const turnAbort = turnTimeoutMs ? new AbortController() : undefined;
   const inertAbort = new AbortController();
   const turnStartMs = Date.now();

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AgentSession, createSession, getSessionTranscript, resetSessionsForTests } from "../agent/session.js";
+import { AgentSession, createSession, getSessionTranscript, resetSessionsForTests, archiveIdleSessions } from "../agent/session.js";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -738,5 +738,27 @@ describe("archived-session pruning", () => {
     const s = mk({ channel: "t", workspacePath: "/workspace" });
     archiveSession(s.id);
     expect(pruneArchivedSessions(0)).toBe(0);
+  });
+});
+describe("archiveIdleSessions — reclaim abandoned active sessions", () => {
+  afterEach(() => { resetSessionsForTests(); });
+
+  it("archives sessions idle past the window, leaves fresh ones, and is disable-able", () => {
+    resetSessionsForTests();
+    const idle = createSession({
+      channel: "webchat", workspacePath: "/workspace", systemPrompt: "t",
+      updatedAt: new Date(Date.now() - 10 * 3_600_000), // 10h ago
+    });
+    const fresh = createSession({ channel: "webchat", workspacePath: "/workspace", systemPrompt: "t" });
+    expect(idle.isArchived()).toBe(false);
+
+    const archived = archiveIdleSessions(3_600_000); // 1h idle window
+    expect(archived).toBe(1);
+    expect(idle.isArchived()).toBe(true);   // idle → archived (pruner can now reclaim it)
+    expect(fresh.isArchived()).toBe(false); // recent activity → left alone
+
+    // Already-archived sessions aren't re-counted, and a non-positive window is a no-op.
+    expect(archiveIdleSessions(3_600_000)).toBe(0);
+    expect(archiveIdleSessions(0)).toBe(0);
   });
 });
