@@ -188,6 +188,13 @@ import {
   looksLikeUnsourcedSpecificClaims,
   prependTurnIncompleteCaveat,
 } from "./citation-honesty.js";
+// Semantic tier of the ungrounded-answer guard (catches prose/named-entity fabrication the
+// structural counter above is blind to). Pure builder + parser; the provider call lives inline.
+import {
+  buildUngroundedClaimJudgeMessages,
+  parseUngroundedClaimVerdict,
+  UNGROUNDED_JUDGE_MIN_CHARS,
+} from "./ungrounded-claim-judge.js";
 
 // Re-export the originally-exported honesty helpers so existing imports from
 // runtime.js (tests, tools) keep working after the extraction.
@@ -2636,13 +2643,44 @@ async function _runTurn(
       // content grounding, so a bare list must not license unsourced specifics. Purely structural
       // (per-turn tool-call counts already tracked in _turnToolCallCounts); this can only make the guard
       // fire LESS, never more.
-      const requiresUngroundedFactualResearch = getConfig().orchestration?.ungroundedFactualAnswerGuard === true
-        && activeMainAssistantToolMode === "orchestration_only"
+      // Shared eligibility for BOTH ungrounded-guard tiers: a tool-free draft on an
+      // orchestration_only turn that ran NO grounding retrieval this turn (no document RAG, no
+      // search_documents / recall_context content call, no shared finding). The structural tier's
+      // boolean value is unchanged by factoring this out — same conjunction as before.
+      const ungroundedDraftIsUnretrieved = activeMainAssistantToolMode === "orchestration_only"
         && !documentRagFoundDocs
         && (_turnToolCallCounts.get("search_documents") ?? 0) === 0
         && (_turnToolCallCounts.get("recall_context") ?? 0) === 0
-        && _turnShareFindingCount === 0
+        && _turnShareFindingCount === 0;
+      let requiresUngroundedFactualResearch = getConfig().orchestration?.ungroundedFactualAnswerGuard === true
+        && ungroundedDraftIsUnretrieved
         && looksLikeUnsourcedSpecificClaims(rawResponse);
+      // SEMANTIC tier (orchestration.semanticUngroundedFactualGuard, default off): the structural
+      // counter is blind to prose/named-entity fabrication (a wrong operator or "how a particular real
+      // system works" claim carries zero fact-shape tokens — audit 57c99128, the DK-deposit answer).
+      // When the cheap counter did NOT fire, a routing-tier judge reads the question + tool-free draft
+      // and decides whether it asserts specific unverified external facts. Same reject → autoResearch
+      // path below, so it never dead-ends. Bounded: only a substantial tool-free ungrounded draft the
+      // structural tier already passed; fail-SAFE to structural-only on any judge error/parse miss.
+      if (!requiresUngroundedFactualResearch
+        && getConfig().orchestration?.semanticUngroundedFactualGuard === true
+        && ungroundedDraftIsUnretrieved
+        && !currentTurnHasExecutableOrchestration
+        && !releasedAfterRoutingNudge
+        && rawResponse.trim().length >= UNGROUNDED_JUDGE_MIN_CHARS) {
+        const judgeProvider = getChatProviderForTier("routing");
+        if (judgeProvider) {
+          try {
+            const verdictRaw = (await judgeProvider.complete(buildUngroundedClaimJudgeMessages(userMessage, rawResponse), [], signal)).content ?? "";
+            if (parseUngroundedClaimVerdict(verdictRaw)) {
+              requiresUngroundedFactualResearch = true;
+              logAudit("guardrail_flagged", { type: "semantic_ungrounded_factual_detected" }, { sessionId: session.id, severity: "info" });
+            }
+          } catch (err) {
+            log.debug({ err, sessionId: session.id }, "Semantic ungrounded-claim judge failed — relying on structural tier");
+          }
+        }
+      }
       if (!releasedAfterRoutingNudge && (requiresDelegatedResearch || requiresUrlFetch || requiresUngroundedFactualResearch) && !currentTurnHasExecutableOrchestration) {
         if (!delegatedResearchRetryUsed) {
           delegatedResearchRetryUsed = true;

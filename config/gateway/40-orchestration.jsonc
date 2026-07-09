@@ -79,6 +79,15 @@
     // general-knowledge questions that did not need research.
     "ungroundedFactualAnswerGuard": true,
 
+    // SEMANTIC tier of the guard above. The structural counter only sees NUMBER-dense drafts; this
+    // catches prose/named-entity fabrication it is blind to (a wrong operator, or a confidently-wrong
+    // account of how a particular real system works — audit 57c99128, the DK deposit-scheme answer)
+    // via a cheap routing-tier LLM judge on the tool-free draft. OFF pending pass^k eval: it adds one
+    // routing call per risky tool-free draft and can convert a legitimate direct answer into a
+    // delegation (latency). Enable alongside ungroundedFactualAnswerGuard once the eval confirms the
+    // honesty lift beats the added latency; WATCH guardrail_flagged{type:"semantic_ungrounded_factual_detected"}.
+    "semanticUngroundedFactualGuard": false,
+
     // Failed-research honesty backstop. When real orchestration RAN this turn and FAILED
     // (forced-synthesis fired / a delegation failed / a partial source-sensitive delegation),
     // don't ship a confident training-data answer as if the research had succeeded — re-anchor

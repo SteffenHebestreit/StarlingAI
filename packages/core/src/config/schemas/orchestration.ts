@@ -125,6 +125,22 @@ export const OrchestrationSchema = z.object({
    *  bdbace34 (fabricated specs). Default OFF — it can convert a legitimate direct answer into a
    *  delegation (latency), so pass^k-gated. */
   ungroundedFactualAnswerGuard: z.boolean().default(false),
+  /** SEMANTIC tier of ungroundedFactualAnswerGuard. The structural counter above only catches
+   *  NUMBER-dense drafts; it is blind to prose/named-entity fabrication — a wrong operator/
+   *  institution, a mis-stated law, or a confidently-wrong account of how a PARTICULAR real system
+   *  works carries zero fact-shape tokens (audit 57c99128: a tool-free "how does the Danish deposit
+   *  system work" answer named the wrong operator with no numbers the counter could see, so the guard
+   *  never fired). When true, on a substantial tool-free ungrounded draft that the structural tier did
+   *  NOT already flag, a cheap routing-tier LLM judge (ungrounded-claim-judge.ts) reads the question +
+   *  draft and decides whether it asserts SPECIFIC unverified external-world facts; if so it reuses the
+   *  same reject → autoResearchOnRefusal → grounded-synthesis path (never dead-ends). Bounded: fires
+   *  ONLY when the structural tier passed AND the draft clears the same 400-char floor, uses the routing
+   *  (cheap) tier, and fail-SAFE falls back to structural-only on any judge error/parse miss. This is
+   *  the semantic "validate the assumptions" signal the de-lex removed with the sourceSensitive flag —
+   *  reasons about the draft in ANY language, no keyword table. Default OFF — adds one routing-tier call
+   *  per risky tool-free draft AND can convert a legitimate direct answer into a delegation (latency), so
+   *  pass^k-gated alongside ungroundedFactualAnswerGuard. */
+  semanticUngroundedFactualGuard: z.boolean().default(false),
   /** Terminal fabrication guard: a turn that RESEARCHED (produced ≥1 curated shared fact) but
    *  produced NO artifact file, and whose answer INLINES a full HTML application document
    *  (looksLikeInlinedAppDocument — the never-legit-inline structural signal), is the model
