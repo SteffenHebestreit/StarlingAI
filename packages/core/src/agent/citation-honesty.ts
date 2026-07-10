@@ -209,9 +209,10 @@ const CURRENCY_SYMBOLS = "€$£¥₹₩₽₺₪₴฿₫₦₱";
 const CURRENCY_CODES = "kr|dkk|sek|nok|isk|øre|zł|pln|kč|czk|huf|bgn|uah|rub|eur|usd|gbp|jpy|chf|cny|aud|nzd|mxn|brl|zar|krw|sgd|hkd|inr|ils";
 // ISO codes that are ALSO common English words: "TRY" (Turkish lira vs "try N"), "CAD" (Canadian
 // dollar vs computer-aided design), "RON" (Romanian leu vs a name). Matched ONLY in their uppercase
-// currency-code form via (?-i:…), so lowercase prose ("try 2 threads", "ron said 3 times") isn't
-// counted as a monetary token — the same case-sensitive discipline the voltage [VW] branch uses.
-// (?-i:…) locally disables the currency regex's global `i` flag for this group.
+// currency-code form — via a SEPARATE case-sensitive regex (no `i` flag) below — so lowercase prose
+// ("try 2 threads", "ron said 3 times") isn't counted as a monetary token, the same case-sensitive
+// discipline the voltage [VW] branch uses. (A single-regex inline modifier like (?-i:…) would be
+// cleaner but older V8 / Node 22 — the deployment runtime — rejects inline flag groups.)
 const CURRENCY_CODES_UPPER = "TRY|CAD|RON";
 // Abbreviated metric/tech PLUS spelled-out volume/mass/imperial units (common in prose and in
 // non-English answers, e.g. "1,5 Liter"). Multi-char only — bare single letters (l/g/t/m/w) are
@@ -220,14 +221,26 @@ const UNIT_TOKENS = "mm|cm|km|kg|mg|ghz|mhz|khz|hz|mah|ma|kw|kwh|wh|nm|px|mb|gb|
   + "|liter|litre|liters|litres|ml|cl|dl|hl|oz|lb|lbs|gal|gallon|gallons|inch|inches|mile|miles"
   + "|meter|metre|meters|metres|gram|grams|tonne|tonnes";
 
-const SPECIFICITY_CATEGORIES: Record<string, RegExp> = {
+// A category maps to one regex, or SEVERAL that all contribute to the same category/token
+// set (used by `currency` to mix a case-insensitive pass with a case-sensitive one without
+// inline flag-modifier groups, which older V8 / Node 22 — the container runtime — reject).
+const SPECIFICITY_CATEGORIES: Record<string, RegExp | RegExp[]> = {
   percent: /\d[\d.,]*\s?%/g,                                                       // 3,75 %
-  currency: new RegExp(
-    `[${CURRENCY_SYMBOLS}]\\s?\\d[\\d.,]*`                                         // €5 / $ 1,200
-    + `|\\b(?:${CURRENCY_CODES}|(?-i:${CURRENCY_CODES_UPPER}))\\.?\\s?\\d[\\d.,]*` // kr. 2,50 / USD 5 / TRY 5 (not "try 5")
-    + `|\\d[\\d.,]*\\s?(?:${CURRENCY_CODES}|(?-i:${CURRENCY_CODES_UPPER}))\\b`,    // 2,50 kr / 82 USD / 82 TRY
-    "gi",
-  ),
+  currency: [
+    new RegExp(
+      `[${CURRENCY_SYMBOLS}]\\s?\\d[\\d.,]*`                                       // €5 / $ 1,200
+      + `|\\b(?:${CURRENCY_CODES})\\.?\\s?\\d[\\d.,]*`                             // kr. 2,50 / USD 5
+      + `|\\d[\\d.,]*\\s?(?:${CURRENCY_CODES})\\b`,                                // 2,50 kr / 82 USD
+      "gi",
+    ),
+    // Ambiguous English-word codes (TRY/CAD/RON): case-SENSITIVE uppercase-only (no `i`
+    // flag), so lowercase prose ("try 2 threads") isn't counted as a monetary token.
+    new RegExp(
+      `\\b(?:${CURRENCY_CODES_UPPER})\\.?\\s?\\d[\\d.,]*`                          // TRY 5 (not "try 5")
+      + `|\\d[\\d.,]*\\s?(?:${CURRENCY_CODES_UPPER})\\b`,                          // 82 TRY
+      "g",
+    ),
+  ],
   unit: new RegExp(`\\b\\d[\\d.,]*\\s?(?:${UNIT_TOKENS})\\b`, "gi"),               // 1,5 Liter / 20 kHz
   voltage: /\b\d[\d.,]*\s?[VW]\b/g,                                                // volts/watts (case-sensitive)
   year: /\b(?:19|20)\d{2}\b/g,                                                     // calendar years
@@ -240,10 +253,12 @@ const SPECIFICITY_CATEGORIES: Record<string, RegExp> = {
 function specificityProfile(text: string): { tokens: number; categories: number } {
   const tokens = new Set<string>();
   const categoriesHit = new Set<string>();
-  for (const [category, re] of Object.entries(SPECIFICITY_CATEGORIES)) {
-    for (const m of text.matchAll(re)) {
-      tokens.add(m[0].toLowerCase());
-      categoriesHit.add(category);
+  for (const [category, matcher] of Object.entries(SPECIFICITY_CATEGORIES)) {
+    for (const re of Array.isArray(matcher) ? matcher : [matcher]) {
+      for (const m of text.matchAll(re)) {
+        tokens.add(m[0].toLowerCase());
+        categoriesHit.add(category);
+      }
     }
   }
   return { tokens: tokens.size, categories: categoriesHit.size };
