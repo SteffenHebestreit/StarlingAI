@@ -81,9 +81,21 @@
       "note": "Nightly/pre-release: pnpm agents:evaluate agent-eval.jsonc --repeat 5 (in-process from repo root, or --via-gateway once the image includes gateway.sessionWorkspaceRoot support)."
     },
     {
+      // Kill a real process mid-graph (exit 137, no cleanup) and prove a
+      // DIFFERENT process detects the wreck and classifies completed-vs-pending
+      // work (GRF-206 crash-detection contract). Self-skips without REDIS_URL;
+      // CI provides a Redis service container.
+      "name": "chaos-crash",
+      "kind": "deterministic",
+      "testFiles": [
+        "src/tests/task-graph.chaos.integration.test.ts"
+      ],
+      "note": "Requires REDIS_URL (real cross-process proof); self-skips otherwise."
+    },
+    {
       "name": "chaos-load",
       "kind": "chaos",
-      "note": "Weekly chaos/load suite (kill -9 at graph transitions, saturated capacity, budget exhaustion under load) — deferred to a later EVL-402 slice; requires GRF-206 restart scheduler."
+      "note": "Weekly load suite (saturated capacity, budget exhaustion under load) — deferred; the kill-based crash scenarios graduated to the deterministic chaos-crash pack."
     }
   ]
 }
