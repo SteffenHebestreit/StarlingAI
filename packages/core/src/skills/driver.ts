@@ -23,9 +23,9 @@ import {
   listSkills,
   setSkillStatus,
   skillSuccessRate,
-  skillLift,
   type Skill,
 } from "./store.js";
+import { skillLiftDecision } from "./lift.js";
 
 const log = childLogger("skills:driver");
 
@@ -74,19 +74,22 @@ export function runSkillImprovementSweep(workspacePath: string): SkillSweepResul
     if (!isCuratorEligible(skill)) continue;
     if (skill.meta.uses < config.retireMinUses) continue;
 
-    // 1a. Evidence-based retirement: when holdout sampling has produced a
-    // measurable lift and it is non-positive, injecting this skill does not
-    // improve outcomes (its success rate just tracks task difficulty). Retire
-    // it regardless of raw success rate — a high-success-but-zero-lift skill is
-    // dead weight in retrieval.
-    const lift = skillLift(skill.meta);
-    if (lift !== null && lift <= 0) {
+    // 1a. Evidence-based retirement (LRN-403): retire on lift only when the
+    // confidence interval on (injected − held-out) success lies at or below
+    // zero — the data actively supports "injecting this skill does not help".
+    // A negative POINT estimate with a CI that still spans zero is noise, not
+    // evidence; the skill keeps collecting samples instead of being coin-flip
+    // retired (the pre-CI behavior at 3 samples/arm).
+    const decision = skillLiftDecision(skill.meta, { minSamplesPerArm: config.liftMinSamplesPerArm });
+    if (decision !== null && decision.ci.high <= 0) {
       setSkillStatus(workspacePath, skill.frontmatter.slug, "archived");
       result.retired.push(skill.frontmatter.slug);
       logAudit("skill_retired", {
         slug: skill.frontmatter.slug,
         reason: "no_measured_lift",
-        lift: Number(lift.toFixed(2)),
+        lift: Number(decision.estimate.toFixed(2)),
+        liftCiLow: Number(decision.ci.low.toFixed(2)),
+        liftCiHigh: Number(decision.ci.high.toFixed(2)),
         successRate: Number(skillSuccessRate(skill.meta).toFixed(2)),
         uses: skill.meta.uses,
         holdoutUses: skill.meta.holdoutUses ?? 0,

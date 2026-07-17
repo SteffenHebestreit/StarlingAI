@@ -150,7 +150,18 @@ export function finalizeSuccessfulTurn(p: FinalizeSuccessfulTurnParams): TurnOut
   // procedures, so a direct single-shot answer is not evidence the procedure
   // was followed (avoids inflating success rates on trivial turns).
   // Fire-and-forget async writes — never block the turn return.
-  if ((injectedSkillSlugs.length > 0 || heldOutSkillSlugs.length > 0) && delegationCount > 0) {
+  // LRN-403 contamination guard: eval-channel turns (gateway-routed harness
+  // runs, trap fixtures) must NEVER feed the learning loop — eval traffic in
+  // the skill stats is training/eval overlap, and a trap case that deliberately
+  // provokes failure would poison the success rates of whatever skill matched.
+  const isEvalTraffic = session.channel === "eval";
+  if (isEvalTraffic && (injectedSkillSlugs.length > 0 || heldOutSkillSlugs.length > 0)) {
+    logAudit("skill_eval_contamination_skipped", {
+      injectedSlugs: injectedSkillSlugs,
+      heldOutSlugs: heldOutSkillSlugs,
+    }, { sessionId: session.id, channel: session.channel });
+  }
+  if (!isEvalTraffic && (injectedSkillSlugs.length > 0 || heldOutSkillSlugs.length > 0) && delegationCount > 0) {
     const outcome = finalResponse.length > 50 && !isApology ? "success" : "failure";
     const skillWorkspace = session.getWorkspacePath();
     for (const slug of injectedSkillSlugs) {
@@ -166,7 +177,9 @@ export function finalizeSuccessfulTurn(p: FinalizeSuccessfulTurnParams): TurnOut
     graphMarkSessionRetrievalsUseful(session.id, { boost: 0.04 }).catch(() => {});
     // Phase 2: distill a reusable skill from this successful multi-step turn
     // (gated by skillLibrary.autoAuthor). Best-effort — never blocks the turn.
-    maybeDistillSkillFromTurn({
+    // LRN-403: never distill from eval traffic — a skill learned from a trap
+    // fixture IS the training/eval overlap the holdout framework exists to prevent.
+    if (!isEvalTraffic) maybeDistillSkillFromTurn({
       workspacePath: session.getWorkspacePath(),
       sessionId: session.id,
       objective: userMessage,

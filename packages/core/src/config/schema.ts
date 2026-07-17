@@ -1294,6 +1294,13 @@ export const SkillLibrarySchema = z.object({
    * 0.15 is a reasonable measurement rate.
    */
   holdoutRate: z.number().min(0).max(0.5).default(0),
+  /**
+   * LRN-403: minimum samples PER ARM (injected and held-out) before a lift
+   * estimate participates in retirement decisions, which additionally require
+   * the lift confidence interval to exclude zero. Raising this trades decision
+   * speed for decision safety.
+   */
+  liftMinSamplesPerArm: z.number().int().min(1).max(100).default(5),
 });
 
 export type SkillLibraryConfig = z.infer<typeof SkillLibrarySchema>;

@@ -8,6 +8,7 @@
  * has proven itself in real use surface ahead of an untested draft.
  */
 
+import { createHash } from "node:crypto";
 import { getConfig } from "../config/loader.js";
 import { getEmbeddingProvider } from "../providers/index.js";
 import { isEmbeddingAvailable } from "../providers/embeddings.js";
@@ -108,10 +109,25 @@ export async function formatSkillGuidance(
  * injected — so the caller can record their outcome at turn end and let the
  * success rate feed back into ranking (Phase 3 closed loop).
  */
+/**
+ * LRN-403: deterministic holdout assignment. Hash the assignment unit (the
+ * session) with the skill's slug into [0, 1) and hold out below the rate.
+ * Deterministic ⇒ the SAME session always lands in the same arm for a given
+ * skill — across turns AND process restarts — so treatment/control groups stay
+ * matched instead of being re-rolled per turn, and a long session cannot
+ * contaminate both arms of the same skill's measurement.
+ */
+export function holdoutAssignment(assignmentKey: string, slug: string, holdoutRate: number): boolean {
+  if (holdoutRate <= 0) return false;
+  const digest = createHash("sha256").update(`${assignmentKey}:${slug}`).digest();
+  const fraction = digest.readUInt32BE(0) / 0x1_0000_0000;
+  return fraction < holdoutRate;
+}
+
 export async function retrieveSkillGuidance(
   workspacePath: string,
   query: string,
-  opts: { limit?: number; maxChars?: number; agent?: string; includeSupportFiles?: boolean } = {},
+  opts: { limit?: number; maxChars?: number; agent?: string; includeSupportFiles?: boolean; assignmentKey?: string } = {},
 ): Promise<{ text: string; slugs: string[]; heldOutSlugs: string[] }> {
   const config = getConfig();
   if (!config.skillLibrary.enabled) return { text: "", slugs: [], heldOutSlugs: [] };
@@ -130,10 +146,18 @@ export async function retrieveSkillGuidance(
   const heldOutSlugs: string[] = [];
   const holdoutRate = config.skillLibrary.holdoutRate ?? 0;
   let injectable = matches;
-  if (holdoutRate > 0 && matches.length > 0 && Math.random() < holdoutRate) {
-    const heldOut = matches[0]!;
-    heldOutSlugs.push(heldOut.skill.frontmatter.slug);
-    injectable = matches.slice(1);
+  if (holdoutRate > 0 && matches.length > 0) {
+    // LRN-403: assignment is deterministic per (session, skill) when the caller
+    // provides an assignment key; the Math.random legacy path remains only for
+    // callers that have no session identity (one-off CLI queries).
+    const topSlug = matches[0]!.skill.frontmatter.slug;
+    const heldOut = opts.assignmentKey
+      ? holdoutAssignment(opts.assignmentKey, topSlug, holdoutRate)
+      : Math.random() < holdoutRate;
+    if (heldOut) {
+      heldOutSlugs.push(topSlug);
+      injectable = matches.slice(1);
+    }
   }
 
   const maxChars = Math.max(300, Math.min(3_000, opts.maxChars ?? 1_400));

@@ -152,6 +152,7 @@ export type CoreAuditEventType =
   | "skill_rolled_back"
   | "skill_outcome_recorded"
   | "skill_retired"
+  | "skill_eval_contamination_skipped"
   | "skill_promoted_to_scene"
   | "user_model_updated"
   | "memory_curation_nudge"

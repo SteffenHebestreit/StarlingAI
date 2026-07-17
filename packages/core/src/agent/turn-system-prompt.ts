@@ -244,6 +244,9 @@ export async function assembleTurnSystemMessages(
       skillRetrievalEnabled
         ? retrieveSkillGuidance(session.getWorkspacePath(), userMessage, {
             maxChars: Math.min(1_400, Math.round(getConfig().agents.performance.promptBudgetChars * 0.08)),
+            // LRN-403: pins this session to one holdout arm per skill (persistent
+            // across turns and restarts) so lift measurement compares matched groups.
+            assignmentKey: session.id,
           })
         : Promise.resolve(null),
       discoveryPrefetchPromise,

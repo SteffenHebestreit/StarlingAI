@@ -132,14 +132,38 @@ describe("skill improvement driver", () => {
       origin: "distilled",
     }).frontmatter.slug;
 
-    // High success rate when injected...
-    for (let i = 0; i < 6; i++) recordSkillOutcome(ws, slug, "success");
-    // ...but equally high when held out → lift ≈ 0.
-    for (let i = 0; i < 4; i++) recordSkillHoldoutOutcome(ws, slug, "success");
+    // LRN-403: retirement needs the lift CI at or below zero, not a noisy point
+    // estimate. Injected 50% over 40 uses vs held-out 90% over 40 — the data
+    // actively supports "injection does not help" (CI high < 0).
+    for (let i = 0; i < 20; i++) recordSkillOutcome(ws, slug, "success");
+    for (let i = 0; i < 20; i++) recordSkillOutcome(ws, slug, "failure");
+    for (let i = 0; i < 36; i++) recordSkillHoldoutOutcome(ws, slug, "success");
+    for (let i = 0; i < 4; i++) recordSkillHoldoutOutcome(ws, slug, "failure");
 
     const result = runSkillImprovementSweep(ws);
     expect(result.retired).toContain(slug);
     expect(getSkill(ws, slug)?.frontmatter.status).toBe("archived");
+  });
+
+  it("does NOT retire on a small-sample negative point estimate — the CI still spans zero (LRN-403)", () => {
+    const ws = workspace();
+    const slug = writeSkill(ws, {
+      name: "Noisy Sample Procedure",
+      description: "Slightly negative point estimate on tiny samples.",
+      whenToUse: "When samples are too small to judge.",
+      procedure: "Steps whose value is not yet measurable.",
+      origin: "distilled",
+    }).frontmatter.slug;
+
+    // Injected 4/6 ≈ 67% vs held-out 5/5 = 100%: the pre-CI rule would retire
+    // this (negative point estimate, ≥3 samples/arm); the CI spans zero.
+    for (let i = 0; i < 4; i++) recordSkillOutcome(ws, slug, "success");
+    for (let i = 0; i < 2; i++) recordSkillOutcome(ws, slug, "failure");
+    for (let i = 0; i < 5; i++) recordSkillHoldoutOutcome(ws, slug, "success");
+
+    const result = runSkillImprovementSweep(ws);
+    expect(result.retired).not.toContain(slug);
+    expect(getSkill(ws, slug)?.frontmatter.status).toBe("active");
   });
 
   it("keeps a skill with positive measured lift even at a moderate success rate", () => {
