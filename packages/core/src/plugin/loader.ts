@@ -26,6 +26,7 @@ import { logAudit } from "../audit/logger.js";
 import { registerTool, unregisterTool, warmToolEmbeddings, type ToolHandler } from "../tools/registry.js";
 import { isCompileTimeMappedTool, getToolTier } from "../guardrails/tool-tiers.js";
 import { computePluginDigest, isPluginTrusted } from "./trust.js";
+import { readPluginManifest, scanPluginCompatibility } from "./manifest.js";
 import { getConfig } from "../config/loader.js";
 import type { Plugin, PluginTool } from "./index.js";
 
@@ -204,6 +205,30 @@ export async function loadPlugins(dir: string = resolvePluginsDir()): Promise<{ 
   for (const entry of entries) {
     const resolvedSource = resolvePluginEntry(dir, entry);
     if (!resolvedSource) continue;
+
+    // ADR-007 data-only manifest: parsed and validated WITHOUT importing any
+    // plugin code. Optional for legacy plugins; when present it is ENFORCED —
+    // a manifest contradicting the on-disk reality rejects the plugin.
+    const manifestResult = readPluginManifest(join(dir, entry), resolvedSource.id);
+    if (manifestResult.status === "invalid") {
+      rejected += 1;
+      logAudit("plugin_tool_rejected", { source: resolvedSource.label, reason: `manifest: ${manifestResult.reason}` }, { severity: "warn" });
+      continue;
+    }
+    // Trust-time compatibility scan (heuristic, non-blocking): flags reliance
+    // on gateway process state that breaks under worker isolation. Declared
+    // env capabilities suppress their own findings.
+    try {
+      const envAllowlist = manifestResult.status === "valid" ? manifestResult.manifest.capabilities?.env ?? [] : [];
+      const compatFindings = scanPluginCompatibility(join(dir, entry), envAllowlist);
+      if (compatFindings.length > 0) {
+        logAudit("plugin_compat_risk", {
+          plugin: resolvedSource.id,
+          findings: compatFindings.slice(0, 20),
+        }, { severity: "warn" });
+        log.warn({ plugin: resolvedSource.id, findings: compatFindings.length }, "Plugin relies on gateway process state — will break under worker isolation (see plugin_compat_risk audit)");
+      }
+    } catch { /* scanner is advisory — never blocks the load */ }
 
     // SEC-105 trust-before-load: fingerprint the plugin's content tree and
     // check it against the operator's trust receipts BEFORE importing anything
