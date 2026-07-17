@@ -80,6 +80,8 @@ export interface MissionStore {
   getMissionBySession(rootSessionId: string): Promise<MissionRecord | null>;
   appendMissionEvent(missionId: string, event: AppendMissionEventInput, opts?: { expectedVersion?: number }): Promise<AppendMissionEventResult>;
   listMissionEvents(missionId: string, opts?: { fromSequence?: number; limit?: number }): Promise<MissionEventRecord[]>;
+  /** UX-501: most-recently-updated missions first, for the flight recorder list. */
+  listMissions(opts?: { limit?: number }): Promise<MissionRecord[]>;
   /** Recompute the projection purely from events (event log is the truth). */
   rebuildMissionProjection(missionId: string): Promise<MissionRecord | null>;
 }
@@ -158,6 +160,14 @@ class LocalMissionStore implements MissionStore {
     const id = this.bySession.get(rootSessionId);
     const mission = id ? this.missions.get(id) : undefined;
     return mission ? this.snapshot(mission) : null;
+  }
+
+  async listMissions(opts: { limit?: number } = {}): Promise<MissionRecord[]> {
+    const limit = Math.max(1, Math.min(opts.limit ?? 100, 500));
+    return [...this.missions.values()]
+      .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))
+      .slice(0, limit)
+      .map((m) => this.snapshot(m));
   }
 
   async appendMissionEvent(missionId: string, event: AppendMissionEventInput, opts: { expectedVersion?: number } = {}): Promise<AppendMissionEventResult> {
@@ -377,6 +387,13 @@ class PostgresMissionStore implements MissionStore {
     await this.init();
     const result = await this.pool.query(`SELECT * FROM missions WHERE root_session_id = $1`, [rootSessionId]);
     return result.rows.length ? this.rowToMission(result.rows[0]) : null;
+  }
+
+  async listMissions(opts: { limit?: number } = {}): Promise<MissionRecord[]> {
+    await this.init();
+    const limit = Math.max(1, Math.min(opts.limit ?? 100, 500));
+    const result = await this.pool.query(`SELECT * FROM missions ORDER BY updated_at DESC LIMIT $1`, [limit]);
+    return result.rows.map((row) => this.rowToMission(row));
   }
 
   async appendMissionEvent(missionId: string, event: AppendMissionEventInput, opts: { expectedVersion?: number } = {}): Promise<AppendMissionEventResult> {

@@ -196,6 +196,8 @@ export type CoreAuditEventType =
   | "provider_admission_blocked"
   // Distributed session cancel (CTL-205): a cancel command was issued / the
   // owning process applied it (aborting the session's active turn).
+  | "mission_cancelled_by_operator"
+  | "mission_cancel_unconfirmed"
   | "session_cancel_requested"
   | "session_cancel_applied"
   // Task-graph ledger entry cap reached — oldest completed-node records were

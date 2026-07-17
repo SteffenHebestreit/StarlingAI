@@ -18,6 +18,7 @@ import { registerDocumentRoutes } from "./document-routes.js";
 import { registerKnowledgeBaseRoutes } from "./knowledge-base-routes.js";
 import { registerMemoryGraphRoutes } from "./memory-graph-routes.js";
 import { registerSessionDashboardRoutes } from "./session-dashboard-routes.js";
+import { registerMissionRoutes } from "./mission-routes.js";
 import { registerWorkspaceRoutes } from "./workspace-routes.js";
 import { buildContentDisposition } from "./content-disposition.js";
 import { registerChannelRoutes } from "./channels-routes.js";
@@ -3548,6 +3549,8 @@ export function createGateway() {
 
   // ── Computer + browser session dashboard routes — extracted to ./session-dashboard-routes.ts ──
   registerSessionDashboardRoutes(app);
+  // Mission flight recorder + controls (UX-501/502) — reads for any authed user, cancel operator-gated.
+  registerMissionRoutes(app);
 
   // ── Long-running-generation routes ──────────────────────────────────────────
   // Surface paused sub-agent runs to the dashboard and accept the operator's

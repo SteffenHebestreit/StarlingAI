@@ -499,6 +499,7 @@ const allNavEntries: NavEntry[] = [
     items: [
       { to: "/jobs", label: "Jobs", hint: "Scenes & runs" },
       { to: "/swarm", label: "Swarm", hint: "Active delegations" },
+      { to: "/missions", label: "Missions", hint: "Flight recorder", operatorOnly: true },
       { to: "/federation", label: "Federation", hint: "Peer activity" },
     ],
   },
