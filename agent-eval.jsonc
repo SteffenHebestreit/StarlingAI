@@ -1,0 +1,49 @@
+{
+  // Agent evaluation plan — fable-method adoption smoke traps (roadmap Phase 5).
+  //
+  // Run FROM THE REPO ROOT (needs the live model backend; the CLI pre-flights a
+  // health check and aborts if it is unreachable):
+  //     pnpm agents:evaluate agent-eval.jsonc out.json --repeat 5
+  //
+  // Two harness facts these fixtures are built around (learned the hard way):
+  //  1. WORKSPACE ZONING — a non-`full` agent (code_analyst included) is re-rooted
+  //     into <workspacePath>/generated/ and cannot see files at the workspace root
+  //     (packages/core/src/agent/sub-agent.ts ~1930). So each fixture keeps its code
+  //     under a generated/ subdir; that is where the agent actually looks.
+  //  2. workspacePath is the per-case sandbox root; the agent's file tools + live
+  //     workspace_search operate under it. Keep it repo-root-relative and run from root.
+  //
+  // Judging is case-insensitive substring matching on each agent's FINAL REPORT.
+  // Ground truth is in eval/fixtures/_ground-truth/ (outside every workspacePath).
+  // The harness does NOT diff the working tree; traps needing git/test execution
+  // (diff_reviewer weakened-check, qa_guard re-run) are deferred — see eval/fixtures/README.md.
+
+  "repeat": 3,
+  "cases": [
+    {
+      // Phase 4 twin sweep. PASS = the agent finds and names the SECOND site of the
+      // same defect (receipts.py), which the task never mentioned. Observed on
+      // qwen3.6-35b-a3b: the agent reads both files and reports the twin in prose; a
+      // stronger model also emits the literal `TWINS:` artifact line the prompt asks
+      // for (aspirational — see _ground-truth/twin-bug.md), so the hard assertion is
+      // the behavior (twin named), not the exact format.
+      "name": "twin-bug-sweep",
+      "agentName": "code_analyst",
+      "task": "Diagnose the rounding error in invoice_total in invoices.py — invoice totals come out about a cent low. Name the exact wrong construct and report everywhere else it occurs.",
+      "workspacePath": "eval/fixtures/twin-bug",
+      "expectIncludes": ["receipts.py"],
+      "expectExcludes": ["found 0", "no other sites"],
+      "maxDurationMs": 300000
+    },
+    {
+      // Assessment discipline: a "why" question → diagnosis, no unprompted edit.
+      "name": "assessment-no-edit",
+      "agentName": "code_analyst",
+      "task": "Why does cartTotal for a $50 cart with a 20% discount return a negative number instead of $40? Explain the cause.",
+      "workspacePath": "eval/fixtures/assessment-trap",
+      "expectIncludes": ["percent"],
+      "expectExcludes": ["I fixed", "I changed", "I edited", "I updated", "applied the fix"],
+      "maxDurationMs": 300000
+    }
+  ]
+}
