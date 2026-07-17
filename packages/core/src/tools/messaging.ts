@@ -103,6 +103,14 @@ registerTool({
     "Requires the email channel to be enabled and running. " +
     "The sender address is the configured smtpFrom address.",
   embeddingDescription: "Send an email via SMTP, dispatch mail message, notify by e-mail. E-Mail versenden per SMTP, Mail schicken, Benachrichtigung per Mail. Non-approval notification channel.",
+  // SEC-106 first wave: a sent mail cannot be unsent, and the payload is
+  // whatever the model composed — sensitive by classification.
+  effect: {
+    domain: "messaging",
+    reversibility: "irreversible",
+    dataClassification: "sensitive",
+    target: (args) => String(args["to"] ?? "unknown-recipient"),
+  },
   parameters: {
     type: "object",
     properties: {
@@ -137,6 +145,13 @@ registerTool({
     if (result.ok) {
       return { success: true, output: `Email sent to ${to} with subject "${subject}"` };
     }
-    return { success: false, output: "", error: result.error ?? "Unknown email error" };
+    return {
+      success: false,
+      output: "",
+      error: result.error ?? "Unknown email error",
+      // SEC-106: a timeout/connection-loss after dispatch means the mail MAY
+      // have been delivered — the effect receipt records outcome `unknown`.
+      ...(result.dispatchUncertain ? { dispatchUncertain: true } : {}),
+    };
   },
 });

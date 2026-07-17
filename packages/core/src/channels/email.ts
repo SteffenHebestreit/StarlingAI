@@ -36,7 +36,7 @@ const log = childLogger("channel:email");
 const INSTALL_HINT = "Email channel requires: pnpm add imapflow nodemailer";
 
 // Module-level ref for outbound email — set when channel starts, cleared on stop
-let _sendMail: ((to: string, subject: string, text: string) => Promise<void>) | null = null;
+let _sendMail: ((to: string, subject: string, text: string) => Promise<import("./delivery.js").DeliveryResult>) | null = null;
 
 export type EmailStopFn = () => Promise<void>;
 
@@ -106,14 +106,20 @@ export async function startEmailChannel(): Promise<EmailStopFn | null> {
     );
   }
 
-  // Expose outbound email at module level for tool use
-  _sendMail = async (to: string, subject: string, text: string) => {
-    await deliverWithRetry(
+  // Expose outbound email at module level for tool use.
+  // SEC-106: the TOOL path sends exactly ONCE (maxAttempts 1) — an agent-
+  // initiated mail is an irreversible external mutation, and a blind SMTP
+  // retry after a connection lost post-DATA can deliver duplicate copies
+  // beneath a single effect receipt. Channel notifications (approvals,
+  // replies) keep their own retry policy; only tool sends are single-shot.
+  // The DeliveryResult is RETURNED so the caller can report delivery
+  // honestly instead of assuming success.
+  _sendMail = async (to: string, subject: string, text: string) =>
+    deliverWithRetry(
       () => transporter.sendMail({ from: smtpFrom, to, subject, text }).then(() => undefined),
       text,
-      { channel: "email" },
+      { channel: "email", maxAttempts: 1 },
     );
-  };
 
   async function pollOnce(): Promise<void> {
     const client = new ImapFlowCtor({
@@ -223,11 +229,20 @@ export async function sendEmailMessage(
   to: string,
   subject: string,
   text: string,
-): Promise<{ ok: boolean; error?: string }> {
+): Promise<{ ok: boolean; error?: string; dispatchUncertain?: boolean }> {
   if (!_sendMail) return { ok: false, error: "Email channel not running or not configured" };
   try {
-    await _sendMail(to, subject, text);
-    return { ok: true };
+    // SEC-106: deliverWithRetry never throws — it returns a DeliveryResult.
+    // The old code discarded it and reported ok:true even when every attempt
+    // failed and the mail was dead-lettered; the result is now the truth.
+    const delivery = await _sendMail(to, subject, text);
+    if (delivery.delivered) return { ok: true };
+    // Classify whether the failed send may still have been accepted by the
+    // server (timeout / connection lost after dispatch) — the effect receipt
+    // must record `unknown`, not a confident "did not happen".
+    const error = delivery.error ?? "delivery failed";
+    const dispatchUncertain = /ETIMEDOUT|ESOCKET|ECONNRESET|EPIPE|timeout|socket close/i.test(error);
+    return { ok: false, error: `${error} (message dead-lettered after ${delivery.attempts} attempt${delivery.attempts === 1 ? "" : "s"})`, ...(dispatchUncertain ? { dispatchUncertain: true } : {}) };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }

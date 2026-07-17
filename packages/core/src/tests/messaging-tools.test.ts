@@ -112,4 +112,31 @@ describe("messaging tools", () => {
     expect(valid.output).toContain('Email sent to ops@example.com with subject "Deploy finished"');
     expect(sendEmailMessageMock).toHaveBeenCalledWith("ops@example.com", "Deploy finished", "Everything is green.");
   });
+
+  it("SEC-106: threads dispatchUncertain from a timeout-ish SMTP failure into the tool result", async () => {
+    const { getTool } = await import("../tools/registry.js");
+    const tool = getTool("send_email");
+    sendEmailMessageMock.mockResolvedValue({
+      ok: false,
+      error: "Connection timeout (message dead-lettered after 1 attempt)",
+      dispatchUncertain: true,
+    });
+    const result = await tool!.execute({
+      to: "ops@example.com",
+      subject: "s",
+      body: "b",
+    }, { sessionId: "session-email-uncertain", workspacePath: "/workspace" });
+    expect(result.success).toBe(false);
+    expect(result.dispatchUncertain).toBe(true);
+
+    // A definitive failure (auth rejected — provably never sent) must NOT carry the flag.
+    sendEmailMessageMock.mockResolvedValue({ ok: false, error: "Invalid login: 535 Authentication failed" });
+    const definitive = await tool!.execute({
+      to: "ops@example.com",
+      subject: "s",
+      body: "b",
+    }, { sessionId: "session-email-definitive", workspacePath: "/workspace" });
+    expect(definitive.success).toBe(false);
+    expect(definitive.dispatchUncertain).toBeUndefined();
+  });
 });

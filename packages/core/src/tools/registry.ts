@@ -1,3 +1,4 @@
+import { createHash, randomUUID } from "node:crypto";
 import { ToolTier, getToolTier, isToolAllowed } from "../guardrails/tool-tiers.js";
 import type { LLMToolDef } from "../providers/lmstudio.js";
 import { computeQueryEmbedding, cosineSimilarity, isEmbeddingAvailable } from "../providers/embeddings.js";
@@ -5,6 +6,8 @@ import { withSpan, genAi } from "../observability/tracing.js";
 import { runWithRequestContext, currentUserId } from "../runtime/request-context.js";
 import { childLogger } from "../logger.js";
 import { isToolDisabled, resolveToolGroup } from "./groups.js";
+import { getConfig } from "../config/loader.js";
+import { logAudit } from "../audit/logger.js";
 
 const registryLog = childLogger("tool-registry");
 
@@ -33,6 +36,26 @@ export interface ToolHandler {
    * extension tools declare it inline.
    */
   group?: string;
+  /**
+   * SEC-106 (ADR-005): what this tool does to the world OUTSIDE the workspace.
+   * Optional and additive — a tool without an effect block behaves exactly as
+   * before. With `guardrails.effectContracts` at `shadow`/`enforce`, external
+   * mutations emit effect receipts (terminal or UNKNOWN outcome — a timed-out
+   * mutation is never assumed to have not happened), and irreversible or
+   * compensatable mutations fall under the approval policy (shadow: recorded;
+   * enforce: required). Tiers express PRIVILEGE; this expresses EFFECT.
+   */
+  effect?: ToolEffect;
+}
+
+/** SEC-106: effect contract metadata (ADR-005). */
+export interface ToolEffect {
+  domain: "local_workspace" | "messaging" | "calendar" | "web_mutation" | "infrastructure" | "payment" | "federation";
+  reversibility: "pure" | "idempotent" | "compensatable" | "irreversible";
+  dataClassification?: "public" | "internal" | "sensitive";
+  supportsDryRun?: boolean;
+  /** Normalized destination (host, mailbox, endpoint) computed from the RESOLVED call args. */
+  target?: (args: Record<string, unknown>) => string;
 }
 
 export interface SwarmTaskAttempt {
@@ -239,6 +262,14 @@ export interface ToolResult {
   output: string;
   error?: string;
   metadata?: Record<string, unknown>;
+  /**
+   * SEC-106: set by a FAILING tool when the request may have been dispatched
+   * and acted on before the failure (timeout mid-flight, connection lost after
+   * send). Drives the effect receipt's `unknown` outcome — an unknown-outcome
+   * mutation must never be blindly retried. Leave unset when the failure
+   * provably happened before dispatch (DNS, connection refused, validation).
+   */
+  dispatchUncertain?: boolean;
 }
 
 const _registry = new Map<string, ToolHandler>();
@@ -554,6 +585,16 @@ export function normalizeToolCall(tc: { name: string; arguments: Record<string, 
   tc.name = realName;
 }
 
+/** SEC-106: resolve an effect target defensively — a throwing resolver must
+ *  never break the call, and the receipt then simply omits the target. */
+function safeEffectTarget(effect: ToolEffect, args: Record<string, unknown>): string | undefined {
+  try {
+    return effect.target?.(args)?.slice(0, 200);
+  } catch {
+    return undefined;
+  }
+}
+
 export async function executeTool(
   name: string,
   args: Record<string, unknown>,
@@ -593,9 +634,29 @@ export async function executeTool(
 
   // Per-call approval:
   //  1. Tier-level default (requiresPerCallApproval), OR
-  //  2. Scene-declared humanInLoopSteps — ENFORCED UNCONDITIONALLY, cannot be bypassed
+  //  2. Scene-declared humanInLoopSteps — ENFORCED UNCONDITIONALLY, cannot be bypassed, OR
+  //  3. SEC-106 effect policy (enforce mode): an irreversible/compensatable external
+  //     mutation requires approval even when the TIER alone would not — tiers express
+  //     privilege, not effect (a Tier-1 webhook can trigger a deployment). Shadow mode
+  //     records where this WOULD have gated (effect_approval_would_block audit) so the
+  //     policy can be calibrated on real traffic before it blocks anything.
+  const effectContractsMode = getConfig().guardrails.effectContracts;
+  const effectDemandsApproval = effectContractsMode !== "off"
+    && handler.effect !== undefined
+    && handler.effect.domain !== "local_workspace"
+    && (handler.effect.reversibility === "irreversible" || handler.effect.reversibility === "compensatable");
   const sceneRequiresApproval = context.humanInLoopSteps?.includes(name) ?? false;
-  const requiresApproval = def.requiresPerCallApproval || sceneRequiresApproval;
+  const tierRequiresApproval = def.requiresPerCallApproval || sceneRequiresApproval;
+  if (effectDemandsApproval && effectContractsMode === "shadow" && !tierRequiresApproval) {
+    const wouldBlockTarget = safeEffectTarget(handler.effect!, args);
+    logAudit("effect_approval_would_block", {
+      tool: name,
+      domain: handler.effect!.domain,
+      reversibility: handler.effect!.reversibility,
+      ...(wouldBlockTarget !== undefined ? { target: wouldBlockTarget } : {}),
+    }, { sessionId: context.sessionId, severity: "warn" });
+  }
+  const requiresApproval = tierRequiresApproval || (effectDemandsApproval && effectContractsMode === "enforce");
 
   if (requiresApproval) {
     if (context.approvalCallback) {
@@ -672,7 +733,9 @@ export async function executeTool(
       if (handler.timeoutMs && handler.timeoutMs > 0) {
         const timeoutPromise = new Promise<ToolResult>((resolve) => {
           const timer = setTimeout(() => {
-            resolve({ success: false, output: "", error: `Tool '${name}' timed out after ${handler.timeoutMs}ms` });
+            // dispatchUncertain: the handler was already running when the race
+            // expired — an external request it made may have been dispatched.
+            resolve({ success: false, output: "", error: `Tool '${name}' timed out after ${handler.timeoutMs}ms`, dispatchUncertain: true });
           }, handler.timeoutMs!);
           timer.unref();
         });
@@ -683,6 +746,28 @@ export async function executeTool(
       span.setAttribute("starlingai.tool.success", result.success);
       if (!result.success && result.error) {
         span.setAttribute("starlingai.tool.error", result.error.slice(0, 240));
+      }
+      // SEC-106 effect receipt: every external-mutation call leaves a replayable
+      // record with a TERMINAL OR UNKNOWN outcome. `unknown` is driven by the
+      // STRUCTURAL `dispatchUncertain` flag (set by the registry's own timeout
+      // race and by tools that classify their transport failures) — never by
+      // matching error text, which both misses tool-internal timeouts and
+      // false-positives on remote error bodies that mention timeouts. An
+      // unknown-outcome mutation may have been acted on and must never be
+      // blindly retried.
+      if (effectContractsMode !== "off" && handler.effect && handler.effect.domain !== "local_workspace") {
+        const unknownOutcome = !result.success && result.dispatchUncertain === true;
+        const target = safeEffectTarget(handler.effect, args);
+        logAudit("effect_receipt", {
+          effectId: randomUUID(),
+          tool: name,
+          domain: handler.effect.domain,
+          reversibility: handler.effect.reversibility,
+          ...(target !== undefined ? { target } : {}),
+          requestHash: createHash("sha256").update(JSON.stringify(args ?? {})).digest("hex").slice(0, 16),
+          outcome: result.success ? "succeeded" : unknownOutcome ? "unknown" : "failed",
+          approvalRequired: requiresApproval,
+        }, { sessionId: context.sessionId, severity: unknownOutcome ? "warn" : "info" });
       }
       return result;
     },

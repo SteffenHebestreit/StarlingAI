@@ -3,6 +3,11 @@
     "promptInjectionBlock": true,
     "outputSecretScan": true,
     "maxInputLength": 32000,
-    "sandboxShellExec": true
+    "sandboxShellExec": true,
+    // SEC-106: effect contracts in SHADOW — external-mutation tools with effect
+    // metadata (webhooks, send_email) emit effect receipts, and calls the policy
+    // WOULD gate are recorded (effect_approval_would_block) without blocking.
+    // Flip to "enforce" after calibrating on receipt telemetry.
+    "effectContracts": "shadow"
   }
 }

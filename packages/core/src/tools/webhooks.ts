@@ -51,6 +51,19 @@ export function syncWebhookTools(): void {
       registerTool({
         name: toolName,
         description: def.description,
+        // SEC-106 first wave: a config-generated webhook is an external HTTP
+        // call whose real-world consequence (deploy, page, ticket) is invisible
+        // to the tier system. ALL webhooks default to irreversible mutations —
+        // the HTTP verb is not evidence of purity (GET-trigger hooks are
+        // common); only an explicit `readOnly: true` in the webhook definition
+        // classifies a hook as pure. Target = the endpoint host, resolved from
+        // the DEFINITION, so receipts group by destination.
+        effect: {
+          domain: "web_mutation",
+          reversibility: def.readOnly === true ? "pure" : "irreversible",
+          dataClassification: "internal",
+          target: () => { try { return new URL(def.url).host; } catch { return def.url.slice(0, 100); } },
+        },
         parameters: {
           type: "object",
           properties: {
@@ -118,7 +131,28 @@ export function syncWebhookTools(): void {
             };
           } catch (err) {
             log.error({ err, toolName }, "Webhook call failed");
-            return { success: false, output: "", error: `Webhook failed: ${String(err)}` };
+            // SEC-106: classify the transport failure for the effect receipt.
+            // An abort (our own timeout mid-flight) or a connection lost AFTER
+            // it was established means the request may have reached the
+            // endpoint and acted — dispatchUncertain drives the receipt's
+            // `unknown` outcome. Pre-connect failures (DNS, connection
+            // refused) provably never dispatched and stay plain failures.
+            // A received HTTP error response never lands here (handled above)
+            // and is always terminal.
+            const causeCode = (err as { cause?: { code?: string } })?.cause?.code ?? "";
+            const preDispatch = ["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "ERR_INVALID_URL", "CERT_HAS_EXPIRED", "DEPTH_ZERO_SELF_SIGNED_CERT", "UNABLE_TO_VERIFY_LEAF_SIGNATURE"].includes(causeCode);
+            const dispatchUncertain = !preDispatch
+              && ((err instanceof Error && err.name === "AbortError")
+                || ["ECONNRESET", "EPIPE", "ETIMEDOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT", "UND_ERR_SOCKET"].includes(causeCode)
+                // Unknown transport failure: conservatively uncertain — a
+                // mislabeled "failed" licenses a double-fire, the worse error.
+                || causeCode === "");
+            return {
+              success: false,
+              output: "",
+              error: `Webhook failed: ${String(err)}`,
+              ...(dispatchUncertain ? { dispatchUncertain: true } : {}),
+            };
           }
         },
       });

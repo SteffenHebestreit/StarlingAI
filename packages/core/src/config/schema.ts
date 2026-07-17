@@ -873,6 +873,12 @@ export const WebhookToolSchema = z.object({
   url: z.string().url(),
   method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]).default("POST"),
   headers: z.record(z.string()).optional(),
+  /** SEC-106: declare this endpoint side-effect-free (a status page, a search).
+   *  Default FALSE — webhooks exist to trigger things, and GET-trigger hooks
+   *  (Jenkins build URLs, cache purges) are common, so the HTTP verb is NOT
+   *  evidence of purity. Only an explicit operator declaration exempts a hook
+   *  from the external-mutation effect policy. */
+  readOnly: z.boolean().default(false),
 });
 
 export const WebhooksSchema = z.record(WebhookToolSchema);
@@ -1064,6 +1070,14 @@ export const GuardrailsSchema = z.object({
   outputSecretScan: z.boolean().default(true),
   maxInputLength: z.number().int().min(100).max(100000).default(32000),
   sandboxShellExec: z.boolean().default(true), // ALWAYS sandbox shell — hard override in code
+  /** SEC-106 effect contracts (ADR-005). Tools may declare an `effect` block
+   *  (domain, reversibility, target resolver); external mutations then emit
+   *  effect receipts with terminal-or-unknown outcomes, and irreversible/
+   *  compensatable ones fall under the approval policy. `off` ignores the
+   *  metadata entirely; `shadow` emits receipts and records where approval
+   *  WOULD have been required without blocking; `enforce` requires approval.
+   *  Rollout: shadow first, enforce after receipt calibration. */
+  effectContracts: z.enum(["off", "shadow", "enforce"]).default("off"),
   modelModeration: z.object({
     enabled: z.boolean().default(false),
     baseUrl: z.string().url().default("http://host.docker.internal:1234/v1"),
