@@ -15,7 +15,7 @@
 | 3 Outcome-first reporting | ✅ done | `REPORTING:` block in `mainAssistant.customInstructions`, `workspace/agents/00-platform.jsonc` |
 | 4 Twin check (fixer side) | ✅ done, **rescoped** | `code_analyst` only. `coder` lacks `workspace_search` and the web builders are greenfield, so instructing them to sweep would reference tools they don't have; the review/verify side (Phase 2) enforces twins regardless of who authored the fix. |
 | 5 Trap-fixture evals | ✅ passing | `agent-eval.jsonc` + `eval/fixtures/{twin-bug,assessment-trap}/generated/` — 2 `code_analyst` cases, **pass^2 2/2 on qwen3.6-35b-a3b** (run from repo root against LM Studio). Two harness facts baked in: fixtures live under `generated/` (workspace zoning re-roots non-`full` agents there) and `workspacePath` is repo-root-relative. Twin case asserts the behavior (twin `receipts.py` named), not the literal `TWINS:` artifact format (model-dependent). Git/test-execution traps (diff_reviewer weakened-check, qa_guard re-run) deferred — an eval that can't run is verification theater; build them against the live harness. See `eval/fixtures/README.md`. |
-| 6 Engine changes | ◑ 6a done | The `parseQaVerdict` fail-open fix landed via the dev-plan Sprint-1 work (docs/agent-swarm-development-plan-2026-07.md, QPR-002): tri-state parser + `qaStrictVerdicts` flag (default off, on in this deployment). 6b (gate-judge fraud rows) and 6c (LLM-judge harness) remain. |
+| 6 Engine changes | ◑ 6a+6b done | The `parseQaVerdict` fail-open fix landed via the dev-plan Sprint-1 work (docs/agent-swarm-development-plan-2026-07.md, QPR-002): tri-state parser + `qaStrictVerdicts` flag (default off, on in this deployment). 6b landed 2026-07-17: scope-creep + debris fraud rows in the delivery-gate prompt (runtime.ts) and the qa_tool_judge inspection task, PASS/FAIL contract unchanged. 6c (LLM-judge harness) remains — note its scope SHRANK: EVL-401 delivered the pristine-workspace diff (`expectNoWorkspaceChanges` receipts) and EVL-402 the comparable report envelope, so only the 0–2 rubric judge itself is still net-new. |
 | 7 Domain adapters | ⛔ not started | optional |
 
 **Validation performed (against the live LM Studio backend @ qwen3.6-35b-a3b):**
@@ -209,7 +209,7 @@ Same build/restart/eval cycle as Phase 2. Eval case: a fixture repo where the sa
 
 **Goal:** port fable-method's trap-scenario designs into our agent eval harness so Phases 2–4 (and future prompt changes) are regression-gated by traps, not just smoke checks.
 
-**Harness facts (verified):** the *agent* harness (`packages/core/src/agent/evaluation.ts`, CLI `pnpm agents:evaluate` = `evaluation-cli.ts`) supports per-case `workspacePath`, `expectArtifact { path, includes, minBytes }`, `expectIncludes`/`expectExcludes` substring checks on the report, and pass^k via `--repeat k`. The *scene* harness (`pnpm scenes:evaluate`) has no repeat and no artifact checks. There is **no LLM judge and no pristine-fixture diff** — don't design cases that need one (that's Phase 6c).
+**Harness facts (verified):** the *agent* harness (`packages/core/src/agent/evaluation.ts`, CLI `pnpm agents:evaluate` = `evaluation-cli.ts`) supports per-case `workspacePath`, `expectArtifact { path, includes, minBytes }`, `expectIncludes`/`expectExcludes` substring checks on the report, and pass^k via `--repeat k`. The *scene* harness (`pnpm scenes:evaluate`) has no repeat and no artifact checks. UPDATE 2026-07-17: the agent harness now ALSO supports the pristine-fixture diff (`expectNoWorkspaceChanges` — before/after workspace hashing with per-path receipts, EVL-401) and both harnesses publish the unified report envelope with environment-health gating (EVL-401/402). There is still **no LLM judge** — don't design cases that need a 0–2 rubric score (that's Phase 6c, now reduced to just the judge itself).
 
 ### Steps
 
@@ -279,8 +279,8 @@ Highest-value port: the **research adapter** → `deep_research` scene + `source
 | 4 | Coder twin check | workspace jsonc | 1 h | — |
 | 5 | Trap-fixture evals | eval plans | 1–2 days | 2–4 (gates them) |
 | 6a | Strict verdict parser | core + flag | ½ day | senior review |
-| 6b | Gate-judge fraud rows | core | ½ day | 6a |
-| 6c | LLM-judge harness | core | 1 wk | design doc |
+| 6b | Gate-judge fraud rows — DONE 2026-07-17 | core | ½ day | 6a |
+| 6c | LLM-judge harness (rubric judge only; diff+envelope landed via EVL-401/402) | core | 2–3 days | design doc |
 | 7 | Research domain adapter | workspace jsonc | 1 day | 2 |
 
 Phases 1–4 are independent of each other and safe to land as separate small PRs; Phase 5 should land with or immediately after 2–4 so the prompt changes are trap-gated. Every workspace edit: `pnpm config:build` → restart gateway → `pnpm config:audit-prompts`. Every PR: `pnpm check && pnpm lint && pnpm test && pnpm build`.

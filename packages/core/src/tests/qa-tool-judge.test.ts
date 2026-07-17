@@ -75,4 +75,13 @@ describe("qa-tool-judge — check wrapper (DI runner, no module mocks)", () => {
     expect(v.pass).toBe(true);
     expect(v.evidence).toBeUndefined();
   });
+
+  it("fable 6b: the inspection task carries the SCOPE and DEBRIS fraud rows without new verdict words", () => {
+    const task = buildQaToolJudgeTask("answer", CRITERIA, [{ kind: "file", location: "app/index.html" }]);
+    expect(task).toMatch(/SCOPE/);
+    expect(task).toMatch(/DEBRIS/);
+    // The gate's parser only understands PASS/FAIL — the fraud rows must not
+    // introduce verdict vocabulary like VERIFIED/REFUTED.
+    expect(task).not.toMatch(/VERIFIED|REFUTED/);
+  });
 });
