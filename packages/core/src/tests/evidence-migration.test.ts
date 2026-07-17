@@ -57,6 +57,31 @@ describe("evidence migration parity (EVD-303)", () => {
     expect(parity).toMatchObject({ legacyFacts: 0, ledgerClaims: 1, backfilled: 0, ledgerOnly: 1 });
   });
 
+  it("VALUE divergence between stores becomes a first-class disputed conflict, not a silent split", async () => {
+    await writeSharedFact("em-5", "gpu_price", "549 EUR");
+    await appendEvidenceClaim("em-5", { subject: "gpu_price", value: "499 EUR", evidenceType: "primary" });
+
+    const parity = await sweepEvidenceMigrationParity("em-5");
+    expect(parity).toMatchObject({ valueDivergences: 1, backfilled: 0 });
+
+    const claims = await listEvidenceClaims("em-5");
+    expect(claims).toHaveLength(2);
+    // The write-time conflict detector marked the divergent append disputed.
+    expect(claims.find((c) => c.agent === "evidence_migration_divergence")?.validationState).toBe("disputed");
+
+    // Idempotent: the divergent value is now IN the ledger — no re-append.
+    const second = await sweepEvidenceMigrationParity("em-5");
+    expect(second?.valueDivergences).toBe(0);
+    expect(await listEvidenceClaims("em-5")).toHaveLength(2);
+  });
+
+  it("agreeing values across stores are NOT divergences", async () => {
+    await writeSharedFact("em-6", "release", "March 2026");
+    await appendEvidenceClaim("em-6", { subject: "release", value: "  march   2026 ", evidenceType: "secondary" });
+    const parity = await sweepEvidenceMigrationParity("em-6");
+    expect(parity).toMatchObject({ valueDivergences: 0, backfilled: 0 });
+  });
+
   it("returns null (and writes nothing) when the evidence ledger is off", async () => {
     testState.evidence = "off";
     await writeSharedFact("em-4", "k", "v");

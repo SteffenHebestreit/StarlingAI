@@ -60,7 +60,7 @@ export function canonicalizeSubject(subject: string): string {
   return subject.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
-function normalizeValue(value: string): string {
+export function normalizeValue(value: string): string {
   return value.trim().toLowerCase().replace(/\s+/g, " ");
 }
 

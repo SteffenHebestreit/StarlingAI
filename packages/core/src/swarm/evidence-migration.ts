@@ -14,7 +14,7 @@
 import { getConfig } from "../config/loader.js";
 import { logAudit } from "../audit/logger.js";
 import { readAllFacts } from "./memory.js";
-import { appendEvidenceClaim, canonicalizeSubject, listEvidenceClaims } from "./evidence-ledger.js";
+import { appendEvidenceClaim, canonicalizeSubject, listEvidenceClaims, normalizeValue } from "./evidence-ledger.js";
 
 export interface EvidenceMigrationParity {
   /** Facts in the legacy shared-facts store. */
@@ -26,6 +26,11 @@ export interface EvidenceMigrationParity {
   /** Ledger subjects with no legacy counterpart (expected: rich share_evidence
    *  records use claim sentences as subjects, not fact keys). */
   ledgerOnly: number;
+  /** Subjects present in BOTH stores whose VALUES disagree. The legacy value is
+   *  appended as a claim, which trips write-time conflict detection — the
+   *  divergence becomes a first-class DISPUTED subject for EVD-302 to route,
+   *  never a silent store split. */
+  valueDivergences: number;
 }
 
 /**
@@ -39,10 +44,37 @@ export async function sweepEvidenceMigrationParity(rootSessionId: string): Promi
   const legacy = await readAllFacts(rootSessionId);
   const claims = await listEvidenceClaims(rootSessionId);
   const ledgerSubjects = new Set(claims.map((claim) => claim.canonicalSubject));
+  const valueNormsBySubject = new Map<string, Set<string>>();
+  for (const claim of claims) {
+    const set = valueNormsBySubject.get(claim.canonicalSubject) ?? new Set<string>();
+    set.add(claim.valueNorm);
+    valueNormsBySubject.set(claim.canonicalSubject, set);
+  }
 
   let backfilled = 0;
+  let valueDivergences = 0;
   for (const [key, value] of Object.entries(legacy)) {
-    if (ledgerSubjects.has(canonicalizeSubject(key))) continue;
+    const subject = canonicalizeSubject(key);
+    if (ledgerSubjects.has(subject)) {
+      // Value-level parity: the subject exists in both stores — do the VALUES
+      // agree? A divergent legacy value is appended as a claim so write-time
+      // conflict detection marks the subject disputed and EVD-302 routes it,
+      // instead of the two stores silently disagreeing.
+      const norms = valueNormsBySubject.get(subject);
+      if (norms && !norms.has(normalizeValue(value))) {
+        try {
+          await appendEvidenceClaim(rootSessionId, {
+            subject: key,
+            value,
+            agent: "evidence_migration_divergence",
+            evidenceType: "observed",
+            validationState: "unverified",
+          });
+          valueDivergences++;
+        } catch { /* re-detected next sweep */ }
+      }
+      continue;
+    }
     try {
       await appendEvidenceClaim(rootSessionId, {
         subject: key,
@@ -65,12 +97,13 @@ export async function sweepEvidenceMigrationParity(rootSessionId: string): Promi
     ledgerClaims: claims.length,
     backfilled,
     ledgerOnly,
+    valueDivergences,
   };
-  // Backfills mean the dual-write missed records — worth a warn while shadow
-  // parity is being judged; a clean sweep is quiet routine telemetry.
+  // Backfills mean the dual-write missed records; value divergences mean the
+  // stores DISAGREE — both warn while shadow parity is being judged.
   logAudit("evidence_migration_parity", { ...parity }, {
     sessionId: rootSessionId,
-    severity: backfilled > 0 ? "warn" : "info",
+    severity: backfilled > 0 || valueDivergences > 0 ? "warn" : "info",
   });
   return parity;
 }
