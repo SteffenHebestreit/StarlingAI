@@ -1694,6 +1694,18 @@ export const ConfigSchema = z.object({
   plugins: z.object({
     enabled: z.boolean().default(false),
     dir: z.string().optional(),
+    /** SEC-105 (ADR-007 "trust before load"): when true, a plugin only loads if
+     *  its CONTENT DIGEST matches a trust receipt below — any byte change
+     *  returns the plugin to untrusted and it is refused at load, before any
+     *  plugin code runs. The refusal log prints the computed digest so an
+     *  operator who reviewed the change can re-trust it deliberately. */
+    requireTrust: z.boolean().default(true),
+    /** Operator-approved plugin trust receipts: plugin id (its directory/file
+     *  basename) → sha256 tree digest. */
+    trust: z.array(z.object({
+      name: z.string().min(1),
+      digest: z.string().regex(/^[a-f0-9]{64}$/),
+    })).default([]),
   }).default({}),
   /**
    * Built-in tool surface control.  Forks disable whole capability families

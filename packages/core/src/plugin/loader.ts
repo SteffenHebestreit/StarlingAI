@@ -25,6 +25,7 @@ import { childLogger } from "../logger.js";
 import { logAudit } from "../audit/logger.js";
 import { registerTool, unregisterTool, warmToolEmbeddings, type ToolHandler } from "../tools/registry.js";
 import { isCompileTimeMappedTool, getToolTier } from "../guardrails/tool-tiers.js";
+import { computePluginDigest, isPluginTrusted } from "./trust.js";
 import { getConfig } from "../config/loader.js";
 import type { Plugin, PluginTool } from "./index.js";
 
@@ -196,9 +197,37 @@ export async function loadPlugins(dir: string = resolvePluginsDir()): Promise<{ 
     return { loaded: 0, rejected: 0 };
   }
 
+  const pluginsConfig = (getConfig() as { plugins?: { requireTrust?: boolean; trust?: Array<{ name: string; digest: string }> } }).plugins;
+  const requireTrust = pluginsConfig?.requireTrust !== false;
+  const trustReceipts = pluginsConfig?.trust ?? [];
+
   for (const entry of entries) {
     const resolvedSource = resolvePluginEntry(dir, entry);
     if (!resolvedSource) continue;
+
+    // SEC-105 trust-before-load: fingerprint the plugin's content tree and
+    // check it against the operator's trust receipts BEFORE importing anything
+    // — module-level code in an untrusted or modified plugin never runs. Any
+    // byte change produces a new digest and silently revokes trust; the
+    // refusal prints the digest so a reviewed change can be re-trusted.
+    if (requireTrust) {
+      let digest: string;
+      try {
+        digest = computePluginDigest(join(dir, entry));
+      } catch (err) {
+        rejected += 1;
+        logAudit("plugin_load_refused_untrusted", { source: resolvedSource.label, reason: `digest failed: ${(err as Error).message}` }, { severity: "warn" });
+        continue;
+      }
+      if (!isPluginTrusted(resolvedSource.id, digest, trustReceipts)) {
+        rejected += 1;
+        log.warn({ plugin: resolvedSource.id, digest }, "Plugin refused — no trust receipt for this content digest. To trust it after review, add { \"name\": \"" + resolvedSource.id + "\", \"digest\": \"" + digest + "\" } to plugins.trust.");
+        logAudit("plugin_load_refused_untrusted", { source: resolvedSource.label, plugin: resolvedSource.id, digest }, { severity: "warn" });
+        continue;
+      }
+      logAudit("plugin_trust_verified", { plugin: resolvedSource.id, digest }, { severity: "info" });
+    }
+
     try {
       const result = await loadOnePlugin(resolvedSource.entryPath, resolvedSource.label, resolvedSource.id);
       if (result.ok) loaded += 1;

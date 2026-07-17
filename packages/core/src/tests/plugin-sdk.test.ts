@@ -26,7 +26,10 @@ describe("plugin SDK loader", () => {
     const configPath = join(tempDir, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
       workspacePath: tempDir,
-      plugins: { enabled: true, dir: pluginsDir },
+      // requireTrust: false — this suite tests the SDK contract (tool shape,
+      // tier fencing, hot reload), not the SEC-105 trust gate, which has its
+      // own suite (plugin-trust.test.ts) exercising the default-ON path.
+      plugins: { enabled: true, dir: pluginsDir, requireTrust: false },
     }), "utf8");
     process.env["SAI_CONFIG_PATH"] = configPath;
     process.env["SAI_AUDIT_LOG"] = join(tempDir, "audit.jsonl");
