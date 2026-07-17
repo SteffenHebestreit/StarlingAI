@@ -251,6 +251,13 @@ export const GatewaySchema = z.object({
   publicUrl: z.string().url().optional(),
   /** Additional browser origins allowed to call the gateway directly when the dashboard runs on a separate host */
   corsAllowedOrigins: z.array(z.string().url()).default([]),
+  /** EVL-401: absolute base directory that RELATIVE `session.create` workspacePath
+   *  overrides resolve against (with containment enforced — a resolved path escaping
+   *  this root is rejected). Unset (default) preserves legacy behavior: the relative
+   *  path is stored raw and resolves against the gateway process CWD, which inside a
+   *  container is NOT the mounted repo — the reason gateway-routed eval fixtures were
+   *  invisible to agents. Deployments set this to the container mount (e.g. "/workspace"). */
+  sessionWorkspaceRoot: z.string().optional(),
 });
 
 /**

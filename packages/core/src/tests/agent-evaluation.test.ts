@@ -485,3 +485,66 @@ describe("agent evaluation harness — artifact inspection (expectArtifact)", ()
     } finally { rmSync(ws, { recursive: true, force: true }); }
   });
 });
+
+describe("agent evaluation harness — pristine diff (expectNoWorkspaceChanges, EVL-401)", () => {
+  const stats = (agentName: string, task: string) => ({
+    agentName, sessionId: "s", promptChars: 0, userContentChars: task.length,
+    toolCount: 0, toolNames: [] as string[], iterations: 1,
+    usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+    maxIterations: 5, model: "test", capabilities: [] as string[],
+  });
+
+  async function runAssessmentCase(ws: string, misbehave?: () => void) {
+    return evaluateAgentPlan({
+      workspacePath: ws,
+      cases: [{
+        name: "assessment", agentName: "code_analyst", task: "Why is it broken?",
+        expectIncludes: ["diagnosis"], expectNoWorkspaceChanges: true,
+      }],
+    }, async (opts) => {
+      misbehave?.();
+      return { output: "diagnosis: sign flip in the percent calculation", stats: stats(opts.agentName, opts.task) };
+    });
+  }
+
+  it("passes and records an empty receipt when the workspace stays pristine", async () => {
+    const ws = mkdtempSync(join(tmpdir(), "sai-pristine-"));
+    try {
+      writeFileSync(join(ws, "cart.py"), "def cartTotal(): return -40", "utf8");
+      const r = await runAssessmentCase(ws);
+      expect(r.results[0]?.passed).toBe(true);
+      expect(r.results[0]?.workspaceChanges).toEqual({ added: [], modified: [], deleted: [] });
+    } finally { rmSync(ws, { recursive: true, force: true }); }
+  });
+
+  it("FAILS with a receipt naming the file when the agent edits during an assessment", async () => {
+    const ws = mkdtempSync(join(tmpdir(), "sai-pristine-"));
+    try {
+      writeFileSync(join(ws, "cart.py"), "def cartTotal(): return -40", "utf8");
+      const r = await runAssessmentCase(ws, () => {
+        writeFileSync(join(ws, "cart.py"), "def cartTotal(): return 40", "utf8");
+      });
+      expect(r.results[0]?.passed).toBe(false);
+      expect(r.results[0]?.failures.some((f) => f.includes("workspace changed") && f.includes("cart.py"))).toBe(true);
+      expect(r.results[0]?.workspaceChanges?.modified).toEqual(["cart.py"]);
+    } finally { rmSync(ws, { recursive: true, force: true }); }
+  });
+
+  it("FAILS on an ADDED file too — a fix written next to the original is still an edit", async () => {
+    const ws = mkdtempSync(join(tmpdir(), "sai-pristine-"));
+    try {
+      writeFileSync(join(ws, "cart.py"), "x", "utf8");
+      const r = await runAssessmentCase(ws, () => {
+        writeFileSync(join(ws, "cart_fixed.py"), "y", "utf8");
+      });
+      expect(r.results[0]?.passed).toBe(false);
+      expect(r.results[0]?.workspaceChanges?.added).toEqual(["cart_fixed.py"]);
+    } finally { rmSync(ws, { recursive: true, force: true }); }
+  });
+
+  it("a MISSING workspace is an unverifiable failure, never a silent pass", async () => {
+    const r = await runAssessmentCase(join(tmpdir(), "sai-pristine-does-not-exist"));
+    expect(r.results[0]?.passed).toBe(false);
+    expect(r.results[0]?.failures.some((f) => f.includes("unverifiable"))).toBe(true);
+  });
+});

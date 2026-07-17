@@ -171,7 +171,19 @@ export function createGatewayEvalRunner(options: GatewayRunnerOptions): GatewayE
 
   const runner: AgentEvaluationRunner = async (opts: SubAgentRunOptions): Promise<SubAgentRunResult> => {
     await connect();
-    const created = await rpc("session.create", { channel: "eval" }) as { sessionId: string };
+    // EVL-401: thread the case's workspace into the remote session so file-fixture
+    // cases are visible to the evaluated agent. Only RELATIVE paths are sent — the
+    // gateway rejects absolute ones, and a host-absolute path would be meaningless
+    // inside the container anyway. Requires gateway.sessionWorkspaceRoot to point
+    // at the container mount of the repo (e.g. "/workspace") for fixtures to resolve.
+    const relativeWorkspace = opts.workspacePath
+      && !opts.workspacePath.startsWith("/") && !/^[A-Za-z]:/.test(opts.workspacePath)
+      ? opts.workspacePath
+      : undefined;
+    const created = await rpc("session.create", {
+      channel: "eval",
+      ...(relativeWorkspace ? { workspacePath: relativeWorkspace } : {}),
+    }) as { sessionId: string };
     const sessionId = created.sessionId;
     await rpc("session.updateSettings", { sessionId, effort }).catch(() => undefined);
     const requestId = randomUUID();

@@ -13,6 +13,7 @@ import {
 } from "./evaluation.js";
 import { buildVersionedEvaluationReportPath } from "./evaluation-provenance.js";
 import { createGatewayEvalRunner } from "./gateway-eval-runner.js";
+import { agentReportEnvironment } from "./eval-report.js";
 
 async function main(): Promise<void> {
   const defaultPlanPath = resolve(process.cwd(), "agent-eval.jsonc");
@@ -110,6 +111,19 @@ async function main(): Promise<void> {
   if (outputPath) {
     const writtenPath = await writeEvaluationReport(report, outputPath);
     console.log(`\nReport written to ${writtenPath}`);
+  }
+
+  // EVL-401: an environment-suspect run is NOT a pass/fail gate. Exit with a
+  // distinct code (3) and refuse the baseline comparison — a "clean" comparison
+  // against crashed cases would read as regressions fixed or introduced when the
+  // truth is "the environment broke". The report is still written above so the
+  // run's evidence is preserved.
+  const environment = agentReportEnvironment(report);
+  if (environment.suspect) {
+    console.error("\nENVIRONMENT-SUSPECT RUN — refusing to gate on these results:");
+    for (const reason of environment.reasons) console.error(`  - ${reason}`);
+    console.error("Fix the environment (model backend, --via-gateway, run from the repo root) and re-run.");
+    process.exit(3);
   }
 
   // Regression check against baseline if provided

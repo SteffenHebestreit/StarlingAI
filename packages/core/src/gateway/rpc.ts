@@ -30,6 +30,7 @@ import type { InterventionNotice } from "../agent/interventions.js";
 import { computerSessionManager } from "../agent/computer-session.js";
 import { subscribeToNotifications } from "../runtime/notifications.js";
 import { captureComputerSessionSnapshot } from "../agent/computer-adapters/runtime.js";
+import { resolveSessionWorkspaceOverride } from "./session-workspace.js";
 
 const log = childLogger("gateway:rpc");
 
@@ -382,12 +383,16 @@ export class RpcConnection {
         // In a real deployed environment, this should be overridden or constrained by the gateway.
         if (params["workspacePath"]) {
           const requestedPath = String(params["workspacePath"]);
-          // SECURITY: Only allow relative paths inside a safe workspace root, never absolute host paths like "/"
-          if (requestedPath.startsWith("/") || requestedPath.includes("..")) {
-             log.warn({ requestedPath, connId: this.connId }, "Rejected relative or absolute workspacePath override");
-             throw new Error("Invalid workspacePath: must be a relative path without traversal");
+          // SECURITY: Only allow relative paths inside a safe workspace root, never absolute host paths like "/".
+          // EVL-401: when gateway.sessionWorkspaceRoot is configured, the relative path resolves
+          // under that root (containment enforced) so eval fixtures on a container mount are
+          // reachable; unset keeps the legacy raw-relative behavior.
+          const resolution = resolveSessionWorkspaceOverride(requestedPath, getConfig().gateway?.sessionWorkspaceRoot);
+          if (!resolution.ok) {
+             log.warn({ requestedPath, reason: resolution.reason, connId: this.connId }, "Rejected workspacePath override");
+             throw new Error(`Invalid workspacePath: ${resolution.reason}`);
           }
-          workspacePath = requestedPath;
+          workspacePath = resolution.path;
         }
 
         const session = createSession({

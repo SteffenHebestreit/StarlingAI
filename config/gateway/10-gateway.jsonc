@@ -33,6 +33,11 @@
     "bindHost": "loopback",
     "sessionTtlMs": 3600000,
     "turnTimeoutMs": 1800000,
+    // EVL-401: relative session.create workspacePath overrides (gateway-routed eval
+    // fixtures) resolve under the compose-mounted repo root instead of the process
+    // CWD, with containment enforced. Only affects sessions that pass an explicit
+    // relative workspacePath; normal sessions are untouched.
+    "sessionWorkspaceRoot": "/workspace",
     "publicUrl": "https://starlingai.example.com",
     "corsAllowedOrigins": [
       "https://chat.starlingai.example.com"

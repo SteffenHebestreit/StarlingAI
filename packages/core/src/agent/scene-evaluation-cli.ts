@@ -82,6 +82,7 @@ import {
   type SceneEvaluationPlan,
   type SceneEvaluationReport,
 } from "./scene-evaluation.js";
+import { sceneReportEnvironment } from "./eval-report.js";
 
 interface ParsedArgs {
   planPath?: string;
@@ -137,6 +138,15 @@ async function main(): Promise<void> {
   if (outputPath) {
     const writtenPath = await writeSceneEvaluationReport(report, outputPath);
     console.log(`\nReport written to ${writtenPath}`);
+  }
+
+  // EVL-401: an environment-suspect run (crashed or missing scenes) is not a
+  // pass/fail gate — same contract as the agent harness, same exit code.
+  const environment = sceneReportEnvironment(report);
+  if (environment.suspect) {
+    console.error("\nENVIRONMENT-SUSPECT RUN — refusing to gate on these results:");
+    for (const reason of environment.reasons) console.error(`  - ${reason}`);
+    process.exit(3);
   }
 
   let hasRegressions = false;

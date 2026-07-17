@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { existsSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { dirname, resolve, join } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { getConfig } from "../config/loader.js";
 import type { SubAgentRunOptions, SubAgentRunResult } from "./sub-agent.js";
 import { runSubAgentWithStats } from "./sub-agent.js";
@@ -33,6 +33,22 @@ export interface AgentEvaluationCase {
    *  truncated section). In-process eval only: the artifact must be in the case's
    *  workspace (a gateway-routed run writes inside the gateway container). */
   expectArtifact?: ExpectArtifact | ExpectArtifact[];
+  /** EVL-401 pristine diff: hash the case workspace before the run and diff it after.
+   *  ANY added/modified/deleted file fails the attempt and the changes are recorded
+   *  as a receipt on the result — this is the deterministic form of the "assessment
+   *  task must not edit" trap (a substring judge can only see what the agent SAYS).
+   *  Valid when the checked workspace is the one the agent actually runs in: always
+   *  for in-process runs; for gateway-routed runs only when the container session
+   *  workspace maps to the same directory (gateway.sessionWorkspaceRoot on the
+   *  repo mount). Mutually exclusive with expectArtifact (which REQUIRES writes). */
+  expectNoWorkspaceChanges?: boolean;
+}
+
+/** Pristine-diff receipt: what changed in the case workspace during an attempt. */
+export interface WorkspaceChanges {
+  added: string[];
+  modified: string[];
+  deleted: string[];
 }
 
 export interface ExpectArtifact {
@@ -87,6 +103,9 @@ export interface AgentEvaluationCaseResult {
    *  surfaced one — gateway-routed runs capture the turn_scorecard audit event,
    *  so eval reports and the dashboard consume the same schema. */
   qualityScorecard?: import("./turn-scorecard.js").TurnQualityScorecard;
+  /** EVL-401: pristine-diff receipt of the last attempt, present only when the case
+   *  sets expectNoWorkspaceChanges. Empty lists = the workspace stayed pristine. */
+  workspaceChanges?: WorkspaceChanges;
 }
 
 export interface AgentEvaluationReport {
@@ -217,27 +236,105 @@ function collectFailures(resultText: string, durationMs: number, testCase: Agent
   return failures;
 }
 
+// ── EVL-401 pristine diff ─────────────────────────────────────────────────────
+// Bounded snapshot: enough for fixture workspaces (tens of files), refuses to hash
+// arbitrarily large trees so a mis-pointed case can't stall the harness.
+const PRISTINE_MAX_FILES = 400;
+const PRISTINE_MAX_FILE_BYTES = 2 * 1024 * 1024;
+
+/** Map of workspace-relative path → content fingerprint. Skips VCS/dependency dirs.
+ *  Returns undefined when the workspace is missing or exceeds the file cap (the
+ *  check is then reported as unverifiable rather than silently passing). */
+export function snapshotWorkspace(workspacePath: string): Map<string, string> | undefined {
+  const abs = resolve(workspacePath);
+  if (!existsSync(abs)) return undefined;
+  const snapshot = new Map<string, string>();
+  const walk = (dir: string, rel: string): boolean => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name === ".git" || entry.name === "node_modules") continue;
+      const p = join(dir, entry.name);
+      const r = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        if (!walk(p, r)) return false;
+      } else if (entry.isFile()) {
+        if (snapshot.size >= PRISTINE_MAX_FILES) return false;
+        const st = statSync(p);
+        // Large files: fingerprint by size+mtime instead of content (still detects edits).
+        snapshot.set(r, st.size > PRISTINE_MAX_FILE_BYTES
+          ? `meta:${st.size}:${st.mtimeMs}`
+          : `sha:${createHash("sha256").update(readFileSync(p)).digest("hex").slice(0, 16)}`);
+      }
+    }
+    return true;
+  };
+  try {
+    return walk(abs, "") ? snapshot : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function diffWorkspaceSnapshots(before: Map<string, string>, after: Map<string, string>): WorkspaceChanges {
+  const changes: WorkspaceChanges = { added: [], modified: [], deleted: [] };
+  for (const [path, hash] of after) {
+    const prior = before.get(path);
+    if (prior === undefined) changes.added.push(path);
+    else if (prior !== hash) changes.modified.push(path);
+  }
+  for (const path of before.keys()) {
+    if (!after.has(path)) changes.deleted.push(path);
+  }
+  return changes;
+}
+
+function hasWorkspaceChanges(c: WorkspaceChanges): boolean {
+  return c.added.length > 0 || c.modified.length > 0 || c.deleted.length > 0;
+}
+
 /** Run one pass^k attempt for a case: clear its artifacts, run the agent, time it,
  *  and collect failures. Pure per-attempt unit so attempts can be ordered or pooled. */
 async function runEvalAttempt(
   testCase: AgentEvaluationCase,
   workspacePath: string,
   runner: AgentEvaluationRunner,
-): Promise<{ durationMs: number; failures: string[]; isError: boolean; result: SubAgentRunResult }> {
+): Promise<{ durationMs: number; failures: string[]; isError: boolean; result: SubAgentRunResult; workspaceChanges?: WorkspaceChanges }> {
   // Start each attempt from a clean slate so artifact checks reflect THIS run. (No-op
   // for non-artifact cases, which is what makes their attempts safe to run concurrently.)
-  clearArtifacts(testCase.workspacePath ?? workspacePath, testCase);
+  const caseWorkspace = testCase.workspacePath ?? workspacePath;
+  clearArtifacts(caseWorkspace, testCase);
+  const pristine = testCase.expectNoWorkspaceChanges ? snapshotWorkspace(caseWorkspace) : undefined;
   const startedAt = Date.now();
   const result = await runner({
     agentName: testCase.agentName,
     task: testCase.task,
     context: testCase.context,
     parentSessionId: `eval:${randomUUID()}`,
-    workspacePath: testCase.workspacePath ?? workspacePath,
+    workspacePath: caseWorkspace,
   });
   const durationMs = Date.now() - startedAt;
-  const failures = collectFailures(result.output, durationMs, testCase, testCase.workspacePath ?? workspacePath);
-  return { durationMs, failures, isError: result.output.startsWith("Sub-agent error:"), result };
+  const failures = collectFailures(result.output, durationMs, testCase, caseWorkspace);
+  let workspaceChanges: WorkspaceChanges | undefined;
+  if (testCase.expectNoWorkspaceChanges) {
+    if (!pristine) {
+      // Unverifiable is a FAILURE, not a silent pass — the case explicitly asked for this gate.
+      failures.push(`workspace pristine-check unverifiable: ${caseWorkspace} missing or exceeds ${PRISTINE_MAX_FILES} files`);
+    } else {
+      const after = snapshotWorkspace(caseWorkspace);
+      workspaceChanges = after ? diffWorkspaceSnapshots(pristine, after) : { added: [], modified: [], deleted: [] };
+      if (!after) {
+        failures.push("workspace pristine-check unverifiable: post-run snapshot failed");
+      } else if (hasWorkspaceChanges(workspaceChanges)) {
+        const describe = (label: string, paths: string[]): string | undefined =>
+          paths.length > 0 ? `${label} ${paths.slice(0, 5).join(", ")}${paths.length > 5 ? ` (+${paths.length - 5} more)` : ""}` : undefined;
+        failures.push(`workspace changed during assessment-only case: ${[
+          describe("modified:", workspaceChanges.modified),
+          describe("added:", workspaceChanges.added),
+          describe("deleted:", workspaceChanges.deleted),
+        ].filter(Boolean).join("; ")}`);
+      }
+    }
+  }
+  return { durationMs, failures, isError: result.output.startsWith("Sub-agent error:"), result, ...(workspaceChanges ? { workspaceChanges } : {}) };
 }
 
 /** Run `fn` over indices [0, count) with at most `limit` in flight, preserving result
@@ -275,7 +372,11 @@ export async function evaluateAgentPlan(
     const attempts = Math.max(1, Math.floor(testCase.repeat ?? planRepeat));
     // Parallelize the k attempts only for artifact-free cases — an artifact case's
     // clear→write→check would race on the shared workspace, so it stays sequential.
-    const attemptLimit = planConcurrency > 1 && testCase.expectArtifact === undefined ? planConcurrency : 1;
+    // Pristine-diff cases are sequential too: a misbehaving agent's write during
+    // attempt A would corrupt attempt B's before/after comparison.
+    const attemptLimit = planConcurrency > 1 && testCase.expectArtifact === undefined && !testCase.expectNoWorkspaceChanges
+      ? planConcurrency
+      : 1;
     const attemptResults = await mapWithConcurrency(attempts, attemptLimit, () =>
       runEvalAttempt(testCase, workspacePath, runner),
     );
@@ -315,6 +416,9 @@ export async function evaluateAgentPlan(
       passAtK,
       runDurationsMs,
       ...(lastResult?.qualityScorecard ? { qualityScorecard: lastResult.qualityScorecard } : {}),
+      ...(attemptResults[attemptResults.length - 1]?.workspaceChanges
+        ? { workspaceChanges: attemptResults[attemptResults.length - 1]!.workspaceChanges }
+        : {}),
     });
   }
 
