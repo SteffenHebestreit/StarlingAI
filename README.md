@@ -25,6 +25,16 @@ The result is a general-purpose swarm that gets smarter the more it works — wi
 
 ## How a task flies through the swarm
 
+<div align="center">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/diagrams/task-flow-dark.svg">
+  <img src="assets/diagrams/task-flow-light.svg" alt="How a task flies through the swarm: any channel feeds the orchestrator; trivial turns are answered directly; complex turns get a recorded plan, are routed to catalog specialists or a purpose-built ephemeral agent, pass every tool call through the guardrail-tier-approval-sandbox-audit chain under the warden's watch, and ship only after risk-gated verification." width="82%">
+</picture>
+</div>
+
+<details>
+<summary>Diagram source (mermaid)</summary>
+
 ```mermaid
 flowchart TD
     U(["Any channel: webchat / Slack / Telegram / Discord / WhatsApp / email"]) --> O{"Orchestrator"}
@@ -40,6 +50,10 @@ flowchart TD
     direct --> out(["Answer + evidence"])
     verify --> out
 ```
+
+Regenerate the SVGs from this source with mermaid (`theme: default | dark`, `flowchart.htmlLabels: false`) into `assets/diagrams/`.
+
+</details>
 
 Sub-tasks run **in parallel** over dependency-aware task graphs; delegation depth and width are hard-capped so a task can never cascade into a runaway fan-out.
 
@@ -112,6 +126,11 @@ pnpm sai dev web               # start web UI in dev mode
 
 ### 🧠 It thinks in parallel
 
+<div align="center">
+<img src="assets/screenshots/agent-catalog.png" alt="The Agent Catalog — 48 specialist sub-agents with their capabilities and routing tags" width="90%" />
+<br/><sub><em>The capability directory: 48 specialists and counting — each card is a bird in the flock.</em></sub>
+</div>
+
 - **Smart routing** — keyword, embedding, and outcome-based ranking picks the best specialist for each task; circuit breakers exclude agents that keep failing.
 - **Ephemeral agents** — no specialist fits? The swarm architects and launches a purpose-built one. The good ones get promoted to the permanent catalog (behind holdout evidence and canary rollout, per the [development plan](docs/agent-swarm-development-plan-2026-07.md)).
 - **Bounded fan-out** — independent sub-tasks run concurrently over dependency-aware task graphs with per-node fallbacks, but delegation depth and width are capped so one task can never cascade into a runaway swarm.
@@ -137,6 +156,11 @@ pnpm sai dev web               # start web UI in dev mode
 - **Penetration testing** — a full Kali Linux toolchain (nmap, nikto, gobuster, sqlmap, hydra, wpscan, sslscan, ffuf, Metasploit, and more) wrapped in a scope-enforcing swarm with mandatory authorization.
 
 ### 🛡️ It stays guarded
+
+<div align="center">
+<img src="assets/screenshots/guardrails-settings.png" alt="Runtime settings — prompt-injection protection and output secret scanning toggles, and a Shell Sandbox switch that is locked on and cannot be disabled" width="90%" />
+<br/><sub><em>Guardrails in the dashboard: prompt-injection scanning, output secret redaction — and a shell sandbox that is locked on. Some switches you don't get to flip.</em></sub>
+</div>
 
 - **Sandboxed by default** — sub-agents run containerized with `--cap-drop ALL`, a read-only root filesystem, bounded resources, and `network: none` unless the role requires approved access. Shell, script, test, and dynamic-tool execution get dedicated Docker sandboxes.
 - **Every tool call gated** — guardrail → tier → approval → audit → output-redaction, on every registered invocation. No exceptions, including for the swarm's own self-improvement. ([tool tiers](docs/tool-tiers.md))
