@@ -76,6 +76,7 @@ import { announceAgentCapability } from "../swarm/capabilities.js";
 import { clearTaskBids, collectTaskBids, DEFAULT_AUTONOMOUS_BID_WINDOW_MS, isAutonomousBiddingStarted } from "../swarm/bidding.js";
 import { isTaskLeaseCurrent, publishTaskLeaseResult, releaseTaskLease, startTaskLeaseHeartbeat, tryAcquireTaskLease, waitForTaskLeaseResult } from "../swarm/locks.js";
 import { defaultChildReserve, reconcileMissionBudget, reserveMissionBudget, type BudgetDimensions, type BudgetReservation } from "../swarm/mission-budget.js";
+import { deriveChildContract, getOrCreateRootContract } from "../swarm/mission-contract.js";
 import { getMissionStore } from "../swarm/mission-store.js";
 import { admitToProvider, releaseProviderPermit, renewProviderPermit, type CapacityPermit } from "../swarm/capacity-broker.js";
 import { formatSharedContextForPrompt, appendPartialResult, claimAgentMessages, extractFactsFromOutput, writeSharedFact, searchSharedFacts, searchPartialResults, readAllFacts, currentTurnFactKeys } from "../swarm/memory.js";
@@ -1616,6 +1617,49 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       }
     }
 
+    // MIS-202: attach a NARROWED contract to this delegation. The root contract
+    // captures the turn's scope (agents/tools grants, deadline, budget envelope);
+    // the child gets the intersection — a request that would widen any dimension
+    // is clamped to the parent bound and audited (contract_narrowing_clamped),
+    // never granted silently. Slice 1 is telemetry: the attempt links to its
+    // effective contract; enforcement against the contract is a later slice.
+    let contractId: string | undefined;
+    if (getConfig().mission.store !== "off") {
+      try {
+        const contractRootSession = deriveSharedSessionId(ctx.sessionId);
+        const budgetCfg = getConfig().mission.budget;
+        const rootContract = getOrCreateRootContract(contractRootSession, {
+          objective: request.task.slice(0, 500),
+          ...(ctx.allowedAgents ? { allowedAgents: ctx.allowedAgents } : {}),
+          ...(ctx.allowedTools ? { allowedTools: ctx.allowedTools } : {}),
+          ...(typeof ctx.turnTimeoutOverrideMs === "number" && ctx.turnTimeoutOverrideMs > 0
+            ? { deadlineAt: new Date(Date.now() + ctx.turnTimeoutOverrideMs).toISOString() }
+            : {}),
+          budget: {
+            tokens: budgetCfg.maxTotalTokens,
+            toolCalls: budgetCfg.maxToolCalls,
+            activeTimeMs: budgetCfg.maxActiveTimeMs,
+          },
+        });
+        const childReserve = defaultChildReserve();
+        const childContract = deriveChildContract(rootContract, {
+          objective: request.task.slice(0, 500),
+          allowedAgents: [candidate],
+          budget: { tokens: childReserve.tokens, toolCalls: childReserve.toolCalls, activeTimeMs: childReserve.activeTimeMs },
+        }, { sessionId: ctx.sessionId, taskId });
+        contractId = childContract.contractId;
+        logAudit("delegation_contract_attached", {
+          taskId,
+          candidate,
+          contractId: childContract.contractId,
+          parentContractId: rootContract.contractId,
+          depth: childContract.depth,
+        }, { sessionId: ctx.sessionId });
+      } catch (error) {
+        log.warn({ error, taskId }, "Contract attachment failed — proceeding without contract telemetry");
+      }
+    }
+
     // CAP-204: admit against the provider endpoint's shared capacity before the
     // run occupies it. Shadow probes once and records saturation; enforce waits
     // up to the admission timeout, then refuses. A renewal timer keeps a long
@@ -2138,6 +2182,8 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           attemptedAgents,
           delegationSucceeded: true,
           delegationOutcome: delegationOutcome ?? "success",
+          // MIS-202: the attempt links to its effective (narrowed) contract.
+          ...(contractId ? { contractId } : {}),
           // Mark runtime-authored research slices: their output is synthesis
           // INPUT (evidence), never a verbatim-relayable final deliverable.
           ...(isCanonicalResearchSliceTask(request.task) ? { researchSlice: true } : {}),
