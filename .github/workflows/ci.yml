@@ -93,6 +93,23 @@ jobs:
           REDIS_URL: redis://localhost:6379
         run: pnpm --filter @starlingai/core exec vitest run src/tests/task-lease.redis.integration.test.ts
 
+      # EVL-402: the PR-deterministic scenario packs (race/crash/budget/evidence/
+      # side-effect/quality-gates) publish one UnifiedEvalReport per pack so PR,
+      # nightly, and weekly results are directly comparable. The tests themselves
+      # already ran in the coverage gate; this step is the comparable-publishing
+      # contract, and the Redis-integration pack reuses the service container.
+      - name: Scenario packs (deterministic, unified envelopes)
+        env:
+          REDIS_URL: redis://localhost:6379
+        run: pnpm packs:evaluate
+      - name: Upload pack envelopes
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-pack-envelopes
+          path: artifacts/evaluations/packs/
+          if-no-files-found: ignore
+
       # Production build (tsc -p tsconfig.build.json + vite build).
       - name: Build
         run: pnpm build

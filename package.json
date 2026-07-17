@@ -36,6 +36,7 @@
     "computer-remote:dev": "pnpm --filter @starlingai/core dev:computer-remote",
     "web:dev": "pnpm --filter @starlingai/web dev",
     "agents:evaluate": "pnpm --filter @starlingai/core agents:evaluate",
+    "packs:evaluate": "pnpm --filter @starlingai/core packs:evaluate",
     "runtime-guidance:evaluate": "pnpm --filter @starlingai/core runtime-guidance:evaluate"
   },
   "devDependencies": {

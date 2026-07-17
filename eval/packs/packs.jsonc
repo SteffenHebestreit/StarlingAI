@@ -1,0 +1,89 @@
+{
+  // EVL-402 scenario packs. Deterministic packs run on every PR via
+  // `pnpm packs:evaluate` (vitest under the hood) and publish one
+  // UnifiedEvalReport per pack to artifacts/evaluations/packs/ — the same
+  // envelope the live agent/scene harnesses emit, so PR, nightly, and weekly
+  // results for a pack are directly comparable.
+  //
+  // Test files are relative to packages/core (the runner's cwd).
+  "packs": [
+    {
+      "name": "race",
+      "kind": "deterministic",
+      "description": "Distributed races: lease contention/fencing, message claim/ack visibility, capacity admission, cancel idempotency.",
+      "testFiles": [
+        "src/tests/task-lease.test.ts",
+        "src/tests/agent-message-claims.test.ts",
+        "src/tests/capacity-broker.test.ts",
+        "src/tests/distributed-control.test.ts"
+      ]
+    },
+    {
+      "name": "crash",
+      "kind": "deterministic",
+      "description": "Crash recovery: redelivery retry ceilings, dead-lettering, idempotent mission-event appends, projection rebuild.",
+      "testFiles": [
+        "src/tests/agent-message-claims.test.ts",
+        "src/tests/mission-store.test.ts"
+      ]
+    },
+    {
+      "name": "budget",
+      "kind": "deterministic",
+      "description": "Budget envelope: reserve-before-dispatch, per-dimension exhaustion refusal, reconcile-to-actuals, release.",
+      "testFiles": [
+        "src/tests/mission-budget.test.ts"
+      ]
+    },
+    {
+      "name": "conflicting-evidence",
+      "kind": "deterministic",
+      "description": "Evidence ledger: write-time conflict detection, authority/freshness supersession, material-conflict verification routing.",
+      "testFiles": [
+        "src/tests/evidence-ledger.test.ts"
+      ]
+    },
+    {
+      "name": "side-effect",
+      "kind": "deterministic",
+      "description": "Side-effect discipline: pristine-diff receipts on assessment cases, artifact production/truncation gates, deterministic probes.",
+      "testFiles": [
+        "src/tests/agent-evaluation.test.ts",
+        "src/tests/artifact-probes.test.ts"
+      ]
+    },
+    {
+      "name": "quality-gates",
+      "kind": "deterministic",
+      "description": "Truthful gating: tri-state QA verdicts (strict/legacy), turn scorecards, eval provenance + unified envelope integrity.",
+      "testFiles": [
+        "src/tests/qa-delivery-loop.test.ts",
+        "src/tests/turn-scorecard.test.ts",
+        "src/tests/evaluation-provenance.test.ts",
+        "src/tests/eval-report.test.ts"
+      ]
+    },
+    {
+      // The two-process lease race against real Redis runs in CI (service
+      // container) and anywhere REDIS_URL is exported; it is its own pack so
+      // its result is published in the same envelope.
+      "name": "race-redis-integration",
+      "kind": "deterministic",
+      "testFiles": [
+        "src/tests/task-lease.redis.integration.test.ts"
+      ],
+      "note": "Self-skips without REDIS_URL; CI provides a Redis service container."
+    },
+    {
+      "name": "fable-traps",
+      "kind": "live",
+      "plan": "agent-eval.jsonc",
+      "note": "Nightly/pre-release: pnpm agents:evaluate agent-eval.jsonc --repeat 5 (in-process from repo root, or --via-gateway once the image includes gateway.sessionWorkspaceRoot support)."
+    },
+    {
+      "name": "chaos-load",
+      "kind": "chaos",
+      "note": "Weekly chaos/load suite (kill -9 at graph transitions, saturated capacity, budget exhaustion under load) — deferred to a later EVL-402 slice; requires GRF-206 restart scheduler."
+    }
+  ]
+}

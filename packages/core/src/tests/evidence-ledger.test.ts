@@ -90,6 +90,24 @@ describe("evidence conflict & freshness engine (EVD-302)", () => {
     expect(await listDisputedSubjects("cf-3")).toEqual(["release"]); // still disputed
   });
 
+  it("UNDATED same-tier claims stay MATERIAL even when appended across a clock tick — ingestion order is not freshness", async () => {
+    // Regression for a flake the EVL-402 pack runner caught: with no explicit
+    // publishedAt/retrievedAt, the auto-stamped observedAt made whichever claim
+    // landed a millisecond later "decisively fresher".
+    await appendEvidenceClaim("cf-6", { subject: "s", value: "x", evidenceType: "observed" });
+    await new Promise((r) => setTimeout(r, 5)); // force distinct observedAt stamps
+    await appendEvidenceClaim("cf-6", { subject: "s", value: "y", evidenceType: "observed" });
+    const result = await resolveSubjectConflict("cf-6", "s");
+    expect(result.outcome).toBe("material");
+  });
+
+  it("ONE dated claim against an undated same-tier claim is still MATERIAL — freshness needs both sides dated", async () => {
+    await appendEvidenceClaim("cf-7", { subject: "s", value: "x", evidenceType: "secondary", retrievedAt: "2026-07-01" });
+    await appendEvidenceClaim("cf-7", { subject: "s", value: "y", evidenceType: "secondary" });
+    const result = await resolveSubjectConflict("cf-7", "s");
+    expect(result.outcome).toBe("material");
+  });
+
   it("sweep resolves every disputed subject and reports the queue", async () => {
     await appendEvidenceClaim("cf-4", { subject: "a", value: "1", evidenceType: "secondary" });
     await appendEvidenceClaim("cf-4", { subject: "a", value: "2", evidenceType: "official" });

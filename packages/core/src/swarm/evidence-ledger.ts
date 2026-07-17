@@ -263,8 +263,21 @@ function authorityOf(claim: EvidenceClaim): number {
   return base * 10 + (claim.validationState === "validated" ? 1 : 0);
 }
 
+/** Ordering freshness: prefers explicit source dates, falls back to the ledger's
+ *  own observedAt stamp — used only to order claims stably, NEVER to decide. */
 function freshnessOf(claim: EvidenceClaim): number {
   const dated = claim.publishedAt ?? claim.retrievedAt ?? claim.observedAt;
+  const ts = Date.parse(dated ?? "");
+  return Number.isFinite(ts) ? ts : 0;
+}
+
+/** Decisive freshness: ONLY dates the SOURCE carries (published/retrieved).
+ *  The auto-stamped observedAt is ingestion order, not evidence freshness — two
+ *  undated same-tier claims appended milliseconds apart must stay a MATERIAL
+ *  conflict, not resolve to whichever landed on the later millisecond (a flake
+ *  the EVL-402 pack runner caught live). */
+function explicitFreshnessOf(claim: EvidenceClaim): number {
+  const dated = claim.publishedAt ?? claim.retrievedAt;
   const ts = Date.parse(dated ?? "");
   return Number.isFinite(ts) ? ts : 0;
 }
@@ -295,10 +308,10 @@ export async function resolveSubjectConflict(sessionId: string, subject: string)
   const [top, runnerUp] = ranked;
 
   const authorityGap = authorityOf(top!) - authorityOf(runnerUp!);
-  const topFresh = freshnessOf(top!);
-  const runnerFresh = freshnessOf(runnerUp!);
+  const topFresh = explicitFreshnessOf(top!);
+  const runnerFresh = explicitFreshnessOf(runnerUp!);
   // Decisive: a strictly higher authority TIER (>=10 after scaling), or same tier
-  // with both dated and the winner strictly fresher.
+  // with both claims carrying EXPLICIT source dates and the winner strictly fresher.
   const decisive = authorityGap >= 10 || (authorityGap >= 0 && topFresh > 0 && runnerFresh > 0 && topFresh > runnerFresh);
 
   const existing = await readSubjectEntry(sessionId, canonical);

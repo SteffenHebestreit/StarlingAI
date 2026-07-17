@@ -17,7 +17,7 @@ import type { AgentEvaluationReport, WorkspaceChanges } from "./evaluation.js";
 import type { SceneEvaluationReport } from "./scene-evaluation.js";
 import type { EvaluationProvenance } from "./evaluation-provenance.js";
 
-export type UnifiedEvalHarness = "agent" | "scene";
+export type UnifiedEvalHarness = "agent" | "scene" | "pack";
 
 export type UnifiedEvalCaseStatus =
   | "passed" | "flaky" | "failed" | "error" | "blocked" | "scene_missing";
@@ -46,6 +46,9 @@ export interface UnifiedEvalEnvironment {
 export interface UnifiedEvalReport {
   schemaVersion: 1;
   harness: UnifiedEvalHarness;
+  /** EVL-402: the suite/pack this report belongs to (e.g. "race", "budget"),
+   *  so PR/nightly/weekly runs of the same pack are directly comparable. */
+  suite?: string;
   runId: string;
   generatedAt: string;
   summary: {
