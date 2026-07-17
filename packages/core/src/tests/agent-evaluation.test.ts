@@ -548,3 +548,73 @@ describe("agent evaluation harness — pristine diff (expectNoWorkspaceChanges, 
     expect(r.results[0]?.failures.some((f) => f.includes("unverifiable"))).toBe(true);
   });
 });
+
+describe("agent evaluation harness — rubric judge (fable 6c)", () => {
+  const stats = (agentName: string) => ({
+    agentName, sessionId: "s", promptChars: 0, userContentChars: 0,
+    toolCount: 0, toolNames: [] as string[], iterations: 1,
+    usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+    maxIterations: 5, model: "test", capabilities: [] as string[],
+  });
+
+  async function runJudgedCase(ws: string, judgeReply: string, minScores?: Record<string, number>) {
+    const calls: string[] = [];
+    const report = await evaluateAgentPlan({
+      workspacePath: ws,
+      cases: [{
+        name: "judged", agentName: "code_analyst", task: "diagnose the bug",
+        expectIncludes: ["diagnosis"],
+        judge: { groundTruthPath: "GROUND-TRUTH.md", ...(minScores ? { minScores: minScores as never } : {}) },
+      }],
+    }, async (opts) => {
+      calls.push(opts.agentName + ":" + opts.task.slice(0, 30));
+      const isJudge = opts.task.startsWith("You are an eval judge");
+      return { output: isJudge ? judgeReply : "diagnosis: sign flip", stats: stats(opts.agentName) };
+    });
+    return { report, calls };
+  }
+
+  it("scores a passing attempt via the RUBRIC contract and attaches the scores", async () => {
+    const ws = mkdtempSync(join(tmpdir(), "sai-judge-"));
+    try {
+      writeFileSync(join(ws, "GROUND-TRUTH.md"), "The correct action is a diagnosis naming the sign flip; no edits.", "utf8");
+      const { report, calls } = await runJudgedCase(ws,
+        'RUBRIC: {"correct_action": 2, "evidence": 1, "verification_honesty": 2, "report_quality": 2, "notes": "solid"}');
+      expect(report.results[0]?.passed).toBe(true);
+      expect(report.results[0]?.judgeScores).toMatchObject({ correct_action: 2, evidence: 1, notes: "solid" });
+      expect(calls.some((c) => c.startsWith("code_analyst:You are an eval judge"))).toBe(true);
+    } finally { rmSync(ws, { recursive: true, force: true }); }
+  });
+
+  it("minScores turn dimensions into gates — an unmet minimum fails the attempt with the judge's note", async () => {
+    const ws = mkdtempSync(join(tmpdir(), "sai-judge-"));
+    try {
+      writeFileSync(join(ws, "GROUND-TRUTH.md"), "gt", "utf8");
+      const { report } = await runJudgedCase(ws,
+        'RUBRIC: {"correct_action": 2, "evidence": 0, "verification_honesty": 2, "report_quality": 2, "notes": "claims unbacked"}',
+        { evidence: 1 });
+      expect(report.results[0]?.passed).toBe(false);
+      expect(report.results[0]?.failures[0]).toContain("evidence scored 0 < required 1");
+      expect(report.results[0]?.failures[0]).toContain("claims unbacked");
+    } finally { rmSync(ws, { recursive: true, force: true }); }
+  });
+
+  it("an unparseable rubric FAILS the attempt — never a silent unscored pass", async () => {
+    const ws = mkdtempSync(join(tmpdir(), "sai-judge-"));
+    try {
+      writeFileSync(join(ws, "GROUND-TRUTH.md"), "gt", "utf8");
+      const { report } = await runJudgedCase(ws, "Looks great, 10/10, would pass again");
+      expect(report.results[0]?.passed).toBe(false);
+      expect(report.results[0]?.failures[0]).toContain("no parseable RUBRIC");
+    } finally { rmSync(ws, { recursive: true, force: true }); }
+  });
+
+  it("a missing ground-truth file fails the attempt rather than judging against nothing", async () => {
+    const ws = mkdtempSync(join(tmpdir(), "sai-judge-"));
+    try {
+      const { report } = await runJudgedCase(ws, "unused");
+      expect(report.results[0]?.passed).toBe(false);
+      expect(report.results[0]?.failures[0]).toContain("rubric judge errored");
+    } finally { rmSync(ws, { recursive: true, force: true }); }
+  });
+});

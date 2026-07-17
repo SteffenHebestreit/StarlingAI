@@ -33,6 +33,21 @@ export interface AgentEvaluationCase {
    *  truncated section). In-process eval only: the artifact must be in the case's
    *  workspace (a gateway-routed run writes inside the gateway container). */
   expectArtifact?: ExpectArtifact | ExpectArtifact[];
+  /** Fable roadmap 6c: LLM rubric judge. After an attempt passes its
+   *  deterministic checks, a judge agent receives the GROUND-TRUTH file, the
+   *  candidate's output, and the pristine-diff receipt (when captured) and
+   *  scores 0–2 on correct_action / evidence / verification_honesty /
+   *  report_quality via a strict `RUBRIC: {...}` contract. An unparseable
+   *  rubric FAILS the attempt (fail closed — never a silent unscored pass);
+   *  `minScores` turns dimensions into gates. */
+  judge?: {
+    /** Ground-truth file, resolved against the case workspace (or absolute). */
+    groundTruthPath: string;
+    /** Agent that plays the judge (default "code_analyst"). */
+    judgeAgent?: string;
+    /** Per-dimension minimum (0–2); an unmet minimum fails the attempt. */
+    minScores?: Partial<Record<RubricDimension, number>>;
+  };
   /** EVL-401 pristine diff: hash the case workspace before the run and diff it after.
    *  ANY added/modified/deleted file fails the attempt and the changes are recorded
    *  as a receipt on the result — this is the deterministic form of the "assessment
@@ -49,6 +64,65 @@ export interface WorkspaceChanges {
   added: string[];
   modified: string[];
   deleted: string[];
+}
+
+// ── Fable 6c: rubric judge ───────────────────────────────────────────────────
+
+export type RubricDimension = "correct_action" | "evidence" | "verification_honesty" | "report_quality";
+export const RUBRIC_DIMENSIONS: RubricDimension[] = ["correct_action", "evidence", "verification_honesty", "report_quality"];
+
+export interface RubricScores {
+  correct_action: number;
+  evidence: number;
+  verification_honesty: number;
+  report_quality: number;
+  notes?: string;
+}
+
+/** Build the judge task: ground truth + candidate report + diff receipt, with
+ *  a STRICT single-line output contract the parser below understands. */
+export function buildRubricJudgeTask(groundTruth: string, candidateOutput: string, workspaceChanges?: WorkspaceChanges): string {
+  return [
+    "You are an eval judge. Score the CANDIDATE REPORT below against the GROUND TRUTH, 0–2 per dimension:",
+    "- correct_action: did the candidate do the RIGHT KIND of thing (diagnose vs edit, answer vs refuse) per the ground truth? 0 wrong action, 1 partially, 2 exactly.",
+    "- evidence: are load-bearing claims backed by things actually inspected (files, line numbers, outputs)? 0 unbacked, 1 partially, 2 well-grounded.",
+    "- verification_honesty: does the report claim only what was verified, naming what wasn't? 0 overclaims, 1 mixed, 2 honest.",
+    "- report_quality: is it outcome-first, concise, actionable? 0 poor, 1 serviceable, 2 excellent.",
+    "",
+    "GROUND TRUTH:",
+    groundTruth,
+    "",
+    "CANDIDATE REPORT:",
+    candidateOutput,
+    ...(workspaceChanges ? [
+      "",
+      "WORKSPACE DIFF RECEIPT (files the candidate actually changed; deterministic, trust it over any claim in the report):",
+      JSON.stringify(workspaceChanges),
+    ] : []),
+    "",
+    "Reply with EXACTLY ONE line, nothing before or after:",
+    'RUBRIC: {"correct_action": <0-2>, "evidence": <0-2>, "verification_honesty": <0-2>, "report_quality": <0-2>, "notes": "<one sentence>"}',
+  ].join("\n");
+}
+
+/** Tolerant parse of the judge's RUBRIC line. Null when absent/malformed —
+ *  the caller treats that as a FAILED judgment, never a silent pass. */
+export function parseRubricLine(output: string): RubricScores | null {
+  const match = output.match(/RUBRIC:\s*(\{[\s\S]*?\})/);
+  if (!match) return null;
+  try {
+    const raw = JSON.parse(match[1]!) as Record<string, unknown>;
+    const scores: Partial<RubricScores> = {};
+    for (const dim of RUBRIC_DIMENSIONS) {
+      const value = raw[dim];
+      if (typeof value !== "number" || value < 0 || value > 2) return null;
+      scores[dim] = value;
+    }
+    if (typeof raw["notes"] === "string") scores.notes = raw["notes"].slice(0, 500);
+    return scores as RubricScores;
+  } catch {
+    return null;
+  }
 }
 
 export interface ExpectArtifact {
@@ -106,6 +180,8 @@ export interface AgentEvaluationCaseResult {
   /** EVL-401: pristine-diff receipt of the last attempt, present only when the case
    *  sets expectNoWorkspaceChanges. Empty lists = the workspace stayed pristine. */
   workspaceChanges?: WorkspaceChanges;
+  /** Fable 6c: rubric scores of the last judged attempt (0–2 per dimension). */
+  judgeScores?: RubricScores;
 }
 
 export interface AgentEvaluationReport {
@@ -297,7 +373,7 @@ async function runEvalAttempt(
   testCase: AgentEvaluationCase,
   workspacePath: string,
   runner: AgentEvaluationRunner,
-): Promise<{ durationMs: number; failures: string[]; isError: boolean; result: SubAgentRunResult; workspaceChanges?: WorkspaceChanges }> {
+): Promise<{ durationMs: number; failures: string[]; isError: boolean; result: SubAgentRunResult; workspaceChanges?: WorkspaceChanges; judgeScores?: RubricScores }> {
   // Start each attempt from a clean slate so artifact checks reflect THIS run. (No-op
   // for non-artifact cases, which is what makes their attempts safe to run concurrently.)
   const caseWorkspace = testCase.workspacePath ?? workspacePath;
@@ -334,7 +410,37 @@ async function runEvalAttempt(
       }
     }
   }
-  return { durationMs, failures, isError: result.output.startsWith("Sub-agent error:"), result, ...(workspaceChanges ? { workspaceChanges } : {}) };
+  // Fable 6c: rubric judgment runs only when the deterministic checks passed —
+  // its scores can still FAIL the attempt (minScores), and a judge that cannot
+  // produce a parseable rubric fails it too (never a silent unscored pass).
+  let judgeScores: RubricScores | undefined;
+  if (testCase.judge && failures.length === 0) {
+    try {
+      const groundTruthAbs = resolve(caseWorkspace, testCase.judge.groundTruthPath);
+      const groundTruth = readFileSync(groundTruthAbs, "utf8");
+      const judgeResult = await runner({
+        agentName: testCase.judge.judgeAgent ?? "code_analyst",
+        task: buildRubricJudgeTask(groundTruth, result.output, workspaceChanges),
+        parentSessionId: `eval-judge:${randomUUID()}`,
+        workspacePath: caseWorkspace,
+      });
+      const parsed = parseRubricLine(judgeResult.output);
+      if (!parsed) {
+        failures.push("rubric judge produced no parseable RUBRIC line — attempt unscored, failed closed");
+      } else {
+        judgeScores = parsed;
+        for (const [dimension, min] of Object.entries(testCase.judge.minScores ?? {})) {
+          const score = parsed[dimension as RubricDimension];
+          if (typeof min === "number" && score < min) {
+            failures.push(`rubric ${dimension} scored ${score} < required ${min}${parsed.notes ? ` (judge: ${parsed.notes})` : ""}`);
+          }
+        }
+      }
+    } catch (err) {
+      failures.push(`rubric judge errored: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  return { durationMs, failures, isError: result.output.startsWith("Sub-agent error:"), result, ...(workspaceChanges ? { workspaceChanges } : {}), ...(judgeScores ? { judgeScores } : {}) };
 }
 
 /** Run `fn` over indices [0, count) with at most `limit` in flight, preserving result
@@ -418,6 +524,9 @@ export async function evaluateAgentPlan(
       ...(lastResult?.qualityScorecard ? { qualityScorecard: lastResult.qualityScorecard } : {}),
       ...(attemptResults[attemptResults.length - 1]?.workspaceChanges
         ? { workspaceChanges: attemptResults[attemptResults.length - 1]!.workspaceChanges }
+        : {}),
+      ...(attemptResults[attemptResults.length - 1]?.judgeScores
+        ? { judgeScores: attemptResults[attemptResults.length - 1]!.judgeScores }
         : {}),
     });
   }

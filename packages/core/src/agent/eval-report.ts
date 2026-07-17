@@ -13,7 +13,7 @@
  * their native reports (existing baselines stay valid) and additionally consume
  * these adapters for gating; EVL-402's suite aggregator consumes the envelope.
  */
-import type { AgentEvaluationReport, WorkspaceChanges } from "./evaluation.js";
+import type { AgentEvaluationReport, RubricScores, WorkspaceChanges } from "./evaluation.js";
 import type { SceneEvaluationReport } from "./scene-evaluation.js";
 import type { EvaluationProvenance } from "./evaluation-provenance.js";
 
@@ -34,6 +34,7 @@ export interface UnifiedEvalCase {
   attempts?: number;
   passCount?: number;
   workspaceChanges?: WorkspaceChanges;
+  judgeScores?: RubricScores;
 }
 
 export interface UnifiedEvalEnvironment {
@@ -126,6 +127,7 @@ export function unifyAgentReport(report: AgentEvaluationReport): UnifiedEvalRepo
       ...(r.attempts !== undefined ? { attempts: r.attempts } : {}),
       ...(r.passCount !== undefined ? { passCount: r.passCount } : {}),
       ...(r.workspaceChanges ? { workspaceChanges: r.workspaceChanges } : {}),
+      ...(r.judgeScores ? { judgeScores: r.judgeScores } : {}),
     })),
   };
 }
