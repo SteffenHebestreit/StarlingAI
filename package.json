@@ -37,6 +37,7 @@
     "web:dev": "pnpm --filter @starlingai/web dev",
     "agents:evaluate": "pnpm --filter @starlingai/core agents:evaluate",
     "packs:evaluate": "pnpm --filter @starlingai/core packs:evaluate",
+    "docs:reference": "pnpm --filter @starlingai/core docs:reference",
     "runtime-guidance:evaluate": "pnpm --filter @starlingai/core runtime-guidance:evaluate"
   },
   "devDependencies": {

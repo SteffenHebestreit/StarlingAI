@@ -125,6 +125,15 @@ jobs:
       - name: Config feature registry
         run: pnpm config:audit-flags -- --strict --require-effective
 
+      # DOC-504: the policy reference under docs/reference/ is GENERATED from
+      # runtime metadata (tool-tier map, deployment readiness rules, feature
+      # registry). Regenerate and fail on drift so the docs can never quietly
+      # diverge from what the code enforces.
+      - name: Reference docs match runtime metadata
+        run: |
+          pnpm docs:reference
+          git diff --exit-code docs/reference/
+
   # Secret-scanning gate: catch a committed .env / token / private key before it
   # reaches history. Full-history scan (fetch-depth 0) so a secret added in ANY
   # commit on the PR/branch is caught, not just the tip. Runs in parallel with

@@ -1796,6 +1796,17 @@ export function getRegisteredTools(): string[] {
 }
 
 /**
+ * DOC-504: read-only dump of every compile-time tier assignment (including
+ * blocked tier-4 entries) for the generated policy reference. The map itself
+ * stays private — this is metadata export, not an override surface.
+ */
+export function listToolTierDefs(): Array<{ name: string } & ToolTierDef> {
+  return Object.entries(TOOL_TIER_MAP)
+    .map(([name, def]) => ({ name, ...def }))
+    .sort((a, b) => a.tier - b.tier || a.name.localeCompare(b.name));
+}
+
+/**
  * Returns true when `toolName` is mapped at compile time — i.e. it is a
  * built-in tool with an explicit tier assignment in TOOL_TIER_MAP.  Used by
  * the dynamic-tool validator to reject self-developed tools whose bare names
