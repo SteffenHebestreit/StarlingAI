@@ -7,6 +7,7 @@ import {
   writeTaskGraphDefinition,
   deleteTaskGraphDefinition,
   listInterruptedTaskGraphs,
+  writeTaskGraphNodeStarted,
   resetSharedMemoryForTests,
 } from "../swarm/memory.js";
 import { recordCompletedTaskGraphNode, computeTaskGraphNodeKey } from "../swarm/task-graph-ledger.js";
@@ -57,7 +58,41 @@ describe("interrupted task-graph detection (GRF-206)", () => {
       totalNodes: 3,
       completedNodeIds: ["research"],
       pendingNodeIds: ["build", "verify"],
+      // No start markers → both pending nodes are never-started; "build" is
+      // resumable (its only dep, research, completed), "verify" waits on build.
+      inFlightNodeIds: [],
+      neverStartedNodeIds: ["build", "verify"],
+      resumableNodeIds: ["build"],
     });
+  });
+
+  it("classifies an IN-FLIGHT node (started, not completed) as unknown-effect, never resumable", async () => {
+    await writeTaskGraphDefinition("gr-inflight", { ...DEF, graphId: "graph_if", sessionId: "gr-inflight" });
+    await recordCompletedTaskGraphNode("gr-inflight", computeTaskGraphNodeKey({ id: "research", task: "research the topic" }), {
+      nodeId: "research", output: "findings", completedAt: "2026-07-17T18:01:00.000Z",
+    });
+    // "build" started (marker written) but never completed — it was in-flight
+    // when the process died and may have fired an irreversible effect.
+    await writeTaskGraphNodeStarted("gr-inflight", "graph_if", "build");
+
+    const [candidate] = await scanForInterruptedTaskGraphs();
+    expect(candidate).toMatchObject({
+      completedNodeIds: ["research"],
+      inFlightNodeIds: ["build"],
+      neverStartedNodeIds: ["verify"],
+      // "build" is in-flight (never resumable); "verify" never started but its
+      // dep "build" is not completed, so it is NOT on the safe frontier.
+      resumableNodeIds: [],
+    });
+  });
+
+  it("resumableNodeIds is empty when the only pending nodes depend on an in-flight ancestor", async () => {
+    // research in-flight, build+verify never started but downstream of research.
+    await writeTaskGraphDefinition("gr-chain", { ...DEF, graphId: "graph_ch", sessionId: "gr-chain" });
+    await writeTaskGraphNodeStarted("gr-chain", "graph_ch", "research");
+    const candidate = (await scanForInterruptedTaskGraphs())[0]!;
+    expect(candidate.inFlightNodeIds).toEqual(["research"]);
+    expect(candidate.resumableNodeIds).toEqual([]); // nothing safe until research is resolved
   });
 
   it("clean completion deletes the definition — nothing to resume", async () => {

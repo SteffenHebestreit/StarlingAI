@@ -9,6 +9,7 @@
 import {
   writeTaskGraphDefinition,
   deleteTaskGraphDefinition,
+  writeTaskGraphNodeStarted,
 } from "../../swarm/memory.js";
 import { recordCompletedTaskGraphNode, computeTaskGraphNodeKey } from "../../swarm/task-graph-ledger.js";
 
@@ -41,6 +42,12 @@ async function main(): Promise<void> {
     console.log("CHAOS_RESULT:clean_complete");
     process.exit(0);
   }
+
+  // "build" begins dispatch (start marker written) but the process dies before
+  // it can complete — it is IN-FLIGHT at the crash, effect unknown. "verify"
+  // never starts. The next boot must classify build as in-flight (operator
+  // review) and never blind-re-dispatch it.
+  await writeTaskGraphNodeStarted(sessionId, graphId, "build");
 
   // Crash: hard exit with the definition still present — no cleanup handlers,
   // exactly what kill -9 / OOM looks like to the next boot.

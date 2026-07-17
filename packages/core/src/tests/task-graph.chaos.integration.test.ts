@@ -48,7 +48,7 @@ async function redisCleanup(sessionId: string): Promise<void> {
   const ioredis = (await import("ioredis")) as unknown as { default: new (url: string) => { del: (...keys: string[]) => Promise<number>; srem: (key: string, member: string) => Promise<number>; quit: () => Promise<unknown> } };
   const client = new ioredis.default(REDIS_URL!);
   try {
-    await client.del(`starlingai:mem:${sessionId}:graphdefs`, `starlingai:mem:${sessionId}:graphnodes`);
+    await client.del(`starlingai:mem:${sessionId}:graphdefs`, `starlingai:mem:${sessionId}:graphnodes`, `starlingai:mem:${sessionId}:graphstarted`);
     await client.srem("starlingai:graphdef-sessions", sessionId);
   } finally {
     await client.quit();
@@ -77,7 +77,10 @@ describe.skipIf(!REDIS_URL)("task-graph chaos: kill mid-graph, detect at next bo
       graphId: `graph_chaos_${sessionId}`,
       totalNodes: 3,
       completedNodeIds: ["research"],           // durably completed before the kill — reused, never re-run
-      pendingNodeIds: ["build", "verify"],      // owed by a resume, operator-review-gated
+      pendingNodeIds: ["build", "verify"],      // owed by a resume
+      inFlightNodeIds: ["build"],               // started before the kill — unknown effect, operator review
+      neverStartedNodeIds: ["verify"],          // provably never ran
+      resumableNodeIds: [],                      // verify waits on in-flight build; nothing safe yet
     });
   }, 90_000);
 

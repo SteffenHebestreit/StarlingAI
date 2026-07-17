@@ -80,7 +80,7 @@ import { deriveChildContract, getOrCreateRootContract } from "../swarm/mission-c
 import { appendEvidenceClaim } from "../swarm/evidence-ledger.js";
 import { getMissionStore } from "../swarm/mission-store.js";
 import { admitToProvider, releaseProviderPermit, renewProviderPermit, type CapacityPermit } from "../swarm/capacity-broker.js";
-import { formatSharedContextForPrompt, appendPartialResult, claimAgentMessages, extractFactsFromOutput, writeSharedFact, searchSharedFacts, searchPartialResults, readAllFacts, currentTurnFactKeys, writeTaskGraphDefinition, deleteTaskGraphDefinition } from "../swarm/memory.js";
+import { formatSharedContextForPrompt, appendPartialResult, claimAgentMessages, extractFactsFromOutput, writeSharedFact, searchSharedFacts, searchPartialResults, readAllFacts, currentTurnFactKeys, writeTaskGraphDefinition, deleteTaskGraphDefinition, writeTaskGraphNodeStarted, deleteTaskGraphStartedMarkers } from "../swarm/memory.js";
 import { computeTaskGraphNodeKey, readTaskGraphLedger, recordCompletedTaskGraphNode } from "../swarm/task-graph-ledger.js";
 import { deriveSharedSessionId } from "./memory.js";
 import { graphPromoteFact } from "../memory/graph-service.js";
@@ -2776,6 +2776,12 @@ registerTool({
           },
         });
 
+        // GRF-206: mark the node started BEFORE it runs, so a crash mid-node is
+        // distinguishable from a never-started node at resume time.
+        if (durableLedgerEnabled) {
+          void writeTaskGraphNodeStarted(graphDefSessionId, graphId, node.id).catch(() => { /* best-effort marker */ });
+        }
+
         active.set(node.id, executeDelegationWithFallback({
           agentName: node.agentName,
           task: node.task,
@@ -2877,6 +2883,7 @@ registerTool({
     // behind, which is exactly the resume evidence.
     if (durableGraphEnabled) {
       await deleteTaskGraphDefinition(graphDefSessionId, graphId).catch(() => { /* best-effort */ });
+      await deleteTaskGraphStartedMarkers(graphDefSessionId, graphId).catch(() => { /* best-effort */ });
     }
 
     const summary = rawNodes.map((node) => {

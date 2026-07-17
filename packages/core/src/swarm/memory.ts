@@ -407,6 +407,65 @@ export async function listInterruptedTaskGraphs(): Promise<TaskGraphDefinitionRe
   return out;
 }
 
+// ── GRF-206: durable node-START markers ──────────────────────────────────────
+// A node's start marker is written the instant it begins dispatch, BEFORE it
+// runs. After a crash, cross-referencing markers against the completion ledger
+// classifies each pending node: a marker with no completion = the node was
+// in-flight and MAY have fired an irreversible effect (unknown outcome, operator
+// review); no marker = the node provably never ran (safe to re-dispatch). This
+// is what lets a resume avoid replaying unknown effects (GRF-206 DoD).
+const graphStartedKey = (sid: string) => `starlingai:mem:${sid}:graphstarted`;    // hash: "graphId\0nodeId" → startedAt
+const _localGraphStarted = new Map<string, Map<string, string>>();                 // local sid → field → startedAt
+
+export async function writeTaskGraphNodeStarted(sessionId: string, graphId: string, nodeId: string): Promise<void> {
+  const field = `${graphId}\0${nodeId}`;
+  const now = new Date().toISOString();
+  const redis = await getRedis();
+  if (redis) {
+    try {
+      const r = redis as { hset: (k: string, f: string, v: string) => Promise<unknown>; expire: (k: string, s: number) => Promise<unknown> };
+      await r.hset(graphStartedKey(sessionId), field, now);
+      await r.expire(graphStartedKey(sessionId), SESSION_TTL_S);
+      return;
+    } catch { /* fall through to local */ }
+  }
+  let map = _localGraphStarted.get(sessionId);
+  if (!map) { map = new Map(); _localGraphStarted.set(sessionId, map); }
+  map.set(field, now);
+}
+
+/** Node ids the given graph marked started (in any state). */
+export async function readStartedTaskGraphNodes(sessionId: string, graphId: string): Promise<string[]> {
+  const prefix = `${graphId}\0`;
+  const redis = await getRedis();
+  if (redis) {
+    try {
+      const all = await (redis as { hkeys: (k: string) => Promise<string[]> }).hkeys(graphStartedKey(sessionId));
+      return all.filter((f) => f.startsWith(prefix)).map((f) => f.slice(prefix.length));
+    } catch { /* fall through */ }
+  }
+  const map = _localGraphStarted.get(sessionId);
+  if (!map) return [];
+  return [...map.keys()].filter((f) => f.startsWith(prefix)).map((f) => f.slice(prefix.length));
+}
+
+/** Clear a completed graph's start markers (called with its definition delete). */
+export async function deleteTaskGraphStartedMarkers(sessionId: string, graphId: string): Promise<void> {
+  const prefix = `${graphId}\0`;
+  const redis = await getRedis();
+  if (redis) {
+    try {
+      const r = redis as { hkeys: (k: string) => Promise<string[]>; hdel: (k: string, ...f: string[]) => Promise<unknown> };
+      const all = await r.hkeys(graphStartedKey(sessionId));
+      const mine = all.filter((f) => f.startsWith(prefix));
+      if (mine.length > 0) await r.hdel(graphStartedKey(sessionId), ...mine);
+      return;
+    } catch { /* fall through */ }
+  }
+  const map = _localGraphStarted.get(sessionId);
+  if (map) for (const f of [...map.keys()]) if (f.startsWith(prefix)) map.delete(f);
+}
+
 /** Sessions whose legacy blob was verified drained this process — skip the
  *  otherwise-per-call Redis GET. Only memoized after a SUCCESSFUL check. */
 const _drainedGraphSessions = new Set<string>();
@@ -1193,6 +1252,7 @@ export async function resetSharedMemoryForTests(): Promise<void> {
   _graphLedgers.clear();
   _graphNodes.clear();
   _localGraphDefs.clear();
+  _localGraphStarted.clear();
   _drainedGraphSessions.clear();
   if (_redis) {
     try { await (_redis as { quit: () => Promise<void> }).quit(); } catch { /* ignore */ }
