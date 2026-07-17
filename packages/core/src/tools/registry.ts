@@ -595,6 +595,39 @@ function safeEffectTarget(effect: ToolEffect, args: Record<string, unknown>): st
   }
 }
 
+// ── SEC-106 unknown-outcome retry guard (ADR-005 transition invariant) ───────
+// A mutation whose receipt recorded outcome UNKNOWN may have been acted on by
+// the destination — re-firing the identical request risks a double mutation
+// (double deploy, duplicate mail). Retry of such a call therefore requires a
+// verified non-execution, an idempotency key at the destination, or operator
+// resolution — never a blind re-send. This in-process ledger tracks unknown
+// outcomes per (session, tool, request hash); a later TERMINAL receipt for the
+// same request clears the marker (the outcome is then known).
+const UNKNOWN_EFFECT_TTL_MS = 10 * 60_000;
+const MAX_UNKNOWN_EFFECTS = 500;
+const _unknownEffects = new Map<string, number>(); // "session\0tool\0requestHash" → recordedAt
+
+function unknownEffectKey(sessionId: string, tool: string, requestHash: string): string {
+  return `${sessionId}\0${tool}\0${requestHash}`;
+}
+
+function sweepUnknownEffects(): void {
+  const cutoff = Date.now() - UNKNOWN_EFFECT_TTL_MS;
+  for (const [key, at] of _unknownEffects) {
+    if (at < cutoff) _unknownEffects.delete(key);
+  }
+  // Bounded belt: evict oldest insertion past the cap.
+  while (_unknownEffects.size > MAX_UNKNOWN_EFFECTS) {
+    const oldest = _unknownEffects.keys().next().value;
+    if (oldest === undefined) break;
+    _unknownEffects.delete(oldest);
+  }
+}
+
+export function _resetUnknownEffectsForTests(): void {
+  _unknownEffects.clear();
+}
+
 export async function executeTool(
   name: string,
   args: Record<string, unknown>,
@@ -641,10 +674,39 @@ export async function executeTool(
   //     records where this WOULD have gated (effect_approval_would_block audit) so the
   //     policy can be calibrated on real traffic before it blocks anything.
   const effectContractsMode = getConfig().guardrails.effectContracts;
+  const isExternalMutation = handler.effect !== undefined && handler.effect.domain !== "local_workspace";
   const effectDemandsApproval = effectContractsMode !== "off"
-    && handler.effect !== undefined
-    && handler.effect.domain !== "local_workspace"
-    && (handler.effect.reversibility === "irreversible" || handler.effect.reversibility === "compensatable");
+    && isExternalMutation
+    && (handler.effect!.reversibility === "irreversible" || handler.effect!.reversibility === "compensatable");
+  const effectRequestHash = effectContractsMode !== "off" && isExternalMutation
+    ? createHash("sha256").update(JSON.stringify(args ?? {})).digest("hex").slice(0, 16)
+    : undefined;
+
+  // SEC-106 retry guard: refuse (enforce) or record (shadow) an IDENTICAL
+  // re-invocation of a non-idempotent external mutation whose previous outcome
+  // is UNKNOWN — it may already have happened. Idempotent/pure effects are safe
+  // to retry by definition (the destination absorbs duplicates).
+  if (effectRequestHash !== undefined
+    && (handler.effect!.reversibility === "irreversible" || handler.effect!.reversibility === "compensatable")) {
+    sweepUnknownEffects();
+    const priorUnknownAt = _unknownEffects.get(unknownEffectKey(context.sessionId, name, effectRequestHash));
+    if (priorUnknownAt !== undefined) {
+      logAudit("effect_retry_after_unknown", {
+        tool: name,
+        requestHash: effectRequestHash,
+        priorUnknownAt: new Date(priorUnknownAt).toISOString(),
+        enforced: effectContractsMode === "enforce",
+      }, { sessionId: context.sessionId, severity: "warn" });
+      if (effectContractsMode === "enforce") {
+        return {
+          success: false,
+          output: "",
+          error: `Tool '${name}' was already invoked with these exact arguments and its outcome is UNKNOWN (the request may have been dispatched and acted on). Blind retry risks a double mutation. Verify the outcome first, change the request, or escalate to the operator.`,
+        };
+      }
+    }
+  }
+
   const sceneRequiresApproval = context.humanInLoopSteps?.includes(name) ?? false;
   const tierRequiresApproval = def.requiresPerCallApproval || sceneRequiresApproval;
   if (effectDemandsApproval && effectContractsMode === "shadow" && !tierRequiresApproval) {
@@ -755,7 +817,7 @@ export async function executeTool(
       // false-positives on remote error bodies that mention timeouts. An
       // unknown-outcome mutation may have been acted on and must never be
       // blindly retried.
-      if (effectContractsMode !== "off" && handler.effect && handler.effect.domain !== "local_workspace") {
+      if (effectContractsMode !== "off" && handler.effect && effectRequestHash !== undefined) {
         const unknownOutcome = !result.success && result.dispatchUncertain === true;
         const target = safeEffectTarget(handler.effect, args);
         logAudit("effect_receipt", {
@@ -764,10 +826,15 @@ export async function executeTool(
           domain: handler.effect.domain,
           reversibility: handler.effect.reversibility,
           ...(target !== undefined ? { target } : {}),
-          requestHash: createHash("sha256").update(JSON.stringify(args ?? {})).digest("hex").slice(0, 16),
+          requestHash: effectRequestHash,
           outcome: result.success ? "succeeded" : unknownOutcome ? "unknown" : "failed",
           approvalRequired: requiresApproval,
         }, { sessionId: context.sessionId, severity: unknownOutcome ? "warn" : "info" });
+        // Retry-guard bookkeeping: an unknown outcome marks this exact request;
+        // a later TERMINAL outcome for the same request clears it (now known).
+        const guardKey = unknownEffectKey(context.sessionId, name, effectRequestHash);
+        if (unknownOutcome) _unknownEffects.set(guardKey, Date.now());
+        else _unknownEffects.delete(guardKey);
       }
       return result;
     },

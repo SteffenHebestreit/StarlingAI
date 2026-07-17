@@ -3,7 +3,7 @@
  * outcomes, and the shadow/enforce approval policy for external mutations.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { executeTool, registerTool, unregisterTool, type ToolContext } from "../tools/registry.js";
+import { executeTool, registerTool, unregisterTool, _resetUnknownEffectsForTests, type ToolContext } from "../tools/registry.js";
 import { subscribeToAudit } from "../audit/logger.js";
 import { getConfig } from "../config/loader.js";
 
@@ -57,6 +57,7 @@ describe("SEC-106 effect contracts", () => {
   afterEach(() => {
     testState.effectContracts = "off";
     unregisterTool("web_search");
+    _resetUnknownEffectsForTests();
     vi.mocked(getConfig).mockClear();
   });
 
@@ -173,6 +174,78 @@ describe("SEC-106 effect contracts", () => {
     await executeTool("web_search", {}, ctx);
     stop();
     expect(events.find((e) => e.type === "effect_receipt")?.data["outcome"]).toBe("failed");
+  });
+
+  it("ADR-005 retry guard: an IDENTICAL retry after an unknown outcome is refused in enforce, recorded in shadow", async () => {
+    testState.effectContracts = "enforce";
+    let failUncertain = true;
+    registerEffectTool("web_search", {
+      reversibility: "irreversible",
+      execute: async () => failUncertain
+        ? { success: false, output: "", error: "aborted mid-flight", dispatchUncertain: true }
+        : { success: true, output: "delivered" },
+    });
+    const approving = { ...ctx, approvalCallback: async () => true };
+
+    // First call: dispatch-uncertain failure → unknown receipt recorded.
+    const first = await executeTool("web_search", { endpoint: "prod" }, approving);
+    expect(first.success).toBe(false);
+
+    // Identical retry: refused BEFORE approval/execution — the outcome is unknown.
+    const { events, stop } = captureAudits(["effect_retry_after_unknown"]);
+    const retry = await executeTool("web_search", { endpoint: "prod" }, approving);
+    expect(retry.success).toBe(false);
+    expect(retry.error).toContain("UNKNOWN");
+    expect(events).toHaveLength(1);
+
+    // DIFFERENT arguments are a different request — allowed.
+    failUncertain = false;
+    const different = await executeTool("web_search", { endpoint: "staging" }, approving);
+    expect(different.success).toBe(true);
+    stop();
+
+    // Shadow mode records but does not block the identical retry.
+    testState.effectContracts = "shadow";
+    const { events: shadowEvents, stop: stop2 } = captureAudits(["effect_retry_after_unknown"]);
+    const shadowRetry = await executeTool("web_search", { endpoint: "prod" }, ctx);
+    stop2();
+    expect(shadowRetry.success).toBe(true);
+    expect(shadowEvents).toHaveLength(1);
+  });
+
+  it("a TERMINAL outcome for the same request clears the unknown marker — a later identical call runs", async () => {
+    testState.effectContracts = "shadow";
+    let mode: "unknown" | "failed" | "ok" = "unknown";
+    registerEffectTool("web_search", {
+      reversibility: "irreversible",
+      execute: async () => mode === "unknown"
+        ? { success: false, output: "", error: "lost", dispatchUncertain: true }
+        : mode === "failed"
+          ? { success: false, output: "", error: "HTTP 500" }
+          : { success: true, output: "ok" },
+    });
+    await executeTool("web_search", {}, ctx);            // unknown recorded
+    mode = "failed";
+    await executeTool("web_search", {}, ctx);            // terminal failure clears it (shadow lets it run)
+    testState.effectContracts = "enforce";
+    mode = "ok";
+    const after = await executeTool("web_search", {}, { ...ctx, approvalCallback: async () => true });
+    expect(after.success).toBe(true);                     // no stale unknown marker blocks it
+  });
+
+  it("IDEMPOTENT mutations are exempt from the retry guard — safe to re-fire by definition", async () => {
+    testState.effectContracts = "enforce";
+    let first = true;
+    registerEffectTool("web_search", {
+      reversibility: "idempotent",
+      execute: async () => {
+        if (first) { first = false; return { success: false, output: "", error: "timeout", dispatchUncertain: true }; }
+        return { success: true, output: "ok" };
+      },
+    });
+    await executeTool("web_search", {}, ctx);
+    const retry = await executeTool("web_search", {}, ctx);
+    expect(retry.success).toBe(true);
   });
 
   it("a throwing target resolver never breaks the call — the receipt just omits the target", async () => {

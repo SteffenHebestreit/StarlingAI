@@ -30,6 +30,7 @@ export type CoreAuditEventType =
   | "tool_output_blocked"
   | "effect_receipt"
   | "effect_approval_would_block"
+  | "effect_retry_after_unknown"
   | "contract_narrowing_clamped"
   | "delegation_contract_attached"
   | "tool_output_framing_neutralized"
