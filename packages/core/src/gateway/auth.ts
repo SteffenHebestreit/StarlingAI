@@ -221,16 +221,25 @@ export async function authenticatedUser(authHeader: string | null | undefined): 
     // lag"); shorten the OIDC token lifetime if prompt off-boarding matters.
     if (getConfig().auth.provider !== "oidc") {
       const users = getConfig().auth.users;
-      // Bootstrap window (documented in config/gateway/30-auth.jsonc): with auth
-      // enabled but ZERO builtin accounts, a signed operator/admin JWT (`sai token`)
-      // must keep resolving via its own claims — otherwise the deployment is locked
-      // out of POST /api/auth/users and no first account can ever be created. The
-      // moment one account exists, the live-store re-check is authoritative again
-      // on every request.
-      if (users.length > 0) {
-        const record = users.find((u) => u.username === username);
-        if (!record) return null; // account deleted from config
+      const record = users.find((u) => u.username === username);
+      if (record) {
         return { username, role: normalizeRole(record.role), displayName: record.displayName };
+      }
+      // Two token classes legitimately resolve via their own claims here:
+      //  - Bootstrap admin tokens (CLI-minted via `sai token`; role claim "admin",
+      //    which POST /api/auth/users can never assign). They are TTL-bound
+      //    instance credentials independent of the user store: the operator who
+      //    boots a fresh deployment must be able to create the first account and
+      //    KEEP administering in the same session (more users, prompts, models).
+      //    Revoke one early by rotating the JWT secret.
+      //  - Any signed token while the store has ZERO accounts (the bootstrap
+      //    window documented in config/gateway/30-auth.jsonc) — without it the
+      //    deployment is locked out of ever creating the first account.
+      // Everything else with an unresolvable sub is a deleted/disabled account
+      // and is revoked immediately by the live-store re-check.
+      const isBootstrapAdmin = normalizeRole(payload["role"]) === "admin";
+      if (!isBootstrapAdmin && users.length > 0) {
+        return null; // account deleted from config
       }
     }
   }

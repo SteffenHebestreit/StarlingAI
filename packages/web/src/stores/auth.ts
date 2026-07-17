@@ -2,7 +2,7 @@ import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import { useGatewayStore } from "@/stores/gateway";
 
-export type AuthRole = "operator" | "viewer";
+export type AuthRole = "operator" | "viewer" | "admin";
 
 export interface CurrentUser {
   username: string;
@@ -23,7 +23,12 @@ export const useAuthStore = defineStore("auth", () => {
   const refreshing = ref(false);
 
   const isAuthenticated = computed(() => currentUser.value !== null);
-  const isOperator = computed(() => currentUser.value?.role === "operator");
+  // Role gates mirror the gateway's rank hierarchy (admin 90 > operator 50 >
+  // viewer 10, gateway/auth.ts): "operator" here means operator-or-higher, so
+  // an admin session (e.g. the bootstrap token) never has FEWER UI rights than
+  // an operator. Exact-matching "operator" would disable operator-only controls
+  // for admins — that's how the bootstrap session got locked out of Users.
+  const isOperator = computed(() => currentUser.value?.role === "operator" || currentUser.value?.role === "admin");
   const isViewer = computed(() => currentUser.value?.role === "viewer");
 
   function apiBase(): string {

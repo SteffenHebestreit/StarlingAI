@@ -3,9 +3,11 @@
   // runtime-data wipe (the `auth.users[]` accounts themselves live in the
   // mutable runtime config under /data, created via POST /api/auth/users — they
   // are NOT committed here because a password hash is a secret). With enabled:true
-  // and zero users, a `sai token` operator JWT still works, so the operator can
-  // always bootstrap the first account; the dashboard username/password login
-  // becomes available once at least one user exists.
+  // and zero users, any `sai token` JWT still works, so the operator can always
+  // bootstrap the first account; the dashboard username/password login becomes
+  // available once at least one user exists. Admin-claim bootstrap tokens stay
+  // valid until they expire (24h) even after accounts exist, so the setup session
+  // can finish its work — rotate the JWT secret to revoke one early.
   "auth": {
     "enabled": true
   }

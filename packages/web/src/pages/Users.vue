@@ -20,7 +20,17 @@
       </div>
     </div>
 
-    <div v-if="!authEnabled" class="users-disabled">
+    <div v-if="bootstrapHandoff" class="users-disabled">
+      <p>
+        Account <strong>{{ bootstrapHandoff }}</strong> was created.  The bootstrap admin session
+        has ended now that a real account exists — sign in with the new account to continue.
+      </p>
+      <button class="users-page__button users-page__button--primary" @click="signInAsNewUser">
+        Sign in
+      </button>
+    </div>
+
+    <div v-else-if="!authEnabled" class="users-disabled">
       <p>
         Multi-user authentication is currently disabled — the gateway uses the bootstrap
         admin token for sign-in.  Adding the first account here automatically flips
@@ -29,7 +39,7 @@
       </p>
     </div>
 
-    <p v-if="errorMessage" class="users-page__error">{{ errorMessage }}</p>
+    <p v-if="errorMessage && !bootstrapHandoff" class="users-page__error">{{ errorMessage }}</p>
 
     <div v-if="loading && users.length === 0" class="users-page__empty">Loading…</div>
 
@@ -146,6 +156,10 @@ const deleting = ref<string | null>(null);
 const creating = ref(false);
 const submitting = ref(false);
 const formError = ref<string | null>(null);
+// Set when creating the FIRST account ends the actor's own (bootstrap) session:
+// the gateway closes the zero-users bootstrap window the moment a real account
+// exists, so instead of surfacing the resulting 401s we hand off to sign-in.
+const bootstrapHandoff = ref<string | null>(null);
 const form = ref({
   username: "",
   password: "",
@@ -166,7 +180,9 @@ async function loadUsers(): Promise<void> {
       headers: { Authorization: `Bearer ${gateway.token}` },
     });
     if (!res.ok) {
-      errorMessage.value = `Failed to load users (${res.status})`;
+      errorMessage.value = res.status === 401
+        ? "Your session is no longer valid — sign in again."
+        : `Failed to load users (${res.status})`;
       return;
     }
     const body = await res.json() as { enabled: boolean; users: User[] };
@@ -215,11 +231,24 @@ async function submitCreate(): Promise<void> {
       formError.value = message;
       return;
     }
+    const createdUsername = form.value.username.trim().toLowerCase();
     closeCreateForm();
+    // Creating the first account closes the gateway's bootstrap window, which
+    // invalidates a bootstrap (token-mode) session mid-flight. Detect that via
+    // a session re-check and hand off to sign-in instead of 401-ing on reload.
+    await auth.refreshCurrentUser();
+    if (!auth.currentUser) {
+      bootstrapHandoff.value = createdUsername;
+      return;
+    }
     await loadUsers();
   } finally {
     submitting.value = false;
   }
+}
+
+function signInAsNewUser(): void {
+  auth.signOut(); // drops the dead token; App.vue shows the login modal on disconnect
 }
 
 async function deleteUser(user: User): Promise<void> {

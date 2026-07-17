@@ -165,11 +165,12 @@ export function createGateway() {
     // routes that gate on bare verifyToken cannot keep honoring a revoked token for its
     // full ~24h TTL. A request with NO token falls through untouched, so public/pre-auth
     // routes (login, /api/auth/mode, oidc, health) and each route's own 401 still work.
-    // Two token classes legitimately resolve outside the user store and are NOT
-    // rejected here: the bootstrap admin token while auth.users[] is still empty
-    // (authenticatedUser's bootstrap window — without it the first account could
-    // never be created), and OIDC tokens, which resolve via validated IdP claims
-    // (their revocation lag is a separate, documented limitation).
+    // Token classes that legitimately resolve outside the user store and are NOT
+    // rejected here: bootstrap admin tokens (TTL-bound instance credentials — see
+    // authenticatedUser), any signed token while auth.users[] is still empty (the
+    // bootstrap window; without it the first account could never be created), and
+    // OIDC tokens, which resolve via validated IdP claims (their revocation lag is
+    // a separate, documented limitation).
     if (!user) {
       const token = extractBearerToken(authHeader);
       if (token && await verifyToken(token)) {

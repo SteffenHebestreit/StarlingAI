@@ -513,13 +513,26 @@ describe("multi-user auth — zero-users bootstrap window", () => {
     expect(getConfig().auth.users.map((u) => u.username)).toEqual(["steffen"]);
   });
 
-  it("closes the window once the first account exists", async () => {
-    // With one real account in the store, the live-store re-check is authoritative
-    // again: the claims-only bootstrap token no longer resolves.
+  it("keeps the bootstrap admin token valid after the first account exists", async () => {
+    // The admin who bootstraps a deployment must be able to keep administering in
+    // the same session (add more users, tune prompts/models) — admin-claim tokens
+    // are TTL-bound instance credentials, not store-backed sessions.
     tempDir = writeAuthConfig({ auth: { enabled: true, users: [userRec("alice", "operator")] } });
     vi.resetModules();
     const auth = await import("../gateway/auth.js");
     const token = await auth.createToken("admin", { role: "admin" });
+    const me = await auth.authenticatedUser(`Bearer ${token}`);
+    expect(me?.username).toBe("admin");
+    expect(me?.role).toBe("admin");
+  });
+
+  it("still revokes non-admin tokens whose account is gone once the store is non-empty", async () => {
+    // A deleted user's token carries role operator/viewer (the only roles the
+    // users API can assign) — those stay subject to the live-store re-check.
+    tempDir = writeAuthConfig({ auth: { enabled: true, users: [userRec("alice", "operator")] } });
+    vi.resetModules();
+    const auth = await import("../gateway/auth.js");
+    const token = await auth.createToken("bob", { role: "operator" });
     expect(await auth.authenticatedUser(`Bearer ${token}`)).toBeNull();
   });
 });
