@@ -1,14 +1,45 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getSkill, listSkills, recordSkillOutcome, recordSkillHoldoutOutcome, setSkillPinned, skillLift, writeSkill } from "../skills/store.js";
 import { isPromotionEligible, runSkillImprovementSweep } from "../skills/driver.js";
+import { getScene } from "../credentials/scenes.js";
+
+// LRN-404 tests: skillLibrary config overrides (holdout gate) + an in-memory
+// scene store so promotion/rollback runs without the credential store.
+const testState = vi.hoisted(() => ({
+  skillLibraryOverrides: {} as Record<string, unknown>,
+  scenes: new Map<string, { description: string; task: string }>(),
+}));
+
+vi.mock("../config/loader.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../config/loader.js")>();
+  return {
+    ...original,
+    getConfig: () => {
+      const config = original.getConfig();
+      return { ...config, skillLibrary: { ...config.skillLibrary, ...testState.skillLibraryOverrides } };
+    },
+  };
+});
+
+vi.mock("../credentials/scenes.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../credentials/scenes.js")>();
+  return {
+    ...original,
+    getScene: (name: string) => testState.scenes.get(name),
+    saveScene: (name: string, input: { description: string; task: string }) => { testState.scenes.set(name, input); },
+    deleteScene: (name: string) => { testState.scenes.delete(name); },
+  };
+});
 
 describe("skill improvement driver", () => {
   const dirs: string[] = [];
   afterEach(() => {
     for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+    testState.skillLibraryOverrides = {};
+    testState.scenes.clear();
   });
   function workspace(): string {
     const dir = mkdtempSync(join(tmpdir(), "starlingai-skill-driver-"));
@@ -214,5 +245,62 @@ describe("skill improvement driver", () => {
     expect(result.retired).not.toContain(pinned);
     expect(getSkill(ws, manual)?.frontmatter.status).toBe("draft");
     expect(getSkill(ws, pinned)?.frontmatter.status).toBe("draft");
+  });
+
+  it("LRN-404: with holdout running, promotion needs DECISIVE positive lift, not just success rate", () => {
+    testState.skillLibraryOverrides = { holdoutRate: 0.15, liftMinSamplesPerArm: 5 };
+    const ws = workspace();
+    const slug = writeSkill(ws, {
+      name: "Candidate Procedure",
+      description: "High success rate, lift not yet measured.",
+      whenToUse: "A candidate awaiting lift evidence.",
+      procedure: "Steps whose value must be proven against a control arm.",
+      origin: "distilled",
+    }).frontmatter.slug;
+
+    for (let i = 0; i < 10; i++) recordSkillOutcome(ws, slug, "success");
+    // 100% over 10 uses — but zero holdout samples: no lift evidence, no promotion.
+    expect(isPromotionEligible(getSkill(ws, slug)!)).toBe(false);
+
+    // A decisively positive lift (10/10 injected vs 0/5 held out) unlocks it.
+    for (let i = 0; i < 5; i++) recordSkillHoldoutOutcome(ws, slug, "failure");
+    expect(isPromotionEligible(getSkill(ws, slug)!)).toBe(true);
+  });
+
+  it("LRN-404: promotes with a rollback pointer, then AUTOMATICALLY rolls the scene back when the canary turns harmful", () => {
+    testState.skillLibraryOverrides = { holdoutRate: 0.15, liftMinSamplesPerArm: 5 };
+    const ws = workspace();
+    const slug = writeSkill(ws, {
+      name: "Canary Procedure",
+      description: "Initially helpful, later measured harmful.",
+      whenToUse: "The canary lifecycle under measurement.",
+      procedure: "Steps that later stop helping compared to the control arm.",
+      origin: "distilled",
+    }).frontmatter.slug;
+
+    // Decisively positive at first: 10/10 injected vs 0/5 held out.
+    for (let i = 0; i < 10; i++) recordSkillOutcome(ws, slug, "success");
+    for (let i = 0; i < 5; i++) recordSkillHoldoutOutcome(ws, slug, "failure");
+
+    const promoted = runSkillImprovementSweep(ws);
+    expect(promoted.promoted).toContain(slug);
+    expect(getScene(slug)).toBeDefined();
+    const afterPromotion = getSkill(ws, slug)!.meta;
+    expect(afterPromotion.promotedToSceneAt).toBeTruthy();
+    expect(afterPromotion.promotedAtVersion).toBeGreaterThanOrEqual(1);
+
+    // The canary turns harmful: injected sinks to 50% over 40 (still above the
+    // retirement floor) while held-out climbs to ~88% — lift CI decisively < 0.
+    for (let i = 0; i < 10; i++) recordSkillOutcome(ws, slug, "success");
+    for (let i = 0; i < 20; i++) recordSkillOutcome(ws, slug, "failure");
+    for (let i = 0; i < 36; i++) recordSkillHoldoutOutcome(ws, slug, "success");
+
+    const rolledBack = runSkillImprovementSweep(ws);
+    expect(rolledBack.retired).toContain(slug);
+    expect(rolledBack.rolledBack).toContain(slug);
+    expect(getScene(slug)).toBeUndefined(); // the promoted alias is withdrawn
+    const afterRollback = getSkill(ws, slug)!.meta;
+    expect(afterRollback.promotedToSceneAt).toBeUndefined(); // pointer cleared
+    expect(getSkill(ws, slug)?.frontmatter.status).toBe("archived");
   });
 });

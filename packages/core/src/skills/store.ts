@@ -102,6 +102,11 @@ export interface SkillMeta {
   sourceSessionId?: string;
   pinned: boolean;
   archivedAt?: string;
+  /** LRN-404: rollback pointer — set when this skill was promoted to a scene.
+   *  Records WHEN and at WHICH skill version, so a rollback receipt can name
+   *  exactly what was withdrawn. Cleared when the promotion is rolled back. */
+  promotedToSceneAt?: string;
+  promotedAtVersion?: number;
   /** Cached embedding of the search document (number[] for JSON). */
   embedding?: number[];
 }
@@ -546,6 +551,24 @@ export function recordSkillHoldoutOutcome(
   persistSkillMeta(workspacePath, skill.meta);
 }
 
+/** LRN-404: stamp the rollback pointer when a skill is promoted to a scene. */
+export function markSkillPromoted(workspacePath: string, slug: string): void {
+  const skill = getSkill(workspacePath, slug);
+  if (!skill) return;
+  skill.meta.promotedToSceneAt = new Date().toISOString();
+  skill.meta.promotedAtVersion = skill.frontmatter.version;
+  persistSkillMeta(workspacePath, skill.meta);
+}
+
+/** LRN-404: clear the rollback pointer after a promotion is rolled back. */
+export function clearSkillPromotion(workspacePath: string, slug: string): void {
+  const skill = getSkill(workspacePath, slug);
+  if (!skill) return;
+  delete skill.meta.promotedToSceneAt;
+  delete skill.meta.promotedAtVersion;
+  persistSkillMeta(workspacePath, skill.meta);
+}
+
 // ── Async, non-blocking variants (hot path) ──────────────────────────────────
 // Used from the turn-completion path and the retrieval search so we never do
 // blocking disk I/O on the request critical path. They yield at the first read,
@@ -764,6 +787,8 @@ function coerceSkillMeta(raw: Partial<SkillMeta>, slug: string): SkillMeta {
     sourceSessionId: raw.sourceSessionId,
     pinned: raw.pinned === true,
     archivedAt: raw.archivedAt,
+    promotedToSceneAt: raw.promotedToSceneAt,
+    promotedAtVersion: typeof raw.promotedAtVersion === "number" ? raw.promotedAtVersion : undefined,
     embedding: Array.isArray(raw.embedding) ? raw.embedding : undefined,
   };
 }

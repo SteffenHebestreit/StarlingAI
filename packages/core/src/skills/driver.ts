@@ -18,9 +18,11 @@
 import { getConfig } from "../config/loader.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
-import { getScene, saveScene } from "../credentials/scenes.js";
+import { deleteScene, getScene, saveScene } from "../credentials/scenes.js";
 import {
+  clearSkillPromotion,
   listSkills,
+  markSkillPromoted,
   setSkillStatus,
   skillSuccessRate,
   type Skill,
@@ -40,6 +42,8 @@ export interface SkillSweepResult {
   retired: string[];
   merged: string[];
   promoted: string[];
+  /** LRN-404: promoted scenes withdrawn because their source skill was retired. */
+  rolledBack: string[];
 }
 
 export function startSkillImprovementDriver(): void {
@@ -65,7 +69,7 @@ export function stopSkillImprovementDriver(): void {
 /** Run one deterministic improvement sweep. Safe to call directly (and in tests). */
 export function runSkillImprovementSweep(workspacePath: string): SkillSweepResult {
   const config = getConfig().skillLibrary;
-  const result: SkillSweepResult = { retired: [], merged: [], promoted: [] };
+  const result: SkillSweepResult = { retired: [], merged: [], promoted: [], rolledBack: [] };
   if (!config.enabled) return result;
 
   // ── 1. Retire low performers and no-lift skills ──────────────────────────
@@ -94,6 +98,9 @@ export function runSkillImprovementSweep(workspacePath: string): SkillSweepResul
         uses: skill.meta.uses,
         holdoutUses: skill.meta.holdoutUses ?? 0,
       }, { severity: "info" });
+      if (rollbackPromotedScene(workspacePath, skill, "no_measured_lift")) {
+        result.rolledBack.push(skill.frontmatter.slug);
+      }
       continue;
     }
 
@@ -107,6 +114,9 @@ export function runSkillImprovementSweep(workspacePath: string): SkillSweepResul
       successRate: Number(skillSuccessRate(skill.meta).toFixed(2)),
       uses: skill.meta.uses,
     }, { severity: "info" });
+    if (rollbackPromotedScene(workspacePath, skill, "low_success_rate")) {
+      result.rolledBack.push(skill.frontmatter.slug);
+    }
   }
 
   // ── 2. Archive the weaker of near-duplicate pairs ────────────────────────
@@ -150,7 +160,19 @@ export function runSkillImprovementSweep(workspacePath: string): SkillSweepResul
 
 export function isPromotionEligible(skill: Skill): boolean {
   if (skill.frontmatter.status !== "active") return false;
-  return skill.meta.uses >= PROMOTE_MIN_USES && skillSuccessRate(skill.meta) >= PROMOTE_MIN_SUCCESS_RATE;
+  if (skill.meta.uses < PROMOTE_MIN_USES || skillSuccessRate(skill.meta) < PROMOTE_MIN_SUCCESS_RATE) return false;
+  // LRN-404: when holdout measurement is running, promotion additionally
+  // requires DECISIVE POSITIVE lift (CI entirely above zero) — a learned
+  // artifact does not graduate to a first-class scene on raw success rate,
+  // which may only reflect easy matching tasks. Deployments without holdout
+  // sampling keep the legacy threshold gate (they have no lift signal at all;
+  // the promotion receipt records that lift was unmeasured).
+  const { holdoutRate, liftMinSamplesPerArm } = getConfig().skillLibrary;
+  if ((holdoutRate ?? 0) > 0) {
+    const decision = skillLiftDecision(skill.meta, { minSamplesPerArm: liftMinSamplesPerArm });
+    return decision !== null && decision.ci.low > 0;
+  }
+  return true;
 }
 
 export function isCuratorEligible(skill: Skill): boolean {
@@ -177,16 +199,56 @@ export function promoteSkillToScene(workspacePath: string, skill: Skill): boolea
       description: `${frontmatter.description} (auto-promoted from a reliable learned skill)`,
       task,
     });
+    // LRN-404: stamp the rollback pointer and emit a receipt that names exactly
+    // what was promoted (skill version), on what evidence (lift or its absence),
+    // and what a rollback would withdraw (the scene).
+    markSkillPromoted(workspacePath, frontmatter.slug);
+    const decision = skillLiftDecision(skill.meta, { minSamplesPerArm: getConfig().skillLibrary.liftMinSamplesPerArm });
     logAudit("skill_promoted_to_scene", {
       slug: frontmatter.slug,
       sceneName: frontmatter.slug,
       uses: skill.meta.uses,
       successRate: Number(skillSuccessRate(skill.meta).toFixed(2)),
+      rollback: { sceneName: frontmatter.slug, skillVersion: frontmatter.version },
+      ...(decision
+        ? { lift: Number(decision.estimate.toFixed(2)), liftCiLow: Number(decision.ci.low.toFixed(2)), liftCiHigh: Number(decision.ci.high.toFixed(2)) }
+        : { liftMeasured: false }),
     }, { severity: "info" });
     log.info({ slug: frontmatter.slug }, "Promoted reliable skill to a reusable scene");
     return true;
   } catch (err) {
     log.debug({ err, slug: frontmatter.slug }, "Skill→scene promotion skipped (scene store unavailable)");
+    return false;
+  }
+}
+
+/**
+ * LRN-404 automatic rollback: when a promoted skill is retired (harmful or
+ * no-lift canary), the scene it was promoted into is withdrawn in the same
+ * sweep — a retired skill must never keep serving through its promoted alias.
+ * Best-effort like promotion itself; emits the rollback receipt on success.
+ */
+function rollbackPromotedScene(workspacePath: string, skill: Skill, reason: string): boolean {
+  const slug = skill.frontmatter.slug;
+  try {
+    if (!getScene(slug)) {
+      // Nothing to withdraw; clear any stale pointer.
+      if (skill.meta.promotedToSceneAt) clearSkillPromotion(workspacePath, slug);
+      return false;
+    }
+    deleteScene(slug);
+    logAudit("skill_promotion_rolled_back", {
+      slug,
+      sceneName: slug,
+      promotedAt: skill.meta.promotedToSceneAt ?? null,
+      promotedAtVersion: skill.meta.promotedAtVersion ?? null,
+      reason,
+    }, { severity: "warn" });
+    clearSkillPromotion(workspacePath, slug);
+    log.info({ slug, reason }, "Rolled back skill→scene promotion");
+    return true;
+  } catch (err) {
+    log.warn({ err, slug }, "Failed to roll back promoted scene for retired skill");
     return false;
   }
 }
