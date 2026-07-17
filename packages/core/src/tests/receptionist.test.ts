@@ -117,6 +117,16 @@ describe("receptionist — source-sensitivity in the micro-call prompt", () => {
     expect(content.toLowerCase()).toContain("specific real-world facts");
     expect(content.toLowerCase()).not.toContain("a fact, a simple explanation");
   });
+
+  it("defaults to German when a bare greeting is language-ambiguous (both prompt branches)", () => {
+    // A German user's bare "hi" is language-neutral; the fast lane must not
+    // silently answer in English. Both branches carry the German-default clause.
+    const smalltalk = String(buildReceptionistMessages("hi")[0]!.content);
+    expect(smalltalk.toLowerCase()).toContain("default to german");
+
+    const confidence = String(buildReceptionistMessages("hi", { confidenceAttempt: true })[0]!.content);
+    expect(confidence.toLowerCase()).toContain("default to german");
+  });
 });
 
 describe("receptionist — micro-call", () => {

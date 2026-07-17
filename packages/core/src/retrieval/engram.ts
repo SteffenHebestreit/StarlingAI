@@ -75,21 +75,57 @@ function engramUrl(path: string): string {
   return `${base}${path.startsWith("/") ? path : `/${path}`}`;
 }
 
-async function engramFetch(path: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+// ── Circuit breaker ──────────────────────────────────────────────────────────
+// After a NETWORK-level failure (engram unreachable or a request that aborts on
+// timeout), skip engram calls for a cooldown instead of re-probing — and
+// re-timing-out — on every turn. This matters when documentRag is enabled but
+// the engram service isn't deployed (the `rag` compose profile is off by
+// default): without this, each turn pays the full searchTimeoutMs abort in the
+// documentRag phase. Reachability (ANY HTTP response, even an error status)
+// clears the breaker; the explicit /health probe bypasses it so recovery is
+// detected promptly. A failure is remembered by timestamp only, so the breaker
+// self-heals after the cooldown.
+const ENGRAM_BREAKER_COOLDOWN_MS = 60_000;
+let _engramFailureAt: number | null = null;
+
+function engramInCooldown(): boolean {
+  return _engramFailureAt !== null && (Date.now() - _engramFailureAt) < ENGRAM_BREAKER_COOLDOWN_MS;
+}
+
+/** Test hook: clear the circuit-breaker state. */
+export function _resetEngramBreakerForTests(): void {
+  _engramFailureAt = null;
+}
+
+async function engramFetch(
+  path: string,
+  init: RequestInit,
+  timeoutMs: number,
+  opts?: { bypassBreaker?: boolean },
+): Promise<Response> {
+  if (!opts?.bypassBreaker && engramInCooldown()) {
+    throw new Error(`engram circuit open — skipping ${path} (last failure ${Math.round((Date.now() - _engramFailureAt!) / 1000)}s ago; retries after ${ENGRAM_BREAKER_COOLDOWN_MS / 1000}s)`);
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(engramUrl(path), { ...init, headers: { ...engramHeaders(), ...(init.headers ?? {}) }, signal: controller.signal });
+    const res = await fetch(engramUrl(path), { ...init, headers: { ...engramHeaders(), ...(init.headers ?? {}) }, signal: controller.signal });
+    _engramFailureAt = null; // reachable (any response) → close the breaker
+    return res;
+  } catch (err) {
+    _engramFailureAt = Date.now(); // network error / abort-timeout → open the breaker
+    throw err;
   } finally {
     clearTimeout(timer);
   }
 }
 
-/** Liveness check (GET /health). */
+/** Liveness check (GET /health). Bypasses the circuit breaker so it always
+ *  performs a real probe and can close the breaker the moment engram recovers. */
 export async function engramHealth(): Promise<boolean> {
   if (!engramConfigured()) return false;
   try {
-    const res = await engramFetch("/health", { method: "GET" }, 5000);
+    const res = await engramFetch("/health", { method: "GET" }, 5000, { bypassBreaker: true });
     return res.ok;
   } catch {
     return false;

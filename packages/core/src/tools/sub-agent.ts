@@ -190,6 +190,20 @@ function formatRoutingCandidate(candidate: AgentRoutingCandidate): string {
   return `**${candidate.name}** (${candidate.model})\n  ${candidate.description}\n  Confidence: ${candidate.confidence} (${scorePct} skill match)${capabilities}${matchLine}${costNote}`;
 }
 
+/**
+ * Whether a routing top match is strong enough to IMPERATIVELY prescribe
+ * delegating to it (the "NEXT ACTION: delegate to X NOW" hint). Only HIGH
+ * confidence qualifies. A merely-medium top match can be a wrong-but-plausible
+ * embedding hit (e.g. image_creator topping "current weather forecast
+ * retrieval"), and imperatively pushing it steers weaker models to the wrong
+ * specialist — so medium/low top matches fall through to the neutral "review
+ * the candidate list" wording instead. Single source for all three hint sites
+ * (search_agents, its shortened-retry, and list_agents) to prevent drift.
+ */
+function isStrongRoutingMatch(candidate: { confidence: string }): boolean {
+  return candidate.confidence === "high";
+}
+
 // ─── ephemeral-agent / architect factory ──────────────────────────────────────
 // The ephemeral-agent cluster (getEphemeralGenerationSettings, requestArchitectSpec,
 // normalizeArchitectModel, validateEphemeralToolSelection, maybePromoteEphemeral,
@@ -1358,6 +1372,46 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
               score: topCandidate.score,
             });
             candidateQueue.push(topCandidate.name);
+          }
+        }
+      }
+
+      // ── Step 1b: shortened-query recovery for verbose task-only delegations ──
+      // A `swarm_delegate` with only `task` (no routingQuery) routes on the FULL
+      // task text. A long/verbose task fragments the embedding so the top catalog
+      // match scores below skillMatchThreshold and nothing is queued — then, with
+      // ephemeral generation off and no bid arriving, the delegation fails with
+      // attemptedAgents:[] (observed: a verbose German weather task routed 0
+      // candidates, while the same task with a concise routingQuery matched
+      // web_task_coordinator at 0.77). Retry once with a shortened query — the same
+      // de-fragmentation the search_agents tool applies — so the concise signal can
+      // recover the catalog match. Additive and safe: it fires ONLY when the full
+      // route queued nothing and the caller supplied no explicit routingQuery to
+      // honor, so it can turn a zero-attempt failure into a match but never regress
+      // a working delegation. shortenOverspecifiedRoutingQuery returns null for
+      // already-short queries, so short tasks incur no extra routing call.
+      if (candidateQueue.length === 0 && !request.routingQuery && !explicitAgentRequested) {
+        const shortened = shortenOverspecifiedRoutingQuery(request.task);
+        if (shortened) {
+          const shortlisted = (await routeAgentCandidates(shortened, ctx, attemptedAgents))
+            .filter((cand) => agentCanFulfillArtifactTask(cand.name, request.task, ctx));
+          const top = shortlisted[0];
+          if (top && shouldPreferCatalogAgent(top.score, top.confidence, skillMatchThreshold)) {
+            bestAutoMatchScore = top.score;
+            bestAutoMatchConfidence = top.confidence;
+            routingCandidateMap.set(top.name, {
+              confidence: top.confidence,
+              matchedTerms: top.matchedTerms,
+              score: top.score,
+            });
+            candidateQueue.push(top.name);
+            logAudit("delegation_routing_shortened_recovered", {
+              taskTitle: title,
+              shortenedQuery: shortened,
+              agent: top.name,
+              score: Number(top.score.toFixed(3)),
+              confidence: top.confidence,
+            }, { sessionId: ctx.sessionId });
           }
         }
       }
@@ -2976,10 +3030,7 @@ registerTool({
       : "";
 
     const topCandidate = allCandidates[0];
-    const topIsStrong = topCandidate &&
-      (topCandidate.confidence === "high" ||
-        (topCandidate.confidence === "medium" && topCandidate.score >= 0.5));
-    const nextActionLine = topIsStrong
+    const nextActionLine = topCandidate && isStrongRoutingMatch(topCandidate)
       ? `➡ NEXT ACTION: Call delegate_to_agent(agentName="${topCandidate.name}", task="<your task>") NOW.`
       : `ℹ Review the candidates below and pick the most relevant, or use create_ephemeral_agent if none fit.`;
 
@@ -3181,9 +3232,7 @@ registerTool({
             topResult: retryResolution.results[0]?.name ?? null,
           }, { sessionId: ctx.sessionId, channel: "agent-routing" });
           const topAgent = retryResolution.results[0]!;
-          const topResultIsStrong = topAgent.confidence === "high"
-            || (topAgent.confidence === "medium" && topAgent.score >= 0.5);
-          const nextActionLine = topResultIsStrong
+          const nextActionLine = isStrongRoutingMatch(topAgent)
             ? `➡ NEXT ACTION: Call delegate_to_agent(agentName="${topAgent.name}", task="<your task>") NOW. Do NOT call search_agents again.`
             : `ℹ Best available match is ${topAgent.name} (${topAgent.confidence} confidence, score ${topAgent.score.toFixed(2)}) — review the candidate list below.`;
           return {
@@ -3273,9 +3322,7 @@ registerTool({
     // models to delegate to the wrong specialist. For weak top results, present
     // the candidate list neutrally and let the LLM choose, including the option
     // to call list_agents or create_ephemeral_agent.
-    const topResultIsStrong = topAgent.confidence === "high"
-      || (topAgent.confidence === "medium" && topAgent.score >= 0.5);
-    const nextActionLine = topResultIsStrong
+    const nextActionLine = isStrongRoutingMatch(topAgent)
       ? `➡ NEXT ACTION: Call delegate_to_agent(agentName="${topAgent.name}", task="<your task>") NOW. Do NOT call search_agents again.`
       : `ℹ Best available match is ${topAgent.name} (${topAgent.confidence} confidence, score ${topAgent.score.toFixed(2)}) — review the candidate list below and pick the most relevant agent, or use create_ephemeral_agent if none fit. Do NOT call search_agents again.`;
     return {
