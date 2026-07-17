@@ -10,7 +10,7 @@ Recurring task shapes can also be encoded as reusable scenes and jobs in the wor
 
 This document explains how the system implements each swarm principle at the code level, describes the full runtime architecture, and maps the flow from user message to final response.
 
-See also: [Security Model](security.md) · [Tool Tiers & Guardrails](tool-tiers.md) · [Workspace Layout](../workspace/README.md)
+See also: [Security Model](security.md) · [Tool Tiers & Guardrails](tool-tiers.md) · [Workspace Layout](../workspace/README.md) · [Agent-Swarm Development Plan](agent-swarm-development-plan-2026-07.md)
 
 ---
 
@@ -18,7 +18,59 @@ See also: [Security Model](security.md) · [Tool Tiers & Guardrails](tool-tiers.
 
 The starling murmuration (*Sternschnuppen-Schwarm*) is a self-organizing system where thousands of birds move as one fluid shape without any conductor or central plan. Each bird follows three simple local rules — avoid collision, match speed, stay close — reacting only to its 6–7 nearest neighbors. From these rules alone, complex emergent behavior arises that is more robust and adaptive than any centrally planned formation.
 
-Most agent systems get this backwards: they build a central planner that scripts every step, assigns every task, and fails completely when one step breaks. StarlingAI takes the opposite approach. The intelligence is distributed. The robustness comes from local rules, not from a master controller.
+Most agent systems get this backwards: they build a central executor that scripts every step, performs every action, and fails completely when one step breaks. StarlingAI instead uses a thin orchestrator, focused specialists, and guarded runtime primitives. Coordination is explicit, but execution knowledge and work remain distributed.
+
+---
+
+## Engineering North Star: Quality, Performance, Robustness
+
+StarlingAI optimizes three coupled outcomes. Guarded autonomy is the invariant around all three, not a fourth metric that can be traded away.
+
+| Contract | Definition | Existing mechanisms | Target mechanisms | Primary measures |
+| --- | --- | --- | --- | --- |
+| **Quality** | The result is correct, complete, grounded, and appropriate for the user's actual ask. A claimed artifact or verification can be inspected. | Structured plans and acceptance criteria, risk-gated QA, artifact completion guards, shared findings, reviewer agents, pass^k harness | Strict tri-state QA, claim/evidence receipts, deterministic artifact probes, mission-level release suite | pass^k, criteria coverage, grounded-claim precision, artifact verification rate |
+| **Performance** | Reach the quality contract with the least useful model, prompt, tool, wall-clock, and compute work. | Bounded fan-out, routing model tier, prompt cache, lean context injection, tool-result shaping, workflow reuse, tool pipelines | Atomic mission budgets, provider/GPU capacity broker, fair admission, critical-path scheduling | time to useful result, model calls, tokens, weighted GPU seconds, queue p95 |
+| **Robustness** | Preserve useful progress across partial results, timeouts, crashes, restarts, and worker loss without repeating completed or side-effectful work. | Fallback agents, circuit breakers, container heartbeats, partial-result recovery, durable sessions/jobs, Warden alerts | Renewable fenced leases, acknowledged messages, durable mission events, idempotent effects, cross-process cancellation | duplicate executions, lost messages, resume success, recovery time, effect replay violations |
+| **Guarded autonomy** | Every capability and external effect stays within explicit identity, data, tool, approval, and audit policy. | Tool allowlists and tiers, approvals, workspace guards, secret-safe tools, redaction, sandboxed execution, Docker socket proxy | Effect contracts, scoped standing grants, plugin isolation, complete tenant graph policy | unauthorized effects, secret leaks, policy denials, isolation failures |
+
+The decision hierarchy is:
+
+1. **Security and explicit authorization are invariants.** No quality, speed, or recovery feature may bypass them.
+2. **Quality defines done.** A fast or resilient result that is wrong, incomplete, or falsely verified is a failed mission.
+3. **Robustness preserves the path to done.** Recovery retains evidence and artifacts, but stays bounded and never blindly repeats an external effect.
+4. **Performance minimizes the cost of reaching done.** Parallelism, caching, smaller models, and prompt reduction are optimizations only when the quality and robustness floors hold.
+
+### Architectural invariants
+
+- **Thin coordination, focused execution.** The orchestrator decomposes, routes, and synthesizes; specialists own scoped work; the runtime owns enforcement.
+- **A mission starts with a contract.** Objective, acceptance criteria, stop conditions, budget, allowed effects, and evidence expectations must be representable as data rather than prompt prose alone.
+- **Observation outranks narration.** A model saying that work passed is not a receipt. Tests, probes, source excerpts, artifact hashes, and effect records are receipts.
+- **Progress is durable before it is advertised.** Claiming, messaging, completion, and cancellation must survive process failure before clustered execution is called robust.
+- **Parallelism is admitted, not merely requested.** Independent work may fan out only within provider, GPU, tenant, and mission capacity.
+- **Effects are idempotent or explicitly unresolved.** Retries carry idempotency keys and fencing; an ambiguous external outcome stops for reconciliation.
+- **Partial failure is a first-class result.** Useful evidence is delivered with clear gaps; the system never fills missing work from model memory and calls it complete.
+- **Learning requires a counterfactual.** Skills, routes, prompts, and agents earn promotion through holdouts or canaries, not success correlation alone.
+- **Capabilities replace recovery scaffolding.** Incident-specific prompt rules are temporary. Once an enforceable capability closes the gap, activation metrics justify removing the rule.
+
+### Quality-performance-robustness loop
+
+```mermaid
+flowchart LR
+    U[User request or trigger] --> C[Mission contract]
+    C --> A[Capacity and budget admission]
+    A --> W[Leased specialist work]
+    W --> E[Evidence, artifacts, effect receipts]
+    E --> Q[Evidence-backed quality gate]
+    Q -->|verified| D[Deliver]
+    Q -->|repairable| W
+    Q -->|blocked or budget exhausted| P[Honest partial result]
+    D --> O[Telemetry and evaluation]
+    P --> O
+    O --> L[Shadow, holdout, canary learning]
+    L --> C
+```
+
+The current runtime implements many boxes in this loop, but mission-wide durability, hard budgets, evidence receipts, and cross-process control are development targets. The detailed sequencing and acceptance gates live in the [agent-swarm development plan](agent-swarm-development-plan-2026-07.md).
 
 ---
 
@@ -26,18 +78,18 @@ Most agent systems get this backwards: they build a central planner that scripts
 
 ### 1. Lokale Regeln statt zentraler Steuerung (Local Rules, No Central Controller)
 
-In a starling murmuration each bird follows three local rules and ignores global state. StarlingAI applies the same model: there is no monolithic planner that knows the full task graph. The orchestrator LLM emits tool calls; each sub-agent receives only its own prompt and context window; results flow back through the A2A protocol. No agent can directly instruct another without going through the orchestrator's tool layer.
+In a starling murmuration each bird follows local rules rather than one bird performing every movement. StarlingAI applies the same separation: an orchestrator may hold the mission objective and an explicit dependency graph, but it does not implement every specialist's work. It emits guarded tool calls; each sub-agent receives a scoped prompt, tool set, and context. Local results return through the tool boundary, while federation and public A2A handle remote agent interoperability. Agent-to-agent evidence and messages use runtime-owned memory and bus primitives rather than an ungoverned side channel.
 
 This applies to any task domain — whether the swarm is analyzing market data, writing code, orchestrating browser automation, or managing communications:
 
 At the code level this means:
 - The orchestrator model runs in `packages/core/src/agent/` and communicates with sub-agents exclusively via `delegate_to_agent` / `parallel_delegate` tool calls.
 - Reusable scenes and jobs act as local rules too: the orchestrator can search the workflow catalog with `search_workflows` and execute a matched reusable flow with `run_workflow` instead of rebuilding the same plan turn after turn.
-- Sub-agents are isolated at the tool and session boundary. They do not coordinate directly with each other; delegation always flows back through the orchestrator tool layer. Some agents run in ephemeral containers with full heartbeat lifecycle management.
+- Sub-agents are isolated at the tool and session boundary. Delegation flows through orchestrator tools; shared evidence, typed messages, and lifecycle events flow through runtime-owned coordination primitives. Sub-agents default to containers, with explicit trusted-agent opt-outs.
 - Config hot-reload updates local rule sets (system prompts, model parameters, tool policies) without restarting the cluster.
 - Heuristic routing now separates headless server administration from desktop automation: SSH, Docker, `systemctl`, `journalctl`, and log-triage requests prefer `shell_agent` or `ops_triage`, while desktop/UI work still prefers `computer_use_agent`.
 - The swarm bus (`swarm/bus.ts`) extends local-rule coordination to an event-driven pub/sub layer: agents emit `task_announced` events and peers respond with ranked `task_bid` offers, enabling autonomous peer discovery without a central planner.
-- A default tool registry (`agent/default-tools.ts`) defines two canonical tool sets: `DIRECT_MAIN_TOOL_NAMES` (20 tools for direct-response agents) and `ORCHESTRATION_TOOL_NAMES` (7 tools for orchestrators), so each agent role follows a consistent local ruleset.
+- A default tool registry (`agent/default-tools.ts`) defines canonical direct and orchestration tool sets, so each role follows a consistent local ruleset without relying on a full tool-catalog dump.
 
 **Current status:** Implemented. The orchestrator composes specialists without scripting their internals. Autonomous bidding via the swarm bus is active.
 
@@ -45,17 +97,17 @@ At the code level this means:
 
 Complex capabilities emerge from the interaction of simple agents. A user asks for a source-backed paper on a technical topic — the orchestrator does not need a hard-coded handler for this. It can first reuse a matching workflow such as `protocol_comparison_paper` or `source_grounded_paper_packet` via the workflow catalog, and if no reusable fit exists it can still chain `researcher` → `paper_author` → `source_verifier` dynamically using the hybrid routing layer. The same mechanism works for any domain: financial analysis, content creation, DevOps automation, data processing, or multimodal workflows involving PDFs, audio, and images.
 
-This emergence is reproducible and auditable: every delegation is recorded in the audit log with inputs, outputs, and token counts. Outcome-weighted routing means the swarm continuously improves its specialist selection without manual tuning.
+This emergence is observable and increasingly reproducible: delegations emit audit, usage, routing, and tracing data. Outcome-weighted routing can use prior performance as one signal, while the target learning loop adds holdouts and canaries so promotion measures causal lift rather than easy-task correlation.
 
-When no registered agent matches a task strongly enough, the **emergent architect fallback** activates: if the best routed or bid specialist scores below the configured skill-match threshold (default `0.75`), the dedicated `agent_architect` specialist designs a purpose-built ephemeral agent on the fly and that generated agent runs immediately on the original task. If the ephemeral agent succeeds repeatedly, it is auto-promoted to `.starlingai/promoted_agents.json` and becomes a permanent catalog member. This creates a self-growing specialist registry.
+When ephemeral generation is enabled and no registered agent matches a task strongly enough, the **emergent architect fallback** can activate: if the best routed or bid specialist scores below the configured skill-match threshold, the dedicated `agent_architect` specialist designs a purpose-built temporary agent. Repeatedly successful configurations can be promoted to `.starlingai/promoted_agents.json`; the target architecture requires holdout evidence and canary rollout before broad trust.
 
 The collective memory layer (`swarm/memory.ts`) gives agents a shared knowledge pool backed by Redis Hash/List structures with embedding-backed semantic lookup (`write_shared_fact`, `read_shared_facts`, `share_finding`), so discoveries made by one agent in a session are available to all peers.
 
-**Current status:** Implemented. Parallel delegation, task graphs, outcome-boosted routing, emergent architect fallback, auto-promotion, and collective memory all operate in production.
+**Current status:** Implemented but activation-dependent. Parallel delegation, task graphs, outcome-informed routing, collective memory, and the optional ephemeral/promotion path exist. Durable mission control and causal promotion gates remain planned work.
 
 ### 3. Robustheit durch Redundanz (Robustness Through Redundancy)
 
-If a sub-agent times out or errors, the orchestrator retries with the next-best candidate from the routing result list. No single agent failure terminates the session. The `ops_triage` agent monitors provider, gateway, and channel health and can trigger corrective actions without human intervention.
+If a sub-agent times out or errors, the orchestrator can use a bounded fallback or synthesize from useful partial evidence. One agent failure does not have to terminate the session, but recovery is never assumed successful. The `ops_triage` agent can diagnose provider, gateway, channel, and service health, then act only within its tool and approval policy.
 
 At the infrastructure level:
 - Docker Compose restarts failed service containers automatically.
@@ -65,7 +117,7 @@ At the infrastructure level:
 - Fallback routing exhausts explicit candidates, then auto-routes using semantic search for general-purpose coverage. A circuit breaker triggers when an agent exceeds a 60% failure rate, marking it unavailable until it recovers.
 - Per-agent `turnTimeoutMs` overrides and a rate-adaptive timeout derived from outcome history prevent slow agents from blocking the swarm.
 
-**Current status:** Implemented. Delegation fallback chains, retry logic, dead-letter queues, container heartbeats, circuit breakers, and adaptive timeouts all provide layered fault tolerance.
+**Current status:** Layered fault tolerance is implemented. Cluster-wide robustness is not yet a hard guarantee: task leases are now scoped, heartbeat-renewed, and fenced, but they lack two-process/chaos acceptance tests and result-following (DST-103); direct agent-message consume is not acknowledged, task-graph durability is optional, and Warden cancellation/concurrency state is process-local. These are the first distributed-correctness milestones in the development plan.
 
 ### 3.5. Begrenzte Selbstverbesserung (Bounded Self-Improvement)
 
@@ -77,13 +129,13 @@ The hard boundary is secrets and privilege escalation. Stored credentials must n
 
 **Current status:** Partially implemented and intentionally guarded. Flow memory, proposal-based config changes, prompt refinement, agent evolution, and the **procedural Skill Library** (below) exist; privileged boundaries still remain outside autonomous control.
 
-#### Tested before applied
+#### Validated before trusted activation
 
-Every self-authored artifact passes through a verification gate before it is treated as done — the swarm never ships an unchecked change:
+Each self-authored artifact type has a validation path before it should be trusted. The strength of that gate differs today, so validation status must remain visible:
 
 - **New tools** go through the `tool_developer` pipeline: `tool_dev_start` validates the code structure, `tool_dev_test` runs the implementation against ≥2 cases in the Docker sandbox, and `tool_dev_submit` is hard-gated on all tests passing plus human approval before the tool deploys as `selfdev__<name>`.
-- **New or edited scenes, jobs, and sub-agent definitions** go through `swarm_validate` (`config/validate-workspace.ts`): it re-reads the `config/` + `workspace/` shards straight from disk, checks JSON syntax, validates the merged result against the same Zod `ConfigSchema` the loader uses, and runs reference-integrity checks the schema cannot express — scenes → agents, jobs → scenes, agents → tools. `swarm_maintainer` is required to run it after any edit and resolve every reported error before reporting success. It is read-only; the change is applied only by the operator running `config build` and reloading.
-- **New skills** start as drafts and only graduate to `active` after they succeed in real use (see below) — a one-off lucky run never hardens into permanent guidance.
+- **New or edited scenes, jobs, and sub-agent definitions** authored through the swarm tools go through `swarm_validate` (`config/validate-workspace.ts`): it re-reads the `config/` + `workspace/` shards, checks syntax and schema, and validates references such as scenes → agents, jobs → scenes, and agents → tools. Manual edits must run the same validation and config build explicitly.
+- **New skills** start as drafts and can graduate after successful use. Holdout measurement exists but defaults off, so raw success currently does not prove causal lift; the target gate requires a minimum sample, a control cohort, and rollback metadata before automatic scene promotion.
 
 #### Procedural memory: the self-authoring Skill Library
 
@@ -114,17 +166,17 @@ All three guidance blocks (Learned Procedures, User Model, and the existing memo
 
 ### 4. Guarded (The Watched Swarm)
 
-Every agent action passes through a four-layer guardrail stack before it can affect the outside world. Tool calls are classified into five tiers at compile time — not runtime-configurable. A shell command always runs inside a Docker sandbox, never on the host. Outputs are scanned for secrets before being returned to the user.
+Every registered tool invocation passes through the guarded execution path before it can affect the outside world. Tool calls are classified into five tiers at compile time, with per-tool and per-scene approval policy. Shell commands always run inside a Docker sandbox, never on the host. Tool and final outputs are scanned for secrets. Trusted extension/plugin module initialization is a separate code-trust boundary; isolating third-party plugins is priority hardening work.
 
-The **Warden agent** (`agent/warden.ts`) subscribes to the live audit stream and autonomously detects erratic behavior: `tool_storm`, `repeated_failures`, `tool_escape_attempt`, `rate_limit_flood`, `turn_slo_breach`, and infrastructure failures such as `docker_daemon_unreachable` when containerized delegations lose access to the Docker daemon mid-session. On detection it can halt containers, revoke capabilities, or escalate to a human operator. Swarm morphing enforces per-agent concurrency semaphores with FIFO queuing and emits backpressure events when the swarm is under load.
+The **Warden agent** (`agent/warden.ts`) subscribes to the live audit stream and detects erratic behavior: `tool_storm`, `repeated_failures`, `tool_escape_attempt`, `rate_limit_flood`, `turn_slo_breach`, and infrastructure failures such as `docker_daemon_unreachable`. It can intervene in work owned by its process, revoke computer-session auto-approval, reinforce circuit breakers, and escalate to an operator. Per-agent and global concurrency semaphores provide FIFO backpressure inside one process; the target capacity broker makes those limits provider-aware and cross-process.
 
-The **human-in-the-loop approval system** (`approval/`) adds a third layer of oversight beyond guardrails and the Warden. Per-scene `humanInLoopSteps` configuration gates specific tool calls or delegation chains behind explicit human approval via Slack Block Kit, outbound webhook, or synchronous webhook. One-click HTTP callbacks and a WebSocket `approval.respond` RPC allow operators to approve or reject in seconds without leaving their existing tooling.
+The **human-in-the-loop approval system** (`approval/`) adds oversight beyond guardrails and the Warden. Compile-time tool policy and per-scene `humanInLoopSteps` gate selected calls or delegation chains through Slack Block Kit, outbound webhook, synchronous webhook, or WebSocket response. Not every Tier-2 interaction requires per-call approval; effect contracts in the target architecture make approval depend on the resolved destination and business effect rather than a tool name alone.
 
 **Intervention diagnostics** (`agent/interventions.ts`) classify every tool-call intervention into one of nine categories and stream the result to the WebSocket as an `intervention` event, giving operators a real-time feed of why the guardrail stack intervened.
 
 The "Guarded" in StarlingAI reflects a fundamental constraint: agents in a starling murmuration are free to move, but StarlingAI agents operate within strict security boundaries. Speed and autonomy never come at the cost of control. This security contract applies regardless of what task domain the swarm is working in.
 
-**Current sandbox scope — important clarification:** Sandboxing applies at the tool-execution level, not the agent-process level. `shell_exec`, `run_script`, and all `selfdev__*` dynamic tools always execute inside the dedicated `sandbox` Docker container (`--cap-drop ALL`, `--read-only`, `--network none`). Individual sub-agents that have `container.enabled: true` in their config also run their entire LLM loop in an isolated container via `container-runner.ts`. Sub-agents now default to containerized execution (opt-out model): each sub-agent runs its full LLM loop in an isolated container via `container-runner.ts` unless it sets `container.disabled: true`. The global default is `agents.defaultContainerized: true`; set `STARLINGAI_DEFAULT_CONTAINERIZED=false` to opt out (e.g. in tests).
+**Current sandbox scope — important clarification:** Sandboxing applies to self-sandboxing execution tools and, by default, to sub-agent processes. `shell_exec`, `run_script`, tests, git execution, and `selfdev__*` tools run inside dedicated Docker sandboxes with dropped capabilities, a read-only root, and bounded resources. Sub-agents default to isolated containers unless their catalog entry explicitly sets `container.disabled: true`. Container network is `none` for ordinary workers and `bridge` for roles that require external access. The global default is `agents.defaultContainerized: true`; the product-specific environment prefix can override it for tests or deliberate legacy operation.
 
 **Current status:** Implemented. Four-layer guardrails, hard-coded tool tiers, Docker sandboxing for tool execution, AES-256-GCM credential store, comprehensive audit trail, active Warden agent, human-in-the-loop approval gates, and intervention diagnostics are all operational. Container isolation now defaults to an opt-out model (see the Implementation Status table below).
 
@@ -134,24 +186,24 @@ See [Tool Tiers & Guardrails](tool-tiers.md) and [Security Model](security.md) f
 
 ## Implementation Status
 
-The current `v0.11.2` codebase implements the swarm vision through **Stage 13** (procedural skill library), layering federated swarms (Stage 11) and open interoperability (Stage 12) on top of the Stage 1–9 foundation. Cross-cutting platform work — plugin SDK, OpenTelemetry tracing, cost governance, and optional multi-user auth — rounds out the current line (see the table and notes below).
+The current `v0.45.8` codebase implements the swarm vision through **Stage 13** (procedural skill library), layering federated swarms (Stage 11) and open interoperability (Stage 12) on top of the Stage 1–9 foundation. The table distinguishes an available capability from a distributed or release-grade guarantee.
 
 | Feature | Stage | Status | Notes |
 |---|---|---|---|
 | **Sub-agent routing & parallel delegation** | 1 | Implemented | Task graphs, four-layer guardrails, Docker sandbox (shell tools + opt-in/opt-out container model), outcome tracking, audit trail, hot-reload config |
 | **Decision-flow controls** | 1 | Implemented | First-class turn plan (`record_plan`), `maxDelegationDepth` + nested-slice collapse bound the fan-out, risk-gated auto-verify QA, and optional plan-approval pause — all soft/flag-gated under `orchestration.*` (`agent/turn-plan.ts`) |
 | **Swarm bus** | 2 | Implemented | Redis Pub/Sub with in-process EventEmitter fallback (`swarm/bus.ts`) |
-| **Distributed task locks** | 2 | Implemented | `swarm/locks.ts` — prevents duplicate execution across workers |
+| **Distributed task locks** | 2 | Partial; hardening planned | Leases are scoped (tenant/user/workspace/session/signature-hashed key), heartbeat-renewed, fenced with monotonic tokens, and acquired before `task_claimed`; a contended task is not executed. Still Partial: two-process/chaos acceptance tests and result-following (DST-103) are pending, so a contender skips the task instead of receiving the winner's result. |
 | **Container heartbeat protocol** | 2 | Implemented | 15s interval, 45s watchdog, SIGTERM→SIGKILL, OOM detection, partial result recovery |
 | **Emergent architect fallback** | 2 | Implemented | `agent_architect` designs ephemeral agents when no catalog match clears the skill threshold |
 | **Auto-promotion** | 2 | Implemented | Successful ephemeral agents promoted to `.starlingai/promoted_agents.json` |
 | **Autonomous bidding** | 2 | Implemented | `task_announced` / `task_bid` events; ranked offers collected before routing |
-| **Warden agent** | 3 | Implemented | Detects tool_storm, repeated_failures, tool_escape_attempt, rate_limit_flood, turn_slo_breach, **config_proposal_flood** (v0.3.2), **docker_daemon_unreachable** (mid-session infra health, rate-limited to 1/min per process) |
-| **Swarm morphing** | 3 | Implemented | Per-agent concurrency semaphores with FIFO queuing and backpressure events |
-| **Collective memory** | 3 | Implemented | Redis Hash+List shared facts, `write_shared_fact`, `read_shared_facts`, embedding-backed semantic lookup, `share_finding` tool |
+| **Warden agent** | 3 | Implemented per process | Detects tool storms, repeated failures, escape attempts, rate-limit floods, SLO breaches, and infrastructure faults; cross-process observation and cancellation remain planned. |
+| **Swarm morphing** | 3 | Implemented per process | Per-agent and process-global concurrency semaphores with FIFO queuing and backpressure; provider-wide admission remains planned. |
+| **Collective memory** | 3 | Implemented; data-plane hardening planned | Redis shared facts and partial results with semantic lookup exist; provenance, conflict handling, and acknowledged agent-message delivery remain planned. |
 | **Adaptive routing** | 3 | Implemented | Circuit breaker (>60% failure rate), `allLowConfidence` flag, routing rationale output |
 | **25+ specialist agents** | 4 | Implemented | Domain/capabilities/tags metadata, per-agent cost profiles in list_agents/search_agents |
-| **Evaluation CI** | 4 | Implemented | Regression comparison, --baseline flag, routing accuracy benchmarks (75% gate, 18 cases) |
+| **Evaluation CI** | 4 | Deterministic CI implemented; live gate maturing | Typecheck, lint, unit/coverage, build, config, dependency, and secret gates run in CI. Live mission pass^k, artifact, side-effect, and chaos baselines are planned release gates. |
 | **Channel hardening** | 5 | Implemented | WhatsApp signature verification, replay-window deduplication, `deliverWithRetry` for all 5 channels, p50/p95/p99 latency, SLO pass rate, Discord health check parity |
 | **Turn performance metrics** | 6 | Implemented | `turn_performance` audit events with full `TurnPerformanceMetrics`; cold-start: `containerColdStartMs`, `containerBootstrapMs`, `containerRuntimeMs` |
 | **Per-agent adaptive timeouts** | 6 | Implemented | `turnTimeoutMs` overrides + rate-adaptive timeout derived from outcome history |
@@ -185,7 +237,7 @@ The current `v0.11.2` codebase implements the swarm vision through **Stage 13** 
 
 **Cross-cutting platform capabilities** (not tied to a single stage):
 
-- **Plugin SDK** — third-party tool packages auto-load from `~/.starlingai/plugins` at Tier 2 with tier-shadow rejection (`plugin/loader.ts`).
+- **Plugin SDK** — explicitly enabled, trusted third-party tool packages load from `~/.starlingai/plugins` at Tier 2 with tier-shadow rejection (`plugin/loader.ts`). They still execute in the gateway process until the planned isolated runner lands.
 - **OpenTelemetry tracing** — spans for tool calls, sub-agents, and federation hops, exported over OTLP (`observability/tracing.ts`).
 - **Cost governance** — token-usage aggregation with per-model pricing and budget thresholds, surfaced on a `/cost` dashboard (`observability/cost.ts`).
 - **Runtime liveness monitors** — the gateway is a single Node event loop reaching a remote model over HTTP, so two passive monitors make "the gateway went unhealthy" measurable instead of guessed: an **event-loop lag monitor** (`observability/event-loop-monitor.ts`, libuv `monitorEventLoopDelay`) catches a genuinely blocked main thread, and a **provider activity monitor** (`observability/provider-activity-monitor.ts`) tracks each in-flight LLM call's token progress to tell *producing* from *still processing the prompt* from *stalled*. Both audit (`event_loop_lag`, `provider_stall`), feed `runSubsystemChecks`, and surface on `/readyz`.
@@ -236,7 +288,7 @@ The current `v0.11.2` codebase implements the swarm vision through **Stage 13** 
 │  LLM: configurable model via LM Studio / Anthropic                  │
 │  Tools: search_agents, search_workflows, run_workflow,              │
 │         delegate_to_agent, parallel_delegate                        │
-│         + all Tier 0–3 tools + multimodal tools + browser tools     │
+│         + configured tool mode and explicit allowlists              │
 └────────┬───────────────┬──────────────────────────┬────────────────┘
          │               │ task_announced (bus)      │ parallel_delegate
          │         ┌─────▼──────────────────┐        │
@@ -247,7 +299,7 @@ The current `v0.11.2` codebase implements the swarm vision through **Stage 13** 
          │         │                        │        │
          │         │  task_announced        │        │
          │         │  task_bid              │        │
-         │         │  task_assigned         │        │
+        │         │  task_claimed          │        │
          │         │  task_completed        │        │
          │         │  backpressure          │        │
          │         └─────┬──────────────────┘        │
@@ -255,7 +307,7 @@ The current `v0.11.2` codebase implements the swarm vision through **Stage 13** 
 ┌────────▼───────────────▼───────────────────────────▼──────────────┐
 │  Sub-Agent Runners                                                  │
 │  ├─ Per-agent concurrency semaphore (swarm/concurrency.ts)         │
-│  ├─ Distributed task lock (swarm/locks.ts)                         │
+│  ├─ Scoped, fenced, renewable task lease (swarm/locks.ts)          │
 │  ├─ Container runner with heartbeat (15s/45s watchdog)             │
 │  └─ Ephemeral architect fallback → auto-promote to catalog         │
 └────────┬───────────────────────────────────────────────────────────┘
@@ -265,7 +317,7 @@ The current `v0.11.2` codebase implements the swarm vision through **Stage 13** 
 │  Subscribes to live audit stream                                    │
 │  Detects: tool_storm · repeated_failures · tool_escape_attempt     │
 │           rate_limit_flood · turn_slo_breach                        │
-│  Actions: halt container · revoke capability · escalate to human   │
+│  Actions: alert · local intervention/abort · operator escalation   │
 └────────┬───────────────────────────────────────────────────────────┘
          │
 ┌────────▼───────────────────────────────────────────────────────────┐
@@ -316,23 +368,27 @@ User message
     │  → wait for approval.respond RPC or HTTP callback before proceeding
     │
     ▼
-[4] Orchestrator LLM receives message + conversation history
+[4] Receptionist / orchestrator receives the request and bounded context
     │
     ▼
-[5] Orchestrator emits tool call: search_agents(query)
+[5] Choose the smallest valid path
+    │  → stable/trivial: answer directly
+    │  → recurring shape: search_workflows / run_workflow
+    │  → complex mission: record_plan with acceptance criteria
+    │  → known atomic domain: delegate directly to the specialist
     │
     ▼
-[6] Hybrid router scores all agents
+[6] When agent discovery is needed, the hybrid router scores candidates
     │  keyword score
     │  + cosine similarity on embeddings (query cache applied)
     │  + outcome boost (±12.5% from outcome history)
     │  + circuit breaker suppression (>60% failure rate)
-    │  → allLowConfidence flag triggers emergent architect fallback
+    │  → low fit may allow the optional emergent architect fallback
     │
     ▼
 [7] Swarm bus: orchestrator emits task_announced event
     │  → peers respond with ranked task_bid offers
-    │  → highest-bid agent receives task_assigned
+    │  → bids inform guarded candidate selection; execution still uses a tool call
     │
     ▼
 [8] Orchestrator emits tool call: delegate_to_agent(name, task)
@@ -340,8 +396,9 @@ User message
     │
     ▼
 [9] Sub-agent runner:
-    │  - Acquires distributed task lock (swarm/locks.ts)
-    │  - Acquires per-agent concurrency semaphore (swarm/concurrency.ts)
+    │  - Acquires the scoped, fenced, heartbeat-renewed task lease
+    │    (swarm/locks.ts) before task_claimed; a contended task is not executed
+    │  - Acquires process-local per-agent/global concurrency slots
     │  - Builds prompt from system prompt + task + context
     │  - Calls provider with agent's model config (streaming)
     │  - Executes any tool calls the sub-agent makes
@@ -352,22 +409,26 @@ User message
     │  - Returns result to orchestrator; releases lock and semaphore
     │
     ▼
-[10] If ephemeral agent succeeded → auto-promote to catalog
+[10] If the optional ephemeral path repeatedly succeeds → promotion may be considered
      Collective memory updated via write_shared_fact / share_finding
      │
     ▼
 [11] Warden samples audit stream in background
-     → detects anomalies; can halt container or escalate
+    → detects anomalies; can intervene in locally-owned work or escalate
      │
     ▼
 [12] Orchestrator incorporates result, continues reasoning
      (steps 5–12 repeat until no more tool calls)
     │
     ▼
-[13] Output guardrail scans for secrets, redacts if needed
+[13] Finalization applies plan/evidence/artifact checks that are enabled
+     → result is verified, caveated, repaired, partial, or blocked
     │
     ▼
-[14] Response streamed to client via AG-UI SSE / WebSocket
+[14] Output guardrail scans for secrets, redacts if needed
+    │
+    ▼
+[15] Response streamed to client via AG-UI SSE / WebSocket
 ```
 
 ### Decision-flow controls
@@ -493,7 +554,7 @@ packages/
                                            auto-refreshing subscription token store
                             embeddings.ts — semantic agent search index + query cache
       swarm/                bus.ts — Redis Pub/Sub bus + EventEmitter fallback
-                            locks.ts — distributed task locks
+                            locks.ts — scoped, fenced, renewable task leases
                             memory.ts — collective memory (Redis Hash+List + embeddings)
                             concurrency.ts — per-agent semaphores with FIFO queuing
                             bidding.ts — task_announced / task_bid auction protocol

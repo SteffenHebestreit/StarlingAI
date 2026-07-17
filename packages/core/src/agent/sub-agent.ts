@@ -50,7 +50,7 @@ import { formatScopedMemoryGuidance } from "../memory/service.js";
 import { formatSkillGuidance } from "../skills/service.js";
 import { graphMarkSessionRetrievalsUseful, graphMarkSessionRetrievalsUnhelpful } from "../memory/graph-service.js";
 import { isSessionDegraded } from "./warden.js";
-import { consumeAgentMessages, readAllFacts } from "../swarm/memory.js";
+import { claimAgentMessages, readAllFacts, type AgentMessageClaim } from "../swarm/memory.js";
 import { sanitizeTranscriptContent } from "./sanitize-response.js";
 import { truncateToolResult, extractKeyFacts, extractedFindingIsLowValue, stripEditorialNotes } from "../tools/result-shaping.js";
 import { buildDynamicTurnGuidance } from "./intent-classifier.js";
@@ -1531,6 +1531,9 @@ export interface SubAgentRunResult {
   output: string;
   stats: SubAgentExecutionStats;
   artifacts?: Record<string, unknown>[];
+  /** QPR-004: the turn's quality scorecard when the transport surfaces one
+   *  (gateway-routed eval runs capture the turn_scorecard audit event). */
+  qualityScorecard?: import("./turn-scorecard.js").TurnQualityScorecard;
 }
 
 export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<SubAgentRunResult> {
@@ -1961,12 +1964,24 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // run — giving the agent a chance to act on them without the orchestrator
     // mediating the content.
     let a2aContext = "";
+    let a2aMessageClaim: AgentMessageClaim | null = null;
     try {
       // Read from the ROOT session bucket the WRITE side targets: send_agent_message writes via
       // deriveSharedSessionId(ctx.sessionId) (→ root), so draining the per-run CHILD subSessionId
       // here found nothing and peer messages were silently lost. deriveRootSessionId is identical
       // to that write-side derivation, so read and write now hit the same bucket.
-      const pending = await consumeAgentMessages(deriveRootSessionId(subSessionId), opts.agentName);
+      // ADR-003 deferred ack: the claim is held open and acknowledged only when this
+      // run records a success/partial outcome — a crashed or failed run leaves the
+      // messages pending, so they redeliver instead of being silently lost.
+      // Visibility scales with THIS run's budget (2×, capped at 30 min): the claim is
+      // held for the whole run, and a static window shorter than the run would let a
+      // concurrent same-agent claim re-deliver (duplicate injection) and eventually
+      // dead-letter messages a healthy run is still processing.
+      const messageVisibilityMs = effectiveTurnTimeoutMs && effectiveTurnTimeoutMs > 0
+        ? Math.max(120_000, Math.min(2 * effectiveTurnTimeoutMs, 1_800_000))
+        : 1_800_000; // "unbound" agents get the cap
+      a2aMessageClaim = await claimAgentMessages(deriveRootSessionId(subSessionId), opts.agentName, { visibilityMs: messageVisibilityMs });
+      const pending = a2aMessageClaim.messages;
       if (pending.length > 0) {
         a2aContext = `\n\n## Pending messages from peer agents\n${pending
           .map((m) => {
@@ -2165,6 +2180,15 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         taskKeywords,
         sharedFindingsCount: shareFindinCallCount,
       });
+      // ADR-003 ack boundary: the run's outcome is durably recorded here. A
+      // success/partial outcome means the delivered peer messages were processed
+      // by the run — acknowledge them (idempotent). A failure leaves the claim
+      // pending so the messages redeliver to the next attempt.
+      if ((fields.outcome === "success" || fields.outcome === "partial") && a2aMessageClaim) {
+        const claim = a2aMessageClaim;
+        a2aMessageClaim = null;
+        claim.ack().catch(() => { /* unacked entries redeliver after the visibility timeout */ });
+      }
       if (fields.outcome === "success" || fields.outcome === "partial") {
         // Partial outcomes credit less than full success — still positive,
         // because some of the retrieved memories *did* contribute.

@@ -21,7 +21,8 @@ import { loadConfig, getConfig } from "./config/loader.js";
 import { initTracing, shutdownTracing } from "./observability/tracing.js";
 import { initMcpServers, shutdownMcpServers } from "./mcp/registry.js";
 import { loadDynamicTools, shutdownDynamicTools } from "./tools/dynamic-tools.js";
-import { loadPlugins } from "./plugin/loader.js";
+import { loadPlugins, resolvePluginsDir } from "./plugin/loader.js";
+import { existsSync, readdirSync } from "node:fs";
 import { warmToolEmbeddings } from "./tools/registry.js";
 import { createStarlingMcpServer } from "./mcp/server.js";
 import { childLogger } from "./logger.js";
@@ -54,12 +55,22 @@ async function main(): Promise<void> {
   loadDynamicTools();
 
   // Load plugin SDK packages.  Errors are logged but don't abort startup.
-  if (config.plugins?.enabled !== false) {
+  if (config.plugins?.enabled === true) {
     try {
       await loadPlugins();
     } catch (err) {
       log.warn({ err }, "Plugin loader failed during stdio bootstrap");
     }
+  } else {
+    // The plugins.enabled default flipped true→false (SEC-105 hardening).
+    // Warn installs whose plugins directory still has entries so they don't
+    // silently stop loading plugins after upgrading.
+    try {
+      const pluginsDir = resolvePluginsDir();
+      if (existsSync(pluginsDir) && readdirSync(pluginsDir).length > 0) {
+        log.warn({ pluginsDir }, "Plugins directory contains entries but plugins.enabled is false — the default changed from true to false for security hardening (SEC-105); set plugins.enabled=true to load them.");
+      }
+    } catch { /* best-effort warning only */ }
   }
 
   // Pre-warm so the first ListTools request is fast.

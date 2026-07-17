@@ -11,6 +11,7 @@ import {
   type AgentEvaluationPlan,
   type AgentEvaluationReport,
 } from "./evaluation.js";
+import { buildVersionedEvaluationReportPath } from "./evaluation-provenance.js";
 import { createGatewayEvalRunner } from "./gateway-eval-runner.js";
 
 async function main(): Promise<void> {
@@ -47,7 +48,7 @@ async function main(): Promise<void> {
   const resolvedPlanPath = planPath ?? (existsSync(defaultPlanPath) ? defaultPlanPath : undefined);
 
   if (!resolvedPlanPath) {
-    console.error("Usage: pnpm agents:evaluate [plan.jsonc] [output.json] [--baseline baseline.json] [--repeat k]");
+    console.error("Usage: pnpm agents:evaluate [plan.jsonc] [output.json] [--baseline baseline.json] [--repeat k] [--record]");
     console.error("                            [--via-gateway [--gateway-url ws://host:8765/ws] [--token <jwt>]]");
     console.error("If omitted, the CLI looks for ./agent-eval.jsonc in the current workspace.");
     console.error("--repeat k runs each case k times and reports pass^k (reliability), not just pass@1.");
@@ -55,6 +56,7 @@ async function main(): Promise<void> {
     console.error("  pass^k wall-clock up to ~k×; latency regressions are not flagged under concurrency.");
     console.error("--via-gateway runs each case through a live gateway so agents get the full runtime env");
     console.error("  (docker/searxng/browser); needed to evaluate web/computer/docker/coordinator agents.");
+    console.error("--record writes a versioned raw report under artifacts/evaluations/ when no output path is supplied.");
     process.exit(1);
   }
 
@@ -95,14 +97,16 @@ async function main(): Promise<void> {
 
   let report: AgentEvaluationReport;
   try {
-    report = await evaluateAgentPlan(plan, gateway?.runner);
+    report = await evaluateAgentPlan(plan, gateway?.runner, { transport: viaGateway ? "gateway" : "in_process" });
   } finally {
     gateway?.close();
   }
 
   console.log(formatEvaluationSummary(report));
 
-  const outputPath = explicitOutputPath ?? plan.outputPath;
+  const outputPath = explicitOutputPath
+    ?? plan.outputPath
+    ?? (args.includes("--record") ? buildVersionedEvaluationReportPath("agent", report.generatedAt, report.provenance) : undefined);
   if (outputPath) {
     const writtenPath = await writeEvaluationReport(report, outputPath);
     console.log(`\nReport written to ${writtenPath}`);

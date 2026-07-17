@@ -28,6 +28,7 @@ import type { AgentSession } from "./session.js";
 import type { DeliverableIntent } from "./deliverable-intent.js";
 import type { DynamicTurnGuidance } from "./intent-classifier.js";
 import { timedPhase } from "./turn-metrics.js";
+import type { TurnQualitySignals } from "./turn-scorecard.js";
 import { loadTurnPlan, classifyTurnRisk } from "./turn-plan.js";
 import {
   shouldCheckDeliverableConsistency,
@@ -73,6 +74,10 @@ interface QaDeliveryGateResult {
   changed: boolean;
   rounds: number;
   passed: boolean;
+  status: "pass" | "fail" | "unverified";
+  evidence?: string;
+  artifactProbeStatus: "not_requested" | "not_applicable" | "pass" | "fail" | "unverified" | "error";
+  artifactProbeCount: number;
   escalated: boolean;
   unverified: boolean;
 }
@@ -125,6 +130,8 @@ export interface TerminalGuardContext {
   // --- live reads of mutable / latched turn state ---
   getTurnDelegationCount: () => number;
   getQaCorrectiveBuildUsed: () => boolean;
+  /** Mutable terminal-quality facts consumed by the centralized turn scorecard. */
+  scorecardSignals?: TurnQualitySignals;
 
   // --- per-turn delegation counter mutation (qaEscalate + corrective closures share it) ---
   incrementDelegationCount: () => void;
@@ -525,10 +532,21 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
         finalResponse = prependUnverifiedQaCaveat(finalResponse);
         guardrailEvents.push({ type: "guardrail_flagged", details: "qa_delivery_loop_unverified" });
       }
+      if (ctx.scorecardSignals) {
+        ctx.scorecardSignals.criteriaTotal = criteria.length;
+        ctx.scorecardSignals.criteriaCovered = gate.status === "pass" ? criteria.length : null;
+        ctx.scorecardSignals.qaStatus = gate.status;
+        ctx.scorecardSignals.qaRounds = gate.rounds;
+        ctx.scorecardSignals.qaEvidencePresent = Boolean(gate.evidence);
+        ctx.scorecardSignals.artifactProbeStatus = gate.artifactProbeStatus;
+        ctx.scorecardSignals.artifactProbeCount = gate.artifactProbeCount;
+      }
       logAudit("flow_verification_passed", {
         reason: "qa_delivery_loop",
         rounds: gate.rounds,
         passed: gate.passed,
+        status: gate.status,
+        ...(gate.evidence ? { qaEvidence: gate.evidence } : {}),
         unverified: gate.unverified,
         improved: gate.changed,
         escalated: gate.escalated,
@@ -536,6 +554,17 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
       }, { sessionId: session.id, severity: gate.changed || gate.unverified ? "warn" : "info" });
     }
   }
+
+  // A downstream guard that REPLACES the answer after the QA gate ran invalidates the
+  // latched QA signals: the scorecard must not describe text QA never saw. Downgrade to
+  // unverified rather than clearing — QA did run, but its verdict no longer applies.
+  const invalidateQaSignals = (): void => {
+    if (ctx.scorecardSignals && ctx.scorecardSignals.qaStatus !== "not_run") {
+      ctx.scorecardSignals.qaStatus = "unverified";
+      ctx.scorecardSignals.qaEvidencePresent = false;
+      ctx.scorecardSignals.criteriaCovered = null;
+    }
+  };
 
   // Deliverable self-consistency gate (audit 17f53ed0): plan-less deliverable turns get
   // NO acceptance-criteria QA, so an internally inconsistent answer ships — a price quote
@@ -563,6 +592,7 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
     );
     if (gate.changed) {
       finalResponse = gate.answer;
+      invalidateQaSignals();
       // The precomputed outputScan only covered the original response — re-run the cheap
       // deterministic secret scan on the corrected text before it ships.
       const rescan = scanOutput(finalResponse);
@@ -599,6 +629,7 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
       const built = await ctx.runCorrectiveBuild(factsCtx);
       if (built) {
         finalResponse = built;
+        invalidateQaSignals();
         guardrailEvents.push({ type: "guardrail_flagged", details: "final_qa_corrective_build_normal_path" });
       }
     }
@@ -718,6 +749,9 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
     } else {
       finalResponse = "Ich habe in diesem Schritt **nichts** gebaut — es wurden keine Tools ausgeführt und keine Datei oder App erstellt, daher existiert ein oben genannter Link/Inhalt nicht. Bestätige kurz, dann lasse ich den passenden Spezialisten die angeforderte Lösung jetzt **wirklich** bauen.\n\nI did **not** build anything in this turn — no tools ran and no file or app was created, so any link or deliverable named above does not exist. Confirm and I'll have the right specialist actually build it now.";
     }
+    // Every branch above replaced the answer wholesale — the latched QA verdict no
+    // longer describes the shipped text.
+    invalidateQaSignals();
   }
 
   // Last-line-of-defense honesty net (audit 52c23af8 turn 2): the false-completion

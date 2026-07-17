@@ -113,6 +113,75 @@ describe("swarm orchestration tools", () => {
     expect(tasks[0]?.attempts[1]?.agentName).toBe("retrieval_analyst");
   }, 30_000);
 
+  it("does not claim or execute a task when its scoped lease is already held", async () => {
+    const [{ getTool }, { acquireTaskLease, releaseTaskLease }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../swarm/locks.js"),
+      import("../tools/sub-agent.js"),
+    ]).then(([registry, locks]) => [registry, locks] as const);
+    const delegate = getTool("delegate_to_agent");
+    expect(delegate).toBeDefined();
+
+    const sessionId = "lease-contention-session";
+    const taskId = "task_1";
+    const task = "Collect docs";
+    const lease = await acquireTaskLease({
+      sessionId,
+      taskId,
+      taskSignature: "collect docs::collect docs::",
+      workspacePath: "/workspace",
+    }, 5_000);
+    expect(lease).not.toBeNull();
+
+    try {
+      const swarmState: SwarmState = {
+        objective: "Collect docs",
+        startedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        tasks: {},
+      };
+      const result = await delegate!.execute({
+        agentName: "researcher",
+        taskId,
+        taskTitle: task,
+        task,
+      }, { sessionId, workspacePath: "/workspace", swarmState });
+
+      // success:false — a contended task with NO published winner result must not
+      // let task graphs or parallel slices record a completion.
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("already claimed");
+      expect(result.metadata?.["leaseContended"]).toBe(true);
+      expect(result.metadata?.["inFlight"]).toBe(true);
+      expect(runSubAgentWithStatsMock).not.toHaveBeenCalled();
+      expect(swarmState.tasks[taskId]?.status).not.toBe("running");
+      expect(swarmState.tasks[taskId]?.attempts).toHaveLength(0);
+
+      // DST-103: once the owning worker publishes its fence-guarded result, a
+      // contender FOLLOWS it — success with the winner's output, still no local run.
+      const { publishTaskLeaseResult } = await import("../swarm/locks.js");
+      expect(await publishTaskLeaseResult(lease!, {
+        status: "completed",
+        output: "winner's collected docs",
+        agentName: "researcher",
+        finishedAt: new Date().toISOString(),
+      })).toBe(true);
+      const followed = await delegate!.execute({
+        agentName: "researcher",
+        taskId,
+        taskTitle: task,
+        task,
+      }, { sessionId, workspacePath: "/workspace", swarmState });
+      expect(followed.success).toBe(true);
+      expect(followed.output).toContain("winner's collected docs");
+      expect(followed.metadata?.["followedWinnerResult"]).toBe(true);
+      expect(followed.metadata?.["winnerAgent"]).toBe("researcher");
+      expect(runSubAgentWithStatsMock).not.toHaveBeenCalled();
+    } finally {
+      await releaseTaskLease(lease!);
+    }
+  }, 30_000);
+
   it("treats sub-agent exit-code stubs as failures and continues to fallback agents", async () => {
     runSubAgentWithStatsMock.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => {
       if (args.agentName === "web_task_coordinator") {

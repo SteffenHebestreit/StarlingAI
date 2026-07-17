@@ -16,6 +16,19 @@ jobs:
     name: typecheck · test · build
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    # Real Redis for the two-process coordination integration tests (DST-102).
+    # REDIS_URL is deliberately NOT set job-wide: unit tests stay hermetic on the
+    # in-process fallback; only the scoped integration step below points at this.
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
 
@@ -71,6 +84,15 @@ jobs:
       - name: Coverage gate (core)
         run: pnpm --filter @starlingai/core test:coverage
 
+      # DST-102 acceptance gate: two OS processes contending on the same lease
+      # scopes against REAL Redis — exactly one winner per round, fenced takeover,
+      # stale-owner rejection. REDIS_URL is scoped to this step only so every
+      # other test keeps exercising the hermetic in-process path.
+      - name: Two-process lease integration (real Redis)
+        env:
+          REDIS_URL: redis://localhost:6379
+        run: pnpm --filter @starlingai/core exec vitest run src/tests/task-lease.redis.integration.test.ts
+
       # Production build (tsc -p tsconfig.build.json + vite build).
       - name: Build
         run: pnpm build
@@ -80,6 +102,11 @@ jobs:
       # they reach a container). DEVPLAN P1 will extend this into a drift diff.
       - name: Config builds cleanly
         run: pnpm config:build
+
+      # The compiled config must be available and every public schema field must
+      # have a production read site; this catches inert flags before docs or operators advertise them.
+      - name: Config feature registry
+        run: pnpm config:audit-flags -- --strict --require-effective
 
   # Secret-scanning gate: catch a committed .env / token / private key before it
   # reaches history. Full-history scan (fetch-depth 0) so a secret added in ANY

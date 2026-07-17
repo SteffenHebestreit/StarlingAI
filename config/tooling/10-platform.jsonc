@@ -205,5 +205,12 @@
         "requireAuth": true
       }
     }
+  },
+  // Skill-lift measurement (dev-plan Phase 0 item 7 / P1 self-improvement finding):
+  // hold out the top matching skill on 15% of eligible turns so injected-vs-held-out
+  // outcomes measure whether a skill CAUSES success, instead of promoting on raw
+  // success rate. Schema default stays 0; this deployment opts into measurement.
+  "skillLibrary": {
+    "holdoutRate": 0.15
   }
 }

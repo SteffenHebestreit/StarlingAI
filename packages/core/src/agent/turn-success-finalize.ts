@@ -21,6 +21,7 @@ import { writeTrajectory, invalidateTrajectory } from "../memory/trajectory-cach
 import { graphMarkSessionRetrievalsUseful, graphMarkSessionRetrievalsUnhelpful } from "../memory/graph-service.js";
 import type { SwarmState } from "../tools/registry.js";
 import type { AgentSession } from "./session.js";
+import { buildTurnQualityScorecard, createTurnQualitySignals, type TurnQualitySignals } from "./turn-scorecard.js";
 import type { TurnOutput } from "./turn-types.js";
 
 export interface FinalizeSuccessfulTurnParams {
@@ -62,6 +63,8 @@ export interface FinalizeSuccessfulTurnParams {
   injectedTrajectoryIdentity: { normalizedQuery: string; finishedAt: string } | null;
   userMessage: string;
   guardrailEvents: TurnOutput["guardrailEvents"];
+  artifactCount?: number;
+  qualitySignals?: TurnQualitySignals;
 }
 
 /**
@@ -76,7 +79,7 @@ export function finalizeSuccessfulTurn(p: FinalizeSuccessfulTurnParams): TurnOut
     toolExecutionTimeMs, lastPromptMetrics, finishReason, iterationCount, totalUsage,
     delegationCount, shareFindingCount, forcedSynthesisFired, consecutiveDelegationFailures,
     sharedFindingsThisTurn, freshnessSensitive, injectedSkillSlugs, heldOutSkillSlugs,
-    injectedTrajectoryIdentity, userMessage, guardrailEvents,
+    injectedTrajectoryIdentity, userMessage, guardrailEvents, artifactCount, qualitySignals,
   } = p;
 
   persistTurnState(session, finalResponse, getTurnSwarmState());
@@ -105,16 +108,18 @@ export function finalizeSuccessfulTurn(p: FinalizeSuccessfulTurnParams): TurnOut
     channel: session.channel,
   });
 
-  // F29: Per-turn quality scorecard
-  logAudit("turn_scorecard", {
+  const qualityScorecard = buildTurnQualityScorecard({
     delegationCount,
     shareFindingCount,
     forcedSynthesisFired,
     wardenFailureCount: consecutiveDelegationFailures,
     finalAnswerLength: finalResponse.length,
     toolIterations: iterationCount,
-  }, { sessionId: session.id, channel: session.channel });
-
+    finishReason,
+    blocked: false,
+    artifactCount: artifactCount ?? 0,
+    quality: qualitySignals ?? createTurnQualitySignals(),
+  });
   // G33: Write trajectory for future cache reuse
   if (shareFindingCount > 0 && finalResponse.length > 50) {
     writeTrajectory(
@@ -216,5 +221,6 @@ export function finalizeSuccessfulTurn(p: FinalizeSuccessfulTurnParams): TurnOut
     blocked: false,
     swarmState: getTurnSwarmState(),
     performance,
+    qualityScorecard,
   };
 }

@@ -22,10 +22,15 @@
  *   shared session facts / partial results, which the original run already persisted.
  */
 import { createHash } from "node:crypto";
-import { readTaskGraphLedgerBlob, writeTaskGraphLedgerBlob } from "./memory.js";
+import { deleteTaskGraphNodes, readTaskGraphNodes, writeTaskGraphNode } from "./memory.js";
 import { childLogger } from "../logger.js";
+import { logAudit } from "../audit/logger.js";
 
 const log = childLogger("swarm:task-graph-ledger");
+
+/** Effect class of a node's work (GRF-206/ADR-005): reuse of a COMPLETED node is
+ *  always safe; a RETRY policy must never auto-replay `irreversible` work. */
+export type TaskGraphNodeEffectClass = "pure" | "idempotent" | "compensatable" | "irreversible";
 
 export interface TaskGraphLedgerEntry {
   /** The node id at completion time (display/debug — the KEY carries identity). */
@@ -34,6 +39,8 @@ export interface TaskGraphLedgerEntry {
   output: string;
   /** Artifact refs the node produced (capped), re-surfaced on reuse so downloads reappear. */
   artifacts?: Record<string, unknown>[];
+  /** Declared effect class; absent = unknown (treated as NOT safely replayable). */
+  effectClass?: TaskGraphNodeEffectClass;
   completedAt: string;
 }
 
@@ -103,25 +110,71 @@ export function upsertTaskGraphLedgerEntry(
   return next;
 }
 
+/** Parse one stored per-node field; a malformed field loses ONLY that field (GRF-206). */
+function parseNodeField(raw: string): TaskGraphLedgerEntry | null {
+  try {
+    const entry = JSON.parse(raw) as Record<string, unknown>;
+    if (typeof entry["nodeId"] !== "string" || typeof entry["output"] !== "string" || typeof entry["completedAt"] !== "string") return null;
+    return {
+      nodeId: entry["nodeId"],
+      output: entry["output"],
+      completedAt: entry["completedAt"],
+      ...(Array.isArray(entry["artifacts"]) ? { artifacts: entry["artifacts"] as Record<string, unknown>[] } : {}),
+      ...(typeof entry["effectClass"] === "string" ? { effectClass: entry["effectClass"] as TaskGraphNodeEffectClass } : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function readTaskGraphLedger(sessionId: string): Promise<TaskGraphLedger> {
   try {
-    return parseTaskGraphLedger(await readTaskGraphLedgerBlob(sessionId));
+    const fields = await readTaskGraphNodes(sessionId);
+    const ledger: TaskGraphLedger = {};
+    for (const [key, raw] of Object.entries(fields)) {
+      const entry = parseNodeField(raw);
+      if (entry) ledger[key] = entry;
+      else log.warn({ sessionId, key }, "task-graph ledger field malformed — skipped (others intact)");
+    }
+    return ledger;
   } catch (err) {
     log.warn({ err, sessionId }, "task-graph ledger read failed — treating as empty");
     return {};
   }
 }
 
-/** Read-modify-write a completed node into the session ledger. Never throws. */
+/**
+ * Record a completed node ATOMICALLY (one hash field, first-writer-wins — a
+ * completed node is terminal, so concurrent processes can never lose each
+ * other's completions; GRF-206 replaces the racy read-modify-write blob).
+ * Values are never truncated; the entry cap evicts EXPLICITLY with an audit.
+ */
 export async function recordCompletedTaskGraphNode(
   sessionId: string,
   key: string,
   entry: TaskGraphLedgerEntry,
 ): Promise<void> {
   try {
-    const ledger = parseTaskGraphLedger(await readTaskGraphLedgerBlob(sessionId));
-    const next = upsertTaskGraphLedgerEntry(ledger, key, entry);
-    await writeTaskGraphLedgerBlob(sessionId, JSON.stringify(next));
+    const bounded: TaskGraphLedgerEntry = {
+      nodeId: entry.nodeId,
+      output: entry.output.slice(0, LEDGER_OUTPUT_MAX),
+      completedAt: entry.completedAt,
+      ...(entry.artifacts && entry.artifacts.length > 0 ? { artifacts: entry.artifacts.slice(0, LEDGER_MAX_ARTIFACTS) } : {}),
+      ...(entry.effectClass ? { effectClass: entry.effectClass } : {}),
+    };
+    await writeTaskGraphNode(sessionId, key, JSON.stringify(bounded));
+
+    // Cap with explicit, audited eviction — never silent truncation.
+    const fields = await readTaskGraphNodes(sessionId);
+    const keys = Object.keys(fields);
+    if (keys.length > LEDGER_MAX_ENTRIES) {
+      const byAge = keys
+        .map((k) => ({ key: k, completedAt: parseNodeField(fields[k]!)?.completedAt ?? "" }))
+        .sort((a, b) => (a.completedAt < b.completedAt ? -1 : 1));
+      const evict = byAge.slice(0, keys.length - LEDGER_MAX_ENTRIES).map((e) => e.key);
+      await deleteTaskGraphNodes(sessionId, evict);
+      logAudit("task_graph_node_evicted", { evicted: evict.length, cap: LEDGER_MAX_ENTRIES }, { sessionId, severity: "info" });
+    }
   } catch (err) {
     log.warn({ err, sessionId, nodeId: entry.nodeId }, "task-graph ledger write failed — node will not be reusable");
   }

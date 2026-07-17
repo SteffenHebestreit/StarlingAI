@@ -45,6 +45,15 @@ async function getRedis(): Promise<unknown | null> {
     return _redis;
   } catch (err) {
     log.warn({ err }, "Redis ephemeral store connection failed");
+    // Dispose the failed client before dropping the reference — otherwise
+    // every failed probe leaks an ioredis instance with reconnect timers.
+    if (_redis) {
+      try {
+        (_redis as { disconnect: () => void }).disconnect();
+      } catch {
+        // ignore
+      }
+    }
     _redis = null;
     return null;
   }
@@ -52,6 +61,30 @@ async function getRedis(): Promise<unknown | null> {
 
 function redisKey(namespace: string, key: string): string {
   return `${KEY_PREFIX}${namespace}:${key}`;
+}
+
+const PROBE_TIMEOUT_MS = 2000;
+
+/**
+ * Live readiness probe — PINGs the connected client (or attempts a fresh
+ * connect when none exists) so post-boot outages surface instead of reusing
+ * boot-time init results. Never throws; errors and timeouts report false.
+ */
+export async function probeRedis(): Promise<boolean> {
+  try {
+    const probe = (async () => {
+      const r = await getRedis();
+      if (!r) return false;
+      await (r as { ping: () => Promise<unknown> }).ping();
+      return true;
+    })();
+    return await Promise.race([
+      probe,
+      new Promise<boolean>((resolve) => setTimeout(resolve, PROBE_TIMEOUT_MS, false)),
+    ]);
+  } catch {
+    return false;
+  }
 }
 
 export const redisBackend: EphemeralBackendDriver = {

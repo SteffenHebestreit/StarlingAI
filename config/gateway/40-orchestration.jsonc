@@ -17,6 +17,18 @@
     // for flow_verification_passed{reason:"qa_delivery_loop"}.
     "qaDeliveryLoop": true,
     "qaDeliveryLoopMaxRounds": 2,
+    // QPR-002 strict tri-state surfacing (dev-plan Phase 0 item 3): a bare/malformed
+    // reviewer PASS ships with an explicit unverified caveat instead of posing as
+    // QA-confirmed. Enabled here because this deployment's qaDeliveryLoop is otherwise
+    // experimental-without-labeling; committed pass^5 baseline: eval/baselines/
+    // agent-fable-root-pass5.json (2026-07-16). Schema default remains OFF.
+    "qaStrictVerdicts": true,
+    // QA-304: deterministic artifact probes before the QA verdict — objective
+    // FAILs for truncated/broken/dead artifacts, receipts for valid ones. No
+    // model call; cheap and deterministic, so enabled with strict verdicts.
+    "qaDeterministicProbes": true,
+    // (mission.store is set at the end of this file — it is a ROOT config key,
+    // not an orchestration flag.)
 
     // S4 — parallel discovery prefetch: on an escalated turn, agent + workflow
     // discovery run concurrently up-front and inject a compact [CAPABILITY CANDIDATES]
@@ -172,5 +184,37 @@
     // request forces the first tool call (existing forceToolChoice path), so a tool-free refusal
     // can't happen. No-op when the model already delegates (e.g. the Opus run). Structural.
     "autonomousModeAntiRefusal": true
+  },
+
+  // MIS-201 shadow rollout (dev-plan R2, ADR-001): record task-lifecycle swarm
+  // events into the durable mission event log (PostgreSQL via DATABASE_URL)
+  // WITHOUT changing any execution behavior. Schema default is "off"; this
+  // deployment opts into the additive shadow stage per the rollout policy.
+  "mission": {
+    "store": "shadow",
+    // BUD-203 shadow rollout: reserve/reconcile per-mission usage (tokens, tool
+    // calls, active time) on the atomic ledger. All ceilings 0 = unlimited, so
+    // nothing is ever refused yet — this records real per-mission spend to
+    // CALIBRATE the ceilings from the Phase-0 baseline before any enforcement.
+    "budget": {
+      "mode": "shadow"
+    },
+    // CAP-204 shadow rollout: probe the cross-process endpoint semaphore at
+    // dispatch (default 2 units — mirrors the single-GPU maxParallelSlices
+    // convention) and record `provider_admission_blocked` when saturated,
+    // WITHOUT blocking. Enforce only after the shadow data confirms the weights.
+    "capacity": {
+      "mode": "shadow"
+    },
+    // CTL-205: distributed session cancel — a cancel issued in any process
+    // aborts the owning process's turn (bus command + durable catch-up marker).
+    // Purely additive: local cancels behave exactly as before.
+    "control": {
+      "distributedCancel": true
+    },
+    // EVD-301 shadow rollout: share_evidence dual-writes append-only structured
+    // claims with write-time conflict detection. Legacy string-fact reads stay
+    // authoritative until the EVD-303 parity check.
+    "evidence": "shadow"
   }
 }

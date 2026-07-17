@@ -465,3 +465,61 @@ describe("multi-user auth Wave B — role gating", () => {
     expect(me?.role).toBe("operator");
   });
 });
+
+describe("multi-user auth — zero-users bootstrap window", () => {
+  let tempDir: string | null = null;
+
+  afterEach(async () => {
+    delete process.env["SAI_CONFIG_PATH"];
+    delete process.env["SAI_MUTABLE_CONFIG_PATH"];
+    if (tempDir) {
+      rmSync(tempDir, { recursive: true, force: true });
+      tempDir = null;
+    }
+    vi.resetModules();
+    const configLoader = await import("../config/loader.js");
+    configLoader.resetConfigForTests();
+    const auth = await import("../gateway/auth.js");
+    auth.resetAuthStateForTests();
+  });
+
+  it("resolves the bootstrap admin token via its claims while auth.users[] is empty", async () => {
+    // The lockout this prevents: auth.enabled=true ships in config BEFORE any
+    // account exists (config/gateway/30-auth.jsonc documents this state), so the
+    // sai-token JWT must keep working or no first account can ever be created.
+    tempDir = writeAuthConfig({ auth: { enabled: true, users: [] } });
+    vi.resetModules();
+    const auth = await import("../gateway/auth.js");
+    const token = await auth.createToken("admin", { role: "admin" });
+    const me = await auth.authenticatedUser(`Bearer ${token}`);
+    expect(me).not.toBeNull();
+    expect(me?.username).toBe("admin");
+    expect(me?.role).toBe("admin");
+  });
+
+  it("lets the bootstrap token create the first account", async () => {
+    tempDir = writeAuthConfig({ auth: { enabled: true, users: [] } });
+    vi.resetModules();
+    const auth = await import("../gateway/auth.js");
+    const token = await auth.createToken("admin", { role: "admin" });
+    const app = await buildAuthApp();
+    const res = await app.request("/api/auth/users", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ username: "steffen", password: "longenough", role: "operator" }),
+    });
+    expect(res.status).toBe(200);
+    const { getConfig } = await import("../config/loader.js");
+    expect(getConfig().auth.users.map((u) => u.username)).toEqual(["steffen"]);
+  });
+
+  it("closes the window once the first account exists", async () => {
+    // With one real account in the store, the live-store re-check is authoritative
+    // again: the claims-only bootstrap token no longer resolves.
+    tempDir = writeAuthConfig({ auth: { enabled: true, users: [userRec("alice", "operator")] } });
+    vi.resetModules();
+    const auth = await import("../gateway/auth.js");
+    const token = await auth.createToken("admin", { role: "admin" });
+    expect(await auth.authenticatedUser(`Bearer ${token}`)).toBeNull();
+  });
+});

@@ -93,6 +93,9 @@ export function createGatewayEvalRunner(options: GatewayRunnerOptions): GatewayE
   const pendingTurns = new Map<string, (r: { status: "ok" | "error" | "blocked"; response: string }) => void>();
   // sessionId → latest turn_performance payload (consumed when the turn finalizes).
   const lastPerfBySession = new Map<string, TurnPerf>();
+  // sessionId → latest turn_scorecard payload (QPR-004: eval reports consume the
+  // same quality schema the dashboard does).
+  const lastScorecardBySession = new Map<string, Record<string, unknown>>();
 
   function connect(): Promise<void> {
     if (ready) return ready;
@@ -126,6 +129,11 @@ export function createGatewayEvalRunner(options: GatewayRunnerOptions): GatewayE
             const sid = (ev["sessionId"] as string) ?? "";
             const data = (ev["data"] ?? ev) as TurnPerf;
             if (sid) lastPerfBySession.set(sid, data);
+          }
+          if (evType === "turn_scorecard" && ev) {
+            const sid = (ev["sessionId"] as string) ?? "";
+            const data = (ev["data"] ?? ev) as Record<string, unknown>;
+            if (sid) lastScorecardBySession.set(sid, data);
           }
           return;
         }
@@ -181,10 +189,17 @@ export function createGatewayEvalRunner(options: GatewayRunnerOptions): GatewayE
 
     const perf = lastPerfBySession.get(sessionId);
     lastPerfBySession.delete(sessionId);
+    const scorecard = lastScorecardBySession.get(sessionId);
+    lastScorecardBySession.delete(sessionId);
     log.info({ agentName: opts.agentName, sessionId, status, responseChars: response.length }, "gateway eval case complete");
     return {
       output: status === "ok" ? response : `Sub-agent error: ${response || status}`,
       stats: statsFromTurnPerformance(opts.agentName, sessionId, opts.task.length, perf, status),
+      // The v2 quality scorecard rides along verbatim when the turn emitted one —
+      // shape-validated at emission (TurnQualityScorecard), so pass-through is safe.
+      ...(scorecard && Number(scorecard["version"]) === 2
+        ? { qualityScorecard: scorecard as unknown as SubAgentRunResult["qualityScorecard"] }
+        : {}),
     };
   };
 

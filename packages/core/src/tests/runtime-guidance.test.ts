@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { buildDelegationLoopResponse, buildModelVisibleToolResult, buildRepeatedOutputFingerprint, buildTemporalContextPrompt, classifyPostOrchestrationDisposition, getPerTurnToolCallLimit } from "../agent/runtime.js";
 import { AgentSession } from "../agent/session.js";
 import { buildDynamicTurnGuidance, buildLanguageInstructionForTurn, toSoftRoutingHint, looksMultiDomainResearch } from "../agent/intent-classifier.js";
+import { computeTurnEnforcementSignals } from "../agent/turn-setup.js";
 
 describe("looksMultiDomainResearch", () => {
   it("treats short lookups/validations as single-domain", () => {
@@ -44,6 +45,32 @@ describe("toSoftRoutingHint", () => {
   it("returns blank input unchanged", () => {
     expect(toSoftRoutingHint("")).toBe("");
     expect(toSoftRoutingHint("   ")).toBe("   ");
+  });
+});
+
+describe("trustModelRouting enforcement", () => {
+  const signalsFor = (guidance: { sourceSensitive: boolean; freshnessSensitive: boolean }, trustModelRouting: boolean) =>
+    computeTurnEnforcementSignals({
+      effectiveToolMode: "orchestration_only",
+      initialDynamicGuidance: { prompt: "test", ...guidance },
+      channel: "webchat",
+      allowedToolNameSet: new Set<string>(),
+      userMessage: "test",
+      recentWorkflowAuthoringMaintenanceContext: false,
+      trustModelRouting,
+    });
+
+  it("keeps freshness-only routing advisory when the model is trusted", () => {
+    expect(signalsFor({ sourceSensitive: false, freshnessSensitive: true }, true).requiresDelegatedResearch).toBe(false);
+  });
+
+  it("restores the strict freshness gate when model routing is not trusted", () => {
+    expect(signalsFor({ sourceSensitive: false, freshnessSensitive: true }, false).requiresDelegatedResearch).toBe(true);
+  });
+
+  it("keeps source-sensitive work hard-gated regardless of the freshness policy", () => {
+    expect(signalsFor({ sourceSensitive: true, freshnessSensitive: false }, true).requiresDelegatedResearch).toBe(true);
+    expect(signalsFor({ sourceSensitive: true, freshnessSensitive: false }, false).requiresDelegatedResearch).toBe(true);
   });
 });
 

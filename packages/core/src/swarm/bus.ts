@@ -48,7 +48,10 @@ export type SwarmEventType =
   // Long-running task checkpoint events
   | "task_checkpoint_created"     // a long-running task started and registered a checkpoint
   | "task_checkpoint_paused"      // a task was paused mid-execution (timeout or explicit suspend)
-  | "task_checkpoint_resumed";    // a paused task was resumed
+  | "task_checkpoint_resumed"     // a paused task was resumed
+  // Distributed control plane (CTL-205)
+  | "session_cancel_requested"    // cancel command for a session's active turn — every process checks ownership
+  | "session_cancel_applied";     // the owning process aborted the turn (ack for observability)
 
 export interface SwarmEvent {
   id: string;

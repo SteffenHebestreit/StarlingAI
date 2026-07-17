@@ -220,9 +220,18 @@ export async function authenticatedUser(authHeader: string | null | undefined): 
     // expires (≤ TTL), not immediately. Documented in docs/iam-sso-oidc.md ("revocation
     // lag"); shorten the OIDC token lifetime if prompt off-boarding matters.
     if (getConfig().auth.provider !== "oidc") {
-      const record = getConfig().auth.users.find((u) => u.username === username);
-      if (!record) return null; // account deleted from config
-      return { username, role: normalizeRole(record.role), displayName: record.displayName };
+      const users = getConfig().auth.users;
+      // Bootstrap window (documented in config/gateway/30-auth.jsonc): with auth
+      // enabled but ZERO builtin accounts, a signed operator/admin JWT (`sai token`)
+      // must keep resolving via its own claims — otherwise the deployment is locked
+      // out of POST /api/auth/users and no first account can ever be created. The
+      // moment one account exists, the live-store re-check is authoritative again
+      // on every request.
+      if (users.length > 0) {
+        const record = users.find((u) => u.username === username);
+        if (!record) return null; // account deleted from config
+        return { username, role: normalizeRole(record.role), displayName: record.displayName };
+      }
     }
   }
 

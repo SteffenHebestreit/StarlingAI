@@ -76,7 +76,7 @@
       </div>
     </div>
 
-    <div v-if="scorecardSummary" class="mb-4 grid gap-3 md:grid-cols-4">
+    <div v-if="scorecardSummary" class="mb-4 grid gap-3 md:grid-cols-5">
       <div class="rounded-xl px-4 py-3 border border-indigo-900/40 bg-indigo-950/20">
         <div class="flex items-center justify-between gap-3">
           <div class="text-[11px] uppercase tracking-wide text-indigo-300">Delegations / turn</div>
@@ -151,6 +151,18 @@
           <path :d="scorecardSummary.wardenFailures.path" fill="none" stroke="currentColor" class="text-amber-400" stroke-width="1.5" />
         </svg>
         <div class="text-xs text-gray-400">Forced synth fires · warden line = delegation failures</div>
+      </div>
+
+      <div class="rounded-xl px-4 py-3 border border-violet-900/40 bg-violet-950/20">
+        <div class="text-[11px] uppercase tracking-wide text-violet-300">QA verdicts</div>
+        <div class="mt-1 flex items-baseline gap-2">
+          <span class="text-xl font-semibold text-emerald-400" title="verified pass">{{ scorecardSummary.qa.pass }}</span>
+          <span class="text-sm font-semibold text-amber-400" title="shipped unverified">{{ scorecardSummary.qa.unverified }}</span>
+          <span class="text-sm font-semibold text-rose-400" title="failed">{{ scorecardSummary.qa.fail }}</span>
+          <span class="text-sm text-gray-500" title="QA not run">{{ scorecardSummary.qa.notRun }}</span>
+        </div>
+        <div class="mt-2 text-xs text-gray-300">Evidence-backed {{ scorecardSummary.qa.evidenceBacked }} · artifact-probed {{ scorecardSummary.qa.probed }}</div>
+        <div class="text-xs text-gray-400">pass / unverified / fail / not run</div>
       </div>
     </div>
 
@@ -376,6 +388,16 @@ const scorecardSummary = computed(() => {
   const answerLengths = pick("finalAnswerLength");
   const wardenFailures = pick("wardenFailureCount");
   const forcedSynthTotal = ordered.filter((ev) => Boolean(ev.data.forcedSynthesisFired)).length;
+  // v2 QA signals (QPR-004): pre-v2 scorecards lack qaStatus and count as not_run.
+  const qaStatuses = ordered.map((ev) => String(ev.data.qaStatus ?? "not_run"));
+  const qa = {
+    pass: qaStatuses.filter((s) => s === "pass").length,
+    unverified: qaStatuses.filter((s) => s === "unverified").length,
+    fail: qaStatuses.filter((s) => s === "fail").length,
+    notRun: qaStatuses.filter((s) => s === "not_run").length,
+    evidenceBacked: ordered.filter((ev) => Boolean(ev.data.qaEvidencePresent)).length,
+    probed: ordered.filter((ev) => Number(ev.data.artifactProbeCount ?? 0) > 0).length,
+  };
   return {
     sampleSize: ordered.length,
     delegations: buildSparkline(delegations),
@@ -383,6 +405,7 @@ const scorecardSummary = computed(() => {
     answerLengths: buildSparkline(answerLengths),
     wardenFailures: buildSparkline(wardenFailures),
     forcedSynthTotal,
+    qa,
     avgDelegations: delegations.reduce((s, v) => s + v, 0) / delegations.length,
     avgIterations: iterations.reduce((s, v) => s + v, 0) / iterations.length,
     avgAnswerLength: answerLengths.reduce((s, v) => s + v, 0) / answerLengths.length,

@@ -67,7 +67,7 @@ One clarification that removes most confusion (see [primitives taxonomy](#a-note
 |---|---|---|
 | **Built-in tools** | The core registered tool surface (tiered) | Disable families/tools: `tools.disabledGroups[]` (only 4 valid names: `pentest`, `infrastructure`, `kubernetes`, `observability`) and `tools.disabledTools[]`. New tools added in code via `registerTool()` + `TOOL_TIER_MAP` |
 | **Dynamic / self-authored tools** | Swarm-built `selfdev__` tools (Tier 2, sandboxed) | `toolDevelopment.enabled`(false→true) for the sandbox; `selfImprovement.enabled` for the autonomous gap→tool loop |
-| **Plugins** | Third-party tool packages auto-loaded at boot | `plugins.enabled`(true), `plugins.dir`(default `~/.starlingai/plugins`); **Plugins page** (view) |
+| **Plugins** | Explicitly trusted third-party tool packages loaded at boot | `plugins.enabled`(**false**), `plugins.dir`(default `~/.starlingai/plugins`); **Plugins page** (view) |
 | **MCP servers (inbound)** | Bridge an external MCP server's tools in (`mcp__<server>__<tool>`) | `mcp.servers.<name>` (stdio/docker/docker-exec/http/tcp); `mcp.autoReconnect`; **MCP page** or `mcp-add` tool |
 | **MCP expose (outbound)** | Publish StarlingAI *as* an MCP server for Claude Desktop/Cursor/etc. | `mcp.expose.*`: `enabled`(false), `exposeTools/Agents/Scenes[]`, `allowTier2`(false), `http.requireAuth`(true) |
 | **Webhooks** | Turn any HTTP endpoint (n8n/Zapier/internal API) into a Tier-1 tool `webhook__<key>` | `webhooks.<key>` = `{ url, method, headers }`; `$ENV` in header values |

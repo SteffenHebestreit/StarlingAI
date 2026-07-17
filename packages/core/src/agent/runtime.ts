@@ -10,7 +10,7 @@ import { markOrchestratorActivity, markOrchestratorIdle } from "./cache-warmer.j
 import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type SwarmState, type ToolContext } from "../tools/registry.js";
 import { isToolAllowed } from "../guardrails/tool-tiers.js";
 import { loadTurnPlan, decidePlanContinuation, renderPlanContinuationDirective } from "./turn-plan.js";
-import { runQaDeliveryLoop, parseQaVerdict, type QaVerdict } from "./qa-delivery-loop.js";
+import { runQaDeliveryLoop, parseQaVerdict, resolveQaVerdictStatus, type QaVerdict, type QaVerdictStatus } from "./qa-delivery-loop.js";
 import {
   buildDeliverableConsistencyCheckMessages,
   buildDeliverableConsistencyRepairInstruction,
@@ -43,8 +43,12 @@ import { getMainAssistantToolNames, type MainAssistantToolMode } from "./default
 import { longRunningGenerationManager } from "./long-running-generation.js";
 import { turnSteeringManager } from "./turn-steering.js";
 import { registerSessionAbortController, deregisterSessionAbortController } from "./warden.js";
+import { consumePendingSessionCancel } from "../swarm/control.js";
 import { artifactFileLooksTruncated, runSubAgent } from "./sub-agent.js";
 import { collectJudgeableArtifactRefs, runQaToolJudgeCheck, type QaJudgeArtifactRef } from "./qa-tool-judge.js";
+import { probeArtifacts } from "./artifact-probes.js";
+import { listEvidenceClaims, sweepEvidenceConflicts } from "../swarm/evidence-ledger.js";
+import { deriveSharedSessionId } from "../tools/memory.js";
 import { join } from "node:path";
 import {
   runCorrectiveBuild as runCorrectiveBuildImpl,
@@ -210,6 +214,7 @@ export {
 import { applyTerminalResponseGuards, type TerminalGuardContext } from "./turn-finalize-guards.js";
 // Clean-success terminal tail (god-file seam).
 import { finalizeSuccessfulTurn } from "./turn-success-finalize.js";
+import { buildTurnQualityScorecard, createTurnQualitySignals, type ArtifactProbeStatus } from "./turn-scorecard.js";
 // Turn-setup spans lifted out of runTurnImpl (god-file seam).
 import { lookupTrajectoryInjection, computeTurnEnforcementSignals } from "./turn-setup.js";
 
@@ -1063,6 +1068,14 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
   const wardenAbort = new AbortController();
   const sessionId = opts.session.id;
   registerSessionAbortController(sessionId, wardenAbort);
+  // CTL-205 catch-up: a distributed cancel issued while no turn was live (or the
+  // owning process was restarting) is consumed at turn start and aborts now.
+  void consumePendingSessionCancel(sessionId).then((pending) => {
+    if (pending && !wardenAbort.signal.aborted) {
+      log.warn({ sessionId, reason: pending.reason, actor: pending.actor }, "Applying pending distributed cancel at turn start");
+      wardenAbort.abort();
+    }
+  }).catch(() => { /* durable marker check is best-effort */ });
   // Fresh turn: clear any per-turn "operator stopped" latch so a stop in a
   // previous turn never auto-stops this one's long-running generations.
   longRunningGenerationManager.clearStopRequested(sessionId);
@@ -1089,7 +1102,24 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
         deadlineMs: turnDeadlineMs,
         extendForDelegationWait: extendTurnDeadlineForDelegationWait,
       }));
-    return finalizeTurnOutput(out, sessionId);
+    const finalized = finalizeTurnOutput(out, sessionId);
+    const qualityScorecard = finalized.qualityScorecard ?? buildTurnQualityScorecard({
+      delegationCount: 0,
+      shareFindingCount: 0,
+      forcedSynthesisFired: false,
+      wardenFailureCount: 0,
+      finalAnswerLength: finalized.response.length,
+      toolIterations: finalized.performance?.toolIterations ?? finalized.toolCallsExecuted,
+      finishReason: finalized.performance?.finishReason ?? (finalized.blocked ? "blocked" : "unknown"),
+      blocked: finalized.blocked,
+      artifactCount: 0,
+    });
+    logAudit("turn_scorecard", { ...qualityScorecard }, {
+      sessionId,
+      channel: opts.session.channel,
+      severity: "info",
+    });
+    return { ...finalized, qualityScorecard };
   } catch (err) {
     // A thrown/aborted turn (provider hard-timeout, the per-turn timeout abort, a
     // Warden cancel, or any unexpected throw) bypasses finalizeTurnOutput's
@@ -1105,6 +1135,20 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
       wardenAborted: wardenAbort.signal.aborted === true,
     });
     recordTurnFailure(opts.session, err, kind);
+    logAudit("turn_scorecard", {
+      ...buildTurnQualityScorecard({
+        delegationCount: 0,
+        shareFindingCount: 0,
+        forcedSynthesisFired: false,
+        wardenFailureCount: 0,
+        finalAnswerLength: 0,
+        toolIterations: 0,
+        finishReason: kind,
+        blocked: false,
+        failed: kind !== "cancelled",
+        artifactCount: 0,
+      }),
+    }, { sessionId, channel: opts.session.channel, severity: "error" });
     throw err;
   } finally {
     if (timeoutHandle) clearTimeout(timeoutHandle);
@@ -1395,6 +1439,20 @@ async function _runTurn(
   let _turnDelegationCount = 0;
   let _turnShareFindingCount = 0;
   let _forcedSynthesisFired = false;
+  const turnQualitySignals = createTurnQualitySignals();
+  const buildCurrentTurnScorecard = (finalAnswerLength: number, finishReason: string, blocked = false) =>
+    buildTurnQualityScorecard({
+      delegationCount: _turnDelegationCount,
+      shareFindingCount: _turnShareFindingCount,
+      forcedSynthesisFired: _forcedSynthesisFired,
+      wardenFailureCount: _consecutiveDelegationFailures,
+      finalAnswerLength,
+      toolIterations: iterationCount,
+      finishReason,
+      blocked,
+      artifactCount: collectTurnArtifactAttachments(session).filter((artifact) => artifact["isDirectory"] !== true).length,
+      quality: turnQualitySignals,
+    });
   // Final-response QA gate: at most ONE corrective build per turn (shared latch across both
   // finalization paths — normal-stop and forced-terminal).
   let qaCorrectiveBuildUsed = false;
@@ -1616,10 +1674,14 @@ async function _runTurn(
             toolExecutionTimeMs, lastPromptMetrics, completionChars: finalResponse.length,
             finishReason: "aborted_synthesized", blocked: false, toolIterations: iterationCount,
           });
+          // Truthful scorecard: without this, the outer fallback fabricates zeroed
+          // counters and a 'completed' classification for a timed-out partial turn.
+          _forcedSynthesisFired = true;
           return {
             response: finalResponse, toolCallsExecuted: iterationCount,
             guardrailEvents, usage: totalUsage, blocked: false,
             swarmState: getTurnSwarmState(), performance,
+            qualityScorecard: buildCurrentTurnScorecard(finalResponse.length, "aborted_synthesized"),
           };
         }
       }
@@ -1782,10 +1844,13 @@ async function _runTurn(
               toolExecutionTimeMs, lastPromptMetrics, completionChars: finalResponse.length,
               finishReason: "oversight_floor_synthesized", blocked: false, toolIterations: iterationCount,
             });
+            // Truthful scorecard for the floor delivery (see the timeout path above).
+            _forcedSynthesisFired = true;
             return {
               response: finalResponse, toolCallsExecuted: iterationCount,
               guardrailEvents, usage: totalUsage, blocked: false,
               swarmState: getTurnSwarmState(), performance,
+              qualityScorecard: buildCurrentTurnScorecard(finalResponse.length, "oversight_floor_synthesized"),
             };
           }
           // Synthesis came back empty — fall through and keep looping (never worse than today).
@@ -2017,15 +2082,6 @@ async function _runTurn(
           channel: session.channel,
           severity: "info",
         });
-        logAudit("turn_scorecard", {
-          delegationCount: _turnDelegationCount,
-          shareFindingCount: _turnShareFindingCount,
-          forcedSynthesisFired: _forcedSynthesisFired,
-          wardenFailureCount: _consecutiveDelegationFailures,
-          finalAnswerLength: finalResponse.length,
-          toolIterations: iterationCount,
-          finishReason: "llm_error_evidence_backstop",
-        }, { sessionId: session.id, channel: session.channel, severity: "info" });
         return {
           response: finalResponse,
           toolCallsExecuted: iterationCount,
@@ -2034,6 +2090,7 @@ async function _runTurn(
           blocked: false,
           swarmState: getTurnSwarmState(),
           performance,
+          qualityScorecard: buildCurrentTurnScorecard(finalResponse.length, "llm_error_evidence_backstop"),
         };
       }
       return blocked(
@@ -2908,6 +2965,7 @@ async function _runTurn(
         runCorrectiveBuild,
         runCorrectiveReroute,
         logWarn: (obj, msg) => log.warn(obj, msg),
+        scorecardSignals: turnQualitySignals,
       };
       const finalResponse = await applyTerminalResponseGuards(terminalGuardCtx);
 
@@ -2940,6 +2998,8 @@ async function _runTurn(
         injectedTrajectoryIdentity,
         userMessage,
         guardrailEvents,
+        artifactCount: collectTurnArtifactAttachments(session).filter((artifact) => artifact["isDirectory"] !== true).length,
+        qualitySignals: turnQualitySignals,
       });
     }
 
@@ -3069,17 +3129,6 @@ async function _runTurn(
             severity: "info",
           });
 
-          // F29: Per-turn quality scorecard (delegate-loop-terminated path)
-          logAudit("turn_scorecard", {
-            delegationCount: _turnDelegationCount,
-            shareFindingCount: _turnShareFindingCount,
-            forcedSynthesisFired: _forcedSynthesisFired,
-            wardenFailureCount: _consecutiveDelegationFailures,
-            finalAnswerLength: finalResponse.length,
-            toolIterations: iterationCount,
-            finishReason: "delegate_loop_terminated",
-          }, { sessionId: session.id, channel: session.channel, severity: "info" });
-
           return {
             response: finalResponse,
             toolCallsExecuted: iterationCount,
@@ -3088,6 +3137,7 @@ async function _runTurn(
             blocked: false,
             swarmState: getTurnSwarmState(),
             performance,
+            qualityScorecard: buildCurrentTurnScorecard(finalResponse.length, "delegate_loop_terminated"),
           };
         }
 
@@ -3542,17 +3592,6 @@ async function _runTurn(
               severity: "info",
             });
 
-            // F29: Per-turn quality scorecard (identical-output loop terminated path)
-            logAudit("turn_scorecard", {
-              delegationCount: _turnDelegationCount,
-              shareFindingCount: _turnShareFindingCount,
-              forcedSynthesisFired: _forcedSynthesisFired,
-              wardenFailureCount: _consecutiveDelegationFailures,
-              finalAnswerLength: finalResponse.length,
-              toolIterations: iterationCount,
-              finishReason: "delegate_loop_terminated",
-            }, { sessionId: session.id, channel: session.channel, severity: "info" });
-
             return {
               response: finalResponse,
               toolCallsExecuted: iterationCount,
@@ -3561,6 +3600,7 @@ async function _runTurn(
               blocked: false,
               swarmState: getTurnSwarmState(),
               performance,
+              qualityScorecard: buildCurrentTurnScorecard(finalResponse.length, "delegate_loop_terminated"),
             };
           }
 
@@ -3705,15 +3745,6 @@ async function _runTurn(
           }, { sessionId: session.id, channel: session.channel, severity: "info" });
           logAudit("turn_performance", { ...performance, usage: totalUsage }, { sessionId: session.id, channel: session.channel });
           logAudit("message_sent", { length: finalResponse.length, toolCalls: iterationCount, usage: totalUsage, performance }, { sessionId: session.id, channel: session.channel });
-          logAudit("turn_scorecard", {
-            delegationCount: _turnDelegationCount,
-            shareFindingCount: _turnShareFindingCount,
-            forcedSynthesisFired: _forcedSynthesisFired,
-            wardenFailureCount: _consecutiveDelegationFailures,
-            finalAnswerLength: finalResponse.length,
-            toolIterations: iterationCount,
-            finishReason: "single_deliverable_relayed",
-          }, { sessionId: session.id, channel: session.channel });
           return {
             response: finalResponse,
             toolCallsExecuted: iterationCount,
@@ -3722,6 +3753,7 @@ async function _runTurn(
             blocked: false,
             swarmState: getTurnSwarmState(),
             performance,
+            qualityScorecard: buildCurrentTurnScorecard(finalResponse.length, "single_deliverable_relayed"),
           };
         }
         // Artifact-aware variant: when the orchestration produced attached files,
@@ -4208,15 +4240,6 @@ async function _runTurn(
     channel: session.channel,
     severity: "info",
   });
-  logAudit("turn_scorecard", {
-    delegationCount: _turnDelegationCount,
-    shareFindingCount: _turnShareFindingCount,
-    forcedSynthesisFired: _forcedSynthesisFired,
-    wardenFailureCount: _consecutiveDelegationFailures,
-    finalAnswerLength: finalMsg.length,
-    toolIterations: iterationCount,
-    finishReason: terminalFinishReason,
-  }, { sessionId: session.id, channel: session.channel, severity: "info" });
   return {
     response: finalMsg,
     toolCallsExecuted: iterationCount,
@@ -4225,6 +4248,7 @@ async function _runTurn(
     blocked: false,
     swarmState: getTurnSwarmState(),
     performance,
+    qualityScorecard: buildCurrentTurnScorecard(finalMsg.length, terminalFinishReason),
   };
 }
 
@@ -4332,7 +4356,7 @@ async function runQaDeliveryGate(
   maxRounds: number,
   escalate?: (current: string, flaws: string, crit: string[]) => Promise<string | null>,
   requireEvidence = false,
-): Promise<{ answer: string; changed: boolean; rounds: number; passed: boolean; escalated: boolean; unverified: boolean }> {
+): Promise<{ answer: string; changed: boolean; rounds: number; passed: boolean; status: QaVerdictStatus; evidence?: string; artifactProbeStatus: ArtifactProbeStatus; artifactProbeCount: number; escalated: boolean; unverified: boolean }> {
   const verdictProvider = getChatProviderForTier("synthesis") ?? provider;
 
   // Tool-equipped clean-context judge (orchestration.qaToolJudge): when this turn produced
@@ -4347,6 +4371,8 @@ async function runQaDeliveryGate(
   // judge must still be downgraded to unverified, which previously only happened if the separate
   // qaEvidenceRequired flag was also on — contradicting the judge's contract. OR them here.
   const effectiveRequireEvidence = requireEvidence || qaToolJudgeOn;
+  let artifactProbeStatus: ArtifactProbeStatus = qaToolJudgeOn ? "not_applicable" : "not_requested";
+  let artifactProbeCount = 0;
   const toolJudgeCheck = async (current: string, crit: string[], refs: QaJudgeArtifactRef[]): Promise<QaVerdict> =>
     runQaToolJudgeCheck(current, crit, refs, async (task, allowedTools) =>
       runSubAgent({
@@ -4371,6 +4397,29 @@ async function runQaDeliveryGate(
 
   const check = async (current: string, crit: string[]): Promise<QaVerdict> => {
     if (signal.aborted) return { pass: true }; // fail open on abort
+    // QA-304: deterministic artifact probes run FIRST — no model call. A broken,
+    // truncated, or dead artifact is an objective FAIL with reproducible receipts
+    // that no reviewer prose can rubber-stamp past; passing receipts become
+    // evidence for the verdict.
+    if (effectiveOrchestration().qaDeterministicProbes) {
+      const probeRefs = collectJudgeableArtifactRefs(collectTurnArtifactAttachments(session));
+      if (probeRefs.length > 0) {
+        const report = await probeArtifacts(probeRefs, { workspacePath: session.getWorkspacePath() });
+        artifactProbeCount = report.probedCount;
+        if (report.status === "fail") {
+          artifactProbeStatus = "fail";
+          const failures = report.receipts.filter((receipt) => receipt.status === "fail")
+            .map((receipt) => `${receipt.target}: ${receipt.detail}`).slice(0, 4).join("; ");
+          logAudit("flow_verification_repaired", {
+            reason: "artifact_probe_failed",
+            failures,
+            probedCount: report.probedCount,
+          }, { sessionId: session.id, severity: "warn" });
+          return { pass: false, flaws: `Deterministic artifact probes failed: ${failures}` };
+        }
+        artifactProbeStatus = "pass";
+      }
+    }
     // Recompute the artifact refs EACH round from the live session, so a coordinator-escalation
     // round that rebuilt the deliverable to a new artifact path is inspected — not the superseded
     // originals frozen at gate entry.
@@ -4378,11 +4427,32 @@ async function runQaDeliveryGate(
       ? collectJudgeableArtifactRefs(collectTurnArtifactAttachments(session))
       : [];
     if (toolJudgeRefs.length > 0) {
+      artifactProbeCount = toolJudgeRefs.length;
       try {
-        return await toolJudgeCheck(current, crit, toolJudgeRefs);
+        const verdict = await toolJudgeCheck(current, crit, toolJudgeRefs);
+        artifactProbeStatus = resolveQaVerdictStatus(verdict);
+        return verdict;
       } catch (err) {
+        artifactProbeStatus = "error";
         log.debug({ err, sessionId: session.id }, "qa tool judge failed — falling back to prose verdict");
       }
+    }
+    // QA-305: unresolved MATERIAL evidence conflicts are verification work the
+    // verdict must respect — an answer asserting one disputed value as settled
+    // fact cannot pass while the dispute is open.
+    let disputedEvidenceBlock = "";
+    if (getConfig().mission.evidence !== "off") {
+      try {
+        const conflicts = (await sweepEvidenceConflicts(deriveSharedSessionId(session.id)))
+          .filter((result) => result.outcome === "material");
+        if (conflicts.length > 0) {
+          disputedEvidenceBlock = "\nDISPUTED EVIDENCE — these subjects carry unresolved conflicting values from different sources:\n"
+            + conflicts.map((conflict) => conflict.outcome === "material"
+              ? `- ${conflict.subject}: ${conflict.claims.map((claim) => `"${claim.value.slice(0, 80)}"`).join(" vs ")}`
+              : "").filter(Boolean).join("\n")
+            + "\nAn answer stating any of these disputed values as settled fact WITHOUT acknowledging the conflict FAILS.";
+        }
+      } catch { /* evidence sweep is best-effort */ }
     }
     // No-PASS-without-evidence (orchestration.qaEvidenceRequired / implied by qaToolJudge): ask the
     // reviewer to ground a PASS in a concrete verifiable fact. A PASS with no evidence is downgraded
@@ -4394,6 +4464,7 @@ async function runQaDeliveryGate(
       "You are a strict QA reviewer. Judge ONLY whether the ANSWER below satisfies EVERY acceptance criterion for the user's task. Do not rewrite it.",
       "Acceptance criteria:",
       ...crit.map((c, i) => `${i + 1}. ${c}`),
+      ...(disputedEvidenceBlock ? [disputedEvidenceBlock] : []),
       "",
       "ANSWER:",
       current,
@@ -4428,12 +4499,49 @@ async function runQaDeliveryGate(
     return candidate;
   };
 
-  const result = await runQaDeliveryLoop(answer, criteria, { check, improve, maxRounds, requireEvidence: effectiveRequireEvidence, ...(escalate ? { escalate } : {}) });
+  const result = await runQaDeliveryLoop(answer, criteria, {
+    check,
+    improve,
+    maxRounds,
+    requireEvidence: effectiveRequireEvidence,
+    strict: effectiveOrchestration().qaStrictVerdicts,
+    ...(escalate ? { escalate } : {}),
+  });
+
+  // QA-305 answer map: which ledger claims does the shipped answer actually
+  // rest on? Matched claim ids become replayable receipts in the audit trail.
+  if (getConfig().mission.evidence !== "off") {
+    try {
+      const claims = await listEvidenceClaims(deriveSharedSessionId(session.id));
+      if (claims.length > 0) {
+        const answerNorm = result.answer.toLowerCase();
+        const matched = claims.filter((claim) =>
+          (claim.valueNorm.length >= 8 && answerNorm.includes(claim.valueNorm.slice(0, 60)))
+          || answerNorm.includes(claim.canonicalSubject));
+        if (matched.length > 0) {
+          logAudit("answer_evidence_map", {
+            matchedClaims: matched.slice(0, 20).map((claim) => ({
+              claimId: claim.claimId,
+              subject: claim.canonicalSubject,
+              validationState: claim.validationState,
+              ...(claim.sourceUrl ? { sourceUrl: claim.sourceUrl } : {}),
+            })),
+            totalClaims: claims.length,
+            disputedAsserted: matched.filter((claim) => claim.validationState === "disputed").length,
+          }, { sessionId: session.id, severity: "info" });
+        }
+      }
+    } catch { /* the map is observational */ }
+  }
   return {
     answer: result.answer,
     changed: result.answer.trim() !== answer.trim(),
     rounds: result.rounds,
     passed: result.passed,
+    status: result.status,
+    ...(result.evidence ? { evidence: result.evidence.slice(0, 500) } : {}),
+    artifactProbeStatus,
+    artifactProbeCount,
     escalated: result.escalated,
     unverified: result.unverified,
   };

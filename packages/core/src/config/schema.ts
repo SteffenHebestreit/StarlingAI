@@ -212,11 +212,13 @@ export const RateLimitSchema = z.object({
 export const MainAssistantConfigSchema = z.object({
   toolMode: z.enum(["hybrid", "orchestration_only", "delegate_only"]).default("orchestration_only"),
   customInstructions: z.string().trim().min(1).max(16000).optional(),
-  // When true (default), the model's own routing decision is trusted: keyword
-  // freshness/source signals become advisory hints in the turn guidance rather
-  // than a hard gate that forces delegation. The never-empty release still
-  // applies in either mode. Set false to restore the strict "must delegate for
-  // fresh/source-sensitive work" enforcement.
+  // When true (default), the model's own routing decision is trusted: a
+  // freshness signal stays advisory instead of forcing delegation; false
+  // restores the strict enforcement. The flag is read at runtime
+  // (agent/turn-setup.ts) and tested at that enforcement site, but the
+  // production intent classifier currently hardwires freshnessSensitive=false
+  // (intent-classifier.ts), so flipping it has no production effect until the
+  // classifier emits that signal — tracked in dev-plan QPR-003.
   trustModelRouting: z.boolean().default(true),
 });
 
@@ -1386,8 +1388,87 @@ export const ReceptionistSchema = z.object({
   confidenceAttemptMaxChars: z.number().int().min(120).max(1_000).default(400),
 });
 
+export const DeploymentSchema = z.object({
+  /**
+   * Defines the coordination and isolation guarantees the gateway is allowed to
+   * claim. Clustered modes fail readiness instead of silently using in-process
+   * Redis/PostgreSQL fallbacks.
+   */
+  mode: z.enum(["single_process", "trusted_cluster", "untrusted_multi_tenant"]).default("single_process"),
+});
+export type DeploymentConfig = z.infer<typeof DeploymentSchema>;
+
+export const MissionSchema = z.object({
+  /**
+   * Mission store rollout stage (MIS-201, ADR-001). "off" records nothing.
+   * "shadow" starts the swarm-event bridge: task-lifecycle events append to the
+   * durable mission event log (PostgreSQL when DATABASE_URL is set, process-
+   * local otherwise) WITHOUT changing any execution behavior — the additive
+   * first rollout stage the dev plan prescribes for every stateful replacement.
+   */
+  store: z.enum(["off", "shadow"]).default("off"),
+  /**
+   * Mission budget envelope (BUD-203): one atomic ledger per mission that every
+   * child delegation reserves against BEFORE dispatch and reconciles to actual
+   * usage after. "shadow" records would-be refusals (audit `mission_budget_refused`)
+   * without blocking; "enforce" refuses dispatch when the envelope cannot fit a
+   * child's reserve. Limits of 0 = unlimited (that dimension is not tracked
+   * against a ceiling; usage is still recorded).
+   */
+  budget: z.object({
+    mode: z.enum(["off", "shadow", "enforce"]).default("off"),
+    /** Hard ceiling on total (prompt+completion) tokens per mission. 0 = unlimited. */
+    maxTotalTokens: z.number().int().min(0).default(0),
+    /** Hard ceiling on tool calls per mission. 0 = unlimited. */
+    maxToolCalls: z.number().int().min(0).default(0),
+    /** Hard ceiling on active compute time per mission (ms). 0 = unlimited. */
+    maxActiveTimeMs: z.number().int().min(0).default(0),
+    /** Estimated reserve debited per child delegation until actuals reconcile. */
+    childReserveTokens: z.number().int().min(0).default(8_000),
+    childReserveToolCalls: z.number().int().min(0).default(15),
+    childReserveActiveTimeMs: z.number().int().min(0).default(600_000),
+  }).default({}),
+  /**
+   * Provider capacity broker (CAP-204): a cross-process weighted semaphore per
+   * provider endpoint, so multiple gateway/worker processes honor ONE
+   * configured concurrency instead of multiplying it. Slice 1 admits at
+   * delegation granularity. "shadow" records would-block admissions
+   * (`provider_admission_blocked` audit) without blocking; "enforce" waits up
+   * to acquireTimeoutMs, then refuses the dispatch.
+   */
+  /**
+   * Canonical evidence ledger (EVD-301, ADR-006). "shadow" dual-writes every
+   * `share_evidence` record as an append-only structured claim with write-time
+   * same-subject conflict detection — legacy string-fact readers stay
+   * authoritative until EVD-303 shows parity.
+   */
+  evidence: z.enum(["off", "shadow"]).default("off"),
+  /**
+   * Distributed control plane (CTL-205). `distributedCancel` lets a cancel
+   * issued in ANY gateway/worker process abort a turn owned by another:
+   * immediate delivery over the swarm bus (owner-checked) plus a durable Redis
+   * marker consumed at turn start (catch-up across restarts). Idempotent by
+   * command id; every applied command leaves an audit + mission event.
+   */
+  control: z.object({
+    distributedCancel: z.boolean().default(false),
+  }).default({}),
+  capacity: z.object({
+    mode: z.enum(["off", "shadow", "enforce"]).default("off"),
+    /** Concurrent weighted units per provider endpoint (single-GPU default: 2). */
+    endpointUnits: z.number().int().min(1).default(2),
+    /** How long an enforce-mode admission may wait before refusing (ms). */
+    acquireTimeoutMs: z.number().int().min(0).default(30_000),
+    /** Permit TTL — a crashed holder frees its units within this window (ms). */
+    permitTtlMs: z.number().int().min(5_000).default(120_000),
+  }).default({}),
+});
+export type MissionConfig = z.infer<typeof MissionSchema>;
+
 export const ConfigSchema = z.object({
   providers: ProvidersSchema.default({}),
+  deployment: DeploymentSchema.default({}),
+  mission: MissionSchema.default({}),
   agents: z.object({
     defaults: z.object({
       model: ModelConfigSchema.default({}),
@@ -1583,7 +1664,7 @@ export const ConfigSchema = z.object({
    * approval) — plugins cannot grant themselves higher tiers.
    */
   plugins: z.object({
-    enabled: z.boolean().default(true),
+    enabled: z.boolean().default(false),
     dir: z.string().optional(),
   }).default({}),
   /**

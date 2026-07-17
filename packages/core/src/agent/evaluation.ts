@@ -5,6 +5,12 @@ import { randomUUID } from "node:crypto";
 import { getConfig } from "../config/loader.js";
 import type { SubAgentRunOptions, SubAgentRunResult } from "./sub-agent.js";
 import { runSubAgentWithStats } from "./sub-agent.js";
+import {
+  buildEvaluationProvenance,
+  captureEvaluationHardwareState,
+  captureEvaluationSourceState,
+  type EvaluationProvenance,
+} from "./evaluation-provenance.js";
 // Register the full built-in tool surface so evaluated agents can actually call
 // their tools (write_file, generate_document, …). Without this the offline eval
 // runs agents against an incomplete registry and silently mis-scores them.
@@ -77,6 +83,10 @@ export interface AgentEvaluationCaseResult {
   /** pass@k — at least one attempt passed. */
   passAtK?: boolean;
   runDurationsMs?: number[];
+  /** QPR-004: quality scorecard of the (last) attempt's turn, when the transport
+   *  surfaced one — gateway-routed runs capture the turn_scorecard audit event,
+   *  so eval reports and the dashboard consume the same schema. */
+  qualityScorecard?: import("./turn-scorecard.js").TurnQualityScorecard;
 }
 
 export interface AgentEvaluationReport {
@@ -99,6 +109,8 @@ export interface AgentEvaluationReport {
   /** Effective max concurrent attempts used for this run (A18). >1 means per-attempt
    *  durations are contended, so latency regressions are not flagged against this run. */
   concurrency?: number;
+  /** Reproducibility fingerprint for source, configuration, evaluated prompts/models, and hardware. */
+  provenance?: EvaluationProvenance;
   workspacePath: string;
   results: AgentEvaluationCaseResult[];
 }
@@ -247,11 +259,16 @@ async function mapWithConcurrency<R>(count: number, limit: number, fn: (index: n
 export async function evaluateAgentPlan(
   plan: AgentEvaluationPlan,
   runner: AgentEvaluationRunner = runSubAgentWithStats,
+  opts?: { transport?: "in_process" | "gateway" },
 ): Promise<AgentEvaluationReport> {
   const config = getConfig();
   const workspacePath = plan.workspacePath ?? config.workspacePath;
   const planRepeat = Math.max(1, Math.floor(plan.repeat ?? 1));
   const planConcurrency = Math.max(1, Math.floor(plan.concurrency ?? 1));
+  // Snapshot source/hardware BEFORE any case runs — the run's own workspace writes
+  // would otherwise contaminate the source digest (git diff/status of eval artifacts).
+  const source = captureEvaluationSourceState();
+  const hardware = captureEvaluationHardwareState();
   const results: AgentEvaluationCaseResult[] = [];
 
   for (const testCase of plan.cases) {
@@ -297,6 +314,7 @@ export async function evaluateAgentPlan(
       passCaretK,
       passAtK,
       runDurationsMs,
+      ...(lastResult?.qualityScorecard ? { qualityScorecard: lastResult.qualityScorecard } : {}),
     });
   }
 
@@ -311,6 +329,7 @@ export async function evaluateAgentPlan(
     flakyCases: results.filter((result) => result.passAtK && !result.passCaretK).length,
     erroredCases: results.filter((result) => result.status === "error").length,
     concurrency: planConcurrency,
+    provenance: buildEvaluationProvenance({ plan, config, results, source, hardware, transport: opts?.transport ?? "in_process" }),
     workspacePath,
     results,
   };

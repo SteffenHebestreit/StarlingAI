@@ -64,7 +64,7 @@ import { isSwarmBusConnected } from "../swarm/bus.js";
 import { getAgentCapabilitySnapshot } from "../swarm/capabilities.js";
 import { getBidderWorkerStatus } from "../swarm/bidder-worker.js";
 import { getSceneJobWorkerStatus } from "../agent/scene-worker.js";
-import { getAgentMessageBacklogSnapshot, readAllFacts } from "../swarm/memory.js";
+import { getAgentMessageBacklog, readAllFacts } from "../swarm/memory.js";
 import { deriveSharedSessionId } from "../tools/memory.js";
 import { turnSteeringManager } from "../agent/turn-steering.js";
 import { getLoadedDynamicTools, listPromotionCandidates, approvePromotion, rejectPromotion, getDynamicToolStats } from "../tools/dynamic-tools.js";
@@ -165,10 +165,11 @@ export function createGateway() {
     // routes that gate on bare verifyToken cannot keep honoring a revoked token for its
     // full ~24h TTL. A request with NO token falls through untouched, so public/pre-auth
     // routes (login, /api/auth/mode, oidc, health) and each route's own 401 still work.
-    // Under active auth no standing token exists outside the user store (the bootstrap
-    // admin token is printed only with auth OFF), so this never rejects a legitimate
-    // operator token; OIDC tokens resolve via validated claims and are unaffected (their
-    // revocation lag is a separate, documented limitation).
+    // Two token classes legitimately resolve outside the user store and are NOT
+    // rejected here: the bootstrap admin token while auth.users[] is still empty
+    // (authenticatedUser's bootstrap window — without it the first account could
+    // never be created), and OIDC tokens, which resolve via validated IdP claims
+    // (their revocation lag is a separate, documented limitation).
     if (!user) {
       const token = extractBearerToken(authHeader);
       if (token && await verifyToken(token)) {
@@ -1320,7 +1321,7 @@ export function createGateway() {
 
     const { listLoadedPlugins, resolvePluginsDir } = await import("../plugin/loader.js");
     return c.json({
-      enabled: getConfig().plugins?.enabled !== false,
+      enabled: getConfig().plugins?.enabled === true,
       directory: resolvePluginsDir(),
       plugins: listLoadedPlugins(),
     });
@@ -3442,7 +3443,7 @@ export function createGateway() {
     const globalConcurrency = getGlobalConcurrencySnapshot();
     const busConnected = isSwarmBusConnected();
     const capabilities = getAgentCapabilitySnapshot();
-    const directMessages = getAgentMessageBacklogSnapshot();
+    const directMessages = await getAgentMessageBacklog();
     const bottlenecks = concurrency
       .filter(s => s.oldestQueuedMs > 0 || s.utilization >= 0.9)
       .sort((left, right) => right.oldestQueuedMs - left.oldestQueuedMs || right.utilization - left.utilization);

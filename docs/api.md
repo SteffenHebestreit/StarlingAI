@@ -43,7 +43,7 @@ Scene webhooks are the main exception: `POST /api/scenes/:name/run` can authenti
 | Method | Path | Notes |
 | --- | --- | --- |
 | `GET` | `/healthz` | returns `{ "status": "ok" }` |
-| `GET` | `/readyz` | returns readiness, active-session count, latest event-loop lag, and in-flight provider activity (producing / prefill / stalled) |
+| `GET` | `/readyz` | returns readiness, active-session count, deployment-mode dependencies, latest event-loop lag, and in-flight provider activity (producing / prefill / stalled); clustered modes return `503` when Redis or PostgreSQL is unavailable |
 | `GET` | `/api/status` | authenticated summary of uptime and active sessions |
 | `GET` | `/api/runtime/status` | authenticated component health snapshot |
 | `GET` | `/api/health/subsystems` | authenticated deep self-checks (embeddings, vector store, graph, telemetry, event loop, provider activity); 503 if any subsystem is unavailable |

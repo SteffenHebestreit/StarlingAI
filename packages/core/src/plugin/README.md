@@ -82,16 +82,21 @@ file's code **in place** does require a gateway restart, because ESM modules are
 cached once imported; adding a new file (e.g. bumping the directory name) is the
 supported workflow for a live code change.
 
-## Disabling plugins
+## Enabling plugins
 
 ```jsonc
 // starlingai.json
 {
-  "plugins": { "enabled": false }
+  "plugins": { "enabled": true }
 }
 ```
 
-When disabled the loader is skipped entirely.
+Plugins are **disabled by default** (`plugins.enabled: false`, flipped from the
+earlier default-on under SEC-105): plugin code currently runs in the gateway
+process, so per-call approval is the only containment until the isolated plugin
+runner lands. Migration: after reviewing that every plugin in your plugins
+directory comes from a source you trust, set `plugins.enabled: true`. When
+disabled, the loader is skipped entirely.
 
 ## Inspecting loaded plugins at runtime
 

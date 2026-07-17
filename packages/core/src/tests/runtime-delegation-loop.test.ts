@@ -769,13 +769,17 @@ describe("runtime delegated-loop regressions", () => {
     expect(logAudit).toHaveBeenCalledWith(
       "turn_scorecard",
       expect.objectContaining({
+        version: 2,
         forcedSynthesisFired: false,
         finishReason: "max_tool_iterations",
         finalAnswerLength: "synthesized".length,
         toolIterations: 1,
+        criteriaStatus: "not_run",
+        artifactProbeStatus: "not_requested",
       }),
       expect.objectContaining({ severity: "info" }),
     );
+    expect(vi.mocked(logAudit).mock.calls.filter((call) => call[0] === "turn_scorecard")).toHaveLength(1);
   });
 
   it("resynthesizes empty post-tool final responses into a direct answer", async () => {

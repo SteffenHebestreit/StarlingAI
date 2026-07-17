@@ -76,8 +76,23 @@ components:
     ReadyStatus:
       type: object
       properties:
-        status: { type: string }
-        activeSessions: { type: integer }
+        status: { type: string, enum: [ready, not_ready] }
+        sessions: { type: integer }
+        deployment:
+          type: object
+          properties:
+            mode: { type: string, enum: [single_process, trusted_cluster, untrusted_multi_tenant] }
+            ready: { type: boolean }
+            dependencies:
+              type: array
+              items:
+                type: object
+                properties:
+                  name: { type: string }
+                  required: { type: boolean }
+                  available: { type: boolean }
+                  probed: { type: boolean }
+                  reason: { type: string }
     RuntimeSnapshot:
       type: object
       description: Component health map; exact fields depend on registered components.
@@ -201,6 +216,11 @@ paths:
       responses:
         '200':
           description: Ready
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReadyStatus' }
+        '503':
+          description: Not ready — a required deployment dependency is unavailable
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ReadyStatus' }

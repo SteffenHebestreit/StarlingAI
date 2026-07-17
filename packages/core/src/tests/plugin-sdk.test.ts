@@ -54,6 +54,11 @@ describe("plugin SDK loader", () => {
     });
   }
 
+  it("defaults third-party plugin loading to disabled", async () => {
+    const { ConfigSchema } = await import("../config/schema.js");
+    expect(ConfigSchema.parse({}).plugins.enabled).toBe(false);
+  });
+
   /** Write a placeholder file (any content) so the loader's directory walk picks the entry up; the importer below decides what default-export to return. */
   function writePluginPlaceholder(name: string): void {
     const dir = join(pluginsDir, name);

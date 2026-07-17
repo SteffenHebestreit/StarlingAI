@@ -31,13 +31,16 @@ import { closeSessionRedis } from "./agent/session-redis.js";
 import { syncConfiguredJobTriggers } from "./runtime/job-triggers.js";
 import { rehydrateScheduledTasks } from "./runtime/scheduled-task-runner.js";
 import { startSwarmBus, stopSwarmBus } from "./swarm/bus.js";
+import { maybeStartMissionEventBridge } from "./swarm/mission-store.js";
+import { maybeStartDistributedControl } from "./swarm/control.js";
 import { startAutonomousBidding, stopAutonomousBidding } from "./swarm/bidding.js";
 import { startBidderWorker, stopBidderWorker } from "./swarm/bidder-worker.js";
 
 // Ephemeral store + dynamic tools
 import { initEphemeralStore, registerEphemeralCleanupCron, shutdownEphemeralStore } from "./runtime/ephemeral-store/index.js";
 import { loadDynamicTools, watchDynamicToolsDirectory, shutdownDynamicTools } from "./tools/dynamic-tools.js";
-import { loadPlugins, watchPluginsDirectory, stopPluginWatcher } from "./plugin/loader.js";
+import { loadPlugins, watchPluginsDirectory, stopPluginWatcher, resolvePluginsDir } from "./plugin/loader.js";
+import { existsSync, readdirSync } from "node:fs";
 import { loadCoreExtensions, runExtensionBoot, runExtensionShutdown } from "./extension/loader.js";
 import { loadCheckpointsFromDisk } from "./swarm/checkpoints.js";
 import { closeGraphDb } from "./db/neo4j.js";
@@ -136,7 +139,7 @@ export async function main() {
   // Load third-party plugin packages from the configured plugins directory.
   // Errors during a single plugin's load are non-fatal — the loader logs
   // them and continues so a broken plugin can't take down the gateway.
-  if (config.plugins?.enabled !== false) {
+  if (config.plugins?.enabled === true) {
     try {
       const result = await loadPlugins();
       if (result.loaded > 0 || result.rejected > 0) {
@@ -148,6 +151,16 @@ export async function main() {
     } catch (err) {
       log.warn({ err }, "Plugin SDK loader threw — continuing without plugins");
     }
+  } else {
+    // The plugins.enabled default flipped true→false (SEC-105 hardening).
+    // Warn installs whose plugins directory still has entries so they don't
+    // silently stop loading plugins after upgrading.
+    try {
+      const pluginsDir = resolvePluginsDir();
+      if (existsSync(pluginsDir) && readdirSync(pluginsDir).length > 0) {
+        log.warn({ pluginsDir }, "Plugins directory contains entries but plugins.enabled is false — the default changed from true to false for security hardening (SEC-105); set plugins.enabled=true to load them.");
+      }
+    } catch { /* best-effort warning only */ }
   }
 
   // Load first-party core extensions (src/extensions/<name>/ — fork-owned
@@ -232,6 +245,13 @@ export async function main() {
 
   // Start swarm event bus (Redis Pub/Sub with in-process fallback)
   await startSwarmBus();
+
+  // MIS-201 shadow mode: record task-lifecycle events into the durable mission
+  // event log when mission.store is enabled (no execution behavior changes).
+  maybeStartMissionEventBridge();
+
+  // CTL-205: subscribe this process to distributed session-cancel commands.
+  maybeStartDistributedControl();
 
   // Start first-pass autonomous bidding over the swarm bus
   startAutonomousBidding();

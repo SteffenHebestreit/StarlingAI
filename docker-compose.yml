@@ -146,7 +146,12 @@ services:
       interval: 15s
       timeout: 5s
       retries: 3
-      start_period: 15s
+      # A cold boot (fresh image: agent+tool embedding warm-up ~40s, MCP npx
+      # bootstrap) takes 60-90s before the HTTP server listens; 15s made every
+      # rebuild flap "unhealthy" until boot finished. Probe failures inside
+      # start_period don't count toward retries, and a genuinely hung gateway is
+      # still caught by the same interval×retries after it — no check weakening.
+      start_period: 80s
 
   # ── Filtering docker-socket proxy ─────────────────────────────────────────
   # The ONLY container that touches /var/run/docker.sock. The gateway reaches the

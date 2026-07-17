@@ -20,6 +20,7 @@ import type { AgentSession, SessionTranscriptAttachment } from "./session.js";
 import type { InterventionNotice } from "./interventions.js";
 import type { SubAgentProgressEvent } from "./sub-agent.js";
 import type { TurnPerformanceMetrics } from "./turn-metrics.js";
+import type { TurnQualityScorecard } from "./turn-scorecard.js";
 
 export interface RunTurnOptions {
   session: AgentSession;
@@ -76,4 +77,6 @@ export interface TurnOutput {
   blocked: boolean;
   swarmState?: SwarmState;
   performance?: TurnPerformanceMetrics;
+  /** Canonical v2 quality payload emitted once as the terminal turn_scorecard audit event. */
+  qualityScorecard?: TurnQualityScorecard;
 }

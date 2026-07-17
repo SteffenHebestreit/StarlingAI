@@ -256,15 +256,26 @@ export const OrchestrationSchema = z.object({
    *  so it stays gated until pass^k shows the quality lift beats the latency. Requires
    *  qaDeliveryLoop. */
   qaDeliveryLoopEscalateToCoordinator: z.boolean().default(false),
-  /** No-PASS-without-evidence invariant for the QA delivery gate. When true, the reviewer is
-   *  asked to justify a PASS with a concrete verifiable ground (a tool-result fact / artifact
-   *  property), and a PASS carrying no such evidence is treated as UNVERIFIED: the answer still
-   *  SHIPS (the gate's fail-open invariant is preserved) but an honesty caveat is stamped instead
-   *  of presenting it as QA-confirmed. Kills the rubber-stamp pass — a weak local reviewer echoing
-   *  a bare "PASS" no longer certifies a possibly-fabricated answer. Structural (evidence present
-   *  or not), not topic-based. Default OFF: changes the reviewer prompt + adds a caveat path, so it
-   *  stays gated until the user's pass^k eval confirms the honesty lift. Requires qaDeliveryLoop. */
+  /** Evidence-demanding reviewer prompt for the QA delivery gate. The parser always marks bare or
+   *  malformed reviewer output UNVERIFIED; when this is true, the prompt additionally requires a
+   *  concrete tool-result/artifact ground for PASS. Delivery still fails open, but only an
+   *  evidence-backed PASS can be presented as QA-confirmed. Default OFF because it changes the
+   *  reviewer prompt and should be pass^k-evaluated before broad activation. Requires qaDeliveryLoop. */
   qaEvidenceRequired: z.boolean().default(false),
+  /** Strict tri-state QA surfacing (QPR-002). The verdict parser ALWAYS computes the tri-state
+   *  truth (pass/fail/unverified — bare or malformed reviewer output is never a verified pass);
+   *  this flag controls whether that truth reaches the DELIVERY: when true, an unverified verdict
+   *  ships with an explicit unverified caveat instead of being presented as QA-passed. When false
+   *  (legacy), delivery behaves as before the tri-state contract (bare PASS ships uncaveated) while
+   *  the scorecard still records the truthful status. Default OFF per the rollout policy — enable
+   *  per deployment once its pass^5 baseline is committed (see eval/baselines/). Requires qaDeliveryLoop. */
+  qaStrictVerdicts: z.boolean().default(false),
+  /** Deterministic artifact probes before the QA verdict (QA-304): parse JSON,
+   *  structurally check HTML (truncation/unclosed tags), hash every artifact,
+   *  health-check served URLs — all WITHOUT a model call. A failing probe is an
+   *  objective FAIL with reproducible receipts; passing receipts ground the
+   *  verdict. Default OFF per rollout policy; requires qaDeliveryLoop. */
+  qaDeterministicProbes: z.boolean().default(false),
   /** Tool-equipped, clean-context QA judge (slice 2 of the evidence work). When the delivery
    *  gate runs on a turn that produced inspectable artifacts (files / served URLs), the verdict
    *  comes from a FRESH-context sub-agent holding read-only inspection tools (read_file,

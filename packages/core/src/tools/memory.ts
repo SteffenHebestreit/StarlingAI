@@ -14,6 +14,7 @@ import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
 import { appendOutcome, readRecentOutcomes } from "../agent/outcomes.js";
 import { appendAgentMessage, writeSharedFact, readAllFacts, searchSharedFacts } from "../swarm/memory.js";
+import { appendEvidenceClaim } from "../swarm/evidence-ledger.js";
 import { emitSwarmEvent } from "../swarm/bus.js";
 import { logAudit } from "../audit/logger.js";
 import { isAgentMessagingSuppressed } from "../agent/warden.js";
@@ -1209,6 +1210,33 @@ registerTool({
 
     await writeSharedFact(parentSessionId, entry.key, value);
     log.info({ key: entry.key, parentSessionId }, "Shared evidence published");
+
+    // EVD-301 shadow dual-write: the rich provenance also lands as an immutable
+    // structured claim (write-time conflict detection). Legacy string facts stay
+    // the authoritative read path until EVD-303 shows parity.
+    if (getConfig().mission.evidence === "shadow") {
+      try {
+        await appendEvidenceClaim(parentSessionId, {
+          subject: entry.claim,
+          value: entry.finding,
+          agent: ctx.currentAgentName,
+          evidenceType: entry.evidenceType,
+          sourceTitle: entry.sourceTitle,
+          sourceUrl: entry.sourceUrl,
+          publisher: entry.publisher,
+          publishedAt: entry.publishedAt,
+          retrievedAt: entry.retrievedAt,
+          confidence: {
+            accuracy: entry.accuracyScore,
+            trustworthiness: entry.trustworthinessScore,
+            corroboration: entry.corroborationScore,
+          },
+          validationState: entry.validationStatus as "unverified" | "tentative" | "validated" | "disputed",
+        });
+      } catch (err) {
+        log.debug({ err, key: entry.key }, "Evidence-ledger dual-write failed (shadow — non-fatal)");
+      }
+    }
 
     return {
       success: true,

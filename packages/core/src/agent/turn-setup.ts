@@ -90,6 +90,11 @@ export function computeTurnEnforcementSignals(params: {
   allowedToolNameSet: Set<string>;
   userMessage: string;
   recentWorkflowAuthoringMaintenanceContext: boolean;
+  /**
+   * Test seam for the documented routing policy. Omit in production to read the
+   * resolved main-assistant configuration.
+   */
+  trustModelRouting?: boolean;
   /** Up-front source-sensitivity verdict (orchestration.upfrontSourceSensitiveClassifier). When the
    *  classifier flagged this QUESTION as source-sensitive before the model drafted, treat it exactly
    *  like guidance.sourceSensitive so requiresDelegatedResearch fires — the turn researches FIRST
@@ -97,6 +102,7 @@ export function computeTurnEnforcementSignals(params: {
   upfrontSourceSensitive?: boolean;
 }): TurnEnforcementSignals {
   const { effectiveToolMode, initialDynamicGuidance, channel, allowedToolNameSet, userMessage, recentWorkflowAuthoringMaintenanceContext, upfrontSourceSensitive } = params;
+  const trustModelRouting = params.trustModelRouting ?? getConfig().agents.mainAssistant.trustModelRouting;
   const softRoutingEnforcement = getConfig().agents.performance.softRoutingEnforcement === true;
   const applyRoutingTone = (text: string): string =>
     softRoutingEnforcement && text ? toSoftRoutingHint(text) : text;
@@ -113,7 +119,7 @@ export function computeTurnEnforcementSignals(params: {
   const requiresDelegatedResearch = effectiveToolMode === "orchestration_only"
     && Boolean(
       initialDynamicGuidance?.sourceSensitive
-      || initialDynamicGuidance?.freshnessSensitive
+      || (!trustModelRouting && initialDynamicGuidance?.freshnessSensitive)
       || upfrontSourceSensitive,
     );
   const requiresArtifactDelegation = effectiveToolMode === "orchestration_only"

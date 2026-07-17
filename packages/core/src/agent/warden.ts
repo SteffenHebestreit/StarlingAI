@@ -204,6 +204,19 @@ export function isSessionTurnActive(sessionId: string): boolean {
   return Boolean(controller && !controller.signal.aborted);
 }
 
+/**
+ * Abort the active turn for a session IF this process owns it (CTL-205: the
+ * distributed control plane calls this on every process; only the owner acts).
+ * Returns whether an active local turn was aborted.
+ */
+export function abortSessionTurnLocally(sessionId: string, reason: string): boolean {
+  const controller = _sessionAbortControllers.get(sessionId);
+  if (!controller || controller.signal.aborted) return false;
+  log.warn({ sessionId, reason }, "Aborting session turn (distributed cancel)");
+  controller.abort();
+  return true;
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 export interface WardenAlert {

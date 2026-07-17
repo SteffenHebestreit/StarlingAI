@@ -56,6 +56,10 @@ describe("agent evaluation harness", () => {
     expect(report.results[1]?.passed).toBe(false);
     expect(report.results[1]?.failures.some((failure) => failure.includes("missing expected text"))).toBe(true);
     expect(report.results[1]?.failures.some((failure) => failure.includes("contained forbidden text"))).toBe(true);
+    expect(report.provenance?.version).toBe(1);
+    expect(report.provenance?.transport).toBe("in_process");
+    expect(report.provenance?.configDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(report.provenance?.promptDigest).toMatch(/^[a-f0-9]{64}$/);
 
     const summary = formatEvaluationSummary(report);
     expect(summary).toContain("Passed 1/2 cases");

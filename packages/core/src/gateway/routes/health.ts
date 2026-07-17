@@ -5,6 +5,9 @@ import { getEventLoopLagSnapshot } from "../../observability/event-loop-monitor.
 import { getLastProviderActivitySnapshot } from "../../observability/provider-activity-monitor.js";
 import { PRODUCT } from "../../product/index.js";
 import { listExtensionRoles, listLoadedExtensions } from "../../extension/index.js";
+import { getConfig } from "../../config/loader.js";
+import { probeEphemeralBackends } from "../../runtime/ephemeral-store/index.js";
+import { evaluateDeploymentReadiness } from "../../runtime/deployment-mode.js";
 
 /**
  * Health / readiness / diagnostic endpoints.
@@ -32,8 +35,35 @@ export function registerHealthRoutes(app: Hono): void {
       extensions: listLoadedExtensions().map((e) => ({ name: e.name, version: e.version, description: e.description })),
     })
   );
-  app.get("/readyz", (c) => {
+  app.get("/readyz", async (c) => {
     const sessions = getAllSessions().length;
+    const config = getConfig();
+    const mode = config.deployment.mode;
+    // Do not start optional backends solely to answer local liveness. In cluster
+    // modes the probes are LIVE (PING / SELECT 1 against the boot-time clients),
+    // so a post-boot Redis/Postgres outage fails readiness instead of reusing
+    // cached init results.
+    const clustered = mode !== "single_process";
+    const backends = clustered
+      ? await probeEphemeralBackends()
+      : { redis: false, postgres: false };
+    const readiness = evaluateDeploymentReadiness({
+      mode,
+      redisAvailable: backends.redis,
+      postgresAvailable: backends.postgres,
+      authEnabled: config.auth?.enabled === true,
+    });
+    // Annotate each dependency with whether a live probe actually ran, so
+    // operators can distinguish "probed and down" from "not probed (optional
+    // in this mode)" — in single_process mode redis/postgres are skipped and
+    // authentication availability always comes from config, not a probe.
+    const deployment = {
+      ...readiness,
+      dependencies: readiness.dependencies.map((dependency) => ({
+        ...dependency,
+        probed: clustered && dependency.name !== "authentication",
+      })),
+    };
     // Latest event-loop lag sample (cheap, no probes) so operators can poll
     // whether the main thread is stalling without hitting the authed deep checks.
     const eventLoopLag = getEventLoopLagSnapshot();
@@ -51,11 +81,12 @@ export function registerHealthRoutes(app: Hono): void {
         }
       : null;
     return c.json({
-      status: "ready",
+      status: deployment.ready ? "ready" : "not_ready",
       sessions,
+      deployment,
       ...(eventLoopLag ? { eventLoopLag } : {}),
       ...(providerActivity ? { providerActivity } : {}),
-    });
+    }, deployment.ready ? 200 : 503);
   });
 
   // Deep subsystem self-checks (authed) — actively probe embeddings (non-zero

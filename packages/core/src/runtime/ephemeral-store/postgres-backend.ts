@@ -55,9 +55,38 @@ async function getPool(): Promise<pg.Pool | null> {
     return _pool;
   } catch (err) {
     log.error({ err }, "Failed to initialize Postgres ephemeral store");
+    // Dispose the failed pool and leave _initialized false so the next call
+    // retries — a recovered Postgres must not stay latched as unavailable
+    // (mirrors the redis backend's retry behavior).
+    if (_pool) {
+      try { await _pool.end(); } catch { /* ignore */ }
+    }
     _pool = null;
-    _initialized = true;
     return null;
+  }
+}
+
+const PROBE_TIMEOUT_MS = 2000;
+
+/**
+ * Live readiness probe — runs `SELECT 1` on the pool (re-initializing it when
+ * a previous attempt failed) so post-boot outages surface instead of reusing
+ * boot-time init results. Never throws; errors and timeouts report false.
+ */
+export async function probePostgres(): Promise<boolean> {
+  try {
+    const probe = (async () => {
+      const pool = await getPool();
+      if (!pool) return false;
+      await pool.query("SELECT 1");
+      return true;
+    })();
+    return await Promise.race([
+      probe,
+      new Promise<boolean>((resolve) => setTimeout(resolve, PROBE_TIMEOUT_MS, false)),
+    ]);
+  } catch {
+    return false;
   }
 }
 

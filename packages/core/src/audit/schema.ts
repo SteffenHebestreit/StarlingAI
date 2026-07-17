@@ -178,6 +178,33 @@ export type CoreAuditEventType =
   | "delegation_halted_partial_evidence"
   | "delegation_coordinator_recursion_blocked"
   | "delegation_result_reused"
+  // Task-lease coordination backend (Redis) unreachable in clustered mode — the
+  // delegation was refused rather than misreported as contention (DST-102).
+  | "delegation_lease_backend_unavailable"
+  // Mission budget envelope could not fit a child's reserve (BUD-203). In shadow
+  // mode this is observational; in enforce mode the delegation was refused.
+  | "mission_budget_refused"
+  // Provider endpoint capacity saturated at admission (CAP-204). Shadow =
+  // observational; enforce = the delegation was refused after the wait budget.
+  | "provider_admission_blocked"
+  // Distributed session cancel (CTL-205): a cancel command was issued / the
+  // owning process applied it (aborting the session's active turn).
+  | "session_cancel_requested"
+  | "session_cancel_applied"
+  // Task-graph ledger entry cap reached — oldest completed-node records were
+  // explicitly evicted (GRF-206 replaces silent blob truncation with this).
+  | "task_graph_node_evicted"
+  // Two claims about the same canonical subject carry different values —
+  // both marked disputed; EVD-302 routes material conflicts to verification.
+  | "evidence_conflict_detected"
+  // EVD-302 outcomes: a dispute resolved decisively (authority/recency
+  // supersession, losers retained in the log) or found MATERIAL — verification
+  // work for the orchestrator, never a silent collapse.
+  | "evidence_conflict_resolved"
+  | "evidence_verification_needed"
+  // QA-305: replayable map from the shipped answer to the ledger claims it
+  // rests on (claim ids + validation states; disputedAsserted flags risk).
+  | "answer_evidence_map"
   | "flow_plan_recorded"
   | "flow_verification_passed"
   | "flow_verification_repaired"

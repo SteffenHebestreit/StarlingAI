@@ -74,8 +74,11 @@ import { readPromotedAgents } from "../agent/promoted-agents.js";
 import { emitSwarmEvent } from "../swarm/bus.js";
 import { announceAgentCapability } from "../swarm/capabilities.js";
 import { clearTaskBids, collectTaskBids, DEFAULT_AUTONOMOUS_BID_WINDOW_MS, isAutonomousBiddingStarted } from "../swarm/bidding.js";
-import { acquireTaskLock, releaseTaskLock } from "../swarm/locks.js";
-import { formatSharedContextForPrompt, appendPartialResult, extractFactsFromOutput, writeSharedFact, searchSharedFacts, searchPartialResults, readAllFacts, currentTurnFactKeys } from "../swarm/memory.js";
+import { isTaskLeaseCurrent, publishTaskLeaseResult, releaseTaskLease, startTaskLeaseHeartbeat, tryAcquireTaskLease, waitForTaskLeaseResult } from "../swarm/locks.js";
+import { defaultChildReserve, reconcileMissionBudget, reserveMissionBudget, type BudgetDimensions, type BudgetReservation } from "../swarm/mission-budget.js";
+import { getMissionStore } from "../swarm/mission-store.js";
+import { admitToProvider, releaseProviderPermit, renewProviderPermit, type CapacityPermit } from "../swarm/capacity-broker.js";
+import { formatSharedContextForPrompt, appendPartialResult, claimAgentMessages, extractFactsFromOutput, writeSharedFact, searchSharedFacts, searchPartialResults, readAllFacts, currentTurnFactKeys } from "../swarm/memory.js";
 import { computeTaskGraphNodeKey, readTaskGraphLedger, recordCompletedTaskGraphNode } from "../swarm/task-graph-ledger.js";
 import { deriveSharedSessionId } from "./memory.js";
 import { graphPromoteFact } from "../memory/graph-service.js";
@@ -498,6 +501,17 @@ function buildTaskSignature(title: string, task: string, dependsOn: string[] = [
   const normalizedTask = summarizeText(task, 240).toLowerCase();
   const normalizedDeps = [...dependsOn].sort().join(",");
   return `${normalizedTitle}::${normalizedTask}::${normalizedDeps}`;
+}
+
+function resolveTaskLeaseTtlMs(ctx: ToolContext, agentTimeoutMs?: number | "unbound"): number {
+  const configured = typeof ctx.turnTimeoutOverrideMs === "number" && ctx.turnTimeoutOverrideMs > 0
+    ? ctx.turnTimeoutOverrideMs
+    : typeof agentTimeoutMs === "number" ? agentTimeoutMs : 30_000;
+  const remaining = typeof ctx._turnDeadlineMs === "number"
+    ? Math.max(0, ctx._turnDeadlineMs - Date.now())
+    : undefined;
+  const bounded = remaining === undefined ? configured : Math.min(configured, remaining);
+  return Math.max(5_000, Math.min(bounded, 60_000));
 }
 
 function findReusableSwarmTask(ctx: ToolContext, signature: string): SwarmTaskState | undefined {
@@ -1459,8 +1473,194 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       continue;
     }
 
-    ctx._turnAgentCounts.set(candidate, prevCalls + 1);
+    const config = getConfig();
+    const promotedAgents = readPromotedAgents(config.workspacePath);
+    const agentCfg = config.subAgents[candidate] ?? promotedAgents[candidate];
+    // Lease scope uses the SHARED (root) session id so every run and nested
+    // delegation of one mission contends on the same key, and the structural
+    // signature — not the positional taskId — identifies equivalent work.
+    const leaseScope = {
+      sessionId: deriveSharedSessionId(ctx.sessionId),
+      taskId,
+      taskSignature: signature,
+      workspacePath: ctx.workspacePath,
+      userId: ctx.userId,
+    };
+    const acquisition = await tryAcquireTaskLease(leaseScope, resolveTaskLeaseTtlMs(ctx, agentCfg?.turnTimeoutMs));
+    if (acquisition.status === "unavailable") {
+      // Backend loss is NOT contention: nobody owns the task. Reporting success
+      // here would silently lose the task (no worker anywhere executes it).
+      logAudit("delegation_lease_backend_unavailable", {
+        taskId,
+        taskSignature: signature,
+        candidate,
+        reason: acquisition.reason,
+      }, { sessionId: ctx.sessionId, severity: "warn" });
+      return {
+        success: false,
+        output: "",
+        error: `Task lease backend is unavailable (${acquisition.reason}) — delegation was not started. Retry when coordination is restored.`,
+        metadata: {
+          taskId,
+          attemptedAgents,
+          leaseBackendUnavailable: true,
+          delegationSucceeded: false,
+        },
+      };
+    }
+    if (acquisition.status === "contended") {
+      // DST-103 result following: the winner publishes a fence-guarded durable
+      // result on the lease key — wait for it (bounded by the remaining turn
+      // budget, capped) instead of duplicating the work.
+      const remainingBudgetMs = typeof ctx._turnDeadlineMs === "number" ? ctx._turnDeadlineMs - Date.now() : 0;
+      const followWaitMs = Math.max(0, Math.min(remainingBudgetMs - 5_000, 30_000));
+      const winner = await waitForTaskLeaseResult(leaseScope, { timeoutMs: followWaitMs });
+      if (winner) {
+        logAudit("delegation_result_reused", {
+          taskId,
+          taskSignature: signature,
+          candidate,
+          reason: "task_lease_result_followed",
+          winnerAgent: winner.agentName,
+          winnerStatus: winner.status,
+          fencingToken: winner.fencingToken,
+        }, { sessionId: ctx.sessionId, severity: "info" });
+        taskState.status = winner.status === "partial" ? "partial" : "completed";
+        taskState.output = winner.output;
+        taskState.error = undefined;
+        ensureSwarmState(ctx, request.task).updatedAt = new Date().toISOString();
+        publishSwarmState(ctx);
+        return {
+          success: true,
+          output: `[${winner.agentName}]: ${winner.output}`,
+          metadata: {
+            taskId,
+            attemptedAgents,
+            delegationSucceeded: true,
+            leaseContended: true,
+            followedWinnerResult: true,
+            winnerAgent: winner.agentName,
+            winnerStatus: winner.status,
+            ...(winner.truncated ? { winnerOutputTruncated: true } : {}),
+          },
+        };
+      }
+      logAudit("delegation_result_reused", {
+        taskId,
+        taskSignature: signature,
+        candidate,
+        reason: "task_lease_contended",
+      }, { sessionId: ctx.sessionId, severity: "info" });
+      // success:false so task graphs and parallel slices cannot record this as a
+      // completed node — the task is running elsewhere and no result surfaced
+      // within the wait budget.
+      return {
+        success: false,
+        output: "",
+        error: `Task '${title}' is already claimed by another worker and its result did not arrive within the wait budget. Wait for the owning worker or retry later.`,
+        metadata: {
+          taskId,
+          attemptedAgents,
+          inFlight: true,
+          leaseContended: true,
+          delegationSucceeded: false,
+        },
+      };
+    }
+    const lease = acquisition.lease;
+    const leaseHeartbeat = startTaskLeaseHeartbeat(lease);
+    let leaseReleased = false;
+    const releaseLease = async (): Promise<void> => {
+      if (leaseReleased) return;
+      leaseReleased = true;
+      await leaseHeartbeat.stop();
+      await releaseTaskLease(lease);
+    };
 
+    // BUD-203: a task runs only after the lease AND a budget reservation succeed.
+    // Reserve an estimated child slice against the mission envelope; reconcile to
+    // actual usage in the finally below. "shadow" records refusals without blocking.
+    let budgetReservation: BudgetReservation | null = null;
+    let budgetActual: BudgetDimensions | null = null;
+    const budgetMode = getConfig().mission.budget.mode;
+    if (budgetMode !== "off") {
+      try {
+        const mission = await (await getMissionStore()).getOrCreateMissionForSession({
+          rootSessionId: deriveSharedSessionId(ctx.sessionId),
+          userId: ctx.userId,
+          workspacePath: ctx.workspacePath,
+        });
+        const reserve = await reserveMissionBudget(mission.id, defaultChildReserve());
+        if (reserve.granted) {
+          budgetReservation = reserve.reservation;
+        } else {
+          logAudit("mission_budget_refused", {
+            taskId,
+            candidate,
+            missionId: mission.id,
+            exceeded: reserve.exceeded,
+            enforced: budgetMode === "enforce",
+          }, { sessionId: ctx.sessionId, severity: "warn" });
+          if (budgetMode === "enforce") {
+            await releaseLease();
+            return {
+              success: false,
+              output: "",
+              error: `Mission budget exhausted (${reserve.exceeded.join(", ")}) — delegation refused. Extend the budget or synthesize from existing evidence.`,
+              metadata: { taskId, attemptedAgents, budgetExhausted: true, delegationSucceeded: false },
+            };
+          }
+        }
+      } catch (error) {
+        log.warn({ error, taskId }, "Mission budget reservation failed — proceeding unreserved");
+      }
+    }
+
+    // CAP-204: admit against the provider endpoint's shared capacity before the
+    // run occupies it. Shadow probes once and records saturation; enforce waits
+    // up to the admission timeout, then refuses. A renewal timer keeps a long
+    // healthy run's permit alive; the finally releases it (TTL self-heals a crash).
+    let capacityPermit: CapacityPermit | null = null;
+    let capacityRenewTimer: ReturnType<typeof setInterval> | null = null;
+    const capacityMode = getConfig().mission.capacity.mode;
+    if (capacityMode !== "off") {
+      try {
+        const providerEndpoint = `${config.providers.lmstudio?.baseUrl ?? "primary"}::${agentCfg?.model?.primary ?? config.agents.defaults.model.primary}`;
+        const admission = await admitToProvider(providerEndpoint, capacityMode === "shadow" ? { timeoutMs: 0 } : {});
+        if (admission.admitted) {
+          capacityPermit = admission.permit;
+          // ttl/3 cadence guarantees 2+ renewal opportunities before expiry for
+          // EVERY legal permitTtlMs (schema floor 5s) — a hardcoded 30s would
+          // let short-TTL configs expire healthy permits mid-run.
+          const renewMs = Math.max(1_000, Math.min(Math.floor(getConfig().mission.capacity.permitTtlMs / 3), 30_000));
+          capacityRenewTimer = setInterval(() => { void renewProviderPermit(admission.permit).catch(() => {}); }, renewMs);
+          capacityRenewTimer.unref?.();
+        } else {
+          logAudit("provider_admission_blocked", {
+            taskId,
+            candidate,
+            reason: admission.reason,
+            waitedMs: admission.waitedMs,
+            enforced: capacityMode === "enforce",
+          }, { sessionId: ctx.sessionId, severity: "warn" });
+          if (capacityMode === "enforce") {
+            await releaseLease();
+            if (budgetReservation) await reconcileMissionBudget(budgetReservation, { tokens: 0, toolCalls: 0, activeTimeMs: 0 }).catch(() => {});
+            return {
+              success: false,
+              output: "",
+              error: `Provider capacity saturated (waited ${admission.waitedMs}ms) — delegation refused. Retry when a slot frees.`,
+              metadata: { taskId, attemptedAgents, capacitySaturated: true, delegationSucceeded: false },
+            };
+          }
+        }
+      } catch (error) {
+        log.warn({ error, taskId }, "Provider admission failed — proceeding unadmitted");
+      }
+    }
+
+    try {
+    ctx._turnAgentCounts.set(candidate, prevCalls + 1);
     attemptedAgents.push(candidate);
 
     const startedAt = new Date().toISOString();
@@ -1475,18 +1675,42 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
     });
     ensureSwarmState(ctx, request.task).updatedAt = startedAt;
     publishSwarmState(ctx);
-
-    emitSwarmEvent("task_claimed", { sessionId: ctx.sessionId, taskId, agentName: candidate, task: request.task });
-
-    // Acquire a distributed lock so a re-queued broadcast of the same task can't
-    // be double-claimed in a multi-instance deployment. Lock TTL = 30 s; released
-    // on completion or failure.
-    const lockOwner = await acquireTaskLock(taskId);
+    emitSwarmEvent("task_claimed", {
+      sessionId: ctx.sessionId,
+      taskId,
+      agentName: candidate,
+      task: request.task,
+      data: { fencingToken: lease.fencingToken },
+    });
 
     const attempt = taskState.attempts[taskState.attempts.length - 1]!;
-    const config = getConfig();
-    const promotedAgents = readPromotedAgents(config.workspacePath);
-    const agentCfg = config.subAgents[candidate] ?? promotedAgents[candidate];
+    const leaseStillCurrent = async (): Promise<boolean> => !leaseHeartbeat.lost && await isTaskLeaseCurrent(lease);
+    const abandonLostLease = async (): Promise<ToolResult> => {
+      const finishedAt = new Date().toISOString();
+      const reason = "Task lease ownership was lost before this worker could publish its result.";
+      attempt.finishedAt = finishedAt;
+      attempt.status = "failed";
+      attempt.summary = reason;
+      finalizeAttemptBudget(ctx, taskState, attempt);
+      taskState.status = "failed";
+      taskState.error = reason;
+      ensureSwarmState(ctx, request.task).updatedAt = finishedAt;
+      publishSwarmState(ctx);
+      await releaseLease();
+      return {
+        success: false,
+        output: "",
+        error: reason,
+        metadata: {
+          agentName: candidate,
+          taskId,
+          attemptedAgents,
+          delegationSucceeded: false,
+          leaseLost: true,
+          fencingToken: lease.fencingToken,
+        },
+      };
+    };
     announceAgentCapability({
       sessionId: ctx.sessionId,
       agentName: candidate,
@@ -1499,14 +1723,9 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
     });
 
     try {
-      // Inject shared facts from other agents into this sub-agent's context
-      const sharedCtx = await formatSharedContextForPrompt(ctx.sessionId, { agentName: candidate });
-      const enrichedContext = sharedCtx
-        ? `${sharedCtx}\n\n---\n\n${request.context ?? ""}`.trim()
-        : request.context;
-
       const reusableSessionEvidence = await findReusableSessionEvidence(candidate, request, ctx, agentCfg);
       if (reusableSessionEvidence) {
+        if (!await leaseStillCurrent()) return abandonLostLease();
         attempt.finishedAt = new Date().toISOString();
         attempt.status = "completed";
         attempt.summary = summarizeText(reusableSessionEvidence.output);
@@ -1538,7 +1757,16 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           availability: "idle",
           source: "runtime",
         });
-        if (lockOwner) await releaseTaskLock(taskId, lockOwner);
+        // DST-103: a cache-served completion is still a terminal result — publish
+        // it so contenders follow instead of re-executing.
+        await publishTaskLeaseResult(lease, {
+          status: "completed",
+          output: reusableSessionEvidence.output.slice(0, 32_000),
+          ...(reusableSessionEvidence.output.length > 32_000 ? { truncated: true } : {}),
+          agentName: candidate,
+          finishedAt: attempt.finishedAt ?? new Date().toISOString(),
+        });
+        await releaseLease();
         return {
           success: true,
           output: reusableSessionEvidence.output,
@@ -1554,6 +1782,26 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           },
         };
       }
+
+      // Inject shared facts from other agents into this sub-agent's context.
+      // ADR-003 deferred ack (claimed only AFTER the reuse short-circuit above, so a
+      // cache-served delegation burns no delivery attempt): acknowledge only when this
+      // attempt records a completed/partial outcome — a failed or crashed attempt
+      // leaves the claim pending for redelivery. Visibility scales with the agent's
+      // run budget (2×, capped at 30 min) so a long healthy run can't be re-claimed
+      // or spuriously dead-lettered mid-flight.
+      const claimVisibilityBudgetMs = typeof ctx.turnTimeoutOverrideMs === "number" && ctx.turnTimeoutOverrideMs > 0
+        ? ctx.turnTimeoutOverrideMs
+        : typeof agentCfg?.turnTimeoutMs === "number" ? agentCfg.turnTimeoutMs : undefined;
+      const messageClaim = await claimAgentMessages(ctx.sessionId, candidate, {
+        visibilityMs: claimVisibilityBudgetMs
+          ? Math.max(120_000, Math.min(2 * claimVisibilityBudgetMs, 1_800_000))
+          : 1_800_000,
+      });
+      const sharedCtx = await formatSharedContextForPrompt(ctx.sessionId, { agentName: candidate, directMessages: messageClaim.messages });
+      const enrichedContext = sharedCtx
+        ? `${sharedCtx}\n\n---\n\n${request.context ?? ""}`.trim()
+        : request.context;
 
       // B7: Cross-agent context handoff — when this is a fallback agent (prior attempts
       // already exist), prepend a brief summary of what was tried so the new agent does
@@ -1663,6 +1911,12 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       }
 
       if (stats) {
+        // BUD-203: actual usage for the finally's budget reconciliation.
+        budgetActual = {
+          tokens: stats.usage?.totalTokens ?? 0,
+          toolCalls: stats.toolCount ?? 0,
+          activeTimeMs: Math.max(0, Date.now() - new Date(startedAt).getTime()),
+        };
         attempt.toolCount = stats.toolCount;
         attempt.iterations = stats.iterations;
         attempt.toolNames = [...stats.toolNames];
@@ -1675,6 +1929,8 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           attempt.terminalState = stats.terminalState;
         }
       }
+
+      if (!await leaseStillCurrent()) return abandonLostLease();
 
       let delegationOutcome = stats?.outcome;
       let parsedOutcome: any = null;
@@ -1797,7 +2053,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           activeTaskId: taskId,
           source: "runtime",
         });
-        if (lockOwner) await releaseTaskLock(taskId, lockOwner);
+        await releaseLease();
         // Infrastructure failures cannot be solved by a different agent — stop immediately
         if (lastFailureWasInfrastructure) break;
         // Keystone (audit 687a224b): once a failed/timed-out attempt has STILL left
@@ -1842,6 +2098,22 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       taskState.error = undefined;
       ensureSwarmState(ctx, request.task).updatedAt = attempt.finishedAt;
       publishSwarmState(ctx);
+      // The attempt outcome is durably recorded — acknowledge the delivered messages
+      // (ADR-003 ack boundary; idempotent, unacked entries would redeliver).
+      messageClaim.ack().catch(() => { /* redelivers after visibility timeout */ });
+      // DST-103: publish the fence-guarded durable result so contenders on this
+      // task follow it instead of re-executing. A stale fence is refused —
+      // then a takeover's result is the authoritative one for followers.
+      const resultPublished = await publishTaskLeaseResult(lease, {
+        status: partial ? "partial" : "completed",
+        output: output.slice(0, 32_000),
+        ...(output.length > 32_000 ? { truncated: true } : {}),
+        agentName: candidate,
+        finishedAt: attempt.finishedAt ?? new Date().toISOString(),
+      });
+      if (!resultPublished) {
+        log.warn({ taskId, candidate }, "Task result publish refused (stale lease) — followers will use the takeover's result");
+      }
       emitSwarmEvent(partial ? "task_partial" : "task_completed", { sessionId: ctx.sessionId, taskId, agentName: candidate });
       announceAgentCapability({
         sessionId: ctx.sessionId,
@@ -1852,7 +2124,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         availability: "idle",
         source: "runtime",
       });
-      if (lockOwner) await releaseTaskLock(taskId, lockOwner);
+      await releaseLease();
 
       const routingNote = routingInfo
         ? `\n↳ Auto-routed to ${candidate} (${routingInfo.confidence} confidence${routingInfo.matchedTerms.length > 0 ? `, matched: ${routingInfo.matchedTerms.join(", ")}` : ""})`
@@ -1895,7 +2167,28 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         activeTaskId: taskId,
         source: "runtime",
       });
-      if (lockOwner) await releaseTaskLock(taskId, lockOwner);
+      await releaseLease();
+    }
+    } finally {
+      // Idempotent backstop: any path that leaves this candidate iteration —
+      // return, continue, break, or a throw outside the inner try — must stop
+      // the heartbeat, or an orphaned renewal keeps the lease alive forever.
+      await releaseLease();
+      // BUD-203: every reservation resolves on every terminal path — reconcile
+      // to actual usage when the run produced stats, else release (spend 0).
+      if (budgetReservation) {
+        await reconcileMissionBudget(
+          budgetReservation,
+          budgetActual ?? { tokens: 0, toolCalls: 0, activeTimeMs: 0 },
+        ).catch(() => { /* ledger TTL bounds a lost reconcile */ });
+        budgetReservation = null;
+      }
+      // CAP-204: free the provider slot on every terminal path.
+      if (capacityRenewTimer) clearInterval(capacityRenewTimer);
+      if (capacityPermit) {
+        await releaseProviderPermit(capacityPermit).catch(() => { /* permit TTL self-heals */ });
+        capacityPermit = null;
+      }
     }
   }
 
@@ -2309,7 +2602,10 @@ registerTool({
     // re-executing them. Conservative by construction — only ever SKIPS work that already
     // succeeded; downstream context still flows from the original run's shared facts.
     const durableLedgerEnabled = effectiveOrchestration().durableTaskGraph;
-    const durableLedger = durableLedgerEnabled ? await readTaskGraphLedger(ctx.sessionId) : {};
+    // Ledger scope matches the lease/budget scope (ROOT session): a coordinator-
+    // invoked graph retried from a different sub-session must find its entries.
+    const ledgerSessionId = deriveSharedSessionId(ctx.sessionId);
+    const durableLedger = durableLedgerEnabled ? await readTaskGraphLedger(ledgerSessionId) : {};
     const nodeLedgerKeys = new Map(rawNodes.map((node) => [node.id, computeTaskGraphNodeKey(node)]));
     const reused = new Set<string>();
     if (durableLedgerEnabled) {
@@ -2454,8 +2750,17 @@ registerTool({
             }
           }
         }
-        if (durableLedgerEnabled) {
-          await recordCompletedTaskGraphNode(ctx.sessionId, nodeLedgerKeys.get(node.id)!, {
+        // Only GENUINELY terminal completions are ledger-worthy: HSETNX makes the
+        // first record permanent, so a partial / in-flight / followed-partial
+        // result recorded here would satisfy every future retry with weak output.
+        const meta = result.metadata ?? {};
+        const genuinelyComplete =
+          meta["delegationOutcome"] !== "partial"
+          && !meta["partialFallback"]
+          && !meta["inFlight"]
+          && meta["winnerStatus"] !== "partial";
+        if (durableLedgerEnabled && genuinelyComplete) {
+          await recordCompletedTaskGraphNode(ledgerSessionId, nodeLedgerKeys.get(node.id)!, {
             nodeId: node.id,
             output: result.output,
             completedAt: new Date().toISOString(),

@@ -10,8 +10,8 @@
 import { childLogger } from "../../logger.js";
 import { logAudit } from "../../audit/logger.js";
 import { createCronJob } from "../scheduler.js";
-import { redisBackend } from "./redis-backend.js";
-import { postgresBackend } from "./postgres-backend.js";
+import { redisBackend, probeRedis } from "./redis-backend.js";
+import { postgresBackend, probePostgres } from "./postgres-backend.js";
 import {
   routeNamespace,
   type EphemeralBackend,
@@ -118,6 +118,17 @@ export async function initEphemeralStore(): Promise<Record<EphemeralBackend, boo
     log.info({ backend: name, available: results[name] }, "Ephemeral backend initialized");
   }
   return results as Record<EphemeralBackend, boolean>;
+}
+
+/**
+ * Live readiness probes for both backends. Unlike initEphemeralStore (boot-time
+ * initialization), this checks whether each backend currently answers — so
+ * post-boot outages surface in readiness instead of reusing cached init results.
+ * Never throws; each probe reports false on error or timeout.
+ */
+export async function probeEphemeralBackends(): Promise<{ redis: boolean; postgres: boolean }> {
+  const [redis, postgres] = await Promise.all([probeRedis(), probePostgres()]);
+  return { redis, postgres };
 }
 
 /**

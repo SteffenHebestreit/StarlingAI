@@ -54,8 +54,23 @@ Skills are workspace-scoped under `.starlingai/skills/<slug>/SKILL.md` (gitignor
 }
 ```
 
-- **`trustModelRouting`** (default `true`) — trusts the model's own decision to answer a turn directly. The weak, false-positive-prone **freshness** keyword heuristic (`jetzt`/`now`/`latest`) no longer *forces* delegation; it stays as advisory guidance in the turn prompt. **Source-sensitive** intent — explicit `cite official sources`, `search online`, product/hardware research — still forces delegation for anti-hallucination value. Set `false` to also force delegation on freshness signals (the stricter, legacy behavior).
+- **`trustModelRouting`** (default `true`) — trusts the model's own decision to answer a turn directly; set `false` to force delegation whenever a turn is flagged freshness-sensitive. The flag is wired and tested at the runtime enforcement site (`agent/turn-setup.ts`), but the production intent classifier does not currently emit `freshnessSensitive=true` (its routing keyword tables were removed), so flipping this flag has no production effect until the classifier emits that signal — tracked in dev-plan `QPR-003`.
 - Regardless of this flag, a turn **never ends empty**: if the model is nudged to delegate but still answers directly, its draft is released (after the security output scan + redactor) rather than being blocked.
+
+## Deployment Mode
+
+```jsonc
+{
+  "deployment": {
+    "mode": "single_process" // single_process | trusted_cluster | untrusted_multi_tenant
+  }
+}
+```
+
+- **`single_process`** (default) permits the existing local/in-memory coordination fallbacks for one operator or development.
+- **`trusted_cluster`** requires reachable Redis and PostgreSQL at `/readyz`; the gateway reports `503` instead of silently coordinating through one process.
+- **`untrusted_multi_tenant`** adds mandatory dashboard/API authentication to the clustered requirements.
+- The unauthenticated `/readyz` response exposes dependency state, not connection strings, model IDs, or credentials.
 
 ## Context Injection
 

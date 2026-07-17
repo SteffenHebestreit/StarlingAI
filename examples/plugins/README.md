@@ -1,9 +1,9 @@
 # StarlingAI Example Plugins
 
-Drop any of these into your configured plugins directory (default
-`~/.starlingai/plugins/`) and the gateway will auto-load them on startup.
-With `plugins.enabled` true (the default), a file watcher also picks up
-new plugins added at runtime — no gateway restart needed.
+After explicitly enabling `plugins.enabled`, drop any of these into your configured
+plugins directory (default `~/.starlingai/plugins/`) and the gateway will load them on
+startup. The file watcher then also picks up new plugins added at runtime — no gateway
+restart needed.
 
 | Plugin | Tools | What it does |
 |--------|-------|--------------|

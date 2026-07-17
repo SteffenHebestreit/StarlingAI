@@ -4,8 +4,8 @@
       <div>
         <h2 class="plugins-page__title">Plugins</h2>
         <p class="plugins-page__subtitle">
-          Third-party tool packages auto-loaded from the configured plugins directory.
-          All plugin tools register at Tier 2 (sandboxed, per-call approval) — plugins cannot self-elevate.
+          Explicitly enabled third-party tool packages load from the configured directory.
+          All plugin tools register at Tier 2 with per-call approval, but currently execute in the gateway process.
         </p>
       </div>
       <div class="plugins-page__actions">
@@ -16,7 +16,7 @@
     <div v-if="!enabled" class="plugins-disabled">
       <p>
         Plugin loader is disabled.  Set <code>plugins.enabled = true</code> in
-        <code>starlingai.json</code> (it's the default) and place a plugin's
+        <code>starlingai.json</code> and place a plugin's
         <code>index.mjs</code> in the configured directory to start using it.
       </p>
     </div>
