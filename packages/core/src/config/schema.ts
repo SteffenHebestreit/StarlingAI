@@ -1715,6 +1715,12 @@ export const ConfigSchema = z.object({
       name: z.string().min(1),
       digest: z.string().regex(/^[a-f0-9]{64}$/),
     })).default([]),
+    /** SEC-105 (ADR-007): where trusted plugin code executes. "in_process"
+     *  (default, legacy) imports into the gateway; "worker" spawns each plugin
+     *  into its own child process with a MINIMAL env (no gateway secrets, only
+     *  manifest-declared vars), per-call timeouts, and crash containment — a
+     *  dead plugin degrades, the gateway never goes down with it. */
+    isolation: z.enum(["in_process", "worker"]).default("in_process"),
   }).default({}),
   /**
    * Built-in tool surface control.  Forks disable whole capability families

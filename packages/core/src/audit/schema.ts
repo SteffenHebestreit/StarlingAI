@@ -269,6 +269,8 @@ export type CoreAuditEventType =
   | "plugin_trust_verified"
   | "plugin_load_refused_untrusted"
   | "plugin_compat_risk"
+  | "plugin_worker_started"
+  | "plugin_worker_crashed"
   // Cost governance
   | "cost_budget_threshold"
   | "cost_budget_blocked"

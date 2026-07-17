@@ -27,6 +27,7 @@ import { registerTool, unregisterTool, warmToolEmbeddings, type ToolHandler } fr
 import { isCompileTimeMappedTool, getToolTier } from "../guardrails/tool-tiers.js";
 import { computePluginDigest, isPluginTrusted } from "./trust.js";
 import { readPluginManifest, scanPluginCompatibility } from "./manifest.js";
+import { disposePluginWorker, importPluginViaWorker } from "./worker-host.js";
 import { getConfig } from "../config/loader.js";
 import type { Plugin, PluginTool } from "./index.js";
 
@@ -138,6 +139,10 @@ async function resyncPlugins(dir: string): Promise<void> {
         try { unregisterTool(fullName); } catch { /* ignore */ }
       }
       _loadedPlugins.delete(name);
+      // Worker mode: the unloaded plugin's child process must die with its
+      // registration — otherwise it leaks (with whatever it opened at import
+      // time) for the gateway's lifetime. No-op for in-process plugins.
+      disposePluginWorker(name);
       logAudit("plugin_unloaded", { plugin: name, reason: "file removed" });
       log.info({ plugin: name }, "Plugin unloaded — file removed");
     }
@@ -198,13 +203,23 @@ export async function loadPlugins(dir: string = resolvePluginsDir()): Promise<{ 
     return { loaded: 0, rejected: 0 };
   }
 
-  const pluginsConfig = (getConfig() as { plugins?: { requireTrust?: boolean; trust?: Array<{ name: string; digest: string }> } }).plugins;
+  const pluginsConfig = (getConfig() as { plugins?: { requireTrust?: boolean; trust?: Array<{ name: string; digest: string }>; isolation?: "in_process" | "worker" } }).plugins;
   const requireTrust = pluginsConfig?.requireTrust !== false;
   const trustReceipts = pluginsConfig?.trust ?? [];
 
   for (const entry of entries) {
     const resolvedSource = resolvePluginEntry(dir, entry);
     if (!resolvedSource) continue;
+
+    // Already-loaded skip BEFORE any import work. Load-time validation
+    // enforces plugin.name === directory id, so the id check is equivalent —
+    // and in worker mode this is load-bearing: importing first would respawn
+    // the worker and dispose the live handle the plugin's REGISTERED tools
+    // still close over, bricking the plugin on every hot-reload resync pass.
+    if (_loadedPlugins.has(resolvedSource.id)) {
+      loaded += 1;
+      continue;
+    }
 
     // ADR-007 data-only manifest: parsed and validated WITHOUT importing any
     // plugin code. Optional for legacy plugins; when present it is ENFORCED —
@@ -254,11 +269,28 @@ export async function loadPlugins(dir: string = resolvePluginsDir()): Promise<{ 
     }
 
     try {
-      const result = await loadOnePlugin(resolvedSource.entryPath, resolvedSource.label, resolvedSource.id);
+      // ADR-007 worker isolation: with plugins.isolation="worker", the plugin
+      // imports inside its own minimal-env child process and its tools RPC in;
+      // the SAME validation/registration path runs either way. Manifest-declared
+      // env vars are the only extras the worker environment receives.
+      const isolation = pluginsConfig?.isolation ?? "in_process";
+      const workerImporter: PluginImporter | undefined = isolation === "worker"
+        ? (entryPathForWorker) => importPluginViaWorker(entryPathForWorker, {
+            pluginId: resolvedSource.id,
+            envAllowlist: manifestResult.status === "valid" ? manifestResult.manifest.capabilities?.env ?? [] : [],
+          })
+        : undefined;
+      const result = await loadOnePlugin(resolvedSource.entryPath, resolvedSource.label, resolvedSource.id, workerImporter);
       if (result.ok) loaded += 1;
-      else rejected += 1;
+      else {
+        rejected += 1;
+        // A plugin that spawned a worker but then failed validation must not
+        // leave that worker running with zero registered tools.
+        if (workerImporter) disposePluginWorker(resolvedSource.id);
+      }
     } catch (err) {
       rejected += 1;
+      disposePluginWorker(resolvedSource.id);
       log.warn({ err, entry }, "Plugin load threw — skipped");
       logAudit("plugin_tool_rejected", { source: resolvedSource.label, reason: (err as Error).message }, { severity: "warn" });
     }
@@ -312,8 +344,8 @@ export function resetPluginImporter(): void {
   _pluginImporter = defaultPluginImporter;
 }
 
-async function loadOnePlugin(entryPath: string, label: string, expectedId: string): Promise<LoadResult> {
-  const mod = await _pluginImporter(entryPath);
+async function loadOnePlugin(entryPath: string, label: string, expectedId: string, importerOverride?: PluginImporter): Promise<LoadResult> {
+  const mod = await (importerOverride ?? _pluginImporter)(entryPath);
   const plugin = mod?.default;
 
   if (!plugin || typeof plugin !== "object") {

@@ -424,6 +424,12 @@ export async function main() {
     await closeGraphDb();
     await closeVectorStore();
     stopAllCronJobs();
+    // ADR-007: kill plugin worker children with the gateway — an orphaned
+    // worker would keep running trusted plugin code with no supervisor.
+    try {
+      const { disposeAllPluginWorkers } = await import("./plugin/worker-host.js");
+      disposeAllPluginWorkers();
+    } catch { /* best-effort */ }
     await flushAuditLog();
     await closeSessionRedis();
     try {
