@@ -202,6 +202,7 @@ export type CoreAuditEventType =
   | "task_graph_node_evicted"
   // Two claims about the same canonical subject carry different values —
   // both marked disputed; EVD-302 routes material conflicts to verification.
+  | "evidence_migration_parity"
   | "evidence_conflict_detected"
   // EVD-302 outcomes: a dispute resolved decisively (authority/recency
   // supersession, losers retained in the log) or found MATERIAL — verification

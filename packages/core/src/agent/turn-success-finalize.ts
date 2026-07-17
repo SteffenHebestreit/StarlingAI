@@ -16,6 +16,7 @@
 import { logAudit } from "../audit/logger.js";
 import { buildTurnPerformanceMetrics } from "./turn-metrics.js";
 import { recordSkillOutcomeAsync, recordSkillHoldoutOutcomeAsync } from "../skills/store.js";
+import { sweepEvidenceMigrationParity } from "../swarm/evidence-migration.js";
 import { maybeDistillSkillFromTurn } from "../skills/distiller.js";
 import { writeTrajectory, invalidateTrajectory } from "../memory/trajectory-cache.js";
 import { graphMarkSessionRetrievalsUseful, graphMarkSessionRetrievalsUnhelpful } from "../memory/graph-service.js";
@@ -160,6 +161,12 @@ export function finalizeSuccessfulTurn(p: FinalizeSuccessfulTurnParams): TurnOut
       injectedSlugs: injectedSkillSlugs,
       heldOutSlugs: heldOutSkillSlugs,
     }, { sessionId: session.id, channel: session.channel });
+  }
+  // EVD-303: once per successful non-eval turn, measure legacy-facts vs
+  // evidence-ledger parity and backfill what the dual-write missed. Fire-and-
+  // forget shadow telemetry — never blocks the turn return.
+  if (!isEvalTraffic && delegationCount > 0) {
+    void sweepEvidenceMigrationParity(session.id).catch(() => { /* shadow telemetry */ });
   }
   if (!isEvalTraffic && (injectedSkillSlugs.length > 0 || heldOutSkillSlugs.length > 0) && delegationCount > 0) {
     const outcome = finalResponse.length > 50 && !isApology ? "success" : "failure";

@@ -77,6 +77,7 @@ import { clearTaskBids, collectTaskBids, DEFAULT_AUTONOMOUS_BID_WINDOW_MS, isAut
 import { isTaskLeaseCurrent, publishTaskLeaseResult, releaseTaskLease, startTaskLeaseHeartbeat, tryAcquireTaskLease, waitForTaskLeaseResult } from "../swarm/locks.js";
 import { defaultChildReserve, reconcileMissionBudget, reserveMissionBudget, type BudgetDimensions, type BudgetReservation } from "../swarm/mission-budget.js";
 import { deriveChildContract, getOrCreateRootContract } from "../swarm/mission-contract.js";
+import { appendEvidenceClaim } from "../swarm/evidence-ledger.js";
 import { getMissionStore } from "../swarm/mission-store.js";
 import { admitToProvider, releaseProviderPermit, renewProviderPermit, type CapacityPermit } from "../swarm/capacity-broker.js";
 import { formatSharedContextForPrompt, appendPartialResult, claimAgentMessages, extractFactsFromOutput, writeSharedFact, searchSharedFacts, searchPartialResults, readAllFacts, currentTurnFactKeys } from "../swarm/memory.js";
@@ -2129,10 +2130,25 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         ts: attempt.finishedAt!,
       });
       const extractedFacts = extractFactsFromOutput(output);
+      const evidenceShadow = getConfig().mission.evidence === "shadow";
       for (const [k, v] of Object.entries(extractedFacts)) {
         await writeSharedFact(ctx.sessionId, k, v);
         // Promote to durable graph node so facts outlive the 4h Redis TTL
         graphPromoteFact(k, v, candidate, ctx.sessionId).catch(() => {});
+        // EVD-303: a raw FACT: line is an agent ASSERTION with no source
+        // provenance — it enters the evidence ledger UNVERIFIED at the lowest
+        // sourced tier (observed), so it can never outrank sourced evidence
+        // (EVD-302 authority ranking) and surfaces in verification queues
+        // instead of masquerading as a validated finding.
+        if (evidenceShadow) {
+          appendEvidenceClaim(deriveSharedSessionId(ctx.sessionId), {
+            subject: k,
+            value: v,
+            agent: candidate,
+            evidenceType: "observed",
+            validationState: "unverified",
+          }).catch(() => { /* shadow write — never blocks the harvest */ });
+        }
       }
 
       const partial = classification === "partial";
