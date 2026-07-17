@@ -323,6 +323,90 @@ const graphNodesKey = (sid: string) => `starlingai:mem:${sid}:graphnodes`;      
 const _graphLedgers = new Map<string, string>();                                  // legacy local blob (drained)
 const _graphNodes = new Map<string, Map<string, string>>();                       // local per-node
 
+// ── GRF-206: durable task-graph DEFINITIONS (restart scheduler) ──────────────
+// The per-node ledger above records COMPLETED work; a crash mid-graph loses the
+// graph's SHAPE (which nodes exist, what depends on what), so nothing can even
+// know a resume is owed. Definitions are written at dispatch, deleted on clean
+// completion — a surviving "running" definition after a process death IS the
+// crash evidence the boot-time scanner (swarm/graph-restart.ts) looks for.
+const graphDefsKey = (sid: string) => `starlingai:mem:${sid}:graphdefs`;          // hash graphId → JSON
+const GRAPHDEF_SESSIONS_KEY = "starlingai:graphdef-sessions";
+const _localGraphDefs = new Map<string, Map<string, string>>();                   // local sid → graphId → JSON
+
+export interface TaskGraphDefinitionRecord {
+  graphId: string;
+  sessionId: string;
+  startedAt: string;
+  objective?: string;
+  nodes: Array<{ id: string; title?: string; task: string; dependsOn?: string[]; agentName?: string }>;
+}
+
+export async function writeTaskGraphDefinition(sessionId: string, def: TaskGraphDefinitionRecord): Promise<void> {
+  // Bound the payload: node task text capped so a huge prompt can't bloat the record.
+  const bounded: TaskGraphDefinitionRecord = {
+    ...def,
+    objective: def.objective?.slice(0, 500),
+    nodes: def.nodes.map((n) => ({ ...n, task: n.task.slice(0, 2_000) })),
+  };
+  const json = JSON.stringify(bounded);
+  const redis = await getRedis();
+  if (redis) {
+    try {
+      const r = redis as { hset: (k: string, f: string, v: string) => Promise<unknown>; expire: (k: string, s: number) => Promise<unknown>; sadd: (k: string, m: string) => Promise<unknown> };
+      await r.hset(graphDefsKey(sessionId), def.graphId, json);
+      await r.expire(graphDefsKey(sessionId), SESSION_TTL_S);
+      await r.sadd(GRAPHDEF_SESSIONS_KEY, sessionId);
+      return;
+    } catch { /* fall through to local */ }
+  }
+  let bySession = _localGraphDefs.get(sessionId);
+  if (!bySession) { bySession = new Map(); _localGraphDefs.set(sessionId, bySession); }
+  bySession.set(def.graphId, json);
+}
+
+/** Clean completion removes the definition — no definition, no resume owed. */
+export async function deleteTaskGraphDefinition(sessionId: string, graphId: string): Promise<void> {
+  const redis = await getRedis();
+  if (redis) {
+    try {
+      await (redis as { hdel: (k: string, f: string) => Promise<unknown> }).hdel(graphDefsKey(sessionId), graphId);
+      return;
+    } catch { /* fall through */ }
+  }
+  _localGraphDefs.get(sessionId)?.delete(graphId);
+}
+
+/** All definitions that still exist = graphs that never completed cleanly. */
+export async function listInterruptedTaskGraphs(): Promise<TaskGraphDefinitionRecord[]> {
+  const out: TaskGraphDefinitionRecord[] = [];
+  const redis = await getRedis();
+  if (redis) {
+    try {
+      const r = redis as { smembers: (k: string) => Promise<string[]>; hgetall: (k: string) => Promise<Record<string, string>>; srem: (k: string, m: string) => Promise<unknown> };
+      const sessions = await r.smembers(GRAPHDEF_SESSIONS_KEY);
+      for (const sid of sessions) {
+        const defs = await r.hgetall(graphDefsKey(sid));
+        const entries = Object.values(defs ?? {});
+        if (entries.length === 0) {
+          // Session's defs all completed or TTL-expired — drop the index entry.
+          await r.srem(GRAPHDEF_SESSIONS_KEY, sid).catch?.(() => {});
+          continue;
+        }
+        for (const json of entries) {
+          try { out.push(JSON.parse(json) as TaskGraphDefinitionRecord); } catch { /* tolerate one bad record */ }
+        }
+      }
+      return out;
+    } catch { /* fall through to local */ }
+  }
+  for (const bySession of _localGraphDefs.values()) {
+    for (const json of bySession.values()) {
+      try { out.push(JSON.parse(json) as TaskGraphDefinitionRecord); } catch { /* tolerate */ }
+    }
+  }
+  return out;
+}
+
 /** Sessions whose legacy blob was verified drained this process — skip the
  *  otherwise-per-call Redis GET. Only memoized after a SUCCESSFUL check. */
 const _drainedGraphSessions = new Set<string>();
@@ -1108,6 +1192,7 @@ export async function resetSharedMemoryForTests(): Promise<void> {
   _factKeysThisTurn.clear();
   _graphLedgers.clear();
   _graphNodes.clear();
+  _localGraphDefs.clear();
   _drainedGraphSessions.clear();
   if (_redis) {
     try { await (_redis as { quit: () => Promise<void> }).quit(); } catch { /* ignore */ }

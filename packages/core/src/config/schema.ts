@@ -1436,6 +1436,15 @@ export const MissionSchema = z.object({
    */
   store: z.enum(["off", "shadow"]).default("off"),
   /**
+   * GRF-206: durable task-graph definitions + boot-time restart scanning.
+   * "shadow" persists every graph's shape at dispatch (deleted on clean
+   * completion) and, at boot, audits graphs a previous process left
+   * interrupted (`task_graph_interrupted_detected`, with completed-vs-pending
+   * node analysis against the durable ledger). Automatic re-dispatch is a
+   * later slice, gated on the chaos pack per the plan.
+   */
+  durableTaskGraph: z.enum(["off", "shadow"]).default("off"),
+  /**
    * Mission budget envelope (BUD-203): one atomic ledger per mission that every
    * child delegation reserves against BEFORE dispatch and reconciles to actual
    * usage after. "shadow" records would-be refusals (audit `mission_budget_refused`)

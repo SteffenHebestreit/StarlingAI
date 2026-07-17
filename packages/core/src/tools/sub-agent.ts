@@ -80,7 +80,7 @@ import { deriveChildContract, getOrCreateRootContract } from "../swarm/mission-c
 import { appendEvidenceClaim } from "../swarm/evidence-ledger.js";
 import { getMissionStore } from "../swarm/mission-store.js";
 import { admitToProvider, releaseProviderPermit, renewProviderPermit, type CapacityPermit } from "../swarm/capacity-broker.js";
-import { formatSharedContextForPrompt, appendPartialResult, claimAgentMessages, extractFactsFromOutput, writeSharedFact, searchSharedFacts, searchPartialResults, readAllFacts, currentTurnFactKeys } from "../swarm/memory.js";
+import { formatSharedContextForPrompt, appendPartialResult, claimAgentMessages, extractFactsFromOutput, writeSharedFact, searchSharedFacts, searchPartialResults, readAllFacts, currentTurnFactKeys, writeTaskGraphDefinition, deleteTaskGraphDefinition } from "../swarm/memory.js";
 import { computeTaskGraphNodeKey, readTaskGraphLedger, recordCompletedTaskGraphNode } from "../swarm/task-graph-ledger.js";
 import { deriveSharedSessionId } from "./memory.js";
 import { graphPromoteFact } from "../memory/graph-service.js";
@@ -2659,6 +2659,28 @@ registerTool({
       },
     });
 
+    // GRF-206: persist the graph's SHAPE so a crash mid-execution is
+    // detectable at next boot (the definition survives; clean completion
+    // deletes it below). Keyed to the ROOT session — the same scope the
+    // per-node ledger uses, so the restart scanner can cross-reference.
+    const graphDefSessionId = deriveSharedSessionId(ctx.sessionId);
+    const durableGraphEnabled = getConfig().mission.durableTaskGraph !== "off";
+    if (durableGraphEnabled) {
+      await writeTaskGraphDefinition(graphDefSessionId, {
+        graphId,
+        sessionId: graphDefSessionId,
+        startedAt: new Date().toISOString(),
+        objective: String(args["objective"] ?? ""),
+        nodes: rawNodes.map((n) => ({
+          id: n.id,
+          ...(n.title ? { title: n.title } : {}),
+          task: n.task,
+          ...(n.dependsOn ? { dependsOn: n.dependsOn } : {}),
+          ...(n.agentName ? { agentName: n.agentName } : {}),
+        })),
+      }).catch(() => { /* definition write is best-effort — never blocks the graph */ });
+    }
+
     // Durable node reuse (orchestration.durableTaskGraph): satisfy nodes a prior run of
     // this session already completed (structural hash match) from the ledger instead of
     // re-executing them. Conservative by construction — only ever SKIPS work that already
@@ -2848,6 +2870,14 @@ registerTool({
         success: failed.size === 0,
       },
     });
+
+    // GRF-206: the graph reached a TERMINAL state (every node completed,
+    // failed, or blocked) — delete the durable definition so the restart
+    // scanner owes nothing. A crash before this line leaves the definition
+    // behind, which is exactly the resume evidence.
+    if (durableGraphEnabled) {
+      await deleteTaskGraphDefinition(graphDefSessionId, graphId).catch(() => { /* best-effort */ });
+    }
 
     const summary = rawNodes.map((node) => {
       const task = swarmState.tasks[node.id];

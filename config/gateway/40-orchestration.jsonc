@@ -192,6 +192,9 @@
   // deployment opts into the additive shadow stage per the rollout policy.
   "mission": {
     "store": "shadow",
+    // GRF-206 shadow: persist graph shapes at dispatch and audit interrupted
+    // graphs at boot (resume candidates only — no auto re-dispatch yet).
+    "durableTaskGraph": "shadow",
     // BUD-203 shadow rollout: reserve/reconcile per-mission usage (tokens, tool
     // calls, active time) on the atomic ledger. All ceilings 0 = unlimited, so
     // nothing is ever refused yet — this records real per-mission spend to

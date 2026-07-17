@@ -201,6 +201,7 @@ export type CoreAuditEventType =
   // Task-graph ledger entry cap reached — oldest completed-node records were
   // explicitly evicted (GRF-206 replaces silent blob truncation with this).
   | "task_graph_node_evicted"
+  | "task_graph_interrupted_detected"
   // Two claims about the same canonical subject carry different values —
   // both marked disputed; EVD-302 routes material conflicts to verification.
   | "evidence_migration_parity"

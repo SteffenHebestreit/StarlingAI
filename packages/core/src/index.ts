@@ -33,6 +33,7 @@ import { rehydrateScheduledTasks } from "./runtime/scheduled-task-runner.js";
 import { startSwarmBus, stopSwarmBus } from "./swarm/bus.js";
 import { maybeStartMissionEventBridge } from "./swarm/mission-store.js";
 import { maybeStartDistributedControl } from "./swarm/control.js";
+import { maybeStartGraphRestartScan } from "./swarm/graph-restart.js";
 import { startAutonomousBidding, stopAutonomousBidding } from "./swarm/bidding.js";
 import { startBidderWorker, stopBidderWorker } from "./swarm/bidder-worker.js";
 
@@ -252,6 +253,7 @@ export async function main() {
 
   // CTL-205: subscribe this process to distributed session-cancel commands.
   maybeStartDistributedControl();
+  maybeStartGraphRestartScan();
 
   // Start first-pass autonomous bidding over the swarm bus
   startAutonomousBidding();
