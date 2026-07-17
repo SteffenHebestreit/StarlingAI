@@ -3,7 +3,7 @@
 **Date:** 2026-07-16  
 **Scope:** swarm orchestration, reliability, security, memory, evaluation, observability, and self-improvement  
 **Baseline:** StarlingAI v0.45.8 on `develop`, including the local Fable-method adoption work  
-**Status:** R0–R3 implemented at slice-1 depth, adversarially reviewed, committed (`feat/dev-plan-r0-r3`), and live-validated in the rebuilt stack on 2026-07-17 (see the "Live validation" ledger row) — shadow-telemetry soak underway; R4/R5 in progress
+**Status:** R0–R5 implemented at slice depth on `feat/dev-plan-r0-r3` (2026-07-17): R0–R3 live-validated in the rebuilt stack; R4 complete (EVL-401/402 incl. chaos-crash pack, LRN-403/404); R5 DOC-504 done; SEC-105 through worker isolation, SEC-106 with retry guard, MIS-202 contracts, EVD-303 value parity; fable roadmap Phase 6 complete. Full suite 2,688 green. Remaining: UX-501/502 (awaiting web-tree availability), PRF-503 (gated on UX-501 + eval soak), GRF-206 auto-resume executor (start fresh-session; chaos-crash pack now backs it), enforcement flips (shadow-soak-gated), ADR-007 capability RPC bridging.
 
 ## Executive decision
 
