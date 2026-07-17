@@ -278,6 +278,9 @@ export async function loadPlugins(dir: string = resolvePluginsDir()): Promise<{ 
         ? (entryPathForWorker) => importPluginViaWorker(entryPathForWorker, {
             pluginId: resolvedSource.id,
             envAllowlist: manifestResult.status === "valid" ? manifestResult.manifest.capabilities?.env ?? [] : [],
+            // Deny-by-default network: only the manifest's declared hosts are
+            // reachable via fetch inside the worker (capability-guard.ts).
+            networkHosts: manifestResult.status === "valid" ? manifestResult.manifest.capabilities?.network ?? [] : [],
           })
         : undefined;
       const result = await loadOnePlugin(resolvedSource.entryPath, resolvedSource.label, resolvedSource.id, workerImporter);

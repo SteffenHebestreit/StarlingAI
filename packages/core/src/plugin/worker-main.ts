@@ -19,6 +19,7 @@
  */
 import { pathToFileURL } from "node:url";
 import { createInterface } from "node:readline";
+import { installNetworkGuard } from "./capability-guard.js";
 
 interface WorkerPluginTool {
   name: string;
@@ -42,8 +43,12 @@ function send(message: Record<string, unknown>): void {
   process.stdout.write(`${JSON.stringify(message)}\n`);
 }
 
-async function handleInit(entryPath: string): Promise<void> {
+async function handleInit(entryPath: string, networkHosts: string[]): Promise<void> {
   try {
+    // Install the network capability guard BEFORE importing the plugin, so even
+    // module-level fetch calls are gated to the manifest-declared hosts
+    // (deny-by-default). Defense in depth — see capability-guard.ts.
+    installNetworkGuard(networkHosts);
     const mod = (await import(/* @vite-ignore */ pathToFileURL(entryPath).href)) as { default?: WorkerPlugin };
     const candidate = mod?.default;
     if (!candidate || typeof candidate !== "object" || typeof candidate.name !== "string" || !Array.isArray(candidate.tools)) {
@@ -89,7 +94,8 @@ rl.on("line", (line) => {
   let message: Record<string, unknown>;
   try { message = JSON.parse(line); } catch { return; }
   if (message["type"] === "init" && typeof message["entryPath"] === "string") {
-    void handleInit(message["entryPath"]);
+    const hosts = Array.isArray(message["networkHosts"]) ? (message["networkHosts"] as unknown[]).filter((h): h is string => typeof h === "string") : [];
+    void handleInit(message["entryPath"], hosts);
   } else if (message["type"] === "invoke" && typeof message["id"] === "string" && typeof message["tool"] === "string") {
     void handleInvoke(
       message["id"],

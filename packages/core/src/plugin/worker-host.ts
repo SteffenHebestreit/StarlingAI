@@ -85,7 +85,7 @@ interface ReadyMessage {
 /** Spawn a worker for one plugin and complete the init handshake. */
 export async function spawnPluginWorker(
   entryPath: string,
-  opts: { pluginId: string; envAllowlist?: string[]; defaultInvokeTimeoutMs?: number } ,
+  opts: { pluginId: string; envAllowlist?: string[]; networkHosts?: string[]; defaultInvokeTimeoutMs?: number } ,
 ): Promise<{ handle: PluginWorkerHandle; ready: ReadyMessage }> {
   const command = resolveWorkerCommand();
   const child: ChildProcess = spawn(process.execPath, command, {
@@ -206,7 +206,7 @@ export async function spawnPluginWorker(
     });
 
     try {
-      child.stdin!.write(`${JSON.stringify({ type: "init", entryPath })}\n`);
+      child.stdin!.write(`${JSON.stringify({ type: "init", entryPath, networkHosts: opts.networkHosts ?? [] })}\n`);
     } catch (err) {
       degrade(`init write failed: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -240,7 +240,7 @@ export function disposeAllPluginWorkers(): void {
  */
 export async function importPluginViaWorker(
   entryPath: string,
-  opts: { pluginId: string; envAllowlist?: string[] },
+  opts: { pluginId: string; envAllowlist?: string[]; networkHosts?: string[] },
 ): Promise<{ default?: Plugin }> {
   const { handle, ready } = await spawnPluginWorker(entryPath, opts);
   _workerHandles.get(opts.pluginId)?.dispose();
