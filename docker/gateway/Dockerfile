@@ -8,12 +8,22 @@ WORKDIR /app
 # dependency versions as the host/CI lockfile. Without it, pnpm re-resolves from
 # the manifests and a stale cached layer can serve an incompatible version (e.g.
 # a `docx` build whose v9 exports are missing), breaking `tsc` only inside Docker.
+#
+# Install with --frozen-lockfile (pnpm's CI default), NOT --no-frozen-lockfile:
+# the build must be reproducible. --frozen-lockfile installs the EXACT versions
+# pinned in pnpm-lock.yaml and fails fast if the lockfile is out of sync with the
+# manifests. --no-frozen-lockfile instead SILENTLY re-resolves the drifting deps,
+# which is what produced the intermittent `tsc` exit 2 here: whenever BuildKit
+# rebuilt this layer it could pick a version set that doesn't typecheck, so the
+# same source builds on one run and fails on the next. If this step ever fails
+# with "lockfile is not up to date", run `pnpm install` on the host to regenerate
+# pnpm-lock.yaml and commit it — do not paper over it by relaxing the flag.
 FROM base AS deps
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY packages/core/package.json ./packages/core/
 COPY packages/web/package.json ./packages/web/
 COPY packages/mail-service/package.json ./packages/mail-service/
-RUN pnpm install --no-frozen-lockfile
+RUN pnpm install --frozen-lockfile
 
 # Test — runs vitest inside the container, exits non-zero on failure
 FROM deps AS test

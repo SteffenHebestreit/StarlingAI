@@ -6,7 +6,11 @@ WORKDIR /app
 FROM base AS deps
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY packages/mail-service/package.json ./packages/mail-service/
-RUN pnpm install --no-frozen-lockfile
+# --frozen-lockfile (not --no-frozen-lockfile): reproducible install that pins the
+# exact locked versions and fails fast on a stale lockfile, instead of silently
+# re-resolving to a drifting version set that only breaks later in the build.
+# See docker/gateway/Dockerfile for the full rationale.
+RUN pnpm install --frozen-lockfile
 
 FROM deps AS build
 COPY scripts/clean-path.mjs ./scripts/clean-path.mjs
