@@ -1,0 +1,615 @@
+{
+  "runId": "10975dc0-fcaf-4ffc-98d6-8c0d11e6ff2c",
+  "generatedAt": "2026-07-16T17:31:37.251Z",
+  "totalCases": 12,
+  "passedCases": 8,
+  "failedCases": 4,
+  "repeat": 1,
+  "reliableCases": 8,
+  "flakyCases": 0,
+  "erroredCases": 0,
+  "concurrency": 1,
+  "provenance": {
+    "version": 1,
+    "source": {
+      "available": true,
+      "revision": "e66fc74ee9d14ac9290789b21d7d9fd5442ac8e7",
+      "dirty": true,
+      "digest": "dccd95af90c6e5af82a0a463f9b9ac096001260de4716afb3075e184d8601092"
+    },
+    "planDigest": "0983d8a52284d16aac8d643dbf4be65c2c9537249b32c0035c93aba3115a7812",
+    "configDigest": "9b0899b37d6612ff469f2dedaac8de2fdb1372adcdcfc343a36250242d4180cf",
+    "modelDigest": "0f21de03566552a170f1914d1e95db03c7c2dc03b8c7560d1a5fe7c1c30550a6",
+    "promptDigest": "a54bcdbefc2197bfe69c2b3087739cb82742e48e2013c07c61a39639fea2b0f9",
+    "hardware": {
+      "digest": "639202ace765119f7fb9b6ece1a2820a6a7936bd6c841ec20d2c6598e1613715",
+      "nodeVersion": "v23.10.0",
+      "platform": "win32",
+      "arch": "x64"
+    }
+  },
+  "workspacePath": "/workspace",
+  "results": [
+    {
+      "name": "research-docs",
+      "agentName": "researcher",
+      "passed": true,
+      "durationMs": 45286,
+      "status": "passed",
+      "failures": [],
+      "outputPreview": "Based on the LM Studio documentation, here is a summary of the main requirements for function calling: **1. Use of \"Custom Tools\" Feature** Function calling in LM Studio is implemented through the **\"Custom tools\"** feature. This feature is",
+      "stats": {
+        "agentName": "researcher",
+        "sessionId": "sub:eval:1f23effb-7c63-4515-9d36-f1a01df81867:researcher:1784222882857",
+        "promptChars": 4829,
+        "userContentChars": 90,
+        "toolCount": 13,
+        "toolNames": [
+          "web_search",
+          "web_search",
+          "web_search",
+          "web_search",
+          "web_fetch",
+          "web_fetch",
+          "web_fetch",
+          "web_fetch",
+          "web_fetch",
+          "web_fetch",
+          "web_fetch",
+          "web_fetch",
+          "web_fetch"
+        ],
+        "iterations": 6,
+        "usage": {
+          "promptTokens": 44217,
+          "completionTokens": 947,
+          "totalTokens": 45164
+        },
+        "maxIterations": 14,
+        "model": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "capabilities": [
+          "web source research",
+          "official documentation lookup",
+          "specification and standards discovery",
+          "release-note lookup",
+          "product and comparison research",
+          "cross-source fact-checking",
+          "source-metadata capture for writers",
+          "published security-advisory lookup"
+        ],
+        "outcome": "partial",
+        "terminalState": "max_iterations"
+      },
+      "attempts": 1,
+      "passCount": 1,
+      "passCaretK": true,
+      "passAtK": true,
+      "runDurationsMs": [
+        45286
+      ]
+    },
+    {
+      "name": "retrieval-workspace",
+      "agentName": "code_analyst",
+      "passed": true,
+      "durationMs": 8189,
+      "status": "passed",
+      "failures": [],
+      "outputPreview": "**Result: No matches found.** The workspace is currently empty — there are no files present. I confirmed this by: 1. **`workspace_search` for `parallel_delegate`** — returned \"No workspace files contain 'parallel_delegate'.\" 2. **`workspace",
+      "stats": {
+        "agentName": "code_analyst",
+        "sessionId": "sub:eval:dec3785b-8d50-4280-b622-3cb00100304a:code_analyst:1784222928144",
+        "promptChars": 1575,
+        "userContentChars": 131,
+        "toolCount": 4,
+        "toolNames": [
+          "workspace_search",
+          "workspace_search",
+          "workspace_search",
+          "list_files"
+        ],
+        "iterations": 3,
+        "usage": {
+          "promptTokens": 10350,
+          "completionTokens": 355,
+          "totalTokens": 10705
+        },
+        "maxIterations": 12,
+        "model": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "capabilities": [
+          "source-code reading",
+          "symbol and reference lookup",
+          "call-site tracing",
+          "config-value extraction",
+          "architecture review",
+          "static bug diagnosis",
+          "security and edge-case review",
+          "workspace code retrieval"
+        ],
+        "outcome": "success",
+        "terminalState": "completed"
+      },
+      "attempts": 1,
+      "passCount": 1,
+      "passCaretK": true,
+      "passAtK": true,
+      "runDurationsMs": [
+        8189
+      ]
+    },
+    {
+      "name": "summary-smoke",
+      "agentName": "summarizer",
+      "passed": true,
+      "durationMs": 4085,
+      "status": "passed",
+      "failures": [],
+      "outputPreview": "StarlingAI executes secure multi-agent workflows via a local gateway.",
+      "stats": {
+        "agentName": "summarizer",
+        "sessionId": "sub:eval:0aac62e8-7e60-4423-8156-e8270333edcb:summarizer:1784222936335",
+        "promptChars": 5993,
+        "userContentChars": 106,
+        "toolCount": 0,
+        "toolNames": [],
+        "iterations": 0,
+        "usage": {
+          "promptTokens": 2717,
+          "completionTokens": 14,
+          "totalTokens": 2731
+        },
+        "maxIterations": 6,
+        "model": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "capabilities": [
+          "text summarization",
+          "structured bullet summaries",
+          "tl;dr creation",
+          "key-point extraction",
+          "faithful value-preserving condensation"
+        ],
+        "outcome": "success",
+        "terminalState": "completed"
+      },
+      "attempts": 1,
+      "passCount": 1,
+      "passCaretK": true,
+      "passAtK": true,
+      "runDurationsMs": [
+        4085
+      ]
+    },
+    {
+      "name": "translation-de-en",
+      "agentName": "content_writer",
+      "passed": true,
+      "durationMs": 12188,
+      "status": "passed",
+      "failures": [],
+      "outputPreview": "**English translation:** > StarlingAI is a local multi-agent system with configurable permissions. This has been saved to shared findings as `translation_result` for reference by other agents in the session.",
+      "stats": {
+        "agentName": "content_writer",
+        "sessionId": "sub:eval:4e3de191-75a3-4890-8160-2a43e10dc19e:content_writer:1784222940410",
+        "promptChars": 5582,
+        "userContentChars": 134,
+        "toolCount": 1,
+        "toolNames": [
+          "share_finding"
+        ],
+        "iterations": 1,
+        "usage": {
+          "promptTokens": 11646,
+          "completionTokens": 145,
+          "totalTokens": 11791
+        },
+        "maxIterations": 10,
+        "model": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "capabilities": [
+          "blog and editorial writing",
+          "product and marketing copy",
+          "newsletter writing",
+          "press-release drafting",
+          "social-media copy",
+          "user-facing documentation",
+          "brand tone adaptation",
+          "static website generation",
+          "microsite and docs-site authoring",
+          "reveal.js slide-deck generation"
+        ],
+        "outcome": "success",
+        "terminalState": "completed"
+      },
+      "attempts": 1,
+      "passCount": 1,
+      "passCaretK": true,
+      "passAtK": true,
+      "runDurationsMs": [
+        12188
+      ]
+    },
+    {
+      "name": "email-draft-smoke",
+      "agentName": "content_writer",
+      "passed": true,
+      "durationMs": 6637,
+      "status": "passed",
+      "failures": [],
+      "outputPreview": "Here's a short follow-up email under 80 words: --- **Subject:** Project Brief Received — Thank You! Hi [Client Name], Thanks for sending over the project brief. I've reviewed it and everything looks great on my end. I'll get started on the ",
+      "stats": {
+        "agentName": "content_writer",
+        "sessionId": "sub:eval:3f286f69-33e1-4eb4-9645-d2e1f5b05e44:content_writer:1784222952598",
+        "promptChars": 5582,
+        "userContentChars": 119,
+        "toolCount": 1,
+        "toolNames": [
+          "share_finding"
+        ],
+        "iterations": 1,
+        "usage": {
+          "promptTokens": 11732,
+          "completionTokens": 268,
+          "totalTokens": 12000
+        },
+        "maxIterations": 10,
+        "model": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "capabilities": [
+          "blog and editorial writing",
+          "product and marketing copy",
+          "newsletter writing",
+          "press-release drafting",
+          "social-media copy",
+          "user-facing documentation",
+          "brand tone adaptation",
+          "static website generation",
+          "microsite and docs-site authoring",
+          "reveal.js slide-deck generation"
+        ],
+        "outcome": "success",
+        "terminalState": "completed"
+      },
+      "attempts": 1,
+      "passCount": 1,
+      "passCaretK": true,
+      "passAtK": true,
+      "runDurationsMs": [
+        6637
+      ]
+    },
+    {
+      "name": "coder-smoke",
+      "agentName": "coder",
+      "passed": true,
+      "durationMs": 33251,
+      "status": "passed",
+      "failures": [],
+      "outputPreview": "The file is written and verified. Here's the content of `/workspace/helpers/slugify.js`: ```js /** * Converts a string to a URL-safe slug. * - Lowercases the input * - Replaces spaces and consecutive non-alphanumeric characters with a singl",
+      "stats": {
+        "agentName": "coder",
+        "sessionId": "sub:eval:8f469437-e5e0-480b-8db5-ae44f00e1777:coder:1784222959244",
+        "promptChars": 1909,
+        "userContentChars": 173,
+        "toolCount": 6,
+        "toolNames": [
+          "write_file",
+          "list_files",
+          "write_file",
+          "list_files",
+          "write_file",
+          "read_file"
+        ],
+        "iterations": 6,
+        "usage": {
+          "promptTokens": 18236,
+          "completionTokens": 1424,
+          "totalTokens": 19660
+        },
+        "maxIterations": 10,
+        "model": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "capabilities": [
+          "javascript execution",
+          "typescript execution",
+          "sandboxed scripting",
+          "calculation and algorithmic logic",
+          "format and data transformation",
+          "utility prototyping"
+        ],
+        "outcome": "success",
+        "terminalState": "completed"
+      },
+      "attempts": 1,
+      "passCount": 1,
+      "passCaretK": true,
+      "passAtK": true,
+      "runDurationsMs": [
+        33251
+      ]
+    },
+    {
+      "name": "shell-smoke",
+      "agentName": "shell_agent",
+      "passed": false,
+      "durationMs": 16898,
+      "status": "failed",
+      "failures": [
+        "missing expected text: hello_starlingai"
+      ],
+      "outputPreview": "Sub-agent 'shell_agent' container error: unknown",
+      "stats": {
+        "agentName": "shell_agent",
+        "sessionId": "sub:eval:7a28d7f4-a0d8-4031-bd2c-61c48c330621:shell_agent:1784222992499",
+        "promptChars": 0,
+        "userContentChars": 50,
+        "toolCount": 0,
+        "toolNames": [],
+        "iterations": 0,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0
+        },
+        "maxIterations": 10,
+        "model": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "capabilities": [
+          "local shell command execution",
+          "single remote command via ssh",
+          "build-command runs",
+          "one-off cli inspection",
+          "raw command-output reporting"
+        ],
+        "outcome": "failure",
+        "terminalState": "error",
+        "containerColdStartMs": 2400,
+        "containerBootstrapMs": 56,
+        "containerRuntimeMs": 16883
+      },
+      "attempts": 1,
+      "passCount": 0,
+      "passCaretK": false,
+      "passAtK": false,
+      "runDurationsMs": [
+        16898
+      ]
+    },
+    {
+      "name": "git-agent-smoke",
+      "agentName": "git_developer",
+      "passed": true,
+      "durationMs": 15836,
+      "status": "passed",
+      "failures": [],
+      "outputPreview": "Sub-agent 'git_developer' container error: unknown",
+      "stats": {
+        "agentName": "git_developer",
+        "sessionId": "sub:eval:79e16890-16e2-429a-bb8d-fc98c6900f4f:git_developer:1784223009384",
+        "promptChars": 0,
+        "userContentChars": 93,
+        "toolCount": 0,
+        "toolNames": [],
+        "iterations": 0,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0
+        },
+        "maxIterations": 12,
+        "model": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "capabilities": [
+          "git commit and staging",
+          "branching and checkout",
+          "git push and tagging",
+          "repository cloning",
+          "github pull-request opening",
+          "pr comments",
+          "ci check-run inspection",
+          "github actions dispatch",
+          "github release publishing"
+        ],
+        "outcome": "failure",
+        "terminalState": "error",
+        "containerColdStartMs": 1441,
+        "containerBootstrapMs": 3,
+        "containerRuntimeMs": 15836
+      },
+      "attempts": 1,
+      "passCount": 1,
+      "passCaretK": true,
+      "passAtK": true,
+      "runDurationsMs": [
+        15836
+      ]
+    },
+    {
+      "name": "test-runner-smoke",
+      "agentName": "shell_agent",
+      "passed": false,
+      "durationMs": 15821,
+      "status": "failed",
+      "failures": [
+        "missing expected text: no_tests_configured"
+      ],
+      "outputPreview": "Sub-agent 'shell_agent' container error: unknown",
+      "stats": {
+        "agentName": "shell_agent",
+        "sessionId": "sub:eval:018b21b2-6091-455a-923a-fcd06a7d6590:shell_agent:1784223025221",
+        "promptChars": 0,
+        "userContentChars": 98,
+        "toolCount": 0,
+        "toolNames": [],
+        "iterations": 0,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0
+        },
+        "maxIterations": 10,
+        "model": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "capabilities": [
+          "local shell command execution",
+          "single remote command via ssh",
+          "build-command runs",
+          "one-off cli inspection",
+          "raw command-output reporting"
+        ],
+        "outcome": "failure",
+        "terminalState": "error",
+        "containerColdStartMs": 1373,
+        "containerBootstrapMs": 2,
+        "containerRuntimeMs": 15819
+      },
+      "attempts": 1,
+      "passCount": 0,
+      "passCaretK": false,
+      "passAtK": false,
+      "runDurationsMs": [
+        15821
+      ]
+    },
+    {
+      "name": "data-analyst-smoke",
+      "agentName": "data_analyst",
+      "passed": true,
+      "durationMs": 11438,
+      "status": "passed",
+      "failures": [],
+      "outputPreview": "The CSV data was provided inline in the prompt rather than as a file. Let me work directly with the given values. **Raw data:** | Month | Revenue | |-------|---------| | Jan | 1200 | | Feb | 1500 | | Mar | 1100 | --- ### Average Monthly Rev",
+      "stats": {
+        "agentName": "data_analyst",
+        "sessionId": "sub:eval:ed64cfae-d024-49fb-988b-434cf50a0fa0:data_analyst:1784223041042",
+        "promptChars": 1094,
+        "userContentChars": 138,
+        "toolCount": 2,
+        "toolNames": [
+          "spreadsheet_read",
+          "list_files"
+        ],
+        "iterations": 1,
+        "usage": {
+          "promptTokens": 9562,
+          "completionTokens": 272,
+          "totalTokens": 9834
+        },
+        "maxIterations": 10,
+        "model": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "capabilities": [
+          "structured-data analysis",
+          "csv computation",
+          "json data inspection",
+          "spreadsheet aggregation",
+          "group-by and pivot",
+          "trend analysis",
+          "statistical anomaly detection",
+          "kpi computation"
+        ],
+        "outcome": "success",
+        "terminalState": "completed"
+      },
+      "attempts": 1,
+      "passCount": 1,
+      "passCaretK": true,
+      "passAtK": true,
+      "runDurationsMs": [
+        11438
+      ]
+    },
+    {
+      "name": "scheduler-add",
+      "agentName": "calendar_agent",
+      "passed": false,
+      "durationMs": 29038,
+      "status": "failed",
+      "failures": [
+        "missing expected text: 2026-04-01"
+      ],
+      "outputPreview": "Unfortunately, I'm unable to complete this request because **no CalDAV/CardDAV mail account is configured** on this system. The `mail_list_accounts` call failed with a fetch error, which means there are no CalDAV calendars or CardDAV contac",
+      "stats": {
+        "agentName": "calendar_agent",
+        "sessionId": "sub:eval:f31452dc-78ce-4ef1-af71-40c027e08a0d:calendar_agent:1784223052481",
+        "promptChars": 1910,
+        "userContentChars": 151,
+        "toolCount": 5,
+        "toolNames": [
+          "mail_list_accounts",
+          "list_files",
+          "list_files",
+          "read_file",
+          "read_shared_facts"
+        ],
+        "iterations": 5,
+        "usage": {
+          "promptTokens": 29834,
+          "completionTokens": 503,
+          "totalTokens": 30337
+        },
+        "maxIterations": 14,
+        "model": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "capabilities": [
+          "calendar management",
+          "event creation",
+          "event scheduling",
+          "meeting management",
+          "contacts management",
+          "address book",
+          "CalDAV",
+          "CardDAV",
+          "conflict detection",
+          "recurring events"
+        ],
+        "outcome": "partial",
+        "terminalState": "completed"
+      },
+      "attempts": 1,
+      "passCount": 0,
+      "passCaretK": false,
+      "passAtK": false,
+      "runDurationsMs": [
+        29038
+      ]
+    },
+    {
+      "name": "tool-developer-smoke",
+      "agentName": "tool_developer",
+      "passed": false,
+      "durationMs": 15732,
+      "status": "failed",
+      "failures": [
+        "missing expected text: 84"
+      ],
+      "outputPreview": "Sub-agent 'tool_developer' container error: unknown",
+      "stats": {
+        "agentName": "tool_developer",
+        "sessionId": "sub:eval:7ca1e444-d026-4c2d-abcf-6bbb79af29b5:tool_developer:1784223081520",
+        "promptChars": 0,
+        "userContentChars": 152,
+        "toolCount": 0,
+        "toolNames": [],
+        "iterations": 0,
+        "usage": {
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0
+        },
+        "maxIterations": 14,
+        "model": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "capabilities": [
+          "tool development",
+          "tool testing",
+          "self-improvement",
+          "dynamic tool creation",
+          "sandbox execution",
+          "typescript tool authoring"
+        ],
+        "outcome": "failure",
+        "terminalState": "error",
+        "containerColdStartMs": 1308,
+        "containerBootstrapMs": 2,
+        "containerRuntimeMs": 15730
+      },
+      "attempts": 1,
+      "passCount": 0,
+      "passCaretK": false,
+      "passAtK": false,
+      "runDurationsMs": [
+        15732
+      ]
+    }
+  ]
+}

@@ -1,0 +1,146 @@
+{
+  "runId": "60ca0110-9d19-4c91-9dd7-e4211641a252",
+  "generatedAt": "2026-07-16T17:26:25.842Z",
+  "totalCases": 2,
+  "passedCases": 2,
+  "failedCases": 0,
+  "repeat": 5,
+  "reliableCases": 2,
+  "flakyCases": 0,
+  "erroredCases": 0,
+  "concurrency": 1,
+  "provenance": {
+    "version": 1,
+    "source": {
+      "available": true,
+      "revision": "e66fc74ee9d14ac9290789b21d7d9fd5442ac8e7",
+      "dirty": true,
+      "digest": "dccd95af90c6e5af82a0a463f9b9ac096001260de4716afb3075e184d8601092"
+    },
+    "planDigest": "1f7cdc7959d5c98be5ecf86975bacbf565e5d75ae992c619af720c7eb68de08a",
+    "configDigest": "9b0899b37d6612ff469f2dedaac8de2fdb1372adcdcfc343a36250242d4180cf",
+    "modelDigest": "6fbe4375b7d971c9f9756008667b29171b17add1efdfde55a0a87f2c8e198d29",
+    "promptDigest": "5a0d68e61bdb9753383fb6e5346b40d0c19b21946e4cfd40eac86f25326cafa8",
+    "hardware": {
+      "digest": "639202ace765119f7fb9b6ece1a2820a6a7936bd6c841ec20d2c6598e1613715",
+      "nodeVersion": "v23.10.0",
+      "platform": "win32",
+      "arch": "x64"
+    }
+  },
+  "workspacePath": "F:\\AI\\StarlingAI\\workspace",
+  "results": [
+    {
+      "name": "twin-bug-sweep",
+      "agentName": "code_analyst",
+      "passed": true,
+      "durationMs": 26607,
+      "status": "passed",
+      "failures": [],
+      "outputPreview": "Here is the full diagnosis: --- ## Exact Wrong Construct **`int()` on line 10 of `invoices.py`** — the expression `return int(subtotal + tax)`. `int()` **truncates toward zero** (i.e., floors for positive numbers). It does *not* round to ne",
+      "stats": {
+        "agentName": "code_analyst",
+        "sessionId": "sub:eval:d669b12f-a6ed-4199-881f-a1874534515e:code_analyst:1784222673165",
+        "promptChars": 1587,
+        "userContentChars": 172,
+        "toolCount": 11,
+        "toolNames": [
+          "list_files",
+          "read_file",
+          "workspace_search",
+          "workspace_search",
+          "workspace_search",
+          "read_file",
+          "regex_test",
+          "workspace_search",
+          "workspace_search",
+          "share_finding",
+          "workspace_search"
+        ],
+        "iterations": 9,
+        "usage": {
+          "promptTokens": 44736,
+          "completionTokens": 1053,
+          "totalTokens": 45789
+        },
+        "maxIterations": 12,
+        "model": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "capabilities": [
+          "source-code reading",
+          "symbol and reference lookup",
+          "call-site tracing",
+          "config-value extraction",
+          "architecture review",
+          "static bug diagnosis",
+          "security and edge-case review",
+          "workspace code retrieval"
+        ],
+        "outcome": "success",
+        "terminalState": "completed"
+      },
+      "attempts": 5,
+      "passCount": 5,
+      "passCaretK": true,
+      "passAtK": true,
+      "runDurationsMs": [
+        17654,
+        30351,
+        25118,
+        14685,
+        45228
+      ]
+    },
+    {
+      "name": "assessment-no-edit",
+      "agentName": "code_analyst",
+      "passed": true,
+      "durationMs": 13492,
+      "status": "passed",
+      "failures": [],
+      "outputPreview": "## Root Cause: Missing Division by 100 in `applyDiscount` The bug is on **line 5** of `cart.js`: ```js return subtotal - subtotal * percent; ``` ### Step-by-step walkthrough for a $50 cart with 20% discount: 1. **`subtotal` = 50** (sum of i",
+      "stats": {
+        "agentName": "code_analyst",
+        "sessionId": "sub:eval:f32b61f1-00a8-4ead-9e81-e0b4d46ebbab:code_analyst:1784222773696",
+        "promptChars": 1594,
+        "userContentChars": 113,
+        "toolCount": 3,
+        "toolNames": [
+          "workspace_search",
+          "list_files",
+          "read_file"
+        ],
+        "iterations": 2,
+        "usage": {
+          "promptTokens": 8770,
+          "completionTokens": 517,
+          "totalTokens": 9287
+        },
+        "maxIterations": 12,
+        "model": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "capabilities": [
+          "source-code reading",
+          "symbol and reference lookup",
+          "call-site tracing",
+          "config-value extraction",
+          "architecture review",
+          "static bug diagnosis",
+          "security and edge-case review",
+          "workspace code retrieval"
+        ],
+        "outcome": "success",
+        "terminalState": "completed"
+      },
+      "attempts": 5,
+      "passCount": 5,
+      "passCaretK": true,
+      "passAtK": true,
+      "runDurationsMs": [
+        14452,
+        12817,
+        11944,
+        16088,
+        12157
+      ]
+    }
+  ]
+}
