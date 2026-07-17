@@ -24,16 +24,9 @@ config/**/*.local.jsonc
 
 # Runtime data directories (any location in the repo). Everything under a .starlingai/
 # dir is runtime state (credentials, audit log, memory, auto-distilled skills) and stays
-# out of git — EXCEPT the version-controlled fable-method seed skill at the repo root,
-# whose source is tracked so a fresh clone / `sai start --fresh` still ships it. Its
-# runtime-mutable sidecars (stats/embedding/history) stay ignored.
+# out of git.
 **/.starlingai/**
 !**/.starlingai/
-!/.starlingai/skills/
-!/.starlingai/skills/fable-method/
-!/.starlingai/skills/fable-method/**
-/.starlingai/skills/fable-method/skill.meta.json
-/.starlingai/skills/fable-method/skill.history.json
 
 # Generated reports, exports, and operator-collected artifacts
 artifacts/

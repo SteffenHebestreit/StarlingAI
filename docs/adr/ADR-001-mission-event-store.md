@@ -2,7 +2,7 @@
 
 **Status:** proposed (design for `MIS-201`; nothing implemented yet)
 **Date:** 2026-07-16
-**Plan reference:** [agent-swarm-development-plan-2026-07.md](../agent-swarm-development-plan-2026-07.md) — "Canonical control-plane data model", packages `MIS-201`/`MIS-202`, R2.
+**Plan reference:** the R0–R5 agent-swarm development program (completed 2026-07-17) — "Canonical control-plane data model", packages `MIS-201`/`MIS-202`, R2.
 
 ## Context
 

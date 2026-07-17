@@ -75,7 +75,7 @@
       "note": "Self-skips without REDIS_URL; CI provides a Redis service container."
     },
     {
-      "name": "fable-traps",
+      "name": "assessment-traps",
       "kind": "live",
       "plan": "agent-eval.jsonc",
       "note": "Nightly/pre-release: pnpm agents:evaluate agent-eval.jsonc --repeat 5 (in-process from repo root, or --via-gateway once the image includes gateway.sessionWorkspaceRoot support)."

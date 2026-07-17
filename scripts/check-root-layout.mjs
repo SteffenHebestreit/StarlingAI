@@ -28,8 +28,6 @@ const allowedFiles = new Set([
   "pnpm-workspace.yaml",
   "QUICKSTART.md",
   "README.md",
-  // Fable-method adoption roadmap (see docs/agent-swarm-development-plan-2026-07.md, QPR-001).
-  "ROADMAP.md",
   "sai",
   "sai.cmd",
   // Live eval PLANS live at the root next to their CLIs' default lookup paths

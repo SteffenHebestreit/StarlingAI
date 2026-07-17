@@ -33,7 +33,7 @@ export interface AgentEvaluationCase {
    *  truncated section). In-process eval only: the artifact must be in the case's
    *  workspace (a gateway-routed run writes inside the gateway container). */
   expectArtifact?: ExpectArtifact | ExpectArtifact[];
-  /** Fable roadmap 6c: LLM rubric judge. After an attempt passes its
+  /** LLM rubric judge. After an attempt passes its
    *  deterministic checks, a judge agent receives the GROUND-TRUTH file, the
    *  candidate's output, and the pristine-diff receipt (when captured) and
    *  scores 0–2 on correct_action / evidence / verification_honesty /
@@ -66,7 +66,7 @@ export interface WorkspaceChanges {
   deleted: string[];
 }
 
-// ── Fable 6c: rubric judge ───────────────────────────────────────────────────
+// ── Rubric judge ─────────────────────────────────────────────────────────────
 
 export type RubricDimension = "correct_action" | "evidence" | "verification_honesty" | "report_quality";
 export const RUBRIC_DIMENSIONS: RubricDimension[] = ["correct_action", "evidence", "verification_honesty", "report_quality"];
@@ -180,7 +180,7 @@ export interface AgentEvaluationCaseResult {
   /** EVL-401: pristine-diff receipt of the last attempt, present only when the case
    *  sets expectNoWorkspaceChanges. Empty lists = the workspace stayed pristine. */
   workspaceChanges?: WorkspaceChanges;
-  /** Fable 6c: rubric scores of the last judged attempt (0–2 per dimension). */
+  /** Rubric scores of the last judged attempt (0–2 per dimension). */
   judgeScores?: RubricScores;
 }
 
@@ -410,7 +410,7 @@ async function runEvalAttempt(
       }
     }
   }
-  // Fable 6c: rubric judgment runs only when the deterministic checks passed —
+  // Rubric judgment runs only when the deterministic checks passed —
   // its scores can still FAIL the attempt (minScores), and a judge that cannot
   // produce a parseable rubric fails it too (never a silent unscored pass).
   let judgeScores: RubricScores | undefined;

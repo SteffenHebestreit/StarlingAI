@@ -4470,7 +4470,7 @@ async function runQaDeliveryGate(
       current,
       "",
       passLine,
-      // Fable fraud rows (roadmap 6b): the two frauds a prose-only reviewer can
+      // Fraud-check rows: the two frauds a prose-only reviewer can
       // still catch — silent scope expansion and debug debris surfaced in the
       // answer itself. Verdict vocabulary stays strictly PASS/FAIL.
       "Also FAIL when the answer reveals work OUTSIDE the task's declared scope (unrequested changes, drive-by refactors, 'improvements' nobody asked for) or shows debug leftovers in the deliverable (debug prints, placeholder text, commented-out scraps) — name the out-of-scope item or leftover.",

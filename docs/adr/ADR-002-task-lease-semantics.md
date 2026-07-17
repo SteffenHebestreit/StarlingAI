@@ -2,7 +2,7 @@
 
 **Status:** draft (documents the DST-102 implementation in `packages/core/src/swarm/locks.ts`; result-following [DST-103] is deferred and marked open)
 **Date:** 2026-07-16
-**Plan reference:** [agent-swarm-development-plan-2026-07.md](../agent-swarm-development-plan-2026-07.md) — P0 "Distributed task claims do not prevent duplicate work", packages `DST-102`/`DST-103`.
+**Plan reference:** the R0–R5 agent-swarm development program (completed 2026-07-17) — P0 "Distributed task claims do not prevent duplicate work", packages `DST-102`/`DST-103`.
 
 ## Context
 

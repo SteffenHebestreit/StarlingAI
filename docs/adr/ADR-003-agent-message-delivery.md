@@ -2,7 +2,7 @@
 
 **Status:** partially implemented 2026-07-16 (`swarm/memory.ts`: per-recipient streams, claim/ack, visibility-timeout redelivery, retry-ceiling dead-letter, ack-time idempotency, legacy-list drain, equivalent in-process fallback; unit-tested in `tests/agent-message-claims.test.ts`). Deferred ack is wired at both production consumers: the sub-agent runner acks in `recordOutcome` on success/partial outcomes, the dispatch layer acks when the attempt records completed/partial — failed or crashed runs leave the claim pending for redelivery. An adversarial review pass (2026-07-16) was applied: claim visibility now scales with the recipient run's budget (2×, capped 30 min) per this ADR's prescription, the legacy drain is loss-safe (transfer-then-remove), locally-parked messages drain back into streams on Redis recovery, malformed payloads dead-letter instead of pinning the reclaim window, redelivery preserves order, and `/api/swarm/status` reads stream lag/pending + dead-letter depth. Open: live-Redis validation after the next image rebuild.
 **Date:** 2026-07-16
-**Plan reference:** [agent-swarm-development-plan-2026-07.md](../agent-swarm-development-plan-2026-07.md) — P0 "Agent messages can be lost during consume", package `DST-104`.
+**Plan reference:** the R0–R5 agent-swarm development program (completed 2026-07-17) — P0 "Agent messages can be lost during consume", package `DST-104`.
 
 ## Context
 

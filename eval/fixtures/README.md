@@ -1,9 +1,10 @@
-# fable-method trap fixtures
+# Trap fixtures
 
-Small self-contained workspaces that exercise the fable-method prompt changes
-(roadmap Phase 5). Each is judged by the agent evaluation harness
-(`packages/core/src/agent/evaluation.ts`) via **case-insensitive substring matching
-on the agent's final report** — there is no working-tree diff and no LLM judge.
+Small self-contained workspaces that exercise the reviewer/verification prompt
+changes (twin-defect sweeps, assessment-without-editing). Each is judged by the
+agent evaluation harness (`packages/core/src/agent/evaluation.ts`) via
+**case-insensitive substring matching on the agent's final report**, and
+optionally by the deterministic pristine-diff and LLM rubric gates.
 
 ## Layout
 

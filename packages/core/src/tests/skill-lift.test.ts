@@ -50,7 +50,7 @@ describe("skillLiftDecision", () => {
 
 describe("holdoutAssignment", () => {
   it("is deterministic: the same (session, skill) pair always lands in the same arm", () => {
-    for (const slug of ["fable-method", "deploy-runbook", "twin-check"]) {
+    for (const slug of ["verified-delivery", "deploy-runbook", "twin-check"]) {
       const first = holdoutAssignment("session-abc", slug, 0.15);
       for (let i = 0; i < 10; i++) {
         expect(holdoutAssignment("session-abc", slug, 0.15)).toBe(first);
@@ -62,7 +62,7 @@ describe("holdoutAssignment", () => {
     let held = 0;
     const n = 2000;
     for (let i = 0; i < n; i++) {
-      if (holdoutAssignment(`session-${i}`, "fable-method", 0.15)) held++;
+      if (holdoutAssignment(`session-${i}`, "verified-delivery", 0.15)) held++;
     }
     expect(held / n).toBeGreaterThan(0.10);
     expect(held / n).toBeLessThan(0.20);

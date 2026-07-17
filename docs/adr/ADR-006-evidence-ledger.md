@@ -2,7 +2,7 @@
 
 **Status:** proposed; slice 1 implemented 2026-07-16 (`swarm/evidence-ledger.ts` — append-only claims, write-time same-subject conflict detection, bounded prompt projection, shadow dual-write from `share_evidence`)
 **Date:** 2026-07-16
-**Plan reference:** [agent-swarm-development-plan-2026-07.md](../agent-swarm-development-plan-2026-07.md) — P1 "Shared facts are mutable strings, not an evidence ledger", packages `EVD-301..303`.
+**Plan reference:** the R0–R5 agent-swarm development program (completed 2026-07-17) — P1 "Shared facts are mutable strings, not an evidence ledger", packages `EVD-301..303`.
 
 ## Context
 

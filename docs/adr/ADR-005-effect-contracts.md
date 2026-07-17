@@ -2,7 +2,7 @@
 
 **Status:** proposed (design for `SEC-106`; requires approval before implementation per the dev plan's governance rule)
 **Date:** 2026-07-16
-**Plan reference:** [agent-swarm-development-plan-2026-07.md](../agent-swarm-development-plan-2026-07.md) — P1 "External side effects are not represented consistently by tool tiers", package `SEC-106`.
+**Plan reference:** the R0–R5 agent-swarm development program (completed 2026-07-17) — P1 "External side effects are not represented consistently by tool tiers", package `SEC-106`.
 
 ## Context
 

@@ -85,7 +85,7 @@ export function buildQaToolJudgeTask(
     "ANSWER under review:",
     answer,
     "",
-    // Fable fraud rows (roadmap 6b) — the two frauds an artifact inspector is
+    // Fraud-check rows — the two frauds an artifact inspector is
     // uniquely positioned to catch. Verdict vocabulary stays strictly PASS/FAIL.
     "Fraud checks while inspecting: (1) SCOPE — files or changes beyond what the criteria asked for are a FAIL even when well-made; name the out-of-scope item. (2) DEBRIS — debug prints, TODO/placeholder text, commented-out code scraps, or leftover scratch files inside the deliverables are a FAIL; name the file.",
     "",

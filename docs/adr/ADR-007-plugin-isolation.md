@@ -2,7 +2,7 @@
 
 **Status:** proposed (design for `SEC-105` full slice; requires approval before implementation per the dev plan's governance rule. The first slice — plugins default-off + digest-less trust warning — already shipped.)
 **Date:** 2026-07-16
-**Plan reference:** [agent-swarm-development-plan-2026-07.md](../agent-swarm-development-plan-2026-07.md) — P0 "Third-party plugins execute before approval containment", package `SEC-105`.
+**Plan reference:** the R0–R5 agent-swarm development program (completed 2026-07-17) — P0 "Third-party plugins execute before approval containment", package `SEC-105`.
 
 ## Context
 

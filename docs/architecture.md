@@ -10,7 +10,7 @@ Recurring task shapes can also be encoded as reusable scenes and jobs in the wor
 
 This document explains how the system implements each swarm principle at the code level, describes the full runtime architecture, and maps the flow from user message to final response.
 
-See also: [Security Model](security.md) · [Tool Tiers & Guardrails](tool-tiers.md) · [Workspace Layout](../workspace/README.md) · [Agent-Swarm Development Plan](agent-swarm-development-plan-2026-07.md)
+See also: [Security Model](security.md) · [Tool Tiers & Guardrails](tool-tiers.md) · [Workspace Layout](../workspace/README.md)
 
 ---
 
@@ -70,7 +70,7 @@ flowchart LR
     L --> C
 ```
 
-The current runtime implements many boxes in this loop, but mission-wide durability, hard budgets, evidence receipts, and cross-process control are development targets. The detailed sequencing and acceptance gates live in the [agent-swarm development plan](agent-swarm-development-plan-2026-07.md).
+The current runtime implements many boxes in this loop; mission-wide durability, hard budgets, evidence receipts, and cross-process control were built out through the R0–R5 agent-swarm development program (completed 2026-07-17) and now run in shadow/enforce stages behind their config flags.
 
 ---
 

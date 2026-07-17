@@ -10,7 +10,7 @@
 [![Setup: one-click Docker](https://img.shields.io/badge/setup-one--click_Docker-2496ED.svg?logo=docker&logoColor=white)](#quick-start)
 [![Speaks MCP + A2A](https://img.shields.io/badge/speaks-MCP_%2B_A2A-8A2BE2.svg)](docs/api.md)
 
-[Quick Start](#quick-start) · [What it does](#what-the-swarm-can-do) · [Architecture](docs/architecture.md) · [API](docs/api.md) · [Security](docs/security.md) · [Roadmap](ROADMAP.md)
+[Quick Start](#quick-start) · [What it does](#what-the-swarm-can-do) · [Architecture](docs/architecture.md) · [API](docs/api.md) · [Security](docs/security.md)
 
 <img src="assets/screenshots/chat-orb.png" alt="The StarlingAI dashboard — the swarm idles as a living particle orb, waiting for its next task" width="100%" />
 <sub><em>The swarm at rest. Every particle is waiting for work — give it some.</em></sub>
@@ -132,7 +132,7 @@ pnpm sai dev web               # start web UI in dev mode
 </div>
 
 - **Smart routing** — keyword, embedding, and outcome-based ranking picks the best specialist for each task; circuit breakers exclude agents that keep failing.
-- **Ephemeral agents** — no specialist fits? The swarm architects and launches a purpose-built one. The good ones get promoted to the permanent catalog (behind holdout evidence and canary rollout, per the [development plan](docs/agent-swarm-development-plan-2026-07.md)).
+- **Ephemeral agents** — no specialist fits? The swarm architects and launches a purpose-built one. The good ones get promoted to the permanent catalog (behind holdout evidence and canary rollout).
 - **Bounded fan-out** — independent sub-tasks run concurrently over dependency-aware task graphs with per-node fallbacks, but delegation depth and width are capped so one task can never cascade into a runaway swarm.
 - **Plan-first on hard turns** — trivial asks get answered directly; complex ones get a recorded plan (`record_plan`) and a risk-gated verification pass before high-stakes answers ship.
 - **Reusable workflows** — scenes and multi-step jobs are discoverable (`search_workflows`) and executable inline (`run_workflow`), so recurring work isn't replanned from scratch.
@@ -297,8 +297,6 @@ workspace/              # Durable workspace definitions and runtime overlays
 | [docs/knowledge-bases.md](docs/knowledge-bases.md) | Crawled corpora: crawler scope/safety, storage, retrieval |
 | [docs/mail-service.md](docs/mail-service.md) | Headless mail-service architecture and API |
 | [docs/forking.md](docs/forking.md) | Fork StarlingAI into a specialized swarm, stay rebase-clean |
-| [ROADMAP.md](ROADMAP.md) | Where the flock flies next |
-| [docs/agent-swarm-development-plan-2026-07.md](docs/agent-swarm-development-plan-2026-07.md) | Audited plan: quality, performance, robustness, distributed control, evaluation |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute |
 
 After `pnpm sai start`, the **interactive tutorials** at `http://localhost:3002` cover setup guides, channel configuration, and agent details hands-on.
