@@ -68,7 +68,18 @@ describe("evaluation provenance", () => {
   });
 
   it("uses a versioned report destination under artifacts/evaluations", () => {
-    const path = buildVersionedEvaluationReportPath("agent", "2026-07-16T12:34:56.789Z", provenance(), "F:/repo");
-    expect(path.replace(/\\/g, "/")).toBe("F:/repo/artifacts/evaluations/agent-2026-07-16T12-34-56-789Z-0123456789ab.json");
+    // The root must be absolute ON THE HOST PLATFORM. A hardcoded "F:/repo" is absolute
+    // on Windows but RELATIVE on Linux, where buildVersionedEvaluationReportPath's
+    // resolve() prepends the CWD — so this passed locally on Windows and failed on the
+    // ubuntu CI runner ("/home/runner/.../packages/core/F:/repo/..."). Use the same root
+    // the function itself defaults to (process.cwd(), i.e. packages/core under test):
+    // absolute on every platform and inside the repo, so the fixture never names a path
+    // outside the tree. Nothing is written — this asserts pure path construction: the
+    // artifacts/evaluations directory plus the sanitized
+    // <kind>-<timestamp>-<revision12>.json filename.
+    const root = process.cwd();
+    const expected = `${root.replace(/\\/g, "/")}/artifacts/evaluations/agent-2026-07-16T12-34-56-789Z-0123456789ab.json`;
+    const path = buildVersionedEvaluationReportPath("agent", "2026-07-16T12:34:56.789Z", provenance(), root);
+    expect(path.replace(/\\/g, "/")).toBe(expected);
   });
 });
