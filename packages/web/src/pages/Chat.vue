@@ -636,7 +636,7 @@
             class="chat-composer__textarea"
             :class="compactComposer ? 'chat-composer__textarea--compact' : ''"
             :style="composerTextareaStyle"
-            :placeholder="gateway.isLoading ? 'Steer the running turn — your message is folded in at the next step…' : 'Message StarlingAI… (Enter to send, Shift+Enter for newline, / for commands)'"
+            :placeholder="gateway.isLoading ? 'Steer the running turn — your message is folded in at the next step…' : `Message ${product.name}… (Enter to send, Shift+Enter for newline, / for commands)`"
             rows="3"
           />
           <div v-if="steeringNote" class="chat-composer__steering-note">{{ steeringNote }}</div>
@@ -974,7 +974,7 @@
         type="button"
         class="chat-composer-launcher"
         :style="launcherOrbStyle"
-        title="Message StarlingAI (press / · drag to move)"
+        :title="`Message ${product.name} (press / · drag to move)`"
         aria-label="Open message input"
         @pointerdown="launcherOrbDown"
         @pointermove="launcherOrbMove"
@@ -1036,6 +1036,11 @@ import ComputerSessionPanel from "@/components/ComputerSessionPanel.vue";
 import ShellSessionPanel from "@/components/ShellSessionPanel.vue";
 import SidePanel from "@/components/SidePanel.vue";
 import type { ChatAttachment } from "@/stores/gateway";
+import { useProductStore } from "@/stores/product";
+
+// Product name comes from GET /api/product so a fork rebrands without editing this
+// file (docs/fork-boilerplate-plan.md WS1).
+const product = useProductStore();
 
 const OrbCanvas = defineAsyncComponent(() => import("@/components/OrbCanvas.vue"));
 
@@ -3358,7 +3363,7 @@ function formatCompactNumber(value: number): string {
 function exportRoleLabel(role: GatewaySessionTranscriptMessage["role"]): string {
   if (role === "user") return "**You**";
   if (role === "system") return "**System**";
-  return "**StarlingAI**";
+  return `**${product.name}**`;
 }
 
 function sanitizeExportMessageContent(message: GatewaySessionTranscriptMessage): string {
@@ -3418,7 +3423,7 @@ function buildMarkdownExport(messages: GatewaySessionTranscriptMessage[]): strin
   const sessionId = gateway.currentSessionId ?? "unknown";
   const date = new Date().toLocaleString();
   const lines: string[] = [
-    `# StarlingAI Conversation`,
+    `# ${product.name} Conversation`,
     ``,
     `**Session:** \`${sessionId}\`  `,
     `**Exported:** ${date}`,
@@ -3484,7 +3489,7 @@ async function exportPDF(): Promise<void> {
     const date = new Date().toLocaleString();
 
     const messageHtml = transcript.map((msg) => {
-      const role = msg.role === "user" ? "You" : msg.role === "system" ? "System" : "StarlingAI";
+      const role = msg.role === "user" ? "You" : msg.role === "system" ? "System" : product.name;
       const roleClass = msg.role === "user" ? "role-user" : msg.role === "system" ? "role-system" : "role-ai";
       const time = new Date(msg.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
       const bodyHtml = msg.content
@@ -3501,7 +3506,7 @@ async function exportPDF(): Promise<void> {
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>StarlingAI Conversation</title>
+  <title>${product.name} Conversation</title>
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 13px; color: #1a1a2e; max-width: 860px; margin: 0 auto; padding: 2rem; }
     h1 { font-size: 1.4rem; color: #4c1d95; margin-bottom: 0.25rem; }
@@ -3529,7 +3534,7 @@ async function exportPDF(): Promise<void> {
   </style>
 </head>
 <body>
-  <h1>StarlingAI Conversation</h1>
+  <h1>${product.name} Conversation</h1>
   <div class="meta">Session: ${sessionId} &nbsp;·&nbsp; Exported: ${date}</div>
   ${messageHtml}
 </body>

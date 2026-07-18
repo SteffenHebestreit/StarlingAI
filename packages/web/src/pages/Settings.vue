@@ -423,7 +423,7 @@
                 <div>
                   <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Save Voice To Qwen-Compatible Library</div>
                   <div class="text-xs text-gray-500 mt-1">Upload a sample once, save it in a qwen-compatible voice library, and reuse the returned voice ID for faster synthesis.</div>
-                  <div class="text-xs text-gray-500 mt-1">If auto-transcription struggles, fill "Audio Example Transcript" above and StarlingAI will forward it with the upload.</div>
+                  <div class="text-xs text-gray-500 mt-1">If auto-transcription struggles, fill "Audio Example Transcript" above and {{ product.name }} will forward it with the upload.</div>
                 </div>
                 <div v-if="qwenVoiceSaveSupported === false" class="rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
                   {{ qwenVoiceSaveMessage }}
@@ -598,7 +598,7 @@
 
         <!-- ── About ──────────────────────────────────────────────────────── -->
         <div v-if="isSettingsPage" class="glass-card p-5">
-          <h3 class="section-title">About StarlingAI</h3>
+          <h3 class="section-title">About {{ product.name }}</h3>
           <div class="text-sm text-gray-500 space-y-1">
             <p>Version: <span class="text-gray-300">{{ appVersion }}</span></p>
             <p>Security-hardened local AI assistant with multi-agent orchestration.</p>
@@ -1108,7 +1108,7 @@
             <div class="flex items-center justify-between mb-4 gap-3">
               <div>
                 <h3 class="section-title mb-0">Config Assistant</h3>
-                <div class="text-xs text-gray-500 mt-1">Describe the setup or enhancement you want. StarlingAI drafts the changes, you review them, and nothing applies until you approve it.</div>
+                <div class="text-xs text-gray-500 mt-1">Describe the setup or enhancement you want. {{ product.name }} drafts the changes, you review them, and nothing applies until you approve it.</div>
               </div>
               <button
                 v-if="gateway.connected"
@@ -1624,7 +1624,7 @@
                   <div class="md:col-span-2 flex items-center justify-between gap-4 pt-1">
                     <div>
                       <label class="field-label text-xs">thinking mode <span class="text-gray-600 font-normal">supported reasoning models</span></label>
-                      <p class="text-[11px] text-gray-600 mt-0.5">When set, StarlingAI sends <code class="text-gray-400">enable_thinking</code> via <code class="text-gray-400">extra_body</code> for models that support it, including Gemma 4 and Qwen. Qwen also gets its recommended sampling defaults unless you explicitly override <code class="text-gray-400">top_p</code>.</p>
+                      <p class="text-[11px] text-gray-600 mt-0.5">When set, {{ product.name }} sends <code class="text-gray-400">enable_thinking</code> via <code class="text-gray-400">extra_body</code> for models that support it, including Gemma 4 and Qwen. Qwen also gets its recommended sampling defaults unless you explicitly override <code class="text-gray-400">top_p</code>.</p>
                     </div>
                     <select
                       :value="agent.model.enableThinking === undefined ? '' : agent.model.enableThinking ? 'on' : 'off'"
@@ -2127,6 +2127,11 @@ import ToggleSwitch from "@/components/ToggleSwitch.vue";
 import ChannelIcon from "@/components/ChannelIcon.vue";
 import AppearanceSettings from "@/components/AppearanceSettings.vue";
 import { appVersion } from "@/appVersion";
+import { useProductStore } from "@/stores/product";
+
+// Product name comes from GET /api/product so a fork rebrands without editing this
+// file (docs/fork-boilerplate-plan.md WS1).
+const product = useProductStore();
 
 const route = useRoute();
 const gateway = useGatewayStore();

@@ -18,14 +18,14 @@
       <!-- Header -->
       <div class="text-center mb-8">
         <img
-          src="/swarmLogo.svg"
-          alt="StarlingAI logo"
+          :src="product.logo"
+          :alt="`${product.name} logo`"
           class="h-20 w-20 mx-auto mb-4 object-contain drop-shadow-[0_14px_34px_rgba(34,211,238,0.2)]"
         />
         <h1 id="login-heading" class="text-xl font-semibold bg-gradient-to-r from-cyan-300 via-sky-300 to-violet-300 bg-clip-text text-transparent mb-1">
-          StarlingAI
+          {{ product.name }}
         </h1>
-        <p class="text-xs uppercase tracking-[0.18em] text-cyan-200/70 mb-3">- Guarded Agent Swarm -</p>
+        <p class="text-xs uppercase tracking-[0.18em] text-cyan-200/70 mb-3">- {{ product.tagline }} -</p>
         <p class="text-sm text-gray-500">{{ tabHint }}</p>
       </div>
 
@@ -132,7 +132,7 @@
       </form>
 
       <p v-if="mode === 'token'" class="text-xs text-gray-600 text-center mt-6">
-        Token location: <code class="text-gray-500 font-mono">~/.starlingai/token</code>
+        Token location: <code class="text-gray-500 font-mono">~/{{ product.stateDirName }}/token</code>
       </p>
       </template>
     </div>
@@ -142,11 +142,15 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount } from "vue";
 import { defaultGatewayWsUrl, useGatewayStore } from "@/stores/gateway";
+import { useProductStore } from "@/stores/product";
 
 const props = withDefaults(defineProps<{ dismissible?: boolean }>(), { dismissible: false });
 const emit = defineEmits<{ (event: "close"): void }>();
 
 const gateway = useGatewayStore();
+// Branding on the PRE-AUTH screen — /api/product is public precisely so this renders
+// a fork name/logo before any token exists (docs/fork-boilerplate-plan.md WS1).
+const product = useProductStore();
 
 function close(): void {
   emit("close");
@@ -203,7 +207,7 @@ const submitting = ref(false);
 
 const tabHint = computed(() =>
   mode.value === "password"
-    ? "Sign in with your StarlingAI account"
+    ? `Sign in with your ${product.name} account`
     : "Paste a gateway token (legacy / single-operator setup)",
 );
 

@@ -5,7 +5,7 @@
         <h2 class="mcp-page__title">MCP Integration</h2>
         <p class="mcp-page__subtitle">
           Bridge external Model Context Protocol servers into the swarm — and
-          publish StarlingAI itself as an MCP endpoint that Claude Desktop,
+          publish {{ product.name }} itself as an MCP endpoint that Claude Desktop,
           Claude Code, Cursor, and Zed can talk to.
         </p>
       </div>
@@ -16,10 +16,10 @@
 
     <p v-if="errorMessage" class="mcp-page__error">{{ errorMessage }}</p>
 
-    <!-- ── Outbound: StarlingAI as an MCP server ────────────────────────── -->
+    <!-- ── Outbound: this product as an MCP server ────────────────────────── -->
     <section class="mcp-section">
       <header class="mcp-section__header">
-        <h3 class="mcp-section__title">Publish StarlingAI as MCP</h3>
+        <h3 class="mcp-section__title">Publish {{ product.name }} as MCP</h3>
         <span class="mcp-section__hint">
           When enabled, external clients can call swarm tools, agents, and
           scenes over <code>/mcp</code> (HTTP/SSE) or via the bundled stdio
@@ -261,6 +261,11 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from "vue";
 import { useGatewayStore } from "@/stores/gateway";
+import { useProductStore } from "@/stores/product";
+
+// Product name comes from GET /api/product so a fork rebrands without editing this
+// file (docs/fork-boilerplate-plan.md WS1).
+const product = useProductStore();
 
 interface ExposeStatus {
   enabled: boolean;

@@ -312,6 +312,11 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from "vue";
 import { useAuditStore, type AuditEvent } from "@/stores/audit";
+import { useProductStore } from "@/stores/product";
+
+// Product name comes from GET /api/product so a fork rebrands without editing this
+// file (docs/fork-boilerplate-plan.md WS1).
+const product = useProductStore();
 
 type PerformanceState = "healthy" | "watch" | "regression";
 
@@ -726,7 +731,7 @@ function formatEventData(data: Record<string, unknown>): string {
 function buildAuditMarkdownExport(events: AuditEvent[]): string {
   const exportedAt = new Date().toLocaleString();
   const lines: string[] = [
-    "# StarlingAI Audit Log",
+    `# ${product.name} Audit Log`,
     "",
     `- Exported: ${exportedAt}`,
     `- Event count: ${events.length}`,

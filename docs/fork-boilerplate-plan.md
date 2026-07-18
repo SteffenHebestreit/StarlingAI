@@ -172,13 +172,25 @@ in-process code:
 |------|-------|--------|
 | 1 | Plan + recon (this doc) | ✅ 2026-06-13 |
 | 2 | WS1 product module + core literal sweep incl. tests + `GET /api/product` | ✅ e73f8fe |
-| 3 | WS1 web-shell branding from /api/product | pending (waits for in-flight App.vue work to land) |
+| 3 | WS1 web-shell branding from /api/product | ✅ (App.vue work landed in v0.46.0, unblocking this) |
 | 4 | WS2 tool groups + config | ✅ b565554 |
 | 5 | WS3 extension SDK + discovery + example + guardrail hooks | ✅ 68e2b45 |
-| 6 | WS4 web extension points (registry + router; shell nav wiring waits on in-flight App.vue work) | ✅ 46abac5 |
+| 6 | WS4 web extension points (registry + router) | ✅ 46abac5 |
+| 6b | WS4 shell nav renders `extensionNavEntries()` (was waiting on the same App.vue work) | ✅ |
 | 7 | WS5+WS6 docs/forking.md + generalized drift script | ✅ a80392a |
 | 8 | WS7 MFA-AI migration (sync to refactored upstream, then move MFA layer onto fork-owned surfaces) | pending |
 | 9 | End-to-end verification: build, tests, rebase dry-run in MFA-AI | pending |
+
+### Deferred from WS1/WS4 branding
+
+`theme.accent` is served by `/api/product` and carried on the product store, but the
+shell's colours still come from the **user-selected palette** in `stores/theme.ts`
+(persisted per user). It is deliberately NOT applied yet: the accent is a fork
+*branding* hint while the palette is a *user preference*, so applying it through
+`applyPalette()` would silently override the user's own choice, and the shell's
+gradients are Tailwind utility classes that need a CSS-custom-property (or safelist)
+refactor before they can be driven by data. Wiring accent → CSS custom properties is
+its own change, with that precedence question decided first.
 
 ## Non-goals
 

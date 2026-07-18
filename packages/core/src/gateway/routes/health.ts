@@ -30,6 +30,10 @@ export function registerHealthRoutes(app: Hono): void {
       name: PRODUCT.name,
       slug: PRODUCT.slug,
       tagline: PRODUCT.tagline,
+      // The web shell shows the on-disk token path ("~/<stateDir>/token") on the
+      // login screen, so the state-dir name is part of the identity it needs —
+      // otherwise a fork's UI would still print upstream's ".starlingai".
+      stateDirName: PRODUCT.stateDirName,
       theme: PRODUCT.theme,
       roles: listExtensionRoles(),
       extensions: listLoadedExtensions().map((e) => ({ name: e.name, version: e.version, description: e.description })),

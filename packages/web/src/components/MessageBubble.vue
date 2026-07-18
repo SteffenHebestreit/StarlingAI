@@ -339,6 +339,11 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { marked, type Tokens } from "marked";
 import DOMPurify from "dompurify";
+import { useProductStore } from "@/stores/product";
+
+// Product name comes from GET /api/product so a fork rebrands without editing this
+// file (docs/fork-boilerplate-plan.md WS1).
+const product = useProductStore();
 // mermaid (hundreds of KB) is dynamically imported so it is NOT in the landing
 // chat chunk — it loads only when a message actually contains a diagram. Rollup
 // auto-splits the dynamic import into its own chunk.
@@ -1383,7 +1388,7 @@ watch(
 
 // ── Per-message export ────────────────────────────────────────────────────────
 function exportMessageMarkdown(): void {
-  const role = props.message.role === "user" ? "You" : props.message.role === "system" ? "System" : "StarlingAI";
+  const role = props.message.role === "user" ? "You" : props.message.role === "system" ? "System" : product.name;
   const time = formatTime(props.message.timestamp);
   const content = mainContent.value;
   const md = `# ${role} — ${time}\n\n${content}\n`;
@@ -1397,7 +1402,7 @@ function exportMessageMarkdown(): void {
 }
 
 function exportMessagePDF(): void {
-  const role = props.message.role === "user" ? "You" : props.message.role === "system" ? "System" : "StarlingAI";
+  const role = props.message.role === "user" ? "You" : props.message.role === "system" ? "System" : product.name;
   const time = formatTime(props.message.timestamp);
   const bodyHtml = renderedContent.value;
   const html = `<!DOCTYPE html>

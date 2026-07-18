@@ -26,16 +26,16 @@
         <!-- Logo + brand: always a way home to the chat interface -->
         <router-link to="/" class="flex items-center gap-2 sm:gap-3 min-w-0" title="Open chat">
           <img
-            src="/swarmLogo.svg"
-            alt="StarlingAI logo"
+            :src="product.logo"
+            :alt="`${product.name} logo`"
             class="h-9 w-9 shrink-0 object-contain drop-shadow-[0_8px_18px_rgba(34,211,238,0.22)]"
           />
           <div class="flex flex-col leading-none min-w-0">
             <span class="font-display font-semibold text-base bg-gradient-to-r from-cyan-300 via-sky-300 to-violet-300 bg-clip-text text-transparent tracking-wide">
-              StarlingAI
+              {{ product.name }}
             </span>
             <span class="hidden sm:inline font-label text-[10px] uppercase tracking-[0.18em] text-cyan-200/70 mt-1">
-              Guarded Agent Swarm
+              {{ product.tagline }}
             </span>
           </div>
         </router-link>
@@ -369,6 +369,8 @@ import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { RouterLink, RouterView, useRoute } from "vue-router";
 import { useGatewayStore } from "@/stores/gateway";
 import { useAuthStore } from "@/stores/auth";
+import { useProductStore } from "@/stores/product";
+import { extensionNavEntries } from "@/extensions/registry";
 import { useModelPresetStore } from "@/stores/modelPreset";
 import { useNotificationStore, type NotificationLevel } from "@/stores/notifications";
 import LoginModal from "@/components/LoginModal.vue";
@@ -379,6 +381,9 @@ import { appVersion } from "@/appVersion";
 
 const gateway = useGatewayStore();
 const auth = useAuthStore();
+// Branding (name / tagline / logo) comes from GET /api/product so a fork rebrands
+// via product.json without editing this shell (docs/fork-boilerplate-plan.md WS1).
+const product = useProductStore();
 const notifications = useNotificationStore();
 const modelPreset = useModelPresetStore();
 const $route = useRoute();
@@ -535,18 +540,37 @@ const allNavEntries: NavEntry[] = [
 // Filter operator-only entries for viewers.  Unauthenticated users (no
 // currentUser) see the full set so the legacy single-operator setup keeps
 // working — the routes themselves still gate on auth via the gateway.
+/**
+ * Extension-contributed nav (docs/fork-boilerplate-plan.md WS4). The registry is
+ * populated at BUILD time via import.meta.glob, so a fork drops a directory under
+ * src/extensions/ and its entries appear here without editing this shell — the same
+ * way its routes already reach the router.
+ *
+ * `roles` is a display-only convenience (the gateway enforces real access), so an
+ * entry that names no roles is visible to everyone.
+ */
+const extensionNav = computed<NavLeaf[]>(() => {
+  const role = auth.currentUser?.role ?? "";
+  return extensionNavEntries()
+    .filter((entry) => !entry.roles?.length || entry.roles.includes(role))
+    .map<NavLeaf>((entry) => ({ kind: "leaf", to: entry.path, label: entry.label }));
+});
+
 const navEntries = computed<NavEntry[]>(() => {
-  if (!auth.isViewer) return allNavEntries;
-  return allNavEntries
-    .filter((entry) => !entry.operatorOnly)
-    .map<NavEntry>((entry) => {
-      if (entry.kind === "group") {
-        const items = entry.items.filter((item) => !item.operatorOnly);
-        return { ...entry, items };
-      }
-      return entry;
-    })
-    .filter((entry) => entry.kind === "leaf" || entry.items.length > 0);
+  const core: NavEntry[] = !auth.isViewer
+    ? allNavEntries
+    : allNavEntries
+        .filter((entry) => !entry.operatorOnly)
+        .map<NavEntry>((entry) => {
+          if (entry.kind === "group") {
+            const items = entry.items.filter((item) => !item.operatorOnly);
+            return { ...entry, items };
+          }
+          return entry;
+        })
+        .filter((entry) => entry.kind === "leaf" || entry.items.length > 0);
+  // Extension entries render after the core ones, already sorted by the registry.
+  return [...core, ...extensionNav.value];
 });
 
 function notificationCardClass(level: NotificationLevel): string {

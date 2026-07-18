@@ -172,6 +172,11 @@ import { marked } from "marked";
 import { useRoute, useRouter } from "vue-router";
 import SwarmStatusPanel from "@/components/SwarmStatusPanel.vue";
 import { sanitizeAssistantMessageContent, useGatewayStore, type GatewaySessionTranscript, type GatewaySessionTranscriptMessage, type SwarmRunRecord } from "@/stores/gateway";
+import { useProductStore } from "@/stores/product";
+
+// Product name comes from GET /api/product so a fork rebrands without editing this
+// file (docs/fork-boilerplate-plan.md WS1).
+const product = useProductStore();
 
 interface SessionCard {
   id: string;
@@ -442,14 +447,14 @@ function formatToolArgs(args: TranscriptToolCall["args"]): string {
 
 function transcriptRoleLabel(role: GatewaySessionTranscriptMessage["role"]): string {
   if (role === "user") return "You";
-  if (role === "assistant") return "StarlingAI";
+  if (role === "assistant") return product.name;
   return "System";
 }
 
 function buildTranscriptMarkdownExport(transcriptPage: GatewaySessionTranscript): string {
   const session = transcriptPage.session;
   const lines = [
-    `# StarlingAI Session Transcript`,
+    `# ${product.name} Session Transcript`,
     ``,
     `- Session: ${session.id}`,
     `- Channel: ${session.channel}`,
@@ -554,7 +559,7 @@ async function exportTranscriptPDF(): Promise<void> {
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>StarlingAI Session Transcript</title>
+  <title>${product.name} Session Transcript</title>
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 13px; color: #1a1a2e; max-width: 860px; margin: 0 auto; padding: 2rem; }
     h1 { font-size: 1.4rem; color: #4c1d95; margin-bottom: 0.25rem; }
@@ -583,7 +588,7 @@ async function exportTranscriptPDF(): Promise<void> {
   </style>
 </head>
 <body>
-  <h1>StarlingAI Session Transcript</h1>
+  <h1>${product.name} Session Transcript</h1>
   <div class="meta">Session: ${escapeHtml(session.id)} · Status: ${session.archivedAt ? "Archived" : "Active"} · Exported: ${escapeHtml(exportedAt)}</div>
   ${messageHtml}
 </body>

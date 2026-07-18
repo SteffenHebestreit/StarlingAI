@@ -4,6 +4,7 @@ import { registerSW } from "virtual:pwa-register";
 import router from "./router";
 import App from "./App.vue";
 import { useThemeStore } from "./stores/theme";
+import { useProductStore } from "./stores/product";
 // Self-hosted base fonts (the default "Clean" typeface). Bundled via @fontsource so
 // first paint makes ZERO third-party font requests (GDPR + offline). Weights match
 // the former Google Fonts @import. Every other typeface still loads its fonts lazily
@@ -28,7 +29,9 @@ const updateSW = registerSW({
 	onNeedRefresh() {
 		if (typeof window === "undefined") return;
 		const shouldReload = window.document.visibilityState === "hidden"
-			|| window.confirm("A new StarlingAI UI build is available. Reload now?");
+			// Brand-neutral: this fires from the service-worker callback, before the
+			// Pinia product store is necessarily reachable, so it must not hardcode a name.
+			|| window.confirm("A new UI build is available. Reload now?");
 		if (shouldReload) void updateSW(true);
 	},
 	onRegisteredSW(_swUrl, registration) {
@@ -84,4 +87,18 @@ app.use(router);
 // Apply the persisted theme before mount so a non-default theme doesn't flash
 // the default palette on first paint.
 useThemeStore(pinia).init();
-app.mount("#app");
+
+// Same reasoning for product identity (docs/fork-boilerplate-plan.md WS1): a fork's
+// name/tagline/logo must not flash upstream's branding on first paint, and the login
+// screen renders BEFORE any token exists (which is why /api/product is public). The
+// load is bounded — a slow or unreachable gateway delays first paint by at most this
+// long instead of hanging the shell, and the store keeps its upstream defaults on any
+// failure. It is reactive, so a late response still updates the UI after mount.
+const PRODUCT_LOAD_TIMEOUT_MS = 1_500;
+void (async () => {
+	await Promise.race([
+		useProductStore(pinia).load(),
+		new Promise<void>((resolve) => { window.setTimeout(resolve, PRODUCT_LOAD_TIMEOUT_MS); }),
+	]);
+	app.mount("#app");
+})();
