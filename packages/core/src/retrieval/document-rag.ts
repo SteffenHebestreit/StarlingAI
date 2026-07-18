@@ -498,8 +498,12 @@ export async function augmentTurnWithDocuments(input: {
   workspacePath: string;
   query: string;
   attachments?: TurnAttachment[];
-}): Promise<{ ingested: number; failed: number; contextBlock: string }> {
-  if (!engramConfigured()) return { ingested: 0, failed: 0, contextBlock: "" };
+  // `retrievalUnavailable` is true ONLY when the returned contextBlock is the "document store did
+  // not respond" placeholder (engram unreachable / timed out) rather than real document content.
+  // The caller must NOT treat that placeholder as grounding — a retrieval FAILURE is not evidence
+  // the answer is sourced from the user's own documents (see prepareDocumentRag / documentRagFoundDocs).
+}): Promise<{ ingested: number; failed: number; contextBlock: string; retrievalUnavailable: boolean }> {
+  if (!engramConfigured()) return { ingested: 0, failed: 0, contextBlock: "", retrievalUnavailable: false };
   const cfg = getConfig().retrieval.documentRag;
   let ingested = 0;
   let failed = 0;
@@ -541,7 +545,7 @@ export async function augmentTurnWithDocuments(input: {
     }
   }
 
-  if (!cfg.injectContext) return { ingested, failed, contextBlock: "" };
+  if (!cfg.injectContext) return { ingested, failed, contextBlock: "", retrievalUnavailable: false };
 
   // Reuse-the-whole-doc (audit ef9bd480): when the user just attached small document(s),
   // inline their FULL text instead of a handful of semantic top-k excerpts that silently
@@ -549,7 +553,7 @@ export async function augmentTurnWithDocuments(input: {
   // THIS turn's freshly-attached docs under the threshold; large + prior-turn docs stay on
   // the lean retrieval path below. Costs no extra engram/LLM call — the text is in hand.
   const inlineBlock = buildInlineDocumentContext(ingestedDocs, cfg);
-  if (inlineBlock) return { ingested, failed, contextBlock: inlineBlock };
+  if (inlineBlock) return { ingested, failed, contextBlock: inlineBlock, retrievalUnavailable: false };
 
   const { chunks, retrievalFailed, lowConfidence } = await retrieveDocumentContextWithStatus(input.query, input.ctx);
   let contextBlock = formatDocumentContext(chunks, { lowConfidence });
@@ -564,6 +568,8 @@ export async function augmentTurnWithDocuments(input: {
       failed,
       contextBlock:
         "[DOCUMENT RETRIEVAL UNAVAILABLE THIS TURN — the document store did not respond, so this is NOT evidence that the user has no documents, CV, or profile on file. Do NOT tell the user that nothing is stored about them; say their stored documents could not be retrieved right now and offer to retry or let them paste the content.]",
+      // A FAILURE placeholder, not real content — the caller must not count this as document grounding.
+      retrievalUnavailable: true,
     };
   }
 
@@ -581,7 +587,7 @@ export async function augmentTurnWithDocuments(input: {
     contextBlock = contextBlock ? `${hint}\n\n${contextBlock}` : hint;
   }
 
-  return { ingested, failed, contextBlock };
+  return { ingested, failed, contextBlock, retrievalUnavailable: false };
 }
 
 /** Parse a scope from an engram source token (`session:x` → "session", etc.). */

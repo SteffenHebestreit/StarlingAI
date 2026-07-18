@@ -270,7 +270,14 @@ export async function prepareDocumentRag(args: {
     }
     if (aug.contextBlock) {
       session.addMessage({ role: "system", content: `[DOCUMENT CONTEXT]\n${aug.contextBlock}` });
-      documentRagFoundDocs = true;
+      // Real document content grounds the answer — but the "[DOCUMENT RETRIEVAL UNAVAILABLE]"
+      // failure placeholder (engram down / timed out) does NOT: it means retrieval FAILED, not that
+      // the answer is sourced from the user's own documents. Counting it as grounding silently
+      // disarmed the whole source-sensitivity honesty stack — the upfront classifier
+      // (runtime.ts !documentRagFoundDocs) and both post-draft ungrounded guards are gated on this
+      // flag — so an engram-down turn shipped memory-recited specifics (opening hours, prices) as
+      // established fact with no research nudge and no unverified caveat (session 5d9136bd, turn 2).
+      documentRagFoundDocs = !aug.retrievalUnavailable;
     }
   } catch (err) {
     log.warn({ err }, "document RAG augmentation failed — continuing without it");
