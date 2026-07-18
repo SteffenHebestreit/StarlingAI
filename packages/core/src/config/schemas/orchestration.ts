@@ -225,8 +225,27 @@ export const OrchestrationSchema = z.object({
    *  it there via the lighter sharesEvidenceVocabulary; this flag applies the full
    *  detector to the model's own draft, where that workaround does not apply.
    *
-   *  Re-measure with tests/anchoring-corpus-measure.test.ts after any change to
-   *  evidence-anchoring.ts before revisiting default-on. */
+   *  MODEL-DEPENDENCE (measured, not assumed). The trigger is a PURE deterministic
+   *  function — regex and string matching, no LLM — so for a given (answer, evidence)
+   *  pair its verdict never varies by model. What varies is the PROSE STYLE of the
+   *  answers, and the corpus above was written by a STRONG model, not the local one:
+   *  it still scored 83% FP. Within it, all 15 false positives were driven by
+   *  hyphenated prose tokens and none by a genuinely novel spec (grounded answers that
+   *  fired averaged 5.2 such tokens; the 3 that passed averaged 1.0). A more capable
+   *  model writes MORE compound adjectives ("user-replaceable", "half-hour"), so it
+   *  should be expected to RAISE the false-positive rate, not lower it — do not assume
+   *  a better model rescues this flag.
+   *
+   *  What genuinely does vary by model is the flag's value and its cost:
+   *    - value: a weaker model fabricates more often, so there is more for the guard to
+   *      catch (the flag is worth most exactly where its repair is worst);
+   *    - cost : a wrong repair is re-synthesized by the SAME model, so on a weak local
+   *      model a false positive is likely to be a quality regression, whereas a strong
+   *      model may rewrite it about as well.
+   *
+   *  Re-measure per deployment with tests/anchoring-corpus-measure.test.ts — ideally
+   *  swapping in answers produced by that deployment's own model — after any change to
+   *  evidence-anchoring.ts, before revisiting default-on. */
   evidenceAnchoringOnGatheredEvidence: z.boolean().default(false),
   /** #5 (citation-honesty tightening): the URL-not-fetched caveat's 400-char floor lets a SHORT
    *  fabricated page summary slip (a ~300-char answer that asserts the page's content but stays under
