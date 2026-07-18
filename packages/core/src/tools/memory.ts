@@ -1106,6 +1106,37 @@ registerTool({
     await writeSharedFact(parentSessionId, key, value);
     log.info({ key, parentSessionId }, "Shared finding published");
 
+    // EVD-303: a SOURCE-BACKED finding shared via share_finding (rather than
+    // share_evidence) still carries provenance — dual-write it to the evidence
+    // ledger too, so that provenance is preserved on the structured claim rather
+    // than being lost until the migration parity sweep backfills a bare unverified
+    // claim. Gated on actual provenance (a source URL or an evidence type) so
+    // lightweight findings (hostnames, computed values) stay out of the ledger,
+    // exactly as share_finding intends. Best-effort, shadow-only, never blocks.
+    if (getConfig().mission.evidence === "shadow" && (metadata.sourceUrl || metadata.evidenceType)) {
+      try {
+        await appendEvidenceClaim(parentSessionId, {
+          subject: metadata.claim || key,
+          value: rawValue,
+          agent: ctx.currentAgentName,
+          evidenceType: metadata.evidenceType,
+          sourceTitle: metadata.sourceTitle,
+          sourceUrl: metadata.sourceUrl,
+          publisher: metadata.publisher,
+          publishedAt: metadata.publishedAt,
+          retrievedAt: metadata.retrievedAt,
+          confidence: {
+            accuracy: metadata.accuracyScore,
+            trustworthiness: metadata.trustworthinessScore,
+            corroboration: metadata.corroborationScore,
+          },
+          validationState: metadata.validationStatus as "unverified" | "tentative" | "validated" | "disputed",
+        });
+      } catch (err) {
+        log.debug({ err, key }, "Evidence-ledger dual-write from share_finding failed (shadow — non-fatal)");
+      }
+    }
+
     return {
       success: true,
       output: `Finding published to shared session memory: '${key}' = "${value.slice(0, 120)}${value.length > 120 ? "…" : ""}"`,

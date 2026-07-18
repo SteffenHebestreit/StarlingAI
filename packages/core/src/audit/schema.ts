@@ -180,6 +180,7 @@ export type CoreAuditEventType =
   | "delegation_explicit_redirected_research_incapable"
   | "delegation_render_research_redirect_skipped"
   | "delegation_routing_embedding_degraded"
+  | "delegation_routing_shortened_recovered"
   | "delegation_depth_ceiling_enforced"
   | "delegation_halted_operator_stop"
   | "delegation_halted_partial_evidence"

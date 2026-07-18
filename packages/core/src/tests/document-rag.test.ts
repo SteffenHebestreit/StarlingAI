@@ -4,6 +4,7 @@ import * as engram from "../retrieval/engram.js";
 import {
   retrieveDocumentContext,
   retrieveDocumentContextWithStatus,
+  augmentTurnWithDocuments,
   formatDocumentContext,
   buildInlineDocumentContext,
   isLowRetrievalConfidence,
@@ -344,5 +345,49 @@ describe("callerManageableSources — document management scope isolation", () =
     const sharedDoc = ["workspace:acme", "user:bob"];
     expect(bobDoc.some((s) => alice.has(s))).toBe(false);
     expect(sharedDoc.some((s) => alice.has(s))).toBe(true); // shared workspace copy still visible
+  });
+});
+
+describe("augmentTurnWithDocuments — retrieval-failure is not grounding", () => {
+  // Regression (session 5d9136bd turn 2): an engram TIMEOUT injected the
+  // "[DOCUMENT RETRIEVAL UNAVAILABLE]" placeholder as a non-empty contextBlock, which the caller
+  // counted as documentRagFoundDocs=true — silently disarming the whole source-sensitivity honesty
+  // stack so memory-recited opening hours shipped as fact. The failure placeholder must report
+  // retrievalUnavailable:true so the caller does NOT treat it as document grounding.
+  it("marks the unavailable placeholder as retrievalUnavailable (not grounding)", async () => {
+    const cfg = mockDocRagConfig({ injectContext: true, autoIngestAttachments: false });
+    mockSearch(null); // engram unreachable / timed out → retrievalFailed, no chunks
+    const aug = await augmentTurnWithDocuments({
+      ctx: { sessionId: "s-fail", userId: "u1" },
+      workspacePath: "/workspace",
+      query: "welche Familienaktivitäten gibt es in Hamburg",
+      attachments: [],
+    });
+    expect(aug.contextBlock).toContain("DOCUMENT RETRIEVAL UNAVAILABLE");
+    expect(aug.retrievalUnavailable).toBe(true);
+    cfg.mockRestore();
+  });
+
+  it("real retrieved content is grounding, not flagged unavailable", async () => {
+    // Contrast: engram RESPONDED with a real document hit → the answer IS grounded in the user's
+    // own document, so retrievalUnavailable stays false and the honesty stack treats it as grounded,
+    // exactly as before. Only a retrieval FAILURE (previous test) must flip the flag.
+    const cfg = mockDocRagConfig({ injectContext: true, autoIngestAttachments: false });
+    vi.spyOn(engram, "engramListDocuments").mockResolvedValue([
+      { id: "docA", title: "CV", sources: ["session:s-ok"], chunkCount: 1 },
+    ]);
+    mockSearch([
+      { chunkId: "c1", documentId: "docA", text: "8 years of backend engineering.", summary: "", keywords: [], origin: "vector", graphDistance: 0, graphProximity: 0, retrievalScore: 0.8, medianScore: 0, fusedScore: 0.8, rerankScore: 0.8 },
+    ]);
+    const aug = await augmentTurnWithDocuments({
+      ctx: { sessionId: "s-ok" },
+      workspacePath: "/workspace",
+      query: "what is my background",
+      attachments: [],
+    });
+    expect(aug.retrievalUnavailable).toBe(false);
+    expect(aug.contextBlock).not.toContain("DOCUMENT RETRIEVAL UNAVAILABLE");
+    expect(aug.contextBlock.length).toBeGreaterThan(0);
+    cfg.mockRestore();
   });
 });

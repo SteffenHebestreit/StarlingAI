@@ -195,10 +195,39 @@ export async function runReceptionist(
   return { handled: true, response: text };
 }
 
+/**
+ * Does the user's message carry NO reliable language signal? A bare social token — "hi", "hey",
+ * "ok", "danke", an emoji — is used verbatim in German chat too, so it does NOT establish English.
+ *
+ * Decided in CODE, deliberately, rather than in the prompt. The prompt-only attempt ("reply in the
+ * same language; if too short/ambiguous default to German") did NOT work on the tiny fast-lane
+ * model: it competes with the stronger "ALWAYS reply in the SAME language (English → English)"
+ * rule, so the model reads the English word "hi", matches that rule, and answers in English —
+ * the observed bug (session 5d9136bd: a German user's "hi" got "Hello! How can I help you
+ * today?"), which survived the first prompt-only fix. When the signal is undetermined the builder
+ * emits ONE unconditional language directive instead, leaving the model nothing to weigh.
+ *
+ * Structural, no keyword table: an umlaut/ß is a positive German marker; otherwise a message of at
+ * most two short word-tokens (or pure emoji/punctuation) is treated as carrying no language.
+ */
+export function languageIsUndetermined(userMessage: string): boolean {
+  const raw = (userMessage ?? "").trim();
+  if (!raw) return true;
+  if (/[äöüß]/i.test(raw)) return false; // unambiguous German marker
+  const words = raw.replace(/[^\p{L}\p{N}\s]/gu, " ").trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return true; // emoji / punctuation only
+  return words.length <= 2 && raw.length <= 15; // a bare greeting or acknowledgement
+}
+
 export function buildReceptionistMessages(
   userMessage: string,
   opts: { memoryCapsule?: string; assistantName?: string; personaLines?: readonly string[]; confidenceAttempt?: boolean } = {},
 ): LLMMessage[] {
+  // ONE unconditional directive when the message carries no language of its own — a conditional
+  // ("...if ambiguous, default to German") is not reliably followed by the fast-lane model.
+  const languageLine = languageIsUndetermined(userMessage)
+    ? "Reply in GERMAN. This message is a bare greeting/acknowledgement that carries no language of its own, and German is this assistant's default language. Do NOT answer in English."
+    : "ALWAYS reply in the SAME language as the user's message (German → German, English → English). Never switch the language.";
   const common = [
     ...(opts.personaLines ?? []),
     opts.assistantName ? `If asked your name, you are "${opts.assistantName}".` : "Do not invent a name for yourself.",
@@ -209,13 +238,18 @@ export function buildReceptionistMessages(
         "You are the fast first-contact desk of an AI assistant — you see every incoming message before the full (larger, slower) assistant does.",
         "Answer the user yourself ONLY for a greeting, small talk, a question about YOU (your name, how you are, what you can broadly help with), a definition of a common concept, or a quick calculation.",
         `Do NOT answer a question that depends on SPECIFIC real-world facts — a named organisation / operator / company / brand, a price / fee / amount, a rate or statistic, a law or rule, an event, or exactly how a PARTICULAR real system, product, place, or scheme actually works. You would be reciting it from memory and could be wrong, and you cannot verify it here. Also do NOT answer anything that needs a tool, a lookup, current or live data, the user's own files/history, or multi-step work. In ANY of these cases do NOT guess — reply with exactly ${ESCALATE_SENTINEL} and nothing else; it is routed to the full assistant, which can verify. A confident-sounding guess is worse than escalating.`,
-        "Reply in the user's language, in at most a few sentences. Do not introduce yourself unless explicitly asked.",
+        // Language policy mirrors the main path (personality/service.ts), but the
+        // undetermined-language case is resolved in code (see languageIsUndetermined).
+        languageLine,
+        "Keep it to at most a few sentences. Do not introduce yourself unless explicitly asked.",
         "After your answer, on a NEW final line, output exactly 'CONFIDENCE: high' if you are confident the answer is complete and correct, or 'CONFIDENCE: low' otherwise. When in any doubt, prefer to escalate.",
         ...common,
       ]
     : [
         "You are the first-contact desk of an AI assistant — you see every incoming user message before the full assistant does.",
-        "ALWAYS reply in the SAME language as the user's message (German → German, English → English). Never switch the language.",
+        // Language policy mirrors the main path (personality/service.ts), but the
+        // undetermined-language case is resolved in code (see languageIsUndetermined).
+        languageLine,
         "You handle ONLY trivial SOCIAL turns yourself: greetings, thanks, acknowledgements, small talk, and questions about YOU (your name, how you are, what you can broadly help with).",
         `Escalate EVERYTHING else. In particular, ANY question asking for real-world information or how something actually works — a fact about a place, country, organisation, company, product, law, price, statistic, event, or exactly how a specific system / service / scheme works — you must NOT answer from your own memory (you would be guessing and could be wrong, and you cannot verify it here). Reply with exactly ${ESCALATE_SENTINEL} and nothing else; the full assistant can verify it. A confident-sounding guess is worse than escalating.`,
         `For anything that needs an action, a lookup, a task, files, or any real work, also reply with exactly ${ESCALATE_SENTINEL} and nothing else.`,
