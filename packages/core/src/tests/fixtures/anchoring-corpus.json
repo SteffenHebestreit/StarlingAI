@@ -1,0 +1,214 @@
+{
+ "pairs": [
+  {
+   "id": "grounded-de-001",
+   "language": "de",
+   "groundTruth": "grounded",
+   "evidence": "- release_channel_postgres: PostgreSQL 17.4 released 2025-02-20, contains 3 security fixes and over 70 bug fixes\n- postgres_cve: CVE-2025-1094 affects psql / pg_dump quoting, rated high severity\n- postgres_eol_note: PostgreSQL 13 reaches end-of-life on 2025-11-13\n- upgrade_path_hint: minor upgrade needs only a restart, no pg_upgrade and no dump/restore step\n- auto_researcher_webfetch_9f2a1c: source_url https://www.postgresql.org/about/news/ publisher PostgreSQL Global Development Group date 2025-02-20 note \"users relying on pg_dump should update immediately\"",
+   "answer": "## PostgreSQL 17.4 – Kurz-Überblick\n\nDas Wartungs-Release **17.4** ist am 20.02.2025 erschienen und bringt drei Sicherheits-Fixes sowie über 70 Bug-Fixes.\n\n- **CVE-2025-1094**: betrifft das Quoting in `psql` / `pg_dump`, Einstufung *hoch*.\n- Laut der PostgreSQL Global Development Group sollten alle, die sich auf `pg_dump` verlassen, sofort aktualisieren.\n- Der Update-Pfad ist unkritisch: Ein Minor-Upgrade braucht nur einen Neustart, kein `pg_upgrade` und kein Dump/Restore.\n\n**Planungs-Hinweis:** PostgreSQL 13 erreicht am 13.11.2025 sein End-of-Life – wer noch darauf läuft, sollte den Umstieg parallel einplanen."
+  },
+  {
+   "id": "grounded-de-002",
+   "language": "de",
+   "groundTruth": "grounded",
+   "evidence": "- forecast_bergen_no: Wed 2026-07-22 high 17 C, low 11 C, precipitation 8 mm, wind SW 24 km/h\n- warning_status: yellow warning for heavy rain, valid 2026-07-22 06:00-18:00 local time\n- forecast_source: source_url https://api.met.no/weatherapi/ publisher MET Norway date 2026-07-18\n- auto_scout_httpget_4b1e: raw \"humidity 88%, cloud cover 95%, sunrise 04:51, sunset 22:34\"",
+   "answer": "## Wetter Bergen – Mittwoch, 22.07.2026\n\n| Kennwert | Wert |\n|---|---|\n| Höchst-Temperatur | 17 °C |\n| Tiefst-Temperatur | 11 °C |\n| Niederschlag | 8 mm |\n| Wind | SW, 24 km/h |\n\nDazu kommen 88 % Luftfeuchte und 95 % Bewölkung – also ein durchgehend grauer Tag. Die Sonne geht um 04:51 auf und erst um 22:34 unter.\n\n**Achtung:** Es gilt eine gelbe Warnung vor Stark-Regen von 06:00 bis 18:00 Uhr Ortszeit. Regenjacke und wasserfeste Schuhe sind Pflicht, für Outdoor-Pläne würde ich auf den späten Abend ausweichen.\n\n*Quelle: MET Norway, Stand 18.07.2026.*"
+  },
+  {
+   "id": "grounded-de-003",
+   "language": "de",
+   "groundTruth": "grounded",
+   "evidence": "- rijksmuseum_hours: open daily 09:00-17:00 including public holidays, last entry 16:30\n- rijksmuseum_prices: adults EUR 25.00, visitors under 18 free, Museumkaart holders free\n- rijksmuseum_booking: online timeslot booking required, also for free-entry categories\n- rijksmuseum_extra: Teekenschool drawing workshops cost EUR 7.50 on top of the ticket\n- auto_agent_browse_77de: source_url https://www.rijksmuseum.nl/en/visit publisher Rijksmuseum date 2026-07-15 raw \"garden accessible from 08:00\"",
+   "answer": "## Rijksmuseum Amsterdam – Öffnungs-Zeiten und Preise\n\n**Öffnungs-Zeiten:** täglich 09:00–17:00 Uhr, auch an Feier-Tagen. Letzter Einlass ist um 16:30 Uhr.\n\n**Eintritt:**\n- Erwachsene: 25,00 €\n- Unter 18 Jahren: frei\n- Museumkaart-Inhaber: frei\n\n**Wichtig zur Planung:** Ein Online-Zeitfenster muss in jedem Fall gebucht werden – auch dann, wenn der Eintritt für dich kostenlos ist. Die Teekenschool-Zeichen-Workshops kosten zusätzlich 7,50 € zum Ticket.\n\nDer Museums-Garten ist schon ab 08:00 Uhr zugänglich, eignet sich also gut zum Überbrücken vor dem gebuchten Slot.\n\n*Stand: 15.07.2026, Angaben des Rijksmuseum.*"
+  },
+  {
+   "id": "grounded-de-004",
+   "language": "de",
+   "groundTruth": "grounded",
+   "evidence": "- ssd_model: Samsung 990 EVO Plus 2TB, interface PCIe 4.0 x4 or PCIe 5.0 x2\n- ssd_speed: sequential read up to 7250 MB/s, sequential write up to 6300 MB/s\n- ssd_endurance: TBW 1200 TB, warranty 5 years, DRAM-less design using host memory buffer\n- ssd_price_de: street price EUR 149, region Germany, date 2026-06-30, publisher geizhals.de\n- auto_hw_toolout_a13c: raw \"idle power 0.04 W in PS4 state, form factor M.2 2280 single-sided\"",
+   "answer": "## Samsung 990 EVO Plus 2 TB – Eck-Daten\n\n| Merkmal | Wert |\n|---|---|\n| Anbindung | PCIe 4.0 x4 **oder** PCIe 5.0 x2 |\n| Lesen (seq.) | bis 7250 MB/s |\n| Schreiben (seq.) | bis 6300 MB/s |\n| TBW | 1200 TB |\n| Garantie | 5 Jahre |\n| Bauform | M.2 2280, einseitig bestückt |\n\nDie SSD arbeitet DRAM-los und nutzt stattdessen den Host Memory Buffer. Im PS4-Idle-Zustand liegt die Leistungs-Aufnahme bei 0,04 W.\n\nDie flexible Anbindung ist der eigentliche Clou: Sie passt sowohl in klassische PCIe-4.0-Slots als auch in x2-Lanes moderner Plattformen.\n\n**Preis:** rund 149 € Straßen-Preis in Deutschland (Stand 30.06.2026, geizhals.de)."
+  },
+  {
+   "id": "grounded-de-005",
+   "language": "de",
+   "groundTruth": "grounded",
+   "evidence": "- eu_batt_reg: Regulation (EU) 2023/1542 on batteries and waste batteries\n- eu_batt_removable: requirement that portable batteries in appliances be user-removable and replaceable applies from 2027-02-18\n- eu_batt_footprint: carbon footprint declaration for EV batteries becomes mandatory from 2026-02-18\n- eu_batt_scope: applies to all batteries placed on the EU market, including imported products\n- auto_legal_eurlex_5c9d: source_url https://eur-lex.europa.eu/eli/reg/2023/1542 publisher Publications Office of the EU date 2023-07-28",
+   "answer": "## EU-Batterie-Verordnung – die relevanten Fristen\n\nMaßgeblich ist die **Verordnung (EU) 2023/1542** über Batterien und Altbatterien.\n\n**Zwei Stichtage stehen an:**\n\n1. **18.02.2026** – die CO2-Fußabdruck-Erklärung für Traktions-Batterien (E-Fahrzeuge) wird verpflichtend.\n2. **18.02.2027** – Geräte-Batterien müssen so verbaut sein, dass Endnutzer sie selbst entnehmen und ersetzen können.\n\n**Geltungs-Bereich:** Die Verordnung erfasst alle Batterien, die auf dem EU-Markt in Verkehr gebracht werden – ausdrücklich auch importierte Produkte. Ein Ausweichen über Drittland-Fertigung gibt es also nicht.\n\n*Fundstelle: EUR-Lex, Amt für Veröffentlichungen der EU, 28.07.2023.*"
+  },
+  {
+   "id": "grounded-de-006",
+   "language": "de",
+   "groundTruth": "grounded",
+   "evidence": "- ferry_route: Puttgarden-Roedby operated by Scandlines, crossing time 45 minutes, departures every 30 minutes\n- ferry_fare: standard car up to 6 m including all passengers EUR 99 one-way in peak season July-August, EUR 89 when booked online\n- ferry_checkin: check-in closes 20 minutes before departure\n- ferry_onboard: hybrid ferries, duty-free shop on board\n- auto_travel_scrape_e21b: source_url https://www.scandlines.de/ publisher Scandlines date 2026-07-10 raw \"Bahnverkehr weiterhin ueber Grossenbrode umgeleitet\"",
+   "answer": "## Fähre Puttgarden–Rødby: Ablauf und Kosten\n\nDie Strecke wird von **Scandlines** bedient. Die Überfahrt dauert 45 Minuten, Abfahrten gibt es alle 30 Minuten – eine feste Uhrzeit musst du also nicht zwingend einplanen.\n\n**Preise (Hoch-Saison Juli/August), PKW bis 6 m inklusive aller Insassen:**\n\n| Buchungs-Weg | Preis pro Richtung |\n|---|---|\n| Standard | 99 € |\n| Online gebucht | 89 € |\n\n**Am Hafen:** Der Check-in schließt 20 Minuten vor Abfahrt – plane Puffer ein, gerade in der Ferien-Zeit. An Bord der Hybrid-Fähren gibt es einen Duty-free-Shop.\n\n**Hinweis für Bahn-Reisende:** Der Bahn-Verkehr wird weiterhin über Großenbrode umgeleitet (Stand 10.07.2026, Scandlines)."
+  },
+  {
+   "id": "grounded-en-001",
+   "language": "en",
+   "groundTruth": "grounded",
+   "evidence": "- release_version: PostgreSQL 17.4\n- release_date: 2025-02-20\n- release_type: minor / cumulative bugfix\n- cve_fixed: CVE-2025-1094 (quoting APIs, psql SQL injection)\n- affected_branches: 17, 16, 15, 14, 13\n- source_url: https://www.postgresql.org/about/news/postgresql-174-released\n- publisher: PostgreSQL Global Development Group\n- auto_researcher_webfetch_9c1d: \"This release fixes one security vulnerability and over 70 bugs reported over the last several months. Users should plan to apply this update at the next scheduled downtime.\"",
+   "answer": "## PostgreSQL 17.4\n\nThe PostgreSQL Global Development Group shipped **17.4 on 2025-02-20**. It is a minor, cumulative bugfix release rather than a feature release, so the upgrade path is the usual one for the branch.\n\n**What it contains**\n\n| Item | Detail |\n| --- | --- |\n| Security | CVE-2025-1094 — a flaw in the quoting APIs allowing SQL injection via psql |\n| Bugfixes | Over 70 bugs reported over the last several months |\n| Branches patched | 17, 16, 15, 14 and 13 |\n\nThe project's guidance is that users should plan to apply this update at the next scheduled downtime. Given that the security issue touches quoting, environments that build SQL from untrusted input are the ones worth prioritising.\n\nSource: postgresql.org release announcement."
+  },
+  {
+   "id": "grounded-en-002",
+   "language": "en",
+   "groundTruth": "grounded",
+   "evidence": "- location: Reykjavik, Iceland\n- forecast_day: 2026-07-19\n- temp_high_c: 13\n- temp_low_c: 8\n- conditions: overcast with intermittent light rain\n- wind_kmh: 34 gusting 52, northeasterly\n- precip_probability: 70%\n- warning: yellow wind advisory for the Reykjanes peninsula until 18:00 local\n- source_url: https://en.vedur.is/weather/forecasts/areas/\n- publisher: Icelandic Met Office (Vedurstofa Islands)\n- date_retrieved: 2026-07-18T21:40Z",
+   "answer": "## Reykjavik forecast — Sunday 19 July 2026\n\nNot a day for optimism about the weather, but nothing dramatic either.\n\n- **Temperature:** high of 13 degC, low of 8 degC\n- **Conditions:** overcast with intermittent light rain\n- **Precipitation chance:** 70%\n- **Wind:** northeasterly at 34 km/h, gusting to 52 km/h\n\nThere is a **yellow wind advisory in force for the Reykjanes peninsula until 18:00 local time** — worth noting if your plans involve driving out toward the airport or walking exposed coastline, since that is where gusts of that order are most noticeable.\n\nPractically: a proper windproof shell beats an umbrella here, and layers matter more than a heavy coat at these temperatures.\n\nForecast from the Icelandic Met Office, retrieved 18 July 2026 at 21:40 UTC."
+  },
+  {
+   "id": "grounded-en-003",
+   "language": "en",
+   "groundTruth": "grounded",
+   "evidence": "- venue: Rijksmuseum, Amsterdam\n- opening_hours: daily 09:00-17:00, including public holidays\n- last_entry: 16:30\n- ticket_adult_eur: 25.00\n- ticket_under_18_eur: 0.00\n- museumkaart: free entry, timeslot reservation still required\n- audio_tour_eur: 6.00\n- booking_note: all visitors must select a timeslot in advance, also when entry is free\n- source_url: https://www.rijksmuseum.nl/en/visit\n- publisher: Rijksmuseum\n- auto_planner_webfetch_4ab2: \"The museum is open every day of the year, from 9 a.m. to 5 p.m.\"",
+   "answer": "## Visiting the Rijksmuseum\n\nThe museum is open **every day from 09:00 to 17:00, public holidays included**, with **last entry at 16:30**. That half-hour buffer is the detail people most often get caught by, so treat 16:30 as the real closing time when planning.\n\n**Tickets**\n\n| Ticket | Price |\n| --- | --- |\n| Adult | EUR 25.00 |\n| Under 18 | Free |\n| Museumkaart holders | Free |\n| Audio tour | EUR 6.00 |\n\nOne rule catches almost everyone: **all visitors must reserve a timeslot in advance, even when entry is free**. That includes under-18s and Museumkaart holders — the free ticket still has to be booked.\n\nDetails from the Rijksmuseum's own visitor information page."
+  },
+  {
+   "id": "grounded-en-004",
+   "language": "en",
+   "groundTruth": "grounded",
+   "evidence": "- product: Framework Laptop 13, Ryzen AI 300 series mainboard\n- cpu_options: Ryzen AI 5 340, Ryzen AI 7 350, Ryzen AI 9 HX 370\n- max_ram_gb: 96 (2x48 DDR5-5600 SODIMM)\n- display: 13.5in, 2880x1920, 120Hz option\n- ports: 6 expansion card slots, USB4 on all four internal connectors\n- battery_wh: 61\n- starting_price_usd: 1099 (DIY edition, no OS, no storage)\n- ships_from: Q2 2025\n- source_url: https://frame.work/products/laptop13\n- publisher: Framework Computer Inc.",
+   "answer": "## Framework Laptop 13 — Ryzen AI 300 mainboard\n\nThe refreshed 13-inch model moves to AMD's Ryzen AI 300 series, offered in three tiers: **Ryzen AI 5 340, Ryzen AI 7 350, and Ryzen AI 9 HX 370**.\n\n**Key specs**\n\n- **Memory:** up to 96 GB, as 2x48 GB DDR5-5600 SODIMMs — user-replaceable, in keeping with the platform\n- **Display:** 13.5in at 2880x1920, with a 120 Hz option\n- **Expansion:** 6 expansion card slots; all four internal connectors are USB4\n- **Battery:** 61 Wh\n\nPricing starts at **USD 1,099 for the DIY edition**, which ships without an OS or storage — so budget for both if you go that route. Shipping began in **Q2 2025**.\n\nThe four-USB4-connector detail is the one that matters most for docking and eGPU plans, since it means slot choice does not constrain bandwidth.\n\nSource: frame.work product page."
+  },
+  {
+   "id": "grounded-en-005",
+   "language": "en",
+   "groundTruth": "grounded",
+   "evidence": "- regulation: EU Regulation 2023/1542 (Batteries Regulation)\n- in_force_since: 2023-08-17\n- requirement: removable and replaceable portable batteries in consumer devices\n- applies_from: 2027-02-18\n- scope_note: applies to portable batteries in appliances; separate rules for LMT and EV batteries\n- carbon_footprint_declaration_ev: from 2025-02-18\n- exemption: devices designed to operate mainly in water-immersed environments\n- penalty_setting: left to member states\n- source_url: https://eur-lex.europa.eu/eli/reg/2023/1542/oj\n- publisher: Official Journal of the European Union",
+   "answer": "## EU Batteries Regulation — replaceable batteries\n\n**Regulation (EU) 2023/1542** has been **in force since 17 August 2023**, but the provision most people are asking about does not bite yet.\n\n**The removability rule**\n\nPortable batteries in consumer appliances must be **removable and replaceable by the end user**, and that obligation **applies from 18 February 2027**. Until then the earlier product rules continue to govern.\n\n**Points worth flagging**\n\n- The rule covers **portable batteries in appliances**; light means of transport (LMT) and EV batteries are handled under separate provisions.\n- **EV battery carbon-footprint declarations** start earlier, from **18 February 2025**.\n- There is an exemption for **devices designed to operate mainly in water-immersed environments**.\n- **Penalties are set by member states**, so enforcement severity will vary across the single market.\n\nText published in the Official Journal of the EU."
+  },
+  {
+   "id": "grounded-en-006",
+   "language": "en",
+   "groundTruth": "grounded",
+   "evidence": "- route: London St Pancras -> Paris Gare du Nord (Eurostar)\n- journey_time: 2h16m fastest service\n- checkin_close: 45 minutes before departure for standard tickets\n- baggage_allowance: 2 large bags + 1 small bag per adult, no weight limit stated\n- ticket_change_fee_eur: 40 plus fare difference, Standard fare\n- standard_premier_includes: seat selection, light meal served at seat\n- auto_travel_websearch_77e0: \"Eurostar recommends arriving 60-90 minutes before departure at St Pancras during peak periods; check-in closes strictly 45 minutes prior and late passengers are not boarded.\"\n- source_url: https://www.eurostar.com/uk-en/travel-info\n- publisher: Eurostar International Ltd\n- date_retrieved: 2026-07-16",
+   "answer": "## London to Paris by Eurostar\n\nThe fastest service runs **St Pancras to Gare du Nord in 2h16m**, which is the headline number — but the check-in rules mean your door-to-door time is longer than that suggests.\n\n**Timing**\n\n- **Check-in closes 45 minutes before departure** on standard tickets, and it closes strictly: late passengers are not boarded.\n- Eurostar recommends **arriving 60-90 minutes ahead during peak periods**.\n\n**Baggage**\n\nTwo large bags plus one small bag per adult, with no weight limit stated — generous compared with flying the same route.\n\n**Tickets**\n\nChanges on a Standard fare cost **EUR 40 plus any fare difference**. **Standard Premier** adds seat selection and a light meal served at your seat.\n\nInformation from Eurostar's travel-info pages, retrieved 16 July 2026."
+  },
+  {
+   "id": "ungrounded-de-postgres-minor-release",
+   "language": "de",
+   "groundTruth": "ungrounded",
+   "evidence": "- release_postgres_latest: PostgreSQL 18.2, freigegeben am 2026-05-14, Minor-Bugfix-Release\n- release_postgres_source_url: https://www.postgresql.org/docs/release/18.2/\n- release_postgres_publisher: PostgreSQL Global Development Group\n- release_postgres_eol: Hauptzweig 18 wird bis 2030-11-14 unterstuetzt\n- auto_researcher_webfetch_9f2c1a: \"This release fixes CVE-2026-1042 (planner memory disclosure) and 41 further bugs reported over the last three months.\"",
+   "answer": "## PostgreSQL: aktueller Stand\n\nDie aktuelle stabile Version ist **PostgreSQL 17.4**, veroeffentlicht am **20. Februar 2025**. Es handelt sich um ein regulaeres Minor-Release des 17er-Zweigs.\n\n| Punkt | Wert |\n|---|---|\n| Version | 17.4 |\n| Release | 2025-02-20 |\n| Support-Ende | November 2029 |\n\nWichtigste Aenderung ist der Fix fuer **CVE-2025-1094** (SQL-Injection ueber psql-Quoting), zusaetzlich wurden rund 60 Fehler behoben. Ein Upgrade innerhalb des 17er-Zweigs erfordert nur einen Neustart, kein pg_upgrade.\n\nWer noch 16.x einsetzt, sollte den Wechsel planen; der 16er-Zweig laeuft im November 2028 aus."
+  },
+  {
+   "id": "ungrounded-de-wetter-bergen",
+   "language": "de",
+   "groundTruth": "ungrounded",
+   "evidence": "- weather_bergen_forecast: Bergen (NO), 19.07.2026: Hoechstwert 14 C, Tiefstwert 9 C, Niederschlag 22 mm, boeiger Suedwestwind bis 65 km/h\n- weather_bergen_source_url: https://www.yr.no/en/forecast/daily-table/1-92416/Norway/Vestland/Bergen\n- weather_bergen_publisher: Meteorologisk institutt / NRK (yr.no)\n- weather_bergen_retrieved: 2026-07-18T06:12Z\n- auto_weatheragent_httpget_4b71de: {\"symbol\":\"heavyrainandwind\",\"precip_prob\":0.9,\"uv_index\":1}",
+   "answer": "## Wetter in Bergen am Sonntag\n\nEs wird ein freundlicher Sommertag. Erwartet werden **21 Grad** am Nachmittag, nachts kuehlt es auf etwa **13 Grad** ab. Der Himmel bleibt ueberwiegend heiter mit ein paar Quellwolken am spaeten Nachmittag.\n\n- Niederschlag: nur 2 mm, Regenwahrscheinlichkeit rund 20 Prozent\n- Wind: schwach aus Nordost, 12 km/h\n- UV-Index: 5 — Sonnenschutz sinnvoll\n\nFuer eine Fahrt mit der Floibanen oder eine Hafenrunde ist der Tag gut geeignet. Eine leichte Jacke fuer den Abend reicht aus, Regenkleidung braucht man voraussichtlich nicht."
+  },
+  {
+   "id": "ungrounded-de-museum-oeffnung-preise",
+   "language": "de",
+   "groundTruth": "ungrounded",
+   "evidence": "- museum_zeche_zollverein_hours: Ruhr Museum, taeglich 10:00-18:00 Uhr, 24. und 31.12. geschlossen\n- museum_zeche_zollverein_prices: Erwachsene 10 EUR, ermaessigt 7 EUR, Kinder bis 17 Jahre frei\n- museum_zeche_zollverein_source_url: https://www.ruhrmuseum.de/besuch/oeffnungszeiten-preise\n- museum_zeche_zollverein_note: Kombiticket mit Denkmalpfad 16 EUR; letzter Einlass 17:00 Uhr\n- auto_localagent_scrape_c7a220: \"Montags geoeffnet. Aufzug Schacht XII barrierefrei nutzbar.\"",
+   "answer": "## Ruhr Museum, Zeche Zollverein — Besuch planen\n\n**Oeffnungszeiten:** Dienstag bis Sonntag von 09:00 bis 17:00 Uhr, **montags geschlossen** (ausser an Feiertagen).\n\n**Eintritt:**\n\n| Kategorie | Preis |\n|---|---|\n| Erwachsene | 14 EUR |\n| Ermaessigt | 9 EUR |\n| Kinder bis 12 Jahre | frei |\n| Familienticket | 28 EUR |\n\nDas Kombiticket mit dem Denkmalpfad kostet 22 EUR. Letzter Einlass ist eine halbe Stunde vor Schliessung. Planen Sie fuer die Dauerausstellung etwa zwei Stunden ein; die Anfahrt mit der Strassenbahn 107 bis Haltestelle Zollverein dauert vom Essener Hauptbahnhof rund 20 Minuten."
+  },
+  {
+   "id": "ungrounded-de-raspberry-hardware",
+   "language": "de",
+   "groundTruth": "ungrounded",
+   "evidence": "- hw_rpi5_specs: Raspberry Pi 5, Broadcom BCM2712, 4x Cortex-A76 @ 2.4 GHz, RAM-Varianten 2/4/8/16 GB\n- hw_rpi5_io: 2x micro-HDMI (4Kp60), 2x USB 3.0, 2x USB 2.0, PCIe 2.0 x1 ueber FFC, Gigabit Ethernet mit PoE+ (HAT noetig)\n- hw_rpi5_power: empfohlenes Netzteil 5 V / 5 A USB-C (27 W)\n- hw_rpi5_source_url: https://www.raspberrypi.com/products/raspberry-pi-5/specifications/\n- auto_hwagent_toolcall_e19b03: \"16GB SKU listed at 120 USD; no onboard eMMC; RTC connector present, battery sold separately\"",
+   "answer": "## Raspberry Pi 5 — Eckdaten\n\nDer Pi 5 setzt auf den **BCM2711** mit vier **Cortex-A72-Kernen bei 1,8 GHz**. Erhaeltlich ist er mit **1, 2 oder 4 GB** RAM; eine 8-GB-Variante wurde angekuendigt, ist aber noch nicht lieferbar.\n\n- Video: 1x HDMI 2.0, maximal 4Kp30\n- USB: 4x USB 2.0\n- Netzwerk: Gigabit Ethernet, PoE direkt onboard, kein HAT noetig\n- Speicher: 32 GB eMMC fest verloetet\n- Stromversorgung: 5 V / 3 A ueber Micro-USB\n\nDie 4-GB-Version kostet rund 55 Euro. Ein PCIe-Anschluss ist nicht vorhanden, NVMe-SSDs lassen sich daher nur ueber USB anbinden."
+  },
+  {
+   "id": "ungrounded-de-eu-usb-c-regel",
+   "language": "de",
+   "groundTruth": "ungrounded",
+   "evidence": "- regulatory_usbc_scope: EU-Richtlinie 2022/2380, einheitlicher Ladeanschluss USB-C\n- regulatory_usbc_dates: Geltung fuer Smartphones, Tablets, Kameras, Kopfhoerer ab 28.12.2024; fuer Laptops ab 28.04.2026\n- regulatory_usbc_source_url: https://eur-lex.europa.eu/eli/dir/2022/2380/oj\n- regulatory_usbc_publisher: Amtsblatt der Europaeischen Union\n- auto_legalagent_fetch_3d55f7: \"Entbuendelung: Verkaeufer muessen Geraete auch ohne Netzteil anbieten; Piktogramm- und Leistungsangabe verpflichtend\"",
+   "answer": "## Einheitliches Ladekabel in der EU\n\nGrundlage ist die **Verordnung (EU) 2023/1542**. Sie schreibt USB-C als einheitlichen Ladeanschluss vor.\n\n| Geraetegruppe | Stichtag |\n|---|---|\n| Smartphones und Tablets | 1. Januar 2026 |\n| Laptops | 1. Januar 2028 |\n| Kopfhoerer | ausgenommen |\n\nDie Regelung gilt ausschliesslich fuer Geraete mit einer Ladeleistung ueber 30 Watt; Kleingeraete wie Kopfhoerer und Fitnesstracker sind dauerhaft ausgenommen. Eine Pflicht zur Entbuendelung von Netzteil und Geraet sieht die Verordnung nicht vor, Hersteller duerfen das Ladegeraet weiterhin beilegen und muessen es sogar.\n\nBestandsgeraete duerfen unbefristet weiterverkauft werden."
+  },
+  {
+   "id": "ungrounded-de-bahn-nachtzug",
+   "language": "de",
+   "groundTruth": "ungrounded",
+   "evidence": "- travel_nightjet_route: Nightjet NJ 421 Wien Hbf -> Amsterdam Centraal, Abfahrt 20:13, Ankunft 09:29 am Folgetag\n- travel_nightjet_days: taeglich ausser Dienstag; Halt u.a. Linz, Nuernberg, Frankfurt (Main) Sued, Utrecht\n- travel_nightjet_price: Sitzplatz ab 44,90 EUR, Liegewagen ab 79,90 EUR, Schlafwagen-Einzelabteil ab 189 EUR\n- travel_nightjet_source_url: https://www.nightjet.com/de/route/wien-amsterdam\n- auto_travelagent_api_8a0f12: {\"bikes_allowed\":true,\"reservation\":\"mandatory\",\"operator\":\"OeBB\"}",
+   "answer": "## Nachtzug Wien - Amsterdam\n\nDie Verbindung faehrt als **NJ 40470**, Abfahrt in Wien Hbf um **19:42 Uhr**, Ankunft in Amsterdam Centraal um **10:55 Uhr**. Betreiber ist die **Deutsche Bahn** in Kooperation mit NS.\n\n- Verkehrstage: nur Montag, Mittwoch und Freitag\n- Halte: Passau, Koeln Hbf, Arnhem\n- Sitzplatz ab 29,90 EUR, Liegewagen ab 59,90 EUR, Schlafwagen ab 129 EUR\n- Fahrradmitnahme ist auf dieser Relation nicht moeglich\n\nEine Reservierung ist optional, wird aber empfohlen. Fahrkarten gibt es im DB-Navigator, das Sparpreis-Kontingent oeffnet sechs Monate vor Abfahrt."
+  },
+  {
+   "id": "ungrounded-en-pgsql-minor-release",
+   "language": "en",
+   "groundTruth": "ungrounded",
+   "evidence": "- release_current: PostgreSQL 18.2 ist das aktuelle Minor-Release des Zweigs 18; veroeffentlicht 2026-05-14\n- release_notes_url: https://www.postgresql.org/docs/release/18.2/\n- eol_policy: Zweig 14 erreicht End-of-Life am 2026-11-12, danach keine Sicherheitspatches mehr\n- auto_researcher_webfetch_9c11ad: publisher=PostgreSQL Global Development Group | date=2026-05-14 | body=\"This release fixes two security vulnerabilities and over 40 bugs reported over the last three months. CVE-2026-1042 affects extended query protocol handling.\"\n- upgrade_note: Minor upgrade requires only restart, kein pg_dump/pg_restore noetig",
+   "answer": "## PostgreSQL: current minor release\n\nThe latest minor release is **PostgreSQL 18.4**, published on 2026-06-09. It bundles fixes for CVE-2026-2201 and CVE-2026-2207, both in the logical replication worker, plus roughly 25 bug fixes.\n\n| Branch | Latest | EOL |\n|---|---|---|\n| 18 | 18.4 | Nov 2030 |\n| 17 | 17.9 | Nov 2029 |\n| 14 | 14.18 | 2026-09-30 |\n\nAs always with minor releases, no dump/restore is needed — install the new binaries and restart the cluster. If you use `pg_stat_statements`, run `ALTER EXTENSION ... UPDATE` afterwards to pick up the new counters added in 18.3."
+  },
+  {
+   "id": "ungrounded-en-baltic-ferry-operator",
+   "language": "en",
+   "groundTruth": "ungrounded",
+   "evidence": "- route_operator: Die Faehrverbindung Rostock-Gedser wird von Scandlines betrieben\n- crossing_time: Ueberfahrt dauert rund zwei Stunden; Abfahrten alle zwei Stunden im Sommerfahrplan\n- seasonal_note: Der verdichtete Sommerfahrplan gilt ab Mitte Juni bis Ende August\n- auto_travel_agent_webfetch_44be07: source_url=https://www.scandlines.de/fahrplan | publisher=Scandlines | body=\"Fahrzeuge ohne Reservierung werden nach Verfuegbarkeit befoerdert. Fussgaenger koennen bis kurz vor Abfahrt einchecken.\"\n- booking_note: Reservierung fuer Wohnmobile in der Hauptsaison dringend empfohlen",
+   "answer": "## Rostock to Gedser by ferry\n\nThis crossing is run by Stena Line, which has held the concession on the western Baltic corridor for many years. The dense summer timetable takes effect at the start of May and runs through to the middle of September, with sailings roughly every ninety minutes during the day and a thinner overnight pattern.\n\nCrossing time is a little under three hours, so plan for a leisurely lunch on board rather than a quick hop. Foot passengers must check in at least an hour before departure, and cars without a reservation are turned away entirely once the vehicle deck is allocated — there is no standby queue on this route, unlike the Puttgarden service further west."
+  },
+  {
+   "id": "ungrounded-en-datacenter-gpu-specs",
+   "language": "en",
+   "groundTruth": "ungrounded",
+   "evidence": "- part_name: NVIDIA H200 SXM, Hopper-Architektur\n- memory: 141 GB HBM3e, Bandbreite 4.8 TB/s\n- tdp: konfigurierbar bis 700 W\n- auto_hw_agent_shell_7f10c2: source_url=https://resources.nvidia.com/en-us-data-center-overview/hpc-datasheet-sc23-h200 | publisher=NVIDIA | date=2024-11-18 | body=\"NVLink: 900GB/s. PCIe Gen5: 128GB/s. Form factor: SXM. MIG: up to 7 MIGs @18GB each.\"\n- availability_note: Hyperscaler-Verfuegbarkeit laut Quelle ab Q2 2024",
+   "answer": "## H200 SXM at a glance\n\n| Spec | Value |\n|---|---|\n| Memory | 192 GB HBM3e |\n| Bandwidth | 8.0 TB/s |\n| TDP | 1000 W (configurable) |\n| NVLink | 1.8 TB/s (NVLink 5) |\n| MIG | up to 7 instances @ 24 GB |\n\nThe part is built on the Blackwell architecture and shipped to hyperscalers from Q4 2024. Because the 1000 W envelope exceeds what most air-cooled 4U chassis can dissipate, direct-to-chip liquid cooling is effectively mandatory; NVIDIA's own reference design pairs it with a 60 kW rack manifold. PCIe Gen6 at 256 GB/s handles host attach."
+  },
+  {
+   "id": "ungrounded-en-museum-opening-hours",
+   "language": "en",
+   "groundTruth": "ungrounded",
+   "evidence": "- institution: Deutsches Museum, Museumsinsel Muenchen\n- hours_winter: Taeglich geoeffnet von neun bis siebzehn Uhr, auch montags\n- closure_days: Geschlossen nur an Heiligabend, Silvester und Neujahr\n- auto_local_agent_webfetch_2ad881: source_url=https://www.deutsches-museum.de/besuch | publisher=Deutsches Museum | body=\"Der Bergwerksbereich ist derzeit wegen Sanierung nicht zugaenglich. Fuehrungen finden weiterhin statt.\"\n- ticket_note: Tageskarte gilt fuer alle Ausstellungsbereiche am selben Tag",
+   "answer": "## Visiting the museum on Munich's island\n\nThe Pinakothek der Moderne keeps a fairly generous winter schedule, opening late morning and staying open until early evening, with a long Thursday night that runs well past supper time. It is closed every Monday, as almost all of the Bavarian state collections are, so plan a weekday visit around that.\n\nThe historic mine tunnels are the highlight and remain fully open; guided tours through them are the best way to see the lower levels. Note that your ticket covers only the wing you enter, so if you want the aviation halls as well you will need a second admission on a separate day."
+  },
+  {
+   "id": "ungrounded-en-packaging-rule-adoption",
+   "language": "en",
+   "groundTruth": "ungrounded",
+   "evidence": "- instrument: Novelle der Verpackungsverordnung; beschlossen vom Bundesrat\n- adoption_date: Zustimmung im Bundesrat im September, Inkrafttreten zum Jahresbeginn\n- scope: Pflicht zur Ruecknahme von Transportverpackungen fuer Haendler ab einer bestimmten Betriebsgroesse\n- auto_legal_agent_webfetch_b6d2e9: publisher=Bundesanzeiger | body=\"Uebergangsfrist von zwoelf Monaten fuer bestehende Ruecknahmesysteme. Verstoesse gelten als Ordnungswidrigkeit und koennen mit Bussgeld geahndet werden.\"\n- enforcement_body: Zustaendig sind die Landesbehoerden, nicht der Bund",
+   "answer": "## The new packaging rules, briefly\n\nThe measure was adopted by the European Parliament in a spring plenary session in Strasbourg and takes effect the following summer, so member states have until then to transpose it. Because it arrives as a directive rather than a regulation, the substance can vary a little from one country to the next.\n\nEnforcement sits with the federal environment agency, which can impose administrative fines directly; there is no transition window for schemes already in operation, and the obligation applies to every retailer regardless of size. Breaches are treated as criminal rather than merely administrative matters, which is the sharpest change from the old regime."
+  },
+  {
+   "id": "ungrounded-en-cup-final-result",
+   "language": "en",
+   "groundTruth": "ungrounded",
+   "evidence": "- match: DFB-Pokal-Finale 2026, Olympiastadion Berlin\n- result: Bayer 04 Leverkusen 2:1 gegen VfB Stuttgart nach Verlaengerung\n- scorers: Wirtz 34., Undav 78. (Ausgleich), Schick 104.\n- auto_sports_agent_webfetch_51ff0a: source_url=https://www.dfb.de/pokal | publisher=DFB | date=2026-05-23 | body=\"Zuschauer: 74.322. Schiedsrichter: Daniel Siebert. Rote Karten: keine.\"\n- attendance_note: Ausverkauft; Anstoss 20:00 Uhr MESZ",
+   "answer": "## 2026 DFB-Pokal final\n\n**Bayer 04 Leverkusen 3:2 VfB Stuttgart (a.e.t.)** — Berlin, 2026-05-16, kick-off 18:30.\n\n| Min | Scorer |\n|---|---|\n| 12 | Boniface |\n| 41 | Millot |\n| 63 | Hofmann |\n| 88 | Undav |\n| 97 | Boniface |\n\nStuttgart finished with ten men after Anrie Chase was sent off in the 84th minute, which arguably decided the extra period. Attendance was 71,000 and the referee was Felix Zwayer. Boniface's brace made him the first player to score twice in a Pokal final since 2019."
+  },
+  {
+   "id": "partial-hedged-001",
+   "language": "de",
+   "groundTruth": "grounded",
+   "evidence": "- release_tag: PostgreSQL 17.4 - release_date: 2025-02-20 - source_url: https://www.postgresql.org/about/news/ - publisher: PostgreSQL Global Development Group - auto_researcher_webfetch_a91c: \"17.4 fixes CVE-2025-1094 (quoting of untrusted input in psql)\" - note_de: Angaben zum Support-Ende dieses Minor-Release im Abrufergebnis nicht enthalten",
+   "answer": "## PostgreSQL 17.4\n\n**Belegt durch die Quellen:**\n\n| Feld | Wert |\n|---|---|\n| Version | 17.4 |\n| Release-Datum | 2025-02-20 |\n| Behobene Luecke | CVE-2025-1094 (Quoting nicht vertrauenswuerdiger Eingaben in psql) |\n\nHerausgeber ist die PostgreSQL Global Development Group (postgresql.org/about/news).\n\n**Nicht belegt:** Zum Support-Ende bzw. zum EOL-Datum dieses Minor-Release liegen in den vorliegenden Findings keine Angaben vor - das konnte ich nicht verifizieren. Wenn Sie ein Upgrade-Fenster planen, sollten Sie den Versioning-Policy-Abschnitt separat pruefen lassen."
+  },
+  {
+   "id": "partial-hedged-002",
+   "language": "en",
+   "groundTruth": "grounded",
+   "evidence": "- museum_name: Deutsches Museum Muenchen - oeffnungszeiten: taeglich 09:00-17:00 Uhr - source_url: https://www.deutsches-museum.de/besuch - abgerufen_am: 2026-07-14 - auto_agent2_httpget_4fd1: \"Tageskarte Erwachsene 15,00 EUR; ermaessigt 8,00 EUR\" - hinweis: Angaben zu Familientickets und Jahreskarten auf der abgerufenen Seite nicht gefunden",
+   "answer": "## Deutsches Museum Munich - visit basics\n\nFrom the retrieved page (deutsches-museum.de/besuch, fetched 2026-07-14):\n\n- **Opening hours:** taeglich 09:00-17:00 Uhr (daily, 9am to 5pm)\n- **Adult day ticket:** 15,00 EUR\n- **Reduced (ermaessigt):** 8,00 EUR\n\n**What I could not verify:** prices for family tickets or annual passes. Those were not present on the page that was fetched, so I am not going to quote a number for them. Booking policy and last-admission time are likewise not covered by the findings I have.\n\nIf the family rate matters for your planning, that needs a second lookup against the ticket-shop page."
+  },
+  {
+   "id": "partial-hedged-003",
+   "language": "de",
+   "groundTruth": "grounded",
+   "evidence": "- match: Bayer 04 Leverkusen vs VfB Stuttgart - endstand: 2:1 - wettbewerb: Bundesliga, 28. Spieltag - datum: 2026-04-11 - publisher: kicker.de - auto_sports_scrape_7b02: \"Tore: 12' Schick, 55' Undav, 78' Grimaldo\" - missing: Zuschauerzahl und Aufstellungen nicht im Abruf enthalten",
+   "answer": "## Leverkusen - Stuttgart, 28. Spieltag\n\n**Result (belegt):** Bayer 04 Leverkusen 2:1 VfB Stuttgart, gespielt am 2026-04-11 in der Bundesliga. Quelle: kicker.de.\n\n**Torschuetzen laut Abruf:**\n\n- 12' Schick\n- 55' Undav\n- 78' Grimaldo\n\n**Nicht belegt / could not be verified:** Zuschauerzahl und die Startaufstellungen beider Teams sind in den vorliegenden Findings nicht enthalten. Ich nenne dafuer bewusst keine Zahlen. Auch Karten, Ballbesitz und die Tabellensituation nach diesem Spiel sind hier nicht abgedeckt."
+  },
+  {
+   "id": "partial-hedged-004",
+   "language": "en",
+   "groundTruth": "grounded",
+   "evidence": "- geraet: Framework Laptop 13 (Ryzen AI 300 Series) - display: 13.5 Zoll, 2880x1920, 120 Hz - source_url: https://frame.work/de/de/laptop13 - publisher: Framework Computer Inc. - auto_hw_agent_fetch_c3e8: \"Gewicht ab 1,30 kg; 2x USB4, Expansion-Card-System\" - luecke: Akkukapazitaet in Wh und Laufzeitangaben auf der Seite nicht extrahiert",
+   "answer": "## Framework Laptop 13 (Ryzen AI 300 Series)\n\n**Confirmed by the product page** (frame.work, Framework Computer Inc.):\n\n| Spec | Value |\n|---|---|\n| Display | 13.5 Zoll, 2880x1920, 120 Hz |\n| Weight | ab 1,30 kg |\n| Ports | 2x USB4 plus the Expansion-Card system |\n\n**Not covered by the evidence:** battery capacity in Wh and any runtime/battery-life figures - the extraction did not capture them, so I am deliberately leaving them blank rather than quoting a spec from memory. RAM and storage configuration options are also nicht belegt here.\n\nA targeted re-fetch of the spec table would close those two gaps."
+  },
+  {
+   "id": "partial-hedged-005",
+   "language": "de",
+   "groundTruth": "grounded",
+   "evidence": "- regelung: EU-Verordnung 2023/1542 (Batterieverordnung) - anwendbar_ab: 2024-02-18 - source_url: https://eur-lex.europa.eu/eli/reg/2023/1542/oj - publisher: Amt fuer Veroeffentlichungen der EU - auto_legal_lookup_9a17: \"Art. 11: austauschbare Geraetebatterien - Anforderungen gelten ab 18.02.2027\" - offen: nationale Umsetzungs- bzw. Bussgeldregelungen in Deutschland nicht recherchiert",
+   "answer": "## EU-Batterieverordnung 2023/1542 - Stand der Belege\n\n**Was die Quellen hergeben** (EUR-Lex, Amt fuer Veroeffentlichungen der EU):\n\n- Die Verordnung ist **seit 18.02.2024** anwendbar.\n- **Art. 11** (austauschbare Geraetebatterien): die dortigen Anforderungen greifen **ab 18.02.2027**.\n\n**Explizit nicht belegt:** Wie Deutschland die Verordnung national flankiert - insbesondere Bussgeldtatbestaende und die zustaendige Vollzugsbehoerde - wurde nicht recherchiert und ist hier nicht abgedeckt. Dazu nenne ich keine Paragraphen.\n\nDas ist keine Rechtsberatung; fuer die Compliance-Planung sollte die nationale Ebene separat geprueft werden."
+  },
+  {
+   "id": "partial-hedged-006",
+   "language": "en",
+   "groundTruth": "grounded",
+   "evidence": "- verbindung: Zuerich HB -> Milano Centrale, EC 15 - fahrzeit: 3 h 17 min - abfahrt: 09:33, Ankunft 12:50 - source_url: https://www.sbb.ch/de/fahrplan - publisher: SBB CFF FFS - auto_travel_agent_query_2ee0: \"Reservierungspflicht fuer EC-Zuege Schweiz-Italien\" - nicht_geprueft: Ticketpreise und Verfuegbarkeit fuer das angefragte Datum nicht abgefragt",
+   "answer": "## Zurich HB to Milano Centrale\n\n**From the SBB timetable** (sbb.ch, SBB CFF FFS):\n\n- Train **EC 15**, departs **09:33**, arrives **12:50**\n- Journey time **3 h 17 min**\n- **Reservierungspflicht** applies to EC services between Switzerland and Italy - a seat reservation is mandatory, not optional\n\n**Could not be verified:** fares and seat availability for your travel date. That query was not run, so any price I gave you would be invented. Same for engineering works or replacement-bus notices on the Gotthard axis - nicht belegt in what I have.\n\nSuggest a live booking-system check for price and availability before you commit to the 09:33."
+  }
+ ]
+}

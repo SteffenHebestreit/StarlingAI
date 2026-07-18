@@ -200,7 +200,33 @@ export const OrchestrationSchema = z.object({
    *  (the cheap deterministic answerNeedsEvidenceAnchoringRepair; no keyword table, no sourceSensitive
    *  read) — running independent of the plan-derived risk tier so a plan-less research turn is covered.
    *  When off, control falls through to the acceptance-criteria arm exactly as before. Default OFF (it
-   *  can re-synthesize an answer) — pass^k-gated. */
+   *  can re-synthesize an answer) — pass^k-gated.
+   *
+   *  EVALUATED 2026-07-18 — DO NOT ENABLE AS-IS. Measured over 30 labelled
+   *  (evidence, answer) pairs (tests/fixtures/anchoring-corpus.json; 15 de / 15 en,
+   *  18 grounded / 12 ungrounded, every label confirmed by an independent relabeller):
+   *
+   *      ALL  FP=15/18 (83%)  FN=1/12 (8%)  accuracy 47%
+   *      de   FP= 8/9  (89%)  FN=1/6 (17%)  accuracy 40%
+   *      en   FP= 7/9  (78%)  FN=0/6 ( 0%)  accuracy 53%
+   *
+   *  FP = an already-grounded answer is discarded and re-synthesized. 47% is WORSE than
+   *  never firing (60%), so turning this on costs a re-synthesis on most successful
+   *  research turns and buys almost no correctness. 5 of 6 honest PARTIAL answers (the
+   *  "here is what is verified, here is what is not" shape the other guards work to
+   *  produce) are also thrown away.
+   *
+   *  Root cause is in the detector, not this flag: condition 2 of looksEvidenceAnchored
+   *  treats every hyphenated token as a falsifiable spec needing a verbatim evidence
+   *  match, so ordinary prose trips it in BOTH languages ("half-hour", "13-inch",
+   *  "user-replaceable", "wartungs-release", "bug-fixes"), as does locale date
+   *  reformatting (answer "20.02.2025" vs evidence "2025-02-20"). evidence-anchoring.ts
+   *  already documents this over-fire for the recovery path (audit f7928f57) and avoids
+   *  it there via the lighter sharesEvidenceVocabulary; this flag applies the full
+   *  detector to the model's own draft, where that workaround does not apply.
+   *
+   *  Re-measure with tests/anchoring-corpus-measure.test.ts after any change to
+   *  evidence-anchoring.ts before revisiting default-on. */
   evidenceAnchoringOnGatheredEvidence: z.boolean().default(false),
   /** #5 (citation-honesty tightening): the URL-not-fetched caveat's 400-char floor lets a SHORT
    *  fabricated page summary slip (a ~300-char answer that asserts the page's content but stays under
