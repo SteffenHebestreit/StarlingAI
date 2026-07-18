@@ -78,25 +78,34 @@ weil dort die sicherheitsrelevanten Korrekturen zuerst landen. Weitere Details s
 offiziellen Dokumentation des Projekts sowie im Release-Kalender der Maintainer.`;
 
 describe("evidence-anchoring repair trigger — precision on real turn data", () => {
-  it("TRUE POSITIVE: an ungrounded from-memory answer is flagged for repair", () => {
-    // The behaviour the flag is for: research ran, findings exist, the answer ignored them.
-    expect(answerNeedsEvidenceAnchoringRepair(UNGROUNDED_ANSWER, EVIDENCE)).toBe(true);
-  });
-
   it("TRUE NEGATIVE: a strict restatement of the evidence is left alone", () => {
     expect(answerNeedsEvidenceAnchoringRepair(STRICT_RESTATEMENT, EVIDENCE)).toBe(false);
   });
 
-  // FALSE POSITIVE (pinned, not endorsed). The delivered answer is grounded, sourced and
-  // correct; it merely ADDS context the findings didn't cover, phrased with German
-  // hyphen-compounds — "lts-reihe", "maintenance-lts-status", "active-lts-status". Condition 2
-  // treats any hyphenated token as a falsifiable spec that must appear verbatim in the
-  // evidence, so ordinary German compounding is indistinguishable from a fabricated spec.
-  // With the flag ON this answer is thrown away and re-synthesized for no correctness gain.
-  it("FALSE POSITIVE: the real grounded answer is flagged because of German compounds", () => {
-    expect(answerNeedsEvidenceAnchoringRepair(REAL_GROUNDED_ANSWER, EVIDENCE)).toBe(true);
-    // ...even though the lighter detector (used by the recovery path) accepts it.
+  // Was a FALSE POSITIVE before the condition-2 fix: this answer is grounded, sourced and
+  // correct, and merely adds context the findings didn't cover, phrased with German
+  // hyphen-compounds ("lts-reihe", "maintenance-lts-status", "active-lts-status"). Condition 2
+  // used to treat any hyphenated token as a falsifiable spec, so ordinary compounding was
+  // indistinguishable from a fabricated spec and the answer was thrown away. Now only
+  // identifier-shaped segments (letters AND digits) are checked, so it is correctly left alone.
+  it("a grounded answer using ordinary hyphenated prose is NOT sent for repair", () => {
+    expect(answerNeedsEvidenceAnchoringRepair(REAL_GROUNDED_ANSWER, EVIDENCE)).toBe(false);
     expect(sharesEvidenceVocabulary(REAL_GROUNDED_ANSWER, EVIDENCE)).toBe(true);
+  });
+
+  // KNOWN BLIND SPOT (pinned, not endorsed). This answer fabricates outright — "Version 20",
+  // codename "Iron" — yet is judged anchored, because its lie carries NO identifier-shaped
+  // token for condition 2 to falsify ("iron" has no digit; "20" is under the 4-digit floor)
+  // and it shares enough generic vocabulary to satisfy condition 1.
+  //
+  // Before the fix this case DID fire, but accidentally: it tripped on German prose compounds
+  // ("LTS-Reihe", "Patch-Releases"), i.e. on hyphenation rather than on the fabrication. That
+  // accidental firing is exactly what produced an 83% false-positive rate, since grounded
+  // answers hyphenate just as much. Prose-only fabrication is structurally outside a
+  // token-matching detector; it is the semantic ungrounded-claim judge
+  // (orchestration.semanticUngroundedFactualGuard) that is designed to catch it.
+  it("KNOWN BLIND SPOT: a prose-only fabrication carries no spec token and slips through", () => {
+    expect(answerNeedsEvidenceAnchoringRepair(UNGROUNDED_ANSWER, EVIDENCE)).toBe(false);
   });
 
   it("DIAGNOSTIC: which condition fails, per draft", () => {

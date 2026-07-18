@@ -122,7 +122,23 @@ export function looksEvidenceAnchored(sourceSensitiveDraft: string, evidence: st
  *  match with \b too. The token starts/ends on alphanumerics (per the extraction regex), so \b is safe. */
 function evidenceGroundsToken(normalizedEvidence: string, token: string): boolean {
   const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`\\b${escaped}\\b`).test(normalizedEvidence);
+  if (new RegExp(`\\b${escaped}\\b`).test(normalizedEvidence)) return true;
+  // A date written in another locale is the SAME fact, not a fabricated one: an answer
+  // saying "20.02.2025" over evidence saying "2025-02-20" is faithful, yet a verbatim
+  // match calls it invented (7 of 15 false positives in the corpus). Accept a DATE-shaped
+  // token — exactly three numeric parts, one of them a 19xx/20xx year, the other two at
+  // most two digits — when every part appears in the evidence as a number.
+  //
+  // Deliberately narrow: a bare year ("2027") has one part and stays under the strict
+  // verbatim rule, and a dotted version ("24.18.0") carries no 4-digit year, so neither
+  // can be laundered through this path.
+  const parts = token.split(/[.\-/]/).filter(Boolean);
+  const dateShaped = parts.length === 3
+    && parts.every((part) => /^\d{1,4}$/.test(part))
+    && parts.some((part) => /^(19|20)\d{2}$/.test(part))
+    && parts.filter((part) => part.length <= 2).length === 2;
+  if (!dateShaped) return false;
+  return parts.every((part) => new RegExp(`\\b0*${Number(part)}\\b`).test(normalizedEvidence));
 }
 
 /**
@@ -152,10 +168,24 @@ function extractSpecTokensFromDraft(normalizedDraft: string): string[] {
     if (seen.has(raw)) continue;
     if (stopwords.has(raw)) continue;
     if (/[a-z]/.test(raw)) {
-      // Letter-bearing spec: a hyphen/underscore compound ("i2s-digital") or a letter+digit
-      // code shape ("IM73A135V01"). A pure lowercase prose word (no digit, no hyphen) is not a spec.
-      const looksLikeSpec = /[-_]/.test(raw) || /[a-z].*\d|\d.*[a-z]/.test(raw);
-      if (!looksLikeSpec) continue;
+      // Letter-bearing spec. A hyphen ALONE is not enough: ordinary prose hyphenates in
+      // every language ("half-hour", "13-inch", "user-replaceable", "wartungs-release",
+      // "bug-fixes"), and treating those as falsifiable specs made this condition reject
+      // 83% of correctly-grounded answers (see tests/anchoring-corpus-measure.test.ts).
+      // The falsifiable part of a compound is the segment that carries an identifier
+      // SHAPE — letters and digits together ("i2s", "usb4", "v24", "im73a135v01") — so
+      // split on hyphen/underscore and keep only those segments. "i2s-digital" still
+      // yields "i2s" and is still caught against evidence saying "analog differential";
+      // "four-usb4-connector" now checks "usb4" instead of the whole compound, which the
+      // evidence could never contain verbatim.
+      const segments = raw.split(/[-_]/).filter((seg) => /[a-z]/.test(seg) && /\d/.test(seg));
+      if (segments.length === 0) continue;
+      for (const seg of segments) {
+        if (seen.has(seg)) continue;
+        seen.add(seg);
+        tokens.push(seg);
+      }
+      continue;
     } else {
       // Pure-numeric: a fabricated concrete number (a year "2027", a price "4999", a dotted
       // version "12.5.1") is one of the most common hallucination shapes and was previously

@@ -202,50 +202,54 @@ export const OrchestrationSchema = z.object({
    *  When off, control falls through to the acceptance-criteria arm exactly as before. Default OFF (it
    *  can re-synthesize an answer) — pass^k-gated.
    *
-   *  EVALUATED 2026-07-18 — DO NOT ENABLE AS-IS. Measured over 30 labelled
-   *  (evidence, answer) pairs (tests/fixtures/anchoring-corpus.json; 15 de / 15 en,
-   *  18 grounded / 12 ungrounded, every label confirmed by an independent relabeller):
+   *  EVALUATED 2026-07-18 over 30 labelled (evidence, answer) pairs
+   *  (tests/fixtures/anchoring-corpus.json; 15 de / 15 en, 18 grounded / 12 ungrounded,
+   *  every label re-derived by an independent relabeller). The first measurement
+   *  disqualified the flag outright and located the fault in the shared detector:
    *
-   *      ALL  FP=15/18 (83%)  FN=1/12 (8%)  accuracy 47%
-   *      de   FP= 8/9  (89%)  FN=1/6 (17%)  accuracy 40%
-   *      en   FP= 7/9  (78%)  FN=0/6 ( 0%)  accuracy 53%
+   *      before the condition-2 fix   ALL  FP=15/18 (83%)  FN= 1/12 ( 8%)  accuracy 47%
+   *      after  the condition-2 fix   ALL  FP= 2/18 (11%)  FN= 2/12 (17%)  accuracy 87%
+   *                                   de   FP= 1/9  (11%)  FN= 2/6  (33%)  accuracy 80%
+   *                                   en   FP= 1/9  (11%)  FN= 0/6  ( 0%)  accuracy 93%
    *
-   *  FP = an already-grounded answer is discarded and re-synthesized. 47% is WORSE than
-   *  never firing (60%), so turning this on costs a re-synthesis on most successful
-   *  research turns and buys almost no correctness. 5 of 6 honest PARTIAL answers (the
-   *  "here is what is verified, here is what is not" shape the other guards work to
-   *  produce) are also thrown away.
+   *  (FP = an already-grounded answer is discarded and re-synthesized. Never firing at
+   *  all scores 60%, so 47% was worse than useless and 87% is a real gain.)
    *
-   *  Root cause is in the detector, not this flag: condition 2 of looksEvidenceAnchored
-   *  treats every hyphenated token as a falsifiable spec needing a verbatim evidence
-   *  match, so ordinary prose trips it in BOTH languages ("half-hour", "13-inch",
-   *  "user-replaceable", "wartungs-release", "bug-fixes"), as does locale date
-   *  reformatting (answer "20.02.2025" vs evidence "2025-02-20"). evidence-anchoring.ts
-   *  already documents this over-fire for the recovery path (audit f7928f57) and avoids
-   *  it there via the lighter sharesEvidenceVocabulary; this flag applies the full
-   *  detector to the model's own draft, where that workaround does not apply.
+   *  The fault was NOT this flag's wiring but looksEvidenceAnchored's condition 2, which
+   *  treated every hyphenated token as a falsifiable spec needing a verbatim evidence
+   *  match. Ordinary prose hyphenates in both languages ("half-hour", "13-inch",
+   *  "user-replaceable", "wartungs-release"), and locale date reformatting
+   *  ("20.02.2025" vs evidence "2025-02-20") looked like invention. Condition 2 now
+   *  checks only identifier-shaped segments (letters AND digits, e.g. "i2s", "usb4")
+   *  and accepts date-shaped tokens whose parts all appear in the evidence. That fix
+   *  also benefits failedResearchHonestyBackstop, which is ENABLED and calls the same
+   *  detector to decide whether an answer may stand.
+   *
+   *  STILL DEFAULT OFF pending a live pass^k. The residual 11% FP means roughly one in
+   *  nine good answers is still re-synthesized, and the corpus is 30 pairs of written
+   *  (not live-captured) answers. The remaining FNs are prose-only fabrications that
+   *  carry no identifier token at all — structurally outside a token-matching detector,
+   *  and the job of semanticUngroundedFactualGuard rather than this flag.
    *
    *  MODEL-DEPENDENCE (measured, not assumed). The trigger is a PURE deterministic
    *  function — regex and string matching, no LLM — so for a given (answer, evidence)
-   *  pair its verdict never varies by model. What varies is the PROSE STYLE of the
-   *  answers, and the corpus above was written by a STRONG model, not the local one:
-   *  it still scored 83% FP. Within it, all 15 false positives were driven by
-   *  hyphenated prose tokens and none by a genuinely novel spec (grounded answers that
-   *  fired averaged 5.2 such tokens; the 3 that passed averaged 1.0). A more capable
-   *  model writes MORE compound adjectives ("user-replaceable", "half-hour"), so it
-   *  should be expected to RAISE the false-positive rate, not lower it — do not assume
-   *  a better model rescues this flag.
+   *  pair its verdict never varies by model; only the PROSE STYLE of answers varies.
+   *  The corpus was written by a STRONG model, not the local one, and still scored 83%
+   *  FP before the fix, with all 15 false positives driven by hyphenated prose tokens
+   *  (those that fired averaged 5.2 such tokens; the 3 that passed averaged 1.0). A more
+   *  capable model writes MORE compound adjectives, so it would have RAISED that rate,
+   *  not lowered it — a better model was never going to rescue the old detector.
    *
    *  What genuinely does vary by model is the flag's value and its cost:
    *    - value: a weaker model fabricates more often, so there is more for the guard to
    *      catch (the flag is worth most exactly where its repair is worst);
    *    - cost : a wrong repair is re-synthesized by the SAME model, so on a weak local
-   *      model a false positive is likely to be a quality regression, whereas a strong
+   *      model a false positive is likelier to be a quality regression, whereas a strong
    *      model may rewrite it about as well.
    *
    *  Re-measure per deployment with tests/anchoring-corpus-measure.test.ts — ideally
    *  swapping in answers produced by that deployment's own model — after any change to
-   *  evidence-anchoring.ts, before revisiting default-on. */
+   *  evidence-anchoring.ts, before flipping the default. */
   evidenceAnchoringOnGatheredEvidence: z.boolean().default(false),
   /** #5 (citation-honesty tightening): the URL-not-fetched caveat's 400-char floor lets a SHORT
    *  fabricated page summary slip (a ~300-char answer that asserts the page's content but stays under
