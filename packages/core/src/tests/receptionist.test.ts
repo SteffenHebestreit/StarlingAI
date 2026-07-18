@@ -16,6 +16,7 @@ import {
   ESCALATE_SENTINEL,
   buildMemoryCapsule,
   buildReceptionistMessages,
+  languageIsUndetermined,
   classifyFrontDesk,
   runReceptionist,
 } from "../agent/receptionist.js";
@@ -118,14 +119,35 @@ describe("receptionist — source-sensitivity in the micro-call prompt", () => {
     expect(content.toLowerCase()).not.toContain("a fact, a simple explanation");
   });
 
-  it("defaults to German when a bare greeting is language-ambiguous (both prompt branches)", () => {
-    // A German user's bare "hi" is language-neutral; the fast lane must not
-    // silently answer in English. Both branches carry the German-default clause.
-    const smalltalk = String(buildReceptionistMessages("hi")[0]!.content);
-    expect(smalltalk.toLowerCase()).toContain("default to german");
+  it("a bare greeting gets ONE unconditional German directive, with no competing same-language rule", () => {
+    // Regression: the prompt-only conditional ("...if ambiguous default to German") lost to the
+    // stronger "ALWAYS reply in the SAME language (English → English)" rule on the tiny fast-lane
+    // model, which read "hi" as English and answered in English. The competing rule must be ABSENT
+    // for an undetermined-language message, leaving one unconditional instruction.
+    for (const opts of [{}, { confidenceAttempt: true }]) {
+      const content = String(buildReceptionistMessages("hi", opts)[0]!.content);
+      expect(content).toContain("Reply in GERMAN");
+      expect(content).not.toContain("English → English"); // the rule that overrode the old fix
+    }
+  });
 
-    const confidence = String(buildReceptionistMessages("hi", { confidenceAttempt: true })[0]!.content);
-    expect(confidence.toLowerCase()).toContain("default to german");
+  it("keeps the same-language rule when the message DOES carry a language", () => {
+    const content = String(buildReceptionistMessages("what kinds of things can you help me with?")[0]!.content);
+    expect(content).toContain("English → English");
+    expect(content).not.toContain("Reply in GERMAN");
+  });
+
+  it("languageIsUndetermined: bare social tokens carry no language; real sentences do", () => {
+    for (const bare of ["hi", "hey", "ok", "danke", "thanks", "👋", "hallo", "  ", "yo!"]) {
+      expect(languageIsUndetermined(bare)).toBe(true);
+    }
+    for (const determined of [
+      "wie funktioniert das Pfandsystem?",        // German (umlaut-free but multi-word)
+      "what can you help me with today?",          // English sentence
+      "Können Sie mir helfen?",                    // umlaut → positive German marker
+    ]) {
+      expect(languageIsUndetermined(determined)).toBe(false);
+    }
   });
 });
 
