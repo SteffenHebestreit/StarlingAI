@@ -124,7 +124,7 @@ pnpm sai dev web               # start web UI in dev mode
 
 ## What the swarm can do
 
-### 🧠 It thinks in parallel
+### It thinks in parallel
 
 <div align="center">
 <img src="assets/screenshots/agent-catalog.png" alt="The Agent Catalog — 48 specialist sub-agents with their capabilities and routing tags" width="90%" />
@@ -137,7 +137,7 @@ pnpm sai dev web               # start web UI in dev mode
 - **Plan-first on hard turns** — trivial asks get answered directly; complex ones get a recorded plan (`record_plan`) and a risk-gated verification pass before high-stakes answers ship.
 - **Reusable workflows** — scenes and multi-step jobs are discoverable (`search_workflows`) and executable inline (`run_workflow`), so recurring work isn't replanned from scratch.
 
-### 📚 It remembers and improves
+### It remembers and improves
 
 - **Collective memory** — agents share facts and partial results through a semantic, embedding-backed memory layer. What one agent learns, all agents know.
 - **Document RAG** — attached files are converted to Markdown and indexed into the [engram](https://github.com/SteffenHebestreit/engram) graph-RAG store; relevant excerpts are auto-retrieved per turn with cross-encoder reranking. Scoped to the conversation by default, extendable to user or workspace libraries.
@@ -145,7 +145,7 @@ pnpm sai dev web               # start web UI in dev mode
 - **Skill library** — agents author and refine reusable `SKILL.md` playbooks at runtime; a background distiller turns successful trajectories into discoverable procedures.
 - **Bounded self-improvement** — the swarm may tune its own prompts, durable memory, sub-agent definitions, and approved tool assignments. It may **never** read secrets into model context or weaken a guardrail — self-improvement strengthens the flock's local rules, it doesn't replace the cage.
 
-### 🌍 It reaches everywhere
+### It reaches everywhere
 
 - **Every channel** — webchat, Telegram, Slack, Discord, WhatsApp, and email, with delivery SLOs, dead-letter queues, and retry with backoff.
 - **Multimodal tools** — speech-to-text, speech synthesis, image analysis, file-to-Markdown conversion, browser automation, shell execution, MCP, and webhooks — all behind the same gateway.
@@ -155,7 +155,7 @@ pnpm sai dev web               # start web UI in dev mode
 - **Plugin SDK** — trusted third-party tool packages extend the registry under a namespaced Tier-2 surface with tier-shadow rejection and per-call approval. (Plugin code currently runs in the gateway process and must be treated as trusted; digest trust and isolated execution are priority hardening items.)
 - **Penetration testing** — a full Kali Linux toolchain (nmap, nikto, gobuster, sqlmap, hydra, wpscan, sslscan, ffuf, Metasploit, and more) wrapped in a scope-enforcing swarm with mandatory authorization.
 
-### 🛡️ It stays guarded
+### It stays guarded
 
 <div align="center">
 <img src="assets/screenshots/guardrails-settings.png" alt="Runtime settings — prompt-injection protection and output secret scanning toggles, and a Shell Sandbox switch that is locked on and cannot be disabled" width="90%" />
@@ -168,7 +168,7 @@ pnpm sai dev web               # start web UI in dev mode
 - **Human-in-the-loop** — approval gates via Slack, outbound webhook, or sync webhook with one-click HTTP callbacks before sensitive actions proceed.
 - **A warden on watch** — background monitoring detects tool storms, escape attempts, failure spikes, and SLO breaches in real time. (Its control state is process-local today; distributed observation and cancellation are planned before multi-worker scaling is treated as a hard guarantee.)
 
-### 🔭 It stays watchable
+### It stays watchable
 
 <div align="center">
 <img src="assets/screenshots/swarm-dashboard.png" alt="The Swarm Health dashboard — live warden alerts, capability gaps, tool promotions, paused tasks, and circuit-breaker states" width="90%" />
@@ -303,10 +303,9 @@ After `pnpm sai start`, the **interactive tutorials** at `http://localhost:3002`
 
 ## Take it for a flight
 
-- 🚀 **[One-click start](#quick-start)** — Docker, a double-click, and the orb is waiting for you at `localhost:3001`.
-- ⭐ **Star the repo** if the murmuration idea resonates — it helps other people find the flock.
-- 🔱 **[Fork it into your own specialized swarm](docs/forking.md)** — the fork guide keeps you rebase-clean with upstream.
-- 🤝 **[Contribute](CONTRIBUTING.md)** — issues, docs, adapters, hardening: the flock grows one bird at a time.
+Install Docker, double-click the launcher, and the orb is waiting at `localhost:3001`. That is the whole setup — [Quick Start](#quick-start).
+
+Once it is flying, [fork it into your own specialized swarm](docs/forking.md) (the fork guide keeps you rebase-clean with upstream) or [contribute](CONTRIBUTING.md) — issues, docs, adapters, hardening. The flock grows one bird at a time.
 
 ## License
 
