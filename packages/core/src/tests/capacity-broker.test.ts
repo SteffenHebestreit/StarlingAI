@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   admitToProvider,
   getEndpointCapacitySnapshot,
@@ -26,8 +26,20 @@ const ENDPOINT = "http://model-host:1234/v1::qwen/test";
 const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 describe("provider capacity broker (CAP-204, local backend)", () => {
+  // This suite asserts the LOCAL backend. capacity-broker's getRedis() selects the Redis
+  // backend purely from process.env.REDIS_URL, so an AMBIENT value silently moved these
+  // tests onto a real, shared Redis — where they contended with other suites and failed
+  // nondeterministically. That is exactly what happened in CI: the `packs:evaluate` step
+  // sets REDIS_URL for the redis-integration pack, and it leaks into every other pack in
+  // the same process (the coverage step, which sets nothing, stayed green).
+  // Pin the env so the suite always exercises the backend its title claims.
+  beforeEach(async () => {
+    vi.stubEnv("REDIS_URL", "");
+    await resetCapacityBrokerForTests();
+  });
   afterEach(async () => {
     await resetCapacityBrokerForTests();
+    vi.unstubAllEnvs();
     vi.mocked(getConfig).mockClear();
   });
 

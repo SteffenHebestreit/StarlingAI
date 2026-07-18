@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   appendAgentMessage,
   claimAgentMessages,
@@ -20,8 +20,20 @@ const msg = (id: string, toAgent = "coder", content = `payload ${id}`) => ({
 });
 
 describe("acknowledged agent messages (ADR-003, in-process transport)", () => {
+  // This suite asserts the IN-PROCESS transport. The swarm bus/memory layer selects its
+  // Redis backend purely from process.env.REDIS_URL, so an AMBIENT value silently moved
+  // these tests onto a real, shared Redis — where messages from other suites/runs leaked
+  // in and claims redelivered out of order (CI: "expected ['m6'] to deeply equal ['m1']").
+  // The `packs:evaluate` step sets REDIS_URL for the redis-integration pack and it leaks
+  // into the others; the coverage step, which sets nothing, stayed green.
+  // Pin the env so the suite always exercises the transport its title claims.
+  beforeEach(async () => {
+    vi.stubEnv("REDIS_URL", "");
+    await resetSharedMemoryForTests();
+  });
   afterEach(async () => {
     await resetSharedMemoryForTests();
+    vi.unstubAllEnvs();
   });
 
   it("claims without destroying: an unacked claim redelivers after the visibility timeout", async () => {
