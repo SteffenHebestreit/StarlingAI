@@ -4237,11 +4237,66 @@ async function _runTurn(
       presentableFinalMsg = buildResearchGatheredFallback(curatedForHonest);
     }
   }
-  const finalMsg = await rewriteTerminalResponseIfNeeded(presentableFinalMsg, iterationCount, session, provider, signal);
-  persistAssistantTurnState(session, finalMsg, getTurnSwarmState());
+  // Converge on the SAME terminal treatment as the normal in-loop exit
+  // (applyTerminalResponseGuards → finalizeSuccessfulTurn) instead of a hand-rolled
+  // finalization that had drifted from it. `presentableFinalMsg` was CONSTRUCTED from
+  // gathered evidence above (corrective build / evidence-gathered fallback), so
+  // skipDraftRecovery=true suppresses only the two draft-recovery stages inside the
+  // guards (they would re-synthesize what we already built) — while every downstream
+  // check the old tail SKIPPED now runs: citation honesty, the QA delivery gate + its
+  // family, deliverable consistency, output redaction, the honesty banner.
+  // finalizeSuccessfulTurn then restores the turn_scorecard + learning signals the
+  // hand-rolled emit also dropped. The three loop-scoped guard inputs that are not in
+  // scope here are supplied safely: currentTurnHasExecutableOrchestration is recomputed
+  // (it only feeds the skipped stages); autoResearchAnswer is null (the constructed
+  // message must not be overridden); releasedWithoutResearchEvidence is false (the
+  // backstop already carries its own honesty via the fallbacks above).
+  const backstopOutputScan = scanOutput(presentableFinalMsg);
+  const backstopGuardCtx: TerminalGuardContext = {
+    signal,
+    session,
+    provider,
+    userMessage,
+    toolContext,
+    deliverableIntent,
+    initialDynamicGuidance,
+    rawResponse: presentableFinalMsg,
+    iterationCount,
+    effectiveToolIterations: iterationCount,
+    terminalFinishReason,
+    toolCallsRequested,
+    currentTurnHasExecutableOrchestration: _turnDelegationCount > 0 || workflowRunCompletedThisTurn,
+    forcedSynthesisFired: _forcedSynthesisFired,
+    consecutiveDelegationFailures: _consecutiveDelegationFailures,
+    turnToolCallCounts: _turnToolCallCounts,
+    turnShareFindingCount: _turnShareFindingCount,
+    workflowRunCompletedThisTurn,
+    releasedWithoutResearchEvidence: false,
+    autoResearchAnswer: null,
+    outputScan: backstopOutputScan,
+    skipDraftRecovery: true,
+    getTurnDelegationCount: () => _turnDelegationCount,
+    getQaCorrectiveBuildUsed: () => qaCorrectiveBuildUsed,
+    incrementDelegationCount: () => { _turnDelegationCount += 1; },
+    guardrailEvents,
+    finalizeUserFacingAssistantResponse,
+    forceSynthesis,
+    collectTurnArtifactAttachments,
+    runQaDeliveryGate,
+    runDeliverableConsistencyGate,
+    runCorrectiveBuild,
+    runCorrectiveReroute,
+    logWarn: (obj, msg) => log.warn(obj, msg),
+    scorecardSignals: turnQualitySignals,
+  };
+  const finalMsg = await applyTerminalResponseGuards(backstopGuardCtx);
   if (opts.onChunk) opts.onChunk(finalMsg);
 
-  const performance = buildTurnPerformanceMetrics({
+  return finalizeSuccessfulTurn({
+    session,
+    finalResponse: finalMsg,
+    persistTurnState: persistAssistantTurnState,
+    getTurnSwarmState,
     turnStartedAt,
     firstModelResponseMs,
     llmCalls,
@@ -4249,31 +4304,23 @@ async function _runTurn(
     toolCallsRequested,
     toolExecutionTimeMs,
     lastPromptMetrics,
-    completionChars: finalMsg.length,
     finishReason: terminalFinishReason,
-    blocked: false,
-    toolIterations: iterationCount,
-  });
-  logAudit("turn_performance", { ...performance, usage: totalUsage }, {
-    sessionId: session.id,
-    channel: session.channel,
-    severity: "info",
-  });
-  logAudit("message_sent", { length: finalMsg.length, toolCalls: iterationCount, usage: totalUsage, performance }, {
-    sessionId: session.id,
-    channel: session.channel,
-    severity: "info",
-  });
-  return {
-    response: finalMsg,
-    toolCallsExecuted: iterationCount,
+    iterationCount,
+    totalUsage,
+    delegationCount: _turnDelegationCount,
+    shareFindingCount: _turnShareFindingCount,
+    forcedSynthesisFired: _forcedSynthesisFired,
+    consecutiveDelegationFailures: _consecutiveDelegationFailures,
+    sharedFindingsThisTurn,
+    freshnessSensitive: initialDynamicGuidance?.freshnessSensitive ?? false,
+    injectedSkillSlugs,
+    heldOutSkillSlugs,
+    injectedTrajectoryIdentity,
+    userMessage,
     guardrailEvents,
-    usage: totalUsage,
-    blocked: false,
-    swarmState: getTurnSwarmState(),
-    performance,
-    qualityScorecard: buildCurrentTurnScorecard(finalMsg.length, terminalFinishReason),
-  };
+    artifactCount: collectTurnArtifactAttachments(session).filter((artifact) => artifact["isDirectory"] !== true).length,
+    qualitySignals: turnQualitySignals,
+  });
 }
 
 /**

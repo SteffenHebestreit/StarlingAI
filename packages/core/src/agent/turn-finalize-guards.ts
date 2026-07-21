@@ -114,6 +114,17 @@ export interface TerminalGuardContext {
   readonly terminalFinishReason: string;
   readonly toolCallsRequested: number;
 
+  /**
+   * True on the max-iterations backstop path, where `rawResponse` is a message
+   * the runtime already CONSTRUCTED from gathered evidence (corrective build /
+   * evidence-gathered fallback) rather than a raw model draft. That construction
+   * IS the evidence recovery, so the two draft-recovery stages below must not
+   * re-run synthesis on it — but every downstream check (citation honesty, the QA
+   * delivery gate, deliverable consistency, redaction, the honesty banner) still
+   * applies. Default/undefined = normal path = recovery stages active.
+   */
+  readonly skipDraftRecovery?: boolean;
+
   // --- turn-state signals, read-only within this run ---
   readonly currentTurnHasExecutableOrchestration: boolean;
   readonly forcedSynthesisFired: boolean;
@@ -193,7 +204,8 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
   // researcher gathered good shared facts but forceSynthesis timed out or the model echoed
   // raw auto_xxx_yyy key names instead of synthesizing them into prose.
   if (
-    currentTurnHasExecutableOrchestration
+    !ctx.skipDraftRecovery
+    && currentTurnHasExecutableOrchestration
     && !initialDynamicGuidance?.sourceSensitive
     && (
       looksLikeRawSharedFactsDump(finalResponse)
@@ -240,7 +252,8 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
   // STRUCTURAL failure-signals only — real orchestration ran this turn AND it forced synthesis /
   // a delegation failed / a partial delegation was detected. No keywords, no topic classification.
   if (
-    getConfig().orchestration?.failedResearchHonestyBackstop === true
+    !ctx.skipDraftRecovery
+    && getConfig().orchestration?.failedResearchHonestyBackstop === true
     && currentTurnHasExecutableOrchestration
     && (
       ctx.forcedSynthesisFired
