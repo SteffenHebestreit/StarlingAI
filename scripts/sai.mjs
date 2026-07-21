@@ -14,7 +14,8 @@
  *   sai dev [gateway|web]                  Start development mode
  */
 import { execSync, spawn } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -177,6 +178,7 @@ async function cmdStart() {
     warn(".env not found — running first-time setup...");
     await run("node", ["scripts/setup.mjs"]);
   }
+  ensureInternalSecrets(); // backfill compose-required tokens into a pre-existing .env
   loadDotEnv();
 
   for (const key of ["SAI_JWT_SECRET", "SAI_MASTER_KEY", "POSTGRES_PASSWORD"]) {
@@ -390,6 +392,7 @@ async function cmdStop() {
 
   hdr(`Stopping ${PRODUCT.name}...`);
   ensureDockerDaemon();
+  ensureInternalSecrets(); // compose `down` interpolates the same `${VAR:?}` tokens
   const downArgs = values.volumes ? ["down", "-v"] : ["down"];
   await run(["docker", "compose", ...composeFiles, ...allProfiles, ...downArgs]);
 
@@ -644,6 +647,34 @@ function loadDotEnv() {
     if (match && !process.env[match[1]]) {
       process.env[match[1]] = match[2];
     }
+  }
+}
+
+// The internal sidecar tokens are mandatory in docker-compose (`${VAR:?}`), so a
+// value must exist in .env before ANY compose command — otherwise interpolation
+// fails and even `down`/`logs` abort. First-run setup writes them, but a .env
+// that predates these vars (upgrade path) needs a backfill. Generate any that
+// are missing or empty; never overwrite an existing value. These are opaque
+// bearer tokens the gateway and each sidecar both read from the same .env, so a
+// freshly generated value stays in sync across containers on the next start.
+function ensureInternalSecrets() {
+  if (!existsSync(".env")) return; // first-run setup owns creation
+  let env = readFileSync(".env", "utf-8");
+  const added = [];
+  for (const key of ["SAI_MAIL_SERVICE_TOKEN", "SAI_COMPUTER_REMOTE_TOKEN"]) {
+    if (new RegExp(`^${key}=.+`, "m").test(env)) continue; // already has a value
+    const value = randomBytes(32).toString("base64url");
+    if (new RegExp(`^${key}=\\s*$`, "m").test(env)) {
+      env = env.replace(new RegExp(`^${key}=.*$`, "m"), `${key}=${value}`);
+    } else {
+      env += (env === "" || env.endsWith("\n") ? "" : "\n") + `${key}=${value}\n`;
+    }
+    process.env[key] = value;
+    added.push(key);
+  }
+  if (added.length) {
+    writeFileSync(".env", env);
+    ok(`Generated missing internal service token(s): ${added.join(", ")}`);
   }
 }
 

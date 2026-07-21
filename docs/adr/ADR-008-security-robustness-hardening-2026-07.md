@@ -164,13 +164,22 @@ running container.
     so with the token now mandatory the no-auth compose healthcheck would 401
     forever and the container would sit permanently `unhealthy`. `/health` is now
     **exempted** in both the mail-service and computer-remote middleware.
-- **Known tradeoff (accepted):** `${VAR:?}` makes **every** compose subcommand
-  (including `down`/`logs`/`ps`) abort when the vars are unset. This is the
-  intended fail-closed posture. **Upgrade note:** an existing deployment whose
-  `.env` predates these vars must run `pnpm sai setup` once (which it needs to do
-  anyway to obtain the tokens) before any compose command. In practice every real
-  deployment already ran setup — the other required secrets (`POSTGRES_PASSWORD`,
-  S3, JWT) are generated the same way — so the stack cannot run un-setup regardless.
+- **`${VAR:?}` is the correct pattern** — `SAI_JWT_SECRET`, `SAI_MASTER_KEY`, and
+  `POSTGRES_PASSWORD` already use it. It makes **every** compose subcommand
+  (including `down`/`logs`) abort when the var is unset, which is the intended
+  fail-closed posture *provided* `sai` populates the value first (the `:?` message
+  itself says "run pnpm sai start first — it generates .env").
+- **Bug found in practice (fixed in v0.46.3):** unlike the older secrets, the two
+  new tokens were only written on **first-run** setup, so a pre-existing `.env`
+  never got them backfilled — and because `sai stop`/`sai start` both shell out to
+  compose, the missing tokens blocked *both*, i.e. an upgraded install could
+  neither start nor stop. Fix: `ensureInternalSecrets()` in `scripts/sai.mjs`
+  generates any missing/empty required token into `.env` before every compose
+  invocation in both `cmdStart` and `cmdStop` (idempotent; never overwrites an
+  existing value). This is the general "sai owns the lifecycle of its required
+  secrets" rule — **any future `${VAR:?}` compose secret must be added to
+  `ensureInternalSecrets` in the same change**, or it will break the upgrade path
+  the same way.
 - **Follow-up:** the `${VAR:?}` guard covers only these two tokens; sibling
   internal secrets (`SAI_N8N_SSH_PASSWORD`, `MEMGRAPH_PASSWORD`, `SEARXNG_SECRET`,
   `KC_BOOTSTRAP_ADMIN_PASSWORD`) still default to empty/shipped values. Driving
