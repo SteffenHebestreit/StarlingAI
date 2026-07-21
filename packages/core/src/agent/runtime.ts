@@ -1350,7 +1350,10 @@ async function _runTurn(
   const recentWorkflowAuthoringMaintenanceContext = hasRecentWorkflowAuthoringMaintenanceContext(session.getHistory());
   const workflowCatalogSignal = detectWorkflowCatalogSignal(userMessage);
   const approvedRunCandidateFollowUp = detectApprovedRunCandidateFollowUp(session.getHistory(), userMessage);
-  const tools = getToolsAsLLMDefs(allowedToolNames);
+  // `let`, not const: load_tool (lean tool catalog) widens the live turn mid-loop
+  // by reassigning this. `activeTools` is re-derived from it on every iteration,
+  // so a reassignment is picked up by the next model call with no other plumbing.
+  let tools = getToolsAsLLMDefs(allowedToolNames);
   // Register tool schema size on the session so the history trimmer accounts
   // for the full actual prompt cost (system + tool schemas + history), and the
   // context window of the model actually running this turn so the trimmer
@@ -3476,6 +3479,27 @@ async function _runTurn(
       }
 
       _lastToolResultByName.set(tc.name, resultText);
+
+      // ── Lean tool catalog: widen this turn (B37) ──────────────────────────
+      // load_tool validated that the request is inside the turn's tool mode and
+      // reported which tool to add; the widening happens HERE so the tool handler
+      // itself can never mutate the live tool set. Re-deriving `tools` is enough:
+      // the per-iteration `activeTools` reads it fresh, so the next model call
+      // sees the schema. The trimmer's prompt budget is corrected too, otherwise
+      // it would keep costing the turn the pre-load schema size.
+      if (tc.name === "load_tool" && result.success) {
+        const loaded = (result.metadata as { loadedTool?: unknown } | undefined)?.loadedTool;
+        if (typeof loaded === "string" && loaded && !allowedToolNameSet.has(loaded)) {
+          allowedToolNameSet.add(loaded);
+          allowedToolNames = [...allowedToolNames, loaded];
+          tools = getToolsAsLLMDefs(allowedToolNames);
+          session.setToolSchemasChars(JSON.stringify(tools).length);
+          logAudit("tool_loaded_into_turn", {
+            tool: loaded,
+            catalogSize: allowedToolNames.length,
+          }, { sessionId: session.id, severity: "info" });
+        }
+      }
 
       // ── Reused-delegation loop detection ─────────────────────────────────
       // When a coordinator keeps paraphrasing the same task, the underlying

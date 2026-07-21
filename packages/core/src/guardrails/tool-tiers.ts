@@ -52,6 +52,14 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  load_tool: {
+    // Tier 0: loading only re-offers a tool the turn's tool mode already permits.
+    // The loaded tool is still gated by its OWN tier when it is actually called.
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Pull an available-but-not-offered tool into the current turn (lean tool catalog)",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
   list_federation_peers: {
     tier: ToolTier.ZERO_READ_ONLY,
     description: "List configured federation peer instances and their advertised agent + tool surface",

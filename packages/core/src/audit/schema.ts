@@ -27,6 +27,8 @@ export type CoreAuditEventType =
   | "tool_call_completed"
   | "tool_call_failed"
   | "tool_call_recovered"
+  /** Lean tool catalog (B37): load_tool pulled a withheld tool into the live turn. */
+  | "tool_loaded_into_turn"
   | "tool_output_blocked"
   | "effect_receipt"
   | "effect_approval_would_block"

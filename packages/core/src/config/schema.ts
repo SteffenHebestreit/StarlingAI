@@ -1583,6 +1583,22 @@ export const ConfigSchema = z.object({
       /** Warn when system prompt exceeds this char count (~8k tokens). */
       promptBudgetChars: z.number().int().min(1_000).default(32_000),
       /**
+       * Lean tool catalog (B37). In hybrid mode the orchestrator is offered every
+       * DIRECT capability tool up front, and their JSON schemas dominate the
+       * request. When true, only the always-available core and the orchestration
+       * tools are offered; the direct tools are discoverable via `search_tools`
+       * and pulled into the live turn with `load_tool`.
+       *
+       * Deliberately does NOT touch the orchestration/routing tools — deferring
+       * those is the change that would actually move routing behaviour, and this
+       * slice is meant to buy prompt tokens without touching delegation.
+       *
+       * Default OFF: it changes what the model can see on iteration 0, so it is
+       * pass^k-gated like every other behavioural slice. No effect outside
+       * hybrid mode (the other modes never offered the direct tools anyway).
+       */
+      leanToolCatalog: z.boolean().default(false),
+      /**
        * Lean context injection. When true, the per-turn memory/user-model/skill/
        * flow/trajectory blocks are NOT pushed into the system prompt; instead a
        * tiny digest tells the model to pull them on demand via recall_context.

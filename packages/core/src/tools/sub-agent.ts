@@ -3410,6 +3410,60 @@ registerTool({
   },
 });
 
+// ─── load_tool ───────────────────────────────────────────────────────────────
+// Companion to search_tools for the lean tool catalog (B37): when
+// agents.performance.leanToolCatalog withholds the direct capability tools from
+// the opening request, this pulls one back into the CURRENT turn so the model can
+// call it on the next iteration.
+//
+// It cannot widen the turn beyond what the tool mode already permits — the
+// loadable set is exactly the direct tools this mode would have offered anyway,
+// so a delegate_only/orchestration_only turn can load nothing. The runtime does
+// the actual widening when it sees `metadata.loadedTool`; this handler only
+// validates and reports, so a stray call can never mutate the tool set on its own.
+
+registerTool({
+  name: "load_tool",
+  description: "Load an available-but-not-yet-offered tool into the current turn so you can call it on your next step. Use after search_tools tells you a tool exists that is not in your current tool list. Pass the exact tool name.",
+  embeddingDescription: "load a tool, enable a tool, activate tool, add tool to this turn, make tool available",
+  costHint: "low" as const,
+  latencyHint: "low" as const,
+  parameters: {
+    type: "object" as const,
+    properties: {
+      name: {
+        type: "string",
+        description: "Exact name of the tool to load, as reported by search_tools.",
+      },
+    },
+    required: ["name"],
+  },
+  async execute(args: Record<string, unknown>): Promise<ToolResult> {
+    const name = String(args["name"] ?? "").trim();
+    if (!name) return { success: false, output: "", error: "name is required" };
+
+    // Lazy: default-tools reads the tool registry this module registers into,
+    // so a static import would close a cycle.
+    const { getLoadableDirectMainToolNames } = await import("../agent/default-tools.js");
+    const loadable = getLoadableDirectMainToolNames();
+    if (!loadable.includes(name)) {
+      // Deliberately does not say whether the tool exists elsewhere — an
+      // orchestrator cannot use this to probe past its tool mode.
+      return {
+        success: false,
+        output: "",
+        error: `"${name}" is not loadable in this turn. Use search_tools to find a loadable tool name.`,
+      };
+    }
+
+    return {
+      success: true,
+      output: `Loaded "${name}". You can call it on your next step.`,
+      metadata: { loadedTool: name },
+    };
+  },
+});
+
 // ─── delegate_to_agent ────────────────────────────────────────────────────────
 
 registerTool({

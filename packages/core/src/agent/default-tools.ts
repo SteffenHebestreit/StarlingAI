@@ -155,7 +155,27 @@ export function getAvailableDirectMainToolNames(mode?: MainAssistantToolMode): s
   const available = getAvailableToolNames();
   const alwaysAvailable = ALWAYS_AVAILABLE_MAIN_TOOL_NAMES.filter(name => available.has(name));
   if (resolveToolMode(mode) !== "hybrid") return alwaysAvailable;
+  // Lean catalog (B37): withhold the direct capability tools from iteration 0 and
+  // let the model pull the one it needs with load_tool. Orchestration tools are
+  // untouched, so delegation/routing behaviour is identical either way.
+  if (getConfig().agents.performance.leanToolCatalog) {
+    // load_tool is only offered when something was actually withheld — otherwise
+    // it would cost every deployment a tool schema for a no-op.
+    return available.has("load_tool") ? [...alwaysAvailable, "load_tool"] : alwaysAvailable;
+  }
   return [...alwaysAvailable, ...DIRECT_MAIN_TOOL_NAMES.filter(name => available.has(name))];
+}
+
+/**
+ * Tool names the orchestrator may pull in mid-turn with `load_tool` — exactly the
+ * direct capability tools the lean catalog withheld. Anything already offered, or
+ * never offered in this mode, is not loadable: load_tool widens the live turn to
+ * what the mode ALREADY permits, it never escalates past the tool-mode boundary.
+ */
+export function getLoadableDirectMainToolNames(mode?: MainAssistantToolMode): string[] {
+  if (resolveToolMode(mode) !== "hybrid") return [];
+  const available = getAvailableToolNames();
+  return DIRECT_MAIN_TOOL_NAMES.filter(name => available.has(name));
 }
 
 export function getAvailableOrchestrationToolNames(mode?: MainAssistantToolMode): string[] {
