@@ -1,7 +1,16 @@
 import { ImapFlow } from "imapflow";
 import { GmailQueryParser } from "./query-parser.js";
+import { log } from "./logger.js";
 import type { MailAccountConfig } from "./types.js";
 import type { RawMailMessage } from "./email-parser.js";
+
+/**
+ * Largest result set we will envelope-scan to order by date before picking the
+ * newest N. Measured ~0.24 ms/message against a live Strato mailbox, so this cap
+ * bounds the pre-pass at roughly 2-3 s — comfortably inside the 20 s tool timeout
+ * even on a slow link. Past it we fall back to UID order and log that we did.
+ */
+const PREPASS_MAX_UIDS = 10_000;
 
 interface MailboxInfo {
   path: string;
@@ -230,12 +239,52 @@ export class MailAccountClient {
     }
   }
 
+  /**
+   * Pick the `limit` genuinely newest UIDs.
+   *
+   * Tail-slicing the UID list assumes UID order == date order, which is only true
+   * while messages arrive and are never moved: a bulk move assigns NEW (high) UIDs
+   * to OLD messages, so in Archive/All-Mail the tail can be the oldest mail in the
+   * box. Measured on a real 544-message Strato INBOX, UID order already did NOT
+   * match date order.
+   *
+   * So when the result set is larger than the limit we do an envelope-only pre-pass
+   * and sort by the actual date. Envelopes are cheap — ~0.24 ms/message measured
+   * (544 messages in 132 ms), versus the full-source fetch this is selecting for.
+   * Above PREPASS_MAX_UIDS the pre-pass itself would start to matter against the
+   * 20 s tool timeout, so we keep the old heuristic there and say so in the log.
+   */
+  private async selectNewestUids(uids: number[], limit: number): Promise<number[]> {
+    if (uids.length <= limit) return uids;
+    if (uids.length > PREPASS_MAX_UIDS) {
+      log.warn(
+        { candidates: uids.length, limit, cap: PREPASS_MAX_UIDS },
+        "result set too large for a date-ordered pre-pass — falling back to UID order, which is wrong for mailboxes that received bulk moves",
+      );
+      return uids.slice(-limit);
+    }
+
+    const dated: Array<{ uid: number; time: number }> = [];
+    for await (const message of this.client!.fetch(uids, { uid: true, envelope: true }, { uid: true })) {
+      const raw = (message.envelope as { date?: unknown } | undefined)?.date;
+      const time = raw ? new Date(raw as string).getTime() : Number.NaN;
+      // A missing/unparsable Date header sorts oldest rather than winning the
+      // window on a NaN comparison.
+      dated.push({ uid: message.uid, time: Number.isFinite(time) ? time : 0 });
+    }
+    if (dated.length === 0) return uids.slice(-limit);
+
+    dated.sort((a, b) => a.time - b.time);
+    // Back to ascending UID order: callers and IMAP FETCH both expect that.
+    return dated.slice(-limit).map((d) => d.uid).sort((a, b) => a - b);
+  }
+
   private async fetchSummariesFromMailbox(mailbox: string, imapQuery: Record<string, unknown>, limit = 50): Promise<MailSearchSummary[]> {
     const lock = await this.client!.getMailboxLock(mailbox);
     try {
       const uids = await this.client!.search(imapQuery, { uid: true });
       if (!uids || uids.length === 0) return [];
-      const recentUids = uids.length > limit ? uids.slice(-limit) : uids;
+      const recentUids = await this.selectNewestUids(uids, limit);
 
       // Pass 1 — envelope + bodyStructure only (no source): from/to/cc/subject/date,
       // attachment count, and which part holds the text body.
@@ -474,9 +523,9 @@ export class MailAccountClient {
       // query (e.g. an empty "ALL" search) fetched the FULL raw source of EVERY
       // message in the mailbox, hanging past the 20s tool timeout on a real inbox
       // (session d251793b: mail_search aborted twice while mail_list_unread —
-      // which matches few messages — stayed fast). IMAP UID SEARCH returns UIDs
-      // ascending by arrival, so the newest are at the tail.
-      const recentUids = uids.length > limit ? uids.slice(-limit) : uids;
+      // which matches few messages — stayed fast). Which messages are "newest" is
+      // decided by date, not UID tail — see selectNewestUids.
+      const recentUids = await this.selectNewestUids(uids, limit);
       const messages: RawMailMessage[] = [];
       for await (const message of this.client!.fetch(recentUids, { uid: true, envelope: true, source: true }, { uid: true })) {
         messages.push({
