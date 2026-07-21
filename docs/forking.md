@@ -25,6 +25,44 @@ file, stop: either the platform is missing an extension point (contribute it
 upstream — see [fork-boilerplate-plan.md](fork-boilerplate-plan.md)) or
 there's a config knob you missed.
 
+## Naming: every fork-owned path carries your slug
+
+Fork-owned paths are named after your `product.json` **`slug`**. Upstream ships
+no `product.json`, so upstream has no slug and can never own these names — which
+means ownership is *decidable from the path alone*, with no hand-maintained
+list, and two forks of this repo never collide with each other:
+
+| Kind | Path |
+|------|------|
+| Core extension | `packages/core/src/extensions/<slug>/` |
+| Web extension | `packages/web/src/extensions/<slug>/` |
+| Config shard | `config/<zone>/<NN>-<slug>[-topic].jsonc` |
+| Workspace overlay | `workspace/<kind>/<NN>-<slug>[-topic].jsonc` |
+| Grouped config | `config/<slug>/…`, `workspace/<slug>/…` |
+| Compose overlay | `docker-compose.<slug>.yml` |
+| Anything else at the repo root | declare it in `product.json` `rootAllowlist` |
+
+**Numbered shards: upstream reserves `00`–`59`; forks use `60`–`99`.** This is
+not cosmetic. Shards are merged in lexicographic path order and the *later* one
+wins, so a fork shard numbered `20` merges before every upstream shard numbered
+above it — any key it means to override is silently re-overridden by upstream,
+and the fork's customisation quietly does nothing. Numbering above upstream's
+range makes your shard win by construction, and leaves upstream room to grow.
+
+If your fork adopted shorter directory names before this convention existed, you
+can list them in `product.json` as `"surfaceNames": ["mfa-ai", "mfa"]` instead of
+renaming the tree; new forks should just use the slug.
+
+Verify at any time — this is the real measure of whether your next rebase is
+clean, and it is worth wiring into CI:
+
+```bash
+node scripts/check-upstream.mjs --remote upstream --strict
+```
+
+It reports **surface drift**: upstream files your fork modified or deleted (drive
+this to zero) and shards numbered below the fork range.
+
 ## Step by step
 
 ### 1. Fork and rename
