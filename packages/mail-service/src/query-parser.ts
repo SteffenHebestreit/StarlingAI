@@ -98,13 +98,16 @@ export class GmailQueryParser {
       if (colonIndex > 0) {
         const op = clean.slice(0, colonIndex).toLowerCase();
         let value = clean.slice(colonIndex + 1);
-        if (value.startsWith('"')) {
-          value = value.slice(1);
-          while (index < query.length && !value.endsWith('"')) {
-            value += query[index];
-            index += 1;
-          }
-          if (value.endsWith('"')) value = value.slice(0, -1);
+        // The word scanner above stops at `"`, so `subject:"two words"` reaches
+        // here as op="subject" with an EMPTY value, and the phrase is still
+        // unread — it would then be tokenized as an unrelated body term, turning
+        // the query into `subject:"" AND body:"two words"` and matching nothing.
+        // (The previous recovery here tested value.startsWith('"'), which the
+        // scanner makes unreachable.) Consume the phrase as this operator's value.
+        if (value === "" && query[index] === '"') {
+          const end = query.indexOf('"', index + 1);
+          value = end === -1 ? query.slice(index + 1) : query.slice(index + 1, end);
+          index = end === -1 ? query.length : end + 1;
         }
         tokens.push({ type: "term", kind: "op", op, value, negated });
         continue;

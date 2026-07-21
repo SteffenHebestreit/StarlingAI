@@ -41,3 +41,20 @@ describe("GmailQueryParser relative dates (MAIL-2)", () => {
     expect(ageDays).toBeGreaterThan(25); // ~1 month back
   });
 });
+
+describe("quoted operator values", () => {
+  it("keeps a quoted multi-word phrase as the operator's value", () => {
+    // The word scanner stops at the quote, so this used to parse as
+    // subject:"" AND body:"SMTP verification" and match nothing.
+    const { imapQueries } = GmailQueryParser.parse('subject:"SMTP verification"');
+    expect(imapQueries).toHaveLength(1);
+    // The whole phrase must land on the subject criterion — not split into an
+    // empty subject plus a stray body term.
+    expect(imapQueries[0]).toEqual({ subject: "SMTP verification" });
+  });
+
+  it("still handles the single-word operator form", () => {
+    const { imapQueries } = GmailQueryParser.parse("subject:StarlingAI");
+    expect(JSON.stringify(imapQueries[0])).toContain("StarlingAI");
+  });
+});
