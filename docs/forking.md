@@ -185,6 +185,20 @@ Notes:
   tools use the [Plugin SDK](../packages/core/src/plugin/README.md) instead
   (fixed Tier 2, sandboxed, per-call approval).
 
+**CLI subcommands.** Drop a file at `extensions/<name>/cli/<command>.{mjs,js,ts}`
+and it becomes `sai <command>`, with everything after the command name passed
+through:
+
+```
+packages/core/src/extensions/mfa-ai/cli/user.mjs   →   sai user list --json
+```
+
+Discovery only runs for a name no built-in command claimed, so an extension can
+never shadow a core command — the same rule the SDK applies to routes and tool
+tiers. Naming a file after a built-in is ignored with a warning rather than
+silently dropped, so a future upstream command with that name can't quietly
+take over. `sai help` lists whatever your fork provides.
+
 ### 4. Add your domain frontend as a web extension
 
 Copy `packages/web/src/extensions/_example/` to `extensions/<name>/`:

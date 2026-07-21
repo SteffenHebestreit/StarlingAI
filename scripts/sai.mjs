@@ -14,7 +14,7 @@
  *   sai dev [gateway|web]                  Start development mode
  */
 import { execSync, spawn } from "node:child_process";
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -36,6 +36,64 @@ const hdr  = (msg) => console.log(`\n${BOLD}${msg}${RESET}`);
 // Resolve repo root (scripts/ lives one level below)
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 process.chdir(repoRoot);
+
+/**
+ * Built-in command names. Extension commands are only ever consulted for a name
+ * NOT in this set, so a fork can never shadow a core command — the same rule the
+ * extension SDK applies to routes and tool tiers. Keep in sync with main()'s switch.
+ */
+const BUILTIN_COMMANDS = new Set([
+  "setup", "start", "stop", "wipe", "config", "memory",
+  "env-check", "token", "health", "dev", "help", "--help", "-h",
+]);
+
+/**
+ * Discover fork-owned CLI subcommands at
+ * `packages/core/src/extensions/<ext>/cli/<command>.{mjs,js,ts}`.
+ *
+ * Mirrors the extension loader's conventions (SAI_EXTENSIONS_DIR override,
+ * "_"/"."-prefixed directories skipped, compiled output preferred over source)
+ * so a fork adds a file instead of editing this upstream script.
+ */
+function discoverExtensionCommands() {
+  const fromEnv = process.env["SAI_EXTENSIONS_DIR"]?.trim();
+  const extensionsDir = fromEnv
+    ? resolve(repoRoot, fromEnv)
+    : resolve(repoRoot, "packages/core/src/extensions");
+  if (!existsSync(extensionsDir)) return new Map();
+
+  const found = new Map();
+  for (const ext of readdirSync(extensionsDir)) {
+    if (ext.startsWith("_") || ext.startsWith(".")) continue;
+    const cliDir = resolve(extensionsDir, ext, "cli");
+    if (!existsSync(cliDir) || !statSync(cliDir).isDirectory()) continue;
+
+    for (const file of readdirSync(cliDir)) {
+      const match = /^(.+)\.(mjs|js|ts)$/.exec(file);
+      if (!match) continue;
+      const [, name, ext2] = match;
+      if (BUILTIN_COMMANDS.has(name)) {
+        // Loud, not silent: otherwise a future upstream command with this name
+        // would quietly start winning and the fork's command would vanish.
+        warn(`Extension "${ext}" declares CLI command "${name}", which is built in — ignoring.`);
+        continue;
+      }
+      const existing = found.get(name);
+      // Compiled output wins over source, matching the extension loader.
+      const rank = { mjs: 0, js: 1, ts: 2 }[ext2];
+      if (!existing || rank < existing.rank) {
+        found.set(name, { ext, path: resolve(cliDir, file), rank, isTs: ext2 === "ts" });
+      }
+    }
+  }
+  return found;
+}
+
+async function runExtensionCommand(entry) {
+  // .ts needs tsx; compiled output runs on plain node.
+  const runner = entry.isTs ? ["npx", "tsx"] : ["node"];
+  await run([...runner, JSON.stringify(entry.path), ...restArgs]);
+}
 
 const command = process.argv[2];
 const subCommand = process.argv[3];
@@ -61,9 +119,17 @@ async function main() {
     case "dev":     await cmdDev(); break;
     case "help": case "--help": case "-h": case undefined:
       printHelp(); break;
-    default:
+    default: {
+      // Only reached for a name no built-in claimed, so an extension can never
+      // shadow a core command.
+      const extensionCommand = discoverExtensionCommands().get(command);
+      if (extensionCommand) {
+        await runExtensionCommand(extensionCommand);
+        break;
+      }
       fail(`Unknown command: ${command}`);
       printHelp();
+    }
   }
 }
 
@@ -531,6 +597,16 @@ ${BOLD}Commands:${RESET}
   health                             Check service health endpoints
   dev [gateway|web]                  Start development mode
 `);
+
+  // A fork's own commands, so `sai help` documents the whole CLI it actually has.
+  const extensionCommands = discoverExtensionCommands();
+  if (extensionCommands.size > 0) {
+    console.log(`${BOLD}Extension commands:${RESET}`);
+    for (const [name, entry] of [...extensionCommands].sort(([a], [b]) => a.localeCompare(b))) {
+      console.log(`  ${name.padEnd(35)}Provided by the "${entry.ext}" extension`);
+    }
+    console.log("");
+  }
 }
 
 function ensureCommand(cmd, errMsg) {
