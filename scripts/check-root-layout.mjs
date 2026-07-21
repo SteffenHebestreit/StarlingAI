@@ -73,6 +73,13 @@ const allowedDirectories = new Set([
   "workspace",
 ]);
 
+// Fork-owned root entries — product.json may declare
+// `rootAllowlist: { files: [], directories: [] }` so a fork can extend the
+// allowlist without editing this upstream script (docs/forking.md).
+const forkAllowlist = PRODUCT.rootAllowlist ?? {};
+for (const file of forkAllowlist.files ?? []) allowedFiles.add(file);
+for (const dir of forkAllowlist.directories ?? []) allowedDirectories.add(dir);
+
 async function main() {
   const entries = await readdir(repoRoot, { withFileTypes: true });
   const unexpected = entries

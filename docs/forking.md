@@ -50,6 +50,20 @@ conflicts. Everything follows it: config resolution, state directories,
 `<PREFIX>_*` env vars, startup banners, MCP/A2A agent cards, document
 metadata, and `GET /api/product` for the web shell.
 
+A fork that adds its own repo-root files or runtime directories can declare
+them in `product.json` too, so `pnpm check`'s root-layout gate passes without
+editing the upstream script:
+
+```jsonc
+{
+  // ...identity fields above...
+  "rootAllowlist": {
+    "files": ["DEVPLAN.md", "docker-compose.myfork.yml"],
+    "directories": ["uploads"]
+  }
+}
+```
+
 ### 2. Disable built-in tool families you don't want
 
 Don't delete upstream tool files — deletions are the worst rebase-conflict
