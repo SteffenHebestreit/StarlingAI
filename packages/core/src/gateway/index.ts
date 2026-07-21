@@ -1052,7 +1052,9 @@ export function createGateway() {
       // Merge the provider's free-form claims FIRST and strip reserved security
       // keys, so a malicious/compromised extension provider cannot override the
       // authoritative `role` (privilege escalation) or `sub` in the minted JWT.
-      const { role: _ignoredRole, sub: _ignoredSub, ...safeClaims } = providerUser.claims ?? {};
+      // `scope` is reserved too: it marks capability tokens, which verifyToken
+      // rejects — a provider setting it would brick its own users' sessions.
+      const { role: _ignoredRole, sub: _ignoredSub, scope: _ignoredScope, ...safeClaims } = providerUser.claims ?? {};
       const token = await createToken(providerUser.id, {
         ...safeClaims,
         role: providerUser.role,

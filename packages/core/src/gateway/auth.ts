@@ -75,17 +75,46 @@ function getJwtSecret(): Uint8Array {
   return _jwtSecret;
 }
 
-export async function createToken(userId: string, claims?: Record<string, unknown>): Promise<string> {
+export async function createToken(
+  userId: string,
+  claims?: Record<string, unknown>,
+  expiresIn: string | number = "24h",
+): Promise<string> {
   return new SignJWT({ sub: userId, ...claims })
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
-    .setExpirationTime("24h")
+    .setExpirationTime(expiresIn)
     .sign(getJwtSecret());
 }
 
+/**
+ * Verify a SESSION token. A token carrying a `scope` claim is a narrow
+ * capability token (e.g. a fork's single-resource media token), not a session:
+ * it must never pass the general auth gates, so it is rejected here and only
+ * accepted by `verifyScopedToken` at the route that owns its scope. Without
+ * this, a leaked scoped token would work as a full bearer credential on every
+ * `verifyToken`-gated route for its TTL.
+ */
 export async function verifyToken(token: string): Promise<JWTPayload | null> {
   try {
     const { payload } = await jwtVerify(token, getJwtSecret());
+    if (payload.scope !== undefined) return null; // capability token, not a session
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Verify a scoped CAPABILITY token minted via `createToken(uid, { scope, ... })`.
+ * Returns the payload only when the signature is valid AND the token's `scope`
+ * claim equals `scope` — a session token (no scope) or a different scope is
+ * rejected, so one capability can never be replayed as another.
+ */
+export async function verifyScopedToken(token: string, scope: string): Promise<JWTPayload | null> {
+  try {
+    const { payload } = await jwtVerify(token, getJwtSecret());
+    if (payload.scope !== scope) return null;
     return payload;
   } catch {
     return null;
