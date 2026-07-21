@@ -1129,7 +1129,10 @@ async function previewAttachment(attachment: ChatAttachment): Promise<void> {
         filename: attachment.filename,
         kind: attachment.previewMode === "pdf" ? "pdf" : attachment.previewMode === "audio" ? "audio" : "html",
         url: attachment.externalUrl,
-        sandbox: attachment.previewMode === "html" ? "allow-scripts allow-same-origin allow-forms allow-popups" : undefined,
+        // Generated/external HTML is untrusted. Never combine scripts with
+        // allow-same-origin: that would let the artifact shed its sandbox and
+        // access the dashboard origin/token storage.
+        sandbox: attachment.previewMode === "html" ? "allow-scripts" : undefined,
       };
       return;
     }
@@ -1147,7 +1150,7 @@ async function previewAttachment(attachment: ChatAttachment): Promise<void> {
         filename: attachment.filename,
         kind: "html",
         url: gateway.buildWorkspacePreviewUrl(attachment.relativePath),
-        sandbox: "allow-scripts allow-same-origin allow-forms allow-popups",
+        sandbox: "allow-scripts",
       };
       return;
     }

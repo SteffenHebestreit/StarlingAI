@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const listMailboxesMock = vi.fn();
 const createMailboxMock = vi.fn();
 const searchMock = vi.fn();
+const moveMessageMock = vi.fn();
+const deleteMessageMock = vi.fn();
 
 vi.mock("../imap-client.js", () => ({
   MailAccountClient: class {
@@ -10,8 +12,8 @@ vi.mock("../imap-client.js", () => ({
     async createMailbox(path: string) { return createMailboxMock(path); }
     async searchSummaries(query: string, mailboxes?: string[], limit?: number) { return searchMock(query, mailboxes, limit); }
     async readMessage() { return null; }
-    async moveMessage() { return { destination: "x" }; }
-    async deleteMessage() { return { movedToTrash: true }; }
+    async moveMessage(mailbox: string, uid: number, dest: string) { moveMessageMock(mailbox, uid, dest); return { destination: dest }; }
+    async deleteMessage(mailbox: string, uid: number, permanent?: boolean) { deleteMessageMock(mailbox, uid, permanent); return { movedToTrash: true }; }
   },
 }));
 
@@ -31,7 +33,7 @@ const store = { getCategory: vi.fn(async () => null), categorize: vi.fn(), creat
 function app() { return createApp({ accounts, store: store as never }); }
 
 describe("mail-service per-user access control", () => {
-  beforeEach(() => { listMailboxesMock.mockReset(); createMailboxMock.mockReset(); searchMock.mockReset(); });
+  beforeEach(() => { listMailboxesMock.mockReset(); createMailboxMock.mockReset(); searchMock.mockReset(); moveMessageMock.mockReset(); deleteMessageMock.mockReset(); });
 
   it("lists all accounts for the allowed user", async () => {
     const res = await app().fetch(new Request("http://m/api/accounts", { headers: { "X-Sai-User": "alice" } }));
@@ -78,5 +80,50 @@ describe("mail-service per-user access control", () => {
     }));
     // Only the shared account is searched (alice-only filtered out for bob).
     expect(searchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects draft creation for a restricted account", async () => {
+    const res = await app().fetch(new Request("http://m/api/drafts", {
+      method: "POST", headers: { "Content-Type": "application/json", "X-Sai-User": "bob" },
+      body: JSON.stringify({ accountId: "alice-only", to: ["recipient@example.com"], subject: "Hello", textBody: "Body" }),
+    }));
+    expect(res.status).toBe(403);
+    expect(store.createDraft).not.toHaveBeenCalled();
+  });
+
+  it("rejects a mixed-account category batch before it mutates state", async () => {
+    const res = await app().fetch(new Request("http://m/api/messages/categorize", {
+      method: "POST", headers: { "Content-Type": "application/json", "X-Sai-User": "bob" },
+      body: JSON.stringify({ items: [
+        { accountId: "shared", mailbox: "INBOX", uid: 1, category: "ok" },
+        { accountId: "alice-only", mailbox: "INBOX", uid: 2, category: "private" },
+      ] }),
+    }));
+    expect(res.status).toBe(403);
+    expect(store.categorize).not.toHaveBeenCalled();
+  });
+
+  it("rejects a mixed-account move batch before moving any message", async () => {
+    const res = await app().fetch(new Request("http://m/api/messages/move", {
+      method: "POST", headers: { "Content-Type": "application/json", "X-Sai-User": "bob" },
+      body: JSON.stringify({ destinationMailbox: "Archive", items: [
+        { accountId: "shared", mailbox: "INBOX", uid: 1 },
+        { accountId: "alice-only", mailbox: "INBOX", uid: 2 },
+      ] }),
+    }));
+    expect(res.status).toBe(403);
+    expect(moveMessageMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects a mixed-account delete batch before deleting any message", async () => {
+    const res = await app().fetch(new Request("http://m/api/messages/delete", {
+      method: "POST", headers: { "Content-Type": "application/json", "X-Sai-User": "bob" },
+      body: JSON.stringify({ permanent: true, items: [
+        { accountId: "shared", mailbox: "INBOX", uid: 1 },
+        { accountId: "alice-only", mailbox: "INBOX", uid: 2 },
+      ] }),
+    }));
+    expect(res.status).toBe(403);
+    expect(deleteMessageMock).not.toHaveBeenCalled();
   });
 });

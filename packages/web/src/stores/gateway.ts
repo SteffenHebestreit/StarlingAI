@@ -2010,20 +2010,8 @@ export const useGatewayStore = defineStore("gateway", () => {
       const data = msg["data"] as Record<string, unknown>;
       if (data["requestId"] === pendingRequestId.value) {
         notePendingTurnActivity();
-        isStreaming.value = true;
-        const text = String(data["text"] ?? "");
-        if (data["delegated"] === true) {
-          const agent = String(data["sourceAgent"] ?? "sub-agent");
-          const last = streamingSubAgentReasoning.value[streamingSubAgentReasoning.value.length - 1];
-          // Coalesce consecutive deltas from the same agent into one entry.
-          if (last && last.agent === agent) {
-            last.text += text;
-          } else {
-            streamingSubAgentReasoning.value.push({ agent, text });
-          }
-        } else {
-          streamingReasoning.value += text;
-        }
+        // Deliberately discard provider chain-of-thought. The backend keeps
+        // aggregate token/latency telemetry and surfaces safe phase updates.
       }
       return;
     }

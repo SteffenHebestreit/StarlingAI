@@ -18,6 +18,27 @@ import { logAudit } from "../audit/logger.js";
 
 const log = childLogger("gateway:workspace");
 
+// CSP for agent-authored workspace previews. Rendered inside a sandboxed
+// (allow-scripts, opaque-origin) iframe, so origin isolation is already
+// enforced there; this header is defense-in-depth against a misconfigured
+// frame. It must still let real artifacts render: generated docs/decks use
+// inline <script>/<style> and load libraries (reveal.js, chart.js, mermaid,
+// highlight.js) from cdn.jsdelivr.net, so those are allowed while form
+// submission, plugins, and <base> hijacking stay blocked. `frame-ancestors`
+// is intentionally omitted so the dashboard can embed the preview even when it
+// is served from a different origin (e.g. `pnpm web:dev` on :3001 → gateway).
+const WORKSPACE_PREVIEW_CSP = [
+  "default-src 'self' data: blob:",
+  "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
+  "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
+  "img-src 'self' data: blob:",
+  "font-src 'self' data: https://cdn.jsdelivr.net",
+  "connect-src 'self' https://cdn.jsdelivr.net",
+  "form-action 'none'",
+  "base-uri 'none'",
+  "object-src 'none'",
+].join("; ");
+
 export function registerWorkspaceRoutes(app: Hono): void {
   function guessWorkspaceContentType(filePath: string): string {
     const extension = extname(filePath).toLowerCase();
@@ -387,9 +408,8 @@ export function registerWorkspaceRoutes(app: Hono): void {
     const filename = basename(fileResolved);
     return c.body(bytes, 200, {
       "Content-Type": guessWorkspaceContentType(filename),
-      // Allow the iframe's scripts to make requests back to the same origin
-      // for additional assets via /api/workspace/preview, but nothing else.
       "Cross-Origin-Resource-Policy": "same-origin",
+      "Content-Security-Policy": WORKSPACE_PREVIEW_CSP,
     });
   });
 
@@ -453,6 +473,7 @@ export function registerWorkspaceRoutes(app: Hono): void {
     const headers: Record<string, string> = {
       "Content-Type": guessWorkspaceContentType(basename(fileResolved)),
       "Cross-Origin-Resource-Policy": "same-origin",
+      "Content-Security-Policy": WORKSPACE_PREVIEW_CSP,
     };
     // Set the path-scoped cookie only on the token-bearing first navigation so the
     // iframe's subsequent relative requests (CSS, sub-pages, images) authenticate.

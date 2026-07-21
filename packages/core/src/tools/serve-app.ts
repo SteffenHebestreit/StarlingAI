@@ -144,7 +144,9 @@ function looksClientRendered(body: string): boolean {
 }
 
 // ── Config (env-driven, no schema churn) ──────────────────────────────────
-function serveAppNetwork(): string { return process.env["SAI_APP_NETWORK"]?.trim() || "starlingai-public"; }
+// Untrusted generated apps receive their own network. The gateway joins it
+// solely to reverse-proxy the app; sensitive sidecars never do.
+function serveAppNetwork(): string { return process.env["SAI_APP_NETWORK"]?.trim() || "starlingai-app"; }
 function serveAppImage(): string { return process.env["SAI_APP_NODE_IMAGE"]?.trim() || "node:22-alpine"; }
 function serveAppDefaultPort(): number { return Number(process.env["SAI_APP_PORT"]) || 3000; }
 function serveAppHealthTimeoutMs(): number { return Number(process.env["SAI_APP_HEALTH_TIMEOUT_MS"]) || 180_000; }

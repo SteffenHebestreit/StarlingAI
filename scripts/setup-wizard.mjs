@@ -145,6 +145,17 @@ async function main() {
     if (!env.POSTGRES_PASSWORD) {
       env.POSTGRES_PASSWORD = randomBytes(24).toString("base64url"); changed = true; ok("Generated POSTGRES_PASSWORD");
     }
+    // Internal sidecars must never start open merely because they share a
+    // Docker network with another service. The gateway supplies these tokens
+    // on every call; setup owns their lifecycle just like database credentials.
+    // Fill only when empty — never rotate an operator's deliberately-set token,
+    // which would desync the value from an already-running sidecar container.
+    if (!env.SAI_MAIL_SERVICE_TOKEN) {
+      env.SAI_MAIL_SERVICE_TOKEN = randomBytes(32).toString("base64url"); changed = true; ok("Generated SAI_MAIL_SERVICE_TOKEN");
+    }
+    if (!env.SAI_COMPUTER_REMOTE_TOKEN) {
+      env.SAI_COMPUTER_REMOTE_TOKEN = randomBytes(32).toString("base64url"); changed = true; ok("Generated SAI_COMPUTER_REMOTE_TOKEN");
+    }
     // Object-store (bundled SeaweedFS) secret — rotate off the shipped dev default and keep
     // SeaweedFS's own credential file in sync with the gateway's SAI_S3_* env.
     if (!env.SAI_S3_SECRET_ACCESS_KEY || env.SAI_S3_SECRET_ACCESS_KEY === "starlingai-dev-secret") {

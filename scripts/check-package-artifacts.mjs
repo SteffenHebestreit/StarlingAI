@@ -7,8 +7,11 @@ const packageDir = path.resolve(process.argv[2] ?? ".");
 const blockedPatterns = [
   /\.map$/i,
   /(^|\/)maps?\//i,
-  /(^|\/).*debug[^/]*$/i,
-  /(^|\/).*\.debug(\.[^/]+)?$/i,
+  // Match dedicated debug artifacts, not legitimate production modules whose
+  // names happen to contain "debug" (for example debug-session-export). The
+  // `$` alternative also catches a bare, extensionless `debug` file/dir dump.
+  /(^|\/)(?:debug|debugging)(?:$|\/|\.[^/]+$)/i,
+  /(^|\/)[^/]+\.debug(\.[^/]+)?$/i,
 ];
 
 async function main() {

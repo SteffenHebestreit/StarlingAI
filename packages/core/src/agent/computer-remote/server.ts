@@ -104,7 +104,10 @@ export function createRemoteComputerServer(options: RemoteComputerServerOptions)
   }
 
   app.use("*", async (c, next) => {
-    if (!options.authToken) {
+    // /health must stay unauthenticated: the container healthcheck (and any
+    // orchestration `--wait`) calls it without a bearer token, and a mandatory
+    // token would otherwise leave the sidecar permanently "unhealthy".
+    if (!options.authToken || c.req.path === "/health") {
       await next();
       return;
     }

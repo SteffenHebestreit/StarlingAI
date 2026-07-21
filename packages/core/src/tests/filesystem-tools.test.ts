@@ -387,4 +387,54 @@ describe("filesystem tools — sensitive-path denylist (#9)", () => {
     expect(isSensitiveWorkspacePath("src/index.ts")).toBe(false);
     expect(isSensitiveWorkspacePath("workspace/agents/00-platform.jsonc")).toBe(false);
   });
+
+  it("blocks shell commands and scripts that target protected workspace paths", async () => {
+    await import("../tools/shell.js");
+    const { getTool } = await import("../tools/registry.js");
+    const ctx = { sessionId: "s-shell-denylist", workspacePath: tempDir };
+    const shell = getTool("shell_exec")!;
+    const script = getTool("run_script")!;
+
+    const commandResult = await shell.execute({ command: "cat /workspace/.env" }, ctx);
+    expect(commandResult.success).toBe(false);
+    expect(commandResult.error).toMatch(/protected workspace data/i);
+
+    const scriptResult = await script.execute({ path: ".env" }, ctx);
+    expect(scriptResult.success).toBe(false);
+    expect(scriptResult.error).toMatch(/protected workspace data/i);
+  });
+
+  it("blocks the ./ and archive-a-directory forms that the raw-regex guard missed", async () => {
+    await import("../tools/shell.js");
+    const { getTool } = await import("../tools/registry.js");
+    const ctx = { sessionId: "s-shell-denylist-2", workspacePath: tempDir };
+    const shell = getTool("shell_exec")!;
+    const script = getTool("run_script")!;
+
+    for (const command of ["cat ./.env", "cat .env|base64", "tar czf x.tgz .git", "cp -r .starlingai /tmp/x"]) {
+      const result = await shell.execute({ command }, ctx);
+      expect(result.success, `expected "${command}" to be blocked`).toBe(false);
+      expect(result.error).toMatch(/protected workspace data/i);
+      // The error names the offending path, not a raw regex source.
+      expect(result.error).not.toMatch(/\?:|\\s|\[\\s/);
+    }
+
+    // A protected path passed as a script argument is rejected too.
+    const argResult = await script.execute({ path: "run.sh", args: ["/workspace/.env"] }, ctx);
+    expect(argResult.success).toBe(false);
+    expect(argResult.error).toMatch(/protected workspace data/i);
+  });
+
+  it("allows the public .env.example template through the shell guard", async () => {
+    await import("../tools/shell.js");
+    const { getTool } = await import("../tools/registry.js");
+    const ctx = { sessionId: "s-shell-allowlist", workspacePath: tempDir };
+    const shell = getTool("shell_exec")!;
+    // .env.example is not protected; the guard must not false-positive on it.
+    // (The command itself will fail in the sandbox, but not on the guard.)
+    const result = await shell.execute({ command: "cat .env.example" }, ctx);
+    if (!result.success) {
+      expect(result.error).not.toMatch(/protected workspace data/i);
+    }
+  });
 });

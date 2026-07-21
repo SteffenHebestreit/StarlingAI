@@ -43,10 +43,8 @@ jobs:
           node-version: "22"
           cache: pnpm
 
-      # The Docker build uses --no-frozen-lockfile; match it until the lockfiles
-      # are reconciled (DEVPLAN P2: drop the stray package-lock.json).
       - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
 
       # Security gate: fail on any HIGH or CRITICAL advisory in PRODUCTION deps.
       # --prod ignores dev-only tooling noise; the bar is deliberately "high" so
@@ -113,6 +111,11 @@ jobs:
       # Production build (tsc -p tsconfig.build.json + vite build).
       - name: Build
         run: pnpm build
+
+      # Ensure publishable core artifacts contain neither source maps nor
+      # debug-only payloads.
+      - name: Package artifact security check
+        run: pnpm security:pack
 
       # Config-validity gate: the compiled starlingai.json must build cleanly
       # from config/ + workspace/ (catches schema drift and bad model ids before

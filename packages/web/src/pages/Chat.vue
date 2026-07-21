@@ -254,7 +254,7 @@
                 v-if="panelArtifactPreview.kind === 'html' || panelArtifactPreview.kind === 'pdf'"
                 :src="panelArtifactPreview.url"
                 class="panel-artifact-frame"
-                :sandbox="panelArtifactPreview.kind === 'html' ? 'allow-scripts allow-same-origin allow-forms allow-popups' : undefined"
+                :sandbox="panelArtifactPreview.kind === 'html' ? 'allow-scripts' : undefined"
                 referrerpolicy="no-referrer"
                 title="Artifact preview"
               />
@@ -269,7 +269,7 @@
                 v-else-if="panelArtifactPreview.kind === 'website'"
                 :src="panelArtifactPreview.url"
                 class="panel-artifact-frame"
-                sandbox="allow-scripts allow-same-origin allow-forms"
+                sandbox="allow-scripts"
                 referrerpolicy="no-referrer"
                 title="Website preview"
               />

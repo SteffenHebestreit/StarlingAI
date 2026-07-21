@@ -3471,19 +3471,14 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // up — making it visible is the whole point of capturing reasoning.
       if (response.reasoning && response.reasoning.trim()) {
         const reasoningText = response.reasoning.trim();
-        opts.onProgress?.({
-          agentName: opts.agentName,
-          kind: "reasoning",
-          iteration: iterations + 1,
-          reasoning: reasoningText,
-        });
         logAudit(
           "sub_agent_reasoning",
           {
             agentName: opts.agentName,
             iteration: iterations + 1,
             reasoningChars: reasoningText.length,
-            reasoningPreview: reasoningText.slice(0, 2000),
+            // Preserve observability without persisting provider reasoning.
+            reasoningCaptured: true,
           },
           { sessionId: subSessionId, severity: "info" },
         );

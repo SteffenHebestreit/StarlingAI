@@ -46,13 +46,13 @@ describe("serve_app — pure helpers", () => {
   it("buildServeRunArgs produces an isolated, named, networked container that binds $PORT and mounts the app dir", () => {
     const app: ServedApp = {
       id: "abc123", name: "demo", containerName: "sai-app-abc123", runtime: "node-express",
-      internalPort: 3000, network: "starlingai-public", image: "node:22-alpine",
+      internalPort: 3000, network: "starlingai-app", image: "node:22-alpine",
       root: "generated/demo", command: "node server.js", status: "starting", startedAt: Date.now(), sessionId: "s",
     };
     const args = buildServeRunArgs(app, "/host/ws/generated/demo");
     expect(args.slice(0, 2)).toEqual(["run", "-d"]);
     expect(args).toContain("--name"); expect(args).toContain("sai-app-abc123");
-    expect(args).toContain("--network"); expect(args).toContain("starlingai-public");
+    expect(args).toContain("--network"); expect(args).toContain("starlingai-app");
     expect(args).toContain("--label"); expect(args).toContain("starlingai.app=abc123");
     expect(args).toContain("-e"); expect(args).toContain("PORT=3000");
     expect(args).toContain("-v"); expect(args).toContain("/host/ws/generated/demo:/app");
@@ -64,7 +64,7 @@ describe("serve_app — pure helpers", () => {
   it("buildServeRunArgs isolates agent-authored code: drops all caps, read-only root, tmpfs /tmp, npm-writable HOME", () => {
     const app: ServedApp = {
       id: "abc123", name: "demo", containerName: "sai-app-abc123", runtime: "node-express",
-      internalPort: 3000, network: "starlingai-public", image: "node:22-alpine",
+      internalPort: 3000, network: "starlingai-app", image: "node:22-alpine",
       root: "generated/demo", command: "npm start", status: "starting", startedAt: Date.now(), sessionId: "s",
     };
     const args = buildServeRunArgs(app, "/host/ws/generated/demo");

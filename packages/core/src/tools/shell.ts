@@ -8,6 +8,7 @@ import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
 import { resolveDockerWorkspaceMountSource } from "./workspace-mount.js";
 import { assertSafeDockerRunArgs } from "./docker-safety.js";
+import { isSensitiveWorkspacePath } from "./filesystem.js";
 
 const log = childLogger("tool:shell");
 const execFileAsync = promisify(execFile);
@@ -44,6 +45,10 @@ registerTool({
 
     if (!workdir) {
       return { success: false, output: "", error: "workdir must stay within /workspace" };
+    }
+    const sensitiveReference = findSensitiveWorkspaceReference(command);
+    if (sensitiveReference) {
+      return { success: false, output: "", error: `Command references protected workspace data: ${sensitiveReference}` };
     }
 
     // Sanity check: reject obviously dangerous commands even inside sandbox
@@ -119,6 +124,43 @@ registerTool({
   },
 });
 
+/**
+ * Shell commands bypass the filesystem-tool allowlist, so reject direct
+ * references to repo secrets and VCS internals before a sandbox starts. This
+ * complements the Docker mount policy and blocks obvious reads/copies/archives.
+ *
+ * Rather than hand-roll a second denylist (which drifts from the file tools and
+ * mis-anchors on `./`, subdirs, and shell metacharacters), split the command
+ * into path-like tokens and test each against the SAME isSensitiveWorkspacePath
+ * the file tools use — so the two guards stay in sync and `.env.example` (the
+ * public template that helper deliberately allows) is never falsely blocked.
+ * It is still string-level, not a shell parser, so variable indirection
+ * (`X=.env; cat $X`) or script *contents* are out of scope — the mount policy
+ * is the deeper backstop. Returns the offending path, not a regex source.
+ */
+function findSensitiveWorkspaceReference(command: string): string | null {
+  const tokens = command.split(/[\s'"=|;&<>()`]+/);
+  for (const token of tokens) {
+    if (isSensitiveCommandToken(token)) return normalizeCommandToken(token);
+  }
+  return null;
+}
+
+/** Strip a `/workspace/` prefix, `./` segments and leading slashes so the token
+ *  becomes a workspace-relative path isSensitiveWorkspacePath can match. */
+function normalizeCommandToken(token: string): string {
+  return token
+    .replace(/\\/g, "/")
+    .replace(/^\/*workspace\//, "")
+    .replace(/^(?:\.\/)+/, "")
+    .replace(/^\/+/, "");
+}
+
+function isSensitiveCommandToken(token: string): boolean {
+  const rel = normalizeCommandToken(token);
+  return rel.length > 0 && isSensitiveWorkspacePath(rel);
+}
+
 function normalizeWorkdir(workdir: string): string | null {
   const trimmed = workdir.trim() || "/workspace";
   const normalized = trimmed.replace(/\\/g, "/");
@@ -171,6 +213,16 @@ registerTool({
 
     if (!scriptPath || scriptPath.includes("..")) {
       return { success: false, output: "", error: "Invalid script path" };
+    }
+    if (isSensitiveWorkspacePath(scriptPath)) {
+      return { success: false, output: "", error: "Script path references protected workspace data" };
+    }
+    // Also reject protected paths passed as arguments (e.g. a generic `cat.sh`
+    // invoked with `/workspace/.env`). Script *contents* can still reach any
+    // mounted path — the mount policy is the deeper backstop there.
+    const sensitiveArg = scriptArgs.map(normalizeCommandToken).find((arg) => arg.length > 0 && isSensitiveWorkspacePath(arg));
+    if (sensitiveArg) {
+      return { success: false, output: "", error: `Script argument references protected workspace data: ${sensitiveArg}` };
     }
 
     // Determine interpreter from extension

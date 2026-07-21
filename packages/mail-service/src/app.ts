@@ -96,7 +96,10 @@ export function createApp(opts: { accounts: MailAccountConfig[]; store: DraftSto
   const app = new Hono();
 
   app.use("*", async (c, next) => {
-    if (!opts.authToken) {
+    // /health must stay unauthenticated: the container healthcheck (and any
+    // orchestration `--wait`) calls it without a bearer token, and a mandatory
+    // token would otherwise leave the service permanently "unhealthy".
+    if (!opts.authToken || c.req.path === "/health") {
       await next();
       return;
     }
@@ -189,9 +192,16 @@ export function createApp(opts: { accounts: MailAccountConfig[]; store: DraftSto
       grouped.set(item.accountId, items);
     }
 
+    // Authorize every account before mutating any of them, so a mixed-account
+    // batch can't move earlier groups before a later restricted account 403s.
+    const user = c.req.header("x-sai-user");
+    for (const accountId of grouped.keys()) {
+      getAccount(opts.accounts, accountId, user);
+    }
+
     const results: Array<Record<string, unknown>> = [];
     for (const [accountId, items] of grouped.entries()) {
-      const account = getAccount(opts.accounts, accountId, c.req.header("x-sai-user"));
+      const account = getAccount(opts.accounts, accountId, user);
       const client = new MailAccountClient(account);
       if (body.createDestination) {
         await client.createMailbox(body.destinationMailbox);
@@ -214,9 +224,16 @@ export function createApp(opts: { accounts: MailAccountConfig[]; store: DraftSto
       grouped.set(item.accountId, items);
     }
 
+    // Authorize every account before mutating any of them, so a mixed-account
+    // batch can't delete earlier groups before a later restricted account 403s.
+    const user = c.req.header("x-sai-user");
+    for (const accountId of grouped.keys()) {
+      getAccount(opts.accounts, accountId, user);
+    }
+
     const results: Array<Record<string, unknown>> = [];
     for (const [accountId, items] of grouped.entries()) {
-      const account = getAccount(opts.accounts, accountId, c.req.header("x-sai-user"));
+      const account = getAccount(opts.accounts, accountId, user);
       const client = new MailAccountClient(account);
       for (const item of items) {
         const deleted = await client.deleteMessage(item.mailbox, item.uid, body.permanent);
@@ -233,6 +250,12 @@ export function createApp(opts: { accounts: MailAccountConfig[]; store: DraftSto
 
   app.post("/api/messages/categorize", async (c) => {
     const body = CategorizeRequestSchema.parse(await c.req.json());
+    const user = c.req.header("x-sai-user");
+    // Authorize every item before writing any state. This keeps a mixed-account
+    // batch atomic: an unauthorized item cannot leave earlier categories changed.
+    for (const item of body.items) {
+      getAccount(opts.accounts, item.accountId, user);
+    }
     const now = new Date().toISOString();
     await opts.store.categorize(body.items.map((item) => ({ ...item, updatedAt: now })));
     return c.json({ ok: true, count: body.items.length });
@@ -240,7 +263,7 @@ export function createApp(opts: { accounts: MailAccountConfig[]; store: DraftSto
 
   app.post("/api/drafts", async (c) => {
     const body = DraftCreateSchema.parse(await c.req.json());
-    getAccount(opts.accounts, body.accountId);
+    getAccount(opts.accounts, body.accountId, c.req.header("x-sai-user"));
     const draft = await opts.store.createDraft(body);
     return c.json(draft, 201);
   });

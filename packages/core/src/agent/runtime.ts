@@ -1991,7 +1991,8 @@ async function _runTurn(
         chunkSink,
         {
           deferTextUntilToolDecision: streamTools.length > 0,
-          onReasoning: opts.onReasoning,
+          // Provider chain-of-thought is intentionally not streamed to the
+          // client. Keep phase/status telemetry instead of raw reasoning.
         },
       );
       const llmDurationMs = Date.now() - llmStartedAt;
@@ -2004,7 +2005,9 @@ async function _runTurn(
         logAudit("agent_reasoning", {
           iteration: iterationCount,
           reasoningChars: reasoningText.length,
-          reasoningPreview: reasoningText.slice(0, 2000),
+          // Do not persist raw chain-of-thought. It can contain unredacted tool
+          // observations and is not required for operational telemetry.
+          reasoningCaptured: true,
         }, { sessionId: session.id, channel: session.channel, severity: "info" });
       }
       if (llmResponse.tool_calls.length === 0 && llmResponse.finishReason === "length") {

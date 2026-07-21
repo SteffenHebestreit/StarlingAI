@@ -90,8 +90,9 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - SAI_PENTEST_SERVICE_URL=${SAI_PENTEST_SERVICE_URL:-http://kali-pentest:5010}
       - SAI_MAIL_SERVICE_URL=${SAI_MAIL_SERVICE_URL:-http://mail-service:5020}
-      - SAI_MAIL_SERVICE_TOKEN=${SAI_MAIL_SERVICE_TOKEN:-}
+      - SAI_MAIL_SERVICE_TOKEN=${SAI_MAIL_SERVICE_TOKEN:?run pnpm sai setup first — it generates internal service credentials}
       - SAI_COMPUTER_REMOTE_URL=${SAI_COMPUTER_REMOTE_URL:-http://computer-remote:8890}
+      - SAI_COMPUTER_REMOTE_TOKEN=${SAI_COMPUTER_REMOTE_TOKEN:?run pnpm sai setup first — it generates internal service credentials}
       - SAI_WORKSPACE_MOUNT_SOURCE=${SAI_WORKSPACE_MOUNT_SOURCE:-}
       # Talk to the Docker Engine API ONLY through the filtering socket-proxy over
       # TCP — never the raw /var/run/docker.sock (which is no longer mounted here).
@@ -120,6 +121,8 @@ services:
     networks:
       - starlingai-internal
       - starlingai-public
+      # Generated serve_app containers join only this isolated app network.
+      - starlingai-app
     extra_hosts:
       - "host.docker.internal:host-gateway"  # Access LM Studio on host
     # The gateway waits on its datastores (Postgres + Redis + the graph/telemetry
@@ -209,7 +212,7 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - SAI_COMPUTER_REMOTE_HOST=0.0.0.0
       - SAI_COMPUTER_REMOTE_PORT=8890
-      - SAI_COMPUTER_REMOTE_TOKEN=${SAI_COMPUTER_REMOTE_TOKEN:-}
+      - SAI_COMPUTER_REMOTE_TOKEN=${SAI_COMPUTER_REMOTE_TOKEN:?run pnpm sai setup first — it generates internal service credentials}
       - SAI_COMPUTER_REMOTE_LABEL=${SAI_COMPUTER_REMOTE_LABEL:-Remote access sidecar}
       - SAI_N8N_SSH_PASSWORD=${SAI_N8N_SSH_PASSWORD:-}
       - SAI_WIN_WORKSTATION_RDP_CREDENTIALS=${SAI_WIN_WORKSTATION_RDP_CREDENTIALS:-}
@@ -447,7 +450,7 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - SAI_MAIL_SERVICE_CONFIG_PATH=${SAI_MAIL_SERVICE_CONFIG_PATH:-/config/mail/accounts.json}
       - SAI_MAIL_SERVICE_DATA_PATH=/data/mail-service.json
-      - SAI_MAIL_SERVICE_TOKEN=${SAI_MAIL_SERVICE_TOKEN:-}
+      - SAI_MAIL_SERVICE_TOKEN=${SAI_MAIL_SERVICE_TOKEN:?run pnpm sai setup first — it generates internal service credentials}
     volumes:
       - gc-mail-data:/data
       - ./config/mail:/config/mail:ro
@@ -457,6 +460,9 @@ services:
       - 9.9.9.9
     networks:
       - starlingai-internal
+      # Mail-service dials external IMAP/SMTP, so it needs an egress-capable
+      # network (starlingai-internal is `internal: true`). Untrusted generated
+      # apps can no longer reach it here — they are isolated on starlingai-app.
       - starlingai-public
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:5020/health"]
@@ -660,7 +666,10 @@ services:
     image: redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
     restart: unless-stopped
     mem_limit: ${SAI_REDIS_MEM_LIMIT:-512m}
-    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    # Redis holds leases, budgets, and delivery coordination. Evicting one of
+    # those keys can duplicate effects, so fail writes under pressure instead
+    # of silently dropping correctness state.
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy noeviction
     volumes:
       - gc-redis-data:/data
     networks:
@@ -839,6 +848,11 @@ networks:
     # SAME network the gateway is on. Without this, compose creates
     # `<project>_starlingai-public` and serve_app fails with "network not found".
     name: starlingai-public
+    driver: bridge
+  # Untrusted generated applications may reach the internet when needed, but
+  # cannot resolve mail/database/control-plane sidecars. Only gateway joins it.
+  starlingai-app:
+    name: starlingai-app
     driver: bridge
   starlingai-pentest:
     driver: bridge    # External internet access allowed for active scanning

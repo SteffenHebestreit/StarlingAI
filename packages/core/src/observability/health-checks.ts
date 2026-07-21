@@ -18,6 +18,7 @@ import { initVectorStore, vectorStoreDimension } from "../db/vector-store.js";
 import { isGraphDbAvailable, runCypher, toPlainRecords } from "../db/neo4j.js";
 import { isQuestDbAvailable, questQuery } from "../db/questdb.js";
 import { getTelemetryWriteHealth } from "./telemetry.js";
+import { getAuditWriteStatus } from "../audit/logger.js";
 import { browserSessionManager } from "../agent/browser-session.js";
 import { engramConfigured, engramHealth } from "../retrieval/engram.js";
 
@@ -187,6 +188,23 @@ async function checkTelemetry(): Promise<SubsystemCheck> {
 }
 
 /**
+ * Audit writes are serialized and fire-and-forget, so a failing append (disk
+ * full, permission change) is otherwise silent — the same lost-write class as
+ * telemetry above. Surface it so the audit trail can't degrade unnoticed.
+ */
+function checkAudit(): SubsystemCheck {
+  const w = getAuditWriteStatus();
+  if (w.failedWrites > 0) {
+    return {
+      name: "audit",
+      status: "degraded",
+      detail: `FAILED ${w.failedWrites} write(s)${w.lastWriteFailureAt ? ` (last ${w.lastWriteFailureAt})` : ""}, ${w.pendingWrites} pending`,
+    };
+  }
+  return { name: "audit", status: "ok", detail: `${w.pendingWrites} pending` };
+}
+
+/**
  * browser-vnc is opt-in (no env, no probe). When configured but the websockify
  * port can't be reached, the noVNC dashboard panel hangs at "connecting" — same
  * silent-failure class as the embedding zero-vector bug, so it belongs here.
@@ -278,6 +296,7 @@ export async function runSubsystemChecks(): Promise<SubsystemHealth> {
     checkVectorStore(),
     checkGraph(),
     checkTelemetry(),
+    Promise.resolve(checkAudit()),
     checkBrowserVnc(),
     checkEngram(),
   ]);
