@@ -300,6 +300,8 @@ export type CoreAuditEventType =
   // A2A — public Agent-to-Agent protocol
   | "a2a_request_received"
   | "a2a_request_failed"
+  /** The public A2A agent card published the whole sub-agent roster (exposeAgents empty). */
+  | "a2a_full_roster_exposed"
   | "a2a_task_completed"
   | "a2a_peer_added"
   | "a2a_peer_removed"

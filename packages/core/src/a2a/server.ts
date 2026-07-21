@@ -323,13 +323,31 @@ function constantTimeEquals(a: string, b: string): boolean {
   }
 }
 
+/** Warn-once guard so the roster notice below doesn't fire on every card fetch. */
+let _warnedFullRosterExposed = false;
+
 function buildAgentCard(req: IncomingMessage): A2AAgentCard {
   const config = getConfig();
   const baseUrl = inferPublicUrl(req);
-  const agentNames =
-    config.a2a.exposeAgents.length > 0
-      ? config.a2a.exposeAgents.filter((n) => config.subAgents[n])
-      : Object.keys(config.subAgents ?? {});
+  const curated = config.a2a.exposeAgents.length > 0;
+  const agentNames = curated
+    ? config.a2a.exposeAgents.filter((n) => config.subAgents[n])
+    : Object.keys(config.subAgents ?? {});
+
+  // `exposeAgents: []` means "expose all", which reads like "expose none" — and
+  // this card is an UNAUTHENTICATED public discovery surface, so the default
+  // publishes every internal sub-agent's name, description and tags to anyone who
+  // fetches it. Enabling A2A is a deliberate opt-in (a2a.enabled defaults false),
+  // so this stays a warning rather than a behaviour change, but the operator
+  // should know the roster is going out.
+  if (!curated && agentNames.length > 0 && !_warnedFullRosterExposed) {
+    _warnedFullRosterExposed = true;
+    log.warn(
+      { agentCount: agentNames.length },
+      "a2a.exposeAgents is empty — publishing EVERY sub-agent on the public agent card. Set a2a.exposeAgents to curate it.",
+    );
+    logAudit("a2a_full_roster_exposed", { agentCount: agentNames.length }, { severity: "warn" });
+  }
 
   const skills: A2AAgentSkill[] = agentNames.map((name) => {
     const cfg = config.subAgents[name];
