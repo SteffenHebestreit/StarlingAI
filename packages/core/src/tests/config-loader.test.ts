@@ -217,6 +217,63 @@ describe("config loader mutable overlay", () => {
     }
   });
 
+  it("drops a sub-agent an upstream shard defined when a later shard lists it in configRemovals", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-config-removals-"));
+    const configDir = join(tempDir, "starling_config");
+    mkdirSync(join(configDir, "agents"), { recursive: true });
+
+    // Stands in for an upstream-shipped shard a fork must not edit.
+    writeFileSync(join(configDir, "agents", "10-upstream.json"), JSON.stringify({
+      subAgents: {
+        pentest_coordinator: { description: "Runs offensive security sweeps." },
+        researcher: { description: "Gathers sources." },
+      },
+    }, null, 2), "utf8");
+
+    // The fork-owned shard removes one without touching the upstream file.
+    writeFileSync(join(configDir, "agents", "60-fork.json"), JSON.stringify({
+      configRemovals: ["subAgents.pentest_coordinator"],
+    }, null, 2), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configDir;
+    vi.resetModules();
+
+    const configLoader = await import("../config/loader.js");
+
+    try {
+      const config = configLoader.loadConfig();
+      expect(config.subAgents["pentest_coordinator"]).toBeUndefined();
+      // Siblings and unrelated sections survive.
+      expect(config.subAgents["researcher"]?.description).toBe("Gathers sources.");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores a configRemovals path that does not exist instead of failing to boot", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-config-removals-missing-"));
+    const configDir = join(tempDir, "starling_config");
+    mkdirSync(join(configDir, "agents"), { recursive: true });
+
+    writeFileSync(join(configDir, "agents", "60-fork.json"), JSON.stringify({
+      subAgents: { researcher: { description: "Gathers sources." } },
+      // Upstream renamed or dropped these — a fork must still boot.
+      configRemovals: ["subAgents.long_gone", "nothing.here.at.all"],
+    }, null, 2), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configDir;
+    vi.resetModules();
+
+    const configLoader = await import("../config/loader.js");
+
+    try {
+      const config = configLoader.loadConfig();
+      expect(config.subAgents["researcher"]?.description).toBe("Gathers sources.");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("overrides LM Studio baseUrl and apiKey from environment variables", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-config-env-lmstudio-"));
     const baseConfigPath = join(tempDir, "starlingai.json");

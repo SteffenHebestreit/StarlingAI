@@ -165,11 +165,62 @@ function getBaseRawConfig(): Record<string, unknown> {
     const base = readRawConfigDirectory(CONFIG_SOURCE.basePath, CONFIG_SOURCE.mutablePath);
     if (CONFIG_SOURCE.workspacePath) {
       const workspace = readRawConfigDirectory(CONFIG_SOURCE.workspacePath, CONFIG_SOURCE.mutablePath);
-      return mergeConfigObjects(base, workspace);
+      return applyConfigRemovals(mergeConfigObjects(base, workspace));
     }
-    return base;
+    return applyConfigRemovals(base);
   }
-  return readRawConfigFile(CONFIG_SOURCE.basePath, "base");
+  return applyConfigRemovals(readRawConfigFile(CONFIG_SOURCE.basePath, "base"));
+}
+
+/**
+ * Drop every dot-path listed in the merged config's `configRemovals`.
+ *
+ * Shard merging deliberately never deletes: `mergeConfigObjects` only ever adds
+ * or overwrites, so one shard can't null out another's key by accident. That
+ * leaves a fork with no way to REMOVE something upstream ships — the only way to
+ * drop, say, an unwanted built-in sub-agent was to edit the upstream shard, which
+ * is exactly the rebase conflict the fork-owned-surfaces model exists to prevent.
+ * (`CONFIG_TOMBSTONE` doesn't help: it is confined to the runtime overlay.)
+ *
+ * So removal is EXPLICIT rather than implicit — a shard names what it wants gone
+ * and nothing is deleted unless it was asked for by path. Applied after the whole
+ * base+workspace fold (so any shard may contribute the list) and before the
+ * mutable overlay and Zod (so a runtime override can still re-add a key, and
+ * emptied sections are refilled by their schema defaults).
+ */
+function applyConfigRemovals(raw: Record<string, unknown>): Record<string, unknown> {
+  const removals = raw["configRemovals"];
+  if (!Array.isArray(removals) || removals.length === 0) return raw;
+
+  for (const entry of removals) {
+    if (typeof entry !== "string" || entry.length === 0) continue;
+    const segments = entry.split(".");
+    let cursor: Record<string, unknown> = raw;
+    let removable = true;
+
+    // Walk to the parent of the leaf; a path through a non-object simply doesn't
+    // match anything, which is the same "nothing to remove" case as a typo.
+    for (const segment of segments.slice(0, -1)) {
+      const next = cursor[segment];
+      if (!isPlainObject(next)) {
+        removable = false;
+        break;
+      }
+      cursor = next;
+    }
+
+    const leaf = segments[segments.length - 1]!;
+    if (removable && leaf in cursor) {
+      delete cursor[leaf];
+      logger.info({ path: entry }, "Removed config path via configRemovals");
+    } else {
+      // Tolerated, not fatal — mirrors disabled-tool handling, and keeps a fork
+      // booting after upstream renames or drops something it had removed.
+      logger.warn({ path: entry }, "configRemovals path not found — ignoring");
+    }
+  }
+
+  return raw;
 }
 
 function readRawConfigFile(path: string, kind: "base" | "mutable"): Record<string, unknown> {

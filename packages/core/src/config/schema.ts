@@ -1503,6 +1503,16 @@ export const MissionSchema = z.object({
 export type MissionConfig = z.infer<typeof MissionSchema>;
 
 export const ConfigSchema = z.object({
+  /**
+   * Dot-paths to delete after all config/ + workspace/ shards have merged, e.g.
+   * ["subAgents.pentest_coordinator", "approvalChannels.pager"]. Shard merging
+   * never deletes, so without this a fork could only drop something upstream
+   * ships by editing the upstream shard — a guaranteed rebase conflict. Removal
+   * stays explicit: only the paths named here are dropped, an unknown path is a
+   * warning rather than a boot failure, and a section emptied this way is
+   * refilled by its schema default. See docs/forking.md.
+   */
+  configRemovals: z.array(z.string()).default([]),
   providers: ProvidersSchema.default({}),
   deployment: DeploymentSchema.default({}),
   mission: MissionSchema.default({}),

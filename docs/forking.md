@@ -116,6 +116,28 @@ Group names live in `packages/core/src/tools/groups.ts` (`pentest`,
 `infrastructure`, `kubernetes`, `observability`, …). Disabled tools are
 skipped at registration: invisible to the LLM, the dashboard, and the API.
 
+For anything else upstream ships that you want *gone* — a sub-agent, a webhook,
+an approval channel — list its dot-path in `configRemovals` from your own shard:
+
+```jsonc
+// config/tooling/60-<slug>.jsonc
+{
+  "configRemovals": [
+    "subAgents.pentest_coordinator",
+    "approvalChannels.pager"
+  ]
+}
+```
+
+This exists because shard merging never deletes — it only adds or overwrites, so
+one shard cannot accidentally null out another's key. Without `configRemovals`
+the only way to drop something upstream ships would be to edit the upstream
+shard, which is precisely the conflict this whole model avoids. Paths are
+deleted after every `config/` + `workspace/` shard has merged and before the
+schema runs, so a section emptied this way falls back to its default, and a path
+that matches nothing is a warning rather than a failed boot (upstream may rename
+or drop it later without breaking your fork).
+
 ### 3. Add your domain backend as a core extension
 
 Copy `packages/core/src/extensions/_example/` to `extensions/<name>/` and
@@ -183,15 +205,22 @@ automatically.
 
 ### 5. Add workspace content
 
-Agents, jobs, scenes, and knowledge are numbered JSONC overlay files —
-fork files sort after upstream files and win on conflict:
+Agents, jobs, scenes, and knowledge are numbered JSONC overlay files. They
+merge in lexicographic order and the later file wins, so a fork file only
+overrides upstream when its number is **higher than every upstream file in
+that directory** — hence the `60`+ fork range:
 
 ```
-workspace/agents/40-subagents-mfa.jsonc
-workspace/jobs/20-mfa-jobs.jsonc
-workspace/scenes/20-mfa-scenes.jsonc
+workspace/agents/60-mfa-ai-subagents.jsonc
+workspace/jobs/60-mfa-ai-jobs.jsonc
+workspace/scenes/60-mfa-ai-scenes.jsonc
 workspace/knowledge/icd10gm/…
 ```
+
+Numbering a fork overlay inside upstream's `00`–`59` range is the classic
+mistake: it loads *before* upstream's own higher-numbered overlays, so any
+entry it means to override is silently overridden right back and the
+customisation appears to do nothing.
 
 ### 6. Heavy capabilities: run them as services, not code
 

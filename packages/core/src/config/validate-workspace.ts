@@ -164,6 +164,38 @@ function mergeShards(repoRoot: string, dirs: string[], parseErrors: string[]): R
 }
 
 /**
+ * Mirror of the loader's `configRemovals` handling (config/loader.ts). Kept as a
+ * local copy because this validator deliberately never calls `loadConfig` — it
+ * works on its own raw merge so a broken section still yields useful diagnostics.
+ * An unknown path is surfaced as a warning here rather than only logged, since
+ * this is the tool a fork runs to check its own overlays.
+ */
+function applyRemovals(merged: Record<string, unknown>, warnings: string[]): void {
+  const removals = merged["configRemovals"];
+  if (!Array.isArray(removals)) return;
+
+  for (const entry of removals) {
+    if (typeof entry !== "string" || entry.length === 0) continue;
+    const segments = entry.split(".");
+    let cursor: Record<string, unknown> = merged;
+    let removable = true;
+
+    for (const segment of segments.slice(0, -1)) {
+      const next = cursor[segment];
+      if (!isPlainObject(next)) {
+        removable = false;
+        break;
+      }
+      cursor = next;
+    }
+
+    const leaf = segments[segments.length - 1]!;
+    if (removable && leaf in cursor) delete cursor[leaf];
+    else warnings.push(`configRemovals: "${entry}" matches nothing — stale entry?`);
+  }
+}
+
+/**
  * Validate the on-disk workspace config: JSON5 parse → Zod schema → cross-refs.
  * `knownToolNames` is the set of currently registered tool names; unknown tool
  * grants become warnings (they may be dynamic, self-developed, or profile-gated)
@@ -177,6 +209,11 @@ export function validateWorkspaceConfig(workspacePath: string, knownToolNames: S
   const warnings: string[] = [];
 
   const merged = dirs.length > 0 ? mergeShards(repoRoot, dirs, parseErrors) : {};
+
+  // The loader deletes `configRemovals` paths after folding the shards, so this
+  // validator must too — otherwise it validates a roster the runtime never sees
+  // and reports a scene referencing a removed agent as a hard reference error.
+  applyRemovals(merged, warnings);
 
   // Schema pass — same gate the loader applies, but collected rather than thrown.
   const result = ConfigSchema.safeParse(merged);
