@@ -67,16 +67,33 @@ Previews render in a sandboxed iframe (`allow-scripts` only — **no**
 `allow-same-origin`, so the artifact has an opaque origin and cannot reach the
 dashboard origin or its token storage) plus a defense-in-depth CSP.
 
-- **CSP relaxed in review** to `WORKSPACE_PREVIEW_CSP` (one shared const in
-  `workspace-routes.ts`). The original `default-src 'self' data: blob:` with no
-  `'unsafe-inline'` and no CDN blanked **every** generated artifact — decks,
-  docs, and charts are built with inline `<script>`/`<style>` and load
-  reveal.js/chart.js/mermaid/highlight.js from `cdn.jsdelivr.net`. The kept CSP
-  allows inline + that CDN for script/style/font/img while keeping
-  `form-action 'none'`, `object-src 'none'`, `base-uri 'none'`, and a restricted
-  `connect-src`. **`frame-ancestors` was dropped** so the dashboard can embed the
-  preview even when served from a different origin (e.g. `pnpm web:dev` on :3001
-  → gateway :8765); origin isolation is already enforced by the sandbox.
+- **CSP is two-layer and both layers matter (fixed through v0.46.4).** The
+  gateway sets a per-route `WORKSPACE_PREVIEW_CSP` (one shared const in
+  `workspace-routes.ts`); the nginx front-door sets a *separate* strict dashboard
+  CSP. The original per-route policy (`default-src 'self' data: blob:`, no
+  `'unsafe-inline'`, no CDN) blanked every generated artifact; relaxing it to
+  allow inline + `cdn.jsdelivr.net` was still not enough because **nginx appends
+  its dashboard CSP (`script-src 'self'`) onto proxied `/api/` responses**, and
+  the browser enforces the *intersection* — collapsing `script-src` back to
+  `'self'` and blocking reveal.js/chart.js/etc. from any CDN. The fix has two
+  parts, both required:
+  - `docker/web/nginx.conf` `location /api/` no longer inherits the server-level
+    dashboard CSP (a location-level `add_header X-Content-Type-Options nosniff`
+    suppresses the inherited set; upstream headers pass through), so the
+    gateway's per-route CSP is the *only* CSP on artifacts. The dashboard SPA
+    (`location /`) keeps its strict CSP unchanged.
+  - `WORKSPACE_PREVIEW_CSP` allows any `https:` origin (plus inline/eval) for
+    script/style/font/img/connect so **arbitrary CDN libraries** work — the
+    sandbox (opaque origin, no `allow-same-origin`) is the real isolation
+    boundary, so the CSP only needs to keep what the sandbox does not already
+    cover and an artifact never needs: `object-src 'none'`, `base-uri 'none'`,
+    `form-action 'none'`.
+- **`frame-ancestors` is omitted** so the dashboard can embed the preview even
+  from a different origin (`pnpm web:dev` :3001 → gateway); origin isolation is
+  the sandbox's job.
+- **Rule:** any new nginx location that proxies gateway artifact/preview routes
+  must not re-inherit the dashboard CSP, and any tightening of the dashboard CSP
+  must not assume it governs artifact iframes — it does not.
 - **Known tradeoff (accepted):** removing `allow-same-origin` breaks **multi-file
   site** previews — relative CSS/images/sub-pages rely on the `SameSite=Lax`
   `sai_site_token` cookie, which an opaque-origin document will not send.

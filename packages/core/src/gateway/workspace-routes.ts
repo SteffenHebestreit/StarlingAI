@@ -18,22 +18,31 @@ import { logAudit } from "../audit/logger.js";
 
 const log = childLogger("gateway:workspace");
 
-// CSP for agent-authored workspace previews. Rendered inside a sandboxed
-// (allow-scripts, opaque-origin) iframe, so origin isolation is already
-// enforced there; this header is defense-in-depth against a misconfigured
-// frame. It must still let real artifacts render: generated docs/decks use
-// inline <script>/<style> and load libraries (reveal.js, chart.js, mermaid,
-// highlight.js) from cdn.jsdelivr.net, so those are allowed while form
-// submission, plugins, and <base> hijacking stay blocked. `frame-ancestors`
-// is intentionally omitted so the dashboard can embed the preview even when it
-// is served from a different origin (e.g. `pnpm web:dev` on :3001 → gateway).
+// CSP for agent-authored workspace previews. The artifact renders inside a
+// sandboxed (allow-scripts, opaque-origin) iframe — that sandbox is the real
+// isolation boundary: the artifact cannot reach the dashboard origin, its
+// cookies/token storage, forms, popups, or top-level navigation regardless of
+// this header. The CSP is defense-in-depth for RESOURCE LOADING, and must let
+// real artifacts render: generated docs/decks/apps pull libraries (reveal.js,
+// chart.js, mermaid, highlight.js, katex, three.js, d3, …) from arbitrary CDNs
+// and use inline <script>/<style>, so script/style/font/img/connect allow any
+// https: origin plus inline/eval. What stays locked down is what the sandbox
+// does not already cover and an artifact never legitimately needs: plugins
+// (object-src 'none'), <base> hijacking (base-uri 'none'), and form submission
+// (form-action 'none'). `frame-ancestors` is intentionally omitted so the
+// dashboard can embed the preview even from a different origin (e.g. `pnpm
+// web:dev` on :3001 → gateway). NOTE: the nginx front-door must NOT layer its
+// stricter dashboard CSP on top of this (see docker/web/nginx.conf, location
+// /api/) or the browser enforces the intersection and blocks CDN libraries.
 const WORKSPACE_PREVIEW_CSP = [
   "default-src 'self' data: blob:",
-  "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
-  "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
-  "img-src 'self' data: blob:",
-  "font-src 'self' data: https://cdn.jsdelivr.net",
-  "connect-src 'self' https://cdn.jsdelivr.net",
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval' https:",
+  "style-src 'self' 'unsafe-inline' https:",
+  "img-src 'self' data: blob: https:",
+  "font-src 'self' data: https:",
+  "connect-src 'self' data: blob: https:",
+  "media-src 'self' data: blob: https:",
+  "frame-src 'self' data: blob:",
   "form-action 'none'",
   "base-uri 'none'",
   "object-src 'none'",
