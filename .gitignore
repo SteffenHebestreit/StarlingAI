@@ -90,3 +90,7 @@ packages/core/*.eval.json
 # package-lock.json causes install drift and forces CI to --no-frozen-lockfile.
 package-lock.json
 packages/*/package-lock.json
+
+# Per-developer editor preferences (file associations for the generated
+# config). Tracking it forces every fork to carry a diff on this path.
+/.vscode/settings.json

@@ -4,13 +4,13 @@
 		{
 			"label": "core test suite",
 			"type": "shell",
-			"command": "source \"$HOME/.nvm/nvm.sh\" >/dev/null 2>&1 || true; nvm use --silent default >/dev/null 2>&1 || true; if command -v pnpm >/dev/null 2>&1; then pnpm --filter @starlingai/core test; else corepack pnpm --filter @starlingai/core test; fi",
+			"command": "source \"$HOME/.nvm/nvm.sh\" >/dev/null 2>&1 || true; nvm use --silent default >/dev/null 2>&1 || true; if command -v pnpm >/dev/null 2>&1; then pnpm --filter ./packages/core test; else corepack pnpm --filter ./packages/core test; fi",
 			"windows": {
 				"command": "powershell.exe",
 				"args": [
 					"-NoProfile",
 					"-Command",
-					"Set-Location 'F:\\StarlingAI'; pnpm --filter @starlingai/core test"
+					"Set-Location '${workspaceFolder}'; pnpm --filter ./packages/core test"
 				],
 				"options": {
 					"shell": {
@@ -115,17 +115,17 @@
 		{
 			"label": "run core tests (powershell)",
 			"type": "shell",
-			"command": "pnpm --filter @starlingai/core test"
+			"command": "pnpm --filter ./packages/core test"
 		},
 		{
 			"label": "core tests powershell",
 			"type": "shell",
-			"command": "powershell.exe -NoProfile -Command \"cd F:\\StarlingAI; pnpm --filter @starlingai/core test\""
+			"command": "powershell.exe -NoProfile -Command \"cd '${workspaceFolder}'; pnpm --filter ./packages/core test\""
 		},
 		{
 			"label": "core tests ps",
 			"type": "shell",
-			"command": "pnpm --filter @starlingai/core test",
+			"command": "pnpm --filter ./packages/core test",
 			"isBackground": false
 		},
 		{
@@ -464,7 +464,7 @@
 			"args": [
 				"-NoProfile",
 				"-Command",
-				"Set-Location 'F:\\StarlingAI'; pnpm --filter @starlingai/core build"
+				"Set-Location '${workspaceFolder}'; pnpm --filter ./packages/core build"
 			],
 			"isBackground": false,
 			"group": "build"
@@ -527,7 +527,7 @@
 			"command": "pnpm",
 			"args": [
 				"--filter",
-				"@starlingai/web",
+				"./packages/web",
 				"build"
 			],
 			"isBackground": false,
@@ -540,7 +540,7 @@
 			"args": [
 				"-NoProfile",
 				"-Command",
-				"Set-Location 'F:\\StarlingAI'; pnpm --filter @starlingai/web build"
+				"Set-Location '${workspaceFolder}'; pnpm --filter ./packages/web build"
 			],
 			"isBackground": false,
 			"group": "build"
@@ -552,7 +552,7 @@
 			"args": [
 				"-NoProfile",
 				"-Command",
-				"Set-Location 'F:\\StarlingAI'; & 'C:\\Program Files\\nodejs\\pnpm.cmd' --filter @starlingai/core test -- src/tests/sub-agent-timeout.test.ts src/tests/swarm-orchestration.test.ts"
+				"Set-Location '${workspaceFolder}'; & 'C:\\Program Files\\nodejs\\pnpm.cmd' --filter ./packages/core test -- src/tests/sub-agent-timeout.test.ts src/tests/swarm-orchestration.test.ts"
 			],
 			"isBackground": false,
 			"group": "test"
