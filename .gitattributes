@@ -5,3 +5,8 @@
 *.mjs       text eol=lf
 # Windows batch files expect CRLF.
 *.bat       text eol=crlf
+
+# The lockfile is generated, and a three-way merge of it produces a plausible
+# but wrong tree. Forks resolve it by regenerating instead:
+#   git checkout --theirs pnpm-lock.yaml && pnpm install
+pnpm-lock.yaml -merge

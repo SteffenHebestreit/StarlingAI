@@ -97,10 +97,26 @@ editing the upstream script:
   // ...identity fields above...
   "rootAllowlist": {
     "files": ["DEVPLAN.md", "docker-compose.myfork.yml"],
-    "directories": ["uploads"]
+    // Nested paths work too — the natural home for fork repo tooling, so your
+    // scripts don't have to live in upstream's scripts/.
+    "directories": ["uploads", "scripts/myfork"]
   }
 }
 ```
+
+Three upstream files forks reliably get wrong, and what to do instead:
+
+- **`.env.example`** — upstream appends to it at EOF, so a fork that adds its own
+  vars conflicts on almost every sync. Nothing parses this file (`.env` is written
+  by the setup wizard and checked by `scripts/check-env-refs.mjs`, which reads
+  `.env` only), so ship a fork-owned `<slug>.env.example` and declare it in
+  `rootAllowlist.files`.
+- **Root `.gitignore`** — upstream-owned. To ignore your renamed state directory,
+  commit a *self-ignoring* `<stateDirName>/.gitignore` containing `*` and
+  `!.gitignore` instead of editing the root file.
+- **`pnpm-lock.yaml`** — generated; never hand-merge it. Upstream marks it
+  `-merge` in `.gitattributes`, so resolve conflicts by regenerating:
+  `git checkout --theirs pnpm-lock.yaml && pnpm install`.
 
 ### 2. Disable built-in tool families you don't want
 
@@ -262,13 +278,19 @@ git remote add upstream https://github.com/SteffenHebestreit/StarlingAI
 Then, whenever you want upstream's latest:
 
 ```bash
-node scripts/check-upstream.mjs --fetch --remote upstream   # drift report (exit 1 = drift)
-git rebase upstream/develop                                  # conflict-free if you stayed on fork-owned surfaces
-pnpm -r check && pnpm build                                   # verify
+pnpm upstream:check --fetch --remote upstream   # drift report (exit 1 = commit drift)
+git rebase upstream/develop                      # conflict-free if you stayed on fork-owned surfaces
+pnpm -r check && pnpm build                       # verify
 ```
 
-The drift checker writes a JSON report under `<stateDir>/upstream-reports/`
-and is cron-friendly (schedule it as a job and alert on exit code 1).
+The report covers two independent things. **Commit drift** is how far the
+histories have diverged. **Surface drift** is the list of upstream-shipped files
+your fork modified or deleted — only that second number predicts rebase
+conflicts, and driving it to zero is the entire point of this model. Add
+`--strict` to fail on it, which makes a useful CI gate once you are at zero.
+
+The checker writes a JSON report under `<stateDir>/upstream-reports/` and is
+cron-friendly (schedule it as a job and alert on a non-zero exit).
 
 ## Rules of thumb
 
