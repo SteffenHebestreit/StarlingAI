@@ -414,6 +414,11 @@ export class AgentSession {
     this.toolSchemasChars = Math.max(0, chars);
   }
 
+  /** Tool-schema payload size for this turn, for telemetry (not part of promptChars). */
+  getToolSchemasChars(): number {
+    return this.toolSchemasChars;
+  }
+
   /** Tell the session the context window (tokens) of the model running its
    *  turns, so the trimmer budgets against the real window. */
   setContextWindow(tokens: number): void {

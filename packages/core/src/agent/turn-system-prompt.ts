@@ -400,7 +400,7 @@ export async function assembleTurnSystemMessages(
     ];
 
     let systemMessages = buildSystemMessages();
-    lastPromptMetrics = measurePrompt(systemMessages, collapsedHistory);
+    lastPromptMetrics = measurePrompt(systemMessages, collapsedHistory, session.getToolSchemasChars());
 
     // ── Per-section prompt-size telemetry ─────────────────────────────────
     // Emitted once per turn (iteration 0) so we can see exactly what dominates
@@ -444,35 +444,35 @@ export async function assembleTurnSystemMessages(
           droppedSections.push({ name: "trajectoryInjectionContext", chars: activeTrajectoryInjectionContext.length });
           activeTrajectoryInjectionContext = null;
           systemMessages = buildSystemMessages();
-          lastPromptMetrics = measurePrompt(systemMessages, collapsedHistory);
+          lastPromptMetrics = measurePrompt(systemMessages, collapsedHistory, session.getToolSchemasChars());
         }
         // Priority 2: memory guidance (background context — non-critical)
         if (lastPromptMetrics.systemPromptChars > promptBudget && memoryGuidance) {
           droppedSections.push({ name: "memoryGuidance", chars: memoryGuidance.length });
           memoryGuidance = "";
           systemMessages = buildSystemMessages();
-          lastPromptMetrics = measurePrompt(systemMessages, collapsedHistory);
+          lastPromptMetrics = measurePrompt(systemMessages, collapsedHistory, session.getToolSchemasChars());
         }
         // Priority 2b: skill guidance (procedural memory — non-critical)
         if (lastPromptMetrics.systemPromptChars > promptBudget && skillGuidance) {
           droppedSections.push({ name: "skillGuidance", chars: skillGuidance.length });
           skillGuidance = "";
           systemMessages = buildSystemMessages();
-          lastPromptMetrics = measurePrompt(systemMessages, collapsedHistory);
+          lastPromptMetrics = measurePrompt(systemMessages, collapsedHistory, session.getToolSchemasChars());
         }
         // Priority 2c: user-model guidance (cross-session adaptation — non-critical)
         if (lastPromptMetrics.systemPromptChars > promptBudget && userModelGuidance) {
           droppedSections.push({ name: "userModelGuidance", chars: userModelGuidance.length });
           userModelGuidance = "";
           systemMessages = buildSystemMessages();
-          lastPromptMetrics = measurePrompt(systemMessages, collapsedHistory);
+          lastPromptMetrics = measurePrompt(systemMessages, collapsedHistory, session.getToolSchemasChars());
         }
         // Priority 3: flow guidance (workflow memory — non-critical)
         if (lastPromptMetrics.systemPromptChars > promptBudget && flowGuidance) {
           droppedSections.push({ name: "flowGuidance", chars: flowGuidance.length });
           flowGuidance = "";
           systemMessages = buildSystemMessages();
-          lastPromptMetrics = measurePrompt(systemMessages, collapsedHistory);
+          lastPromptMetrics = measurePrompt(systemMessages, collapsedHistory, session.getToolSchemasChars());
         }
         // Priority 3b: discovery prefetch capsule (a planning head start — the model
         // can still discover on demand, so it yields before the plan-first nudge).
@@ -480,7 +480,7 @@ export async function assembleTurnSystemMessages(
           droppedSections.push({ name: "discoveryCapsule", chars: discoveryCapsule.length });
           discoveryCapsule = "";
           systemMessages = buildSystemMessages();
-          lastPromptMetrics = measurePrompt(systemMessages, collapsedHistory);
+          lastPromptMetrics = measurePrompt(systemMessages, collapsedHistory, session.getToolSchemasChars());
         }
         // Priority 4: plan-first nudge — high value (governs turn structure), so
         // dropped only under the most extreme prompt pressure, after the above.
@@ -488,7 +488,7 @@ export async function assembleTurnSystemMessages(
           droppedSections.push({ name: "planGuidance", chars: planGuidance.length });
           planGuidance = "";
           systemMessages = buildSystemMessages();
-          lastPromptMetrics = measurePrompt(systemMessages, collapsedHistory);
+          lastPromptMetrics = measurePrompt(systemMessages, collapsedHistory, session.getToolSchemasChars());
         }
         // Priority 4 (last resort): compact the base system prompt itself.
         // Until now the trimmer dropped only auxiliary blocks and shipped the
@@ -503,7 +503,7 @@ export async function assembleTurnSystemMessages(
             droppedSections.push({ name: "basePromptCompaction", chars: systemPrompt.length - compacted.length });
             systemPrompt = compacted;
             systemMessages = buildSystemMessages();
-            lastPromptMetrics = measurePrompt(systemMessages, collapsedHistory);
+            lastPromptMetrics = measurePrompt(systemMessages, collapsedHistory, session.getToolSchemasChars());
           }
         }
 

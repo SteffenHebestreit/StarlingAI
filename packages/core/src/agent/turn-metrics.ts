@@ -26,6 +26,16 @@ export interface TurnPerformanceMetrics {
   collapsedHistoryMessages: number;
   collapsedHistoryChars: number;
   promptChars: number;
+  /**
+   * Serialized size of the tool schemas sent with the request. NOT part of
+   * promptChars: schemas travel in the provider's `tools` parameter, not in the
+   * messages, so every other prompt metric here is blind to them — yet the tool
+   * block can exceed the system prompt itself (measured ~72 KB of schemas vs a
+   * ~17 KB system prompt in hybrid mode), which is what made the lean-catalog
+   * (B37) saving impossible to observe in production. Optional: non-LLM / early
+   * exit paths that build this shape have no tool payload to report.
+   */
+  toolSchemasChars?: number;
   completionChars: number;
   toolIterations: number;
   finishReason: string;
@@ -71,11 +81,16 @@ export async function timedPhase<T>(phase: string, fn: () => Promise<T>): Promis
   }
 }
 
-export function measurePrompt(systemMessages: readonly LLMMessage[], history: readonly LLMMessage[]): {
+export function measurePrompt(
+  systemMessages: readonly LLMMessage[],
+  history: readonly LLMMessage[],
+  toolSchemasChars = 0,
+): {
   systemPromptChars: number;
   collapsedHistoryMessages: number;
   collapsedHistoryChars: number;
   promptChars: number;
+  toolSchemasChars: number;
 } {
   const systemPromptChars = systemMessages.reduce((sum, message) => {
     const contentLength = typeof message.content === "string" ? message.content.length : 0;
@@ -89,7 +104,11 @@ export function measurePrompt(systemMessages: readonly LLMMessage[], history: re
     systemPromptChars,
     collapsedHistoryMessages: history.length,
     collapsedHistoryChars,
+    // Deliberately NOT folded into promptChars — schemas are a separate request
+    // field, and adding them would silently move every prompt-budget threshold
+    // that compares against promptChars.
     promptChars: systemPromptChars + collapsedHistoryChars,
+    toolSchemasChars,
   };
 }
 
@@ -126,6 +145,7 @@ export function buildTurnPerformanceMetrics(input: {
     collapsedHistoryMessages: number;
     collapsedHistoryChars: number;
     promptChars: number;
+    toolSchemasChars?: number;
   };
   completionChars: number;
   finishReason: string;
@@ -151,6 +171,7 @@ export function buildTurnPerformanceMetrics(input: {
     collapsedHistoryMessages: input.lastPromptMetrics.collapsedHistoryMessages,
     collapsedHistoryChars: input.lastPromptMetrics.collapsedHistoryChars,
     promptChars: input.lastPromptMetrics.promptChars,
+    toolSchemasChars: input.lastPromptMetrics.toolSchemasChars ?? 0,
     completionChars: input.completionChars,
     toolIterations: input.toolIterations,
     finishReason: input.finishReason,

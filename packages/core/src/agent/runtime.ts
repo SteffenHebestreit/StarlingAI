@@ -1188,6 +1188,7 @@ async function _runTurn(
     collapsedHistoryMessages: 0,
     collapsedHistoryChars: 0,
     promptChars: 0,
+    toolSchemasChars: 0,
   };
 
   // ── Rate limit check ──────────────────────────────────────────────────────
