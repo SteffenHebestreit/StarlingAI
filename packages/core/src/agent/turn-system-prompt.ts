@@ -152,6 +152,17 @@ export async function assembleTurnSystemMessages(
       }
     }
     const temporalContext = buildTemporalContextPrompt();
+    // The lean catalog withholds the direct capability tools from the request, so
+    // the model has to be told that its tool list is a starting point rather than
+    // the full set — otherwise a missing tool reads as "I cannot do this".
+    const leanToolCatalogNotice = getConfig().agents.performance.leanToolCatalog === true
+      ? "TOOL CATALOG IS PARTIAL: the tools listed for this turn are a starting set, not the limit of what you can do. "
+        + "More tools exist and can be added to THIS turn on demand. If you need a capability that is not in your current "
+        + "tool list (reading or writing files, running code or shell commands, fetching a URL, generating a document or "
+        + "image, and so on), call search_tools with a short description of what you need, then call load_tool with the "
+        + "exact name it returns — the tool becomes callable on your next step. Never tell the user a task is impossible, "
+        + "and never ask them to do it manually, because a tool was missing from the list: look for it and load it first."
+      : "";
     const dynamicGuidance = iterationCount === 0 ? initialDynamicGuidance : null;
     // Lean context injection: when on, the heavy per-turn memory/user-model/skill/
     // flow/trajectory blocks are not pushed into the prompt — the model pulls them
@@ -348,6 +359,12 @@ export async function assembleTurnSystemMessages(
       // stays the shared, cacheable prefix; present only on orchestration-intent turns.
       ...(orchestrationModuleMsg ? [{ role: "system" as const, content: orchestrationModuleMsg }] : []),
       { role: "system", content: temporalContext },
+      // Lean tool catalog (B37): without this the model treats the shortened tool
+      // list as its real capability ceiling — measured, it silently gave up and
+      // asked the user to do the work by hand instead of loading the tool it
+      // needed. Only present when the catalog is actually withheld, so it costs
+      // nothing in the default configuration.
+      ...(leanToolCatalogNotice ? [{ role: "system" as const, content: leanToolCatalogNotice }] : []),
       ...(languageAndIdentityGuidance ? [{ role: "system" as const, content: languageAndIdentityGuidance }] : []),
       ...(priorEvidenceFollowUpPrompt ? [{ role: "system" as const, content: priorEvidenceFollowUpPrompt }] : []),
       ...(sessionEvidenceReuseNudge ? [{ role: "system" as const, content: sessionEvidenceReuseNudge }] : []),
