@@ -65,8 +65,22 @@ which is the safe direction for a product-selection ask.
 - **Eval note:** this is an LLM-judge prompt change on the routing-tier model; the
   unit test only pins the `VERDICT:` contract, so the verdict flip on the repro is
   validated by the pass^k eval / a live re-run, not a unit test.
-- **Follow-up (not done here):** `search_agents` ranks `image_creator` for a
-  research query — topic-over-intent embedding bias. The classifier fix mitigates
-  the symptom (the loop is rewritten to `delegate(researcher)`), but hardening
-  discovery ranking itself (intent-aware routing, or de-weighting a creation
-  agent for a "research"-framed query) is a separate improvement.
+- **Discovery-side hardening (done in v0.46.6):** `search_agents` ranked
+  `image_creator` for a research query — a topic-over-intent embedding bias (the
+  query embeds near its SUBJECT, "image generation models", so the generator that
+  owns that subject tops the ranking despite being unable to research). This is
+  now fixed at the discovery layer, independent of the source-sensitive arming:
+  - `taskRequiresExternalResearch` had a noun gap — its external-web noun list
+    (`url/website/provider/price/datasheet…`) did not include product/model/tool
+    nouns, so "research the best **model**" matched the verb but no noun and
+    returned false. Broadened to cover `model/tool/software/hardware/framework/
+    library/app/service/product/benchmark/gpu` plus the `compare`/`recommend`
+    verbs; the workspace/code veto still excludes internal lookups. This shared
+    detector also feeds the delegation-path research gate, so the fix closes the
+    same class there too.
+  - `search_agents` now applies `preferResearchCapableCandidates` (mirrors the
+    existing `filterCandidatesByExecutionCapability` pattern): for a research
+    query it demotes research-incapable generators below capable candidates, and
+    when the whole ranking is research-incapable it surfaces the canonical
+    `researcher` as the top pick. Pure, never dead-ends. Flows through the audit
+    `topResult`, the NEXT ACTION pointer, and `suggestedFallbackAgents`.

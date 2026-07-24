@@ -8,6 +8,8 @@ import {
   filterCandidatesByExecutionCapability,
   explicitAgentsCoverTaskExecution,
 } from "../tools/sub-agent.js";
+import { reorderByResearchCapability } from "../tools/agent-routing.js";
+import type { AgentRoutingCandidate } from "../tools/agent-routing.js";
 
 /**
  * Research-capability gate (regression: session 64b90fcc, 2026-05-29). A
@@ -81,6 +83,68 @@ describe("research capability gate", () => {
     expect(taskRequiresExternalResearch("find every file that imports the website module")).toBe(false);
     // verb but no external web noun → stays inactive.
     expect(taskRequiresExternalResearch("research how the dependency injection works here")).toBe(false);
+  });
+
+  it("flags product/model/tool SELECTION & comparison research (live session d4eca79c)", () => {
+    // The exact repro that fabricated hardware specs with zero web_search: a research
+    // verb + a product/model noun, no workspace marker. "models"/"benchmarks"/"gpu"/
+    // "software"/"library" now count as external-web nouns.
+    expect(taskRequiresExternalResearch("research the best open weights model for image creation on our hardware")).toBe(true);
+    expect(taskRequiresExternalResearch("compare the top open-source image generation models and their benchmarks")).toBe(true);
+    expect(taskRequiresExternalResearch("find the best GPU for local LLM inference")).toBe(true);
+    expect(taskRequiresExternalResearch("recommend a good charting library")).toBe(true);
+  });
+
+  it("still leaves creation and internal tasks inactive after the noun broadening", () => {
+    // "generate"/"draw"/"build" are not research verbs, so a creation task stays false
+    // even when it mentions a model/image.
+    expect(taskRequiresExternalResearch("generate the best possible image of a sunset")).toBe(false);
+    expect(taskRequiresExternalResearch("build a data model for the app")).toBe(false);
+    // research verb + product noun, but a workspace/code marker vetoes it.
+    expect(taskRequiresExternalResearch("find the models module in our codebase")).toBe(false);
+  });
+});
+
+/**
+ * Topic-over-intent reorder (live session d4eca79c). A "research the best image MODEL"
+ * query embeds near its SUBJECT, so image_creator (a pure generator, no web tools) topped
+ * search_agents at 0.87 confidence and the orchestrator never reached the researcher.
+ * reorderByResearchCapability puts research-capable candidates first for a research query
+ * and flags when the whole ranking is research-incapable so the caller can surface the
+ * researcher. Pure — tested here with an injected capability predicate.
+ */
+describe("research-capability reorder (topic-over-intent)", () => {
+  const c = (name: string): AgentRoutingCandidate => ({ name } as AgentRoutingCandidate);
+  const capable = new Set(["researcher", "browser_agent", "mission_coordinator"]);
+  const isCapable = (name: string) => capable.has(name);
+
+  it("demotes a generator below a research-capable peer for a research query", () => {
+    const { results, needsFallback } = reorderByResearchCapability(
+      [c("image_creator"), c("researcher"), c("chart_designer")], true, isCapable,
+    );
+    expect(results.map((r) => r.name)).toEqual(["researcher", "image_creator", "chart_designer"]);
+    expect(needsFallback).toBe(false);
+  });
+
+  it("flags needsFallback when the whole ranking is research-incapable", () => {
+    const { results, needsFallback } = reorderByResearchCapability(
+      [c("image_creator"), c("image_sourcer"), c("prompt_optimizer")], true, isCapable,
+    );
+    expect(needsFallback).toBe(true);
+    // Order preserved — the caller prepends the researcher fallback.
+    expect(results.map((r) => r.name)).toEqual(["image_creator", "image_sourcer", "prompt_optimizer"]);
+  });
+
+  it("leaves a non-research query and an already-capable ranking untouched", () => {
+    const set = [c("image_creator"), c("researcher")];
+    expect(reorderByResearchCapability(set, false, isCapable).results).toBe(set); // non-research → unchanged reference
+    const allCapable = reorderByResearchCapability([c("researcher"), c("browser_agent")], true, isCapable);
+    expect(allCapable.needsFallback).toBe(false);
+    expect(allCapable.results.map((r) => r.name)).toEqual(["researcher", "browser_agent"]);
+  });
+
+  it("never dead-ends on an empty set", () => {
+    expect(reorderByResearchCapability([], true, isCapable)).toEqual({ results: [], needsFallback: false });
   });
 });
 

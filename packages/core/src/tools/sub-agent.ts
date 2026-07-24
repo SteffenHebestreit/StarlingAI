@@ -23,6 +23,7 @@ import {
   resolveAgentRouting,
   taskRequiresExternalResearch,
   agentIsResearchCapable,
+  preferResearchCapableCandidates,
   agentCfgIsMetaFactory,
   agentIsMetaFactory,
   pickResearchFallbackAgent,
@@ -3168,6 +3169,12 @@ registerTool({
           weakCandidates: rawResolution.weakCandidates.filter((candidate) => candidate.name !== currentAgentName),
         }
       : rawResolution;
+    // Topic-over-intent guard: for a research query, a pure generator that merely
+    // embeds near the research SUBJECT (image_creator for "research the best image
+    // model") must not top the ranking. Prefer a research-capable specialist, and
+    // surface the researcher when the whole ranking is research-incapable. Flows
+    // through the audit topResult, the NEXT ACTION pointer, and suggestedFallbackAgents.
+    resolution.results = preferResearchCapableCandidates(resolution.results, raw);
     const semanticMetadata = buildSemanticRoutingMetadata(resolution);
     const semanticUnavailableNote = formatSemanticUnavailableNote(semanticMetadata);
 

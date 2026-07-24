@@ -529,8 +529,15 @@ const SEARCH_ONLINE_TASK_RE = /\b(search online|search the web|web search|look (
 // is the English-only fallback. NOTE: the boundary-translation layer that would render a
 // non-English task to English before this fallback is NOT YET IMPLEMENTED — until it lands, a
 // non-English task relies on the structural marker alone (the verb+noun fallback won't fire).
-const WEB_RESEARCH_VERB_RE = /\b(?:research|investigat\w+|searche?s?|find|look\s*up|gather)\b/i;
-const EXTERNAL_WEB_NOUN_RE = /\b(?:url|urls|link|links|website|websites|online|platforms?|providers?|vendors?|prices?|pricing|courses?|datasheets?|reviews?)\b/i;
+const WEB_RESEARCH_VERB_RE = /\b(?:research|investigat\w+|searche?s?|find|look\s*up|gather|compare|recommend)\b/i;
+// External web nouns now also cover PRODUCT/MODEL/TOOL SELECTION research — "find the
+// best image MODEL", "compare GPUs", "research the top framework". The field of real
+// options, their specs/benchmarks/versions/availability are external facts that must be
+// gathered, not recalled; without these nouns "research the best X model" matched the
+// verb but no noun and slipped through (live session d4eca79c: a generator, image_creator,
+// topped the ranking for a research query and the answer was fabricated with zero
+// web_search calls). WORKSPACE_CODE_MARKER_RE still vetoes internal code/file lookups.
+const EXTERNAL_WEB_NOUN_RE = /\b(?:url|urls|link|links|website|websites|online|platforms?|providers?|vendors?|prices?|pricing|courses?|datasheets?|reviews?|models?|tools?|toolkits?|software|hardware|frameworks?|librar(?:y|ies)|apps?|applications?|services?|products?|benchmarks?|alternatives?|gpus?|cpus?)\b/i;
 const WORKSPACE_CODE_MARKER_RE = /\b(?:codebase|workspace|repository|repo|source\s*code|functions?|methods?|files?|symbols?|class(?:es)?|modules?)\b/i;
 
 /**
@@ -566,6 +573,62 @@ export function pickResearchFallbackAgent(attempted: string[]): string | undefin
   return ["researcher", "browser_agent", "web_task_coordinator", "mission_coordinator"].find(
     (name) => (config.subAgents[name] || promoted[name]) && agentIsResearchCapable(name) && !attempted.includes(name),
   );
+}
+
+/**
+ * Pure reorder for the topic-over-intent bias in semantic routing. A research
+ * query embeds near its SUBJECT, so a pure generator that owns that subject
+ * (image_creator for "research the best image MODEL") can top the ranking despite
+ * being unable to research anything. For a research query, put research-capable
+ * candidates first; report `needsFallback` when NONE of the surfaced candidates
+ * can research (the caller then surfaces the canonical research specialist).
+ * Never dead-ends: a non-research query, an empty set, or an all-capable set is
+ * returned unchanged. Extracted from the config-backed wrapper below so the
+ * ordering rule is unit-testable without a config fixture.
+ */
+export function reorderByResearchCapability(
+  results: AgentRoutingCandidate[],
+  isResearchQuery: boolean,
+  isCapable: (name: string) => boolean,
+): { results: AgentRoutingCandidate[]; needsFallback: boolean } {
+  if (results.length === 0 || !isResearchQuery) return { results, needsFallback: false };
+  const capable = results.filter((candidate) => isCapable(candidate.name));
+  if (capable.length === 0) return { results, needsFallback: true };
+  if (capable.length === results.length) return { results, needsFallback: false };
+  const incapable = results.filter((candidate) => !isCapable(candidate.name));
+  return { results: [...capable, ...incapable], needsFallback: false };
+}
+
+function buildConfiguredAgentCandidate(name: string, score: number): AgentRoutingCandidate | null {
+  const config = getConfig();
+  const cfg = config.subAgents[name] ?? readPromotedAgents(config.workspacePath)[name];
+  if (!cfg) return null;
+  return toCandidate(name, cfg, score, [], config.agents.defaults.model.primary, config.workspacePath);
+}
+
+/**
+ * Apply {@link reorderByResearchCapability} against the live config, and when the
+ * entire ranking is research-incapable for a research query, surface the canonical
+ * research specialist ({@link pickResearchFallbackAgent}, i.e. researcher) as the
+ * top pick — for a research task we are confident the web specialist is the right
+ * CAPABILITY match even though the topical embedding did not surface it. Pure of
+ * side effects; returns the (possibly reordered / fallback-prepended) list.
+ */
+export function preferResearchCapableCandidates(
+  results: AgentRoutingCandidate[],
+  query: string,
+): AgentRoutingCandidate[] {
+  const { results: reordered, needsFallback } = reorderByResearchCapability(
+    results,
+    taskRequiresExternalResearch(query),
+    agentIsResearchCapable,
+  );
+  if (!needsFallback) return reordered;
+  const fallbackName = pickResearchFallbackAgent([]);
+  if (!fallbackName) return reordered;
+  // Score just above the strong-match threshold (0.72): confident capability match.
+  const fallbackCandidate = buildConfiguredAgentCandidate(fallbackName, 0.75);
+  return fallbackCandidate ? [fallbackCandidate, ...reordered] : reordered;
 }
 
 // ── General capability-aware routing/bidding gate ───────────────────────────
