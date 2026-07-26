@@ -1,6 +1,9 @@
 # Fork-Boilerplate Refactor — Design & Roadmap
 
-> Status: **in progress** (started 2026-06-13).
+> Status: **upstream work complete** (started 2026-06-13). WS1–WS6 have all
+> landed — every fork-owned seam described here exists in the codebase today.
+> Only WS7 (migrating the downstream MFA-AI fork onto those seams) is pending;
+> it is fork-side work, not an upstream gap. See the progress ledger below.
 > Goal: make StarlingAI a clean boilerplate for specialized swarm forks
 > (reference fork: MFA-AI). A fork should express **all** of its
 > specialization through fork-owned surfaces that upstream never touches, so
@@ -14,8 +17,18 @@ costs a manual cherry-pick / read-tree merge session. Auditing the diff shows
 the modifications fall into a small number of recurring causes — each one is
 a missing extension point in upstream:
 
-| # | Fork change pattern | Today's mechanism | Files hit |
-|---|---------------------|-------------------|-----------|
+> **This table is the 2026-06-13 recon snapshot — the problem state, not current upstream.**
+> WS1–WS6 replaced almost every mechanism below with a fork-owned seam (see the
+> progress ledger further down). Patterns 1–10 are now served by
+> `packages/core/src/product/` (identity), `configRemovals` + `tools.disabledGroups` /
+> `disabledTools` (removal), and `defineCoreExtension({ tools, tiers, roles, routes,
+> guardrails, auditEvents, configSchema, boot })` in `packages/core/src/extension/`
+> plus `packages/web/src/extensions/registry.ts` (web routes/nav) and
+> `gateway/route-policies.ts` (declarative RBAC). Some file names cited below
+> (`auth/roles.ts`, `gateway/middleware.ts`) are the fork's, and never existed upstream.
+
+| # | Fork change pattern | Mechanism as of the 2026-06-13 recon | Files hit |
+|---|---------------------|--------------------------------------|-----------|
 | 1 | Product identity (`.starlingai` state dir → `.mfa-ai`, `starlingai.json` → `mfa-ai.json`, `STARLINGAI_*` env → `MFA_AI_*`, app name/tagline/theme) | String literals hardcoded in ~110 core files + web shell | config/loader, plugin/loader, gateway/auth, audit/logger, credentials/store, App.vue, dozens of tests |
 | 2 | Remove unwanted built-in tools (pentest, ssh, proxmox, terraform, ansible, service-check) | Delete the files + edit `index.ts` side-effect imports | 12 deletions, guaranteed conflict on every upstream touch |
 | 3 | Add domain tools (25 × `mfa-*` tools) | New files + edit `index.ts` imports + edit `guardrails/tool-tiers.ts` tier map | index.ts, tool-tiers.ts |

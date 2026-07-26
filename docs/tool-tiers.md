@@ -10,6 +10,8 @@ This classification system is domain-agnostic. Whether the swarm is analyzing da
 
 See also: [Security Model](security.md) · [Architecture & Design](architecture.md)
 
+> **This page is the narrative explanation, not the tier registry.** The tool tables below are illustrative and cover only part of the surface. The complete, always-current tier assignment is generated from `TOOL_TIER_MAP` into **[reference/tool-tiers.md](reference/tool-tiers.md)** (regenerate with `pnpm docs:reference`; CI fails when it drifts). When the two disagree, the generated file wins.
+
 ---
 
 ## The Five Tiers
@@ -70,8 +72,6 @@ This tier model is also the hard boundary for self-improvement. The swarm may re
 | `read_shared_facts` | Read the per-session shared swarm fact ledger |
 | `get_swarm_state` | Read the current turn-local swarm task state and progress |
 | `get_swarm_budget` | Aggregate token, tool-call, and wall-clock spending across swarm tasks |
-| `geocode_location` | Resolve a place name or address to coordinates via OpenStreetMap |
-| `route_distance_time` | Calculate route distance and travel time between two coordinates |
 | `kubectl_get` | List/fetch Kubernetes resources from an external cluster |
 | `kubectl_describe` | Describe a Kubernetes resource (events, conditions, related state) |
 | `kubectl_logs` | Fetch container logs from a pod, with tail/since/previous filters |
@@ -183,7 +183,6 @@ All writes are confined to the configured `workspacePath`. The agent cannot writ
 | `github_pr_comment` | Post an issue-style comment on a pull request thread | Per-call | No |
 | `github_actions_trigger` | Trigger a `workflow_dispatch` run for a GitHub Actions workflow | Per-call | No |
 | `github_release_create` | Create a GitHub Release pointing at a tag with optional release notes | Per-call | No |
-| `translate_text` | Tier-0 inline LLM translation (max 4 000 chars; auto-detects source language) | Per-call | No |
 | `ask_user` | Pause execution and surface a question to the operator (multi-choice or free-text) | None | No |
 | `tool_dev_start` / `tool_dev_submit` | Start / submit a self-developed tool for review | Per-call | Yes — Docker sandbox |
 | `cron_remove` / `cron_list` | Remove or list scheduled cron jobs | Per-call | No |

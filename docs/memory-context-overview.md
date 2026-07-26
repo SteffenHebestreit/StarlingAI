@@ -36,7 +36,8 @@ The spine of all of it is **scope**:
 | **Durable workspace memory** | workspace | one JSON file/key at `<ws>/.starlingai/memory/` (+ optional graph node) | `memory_store`; auto-consolidated from sessions; supersession + near-dup compaction + kind-decay | `memory.*`; `memory_store/search/promote/compact`; **Memory page** |
 | **Durable user memory** | user | JSON files at `$SAI_USER_MEMORY_PATH` (docker `/data`) else `~/.starlingai/user-memory` | same pipeline; higher scope weight (0.34 vs 0.30) | `SAI_USER_MEMORY_PATH`; `memory_store scope:'user'` |
 | **Session shared-facts** | session | Redis hash `starlingai:mem:{sessionId}:facts` (4h TTL); in-proc Map fallback | sub-agents `share_finding`/`share_evidence`; `read_shared_facts`; near-dup rejected (0.85); consolidated up on archive | code constants (`FACT_VALUE_MAX=2000`); `memory.autoConsolidateSessions` |
-| **Partial-results + agent messages** | session | Redis lists `:results` / `:messages` (4h, ltrim 50) | completed-output snippets for reuse; `send_agent_message` → destructive drain on recipient's next turn | constants `RESULTS_MAX=50`, `RESULT_CONTENT_MAX=1200` |
+| **Partial results** | session | Redis list `starlingai:mem:{sid}:results` (4h, ltrim 50) | completed-output snippets for reuse | constants `RESULTS_MAX=50`, `RESULT_CONTENT_MAX=1200` |
+| **Agent messages** | session | per-recipient Redis **Streams** `starlingai:msgs:{sid}:{recipient}` (+ `:seen` set, `:recipients`, dead-letter stream) | `send_agent_message` → claim/ack with visibility-timeout redelivery and a retry ceiling, **not** a destructive drain (ADR-003). The old `:messages` list is legacy and is drained into streams on claim. | see `swarm/memory.ts`; equivalent in-process fallback when Redis is absent |
 | **Task checkpoints** | session | Redis 24h + fallback | written when a delegation pauses/times out (keyed by `taskId`) | module constant TTL |
 | **Durable task-graph ledger** | session | per-session Redis slot | `run_task_graph` completed-node reuse | `orchestration.durableTaskGraph` (default **off**, eval-gated) |
 | **Session record (history)** | session | Redis `sai:session:<id>` (**7d**, `SESSION_TTL_SECONDS`) + `sai:session-index` | the substrate the whole context-assembly layer replays | `REDIS_URL`; TTL is a constant, *not* the prune interval |
@@ -75,7 +76,7 @@ Several soft nudges also ride here, all eval-gated default-OFF: `splitOrchestrat
 
 | Subsystem | What it indexes | Scope / isolation | Config + inert-when |
 |---|---|---|---|
-| **engram Document-RAG** | attached files → graph-RAG chunks | source tokens `user:<id>` / `session:<id>` / `workspace:<name>` / `kb:<id>` + gateway RBAC + always-on client post-filter | `retrieval.documentRag.*`: `enabled`, `engramBaseUrl`(`http://engram:8088`), `autoIngestAttachments`(true), `retrievalTopK`(6), `maxContextChars`(6000), `includeUser/WorkspaceDocs`(true). Inert if disabled / engram unreachable. Tools: `ingest_document`, `search_documents`, `list_documents`, `forget_document`. **Documents page** |
+| **engram Document-RAG** | attached files → graph-RAG chunks | source tokens `user:<id>` / `session:<id>` / `workspace:<name>` / `kb:<id>` + gateway RBAC + always-on client post-filter | `retrieval.documentRag.*`: `enabled`, `engramBaseUrl`(`http://engram:8088`), `autoIngestAttachments`(true), `retrievalTopK`(6), `maxContextChars`(6000), `includeUser/WorkspaceDocs` (schema **false**, deployment shard **true** — `config/tooling/10-platform.jsonc`). Inert if disabled / engram unreachable. Tools: `ingest_document`, `search_documents`, `list_documents`, `forget_document`. **Documents page** |
 | **Knowledge Bases** | crawled docs sites → `kb:<id>` corpora | per-KB `KbScope` (session/workspace/user) + registry ACL | `retrieval.knowledgeBases.*` (crawl budgets). **HARD-depends on `documentRag.enabled`**. `create/search/manage_knowledge_base`. **Knowledge page** |
 | **pgvector unified store** | RAG chunks (rag_* tools) | `metadata.sessionId` (session) or global; instance-global table | `DATABASE_URL` env (+ `SAI_PGVECTOR_POOL_MAX`); inert without it. `rag_*` tools (`scope`, `k`, `minScore`) |
 | **MemGraph graph memory** | durable-memory nodes + `RETRIEVED` edges (E26) | scope/domain on nodes (workspace/user); **no `tenant_id`** | `MEMGRAPH_URL`/`NEO4J_URL`; inert → silent flat-file fallback. Tuning is code constants |
@@ -131,7 +132,7 @@ Several soft nudges also ride here, all eval-gated default-OFF: `splitOrchestrat
 - The **global default personality** — until a user saves their own override, everyone sees the shared persona. Editing the shared default while auth is on is intentionally not exposed to Wave-A users (everyone is an operator); it belongs with Wave-B roles.
 
 **Guards that fail open (know before relying on them):**
-- `canAccessResource(allowedUsers)` on credential/mail/compute stores: empty/unset `allowedUsers` = shared to all, and `undefined userId` (token/anon/auth-off) = allowed. It only restricts a resource **explicitly bound** to users under active multi-user auth.
+- `canAccessResource(allowedUsers)` on credential/mail/compute stores: empty/unset `allowedUsers` = **shared to all** (unbound is shared by design). For a resource *explicitly bound* via `allowedUsers`, a caller with `undefined userId` **fails closed when `auth.enabled` is true** and is allowed only when auth is off (`guardrails/resource-access.ts`). So under active multi-user auth an anonymous/token caller cannot reach a bound resource.
 - MemGraph nodes carry `scope`/`domain` but **no `tenant_id`** — no DB-level per-user partition. `graph_*` tools default to a shared global graph.
 - `tenant_id` scope-sets are **planned, not built** (a forward-looking comment in `document-rag.ts`); today's cross-scope enforcement is the client post-filter + the optional (default-OFF) `serverSideScopeFilter`.
 
@@ -150,7 +151,7 @@ Several soft nudges also ride here, all eval-gated default-OFF: `splitOrchestrat
 - **Change its personality** → **Memory page → Personality**.
 - **Stop stale facts resurfacing** → already on (`memory.supersedeStaleFacts`); run **Curate** to compact duplicates.
 - **Back up / move memory** → `sai memory export --vault <path>` (Obsidian vault), `sai memory import` to restore.
-- **Isolate per user** → today, only RAG documents/KBs are per-user; durable memory/personality are shared (see §6). File a hardening task if you need per-account durable isolation.
+- **Isolate per user** → **already done.** Under active multi-user auth (`auth.enabled`), durable user memory, the dialectic user-model, and the personality override are each partitioned per authenticated user under `<base>/users/<segment>/` via `userScopedDir` (`runtime/user-scope.ts`) — see `memory/service.ts`, `user-model/service.ts`, `personality/service.ts`. RAG documents/KBs are scoped by engram `user:` source tokens. With auth disabled, every path collapses to the single shared location, preserving single-operator back-compat.
 
 ---
 

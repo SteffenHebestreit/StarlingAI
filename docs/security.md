@@ -25,10 +25,11 @@ The gateway uses JWT tokens for both WebSocket and REST authentication.
 The JWT signing secret is resolved in this order:
 
 1. `SAI_JWT_SECRET` environment variable (≥32 chars) — explicit override, recommended for production and CI.
-2. `./.starlingai/.jwt_secret` — auto-generated on first run, persisted in the workspace. Written with mode `0600`.
-3. `~/.starlingai/.jwt_secret` — reused if a home-scoped secret from an older installation exists.
+2. `gateway.jwtSecret` in config (≥32 chars) — takes precedence over **both** persisted secret files below, so a value left here silently overrides the auto-generated one.
+3. `./.starlingai/.jwt_secret` — auto-generated on first run, persisted in the workspace. Written with mode `0600`.
+4. `~/.starlingai/.jwt_secret` — reused if a home-scoped secret from an older installation exists.
 
-If none of the above is present, a cryptographically random secret is generated and written to option 2. Tokens are stable across restarts with zero configuration.
+If none of the above is present, a cryptographically random secret is generated and written to option 3. Tokens are stable across restarts with zero configuration.
 
 ### Generating Tokens
 
@@ -41,11 +42,13 @@ pnpm sai token --user alice --role viewer --ttl 7d
 pnpm sai token --user deploy-bot --role admin --ttl 30d
 ```
 
-Tokens carry a `user` claim (default: `admin`), a `role` claim, and a standard `exp` expiry. The gateway validates `exp` on every request.
+Tokens carry a `sub` claim holding the user id (the standard JWT subject — not a `user` claim), a `role` claim, and a standard `exp` expiry. The gateway validates `exp` on every request.
 
 ### Auth Failure Rate Limiting
 
-Authentication failures are rate-limited to **10 attempts per 5-minute window per IP address**. After the limit is reached, all requests from that IP return HTTP 429 until the window expires. This limit applies to WebSocket upgrade attempts and REST API calls with invalid or missing tokens.
+Authentication failures are rate-limited to **10 attempts per 5-minute window per IP address** (`checkAuthRateLimit` in `packages/core/src/gateway/auth.ts`). A successful auth clears that IP's counter.
+
+The limit covers exactly three surfaces: `POST /api/auth/login` (HTTP 429), `/ws` connections (closed with code 4429), and `/ws/browser-vnc` upgrades (HTTP 429). Every other `/api/*` route rejects an invalid or missing bearer token with a plain 401 and is **not** rate-limited — put a reverse proxy in front of the gateway if you need blanket per-IP throttling.
 
 ---
 
@@ -58,7 +61,7 @@ The encrypted credential store holds secrets that should survive restarts but mu
 **Location:**
 
 - local development default: `./.starlingai/credentials.enc`
-- Docker Compose default: `/data/credentials.enc`
+- Docker Compose default: `/workspace/.starlingai/credentials.enc` (Compose sets `SAI_CRED_STORE` explicitly)
 - explicit override: `SAI_CRED_STORE`
 
 **What is stored:**
@@ -84,7 +87,11 @@ Semantics (backwards compatible):
 
 - **Empty / omitted** `allowedUsers` → the resource is **shared** (every authenticated user may use it). Unbound-is-shared is by design; private-by-default would need a per-resource owner model.
 - **No requesting user** + an **unbound** resource → allowed (the `allowedUsers` lists are inert until `auth.enabled`).
-- **No requesting user** + a **bound** resource → allowed only when `auth.enabled: false` (single-operator / token mode). Under active multi-user auth a bound resource **fails closed** rather than leak to a user-less caller.
+- **No requesting user** + a **bound** resource → **the two enforcement points differ here:**
+  - *Stored site credentials and computer-use nodes* go through `canAccessResource` (`guardrails/resource-access.ts`), which **fails closed** under active multi-user auth — allowed only when `auth.enabled: false`.
+  - *Mail / calendar / contacts accounts* are enforced by the mail-service instead (`packages/mail-service/src/account-access.ts`), which **allows** a user-less caller even for a bound account (`if (!user) return true`). The gateway forwards the authenticated user as `X-Sai-User`; when that header is absent the mail-service treats the request as unscoped. It has no visibility into `auth.enabled`, so it cannot make the same fail-closed decision.
+
+  In practice the gateway sets the header for any JWT-authenticated request, so this gap is reachable only by a caller that bypasses user context (e.g. a service-token path). Treat `allowedUsers` on mail accounts as **advisory** rather than a hard boundary until the mail-service is given the auth state.
 - Otherwise → access is allowed only if the user's username appears in the list (compared case-insensitively).
 
 Enforcement is centralized: the gateway threads the authenticated user into tool execution and forwards it to the mail-service (`X-Sai-User` header); a restricted mail account returns 403 and a restricted node/credential is treated as not-found (no existence leak). See `guardrails/resource-access.ts` and the mail-service `account-access.ts`. Tool tiers, sandboxing, and approval gates remain global and are not affected by `allowedUsers`.
@@ -131,7 +138,15 @@ Detects:
 - **Prompt injection** — instruction override phrases ("ignore previous instructions", "you are now DAN", etc.)
 - **Jailbreak templates** — known patterns for role confusion and authority escalation
 - **Indirect injection** — instruction fragments embedded in content the agent is asked to process (web pages, documents, emails)
-- **Sensitive input data** — credit card numbers, SSNs, private key headers in user messages
+- **Credential-extraction phrasing** — requests such as "show me all API keys" (`extract_credentials`)
+- **Padding / steganography heuristics** — zero-width and bidi-override characters, long base64 blobs, excessive character repetition
+
+> **Layer 1 does not scan for secret or PII *values*.** There is no credit-card,
+> SSN, or private-key detection on the input path — `INJECTION_PATTERNS`
+> (`packages/core/src/guardrails/input.ts`) matches injection and jailbreak
+> phrasing only. Secret *values* are caught on the way **out**, by the Layer 3/4
+> output redaction (`guardrails/output.ts`). Do not rely on this layer to stop a
+> user pasting credentials into the chat.
 
 Blocked messages return `status: "blocked"` to the client. The block event is recorded in the audit log with the matched pattern type (but not the full pattern content, to avoid logging the injection attempt verbatim).
 
@@ -141,7 +156,7 @@ Applied before any tool execution.
 
 - Tier 0 tools execute immediately.
 - Tier 1 tools execute with audit logging.
-- Tier 2 and Tier 3 tools require per-call approval. Approval requests are routed to the configured approval channel (Slack or webhook). Execution blocks until approved or denied.
+- Per-call approval is driven by each tool's own `requiresPerCallApproval` flag, **not by its tier number** — `executeTool` gates on that flag (`packages/core/src/tools/registry.ts`), and a scene's `humanInLoopSteps` can additionally force approval for any tool. Most Tier 2/3 tools set the flag (`shell_exec`, the `ssh_*` and infrastructure tools, credential injection, …), but some execution-tier tools deliberately do not — internal orchestration (`delegate_to_agent`, `swarm_delegate`, `parallel_delegate`, `run_workflow`, …) stays inside the guarded runtime, where the sub-agent's own tool calls are gated individually. **Check `docs/reference/tool-tiers.md` for the per-tool `approval` column rather than assuming from the tier.**
 - Tier 4 tools are rejected immediately with no approval path.
 - Unknown tools (not in any tier) are treated as Tier 4.
 
@@ -171,7 +186,7 @@ This is a last-resort layer — it catches anything that slipped through Layer 3
 
 `shell_exec` and `run_script` always execute inside a dedicated sandbox Docker container. There is no configuration option that routes these tools to the host. The sandbox container:
 
-- Has no access to the host network (isolated bridge network)
+- Has **no network stack at all** (`docker run --network=none`, `tools/shell.ts`) — it cannot reach the host, other containers, or the internet
 - Mounts only the workspace volume (read-write) and nothing else
 - Runs as a non-root user
 - Has a hard CPU and memory limit
@@ -200,7 +215,7 @@ Default resolution:
 
 - `./.starlingai/audit.jsonl` when running locally and no explicit override is set
 - existing `~/.starlingai/audit.jsonl` only if that legacy path already exists
-- `/data/audit.jsonl` in the Docker Compose setup because Compose sets `SAI_AUDIT_LOG`
+- `/workspace/.starlingai/audit.jsonl` in the Docker Compose setup, because Compose sets `SAI_AUDIT_LOG` explicitly
 
 **PostgreSQL sink (optional):** when Postgres is configured, the gateway also writes audit events to `audit_events`.
 
@@ -214,7 +229,7 @@ Secrets are redacted in audit entries using the same scanner as Layer 3/4 before
 
 ## Security Checklist for Production
 
-- [ ] Set `SAI_MASTER_KEY` to a randomly generated ≥32-character string (not the default from `setup.mjs`)
+- [ ] Confirm `SAI_MASTER_KEY` is set to a randomly generated ≥32-character string. `scripts/setup-wizard.mjs` generates one automatically when it is missing or shorter than 32 chars — there is no shared default to replace, but verify the value was not copied between environments.
 - [ ] Set `SAI_JWT_SECRET` explicitly — do not rely on the auto-generated file in production
 - [ ] Set `gateway.publicUrl` in `starlingai.json` — required for channel webhook verification
 - [ ] If the dashboard calls the gateway across origins, add the dashboard origin to `gateway.corsAllowedOrigins`

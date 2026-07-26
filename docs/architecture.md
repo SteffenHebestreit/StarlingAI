@@ -212,9 +212,9 @@ The current `v0.45.8` codebase implements the swarm vision through **Stage 13** 
 | **Browser tools** | 7 | Implemented | `browser_navigate`, `browser_snapshot`, `browser_wait_for`, `browser_click`, `browser_type`, `browser_select_option`, `browser_screenshot` (Playwright MCP wrappers) |
 | **Human-in-the-loop approvals** | 7 | Implemented | Slack Block Kit, outbound webhook, sync webhook; per-scene `humanInLoopSteps`; one-click HTTP callbacks; WebSocket `approval.respond` RPC |
 | **Intervention diagnostics** | 7 | Implemented | `classifyToolIntervention()` with 9 categories; streamed to WebSocket as `intervention` events |
-| **Default tool registry** | 7 | Implemented | `DIRECT_MAIN_TOOL_NAMES` (20 tools) + `ORCHESTRATION_TOOL_NAMES` (7 tools) |
+| **Default tool registry** | 7 | Implemented | `ALWAYS_AVAILABLE_MAIN_TOOL_NAMES` (22) + `DIRECT_MAIN_TOOL_NAMES` (52) + `ORCHESTRATION_TOOL_NAMES` (13), in `agent/default-tools.ts` |
 | **Standalone scene worker** | 7 | Implemented | `pnpm --filter @starlingai/core worker:scene` runs queued scene jobs outside the gateway process; set `SAI_DISABLE_EMBEDDED_SCENE_WORKER=1` on the gateway when splitting processes |
-| **Container opt-out model** | 8 | Implemented (v0.3.2, default flipped post-v0.6.4) | `agents.defaultContainerized: true` global flag (set `STARLINGAI_DEFAULT_CONTAINERIZED=false` to opt out in tests) + per-agent `container.disabled: true` escape hatch; 27 trusted agents pre-opted-out in the workspace catalog |
+| **Container opt-out model** | 8 | Implemented (v0.3.2, default flipped post-v0.6.4) | `agents.defaultContainerized: true` global flag (set `STARLINGAI_DEFAULT_CONTAINERIZED=false` to opt out in tests) + per-agent `container.disabled: true` escape hatch; 26 of the 48 workspace-catalog agents are pre-opted-out |
 | **Self-improvement audit trail** | 8 | Implemented (v0.3.2) | `config_proposal_created` / `config_proposal_applied` / `self_improvement_applied` audit events with full attribution (proposingAgent, targetAgent, changes); Warden detects proposal floods |
 | **selfdev__ prefix guard** | 8 | Implemented (v0.3.2) | Dynamic tool validator rejects any tool definition whose name starts with `selfdev__` (prefix stacking attack blocked) |
 | **Grounded chart and Mermaid artifacts** | 9.1 | Implemented (v0.4.1) | `generate_chart_html` can carry explicit source attachments; `generate_mermaid_diagram` produces previewable diagram artifacts end-to-end |
@@ -576,18 +576,25 @@ packages/
                                             analyze_image, browser_* (Playwright MCP)
   web/                      Vue 3 dashboard (Vite + Tailwind + Three.js)
     src/
-      components/           MessageBubble.vue — chat message renderer
+      components/           (15) MessageBubble.vue — chat message renderer
                             LoginModal.vue — JWT login
                             OrbCanvas.vue — Three.js swarm visualizer
                             SwarmStatusPanel.vue — live agent and bus status
-                            ToolCallCard.vue — tool call inspector
-                            ToggleSwitch.vue — settings toggle
-                            ChannelIcon.vue — channel type icon
-      pages/                Chat.vue — main chat interface with streaming
+                            BrowserSessionPanel.vue · ComputerSessionPanel.vue ·
+                              ShellSessionPanel.vue — live operator docks
+                            OperatorRequestsDock.vue — human-assist requests
+                            AppearanceSettings.vue — theme picker
+                            ToggleSwitch.vue · ChannelIcon.vue · NavGroup.vue ·
+                              SidePanel.vue · ModelConnectModal.vue
+      pages/                (18) Chat.vue — main chat interface with streaming
                             Settings.vue — agent, guardrail, channel configuration
                             AuditLog.vue — real-time audit event viewer
                             Sessions.vue — session history browser
-      stores/               gateway.ts — WebSocket connection and RPC
+                            SwarmDashboard.vue · Missions.vue · MemoryInspector.vue ·
+                              Documents.vue · KnowledgeBases.vue · Skills.vue ·
+                              Agents.vue · Jobs.vue · Cost.vue · Users.vue ·
+                              Plugins.vue · McpServers.vue · A2APeers.vue · Federation.vue
+      stores/               (21) gateway.ts — WebSocket connection and RPC
                             agents.ts — agent catalog and routing state
                             guardrails.ts — guardrail configuration
                             channels.ts — channel status and metrics
@@ -595,6 +602,12 @@ packages/
                             audit.ts — audit event stream
                             runtime.ts — swarm runtime status
                             multimodal.ts — multimodal config and status
+                            theme.ts · product.ts · notifications.ts ·
+                              browser.ts · computer.ts · shell.ts · operatorRequests.ts ·
+                              auth.ts · jobs.ts · personality.ts · modelPreset.ts ·
+                              configAssistant.ts
+      extensions/           registry.ts — fork-owned routes/nav discovered at build
+                            time via import.meta.glob (`_example/` stays dormant)
 docker/
   gateway/Dockerfile        Gateway service container
   web/Dockerfile            Nginx-served Vue dashboard
