@@ -244,6 +244,7 @@ function vncDesEncrypt(challenge: Buffer, password: string): Buffer {
 class StreamReader {
   private buffer = Buffer.alloc(0);
   private waitResolve: ((chunk: Buffer) => void) | null = null;
+  private waitReject: ((err: Error) => void) | null = null;
   private waitBytes = 0;
   private error: Error | null = null;
 
@@ -263,6 +264,7 @@ class StreamReader {
       const resolve = this.waitResolve;
       const n = this.waitBytes;
       this.waitResolve = null;
+      this.waitReject = null;
       this.waitBytes = 0;
       const data = this.buffer.subarray(0, n);
       this.buffer = this.buffer.subarray(n);
@@ -270,14 +272,20 @@ class StreamReader {
     }
   }
 
+  /**
+   * Settle a pending read with an error. The pending promise MUST be rejected
+   * here, not just recorded in `this.error`: a socket error/close while a read
+   * is outstanding is the common case (server drops the connection mid-frame),
+   * and an unsettled promise hangs the whole VNC session forever with no
+   * timeout to break it.
+   */
   private reject(err: Error): void {
-    if (this.waitResolve) {
-      // Using a local to avoid calling a stale resolve
-      const oldResolve = this.waitResolve;
-      this.waitResolve = null;
-      // We can't reject a resolve, so we store the error for the next read
-      this.error = err;
-    }
+    this.error = err;
+    const reject = this.waitReject;
+    this.waitResolve = null;
+    this.waitReject = null;
+    this.waitBytes = 0;
+    if (reject) reject(err);
   }
 
   async read(n: number): Promise<Buffer> {
@@ -290,6 +298,7 @@ class StreamReader {
     return new Promise<Buffer>((resolve, reject) => {
       if (this.error) { reject(this.error); return; }
       this.waitResolve = resolve;
+      this.waitReject = reject;
       this.waitBytes = n;
       // Check again in case data arrived between the check above and now
       this.tryFlush();
@@ -397,7 +406,10 @@ export class VncClient extends EventEmitter {
     // ── Server Init ──
     this._width = await this.reader.readUint16BE();
     this._height = await this.reader.readUint16BE();
-    const pixelFormat = await this.reader.read(16); // server's default pixel format
+    // Consume (and discard) the server's default pixel format. The read is
+    // load-bearing even though the value is unused: it advances the stream past
+    // 16 bytes that the name-length field follows.
+    await this.reader.read(16);
     const nameLen = await this.reader.readUint32BE();
     this._name = (await this.reader.read(nameLen)).toString("utf-8");
 

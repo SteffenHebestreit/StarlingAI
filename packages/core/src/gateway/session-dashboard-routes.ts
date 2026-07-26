@@ -35,6 +35,17 @@ export function registerSessionDashboardRoutes(app: Hono): void {
     return c.json(computerSessionManager.listActiveSessions());
   });
 
+  // MUST stay ahead of "/:id" — Hono matches in registration order, so a later
+  // literal route is shadowed by an earlier parameterized one ("config" would be
+  // read as a session id and always 404).
+  app.get("/api/computer-sessions/config", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const cfg = getConfig();
+    const computerUse = (cfg as Record<string, unknown>)["computerUse"] ?? {};
+    return c.json(computerUse);
+  });
+
   app.get("/api/computer-sessions/:id", async (c) => {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
@@ -61,14 +72,6 @@ export function registerSessionDashboardRoutes(app: Hono): void {
     const id = c.req.param("id");
     computerSessionManager.heartbeat(id);
     return c.json({ ok: true });
-  });
-
-  app.get("/api/computer-sessions/config", async (c) => {
-    const token = extractBearerToken(c.req.header("Authorization"));
-    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
-    const cfg = getConfig();
-    const computerUse = (cfg as Record<string, unknown>)["computerUse"] ?? {};
-    return c.json(computerUse);
   });
 
   // ── Browser-session routes (noVNC live preview + human handoff) ──────────────
