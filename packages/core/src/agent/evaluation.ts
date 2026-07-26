@@ -3,6 +3,7 @@ import { existsSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs
 import { dirname, resolve, join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { getConfig } from "../config/loader.js";
+import { PRODUCT } from "../product/index.js";
 import { runWithOrchestrationOverride } from "../runtime/effort-context.js";
 import type { SubAgentExecutionStats, SubAgentRunOptions, SubAgentRunResult } from "./sub-agent.js";
 import { runSubAgentWithStats } from "./sub-agent.js";
@@ -371,7 +372,13 @@ export function snapshotWorkspace(workspacePath: string): Map<string, string> | 
   const snapshot = new Map<string, string>();
   const walk = (dir: string, rel: string): boolean => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (entry.name === ".git" || entry.name === "node_modules") continue;
+      // Skip non-agent-authored trees. PRODUCT.stateDirName is the important one:
+      // every sub-agent run appends its outcome record to
+      // <workspacePath>/<stateDir>/agent_outcomes.ndjson (sub-agent.ts appendOutcome),
+      // so without this exclusion `expectNoWorkspaceChanges` flagged the RUNTIME's own
+      // bookkeeping as an agent edit and could never pass. The gate asks "did the agent
+      // modify the code", not "did the runtime record telemetry".
+      if (entry.name === ".git" || entry.name === "node_modules" || entry.name === PRODUCT.stateDirName) continue;
       const p = join(dir, entry.name);
       const r = rel ? `${rel}/${entry.name}` : entry.name;
       if (entry.isDirectory()) {

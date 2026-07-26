@@ -766,3 +766,35 @@ describe("agent evaluation harness — configOverride (candidate-config A/B arm)
     }
   });
 });
+
+describe("agent evaluation harness — pristine diff ignores runtime bookkeeping", () => {
+  it("the product state dir is excluded, so the runtime's own outcome write is not an 'agent edit'", async () => {
+    const { snapshotWorkspace, diffWorkspaceSnapshots } = await import("../agent/evaluation.js");
+    const { PRODUCT } = await import("../product/index.js");
+
+    const ws = mkdtempSync(join(tmpdir(), "sai-pristine-"));
+    mkdirSync(join(ws, "generated"), { recursive: true });
+    writeFileSync(join(ws, "generated", "cart.js"), "export const x = 1;\n", "utf8");
+
+    const before = snapshotWorkspace(ws);
+    expect(before).toBeDefined();
+
+    // Exactly what every sub-agent run does: appendOutcome writes
+    // <workspacePath>/<stateDir>/agent_outcomes.ndjson. Before this exclusion it
+    // tripped expectNoWorkspaceChanges on every single run, so the EVL-401
+    // assessment-must-not-edit trap could never pass.
+    mkdirSync(join(ws, PRODUCT.stateDirName), { recursive: true });
+    writeFileSync(join(ws, PRODUCT.stateDirName, "agent_outcomes.ndjson"), '{"agent":"code_analyst"}\n', "utf8");
+
+    const changes = diffWorkspaceSnapshots(before!, snapshotWorkspace(ws)!);
+    expect(changes.added).toEqual([]);
+    expect(changes.modified).toEqual([]);
+    expect(changes.deleted).toEqual([]);
+
+    // A real source edit is still caught.
+    writeFileSync(join(ws, "generated", "cart.js"), "export const x = 2;\n", "utf8");
+    expect(diffWorkspaceSnapshots(before!, snapshotWorkspace(ws)!).modified).toEqual(["generated/cart.js"]);
+
+    rmSync(ws, { recursive: true, force: true });
+  });
+});
