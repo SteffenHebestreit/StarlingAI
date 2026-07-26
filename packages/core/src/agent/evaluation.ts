@@ -3,6 +3,7 @@ import { existsSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs
 import { dirname, resolve, join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { getConfig } from "../config/loader.js";
+import { runWithOrchestrationOverride } from "../runtime/effort-context.js";
 import type { SubAgentExecutionStats, SubAgentRunOptions, SubAgentRunResult } from "./sub-agent.js";
 import { runSubAgentWithStats } from "./sub-agent.js";
 import {
@@ -54,6 +55,22 @@ export interface AgentEvaluationCase {
    * `"composed"` — it labels the arm and is what the pinned twin runs.
    */
   arm?: "pinned" | "composed";
+  /**
+   * Flip `orchestration.*` flags for this case only.
+   *
+   * `effectiveOrchestration()` reads process-global config, so measuring a candidate
+   * orchestration flag previously meant editing a shard, rebuilding config and
+   * restarting — which is why flags accumulate at default-off instead of being
+   * evaluated. This applies the flags through the turn-scoped AsyncLocalStorage
+   * overlay for the duration of the attempt and nothing else.
+   *
+   * Two arms over the same task, one with `{ qaToolJudge: true }`, is the whole A/B.
+   *
+   * In-process transport only (a gateway-routed run is a different process). Fields
+   * an effort profile controls still lose to the effort dial — see
+   * runWithOrchestrationOverride.
+   */
+  orchestrationOverride?: Partial<import("../config/schemas/orchestration.js").OrchestrationConfig>;
   /** Inspect the file(s) the agent actually PRODUCED, not just its returned text —
    *  the only way to gate file-writing builders on deliverable completeness (a
    *  builder's reply is a summary+path, so expectIncludes can't see a dropped or
@@ -426,7 +443,7 @@ async function runEvalAttempt(
   clearArtifacts(caseWorkspace, testCase);
   const pristine = testCase.expectNoWorkspaceChanges ? snapshotWorkspace(caseWorkspace) : undefined;
   const startedAt = Date.now();
-  const result = await runner({
+  const result = await runWithOrchestrationOverride(testCase.orchestrationOverride, () => runner({
     agentName: testCase.agentName,
     task: testCase.task,
     context: testCase.context,
@@ -434,7 +451,7 @@ async function runEvalAttempt(
     workspacePath: caseWorkspace,
     ...(testCase.configOverride ? { inlineConfig: resolveInlineConfig(testCase) } : {}),
     ...(testCase.arm ? { _evalArm: testCase.arm } : {}),
-  });
+  }));
   const durationMs = Date.now() - startedAt;
   const failures = collectFailures(result.output, durationMs, testCase, caseWorkspace);
   let workspaceChanges: WorkspaceChanges | undefined;
