@@ -34,3 +34,27 @@ describe("gateway eval runner — pure helpers", () => {
     expect(typeof stats.usage.promptTokens).toBe("number");
   });
 });
+
+describe("gateway eval runner — pinned vs composed arm", () => {
+  it("omitting the arm is byte-identical to the pinned behavior", () => {
+    const withoutArm = buildGatewayMessage({ task: "Write a doc", agentName: "content_writer" });
+    const explicitPinned = buildGatewayMessage({ task: "Write a doc", agentName: "content_writer", _evalArm: "pinned" });
+    expect(withoutArm).toBe("Write a doc --agent content_writer");
+    expect(explicitPinned).toBe(withoutArm);
+  });
+
+  it("the composed arm drops --agent so live routing picks the agents", () => {
+    const msg = buildGatewayMessage({ task: "Write a doc", agentName: "content_writer", _evalArm: "composed" });
+    expect(msg).toBe("Write a doc");
+    expect(msg).not.toContain("--agent");
+  });
+
+  it("composed still folds context in, it only drops the override", () => {
+    const msg = buildGatewayMessage({
+      task: "Review it", context: "diff here", agentName: "diff_reviewer", _evalArm: "composed",
+    });
+    expect(msg).toContain("Context:\ndiff here");
+    expect(msg).toContain("Task: Review it");
+    expect(msg).not.toContain("--agent");
+  });
+});

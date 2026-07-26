@@ -3,7 +3,7 @@ import { existsSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs
 import { dirname, resolve, join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { getConfig } from "../config/loader.js";
-import type { SubAgentRunOptions, SubAgentRunResult } from "./sub-agent.js";
+import type { SubAgentExecutionStats, SubAgentRunOptions, SubAgentRunResult } from "./sub-agent.js";
 import { runSubAgentWithStats } from "./sub-agent.js";
 import {
   buildEvaluationProvenance,
@@ -27,6 +27,33 @@ export interface AgentEvaluationCase {
   maxDurationMs?: number;
   /** Per-case override for how many times to run this case (reliability sampling). */
   repeat?: number;
+  /**
+   * Score a CANDIDATE agent config without committing it to a workspace shard.
+   *
+   * Shallow-merged over `config.subAgents[agentName]` and handed to the runner as
+   * `inlineConfig`, which `runSubAgent` already prefers over the catalog entry.
+   * Absent ⇒ byte-identical to today.
+   *
+   * This exists because the alternative — edit a shard, run `config build`, restart,
+   * measure, revert — is the friction that keeps flag and prompt changes sitting at
+   * default-off indefinitely. With this, an A/B arm is two cases in one plan.
+   *
+   * In-process transport only: a gateway-routed run resolves the agent inside the
+   * gateway process, which has its own config and never sees this field.
+   */
+  configOverride?: Partial<import("../config/schema.js").SubAgentConfig>;
+  /**
+   * Pinned-vs-composed arm (gateway transport only).
+   *
+   * `"pinned"` (default) forces `--agent <agentName>`, which is how every eval has
+   * run so far — it measures one agent in isolation. `"composed"` drops the override
+   * and lets routing/bidding/the coordinator choose, measuring the swarm as a system.
+   *
+   * Pair the same task under both arms to answer whether coordination actually beats
+   * a single strong agent on your own tasks. `agentName` is still required under
+   * `"composed"` — it labels the arm and is what the pinned twin runs.
+   */
+  arm?: "pinned" | "composed";
   /** Inspect the file(s) the agent actually PRODUCED, not just its returned text —
    *  the only way to gate file-writing builders on deliverable completeness (a
    *  builder's reply is a summary+path, so expectIncludes can't see a dropped or
@@ -369,6 +396,25 @@ function hasWorkspaceChanges(c: WorkspaceChanges): boolean {
 
 /** Run one pass^k attempt for a case: clear its artifacts, run the agent, time it,
  *  and collect failures. Pure per-attempt unit so attempts can be ordered or pooled. */
+/**
+ * Merge a case's `configOverride` onto the catalog entry for its agent.
+ *
+ * Shallow by design: `model`, `container` and friends are replaced wholesale rather
+ * than deep-merged, so an override says exactly what the arm runs. Throws when the
+ * agent is absent from the catalog — silently evaluating a half-defined agent would
+ * produce a number that looks valid and means nothing.
+ */
+function resolveInlineConfig(testCase: AgentEvaluationCase): import("../config/schema.js").SubAgentConfig {
+  const base = getConfig().subAgents[testCase.agentName];
+  if (!base) {
+    throw new Error(
+      `configOverride on case "${testCase.name}" targets unknown agent "${testCase.agentName}" — ` +
+      "there is no catalog entry to merge onto.",
+    );
+  }
+  return { ...base, ...testCase.configOverride };
+}
+
 async function runEvalAttempt(
   testCase: AgentEvaluationCase,
   workspacePath: string,
@@ -386,6 +432,8 @@ async function runEvalAttempt(
     context: testCase.context,
     parentSessionId: `eval:${randomUUID()}`,
     workspacePath: caseWorkspace,
+    ...(testCase.configOverride ? { inlineConfig: resolveInlineConfig(testCase) } : {}),
+    ...(testCase.arm ? { _evalArm: testCase.arm } : {}),
   });
   const durationMs = Date.now() - startedAt;
   const failures = collectFailures(result.output, durationMs, testCase, caseWorkspace);
@@ -441,6 +489,40 @@ async function runEvalAttempt(
     }
   }
   return { durationMs, failures, isError: result.output.startsWith("Sub-agent error:"), result, ...(workspaceChanges ? { workspaceChanges } : {}), ...(judgeScores ? { judgeScores } : {}) };
+}
+
+/**
+ * Aggregate per-attempt execution stats into one representative record.
+ *
+ * Cost and effort fields are MEANS across the k attempts; identity fields
+ * (agent, model, session, capabilities) come from the last attempt since they
+ * are constant across a case's repeats.
+ *
+ * Why this matters: `compareEvaluationReports` gates CI on `stats.usage.totalTokens`
+ * (token_spike, >1.3x) and on latency. Reporting only the last attempt's stats
+ * made those a ONE-SAMPLE comparison even at --repeat 5, while passCount/passCaretK
+ * right beside them correctly aggregated every attempt. With normal LLM token
+ * variance a single sample crosses a 1.3x threshold routinely, so the gate both
+ * fired on noise and missed real regressions.
+ */
+function meanStats(attemptStats: SubAgentExecutionStats[]): SubAgentExecutionStats {
+  const last = attemptStats[attemptStats.length - 1]!;
+  const n = attemptStats.length;
+  if (n === 1) return last;
+  const mean = (pick: (s: SubAgentExecutionStats) => number): number =>
+    Math.round(attemptStats.reduce((acc, s) => acc + pick(s), 0) / n);
+  return {
+    ...last,
+    promptChars: mean((s) => s.promptChars),
+    userContentChars: mean((s) => s.userContentChars),
+    toolCount: mean((s) => s.toolCount),
+    iterations: mean((s) => s.iterations),
+    usage: {
+      promptTokens: mean((s) => s.usage?.promptTokens ?? 0),
+      completionTokens: mean((s) => s.usage?.completionTokens ?? 0),
+      totalTokens: mean((s) => s.usage?.totalTokens ?? 0),
+    },
+  };
 }
 
 /** Run `fn` over indices [0, count) with at most `limit` in flight, preserving result
@@ -515,7 +597,7 @@ export async function evaluateAgentPlan(
       status,
       failures: passCaretK ? [] : firstFailures,
       outputPreview: preview(lastResult?.output ?? ""),
-      stats: lastResult!.stats,
+      stats: meanStats(attemptResults.map((a) => a.result.stats)),
       attempts,
       passCount,
       passCaretK,
@@ -560,7 +642,7 @@ export async function writeEvaluationReport(report: AgentEvaluationReport, outpu
 export interface RegressionFinding {
   caseName: string;
   agentName: string;
-  kind: "case_newly_failed" | "latency_spike" | "token_spike";
+  kind: "case_newly_failed" | "latency_spike" | "token_spike" | "cost_per_pass";
   detail: string;
   baselineValue: number;
   currentValue: number;
@@ -576,6 +658,27 @@ export interface RegressionReport {
 
 const LATENCY_REGRESSION_FACTOR = 1.5; // >50% increase
 const TOKEN_REGRESSION_FACTOR = 1.3;   // >30% increase
+const COST_PER_PASS_REGRESSION_FACTOR = 1.3; // >30% more tokens per SUCCESSFUL attempt
+
+/**
+ * Mean tokens per passing attempt — the metric that survives a reliability/cost
+ * tradeoff. `token_spike` only fires when the case still passes pass^k, so a change
+ * that makes an agent cheaper per run but flakier is invisible to it: fewer tokens
+ * AND a dropped passCount reads as "no token regression" (or no comparison at all).
+ * Dividing mean tokens by passCount prices that honestly — halving tokens while
+ * going 5/5 → 2/5 is a 25% cost-per-pass INCREASE, not a win.
+ *
+ * Returns null when nothing passed: there is no meaningful cost-per-pass for a case
+ * that never succeeded, and the pass regression is already reported separately.
+ */
+function costPerPass(result: AgentEvaluationCaseResult): number | null {
+  const passes = result.passCount ?? (result.passed ? 1 : 0);
+  if (passes <= 0) return null;
+  const tokens = result.stats.usage?.totalTokens ?? 0;
+  if (tokens <= 0) return null;
+  const attempts = result.attempts ?? 1;
+  return Math.round((tokens * attempts) / passes);
+}
 
 /** Median run duration — robust to the cold-start outlier that skews the mean on
  *  small pass^k samples (a single process-warmup run shouldn't read as a latency
@@ -596,6 +699,12 @@ function medianDurationMs(result: AgentEvaluationCaseResult): number {
 export function compareEvaluationReports(
   baseline: AgentEvaluationReport,
   current: AgentEvaluationReport,
+  opts?: {
+    /** Opt-in: report cost-per-pass regressions. Off by default so existing
+     *  baselines (which predate mean-aggregated stats) don't start failing CI
+     *  on a metric they were never measured against. */
+    costCompare?: boolean;
+  },
 ): RegressionReport {
   const findings: RegressionFinding[] = [];
   const baselineByName = new Map(baseline.results.map(r => [r.name, r]));
@@ -644,6 +753,24 @@ export function compareEvaluationReports(
         baselineValue: baseTokens,
         currentValue: currTokens,
       });
+    }
+
+    if (opts?.costCompare) {
+      const baseCost = costPerPass(base);
+      const currCost = costPerPass(curr);
+      // Unlike token_spike this deliberately does NOT require curr.passed — pricing a
+      // reliability drop is the whole point. A case that stopped passing entirely is
+      // skipped (currCost null) since case_newly_failed already reports it.
+      if (baseCost !== null && currCost !== null && currCost > baseCost * COST_PER_PASS_REGRESSION_FACTOR) {
+        findings.push({
+          caseName: curr.name,
+          agentName: curr.agentName,
+          kind: "cost_per_pass",
+          detail: `Tokens per passing attempt up ${Math.round(((currCost / baseCost) - 1) * 100)}% (${baseCost} → ${currCost}; passCount ${base.passCount ?? "?"}/${base.attempts ?? "?"} → ${curr.passCount ?? "?"}/${curr.attempts ?? "?"})`,
+          baselineValue: baseCost,
+          currentValue: currCost,
+        });
+      }
     }
   }
 

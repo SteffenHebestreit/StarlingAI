@@ -31,6 +31,11 @@ async function main(): Promise<void> {
     : (process.env["SAI_EVAL_CONCURRENCY"] ? Math.max(1, parseInt(process.env["SAI_EVAL_CONCURRENCY"], 10) || 1) : undefined);
   // Gateway-routed eval: run each case through a live gateway (full runtime env)
   // instead of in-process. Needed for agents that touch docker/web/browser.
+  // Opt-in cost-per-pass regression check (mean tokens ÷ passing attempts). Off by
+  // default: existing baselines were recorded before stats were mean-aggregated, so
+  // enabling it silently would compare against numbers that meant something else.
+  // Re-baseline first, then pass this.
+  const costCompare = args.includes("--cost-compare");
   const viaGateway = args.includes("--via-gateway");
   const gatewayUrlIndex = args.indexOf("--gateway-url");
   const gatewayUrl = (gatewayUrlIndex !== -1 ? args[gatewayUrlIndex + 1] : undefined) ?? "ws://localhost:8765/ws";
@@ -49,7 +54,7 @@ async function main(): Promise<void> {
   const resolvedPlanPath = planPath ?? (existsSync(defaultPlanPath) ? defaultPlanPath : undefined);
 
   if (!resolvedPlanPath) {
-    console.error("Usage: pnpm agents:evaluate [plan.jsonc] [output.json] [--baseline baseline.json] [--repeat k] [--record]");
+    console.error("Usage: pnpm agents:evaluate [plan.jsonc] [output.json] [--baseline baseline.json] [--repeat k] [--cost-compare] [--record]");
     console.error("                            [--via-gateway [--gateway-url ws://host:8765/ws] [--token <jwt>]]");
     console.error("If omitted, the CLI looks for ./agent-eval.jsonc in the current workspace.");
     console.error("--repeat k runs each case k times and reports pass^k (reliability), not just pass@1.");
@@ -140,7 +145,7 @@ async function main(): Promise<void> {
       return;
     }
 
-    const regressions = compareEvaluationReports(baseline, report);
+    const regressions = compareEvaluationReports(baseline, report, { costCompare });
     console.log(`\n${formatRegressionSummary(regressions)}`);
     if (regressions.hasRegressions) {
       hasRegressions = true;

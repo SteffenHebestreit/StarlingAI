@@ -75,10 +75,25 @@ export function statsFromTurnPerformance(
   };
 }
 
-/** Compose the chat.send message: task + optional context + the forced-agent flag. */
-export function buildGatewayMessage(opts: Pick<SubAgentRunOptions, "task" | "context" | "agentName">): string {
+/**
+ * Compose the chat.send message: task + optional context + the forced-agent flag.
+ *
+ * `_evalArm` selects what is actually under test:
+ * - `"pinned"` (default) forces `--agent <name>`, measuring that ONE agent in
+ *   isolation. Every eval to date has run this way.
+ * - `"composed"` omits the override so the live routing/bidding/coordinator path
+ *   picks the agents itself. This is the only way to measure the swarm AS a swarm —
+ *   without it there is no arm to compare a pinned single agent against, and the
+ *   question "does coordination beat one strong agent on OUR tasks" is unanswerable.
+ *
+ * Default is `"pinned"`, so an omitted arm is byte-identical to the previous
+ * behavior.
+ */
+export function buildGatewayMessage(
+  opts: Pick<SubAgentRunOptions, "task" | "context" | "agentName"> & { _evalArm?: "pinned" | "composed" },
+): string {
   const base = opts.context ? `Context:\n${opts.context}\n\nTask: ${opts.task}` : opts.task;
-  return `${base} --agent ${opts.agentName}`;
+  return opts._evalArm === "composed" ? base : `${base} --agent ${opts.agentName}`;
 }
 
 export function createGatewayEvalRunner(options: GatewayRunnerOptions): GatewayEvalRunner {

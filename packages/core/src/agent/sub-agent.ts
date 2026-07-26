@@ -1485,6 +1485,13 @@ export interface SubAgentRunOptions {
    * of their own budget to each delegated specialist.
    */
   softDeadlineMs?: number;
+  /**
+   * Eval transport only, ignored by the in-process runner: which arm of a
+   * pinned-vs-composed comparison this attempt belongs to. "composed" tells the
+   * gateway runner to omit the `--agent` override so live routing/bidding picks
+   * the agents instead. Absent ⇒ "pinned" ⇒ previous behavior.
+   */
+  _evalArm?: "pinned" | "composed";
 }
 
 export interface SubAgentProgressEvent {
