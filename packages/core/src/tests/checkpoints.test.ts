@@ -1,4 +1,22 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+// Checkpoints persist to `config.workspacePath` and there is no env override for
+// it, so under vitest (which runs from packages/core) these tests were writing
+// real checkpoint JSON into packages/core/workspace/.starlingai/checkpoints/.
+// workspacePath is the ONLY config field checkpoints.ts reads, so overriding
+// just that keeps every other consumer of the real config intact.
+const TEST_WORKSPACE = mkdtempSync(join(tmpdir(), "sai-checkpoints-ws-"));
+vi.mock("../config/loader.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../config/loader.js")>();
+  return {
+    ...actual,
+    getConfig: () => ({ ...actual.getConfig(), workspacePath: TEST_WORKSPACE }),
+  };
+});
+
 import {
   createCheckpoint,
   pauseCheckpoint,
