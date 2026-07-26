@@ -77,6 +77,7 @@ Always allowed; no side effects.
 | `list_pdf_form_fields` | — | — | Inspect AcroForm fields in an existing PDF file |
 | `list_skills` | — | — | List Skill Library entries with status and reliability stats |
 | `list_tts_voices` | — | — | List voices from the configured TTS backend |
+| `load_tool` | — | — | Pull an available-but-not-offered tool into the current turn (lean tool catalog) |
 | `log_stream` | — | — | Tail and filter container logs or workspace log files (read-only) |
 | `mail_get_draft` | — | — | Read a prepared mail draft from the headless mail service |
 | `mail_list_accounts` | — | — | List configured mail accounts from the headless mail service |

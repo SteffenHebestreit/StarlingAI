@@ -3,12 +3,17 @@
  * the enforcement facts they claim to document.
  */
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   renderConfigFlagsMarkdown,
   renderDeploymentModesMarkdown,
   renderToolTiersMarkdown,
 } from "../runtime/reference-docs.js";
 import { listToolTierDefs } from "../guardrails/tool-tiers.js";
+
+// vitest runs from packages/core; the docs live at the repo root.
+const REPO_ROOT = resolve(process.cwd(), "..", "..");
 
 describe("reference-docs renderers", () => {
   it("tool-tiers reference lists known tools under their enforced tiers, deterministically", () => {
@@ -50,5 +55,35 @@ describe("reference-docs renderers", () => {
     });
     expect(md.indexOf("alpha.flag")).toBeLessThan(md.indexOf("zeta.flag"));
     expect(md).toContain("| `alpha.flag` | packages/core/src/config/schema.ts:5 | 2 |");
+  });
+});
+
+/**
+ * The generated files carry the line "CI fails when this file drifts from the
+ * code." Nothing enforced that: the tests above only exercise the renderers in
+ * memory, so a tool added to TOOL_TIER_MAP could (and did — `load_tool`) go
+ * missing from the committed reference for as long as nobody ran
+ * `pnpm docs:reference`. These tests compare the renderer output to what is
+ * actually on disk, which is what the header claims.
+ *
+ * config-flags.md is deliberately not covered here: its registry comes from
+ * shelling out to scripts/audit-config-flags.mjs (a full schema walk + read-site
+ * scan over the repo), which is far too slow for a unit test. Regenerate it with
+ * `pnpm docs:reference` when the schema changes.
+ */
+describe("generated reference docs are in sync with the code", () => {
+  const committed = (relPath: string): string =>
+    readFileSync(resolve(REPO_ROOT, relPath), "utf8").replace(/\r\n/g, "\n");
+
+  it("docs/reference/tool-tiers.md matches renderToolTiersMarkdown()", () => {
+    expect(committed("docs/reference/tool-tiers.md")).toBe(
+      renderToolTiersMarkdown().replace(/\r\n/g, "\n"),
+    );
+  });
+
+  it("docs/reference/deployment-modes.md matches renderDeploymentModesMarkdown()", () => {
+    expect(committed("docs/reference/deployment-modes.md")).toBe(
+      renderDeploymentModesMarkdown().replace(/\r\n/g, "\n"),
+    );
   });
 });
