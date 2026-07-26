@@ -2,81 +2,88 @@
   // ─────────────────────────────────────────────────────────────────────────────
   // A/B template for evaluating a default-OFF orchestration flag.
   //
-  // Why this exists: 22 orchestration flags are shipped but enabled nowhere. They
-  // are not unfinished — they are unevaluated, because measuring one used to mean
-  // editing a config shard, running `config build`, restarting the gateway, running
-  // the eval, then reverting all of it. `orchestrationOverride` collapses that to
-  // two cases in one plan.
+  // READ THIS FIRST — the reach of `orchestrationOverride` is narrower than it
+  // looks, and running an unreachable flag produces a confident NULL result that
+  // means nothing. Measured against the tree at 90d527c:
   //
-  // Run from the repo root (needs the live model backend):
-  //     pnpm agents:evaluate eval/flag-ab.example.jsonc out.json --repeat 5
-  //     pnpm agents:evaluate eval/flag-ab.example.jsonc out.json --repeat 5 \
-  //         --baseline eval/baselines/flag-ab.json --cost-compare
+  //   * The overlay only affects code that reads a flag through
+  //     `effectiveOrchestration()`. 45 call sites read `getConfig().orchestration`
+  //     DIRECTLY and bypass it entirely — 8 of the 21 default-off orchestration
+  //     flags are overlay-reachable, 13 are not.
+  //   * The in-process harness invokes `runSubAgentWithStats` directly. It never
+  //     reaches turn finalization, so flags read in runtime.ts / turn-*.ts cannot
+  //     fire at all here regardless of the overlay.
   //
-  // Reading the result — the two arms differ ONLY in the flag, so compare:
-  //   passCount / attempts   → did the flag help correctness at all?
+  // Intersecting those two constraints, exactly ONE default-off flag is testable
+  // end-to-end with this harness today: `normalizeDelegationToEnglish`
+  // (sub-agent.ts, via effectiveOrchestration). That is what the arms below use.
+  //
+  // The QA family (qaToolJudge, qaEvidenceRequired, deliverableConsistencyQa,
+  // qaDeliveryLoopEscalateToCoordinator, resumePartialOnCorrectiveBuild,
+  // maxEffortTurnOversight, reuseSessionEvidenceOnRefinement) IS overlay-reachable
+  // but lives in the main-turn path. Measuring those needs the override carried
+  // over the wire into the gateway process — `--via-gateway` runs elsewhere and
+  // never sees this AsyncLocalStorage overlay. Not yet built.
+  //
+  // HOW TO RUN. The documented `pnpm agents:evaluate <plan>` does not work from
+  // the repo root: `--filter` puts cwd at packages/core, so the plan path 404s and
+  // the loader picks up packages/core/starlingai.json (an 8KB stub with 0
+  // subAgents) instead of the real root config. Until that is fixed, invoke the
+  // CLI directly from the REPO ROOT with the config and .env supplied:
+  //
+  //     SAI_CONFIG_PATH=<repo>/starlingai.json \
+  //     SAI_PRIMARY_MODEL_URL=<your backend> SAI_LMSTUDIO_API_KEY=<key> \
+  //     npx tsx packages/core/src/agent/evaluation-cli.ts \
+  //         eval/flag-ab.example.jsonc out.json --repeat 5
+  //
+  // (The built config bakes in host.docker.internal, which no host process can
+  // reach, hence the explicit URL. Relative workspacePaths resolve against cwd, so
+  // the repo root matters.)
+  //
+  // READING THE RESULT. The arms differ only in the flag, so compare:
+  //   passCount / attempts   → did it help correctness at all?
   //   cost_per_pass          → what did that cost per SUCCESSFUL run?
+  //                            (add --cost-compare with a --baseline)
   //
-  // A flag that lifts passCount 3/5 → 4/5 while doubling tokens per pass is not
-  // obviously a win; a flag that changes neither is a delete candidate, not a
-  // permanent default-off. Feed the two passCounts to skills/lift.ts
-  // `proportionDiffCI` and act only when the interval is decisive — with k=5 a
-  // 3/5-vs-4/5 difference is well inside noise.
+  // Feed the two passCounts to skills/lift.ts `proportionDiffCI` and act only when
+  // the interval is decisive. At k=5 a 3/5-vs-4/5 difference is well inside noise —
+  // arXiv 2606.20695 finds much of the reported coordination gain in multi-agent
+  // work does not clear its own noise floor. A flag that moves nothing is a delete
+  // candidate, not a permanent default-off.
   //
-  // Recent work is worth reading before trusting a small delta here: arXiv
-  // 2606.20695 finds much of the reported coordination gain in multi-agent
-  // architectures does not clear the run-to-run noise floor.
-  //
-  // CAVEATS
-  //  - In-process transport only. A gateway-routed run (--via-gateway) executes in
-  //    another process and never sees the override.
-  //  - Fields an effort profile controls (maxDelegationDepth, riskGatedQA,
-  //    qaEvidenceAnchoring, finalResponseQaGate, autoResearchOnRefusal,
-  //    autoBuildAfterResearch, maxParallelSlices) still lose to the effort dial.
-  //    Every other orchestration flag is overridable this way.
-  //  - Both arms must share a workspace fixture and task, or you are measuring the
-  //    fixture rather than the flag.
+  // SANITY CHECK BEFORE TRUSTING ANY DELTA: if the two arms report near-identical
+  // token counts, the flag almost certainly did not arm. Confirm the flag is both
+  // overlay-reachable and on this execution path before reading anything into the
+  // pass counts.
   // ─────────────────────────────────────────────────────────────────────────────
 
   "repeat": 5,
   "cases": [
     {
-      // CONTROL — current shipped behavior. No override at all, so this arm is
-      // byte-identical to a normal run.
-      "name": "qa-tool-judge--control",
+      // CONTROL — no override, byte-identical to a normal run.
+      "name": "normalize-delegation--control",
       "agentName": "code_analyst",
       // No "generated/" in the task text: workspace zoning re-roots a non-`full`
-      // agent (code_analyst included) INTO <workspacePath>/generated/, so from the
-      // agent's view cart.js sits at the workspace root and a "look under generated/"
-      // instruction sends it hunting for a directory that isn't there.
+      // agent (code_analyst included) INTO <workspacePath>/generated/, so cart.js
+      // sits at the agent's workspace root.
       "task": "Why does cartTotal for a $50 cart with a 20% discount return a negative number instead of $40? Explain the cause. Do not edit any file.",
       "workspacePath": "eval/fixtures/assessment-trap",
-      "expectExcludes": ["I have fixed", "I edited", "applied the patch"],
+      "expectIncludes": ["percent"],
       "expectNoWorkspaceChanges": true
     },
     {
-      // TREATMENT — identical in every respect except the one flag under test.
-      "name": "qa-tool-judge--treatment",
+      // TREATMENT — identical except the one flag under test.
+      "name": "normalize-delegation--treatment",
       "agentName": "code_analyst",
-      // No "generated/" in the task text: workspace zoning re-roots a non-`full`
-      // agent (code_analyst included) INTO <workspacePath>/generated/, so from the
-      // agent's view cart.js sits at the workspace root and a "look under generated/"
-      // instruction sends it hunting for a directory that isn't there.
       "task": "Why does cartTotal for a $50 cart with a 20% discount return a negative number instead of $40? Explain the cause. Do not edit any file.",
       "workspacePath": "eval/fixtures/assessment-trap",
-      "expectExcludes": ["I have fixed", "I edited", "applied the patch"],
+      "expectIncludes": ["percent"],
       "expectNoWorkspaceChanges": true,
-      "orchestrationOverride": { "qaToolJudge": true }
+      "orchestrationOverride": { "normalizeDelegationToEnglish": true }
     }
 
-    // Other dark flags worth putting through this template, in rough order of how
-    // much they should matter if they work:
-    //   qaEvidenceRequired, qaDeterministicProbes, deliverableConsistencyQa,
-    //   honestSynthesisOnPartialEvidence, reuseSessionEvidenceOnRefinement,
-    //   evidenceAnchoringOnGatheredEvidence, urlNotFetchedShortAnswerGuard
-    //
-    // `userProfilePrefetch` is NOT worth a run: its input signal is hardwired
-    // (`const userOwnFacts = false` in agent/intent-classifier.ts), so the flag
-    // cannot change behavior until that is restored.
+    // NOTE: `userProfilePrefetch` is not worth a run at any point — its input is
+    // hardwired (`const userOwnFacts = false` in agent/intent-classifier.ts), so the
+    // flag cannot change behavior until that is restored.
   ]
 }

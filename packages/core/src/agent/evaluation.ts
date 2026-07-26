@@ -59,16 +59,26 @@ export interface AgentEvaluationCase {
   /**
    * Flip `orchestration.*` flags for this case only.
    *
-   * `effectiveOrchestration()` reads process-global config, so measuring a candidate
-   * orchestration flag previously meant editing a shard, rebuilding config and
-   * restarting — which is why flags accumulate at default-off instead of being
-   * evaluated. This applies the flags through the turn-scoped AsyncLocalStorage
-   * overlay for the duration of the attempt and nothing else.
+   * Applies the flags through the turn-scoped AsyncLocalStorage overlay for the
+   * duration of the attempt and nothing else, so an arm can measure a candidate
+   * flag without editing a shard, rebuilding config and restarting.
    *
-   * Two arms over the same task, one with `{ qaToolJudge: true }`, is the whole A/B.
+   * KNOW THE REACH before trusting a result — measured at 90d527c:
+   * - Only reads that go through `effectiveOrchestration()` see this. 45 call sites
+   *   read `getConfig().orchestration` directly and bypass it; 8 of the 21
+   *   default-off orchestration flags are overlay-reachable, 13 are not.
+   * - The in-process harness calls `runSubAgentWithStats` directly and never reaches
+   *   turn finalization, so flags read in runtime.ts / turn-*.ts cannot fire here at
+   *   all. Intersecting both constraints, `normalizeDelegationToEnglish` is currently
+   *   the only default-off flag testable end-to-end this way.
+   * - Gateway transport is a different process and never observes this store, so the
+   *   main-turn QA family stays unmeasurable until the override is carried over the
+   *   wire.
    *
-   * In-process transport only (a gateway-routed run is a different process). Fields
-   * an effort profile controls still lose to the effort dial — see
+   * A flag that does not arm produces two identical arms and a confident null. If
+   * the arms' token counts match closely, suspect reach before believing the result.
+   *
+   * Fields an effort profile controls still lose to the effort dial — see
    * runWithOrchestrationOverride.
    */
   orchestrationOverride?: Partial<import("../config/schemas/orchestration.js").OrchestrationConfig>;
