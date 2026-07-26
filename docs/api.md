@@ -493,7 +493,7 @@ The response body is raw WAV audio.
 
 ### Chat
 
-`POST /api/chat` exists for future simple integrations but currently returns `501` with `Use WebSocket for chat. REST chat coming in v0.2.`
+`POST /api/chat` is **not implemented** and always returns `501` (after authenticating) — a turn is inherently streaming, so there is no useful synchronous response shape. Use `POST /api/chat/stream` (AG-UI SSE, below) or the WebSocket RPC channel instead. The endpoint is kept so integrators hitting the obvious path get a pointer rather than a `404`.
 
 ## WebSocket RPC
 
