@@ -192,7 +192,7 @@ export interface TerminalGuardContext {
  */
 export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Promise<string> {
   const { signal, session, provider, userMessage, toolContext, deliverableIntent, initialDynamicGuidance, guardrailEvents } = ctx;
-  const { rawResponse, iterationCount, effectiveToolIterations, terminalFinishReason, toolCallsRequested, outputScan } = ctx;
+  const { rawResponse, iterationCount, effectiveToolIterations, terminalFinishReason, toolCallsRequested } = ctx;
   const { currentTurnHasExecutableOrchestration } = ctx;
 
   let finalResponse = await ctx.finalizeUserFacingAssistantResponse(rawResponse, effectiveToolIterations, session, provider, signal);

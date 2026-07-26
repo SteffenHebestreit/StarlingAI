@@ -1045,8 +1045,6 @@ const IDEMPOTENT_TOOLS = new Set<string>([
   "spreadsheet_read",
   "list_pdf_form_fields",
   "list_tts_voices",
-  "geocode_location",
-  "route_distance_time",
   "web_search",
   "web_fetch",
   "workspace_search",

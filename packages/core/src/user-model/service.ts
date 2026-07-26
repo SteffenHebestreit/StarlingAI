@@ -62,15 +62,6 @@ export interface UserModelUpdate {
   reset?: boolean;
 }
 
-const EMPTY_EDITABLE: UserModelEditable = Object.freeze({
-  schemaVersion: SCHEMA_VERSION,
-  goals: [],
-  expertise: [],
-  workingStyle: [],
-  communication: [],
-  openQuestions: [],
-});
-
 function storePath(): string {
   const baseDir = process.env["SAI_USER_MEMORY_PATH"]?.trim()
     ? resolve(process.env["SAI_USER_MEMORY_PATH"])

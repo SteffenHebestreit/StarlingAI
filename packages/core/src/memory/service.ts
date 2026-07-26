@@ -1108,10 +1108,6 @@ function memoryDirForScope(scope: DurableMemoryScope, workspacePath: string): st
   return resolve(workspacePath, MEMORY_SUBDIR);
 }
 
-function ensureDir(workspacePath: string): string {
-  return ensureDirForScope("workspace", workspacePath);
-}
-
 function ensureDirForScope(scope: DurableMemoryScope, workspacePath: string): string {
   const dir = memoryDirForScope(scope, workspacePath);
   mkdirSync(dir, { recursive: true });

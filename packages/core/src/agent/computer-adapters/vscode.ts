@@ -75,7 +75,6 @@ export class VscodeComputerAdapter implements ComputerAdapter {
 
   async captureSnapshot(): Promise<ComputerSessionSnapshot> {
     this.assertInitialized();
-    const start = Date.now();
 
     const image = await _nutScreen!.grab();
     const rawBytes = new Uint8Array(image.data);

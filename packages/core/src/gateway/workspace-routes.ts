@@ -13,10 +13,7 @@ import { getConfig } from "../config/loader.js";
 import { resolvePathWithinWorkspace } from "../tools/workspace-path.js";
 import { getServedApp, injectBaseHref } from "../tools/serve-app.js";
 import { buildContentDisposition } from "./content-disposition.js";
-import { childLogger } from "../logger.js";
 import { logAudit } from "../audit/logger.js";
-
-const log = childLogger("gateway:workspace");
 
 // CSP for agent-authored workspace previews. The artifact renders inside a
 // sandboxed (allow-scripts, opaque-origin) iframe — that sandbox is the real

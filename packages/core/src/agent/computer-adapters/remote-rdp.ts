@@ -62,7 +62,6 @@ function parseDisplayResolution(value: string | undefined): { width: number; hei
 
 /** Xvfb display tracker — shared across all RDP sessions in this process. */
 let xvfbDisplay: string | null = null;
-let xvfbProcess: import("node:child_process").ChildProcess | null = null;
 
 /**
  * Ensure an X11 display is available. If DISPLAY is already set (e.g. inside
@@ -80,13 +79,14 @@ async function ensureDisplay(): Promise<string> {
   const displayNum = 50 + Math.floor(Math.random() * 50);
   const display = `:${displayNum}`;
 
+  // Deliberately detached + unref'd: the framebuffer is shared by every RDP
+  // session and must outlive any single one, so we intentionally keep no
+  // handle and never kill it — the container lifecycle reaps it.
   const { spawn } = await import("node:child_process");
-  const proc = spawn("Xvfb", [display, "-screen", "0", "1920x1080x24", "-ac"], {
+  spawn("Xvfb", [display, "-screen", "0", "1920x1080x24", "-ac"], {
     detached: true,
     stdio: "ignore",
-  });
-  proc.unref();
-  xvfbProcess = proc;
+  }).unref();
 
   // Wait for the display to become usable
   const deadline = Date.now() + 5_000;

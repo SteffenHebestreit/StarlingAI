@@ -52,7 +52,7 @@ registerTool({
   description:
     "Fetch the current weather and short-term forecast for a latitude/longitude pair. " +
     "Defaults to the free Open-Meteo provider (no API key needed). " +
-    "Use `geocode_location` first if you only have a place name.",
+    "Takes coordinates only — if you have a place name, resolve it to lat/lon first (e.g. via `web_search`).",
   parameters: {
     type: "object",
     properties: {
