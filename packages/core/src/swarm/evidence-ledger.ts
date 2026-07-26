@@ -60,8 +60,104 @@ export function canonicalizeSubject(subject: string): string {
   return subject.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
+/** Currency symbol → ISO code. Symbols only: this is a rendering difference, not a
+ *  semantic one. Currency CODES are deliberately left alone so USD vs EUR stays a
+ *  real conflict — folding those would hide a genuine disagreement. */
+// Plain strings, not /g regexes: `RegExp.test` on a global regex advances lastIndex,
+// so reusing one across calls silently alternates between true and false.
+const CURRENCY_SYMBOLS: ReadonlyArray<readonly [string, string]> = [
+  ["$", "usd"], ["€", "eur"], ["£", "gbp"], ["¥", "jpy"], ["₹", "inr"], ["₽", "rub"],
+];
+
+/**
+ * Canonicalize a numeric magnitude written in any locale, or null when the string
+ * is not unambiguously one number.
+ *
+ * Separator disambiguation is structural, not locale-guessed:
+ * - Both `.` and `,` present → the LAST one is the decimal mark (true in every
+ *   common convention), the other is a group separator.
+ * - One separator type, appearing more than once → group separator (1.234.567).
+ * - One separator, once, followed by exactly 3 digits → depends on context:
+ *   ambiguous for a BARE number ("1,299" is 1299 in en-US, 1.299 in de-DE), so it
+ *   returns null rather than guess — reading it wrong would silently equate values
+ *   1000x apart, which is far worse than leaving a formatting difference flagged.
+ *   With `hasCurrency`, it is a GROUP separator: none of the currencies recognized
+ *   here use 3 decimal places, so a 3-digit tail cannot be a fraction. That is what
+ *   lets "$1,299" and "1299 USD" collapse without guessing.
+ * - One separator, once, followed by 1-2 or 4+ digits → decimal mark.
+ */
+function canonicalNumber(raw: string, hasCurrency: boolean): string | null {
+  if (!/^[0-9][0-9.,\s]*$/.test(raw)) return null;
+  const s = raw.replace(/\s/g, "");
+  const dot = s.lastIndexOf("."), comma = s.lastIndexOf(",");
+  const dots = (s.match(/\./g) ?? []).length, commas = (s.match(/,/g) ?? []).length;
+
+  let intPart: string, fracPart = "";
+  if (dots > 0 && commas > 0) {
+    const decIdx = Math.max(dot, comma);
+    intPart = s.slice(0, decIdx).replace(/[.,]/g, "");
+    fracPart = s.slice(decIdx + 1);
+  } else if (dots + commas === 0) {
+    intPart = s;
+  } else if (dots > 1 || commas > 1) {
+    intPart = s.replace(/[.,]/g, "");
+  } else {
+    const idx = Math.max(dot, comma);
+    const after = s.length - idx - 1;
+    if (after === 3) {
+      if (!hasCurrency) return null; // bare number: genuinely ambiguous — do not merge
+      intPart = s.replace(/[.,]/g, ""); // currency: 3-digit tail must be a group
+    } else {
+      intPart = s.slice(0, idx);
+      fracPart = s.slice(idx + 1);
+    }
+  }
+  if (!/^\d+$/.test(intPart) || (fracPart && !/^\d+$/.test(fracPart))) return null;
+  const normFrac = fracPart.replace(/0+$/, "");
+  const normInt = intPart.replace(/^0+(?=\d)/, "");
+  return normFrac ? `${normInt}.${normFrac}` : normInt;
+}
+
+/**
+ * Normalize a claim value for same-subject conflict detection.
+ *
+ * Beyond case/whitespace folding this canonicalizes NUMERIC values so that the same
+ * quantity written differently stops registering as a contradiction: "$1,299",
+ * "1299 USD" and "USD 1299.00" all collapse to `usd 1299`.
+ *
+ * Why it matters: the ledger's one behavioral consumer injects a "DISPUTED EVIDENCE …
+ * an answer stating any of these as settled fact WITHOUT acknowledging the conflict
+ * FAILS" block into the QA reviewer prompt. A purely textual comparison therefore
+ * turned formatting variance into a hard QA failure on a CORRECT answer, plus a
+ * wasted re-synthesis round.
+ *
+ * Fail-safe direction: when a value is not unambiguously numeric — including the
+ * genuinely ambiguous "one separator + 3 digits" case — it falls through to the
+ * original text normalization, so the pair stays distinct and is still flagged.
+ * Over-merging would HIDE real conflicts, which is the worse failure; this only
+ * removes cases where the values are provably the same number.
+ */
 export function normalizeValue(value: string): string {
-  return value.trim().toLowerCase().replace(/\s+/g, " ");
+  const text = value.trim().toLowerCase().replace(/\s+/g, " ");
+  if (!/\d/.test(text)) return text;
+
+  let currency = "";
+  let rest = text;
+  for (const [symbol, code] of CURRENCY_SYMBOLS) {
+    if (rest.includes(symbol)) { currency = code; rest = rest.split(symbol).join(" "); }
+  }
+  const codeMatch = rest.match(/\b(usd|eur|gbp|jpy|inr|rub|chf|cad|aud|cny)\b/);
+  if (codeMatch) {
+    // A symbol AND a different code (e.g. "$100 EUR") is contradictory on its face —
+    // leave it to text comparison rather than silently picking one.
+    if (currency && currency !== codeMatch[1]) return text;
+    currency = codeMatch[1]!;
+    rest = rest.replace(codeMatch[0], " ");
+  }
+
+  const numeric = canonicalNumber(rest.trim(), currency !== "");
+  if (numeric === null) return text;
+  return currency ? `${currency} ${numeric}` : numeric;
 }
 
 // ── Storage (Redis list+hash, local fallback) ───────────────────────────────
