@@ -52,6 +52,20 @@ const SECRET_PATTERNS: SecretPattern[] = [
 // minimum length so short/non-secret config (ports, "true", model ids) is untouched.
 const SECRET_ENV_NAME_RE = /(SECRET|TOKEN|PASSWORD|PASSWD|PASSPHRASE|PRIVATE[_-]?KEY|API[_-]?KEY|APIKEY|ACCESS[_-]?KEY|_KEY$|CREDENTIAL|AUTH)/i;
 const MIN_SECRET_VALUE_LEN = 8;
+/**
+ * Names that LOOK secret to SECRET_ENV_NAME_RE but hold an IDENTIFIER, not a
+ * credential — an access-key ID, client ID, key id, tenant id. These are public by
+ * design (the paired *secret* is the secret), and they are frequently short,
+ * human-chosen words.
+ *
+ * Treating one as a secret VALUE is actively harmful, because redaction is a blind
+ * substring replace over every agent response. Observed here: SAI_S3_ACCESS_KEY_ID
+ * is "starlingai", so the guardrail rewrote every occurrence of the product's own
+ * name to [REDACTED:secret] — corrupting ordinary prose, file paths under
+ * .starlingai/, and any explanation the swarm wrote about itself. It surfaced as an
+ * eval fixture failing on `echo hello_starlingai` -> `hello_[REDACTED:secret]`.
+ */
+const IDENTIFIER_ENV_NAME_RE = /(^|_)(ACCESS_KEY_ID|KEY_ID|CLIENT_ID|TENANT_ID|APP_ID|USER_ID|ACCOUNT_ID)$/i;
 // Values that match a secret-looking env name but are obviously not secrets.
 const NON_SECRET_VALUES = new Set(["true", "false", "none", "null", "undefined", "changeme", "disabled", "enabled", "default"]);
 
@@ -68,6 +82,7 @@ function collectSecretValues(): string[] {
     const v = value.trim();
     if (v.length < MIN_SECRET_VALUE_LEN) continue;
     if (NON_SECRET_VALUES.has(v.toLowerCase())) continue;
+    if (IDENTIFIER_ENV_NAME_RE.test(name)) continue; // identifier, not a credential
     if (SECRET_ENV_NAME_RE.test(name)) values.add(v);
   }
   _secretValuesCache = [...values].sort((a, b) => b.length - a.length);
