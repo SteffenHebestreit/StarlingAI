@@ -26,6 +26,13 @@
     {
       "name": "retrieval-workspace",
       "agentName": "code_analyst",
+      // TRANSPORT-DEPENDENT LATENCY. In-process this finishes in ~2.5s; through the
+      // gateway it has now exceeded this 60s ceiling twice — 71.1s (2026-07-16
+      // baseline) and 62.4s (2026-07-27) — so it is the ONE case that fails purely on
+      // time rather than on content. Deliberately NOT relaxed: a latency ceiling that
+      // gets widened whenever it trips stops being a gate. Either the gateway-side
+      // workspace search is genuinely slow and worth profiling, or this case needs a
+      // per-transport ceiling. Left failing so the question stays visible.
       "task": "Search the workspace for any files that mention 'parallel_delegate' and return the file paths and a one-line summary of each match.",
       "expectIncludes": ["parallel_delegate"],
       "expectExcludes": ["Sub-agent error:"],
@@ -110,6 +117,11 @@
     {
       "name": "tool-developer-smoke",
       "agentName": "tool_developer",
+      // Measured 2026-07-27: FAILS in-process, PASSES via gateway in 4.6s. The
+      // tool-development pipeline needs the Docker sandbox, which only exists in the
+      // full stack — so this belongs with the needsStack cases despite the task
+      // reading like pure description.
+      "needsStack": true,
       "task": "Describe how you would build a minimal tool that takes the number 42, doubles it, and returns 84 — list the tool name, its single input, and its output.",
       "expectIncludes": ["84"],
       "expectExcludes": ["Sub-agent error:", "is not defined"],
