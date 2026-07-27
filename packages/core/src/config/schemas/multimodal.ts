@@ -49,8 +49,9 @@ export const MultimodalTextToSpeechSchema = MultimodalServiceSchema.extend({
   voiceSamplePath: z.string().min(1).optional(),
   voiceSampleText: z.string().min(1).optional(),
   defaultQuality: z.string().min(1).default("medium"),
-  /** Auto-speak a summary of the assistant reply after each turn when voice-input mode is active. */
-  speakReplySummary: z.boolean().default(false),
+  // (`speakReplySummary` used to gate this; nothing ever read it. The web client
+  // decides from TTS availability + the caller's forceFullText, so the flag was a
+  // switch wired to nothing.)
   /** Maximum number of spoken sentences in the auto-generated reply summary. */
   speakReplySummaryMaxSentences: z.number().int().min(1).max(5).default(3),
 });

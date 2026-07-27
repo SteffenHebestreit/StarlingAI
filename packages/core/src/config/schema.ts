@@ -232,9 +232,12 @@ export const EphemeralGenerationSchema = z.object({
 // moved to ./schemas/channels.ts; re-exported above.
 
 export const GatewaySchema = z.object({
+  // REST and the WebSocket share this one port. (`restPort` and `bindHost` used
+  // to live here; both were vestigial — nothing ever listened on a second port,
+  // and the listen address is hardcoded 0.0.0.0 inside the container while HOST
+  // exposure is set by SAI_BIND_HOST in docker-compose. A `bindHost: "loopback"`
+  // that does not bind loopback is worse than no knob at all.)
   port: z.number().int().min(1024).max(65535).default(8765),
-  restPort: z.number().int().min(1024).max(65535).default(8766),
-  bindHost: z.enum(["loopback", "lan", "docker"]).default("loopback"),
   jwtSecret: z.string().min(32).optional(), // loaded from env if not set
   sessionTtlMs: z.number().int().min(60000).default(3600000), // 1 hour
   // Hard ceiling for an interactive orchestrator turn. On expiry the turn is
