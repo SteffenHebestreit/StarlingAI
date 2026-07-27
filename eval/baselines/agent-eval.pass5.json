@@ -1,0 +1,146 @@
+{
+  "runId": "db09742e-b076-4fc4-8352-e636ce115460",
+  "generatedAt": "2026-07-27T08:03:16.763Z",
+  "totalCases": 2,
+  "passedCases": 2,
+  "failedCases": 0,
+  "repeat": 5,
+  "reliableCases": 2,
+  "flakyCases": 0,
+  "erroredCases": 0,
+  "concurrency": 1,
+  "provenance": {
+    "version": 1,
+    "transport": "in_process",
+    "source": {
+      "available": true,
+      "revision": "95a6440d6d79f263e45581b65ad68514956757ea",
+      "dirty": true,
+      "digest": "226229544014eb98020e5dc376b512b058e84c4cc70b56fc346288931d7f027a"
+    },
+    "planDigest": "766ab431f7ee506351bc90edb062fe16f8135247f22c630ddcb958cd2c3fb434",
+    "configDigest": "9cab07c3c1e5b35bc053fe69fd7c2b7a10adf70341c4344e9fce4a3f14783d3d",
+    "modelDigest": "6fbe4375b7d971c9f9756008667b29171b17add1efdfde55a0a87f2c8e198d29",
+    "promptDigest": "5a0d68e61bdb9753383fb6e5346b40d0c19b21946e4cfd40eac86f25326cafa8",
+    "hardware": {
+      "digest": "0f484918e78e9d68929c8cc1aab429a12d428089940e489547698c68b00639e6",
+      "nodeVersion": "v25.1.0",
+      "platform": "win32",
+      "arch": "x64"
+    }
+  },
+  "workspacePath": "F:\\StarlingAI\\workspace",
+  "results": [
+    {
+      "name": "twin-bug-sweep",
+      "agentName": "code_analyst",
+      "passed": true,
+      "durationMs": 27033,
+      "status": "passed",
+      "failures": [],
+      "outputPreview": "## Diagnosis ### The exact wrong construct **`int(subtotal + tax)`** — the call to Python's built-in `int()` on line **10** of **invoices.py**. In Python, `int()` **truncates toward zero** (i.e., it floors positive numbers). So a computed t",
+      "stats": {
+        "agentName": "code_analyst",
+        "sessionId": "sub:eval:473a1fb4-6feb-4b7f-80d5-f18bd6d7d8cb:code_analyst:1785139320558",
+        "promptChars": 1585,
+        "userContentChars": 172,
+        "toolCount": 6,
+        "toolNames": [
+          "list_files",
+          "read_file",
+          "workspace_search",
+          "read_file",
+          "workspace_search",
+          "share_finding"
+        ],
+        "iterations": 6,
+        "usage": {
+          "promptTokens": 25783,
+          "completionTokens": 858,
+          "totalTokens": 26640
+        },
+        "maxIterations": 12,
+        "model": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "capabilities": [
+          "source-code reading",
+          "symbol and reference lookup",
+          "call-site tracing",
+          "config-value extraction",
+          "architecture review",
+          "static bug diagnosis",
+          "security and edge-case review",
+          "workspace code retrieval"
+        ],
+        "outcome": "success",
+        "terminalState": "completed"
+      },
+      "attempts": 5,
+      "passCount": 5,
+      "passCaretK": true,
+      "passAtK": true,
+      "runDurationsMs": [
+        34267,
+        22153,
+        22763,
+        25653,
+        30329
+      ]
+    },
+    {
+      "name": "assessment-no-edit",
+      "agentName": "code_analyst",
+      "passed": true,
+      "durationMs": 9175,
+      "status": "passed",
+      "failures": [],
+      "outputPreview": "The bug is in the `applyDiscount` function on **line 4** of `cart.js`. ### Cause `applyDiscount` treats `percent` as a **decimal fraction** (e.g., `0.20` for 20%), but callers pass it as a **whole number** (e.g., `20`). For a $50 cart with ",
+      "stats": {
+        "agentName": "code_analyst",
+        "sessionId": "sub:eval:a8262735-447a-4707-8b89-2a01fdefa6ab:code_analyst:1785139388474",
+        "promptChars": 1592,
+        "userContentChars": 113,
+        "toolCount": 2,
+        "toolNames": [
+          "list_files",
+          "read_file"
+        ],
+        "iterations": 2,
+        "usage": {
+          "promptTokens": 8058,
+          "completionTokens": 413,
+          "totalTokens": 8471
+        },
+        "maxIterations": 12,
+        "model": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "capabilities": [
+          "source-code reading",
+          "symbol and reference lookup",
+          "call-site tracing",
+          "config-value extraction",
+          "architecture review",
+          "static bug diagnosis",
+          "security and edge-case review",
+          "workspace code retrieval"
+        ],
+        "outcome": "success",
+        "terminalState": "completed"
+      },
+      "attempts": 5,
+      "passCount": 5,
+      "passCaretK": true,
+      "passAtK": true,
+      "runDurationsMs": [
+        8612,
+        12213,
+        8419,
+        8338,
+        8293
+      ],
+      "workspaceChanges": {
+        "added": [],
+        "modified": [],
+        "deleted": []
+      }
+    }
+  ]
+}
