@@ -798,3 +798,49 @@ describe("agent evaluation harness — pristine diff ignores runtime bookkeeping
     rmSync(ws, { recursive: true, force: true });
   });
 });
+
+describe("agent evaluation harness — reliability gate uses pass COUNTS, not the pass^k bit", () => {
+  const caseAt = (passCount: number, attempts: number): AgentEvaluationReport => ({
+    runId: "r", generatedAt: "2026-01-01T00:00:00Z",
+    totalCases: 1, passedCases: passCount === attempts ? 1 : 0, failedCases: passCount === attempts ? 0 : 1,
+    results: [{
+      name: "c", agentName: "code_analyst", passed: passCount === attempts,
+      durationMs: 10, status: passCount === attempts ? "passed" : "flaky", failures: [],
+      outputPreview: "", attempts, passCount, passCaretK: passCount === attempts, passAtK: passCount > 0,
+      runDurationsMs: Array.from({ length: attempts }, () => 10),
+      stats: {
+        agentName: "code_analyst", sessionId: "s", promptChars: 1, userContentChars: 1,
+        toolCount: 0, toolNames: [], iterations: 1,
+        usage: { promptTokens: 0, completionTokens: 100, totalTokens: 100 },
+        maxIterations: 4, model: "m", capabilities: [],
+      },
+    }],
+  } as unknown as AgentEvaluationReport);
+
+  it("does not flag one unlucky attempt — the exact 5/5 -> 4/5 seen on real fixtures", () => {
+    // Measured: per-attempt success ~0.95, so a single miss in 5 is routine. Under the
+    // old binary gate this fired case_newly_failed and read as a regression.
+    const report = compareEvaluationReports(caseAt(5, 5), caseAt(4, 5));
+    expect(report.findings.some((f) => f.kind === "reliability_drop")).toBe(false);
+    expect(report.findings.some((f) => f.kind === "case_newly_failed")).toBe(false);
+    expect(report.hasRegressions).toBe(false);
+  });
+
+  it("flags a decisive collapse", () => {
+    const report = compareEvaluationReports(caseAt(10, 10), caseAt(1, 10));
+    const finding = report.findings.find((f) => f.kind === "reliability_drop");
+    expect(finding).toBeDefined();
+    expect(finding!.detail).toContain("10/10 → 1/10");
+    expect(report.hasRegressions).toBe(true);
+  });
+
+  it("never flags an IMPROVEMENT as a regression", () => {
+    const report = compareEvaluationReports(caseAt(2, 10), caseAt(10, 10));
+    expect(report.findings.some((f) => f.kind === "reliability_drop")).toBe(false);
+  });
+
+  it("falls back to the binary verdict at k=1, where there is no distribution", () => {
+    const report = compareEvaluationReports(caseAt(1, 1), caseAt(0, 1));
+    expect(report.findings.some((f) => f.kind === "case_newly_failed")).toBe(true);
+  });
+});

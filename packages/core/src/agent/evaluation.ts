@@ -5,6 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { getConfig } from "../config/loader.js";
 import { PRODUCT } from "../product/index.js";
 import { runWithOrchestrationOverride } from "../runtime/effort-context.js";
+import { proportionDiffCI } from "../skills/lift.js";
 import type { SubAgentExecutionStats, SubAgentRunOptions, SubAgentRunResult } from "./sub-agent.js";
 import { runSubAgentWithStats } from "./sub-agent.js";
 import {
@@ -676,7 +677,7 @@ export async function writeEvaluationReport(report: AgentEvaluationReport, outpu
 export interface RegressionFinding {
   caseName: string;
   agentName: string;
-  kind: "case_newly_failed" | "latency_spike" | "token_spike" | "cost_per_pass";
+  kind: "case_newly_failed" | "reliability_drop" | "latency_spike" | "token_spike" | "cost_per_pass";
   detail: string;
   baselineValue: number;
   currentValue: number;
@@ -752,7 +753,42 @@ export function compareEvaluationReports(
     const base = baselineByName.get(curr.name);
     if (!base) continue; // new case — not a regression
 
-    if (base.passed && !curr.passed) {
+    // Reliability regression. Compare the PASS COUNTS with a confidence interval
+    // rather than the binary pass^k verdict.
+    //
+    // Why: pass^k collapses k attempts into one bit, and at realistic per-attempt
+    // rates that bit is mostly noise. Measured on this repo's own fixtures over 20
+    // attempts per case, per-attempt success is ~0.95 — which makes pass^5 succeed
+    // 77% of the time and pass^10 only 60%. Gating on the binary therefore fires
+    // `case_newly_failed` on a perfectly healthy agent about 4 runs in 10, and a
+    // gate that cries wolf is one people learn to ignore.
+    //
+    // proportionDiffCI (already shipped for skill lift) uses every attempt and only
+    // reports when the interval excludes zero, so a single unlucky attempt out of 10
+    // no longer reads as a regression while a real drop still does.
+    const baseAttempts = base.attempts ?? 1;
+    const currAttempts = curr.attempts ?? 1;
+    const basePasses = base.passCount ?? (base.passed ? baseAttempts : 0);
+    const currPasses = curr.passCount ?? (curr.passed ? currAttempts : 0);
+
+    if (baseAttempts >= 2 && currAttempts >= 2) {
+      // baseline − current: a POSITIVE lower bound means current is decisively worse.
+      const ci = proportionDiffCI(basePasses, baseAttempts, currPasses, currAttempts);
+      if (ci.low > 0) {
+        findings.push({
+          caseName: curr.name,
+          agentName: curr.agentName,
+          kind: "reliability_drop",
+          detail: `Pass rate down decisively: ${basePasses}/${baseAttempts} → ${currPasses}/${currAttempts}`
+            + ` (Δ ${(ci.estimate * 100).toFixed(0)}pp, 95% CI [${(ci.low * 100).toFixed(0)}, ${(ci.high * 100).toFixed(0)}]pp)`
+            + (curr.failures.length ? ` — ${curr.failures.join("; ")}` : ""),
+          baselineValue: basePasses / baseAttempts,
+          currentValue: currPasses / currAttempts,
+        });
+      }
+    } else if (base.passed && !curr.passed) {
+      // k=1 on either side: there is no distribution to reason about, so fall back to
+      // the binary. Single-sample runs are smoke tests, not reliability measurements.
       findings.push({
         caseName: curr.name,
         agentName: curr.agentName,
