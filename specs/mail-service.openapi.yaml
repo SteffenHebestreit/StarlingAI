@@ -84,7 +84,7 @@ components:
         subject: { type: string }
         date: { type: string, format: date-time }
         textBody: { type: string }
-        htmlBody: { type: string }
+        html: { type: string }
         attachments:
           type: array
           items:
@@ -92,8 +92,7 @@ components:
             properties:
               filename: { type: string }
               contentType: { type: string }
-              sizeBytes: { type: integer }
-              contentId: { type: string }
+              size: { type: integer }
         categories: { type: array, items: { type: string } }
         note: { type: string }
     Draft:
@@ -106,7 +105,7 @@ components:
         bcc: { type: array, items: { type: string, format: email } }
         subject: { type: string }
         textBody: { type: string }
-        htmlBody: { type: string }
+        html: { type: string }
         replyTo:
           $ref: '#/components/schemas/MessageActionItem'
         status: { type: string, enum: [draft, sent] }
@@ -354,7 +353,7 @@ paths:
                 bcc: { type: array, items: { type: string, format: email }, default: [] }
                 subject: { type: string }
                 textBody: { type: string }
-                htmlBody: { type: string }
+                html: { type: string }
                 replyTo:
                   $ref: '#/components/schemas/MessageActionItem'
               required: [accountId, to, subject, textBody]
