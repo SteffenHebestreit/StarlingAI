@@ -206,7 +206,7 @@ export async function vectorUpsertMany(entries: VectorUpsert[]): Promise<number>
   for (const entry of entries) {
     const vec = entry.embedding ?? await computeQueryEmbedding(entry.content);
     if (!vec || vec.length !== _dim || isDegenerateVector(vec)) continue; // skip unembeddable / dim-mismatched / degenerate
-    prepared.set(`${entry.collection} ${entry.id}`, {
+    prepared.set(`${entry.collection}\u0000${entry.id}`, {
       collection: entry.collection,
       id: entry.id,
       content: entry.content,
