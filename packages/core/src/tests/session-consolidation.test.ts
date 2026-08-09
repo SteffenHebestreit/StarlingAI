@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -23,6 +23,35 @@ describe("end-of-session memory consolidation", () => {
     dirs.push(dir);
     return dir;
   }
+
+  it("keeps facts from different sessions that share a name", async () => {
+    // Regression: the durable key was `session_fact:<name>`, and safeKey strips
+    // punctuation and truncates — so every session promoting a fact called "budget"
+    // wrote to the same file. The second session silently overwrote the first, with
+    // no error and no symptom. Two sessions, one fact name, two records.
+    const ws = workspace();
+    const content1 = "The agreed construction budget is 480k EUR including the garage and the outdoor works.";
+    const content2 = "The agreed litigation budget is 25k EUR covering first instance only, excluding appeal.";
+
+    factsRef.value = { budget: content1 };
+    await consolidateSessionMemory({ sessionId: "sess-alpha-0001", workspacePath: ws, channel: "webchat", turnCount: 2 });
+
+    factsRef.value = { budget: content2 };
+    await consolidateSessionMemory({ sessionId: "sess-beta-0002", workspacePath: ws, channel: "webchat", turnCount: 2 });
+
+    // Assert on the FILES, not the visible records. Both facts carry the subject
+    // "budget", so temporal supersession separately marks the older one stale and
+    // hides it at read time — that is a different, intentional mechanism. What this
+    // test pins is that the earlier fact still EXISTS rather than having been
+    // overwritten on disk and lost irrecoverably.
+    const memoryDir = join(ws, ".starlingai", "memory");
+    const files = readdirSync(memoryDir).filter((f) => f.startsWith("session_fact"));
+    expect(files).toHaveLength(2);
+
+    const stored = files.map((f) => readFileSync(join(memoryDir, f), "utf-8"));
+    expect(stored.some((c) => c.includes("construction budget"))).toBe(true);
+    expect(stored.some((c) => c.includes("litigation budget"))).toBe(true);
+  });
 
   it("promotes durable-worthy facts and skips trivial/transient/credential ones", async () => {
     const ws = workspace();

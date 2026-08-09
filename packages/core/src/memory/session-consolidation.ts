@@ -126,7 +126,12 @@ export async function consolidateSessionMemory(opts: {
 
       try {
         storeWorkspaceMemoryRecord(opts.workspacePath, {
-          key: `session_fact:${key}`,
+          // Scope the key to the originating session. Previously every session that
+          // shared a fact name collapsed onto one file (safeKey strips punctuation and
+          // truncates), so the second session to promote "budget" silently overwrote
+          // the first — losing the earlier fact with no error and no symptom.
+          // Genuine duplicates are already filtered above by the near-duplicate check.
+          key: `session_fact:${opts.sessionId.slice(0, 8)}:${key}`,
           subject: key,
           content,
           kind: "fact",
