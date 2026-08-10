@@ -53,6 +53,21 @@ describe("mail-service per-user access control", () => {
     expect(ids).toEqual(["shared", "alice-only"]);
   });
 
+  it("hides restricted accounts from an unidentified caller when auth is on", async () => {
+    // A missing header means "there is no user" on a single-operator install and
+    // "the header was dropped" on a multi-user one. Where gateway auth is enabled
+    // the deployment sets this flag, and a bound account then cannot be reached by
+    // simply omitting the header — an access list you can opt out of is not one.
+    process.env["SAI_MAIL_REQUIRE_IDENTIFIED_USER"] = "true";
+    try {
+      const res = await app().fetch(new Request("http://m/api/accounts"));
+      const ids = (await res.json() as Array<{ id: string }>).map((a) => a.id);
+      expect(ids).toEqual(["shared"]);
+    } finally {
+      delete process.env["SAI_MAIL_REQUIRE_IDENTIFIED_USER"];
+    }
+  });
+
   it("403s a restricted account for a disallowed user", async () => {
     const res = await app().fetch(new Request("http://m/api/mailboxes", {
       method: "POST", headers: { "Content-Type": "application/json", "X-Sai-User": "bob" },
