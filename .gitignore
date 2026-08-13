@@ -94,3 +94,8 @@ packages/*/package-lock.json
 # Per-developer editor preferences (file associations for the generated
 # config). Tracking it forces every fork to carry a diff on this path.
 /.vscode/settings.json
+
+# Machine-specific workspace shards (agents/scenes/jobs that depend on services
+# only this machine runs). Same convention as config/**/*.local.jsonc: loaded after
+# the numbered sibling, never committed.
+workspace/**/*.local.jsonc
