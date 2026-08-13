@@ -1,7 +1,7 @@
 import { getConfig } from "../config/loader.js";
 import { LMStudioProvider, type ChatProvider, type OpenAICompatibleProviderRuntimeSnapshot } from "./lmstudio.js";
 import { AnthropicProvider, ANTHROPIC_DEFAULT_BASE_URL } from "./anthropic.js";
-import { loadStoredTokenSet, getValidAccessToken, startAnthropicTokenRefresher } from "./anthropic-oauth.js";
+import { loadStoredTokenSet, getValidAccessToken, startAnthropicTokenRefresher, anthropicRefreshDisabledReason } from "./anthropic-oauth.js";
 import { FailoverChatProvider, type FailoverEndpointDescriptor, type FailoverEndpointRuntimeSnapshot, type FailoverProviderBinding } from "./failover.js";
 import { buildAgentIndex } from "./embeddings.js";
 import { childLogger } from "../logger.js";
@@ -470,6 +470,12 @@ function updateProviderRuntimeComponent(status: ProviderRuntimeStatusSnapshot): 
       activeBaseUrl: status.activeBaseUrl,
       loadedModel: activeEndpoint?.loadedModel,
       endpoints: status.endpoints,
+      // Surfaced rather than only logged: once the background refresh disables itself
+      // the logs go quiet, and quiet is indistinguishable from healthy unless the state
+      // is readable somewhere an operator already looks.
+      ...(anthropicRefreshDisabledReason()
+        ? { anthropicOAuth: { refreshDisabled: true, reason: anthropicRefreshDisabledReason() } }
+        : {}),
     },
     status.healthy
       ? undefined
@@ -543,12 +549,39 @@ export async function syncChatProviderRuntimeStatus(): Promise<ProviderRuntimeSt
 
 export type { ChatProvider } from "./lmstudio.js";
 
+/**
+ * Whether anything on this deployment can actually route to Anthropic.
+ *
+ * A stored OAuth token is not the test. A deployment that connected Claude once and
+ * then moved to a local model still has the credential on disk, and refreshing it
+ * accomplishes nothing — which is exactly the state that produced a token-endpoint
+ * warning every four minutes with no consumer for the result.
+ *
+ * Evaluated fresh on each tick rather than latched at startup, so connecting Claude or
+ * switching the active preset takes effect without a restart.
+ */
+export function isAnthropicInUse(config: Config = getConfig()): boolean {
+  const anthropic = config.providers?.anthropic;
+  if (anthropic?.apiKey || anthropic?.authToken) return true;
+  if (process.env["ANTHROPIC_API_KEY"] || process.env["ANTHROPIC_AUTH_TOKEN"]
+      || process.env["CLAUDE_CODE_OAUTH_TOKEN"]) return true;
+
+  const usesAnthropic = (model: { primary?: string } | undefined): boolean =>
+    typeof model?.primary === "string" && model.primary.startsWith("anthropic/");
+
+  if (usesAnthropic(config.agents?.defaults?.model)) return true;
+  if (usesAnthropic(getActiveModelPreset(config)?.preset)) return true;
+  return Object.values(config.subAgents ?? {}).some((agent) => usesAnthropic(agent?.model));
+}
+
 export async function initProviders(): Promise<void> {
   markRuntimeComponentAttempt("providers");
 
   // Keep any browser-connected Claude subscription token fresh so sub-agent
-  // dispatches (which snapshot the token at resolve time) never get a stale one.
-  startAnthropicTokenRefresher();
+  // dispatches (which snapshot the token at resolve time) never get a stale one —
+  // but only while Anthropic is actually reachable from some model route, and only
+  // until the grant is refused permanently. See isAnthropicInUse.
+  startAnthropicTokenRefresher(() => isAnthropicInUse());
 
   try {
     const config = getConfig();
