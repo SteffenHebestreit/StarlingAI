@@ -299,12 +299,69 @@ export function resolveThinkingControls(
   }
 }
 
+/**
+ * Fold the message list into the one shape every chat template accepts: at most one
+ * system message, and only at the head.
+ *
+ * The turn assembly emits the system prompt as roughly ten separate system messages and
+ * appends more mid-conversation as steering directives. That is legal OpenAI Chat
+ * Completions and most servers accept it — but a chat template is free to be stricter,
+ * and several are. Qwen3's raises `System message must be at the beginning` on the
+ * SECOND system message, because only index 0 is `loop.first`. Measured against a live
+ * LM Studio host: one leading system message returns 200, two return 400, and a system
+ * message after a user message returns 400. So on such a model every single turn fails
+ * before the agent does anything, and the operator sees "LLM error" with a Jinja stack
+ * trace — a total outage presented as a template bug.
+ *
+ * Both mappings are already settled in this codebase: the Anthropic provider merges the
+ * leading run into its top-level system parameter and delivers a mid-conversation system
+ * message as user-turn context (`anthropic.ts`). This applies the same two rules here,
+ * so the two providers no longer disagree about what a system message means.
+ *
+ * Deliberately NOT keyed on a model-family list. Which templates are strict is not
+ * knowable up front and the list would be permanently incomplete; the folded shape is
+ * accepted by the strict ones and identical in content for the lenient ones, so there is
+ * nothing to detect.
+ */
+function foldSystemMessages(messages: readonly LLMMessage[]): LLMMessage[] {
+  let leading = 0;
+  while (leading < messages.length && messages[leading]!.role === "system") leading += 1;
+
+  const head: LLMMessage[] = [];
+  if (leading > 0) {
+    const merged = messages
+      .slice(0, leading)
+      .map((message) => (typeof message.content === "string" ? message.content.trim() : ""))
+      .filter(Boolean)
+      .join("\n\n");
+    // A run of system messages that is entirely empty leaves no head at all, rather than
+    // an empty system message some servers reject outright.
+    if (merged) head.push({ role: "system", content: merged });
+  }
+
+  const tail = messages.slice(leading).map((message) =>
+    message.role === "system"
+      // Mid-conversation steering, delivered as user-turn context. Position is preserved
+      // rather than merged into the head: these directives are written to be the most
+      // recent instruction the model has seen, and hoisting them to the top would
+      // silently invert that.
+      ? ({ ...message, role: "user" } as LLMMessage)
+      : message,
+  );
+
+  return [...head, ...tail];
+}
+
 export function normalizeMessagesForModel(
   messages: readonly LLMMessage[],
   providerModel: string,
 ): ChatCompletionMessageParam[] {
-  const cloned = messages.map((message) => ({ ...message })) as ChatCompletionMessageParam[];
+  const folded = foldSystemMessages(messages);
+  const cloned = folded.map((message) => ({ ...message })) as ChatCompletionMessageParam[];
   if (!isGemmaModelId(providerModel)) return cloned;
+  // Gemma has no system role at all, so it needs the stronger transform below; it reads
+  // the ORIGINAL list because folding has already collapsed the leading run it counts.
+  messages = folded;
 
   const leadingSystemPrompts: string[] = [];
   let leadingSystemCount = 0;
