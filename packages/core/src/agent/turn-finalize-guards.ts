@@ -28,6 +28,11 @@ import type { AgentSession } from "./session.js";
 import type { DeliverableIntent } from "./deliverable-intent.js";
 import type { DynamicTurnGuidance } from "./intent-classifier.js";
 import { timedPhase } from "./turn-metrics.js";
+import {
+  runArtifactVerificationGate,
+  buildFailureCaveat,
+  buildUnverifiableCaveat,
+} from "./artifact-verification-gate.js";
 import type { TurnQualitySignals } from "./turn-scorecard.js";
 import { loadTurnPlan, classifyTurnRisk } from "./turn-plan.js";
 import {
@@ -788,6 +793,41 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
       type: "artifact_completion_claim_unbacked_bannered",
       answerLength: finalResponse.length,
     }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+  }
+
+  // Artifact verification (orchestration.verifyArtifacts): open every file this turn
+  // produced and check it is actually well-formed, rebuilding it when it is not.
+  //
+  // Runs LAST deliberately. The probes above that could catch this live inside the QA
+  // delivery gate, which is a no-op without a plan carrying acceptance criteria — so an
+  // ordinary "give me a PDF" turn shipped its file unopened. And the caveat has to be
+  // appended after every guard that can REPLACE finalResponse (the consistency gate, the
+  // redaction rescan), or an upstream rewrite would silently drop the warning while the
+  // broken file still shipped.
+  const verification = await runArtifactVerificationGate({
+    session,
+    signal,
+    toolContext,
+    collectTurnArtifactAttachments: ctx.collectTurnArtifactAttachments,
+    incrementDelegationCount: ctx.incrementDelegationCount,
+  });
+  if (ctx.scorecardSignals) {
+    ctx.scorecardSignals.artifactVerificationStatus = verification.status;
+  }
+  if (verification.status === "fail") {
+    finalResponse += buildFailureCaveat(verification.failures);
+    guardrailEvents.push({ type: "guardrail_flagged", details: "artifact_verification_failed" });
+    logAudit("guardrail_flagged", {
+      type: "artifact_verification_failed",
+      failures: verification.failures,
+      repairAttempts: verification.repairAttempts,
+      probedCount: verification.probedCount,
+    }, { sessionId: session.id, channel: session.channel, severity: "error" });
+  } else if (verification.status === "repaired") {
+    guardrailEvents.push({ type: "guardrail_flagged", details: "artifact_verification_repaired" });
+  } else if (verification.status === "unverifiable" && verification.failures) {
+    finalResponse += buildUnverifiableCaveat(verification.failures);
+    guardrailEvents.push({ type: "guardrail_flagged", details: "artifact_verification_unverifiable" });
   }
 
   return finalResponse;

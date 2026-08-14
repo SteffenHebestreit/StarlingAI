@@ -10,6 +10,7 @@ import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { childLogger } from "../logger.js";
+import { validateArtifactBytes, checkFormatMatchesExtension, validateHtmlText } from "./artifact-validators.js";
 import type { QaJudgeArtifactRef } from "./qa-tool-judge.js";
 
 const log = childLogger("agent:artifact-probes");
@@ -20,18 +21,31 @@ const OVERALL_TIMEOUT_MS = 20_000;
 
 export interface ArtifactProbeReceipt {
   target: string;
-  probe: "exists" | "json_parse" | "html_structure" | "served_health";
-  status: "pass" | "fail";
+  /** Probe name — "exists", "served_health", or a validator name (see artifact-validators.ts). */
+  probe: string;
+  status: "pass" | "fail" | "unverifiable";
   detail: string;
+  /** Only hard failures are grounds for failing the report; soft ones are reported and ignored. */
+  severity?: "hard" | "soft";
   contentHash?: string;
   bytes?: number;
   durationMs: number;
 }
 
 export interface ArtifactProbeReport {
-  status: "pass" | "fail" | "not_applicable";
+  /** "unverifiable" = nothing was proven broken, but at least one artifact could not be checked. */
+  status: "pass" | "fail" | "unverifiable" | "not_applicable";
   receipts: ArtifactProbeReceipt[];
   probedCount: number;
+}
+
+/** Human-readable one-liner for the receipts that failed — used in diagnostics and caveats. */
+export function summarizeProbeFailures(report: ArtifactProbeReport, limit = 4): string {
+  return report.receipts
+    .filter((r) => r.status === "fail" && r.severity !== "soft")
+    .map((r) => `${r.target}: ${r.detail}`)
+    .slice(0, limit)
+    .join("; ");
 }
 
 function withTimeout<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
@@ -41,20 +55,18 @@ function withTimeout<T>(work: Promise<T>, ms: number, label: string): Promise<T>
   ]);
 }
 
-/** Structural HTML sanity: non-empty, no truncation mid-tag, opened script/body/html closed. */
+/**
+ * Structural HTML sanity. Delegates to the shared validator so this module, the
+ * sub-agent truncation check, and any future caller all apply the SAME rules.
+ *
+ * The previous implementation counted `<script`/`</script>` with a regex over the
+ * whole file, which reported "unclosed <script>" on any valid page that printed
+ * markup inside a JS string or a <pre> tutorial block. The shared validator strips
+ * comments and script/style bodies before counting.
+ */
 export function probeHtmlStructure(content: string): { ok: boolean; detail: string } {
-  const trimmed = content.trim();
-  if (trimmed.length === 0) return { ok: false, detail: "empty file" };
-  // Truncation heuristic: file ends inside an unterminated tag.
-  const lastOpen = trimmed.lastIndexOf("<");
-  const lastClose = trimmed.lastIndexOf(">");
-  if (lastOpen > lastClose) return { ok: false, detail: "ends mid-tag (truncated write)" };
-  for (const tag of ["script", "body", "html"]) {
-    const opens = (trimmed.match(new RegExp(`<${tag}[\\s>]`, "gi")) ?? []).length;
-    const closes = (trimmed.match(new RegExp(`</${tag}>`, "gi")) ?? []).length;
-    if (opens > closes) return { ok: false, detail: `unclosed <${tag}> (${opens} opened, ${closes} closed)` };
-  }
-  return { ok: true, detail: "structure balanced" };
+  const result = validateHtmlText(content);
+  return { ok: result.status !== "fail", detail: result.detail };
 }
 
 async function probeFile(workspacePath: string, location: string): Promise<ArtifactProbeReceipt[]> {
@@ -68,7 +80,9 @@ async function probeFile(workspacePath: string, location: string): Promise<Artif
       return [{ target: location, probe: "exists", status: "fail", detail: info.isFile() ? "zero-byte file" : "not a file", durationMs: Date.now() - started }];
     }
     if (info.size > MAX_PROBE_BYTES) {
-      return [{ target: location, probe: "exists", status: "pass", detail: `exists (${info.size} bytes; content probes skipped over size cap)`, bytes: info.size, durationMs: Date.now() - started }];
+      // "Too big to check" is NOT "checked and fine" — reporting pass here told the
+      // QA gate an unexamined 40 MB file was verified.
+      return [{ target: location, probe: "exists", status: "unverifiable", detail: `exists (${info.size} bytes) but is over the ${MAX_PROBE_BYTES}-byte probe cap — contents were NOT checked`, bytes: info.size, severity: "soft", durationMs: Date.now() - started }];
     }
     content = await readFile(absolute);
   } catch (error) {
@@ -77,20 +91,21 @@ async function probeFile(workspacePath: string, location: string): Promise<Artif
   const contentHash = createHash("sha256").update(content).digest("hex").slice(0, 16);
   receipts.push({ target: location, probe: "exists", status: "pass", detail: "readable", contentHash, bytes: content.length, durationMs: Date.now() - started });
 
-  const lower = location.toLowerCase();
-  if (lower.endsWith(".json")) {
-    const t0 = Date.now();
-    try {
-      JSON.parse(content.toString("utf8"));
-      receipts.push({ target: location, probe: "json_parse", status: "pass", detail: "valid JSON", contentHash, durationMs: Date.now() - t0 });
-    } catch (error) {
-      receipts.push({ target: location, probe: "json_parse", status: "fail", detail: `invalid JSON: ${error instanceof Error ? error.message.slice(0, 120) : "parse error"}`, contentHash, durationMs: Date.now() - t0 });
-    }
-  } else if (lower.endsWith(".html") || lower.endsWith(".htm")) {
-    const t0 = Date.now();
-    const result = probeHtmlStructure(content.toString("utf8"));
-    receipts.push({ target: location, probe: "html_structure", status: result.ok ? "pass" : "fail", detail: result.detail, contentHash, durationMs: Date.now() - t0 });
+  const bytes = new Uint8Array(content);
+
+  // Does the content match what the filename promises? This is what catches a .docx
+  // handed over as "your PDF" — a defect no per-format validator sees, because the
+  // bytes are a perfectly valid document of the WRONG kind.
+  const t0 = Date.now();
+  const mismatch = checkFormatMatchesExtension(location, bytes);
+  if (mismatch) {
+    receipts.push({ target: location, probe: mismatch.probe, status: mismatch.status, detail: mismatch.detail, severity: mismatch.severity, contentHash, durationMs: Date.now() - t0 });
+    return receipts; // the format is wrong; per-format validation below would only restate it
   }
+
+  const t1 = Date.now();
+  const verdict = await validateArtifactBytes(location, bytes);
+  receipts.push({ target: location, probe: verdict.probe, status: verdict.status, detail: verdict.detail, severity: verdict.severity, contentHash, durationMs: Date.now() - t1 });
   return receipts;
 }
 
@@ -141,8 +156,14 @@ export async function probeArtifacts(
       receipts.push({ target: ref.location, probe: "exists", status: "fail", detail: `probe error: ${error instanceof Error ? error.message.slice(0, 120) : String(error)}`, durationMs: 0 });
     }
   }
+  // Only a HARD failure is grounds for failing the report and spending a rebuild.
+  // A soft failure is reported in the receipts and otherwise ignored; an
+  // unverifiable artifact means "nothing was proven broken, but nothing was proven
+  // sound either" — an honest caveat, never a rebuild.
+  const hardFail = receipts.some((receipt) => receipt.status === "fail" && receipt.severity !== "soft");
+  const anyUnverifiable = receipts.some((receipt) => receipt.status === "unverifiable");
   return {
-    status: receipts.some((receipt) => receipt.status === "fail") ? "fail" : "pass",
+    status: hardFail ? "fail" : anyUnverifiable ? "unverifiable" : "pass",
     receipts,
     probedCount: receipts.length,
   };
