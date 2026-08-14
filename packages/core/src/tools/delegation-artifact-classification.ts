@@ -113,6 +113,7 @@ export function looksLikeReadOnlyMutationMiss(
 export const ARTIFACT_PRODUCING_TOOLS = new Set([
   "write_file", "edit_file", "create_dir",
   "generate_document", "generate_website", "generate_presentation", "generate_docx", "generate_pptx", "generate_pdf",
+  "render_pdf",
   "bundle_artifact_zip", "export_workspace_artifact",
   // fetch_image downloads + SAVES a real local image file — that saved asset is the
   // deliverable, which cached research facts can never satisfy. Without this, an

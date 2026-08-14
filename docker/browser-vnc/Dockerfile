@@ -30,6 +30,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     supervisor iproute2 nginx \
     wget curl ca-certificates gnupg \
     fonts-liberation fonts-dejavu \
+    # This Chrome is also the PDF renderer behind render_pdf (raw CDP Page.printToPDF),
+    # so its installed fonts ARE the document's font coverage. Liberation + DejaVu alone
+    # cover Latin/Greek/Cyrillic and marks like ✓ → but render CJK and emoji as tofu —
+    # verified by inspecting the embedded fonts of a generated PDF. Noto closes both gaps.
+    fonts-noto-cjk fonts-noto-color-emoji \
     libasound2t64 libnspr4 libnss3 libxss1 libgbm1 xdg-utils \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 

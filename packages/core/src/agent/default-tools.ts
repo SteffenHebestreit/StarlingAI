@@ -89,6 +89,7 @@ export const DIRECT_MAIN_TOOL_NAMES = [
   "generate_mermaid_diagram",
   "generate_chart_html",
   "generate_pdf",
+  "render_pdf",
   "get_site_credentials",
   "site_fill_credentials",
   "browser_navigate",

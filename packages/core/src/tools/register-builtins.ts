@@ -42,6 +42,7 @@ import "./workspace-search.js";
 import "./web.js";
 import "./multimodal.js";
 import "./document-output.js";
+import "./render-pdf.js";
 import "./website.js";
 import "./serve-app.js";
 import "./extractors.js";

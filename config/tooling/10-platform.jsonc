@@ -33,6 +33,13 @@
       "retrievalTopK": 6,
       "candidateTopK": 30,
       "maxContextChars": 6000,
+      // Inline the FULL text of small files attached this turn instead of a top-k sample.
+      // A CV, offer, or invoice is 2–6k chars: well under the threshold, and semantic
+      // top-k over one short document is strictly worse than just reading it — it drops
+      // whole sections, and rewriting a CV from a partial sample invents dates and loses
+      // roles. Large and prior-turn documents still take the lean retrieval path below.
+      "inlineSmallDocuments": true,
+      "inlineThresholdChars": 20000,
       // Search the signed-in user's personal library in every conversation (not
       // just the session a file was attached to). Files uploaded on the Documents
       // page → Personal library become available across all of that user's chats.
@@ -86,6 +93,20 @@
       // Allow crawling private/internal hosts (RFC1918, *.internal). OFF applies the
       // SSRF guard per redirect hop. Turn ON only to index a trusted internal wiki.
       "allowPrivateHosts": false
+    }
+  },
+  // Document rendering for render_pdf. The renderer is the Chrome that already runs in
+  // the browser-vnc container, driven over raw CDP — no extra image, no extra dependency.
+  // The HTML is pushed into the page with Page.setDocumentContent and the PDF comes back
+  // base64 on the same socket, so nothing is served over HTTP and no volume is shared.
+  // Disable this (or point cdpUrl elsewhere) in a deployment that drops browser-vnc;
+  // render_pdf then returns a clear error telling the agent to use generate_docx instead.
+  "render": {
+    "pdf": {
+      "enabled": true,
+      "cdpUrl": "http://browser-vnc:9222",
+      "timeoutMs": 30000,
+      "settleMs": 400
     }
   },
   "computerUse": {

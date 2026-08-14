@@ -56,6 +56,7 @@ export type { EffortProfile, EffortTier, EffortConfig } from "./schemas/effort.j
 import { ChannelsSchema } from "./schemas/channels.js";
 import { MultimodalSchema } from "./schemas/multimodal.js";
 import { RetrievalSchema } from "./schemas/retrieval.js";
+import { RenderSchema } from "./schemas/render.js";
 import { OrchestrationSchema } from "./schemas/orchestration.js";
 import { EffortSchema } from "./schemas/effort.js";
 
@@ -1698,6 +1699,7 @@ export const ConfigSchema = z.object({
   guardrails: GuardrailsSchema.default({}),
   multimodal: MultimodalSchema.default({}),
   retrieval: RetrievalSchema.default({}),
+  render: RenderSchema,
   mcp: McpConfigSchema.default({}),
   sites: SitesSchema.default({}),
   webhooks: WebhooksSchema.default({}),

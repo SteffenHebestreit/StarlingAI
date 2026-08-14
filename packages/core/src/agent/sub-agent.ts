@@ -909,6 +909,7 @@ const SUB_AGENT_PER_TOOL_CAPS: Partial<Record<string, number>> = {
   generate_docx: 4,
   generate_pptx: 4,
   generate_pdf: 4,
+  render_pdf: 4,
   export_workspace_artifact: 4,
   bundle_artifact_zip: 2,
 };
@@ -918,7 +919,7 @@ const SUB_AGENT_PER_TOOL_CAPS: Partial<Record<string, number>> = {
 // (same path written repeatedly) still trips the cap at PER_PATH_CAP.
 const PATH_KEYED_WRITE_TOOLS = new Set<string>([
   "write_file", "edit_file",
-  "generate_document", "generate_docx", "generate_pptx", "generate_pdf",
+  "generate_document", "generate_docx", "generate_pptx", "generate_pdf", "render_pdf",
   "export_workspace_artifact",
 ]);
 const PER_PATH_WRITE_CAP = 2;
@@ -949,6 +950,7 @@ const ARTIFACT_PERSIST_TOOLS = new Set<string>([
   "write_file",
   "generate_document",
   "generate_pdf",
+  "render_pdf",
   "generate_website",
   "generate_presentation",
   "export_workspace_artifact",

@@ -185,6 +185,7 @@ Write operations inside the workspace; session-level consent once.
 | `record_lesson` | — | — | Record a lesson learned from a task execution into the agent outcome log |
 | `record_plan` | — | — | Record the orchestrator's structured plan for a complex turn |
 | `record_skill` | — | — | Author a reusable procedure (skill) in the Skill Library from experience |
+| `render_pdf` | — | — | Render Markdown or HTML into a typeset, send-ready PDF via a browser engine |
 | `request_new_capability` | — | — | Request development of a new tool to fill a capability gap |
 | `research_note` | — | — | Write a research finding into the durable scratchpad for the current session |
 | `research_notes_clear` | — | — | Clear research scratchpad notes for the current session |

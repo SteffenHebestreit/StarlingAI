@@ -923,6 +923,12 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  render_pdf: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Render Markdown or HTML into a typeset, send-ready PDF via a browser engine",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
   // Active scanning tools — Tier 3, per-call approval, require authorized scope
   nmap_scan: {
     tier: ToolTier.THREE_PRIVILEGED,

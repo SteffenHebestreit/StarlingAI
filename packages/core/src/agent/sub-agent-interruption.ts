@@ -363,7 +363,7 @@ export function hasDeliverableArtifact(artifacts: Record<string, unknown>[]): bo
     const previewMode = typeof artifact["previewMode"] === "string" ? artifact["previewMode"] : "";
     const contentType = typeof artifact["contentType"] === "string" ? artifact["contentType"] : "";
 
-    if (["generate_document", "generate_pdf", "generate_chart_html", "generate_mermaid_diagram", "export_workspace_artifact", "write_file"].includes(sourceTool)) {
+    if (["generate_document", "generate_pdf", "render_pdf", "generate_chart_html", "generate_mermaid_diagram", "export_workspace_artifact", "write_file"].includes(sourceTool)) {
       return true;
     }
 
