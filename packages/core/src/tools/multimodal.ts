@@ -570,18 +570,28 @@ function registerBrowserTool(input: {
 
 async function readWorkspaceBinaryFile(path: string, workspacePath: string): Promise<WorkspaceBinaryFile> {
   const resolved = resolveWorkspacePath(path, workspacePath);
-  const fileStat = await stat(resolved.resolved);
-  if (!fileStat.isFile()) {
-    throw new Error(`Path is not a file: ${path}`);
-  }
-
-  const bytes = await readFile(resolved.resolved);
-  return {
+  const describe = (bytes: Buffer): WorkspaceBinaryFile => ({
     resolvedPath: resolved.resolved,
     filename: basename(resolved.resolved),
     contentType: inferMimeType(resolved.resolved),
     bytes,
-  };
+  });
+
+  try {
+    const fileStat = await stat(resolved.resolved);
+    if (!fileStat.isFile()) {
+      throw new Error(`Path is not a file: ${path}`);
+    }
+    return describe(await readFile(resolved.resolved));
+  } catch (err) {
+    // Uploads go through the object store, and under `storage.backend: "s3"` (the bundled
+    // compose default) they never touch the workspace disk — so an agent re-opening an
+    // attachment it was told about would ENOENT here. Fall back to the store before failing.
+    const { getUpload } = await import("../storage/object-store.js");
+    const stored = await getUpload(path.replace(/\\/g, "/").replace(/^\/+/, ""));
+    if (!stored) throw err;
+    return describe(Buffer.from(stored));
+  }
 }
 
 function resolveWorkspacePath(path: string, workspacePath: string): { resolved: string } {

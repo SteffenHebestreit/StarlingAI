@@ -508,23 +508,36 @@ export async function augmentTurnWithDocuments(input: {
   let ingested = 0;
   let failed = 0;
   const ingestedNames: string[] = [];
+  const failedNames: string[] = [];
   // Full extracted text of docs attached THIS turn — used to inline small docs whole.
   const ingestedDocs: Array<{ title: string; text: string }> = [];
 
   if (cfg.autoIngestAttachments && input.attachments?.length) {
-    const [{ readFile }, { resolvePathWithinWorkspace }, { basename }] = await Promise.all([
+    const [{ readFile }, { resolvePathWithinWorkspace }, { basename }, { getUpload }] = await Promise.all([
       import("node:fs/promises"),
       import("../tools/workspace-path.js"),
       import("node:path"),
+      import("../storage/object-store.js"),
     ]);
     for (const att of input.attachments) {
       if (att.isDirectory || !att.relativePath) continue;
       try {
+        // Chat attachments are persisted through the object store (scanAndStoreUpload →
+        // putUpload), and under `storage.backend: "s3"` — the bundled compose DEFAULT —
+        // putUpload writes to S3 and nothing lands on the workspace disk. Reading them
+        // back with a bare readFile therefore ENOENTs on every default deployment, and
+        // the catch below turned that into a silent no-context turn: the user attaches a
+        // CV, the model never sees it, and nothing anywhere says so. Resolve first (the
+        // traversal guard still has to run on a client-supplied path), then read through
+        // the backend-aware store, falling back to the disk for genuine workspace files
+        // that were never routed through an upload.
         const { resolved } = resolvePathWithinWorkspace(att.relativePath, input.workspacePath);
-        const bytes = await readFile(resolved);
+        const storeKey = att.relativePath.replace(/\\/g, "/").replace(/^\/+/, "");
+        const stored = await getUpload(storeKey);
+        const bytes = stored ?? new Uint8Array(await readFile(resolved));
         const filename = att.filename || basename(att.relativePath);
         const outcome = await ingestDocumentBytes({
-          bytes: new Uint8Array(bytes),
+          bytes,
           filename,
           contentType: att.contentType || "application/octet-stream",
           scope: "session",
@@ -536,16 +549,30 @@ export async function augmentTurnWithDocuments(input: {
           ingestedNames.push(outcome.result.title);
           ingestedDocs.push({ title: outcome.result.title, text: outcome.result.text });
         } else {
+          failedNames.push(att.filename || basename(att.relativePath));
           failed += 1;
         }
       } catch (err) {
         log.warn({ err, path: att.relativePath }, "auto-ingest of attachment failed");
+        failedNames.push(att.filename || att.relativePath);
         failed += 1;
       }
     }
   }
 
-  if (!cfg.injectContext) return { ingested, failed, contextBlock: "", retrievalUnavailable: false };
+  // An attachment that failed to extract must NEVER be silent. Without this, the turn is
+  // indistinguishable from one where the user attached nothing, so the model answers from
+  // memory — or tells the user it has no documents on file — while their CV sits in the
+  // object store unread. Same failure class as the engram-down placeholder below.
+  const failureNotice = failedNames.length > 0
+    ? `[ATTACHMENT NOT READABLE — ${failedNames.length} file(s) attached this turn (${failedNames.join(", ")}) could NOT be extracted or indexed, so their contents are NOT available to you. `
+      + `Do not guess at, summarize, or answer from what you assume those files contain, and do not tell the user they attached nothing or that no document is on file. `
+      + `Say plainly that the file could not be read this turn, and offer to retry or to let them paste the text.]`
+    : "";
+  const withNotice = (block: string): string =>
+    failureNotice ? (block ? `${failureNotice}\n\n${block}` : failureNotice) : block;
+
+  if (!cfg.injectContext) return { ingested, failed, contextBlock: withNotice(""), retrievalUnavailable: false };
 
   // Reuse-the-whole-doc (audit ef9bd480): when the user just attached small document(s),
   // inline their FULL text instead of a handful of semantic top-k excerpts that silently
@@ -553,7 +580,7 @@ export async function augmentTurnWithDocuments(input: {
   // THIS turn's freshly-attached docs under the threshold; large + prior-turn docs stay on
   // the lean retrieval path below. Costs no extra engram/LLM call — the text is in hand.
   const inlineBlock = buildInlineDocumentContext(ingestedDocs, cfg);
-  if (inlineBlock) return { ingested, failed, contextBlock: inlineBlock, retrievalUnavailable: false };
+  if (inlineBlock) return { ingested, failed, contextBlock: withNotice(inlineBlock), retrievalUnavailable: false };
 
   const { chunks, retrievalFailed, lowConfidence } = await retrieveDocumentContextWithStatus(input.query, input.ctx);
   let contextBlock = formatDocumentContext(chunks, { lowConfidence });
@@ -566,8 +593,8 @@ export async function augmentTurnWithDocuments(input: {
     return {
       ingested,
       failed,
-      contextBlock:
-        "[DOCUMENT RETRIEVAL UNAVAILABLE THIS TURN — the document store did not respond, so this is NOT evidence that the user has no documents, CV, or profile on file. Do NOT tell the user that nothing is stored about them; say their stored documents could not be retrieved right now and offer to retry or let them paste the content.]",
+      contextBlock: withNotice(
+        "[DOCUMENT RETRIEVAL UNAVAILABLE THIS TURN — the document store did not respond, so this is NOT evidence that the user has no documents, CV, or profile on file. Do NOT tell the user that nothing is stored about them; say their stored documents could not be retrieved right now and offer to retry or let them paste the content.]"),
       // A FAILURE placeholder, not real content — the caller must not count this as document grounding.
       retrievalUnavailable: true,
     };
@@ -586,6 +613,7 @@ export async function augmentTurnWithDocuments(input: {
       `Any directly relevant excerpts found for the current message are included below.`;
     contextBlock = contextBlock ? `${hint}\n\n${contextBlock}` : hint;
   }
+  contextBlock = withNotice(contextBlock);
 
   return { ingested, failed, contextBlock, retrievalUnavailable: false };
 }
