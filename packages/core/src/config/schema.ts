@@ -143,16 +143,19 @@ export const ModelConfigSchema = z.object({
    *  build a ModelConfig object inline (not via `.parse()`) MUST include
    *  `enableThinking` explicitly — the default only applies on schema parse. */
   enableThinking: z.boolean().default(false),
-  /** Reasoning EFFORT for models with graded thinking (gpt-oss / o-series:
-   *  low | medium | high). Family-aware (resolveThinkingControls):
-   *  - gpt-oss: injected as a `Reasoning: <effort>` line in the system message
-   *    (the only form LM Studio honors — it ignores the `reasoning_effort` API
-   *    parameter, lmstudio-bug-tracker#988) AND sent as `reasoning_effort` in
-   *    extra_body for backends that DO honor it (vLLM / OpenAI).
-   *  - enable_thinking-toggle families (Qwen / GLM / DeepSeek) are on/off only via
-   *    `enableThinking`; this field is ignored there. Undefined → model/GUI default;
-   *    falls back to enableThinking (false→low, true→high) for gpt-oss when unset. */
-  reasoningEffort: z.enum(["low", "medium", "high"]).optional(),
+  /** Reasoning EFFORT for models with graded thinking. Family-aware
+   *  (resolveThinkingControls in providers/lmstudio.ts):
+   *  - Qwen 3.8+ ("qwen-effort"): sent as a top-level `reasoning_effort`, which
+   *    this family honors — levels none | low | medium | xhigh. This is the ONLY
+   *    working control there: `enable_thinking` is silently ignored by the 3.8
+   *    template (measured 2026-08-15), so `enableThinking:false` maps to "none".
+   *    "high" folds to "xhigh" since 3.8 has no "high".
+   *  - gpt-oss / o-series: low | medium | high, injected as a `Reasoning: <effort>`
+   *    system line (the form LM Studio reads for that family) AND sent as
+   *    `reasoning_effort`. "xhigh"/"none" fold to "high"/"low".
+   *  - Qwen ≤3.6 / GLM / Gemma-4: on-off only via `enableThinking`; ignored here.
+   *  Undefined → model/GUI default. */
+  reasoningEffort: z.enum(["none", "low", "medium", "high", "xhigh"]).optional(),
   /** Reuse the provider's KV/prefix cache across calls. The ~22KB base system
    *  prompt + tool catalog is the stable first part of every call, so reusing a
    *  cached prefill skips re-prefilling it each iteration/turn — a large latency

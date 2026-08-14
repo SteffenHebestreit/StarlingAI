@@ -6,23 +6,46 @@
     },
     "defaults": {
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
-        "fallback": "lmstudio/qwen/qwen3.6-35b-a3b",
-        "enableThinking": false,
-        "contextWindow": 32768,
-        "temperature": 0.2,
-        "topP": 0.9,
+        "primary": "lmstudio/qwen/qwen3.8-27b",
+        "fallback": "lmstudio/qwen/qwen3.8-27b",
+        // Qwen 3.8 replaced the on/off enable_thinking toggle with graded
+        // reasoning_effort (none|low|medium|xhigh), and enable_thinking is IGNORED by
+        // its template — measured on this server 2026-08-15, enable_thinking:false
+        // left thinking fully on. reasoning_effort is honored: none→0 reasoning
+        // chars, low→1.3k, medium→1.6k, xhigh→9k (and xhigh took 183s on this box).
+        // Deliberately NOT setting reasoningEffort here. Every agent already declares
+        // enableThinking, and an explicit effort in defaults would win over all of
+        // them (explicit effort beats the toggle in resolveThinkingControls) — forcing
+        // the thinking-OFF specialists back on and erasing the curated per-agent
+        // policy. Instead the existing toggle maps onto the ladder automatically:
+        //   enableThinking: true  → reasoning_effort "medium"
+        //   enableThinking: false → reasoning_effort "none" (+ enable_thinking:false)
+        // Agents that want the in-between rung set "low" explicitly; the per-session
+        // effort dial supplies "xhigh" on demand.
+        // The model serves 262144 and is loaded at full context; 32768 was sized for
+        // the previous 35B. Half the window leaves generous prefill headroom.
+        "contextWindow": 131072,
+        // Qwen's published sampling for 3.8 THINKING mode. The old 0.2/0.9 was tuned
+        // for a non-thinking default — Qwen explicitly warns that near-greedy
+        // sampling in thinking mode can drive endless repetition, and every agent now
+        // reasons by default. Non-thinking agents (reasoningEffort "none") fall back
+        // to 0.7/0.8 automatically in the provider.
+        "temperature": 1.0,
+        "topP": 0.95,
         "repeatPenalty": 1.05,
         "maxTokens": 4096,
         // llama.cpp/LM Studio KV-cache reuse for the stable system-prompt prefix —
         // skips re-prefilling ~12k tokens per turn (audit 0792acf0: 7.6s for "hi").
         "promptCache": true,
         "embeddingModel": "lmstudio/text-embedding-qwen3-embedding-0.6b",
-        // Routing tier — the small/fast model the receptionist fast-lane uses to
-        // answer trivial turns ("hi") without the full prompt + swarm. qwen3.5-9b
-        // is loaded alongside the 35b primary.
+        // Routing tier — the fast lane that answers trivial turns ("hi") without the
+        // full prompt + swarm. This pointed at qwen3.5-9b, which reports
+        // state:"not-loaded" on the server — it depended on LM Studio JIT-loading a
+        // second model beside a 27B holding a 262k context. Point it at the resident
+        // model instead and make it cheap with reasoning_effort "none" (measured: 0
+        // reasoning chars, the fastest configuration available).
         "tiers": {
-          "routing": "lmstudio/qwen/qwen3.5-9b"
+          "routing": "lmstudio/qwen/qwen3.8-27b"
         }
       }
     },

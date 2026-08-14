@@ -7,6 +7,10 @@
       "capabilities": ["multi-agent mission execution", "parallel slice partitioning", "task-graph dependency sequencing", "cross-topic result synthesis", "drafting handoff to author specialists", "final quality gating", "acceptance-checklist tracking", "ephemeral agent spin-up"],
       "tags": ["coordination", "orchestration", "parallel", "task-graph", "dependencies", "synthesis", "quality-gate", "acceptance", "mission", "multi-area", "execution"],
       "model": {
+        // Reasoning role: deliberation rung. Explicit effort overrides the
+        // enableThinking toggle below, which predates graded effort and would
+        // otherwise map to "none" (thinking fully off) on Qwen 3.8.
+        "reasoningEffort": "medium",
         "enableThinking": false,
         "temperature": 0.1,
         "maxTokens": 4096
@@ -96,6 +100,10 @@
       "capabilities": ["web source research", "official documentation lookup", "specification and standards discovery", "release-note lookup", "product and comparison research", "cross-source fact-checking", "source-metadata capture for writers", "published security-advisory lookup"],
       "tags": ["research", "web-research", "documentation", "sources", "specifications", "standards", "release-notes", "fact-checking", "comparison-research", "advisory-lookup"],
       "model": {
+        // Reasoning role: deliberation rung. Explicit effort overrides the
+        // enableThinking toggle below, which predates graded effort and would
+        // otherwise map to "none" (thinking fully off) on Qwen 3.8.
+        "reasoningEffort": "medium",
         "enableThinking": false,
         "temperature": 0.2,
         "maxTokens": 4096
@@ -208,6 +216,10 @@
       "capabilities": ["javascript execution", "typescript execution", "sandboxed scripting", "calculation and algorithmic logic", "format and data transformation", "utility prototyping"],
       "tags": ["code", "sandbox", "javascript", "typescript", "script", "execute", "calculation", "transform"],
       "model": {
+        // Execution specialist: light reasoning is enough — the deliberation rung
+        // ("medium") is for planning/analysis roles. Measured low→1.3k reasoning
+        // chars vs medium→1.6k, and both far below xhigh→9k.
+        "reasoningEffort": "low",
         "enableThinking": true,
         "temperature": 0.2,
         "maxTokens": 8192
@@ -262,6 +274,10 @@
       "capabilities": ["source-code reading", "symbol and reference lookup", "call-site tracing", "config-value extraction", "architecture review", "static bug diagnosis", "security and edge-case review", "workspace code retrieval"],
       "tags": ["code-analysis", "workspace-search", "symbol-lookup", "references", "static-review", "bug-diagnosis", "architecture", "code-at-rest"],
       "model": {
+        // Reasoning role: deliberation rung. Explicit effort overrides the
+        // enableThinking toggle below, which predates graded effort and would
+        // otherwise map to "none" (thinking fully off) on Qwen 3.8.
+        "reasoningEffort": "medium",
         "enableThinking": true,
         "temperature": 0.1,
         "maxTokens": 8192

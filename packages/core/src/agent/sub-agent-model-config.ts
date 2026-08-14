@@ -9,6 +9,7 @@
  */
 
 import type { ModelConfig } from "../config/schema.js";
+import type { ReasoningEffort } from "../providers/lmstudio.js";
 
 /**
  * Merge a per-agent model override onto the defaults, dropping override keys
@@ -45,7 +46,7 @@ export function mergeAgentModelOverride(
 export function applyEffortModelOverlay(
   baseModelConfig: ModelConfig,
   effortProfile:
-    | { subAgentMaxTokens?: number; enableThinking?: boolean; reasoningEffort?: "low" | "medium" | "high" }
+    | { subAgentMaxTokens?: number; enableThinking?: boolean; reasoningEffort?: ReasoningEffort }
     | null
     | undefined,
 ): ModelConfig {
