@@ -684,8 +684,11 @@ describe("infrastructure tools", () => {
     ]);
 
     const tool = getTool("terraform_exec");
-    const workspacePath = process.cwd();
-    const planPath = "packages/core/tmp/test.tfplan";
+    // Temp workspace, NOT process.cwd(): the plan path below is workspace-relative,
+    // and resolving it against the repo made every test run litter the source tree
+    // with packages/core/packages/core/tmp/test.tfplan.
+    const workspacePath = mkdtempSync(join(tmpdir(), "sai-terraform-plan-"));
+    const planPath = "tmp/test.tfplan";
 
     const planResult = await tool!.execute({
       action: "plan",
@@ -698,15 +701,15 @@ describe("infrastructure tools", () => {
 
     expect(planResult.success).toBe(true);
     const planArgs = execFileMock.mock.calls.find((call) => (call[1] as string[])[0] === "plan")?.[1] as string[];
-    expect(planArgs).toEqual(expect.arrayContaining([`-out=${join(workspacePath, "packages", "core", "tmp", "test.tfplan")}`]));
+    expect(planArgs).toEqual(expect.arrayContaining([`-out=${join(workspacePath, "tmp", "test.tfplan")}`]));
 
     execFileMock.mockReset();
     execFileMock.mockImplementation((_file, args, _options, callback) => {
       callback(null, { stdout: Array.isArray(args) ? args.join(" ") : "ok", stderr: "" });
     });
 
-    mkdirSync(join(workspacePath, "packages", "core", "tmp"), { recursive: true });
-    writeFileSync(join(workspacePath, "packages", "core", "tmp", "test.tfplan"), "fake-plan", "utf8");
+    mkdirSync(join(workspacePath, "tmp"), { recursive: true });
+    writeFileSync(join(workspacePath, "tmp", "test.tfplan"), "fake-plan", "utf8");
 
     const showResult = await tool!.execute({
       action: "show",
@@ -719,7 +722,7 @@ describe("infrastructure tools", () => {
 
     expect(showResult.success).toBe(true);
     const showArgs = execFileMock.mock.calls.find((call) => (call[1] as string[])[0] === "show")?.[1] as string[];
-    expect(showArgs).toEqual(expect.arrayContaining(["-json", join(workspacePath, "packages", "core", "tmp", "test.tfplan")]));
+    expect(showArgs).toEqual(expect.arrayContaining(["-json", join(workspacePath, "tmp", "test.tfplan")]));
 
     execFileMock.mockReset();
     execFileMock.mockImplementation((_file, args, _options, callback) => {
@@ -737,7 +740,9 @@ describe("infrastructure tools", () => {
 
     expect(applyResult.success).toBe(true);
     const applyArgs = execFileMock.mock.calls.find((call) => (call[1] as string[])[0] === "apply")?.[1] as string[];
-    expect(applyArgs).toEqual(expect.arrayContaining([join(workspacePath, "packages", "core", "tmp", "test.tfplan")]));
+    expect(applyArgs).toEqual(expect.arrayContaining([join(workspacePath, "tmp", "test.tfplan")]));
+
+    rmSync(workspacePath, { recursive: true, force: true });
   });
 
   it("parses Terraform outputs into structured metadata", async () => {
@@ -838,15 +843,18 @@ describe("infrastructure tools", () => {
     ]);
 
     const tool = getTool("ssh_download");
+    // Temp workspace, NOT process.cwd() — destinationPath is workspace-relative and
+    // the tool mkdir's its parent, which littered the source tree on every run.
+    const workspacePath = mkdtempSync(join(tmpdir(), "sai-ssh-download-"));
     const result = await tool!.execute({
       host: "vm.internal",
       username: "deploy",
       port: 2222,
       sourcePath: "/var/log/app.log",
-      destinationPath: "packages/core/tmp/app.log",
+      destinationPath: "logs/app.log",
     }, {
       sessionId: "session-ssh-download",
-      workspacePath: process.cwd(),
+      workspacePath,
     });
 
     expect(result.success).toBe(true);
@@ -857,7 +865,9 @@ describe("infrastructure tools", () => {
       "2222",
       "deploy@vm.internal:/var/log/app.log",
     ]));
-    expect(args.some((value) => value.endsWith(join("packages", "core", "tmp", "app.log")))).toBe(true);
+    expect(args.some((value) => value.endsWith(join("logs", "app.log")))).toBe(true);
+
+    rmSync(workspacePath, { recursive: true, force: true });
   });
 
   it("retries HTTP service checks until the endpoint is ready", async () => {

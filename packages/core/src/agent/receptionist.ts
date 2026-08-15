@@ -319,7 +319,11 @@ export async function tryReceptionistFastLane(
   if (!config.receptionist?.enabled) return null;
 
   // No routing tier → there is no cheap model to answer with; use the full path.
-  const provider = getChatProviderForTier("routing");
+  // reasoningEffort "none" is the point of this lane: it answers trivial turns ("hi")
+  // cheaply, and on a graded-thinking model the default effort would otherwise spend
+  // ~1.3k reasoning characters deciding how to say hello. Families that do not honor
+  // the field ignore it, so this is safe across model swaps.
+  const provider = getChatProviderForTier("routing", { reasoningEffort: "none" });
   if (!provider) return null;
 
   let capsule = "";

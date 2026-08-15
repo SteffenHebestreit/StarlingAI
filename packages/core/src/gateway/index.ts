@@ -900,15 +900,6 @@ export function createGateway() {
     );
   }
 
-  async function qwenTtsSupportsVoiceClone(input: {
-    baseUrl: string;
-    apiKey?: string;
-    timeoutMs: number;
-    requestedModel?: string;
-  }): Promise<boolean | undefined> {
-    return (await getQwenTtsCapabilitySnapshot(input))?.voiceCloneSupported;
-  }
-
   // ── Health / readiness / diagnostic endpoints ───────────────────────────
   // Extracted to gateway/routes/health.ts (pure move). Registered here so the
   // order relative to the surrounding middleware is preserved.
@@ -3583,15 +3574,18 @@ export function createGateway() {
     return c.json({ ok: true, request: resolved });
   });
 
-  // ── REST chat endpoint (for simple integrations) ─────────────────────────
+  // ── REST chat endpoint ───────────────────────────────────────────────────
+  // Never implemented: a turn is inherently streaming (tool calls, delegation,
+  // progress), so there is no useful synchronous response shape. Kept as an
+  // explicit, authenticated 501 rather than a 404 so integrators hitting the
+  // obvious path get pointed at the two real entry points instead of guessing.
+  // The request body is deliberately not parsed — nothing here consumes it.
   app.post("/api/chat", async (c) => {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) {
       return c.json({ error: "Unauthorized" }, 401);
     }
-    const { message, sessionId } = await c.req.json<{ message: string; sessionId?: string }>();
-    // Full implementation delegates to WS channel; REST returns 501 for streaming turns
-    return c.json({ error: "Use WebSocket for chat. REST chat coming in v0.2." }, 501);
+    return c.json({ error: "Synchronous REST chat is not implemented. Use POST /api/chat/stream (AG-UI SSE) or the WebSocket RPC channel." }, 501);
   });
 
   // ── HTTP server with WS upgrade ──────────────────────────────────────────

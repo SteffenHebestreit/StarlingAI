@@ -221,9 +221,20 @@ export async function assembleTurnSystemMessages(
     // turn. Still capped so a stalled embed backend degrades to "" (the per-turn RAG then
     // covers it) rather than hanging the turn.
     const PROFILE_PREFETCH_BUDGET_MS = 8000;
+    // SIGNAL (restored 2026-07-27): de-lexicalization deleted the userOwnFacts keyword
+    // tables and hardwired the flag to false, which left this whole subsystem unable to
+    // fire. The replacement is structural rather than lexical, exactly as that change
+    // intended: `documentRagFoundDocs` means the per-turn RAG surfaced real user-scope
+    // document content for THIS query — i.e. the user has material of their own that
+    // bears on what they just asked. That is language-independent, costs nothing extra
+    // (the boolean is already computed upstream), and is precisely the audited failure
+    // case: a CV is attached, yet the turn answers "I have no info about you".
+    // `userOwnFacts` is kept in the condition so a future semantic classifier can feed
+    // this path without touching the gate again.
+    const userProfileEvidenceWarranted = documentRagFoundDocs || dynamicGuidance?.userOwnFacts === true;
     const userProfilePrefetchPromise: Promise<string> =
       iterationCount === 0
-        && dynamicGuidance?.userOwnFacts === true
+        && userProfileEvidenceWarranted
         && getConfig().orchestration?.userProfilePrefetch === true
         ? timedPhase("userProfilePrefetch", async () => {
             let timer: ReturnType<typeof setTimeout> | undefined;

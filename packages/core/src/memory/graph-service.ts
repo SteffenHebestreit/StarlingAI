@@ -322,21 +322,33 @@ export async function graphRerank(candidateIds: string[]): Promise<Map<string, n
   }
 
   try {
+    // Each OPTIONAL MATCH must be collapsed by its own WITH before the next one
+    // expands again. Chained un-aggregated OPTIONAL MATCHes multiply row counts
+    // (peers x older x newer x retrievals per candidate) and only collapse at the
+    // final count(DISTINCT ...) — correct values, but a cartesian intermediate.
+    // That is survivable only while SIMILAR_TO/SUPERSEDES are never written; the
+    // moment either starts producing edges it blows the 200 ms budget above.
+    // RETRIEVED alone already grows without bound (it is CREATEd, not MERGEd).
     const queryPromise = runCypher(`
       MATCH (m:MemoryRecord) WHERE m.id IN $ids
       OPTIONAL MATCH (m)-[:SIMILAR_TO]-(peer:MemoryRecord)
+      WITH m, count(DISTINCT peer) AS peerCount
       OPTIONAL MATCH (m)-[:SUPERSEDES]->(older:MemoryRecord)
+      WITH m, peerCount, count(DISTINCT older) AS supersededCount
       OPTIONAL MATCH (m)<-[:SUPERSEDES]-(newer:MemoryRecord)
+      WITH m, peerCount, supersededCount, count(DISTINCT newer) AS newerVersionCount
       OPTIONAL MATCH ()-[ret:RETRIEVED {wasUseful: true}]->(m)
+      WITH m, peerCount, supersededCount, newerVersionCount,
+           count(DISTINCT ret) AS usefulRetrievals
       RETURN
         m.id                           AS id,
         coalesce(m.importance, 0.5)    AS importance,
         coalesce(m.centrality, 0.0)    AS centrality,
         coalesce(m.accessCount, 0)     AS accessCount,
-        count(DISTINCT peer)           AS peerCount,
-        count(DISTINCT older)          AS supersededCount,
-        count(DISTINCT newer)          AS newerVersionCount,
-        count(DISTINCT ret)            AS usefulRetrievals
+        peerCount                      AS peerCount,
+        supersededCount                AS supersededCount,
+        newerVersionCount              AS newerVersionCount,
+        usefulRetrievals               AS usefulRetrievals
     `, { ids: candidateIds }).catch(() => null); // swallow a late rejection after timeout
     const result = await Promise.race([
       queryPromise,

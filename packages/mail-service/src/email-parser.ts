@@ -51,6 +51,16 @@ export class EmailParser {
       mailbox: rawMessage.mailbox,
       uid: rawMessage.uid,
       messageId: parsed.messageId || rawMessage.envelope?.messageId || "",
+      // simpleParser already produces these; they were being dropped when the return
+      // object was assembled. Without them the reply graph is unreachable, and the
+      // only substitute — grouping by subject prefix — is a per-language heuristic
+      // ("Re:" vs "AW:") that shatters threads in exactly the corpora that need them.
+      inReplyTo: parsed.inReplyTo || "",
+      references: Array.isArray(parsed.references)
+        ? parsed.references
+        : (typeof parsed.references === "string" && parsed.references
+            ? parsed.references.split(/\s+/).filter(Boolean)
+            : []),
       from,
       to,
       cc,

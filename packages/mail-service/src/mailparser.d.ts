@@ -18,6 +18,11 @@ declare module "mailparser" {
     html?: string | Buffer | false | null;
     text?: string | null;
     messageId?: string | null;
+    /** RFC 5322 In-Reply-To. */
+    inReplyTo?: string | null;
+    /** RFC 5322 References. mailparser yields an array for multiple ids and a bare
+     *  string when there is exactly one, so consumers must handle both. */
+    references?: string[] | string | null;
     attachments?: AttachmentLike[];
   }
 

@@ -27,6 +27,19 @@
     // FAILs for truncated/broken/dead artifacts, receipts for valid ones. No
     // model call; cheap and deterministic, so enabled with strict verdicts.
     "qaDeterministicProbes": true,
+    // Artifact verification. The probes above only run inside the QA delivery gate,
+    // which needs a plan with acceptance criteria — so an ordinary "give me a PDF"
+    // turn shipped its file without anyone opening it. verifyArtifacts is triggered by
+    // an artifact EXISTING, so every artifact turn is covered, and on a hard failure
+    // verifyArtifactsRepair delegates a real rebuild rather than the QA loop's text
+    // rewrite (which runs with an empty tool array and cannot touch a file on disk).
+    // Repair costs one sub-agent run per failing turn, which is why the schema default
+    // stays OFF and it is enabled per deployment here.
+    // (verifyArtifacts defaults to true in the schema; stated here so the pairing is
+    // visible to an operator reading this shard.)
+    "verifyArtifacts": true,
+    "verifyArtifactsRepair": true,
+    "verifyArtifactsMaxRepairAttempts": 1,
     // (mission.store is set at the end of this file — it is a ROOT config key,
     // not an orchestration flag.)
 

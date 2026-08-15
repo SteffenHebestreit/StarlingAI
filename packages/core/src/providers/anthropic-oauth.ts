@@ -95,6 +95,43 @@ function toTokenSet(json: Record<string, unknown>, previousRefresh?: string): An
   return { accessToken, refreshToken, expiresAt: Date.now() + expiresInSec * 1000 };
 }
 
+/** A token-endpoint failure, carrying just enough to decide whether retrying is futile. */
+export class AnthropicOAuthError extends Error {
+  constructor(readonly status: number, readonly code: string | null) {
+    super(`Anthropic OAuth token request failed (HTTP ${status}${code ? `, ${code}` : ""})`);
+    this.name = "AnthropicOAuthError";
+  }
+}
+
+/** The OAuth2 `error` field only — a short enum like "invalid_grant", never the body. */
+function extractOAuthErrorCode(body: string): string | null {
+  try {
+    const parsed = JSON.parse(body) as Record<string, unknown>;
+    const direct = parsed["error"];
+    if (typeof direct === "string") return direct;
+    if (direct && typeof direct === "object") {
+      const nested = (direct as Record<string, unknown>)["type"] ?? (direct as Record<string, unknown>)["code"];
+      if (typeof nested === "string") return nested;
+    }
+  } catch { /* not JSON — nothing safe to extract */ }
+  return null;
+}
+
+/**
+ * Whether a refresh can never succeed again, as opposed to failing right now.
+ *
+ * A dead refresh token answers 400 `invalid_grant` forever, so retrying it every four
+ * minutes is not resilience — it is a permanent log fire that also hides real outages.
+ * A 5xx or a network error is the opposite case and must keep retrying.
+ */
+export function isUnrecoverableOAuthFailure(err: unknown): boolean {
+  if (!(err instanceof AnthropicOAuthError)) return false;
+  if (err.code && ["invalid_grant", "invalid_client", "unauthorized_client", "invalid_request"].includes(err.code)) {
+    return true;
+  }
+  return err.status === 400 || err.status === 401 || err.status === 403;
+}
+
 async function postToken(body: Record<string, unknown>): Promise<Record<string, unknown>> {
   const res = await fetch(ANTHROPIC_OAUTH_TOKEN_URL, {
     method: "POST",
@@ -104,9 +141,12 @@ async function postToken(body: Record<string, unknown>): Promise<Record<string, 
   const text = await res.text();
   if (!res.ok) {
     // Don't echo the raw body verbatim into an error that may be logged widely —
-    // it can contain token material on some error shapes.
-    log.warn({ status: res.status }, "Anthropic OAuth token endpoint returned an error");
-    throw new Error(`Anthropic OAuth token request failed (HTTP ${res.status})`);
+    // it can contain token material on some error shapes. The short OAuth `error`
+    // code is safe and is the difference between "retry later" and "this will never
+    // work again", so it is extracted on its own.
+    const code = extractOAuthErrorCode(text);
+    log.warn({ status: res.status, code }, "Anthropic OAuth token endpoint returned an error");
+    throw new AnthropicOAuthError(res.status, code);
   }
   try {
     return JSON.parse(text) as Record<string, unknown>;
@@ -165,6 +205,9 @@ export function loadStoredTokenSet(): AnthropicTokenSet | null {
 
 export function storeTokenSet(set: AnthropicTokenSet): void {
   setCredential(TOKEN_STORE_KEY, JSON.stringify(set));
+  // A newly stored grant is the one thing that can undo a permanent failure, so the
+  // latch clears here rather than requiring a restart after reconnecting.
+  resetAnthropicRefreshFailure();
 }
 
 export function clearStoredTokenSet(): void {
@@ -202,7 +245,15 @@ export async function getValidAccessToken(): Promise<string | null> {
   try {
     return (await inFlight).accessToken;
   } catch (err) {
-    log.error({ err }, "Anthropic OAuth token refresh failed — returning current token");
+    // The current token is still returned so a transient blip surfaces downstream as a
+    // clear 401 rather than an internal error. But a refusal that can never succeed is
+    // recorded here, because this is the only place a refresh failure is observed —
+    // the background refresher cannot see it, by design.
+    if (isUnrecoverableOAuthFailure(err)) {
+      noteUnrecoverableRefreshFailure(err);
+    } else {
+      log.error({ err }, "Anthropic OAuth token refresh failed — returning current token");
+    }
     return current.accessToken;
   }
 }
@@ -212,11 +263,58 @@ export async function getValidAccessToken(): Promise<string | null> {
 // capture a token snapshot at resolve time) never hand out an expiring token.
 
 let _refreshTimer: ReturnType<typeof setInterval> | null = null;
+/** Set when the stored grant is dead. Retrying it cannot help; only reconnecting can. */
+let _refreshDisabledReason: string | null = null;
 
-export function startAnthropicTokenRefresher(intervalMs = 4 * 60_000): void {
+/** Why the refresher is not running, for the runtime status surface. null = healthy. */
+export function anthropicRefreshDisabledReason(): string | null {
+  return _refreshDisabledReason;
+}
+
+/** Clear the disabled latch — called after a successful reconnect stores a new grant. */
+export function resetAnthropicRefreshFailure(): void {
+  _refreshDisabledReason = null;
+}
+
+/** Latch a permanently refused grant, and say so exactly once. */
+function noteUnrecoverableRefreshFailure(err: unknown): void {
+  if (_refreshDisabledReason) return;
+  _refreshDisabledReason =
+    err instanceof AnthropicOAuthError && err.code ? err.code : "invalid_grant";
+  log.error(
+    { code: _refreshDisabledReason },
+    "Anthropic OAuth grant is no longer valid — background refresh disabled. "
+      + "Reconnect Claude in the dashboard (or re-run `claude setup-token` and set "
+      + "CLAUDE_CODE_OAUTH_TOKEN) to restore it.",
+  );
+}
+
+/**
+ * Keep the stored token fresh, but only while that can accomplish something.
+ *
+ * Two conditions, and both were missing. The refresher started whenever a token file
+ * existed, so a deployment that had once connected Claude and then moved to a local
+ * model kept refreshing a credential nothing would ever use. And when the grant died it
+ * kept trying every four minutes forever: an expired refresh token answers 400
+ * `invalid_grant` permanently, so each attempt logged a warning that would never stop
+ * and buried real problems underneath it.
+ *
+ * `shouldRun` is supplied by the caller because whether Anthropic is in use is a config
+ * question, and this module deliberately knows nothing about config.
+ */
+export function startAnthropicTokenRefresher(
+  shouldRun: () => boolean = () => true,
+  intervalMs = 4 * 60_000,
+): void {
   if (_refreshTimer) return;
   _refreshTimer = setInterval(() => {
-    if (hasStoredOAuthToken()) void getValidAccessToken().catch(() => undefined);
+    if (_refreshDisabledReason) return;
+    // Re-checked every tick, not just at startup: connecting Claude, switching the
+    // active preset, or reloading config must take effect without a restart.
+    if (!shouldRun() || !hasStoredOAuthToken()) return;
+    // getValidAccessToken records a permanently refused grant in the latch above; it
+    // never rejects, so there is nothing to catch here beyond an unexpected throw.
+    void getValidAccessToken().catch(() => undefined);
   }, intervalMs);
   _refreshTimer.unref?.();
 }

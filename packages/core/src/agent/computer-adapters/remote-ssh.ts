@@ -53,10 +53,6 @@ export interface SshAdapterConfig {
   connectTimeoutMs?: number;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function resolveCredentials(cred?: string): string | undefined {
   if (!cred) return undefined;
   if (cred.startsWith("$") && !cred.startsWith("$$")) {

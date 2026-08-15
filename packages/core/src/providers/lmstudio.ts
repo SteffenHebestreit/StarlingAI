@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { Agent as UndiciAgent } from "undici";
 import type { ChatCompletion, ChatCompletionChunk, ChatCompletionMessageParam, ChatCompletionTool } from "openai/resources/chat/completions";
 import type { Stream } from "openai/streaming";
 import { childLogger } from "../logger.js";
@@ -7,7 +8,39 @@ import { beginProviderCall, recordProviderToken, endProviderCall } from "../obse
 
 const log = childLogger("provider:openai-compatible");
 const DEFAULT_PROVIDER_TIMEOUT_MS = 30_000;
-const MAX_PROVIDER_TIMEOUT_MS = 300_000;
+/**
+ * Ceiling on the per-request budget, which streamOnce() uses as the SILENCE budget:
+ * the inactivity timer resets on every chunk, so this bounds how long the provider
+ * may go quiet, not how long a generation may take.
+ *
+ * Raised from 300_000. A graded-thinking model with a large prompt legitimately
+ * emits nothing for minutes inside one reasoning block — an observed content_writer
+ * run on qwen3.8-27b with a 28k-token prompt sat silent for ~5 minutes mid-think and
+ * was killed, after 4 useful iterations, with only 95 completion tokens banked. The
+ * model was working; the ceiling was not. 15 minutes of TOTAL silence is still a
+ * decisive hung-provider signal while leaving a long reasoning block room to finish.
+ */
+const MAX_PROVIDER_TIMEOUT_MS = 900_000;
+
+/**
+ * Transport dispatcher with undici's body timeout DISABLED.
+ *
+ * This module already owns stall policy: armInactivity() in streamOnce() aborts when
+ * no chunk arrives within requestTimeoutMs and re-arms on every chunk. Node's global
+ * fetch is undici, and undici applies its own bodyTimeout (default 300s) underneath —
+ * a second, invisible authority with a shorter fuse. It won: a stream that our guard
+ * was still patiently waiting on died with "BodyTimeoutError: terminated", surfacing
+ * as a sub-agent failure that looked like a model problem and was not.
+ *
+ * headersTimeout stays bounded — a server that never sends headers at all is a real
+ * connection failure and should not wait on the silence budget.
+ */
+const providerDispatcher = new UndiciAgent({
+  bodyTimeout: 0,
+  headersTimeout: 120_000,
+  keepAliveTimeout: 60_000,
+  keepAliveMaxTimeout: 600_000,
+});
 
 /**
  * Thrown when a single LLM call exceeds its own wall-clock hard timeout (a hung
@@ -241,6 +274,32 @@ function isQwenModelId(modelId: string): boolean {
   return modelId.toLowerCase().includes("qwen");
 }
 
+/**
+ * Qwen's own recommended sampling, which differs per generation and per mode.
+ * Returns null when the caller already set top_p explicitly (never override an
+ * operator's deliberate choice) or when the model is not a Qwen.
+ *
+ * Qwen 3.8 raised the thinking-mode temperature to 1.0 (3.5/3.6 recommended 0.6);
+ * both generations use 0.7 / 0.80 for non-thinking.
+ */
+export function recommendedQwenSampling(
+  modelId: string,
+  cfg: { enableThinking?: boolean; reasoningEffort?: ReasoningEffort },
+): { temperature: number; topP: number } | null {
+  if (!isQwenModelId(modelId)) return null;
+  const family = detectThinkingFamily(modelId);
+
+  if (family === "qwen-effort") {
+    // Thinking is on for this family unless the effort is explicitly "none".
+    const effort = cfg.reasoningEffort ?? (cfg.enableThinking === false ? "none" : undefined);
+    if (effort === "none") return { temperature: 0.7, topP: 0.8 };
+    return { temperature: 1.0, topP: 0.95 };
+  }
+
+  if (cfg.enableThinking === undefined) return null;
+  return cfg.enableThinking ? { temperature: 0.6, topP: 0.95 } : { temperature: 0.7, topP: 0.8 };
+}
+
 /** Reasoning/thinking control mechanism by model family (researched June 2026).
  *  Families are grouped by the API MECHANISM they share, not the vendor:
  *  - enable_thinking → chat_template_kwargs { enable_thinking: bool }. Shared by
@@ -257,23 +316,53 @@ function isQwenModelId(modelId: string): boolean {
  *      param (lmstudio-bug-tracker#988), so the effort is ALSO injected as a
  *      `Reasoning: <effort>` system line (harmony format).
  *  - none → no programmatic toggle; the backend/GUI default applies. */
-export type ThinkingFamily = "enable_thinking" | "deepseek" | "gpt-oss" | "none";
+export type ThinkingFamily = "qwen-effort" | "enable_thinking" | "deepseek" | "gpt-oss" | "none";
+
+/** Qwen 3.8+ switched from the on/off `enable_thinking` toggle to graded
+ *  `reasoning_effort`. Measured on LM Studio against qwen3.8-27b (2026-08-15):
+ *
+ *    reasoning_effort   reasoning chars   completion tokens
+ *    none                            0                 917
+ *    low                         1,344                 878
+ *    medium                      1,634               1,091
+ *    xhigh                       9,034               3,000 (hit the cap)
+ *
+ *  and, on the SAME model, `chat_template_kwargs.enable_thinking:false` did NOT
+ *  disable thinking (2,892 / 6,040 reasoning chars across two runs vs a
+ *  4,395 / 6,789 baseline). So routing 3.8 through the enable_thinking family
+ *  would leave it with no working control at all.
+ *
+ *  Matched on the 3.8+ version marker rather than a bare "qwen" so 3.5/3.6 keep
+ *  the enable_thinking mechanism that does work for them. */
+const QWEN_EFFORT_VERSION_RE = /qwen-?3\.(?:[89]|\d{2,})/;
 
 export function detectThinkingFamily(modelId: string): ThinkingFamily {
   const m = modelId.toLowerCase();
   if (m.includes("gpt-oss") || m.includes("gpt_oss")) return "gpt-oss";
   if (m.includes("deepseek")) return "deepseek";
+  if (m.includes("qwen") && QWEN_EFFORT_VERSION_RE.test(m)) return "qwen-effort";
   if (m.includes("qwen") || m.includes("glm") || m.includes("gemma-4")) return "enable_thinking";
   return "none";
 }
 
-export type ReasoningEffort = "low" | "medium" | "high";
+/** "none" and "xhigh" are Qwen 3.8+ levels; gpt-oss/o-series use low|medium|high. */
+export type ReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh";
+
+/** Qwen 3.8 accepts none|low|medium|xhigh — it has no "high". A config written for
+ *  a gpt-oss-style model must not silently send an unknown level, so fold it up. */
+function normalizeQwenEffort(effort: ReasoningEffort): ReasoningEffort {
+  return effort === "high" ? "xhigh" : effort;
+}
 
 /** Effort for gpt-oss-style models: explicit reasoningEffort wins; otherwise map
  *  the boolean toggle (off→low, on→high); undefined → leave the model/GUI default. */
 function resolveReasoningEffort(
   cfg: { reasoningEffort?: ReasoningEffort; enableThinking?: boolean },
 ): ReasoningEffort | undefined {
+  // gpt-oss knows low|medium|high only — fold the Qwen-only levels onto it rather
+  // than sending a level the model will not recognise.
+  if (cfg.reasoningEffort === "xhigh") return "high";
+  if (cfg.reasoningEffort === "none") return "low";
   if (cfg.reasoningEffort) return cfg.reasoningEffort;
   if (cfg.enableThinking === false) return "low";
   if (cfg.enableThinking === true) return "high";
@@ -286,6 +375,30 @@ export function resolveThinkingControls(
   cfg: { enableThinking?: boolean; reasoningEffort?: ReasoningEffort },
 ): { chatTemplateKwargs?: Record<string, boolean>; reasoningEffort?: ReasoningEffort; systemReasoningLine?: string } {
   switch (detectThinkingFamily(modelId)) {
+    case "qwen-effort": {
+      // Explicit effort wins; otherwise map the boolean toggle onto the ladder.
+      const effort = cfg.reasoningEffort
+        ? normalizeQwenEffort(cfg.reasoningEffort)
+        : cfg.enableThinking === false ? "none"
+          : cfg.enableThinking === true ? "medium"
+            : undefined;
+      if (!effort) return {};
+      // Turning thinking OFF sends BOTH mechanisms, because the spec and this
+      // backend disagree and each covers the other's gap:
+      //  - Qwen's model card documents only xhigh|medium|low and says to disable
+      //    thinking with chat_template_kwargs.enable_thinking:false. That is what
+      //    vLLM honors (it maps reasoning_effort "none" onto the same flag).
+      //  - Measured against LM Studio on qwen3.8-27b, the documented flag does
+      //    NOTHING (thinking stayed on) while the undocumented reasoning_effort
+      //    "none" produced 0 reasoning characters.
+      // Sending both is correct on either backend and costs one extra field. It also
+      // means a future LM Studio fix, or a move to vLLM, degrades to still-off
+      // rather than to silently-thinking.
+      if (effort === "none") {
+        return { reasoningEffort: "none", chatTemplateKwargs: { enable_thinking: false } };
+      }
+      return { reasoningEffort: effort };
+    }
     case "enable_thinking":
       return cfg.enableThinking !== undefined ? { chatTemplateKwargs: { enable_thinking: cfg.enableThinking } } : {};
     case "deepseek":
@@ -299,12 +412,69 @@ export function resolveThinkingControls(
   }
 }
 
+/**
+ * Fold the message list into the one shape every chat template accepts: at most one
+ * system message, and only at the head.
+ *
+ * The turn assembly emits the system prompt as roughly ten separate system messages and
+ * appends more mid-conversation as steering directives. That is legal OpenAI Chat
+ * Completions and most servers accept it — but a chat template is free to be stricter,
+ * and several are. Qwen3's raises `System message must be at the beginning` on the
+ * SECOND system message, because only index 0 is `loop.first`. Measured against a live
+ * LM Studio host: one leading system message returns 200, two return 400, and a system
+ * message after a user message returns 400. So on such a model every single turn fails
+ * before the agent does anything, and the operator sees "LLM error" with a Jinja stack
+ * trace — a total outage presented as a template bug.
+ *
+ * Both mappings are already settled in this codebase: the Anthropic provider merges the
+ * leading run into its top-level system parameter and delivers a mid-conversation system
+ * message as user-turn context (`anthropic.ts`). This applies the same two rules here,
+ * so the two providers no longer disagree about what a system message means.
+ *
+ * Deliberately NOT keyed on a model-family list. Which templates are strict is not
+ * knowable up front and the list would be permanently incomplete; the folded shape is
+ * accepted by the strict ones and identical in content for the lenient ones, so there is
+ * nothing to detect.
+ */
+function foldSystemMessages(messages: readonly LLMMessage[]): LLMMessage[] {
+  let leading = 0;
+  while (leading < messages.length && messages[leading]!.role === "system") leading += 1;
+
+  const head: LLMMessage[] = [];
+  if (leading > 0) {
+    const merged = messages
+      .slice(0, leading)
+      .map((message) => (typeof message.content === "string" ? message.content.trim() : ""))
+      .filter(Boolean)
+      .join("\n\n");
+    // A run of system messages that is entirely empty leaves no head at all, rather than
+    // an empty system message some servers reject outright.
+    if (merged) head.push({ role: "system", content: merged });
+  }
+
+  const tail = messages.slice(leading).map((message) =>
+    message.role === "system"
+      // Mid-conversation steering, delivered as user-turn context. Position is preserved
+      // rather than merged into the head: these directives are written to be the most
+      // recent instruction the model has seen, and hoisting them to the top would
+      // silently invert that.
+      ? ({ ...message, role: "user" } as LLMMessage)
+      : message,
+  );
+
+  return [...head, ...tail];
+}
+
 export function normalizeMessagesForModel(
   messages: readonly LLMMessage[],
   providerModel: string,
 ): ChatCompletionMessageParam[] {
-  const cloned = messages.map((message) => ({ ...message })) as ChatCompletionMessageParam[];
+  const folded = foldSystemMessages(messages);
+  const cloned = folded.map((message) => ({ ...message })) as ChatCompletionMessageParam[];
   if (!isGemmaModelId(providerModel)) return cloned;
+  // Gemma has no system role at all, so it needs the stronger transform below; it reads
+  // the ORIGINAL list because folding has already collapsed the leading run it counts.
+  messages = folded;
 
   const leadingSystemPrompts: string[] = [];
   let leadingSystemCount = 0;
@@ -386,7 +556,13 @@ export class LMStudioProvider {
       // byte-silent PREFILL and surfaces ERR_STREAM_PREMATURE_CLOSE (~4s), killing
       // the turn; native fetch holds the identical ~28s prefill against LM Studio
       // (verified: a 29K-token streaming call from inside the gateway container).
-      fetch: globalThis.fetch as unknown as NonNullable<ConstructorParameters<typeof OpenAI>[0]>["fetch"],
+      // Native fetch, but routed through providerDispatcher so undici's default
+      // 300s bodyTimeout cannot pre-empt this file's own per-chunk stall guard.
+      fetch: ((input: unknown, init?: Record<string, unknown>) =>
+        (globalThis.fetch as unknown as (i: unknown, o?: Record<string, unknown>) => Promise<unknown>)(
+          input,
+          { ...(init ?? {}), dispatcher: providerDispatcher },
+        )) as unknown as NonNullable<ConstructorParameters<typeof OpenAI>[0]>["fetch"],
     });
   }
 
@@ -469,27 +645,34 @@ export class LMStudioProvider {
   }
 
   /**
-   * Build the OpenAI `extra_body` for this model, merging the Qwen thinking
-   * toggle and the opt-in llama.cpp/LM Studio prompt-cache reuse. Returns
-   * undefined when neither applies (so we don't send an empty extra_body).
+   * Build the provider-extension request fields for this model: the thinking
+   * controls plus the opt-in llama.cpp/LM Studio prompt-cache reuse.
+   *
+   * These are spread at the TOP LEVEL of the request body, NOT nested under an
+   * `extra_body` key. `extra_body` is a *Python* OpenAI-SDK convenience: that
+   * client merges its contents into the top-level JSON before sending, so
+   * `extra_body` never appears on the wire. Sending a literal `extra_body`
+   * object made the server see one unknown field and drop it, which silently
+   * disabled EVERY control in here — the thinking toggle, the reasoning effort,
+   * and the prompt-cache reuse. Measured against LM Studio on qwen3.8-27b:
+   * top-level `reasoning_effort:"none"` → 0 reasoning chars, the same value
+   * nested under `extra_body` → 2323. Keep these top-level.
    */
-  private buildExtraBody(modelId: string): Record<string, unknown> | undefined {
-    const extraBody: Record<string, unknown> = {};
+  private buildProviderExtensions(modelId: string): Record<string, unknown> | undefined {
+    const fields: Record<string, unknown> = {};
     const controls = resolveThinkingControls(modelId, this.modelConfig);
     if (controls.chatTemplateKwargs) {
-      extraBody["chat_template_kwargs"] = controls.chatTemplateKwargs;
+      fields["chat_template_kwargs"] = controls.chatTemplateKwargs;
     }
     if (controls.reasoningEffort) {
-      // Sent for portability (vLLM / OpenAI honor it). LM Studio ignores it (#988);
-      // the system-message `Reasoning:` line injected below is what it reads.
-      extraBody["reasoning_effort"] = controls.reasoningEffort;
+      fields["reasoning_effort"] = controls.reasoningEffort;
     }
     if (this.modelConfig.promptCache) {
       // llama.cpp / LM Studio: reuse the KV cache for the common prompt prefix
       // (the stable ~22KB base system message) instead of re-prefilling it.
-      extraBody["cache_prompt"] = true;
+      fields["cache_prompt"] = true;
     }
-    return Object.keys(extraBody).length > 0 ? extraBody : undefined;
+    return Object.keys(fields).length > 0 ? fields : undefined;
   }
 
   /** Prepend the gpt-oss `Reasoning: <effort>` system line — the only reasoning-
@@ -600,13 +783,11 @@ export class LMStudioProvider {
     // and the user has not explicitly overridden topP. Explicit topP always wins.
     let effectiveTemp = this.modelConfig.temperature;
     let effectiveTopP = this.modelConfig.topP;
-    if (isQwenModelId(modelId) && this.modelConfig.enableThinking !== undefined && effectiveTopP === undefined) {
-      if (this.modelConfig.enableThinking) {
-        effectiveTemp = 0.6;
-        effectiveTopP = 0.95;
-      } else {
-        effectiveTemp = 0.7;
-        effectiveTopP = 0.8;
+    if (effectiveTopP === undefined) {
+      const rec = recommendedQwenSampling(modelId, this.modelConfig);
+      if (rec) {
+        effectiveTemp = rec.temperature;
+        effectiveTopP = rec.topP;
       }
     }
 
@@ -631,10 +812,11 @@ export class LMStudioProvider {
             ...(this.modelConfig.minP !== undefined && { min_p: this.modelConfig.minP }),
             ...(this.modelConfig.repeatPenalty !== undefined && { repeat_penalty: this.modelConfig.repeatPenalty }),
             ...(this.modelConfig.seed !== undefined && { seed: this.modelConfig.seed }),
-            // extra_body is a LM Studio / vLLM extension: Qwen thinking toggle +
-            // opt-in llama.cpp prompt-cache reuse. Outer cast suppresses the
-            // unknown-property error.
-            ...(this.buildExtraBody(modelId) ? { extra_body: this.buildExtraBody(modelId) } : {}),
+            // Provider extensions (thinking controls + prompt-cache reuse) go at the
+            // TOP LEVEL — `extra_body` is a Python-SDK client-side concept and never
+            // appears on the wire, so nesting them there silently dropped all of them.
+            // Outer cast suppresses the unknown-property error.
+            ...(this.buildProviderExtensions(modelId) ?? {}),
           } as Parameters<typeof this.client.chat.completions.create>[0],
           { signal: s }
         )) as ChatCompletion;
@@ -724,32 +906,59 @@ export class LMStudioProvider {
     let finishReason = "stop";
     let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 
-    for await (const chunk of this.stream(messages, tools, signal)) {
-      switch (chunk.type) {
-        case "text_delta":
-          content += chunk.content ?? "";
-          break;
-        case "reasoning_delta":
-          if (chunk.content) reasoningParts.push(chunk.content);
-          break;
-        case "tool_call_start": {
-          const id = chunk.toolCallId ?? `tc_${toolOrder.length}`;
-          if (!toolBuffers.has(id)) {
-            toolBuffers.set(id, { id, name: chunk.toolName ?? "", args: "" });
-            toolOrder.push(id);
+    try {
+      for await (const chunk of this.stream(messages, tools, signal)) {
+        switch (chunk.type) {
+          case "text_delta":
+            content += chunk.content ?? "";
+            break;
+          case "reasoning_delta":
+            if (chunk.content) reasoningParts.push(chunk.content);
+            break;
+          case "tool_call_start": {
+            const id = chunk.toolCallId ?? `tc_${toolOrder.length}`;
+            if (!toolBuffers.has(id)) {
+              toolBuffers.set(id, { id, name: chunk.toolName ?? "", args: "" });
+              toolOrder.push(id);
+            }
+            break;
           }
-          break;
+          case "tool_call_delta": {
+            const buf = chunk.toolCallId ? toolBuffers.get(chunk.toolCallId) : undefined;
+            if (buf) buf.args += chunk.argumentsDelta ?? "";
+            break;
+          }
+          case "done":
+            finishReason = chunk.finishReason ?? finishReason;
+            if (chunk.usage) usage = chunk.usage;
+            break;
         }
-        case "tool_call_delta": {
-          const buf = chunk.toolCallId ? toolBuffers.get(chunk.toolCallId) : undefined;
-          if (buf) buf.args += chunk.argumentsDelta ?? "";
-          break;
-        }
-        case "done":
-          finishReason = chunk.finishReason ?? finishReason;
-          if (chunk.usage) usage = chunk.usage;
-          break;
       }
+    } catch (err) {
+      // SALVAGE. A stream that produced real work and THEN died must not throw the
+      // work away. Observed: a content_writer run emitted 278 chunks, went quiet
+      // inside a reasoning block, and the transport killed it — the whole turn was
+      // reported as an error with 4 useful iterations discarded.
+      //
+      // If nothing was produced there is nothing to salvage and the error is the
+      // honest result. If there IS content or a tool call, return it with a
+      // finishReason the callers already understand as incomplete: the iteration
+      // loop can act on a recovered tool call, the QA and artifact gates can judge
+      // recovered text, and the loop detector can still catch a genuine repeat.
+      // Throwing here removes every one of those chances.
+      // An operator cancel is NOT a salvage case — the user asked for it to stop, so
+      // the abort must propagate. Only a failure the caller did not ask for
+      // (transport drop, provider stall) salvages.
+      const operatorCancelled = signal?.aborted === true;
+      const salvageable = content.trim().length > 0 || toolOrder.length > 0 || reasoningParts.length > 0;
+      if (!salvageable || operatorCancelled) throw err;
+      log.warn({
+        err: err instanceof Error ? err.message : String(err),
+        contentChars: content.length,
+        toolCalls: toolOrder.length,
+        reasoningChars: reasoningParts.join("").length,
+      }, "Stream failed after producing content — salvaging the partial result instead of failing the turn");
+      finishReason = "length";
     }
 
     const tool_calls = toolOrder.map((id) => {
@@ -835,13 +1044,11 @@ export class LMStudioProvider {
     // Qwen3.5 thinking-mode: same auto-sampling logic as complete()
     let streamEffectiveTemp = this.modelConfig.temperature;
     let streamEffectiveTopP = this.modelConfig.topP;
-    if (isQwenModelId(modelId) && this.modelConfig.enableThinking !== undefined && streamEffectiveTopP === undefined) {
-      if (this.modelConfig.enableThinking) {
-        streamEffectiveTemp = 0.6;
-        streamEffectiveTopP = 0.95;
-      } else {
-        streamEffectiveTemp = 0.7;
-        streamEffectiveTopP = 0.8;
+    if (streamEffectiveTopP === undefined) {
+      const rec = recommendedQwenSampling(modelId, this.modelConfig);
+      if (rec) {
+        streamEffectiveTemp = rec.temperature;
+        streamEffectiveTopP = rec.topP;
       }
     }
 
@@ -875,8 +1082,8 @@ export class LMStudioProvider {
         ...(this.modelConfig.minP !== undefined && { min_p: this.modelConfig.minP }),
         ...(this.modelConfig.repeatPenalty !== undefined && { repeat_penalty: this.modelConfig.repeatPenalty }),
         ...(this.modelConfig.seed !== undefined && { seed: this.modelConfig.seed }),
-        // extra_body: Qwen thinking toggle + opt-in llama.cpp prompt-cache reuse.
-        ...(this.buildExtraBody(modelId) ? { extra_body: this.buildExtraBody(modelId) } : {}),
+        // Top-level, not extra_body — see buildProviderExtensions.
+        ...(this.buildProviderExtensions(modelId) ?? {}),
         stream: true,
         stream_options: { include_usage: true },
       } as Parameters<typeof createStream>[0],

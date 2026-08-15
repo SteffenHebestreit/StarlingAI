@@ -4485,7 +4485,11 @@ async function runQaDeliveryGate(
           artifactProbeStatus = "fail";
           const failures = report.receipts.filter((receipt) => receipt.status === "fail")
             .map((receipt) => `${receipt.target}: ${receipt.detail}`).slice(0, 4).join("; ");
-          logAudit("flow_verification_repaired", {
+          // Detection, not repair: this event fires the moment a probe fails, before
+          // anything has been fixed. It logged as flow_verification_repaired, so the
+          // audit trail asserted a repair that had not happened (and, on this path,
+          // could not — the QA loop's improve() rewrites text, never the file).
+          logAudit("artifact_verification_failed", {
             reason: "artifact_probe_failed",
             failures,
             probedCount: report.probedCount,

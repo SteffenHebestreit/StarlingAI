@@ -22,6 +22,14 @@ export interface QaJudgeArtifactRef {
   kind: "file" | "url";
   /** Workspace-relative path (file) or full URL (url). */
   location: string;
+  /**
+   * True for a URL we merely CITED rather than produced — e.g. the source links
+   * generate_chart_html attaches alongside a chart. A cited page answering 403/404
+   * to a bare GET is routine and says nothing about our deliverable, so probes
+   * report it softly. A URL we SERVE (serve_app) is our artifact: if it is dead the
+   * app does not work, and that stays a hard failure.
+   */
+  external?: boolean;
 }
 
 /** Read-only inspection tools granted to the judge — nothing that can mutate or delegate. */
@@ -44,10 +52,11 @@ export function collectJudgeableArtifactRefs(
     if (a["isDirectory"] === true) continue;
     const relativePath = typeof a["relativePath"] === "string" ? a["relativePath"].trim() : "";
     const externalUrl = typeof a["externalUrl"] === "string" ? a["externalUrl"].trim() : "";
+    const cited = a["artifactKind"] === "external_source" || a["sourceTool"] === "source_reference";
     const ref: QaJudgeArtifactRef | null = relativePath
       ? { kind: "file", location: relativePath }
       : externalUrl
-        ? { kind: "url", location: externalUrl }
+        ? { kind: "url", location: externalUrl, ...(cited ? { external: true } : {}) }
         : null;
     if (!ref || seen.has(ref.location)) continue;
     seen.add(ref.location);

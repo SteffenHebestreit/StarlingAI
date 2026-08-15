@@ -32,10 +32,13 @@ const log = childLogger("tool:sub-agent");
 // Tools the factory is allowed to grant to ephemeral agents (must exist in registry)
 const GRANTABLE_TOOLS = new Set([
   "read_file", "list_files", "write_file", "edit_file", "create_dir", "delete_file",
+  // Deliverable emitters an ad-hoc "turn X into a document/PDF" task needs — granting
+  // these beats standing up a permanent agent for a one-off shape.
+  "generate_document", "render_pdf",
   "memory_search", "memory_store", "record_lesson",
   "share_finding", "read_shared_facts",
   "parallel_delegate",
-  "workspace_search",
+  "workspace_search", "glob_files", "grep_files",
   "web_search", "web_fetch",
   "list_knowledge_bases", "search_knowledge_base",
   // Native live-site inspection + read-only web audits, so a temporary agent

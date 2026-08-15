@@ -854,7 +854,8 @@ function renderPageBody(page: PageSpec): string {
   return markdownToHtml(page.content);
 }
 
-function markdownToHtml(md: string): string {
+/** Markdown → HTML (CommonMark subset + GFM tables + fenced code). Shared with the PDF renderer. */
+export function markdownToHtml(md: string): string {
   // Normalize line endings
   const src = md.replace(/\r\n?/g, "\n");
   const lines = src.split("\n");

@@ -253,6 +253,12 @@ export async function prepareDocumentRag(args: {
   // prefetch then skips its own duplicate doc retrieval. Captured so the prefetch knows
   // whether the CV was already surfaced — and so it cannot be lost (the [DOCUMENT CONTEXT]
   // here runs first and unconditionally).
+  // The profile-biased query is only reachable via an explicit userOwnFacts signal,
+  // which no classifier currently sets (de-lexicalization removed the keyword tables).
+  // It deliberately stays that way: the prefetch's own gate now keys on whether this
+  // RAG pass FOUND user documents, and that answer does not exist until after the pass
+  // runs — biasing the query on it would be circular. Plain `userMessage` retrieval is
+  // what decides it, and the prefetch adds memory + the confirmed-empty marker on top.
   const userOwnFactsTurn = detectedDynamicGuidance?.userOwnFacts === true
     && getConfig().orchestration?.userProfilePrefetch === true;
   const ragQuery = userOwnFactsTurn ? buildProfileBiasedQuery(userMessage) : userMessage;

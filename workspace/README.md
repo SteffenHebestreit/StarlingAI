@@ -10,6 +10,7 @@ This directory holds configuration that the **agent swarm can self-tune** at run
 | `jobs/` | Operator-managed reusable job definitions exposed by the dashboard/API |
 | `scenes/` | Named workflow / mission definitions |
 | `tools/` | Swarm-invented dynamic tool bundles (JSON) — written only by the tool-development pipeline (sandbox-tested + approved), hot-loaded into the registry as `selfdev__*` tools |
+| `generated/` | *(generated, gitignored)* Agent-authored run output — decks, papers, fetched images, served apps. This is the **default write sandbox**: an agent's file tools are confined here unless it declares `workspaceAccess: "full"` |
 | `runtime/` | `runtime.overrides.json` — live overrides written by the config-assistant |
 | `vault/` | *(generated, gitignore it)* Obsidian-style Markdown mirror of durable memory/skills/sessions — `sai memory export` / `import` or the `memory_export` / `memory_import` tools. See [`ARCHITECTURE.md`](./ARCHITECTURE.md) §6 |
 

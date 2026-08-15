@@ -9,8 +9,9 @@ info:
     `docs/api.md` for the RPC method catalog).
 
     Authentication: all `/api/*` paths require a bearer JWT unless noted.
-    Scene-trigger endpoints (`POST /api/scenes/:name/run`, `POST /api/jobs/:name/run`)
-    also accept a scene/job webhook key via `?key=` or `X-Scene-Key`.
+    Trigger endpoints also accept a webhook key via `?key=` or a header — but the
+    header name differs per endpoint: `POST /api/scenes/{name}/run` reads
+    `X-Scene-Key`, while `POST /api/jobs/{name}/run` reads `X-Job-Key`.
 
     Schemas below are intentionally loose — the runtime validates with Zod
     schemas in `packages/core/src/config/` and `packages/core/src/gateway/`.
@@ -60,6 +61,10 @@ components:
       type: apiKey
       in: header
       name: X-Scene-Key
+    jobKey:
+      type: apiKey
+      in: header
+      name: X-Job-Key
 
   schemas:
     Error:
@@ -135,25 +140,34 @@ components:
       type: object
       properties:
         jobId: { type: string }
-        status: { type: string, enum: [pending, running, completed, failed, cancelled] }
+        # Mirrors JobStatus in packages/core/src/agent/jobs.ts — there is no "pending".
+        status: { type: string, enum: [queued, running, cancelling, cancelled, completed, failed] }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
         result: { type: object, additionalProperties: true }
         error: { type: string }
-    ApprovalRecord:
+    # Mirrors PendingApproval in packages/core/src/approval/store.ts
+    # (listPendingApprovals). Resolved approvals are removed from the store, so
+    # there is no status field — everything returned is pending by definition.
+    PendingApproval:
       type: object
       properties:
-        approvalId: { type: string }
-        status: { type: string, enum: [pending, approved, rejected, expired] }
-        summary: { type: string }
-        requestedBy: { type: string }
+        id: { type: string }
+        toolName: { type: string }
+        args: { type: object, additionalProperties: true }
+        sceneName: { type: string, description: 'Present only for scene/job-triggered approvals.' }
         createdAt: { type: string, format: date-time }
     ApprovalDecision:
       type: object
+      description: |
+        Field names match the handler exactly. `approved` is read as a boolean —
+        a body without it resolves the approval as DENIED, so always send it.
+        Authorize with EITHER the per-approval `secret` (Slack/webhook callbacks)
+        OR an operator bearer token (dashboard).
       properties:
-        decision: { type: string, enum: [approve, reject] }
-        comment: { type: string }
-      required: [decision]
+        approved: { type: boolean, description: 'true = approve, false = reject. Required — absent is treated as false.' }
+        secret: { type: string, description: 'Per-approval secret. Omit when authenticating with an operator bearer token.' }
+      required: [approved]
     ChannelConfig:
       type: object
       additionalProperties: true
@@ -306,9 +320,10 @@ paths:
             schema:
               type: object
               properties:
-                audio: { type: string, format: binary }
+                # The handler reads the part named `file` — not `audio`.
+                file: { type: string, format: binary }
                 language: { type: string }
-              required: [audio]
+              required: [file]
       responses:
         '200': { description: Transcription, content: { application/json: { schema: { type: object, properties: { text: { type: string } } } } } }
   /api/multimodal/voices:
@@ -317,14 +332,25 @@ paths:
     post:
       tags: [Multimodal]
       summary: Upsert a TTS voice preset
-      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      requestBody:
+        required: true
+        content:
+          # multipart/form-data, NOT application/json — the handler calls
+          # c.req.raw.formData() and requires both parts.
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file: { type: string, format: binary, description: Reference audio sample for the voice clone. }
+                name: { type: string }
+              required: [file, name]
       responses: { '200': { description: Saved } }
   /api/multimodal/voices/{id}:
     delete:
       tags: [Multimodal]
       summary: Delete a TTS voice preset
       parameters: [ { name: id, in: path, required: true, schema: { type: string } } ]
-      responses: { '204': { description: Deleted } }
+      responses: { '200': { description: 'Deleted (200 with a JSON body, not 204)', content: { application/json: { schema: { type: object, properties: { ok: { type: boolean } } } } } } }
   /api/multimodal/tts:
     post:
       tags: [Multimodal]
@@ -360,9 +386,10 @@ paths:
             schema:
               type: object
               properties:
-                image: { type: string, format: binary }
+                # The handler reads the part named `file` — not `image`.
+                file: { type: string, format: binary }
                 prompt: { type: string }
-              required: [image]
+              required: [file]
       responses: { '200': { description: Analysis result } }
   /api/multimodal/generate-image:
     post:
@@ -383,7 +410,9 @@ paths:
               type: object
               properties:
                 file: { type: string, format: binary }
-                path: { type: string }
+                # The handler reads `subdir`, not `path`. A `path` part is
+                # silently ignored and the file lands in `uploads/`.
+                subdir: { type: string, default: uploads, description: 'Workspace subdirectory to write into. Must match /^[\w/-]+$/; any other value — or omission — falls back to "uploads".' }
               required: [file]
       responses: { '200': { description: Upload accepted } }
   /api/workspace/file:
@@ -397,8 +426,11 @@ paths:
   /api/workspace/archive:
     get:
       tags: [Workspace]
-      summary: Download the workspace as a ZIP archive
+      summary: Download a workspace subtree as a ZIP archive
+      parameters:
+        - { name: path, in: query, required: true, schema: { type: string }, description: 'Workspace-relative path to archive. Required — omitting it returns 400.' }
       responses:
+        '400': { description: '`path` query parameter missing' }
         '200':
           description: ZIP
           content: { 'application/zip': { schema: { type: string, format: binary } } }
@@ -432,7 +464,7 @@ paths:
       tags: [Sites]
       summary: Remove stored login metadata for a hostname
       parameters: [ { name: hostname, in: path, required: true, schema: { type: string } } ]
-      responses: { '204': { description: Deleted } }
+      responses: { '200': { description: 'Deleted (200 with a JSON body, not 204)', content: { application/json: { schema: { type: object, properties: { ok: { type: boolean } } } } } } }
 
   /api/guardrails:
     get: { tags: [Guardrails], summary: Read current guardrail config, responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GuardrailsConfig' } } } } } }
@@ -453,8 +485,12 @@ paths:
     get:
       tags: [Agents]
       summary: Resolve a query to the best-matched agent(s)
-      parameters: [ { name: q, in: query, required: true, schema: { type: string } } ]
-      responses: { '200': { description: OK } }
+      parameters:
+        - { name: query, in: query, required: true, schema: { type: string }, description: 'Text to route. Missing/empty returns 400.' }
+        - { name: minConfidence, in: query, required: false, schema: { type: string, enum: [high, medium, low], default: medium } }
+      responses:
+        '200': { description: OK }
+        '400': { description: '`query` missing or empty' }
   /api/agents/{name}/model:
     patch:
       tags: [Agents]
@@ -466,7 +502,10 @@ paths:
     get:
       tags: [Agents]
       summary: Per-agent success rate and sample counts
-      responses: { '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/AgentOutcome' } } } } } }
+      responses:
+        '200':
+          description: OK — a wrapper object, not a bare array
+          content: { application/json: { schema: { type: object, properties: { agents: { type: array, items: { $ref: '#/components/schemas/AgentOutcome' } }, totalEntries: { type: integer } } } } }
 
   /api/flow-memory:
     get: { tags: [Memory], summary: Read persistent swarm flow memory, responses: { '200': { description: OK } } }
@@ -520,7 +559,7 @@ paths:
       tags: [Scenes]
       summary: Delete a scene
       parameters: [ { name: name, in: path, required: true, schema: { type: string } } ]
-      responses: { '204': { description: Deleted } }
+      responses: { '200': { description: 'Deleted (200 with a JSON body, not 204)', content: { application/json: { schema: { type: object, properties: { ok: { type: boolean } } } } } } }
   /api/scenes/{name}/run:
     post:
       tags: [Scenes]
@@ -533,9 +572,9 @@ paths:
         - { name: key, in: query, required: false, schema: { type: string }, description: Scene webhook key (alternative to bearer auth) }
       requestBody: { required: false, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
       responses:
-        '202':
-          description: Scene job enqueued
-          content: { application/json: { schema: { type: object, properties: { jobId: { type: string } } } } }
+        '200':
+          description: Scene job enqueued (the handler returns 200, not 202)
+          content: { application/json: { schema: { type: object, properties: { ok: { type: boolean }, sceneName: { type: string }, jobId: { type: string }, sessionId: { type: string }, status: { type: string } } } } }
 
   /api/jobs:
     get: { tags: [Jobs], summary: List job definitions, responses: { '200': { description: OK } } }
@@ -550,21 +589,34 @@ paths:
       tags: [Jobs]
       summary: Delete a job
       parameters: [ { name: name, in: path, required: true, schema: { type: string } } ]
-      responses: { '204': { description: Deleted } }
+      responses: { '200': { description: 'Deleted (200 with a JSON body, not 204)', content: { application/json: { schema: { type: object, properties: { ok: { type: boolean } } } } } } }
   /api/jobs/{name}/run:
     post:
       tags: [Jobs]
       summary: Trigger a job (async; returns jobId)
       security:
         - bearerAuth: []
-        - sceneKey: []
-      parameters: [ { name: name, in: path, required: true, schema: { type: string } } ]
+        - jobKey: []
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+        - { name: key, in: query, required: false, schema: { type: string }, description: Job webhook key (alternative to bearer auth) }
       requestBody: { required: false, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
       responses:
-        '202': { description: Job enqueued, content: { application/json: { schema: { type: object, properties: { jobId: { type: string } } } } } }
+        '200':
+          description: Job enqueued (the handler returns 200, not 202)
+          content: { application/json: { schema: { type: object, properties: { ok: { type: boolean }, sceneName: { type: string, description: 'Carries the JOB name — the field is named sceneName for historical reasons.' }, definitionType: { type: string, enum: [job] }, jobId: { type: string }, sessionId: { type: string }, status: { type: string } } } } }
 
   /api/scenes/jobs:
-    get: { tags: [Jobs], summary: List scene-job runs, responses: { '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/JobRun' } } } } } } }
+    get:
+      tags: [Jobs]
+      summary: List scene-job runs
+      parameters:
+        - { name: limit, in: query, required: false, schema: { type: integer } }
+        - { name: status, in: query, required: false, schema: { type: string, enum: [queued, running, cancelling, cancelled, completed, failed] }, description: 'Unrecognized values are ignored rather than rejected.' }
+      responses:
+        '200':
+          description: OK — a wrapper object, not a bare array
+          content: { application/json: { schema: { type: object, properties: { jobs: { type: array, items: { $ref: '#/components/schemas/JobRun' } } } } } }
   /api/scenes/jobs/{jobId}:
     get:
       tags: [Jobs]
@@ -578,12 +630,40 @@ paths:
       parameters: [ { name: jobId, in: path, required: true, schema: { type: string } } ]
       responses: { '200': { description: Cancelled } }
 
+  /api/approvals/pending:
+    get:
+      tags: [Approval]
+      summary: List every unresolved approval (dashboard surface)
+      description: |
+        The only read-only view of approvals — `GET /api/approval/{approvalId}`
+        mutates. Requires an operator bearer token.
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/PendingApproval' } } } }
+        '401': { description: Unauthorized }
+
   /api/approval/{approvalId}:
     get:
       tags: [Approval]
-      summary: Read an approval record
-      parameters: [ { name: approvalId, in: path, required: true, schema: { type: string } } ]
-      responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ApprovalRecord' } } } } }
+      summary: One-click approve/deny link (NOT a read — this RESOLVES the approval)
+      description: |
+        **This endpoint mutates.** It is the human-facing link embedded in Slack /
+        WhatsApp / email notifications, and it returns an HTML page, not JSON.
+        Opening it resolves the approval and the decision is final.
+
+        `approved` is compared against the literal string `"true"`; **any other
+        value — including omitting the parameter — DENIES the request.** There is
+        no read-only way to inspect a single approval; use
+        `GET /api/approvals/pending` to list pending approvals instead.
+      parameters:
+        - { name: approvalId, in: path, required: true, schema: { type: string } }
+        - { name: approved, in: query, required: true, schema: { type: string, enum: ['true', 'false'] }, description: 'Literal "true" approves; anything else denies.' }
+        - { name: secret, in: query, required: false, schema: { type: string }, description: 'Required when the approval was created with a secret (always the case for Slack/webhook channels).' }
+      responses:
+        '200': { description: 'HTML confirmation page', content: { text/html: { schema: { type: string } } } }
+        '403': { description: 'HTML error page — invalid approval secret', content: { text/html: { schema: { type: string } } } }
+        '404': { description: 'HTML error page — not found or already resolved', content: { text/html: { schema: { type: string } } } }
     post:
       tags: [Approval]
       summary: Submit an approval decision (one-click callback)
@@ -633,7 +713,7 @@ paths:
       tags: [Channels]
       summary: Disable a channel
       parameters: [ { name: type, in: path, required: true, schema: { type: string } } ]
-      responses: { '204': { description: Deleted } }
+      responses: { '200': { description: 'Deleted (200 with a JSON body, not 204)', content: { application/json: { schema: { type: object, properties: { ok: { type: boolean } } } } } } }
   /api/channels/dead-letters:
     get: { tags: [Channels], summary: Inspect the channel dead-letter queue, responses: { '200': { description: OK } } }
 
@@ -706,12 +786,18 @@ paths:
   /api/chat:
     post:
       tags: [Chat]
-      summary: Synchronous chat turn
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ChatRequest' } } } }
+      summary: Synchronous chat turn — NOT IMPLEMENTED
+      description: |
+        Always returns `501`. A turn is inherently streaming (tool calls, delegation,
+        progress), so there is no useful synchronous response shape. Use
+        `POST /api/chat/stream` (AG-UI SSE) or the WebSocket RPC channel.
+        The endpoint is retained so integrators hitting the obvious path get a
+        pointer to the real entry points rather than a `404`.
       responses:
-        '200':
-          description: OK
-          content: { application/json: { schema: { $ref: '#/components/schemas/ChatResponse' } } }
+        '401':
+          description: Missing or invalid bearer token
+        '501':
+          description: Not implemented — use `/api/chat/stream` or the WebSocket RPC channel
   /api/chat/stream:
     post:
       tags: [Chat]

@@ -35,14 +35,14 @@ const SEMANTIC_AGENT_ROUTING_MIN_SCORE = 0.72;
 const KEYWORD_AGENT_ROUTING_MIN_SCORE = 0.45;
 
 function confidenceLabel(score: number): "high" | "medium" | "low" {
-  if (score >= 0.72) return "high";
-  if (score >= 0.45) return "medium";
+  if (score >= SEMANTIC_AGENT_ROUTING_MIN_SCORE) return "high";
+  if (score >= KEYWORD_AGENT_ROUTING_MIN_SCORE) return "medium";
   return "low";
 }
 
 function confidenceThreshold(label: "high" | "medium" | "low"): number {
-  if (label === "high") return 0.72;
-  if (label === "medium") return 0.45;
+  if (label === "high") return SEMANTIC_AGENT_ROUTING_MIN_SCORE;
+  if (label === "medium") return KEYWORD_AGENT_ROUTING_MIN_SCORE;
   return 0;
 }
 

@@ -244,8 +244,6 @@ function buildSafeConfigurationSnapshot(targetAgent?: string): Record<string, un
     },
     gateway: {
       port: config.gateway.port,
-      restPort: config.gateway.restPort,
-      bindHost: config.gateway.bindHost,
       publicUrl: config.gateway.publicUrl,
       corsAllowedOrigins: config.gateway.corsAllowedOrigins,
     },

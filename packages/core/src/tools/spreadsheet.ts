@@ -275,10 +275,19 @@ registerTool({
       success: true,
       output: `Spreadsheet written to ${relativePath} (${sheetsInput.length} sheet(s), ${totalRows} total rows).`,
       metadata: {
-        path: relativePath,
+        // `outputPath` is the key the artifact collector reads (runtime
+        // collectTurnArtifactAttachments). Emitting `path` alone made every generated
+        // spreadsheet invisible: not offered as a download, and never verified.
+        artifactKind: "document",
+        outputPath: relativePath,
+        filename: relativePath.replace(/\\/g, "/").split("/").pop() || relativePath,
         format: ext.slice(1),
         sheetCount: sheetsInput.length,
         totalRows,
+        contentType: ext === ".csv"
+          ? "text/csv; charset=utf-8"
+          : "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        previewMode: "download",
       },
     };
   },

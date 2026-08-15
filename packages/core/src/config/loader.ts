@@ -552,6 +552,32 @@ function mergeEnvOverrides(raw: Record<string, unknown>): Record<string, unknown
     const tg = (ch["telegram"] as Record<string, unknown> | undefined) ?? {};
     raw["channels"] = { ...(ch as object), telegram: { ...tg, enabled: true, botToken: env["TELEGRAM_BOT_TOKEN"] } };
   }
+  // Email channel — enabled ONLY when it is actually configured. An IMAP host plus
+  // credentials is the minimum that can work; without them the adapter would spin on
+  // a connection it can never make. Configured means on, unconfigured means off, so
+  // there is no separate flag to remember and no half-enabled state. Mirrors the
+  // TELEGRAM_BOT_TOKEN rule above. An explicit `enabled: false` in a shard still
+  // wins, so an operator can hold it back while leaving credentials in place.
+  if (env["SAI_EMAIL_IMAP_HOST"] && env["SAI_EMAIL_IMAP_USER"] && env["SAI_EMAIL_IMAP_PASSWORD"]) {
+    const ch = (raw["channels"] as Record<string, unknown> | undefined) ?? {};
+    const email = (ch["email"] as Record<string, unknown> | undefined) ?? {};
+    raw["channels"] = {
+      ...(ch as object),
+      email: {
+        ...email,
+        enabled: email["enabled"] === false ? false : true,
+        imapHost: env["SAI_EMAIL_IMAP_HOST"],
+        imapUser: env["SAI_EMAIL_IMAP_USER"],
+        imapPassword: env["SAI_EMAIL_IMAP_PASSWORD"],
+        ...(env["SAI_EMAIL_IMAP_PORT"] ? { imapPort: Number(env["SAI_EMAIL_IMAP_PORT"]) } : {}),
+        ...(env["SAI_EMAIL_SMTP_HOST"] ? { smtpHost: env["SAI_EMAIL_SMTP_HOST"] } : {}),
+        ...(env["SAI_EMAIL_SMTP_PORT"] ? { smtpPort: Number(env["SAI_EMAIL_SMTP_PORT"]) } : {}),
+        ...(env["SAI_EMAIL_SMTP_USER"] ? { smtpUser: env["SAI_EMAIL_SMTP_USER"] } : {}),
+        ...(env["SAI_EMAIL_SMTP_PASSWORD"] ? { smtpPassword: env["SAI_EMAIL_SMTP_PASSWORD"] } : {}),
+        ...(env["SAI_EMAIL_SMTP_FROM"] ? { smtpFrom: env["SAI_EMAIL_SMTP_FROM"] } : {}),
+      },
+    };
+  }
   if (env["SAI_MULTIMODAL_FILES_URL"] || env["SAI_MULTIMODAL_STT_URL"] || env["SAI_MULTIMODAL_TTS_URL"]) {
     const multimodal = (raw["multimodal"] as Record<string, unknown> | undefined) ?? {};
     const files = (multimodal["files"] as Record<string, unknown> | undefined) ?? {};

@@ -58,7 +58,7 @@ One clarification that removes most confusion (see [primitives taxonomy](#a-note
 
 **Agents** — `SubAgentConfigSchema`: `description`(required), `capabilities[]`/`tags[]` (routing), `model` override, `systemPrompt`, `tools[]` (omit = inherit all), `maxIterations`(5), `container`, `workspaceAccess`(`generated`|`full`). `defaultContainerized=true` (all agents Dockerized unless `container.disabled`) — needs reachable Docker or startup aborts. `workspaceAccess:'generated'` confines file tools to `generated/`+`uploads/`; `'full'` exposes config zones (reserved for self-maintenance agents).
 
-- **Ephemeral agents** (`create_ephemeral_agent`) — single-use, defined inline, discarded after one run. **To extend what they can do, add the tool to `GRANTABLE_TOOLS`** in `tools/ephemeral-agent-factory.ts` (~50 tier-0/1 read/browser/computer/KB tools today). *Prefer this over hardcoding a permanent agent for one-off tasks.*
+- **Ephemeral agents** (`create_ephemeral_agent`) — single-use, defined inline, discarded after one run. **To extend what they can do, add the tool to `GRANTABLE_TOOLS`** in `tools/ephemeral-agent-factory.ts` (47 tools today: 18 tier-0, 8 tier-1, **12 tier-2 execute** — including `shell_exec`, `run_script`, `parallel_delegate` and the `computer_*` action tools — plus 9 MCP tools tiered dynamically). Note this set is **not** read-only: an ephemeral agent can be granted shell execution, so treat additions as a privilege decision, not a convenience one. *Prefer this over hardcoding a permanent agent for one-off tasks.*
 - **Promoted agents** — an ephemeral that proves reliable is auto-promoted into `subAgents` (thresholds `PROMOTION_MIN_SUCCESSES` / `PROMOTION_MIN_SUCCESS_RATE` in `promoted-agents.ts`). The emergent counterpart to the deliberate `swarm_define_agent`.
 
 ### Tools & extensions
@@ -99,16 +99,16 @@ There is **no `Workflow` type** — `run_workflow` is a uniform verb over `Workf
 | Lever | Default | How to adjust |
 |---|---|---|
 | **Personality profile** (identity/voice/collaboration/growth) | built-in default persona | **Memory page** (Personality tab, inline edit) or the personality store; the swarm can revise it too |
-| **Model preset** (Local ⇄ Claude) | unset = pure local | `agents.activeModelPreset` + header switch in App.vue; `modelPresetScope`(`all`) controls breadth |
+| **Model preset** (Local ⇄ Claude) | unset = pure local | `agents.defaults.activeModelPreset` + header switch in App.vue; `agents.defaults.modelPresetScope`(`all`) controls breadth |
 | **Per-agent provider/model mixing** | agents inherit `agents.defaults.model` | override `model` on `subAgents.<name>` (e.g. OpenRouter for `coder`) |
 | **Effort tier** (low/med/high/max) | `effort.default`=`medium` | per-session dial (Chat composer) or `effort.default`; `effort.profiles` to override what a tier bundles (timeout/iters/depth/reasoning) |
 | **Thinking toggle** (extended reasoning) | `enableThinking`=**false** | per-model-family `enableThinking`; `reasoningEffort`(low/med/high) for graded thinking; per-session toggle in composer |
-| **Tool mode** | `orchestration_only` | `subAgents.main-assistant.toolMode` = `orchestration_only` / `hybrid` / `delegate_only` |
-| **Custom instructions** | a substantial one is set in the workspace shard | `subAgents.main-assistant.customInstructions` (base-prompt behavioral override) |
+| **Tool mode** | `orchestration_only` | `agents.mainAssistant.toolMode` = `orchestration_only` / `hybrid` / `delegate_only` |
+| **Custom instructions** | a substantial one is set in the workspace shard | `agents.mainAssistant.customInstructions` (base-prompt behavioral override) |
 
 ### Orchestration behavior flags
 
-These live in `config/schemas/orchestration.ts`. **Most are default-ON and shipped** (don't re-propose); the honesty/reuse family is default-OFF pending eval. Note two flipped ON in the deployment shard `config/gateway/40-orchestration.jsonc`: `planDrivenContinuation` and `autonomousModeAntiRefusal`.
+Most live in `config/schemas/orchestration.ts` (keys are `orchestration.<flag>`); a few — including `trustModelRouting` and `softRoutingEnforcement` — are declared in `config/schema.ts` instead. **Most are default-ON and shipped** (don't re-propose); the honesty/reuse family is default-OFF pending eval. The deployment shard `config/gateway/40-orchestration.jsonc` sets 21 orchestration keys, **19 of them ON** — including the whole QA-delivery and honesty family (`qaDeliveryLoop`, `qaStrictVerdicts`, `qaDeterministicProbes`, `freshnessHonestyGuard`, `citationHonestyGuard`, `ungroundedFactualAnswerGuard`, `failedResearchHonestyBackstop`, …). Read that shard for the authoritative per-deployment state; the schema defaults are not what this deployment runs.
 
 | Family | Flags (default) | Purpose |
 |---|---|---|
@@ -127,8 +127,8 @@ These live in `config/schemas/orchestration.ts`. **Most are default-ON and shipp
 
 | Lever | Default | Key |
 |---|---|---|
-| **Guardrails** (prompt-injection block, secret scan, moderation) | mostly on | `guardrails.*`: `promptInjectionBlock`(true), `outputSecretScan`(true), `moderation` |
-| **Receptionist fast-lane** (cheap short-answer bypass) | off | `receptionist.*`: `enabled`(false), `maxResponseChars`(400), `alwaysEscalate` |
+| **Guardrails** (prompt-injection block, secret scan, moderation) | mostly on | `guardrails.*`: `promptInjectionBlock`(true), `outputSecretScan`(true), `modelModeration.enabled`(false) |
+| **Receptionist fast-lane** (cheap short-answer bypass) | off | `receptionist.*`: `enabled`(false), `maxResponseChars`(400), `alwaysEscalateTerms`([]) |
 | **Model sampling / context / cache** | per model | `agents.defaults.model.*`: `contextWindow`(32768), `temperature`, tiers, `promptCache` |
 | **Base-prompt assembly** | lean on | `leanContextInjection`(true), `taskConditionalPrompt`(false, reverted), split-orchestration, cache-warm |
 
@@ -163,7 +163,7 @@ The swarm autonomously improves along these loops. **Most memory/skill loops are
 | Knob | Default | Key |
 |---|---|---|
 | **Rate limits / concurrency ceiling** | 60 req/min, 20 tool-calls/turn | `agents.rateLimit.*` |
-| **Session pruning / soft budgets** | 60 s prune interval | `agents.sessionPruneIntervalMs`, `agents.defaults.budgets.maxToolCalls` |
+| **Session pruning / soft budgets** | 60 s prune interval | `agents.sessionPruneIntervalMs`, `agents.budgets.maxToolCallsPerTask` |
 | **Gateway server** | 10-min turn ceiling, 1-h session TTL | `gateway.*`: `turnTimeoutMs`(600000), `sessionTtlMs`, `publicUrl` |
 | **Sub-agent resources** | 512 MB / 0.5 cpu | `subAgents.<name>.container.memoryMb`/`cpus`/`timeoutMs`, `compute` (GPU) |
 | **RBAC / multi-user** | `auth.enabled`=false (back-compat) | **Users page** once enabled; per-credential `allowedUsers` |

@@ -35,8 +35,10 @@ export const EffortProfileSchema = z.object({
   orchestratorTurnSloMs: z.number().int().min(5_000).optional(),
   /** Sub-agent turn-SLO breach threshold (ms). */
   subAgentTurnSloMs: z.number().int().min(5_000).optional(),
-  /** Reasoning effort passed to reasoning-effort models for this turn. */
-  reasoningEffort: z.enum(["low", "medium", "high"]).optional(),
+  /** Reasoning effort passed to reasoning-effort models for this turn.
+   *  "none" (thinking off) and "xhigh" are Qwen 3.8+ levels; see ModelConfig.reasoningEffort
+   *  for how each family folds the ladder onto what it actually accepts. */
+  reasoningEffort: z.enum(["none", "low", "medium", "high", "xhigh"]).optional(),
   /** Extended-thinking toggle for this turn (Qwen/GLM/DeepSeek enable_thinking families). */
   enableThinking: z.boolean().optional(),
   /** Multiplier applied to every per-call/per-turn tool cap (subAgentToolCaps, coordinatorToolCaps, perTurnCaps). */

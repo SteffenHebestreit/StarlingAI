@@ -148,11 +148,15 @@ registerTool({
     type: "object",
     properties: {
       path: { type: "string", description: "Relative path within workspace" },
+      offset: { type: "number", description: "1-indexed line to start from. Use with limit to read a WINDOW of a large file instead of all of it." },
+      limit: { type: "number", description: "Maximum number of lines to return, counted from offset." },
     },
     required: ["path"],
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const path = String(args["path"] ?? "");
+    const offset = Number.isFinite(Number(args["offset"])) ? Math.max(1, Math.floor(Number(args["offset"]))) : undefined;
+    const limit = Number.isFinite(Number(args["limit"])) ? Math.max(1, Math.floor(Number(args["limit"]))) : undefined;
     const { safe, resolved } = guardPath(path, ctx.workspacePath);
 
     if (!safe) {
@@ -177,10 +181,31 @@ registerTool({
 
     try {
       const content = readFileSync(resolved, "utf-8");
+      // Windowed read. Without it the only way to see part of a large file was to
+      // pull the whole thing into context and let the model find its way — the
+      // single biggest source of wasted prompt on a big source tree.
+      if (offset !== undefined || limit !== undefined) {
+        const lines = content.split("\n");
+        const start = (offset ?? 1) - 1;
+        const end = limit !== undefined ? start + limit : lines.length;
+        const window = lines.slice(start, end);
+        const shown = window.map((l, i) => `${start + i + 1}\t${l}`).join("\n");
+        return {
+          success: true,
+          output: shown,
+          metadata: {
+            path, size: stat.size, ext,
+            totalLines: lines.length,
+            firstLine: start + 1,
+            lastLine: Math.min(end, lines.length),
+            truncated: end < lines.length || start > 0,
+          },
+        };
+      }
       return {
         success: true,
         output: content,
-        metadata: { path, size: stat.size, ext },
+        metadata: { path, size: stat.size, ext, totalLines: content.split("\n").length },
       };
     } catch (err) {
       log.error({ err, path }, "read_file failed");
@@ -499,7 +524,7 @@ registerTool({
 
 registerTool({
   name: "edit_file",
-  description: "Apply an exact string replacement to a file within the workspace. Fails if old_string is not found.",
+  description: "Apply an exact string replacement to a file within the workspace. Fails if old_string is not found, or if it appears more than once and replace_all is not set — include surrounding lines to make it unique.",
   embeddingDescription: "Edit, modify, update, patch, or change a specific section of a file. Datei bearbeiten, anpassen, ändern, patchen. Surgical string replacement for targeted edits.",
   costHint: "low",
   latencyHint: "low",
@@ -507,8 +532,9 @@ registerTool({
     type: "object",
     properties: {
       path: { type: "string", description: "Relative path within workspace" },
-      old_string: { type: "string", description: "Exact string to find and replace" },
+      old_string: { type: "string", description: "Exact string to find and replace. Must match EXACTLY ONE place in the file unless replace_all is true — add surrounding context lines to disambiguate." },
       new_string: { type: "string", description: "Replacement string" },
+      replace_all: { type: "boolean", description: "Replace every occurrence instead of requiring a unique match. Default false.", default: false },
     },
     required: ["path", "old_string", "new_string"],
   },
@@ -516,6 +542,7 @@ registerTool({
     const path = String(args["path"] ?? "");
     const oldStr = String(args["old_string"] ?? "");
     const newStr = String(args["new_string"] ?? "");
+    const replaceAll = args["replace_all"] === true;
     const { safe, resolved } = guardWritePath(path, ctx.workspacePath);
 
     if (!safe) return { success: false, output: "", error: "Path escapes workspace boundary" };
@@ -537,12 +564,25 @@ registerTool({
       if (!content.includes(oldStr)) {
         return { success: false, output: "", error: "old_string not found in file" };
       }
-      const updated = content.replace(oldStr, newStr);
+      // Count first. `String.replace` with a string pattern rewrites only the FIRST
+      // match, and this reported `replacements: 1` unconditionally — so an ambiguous
+      // old_string silently edited whichever occurrence came first, which is very
+      // often not the intended one, and the caller was told it succeeded.
+      const occurrences = content.split(oldStr).length - 1;
+      if (occurrences > 1 && !replaceAll) {
+        return {
+          success: false,
+          output: "",
+          error: `old_string matches ${occurrences} places in ${path}. Add surrounding lines so it identifies exactly one, or pass replace_all: true to change all ${occurrences}.`,
+        };
+      }
+      const updated = replaceAll ? content.split(oldStr).join(newStr) : content.replace(oldStr, newStr);
       writeFileSync(resolved, updated, "utf-8");
+      const replacements = replaceAll ? occurrences : 1;
       return {
         success: true,
-        output: `File edited: ${path}`,
-        metadata: { path, replacements: 1 },
+        output: `File edited: ${path} (${replacements} replacement${replacements === 1 ? "" : "s"}).`,
+        metadata: { path, replacements },
       };
     } catch (err) {
       log.error({ err, path }, "edit_file failed");

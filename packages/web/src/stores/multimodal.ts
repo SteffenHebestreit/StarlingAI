@@ -29,8 +29,6 @@ export interface MultimodalTtsConfig extends MultimodalServiceConfig {
   voiceSamplePath?: string;
   voiceSampleText?: string;
   defaultQuality: string;
-  /** Auto-speak a summary of the assistant reply after each turn when voice-input mode is active. */
-  speakReplySummary?: boolean;
   /** Maximum number of sentences in the spoken reply summary (1-5). */
   speakReplySummaryMaxSentences?: number;
 }
@@ -113,7 +111,6 @@ const DEFAULT_MULTIMODAL_CONFIG: MultimodalConfig = {
     voiceSamplePath: "",
     voiceSampleText: "",
     defaultQuality: "medium",
-    speakReplySummary: false,
     speakReplySummaryMaxSentences: 3,
   },
   wakeWord: {

@@ -1,7 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+
+// Stub appendOutcome: the warden records an outcome on every alert, and
+// outcomes.ts resolves its path from config.workspacePath — which under vitest
+// points at the real repo, so these tests were writing
+// packages/core/workspace/.starlingai/agent_outcomes.ndjson into the source tree
+// on every run. No assertion here inspects the outcome log (they read the
+// returned alerts or the mocked logAudit), so stubbing the single writer is
+// enough. Spread the original so other exports stay intact for transitive
+// importers.
+vi.mock("../agent/outcomes.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../agent/outcomes.js")>()),
+  appendOutcome: vi.fn(),
+}));
 
 // Stub logAudit before importing the warden so we can track alert emissions
 // without writing to the real audit file.
@@ -172,11 +182,7 @@ describe("Warden — tool storm detection", () => {
 });
 
 describe("Warden — repeated failures detection", () => {
-  let tempDir: string;
-
   beforeEach(() => {
-    tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-warden-"));
-    process.env["SAI_CONFIG_PATH"] = join(tempDir, "starlingai.json");
     resetWardenForTests();
     vi.mocked(logAudit).mockClear();
     startWarden();
@@ -184,8 +190,6 @@ describe("Warden — repeated failures detection", () => {
 
   afterEach(() => {
     stopWarden();
-    delete process.env["SAI_CONFIG_PATH"];
-    rmSync(tempDir, { recursive: true, force: true });
   });
 
   it("does not alert with fewer than threshold failures", () => {
@@ -219,11 +223,7 @@ describe("Warden — repeated failures detection", () => {
 });
 
 describe("Warden — tool escape attempt detection", () => {
-  let tempDir: string;
-
   beforeEach(() => {
-    tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-warden-esc-"));
-    process.env["SAI_CONFIG_PATH"] = join(tempDir, "starlingai.json");
     resetWardenForTests();
     vi.mocked(logAudit).mockClear();
     startWarden();
@@ -231,8 +231,6 @@ describe("Warden — tool escape attempt detection", () => {
 
   afterEach(() => {
     stopWarden();
-    delete process.env["SAI_CONFIG_PATH"];
-    rmSync(tempDir, { recursive: true, force: true });
   });
 
   it("does not alert below escape threshold", () => {

@@ -3,7 +3,10 @@ import { existsSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs
 import { dirname, resolve, join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { getConfig } from "../config/loader.js";
-import type { SubAgentRunOptions, SubAgentRunResult } from "./sub-agent.js";
+import { PRODUCT } from "../product/index.js";
+import { runWithOrchestrationOverride } from "../runtime/effort-context.js";
+import { proportionDiffCI } from "../skills/lift.js";
+import type { SubAgentExecutionStats, SubAgentRunOptions, SubAgentRunResult } from "./sub-agent.js";
 import { runSubAgentWithStats } from "./sub-agent.js";
 import {
   buildEvaluationProvenance,
@@ -27,6 +30,59 @@ export interface AgentEvaluationCase {
   maxDurationMs?: number;
   /** Per-case override for how many times to run this case (reliability sampling). */
   repeat?: number;
+  /**
+   * Score a CANDIDATE agent config without committing it to a workspace shard.
+   *
+   * Shallow-merged over `config.subAgents[agentName]` and handed to the runner as
+   * `inlineConfig`, which `runSubAgent` already prefers over the catalog entry.
+   * Absent ⇒ byte-identical to today.
+   *
+   * This exists because the alternative — edit a shard, run `config build`, restart,
+   * measure, revert — is the friction that keeps flag and prompt changes sitting at
+   * default-off indefinitely. With this, an A/B arm is two cases in one plan.
+   *
+   * In-process transport only: a gateway-routed run resolves the agent inside the
+   * gateway process, which has its own config and never sees this field.
+   */
+  configOverride?: Partial<import("../config/schema.js").SubAgentConfig>;
+  /**
+   * Pinned-vs-composed arm (gateway transport only).
+   *
+   * `"pinned"` (default) forces `--agent <agentName>`, which is how every eval has
+   * run so far — it measures one agent in isolation. `"composed"` drops the override
+   * and lets routing/bidding/the coordinator choose, measuring the swarm as a system.
+   *
+   * Pair the same task under both arms to answer whether coordination actually beats
+   * a single strong agent on your own tasks. `agentName` is still required under
+   * `"composed"` — it labels the arm and is what the pinned twin runs.
+   */
+  arm?: "pinned" | "composed";
+  /**
+   * Flip `orchestration.*` flags for this case only.
+   *
+   * Applies the flags through the turn-scoped AsyncLocalStorage overlay for the
+   * duration of the attempt and nothing else, so an arm can measure a candidate
+   * flag without editing a shard, rebuilding config and restarting.
+   *
+   * KNOW THE REACH before trusting a result — measured at 90d527c:
+   * - Only reads that go through `effectiveOrchestration()` see this. 45 call sites
+   *   read `getConfig().orchestration` directly and bypass it; 8 of the 21
+   *   default-off orchestration flags are overlay-reachable, 13 are not.
+   * - The in-process harness calls `runSubAgentWithStats` directly and never reaches
+   *   turn finalization, so flags read in runtime.ts / turn-*.ts cannot fire here at
+   *   all. Intersecting both constraints, `normalizeDelegationToEnglish` is currently
+   *   the only default-off flag testable end-to-end this way.
+   * - Gateway transport is a different process and never observes this store, so the
+   *   main-turn QA family stays unmeasurable until the override is carried over the
+   *   wire.
+   *
+   * A flag that does not arm produces two identical arms and a confident null. If
+   * the arms' token counts match closely, suspect reach before believing the result.
+   *
+   * Fields an effort profile controls still lose to the effort dial — see
+   * runWithOrchestrationOverride.
+   */
+  orchestrationOverride?: Partial<import("../config/schemas/orchestration.js").OrchestrationConfig>;
   /** Inspect the file(s) the agent actually PRODUCED, not just its returned text —
    *  the only way to gate file-writing builders on deliverable completeness (a
    *  builder's reply is a summary+path, so expectIncludes can't see a dropped or
@@ -327,7 +383,13 @@ export function snapshotWorkspace(workspacePath: string): Map<string, string> | 
   const snapshot = new Map<string, string>();
   const walk = (dir: string, rel: string): boolean => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (entry.name === ".git" || entry.name === "node_modules") continue;
+      // Skip non-agent-authored trees. PRODUCT.stateDirName is the important one:
+      // every sub-agent run appends its outcome record to
+      // <workspacePath>/<stateDir>/agent_outcomes.ndjson (sub-agent.ts appendOutcome),
+      // so without this exclusion `expectNoWorkspaceChanges` flagged the RUNTIME's own
+      // bookkeeping as an agent edit and could never pass. The gate asks "did the agent
+      // modify the code", not "did the runtime record telemetry".
+      if (entry.name === ".git" || entry.name === "node_modules" || entry.name === PRODUCT.stateDirName) continue;
       const p = join(dir, entry.name);
       const r = rel ? `${rel}/${entry.name}` : entry.name;
       if (entry.isDirectory()) {
@@ -369,6 +431,25 @@ function hasWorkspaceChanges(c: WorkspaceChanges): boolean {
 
 /** Run one pass^k attempt for a case: clear its artifacts, run the agent, time it,
  *  and collect failures. Pure per-attempt unit so attempts can be ordered or pooled. */
+/**
+ * Merge a case's `configOverride` onto the catalog entry for its agent.
+ *
+ * Shallow by design: `model`, `container` and friends are replaced wholesale rather
+ * than deep-merged, so an override says exactly what the arm runs. Throws when the
+ * agent is absent from the catalog — silently evaluating a half-defined agent would
+ * produce a number that looks valid and means nothing.
+ */
+function resolveInlineConfig(testCase: AgentEvaluationCase): import("../config/schema.js").SubAgentConfig {
+  const base = getConfig().subAgents[testCase.agentName];
+  if (!base) {
+    throw new Error(
+      `configOverride on case "${testCase.name}" targets unknown agent "${testCase.agentName}" — ` +
+      "there is no catalog entry to merge onto.",
+    );
+  }
+  return { ...base, ...testCase.configOverride };
+}
+
 async function runEvalAttempt(
   testCase: AgentEvaluationCase,
   workspacePath: string,
@@ -380,13 +461,15 @@ async function runEvalAttempt(
   clearArtifacts(caseWorkspace, testCase);
   const pristine = testCase.expectNoWorkspaceChanges ? snapshotWorkspace(caseWorkspace) : undefined;
   const startedAt = Date.now();
-  const result = await runner({
+  const result = await runWithOrchestrationOverride(testCase.orchestrationOverride, () => runner({
     agentName: testCase.agentName,
     task: testCase.task,
     context: testCase.context,
     parentSessionId: `eval:${randomUUID()}`,
     workspacePath: caseWorkspace,
-  });
+    ...(testCase.configOverride ? { inlineConfig: resolveInlineConfig(testCase) } : {}),
+    ...(testCase.arm ? { _evalArm: testCase.arm } : {}),
+  }));
   const durationMs = Date.now() - startedAt;
   const failures = collectFailures(result.output, durationMs, testCase, caseWorkspace);
   let workspaceChanges: WorkspaceChanges | undefined;
@@ -441,6 +524,40 @@ async function runEvalAttempt(
     }
   }
   return { durationMs, failures, isError: result.output.startsWith("Sub-agent error:"), result, ...(workspaceChanges ? { workspaceChanges } : {}), ...(judgeScores ? { judgeScores } : {}) };
+}
+
+/**
+ * Aggregate per-attempt execution stats into one representative record.
+ *
+ * Cost and effort fields are MEANS across the k attempts; identity fields
+ * (agent, model, session, capabilities) come from the last attempt since they
+ * are constant across a case's repeats.
+ *
+ * Why this matters: `compareEvaluationReports` gates CI on `stats.usage.totalTokens`
+ * (token_spike, >1.3x) and on latency. Reporting only the last attempt's stats
+ * made those a ONE-SAMPLE comparison even at --repeat 5, while passCount/passCaretK
+ * right beside them correctly aggregated every attempt. With normal LLM token
+ * variance a single sample crosses a 1.3x threshold routinely, so the gate both
+ * fired on noise and missed real regressions.
+ */
+function meanStats(attemptStats: SubAgentExecutionStats[]): SubAgentExecutionStats {
+  const last = attemptStats[attemptStats.length - 1]!;
+  const n = attemptStats.length;
+  if (n === 1) return last;
+  const mean = (pick: (s: SubAgentExecutionStats) => number): number =>
+    Math.round(attemptStats.reduce((acc, s) => acc + pick(s), 0) / n);
+  return {
+    ...last,
+    promptChars: mean((s) => s.promptChars),
+    userContentChars: mean((s) => s.userContentChars),
+    toolCount: mean((s) => s.toolCount),
+    iterations: mean((s) => s.iterations),
+    usage: {
+      promptTokens: mean((s) => s.usage?.promptTokens ?? 0),
+      completionTokens: mean((s) => s.usage?.completionTokens ?? 0),
+      totalTokens: mean((s) => s.usage?.totalTokens ?? 0),
+    },
+  };
 }
 
 /** Run `fn` over indices [0, count) with at most `limit` in flight, preserving result
@@ -515,7 +632,7 @@ export async function evaluateAgentPlan(
       status,
       failures: passCaretK ? [] : firstFailures,
       outputPreview: preview(lastResult?.output ?? ""),
-      stats: lastResult!.stats,
+      stats: meanStats(attemptResults.map((a) => a.result.stats)),
       attempts,
       passCount,
       passCaretK,
@@ -560,7 +677,7 @@ export async function writeEvaluationReport(report: AgentEvaluationReport, outpu
 export interface RegressionFinding {
   caseName: string;
   agentName: string;
-  kind: "case_newly_failed" | "latency_spike" | "token_spike";
+  kind: "case_newly_failed" | "reliability_drop" | "latency_spike" | "token_spike" | "cost_per_pass";
   detail: string;
   baselineValue: number;
   currentValue: number;
@@ -576,6 +693,27 @@ export interface RegressionReport {
 
 const LATENCY_REGRESSION_FACTOR = 1.5; // >50% increase
 const TOKEN_REGRESSION_FACTOR = 1.3;   // >30% increase
+const COST_PER_PASS_REGRESSION_FACTOR = 1.3; // >30% more tokens per SUCCESSFUL attempt
+
+/**
+ * Mean tokens per passing attempt — the metric that survives a reliability/cost
+ * tradeoff. `token_spike` only fires when the case still passes pass^k, so a change
+ * that makes an agent cheaper per run but flakier is invisible to it: fewer tokens
+ * AND a dropped passCount reads as "no token regression" (or no comparison at all).
+ * Dividing mean tokens by passCount prices that honestly — halving tokens while
+ * going 5/5 → 2/5 is a 25% cost-per-pass INCREASE, not a win.
+ *
+ * Returns null when nothing passed: there is no meaningful cost-per-pass for a case
+ * that never succeeded, and the pass regression is already reported separately.
+ */
+function costPerPass(result: AgentEvaluationCaseResult): number | null {
+  const passes = result.passCount ?? (result.passed ? 1 : 0);
+  if (passes <= 0) return null;
+  const tokens = result.stats.usage?.totalTokens ?? 0;
+  if (tokens <= 0) return null;
+  const attempts = result.attempts ?? 1;
+  return Math.round((tokens * attempts) / passes);
+}
 
 /** Median run duration — robust to the cold-start outlier that skews the mean on
  *  small pass^k samples (a single process-warmup run shouldn't read as a latency
@@ -596,6 +734,12 @@ function medianDurationMs(result: AgentEvaluationCaseResult): number {
 export function compareEvaluationReports(
   baseline: AgentEvaluationReport,
   current: AgentEvaluationReport,
+  opts?: {
+    /** Opt-in: report cost-per-pass regressions. Off by default so existing
+     *  baselines (which predate mean-aggregated stats) don't start failing CI
+     *  on a metric they were never measured against. */
+    costCompare?: boolean;
+  },
 ): RegressionReport {
   const findings: RegressionFinding[] = [];
   const baselineByName = new Map(baseline.results.map(r => [r.name, r]));
@@ -609,7 +753,42 @@ export function compareEvaluationReports(
     const base = baselineByName.get(curr.name);
     if (!base) continue; // new case — not a regression
 
-    if (base.passed && !curr.passed) {
+    // Reliability regression. Compare the PASS COUNTS with a confidence interval
+    // rather than the binary pass^k verdict.
+    //
+    // Why: pass^k collapses k attempts into one bit, and at realistic per-attempt
+    // rates that bit is mostly noise. Measured on this repo's own fixtures over 20
+    // attempts per case, per-attempt success is ~0.95 — which makes pass^5 succeed
+    // 77% of the time and pass^10 only 60%. Gating on the binary therefore fires
+    // `case_newly_failed` on a perfectly healthy agent about 4 runs in 10, and a
+    // gate that cries wolf is one people learn to ignore.
+    //
+    // proportionDiffCI (already shipped for skill lift) uses every attempt and only
+    // reports when the interval excludes zero, so a single unlucky attempt out of 10
+    // no longer reads as a regression while a real drop still does.
+    const baseAttempts = base.attempts ?? 1;
+    const currAttempts = curr.attempts ?? 1;
+    const basePasses = base.passCount ?? (base.passed ? baseAttempts : 0);
+    const currPasses = curr.passCount ?? (curr.passed ? currAttempts : 0);
+
+    if (baseAttempts >= 2 && currAttempts >= 2) {
+      // baseline − current: a POSITIVE lower bound means current is decisively worse.
+      const ci = proportionDiffCI(basePasses, baseAttempts, currPasses, currAttempts);
+      if (ci.low > 0) {
+        findings.push({
+          caseName: curr.name,
+          agentName: curr.agentName,
+          kind: "reliability_drop",
+          detail: `Pass rate down decisively: ${basePasses}/${baseAttempts} → ${currPasses}/${currAttempts}`
+            + ` (Δ ${(ci.estimate * 100).toFixed(0)}pp, 95% CI [${(ci.low * 100).toFixed(0)}, ${(ci.high * 100).toFixed(0)}]pp)`
+            + (curr.failures.length ? ` — ${curr.failures.join("; ")}` : ""),
+          baselineValue: basePasses / baseAttempts,
+          currentValue: currPasses / currAttempts,
+        });
+      }
+    } else if (base.passed && !curr.passed) {
+      // k=1 on either side: there is no distribution to reason about, so fall back to
+      // the binary. Single-sample runs are smoke tests, not reliability measurements.
       findings.push({
         caseName: curr.name,
         agentName: curr.agentName,
@@ -644,6 +823,24 @@ export function compareEvaluationReports(
         baselineValue: baseTokens,
         currentValue: currTokens,
       });
+    }
+
+    if (opts?.costCompare) {
+      const baseCost = costPerPass(base);
+      const currCost = costPerPass(curr);
+      // Unlike token_spike this deliberately does NOT require curr.passed — pricing a
+      // reliability drop is the whole point. A case that stopped passing entirely is
+      // skipped (currCost null) since case_newly_failed already reports it.
+      if (baseCost !== null && currCost !== null && currCost > baseCost * COST_PER_PASS_REGRESSION_FACTOR) {
+        findings.push({
+          caseName: curr.name,
+          agentName: curr.agentName,
+          kind: "cost_per_pass",
+          detail: `Tokens per passing attempt up ${Math.round(((currCost / baseCost) - 1) * 100)}% (${baseCost} → ${currCost}; passCount ${base.passCount ?? "?"}/${base.attempts ?? "?"} → ${curr.passCount ?? "?"}/${curr.attempts ?? "?"})`,
+          baselineValue: baseCost,
+          currentValue: currCost,
+        });
+      }
     }
   }
 

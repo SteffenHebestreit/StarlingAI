@@ -186,13 +186,15 @@ function buildTransport(serverName: string, config: McpServerConfig, containerNa
       });
     }
 
-    case "http":
+    case "http": {
+      const headers = resolveMcpHeaderEnvRefs(config.headers, serverName);
       if (config.protocol === "legacy-jsonrpc") {
-        return new LegacyHttpJsonRpcClientTransport(new URL(config.url), config.headers);
+        return new LegacyHttpJsonRpcClientTransport(new URL(config.url), headers);
       }
       return new StreamableHTTPClientTransport(new URL(config.url), {
-        requestInit: config.headers ? { headers: config.headers } : undefined,
+        requestInit: headers ? { headers } : undefined,
       });
+    }
 
     case "tcp":
       return new TcpClientTransport(config.host, config.port);
@@ -200,6 +202,58 @@ function buildTransport(serverName: string, config: McpServerConfig, containerNa
     default:
       throw new Error(`Unknown MCP transport: ${(config as McpServerConfig).transport}`);
   }
+}
+
+/**
+ * Expand `$VAR` / `${VAR}` references inside MCP HTTP header values.
+ *
+ * The `$VAR` convention is established across this codebase — A2A bearer tokens,
+ * provider API keys, OIDC client secrets and approval-webhook secrets all resolve it —
+ * and MCP headers were the one secret-bearing config that did not. A shard written the
+ * documented way (`"Authorization": "Bearer $SOME_API_KEY"`) was sent to the remote
+ * server *literally*, so the failure arrived as a 401 from the far end and read as a
+ * wrong credential rather than an unexpanded variable.
+ *
+ * Interpolation is substring-level, unlike `resolveSecretRef`, which only handles a
+ * whole value being a reference. That is not a gratuitous difference: an auth header is
+ * `Bearer <token>`, so the reference is necessarily embedded, and a whole-value-only
+ * resolver cannot express the single most common case.
+ *
+ * An unset variable throws instead of substituting an empty string. Sending
+ * `Authorization: Bearer ` to a remote server is an authentication attempt with a blank
+ * credential — it fails somewhere else, later, with a message about the credential
+ * rather than about the missing variable.
+ */
+export function resolveMcpHeaderEnvRefs(
+  headers: Record<string, string> | undefined,
+  serverName: string,
+): Record<string, string> | undefined {
+  if (!headers) return undefined;
+  const missing: string[] = [];
+  const resolved = Object.fromEntries(
+    Object.entries(headers).map(([name, value]) => [
+      name,
+      value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g, (_match, braced, bare) => {
+        const key = (braced ?? bare) as string;
+        const found = process.env[key];
+        if (found === undefined || found === "") {
+          missing.push(key);
+          return "";
+        }
+        return found;
+      }),
+    ]),
+  );
+  if (missing.length > 0) {
+    throw new Error(
+      `MCP server "${serverName}" references unset environment ${
+        missing.length === 1 ? "variable" : "variables"
+      } ${missing.map((k) => `$${k}`).join(", ")} in its headers. `
+        + `Set ${missing.length === 1 ? "it" : "them"} in the gateway environment, or remove the reference — `
+        + `sending the header unexpanded would fail at the remote end as a bad credential.`,
+    );
+  }
+  return resolved;
 }
 
 function createDockerRuntime(serverName: string, config: McpServerConfig): { containerName: string } | null {

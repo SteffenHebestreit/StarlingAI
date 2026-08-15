@@ -21,6 +21,7 @@ import { scanOutput } from "../guardrails/output.js";
 import { neutralizeToolResultFraming } from "../guardrails/input.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
+import { createCheckpoint, pauseCheckpoint, completeCheckpoint } from "../swarm/checkpoints.js";
 import { withSpan, genAi } from "../observability/tracing.js";
 import { runSubAgentInContainer } from "./container-runner.js";
 import { looksLikeContainerLevelFailure, looksLikeModelTemplateArtifact, looksLikeProviderErrorEcho, looksLikeHallucinatedTruncationClaim } from "./container-failure.js";
@@ -909,6 +910,7 @@ const SUB_AGENT_PER_TOOL_CAPS: Partial<Record<string, number>> = {
   generate_docx: 4,
   generate_pptx: 4,
   generate_pdf: 4,
+  render_pdf: 4,
   export_workspace_artifact: 4,
   bundle_artifact_zip: 2,
 };
@@ -918,7 +920,7 @@ const SUB_AGENT_PER_TOOL_CAPS: Partial<Record<string, number>> = {
 // (same path written repeatedly) still trips the cap at PER_PATH_CAP.
 const PATH_KEYED_WRITE_TOOLS = new Set<string>([
   "write_file", "edit_file",
-  "generate_document", "generate_docx", "generate_pptx", "generate_pdf",
+  "generate_document", "generate_docx", "generate_pptx", "generate_pdf", "render_pdf",
   "export_workspace_artifact",
 ]);
 const PER_PATH_WRITE_CAP = 2;
@@ -949,6 +951,7 @@ const ARTIFACT_PERSIST_TOOLS = new Set<string>([
   "write_file",
   "generate_document",
   "generate_pdf",
+  "render_pdf",
   "generate_website",
   "generate_presentation",
   "export_workspace_artifact",
@@ -1045,8 +1048,6 @@ const IDEMPOTENT_TOOLS = new Set<string>([
   "spreadsheet_read",
   "list_pdf_form_fields",
   "list_tts_voices",
-  "geocode_location",
-  "route_distance_time",
   "web_search",
   "web_fetch",
   "workspace_search",
@@ -1487,6 +1488,13 @@ export interface SubAgentRunOptions {
    * of their own budget to each delegated specialist.
    */
   softDeadlineMs?: number;
+  /**
+   * Eval transport only, ignored by the in-process runner: which arm of a
+   * pinned-vs-composed comparison this attempt belongs to. "composed" tells the
+   * gateway runner to omit the `--agent` override so live routing/bidding picks
+   * the agents instead. Absent ⇒ "pinned" ⇒ previous behavior.
+   */
+  _evalArm?: "pinned" | "composed";
 }
 
 export interface SubAgentProgressEvent {
@@ -1676,6 +1684,22 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
   const signal = opts.signal;
 
   const subSessionId = `sub:${opts.parentSessionId}:${opts.agentName}:${Date.now()}`;
+
+  // Open a checkpoint for this run. The resume side of this system was complete —
+  // context rebuilding, gateway routes, dashboard — but NOTHING ever wrote one, so
+  // none of it could fire. A run that dies with partial work now leaves a record the
+  // operator can resume from instead of vanishing. Best-effort by construction: a
+  // checkpoint failure must never take down the work it is describing.
+  let checkpointTaskId: string | null = null;
+  try {
+    checkpointTaskId = createCheckpoint({
+      agentName: opts.agentName,
+      parentSessionId: opts.parentSessionId,
+      task: opts.task,
+    }).taskId;
+  } catch (err) {
+    log.warn({ err, agentName: opts.agentName }, "createCheckpoint failed — continuing without one");
+  }
 
   // Surface a live, take-over-able browser preview for the whole browser_agent
   // run (parity with the computer-use session preview). The session is stopped
@@ -2253,6 +2277,26 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         },
         { sessionId: subSessionId, severity },
       );
+
+      // Close the checkpoint on the same choke point every terminal outcome flows
+      // through. A completed run has nothing to resume; anything else keeps what it
+      // produced so the work is recoverable rather than lost.
+      if (checkpointTaskId) {
+        try {
+          if (stats.terminalState === "completed") {
+            completeCheckpoint(checkpointTaskId);
+          } else {
+            pauseCheckpoint(checkpointTaskId, {
+              progressNote: `Ended as ${stats.terminalState} after ${stats.iterations} iteration(s). Tools used: ${stats.toolNames.join(", ") || "none"}.`,
+              conversationSummary: output,
+              elapsedMs: Date.now() - runStartedAt,
+              iterationsCompleted: stats.iterations,
+            });
+          }
+        } catch (err) {
+          log.warn({ err, taskId: checkpointTaskId }, "closing the checkpoint failed — the run result is unaffected");
+        }
+      }
     };
 
     /** Single-delegation passthrough — see PASSTHROUGH_DELEGATION_MIN_BYTES.

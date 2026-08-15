@@ -325,6 +325,23 @@ export const OrchestrationSchema = z.object({
    *  objective FAIL with reproducible receipts; passing receipts ground the
    *  verdict. Default OFF per rollout policy; requires qaDeliveryLoop. */
   qaDeterministicProbes: z.boolean().default(false),
+  /** Verify EVERY artifact the turn produced, triggered by an artifact existing rather
+   *  than by a plan existing. The qaDeterministicProbes above only run inside the QA
+   *  delivery gate, which is a no-op without a plan carrying acceptance criteria — so
+   *  the most ordinary artifact turn ("update my CV and give me a PDF") shipped its
+   *  file completely unchecked. This gate opens each file and validates it against the
+   *  format its extension claims (see artifact-validators.ts), then caveats anything
+   *  broken or uncheckable. Deterministic and model-free, so it is default-ON: there is
+   *  no tuned prompt to regress, and the alternative is shipping corrupt files silently. */
+  verifyArtifacts: z.boolean().default(true),
+  /** On a verification FAILURE, delegate a bounded rebuild instead of only caveating.
+   *  Costs a real sub-agent run per failing turn, which is why the schema default is OFF
+   *  per rollout policy — enable per deployment. Without it the gate still detects and
+   *  reports the breakage, it just does not try to fix it. Requires verifyArtifacts. */
+  verifyArtifactsRepair: z.boolean().default(false),
+  /** How many rebuild delegations a single turn may spend on broken artifacts. Each is a
+   *  fresh sub-agent run, so per-run write caps reset and cannot deadlock the retry. */
+  verifyArtifactsMaxRepairAttempts: z.number().int().min(1).max(3).default(1),
   /** Tool-equipped, clean-context QA judge (slice 2 of the evidence work). When the delivery
    *  gate runs on a turn that produced inspectable artifacts (files / served URLs), the verdict
    *  comes from a FRESH-context sub-agent holding read-only inspection tools (read_file,

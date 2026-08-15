@@ -186,7 +186,7 @@ export async function searchMemoryRecords(
   query: string,
   opts: SearchMemoryOptions = {},
 ): Promise<MemoryRecord[]> {
-  const normalizedQuery = query.trim().toLowerCase();
+  const normalizedQuery = normalizeText(query.trim());
   const tokens = tokenize(normalizedQuery);
   const scopes = new Set<MemoryScope>(opts.scopes?.length ? opts.scopes : ["workspace", "user", "session", "agent"]);
   const allowedKinds = opts.kinds?.length ? new Set(opts.kinds.map((kind) => normalizeKind(kind)).filter(Boolean) as MemoryKind[]) : null;
@@ -646,7 +646,7 @@ function _readDurableCached(scope: DurableMemoryScope, workspacePath: string): D
 
 /** Internal — exposed for tests. Clears all in-process caches. */
 export function _clearDurableMemoryCaches(): void {
-  _durableCache.clear();
+  _durableCache.clear();
   _writeCounters.clear();
 }
 
@@ -975,9 +975,9 @@ function scoreRecord(record: MemoryRecord, normalizedQuery: string, tokens: stri
   const decay = decayFactorForKind(record.kind, record.updatedAt);
   if (!normalizedQuery) return (scopeWeight(record.scope) + recencyBoost(record.updatedAt)) * decay;
 
-  const subject = record.subject.toLowerCase();
-  const content = record.content.toLowerCase();
-  const tags = record.tags.map((tag) => tag.toLowerCase());
+  const subject = normalizeText(record.subject);
+  const content = normalizeText(record.content);
+  const tags = record.tags.map((tag) => normalizeText(tag));
   const corpus = `${subject}\n${content}\n${tags.join(" ")}\n${record.kind}\n${record.source}`;
 
   let score = scopeWeight(record.scope) + recencyBoost(record.updatedAt);
@@ -1033,9 +1033,23 @@ function recencyBoost(value: string): number {
   return Math.max(0, 0.15 - Math.min(0.15, ageDays * 0.01));
 }
 
+/** Unicode word separator: anything that is not a letter, number, or underscore.
+ *  The ASCII form this replaces (`[^a-z0-9_]+/i`) treated every non-ASCII letter as
+ *  a separator, so "Mängelrüge" tokenized to ["ngelr","ge"] and every CJK string to
+ *  []. Because scoreRecord matches tokens by SUBSTRING, those fragments did not just
+ *  lose the term — "ngel" matched Mangel/Engel/Klingel, manufacturing false hits. */
+const WORD_SEPARATOR = /[^\p{L}\p{N}_]+/u;
+
+/** Case-fold + NFKC so the query and the corpus are compared in the same form.
+ *  Must be applied to BOTH sides: normalizing only the query would make a
+ *  decomposed "a+◌̈" record unmatchable by a composed "ä" token. */
+function normalizeText(value: string): string {
+  return value.normalize("NFKC").toLowerCase();
+}
+
 function tokenize(value: string): string[] {
-  return value
-    .split(/[^a-z0-9_]+/i)
+  return normalizeText(value)
+    .split(WORD_SEPARATOR)
     .map((token) => token.trim())
     .filter((token) => token.length >= 2);
 }
@@ -1106,10 +1120,6 @@ function memoryDirForScope(scope: DurableMemoryScope, workspacePath: string): st
   // it stays at the single shared base when no userId is present (auth-off).
   if (scope === "user") return userScopedDir(userMemoryBaseDir());
   return resolve(workspacePath, MEMORY_SUBDIR);
-}
-
-function ensureDir(workspacePath: string): string {
-  return ensureDirForScope("workspace", workspacePath);
 }
 
 function ensureDirForScope(scope: DurableMemoryScope, workspacePath: string): string {
@@ -1353,9 +1363,8 @@ function areNearDuplicateUnits(left: string, right: string): boolean {
 
 function tokenSet(value: string): Set<string> {
   return new Set(
-    value
-      .toLowerCase()
-      .split(/[^a-z0-9_]+/i)
+    normalizeText(value)
+      .split(WORD_SEPARATOR)
       .map((token) => token.trim())
       .filter((token) => token.length >= 3 && !TOKEN_STOPWORDS.has(token)),
   );

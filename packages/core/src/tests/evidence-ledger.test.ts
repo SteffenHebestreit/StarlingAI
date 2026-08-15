@@ -5,6 +5,7 @@ import {
   formatEvidenceForPrompt,
   listDisputedSubjects,
   listEvidenceClaims,
+  normalizeValue,
   resetEvidenceLedgerForTests,
   resolveSubjectConflict,
   sweepEvidenceConflicts,
@@ -117,5 +118,43 @@ describe("evidence conflict & freshness engine (EVD-302)", () => {
     const byOutcome = Object.fromEntries(results.map((r) => [r.subject, r.outcome]));
     expect(byOutcome["a"]).toBe("resolved");
     expect(byOutcome["b"]).toBe("material");
+  });
+});
+
+describe("evidence ledger — numeric value normalization (same quantity, different rendering)", () => {
+  const same = (a: string, b: string): boolean => normalizeValue(a) === normalizeValue(b);
+
+  it("folds currency symbol, thousands separator and trailing zeros into one form", () => {
+    expect(same("$1,299", "1299 USD")).toBe(true);
+    expect(same("$1,299", "USD 1299.00")).toBe(true);
+    expect(same("1299", "1,299.0")).toBe(true);
+    expect(same("€2.500,50", "2500.5 EUR")).toBe(true);
+  });
+
+  it("keeps genuinely different quantities and different currencies apart", () => {
+    expect(same("$1,299", "$1,300")).toBe(false);
+    // Same number, different currency is a REAL conflict — must not be folded.
+    expect(same("1299 USD", "1299 EUR")).toBe(false);
+    expect(same("$1,299", "1299 EUR")).toBe(false);
+  });
+
+  it("refuses to guess on the ambiguous one-separator-plus-3-digits case", () => {
+    // "1,299" is 1299 in en-US and 1.299 in de-DE. Merging would be a guess, so
+    // these stay distinct (today's behavior) rather than risk hiding a conflict.
+    expect(normalizeValue("1,299")).not.toBe(normalizeValue("1.299"));
+  });
+
+  it("leaves non-numeric and mixed values to plain text comparison", () => {
+    expect(same("Acme Corp", "acme corp")).toBe(true);
+    expect(same("about 5 units", "about 5 units")).toBe(true);
+    expect(same("released 2024", "released 2025")).toBe(false);
+    // Contradictory decoration is not silently resolved.
+    expect(normalizeValue("$100 EUR")).toBe("$100 eur");
+  });
+
+  it("is idempotent — normalizing an already-normalized value is a no-op", () => {
+    for (const v of ["$1,299", "1299 USD", "Acme Corp", "1.299", "€2.500,50"]) {
+      expect(normalizeValue(normalizeValue(v))).toBe(normalizeValue(v));
+    }
   });
 });

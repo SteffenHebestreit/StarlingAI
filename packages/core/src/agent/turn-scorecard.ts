@@ -1,4 +1,5 @@
 import type { QaVerdictStatus } from "./qa-delivery-loop.js";
+import type { ArtifactVerificationStatus } from "./artifact-verification-gate.js";
 
 export type ScorecardQaStatus = QaVerdictStatus | "not_run";
 export type ArtifactProbeStatus = "not_requested" | "not_applicable" | "pass" | "fail" | "unverified" | "error";
@@ -12,6 +13,8 @@ export interface TurnQualitySignals {
   qaEvidencePresent: boolean;
   artifactProbeStatus: ArtifactProbeStatus;
   artifactProbeCount: number;
+  /** Verdict of the plan-independent artifact verification gate. */
+  artifactVerificationStatus: ArtifactVerificationStatus;
 }
 
 export interface TurnQualityScorecard {
@@ -61,6 +64,7 @@ export function createTurnQualitySignals(): TurnQualitySignals {
     qaEvidencePresent: false,
     artifactProbeStatus: "not_requested",
     artifactProbeCount: 0,
+    artifactVerificationStatus: "not_requested",
   };
 }
 
@@ -77,6 +81,9 @@ function outcomeFor(input: BuildTurnQualityScorecardInput, quality: TurnQualityS
   if (input.finishReason === "cancelled") return { status: "cancelled", reason: "cancelled" };
   if (quality.qaStatus === "fail") return { status: "partial", reason: "qa_failed" };
   if (quality.qaStatus === "unverified") return { status: "partial", reason: "qa_unverified" };
+  // A turn that shipped a file which failed its integrity check is NOT "completed",
+  // however clean the prose was. The user got a broken deliverable.
+  if (quality.artifactVerificationStatus === "fail") return { status: "partial", reason: "artifact_verification_failed" };
   if (input.wardenFailureCount > 0) return { status: "partial", reason: "delegation_failures" };
   if (input.forcedSynthesisFired) return { status: "partial", reason: input.finishReason };
   return { status: "completed", reason: null };

@@ -320,3 +320,20 @@ describe("checkToolOutput", () => {
     }
   });
 });
+
+describe("tier fallbacks for pattern-matched namespaces", () => {
+  // a2a__ had no fallback, so federated tools hit the fail-closed default and were
+  // blocked outright — with a warning that blamed a missing map entry rather than
+  // the missing prefix rule. Treated like the MCP bridge: a remote capability we do
+  // not control, so Tier 3 with per-call approval.
+  it("classifies a2a__ federated tools as Tier 3 with approval", () => {
+    const def = getToolTier("a2a__peerhost__summarize");
+    expect(def.tier).toBe(ToolTier.THREE_PRIVILEGED);
+    expect(def.requiresPerCallApproval).toBe(true);
+    expect(def.requiresSandbox).toBe(false);
+  });
+
+  it("still fails closed for an unrecognised name", () => {
+    expect(getToolTier("totally_unknown_tool").tier).toBe(ToolTier.FOUR_BLOCKED);
+  });
+});

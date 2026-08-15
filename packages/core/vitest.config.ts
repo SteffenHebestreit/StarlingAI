@@ -5,6 +5,9 @@ export default defineConfig({
     globals: true,
     environment: "node",
     include: ["src/**/*.test.ts"],
+    // Redirects the default audit-log destination to a temp dir so unisolated
+    // tests stop appending to the repo's own .starlingai/audit.jsonl.
+    setupFiles: ["src/tests/vitest.setup.ts"],
     testTimeout: 60000,
     hookTimeout: 30000,
     minWorkers: 1,

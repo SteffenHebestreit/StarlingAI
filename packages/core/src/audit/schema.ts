@@ -222,6 +222,12 @@ export type CoreAuditEventType =
   | "flow_plan_recorded"
   | "flow_verification_passed"
   | "flow_verification_repaired"
+  // An artifact this turn produced failed its deterministic integrity check. Distinct
+  // from flow_verification_repaired, which asserts a repair actually happened — the
+  // detection and the fix must not share one event name or the trail claims a repair
+  // that never ran.
+  | "artifact_verification_failed"
+  | "artifact_verification_unrepaired"
   | "flow_high_stakes_unverified"
   | "plan_approval_requested"
   | "plan_approval_resolved"

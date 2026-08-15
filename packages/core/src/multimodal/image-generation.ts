@@ -415,28 +415,6 @@ function stringField(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
-function firstNestedString(value: unknown): string | undefined {
-  if (typeof value === "string") {
-    return value.trim() || undefined;
-  }
-
-  if (Array.isArray(value)) {
-    for (const entry of value) {
-      const nested = firstNestedString(entry);
-      if (nested) return nested;
-    }
-  }
-
-  if (isRecord(value)) {
-    for (const entry of Object.values(value)) {
-      const nested = firstNestedString(entry);
-      if (nested) return nested;
-    }
-  }
-
-  return undefined;
-}
-
 function firstNestedErrorString(value: unknown): string | undefined {
   if (Array.isArray(value)) {
     for (const entry of value) {

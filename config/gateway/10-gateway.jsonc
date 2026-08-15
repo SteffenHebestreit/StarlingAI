@@ -29,8 +29,6 @@
   },
   "gateway": {
     "port": 8765,
-    "restPort": 8766,
-    "bindHost": "loopback",
     "sessionTtlMs": 3600000,
     "turnTimeoutMs": 1800000,
     // EVL-401: relative session.create workspacePath overrides (gateway-routed eval

@@ -118,6 +118,10 @@ export interface ParsedAttachment {
 
 export interface ParsedMailMessage extends MessageRef {
   messageId: string;
+  /** RFC 5322 In-Reply-To, when present. Empty string when the sender omitted it. */
+  inReplyTo: string;
+  /** RFC 5322 References chain, oldest first. The exact, language-independent thread spine. */
+  references: string[];
   from: string;
   to: string;
   cc: string;

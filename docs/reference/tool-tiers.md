@@ -55,10 +55,12 @@ Always allowed; no side effects.
 | `github_check_runs_list` | — | — | List CI check runs for a commit on a remote GitHub repository (read-only) |
 | `github_pr_get` | — | — | Fetch a single pull request by number from a remote GitHub repository (read-only) |
 | `github_pr_list` | — | — | List pull requests on a remote GitHub repository (read-only) |
+| `glob_files` | — | — | Find workspace files by path pattern (glob) |
 | `grafana_alerts_list` | — | — | List Grafana unified-alerting rules (read-only) |
 | `grafana_dashboard_search` | — | — | Search Grafana dashboards by query / tag / folder (read-only) |
 | `graph_find_paths` | — | — | Find shortest relationship paths between graph entities |
 | `graph_query` | — | — | Run read-only Cypher queries against the MemGraph knowledge graph |
+| `grep_files` | — | — | Search file contents by regular expression with surrounding context |
 | `hash_compute` | — | — | Compute md5/sha1/sha256/sha512 hash of a UTF-8 string — useful for content fingerprints, dedup checks, integrity comparisons |
 | `helm_list` | — | — | List Helm releases in the target Kubernetes cluster (read-only) |
 | `json_query` | — | — | Extract values from a JSON document via a dot/bracket path expression (jq-lite — no piping or transforms) |
@@ -77,6 +79,7 @@ Always allowed; no side effects.
 | `list_pdf_form_fields` | — | — | Inspect AcroForm fields in an existing PDF file |
 | `list_skills` | — | — | List Skill Library entries with status and reliability stats |
 | `list_tts_voices` | — | — | List voices from the configured TTS backend |
+| `load_tool` | — | — | Pull an available-but-not-offered tool into the current turn (lean tool catalog) |
 | `log_stream` | — | — | Tail and filter container logs or workspace log files (read-only) |
 | `mail_get_draft` | — | — | Read a prepared mail draft from the headless mail service |
 | `mail_list_accounts` | — | — | List configured mail accounts from the headless mail service |
@@ -184,6 +187,7 @@ Write operations inside the workspace; session-level consent once.
 | `record_lesson` | — | — | Record a lesson learned from a task execution into the agent outcome log |
 | `record_plan` | — | — | Record the orchestrator's structured plan for a complex turn |
 | `record_skill` | — | — | Author a reusable procedure (skill) in the Skill Library from experience |
+| `render_pdf` | — | — | Render Markdown or HTML into a typeset, send-ready PDF via a browser engine |
 | `request_new_capability` | — | — | Request development of a new tool to fill a capability gap |
 | `research_note` | — | — | Write a research finding into the durable scratchpad for the current session |
 | `research_notes_clear` | — | — | Clear research scratchpad notes for the current session |

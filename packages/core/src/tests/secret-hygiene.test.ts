@@ -67,3 +67,34 @@ describe("logSecretHygiene", () => {
     expect(() => logSecretHygiene({ SAI_MASTER_KEY: STRONG_KEY, SAI_JWT_SECRET: STRONG_JWT })).not.toThrow();
   });
 });
+
+describe("output redaction — identifiers are not secret VALUES", () => {
+  it("does not redact an access-key ID's value out of ordinary output", async () => {
+    const { scanOutput, refreshSecretValueCache } = await import("../guardrails/output.js");
+
+    // Reproduces the real deployment: SAI_S3_ACCESS_KEY_ID = "starlingai". Redaction
+    // is a blind substring replace, so before the identifier exclusion this rewrote
+    // every occurrence of the product's own name to [REDACTED:secret] — corrupting
+    // prose, .starlingai/ paths, and (as observed) `echo hello_starlingai`.
+    const prevId = process.env["SAI_S3_ACCESS_KEY_ID"];
+    const prevSecret = process.env["SAI_S3_SECRET_ACCESS_KEY"];
+    process.env["SAI_S3_ACCESS_KEY_ID"] = "starlingai";
+    process.env["SAI_S3_SECRET_ACCESS_KEY"] = "sk-live-abcdefghijklmnop";
+    refreshSecretValueCache();
+    try {
+      const text = "Command: echo hello_starlingai — wrote .starlingai/report.md";
+      const out = scanOutput(text);
+      expect(out.redacted ?? text).toContain("hello_starlingai");
+      expect(out.redacted ?? text).not.toContain("[REDACTED:secret]");
+
+      // The PAIRED secret is still redacted — the exclusion must not widen the hole.
+      const leaked = scanOutput("key is sk-live-abcdefghijklmnop");
+      expect(leaked.redacted ?? "").toContain("[REDACTED:secret]");
+      expect(leaked.redacted ?? "").not.toContain("sk-live-abcdefghijklmnop");
+    } finally {
+      if (prevId === undefined) delete process.env["SAI_S3_ACCESS_KEY_ID"]; else process.env["SAI_S3_ACCESS_KEY_ID"] = prevId;
+      if (prevSecret === undefined) delete process.env["SAI_S3_SECRET_ACCESS_KEY"]; else process.env["SAI_S3_SECRET_ACCESS_KEY"] = prevSecret;
+      refreshSecretValueCache();
+    }
+  });
+});

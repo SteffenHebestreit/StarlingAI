@@ -12,7 +12,6 @@ import { childLogger } from "../logger.js";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { homedir } from "node:os";
 
 import { PRODUCT } from "../product/index.js";
 
@@ -355,10 +354,8 @@ interface PersistedEmbeddingCache {
 function resolveEmbeddingCachePath(): string {
   const explicit = process.env["SAI_EMBEDDING_CACHE"]?.trim();
   if (explicit) return resolve(explicit);
-  const workspacePath = resolve(process.cwd(), PRODUCT.stateDirName, "embedding-cache.json");
-  const homePath = resolve(homedir(), PRODUCT.stateDirName, "embedding-cache.json");
-  if (existsSync(workspacePath)) return workspacePath;
-  return workspacePath; // default to workspace even if it doesn't exist yet
+  // Always workspace-local; created on first write if it doesn't exist yet.
+  return resolve(process.cwd(), PRODUCT.stateDirName, "embedding-cache.json");
 }
 
 function hashAgentDocument(doc: string): string {

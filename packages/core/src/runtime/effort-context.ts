@@ -147,6 +147,8 @@ export function defaultEffortTier(): EffortTier {
 interface EffortContext {
   tier: EffortTier;
   profile: ResolvedEffortProfile;
+  /** Turn-scoped orchestration overlay — see runWithOrchestrationOverride. */
+  orchestrationOverride?: Partial<OrchestrationConfig>;
 }
 
 const storage = new AsyncLocalStorage<EffortContext>();
@@ -154,7 +156,47 @@ const storage = new AsyncLocalStorage<EffortContext>();
 /** Run `fn` with the resolved effort profile active for its entire async lifetime. */
 export function runWithEffortContext<T>(tier: EffortTier | undefined, fn: () => T): T {
   const effectiveTier: EffortTier = tier ?? defaultEffortTier();
-  return storage.run({ tier: effectiveTier, profile: resolveEffortProfile(effectiveTier) }, fn);
+  const current = storage.getStore();
+  return storage.run({
+    tier: effectiveTier,
+    profile: resolveEffortProfile(effectiveTier),
+    // Preserve an outer orchestration overlay: an eval arm sets the overlay, then the
+    // turn sets its effort tier inside it. Dropping it here would silently disarm the
+    // arm being measured.
+    ...(current?.orchestrationOverride ? { orchestrationOverride: current.orchestrationOverride } : {}),
+  }, fn);
+}
+
+/**
+ * Run `fn` with a turn-scoped orchestration overlay.
+ *
+ * Exists so an A/B arm can flip an `orchestration.*` flag for the duration of one
+ * run WITHOUT mutating process-global config. `effectiveOrchestration` reads
+ * `getConfig().orchestration`, which is shared by every concurrent turn — so before
+ * this, evaluating a candidate orchestration flag meant editing a shard, rebuilding
+ * config and restarting. That friction is why flags accumulate at default-off.
+ *
+ * Layering is base → overlay → effort profile, so the effort dial still wins by
+ * construction. The fields an effort profile controls (maxDelegationDepth,
+ * riskGatedQA, qaEvidenceAnchoring, finalResponseQaGate, autoResearchOnRefusal,
+ * autoBuildAfterResearch, maxParallelSlices) therefore cannot be A/B'd this way
+ * while a non-default tier is active; every other orchestration flag can.
+ *
+ * In-process only. A gateway-routed run executes in a different process and never
+ * observes this store.
+ */
+export function runWithOrchestrationOverride<T>(
+  override: Partial<OrchestrationConfig> | undefined,
+  fn: () => T,
+): T {
+  if (!override || Object.keys(override).length === 0) return fn();
+  const current = storage.getStore();
+  const tier: EffortTier = current?.tier ?? defaultEffortTier();
+  return storage.run({
+    tier,
+    profile: current?.profile ?? resolveEffortProfile(tier),
+    orchestrationOverride: { ...current?.orchestrationOverride, ...override },
+  }, fn);
 }
 
 /** The active turn's resolved effort profile, if a turn context is set. */
@@ -171,8 +213,13 @@ export function currentEffortTier(): EffortTier | undefined {
 
 /** config.orchestration with the active profile's gate/number overrides applied. */
 export function effectiveOrchestration(): OrchestrationConfig {
-  const base = getConfig().orchestration;
-  const p = currentEffortProfile();
+  const store = storage.getStore();
+  // base → turn-scoped overlay (eval arms) → effort profile. Effort stays last so
+  // its existing precedence is unchanged.
+  const base = store?.orchestrationOverride
+    ? { ...getConfig().orchestration, ...store.orchestrationOverride }
+    : getConfig().orchestration;
+  const p = store?.profile;
   if (!p) return base;
   return {
     ...base,

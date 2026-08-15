@@ -243,6 +243,19 @@
         "computer_clipboard_write",
         "computer_upload_file",
         "computer_download_file",
+        // VS Code adapter tools. default-tools.ts already documents these as
+        // "delegated to the computer_use_agent", and computerUse.adapters ships
+        // local_vscode — but they were never listed here, so no agent could invoke
+        // them and the configured adapter was unreachable. The two tier-2 entries
+        // (vscode_run_terminal_command, vscode_command) carry per-call approval.
+        "vscode_open_file",
+        "vscode_get_active_editor",
+        "vscode_get_diagnostics",
+        "vscode_search_workspace",
+        "vscode_diff",
+        "vscode_focus_panel",
+        "vscode_run_terminal_command",
+        "vscode_command",
         "http_request",
         "get_site_credentials",
         "share_finding"

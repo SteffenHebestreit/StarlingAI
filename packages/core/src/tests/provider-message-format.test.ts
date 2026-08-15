@@ -196,7 +196,10 @@ describe("normalizeMessagesForModel", () => {
       expect.objectContaining({
         model: "gemma-4-e4b-it",
         temperature: 0.2,
-        extra_body: { chat_template_kwargs: { enable_thinking: true } },
+        // TOP-LEVEL, not nested under extra_body: that key is a Python-SDK
+        // client-side convenience and never reaches the wire, so a server sees one
+        // unknown field and drops the thinking control inside it.
+        chat_template_kwargs: { enable_thinking: true },
       }),
       // The provider wraps every call in a hard-timeout AbortController and
       // hands the combined signal to the SDK, so the second arg always carries

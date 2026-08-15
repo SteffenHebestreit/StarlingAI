@@ -24,7 +24,7 @@ export interface EvaluationProvenanceResult {
 }
 
 export interface EvaluationProvenanceInput {
-  plan: { cases?: Array<{ agentName?: string }> };
+  plan: { cases?: Array<{ agentName?: string; arm?: "pinned" | "composed" }> };
   config: unknown;
   results: readonly EvaluationProvenanceResult[];
   source: EvaluationSourceState;
@@ -89,6 +89,12 @@ function evaluatedAgentNames(
   const names = new Set<string>();
   for (const testCase of plan.cases ?? []) {
     if (typeof testCase.agentName === "string" && testCase.agentName.trim()) names.add(testCase.agentName.trim());
+    // A composed-arm case does NOT pin its agent — routing picks at runtime, so the
+    // set of prompts that actually ran is not knowable from the plan. Mark it so the
+    // promptDigest cannot claim to fingerprint a composed run as if one agent ran it;
+    // otherwise a pinned and a composed report over the same cases would share a
+    // digest and read as comparable when they are not.
+    if (testCase.arm === "composed") names.add("__composed__");
   }
   for (const result of results) {
     if (result.agentName.trim()) names.add(result.agentName.trim());

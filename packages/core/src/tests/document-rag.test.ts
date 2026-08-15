@@ -1,6 +1,12 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import * as loaderModule from "../config/loader.js";
 import * as engram from "../retrieval/engram.js";
+
+// document-rag lazily imports multimodal for byte→markdown extraction; that module
+// transitively pulls the whole provider stack, which this suite has no need to load.
+// Stub the single function it actually calls.
+const extractMock = vi.hoisted(() => vi.fn());
+vi.mock("../tools/multimodal.js", () => ({ extractDocumentBytesToMarkdown: extractMock }));
 import {
   retrieveDocumentContext,
   retrieveDocumentContextWithStatus,
@@ -388,6 +394,67 @@ describe("augmentTurnWithDocuments — retrieval-failure is not grounding", () =
     expect(aug.retrievalUnavailable).toBe(false);
     expect(aug.contextBlock).not.toContain("DOCUMENT RETRIEVAL UNAVAILABLE");
     expect(aug.contextBlock.length).toBeGreaterThan(0);
+    cfg.mockRestore();
+  });
+});
+
+describe("augmentTurnWithDocuments — attachments come from the object store", () => {
+  // Chat attachments are persisted with scanAndStoreUpload → putUpload, and under
+  // `storage.backend: "s3"` (the bundled compose DEFAULT) putUpload writes to S3 and
+  // NOTHING lands on the workspace disk. Auto-ingest used a bare readFile, so on every
+  // default deployment the attachment ENOENTed, `failed` was incremented, and the turn
+  // continued with no document context AND no signal anywhere — the user attaches a CV
+  // and the model answers as if nothing were attached.
+  const attachment = [{ filename: "cv.pdf", relativePath: "uploads/s-att/1786-cv.pdf", contentType: "application/pdf" }];
+
+  it("reads an attachment through the object store when it is not on disk", async () => {
+    const cfg = mockDocRagConfig({ injectContext: true, autoIngestAttachments: true, inlineSmallDocuments: true, inlineThresholdChars: 20000 });
+    const store = await import("../storage/object-store.js");
+    // Present in the store, absent from the workspace disk — the S3 deployment shape.
+    const getUpload = vi.spyOn(store, "getUpload").mockResolvedValue(new Uint8Array([1, 2, 3]));
+    // Stub the rest of the ingest chain so the test isolates the READ path.
+    extractMock.mockResolvedValue("Jane Doe — Senior Engineer, 2019–2024.");
+    vi.spyOn(engram, "engramIngest").mockResolvedValue({ documentId: "doc-cv", chunkCount: 1 } as never);
+    const registry = await import("../retrieval/document-registry.js");
+    vi.spyOn(registry, "registerDocument").mockResolvedValue(undefined as never);
+
+    const aug = await augmentTurnWithDocuments({
+      ctx: { sessionId: "s-att" },
+      workspacePath: "/nonexistent-workspace",
+      query: "update my cv",
+      attachments: attachment,
+    });
+
+    expect(getUpload).toHaveBeenCalledWith("uploads/s-att/1786-cv.pdf");
+    expect(aug.ingested).toBe(1);
+    expect(aug.failed).toBe(0);
+    expect(aug.contextBlock).toContain("Jane Doe");
+    cfg.mockRestore();
+  });
+
+  it("tells the model when an attachment could not be read instead of staying silent", async () => {
+    const cfg = mockDocRagConfig({ injectContext: true, autoIngestAttachments: true });
+    const store = await import("../storage/object-store.js");
+    vi.spyOn(store, "getUpload").mockResolvedValue(null); // not in the store either
+    mockSearch([]);
+
+    const aug = await augmentTurnWithDocuments({
+      ctx: { sessionId: "s-att" },
+      workspacePath: "/nonexistent-workspace",
+      query: "update my cv",
+      attachments: attachment,
+    });
+
+    expect(aug.failed).toBe(1);
+    // The whole point: a failed attachment must be VISIBLE in the turn context, so the
+    // model cannot answer from memory or claim the user attached nothing.
+    expect(aug.contextBlock).toContain("ATTACHMENT NOT READABLE");
+    expect(aug.contextBlock).toContain("cv.pdf");
+    // ...but the notice is NOT grounding. The caller reads contextBlock together with
+    // retrievalUnavailable to set documentRagFoundDocs; a non-empty block whose only
+    // content is "we could not read your file" previously flipped that true and
+    // disarmed the source-sensitivity classifier and both ungrounded-factual guards.
+    expect(aug.retrievalUnavailable).toBe(true);
     cfg.mockRestore();
   });
 });

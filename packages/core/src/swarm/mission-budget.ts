@@ -1,5 +1,5 @@
 /**
- * Mission budget envelope (BUD-203, ADR-004 dimensions per the dev plan).
+ * Mission budget envelope.
  *
  * One atomic ledger per mission: children RESERVE an estimated slice before
  * dispatch, RECONCILE to actual usage while/after running, and RELEASE on

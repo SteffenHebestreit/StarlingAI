@@ -1,6 +1,9 @@
+// MUST be first: loads .env before config/loader.ts freezes its resolution. See the
+// module's own comment for why doing this inside main() is too late.
+import { REPO_ROOT } from "./eval-env-bootstrap.js";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import JSON5 from "json5";
 import {
   evaluateAgentPlan,
@@ -15,8 +18,17 @@ import { buildVersionedEvaluationReportPath } from "./evaluation-provenance.js";
 import { createGatewayEvalRunner } from "./gateway-eval-runner.js";
 import { agentReportEnvironment } from "./eval-report.js";
 
+/** Resolve a user-supplied path: absolute wins, then cwd, then the repo root. */
+function resolveInputPath(p: string, repoRoot: string): string {
+  if (isAbsolute(p)) return p;
+  const fromCwd = resolve(process.cwd(), p);
+  if (existsSync(fromCwd)) return fromCwd;
+  return resolve(repoRoot, p);
+}
+
 async function main(): Promise<void> {
-  const defaultPlanPath = resolve(process.cwd(), "agent-eval.jsonc");
+  const repoRoot = REPO_ROOT;
+  const defaultPlanPath = resolve(repoRoot, "agent-eval.jsonc");
   // Parse args: <plan.jsonc> [output.json] [--baseline baseline.json] [--repeat k]
   const args = process.argv.slice(2);
   const baselineIndex = args.indexOf("--baseline");
@@ -31,6 +43,11 @@ async function main(): Promise<void> {
     : (process.env["SAI_EVAL_CONCURRENCY"] ? Math.max(1, parseInt(process.env["SAI_EVAL_CONCURRENCY"], 10) || 1) : undefined);
   // Gateway-routed eval: run each case through a live gateway (full runtime env)
   // instead of in-process. Needed for agents that touch docker/web/browser.
+  // Opt-in cost-per-pass regression check (mean tokens ÷ passing attempts). Off by
+  // default: existing baselines were recorded before stats were mean-aggregated, so
+  // enabling it silently would compare against numbers that meant something else.
+  // Re-baseline first, then pass this.
+  const costCompare = args.includes("--cost-compare");
   const viaGateway = args.includes("--via-gateway");
   const gatewayUrlIndex = args.indexOf("--gateway-url");
   const gatewayUrl = (gatewayUrlIndex !== -1 ? args[gatewayUrlIndex + 1] : undefined) ?? "ws://localhost:8765/ws";
@@ -46,10 +63,12 @@ async function main(): Promise<void> {
   const positionals = args.filter((a, i) => !a.startsWith("--") && !flagValueIndices.has(i));
   const planPath = positionals[0];
   const explicitOutputPath = positionals[1];
-  const resolvedPlanPath = planPath ?? (existsSync(defaultPlanPath) ? defaultPlanPath : undefined);
+  const resolvedPlanPath = planPath
+    ? resolveInputPath(planPath, repoRoot)
+    : (existsSync(defaultPlanPath) ? defaultPlanPath : undefined);
 
   if (!resolvedPlanPath) {
-    console.error("Usage: pnpm agents:evaluate [plan.jsonc] [output.json] [--baseline baseline.json] [--repeat k] [--record]");
+    console.error("Usage: pnpm agents:evaluate [plan.jsonc] [output.json] [--baseline baseline.json] [--repeat k] [--cost-compare] [--record]");
     console.error("                            [--via-gateway [--gateway-url ws://host:8765/ws] [--token <jwt>]]");
     console.error("If omitted, the CLI looks for ./agent-eval.jsonc in the current workspace.");
     console.error("--repeat k runs each case k times and reports pass^k (reliability), not just pass@1.");
@@ -65,6 +84,25 @@ async function main(): Promise<void> {
   const plan = JSON5.parse(raw) as AgentEvaluationPlan;
   if (repeatOverride !== undefined) plan.repeat = repeatOverride;
   if (concurrencyOverride !== undefined) plan.concurrency = concurrencyOverride;
+
+  // Fail loudly on an empty agent catalog (in-process runs). runSubAgent returns
+  // "Sub-agent 'X' is not defined in config.subAgents" as its OUTPUT rather than
+  // throwing, so every case fails its expectIncludes and the run reads like the
+  // AGENTS regressed. The usual cause is the wrong config being loaded — running
+  // under `pnpm --filter` used to resolve packages/core/starlingai.json, an 8KB
+  // stub with zero subAgents, instead of the real root config.
+  if (!viaGateway) {
+    const { getConfig } = await import("../config/loader.js");
+    const catalogSize = Object.keys(getConfig().subAgents ?? {}).length;
+    if (catalogSize === 0) {
+      console.error("Aborting: the loaded config declares ZERO subAgents, so every case would fail with");
+      console.error("\"Sub-agent '<name>' is not defined in config.subAgents\" — a config problem misreported");
+      console.error("as an agent regression.");
+      console.error(`Set SAI_CONFIG_PATH to the real config (repo root: ${resolve(repoRoot, "starlingai.json")}),`);
+      console.error("or run `pnpm config:build` if it has not been generated yet.");
+      process.exit(1);
+    }
+  }
 
   // Pre-flight (in-process runs only): one quick model-backend health check so a run
   // against an unreachable backend fails FAST with a clear reason, instead of every case
@@ -140,7 +178,7 @@ async function main(): Promise<void> {
       return;
     }
 
-    const regressions = compareEvaluationReports(baseline, report);
+    const regressions = compareEvaluationReports(baseline, report, { costCompare });
     console.log(`\n${formatRegressionSummary(regressions)}`);
     if (regressions.hasRegressions) {
       hasRegressions = true;

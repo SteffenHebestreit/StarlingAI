@@ -97,7 +97,17 @@ registerTool({
       if (isSensitiveWorkspacePath(relative(ctx.workspacePath, resolved)) || (realRel !== null && isSensitiveWorkspacePath(realRel))) {
         return fail(`Refusing to ingest a protected path: ${path}`);
       }
-      bytes = await readFile(resolved);
+      try {
+        bytes = await readFile(resolved);
+      } catch (diskErr) {
+        // Under `storage.backend: "s3"` (the compose default) uploads live only in the
+        // object store, never on the workspace disk — read them back through it. The
+        // sensitive-path guard above has already run on the lexical + real path.
+        const { getUpload } = await import("../storage/object-store.js");
+        const stored = await getUpload(path.replace(/\\/g, "/").replace(/^\/+/, ""));
+        if (!stored) throw diskErr;
+        bytes = Buffer.from(stored);
+      }
     } catch (err) {
       return fail(`Failed to read ${path}: ${err instanceof Error ? err.message : String(err)}`);
     }

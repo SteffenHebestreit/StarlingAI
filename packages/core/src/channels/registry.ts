@@ -2,9 +2,6 @@
  * Channel registry — tracks all running message channel instances and
  * exposes their status for the /api/channels REST endpoint.
  */
-import { childLogger } from "../logger.js";
-
-const log = childLogger("channels:registry");
 const MAX_DELIVERY_LATENCY_SAMPLES = 200;
 
 export interface ChannelHealthResult {

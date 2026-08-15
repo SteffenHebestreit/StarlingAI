@@ -618,3 +618,229 @@ describe("agent evaluation harness — rubric judge (fable 6c)", () => {
     } finally { rmSync(ws, { recursive: true, force: true }); }
   });
 });
+describe("agent evaluation harness — cost metrics across repeats", () => {
+  /** Runner whose token usage varies per attempt, so mean != last. */
+  const varyingRunner = (tokensPerAttempt: number[], outputs: string[]) => {
+    let call = 0;
+    return async (opts: { agentName: string; task: string }) => {
+      const i = call++;
+      return {
+        output: outputs[i] ?? outputs[outputs.length - 1]!,
+        stats: {
+          agentName: opts.agentName,
+          sessionId: `eval:${opts.agentName}:${i}`,
+          promptChars: 100,
+          userContentChars: opts.task.length,
+          toolCount: 1,
+          toolNames: ["web_search"],
+          iterations: 1,
+          usage: {
+            promptTokens: 0,
+            completionTokens: tokensPerAttempt[i] ?? 0,
+            totalTokens: tokensPerAttempt[i] ?? 0,
+          },
+          maxIterations: 4,
+          model: "lmstudio/qwen",
+          capabilities: ["analysis"],
+        },
+      };
+    };
+  };
+
+  it("reports MEAN token usage across attempts, not the last attempt's", async () => {
+    // 1000, 1000, 100 — the last attempt is a 10x outlier low. Reporting only the
+    // last (the old behavior) would claim 100 tokens for a case that averaged 700.
+    const report = await evaluateAgentPlan({
+      workspacePath: "/workspace",
+      repeat: 3,
+      cases: [{ name: "varying", agentName: "researcher", task: "t", expectIncludes: ["ok"] }],
+    }, varyingRunner([1000, 1000, 100], ["ok", "ok", "ok"]) as never);
+
+    expect(report.results[0]?.attempts).toBe(3);
+    expect(report.results[0]?.passCount).toBe(3);
+    expect(report.results[0]?.stats.usage.totalTokens).toBe(700);
+  });
+
+  it("cost_per_pass prices a cheaper-but-flakier change that token_spike misses", async () => {
+    const caseOf = (tokens: number, passCount: number, attempts: number): AgentEvaluationReport => ({
+      runId: "r", generatedAt: "2026-01-01T00:00:00Z",
+      totalCases: 1, passedCases: passCount === attempts ? 1 : 0, failedCases: passCount === attempts ? 0 : 1,
+      results: [{
+        name: "c", agentName: "researcher", passed: passCount === attempts,
+        durationMs: 10, status: passCount === attempts ? "passed" : "flaky", failures: [],
+        outputPreview: "", attempts, passCount, passCaretK: passCount === attempts, passAtK: passCount > 0,
+        runDurationsMs: Array.from({ length: attempts }, () => 10),
+        stats: {
+          agentName: "researcher", sessionId: "s", promptChars: 1, userContentChars: 1,
+          toolCount: 0, toolNames: [], iterations: 1,
+          usage: { promptTokens: 0, completionTokens: tokens, totalTokens: tokens },
+          maxIterations: 4, model: "m", capabilities: [],
+        },
+      }],
+    } as unknown as AgentEvaluationReport);
+
+    // Baseline: 1000 tokens/run, 5/5 pass  -> 1000 tokens per pass.
+    // Current:  600 tokens/run,  2/5 pass  -> 1500 tokens per pass (+50%).
+    // Fewer tokens per run, so token_spike cannot fire; reliability collapsed.
+    const baseline = caseOf(1000, 5, 5);
+    const current = caseOf(600, 2, 5);
+
+    const withoutFlag = compareEvaluationReports(baseline, current);
+    expect(withoutFlag.findings.some((f) => f.kind === "cost_per_pass")).toBe(false);
+    expect(withoutFlag.findings.some((f) => f.kind === "token_spike")).toBe(false);
+
+    const withFlag = compareEvaluationReports(baseline, current, { costCompare: true });
+    const finding = withFlag.findings.find((f) => f.kind === "cost_per_pass");
+    expect(finding).toBeDefined();
+    expect(finding!.baselineValue).toBe(1000);
+    expect(finding!.currentValue).toBe(1500);
+    expect(withFlag.hasRegressions).toBe(true);
+  });
+
+  it("skips cost_per_pass when nothing passed (case_newly_failed already covers it)", async () => {
+    const mk = (tokens: number, passCount: number): AgentEvaluationReport => ({
+      runId: "r", generatedAt: "2026-01-01T00:00:00Z",
+      totalCases: 1, passedCases: 0, failedCases: 1,
+      results: [{
+        name: "c", agentName: "researcher", passed: passCount > 0,
+        durationMs: 10, status: "failed", failures: ["x"], outputPreview: "",
+        attempts: 3, passCount, passCaretK: false, passAtK: passCount > 0,
+        runDurationsMs: [10, 10, 10],
+        stats: {
+          agentName: "researcher", sessionId: "s", promptChars: 1, userContentChars: 1,
+          toolCount: 0, toolNames: [], iterations: 1,
+          usage: { promptTokens: 0, completionTokens: tokens, totalTokens: tokens },
+          maxIterations: 4, model: "m", capabilities: [],
+        },
+      }],
+    } as unknown as AgentEvaluationReport);
+
+    const report = compareEvaluationReports(mk(100, 3), mk(9999, 0), { costCompare: true });
+    expect(report.findings.some((f) => f.kind === "cost_per_pass")).toBe(false);
+  });
+});
+
+describe("agent evaluation harness — configOverride (candidate-config A/B arm)", () => {
+  const captureRunner = (seen: Array<Record<string, unknown> | undefined>) =>
+    (async (opts: Record<string, unknown>) => {
+      seen.push(opts["inlineConfig"] as Record<string, unknown> | undefined);
+      return {
+        output: "ok",
+        stats: {
+          agentName: String(opts["agentName"]), sessionId: "s", promptChars: 1, userContentChars: 1,
+          toolCount: 0, toolNames: [], iterations: 1,
+          usage: { promptTokens: 0, completionTokens: 1, totalTokens: 1 },
+          maxIterations: 4, model: "m", capabilities: [],
+        },
+      };
+    }) as never;
+
+  it("passes no inlineConfig when the field is absent (byte-identical to before)", async () => {
+    const seen: Array<Record<string, unknown> | undefined> = [];
+    await evaluateAgentPlan({
+      workspacePath: "/workspace",
+      cases: [{ name: "plain", agentName: "researcher", task: "t", expectIncludes: ["ok"] }],
+    }, captureRunner(seen));
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toBeUndefined();
+  });
+
+  it("fails loudly when configOverride targets an agent with no catalog entry", async () => {
+    const seen: Array<Record<string, unknown> | undefined> = [];
+    const report = await evaluateAgentPlan({
+      workspacePath: "/workspace",
+      cases: [{
+        name: "ghost",
+        agentName: "no_such_agent_exists",
+        task: "t",
+        expectIncludes: ["ok"],
+        configOverride: { maxIterations: 3 },
+      }],
+    }, captureRunner(seen)).catch((err: Error) => err);
+
+    // Either it throws, or the case is recorded as errored — never a silent pass.
+    if (report instanceof Error) {
+      expect(report.message).toContain("no_such_agent_exists");
+    } else {
+      expect(report.results[0]?.passed).toBe(false);
+    }
+  });
+});
+
+describe("agent evaluation harness — pristine diff ignores runtime bookkeeping", () => {
+  it("the product state dir is excluded, so the runtime's own outcome write is not an 'agent edit'", async () => {
+    const { snapshotWorkspace, diffWorkspaceSnapshots } = await import("../agent/evaluation.js");
+    const { PRODUCT } = await import("../product/index.js");
+
+    const ws = mkdtempSync(join(tmpdir(), "sai-pristine-"));
+    mkdirSync(join(ws, "generated"), { recursive: true });
+    writeFileSync(join(ws, "generated", "cart.js"), "export const x = 1;\n", "utf8");
+
+    const before = snapshotWorkspace(ws);
+    expect(before).toBeDefined();
+
+    // Exactly what every sub-agent run does: appendOutcome writes
+    // <workspacePath>/<stateDir>/agent_outcomes.ndjson. Before this exclusion it
+    // tripped expectNoWorkspaceChanges on every single run, so the EVL-401
+    // assessment-must-not-edit trap could never pass.
+    mkdirSync(join(ws, PRODUCT.stateDirName), { recursive: true });
+    writeFileSync(join(ws, PRODUCT.stateDirName, "agent_outcomes.ndjson"), '{"agent":"code_analyst"}\n', "utf8");
+
+    const changes = diffWorkspaceSnapshots(before!, snapshotWorkspace(ws)!);
+    expect(changes.added).toEqual([]);
+    expect(changes.modified).toEqual([]);
+    expect(changes.deleted).toEqual([]);
+
+    // A real source edit is still caught.
+    writeFileSync(join(ws, "generated", "cart.js"), "export const x = 2;\n", "utf8");
+    expect(diffWorkspaceSnapshots(before!, snapshotWorkspace(ws)!).modified).toEqual(["generated/cart.js"]);
+
+    rmSync(ws, { recursive: true, force: true });
+  });
+});
+
+describe("agent evaluation harness — reliability gate uses pass COUNTS, not the pass^k bit", () => {
+  const caseAt = (passCount: number, attempts: number): AgentEvaluationReport => ({
+    runId: "r", generatedAt: "2026-01-01T00:00:00Z",
+    totalCases: 1, passedCases: passCount === attempts ? 1 : 0, failedCases: passCount === attempts ? 0 : 1,
+    results: [{
+      name: "c", agentName: "code_analyst", passed: passCount === attempts,
+      durationMs: 10, status: passCount === attempts ? "passed" : "flaky", failures: [],
+      outputPreview: "", attempts, passCount, passCaretK: passCount === attempts, passAtK: passCount > 0,
+      runDurationsMs: Array.from({ length: attempts }, () => 10),
+      stats: {
+        agentName: "code_analyst", sessionId: "s", promptChars: 1, userContentChars: 1,
+        toolCount: 0, toolNames: [], iterations: 1,
+        usage: { promptTokens: 0, completionTokens: 100, totalTokens: 100 },
+        maxIterations: 4, model: "m", capabilities: [],
+      },
+    }],
+  } as unknown as AgentEvaluationReport);
+
+  it("does not flag one unlucky attempt — the exact 5/5 -> 4/5 seen on real fixtures", () => {
+    // Measured: per-attempt success ~0.95, so a single miss in 5 is routine. Under the
+    // old binary gate this fired case_newly_failed and read as a regression.
+    const report = compareEvaluationReports(caseAt(5, 5), caseAt(4, 5));
+    expect(report.findings.some((f) => f.kind === "reliability_drop")).toBe(false);
+    expect(report.findings.some((f) => f.kind === "case_newly_failed")).toBe(false);
+    expect(report.hasRegressions).toBe(false);
+  });
+
+  it("flags a decisive collapse", () => {
+    const report = compareEvaluationReports(caseAt(10, 10), caseAt(1, 10));
+    const finding = report.findings.find((f) => f.kind === "reliability_drop");
+    expect(finding).toBeDefined();
+    expect(finding!.detail).toContain("10/10 → 1/10");
+    expect(report.hasRegressions).toBe(true);
+  });
+
+  it("never flags an IMPROVEMENT as a regression", () => {
+    const report = compareEvaluationReports(caseAt(2, 10), caseAt(10, 10));
+    expect(report.findings.some((f) => f.kind === "reliability_drop")).toBe(false);
+  });
+
+  it("falls back to the binary verdict at k=1, where there is no distribution", () => {
+    const report = compareEvaluationReports(caseAt(1, 1), caseAt(0, 1));
+    expect(report.findings.some((f) => f.kind === "case_newly_failed")).toBe(true);
+  });
+});

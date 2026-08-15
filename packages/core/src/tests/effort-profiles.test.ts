@@ -168,3 +168,36 @@ describe("turn-scoped overlay", () => {
     });
   });
 });
+
+describe("orchestration overlay — turn-scoped A/B arms", () => {
+  it("applies the overlay inside the scope and leaves global config untouched outside", async () => {
+    const { effectiveOrchestration, runWithOrchestrationOverride } = await import("../runtime/effort-context.js");
+
+    const before = effectiveOrchestration().qaToolJudge;
+    const inside = runWithOrchestrationOverride({ qaToolJudge: !before }, () => effectiveOrchestration().qaToolJudge);
+    const after = effectiveOrchestration().qaToolJudge;
+
+    expect(inside).toBe(!before);
+    expect(after).toBe(before); // scope closed — no global mutation
+  });
+
+  it("an empty or absent override is a straight pass-through", async () => {
+    const { effectiveOrchestration, runWithOrchestrationOverride } = await import("../runtime/effort-context.js");
+    const base = effectiveOrchestration().qaToolJudge;
+    expect(runWithOrchestrationOverride(undefined, () => effectiveOrchestration().qaToolJudge)).toBe(base);
+    expect(runWithOrchestrationOverride({}, () => effectiveOrchestration().qaToolJudge)).toBe(base);
+  });
+
+  it("survives an inner effort-context scope — the arm stays armed", async () => {
+    const { effectiveOrchestration, runWithOrchestrationOverride, runWithEffortContext } =
+      await import("../runtime/effort-context.js");
+
+    const before = effectiveOrchestration().qaToolJudge;
+    const seen = runWithOrchestrationOverride({ qaToolJudge: !before }, () =>
+      // A turn sets its effort tier inside the arm; dropping the overlay here would
+      // silently disarm the thing being measured.
+      runWithEffortContext("high", () => effectiveOrchestration().qaToolJudge));
+
+    expect(seen).toBe(!before);
+  });
+});

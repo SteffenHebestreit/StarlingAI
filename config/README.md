@@ -7,12 +7,14 @@ This directory holds the **user-managed** configuration that defines how Starlin
 | Folder | What it configures |
 |---|---|
 | `providers/` | Model backends — LM Studio, Ollama, Anthropic, OpenAI-compatible |
-| `gateway/` | Gateway port / bind, guardrails, sandbox policy |
+| `gateway/` | Gateway port / bind, auth, guardrails, sandbox policy, orchestration |
 | `channels/` | Messaging — webchat, Telegram, Slack, Discord, WhatsApp, Email, Signal |
-| `infrastructure/` | Proxmox, Terraform, Ansible, SSH targets |
+| `mail/` | Mail-service account credentials (`accounts.json`; see `accounts.example.json`) |
 | `multimodal/` | File handling, STT, TTS, image generation service URLs |
-| `integrations/` | n8n, webhooks, sites, approval channels, workspace path |
-| `tooling/` | Retrieval, computer-use adapters, pentest scope, MCP servers |
+| `integrations/` | n8n, webhooks, sites, approval channels, A2A federation |
+| `tooling/` | Retrieval, computer-use adapters, **infrastructure** (Proxmox / Terraform / Ansible / SSH targets), pentest scope, MCP servers, skill library |
+
+> Infrastructure targets are the `infrastructure` **key** inside `tooling/10-platform.jsonc` — there is no `config/infrastructure/` folder.
 
 ## Skill Library & Tool Pipeline
 

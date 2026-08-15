@@ -200,10 +200,15 @@ function extractiveSummary(messages: SearchableMessage[]): string {
 }
 
 function tokenize(value: string): string[] {
+  // Unicode-aware, matching memory/service.ts. The previous form lowercased and then
+  // replaced /[^a-z0-9\s]+/ with a space, which deleted every non-ASCII letter: a
+  // German query tokenized to fragments and a CJK query to nothing at all. NFKC first
+  // so composed and decomposed forms of the same word agree.
   return [...new Set(
     value
+      .normalize("NFKC")
       .toLowerCase()
-      .replace(/[^a-z0-9\s]+/g, " ")
+      .replace(/[^\p{L}\p{N}\s]+/gu, " ")
       .split(/\s+/)
       .filter((token) => (token.length >= 3 || /\d/.test(token)) && !STOPWORDS.has(token)),
   )];
