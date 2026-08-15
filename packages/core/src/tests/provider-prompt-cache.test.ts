@@ -55,7 +55,10 @@ describe("LMStudioProvider promptCache → top-level cache_prompt", () => {
     const { provider, captured } = mockProvider({ promptCache: true, primary: "lmstudio/qwen/qwen3.8-27b", reasoningEffort: "none" });
     await provider.complete([{ role: "user", content: "hi" }], []);
     expect(captured[0]!["extra_body"]).toBeUndefined();
-    expect(captured[0]!["reasoning_effort"]).toBe("none");
+    // "none" is the CONFIG intent; the wire value is "low", because LM Studio rejects
+    // anything outside xhigh|medium|low and a rejected field is skipped entirely —
+    // which would silently leave the model on its xhigh default.
+    expect(captured[0]!["reasoning_effort"]).toBe("low");
     expect(captured[0]!["cache_prompt"]).toBe(true);
   });
 });

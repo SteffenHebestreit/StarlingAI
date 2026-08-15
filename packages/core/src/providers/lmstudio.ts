@@ -354,6 +354,34 @@ function normalizeQwenEffort(effort: ReasoningEffort): ReasoningEffort {
   return effort === "high" ? "xhigh" : effort;
 }
 
+/**
+ * The value actually put on the wire for `reasoning_effort`.
+ *
+ * LM Studio accepts ONLY xhigh | medium | low and rejects anything else outright:
+ *
+ *   [WARN] Reasoning setting 'off' is not a valid option for reasoning level field
+ *   '…qwen.qwen3.8-27b.reasoningEffort'. Valid options are: xhigh, medium, low.
+ *   Skipping this field.
+ *
+ * "Skipping this field" is the dangerous part. A rejected value does not mean "no
+ * thinking" — it means NO SETTING, so the model falls back to its own default, and
+ * that default is xhigh: the rung measured at 9,034 reasoning characters and 183s,
+ * which hits the completion cap. Sending "none" therefore did the exact opposite of
+ * what it asked for, and silently: the agents configured as thinking-off (the
+ * receptionist fast lane, content_writer) were the ones most likely to be running
+ * the slowest setting available.
+ *
+ * So "none" goes on the wire as "low" — the lowest VALID rung, ~1.3k reasoning
+ * characters — while chat_template_kwargs.enable_thinking:false is still sent
+ * alongside for backends that honour it (vLLM maps it the same way). Whatever the
+ * backend does, a valid field is always present and nothing silently inherits xhigh.
+ */
+function wireQwenEffort(effort: ReasoningEffort): "xhigh" | "medium" | "low" {
+  if (effort === "xhigh" || effort === "high") return "xhigh";
+  if (effort === "medium") return "medium";
+  return "low";   // "low" and "none" alike — "none" is not accepted by LM Studio
+}
+
 /** Effort for gpt-oss-style models: explicit reasoningEffort wins; otherwise map
  *  the boolean toggle (off→low, on→high); undefined → leave the model/GUI default. */
 function resolveReasoningEffort(
@@ -395,9 +423,10 @@ export function resolveThinkingControls(
       // means a future LM Studio fix, or a move to vLLM, degrades to still-off
       // rather than to silently-thinking.
       if (effort === "none") {
-        return { reasoningEffort: "none", chatTemplateKwargs: { enable_thinking: false } };
+        // Both switches, and never the literal "none" — see wireQwenEffort.
+        return { reasoningEffort: wireQwenEffort("none"), chatTemplateKwargs: { enable_thinking: false } };
       }
-      return { reasoningEffort: effort };
+      return { reasoningEffort: wireQwenEffort(effort) };
     }
     case "enable_thinking":
       return cfg.enableThinking !== undefined ? { chatTemplateKwargs: { enable_thinking: cfg.enableThinking } } : {};
