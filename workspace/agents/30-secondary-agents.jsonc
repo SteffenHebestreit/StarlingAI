@@ -21,6 +21,7 @@
         "read_shared_facts",
         "share_finding",
         "write_file",
+        "edit_file",
         "research_note",
         "research_notes_read",
         "research_notes_summary",
@@ -61,7 +62,7 @@
         "share_finding",
         "metric_write",
         "metric_query",
-        "write_file"
+        "write_file", "edit_file"
       ]
     },
     "document_intake": {
@@ -93,7 +94,7 @@
         "workspace_search",
         "read_shared_facts",
         "share_finding",
-        "write_file"
+        "write_file", "edit_file"
       ]
     },
     "paper_author": {
@@ -114,6 +115,7 @@
         "read_shared_facts",
         "read_file",
         "write_file",
+        "edit_file",
         "generate_document",
         "generate_pdf",
         "generate_docx",
@@ -147,7 +149,7 @@
         "bundle_artifact_zip",
         "datetime_arithmetic",
         "share_finding",
-        "write_file"
+        "write_file", "edit_file"
       ]
     },
     "diagram_designer": {
@@ -173,7 +175,7 @@
         "generate_mermaid_diagram",
         "generate_document",
         "share_finding",
-        "write_file"
+        "write_file", "edit_file"
       ]
     },
     "chart_designer": {
@@ -198,7 +200,7 @@
         "generate_chart_html",
         "generate_document",
         "share_finding",
-        "write_file"
+        "write_file", "edit_file"
       ]
     },
     "image_creator": {
@@ -219,6 +221,7 @@
         "generate_qr_code",
         "read_file",
         "write_file",
+        "edit_file",
         "read_shared_facts",
         "share_finding"
       ]
@@ -275,6 +278,7 @@
         "url_inspect",
         "read_file",
         "write_file",
+        "edit_file",
         "list_files",
         "json_query",
         "regex_test",
@@ -299,6 +303,7 @@
         "spreadsheet_write",
         "read_file",
         "write_file",
+        "edit_file",
         "list_files",
         "workspace_search",
         "read_shared_facts",
@@ -330,6 +335,7 @@
         "read_file",
         "share_finding",
         "write_file",
+        "edit_file",
         "text_diff"
       ]
     },
@@ -351,7 +357,7 @@
         "workspace_search",
         "read_shared_facts",
         "share_finding",
-        "write_file"
+        "write_file", "edit_file"
       ]
     },
   }

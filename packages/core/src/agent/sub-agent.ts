@@ -928,6 +928,18 @@ const PER_PATH_WRITE_CAP = 2;
 // head → append chunks), so one file legitimately takes many appends. Bound it
 // generously to still catch a true runaway, but well above a chunked large file.
 const PER_PATH_APPEND_CAP = 24;
+/**
+ * Per-path ceiling for edit_file. An edit-test-edit loop — locate the failure, change
+ * the smallest unique span, re-run the test, repeat — touches ONE file many times by
+ * design, which is the whole point of editing in place rather than rewriting. The
+ * overwrite cap of 2 exists to catch a model rewriting the same file in circles; it
+ * is the wrong instrument for surgical edits, and applying it here capped the loop at
+ * a single correction. edit_file is also self-limiting in a way write_file is not: it
+ * fails when old_string is absent or ambiguous, so a confused agent stops rather than
+ * silently churning. Bounded well above a real convergence run, still far below a
+ * runaway.
+ */
+const PER_PATH_EDIT_CAP = 12;
 // A FAILED tool call (most often arguments the model can fix by re-emitting them —
 // e.g. generate_presentation rejecting a JSON-string `slides` arg) must NOT burn the
 // per-tool SUCCESS cap, or a couple of mis-serializations hard-block a build tool
@@ -3969,7 +3981,9 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           const isAppendWrite = tc.name === "write_file"
             && typeof tc.arguments?.["mode"] === "string"
             && String(tc.arguments["mode"]).toLowerCase() === "append";
-          const pathCap = isAppendWrite ? PER_PATH_APPEND_CAP : PER_PATH_WRITE_CAP;
+          const pathCap = isAppendWrite
+            ? PER_PATH_APPEND_CAP
+            : tc.name === "edit_file" ? PER_PATH_EDIT_CAP : PER_PATH_WRITE_CAP;
           const pathKey = `${tc.name}:${writePath}`;
           const pathCount = perWritePathCount.get(pathKey) ?? 0;
           if (pathCount >= pathCap) {
