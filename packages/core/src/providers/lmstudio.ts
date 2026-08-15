@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { Agent as UndiciAgent } from "undici";
 import type { ChatCompletion, ChatCompletionChunk, ChatCompletionMessageParam, ChatCompletionTool } from "openai/resources/chat/completions";
 import type { Stream } from "openai/streaming";
 import { childLogger } from "../logger.js";
@@ -7,7 +8,39 @@ import { beginProviderCall, recordProviderToken, endProviderCall } from "../obse
 
 const log = childLogger("provider:openai-compatible");
 const DEFAULT_PROVIDER_TIMEOUT_MS = 30_000;
-const MAX_PROVIDER_TIMEOUT_MS = 300_000;
+/**
+ * Ceiling on the per-request budget, which streamOnce() uses as the SILENCE budget:
+ * the inactivity timer resets on every chunk, so this bounds how long the provider
+ * may go quiet, not how long a generation may take.
+ *
+ * Raised from 300_000. A graded-thinking model with a large prompt legitimately
+ * emits nothing for minutes inside one reasoning block — an observed content_writer
+ * run on qwen3.8-27b with a 28k-token prompt sat silent for ~5 minutes mid-think and
+ * was killed, after 4 useful iterations, with only 95 completion tokens banked. The
+ * model was working; the ceiling was not. 15 minutes of TOTAL silence is still a
+ * decisive hung-provider signal while leaving a long reasoning block room to finish.
+ */
+const MAX_PROVIDER_TIMEOUT_MS = 900_000;
+
+/**
+ * Transport dispatcher with undici's body timeout DISABLED.
+ *
+ * This module already owns stall policy: armInactivity() in streamOnce() aborts when
+ * no chunk arrives within requestTimeoutMs and re-arms on every chunk. Node's global
+ * fetch is undici, and undici applies its own bodyTimeout (default 300s) underneath —
+ * a second, invisible authority with a shorter fuse. It won: a stream that our guard
+ * was still patiently waiting on died with "BodyTimeoutError: terminated", surfacing
+ * as a sub-agent failure that looked like a model problem and was not.
+ *
+ * headersTimeout stays bounded — a server that never sends headers at all is a real
+ * connection failure and should not wait on the silence budget.
+ */
+const providerDispatcher = new UndiciAgent({
+  bodyTimeout: 0,
+  headersTimeout: 120_000,
+  keepAliveTimeout: 60_000,
+  keepAliveMaxTimeout: 600_000,
+});
 
 /**
  * Thrown when a single LLM call exceeds its own wall-clock hard timeout (a hung
@@ -523,7 +556,13 @@ export class LMStudioProvider {
       // byte-silent PREFILL and surfaces ERR_STREAM_PREMATURE_CLOSE (~4s), killing
       // the turn; native fetch holds the identical ~28s prefill against LM Studio
       // (verified: a 29K-token streaming call from inside the gateway container).
-      fetch: globalThis.fetch as unknown as NonNullable<ConstructorParameters<typeof OpenAI>[0]>["fetch"],
+      // Native fetch, but routed through providerDispatcher so undici's default
+      // 300s bodyTimeout cannot pre-empt this file's own per-chunk stall guard.
+      fetch: ((input: unknown, init?: Record<string, unknown>) =>
+        (globalThis.fetch as unknown as (i: unknown, o?: Record<string, unknown>) => Promise<unknown>)(
+          input,
+          { ...(init ?? {}), dispatcher: providerDispatcher },
+        )) as unknown as NonNullable<ConstructorParameters<typeof OpenAI>[0]>["fetch"],
     });
   }
 
