@@ -906,32 +906,59 @@ export class LMStudioProvider {
     let finishReason = "stop";
     let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 
-    for await (const chunk of this.stream(messages, tools, signal)) {
-      switch (chunk.type) {
-        case "text_delta":
-          content += chunk.content ?? "";
-          break;
-        case "reasoning_delta":
-          if (chunk.content) reasoningParts.push(chunk.content);
-          break;
-        case "tool_call_start": {
-          const id = chunk.toolCallId ?? `tc_${toolOrder.length}`;
-          if (!toolBuffers.has(id)) {
-            toolBuffers.set(id, { id, name: chunk.toolName ?? "", args: "" });
-            toolOrder.push(id);
+    try {
+      for await (const chunk of this.stream(messages, tools, signal)) {
+        switch (chunk.type) {
+          case "text_delta":
+            content += chunk.content ?? "";
+            break;
+          case "reasoning_delta":
+            if (chunk.content) reasoningParts.push(chunk.content);
+            break;
+          case "tool_call_start": {
+            const id = chunk.toolCallId ?? `tc_${toolOrder.length}`;
+            if (!toolBuffers.has(id)) {
+              toolBuffers.set(id, { id, name: chunk.toolName ?? "", args: "" });
+              toolOrder.push(id);
+            }
+            break;
           }
-          break;
+          case "tool_call_delta": {
+            const buf = chunk.toolCallId ? toolBuffers.get(chunk.toolCallId) : undefined;
+            if (buf) buf.args += chunk.argumentsDelta ?? "";
+            break;
+          }
+          case "done":
+            finishReason = chunk.finishReason ?? finishReason;
+            if (chunk.usage) usage = chunk.usage;
+            break;
         }
-        case "tool_call_delta": {
-          const buf = chunk.toolCallId ? toolBuffers.get(chunk.toolCallId) : undefined;
-          if (buf) buf.args += chunk.argumentsDelta ?? "";
-          break;
-        }
-        case "done":
-          finishReason = chunk.finishReason ?? finishReason;
-          if (chunk.usage) usage = chunk.usage;
-          break;
       }
+    } catch (err) {
+      // SALVAGE. A stream that produced real work and THEN died must not throw the
+      // work away. Observed: a content_writer run emitted 278 chunks, went quiet
+      // inside a reasoning block, and the transport killed it — the whole turn was
+      // reported as an error with 4 useful iterations discarded.
+      //
+      // If nothing was produced there is nothing to salvage and the error is the
+      // honest result. If there IS content or a tool call, return it with a
+      // finishReason the callers already understand as incomplete: the iteration
+      // loop can act on a recovered tool call, the QA and artifact gates can judge
+      // recovered text, and the loop detector can still catch a genuine repeat.
+      // Throwing here removes every one of those chances.
+      // An operator cancel is NOT a salvage case — the user asked for it to stop, so
+      // the abort must propagate. Only a failure the caller did not ask for
+      // (transport drop, provider stall) salvages.
+      const operatorCancelled = signal?.aborted === true;
+      const salvageable = content.trim().length > 0 || toolOrder.length > 0 || reasoningParts.length > 0;
+      if (!salvageable || operatorCancelled) throw err;
+      log.warn({
+        err: err instanceof Error ? err.message : String(err),
+        contentChars: content.length,
+        toolCalls: toolOrder.length,
+        reasoningChars: reasoningParts.join("").length,
+      }, "Stream failed after producing content — salvaging the partial result instead of failing the turn");
+      finishReason = "length";
     }
 
     const tool_calls = toolOrder.map((id) => {
