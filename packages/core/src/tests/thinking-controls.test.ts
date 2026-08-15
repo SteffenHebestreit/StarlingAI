@@ -90,13 +90,33 @@ describe("thinking control — Qwen 3.8+ graded reasoning_effort", () => {
   // Qwen's card documents only xhigh|medium|low and says to disable thinking with
   // enable_thinking:false (what vLLM honors). Measured on LM Studio, that flag did
   // nothing and the undocumented reasoning_effort "none" was what worked. Send both.
-  it("sends BOTH off-switches when thinking is disabled, so either backend obeys", () => {
-    expect(resolveThinkingControls("qwen/qwen3.8-27b", { enableThinking: false }))
-      .toEqual({ reasoningEffort: "none", chatTemplateKwargs: { enable_thinking: false } });
-    expect(resolveThinkingControls("qwen/qwen3.8-27b", { reasoningEffort: "none" }))
-      .toEqual({ reasoningEffort: "none", chatTemplateKwargs: { enable_thinking: false } });
-    expect(resolveThinkingControls("qwen/qwen3.8-27b", { enableThinking: true }))
-      .toEqual({ reasoningEffort: "medium" });
+  // LM Studio accepts ONLY xhigh|medium|low and SKIPS anything else — a rejected
+  // value leaves NO setting, so the model falls back to its default of xhigh (the
+  // 183s rung). "none" must therefore never reach the wire: it goes as "low", the
+  // lowest valid rung, with enable_thinking:false alongside for backends that honour
+  // it. Otherwise the agents asking for no thinking got the slowest setting there is.
+  it("never puts a value on the wire that LM Studio rejects, and sends no dead switch", () => {
+    for (const cfg of [{ enableThinking: false }, { reasoningEffort: "none" as const }]) {
+      const c = resolveThinkingControls("qwen/qwen3.8-27b", cfg);
+      // "low" is the floor this backend actually offers. enable_thinking is NOT sent:
+      // it was measured inert on qwen3.8 here, so including it would look like an
+      // off-switch while doing nothing.
+      expect(c).toEqual({ reasoningEffort: "low" });
+      expect(c.chatTemplateKwargs).toBeUndefined();
+    }
+  });
+
+  it("only ever emits xhigh, medium or low for this family", () => {
+    const valid = new Set(["xhigh", "medium", "low"]);
+    for (const cfg of [
+      { reasoningEffort: "none" as const }, { reasoningEffort: "low" as const },
+      { reasoningEffort: "medium" as const }, { reasoningEffort: "high" as const },
+      { reasoningEffort: "xhigh" as const }, { enableThinking: false }, { enableThinking: true },
+    ]) {
+      const eff = resolveThinkingControls("qwen/qwen3.8-27b", cfg).reasoningEffort;
+      expect(eff === undefined || valid.has(eff), JSON.stringify(cfg)).toBe(true);
+    }
+    expect(resolveThinkingControls("qwen/qwen3.8-27b", { enableThinking: true }).reasoningEffort).toBe("medium");
   });
 
   it("folds 'high' to 'xhigh' — Qwen 3.8 has no 'high' level", () => {

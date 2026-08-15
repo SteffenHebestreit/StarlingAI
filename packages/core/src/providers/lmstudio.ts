@@ -354,6 +354,40 @@ function normalizeQwenEffort(effort: ReasoningEffort): ReasoningEffort {
   return effort === "high" ? "xhigh" : effort;
 }
 
+/**
+ * The value actually put on the wire for `reasoning_effort`.
+ *
+ * LM Studio accepts ONLY xhigh | medium | low and rejects anything else outright:
+ *
+ *   [WARN] Reasoning setting 'off' is not a valid option for reasoning level field
+ *   '…qwen.qwen3.8-27b.reasoningEffort'. Valid options are: xhigh, medium, low.
+ *   Skipping this field.
+ *
+ * "Skipping this field" is the dangerous part. A rejected value does not mean "no
+ * thinking" — it means NO SETTING, so the model falls back to its own default, and
+ * that default is xhigh: the rung measured at 9,034 reasoning characters and 183s,
+ * which hits the completion cap. Sending "none" therefore did the exact opposite of
+ * what it asked for, and silently: the agents configured as thinking-off (the
+ * receptionist fast lane, content_writer) were the ones most likely to be running
+ * the slowest setting available.
+ *
+ * So "none" goes on the wire as "low" — the lowest VALID rung, ~1.3k reasoning
+ * characters. A valid field is always present, so nothing silently inherits xhigh.
+ *
+ * There is no true OFF for this model on this backend, and the code should not
+ * pretend otherwise. chat_template_kwargs.enable_thinking:false was measured to have
+ * NO effect on qwen3.8 here (2,892 / 6,040 reasoning characters across two runs
+ * against a 4,395 / 6,789 baseline), and reasoning_effort has no "none". "low" is
+ * the floor. Config may still say "none" — it reads as the intent, "as little
+ * reasoning as possible" — but it resolves to the cheapest rung the server accepts,
+ * not to silence.
+ */
+function wireQwenEffort(effort: ReasoningEffort): "xhigh" | "medium" | "low" {
+  if (effort === "xhigh" || effort === "high") return "xhigh";
+  if (effort === "medium") return "medium";
+  return "low";   // "low" and "none" alike — "none" is not accepted by LM Studio
+}
+
 /** Effort for gpt-oss-style models: explicit reasoningEffort wins; otherwise map
  *  the boolean toggle (off→low, on→high); undefined → leave the model/GUI default. */
 function resolveReasoningEffort(
@@ -394,10 +428,10 @@ export function resolveThinkingControls(
       // Sending both is correct on either backend and costs one extra field. It also
       // means a future LM Studio fix, or a move to vLLM, degrades to still-off
       // rather than to silently-thinking.
-      if (effort === "none") {
-        return { reasoningEffort: "none", chatTemplateKwargs: { enable_thinking: false } };
-      }
-      return { reasoningEffort: effort };
+      // One control, always a value the server accepts. enable_thinking is NOT sent
+      // for this family: measured inert on qwen3.8 here, so it would be a field that
+      // looks like an off-switch while doing nothing — worse than no field at all.
+      return { reasoningEffort: wireQwenEffort(effort) };
     }
     case "enable_thinking":
       return cfg.enableThinking !== undefined ? { chatTemplateKwargs: { enable_thinking: cfg.enableThinking } } : {};

@@ -16,7 +16,7 @@ Every public schema field, where it is declared, and how many production files r
 | `activeModelPreset` | packages/core/src/config/schema.ts:1536 | 2 |
 | `addHosts` | packages/core/src/config/schema.ts:627 | 1 |
 | `admin` | packages/core/src/config/schema.ts:312 | 21 |
-| `agents` | packages/core/src/config/schema.ts:1526 | 123 |
+| `agents` | packages/core/src/config/schema.ts:1526 | 124 |
 | `alertmanager` | packages/core/src/config/schema.ts:993 | 1 |
 | `all` | packages/core/src/config/schema.ts:1131 | 199 |
 | `allowedAgents` | packages/core/src/config/schema.ts:1145 | 25 |
