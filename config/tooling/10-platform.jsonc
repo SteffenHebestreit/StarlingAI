@@ -109,6 +109,27 @@
       "settleMs": 400
     }
   },
+  // ── Self-extension, enabled ─────────────────────────────────────────────────
+  // These shipped OFF by schema default and were absent from every shard, so the
+  // whole self-extension pipeline was inert. Each keeps its own human gate:
+  // tool development still requires approval before a developed tool is deployed,
+  // and self-improvement only NOMINATES a selfdev__ tool for promotion once it has
+  // proven itself over repeated successful calls — the operator signs off.
+  // Authored tool code runs in the network-isolated sandbox and is statically
+  // screened before execution.
+  "toolDevelopment": {
+    "enabled": true,
+    "requireApproval": true
+  },
+  "selfImprovement": {
+    "enabled": true
+  },
+  // Third-party tool packages from the plugin directory. requireTrust stays ON, so
+  // a plugin only loads against an operator-approved trust receipt.
+  "plugins": {
+    "enabled": true,
+    "requireTrust": true
+  },
   "computerUse": {
     "enabled": true,
     "visionModel": "lmstudio/qwen/qwen3.8-27b",
