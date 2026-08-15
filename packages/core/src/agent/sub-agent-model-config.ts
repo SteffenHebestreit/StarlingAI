@@ -52,6 +52,15 @@ export function applyEffortModelOverlay(
 ): ModelConfig {
   if (!effortProfile) return baseModelConfig;
   const agentDisabledThinking = baseModelConfig.enableThinking === false;
+  // An agent that PINNED its own reasoning effort has expressed the same kind of
+  // deliberate opt-out as enableThinking:false, and the documented precedence
+  // above ("explicit agent opt-out > effort dial > default") covers both. Without
+  // this, a high/max-effort session overwrites e.g. coder's explicit "low" — and
+  // normalizeQwenEffort folds the dial's "high" to "xhigh", the rung measured at
+  // 9,034 reasoning chars / 183s that hits the completion cap. An artifact-emitting
+  // agent truncating at the cap is exactly the failure of audit 463d6192 that the
+  // enableThinking half of this guard was written to prevent.
+  const agentPinnedEffort = baseModelConfig.reasoningEffort !== undefined;
   return {
     ...baseModelConfig,
     ...(effortProfile.subAgentMaxTokens !== undefined
@@ -60,7 +69,7 @@ export function applyEffortModelOverlay(
     ...(effortProfile.enableThinking !== undefined && !agentDisabledThinking
       ? { enableThinking: effortProfile.enableThinking }
       : {}),
-    ...(effortProfile.reasoningEffort !== undefined && !agentDisabledThinking
+    ...(effortProfile.reasoningEffort !== undefined && !agentDisabledThinking && !agentPinnedEffort
       ? { reasoningEffort: effortProfile.reasoningEffort }
       : {}),
   };

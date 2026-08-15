@@ -13,25 +13,28 @@
         // its template — measured on this server 2026-08-15, enable_thinking:false
         // left thinking fully on. reasoning_effort is honored: none→0 reasoning
         // chars, low→1.3k, medium→1.6k, xhigh→9k (and xhigh took 183s on this box).
-        // Deliberately NOT setting reasoningEffort here. Every agent already declares
-        // enableThinking, and an explicit effort in defaults would win over all of
-        // them (explicit effort beats the toggle in resolveThinkingControls) — forcing
-        // the thinking-OFF specialists back on and erasing the curated per-agent
-        // policy. Instead the existing toggle maps onto the ladder automatically:
+        // reasoningEffort is deliberately NOT set here: an explicit effort in defaults
+        // beats the per-agent enableThinking toggle, which would force the curated
+        // thinking-OFF specialists back on. The toggle maps onto the ladder instead:
         //   enableThinking: true  → reasoning_effort "medium"
         //   enableThinking: false → reasoning_effort "none" (+ enable_thinking:false)
-        // Agents that want the in-between rung set "low" explicitly; the per-session
-        // effort dial supplies "xhigh" on demand.
+        // enableThinking MUST be stated explicitly. Omitting it does NOT mean "no
+        // opinion" — ModelConfigSchema declares `.default(false)`, so the parsed
+        // config materialises `false` regardless, and on this family that is the
+        // hard-off rung. The orchestrator (mainAssistant) declares no model block of
+        // its own and reads these defaults directly, so leaving it out silently ran
+        // the orchestrator with thinking disabled — the opposite of the intent here.
+        "enableThinking": true,
         // The model serves 262144 and is loaded at full context; 32768 was sized for
         // the previous 35B. Half the window leaves generous prefill headroom.
         "contextWindow": 131072,
-        // Qwen's published sampling for 3.8 THINKING mode. The old 0.2/0.9 was tuned
-        // for a non-thinking default — Qwen explicitly warns that near-greedy
-        // sampling in thinking mode can drive endless repetition, and every agent now
-        // reasons by default. Non-thinking agents (reasoningEffort "none") fall back
-        // to 0.7/0.8 automatically in the provider.
-        "temperature": 1.0,
-        "topP": 0.95,
+        // temperature/topP are deliberately UNSET so the provider applies Qwen's
+        // published per-mode sampling (recommendedQwenSampling): 1.0/0.95 for
+        // thinking, 0.7/0.80 for reasoning_effort "none". Pinning topP here defeats
+        // that entirely — the fallback is gated on `topP === undefined`, so a value
+        // in defaults propagates to every agent and the non-thinking ones run
+        // thinking-mode sampling. Agents that genuinely need a fixed temperature
+        // still set it themselves.
         "repeatPenalty": 1.05,
         "maxTokens": 4096,
         // llama.cpp/LM Studio KV-cache reuse for the stable system-prompt prefix —
