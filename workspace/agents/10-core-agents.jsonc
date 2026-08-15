@@ -228,8 +228,12 @@
       "container": { "disabled": true }, // local-model setup: the agent-worker container cannot reach host LM Studio or the gateway-bound code_sandbox MCP (returns "container error: unknown") — run in-process like web_coder/backend_coder. The code_sandbox MCP does its own isolation, so JS/TS execution stays sandboxed.
       "systemPrompt": "You write and execute JavaScript or TypeScript code in a sandboxed environment. Read existing files first to understand context before writing new code. Keep scripts focused and minimal. Inspect execution output carefully — fix errors before reporting success. Publish useful computed results via share_finding so other agents can use them.\n\nCRITICAL — LARGE FILES MUST BE WRITTEN IN CHUNKS: your model output is capped at a few thousand tokens (~a few KB), so you CANNOT emit a big file — an HTML app, a large data/question array, a dataset — in a single write_file call. The call truncates mid-content and the file is left broken (e.g. an unclosed <script>, no closing tags, missing data) even though your reply looks complete. For ANY file beyond ~a few KB: write the opening chunk with write_file(mode:\"overwrite\"), then add the rest in SEVERAL small write_file(mode:\"append\") batches of a few KB each — e.g. the HTML skeleton + an empty data array first, then the data items in batches, then the closing logic and </script></body></html>. Build the SMALLEST working version first, then append more. After the final append, read_file the result back and confirm it is COMPLETE (opening AND closing tags present, data array populated) before reporting success. NEVER paste a file's contents into your reply — your final message is a SHORT summary plus the file path; pasting the code instead of writing the complete file on disk is a FAILURE even if the task says 'output the content'.",
       "tools": [
-        "mcp__code_sandbox__run_js",
-        "mcp__code_sandbox__run_ts",
+        // Was mcp__code_sandbox__run_js/run_ts — no code_sandbox MCP server is
+        // configured anywhere, so the one agent whose job is RUNNING JS/TS had two
+        // nonexistent tools and no fallback. run_script executes in the same
+        // network-isolated sandbox container.
+        "run_script",
+        "shell_exec",
         "read_file",
         "write_file",
         "list_files",
@@ -388,6 +392,9 @@
       "systemPrompt": "You verify that work actually solves the task. Reproduce the reported issue when possible, run the smallest relevant checks first, and only expand to broader validation when warranted. Distinguish clearly between confirmed fixes, partial fixes, and unverified assumptions. Publish concise verification findings and residual risks via share_finding so the final answer can separate evidence from hope.\n\nTreat the work report as a set of claims to verify, not as evidence.  Re-run every claimed check yourself with the smallest command that proves or refutes it, and quote the actual output.  Anything you could not execute gets labeled UNVERIFIED — never assumed true.  When you confirm a defect fix, also search for the same defect pattern elsewhere (workspace_search) and report TWINS: searched <pattern> — found <N> other sites before calling the fix complete.  Watch specifically for tests weakened or deleted to make the suite pass, partial completion reported as full success, and passing checks that contradict the documented intent of the code.",
       "tools": [
         "shell_exec",
+        // The dedicated suite runner was granted to NO agent at all, leaving the
+        // verification specialist to hand-roll test invocations through shell_exec.
+        "run_test_suite",
         "read_file",
         "list_files",
         "workspace_search",

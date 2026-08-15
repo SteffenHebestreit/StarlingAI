@@ -163,6 +163,22 @@ function ok(output: string, metadata?: Record<string, unknown>): ToolResult {
   return { success: true, output, metadata };
 }
 
+/**
+ * A tool that is registered but NOT implemented. It must report failure.
+ *
+ * These returned success while transferring no file, polling nothing, and running
+ * no command — an agent could only discover the no-op by inferring it from later
+ * state, and a QA gate reading `success` saw a completed step. A tool that cannot
+ * do its job says so.
+ */
+function notImplemented(what: string, instead?: string): ToolResult {
+  return {
+    success: false,
+    output: "",
+    error: `${what} is not implemented in this build${instead ? ` — ${instead}` : ""}.`,
+  };
+}
+
 function formatDisplayTopologySummary(sessionId: string): string {
   const topology = computerSessionManager.getSession(sessionId)?.displayTopology;
   if (!topology || topology.monitors.length === 0) return "";
@@ -983,11 +999,7 @@ registerTool({
       logAudit("computer_action", { sessionId, action: "wait_for", description, timeoutMs });
 
       // Placeholder — full implementation will poll screenshots via vision model
-      return ok(
-        `Waiting for: "${description}" (timeout: ${timeoutMs}ms).\n` +
-        `(Vision polling will be implemented with the adapter layer)`,
-        { sessionId, action: "wait_for" },
-      );
+      return notImplemented("computer_wait_for (vision polling)", "take a snapshot and decide from it");
     } catch (error) {
       return fail(error instanceof Error ? error.message : String(error));
     }
@@ -1188,10 +1200,7 @@ registerTool({
 
       logAudit("computer_action", { sessionId, action: "upload_file", localPath, targetPath });
 
-      return ok(
-        `File upload queued: ${localPath}${targetPath ? ` → ${targetPath}` : ""}`,
-        { sessionId, action: "upload_file" },
-      );
+      return notImplemented("computer_upload_file", "copy the file through a shared path or the workspace");
     } catch (error) {
       return fail(error instanceof Error ? error.message : String(error));
     }
@@ -1220,10 +1229,7 @@ registerTool({
 
       logAudit("computer_action", { sessionId, action: "download_file", remotePath, localPath });
 
-      return ok(
-        `File download queued: ${remotePath}${localPath ? ` → ${localPath}` : ""}`,
-        { sessionId, action: "download_file" },
-      );
+      return notImplemented("computer_download_file", "copy the file through a shared path or the workspace");
     } catch (error) {
       return fail(error instanceof Error ? error.message : String(error));
     }
@@ -1284,10 +1290,7 @@ registerTool({
 
       logAudit("computer_action", { action: "vscode_run_terminal_command", commandLength: command.length, cwd });
 
-      return ok(
-        `Terminal command queued: ${command.length > 100 ? command.slice(0, 100) + "…" : command}`,
-        { action: "vscode_run_terminal_command" },
-      );
+      return notImplemented("vscode_run_terminal_command", "use shell_exec");
     } catch (error) {
       return fail(error instanceof Error ? error.message : String(error));
     }
@@ -1400,10 +1403,7 @@ registerTool({
 
       logAudit("computer_action", { action: "vscode_command", commandId });
 
-      return ok(
-        `VS Code command queued: ${commandId}`,
-        { action: "vscode_command", commandId },
-      );
+      return notImplemented("vscode_command");
     } catch (error) {
       return fail(error instanceof Error ? error.message : String(error));
     }

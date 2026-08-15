@@ -1743,6 +1743,21 @@ export function getToolTier(toolName: string): ToolTierDef {
     };
   }
 
+  // Federated A2A tools: a2a__<peer>__<tool> → Tier 3, per-call approval.
+  // Same treatment as the MCP bridge above, and for the same reason: it is a remote
+  // capability we do not control. Without this the prefix fell through to the
+  // fail-closed default and every federated tool was BLOCKED, with a warning that
+  // blamed a missing tier entry rather than the missing fallback — so A2A could not
+  // work at all, no matter how it was configured.
+  if (/^a2a__[a-z0-9_-]+__[a-z0-9_]+$/i.test(toolName)) {
+    return {
+      tier: ToolTier.THREE_PRIVILEGED,
+      description: `A2A federation: ${toolName}`,
+      requiresPerCallApproval: true,
+      requiresSandbox: false,
+    };
+  }
+
   // Self-developed dynamic tools: selfdev__<name> → Tier 2, sandboxed, per-call approval
   if (/^selfdev__[a-z0-9_]+$/i.test(toolName)) {
     return {
@@ -1826,7 +1841,7 @@ export function listToolTierDefs(): Array<{ name: string } & ToolTierDef> {
  * the dynamic-tool validator to reject self-developed tools whose bare names
  * would shadow a privileged built-in (closes a GAP-4 vector where a promoted
  * dynamic tool could override e.g. `read_file` and inherit its Tier-0 callsite
- * permissions).  Pattern-matched namespaces (`mcp__*`, `selfdev__*`,
+ * permissions).  Pattern-matched namespaces (`mcp__*`, `a2a__*`, `selfdev__*`,
  * `webhook__*`) are NOT considered compile-time mapped.
  */
 export function isCompileTimeMappedTool(toolName: string): boolean {

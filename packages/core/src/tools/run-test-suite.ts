@@ -162,9 +162,13 @@ registerTool({
         };
       }
       const output = [e.stdout, e.stderr].filter(Boolean).join("\n");
-      // Non-zero exit from the test runner is a test-failure, not a tool-failure
+      // A non-zero exit means tests FAILED. Reporting success:true with the truth
+      // buried in metadata meant any gate reading `success` alone read red as green
+      // — the whole point of running a suite is that a failure is visible. The
+      // metadata is preserved so a caller that wants the distinction still has it.
       return {
-        success: true,
+        success: false,
+        error: `Test suite failed (exit ${e.code ?? 1}). Output below.`,
         output: output || "(no output)",
         metadata: {
           suite,
