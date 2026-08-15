@@ -146,6 +146,9 @@ importers:
       pptxgenjs:
         specifier: ^4.0.1
         version: 4.0.1
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
       undici:
         specifier: ^6.27.0
         version: 6.27.0
@@ -183,9 +186,6 @@ importers:
       tsx:
         specifier: ^4.23.0
         version: 4.23.0
-      typescript:
-        specifier: ^5.9.3
-        version: 5.9.3
       vitest:
         specifier: 3.2.6
         version: 3.2.6(@types/node@22.20.1)(jiti@1.21.7)(terser@5.49.0)(tsx@4.23.0)(yaml@2.9.0)
@@ -1585,16 +1585,19 @@ packages:
   '@nut-tree-fork/libnut-darwin@2.7.5':
     resolution: {integrity: sha512-LbqtPtMPTJUcg4XoPP2jsU1wc8flBcGyKTerKsIfK9cD7nBHROnO0QksbrsbSWEpLym8T8fRtuU7XEY83l6Z2Q==}
     engines: {node: '>=10.15.3'}
+    cpu: [x64, arm64]
     os: [darwin, linux, win32]
 
   '@nut-tree-fork/libnut-linux@2.7.5':
     resolution: {integrity: sha512-uxaXEcRKnFObAljsoR6tLOBUU1dJ2sctloG6gFgCBGN7+k6Jdv6jZfOuNjd/fpdq2C5WPMm0rtn9EE7h5J3Jcg==}
     engines: {node: '>=10.15.3'}
+    cpu: [x64, arm64]
     os: [darwin, linux, win32]
 
   '@nut-tree-fork/libnut-win32@2.7.5':
     resolution: {integrity: sha512-yqC87zvmFcDPwFrRU40DYhN0xmEVM3aSkOuyF0IX+y1x+HWSu/i0PNklATpPBhGid3QVb/TOHuVoaraMrUFCNw==}
     engines: {node: '>=10.15.3'}
+    cpu: [x64, arm64]
     os: [darwin, linux, win32]
 
   '@nut-tree-fork/libnut@4.2.6':

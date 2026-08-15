@@ -28,6 +28,7 @@
  * else is hand-rolled against the format spec so this module adds no dependency and
  * cannot fail because a package is missing.
  */
+import { createRequire } from "node:module";
 import { childLogger } from "../logger.js";
 
 const log = childLogger("agent:artifact-validators");
@@ -287,10 +288,27 @@ export function validateHtmlText(text: string): ValidationResult {
     return fail("html_structure", "ends mid-tag — the file was cut off during the write");
   }
 
+  // Order matters: strip matched script/style BODIES first, THEN comments. The other
+  // way round, a "<!--" sitting inside a JS string started a non-greedy comment match
+  // that ran all the way to the real "-->" later in the document, swallowing the
+  // closing tags with it and hard-failing a perfectly valid page — reintroducing the
+  // very false positive this function was written to remove.
   const stripped = trimmed
-    .replace(/<!--[\s\S]*?-->/g, "")
     .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, "<script></script>")
-    .replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, "<style></style>");
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, "<style></style>")
+    .replace(/<!--[\s\S]*?-->/g, "");
+
+  // An unclosed <script> is a truncation signal in a FRAGMENT too — a partial page or
+  // a deck body has no <html>, but it still must not end mid-script. Safe to check
+  // unconditionally now that matched script bodies are removed above; html/body only
+  // have a required terminator in a full document, so those stay gated below.
+  {
+    const opens = (stripped.match(/<script[\s>]/gi) ?? []).length;
+    const closes = (stripped.match(/<\/script\s*>/gi) ?? []).length;
+    if (opens > closes) {
+      return fail("html_structure", `unclosed <script> (${opens} opened, ${closes} closed) — the document ends before it is complete`);
+    }
+  }
 
   // A fragment (no <html>) has no required terminator — only judge full documents.
   if (/<html[\s>]/i.test(stripped)) {
@@ -348,127 +366,94 @@ function validateText(bytes: Uint8Array, ext: string): ValidationResult {
 // ── Code integrity ───────────────────────────────────────────────────────────
 
 /**
- * Structural integrity for code, WITHOUT executing or fully parsing it.
+ * Syntactic integrity for code — does the file actually PARSE?
  *
- * This deliberately verifies integrity, not correctness. It answers "did the whole
- * file get written?", which is the failure that actually happens: a model hits its
- * completion budget mid-function and the file ends inside a string or a block. Real
- * syntax validation would need a per-language parser; this is language-independent
- * and catches the dominant defect.
+ * This asks whether the whole file arrived, which is the failure that really
+ * happens: a model hits its completion budget mid-function and the file ends inside
+ * a string, a block, or a comment.
  *
- * It reports `fail` ONLY on unambiguous truncation — an unterminated block comment
- * or string literal at EOF, or brackets left open at EOF. Anything the scanner
- * cannot read confidently (notably JS regex-literal-vs-division ambiguity) returns
- * `unverifiable` rather than risking a false failure on good code.
+ * It uses the TypeScript compiler's parser rather than a hand-rolled scanner. That
+ * is not gold-plating — the hand-rolled version was measurably wrong. Correctly
+ * lexing JavaScript means resolving regex-vs-division, template interpolation with
+ * nested templates and strings inside it, and JSX; each of those produced FALSE
+ * failures on this repo's own committed, compiling source, and a false failure costs
+ * a wasted rebuild and can replace a good deliverable with a worse one. Verified on
+ * the cases that broke the scanner — `return /['"]/.test(s)`, a nested template,
+ * shell-style `'${v.replace(/'/g, ...)}'` quoting, and JSX — all clean, while all
+ * three truncation shapes still report.
+ *
+ * Parse-only: TypeScript builds a syntax tree and never runs the file. Type errors
+ * are NOT consulted — a file can be perfectly well-formed and still not typecheck,
+ * and that is not this check's business.
  */
 export function validateCodeIntegrityText(source: string, ext: string): ValidationResult {
   if (!source.trim()) return fail("code_integrity", "empty file");
 
-  const jsLike = ext !== ".css";
-  const stack: string[] = [];
-  let i = 0;
-  let ambiguous = false;
+  // CSS is not JavaScript — keep the cheap, unambiguous brace-balance check for it.
+  if (ext === ".css") return validateCssBalance(source);
 
-  // Tracks whether a `/` at this position can start a regex literal. After a value
-  // (identifier, literal, closing bracket) it is division; otherwise it may be a
-  // regex. When we cannot tell, bail to unverifiable instead of guessing.
-  let prevSignificant = "";
-
-  while (i < source.length) {
-    const c = source[i]!;
-    const next = source[i + 1];
-
-    // Line comment
-    if (c === "/" && next === "/") {
-      const nl = source.indexOf("\n", i);
-      if (nl < 0) break;
-      i = nl + 1;
-      continue;
-    }
-    // Block comment
-    if (c === "/" && next === "*") {
-      const end = source.indexOf("*/", i + 2);
-      if (end < 0) return fail("code_integrity", "unterminated block comment — the file ends inside /* ... */, so the write was cut off");
-      i = end + 2;
-      continue;
-    }
-    // String / template literal
-    if (c === '"' || c === "'" || (jsLike && c === "`")) {
-      const end = scanStringEnd(source, i, c);
-      if (end < 0) {
-        return fail("code_integrity", `unterminated ${c === "`" ? "template literal" : "string literal"} starting at offset ${i} — the file ends mid-string, so the write was cut off`);
-      }
-      i = end + 1;
-      prevSignificant = "value";
-      continue;
-    }
-    // Regex literal (JS-family only) — the one genuinely ambiguous construct.
-    if (jsLike && c === "/" && prevSignificant !== "value") {
-      const end = scanRegexEnd(source, i);
-      if (end < 0) { ambiguous = true; break; }
-      i = end + 1;
-      prevSignificant = "value";
-      continue;
-    }
-
-    if (c === "(" || c === "[" || c === "{") { stack.push(c); prevSignificant = ""; i++; continue; }
-    if (c === ")" || c === "]" || c === "}") {
-      const open = stack.pop();
-      const expected = c === ")" ? "(" : c === "]" ? "[" : "{";
-      if (open !== expected) {
-        // Mismatched closer. In a language this scanner only approximates, treat a
-        // mismatch as ambiguity rather than proof of breakage.
-        ambiguous = true;
-        break;
-      }
-      prevSignificant = "value";
-      i++;
-      continue;
-    }
-
-    if (/[A-Za-z0-9_$)\]]/.test(c)) prevSignificant = "value";
-    else if (!/\s/.test(c)) prevSignificant = "";
-    i++;
+  const ts = loadTypeScript();
+  if (!ts) {
+    return unknown("code_integrity", "the TypeScript parser is unavailable in this runtime — file not syntax-checked");
   }
 
-  if (ambiguous) {
-    return unknown("code_integrity", "structure could not be scanned confidently (ambiguous regex or bracket nesting) — not treated as a defect");
+  try {
+    const kind = ext === ".tsx" || ext === ".jsx" ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
+    const sourceFile = ts.createSourceFile(`artifact${ext}`, source, ts.ScriptTarget.Latest, true, kind);
+    // parseDiagnostics carries the SYNTAX errors and is internal to the compiler's
+    // public typings, hence the cast. It is exactly what we want: purely syntactic,
+    // no type checking, no program construction, no file-system access.
+    const diagnostics = (sourceFile as typeof sourceFile & { parseDiagnostics?: readonly import("typescript").Diagnostic[] }).parseDiagnostics ?? [];
+    if (diagnostics.length === 0) return pass("code_integrity", "parses cleanly");
+
+    const first = diagnostics[0]!;
+    const message = ts.flattenDiagnosticMessageText(first.messageText, " ");
+    const line = typeof first.start === "number"
+      ? ts.getLineAndCharacterOfPosition(sourceFile, first.start).line + 1
+      : undefined;
+    return fail(
+      "code_integrity",
+      `does not parse: ${message}${line ? ` (line ${line})` : ""}`
+        + (diagnostics.length > 1 ? ` — and ${diagnostics.length - 1} more` : "")
+        + " — the file is incomplete or malformed",
+    );
+  } catch (err) {
+    return unknown("code_integrity", `parser error: ${err instanceof Error ? err.message.slice(0, 100) : String(err)}`);
   }
-  if (stack.length > 0) {
-    const kind = stack[stack.length - 1] === "{" ? "brace" : stack[stack.length - 1] === "(" ? "parenthesis" : "bracket";
-    return fail("code_integrity", `${stack.length} unclosed ${kind}(s) at end of file — the file ends mid-block, so the write was cut off`);
+}
+
+/** Brace balance for CSS, which has no regex/template ambiguity to worry about. */
+function validateCssBalance(source: string): ValidationResult {
+  const withoutComments = source.replace(/\/\*[\s\S]*?\*\//g, "");
+  if (/\/\*/.test(withoutComments)) {
+    return fail("code_integrity", "unterminated block comment — the file ends inside /* ... */, so the write was cut off");
   }
-  return pass("code_integrity", "brackets, strings and comments all terminated");
+  let depth = 0;
+  for (const c of withoutComments) {
+    if (c === "{") depth++;
+    else if (c === "}") depth--;
+    if (depth < 0) return unknown("code_integrity", "stray closing brace — not treated as a defect");
+  }
+  return depth > 0
+    ? fail("code_integrity", `${depth} unclosed brace(s) at end of file — the file ends mid-rule, so the write was cut off`)
+    : pass("code_integrity", "braces balanced");
+}
+
+/** TypeScript is a runtime dependency; loaded once and cached. null when absent. */
+let _ts: typeof import("typescript") | null | undefined;
+function loadTypeScript(): typeof import("typescript") | null {
+  if (_ts !== undefined) return _ts;
+  try {
+    const require_ = createRequire(import.meta.url);
+    _ts = require_("typescript") as typeof import("typescript");
+  } catch {
+    _ts = null;
+  }
+  return _ts;
 }
 
 function validateCodeIntegrity(bytes: Uint8Array, ext: string): ValidationResult {
   return validateCodeIntegrityText(decode(bytes), ext);
-}
-
-/** Index of the closing quote, or -1 when the literal never terminates. */
-function scanStringEnd(source: string, start: number, quote: string): number {
-  for (let i = start + 1; i < source.length; i++) {
-    const c = source[i]!;
-    if (c === "\\") { i++; continue; }
-    if (c === quote) return i;
-    // A plain quote never spans a newline; a template literal may.
-    if (c === "\n" && quote !== "`") return -1;
-  }
-  return -1;
-}
-
-/** Index of the closing slash of a regex literal, or -1 when it does not terminate. */
-function scanRegexEnd(source: string, start: number): number {
-  let inClass = false;
-  for (let i = start + 1; i < source.length; i++) {
-    const c = source[i]!;
-    if (c === "\\") { i++; continue; }
-    if (c === "[") inClass = true;
-    else if (c === "]") inClass = false;
-    else if (c === "/" && !inClass) return i;
-    else if (c === "\n") return -1;
-  }
-  return -1;
 }
 
 // ── Format-vs-extension agreement ────────────────────────────────────────────

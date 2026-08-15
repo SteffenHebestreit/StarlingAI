@@ -109,7 +109,7 @@ async function probeFile(workspacePath: string, location: string): Promise<Artif
   return receipts;
 }
 
-async function probeUrl(location: string): Promise<ArtifactProbeReceipt[]> {
+async function probeUrl(location: string, cited: boolean): Promise<ArtifactProbeReceipt[]> {
   const started = Date.now();
   try {
     const response = await withTimeout(fetch(location, { method: "GET" }), PER_PROBE_TIMEOUT_MS, `GET ${location}`);
@@ -119,6 +119,12 @@ async function probeUrl(location: string): Promise<ArtifactProbeReceipt[]> {
       target: location,
       probe: "served_health",
       status: ok ? "pass" : "fail",
+      // A URL we SERVE is our artifact — dead means the app is broken, so that stays
+      // hard. A URL we merely CITED is someone else's page: 403/404 to a bare GET is
+      // routine and says nothing about our deliverable, so it is soft. Without the
+      // distinction, a cited news link told a rebuild agent "a file you produced this
+      // turn is CORRUPT on disk" about a third-party web page.
+      ...(cited ? { severity: "soft" as const } : {}),
       detail: ok ? `HTTP ${response.status}, ${body.length} bytes` : `HTTP ${response.status}${body.trim().length === 0 ? ", empty body" : ""}`,
       contentHash: createHash("sha256").update(body).digest("hex").slice(0, 16),
       bytes: body.length,
@@ -129,6 +135,7 @@ async function probeUrl(location: string): Promise<ArtifactProbeReceipt[]> {
       target: location,
       probe: "served_health",
       status: "fail",
+      ...(cited ? { severity: "soft" as const } : {}),   // see above
       detail: `unreachable: ${error instanceof Error ? error.message.slice(0, 120) : String(error)}`,
       durationMs: Date.now() - started,
     }];
@@ -151,9 +158,10 @@ export async function probeArtifacts(
     try {
       receipts.push(...(ref.kind === "file"
         ? await withTimeout(probeFile(opts.workspacePath, ref.location), PER_PROBE_TIMEOUT_MS * 2, `probe ${ref.location}`)
-        : await probeUrl(ref.location)));
+        : await probeUrl(ref.location, ref.external === true)));
     } catch (error) {
-      receipts.push({ target: ref.location, probe: "exists", status: "fail", detail: `probe error: ${error instanceof Error ? error.message.slice(0, 120) : String(error)}`, durationMs: 0 });
+      // A probe that ERRORED proved nothing about the artifact — soft, not a defect.
+      receipts.push({ target: ref.location, probe: "exists", status: "fail", severity: "soft", detail: `probe error: ${error instanceof Error ? error.message.slice(0, 120) : String(error)}`, durationMs: 0 });
     }
   }
   // Only a HARD failure is grounds for failing the report and spending a rebuild.

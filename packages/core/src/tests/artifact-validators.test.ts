@@ -143,19 +143,19 @@ describe("validateCodeIntegrityText", () => {
     const src = `function greet(name) {\n  if (name) {\n    console.log("hi");\n`;
     const r = validateCodeIntegrityText(src, ".js");
     expect(r.status).toBe("fail");
-    expect(r.detail).toMatch(/unclosed brace/);
+    expect(r.detail).toMatch(/does not parse/);
   });
 
   it("fails code that ends inside a string literal", () => {
     const r = validateCodeIntegrityText(`const msg = "hello there\n`, ".js");
     expect(r.status).toBe("fail");
-    expect(r.detail).toMatch(/unterminated string/);
+    expect(r.detail).toMatch(/does not parse.*[Uu]nterminated string/);
   });
 
   it("fails code that ends inside a block comment", () => {
     const r = validateCodeIntegrityText(`const a = 1;\n/* explanation that never ends\n`, ".ts");
     expect(r.status).toBe("fail");
-    expect(r.detail).toMatch(/unterminated block comment/);
+    expect(r.detail).toMatch(/does not parse/);
   });
 
   // False-positive guards: each of these is valid code that a naive brace counter breaks on.
@@ -174,6 +174,21 @@ describe("validateCodeIntegrityText", () => {
   it("handles CSS without treating / as a regex", () => {
     expect(validateCodeIntegrityText(`.a { width: calc(100% / 3); }`, ".css").status).toBe("pass");
     expect(validateCodeIntegrityText(`.a { width: 10px;`, ".css").status).toBe("fail");
+  });
+
+  // The cases that broke the hand-rolled lexer and drove the move to a real parser.
+  // Each is valid, compiling source that was previously hard-failed as truncated.
+  it("accepts constructs a hand-rolled lexer gets wrong", () => {
+    for (const [label, src, ext] of [
+      ["regex containing a quote", `function f(s: string) { return /['\"]/.test(s); }`, ".ts"],
+      ["regex char class with quotes", `const ok = /^[A-Z!@#$%^&*()_+{}|:\"<>?~]$/.test(c);`, ".ts"],
+      ["nested template interpolation", "const a = `x ${c ? `y` : \"\"} z`;", ".ts"],
+      ["shell-style nested quoting", "const q = `'${v.replace(/'/g, `'\"'\"'`)}'`;", ".ts"],
+      ["JSX closing tag", `const A = () => <div className="a">hi</div>;`, ".tsx"],
+      ["division after a paren", `const r = (a + b) / c;`, ".ts"],
+    ] as const) {
+      expect(validateCodeIntegrityText(src, ext).status, label).toBe("pass");
+    }
   });
 
   it("passes TypeScript generics and arrow functions", () => {
