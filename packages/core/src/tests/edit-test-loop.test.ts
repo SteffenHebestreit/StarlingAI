@@ -1,6 +1,8 @@
+import { readdirSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import JSON5 from "json5";
 
 /**
  * The generate → test → fix-in-place → test loop.
@@ -10,9 +12,17 @@ import { resolve } from "node:path";
  * re-emitting the whole thing — which is what exhausts the completion budget on long
  * code turns and truncates the result. The loop could not close inside one agent.
  */
-const config = JSON.parse(readFileSync(resolve(process.cwd(), "../../starlingai.json"), "utf-8")) as {
-  subAgents: Record<string, { tools?: string[]; systemPrompt?: string }>;
-};
+// Read the committed workspace SHARDS, not the generated starlingai.json — that file
+// is gitignored, so it does not exist in CI and a test depending on it fails there
+// while passing locally. Mirrors workspace-catalog.test.ts.
+const agentsDir = fileURLToPath(new URL("../../../../workspace/agents/", import.meta.url));
+type Agent = { tools?: string[]; systemPrompt?: string };
+const config: { subAgents: Record<string, Agent> } = { subAgents: {} };
+for (const file of readdirSync(agentsDir)) {
+  if (!file.endsWith(".jsonc")) continue;
+  const shard = JSON5.parse<{ subAgents?: Record<string, Agent> }>(readFileSync(join(agentsDir, file), "utf-8"));
+  Object.assign(config.subAgents, shard.subAgents ?? {});
+}
 const VERIFY = ["run_test_suite", "shell_exec", "run_script", "verify_app"];
 const tools = (n: string): string[] => config.subAgents[n]?.tools ?? [];
 
