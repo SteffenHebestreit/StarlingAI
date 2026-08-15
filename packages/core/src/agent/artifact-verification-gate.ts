@@ -171,7 +171,16 @@ async function attemptRepair(deps: ArtifactVerificationDeps, failures: string): 
     const result = await executeTool(
       "delegate_to_agent",
       { agentName: "mission_coordinator", task: buildRepairTask(failures) },
-      { ...deps.toolContext, allowDelegationAfterOperatorStop: true },
+      // NOT allowDelegationAfterOperatorStop. That flag does more than exempt one
+      // call — it CLEARS the session's operator-Stop latch, and its safety argument
+      // in sub-agent.ts is explicitly that the agent it unblocks holds no delegate
+      // tools. mission_coordinator holds delegate_to_agent, parallel_delegate,
+      // run_task_graph and create_ephemeral_agent, so clearing the latch here let a
+      // single failed artifact re-open a fan-out the operator had just stopped.
+      // Stop is a latch rather than the AbortSignal, so the aborted checks above do
+      // not see it; if the operator stopped the turn, the repair simply does not run
+      // and the artifact ships with its caveat.
+      { ...deps.toolContext },
     );
     deps.incrementDelegationCount();
     if (!result.success) {

@@ -571,8 +571,23 @@ export async function augmentTurnWithDocuments(input: {
     : "";
   const withNotice = (block: string): string =>
     failureNotice ? (block ? `${failureNotice}\n\n${block}` : failureNotice) : block;
+  /**
+   * True when the ONLY thing in the context block is the failure notice.
+   *
+   * The caller reads a non-empty contextBlock together with retrievalUnavailable to
+   * decide documentRagFoundDocs — "this answer is grounded in the user's documents".
+   * A notice saying the attachment could NOT be read is the opposite of grounding,
+   * but it is still non-empty text, so it flipped that flag true and disarmed the
+   * source-sensitivity classifier and both ungrounded-factual guards for the turn.
+   * Same invariant the engram-down placeholder below already observes: a retrieval
+   * FAILURE must never be counted as evidence.
+   */
+  const noticeOnly = (block: string): boolean => Boolean(failureNotice) && block === failureNotice;
 
-  if (!cfg.injectContext) return { ingested, failed, contextBlock: withNotice(""), retrievalUnavailable: false };
+  if (!cfg.injectContext) {
+    const block = withNotice("");
+    return { ingested, failed, contextBlock: block, retrievalUnavailable: noticeOnly(block) };
+  }
 
   // Reuse-the-whole-doc (audit ef9bd480): when the user just attached small document(s),
   // inline their FULL text instead of a handful of semantic top-k excerpts that silently
@@ -614,6 +629,10 @@ export async function augmentTurnWithDocuments(input: {
     contextBlock = contextBlock ? `${hint}\n\n${contextBlock}` : hint;
   }
   contextBlock = withNotice(contextBlock);
+  // A block that is ONLY the failure notice is not grounding — see noticeOnly.
+  if (noticeOnly(contextBlock)) {
+    return { ingested, failed, contextBlock, retrievalUnavailable: true };
+  }
 
   return { ingested, failed, contextBlock, retrievalUnavailable: false };
 }

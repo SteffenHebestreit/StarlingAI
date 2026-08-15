@@ -450,6 +450,11 @@ describe("augmentTurnWithDocuments — attachments come from the object store", 
     // model cannot answer from memory or claim the user attached nothing.
     expect(aug.contextBlock).toContain("ATTACHMENT NOT READABLE");
     expect(aug.contextBlock).toContain("cv.pdf");
+    // ...but the notice is NOT grounding. The caller reads contextBlock together with
+    // retrievalUnavailable to set documentRagFoundDocs; a non-empty block whose only
+    // content is "we could not read your file" previously flipped that true and
+    // disarmed the source-sensitivity classifier and both ungrounded-factual guards.
+    expect(aug.retrievalUnavailable).toBe(true);
     cfg.mockRestore();
   });
 });

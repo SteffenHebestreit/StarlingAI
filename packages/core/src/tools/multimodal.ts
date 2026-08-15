@@ -587,16 +587,27 @@ async function readWorkspaceBinaryFile(path: string, workspacePath: string): Pro
     // Uploads go through the object store, and under `storage.backend: "s3"` (the bundled
     // compose default) they never touch the workspace disk — so an agent re-opening an
     // attachment it was told about would ENOENT here. Fall back to the store before failing.
+    // Key the store off the RESOLVED relative path, never the caller's raw string.
+    // The confinement guard ran on `resolved`; deriving the key from the raw input
+    // hands the store a path the guard never approved. Under
+    // `storage.backend: "local"` getUpload re-joins that key against workspacePath
+    // with no zone or traversal check, so a scope-confined agent calling
+    // extract_file_content({path:"uploads/../.env"}) read the real .env the guard
+    // had just denied — API keys, JWT secret, S3 credentials, rendered to markdown.
+    // Using relativePath also repairs the accepted "/workspace/..." form, whose raw
+    // key could never match what putUpload actually stored.
     const { getUpload } = await import("../storage/object-store.js");
-    const stored = await getUpload(path.replace(/\\/g, "/").replace(/^\/+/, ""));
+    const stored = await getUpload(resolved.relativePath.replace(/\\/g, "/").replace(/^\/+/, ""));
     if (!stored) throw err;
     return describe(Buffer.from(stored));
   }
 }
 
-function resolveWorkspacePath(path: string, workspacePath: string): { resolved: string } {
-  const { resolved } = resolvePathWithinWorkspace(path, workspacePath);
-  return { resolved };
+function resolveWorkspacePath(path: string, workspacePath: string): { resolved: string; relativePath: string } {
+  // relativePath is carried through deliberately: it is the guard-approved form, and
+  // it is what any downstream lookup (e.g. the object store) must be keyed on.
+  const { resolved, relativePath } = resolvePathWithinWorkspace(path, workspacePath);
+  return { resolved, relativePath };
 }
 
 async function convertFileToMarkdown(file: WorkspaceBinaryFile): Promise<Record<string, unknown>> {
