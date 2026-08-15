@@ -43,6 +43,24 @@ export function mergeAgentModelOverride(
  *    artifacts (audit 463d6192). Precedence: explicit agent opt-out > effort dial > default.
  * Pure so the precedence is unit-testable without a running sub-agent.
  */
+/**
+ * Ceiling on the effort the DIAL may hand a sub-agent.
+ *
+ * A sub-agent's deliverable is tool calls — write the file, serve the app, run the
+ * test. Deliberation is the orchestrator's job. The top reasoning rung multiplies
+ * badly with the same tier's raised token budget, and the two together produced a
+ * total loss: backend_coder at high effort emitted 97,714 characters of reasoning,
+ * consumed all 32,768 completion tokens, called ZERO tools, and failed after 36
+ * minutes. The model was not stuck and the task was not too hard — it was handed a
+ * budget to think with and no ceiling on thinking.
+ *
+ * An agent may still PIN the top rung for itself; this clamps only what the dial
+ * imposes on an agent that expressed no preference.
+ */
+function clampSubAgentEffort(effort: ReasoningEffort): ReasoningEffort {
+  return effort === "high" || effort === "xhigh" ? "medium" : effort;
+}
+
 export function applyEffortModelOverlay(
   baseModelConfig: ModelConfig,
   effortProfile:
@@ -70,7 +88,7 @@ export function applyEffortModelOverlay(
       ? { enableThinking: effortProfile.enableThinking }
       : {}),
     ...(effortProfile.reasoningEffort !== undefined && !agentDisabledThinking && !agentPinnedEffort
-      ? { reasoningEffort: effortProfile.reasoningEffort }
+      ? { reasoningEffort: clampSubAgentEffort(effortProfile.reasoningEffort) }
       : {}),
   };
 }

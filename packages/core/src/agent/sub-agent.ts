@@ -1249,7 +1249,14 @@ function rejectSuspiciousNoToolOutput(
     // "Sub-agent produced no final response." string. Now it's a real failure
     // so the orchestrator surfaces it instead of inlining the artifact as a
     // chat code block.
-    reason = "exhausted completion budget without calling any tool — the model likely tried to inline a large artifact instead of using a focused write_file/generate_website call";
+    // Two different failures land here and the difference decides the fix, so do not
+    // assert one. Inlining a large artifact leaves a long OUTPUT; burning the budget
+    // on reasoning leaves almost none (observed: 97,714 reasoning characters, 32,768
+    // completion tokens, zero tools, 36 minutes — the previous wording blamed
+    // inlining and would have sent the next reader after the wrong cause).
+    reason = output.trim().length > 400
+      ? "exhausted completion budget without calling any tool — the model inlined a large artifact instead of using a focused write_file/generate_website call"
+      : "exhausted completion budget without calling any tool and produced almost no output — the budget went on reasoning rather than on a tool call; lower this agent's reasoning effort or raise its token budget";
   }
 
   if (!reason) return null;

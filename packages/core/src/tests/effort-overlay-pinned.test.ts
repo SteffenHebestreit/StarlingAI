@@ -31,9 +31,10 @@ describe("applyEffortModelOverlay — a pinned agent effort is an opt-out", () =
     expect(r.maxTokens).toBe(32_768);        // budget is still raised
   });
 
-  it("still lets the dial set effort for an agent that did NOT pin one", () => {
-    const r = applyEffortModelOverlay(mk({}), MAX);
-    expect(r.reasoningEffort).toBe("high");
+  it("still lets the dial set effort for an agent that did NOT pin one, up to the ceiling", () => {
+    // The dial applies — but clamped: see the clamp suite below for why the top rung
+    // is never handed to a sub-agent.
+    expect(applyEffortModelOverlay(mk({}), MAX).reasoningEffort).toBe("medium");
   });
 
   it("keeps honouring the enableThinking opt-out", () => {
@@ -45,5 +46,29 @@ describe("applyEffortModelOverlay — a pinned agent effort is an opt-out", () =
   it("raises the budget regardless of either opt-out", () => {
     expect(applyEffortModelOverlay(mk({ reasoningEffort: "low" }), MAX).maxTokens).toBe(32_768);
     expect(applyEffortModelOverlay(mk({ enableThinking: false }), MAX).maxTokens).toBe(32_768);
+  });
+});
+
+describe("applyEffortModelOverlay — the dial cannot hand a sub-agent the top rung", () => {
+  // Observed total loss: backend_coder at high effort pinned no effort of its own, so
+  // the dial's "high" folded to "xhigh" on Qwen 3.8 and combined with the same tier's
+  // 32,768-token budget. It emitted 97,714 characters of reasoning, called ZERO tools,
+  // and failed after 36 minutes. A sub-agent's deliverable is tool calls; deliberation
+  // is the orchestrator's job.
+  it("clamps a dial-imposed high/xhigh to medium", () => {
+    expect(applyEffortModelOverlay(mk({}), MAX).reasoningEffort).toBe("medium");
+    expect(applyEffortModelOverlay(mk({}), { ...MAX, reasoningEffort: "xhigh" }).reasoningEffort).toBe("medium");
+  });
+
+  it("leaves a lower dial value alone", () => {
+    expect(applyEffortModelOverlay(mk({}), { ...MAX, reasoningEffort: "low" }).reasoningEffort).toBe("low");
+  });
+
+  it("still lets an agent PIN the top rung for itself", () => {
+    expect(applyEffortModelOverlay(mk({ reasoningEffort: "xhigh" }), MAX).reasoningEffort).toBe("xhigh");
+  });
+
+  it("still raises the token budget — only reasoning is clamped", () => {
+    expect(applyEffortModelOverlay(mk({}), MAX).maxTokens).toBe(32_768);
   });
 });
