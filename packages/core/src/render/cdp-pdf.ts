@@ -116,6 +116,24 @@ async function printInTarget(
   const { default: WebSocket } = await import("ws");
   const ws = new WebSocket(target.webSocketDebuggerUrl, { perMessageDeflate: false });
 
+  // A permanent 'error' listener that outlives every per-phase handler below.
+  //
+  // This is not defensive tidiness — without it a slow browser takes the whole
+  // gateway down. `ws` reports a handshake abort ASYNCHRONOUSLY: close() on a
+  // still-CONNECTING socket calls abortHandshake, which emits 'error' on a
+  // process.nextTick (ws 8.21.0 websocket.js:302-307 → :1121 → :1053-1061). The
+  // connect promise's cleanup() has by then removed its own 'error' listener, and
+  // the finally below calls close() precisely in that state — so the emission
+  // lands on a socket with zero listeners. In Node an unhandled 'error' event is
+  // an uncaught throw, and index.ts's uncaughtException handler responds by
+  // shutting the process down, killing every in-flight turn for every user.
+  //
+  // Trigger: browser-vnc answers PUT /json/new but never completes the WebSocket
+  // upgrade (Chrome wedged, container restarting) → connect times out → crash.
+  // Failures are still surfaced through the per-phase handlers; this listener
+  // exists only so a late, post-cleanup abort is never unhandled.
+  ws.on("error", () => { /* see above — real reporting happens in the handlers below */ });
+
   try {
     await new Promise<void>((resolve, reject) => {
       const onOpen = () => { cleanup(); resolve(); };
