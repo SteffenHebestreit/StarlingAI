@@ -372,9 +372,15 @@ function normalizeQwenEffort(effort: ReasoningEffort): ReasoningEffort {
  * the slowest setting available.
  *
  * So "none" goes on the wire as "low" — the lowest VALID rung, ~1.3k reasoning
- * characters — while chat_template_kwargs.enable_thinking:false is still sent
- * alongside for backends that honour it (vLLM maps it the same way). Whatever the
- * backend does, a valid field is always present and nothing silently inherits xhigh.
+ * characters. A valid field is always present, so nothing silently inherits xhigh.
+ *
+ * There is no true OFF for this model on this backend, and the code should not
+ * pretend otherwise. chat_template_kwargs.enable_thinking:false was measured to have
+ * NO effect on qwen3.8 here (2,892 / 6,040 reasoning characters across two runs
+ * against a 4,395 / 6,789 baseline), and reasoning_effort has no "none". "low" is
+ * the floor. Config may still say "none" — it reads as the intent, "as little
+ * reasoning as possible" — but it resolves to the cheapest rung the server accepts,
+ * not to silence.
  */
 function wireQwenEffort(effort: ReasoningEffort): "xhigh" | "medium" | "low" {
   if (effort === "xhigh" || effort === "high") return "xhigh";
@@ -422,10 +428,9 @@ export function resolveThinkingControls(
       // Sending both is correct on either backend and costs one extra field. It also
       // means a future LM Studio fix, or a move to vLLM, degrades to still-off
       // rather than to silently-thinking.
-      if (effort === "none") {
-        // Both switches, and never the literal "none" — see wireQwenEffort.
-        return { reasoningEffort: wireQwenEffort("none"), chatTemplateKwargs: { enable_thinking: false } };
-      }
+      // One control, always a value the server accepts. enable_thinking is NOT sent
+      // for this family: measured inert on qwen3.8 here, so it would be a field that
+      // looks like an off-switch while doing nothing — worse than no field at all.
       return { reasoningEffort: wireQwenEffort(effort) };
     }
     case "enable_thinking":

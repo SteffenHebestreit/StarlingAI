@@ -59,6 +59,7 @@ describe("LMStudioProvider promptCache → top-level cache_prompt", () => {
     // anything outside xhigh|medium|low and a rejected field is skipped entirely —
     // which would silently leave the model on its xhigh default.
     expect(captured[0]!["reasoning_effort"]).toBe("low");
+    expect(captured[0]!["chat_template_kwargs"]).toBeUndefined();
     expect(captured[0]!["cache_prompt"]).toBe(true);
   });
 });

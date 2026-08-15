@@ -95,10 +95,14 @@ describe("thinking control — Qwen 3.8+ graded reasoning_effort", () => {
   // 183s rung). "none" must therefore never reach the wire: it goes as "low", the
   // lowest valid rung, with enable_thinking:false alongside for backends that honour
   // it. Otherwise the agents asking for no thinking got the slowest setting there is.
-  it("never puts a value on the wire that LM Studio rejects", () => {
+  it("never puts a value on the wire that LM Studio rejects, and sends no dead switch", () => {
     for (const cfg of [{ enableThinking: false }, { reasoningEffort: "none" as const }]) {
       const c = resolveThinkingControls("qwen/qwen3.8-27b", cfg);
-      expect(c).toEqual({ reasoningEffort: "low", chatTemplateKwargs: { enable_thinking: false } });
+      // "low" is the floor this backend actually offers. enable_thinking is NOT sent:
+      // it was measured inert on qwen3.8 here, so including it would look like an
+      // off-switch while doing nothing.
+      expect(c).toEqual({ reasoningEffort: "low" });
+      expect(c.chatTemplateKwargs).toBeUndefined();
     }
   });
 
