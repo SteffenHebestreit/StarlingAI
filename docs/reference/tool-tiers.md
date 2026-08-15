@@ -55,10 +55,12 @@ Always allowed; no side effects.
 | `github_check_runs_list` | — | — | List CI check runs for a commit on a remote GitHub repository (read-only) |
 | `github_pr_get` | — | — | Fetch a single pull request by number from a remote GitHub repository (read-only) |
 | `github_pr_list` | — | — | List pull requests on a remote GitHub repository (read-only) |
+| `glob_files` | — | — | Find workspace files by path pattern (glob) |
 | `grafana_alerts_list` | — | — | List Grafana unified-alerting rules (read-only) |
 | `grafana_dashboard_search` | — | — | Search Grafana dashboards by query / tag / folder (read-only) |
 | `graph_find_paths` | — | — | Find shortest relationship paths between graph entities |
 | `graph_query` | — | — | Run read-only Cypher queries against the MemGraph knowledge graph |
+| `grep_files` | — | — | Search file contents by regular expression with surrounding context |
 | `hash_compute` | — | — | Compute md5/sha1/sha256/sha512 hash of a UTF-8 string — useful for content fingerprints, dedup checks, integrity comparisons |
 | `helm_list` | — | — | List Helm releases in the target Kubernetes cluster (read-only) |
 | `json_query` | — | — | Extract values from a JSON document via a dot/bracket path expression (jq-lite — no piping or transforms) |

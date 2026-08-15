@@ -905,6 +905,18 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  glob_files: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Find workspace files by path pattern (glob)",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  grep_files: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Search file contents by regular expression with surrounding context",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
   generate_document: {
     tier: ToolTier.ONE_WRITE,
     description: "Generate and save a workspace document as Markdown, text, HTML, or JSON",

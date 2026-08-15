@@ -38,7 +38,7 @@ const GRANTABLE_TOOLS = new Set([
   "memory_search", "memory_store", "record_lesson",
   "share_finding", "read_shared_facts",
   "parallel_delegate",
-  "workspace_search",
+  "workspace_search", "glob_files", "grep_files",
   "web_search", "web_fetch",
   "list_knowledge_bases", "search_knowledge_base",
   // Native live-site inspection + read-only web audits, so a temporary agent

@@ -21,6 +21,7 @@ import { scanOutput } from "../guardrails/output.js";
 import { neutralizeToolResultFraming } from "../guardrails/input.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
+import { createCheckpoint, pauseCheckpoint, completeCheckpoint } from "../swarm/checkpoints.js";
 import { withSpan, genAi } from "../observability/tracing.js";
 import { runSubAgentInContainer } from "./container-runner.js";
 import { looksLikeContainerLevelFailure, looksLikeModelTemplateArtifact, looksLikeProviderErrorEcho, looksLikeHallucinatedTruncationClaim } from "./container-failure.js";
@@ -1684,6 +1685,22 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
 
   const subSessionId = `sub:${opts.parentSessionId}:${opts.agentName}:${Date.now()}`;
 
+  // Open a checkpoint for this run. The resume side of this system was complete —
+  // context rebuilding, gateway routes, dashboard — but NOTHING ever wrote one, so
+  // none of it could fire. A run that dies with partial work now leaves a record the
+  // operator can resume from instead of vanishing. Best-effort by construction: a
+  // checkpoint failure must never take down the work it is describing.
+  let checkpointTaskId: string | null = null;
+  try {
+    checkpointTaskId = createCheckpoint({
+      agentName: opts.agentName,
+      parentSessionId: opts.parentSessionId,
+      task: opts.task,
+    }).taskId;
+  } catch (err) {
+    log.warn({ err, agentName: opts.agentName }, "createCheckpoint failed — continuing without one");
+  }
+
   // Surface a live, take-over-able browser preview for the whole browser_agent
   // run (parity with the computer-use session preview). The session is stopped
   // in the finally below; request_human_assist flips it to "needs help" on a
@@ -2260,6 +2277,26 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         },
         { sessionId: subSessionId, severity },
       );
+
+      // Close the checkpoint on the same choke point every terminal outcome flows
+      // through. A completed run has nothing to resume; anything else keeps what it
+      // produced so the work is recoverable rather than lost.
+      if (checkpointTaskId) {
+        try {
+          if (stats.terminalState === "completed") {
+            completeCheckpoint(checkpointTaskId);
+          } else {
+            pauseCheckpoint(checkpointTaskId, {
+              progressNote: `Ended as ${stats.terminalState} after ${stats.iterations} iteration(s). Tools used: ${stats.toolNames.join(", ") || "none"}.`,
+              conversationSummary: output,
+              elapsedMs: Date.now() - runStartedAt,
+              iterationsCompleted: stats.iterations,
+            });
+          }
+        } catch (err) {
+          log.warn({ err, taskId: checkpointTaskId }, "closing the checkpoint failed — the run result is unaffected");
+        }
+      }
     };
 
     /** Single-delegation passthrough — see PASSTHROUGH_DELEGATION_MIN_BYTES.

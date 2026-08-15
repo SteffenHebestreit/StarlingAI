@@ -43,6 +43,7 @@ import "./web.js";
 import "./multimodal.js";
 import "./document-output.js";
 import "./render-pdf.js";
+import "./code-navigation.js";
 import "./website.js";
 import "./serve-app.js";
 import "./extractors.js";

@@ -148,11 +148,15 @@ registerTool({
     type: "object",
     properties: {
       path: { type: "string", description: "Relative path within workspace" },
+      offset: { type: "number", description: "1-indexed line to start from. Use with limit to read a WINDOW of a large file instead of all of it." },
+      limit: { type: "number", description: "Maximum number of lines to return, counted from offset." },
     },
     required: ["path"],
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const path = String(args["path"] ?? "");
+    const offset = Number.isFinite(Number(args["offset"])) ? Math.max(1, Math.floor(Number(args["offset"]))) : undefined;
+    const limit = Number.isFinite(Number(args["limit"])) ? Math.max(1, Math.floor(Number(args["limit"]))) : undefined;
     const { safe, resolved } = guardPath(path, ctx.workspacePath);
 
     if (!safe) {
@@ -177,10 +181,31 @@ registerTool({
 
     try {
       const content = readFileSync(resolved, "utf-8");
+      // Windowed read. Without it the only way to see part of a large file was to
+      // pull the whole thing into context and let the model find its way — the
+      // single biggest source of wasted prompt on a big source tree.
+      if (offset !== undefined || limit !== undefined) {
+        const lines = content.split("\n");
+        const start = (offset ?? 1) - 1;
+        const end = limit !== undefined ? start + limit : lines.length;
+        const window = lines.slice(start, end);
+        const shown = window.map((l, i) => `${start + i + 1}\t${l}`).join("\n");
+        return {
+          success: true,
+          output: shown,
+          metadata: {
+            path, size: stat.size, ext,
+            totalLines: lines.length,
+            firstLine: start + 1,
+            lastLine: Math.min(end, lines.length),
+            truncated: end < lines.length || start > 0,
+          },
+        };
+      }
       return {
         success: true,
         output: content,
-        metadata: { path, size: stat.size, ext },
+        metadata: { path, size: stat.size, ext, totalLines: content.split("\n").length },
       };
     } catch (err) {
       log.error({ err, path }, "read_file failed");
