@@ -176,7 +176,10 @@ registerTool({
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const pattern = String(args["pattern"] ?? "");
     if (!pattern.trim()) return fail("pattern is required");
-    const contextLines = Math.min(10, Math.max(0, Number(args["context"]) ?? 2));
+    // `??` cannot help here: Number(undefined) is NaN, not nullish, so the default
+    // never applied and an omitted `context` produced NaN context lines.
+    const rawContext = Number(args["context"]);
+    const contextLines = Math.min(10, Math.max(0, Number.isFinite(rawContext) ? Math.floor(rawContext) : 2));
     const limit = Math.min(500, Math.max(1, Number(args["limit"]) || 100));
 
     let re: RegExp;
@@ -215,7 +218,7 @@ registerTool({
 
       let text: string;
       try { text = readFileSync(abs, "utf-8"); } catch { return; }
-      if (text.includes(" ")) return;   // binary that slipped the extension check
+      if (text.includes(String.fromCharCode(0))) return;   // NUL byte: a binary that slipped the extension check
       if (!re.test(text)) { re.lastIndex = 0; return; }
       re.lastIndex = 0;
 
