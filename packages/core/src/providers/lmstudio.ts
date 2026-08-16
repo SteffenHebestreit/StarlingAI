@@ -23,6 +23,16 @@ const DEFAULT_PROVIDER_TIMEOUT_MS = 30_000;
 const MAX_PROVIDER_TIMEOUT_MS = 900_000;
 
 /**
+ * Hard ceiling on a SINGLE streaming call, however healthy it looks.
+ *
+ * The inactivity guard measures silence and re-arms per chunk, so it can never stop a
+ * model that keeps emitting. 20 minutes is far above any legitimate single generation
+ * on this hardware (a full build turn is minutes) and far below the 36-minute runaway
+ * that motivated it.
+ */
+const MAX_STREAM_TOTAL_MS = 1_200_000;
+
+/**
  * Transport dispatcher with undici's body timeout DISABLED.
  *
  * This module already owns stall policy: armInactivity() in streamOnce() aborts when
@@ -1146,8 +1156,30 @@ export class LMStudioProvider {
     };
     armInactivity();
 
+    // TOTAL wall-clock cap, separate from the inactivity guard above.
+    //
+    // armInactivity only catches SILENCE, and it re-arms on every chunk — so a model
+    // that streams continuously is never "stalled" no matter how long it runs. A
+    // graded-thinking model can talk to itself indefinitely: an observed backend_coder
+    // run emitted 97,714 characters of reasoning over 36 MINUTES, called zero tools,
+    // and stopped only when the completion budget ran out. Its agent had a 600s turn
+    // timeout; nothing enforced it against a call that was healthily producing tokens.
+    //
+    // This bounds the call itself. Paired with the partial-result salvage in
+    // completeViaStream, hitting the cap keeps whatever was produced rather than
+    // discarding the run.
+    const streamStartedAt = Date.now();
+    const totalCapMs = Math.max(this.requestTimeoutMs, MAX_STREAM_TOTAL_MS);
+
     try {
       for await (const chunk of stream) {
+        if (Date.now() - streamStartedAt > totalCapMs) {
+          streamAc.abort(new Error(
+            `LLM stream exceeded its total budget of ${Math.round(totalCapMs / 1000)}s while still producing output `
+            + "— the model is generating without converging (most often a runaway reasoning block)",
+          ));
+          break;
+        }
         armInactivity();
         // Usage arrives in a final chunk with empty choices (stream_options.include_usage)
         if (chunk.usage) {

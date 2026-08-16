@@ -96,3 +96,29 @@ describe("completeViaStream — partial salvage", () => {
     expect(r.usage.totalTokens).toBe(3);
   });
 });
+
+describe("completeViaStream — total duration cap", () => {
+  /**
+   * The inactivity guard measures SILENCE and re-arms per chunk, so it can never stop
+   * a model that keeps emitting. An observed backend_coder run streamed 97,714
+   * characters of reasoning over 36 minutes, called zero tools, and stopped only when
+   * the completion budget ran out — its agent's 600s turn timeout never applied,
+   * because the call was healthily producing tokens the whole time.
+   *
+   * The cap is 20 minutes in production, which is impractical to test directly, so
+   * this asserts the property that matters: a stream aborted mid-flight keeps what it
+   * already produced rather than discarding the run.
+   */
+  it("keeps partial output when a run is cut off mid-stream", async () => {
+    const p = new LMStudioProvider("http://localhost:1234/v1", "k", base, { maxRetries: 0 });
+    (p as unknown as { stream: unknown }).stream = async function* () {
+      yield { type: "reasoning_delta", content: "thinking".repeat(50) };
+      yield { type: "text_delta", content: "a partial answer" };
+      throw new Error("LLM stream exceeded its total budget of 1200s while still producing output");
+    };
+    const r = await p.completeViaStream([{ role: "user", content: "go" }], []);
+    expect(r.content).toBe("a partial answer");
+    expect(r.reasoning).toContain("thinking");
+    expect(r.finishReason).toBe("length");
+  });
+});
