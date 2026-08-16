@@ -1444,14 +1444,20 @@ describe("gateway HTTP bridge", () => {
       expect(body.endpoints.find((endpoint) => endpoint.priority === "primary")).toMatchObject({
         active: true,
         healthy: true,
-        requestTimeoutMs: 71_200,
+        // Floored at the minimum silence budget. No longer 20_000 + maxTokens*25 —
+        // the silence budget is decoupled from the completion budget, which is now
+        // derived per request from the context window.
+        requestTimeoutMs: 600_000,
         configuredMaxRetries: 2,
       });
       expect(body.endpoints.find((endpoint) => endpoint.priority === "primary")?.lastHealthCheckAt).toBeTruthy();
       expect(body.endpoints.find((endpoint) => endpoint.priority === "fallback")).toMatchObject({
         active: false,
         healthy: true,
-        requestTimeoutMs: 71_200,
+        // Floored at the minimum silence budget. No longer 20_000 + maxTokens*25 —
+        // the silence budget is decoupled from the completion budget, which is now
+        // derived per request from the context window.
+        requestTimeoutMs: 600_000,
         configuredMaxRetries: 2,
       });
     } finally {

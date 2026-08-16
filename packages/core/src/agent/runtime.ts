@@ -2,8 +2,8 @@
  * Agent Runtime — the main agent loop.
  * LLM call → parse tool calls → execute (with guardrails) → loop → final response
  */
-import { getChatProvider, getChatProviderForTier, getChatProviderWithOverride } from "../providers/index.js";
-import { salvageToolCallArguments } from "../providers/lmstudio.js";
+import { applyActiveModelPreset, getChatProvider, getChatProviderForTier, getChatProviderWithOverride } from "../providers/index.js";
+import { DeadlineAbort, salvageToolCallArguments } from "../providers/lmstudio.js";
 import type { ChatProvider, LLMMessage, LLMResponse, StreamChunk } from "../providers/lmstudio.js";
 import { assembleTurnSystemMessages } from "./turn-system-prompt.js";
 import { markOrchestratorActivity, markOrchestratorIdle } from "./cache-warmer.js";
@@ -1047,8 +1047,14 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
   // it out while the orchestrator is BLOCKED awaiting a child, but never past turnDeadlineCeilingMs.
   let turnDeadlineMs = turnTimeoutMs ? turnStartMs + turnTimeoutMs : undefined;
   const turnDeadlineCeilingMs = turnTimeoutMs ? turnStartMs + DELEGATION_WAIT_CEILING_MS : undefined;
+  // The abort reason is TYPED. The provider salvage discriminates an operator cancel
+  // (discard the partial — the user asked for it to stop) from a wall-clock deadline
+  // (keep the partial — the run wanted to finish). A bare abort() reads as a cancel,
+  // so the orchestrator's own deadline would throw away content the model had already
+  // produced; with the output ceiling gone a single orchestrator completion can run
+  // long enough for that to be the normal case, not the rare one.
   let timeoutHandle = turnAbort && turnTimeoutMs
-    ? setTimeout(() => turnAbort.abort(), turnTimeoutMs)
+    ? setTimeout(() => turnAbort.abort(new DeadlineAbort(turnTimeoutMs)), turnTimeoutMs)
     : undefined;
   // D5 (orchestration.excludeDelegationWaitFromTurnBudget): push the turn deadline out by `ms` (the
   // wall-clock the orchestrator sat BLOCKED awaiting a delegated child) and re-arm the abort, so the
@@ -1060,7 +1066,11 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
     }
     turnDeadlineMs = extendDeadlineForDelegationWait(turnDeadlineMs, ms, turnDeadlineCeilingMs);
     if (timeoutHandle) clearTimeout(timeoutHandle);
-    timeoutHandle = setTimeout(() => turnAbort.abort(), Math.max(0, turnDeadlineMs - Date.now()));
+    const extendedBudgetMs = Math.max(0, turnDeadlineMs - turnStartMs);
+    timeoutHandle = setTimeout(
+      () => turnAbort.abort(new DeadlineAbort(extendedBudgetMs)),
+      Math.max(0, turnDeadlineMs - Date.now()),
+    );
     return turnDeadlineMs;
   };
 
@@ -1360,7 +1370,10 @@ async function _runTurn(
   // context window of the model actually running this turn so the trimmer
   // budgets against the real window rather than the global default.
   session.setToolSchemasChars(JSON.stringify(tools).length);
-  session.setContextWindow(getConfig().agents.defaults.model.contextWindow);
+  // Resolve through the active preset: the dashboard Local⇄Claude switch can carry
+  // its own contextWindow, and passing the raw default made the trimmer budget
+  // against a window the turn is not actually running on.
+  session.setContextWindow(applyActiveModelPreset(getConfig().agents.defaults.model).contextWindow);
   const resolvedApprovalCallback = opts.autoApprove
     ? async (_toolName: string, _args: Record<string, unknown>) => true
     : opts.approvalCallback;

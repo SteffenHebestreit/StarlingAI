@@ -2,7 +2,12 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
-import type { LLMMessage } from "../providers/lmstudio.js";
+import {
+  computePromptTokenBudget,
+  estimatePromptTokensForRequest,
+  PROMPT_ESTIMATE_CHARS_PER_TOKEN,
+  type LLMMessage,
+} from "../providers/lmstudio.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
@@ -635,7 +640,19 @@ export class AgentSession {
   }
 
   private maybeTrimHistory(): void {
-    const maxTokenEstimate = this.effectiveContextWindow() * 0.75;
+    // The completion budget is DERIVED from what the prompt leaves free
+    // (providers/lmstudio.ts computeOutputTokenBudget), so this trimmer's job is to
+    // guarantee a usable output budget always remains. A flat 0.75 could not: at
+    // contextWindow 32768 it left 8,192 tokens free, of which the provider's own 8%
+    // reserve takes 2,622 — less output headroom than the reservation implies.
+    //
+    // The bound AND the estimator now come from the provider module, because the
+    // provider re-measures this same text before deriving max_tokens: a local
+    // chars/4 count against the provider's chars/3.0 meant the "reserved" headroom
+    // was never the number this file claimed. One estimator, one unit, one bound —
+    // shared with the sub-agent trimmer (agent/sub-agent-history.ts).
+    const contextWindow = this.effectiveContextWindow();
+    const maxTokenEstimate = computePromptTokenBudget(contextWindow);
     if (estimatePromptTokens(this.systemPrompt, this.getCollapsedHistory(), this.toolSchemasChars) <= maxTokenEstimate || this.history.length <= 6) return;
 
     const minKeep = 6; // always keep at least the last 6 messages
@@ -731,14 +748,17 @@ function digestHistoryMessage(msg: SessionHistoryMessage): string[] {
   return [`• ${label}: ${text.slice(0, 220)}`];
 }
 
+/** Measured in the SAME unit the provider uses to derive max_tokens
+ *  (providers/lmstudio.ts PROMPT_ESTIMATE_CHARS_PER_TOKEN + per-message framing).
+ *  It used to be a private chars/4 count, so the headroom this trimmer reserved and
+ *  the headroom the provider actually found were different numbers — the trimmer
+ *  under-counted the prompt by ~25% and the provider's derived budget collapsed
+ *  accordingly. `estimatePromptTokensForRequest` also counts tool_call arguments,
+ *  which the old reducer ignored entirely. */
 function estimatePromptTokens(systemPrompt: string, history: readonly LLMMessage[], toolSchemasChars = 0): number {
-  const systemPromptTokens = Math.ceil(systemPrompt.length / 4);
-  const toolSchemaTokens = Math.ceil(toolSchemasChars / 4);
-  const historyTokens = history.reduce((sum, message) => {
-    const contentLength = typeof message.content === "string" ? message.content.length : 0;
-    return sum + Math.ceil(contentLength / 4);
-  }, 0);
-  return systemPromptTokens + toolSchemaTokens + historyTokens;
+  const fixedChars = systemPrompt.length + toolSchemasChars;
+  return Math.ceil(fixedChars / PROMPT_ESTIMATE_CHARS_PER_TOKEN)
+    + estimatePromptTokensForRequest(history);
 }
 
 function getTranscriptDisplayContent(message: SessionHistoryMessage): string {

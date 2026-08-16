@@ -22,6 +22,9 @@ vi.mock("../providers/index.js", () => {
   };
 
   return {
+    // Identity: no model preset is active in tests, so the turn's context window
+    // stays the one the config declares.
+    applyActiveModelPreset: (model: unknown) => model,
     getChatProvider: () => provider,
     getChatProviderWithOverride: () => provider,
     getChatProviderForTier: () => null,

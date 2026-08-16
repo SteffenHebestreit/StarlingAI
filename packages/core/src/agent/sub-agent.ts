@@ -13,6 +13,8 @@
 
 import fs from "node:fs";
 import type { LLMMessage, ChatProvider } from "../providers/lmstudio.js";
+import { DeadlineAbort } from "../providers/lmstudio.js";
+import { trimSubAgentHistory } from "./sub-agent-history.js";
 import { getConfig } from "../config/loader.js";
 import { currentEffortProfile, effectiveOrchestration, effectiveSubAgentTurnSloMs } from "../runtime/effort-context.js";
 import { getToolsAsLLMDefs, rerankToolsForTask, executeTool, normalizeToolCall, type ToolContext, type SwarmState, type ToolResult } from "../tools/registry.js";
@@ -1693,16 +1695,62 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       );
     }
   }
-  let turnTimeoutReached = false;
-  const timeoutHandle = turnTimeoutMs
-    ? setTimeout(() => { turnTimeoutReached = true; }, turnTimeoutMs)
-    : undefined;
-  // The wall-clock timeout is a stop-after-current-operation deadline, not
-  // an abort signal for the provider/tool call currently in flight. External
-  // cancellation still aborts immediately through opts.signal.
-  const signal = opts.signal;
-
   const subSessionId = `sub:${opts.parentSessionId}:${opts.agentName}:${Date.now()}`;
+
+  let turnTimeoutReached = false;
+  // The deadline now ABORTS the in-flight completion instead of only latching a
+  // boolean. With the output ceiling gone, a token budget can no longer stop a
+  // runaway generation — the wall clock is the only real bound, and a latch read
+  // between iterations cannot enforce it against a call that never returns.
+  //
+  // RE-ARMABLE, deliberately. `turnTimeoutReached` is a boolean that the "unbounded"
+  // grant clears below; an aborted AbortController can never be un-aborted. A single
+  // permanent controller would therefore turn the grant — the dock's "let it finish
+  // naturally", and the max-effort tier's silent equivalent — into a death sentence:
+  // every later model call would reject instantly on the already-aborted signal and
+  // be reported as the very timeout the grant was supposed to suspend (audit
+  // 2445da2e, again). The deadline stays fully in force for every run that was NOT
+  // granted unbounded — those never touch either escape hatch below.
+  let deadlineAc = new AbortController();
+  // Signal for the MAIN model call ONLY. Deliberately not used for tool calls nor
+  // for the post-deadline synthesis passes (attemptTimeoutSynthesis /
+  // attemptPreDeadlineSynthesis, which compose opts.signal with their own grace
+  // controller): those must still run AFTER the deadline fires, or the accumulated
+  // evidence is destroyed by the very mechanism meant to preserve it.
+  // No turnTimeoutMs means no deadline is ever armed (an agent may declare
+  // turnTimeoutMs:"unbound" precisely to say so). Composing deadlineAc in anyway would
+  // hand every such call a signal that can never fire — inventing an AbortSignal where
+  // the contract is "there is no deadline here", and hiding that the run is unbounded
+  // from anything that inspects the signal.
+  const composeLlmSignal = (): AbortSignal | undefined => {
+    if (!turnTimeoutMs) return opts.signal;
+    return opts.signal ? AbortSignal.any([opts.signal, deadlineAc.signal]) : deadlineAc.signal;
+  };
+  let llmSignal = composeLlmSignal();
+  const signal = opts.signal;
+  // Escape hatch 1 (grant BEFORE the deadline): never fire at all. Aborting here would
+  // kill the completion the operator was just promised would finish.
+  const timeoutHandle = turnTimeoutMs
+    ? setTimeout(() => {
+        if (longRunningGenerationManager.isUnbounded(subSessionId)) {
+          log.info(
+            { agentName: opts.agentName, runSessionId: subSessionId, turnTimeoutMs },
+            "Turn deadline suppressed — this run was granted unbounded budget",
+          );
+          return;
+        }
+        turnTimeoutReached = true;
+        deadlineAc.abort(new DeadlineAbort(turnTimeoutMs));
+      }, turnTimeoutMs)
+    : undefined;
+  // Escape hatch 2 (grant AFTER the deadline already fired): swap in a fresh, un-aborted
+  // controller so the run can actually call the model again. Nothing re-arms the timer —
+  // an unbounded grant suspends the deadline for good, exactly as its comment promises;
+  // maxIterations, the provider's own stream cap and the progress verifier stay as bounds.
+  const rearmDeadlineForUnboundedGrant = (): void => {
+    deadlineAc = new AbortController();
+    llmSignal = composeLlmSignal();
+  };
 
   // Open a checkpoint for this run. The resume side of this system was complete —
   // context rebuilding, gateway routes, dashboard — but NOTHING ever wrote one, so
@@ -2252,7 +2300,17 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     ): SubAgentExecutionStats => ({
       agentName: opts.agentName,
       sessionId: subSessionId,
-      promptChars: systemPrompt.length,
+      // Measured over the LIVE conversation, not the system prompt alone. It was blind
+      // to every message the run appended, so a turn whose prompt had grown to fill the
+      // context window reported the same number as its first iteration — useless for
+      // the one question this stat now has to answer (how much of the window the INPUT
+      // ate, and therefore how little was left for the derived output budget).
+      promptChars: systemPrompt.length + history.reduce(
+        (sum, message) => sum
+          + (message.content?.length ?? 0)
+          + (message.tool_calls ?? []).reduce((n, call) => n + call.function.arguments.length, 0),
+        0,
+      ),
       userContentChars: userContent.length,
       toolCount,
       toolNames: [...toolNames],
@@ -3020,6 +3078,19 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // still wins.
       if (!lrgOperatorStop && turnTimeoutReached && longRunningGenerationManager.isUnbounded(subSessionId)) {
         turnTimeoutReached = false;
+        // Clearing the latch alone is not enough: the deadline also ABORTED the run's
+        // model signal, and an aborted controller stays aborted. Without this the run
+        // would resume only to have its very next completion reject instantly and be
+        // recorded as a timeout — the grant honoured on paper and defeated in fact.
+        rearmDeadlineForUnboundedGrant();
+        logAudit("long_running_generation_auto_resolved", {
+          agentName: opts.agentName,
+          runSessionId: subSessionId,
+          action: "deadline_suspended_by_unbounded_grant",
+          turnTimeoutMs,
+          elapsedMs: Date.now() - runStartedAt,
+          iterations,
+        }, { sessionId: opts.parentSessionId, severity: "info" });
       }
       if (!lrgOperatorStop && !longRunningGenerationManager.isUnbounded(subSessionId)) {
         if (longRunningGenerationManager.isStopRequested(subSessionId)) {
@@ -3405,6 +3476,28 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         );
       }
 
+      // INPUT bound. The completion budget is derived from what the prompt leaves
+      // free, so an append-only history would starve it before it overflows the
+      // window. Trim BEFORE assembling the request, not after.
+      const trimmed = trimSubAgentHistory(history, {
+        systemPromptChars: effectiveSystemPrompt.length,
+        tools: effectiveTools,
+        contextWindow: modelConfig.contextWindow,
+      });
+      if (trimmed.dropped > 0) {
+        logAudit(
+          "sub_agent_history_trimmed",
+          {
+            agentName: opts.agentName,
+            iteration: iterations + 1,
+            droppedMessages: trimmed.dropped,
+            remainingMessages: history.length,
+            contextWindow: modelConfig.contextWindow,
+          },
+          { sessionId: subSessionId, severity: "info" },
+        );
+      }
+
       const messages: LLMMessage[] = [
         { role: "system", content: effectiveSystemPrompt },
         ...history,
@@ -3425,8 +3518,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         // abort, which the plain non-streaming complete() lacks. Falls back to
         // complete() for any provider/mock that doesn't implement it.
         response = provider.completeViaStream
-          ? await provider.completeViaStream(messages, effectiveTools, signal)
-          : await provider.complete(messages, effectiveTools, signal);
+          ? await provider.completeViaStream(messages, effectiveTools, llmSignal)
+          : await provider.complete(messages, effectiveTools, llmSignal);
       } catch (err) {
         if (opts.signal?.aborted) {
           const interruptedOutcome = classifyInterruptedOutcome({
@@ -3462,6 +3555,87 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             output,
             stats,
           });
+        }
+        // The TURN DEADLINE aborted the in-flight completion (not the operator).
+        // Take the same route the between-iterations latch takes above so the run
+        // still gets its synthesis pass and its evidence relay, instead of being
+        // reported as a generic "Sub-agent LLM call failed".
+        //
+        // Reached only when the provider's salvage found NOTHING to keep (the
+        // deadline landed during prefill). When the model had already produced
+        // content or a tool call, completeViaStream returns normally with
+        // finishReason "length" and the existing latch handles the wind-down.
+        //
+        // Escape hatch 3 (grant landed WHILE this completion was in flight — the
+        // operator answered the dock in the moments after the timer fired): the grant
+        // outranks the deadline here too. Re-arm and take another pass instead of
+        // reporting a timeout the operator just waived. Bounded: `iterations` still
+        // advances and the one-shot timer never re-arms, so this cannot spin.
+        if (
+          deadlineAc.signal.aborted
+          && !opts.signal?.aborted
+          && longRunningGenerationManager.isUnbounded(subSessionId)
+          && !longRunningGenerationManager.isStopRequested(subSessionId)
+        ) {
+          turnTimeoutReached = false;
+          rearmDeadlineForUnboundedGrant();
+          logAudit("long_running_generation_auto_resolved", {
+            agentName: opts.agentName,
+            runSessionId: subSessionId,
+            action: "deadline_abort_retried_under_unbounded_grant",
+            turnTimeoutMs,
+            elapsedMs: Date.now() - runStartedAt,
+            iterations,
+          }, { sessionId: opts.parentSessionId, severity: "warn" });
+          iterations++;
+          continue;
+        }
+        if (deadlineAc.signal.aborted && turnTimeoutMs && !opts.signal?.aborted) {
+          const synthesized = await attemptTimeoutSynthesis();
+          if (synthesized) return synthesized;
+          const interruptedOutcome = classifyInterruptedOutcome({
+            successfulToolCount,
+            artifacts,
+            swarmState: toolContext.swarmState,
+          });
+          recordOutcome({
+            ts: new Date().toISOString(),
+            agent: opts.agentName,
+            task: opts.task.slice(0, 200),
+            outcome: interruptedOutcome,
+            iterations,
+            totalTokens: usage.totalTokens,
+            durationMs: Date.now() - runStartedAt,
+            timeoutMs: turnTimeoutMs,
+            error: `timeout (${turnTimeoutMs}ms) aborted the in-flight completion`,
+          });
+          const output = buildInterruptedSubAgentOutput({
+            agentName: opts.agentName,
+            reason: `timed out after ${turnTimeoutMs}ms while a completion was still generating`,
+            swarmState: toolContext.swarmState,
+            toolNames,
+            toolCount,
+            iterations,
+            artifacts,
+            evidenceSnippets: resolveInterruptedEvidenceSnippets({ recentEvidenceSnippets, history }),
+            primaryDelegationBody: currentPrimaryDelegationBody(),
+          });
+          const stats = buildStats("timeout", interruptedOutcome);
+          logSubAgentCompletionAudit(
+            stats,
+            output,
+            {
+              timeoutMs: turnTimeoutMs,
+              abortedInFlightCompletion: true,
+              // The branch keys off "the deadline had fired", not off the identity of
+              // the caught error — a provider failure that happened to land in the same
+              // window is wound down here too. Record what actually threw so the audit
+              // is never blind about which of the two it was.
+              providerError: err instanceof Error ? err.message : String(err),
+            },
+            "warn",
+          );
+          return withArtifacts({ output, stats });
         }
         // A stalled/timed-out FINAL call after the deliverable already exists is
         // not a failed run — return the finished build instead of branding it
@@ -3799,7 +3973,25 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           // so recover mechanically: write the salvaged first part and coach the model
           // to continue with mode:"append" — the truncation becomes forward progress
           // instead of "path is required" + zero bytes.
-          const looksTruncatedByOutputLimit = response.finishReason === "length" || rawArgs.length > 4_000;
+          // `_parse_error` means the arguments did not PARSE, not that they were
+          // TRUNCATED, so the guard has to answer "was this CUT OFF?":
+          //   - finishReason "length" / truncatedBy — the provider says so outright.
+          //     (Every path that sets truncatedBy today also sets "length"; it is kept
+          //     as the direct, self-describing signal rather than an inference.)
+          //   - the size heuristic, restored but no longer BARE. With no output ceiling
+          //     multi-KB write_file calls are normal, so "large" on its own would fire
+          //     on essentially every big write and coach an append onto a complete file.
+          //     Requiring the raw JSON to also be visibly UNTERMINATED (a cut stream
+          //     stops mid-string; a complete-but-invalid object still closes its brace)
+          //     keeps the case the provider flags miss entirely — a truncation that
+          //     arrives with finishReason "stop", i.e. the non-streaming complete()
+          //     path and Anthropic, which never sets truncatedBy — without the false
+          //     positives that motivated dropping it.
+          const rawArgsLookCutOff = rawArgs.length > 4_000 && !/\}$/.test(rawArgs.trimEnd());
+          const looksTruncatedByOutputLimit =
+            response.finishReason === "length"
+            || response.truncatedBy !== undefined
+            || rawArgsLookCutOff;
           const salvaged = tc.name === "write_file" && looksTruncatedByOutputLimit
             ? salvageTruncatedWriteFileArgs(rawArgs)
             : null;

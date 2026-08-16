@@ -26,7 +26,11 @@ vi.mock("../mcp/client.js", () => ({
   cleanupConfiguredDockerMcpContainers: vi.fn(async () => {}),
 }));
 
-vi.mock("../providers/lmstudio.js", () => ({
+vi.mock("../providers/lmstudio.js", async (importActual) => ({
+  // Spread the real module: sub-agent.ts and its helpers import value exports
+  // (computePromptTokenBudget, DeadlineAbort, ...) from here, and a mock that
+  // replaced the whole module broke every time production code grew an export.
+  ...(await importActual<typeof import("../providers/lmstudio.js")>()),
   LMStudioProvider: class MockLMStudioProvider {
     constructor(baseUrl: string, apiKey: string, modelConfig: Record<string, unknown>) {
       providerInstances.push({ baseUrl, apiKey, modelConfig });

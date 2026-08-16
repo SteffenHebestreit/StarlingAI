@@ -52,10 +52,10 @@ describe("LMStudioProvider hard timeout", () => {
       (value) => ({ ok: true as const, value }),
       (err) => ({ ok: false as const, err: err as Error }),
     );
-    // Hard ceiling = requestTimeoutMs + 5000. With our 100ms timeoutMs that's
-    // capped to the DEFAULT (30_000) by computeOpenAICompatibleRequestTimeoutMs
-    // floor, then +5000 grace. Advance well past it.
-    await vi.advanceTimersByTimeAsync(40_000);
+    // Hard ceiling = requestTimeoutMs + 5000. Our 100ms timeoutMs is raised to the
+    // MINIMUM SILENCE BUDGET (600_000) by computeOpenAICompatibleRequestTimeoutMs,
+    // then +5000 grace. Advance well past it.
+    await vi.advanceTimersByTimeAsync(700_000);
     const result = await settled;
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.err.message).toMatch(/exceeded hard timeout/);
@@ -90,7 +90,7 @@ describe("LMStudioProvider hard timeout", () => {
       (err) => ({ ok: false as const, err: err as Error }),
     );
     // Advance far past several hard-timeout windows + retry delays.
-    await vi.advanceTimersByTimeAsync(120_000);
+    await vi.advanceTimersByTimeAsync(2_000_000);
     const result = await settled;
 
     expect(result.ok).toBe(false);

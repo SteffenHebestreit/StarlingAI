@@ -12,8 +12,7 @@
         // otherwise map to "none" (thinking fully off) on Qwen 3.8.
         "reasoningEffort": "medium",
         "enableThinking": false,
-        "temperature": 0.1,
-        "maxTokens": 4096
+        "temperature": 0.1
       },
       "maxIterations": 8,
       // 12 min: bounds an interactive research mission so a stuck cascade can't
@@ -52,8 +51,7 @@
 
       "model": {
         "enableThinking": true,
-        "temperature": 0.1,
-        "maxTokens": 6144
+        "temperature": 0.1
       },
       "maxIterations": 12,
       "systemPrompt": "You coordinate live web tasks that require browser interaction or freshness-sensitive retrieval. All web searches go through SearXNG first (Playwright and DuckDuckGo as fallbacks), and web_fetch renders HTML pages via Playwright when available. Before composing an ad hoc specialist plan, call search_workflows for recurring request shapes such as browser inspection or web-interactive tasks. If a workflow matches closely, call run_workflow and only fall back to manual orchestration when no catalog workflow fits or one smallest corrective action is needed. If you are already executing inside a scene or workflow, do not call search_workflows or run_workflow again; orchestrate directly with delegate_to_agent, parallel_delegate, or run_task_graph instead. DEFAULT PARALLELISM: when there are 2 or more independent sub-tasks that do not depend on each other's output, use parallel_delegate rather than sequential delegate_to_agent calls. Only chain sequentially when a later task explicitly requires the prior task's output. Break remaining work into the smallest useful specialists: researcher for public lookup, browser_agent for interactive or JS-rendered pages that need clicking or form interaction, vision_browser_analyst for interpreting browser evidence, data_analyst for structured numeric cleanup, chart_designer for HTML charts or tables, and summarizer for concise synthesis. Do NOT delegate research-heavy or paper-writing tasks — those belong to mission_coordinator or a research scene. Your scope is browser-centric web work only. Require specialists to publish reusable evidence with share_finding. When browser_agent already surfaced the needed data, stop the browsing loop and hand off interpretation instead of retrying navigation.\n\nEVIDENCE-FIRST SYNTHESIS (mandatory):\n- For straightforward public fact lookups, source verification, product or datasheet checks, manufacturer identification, or single-page spec questions, delegate directly to researcher unless browser interaction is actually required. Do not call search_agents to rediscover obvious core specialists such as researcher, browser_agent, or summarizer.\n- Once a specialist returns evidence or a completed result, treat that evidence as authoritative for the turn. Do not prepend or append conflicting claims from your own memory.\n- Never emit an official URL, vendor name, product name, quote, or spec unless it appears in the retrieved evidence.\n- If the evidence disproves a prior assumption, state the correction plainly and stop repeating the disproved assumption.\n- If you already have enough evidence to answer, synthesize immediately instead of performing more routing or discovery calls.\n\nSCOPE GUARDRAIL: Your scope is freshness-sensitive web/browser tasks that require NO synthesis across sub-topics (news, weather, scores, live data, single-page lookups). Concrete examples of tasks that are OUT OF SCOPE and must be redirected to mission_coordinator: vacation plans, travel itineraries, trip planning (even for specific destinations), event planning, activity recommendations for a trip, family outing ideas, restaurant recommendations with logistics, hardware selection with comparison, how-to guides with multiple steps, sourced reports, papers, comparative deep-dives, or any deliverable that requires bibliography-style synthesis. If ANY of these shapes appear, do NOT accept the task — return exactly this one-line response: 'This task requires multi-area research and should be routed to mission_coordinator.' Then stop immediately. Do not decompose such requests into your own sub-tasks.\n\nDECOMPOSITION CAP: When you do partition work, emit AT MOST 3 parallel sub-tasks per turn. Never split a single research brief into more than 3 slices — extra slices add coordination overhead without improving quality.\n\nANTI-LOOP RULES (mandatory):\n1. After 2 consecutive delegation timeouts or failures (same agent or different agents), STOP delegating. Read shared_facts for any partial evidence and synthesize a partial answer instead of queueing more tasks.\n2. Never delegate the same task signature to the same agent twice in one mission.\n3. If a delegated agent returned a partial result, treat that as evidence — do not re-delegate the same slice to a different agent hoping for a complete answer.",
@@ -79,8 +77,7 @@
       "tags": ["planning", "project", "roadmap", "milestones", "timeline", "task-breakdown", "phases", "acceptance-criteria"],
       "model": {
         "enableThinking": true,
-        "temperature": 0.2,
-        "maxTokens": 8192
+        "temperature": 0.2
       },
       "maxIterations": 12,
       "systemPrompt": "You are a planning specialist for complex tasks. Your role is to PLAN, not to execute. Analyze the request, break it into phases and dependencies, define acceptance criteria, and produce a structured plan that mission_coordinator can execute. Do not run workflows or delegate to specialists yourself — hand the plan to mission_coordinator for execution. If the task is simple enough for one specialist, say so and name the specialist. When producing plans, keep them concrete: deliverables, dependencies, acceptance criteria, and stopping conditions. Publish key planning decisions and identified risks via share_finding.",
@@ -110,8 +107,7 @@
         // otherwise map to "none" (thinking fully off) on Qwen 3.8.
         "reasoningEffort": "medium",
         "enableThinking": false,
-        "temperature": 0.2,
-        "maxTokens": 4096
+        "temperature": 0.2
       },
       "maxIterations": 14,
       "turnTimeoutMs": 600000,
@@ -144,8 +140,7 @@
       "tags": ["evidence", "ledger", "grounding", "reconciliation", "conflict-detection", "attribution", "evidence-handoff"],
       "model": {
         "enableThinking": true,
-        "temperature": 0.1,
-        "maxTokens": 6144
+        "temperature": 0.1
       },
       "maxIterations": 10,
       "container": { "disabled": true }, // Tier 0/1 tools only — in-process is safe
@@ -172,8 +167,7 @@
       "tags": ["summary", "summarize", "tldr", "key-points", "condensation"],
       "model": {
         "enableThinking": false,
-        "temperature": 0.15,
-        "maxTokens": 4096
+        "temperature": 0.15
       },
       "maxIterations": 6,
       "container": { "disabled": true }, // Tier 0/1 tools only — in-process is safe
@@ -193,8 +187,7 @@
       "tags": ["content", "copywriting", "blog", "newsletter", "marketing", "press-release", "social-media", "documentation", "static-website", "microsite", "docs-site", "presentation", "slide-deck", "reveal.js"],
       "model": {
         "enableThinking": false,
-        "temperature": 0.3,
-        "maxTokens": 16384
+        "temperature": 0.3
       },
       "maxIterations": 10,
       // 10 min: multi-page generate_website / chunked-append deliverables span several full
@@ -231,8 +224,7 @@
         // chars vs medium→1.6k, and both far below xhigh→9k.
         "reasoningEffort": "low",
         "enableThinking": true,
-        "temperature": 0.2,
-        "maxTokens": 8192
+        "temperature": 0.2
       },
       "maxIterations": 10,
       "container": { "disabled": true }, // local-model setup: the agent-worker container cannot reach host LM Studio or the gateway-bound code_sandbox MCP (returns "container error: unknown") — run in-process like web_coder/backend_coder. The code_sandbox MCP does its own isolation, so JS/TS execution stays sandboxed.
@@ -256,10 +248,12 @@
       "description": "Front-end engineer that hand-writes raw multi-file web front-ends — index.html plus separate CSS and vanilla-JS (or lightweight-framework) files, including interactive SPAs and dashboards whose JS fetches a backend API. It produces the actual source files in the workspace (split across files and chunked writes), unlike content_writer which generates static pages from Markdown blocks; it writes only the client side and does not run a server (backend_coder launches the app via serve_app). Use when the request needs bespoke client-side HTML/CSS/JS code rather than authored Markdown content. Example queries: 'build a landing page with custom HTML/CSS/JS', 'erstelle eine mehrseitige SPA', 'baue ein Dashboard-Frontend, das eine API aufruft', 'schreibe das Frontend für die App, die das Backend ausliefert'.",
       "capabilities": ["front-end coding", "hand-written html/css/js", "single-page-app building", "interactive dashboard ui", "client-side api fetch", "responsive layout", "multi-file front-end authoring"],
       "tags": ["frontend", "html", "css", "javascript", "spa", "dashboard-ui", "client-side", "ajax-fetch", "multi-file"],
-      // maxTokens 16384: a complete self-contained app (~20KB HTML ≈ 7K tokens) plus thinking must
+      // No maxTokens pin: a complete self-contained app (~20KB HTML ≈ 7K tokens) plus thinking must
       // fit in ONE completion — at 8192 the big write_file call was cut mid-arguments every time
       // (audits 77944865, 0ac7d3fc, a438ef4a) and the file content was lost at the provider parser.
-      "model": { "enableThinking": true, "temperature": 0.2, "maxTokens": 16384 },
+      // The provider now derives the completion budget from what the context window has left
+      // (computeOutputTokenBudget), which is strictly more headroom than the old 16384 pin.
+      "model": { "enableThinking": true, "temperature": 0.2 },
       "maxIterations": 14,
       // 10 min: the chunked-build discipline below means a complete app is 4-6 full completions
       // (skeleton + data batches + logic). The 240s default killed the iSAQB quiz build mid-chunk-2
@@ -273,9 +267,9 @@
       "description": "Back-end engineer that BUILDS and RUNS a dynamic web app: writes a Node.js/Express server (server.js + package.json) that serves a front-end and/or its own JSON API endpoints, launches it as a LIVE container via serve_app, verifies it, and returns the gateway /api/app/<id>/ URL. Use whenever a request needs a running server or 'serve/run the app' — a purely static site or reveal.js deck does not (content_writer/web_coder). It authors and hosts a new backend, unlike api_integrator which only calls and tests an already-running external API. Example queries: 'build and serve an Express API for the dashboard', 'erstelle einen Node-Server, der das Frontend ausliefert, und starte ihn', 'stand up a small REST backend and run it on a live instance', 'serve the web app'.",
       "capabilities": ["node.js/express server authoring", "json api endpoint implementation", "serving a web app as a live container", "static-file serving", "app launch via serve_app", "served-app verification"],
       "tags": ["backend", "server", "nodejs", "express", "rest-api", "serve-app", "live-container", "fullstack", "dynamic-webapp"],
-      // maxTokens 16384: same single-completion headroom as web_coder — a full server.js +
+      // No maxTokens pin: same single-completion headroom as web_coder — a full server.js +
       // package.json write must never be cut mid-arguments by the completion cap.
-      "model": { "enableThinking": true, "temperature": 0.2, "maxTokens": 16384 },
+      "model": { "enableThinking": true, "temperature": 0.2 },
       "maxIterations": 14,
       // 10 min: chunked builds (server + skeleton + appended data batches + serve_app round trip)
       // need 4-6 full completions; the 240s default cuts them mid-chunk. Same budget as web_coder.
@@ -294,8 +288,7 @@
         // otherwise map to "none" (thinking fully off) on Qwen 3.8.
         "reasoningEffort": "medium",
         "enableThinking": true,
-        "temperature": 0.1,
-        "maxTokens": 8192
+        "temperature": 0.1
       },
       "maxIterations": 12,
       "container": { "disabled": true }, // read-only tools only — in-process is safe
@@ -320,8 +313,7 @@
       "tags": ["git", "version-control", "commit", "branch", "push", "tag", "github", "pull-request", "ci-checks", "actions-dispatch", "release"],
       "model": {
         "enableThinking": true,
-        "temperature": 0.1,
-        "maxTokens": 8192
+        "temperature": 0.1
       },
       "maxIterations": 12,
       "systemPrompt": "You are a Git + GitHub specialist. Use git_status to understand the current repository state before any operation. Use git_log to review commit history and git_diff to inspect changes. When committing, write clear conventional commit messages (type: description) and only stage files relevant to the change. When reviewing code, use git_diff to examine changes and share structured feedback via share_finding. For branching workflows, check the current branch with git_status before creating or switching branches. When cloning repositories, always use HTTPS URLs — SSH and git:// protocols are blocked for security. For GitHub interactions, use github_pr_list / github_pr_get to inspect existing PRs, github_pr_create to open a new PR (always with a clear title + Markdown body that summarizes what changed and why; never with auto-merge), github_pr_comment to add review feedback or status updates on a PR thread, github_check_runs_list to inspect CI status on a head SHA before merging, github_actions_runs_list and github_actions_trigger when a manual workflow_dispatch is appropriate, and github_release_create to publish a tagged release with operator-approved notes (typically produced by the release_notes_draft scene). Every GitHub mutate call (pr_create, pr_comment, actions_trigger, release_create) is approval-gated — do not treat approval as a formality. Publish useful findings (merge conflicts, significant changes, branch status, PR url, CI verdict) via share_finding.",
@@ -360,8 +352,7 @@
       "tags": ["shell", "cli", "ssh", "command", "shell-exec", "ssh-exec", "build-check", "terminal"],
       "model": {
         "enableThinking": false,
-        "temperature": 0.1,
-        "maxTokens": 4096
+        "temperature": 0.1
       },
       "maxIterations": 10,
       "systemPrompt": "You execute targeted shell or SSH commands for straightforward diagnostics and inspection. Use shell_exec for local workspace commands and ssh_exec when the task is explicitly about a remote server or host. Keep commands minimal, inspect the result, and publish durable findings with share_finding when they matter to other agents. Do not loop on the same failing command pattern. For single-command remote checks such as docker ps, whoami, systemctl status, journalctl, or df -h: run the requested command once via ssh_exec, then stop. If ssh_exec succeeds and returns stdout, your answer must be grounded in that stdout and must not be replaced with diagnosis or speculation. If ssh_exec fails, return the exact target, command, and the literal stderr or error text from ssh_exec instead of paraphrasing it into generic categories. If the output includes phrases like 'Permission denied', 'Connection refused', 'No route to host', or 'timed out', quote that exact phrase and classify only from that evidence.",
@@ -383,8 +374,7 @@
       "tags": ["quality-gate", "acceptance", "completeness", "consistency", "gap-analysis", "ship-or-rerun", "deliverable-review"],
       "model": {
         "enableThinking": true,
-        "temperature": 0.1,
-        "maxTokens": 6144
+        "temperature": 0.1
       },
       "maxIterations": 10,
       "container": { "disabled": true }, // Tier 0/1 read-only tools — in-process is safe
@@ -405,8 +395,7 @@
       "tags": ["qa", "run-tests", "test-execution", "regression", "bug-reproduction", "fix-verification", "vitest", "pytest"],
       "model": {
         "enableThinking": true,
-        "temperature": 0.1,
-        "maxTokens": 4096
+        "temperature": 0.1
       },
       "maxIterations": 10,
       "systemPrompt": "You verify that work actually solves the task. Reproduce the reported issue when possible, run the smallest relevant checks first, and only expand to broader validation when warranted. Distinguish clearly between confirmed fixes, partial fixes, and unverified assumptions. Publish concise verification findings and residual risks via share_finding so the final answer can separate evidence from hope.\n\nTreat the work report as a set of claims to verify, not as evidence.  Re-run every claimed check yourself with the smallest command that proves or refutes it, and quote the actual output.  Anything you could not execute gets labeled UNVERIFIED — never assumed true.  When you confirm a defect fix, also search for the same defect pattern elsewhere (workspace_search) and report TWINS: searched <pattern> — found <N> other sites before calling the fix complete.  Watch specifically for tests weakened or deleted to make the suite pass, partial completion reported as full success, and passing checks that contradict the documented intent of the code.\n\nFIX BY EDITING, NOT REWRITING. When something you produced is wrong or a check fails, do NOT re-emit the whole file. Locate the exact place with grep_files (it returns line numbers and surrounding context), change the smallest unique span with edit_file, then re-run the same check. Repeat until it passes. edit_file requires old_string to match exactly ONE place, so include enough surrounding lines to make it unique — if it reports several matches, add more context rather than falling back to write_file. Re-emitting a large file to change three lines is what exhausts the completion budget and truncates the result; a targeted edit costs a fraction and cannot corrupt the parts you did not touch. Reserve write_file for creating a file, or for a rewrite that genuinely replaces most of it.",
@@ -432,8 +421,7 @@
       "tags": ["diff-review", "pr-review", "merge-readiness", "change-risk", "coverage-gap", "branch-comparison", "commit-walkthrough"],
       "model": {
         "enableThinking": true,
-        "temperature": 0.2,
-        "maxTokens": 6144
+        "temperature": 0.2
       },
       "maxIterations": 12,
       "container": { "disabled": true }, // git_diff/log/status are Tier 0 read-only — in-process is safe

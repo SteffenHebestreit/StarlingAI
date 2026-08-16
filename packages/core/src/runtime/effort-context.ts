@@ -87,6 +87,9 @@ export const BUILTIN_EFFORT_PROFILES: Record<EffortTier, EffortProfile> = {
     maxDelegationDepth: 4,
     maxParallelSlices: 3,
     maxDelegatedResultChars: 40_000,
+    // Floor for an agent that PINNED its own maxTokens: applyEffortModelOverlay only
+    // raises an existing pin, never invents one (sub-agent-model-config.ts), so an
+    // unpinned agent stays on the derived per-request budget and this is inert for it.
     subAgentMaxTokens: 16_384,
     orchestratorTurnSloMs: 1_200_000,
     subAgentTurnSloMs: 600_000,
@@ -102,6 +105,7 @@ export const BUILTIN_EFFORT_PROFILES: Record<EffortTier, EffortProfile> = {
     maxDelegationDepth: 6,
     maxParallelSlices: 4,
     maxDelegatedResultChars: 120_000,
+    // Same "raise a pin, never invent one" semantics as the high tier above.
     subAgentMaxTokens: 32_768,
     orchestratorTurnSloMs: 86_400_000,
     subAgentTurnSloMs: 86_400_000,

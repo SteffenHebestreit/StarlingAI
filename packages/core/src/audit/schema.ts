@@ -58,6 +58,7 @@ export type CoreAuditEventType =
   | "sub_agent_started"
   | "sub_agent_completed"
   | "sub_agent_soft_deadline"
+  | "sub_agent_history_trimmed"
   | "sub_agent_tool_call"
   | "sub_agent_tool_blocked"
   | "sub_agent_max_iterations"

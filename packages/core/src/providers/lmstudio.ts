@@ -30,7 +30,7 @@ const MAX_PROVIDER_TIMEOUT_MS = 900_000;
  * on this hardware (a full build turn is minutes) and far below the 36-minute runaway
  * that motivated it.
  */
-const MAX_STREAM_TOTAL_MS = 1_200_000;
+export const MAX_STREAM_TOTAL_MS = 1_200_000;
 
 /**
  * Transport dispatcher with undici's body timeout DISABLED.
@@ -68,6 +68,30 @@ export class ProviderHardTimeoutError extends Error {
   }
 }
 
+/**
+ * Abort reason raised by a caller's own WALL-CLOCK DEADLINE.
+ *
+ * It is NOT an operator cancel. The run hit its own budget, so whatever the model
+ * already produced is still wanted: the provider salvages the partial, the caller
+ * relays its evidence. An operator cancel arrives with no such reason and must still
+ * discard. That distinction is the whole reason this is a typed reason rather than a
+ * bare abort — completeViaStream's salvage keys off `signal.aborted` alone today and
+ * would throw away a deadline-truncated partial.
+ */
+export class DeadlineAbort extends Error {
+  readonly isDeadlineAbort = true as const;
+  constructor(public readonly deadlineMs: number) {
+    super(`Wall-clock deadline of ${deadlineMs}ms reached while a completion was in flight`);
+    this.name = "DeadlineAbort";
+  }
+}
+
+export function isDeadlineAbort(reason: unknown): boolean {
+  return typeof reason === "object"
+    && reason !== null
+    && (reason as { isDeadlineAbort?: unknown }).isDeadlineAbort === true;
+}
+
 interface LMStudioProviderOptions {
   timeoutMs?: number;
   maxRetries?: number;
@@ -92,12 +116,202 @@ export interface OpenAICompatibleProviderRuntimeSnapshot {
   lastHealthCheckLatencyMs?: number;
 }
 
+/** Floor on the SILENCE budget of a LOCALLY served model. Raised above 300_000 because
+ *  a graded-thinking model legitimately emits nothing for ~5 minutes inside one
+ *  reasoning block. It replaces the old `20_000 + maxTokens * 25` floor, which produced
+ *  ~430s for the (now deleted) 16384-token pins and collapses to the bare configured
+ *  30s once maxTokens is absent — which is why the floor cannot simply be dropped. */
+const MIN_PROVIDER_SILENCE_MS = 600_000;
+
+/**
+ * Is this endpoint served from the local machine / local network?
+ *
+ * The generous silence floor exists for ONE reason: a graded-thinking model we serve
+ * ourselves goes byte-silent for minutes inside a reasoning block. That reason does
+ * not transfer to a remote endpoint — a cloud API that accepts a request and then
+ * says nothing for ten minutes is dead, and its configured `timeoutMs` is a real
+ * fail-fast instruction the failover chain depends on. Structural test (hostname
+ * shape), not a provider-name list.
+ */
+export function isLocallyServedEndpoint(baseUrl: string): boolean {
+  let host: string;
+  try {
+    host = new URL(baseUrl).hostname.toLowerCase();
+  } catch {
+    return true; // unparseable — keep the conservative (generous) budget
+  }
+  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local")) return true;
+  if (host === "host.docker.internal" || host.endsWith(".internal")) return true;
+  if (!host.includes(".")) return true; // bare docker-compose service name
+  if (host === "::1" || host === "[::1]") return true;
+  return /^127\./.test(host)
+    || /^10\./.test(host)
+    || /^192\.168\./.test(host)
+    || /^172\.(1[6-9]|2\d|3[01])\./.test(host);
+}
+
+/**
+ * The provider's per-chunk SILENCE budget — how long the remote may send nothing
+ * at all before we call it hung.
+ *
+ * It is no longer derived from maxTokens. That coupling was wrong in both directions:
+ * it assumed 40 tok/s (25 ms/token) against a measured ~15.3 tok/s, and it meant that
+ * raising the output budget silently stretched stall detection from 2 minutes to 15.
+ * Now that the completion budget is derived per request there is no constant to derive
+ * from, and TOTAL runtime is bounded by the caller's deadline signal, not by this.
+ *
+ * The floor is applied only where its justification holds. Pass `locallyServed: false`
+ * for a REMOTE endpoint and the configured `providers.<name>.timeoutMs` is honoured
+ * verbatim (clamped only by MAX_PROVIDER_TIMEOUT_MS), so a dead cloud endpoint hands
+ * over to the failover chain in seconds instead of ten minutes. Omitting the flag
+ * keeps the conservative local behaviour.
+ *
+ * Operator note: a self-hosted thinking model reached over a PUBLIC hostname is
+ * classified remote and therefore gets its configured budget, not the 10-minute floor.
+ * Raise `providers.<name>.timeoutMs` for it (or address it by a private/`.internal`
+ * host) — otherwise a legitimate multi-minute reasoning block reads as a stall.
+ */
 export function computeOpenAICompatibleRequestTimeoutMs(
-  modelConfig: Partial<Pick<ModelConfig, "maxTokens">>,
+  _modelConfig: Partial<Pick<ModelConfig, "maxTokens">>,
   configuredTimeoutMs = DEFAULT_PROVIDER_TIMEOUT_MS,
+  opts: { locallyServed?: boolean } = {},
 ): number {
-  const tokenBudgetTimeoutMs = 20_000 + Math.max(0, modelConfig.maxTokens ?? 0) * 25;
-  return Math.min(MAX_PROVIDER_TIMEOUT_MS, Math.max(configuredTimeoutMs, tokenBudgetTimeoutMs));
+  const floor = opts.locallyServed === false ? 0 : MIN_PROVIDER_SILENCE_MS;
+  return Math.min(MAX_PROVIDER_TIMEOUT_MS, Math.max(configuredTimeoutMs, floor));
+}
+
+/**
+ * Deliberately pessimistic chars-per-token ratio.
+ *
+ * There is no tokenizer in this repo (no tiktoken / js-tiktoken / llama-tokenizer
+ * dependency), so this is a heuristic. 4.0 is the English-prose average; code, JSON,
+ * tool schemas and non-English text run 2.5-3.5. Under-counting the PROMPT is the only
+ * error that can push prompt+completion past the served window — and the server's
+ * response to that is to truncate the FRONT of the prompt, i.e. the system message —
+ * so the divisor must sit at the BOTTOM of that band, not the top. 3.4 was the top of
+ * it and under-counted German (~2.8-3.0 on a Qwen tokenizer), which this deployment
+ * routes routinely.
+ *
+ * Known residual: CJK runs ~1-1.5 chars/token and is still under-counted here. A
+ * divisor low enough for CJK would over-count Latin prose by ~3x and shrink every
+ * request's derived completion budget accordingly, so the honest statement is: this
+ * covers Latin-script prose, code and JSON, and the OUTPUT_BUDGET_RESERVE_FRACTION
+ * absorbs the remainder. A real tokenizer is the only complete fix.
+ */
+export const PROMPT_ESTIMATE_CHARS_PER_TOKEN = 3.0;
+/** Per-message role/JSON framing the char count cannot see. */
+export const PROMPT_ESTIMATE_MESSAGE_OVERHEAD_TOKENS = 8;
+/** Slack left unusable by EITHER side, absorbing the heuristic's error. */
+export const OUTPUT_BUDGET_RESERVE_FRACTION = 0.08;
+export const OUTPUT_BUDGET_MIN_RESERVE_TOKENS = 512;
+/** Below this a shrunken request is not worth issuing — let the server refuse honestly. */
+export const OUTPUT_BUDGET_FLOOR_TOKENS = 1_024;
+/** Fallback window when a config carries a non-numeric/absent contextWindow. Matches
+ *  ModelConfigSchema's default so a bad value degrades to the documented behaviour
+ *  instead of putting NaN on the wire. */
+export const FALLBACK_CONTEXT_WINDOW_TOKENS = 32_768;
+/**
+ * Completion headroom the INPUT side must leave free.
+ *
+ * Both trimmers (agent/session.ts for the orchestrator, agent/sub-agent-history.ts for
+ * sub-agents) exist to guarantee this much room is still available AFTER the provider
+ * takes its own reserve — see computePromptTokenBudget.
+ */
+export const MIN_USABLE_OUTPUT_TOKENS = 8_192;
+
+/** The context window to budget against: the configured number when it is usable, the
+ *  schema default otherwise. `PATCH /api/agents/:name/model` copies `contextWindow`
+ *  through a bare allow-list cast, so a null/string/NaN can reach here; before the
+ *  budget was derived it was inert, now it would serialise as `max_tokens: null`. */
+function usableContextWindow(contextWindow: number): number {
+  return Number.isFinite(contextWindow) && contextWindow > 0
+    ? Math.floor(contextWindow)
+    : FALLBACK_CONTEXT_WINDOW_TOKENS;
+}
+
+/**
+ * INPUT bound: the largest prompt — measured in PROMPT_ESTIMATE_CHARS_PER_TOKEN tokens,
+ * the same unit computeOutputTokenBudget re-measures it in — that still leaves
+ * MIN_USABLE_OUTPUT_TOKENS of completion budget after the provider's reserve.
+ *
+ * A flat `contextWindow * 0.75` could not make that promise: at contextWindow 32768 it
+ * leaves 8192 tokens minus the 8% reserve = 5570, and at 8192 the naive
+ * `contextWindow - MIN_USABLE_OUTPUT_TOKENS` goes to zero, which makes a trimmer clamp
+ * to its minKeep on every single turn. So: take the tighter of 0.75 and the real
+ * headroom bound, then never let it fall below half the window.
+ */
+export function computePromptTokenBudget(contextWindow: number): number {
+  const cw = usableContextWindow(contextWindow);
+  const providerReserve = Math.max(
+    OUTPUT_BUDGET_MIN_RESERVE_TOKENS,
+    Math.ceil(cw * OUTPUT_BUDGET_RESERVE_FRACTION),
+  );
+  const headroomBound = cw - providerReserve - MIN_USABLE_OUTPUT_TOKENS;
+  return Math.max(Math.floor(cw * 0.5), Math.min(Math.floor(cw * 0.75), headroomBound));
+}
+
+/**
+ * Estimate the tokens a request's INPUT will occupy.
+ *
+ * Unlike agent/session.ts:734 this counts what actually goes on the wire:
+ * tool_call arguments (a write_file argument is the single largest thing in a
+ * builder agent's history and is invisible to the session-side estimator, which
+ * is fed the collapsed view) and the tool schemas.
+ */
+export function estimatePromptTokensForRequest(
+  messages: readonly LLMMessage[],
+  tools: readonly LLMToolDef[] = [],
+): number {
+  let chars = 0;
+  for (const message of messages) {
+    chars += typeof message.content === "string" ? message.content.length : 0;
+    if (message.tool_call_id) chars += message.tool_call_id.length;
+    for (const call of message.tool_calls ?? []) {
+      chars += call.function.name.length + call.function.arguments.length;
+    }
+  }
+  for (const tool of tools) {
+    chars += tool.name.length
+      + tool.description.length
+      + JSON.stringify(tool.parameters ?? {}).length;
+  }
+  return Math.ceil(chars / PROMPT_ESTIMATE_CHARS_PER_TOKEN)
+    + messages.length * PROMPT_ESTIMATE_MESSAGE_OVERHEAD_TOKENS;
+}
+
+/**
+ * The completion budget for THIS request: everything the context window has left
+ * after the prompt, minus a reserve.
+ *
+ * This replaces a configured constant. On this API max_tokens is a SHARED
+ * reasoning+content budget, so a fixed number does not bound "the answer" — it
+ * bounds thinking, and the model is guillotined mid-<think> before it ever emits a
+ * tool call. The window is the only genuinely scarce resource; a declared
+ * maxTokens is honoured only as a deliberate ceiling on top of it.
+ *
+ * Every input is guarded for finiteness: this number now goes on the wire as
+ * `max_tokens`, and `JSON.stringify` turns a NaN into `null`, which a server either
+ * rejects or silently replaces with its own default — a discarded budget nobody logs.
+ */
+export function computeOutputTokenBudget(input: {
+  contextWindow: number;
+  estimatedPromptTokens: number;
+  declaredMaxTokens?: number;
+}): number {
+  const contextWindow = usableContextWindow(input.contextWindow);
+  const promptTokens = Number.isFinite(input.estimatedPromptTokens)
+    ? Math.max(0, input.estimatedPromptTokens)
+    : contextWindow; // unknown prompt size — assume it fills the window, fall to the floor
+  const reserve = Math.max(
+    OUTPUT_BUDGET_MIN_RESERVE_TOKENS,
+    Math.ceil(contextWindow * OUTPUT_BUDGET_RESERVE_FRACTION),
+  );
+  const derived = contextWindow - promptTokens - reserve;
+  const budget = Math.max(OUTPUT_BUDGET_FLOOR_TOKENS, derived);
+  const declared = input.declaredMaxTokens;
+  return typeof declared === "number" && Number.isFinite(declared) && declared > 0
+    ? Math.min(Math.floor(declared), budget)
+    : budget;
 }
 
 /**
@@ -137,6 +351,23 @@ export interface LLMToolDef {
   parameters: Record<string, unknown>;
 }
 
+export interface LLMUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  /** True when these numbers were NOT reported by the provider but reconstructed from
+   *  the produced text (the salvage path — a cut stream never delivers the usage
+   *  chunk). Cost and budget code can still spend them, but must not present them as
+   *  metered. */
+  estimated?: boolean;
+  /** The share of `completionTokens` that is chain-of-thought rather than answer text
+   *  or tool-call arguments. `completionTokens` stays whole (reasoning IS billed as
+   *  completion), but a progress/stall check needs to tell "the model is thinking in
+   *  circles" from "the model is producing output" — subtract this to get the latter.
+   *  Only populated where the split is actually known (currently the salvage path). */
+  reasoningTokens?: number;
+}
+
 export interface LLMResponse {
   content: string | null;
   /** Chain-of-thought / reasoning text, when the model exposes it (qwen
@@ -148,8 +379,13 @@ export interface LLMResponse {
     name: string;
     arguments: Record<string, unknown>;
   }>;
-  usage: { promptTokens: number; completionTokens: number; totalTokens: number };
+  usage: LLMUsage;
   finishReason: string;
+  /** Set when the response is known-incomplete and WHY. `finishReason: "length"` alone
+   *  is ambiguous now: it is the real provider value on a genuine budget stop, and a
+   *  fabricated one on the salvage path. Filling usage on salvage removes the accidental
+   *  `completionTokens === 0` discriminator, so state it explicitly instead. */
+  truncatedBy?: "output_budget" | "deadline" | "transport";
 }
 
 export interface StreamChunk {
@@ -159,7 +395,7 @@ export interface StreamChunk {
   toolName?: string;
   argumentsDelta?: string;
   finishReason?: string;
-  usage?: { promptTokens: number; completionTokens: number; totalTokens: number };
+  usage?: LLMUsage;
 }
 
 /**
@@ -589,7 +825,9 @@ export class LMStudioProvider {
     this.baseUrl = baseUrl;
     this.modelConfig = modelConfig;
     this.configuredMaxRetries = Math.max(0, options.maxRetries ?? 1);
-    this.requestTimeoutMs = computeOpenAICompatibleRequestTimeoutMs(modelConfig, options.timeoutMs);
+    this.requestTimeoutMs = computeOpenAICompatibleRequestTimeoutMs(modelConfig, options.timeoutMs, {
+      locallyServed: isLocallyServedEndpoint(baseUrl),
+    });
     this.client = new OpenAI({
       baseURL: baseUrl,
       apiKey: apiKey,
@@ -727,6 +965,28 @@ export class LMStudioProvider {
     return line ? [{ role: "system", content: line } as ChatCompletionMessageParam, ...msgs] : msgs;
   }
 
+  /** Per-request completion budget. Estimated on the pre-normalisation messages;
+   *  foldSystemMessages only merges/relabels, it does not change the byte count, and
+   *  withReasoningSystemLine's one extra line is inside the reserve.
+   *
+   *  KNOWN LIMIT — `this.modelConfig.contextWindow` describes the model the OPERATOR
+   *  configured, not necessarily the model this endpoint serves. providers/index.ts
+   *  spreads one ModelConfig across every endpoint of a failover chain
+   *  (createChatProvider) and overrides only `primary` for the tier ladder
+   *  (getChatProviderForTier), so a small routing/fallback model can be handed a budget
+   *  derived from the big model's window and ask a server for more than it serves.
+   *  While max_tokens was a fixed small constant that was harmless; now it sizes the
+   *  request. The fix belongs where the per-endpoint config is built (a per-endpoint
+   *  `contextWindow`), not here — this class is handed one number and has no way to
+   *  learn the served window without probing the endpoint. */
+  private resolveMaxTokens(messages: readonly LLMMessage[], tools: readonly LLMToolDef[]): number {
+    return computeOutputTokenBudget({
+      contextWindow: this.modelConfig.contextWindow,
+      estimatedPromptTokens: estimatePromptTokensForRequest(messages, tools),
+      declaredMaxTokens: this.modelConfig.maxTokens,
+    });
+  }
+
   // The OpenAI SDK's `timeout` option has been observed not to fire when
   // LM Studio holds the HTTP connection open without sending data (we saw a
   // single `complete()` call run for 20 min past a 5-min SDK timeout). This
@@ -850,7 +1110,7 @@ export class LMStudioProvider {
             tools: openAITools.length > 0 ? openAITools : undefined,
             tool_choice: openAITools.length > 0 ? "auto" : undefined,
             temperature: effectiveTemp,
-            max_tokens: this.modelConfig.maxTokens,
+            max_tokens: this.resolveMaxTokens(messages, tools),
             ...(effectiveTopP !== undefined && { top_p: effectiveTopP }),
             ...(this.modelConfig.topK !== undefined && { top_k: this.modelConfig.topK }),
             ...(this.modelConfig.minP !== undefined && { min_p: this.modelConfig.minP }),
@@ -902,6 +1162,9 @@ export class LMStudioProvider {
             totalTokens: response.usage?.total_tokens ?? 0,
           },
           finishReason: choice.finish_reason ?? "stop",
+          // The provider's own budget stop, as opposed to the fabricated "length"
+          // completeViaStream sets when it salvages a cut stream.
+          ...(choice.finish_reason === "length" ? { truncatedBy: "output_budget" as const } : {}),
         };
       } catch (err: unknown) {
         endProviderCall(callId);
@@ -948,7 +1211,8 @@ export class LMStudioProvider {
     const toolBuffers = new Map<string, { id: string; name: string; args: string }>();
     const toolOrder: string[] = [];
     let finishReason = "stop";
-    let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+    let truncatedBy: LLMResponse["truncatedBy"];
+    let usage: LLMUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 
     try {
       for await (const chunk of this.stream(messages, tools, signal)) {
@@ -974,6 +1238,9 @@ export class LMStudioProvider {
           }
           case "done":
             finishReason = chunk.finishReason ?? finishReason;
+            // The provider's OWN "length" — the request's max_tokens was reached.
+            // Distinct from the fabricated "length" the salvage path below sets.
+            if (finishReason === "length") truncatedBy = "output_budget";
             if (chunk.usage) usage = chunk.usage;
             break;
         }
@@ -993,7 +1260,11 @@ export class LMStudioProvider {
       // An operator cancel is NOT a salvage case — the user asked for it to stop, so
       // the abort must propagate. Only a failure the caller did not ask for
       // (transport drop, provider stall) salvages.
-      const operatorCancelled = signal?.aborted === true;
+      // A DEADLINE abort is not an operator cancel: the run hit its own wall clock,
+      // and with no token ceiling that deadline is now the ONLY bound — so it fires
+      // routinely on healthy long generations, and discarding their output would
+      // convert every long run into a total loss.
+      const operatorCancelled = signal?.aborted === true && !isDeadlineAbort(signal.reason);
       const salvageable = content.trim().length > 0 || toolOrder.length > 0 || reasoningParts.length > 0;
       if (!salvageable || operatorCancelled) throw err;
       log.warn({
@@ -1002,6 +1273,44 @@ export class LMStudioProvider {
         toolCalls: toolOrder.length,
         reasoningChars: reasoningParts.join("").length,
       }, "Stream failed after producing content — salvaging the partial result instead of failing the turn");
+      // Usage arrives only in the final empty-choices chunk, which a cut stream never
+      // reaches — so a salvaged run reported completionTokens: 0, and the cost
+      // aggregator (observability/cost.ts prices promptTokens and completionTokens
+      // SEPARATELY) under-reported the call to nothing.
+      //
+      // Both sides are reconstructed, not just the completion side: leaving
+      // promptTokens at 0 would keep totalTokens wrong by the whole prompt — on a
+      // 28k-token prompt that is a 3-4x under-count of the call, repeated on every
+      // salvaged iteration, silently keeping a run under its budget threshold. The
+      // prompt is estimated with the same heuristic resolveMaxTokens already used to
+      // size this very request, so the two numbers at least agree with each other.
+      //
+      // `estimated: true` marks the whole record as reconstructed so downstream cost
+      // code can tell metered numbers from inferred ones, and `reasoningTokens`
+      // preserves the discriminator the old `completionTokens === 0` accidentally
+      // provided: a run that emits ONLY chain-of-thought and never a tool call is
+      // stalled, not progressing, and a stall check must be able to see that
+      // (agent/progress-verifier.ts isHardStall reads the completion counter alone).
+      if (usage.completionTokens === 0 || usage.promptTokens === 0) {
+        const reasoningChars = reasoningParts.join("").length;
+        const outputChars = content.length
+          + toolOrder.reduce((sum, id) => sum + (toolBuffers.get(id)?.args.length ?? 0), 0);
+        const estimatedReasoning = Math.ceil(reasoningChars / PROMPT_ESTIMATE_CHARS_PER_TOKEN);
+        const completionTokens = usage.completionTokens > 0
+          ? usage.completionTokens
+          : estimatedReasoning + Math.ceil(outputChars / PROMPT_ESTIMATE_CHARS_PER_TOKEN);
+        const promptTokens = usage.promptTokens > 0
+          ? usage.promptTokens
+          : estimatePromptTokensForRequest(messages, tools);
+        usage = {
+          promptTokens,
+          completionTokens,
+          totalTokens: promptTokens + completionTokens,
+          estimated: true,
+          reasoningTokens: Math.min(estimatedReasoning, completionTokens),
+        };
+      }
+      truncatedBy = isDeadlineAbort(signal?.reason) ? "deadline" : "transport";
       finishReason = "length";
     }
 
@@ -1029,6 +1338,7 @@ export class LMStudioProvider {
       tool_calls,
       usage,
       finishReason,
+      ...(truncatedBy ? { truncatedBy } : {}),
     };
   }
 
@@ -1120,7 +1430,7 @@ export class LMStudioProvider {
         // multi-minute cost on the slow local model (audit 5d51862f).
         tool_choice: openAITools.length > 0 ? (options?.toolChoice ?? "auto") : undefined,
         temperature: streamEffectiveTemp,
-        max_tokens: this.modelConfig.maxTokens,
+        max_tokens: this.resolveMaxTokens(messages, tools),
         ...(streamEffectiveTopP !== undefined && { top_p: streamEffectiveTopP }),
         ...(this.modelConfig.topK !== undefined && { top_k: this.modelConfig.topK }),
         ...(this.modelConfig.minP !== undefined && { min_p: this.modelConfig.minP }),
@@ -1169,16 +1479,32 @@ export class LMStudioProvider {
     // completeViaStream, hitting the cap keeps whatever was produced rather than
     // discarding the run.
     const streamStartedAt = Date.now();
-    const totalCapMs = Math.max(this.requestTimeoutMs, MAX_STREAM_TOTAL_MS);
+    // BACKSTOP only. The real bound is the caller's deadline signal (the sub-agent
+    // turn deadline, the gateway turn timeout); this exists so a caller that passes
+    // NO signal still cannot hang forever.
+    //
+    // The old `Math.max(this.requestTimeoutMs, …)` was dead code: requestTimeoutMs is
+    // clamped to MAX_PROVIDER_TIMEOUT_MS (900_000), always below MAX_STREAM_TOTAL_MS
+    // (1_200_000), so the max always resolved to the constant and the cap never scaled.
+    const totalCapMs = MAX_STREAM_TOTAL_MS;
 
     try {
       for await (const chunk of stream) {
         if (Date.now() - streamStartedAt > totalCapMs) {
-          streamAc.abort(new Error(
+          // THROW, do not break. A `break` leaves the try block normally: the catch
+          // below never runs, recordRequestSuccess() fires, collectedFinishReason is
+          // still undefined so `?? "stop"` reports a CLEAN STOP, and collectedUsage is
+          // still undefined so the caller records {0,0,0} tokens. A guillotined
+          // generation was being laundered into a successful one that no downstream
+          // gate, scorecard or audit record could distinguish from a finished answer.
+          // Throwing routes it through the catch (health counters see a failure) and
+          // then through completeViaStream's salvage, which keeps the partial.
+          const capErr = new Error(
             `LLM stream exceeded its total budget of ${Math.round(totalCapMs / 1000)}s while still producing output `
             + "— the model is generating without converging (most often a runaway reasoning block)",
-          ));
-          break;
+          );
+          streamAc.abort(capErr);
+          throw capErr;
         }
         armInactivity();
         // Usage arrives in a final chunk with empty choices (stream_options.include_usage)

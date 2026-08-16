@@ -112,9 +112,26 @@ export const ModelConfigSchema = z.object({
   baseUrl: z.string().url().optional(),
   /** Override the provider's apiKey for this specific model endpoint. Falls back to the provider's configured apiKey when omitted. */
   apiKey: z.string().optional(),
-  contextWindow: z.number().int().min(2048).max(131072).default(32768),
+  /** Context window the model is SERVED with. This is the only budget that is
+   *  really scarce: prompt and completion share it. Raised from max(131072)
+   *  because the configured value was already pinned at the schema maximum while
+   *  the box serves 262144, i.e. half the real window was unreachable from config. */
+  contextWindow: z.number().int().min(2048).max(1_048_576).default(32768),
   temperature: z.number().min(0).max(2).default(0.3),
-  maxTokens: z.number().int().min(256).max(16384).default(4096),
+  /** OPTIONAL hard pin on completion tokens.
+   *
+   *  Leave it UNSET. When unset the provider derives the budget per request as
+   *  contextWindow − estimated prompt − reserve (providers/lmstudio.ts,
+   *  computeOutputTokenBudget), which is the only number that is actually
+   *  meaningful: max_tokens on the OpenAI-compatible wire is a SHARED
+   *  reasoning+content budget, so a fixed value truncates mid-`<think>` and the
+   *  model never reaches the point of emitting a tool call (measured:
+   *  completionTokens == maxTokens EXACTLY, 0 tool calls, 46k-59k reasoning chars).
+   *
+   *  When set it is honoured as a CEILING (min with the derived budget), for the
+   *  rare case of deliberately capping spend on a priced cloud model. The
+   *  remaining .max() is a sanity bound against a typo, not a policy. */
+  maxTokens: z.number().int().min(256).max(1_048_576).optional(),
   topP: z.number().min(0).max(1).optional(),
   topK: z.number().int().min(1).max(200).optional(),
   minP: z.number().min(0).max(1).optional(),
@@ -201,8 +218,12 @@ export const ModelPresetSchema = z.object({
   primary: z.string().max(200),
   /** Explicit fallback; defaults to the regular configured primary. */
   fallback: z.string().max(200).optional(),
-  maxTokens: z.number().int().min(256).max(16384).optional(),
-  contextWindow: z.number().int().min(2048).max(131072).optional(),
+  /** Independent second cap: providers/index.ts overwrites the resolved
+   *  ModelConfig unconditionally, so a preset ceiling here re-imposes itself on
+   *  every agent (modelPresetScope defaults to "all"). Kept in step with
+   *  ModelConfigSchema above. */
+  maxTokens: z.number().int().min(256).max(1_048_576).optional(),
+  contextWindow: z.number().int().min(2048).max(1_048_576).optional(),
 });
 export type ModelPreset = z.infer<typeof ModelPresetSchema>;
 

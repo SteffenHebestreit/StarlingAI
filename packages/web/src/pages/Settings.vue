@@ -1552,9 +1552,11 @@
                   </div>
                   <div>
                     <label class="field-label text-xs">maxTokens</label>
-                    <input type="number" step="256" min="256" max="16384"
-                      :value="agent.model.maxTokens ?? 4096"
-                      @change="agentsStore.patchModel(agent.name, { maxTokens: +($event.target as HTMLInputElement).value })"
+                    <input type="number" step="256" min="256" max="1048576"
+                      :value="agent.model.maxTokens ?? ''"
+                      placeholder="derived"
+                      title="Leave empty to derive the output budget per request from the context window. A value here is a hard ceiling."
+                      @change="agentsStore.patchModel(agent.name, { maxTokens: ($event.target as HTMLInputElement).value ? +($event.target as HTMLInputElement).value : undefined })"
                       class="input-box text-sm" />
                   </div>
                   <div>

@@ -8,7 +8,11 @@ import { PRODUCT } from "../product/index.js";
 
 const completeMock = vi.fn();
 
-vi.mock("../providers/lmstudio.js", () => ({
+vi.mock("../providers/lmstudio.js", async (importActual) => ({
+  // Spread the real module: sub-agent.ts and its helpers import value exports
+  // (computePromptTokenBudget, DeadlineAbort, ...) from here, and a mock that
+  // replaced the whole module broke every time production code grew an export.
+  ...(await importActual<typeof import("../providers/lmstudio.js")>()),
   LMStudioProvider: class {
     async complete(messages: unknown, tools: unknown, signal?: AbortSignal) {
       return completeMock(messages, tools, signal);
@@ -29,7 +33,7 @@ describe("sub-agent turn timeouts", () => {
     await swarmMemory.resetSharedMemoryForTests();
   });
 
-  it("lets the current sub-agent LLM call finish after per-agent turnTimeoutMs elapses", async () => {
+  it("ABORTS the in-flight sub-agent LLM call when per-agent turnTimeoutMs elapses", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-timeout-"));
     const configPath = join(tempDir, "starlingai.json");
 
@@ -47,31 +51,48 @@ describe("sub-agent turn timeouts", () => {
 
     process.env["SAI_CONFIG_PATH"] = configPath;
 
+    // The deadline used to be a boolean latch read BETWEEN iterations, so a call that
+    // never returned was never interrupted: an agent configured with turnTimeoutMs
+    // 600000 was measured running 1,069,298 ms — 78% over its own budget — because it
+    // was healthily streaming the whole time. The deadline now aborts the in-flight
+    // completion, which is what makes the wall clock a real bound now that the output
+    // token ceiling (previously the only thing that stopped a runaway) is gone.
+    let sawAbort = false;
     completeMock.mockImplementation((_messages: unknown, _tools: unknown, signal?: AbortSignal) => new Promise((resolve, reject) => {
-      signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      signal?.addEventListener("abort", () => {
+        sawAbort = true;
+        reject(new Error("aborted"));
+      }, { once: true });
       setTimeout(() => resolve({
         content: "Finished the current LLM run after the deadline.",
         tool_calls: [],
         usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
         finishReason: "stop",
-      }), 1100);
+      }), 5000);
     }));
 
     try {
       const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const startedAt = Date.now();
       const result = await runSubAgentWithStats({
         agentName: "slow_agent",
         task: "Do a very slow thing.",
         parentSessionId: "parent-1",
         workspacePath: "/workspace",
       });
+      const elapsedMs = Date.now() - startedAt;
 
-      expect(result.output).toContain("Finished the current LLM run after the deadline.");
-      expect(completeMock).toHaveBeenCalledTimes(1);
+      // The discriminating assertion: the call would have resolved at 5000ms, and the
+      // deadline is 1000ms. Returning at all before 5000ms is only possible if the
+      // in-flight completion was actually cut off. Revert the abort and this hangs
+      // until the mock resolves, then fails on the content assertion below.
+      expect(sawAbort).toBe(true);
+      expect(elapsedMs).toBeLessThan(5000);
+      expect(result.output).not.toContain("Finished the current LLM run after the deadline.");
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
-  }, 10000);
+  }, 15000);
 
   it("includes partial swarm progress in timeout output when work was already underway", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-timeout-progress-"));
@@ -1375,7 +1396,7 @@ describe("sub-agent turn timeouts", () => {
     }
   }, 10000);
 
-  it("records an adaptive timeout budget without creating an internal abort signal", async () => {
+  it("records an adaptive timeout budget and arms an abort signal enforcing it", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-adaptive-timeout-"));
     const configPath = join(tempDir, "starlingai.json");
 
@@ -1443,8 +1464,14 @@ describe("sub-agent turn timeouts", () => {
 
       expect(result.output).toBe("done");
       expect(completeMock).toHaveBeenCalledTimes(1);
+      // An adaptive budget is still a budget, so the call must carry a signal that can
+      // enforce it — un-aborted here, because this run finished well inside it. Passing
+      // `undefined` (the old contract) is what made a turn deadline unenforceable
+      // against a completion that never returns. Agents that declare turnTimeoutMs
+      // "unbound" get `undefined`; that case is covered by the next test.
       const passedSignal = completeMock.mock.calls[0]?.[2] as AbortSignal | undefined;
-      expect(passedSignal).toBeUndefined();
+      expect(passedSignal).toBeInstanceOf(AbortSignal);
+      expect(passedSignal!.aborted).toBe(false);
       const startEvent = auditEvents.find(
         (event) => event.type === "sub_agent_started" && event.data.agentName === "adaptive_agent",
       );

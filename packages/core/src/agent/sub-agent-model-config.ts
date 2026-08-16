@@ -43,24 +43,22 @@ export function mergeAgentModelOverride(
  *    artifacts (audit 463d6192). Precedence: explicit agent opt-out > effort dial > default.
  * Pure so the precedence is unit-testable without a running sub-agent.
  */
-/**
- * Ceiling on the effort the DIAL may hand a sub-agent.
+/*
+ * NOTE — there is deliberately NO clamp on the effort the dial hands a sub-agent.
  *
- * A sub-agent's deliverable is tool calls — write the file, serve the app, run the
- * test. Deliberation is the orchestrator's job. The top reasoning rung multiplies
- * badly with the same tier's raised token budget, and the two together produced a
- * total loss: backend_coder at high effort emitted 97,714 characters of reasoning,
- * consumed all 32,768 completion tokens, called ZERO tools, and failed after 36
- * minutes. The model was not stuck and the task was not too hard — it was handed a
- * budget to think with and no ceiling on thinking.
+ * One briefly lived here, folding high/xhigh down to medium on the theory that the
+ * top rung was what made backend_coder emit 97,714 characters of reasoning, call
+ * ZERO tools and die at 36 minutes. Measurement refuted it. Across four cap-hits on
+ * qwen3.8-27b the reasoning volume was independent of the rung — content_writer sat
+ * on the LOWEST rung LM Studio accepts and burned the MOST (59,508 chars) — and in
+ * every case completionTokens equalled maxTokens EXACTLY. The model was not
+ * over-thinking because of the rung; it was being TRUNCATED mid-thought by a shared
+ * reasoning+content budget, so it never reached the point of emitting a tool call.
  *
- * An agent may still PIN the top rung for itself; this clamps only what the dial
- * imposes on an agent that expressed no preference.
+ * The fix is the derived output budget (providers/lmstudio.ts computeOutputTokenBudget),
+ * not a quieter rung. Clamping here only made max effort silently not-max for every
+ * sub-agent, for no measured gain.
  */
-function clampSubAgentEffort(effort: ReasoningEffort): ReasoningEffort {
-  return effort === "high" || effort === "xhigh" ? "medium" : effort;
-}
-
 export function applyEffortModelOverlay(
   baseModelConfig: ModelConfig,
   effortProfile:
@@ -81,14 +79,18 @@ export function applyEffortModelOverlay(
   const agentPinnedEffort = baseModelConfig.reasoningEffort !== undefined;
   return {
     ...baseModelConfig,
-    ...(effortProfile.subAgentMaxTokens !== undefined
-      ? { maxTokens: Math.max(baseModelConfig.maxTokens ?? 0, effortProfile.subAgentMaxTokens) }
+    // The dial may only RAISE an existing pin. It must NOT invent one: an agent
+    // with no maxTokens is on the derived budget, and Math.max(0, 16_384) would
+    // silently pin it back to a fixed 16_384 — the very ceiling the directive
+    // removes, re-applied by the effort tier.
+    ...(effortProfile.subAgentMaxTokens !== undefined && baseModelConfig.maxTokens !== undefined
+      ? { maxTokens: Math.max(baseModelConfig.maxTokens, effortProfile.subAgentMaxTokens) }
       : {}),
     ...(effortProfile.enableThinking !== undefined && !agentDisabledThinking
       ? { enableThinking: effortProfile.enableThinking }
       : {}),
     ...(effortProfile.reasoningEffort !== undefined && !agentDisabledThinking && !agentPinnedEffort
-      ? { reasoningEffort: clampSubAgentEffort(effortProfile.reasoningEffort) }
+      ? { reasoningEffort: effortProfile.reasoningEffort }
       : {}),
   };
 }

@@ -29,7 +29,13 @@ import { childLogger } from "../logger.js";
 import type { ModelConfig } from "../config/schema.js";
 import {
   computeOpenAICompatibleRequestTimeoutMs,
+  computeOutputTokenBudget,
+  estimatePromptTokensForRequest,
+  isDeadlineAbort,
+  MAX_STREAM_TOTAL_MS,
+  PROMPT_ESTIMATE_CHARS_PER_TOKEN,
   ProviderHardTimeoutError,
+  salvageToolCallArguments,
   type ChatProvider,
   type LLMMessage,
   type LLMResponse,
@@ -56,6 +62,64 @@ export const ANTHROPIC_MODEL_CHOICES: ReadonlyArray<{ id: string; label: string;
   { id: "claude-fable-5", label: "Claude Fable 5", hint: "Most powerful tier — highest cost" },
   { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", hint: "Fastest and most cost-effective" },
 ];
+/**
+ * Anthropic's REAL per-model output ceiling.
+ *
+ * On the OpenAI-compatible wire max_tokens is only a slice of the shared context
+ * window, so the derived budget can safely be "whatever the window has left".
+ * The Messages API is different: it rejects (400 invalid_request_error) a request
+ * whose max_tokens exceeds the model's own output limit, so the derived budget
+ * must be clamped by this as well as by the window.
+ *
+ * Longest matching prefix wins, so a dated/suffixed id resolves to its family.
+ * An id that matches nothing falls back to ANTHROPIC_FALLBACK_MAX_OUTPUT_TOKENS:
+ * under-asking truncates one answer, over-asking fails the request outright, so
+ * the unknown case biases low (declare `maxTokens` in config to raise it for a
+ * model not listed here). Exported for tests.
+ */
+export const ANTHROPIC_MODEL_OUTPUT_LIMITS: ReadonlyArray<{ prefix: string; maxOutputTokens: number }> = [
+  { prefix: "claude-fable-5", maxOutputTokens: 128_000 },
+  { prefix: "claude-mythos-5", maxOutputTokens: 128_000 },
+  { prefix: "claude-opus-5", maxOutputTokens: 128_000 },
+  { prefix: "claude-sonnet-5", maxOutputTokens: 128_000 },
+  { prefix: "claude-opus-4-8", maxOutputTokens: 128_000 },
+  { prefix: "claude-opus-4-7", maxOutputTokens: 128_000 },
+  { prefix: "claude-opus-4-6", maxOutputTokens: 128_000 },
+  { prefix: "claude-sonnet-4-6", maxOutputTokens: 128_000 },
+  { prefix: "claude-opus-4-5", maxOutputTokens: 64_000 },
+  { prefix: "claude-sonnet-4-5", maxOutputTokens: 64_000 },
+  { prefix: "claude-sonnet-4-0", maxOutputTokens: 64_000 },
+  { prefix: "claude-haiku-4-5", maxOutputTokens: 64_000 },
+  { prefix: "claude-opus-4-1", maxOutputTokens: 32_000 },
+  { prefix: "claude-opus-4-0", maxOutputTokens: 32_000 },
+];
+/** Conservative ceiling for a model id this build has never heard of. */
+export const ANTHROPIC_FALLBACK_MAX_OUTPUT_TOKENS = 8_192;
+
+/**
+ * Extra ceiling for the NON-STREAMING path only.
+ *
+ * The Messages API refuses a non-streaming request whose max_tokens implies a
+ * generation past its ~10-minute single-request cap ("… is the maximum allowed
+ * number of output tokens for <model> with non-streaming requests. Please
+ * consider streaming…"), and this provider's own complete() hard timeout is 10
+ * minutes as well — so a budget derived from the whole context window would turn
+ * an unreachable ceiling into a hard 400. The streaming paths
+ * (stream/completeViaStream) carry the full derived budget; only the one-shot
+ * complete() is clamped, and even clamped it is 4x the 4096 it used to send.
+ */
+export const ANTHROPIC_NONSTREAMING_MAX_OUTPUT_TOKENS = 16_384;
+
+/** The output ceiling Anthropic itself enforces for `modelId`. Exported for tests. */
+export function resolveAnthropicMaxOutputTokens(modelId: string): number {
+  let best: { prefix: string; maxOutputTokens: number } | undefined;
+  for (const entry of ANTHROPIC_MODEL_OUTPUT_LIMITS) {
+    if (!modelId.startsWith(entry.prefix)) continue;
+    if (!best || entry.prefix.length > best.prefix.length) best = entry;
+  }
+  return best?.maxOutputTokens ?? ANTHROPIC_FALLBACK_MAX_OUTPUT_TOKENS;
+}
+
 const OAUTH_BETA_HEADER = "oauth-2025-04-20";
 /**
  * Subscription OAuth tokens are scoped to Claude Code, and the Messages API
@@ -521,7 +585,48 @@ export class AnthropicProvider implements ChatProvider {
     return true;
   }
 
-  private buildRequestBase(messages: LLMMessage[], tools: LLMToolDef[], toolChoice?: "auto" | "required" | "none") {
+  /**
+   * Per-request completion budget, derived the same way the OpenAI-compatible
+   * providers derive theirs: what the context window has left after the prompt,
+   * minus a reserve — then clamped by the model's real output ceiling.
+   *
+   * The previous `modelConfig.maxTokens ?? 4096` turned into a silent 4x CUT the
+   * moment the per-agent maxTokens pins were removed: no preset in the repo
+   * declares one, so every agent resolved to `undefined` and every Claude call
+   * was pinned at 4096 — below the 16384 the builder agents used to carry, on
+   * exactly the agents whose shard comments recorded truncation audits.
+   *
+   * A declared maxTokens is still honoured, but only as a CEILING on top of the
+   * derived budget (the contract computeOutputTokenBudget already implements).
+   *
+   * The window used is the CONFIGURED one, not Claude's own (which is far larger
+   * on current models). That is deliberate: one ModelConfig is shared across every
+   * endpoint of a failover chain, so the configured window is the number the
+   * session trimmer also budgets against. It under-uses Claude rather than
+   * over-committing, and the model ceiling above is what actually keeps the
+   * request legal.
+   */
+  private resolveMaxTokens(
+    messages: readonly LLMMessage[],
+    tools: readonly LLMToolDef[],
+    mode: "complete" | "stream",
+  ): number {
+    const ceilings = [resolveAnthropicMaxOutputTokens(parseModelId(this.modelConfig.primary))];
+    if (mode === "complete") ceilings.push(ANTHROPIC_NONSTREAMING_MAX_OUTPUT_TOKENS);
+    if (this.modelConfig.maxTokens !== undefined) ceilings.push(this.modelConfig.maxTokens);
+    return computeOutputTokenBudget({
+      contextWindow: this.modelConfig.contextWindow,
+      estimatedPromptTokens: estimatePromptTokensForRequest(messages, tools),
+      declaredMaxTokens: Math.min(...ceilings),
+    });
+  }
+
+  private buildRequestBase(
+    messages: LLMMessage[],
+    tools: LLMToolDef[],
+    mode: "complete" | "stream",
+    toolChoice?: "auto" | "required" | "none",
+  ) {
     const modelId = parseModelId(this.modelConfig.primary);
     const { system, messages: anthropicMessages } = toAnthropicMessages(messages);
     let anthropicTools = toAnthropicTools(tools);
@@ -567,7 +672,7 @@ export class AnthropicProvider implements ChatProvider {
       modelId,
       params: {
         model: modelId,
-        max_tokens: this.modelConfig.maxTokens ?? 4096,
+        max_tokens: this.resolveMaxTokens(messages, tools, mode),
         ...(systemParam ? { system: systemParam } : {}),
         messages: anthropicMessages,
         ...(anthropicTools.length > 0
@@ -630,7 +735,7 @@ export class AnthropicProvider implements ChatProvider {
   }
 
   async complete(messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal): Promise<LLMResponse> {
-    const { modelId, params } = this.buildRequestBase(messages, tools);
+    const { modelId, params } = this.buildRequestBase(messages, tools, "complete");
 
     let attempt = 0;
     const maxAttempts = this.configuredMaxRetries + 1;
@@ -672,6 +777,9 @@ export class AnthropicProvider implements ChatProvider {
             totalTokens: promptTokens + (usage.output_tokens ?? 0),
           },
           finishReason: mapStopReason(response.stop_reason),
+          // Mirrors the OpenAI-compatible complete(): "length" alone is ambiguous
+          // downstream, so state that the OUTPUT BUDGET is what cut this response.
+          ...(response.stop_reason === "max_tokens" ? { truncatedBy: "output_budget" as const } : {}),
         };
       } catch (err: unknown) {
         endProviderCall(callId);
@@ -702,46 +810,104 @@ export class AnthropicProvider implements ChatProvider {
 
   /** Same contract as LMStudioProvider.completeViaStream — a complete()-shaped
    *  result accumulated from the streaming endpoint, giving the activity
-   *  monitor live token progress and the per-chunk inactivity abort. */
+   *  monitor live token progress and the per-chunk inactivity abort, and the
+   *  same partial-result salvage on a stream that dies after producing work. */
   async completeViaStream(messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal): Promise<LLMResponse> {
     let content = "";
     const reasoningParts: string[] = [];
     const toolBuffers = new Map<string, { id: string; name: string; args: string }>();
     const toolOrder: string[] = [];
     let finishReason = "stop";
+    let truncatedBy: LLMResponse["truncatedBy"];
     let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 
-    for await (const chunk of this.stream(messages, tools, signal)) {
-      switch (chunk.type) {
-        case "text_delta":
-          content += chunk.content ?? "";
-          break;
-        case "reasoning_delta":
-          if (chunk.content) reasoningParts.push(chunk.content);
-          break;
-        case "tool_call_start": {
-          const id = chunk.toolCallId ?? `tc_${toolOrder.length}`;
-          if (!toolBuffers.has(id)) {
-            toolBuffers.set(id, { id, name: chunk.toolName ?? "", args: "" });
-            toolOrder.push(id);
+    try {
+      for await (const chunk of this.stream(messages, tools, signal)) {
+        switch (chunk.type) {
+          case "text_delta":
+            content += chunk.content ?? "";
+            break;
+          case "reasoning_delta":
+            if (chunk.content) reasoningParts.push(chunk.content);
+            break;
+          case "tool_call_start": {
+            const id = chunk.toolCallId ?? `tc_${toolOrder.length}`;
+            if (!toolBuffers.has(id)) {
+              toolBuffers.set(id, { id, name: chunk.toolName ?? "", args: "" });
+              toolOrder.push(id);
+            }
+            break;
           }
-          break;
+          case "tool_call_delta": {
+            const buf = chunk.toolCallId ? toolBuffers.get(chunk.toolCallId) : undefined;
+            if (buf) buf.args += chunk.argumentsDelta ?? "";
+            break;
+          }
+          case "done":
+            finishReason = chunk.finishReason ?? finishReason;
+            // The provider's OWN "length" (stop_reason max_tokens) — distinct from
+            // the fabricated one the salvage path below sets.
+            if (finishReason === "length") truncatedBy = "output_budget";
+            if (chunk.usage) usage = chunk.usage;
+            break;
         }
-        case "tool_call_delta": {
-          const buf = chunk.toolCallId ? toolBuffers.get(chunk.toolCallId) : undefined;
-          if (buf) buf.args += chunk.argumentsDelta ?? "";
-          break;
-        }
-        case "done":
-          finishReason = chunk.finishReason ?? finishReason;
-          if (chunk.usage) usage = chunk.usage;
-          break;
       }
+    } catch (err) {
+      // SALVAGE — identical semantics to LMStudioProvider.completeViaStream. Without
+      // it the DeadlineAbort design ("the run hit its own budget, so whatever the
+      // model already produced is still wanted") simply did not hold on this
+      // provider: a deadline crossing threw away every token Anthropic had already
+      // streamed AND billed, and the caller's usage accounting never saw them.
+      // An OPERATOR cancel is still not a salvage case — the user asked for it to
+      // stop, so that abort propagates untouched.
+      const operatorCancelled = signal?.aborted === true && !isDeadlineAbort(signal.reason);
+      const salvageable = content.trim().length > 0 || toolOrder.length > 0 || reasoningParts.length > 0;
+      if (!salvageable || operatorCancelled) throw err;
+      log.warn({
+        err: err instanceof Error ? err.message : String(err),
+        model: parseModelId(this.modelConfig.primary),
+        contentChars: content.length,
+        toolCalls: toolOrder.length,
+        reasoningChars: reasoningParts.join("").length,
+      }, "Anthropic stream failed after producing content — salvaging the partial result instead of failing the turn");
+      // Usage only reaches us on the final `done` chunk, which a cut stream never
+      // emits — so a salvaged run reported completionTokens: 0. Both stall detectors
+      // read "did completionTokens increase?" as progress, and the cost aggregator
+      // would under-report output Anthropic already billed. Estimate it, and say so
+      // via truncatedBy.
+      if (usage.completionTokens === 0) {
+        const producedChars = content.length
+          + reasoningParts.join("").length
+          + toolOrder.reduce((sum, id) => sum + (toolBuffers.get(id)?.args.length ?? 0), 0);
+        const estimated = Math.ceil(producedChars / PROMPT_ESTIMATE_CHARS_PER_TOKEN);
+        usage = {
+          promptTokens: usage.promptTokens,
+          completionTokens: estimated,
+          totalTokens: usage.promptTokens + estimated,
+        };
+      }
+      truncatedBy = isDeadlineAbort(signal?.reason) ? "deadline" : "transport";
+      finishReason = "length";
     }
 
     const tool_calls = toolOrder.map((id) => {
       const buf = toolBuffers.get(id)!;
-      return { id: buf.id, name: buf.name, arguments: parseToolArguments(buf.args) };
+      let args: Record<string, unknown>;
+      if (!buf.args.trim()) {
+        args = {};
+      } else {
+        // Tolerant parse: a salvaged stream cuts the argument JSON mid-object, and
+        // parseToolArguments would silently return {} — an empty-args tool call the
+        // caller cannot tell from a genuinely argument-less one.
+        const salvaged = salvageToolCallArguments(buf.args);
+        if (salvaged) {
+          args = salvaged;
+        } else {
+          log.warn({ toolName: buf.name, rawArgs: buf.args.slice(0, 200) }, "Failed to parse streamed Anthropic tool call arguments");
+          args = { _parse_error: true, _raw: buf.args };
+        }
+      }
+      return { id: buf.id, name: buf.name, arguments: args };
     });
 
     const reasoning = reasoningParts.join("").trim();
@@ -751,6 +917,7 @@ export class AnthropicProvider implements ChatProvider {
       tool_calls,
       usage,
       finishReason,
+      ...(truncatedBy ? { truncatedBy } : {}),
     };
   }
 
@@ -760,7 +927,7 @@ export class AnthropicProvider implements ChatProvider {
     signal?: AbortSignal,
     options?: { toolChoice?: "auto" | "required" | "none" },
   ): AsyncGenerator<StreamChunk> {
-    const { modelId, params } = this.buildRequestBase(messages, tools, options?.toolChoice);
+    const { modelId, params } = this.buildRequestBase(messages, tools, "stream", options?.toolChoice);
 
     const streamAc = new AbortController();
     let streamParentListener: (() => void) | undefined;
@@ -814,8 +981,26 @@ export class AnthropicProvider implements ChatProvider {
     };
     armInactivity();
 
+    // TOTAL wall-clock BACKSTOP, separate from the inactivity guard above, which
+    // measures SILENCE and re-arms on every chunk — so it can never stop a model
+    // that keeps emitting. This path had no total bound at all. The real bound is
+    // the caller's deadline signal; this exists so a caller that passes NO signal
+    // still cannot hang forever, and it matters more here than on the local
+    // provider because a runaway generation on a priced model also burns money.
+    const streamStartedAt = Date.now();
+
     try {
       for await (const event of stream) {
+        if (Date.now() - streamStartedAt > MAX_STREAM_TOTAL_MS) {
+          // THROW, do not break: a break would leave the try normally, record a
+          // SUCCESS, and report the guillotined generation as a clean stop.
+          const capErr = new Error(
+            `LLM stream exceeded its total budget of ${Math.round(MAX_STREAM_TOTAL_MS / 1000)}s while still producing output `
+            + "— the model is generating without converging (most often a runaway reasoning block)",
+          );
+          streamAc.abort(capErr);
+          throw capErr;
+        }
         armInactivity();
         switch (event.type) {
           case "message_start": {

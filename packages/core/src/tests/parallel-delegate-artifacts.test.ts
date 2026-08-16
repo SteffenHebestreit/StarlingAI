@@ -5,7 +5,11 @@ import { join } from "node:path";
 
 const completeMock = vi.fn();
 
-vi.mock("../providers/lmstudio.js", () => ({
+vi.mock("../providers/lmstudio.js", async (importActual) => ({
+  // Spread the real module: sub-agent.ts and its helpers import value exports
+  // (computePromptTokenBudget, DeadlineAbort, ...) from here, and a mock that
+  // replaced the whole module broke every time production code grew an export.
+  ...(await importActual<typeof import("../providers/lmstudio.js")>()),
   LMStudioProvider: class {
     async complete(messages: unknown, tools: unknown, signal?: AbortSignal) {
       return completeMock(messages, tools, signal);
