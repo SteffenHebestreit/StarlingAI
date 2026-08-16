@@ -7,6 +7,9 @@
 
 import { registerTool, getAllTools, searchToolsByEmbedding, executeTool, type SwarmState, type SwarmTaskAttempt, type SwarmTaskState, type ToolContext, type ToolResult } from "./registry.js";
 import { runSubAgent, runSubAgentWithStats } from "../agent/sub-agent.js";
+// Leaf module shared with agent/sub-agent.ts so the soft deadline and the hard deadline
+// are derived from ONE precedence rule; deriving them separately is how they drifted.
+import { resolveSoftDeadlineOffsetMs } from "../agent/sub-agent-turn-budget.js";
 // Importing runArchitectFallback also runs ./ephemeral-agent-factory.ts's top-level
 // registerTool side effect, so create_ephemeral_agent stays registered when this
 // module loads. The factory imports a few shared helpers back from here
@@ -138,6 +141,7 @@ export function reserveSubAgentTimeout(
   if (reserveMs <= 0) return parentBudgetMs; // identity (default off)
   return Math.max(floorMs, parentBudgetMs - reserveMs);
 }
+
 
 function buildSemanticRoutingMetadata(resolution: AgentRoutingResolution): Record<string, unknown> {
   const status = getEmbeddingSearchStatus();
@@ -1961,16 +1965,14 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         // it starts wrapping up before the hard timeout fires.
         softDeadlineMs: (() => {
           // Derive from the SAME reserved budget as the hard timeout above so the soft
-          // deadline (70%) stays proportional when a synthesis reserve is in effect.
+          // deadline (70%) stays proportional when a synthesis reserve is in effect, and
+          // from the SAME min(caller, declared) precedence the runner resolves the hard
+          // deadline with — see resolveSoftDeadlineOffsetMs for why that matters.
           const reserved = reserveSubAgentTimeout(
             ctx.turnTimeoutOverrideMs,
             getConfig().orchestration?.subAgentSynthesisReserveMs ?? 0,
           );
-          const raw = reserved ?? agentCfg?.turnTimeoutMs ?? 60_000;
-          // "unbound" (no numeric budget) → push the soft deadline effectively
-          // out of reach so it never fires for long-running agents.
-          const effective = typeof raw === "number" ? raw : Number.MAX_SAFE_INTEGER;
-          const softMs = Date.now() + Math.floor(effective * 0.70);
+          const softMs = Date.now() + resolveSoftDeadlineOffsetMs(reserved, agentCfg?.turnTimeoutMs);
           // D3: don't let the wrap-up nudge land AFTER the parent turn's hard deadline (else it never
           // fires and the specialist is guillotined mid-flight). Clamp when the clamp flag is on.
           return (getConfig().orchestration?.clampSubAgentTimeoutToParent === true && typeof ctx._turnDeadlineMs === "number")

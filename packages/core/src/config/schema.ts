@@ -132,6 +132,30 @@ export const ModelConfigSchema = z.object({
    *  rare case of deliberately capping spend on a priced cloud model. The
    *  remaining .max() is a sanity bound against a typo, not a policy. */
   maxTokens: z.number().int().min(256).max(1_048_576).optional(),
+  /** OPTIONAL per-agent ceiling on a SINGLE streaming call (ms).
+   *
+   *  Unset → the provider's 20-minute default (providers/lmstudio.ts
+   *  MAX_STREAM_TOTAL_MS). The sub-agent runner sets it automatically: an agent
+   *  holding a whole-file EMITTER tool (generate_document / generate_website /
+   *  generate_presentation / generate_docx / generate_pptx / generate_pdf /
+   *  render_pdf) gets BUILDER_MAX_STREAM_TOTAL_MS (45 min), because at the measured
+   *  ~16.8 tok/s a ~30 KB artifact is ~9K tokens to emit plus the reasoning that
+   *  precedes it — ~26 minutes for ONE legitimate pass. Holding write_file/edit_file
+   *  does NOT qualify: 39 of the 49 shipped agents hold them, mostly to take notes.
+   *  The runner also floors the cap above the agent's own turnTimeoutMs and above the
+   *  deadline the run resolved, so the turn DEADLINE — which salvages and then
+   *  resynthesizes — reaches the stream before this cap, which only salvages.
+   *
+   *  That ordering holds where a deadline EXISTS (it does not on a max-effort or
+   *  "unbound" run) and where MAX_STREAM_TOTAL_CEILING_MS does not clip the floor
+   *  (a turn budget above ~59 minutes does). See resolveAgentStreamCapMs.
+   *
+   *  Set it here to pin an agent explicitly — the intended route for an agent whose
+   *  deliverable is a large file written through bare write_file, which no tool grant
+   *  can distinguish from note-taking. The value is clamped into
+   *  [60_000, MAX_STREAM_TOTAL_CEILING_MS] by the provider. This is a BACKSTOP for
+   *  a call with no deadline signal, never the primary bound. */
+  maxStreamTotalMs: z.number().int().min(60_000).max(3_600_000).optional(),
   topP: z.number().min(0).max(1).optional(),
   topK: z.number().int().min(1).max(200).optional(),
   minP: z.number().min(0).max(1).optional(),

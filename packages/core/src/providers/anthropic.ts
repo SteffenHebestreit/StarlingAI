@@ -32,9 +32,9 @@ import {
   computeOutputTokenBudget,
   estimatePromptTokensForRequest,
   isDeadlineAbort,
-  MAX_STREAM_TOTAL_MS,
   PROMPT_ESTIMATE_CHARS_PER_TOKEN,
   ProviderHardTimeoutError,
+  resolveStreamTotalCapMs,
   salvageToolCallArguments,
   type ChatProvider,
   type LLMMessage,
@@ -427,6 +427,8 @@ export class AnthropicProvider implements ChatProvider {
   private lastHealthCheck = 0;
   private configuredMaxRetries: number;
   private requestTimeoutMs: number;
+  /** Per-agent total-stream backstop, resolved from the ModelConfig (see resolveStreamTotalCapMs). */
+  private readonly maxStreamTotalMs: number;
   private loadedModel?: string;
   private lastError?: string;
   private requestCount = 0;
@@ -450,6 +452,9 @@ export class AnthropicProvider implements ChatProvider {
     this.promptCaching = options.promptCaching ?? true;
     this.configuredMaxRetries = Math.max(0, options.maxRetries ?? 1);
     this.requestTimeoutMs = computeOpenAICompatibleRequestTimeoutMs(modelConfig, options.timeoutMs ?? 120_000);
+    // Per-agent, off the ModelConfig — same seam and same rationale as the OpenAI-
+    // compatible provider (providers/lmstudio.ts resolveStreamTotalCapMs).
+    this.maxStreamTotalMs = resolveStreamTotalCapMs(modelConfig);
     // Pass the unused credential slot as null so the SDK does not pick up a
     // conflicting ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN from the
     // environment (sending both headers is rejected by the API).
@@ -548,35 +553,37 @@ export class AnthropicProvider implements ChatProvider {
   // Same wall-clock guard as LMStudioProvider: the SDK timeout has been seen
   // not to fire when a connection is held open without data, so every attempt
   // gets a setTimeout-based abort we control. Hard timeouts are terminal.
+  //
+  // SIGNAL LIFETIME — composed with AbortSignal.any, and the only cleanup is the
+  // timer. See the long note on LMStudioProvider.withHardTimeout: unhooking a
+  // hand-rolled parent listener in `finally` severs the caller's abort the instant
+  // the stream OPENS, because that is when `fn` resolves on the streaming path.
+  // A composite signal has no un-hook step to get wrong.
   private async withHardTimeout<T>(
     parentSignal: AbortSignal | undefined,
     timeoutMs: number,
     fn: (combinedSignal: AbortSignal) => Promise<T>,
   ): Promise<T> {
-    const ac = new AbortController();
-    let parentListener: (() => void) | undefined;
+    const timeoutAc = new AbortController();
     let timedOut = false;
-
-    if (parentSignal?.aborted) {
-      ac.abort(parentSignal.reason);
-    } else if (parentSignal) {
-      parentListener = () => ac.abort(parentSignal.reason);
-      parentSignal.addEventListener("abort", parentListener, { once: true });
-    }
 
     const timer = setTimeout(() => {
       timedOut = true;
-      ac.abort(new Error(`LLM call exceeded hard timeout of ${timeoutMs}ms`));
+      timeoutAc.abort(new Error(`LLM call exceeded hard timeout of ${timeoutMs}ms`));
     }, timeoutMs);
 
+    const combined = parentSignal
+      ? AbortSignal.any([parentSignal, timeoutAc.signal])
+      : timeoutAc.signal;
+
     try {
-      return await fn(ac.signal);
+      return await fn(combined);
     } catch (err) {
       if (timedOut && !parentSignal?.aborted) throw new ProviderHardTimeoutError(timeoutMs);
       throw err;
     } finally {
+      // ONLY the timer — never the caller's link to what the open phase produced.
       clearTimeout(timer);
-      if (parentListener && parentSignal) parentSignal.removeEventListener("abort", parentListener);
     }
   }
 
@@ -823,6 +830,14 @@ export class AnthropicProvider implements ChatProvider {
 
     try {
       for await (const chunk of this.stream(messages, tools, signal)) {
+        // Second consumer-side abort check (stream() has the first) — the last
+        // loop between the transport and the caller. Throws into the catch below,
+        // where the existing operator-vs-deadline classification decides.
+        if (signal?.aborted) {
+          throw signal.reason instanceof Error
+            ? signal.reason
+            : new Error(`LLM stream aborted by the caller: ${String(signal.reason)}`);
+        }
         switch (chunk.type) {
           case "text_delta":
             content += chunk.content ?? "";
@@ -929,19 +944,17 @@ export class AnthropicProvider implements ChatProvider {
   ): AsyncGenerator<StreamChunk> {
     const { modelId, params } = this.buildRequestBase(messages, tools, "stream", options?.toolChoice);
 
+    // streamAc carries the provider-side aborts (total-budget cap, inactivity
+    // stall), composed ONCE with the caller's signal. The composite is what the
+    // SDK holds, and it stays linked for the whole life of the stream — see the
+    // note on withHardTimeout for what the hand-rolled listener pair broke.
     const streamAc = new AbortController();
-    let streamParentListener: (() => void) | undefined;
-    if (signal?.aborted) {
-      streamAc.abort(signal.reason);
-    } else if (signal) {
-      streamParentListener = () => streamAc.abort(signal.reason);
-      signal.addEventListener("abort", streamParentListener, { once: true });
-    }
+    const streamSignal = signal ? AbortSignal.any([signal, streamAc.signal]) : streamAc.signal;
 
     // Open the stream with the same bounded retry/backoff as complete(). The 429
     // (and 529) happens at open time, before any chunk; previously this threw with
     // ZERO retry, so concurrent sub-agents hitting a rate limit all failed at once.
-    const openStream = () => this.withHardTimeout(streamAc.signal, this.requestTimeoutMs + 5000, async (s) =>
+    const openStream = () => this.withHardTimeout(streamSignal, this.requestTimeoutMs + 5000, async (s) =>
       this.client.messages.create({ ...params, stream: true }, await this.requestOptions(s)),
     );
     let stream: Awaited<ReturnType<typeof openStream>>;
@@ -987,15 +1000,30 @@ export class AnthropicProvider implements ChatProvider {
     // the caller's deadline signal; this exists so a caller that passes NO signal
     // still cannot hang forever, and it matters more here than on the local
     // provider because a runaway generation on a priced model also burns money.
+    // Per-agent (this.maxStreamTotalMs), so an agent emitting a whole file is not held to
+    // the same ceiling as a summarizer — see resolveStreamTotalCapMs. Where a deadline
+    // exists it reaches the stream first (the caller's signal now survives stream-open);
+    // where none does — max effort, "unbound", an operator grant — this is the only wall
+    // clock left, which is why the raised tier is narrow.
     const streamStartedAt = Date.now();
+    const totalCapMs = this.maxStreamTotalMs;
 
     try {
       for await (const event of stream) {
-        if (Date.now() - streamStartedAt > MAX_STREAM_TOTAL_MS) {
+        // BELT AND BRACES over the composed signal above — same rationale and same
+        // classification as the OpenAI-compatible provider: re-throwing the
+        // signal's own reason lets completeViaStream salvage a DeadlineAbort and
+        // propagate an operator cancel.
+        if (signal?.aborted) {
+          throw signal.reason instanceof Error
+            ? signal.reason
+            : new Error(`LLM stream aborted by the caller: ${String(signal.reason)}`);
+        }
+        if (Date.now() - streamStartedAt > totalCapMs) {
           // THROW, do not break: a break would leave the try normally, record a
           // SUCCESS, and report the guillotined generation as a clean stop.
           const capErr = new Error(
-            `LLM stream exceeded its total budget of ${Math.round(MAX_STREAM_TOTAL_MS / 1000)}s while still producing output `
+            `LLM stream exceeded its total budget of ${Math.round(totalCapMs / 1000)}s while still producing output `
             + "— the model is generating without converging (most often a runaway reasoning block)",
           );
           streamAc.abort(capErr);
@@ -1048,7 +1076,7 @@ export class AnthropicProvider implements ChatProvider {
     } finally {
       endProviderCall(callId);
       if (inactivityTimer !== undefined) clearTimeout(inactivityTimer);
-      if (streamParentListener && signal) signal.removeEventListener("abort", streamParentListener);
+      // No listener to unhook: streamSignal is an AbortSignal.any composite.
     }
 
     this.recordRequestSuccess(startedAt);

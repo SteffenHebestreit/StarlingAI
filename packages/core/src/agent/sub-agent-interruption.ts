@@ -208,12 +208,24 @@ export function buildInterruptedSubAgentOutput(params: {
    * its own synthesis. Without this, the parent only saw the 900-char head
    * and the rest of the delegated specialist's work was discarded. */
   primaryDelegationBody?: { content: string; bytes: number } | null;
+  /** Pre-formatted "- <path> (<n> bytes on disk)[ — INCOMPLETE: …]" lines for the
+   *  workspace files this run actually mutated (sub-agent.ts
+   *  describeMutatedWorkspaceFiles). Distinct from `artifacts`: a staged build whose
+   *  fill passes went through edit_file records NO artifact — edit_file's metadata
+   *  has no outputPath — so without these a cut-off build reported nothing at all
+   *  even though a valid skeleton and several finished subsystems were on disk. */
+  mutatedFileLines?: string[];
 }): string {
   const swarmSummary = formatSwarmProgressForInterruption(params.swarmState);
   const progressLines: string[] = [];
 
   if (swarmSummary) {
     progressLines.push(swarmSummary);
+  }
+
+  if (params.mutatedFileLines && params.mutatedFileLines.length > 0) {
+    progressLines.push("Files this run wrote to the workspace (usable as-is; finish them in place rather than rebuilding):");
+    progressLines.push(...params.mutatedFileLines);
   }
 
   if (params.artifacts.length > 0) {

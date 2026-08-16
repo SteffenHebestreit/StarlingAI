@@ -54,4 +54,20 @@ describe("edit-test-fix loop", () => {
       expect(config.subAgents[agent]?.systemPrompt ?? "", agent).toContain("FIX BY EDITING");
     }
   });
+
+  it("the builders are told to CONSTRUCT in passes, not only to repair in passes", () => {
+    // FIX BY EDITING is a REPAIR policy: every clause is conditioned on an artifact
+    // already existing ("when something you produced is wrong"), and it explicitly
+    // reserves write_file "for creating a file". On a first-pass build nothing exists
+    // yet, so it correctly points the model at the single giant write_file call that
+    // run f08195d2 died inside. The staged-build paragraph is the missing first-pass
+    // half; content_writer — the agent that produced that failure — carries it too,
+    // and qa_guard (a reviewer, not a builder) deliberately does not.
+    for (const agent of ["coder", "web_coder", "backend_coder", "content_writer"]) {
+      const prompt = config.subAgents[agent]?.systemPrompt ?? "";
+      expect(prompt, agent).toContain("BUILD IN PASSES");
+      expect(prompt, `${agent} must name the real edit_file anchor mechanism`).toContain("old_string");
+    }
+    expect(config.subAgents["qa_guard"]?.systemPrompt ?? "").not.toContain("BUILD IN PASSES");
+  });
 });

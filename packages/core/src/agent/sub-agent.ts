@@ -12,6 +12,9 @@
  */
 
 import fs from "node:fs";
+// Named import: two local `path` bindings already exist in this module, and an
+// unqualified `path` default import would shadow-warn against them.
+import { resolve as resolvePath } from "node:path";
 import type { LLMMessage, ChatProvider } from "../providers/lmstudio.js";
 import { DeadlineAbort } from "../providers/lmstudio.js";
 import { trimSubAgentHistory } from "./sub-agent-history.js";
@@ -71,8 +74,13 @@ import {
   buildSubAgentToolInventory,
   buildSubAgentAgentDiscoveryGuidance,
   sanitizeSubAgentTask,
+  isStagedArtifactBuildRun,
+  buildStagedArtifactBuildGuidance,
+  STAGED_BUILD_TASK_CHAR_THRESHOLD,
+  STAGED_BUILD_REQUIRED_TOOLS,
 } from "./sub-agent-prompt-guidance.js";
-import { mergeAgentModelOverride, applyEffortModelOverlay } from "./sub-agent-model-config.js";
+import { mergeAgentModelOverride, applyEffortModelOverlay, applyStreamCapOverlay } from "./sub-agent-model-config.js";
+import { resolveTurnBudgetMs } from "./sub-agent-turn-budget.js";
 import {
   extractInfraFailureSignature,
   liveToolFamily,
@@ -98,7 +106,14 @@ import {
 } from "./sub-agent-interruption.js";
 // Re-export pure helpers that were extracted from this module so existing
 // importers (and tests) of "../agent/sub-agent.js" keep working unchanged.
-export { mergeAgentModelOverride, applyEffortModelOverlay } from "./sub-agent-model-config.js";
+export {
+  mergeAgentModelOverride,
+  applyEffortModelOverlay,
+  applyStreamCapOverlay,
+  resolveAgentStreamCapMs,
+  emitsWholeFileArtifacts,
+  canWriteWorkspaceFiles,
+} from "./sub-agent-model-config.js";
 export { getEffectiveToolNames, compactAgentCatalogDescription } from "./sub-agent-prompt-guidance.js";
 // Lazy-import clearSearchSessionState to avoid pulling in web.ts at module
 // load time, which would re-register web_search/web_fetch and break tests
@@ -905,7 +920,11 @@ const SUB_AGENT_PER_TOOL_CAPS: Partial<Record<string, number>> = {
   // many mode:"append" chunks) without tripping the flat per-tool cap; the tight
   // per-path overwrite cap (PER_PATH_WRITE_CAP=2) remains the real loop guard.
   write_file: 24,
-  edit_file: 12,
+  // Raised 12 -> 24 alongside PER_PATH_EDIT_CAP. This one is a TOTAL across every
+  // path, so at 12 it bound tighter than the per-path cap the moment a staged build
+  // touched more than one file (index.html + app.js + data.json is three skeletons
+  // and three fill sequences sharing the same budget).
+  edit_file: 24,
   generate_document: 4,
   generate_website: 2,
   generate_presentation: 2,
@@ -940,8 +959,18 @@ const PER_PATH_APPEND_CAP = 24;
  * fails when old_string is absent or ambiguous, so a confused agent stops rather than
  * silently churning. Bounded well above a real convergence run, still far below a
  * runaway.
+ *
+ * Raised 12 -> 24 for staged artifact builds. A staged build is skeleton (one
+ * write_file) + ONE edit_file per subsystem + verification-driven corrections, all
+ * against the SAME path, so the passes are the deliverable rather than a loop. The
+ * widest builder iteration budget in the workspace is 14 (web_coder, backend_coder),
+ * which the directive turns into 11 fill passes — at 12 the cap bit after a single
+ * correction, i.e. exactly when the artifact was nearly finished and the work was
+ * most expensive to lose. 24 matches the write_file total below and still leaves the
+ * ambiguity failure (edit_file rejects an absent or non-unique old_string) as the
+ * real brake on a confused agent.
  */
-const PER_PATH_EDIT_CAP = 12;
+const PER_PATH_EDIT_CAP = 24;
 // A FAILED tool call (most often arguments the model can fix by re-emitting them —
 // e.g. generate_presentation rejecting a JSON-string `slides` arg) must NOT burn the
 // per-tool SUCCESS cap, or a couple of mis-serializations hard-block a build tool
@@ -1081,11 +1110,25 @@ const IDEMPOTENT_TOOLS = new Set<string>([
  * must contain a closing </html> tag; a .json file must parse. Returns a short
  * human-readable reason when the file looks truncated, null when it looks
  * complete or cannot be assessed (missing path, unreadable, other formats).
+ *
+ * `workspaceRoot` resolves RELATIVE artifact paths. write_file's metadata sets
+ * `path` to the path the MODEL passed (relative, e.g. "generated/app/index.html")
+ * and only `outputPath` to the workspace-relative resolved one — so without a root
+ * this existsSync missed the file entirely against the gateway's cwd and returned
+ * null, i.e. every half-written write_file artifact was silently reported complete.
+ * Callers that already hold an absolute path (runtime.ts, turn-corrective.ts) are
+ * unaffected: an absolute path that exists is used as-is.
  */
-export function artifactFileLooksTruncated(artifact: Record<string, unknown>): string | null {
+export function artifactFileLooksTruncated(artifact: Record<string, unknown>, workspaceRoot?: string): string | null {
   try {
-    const absPath = typeof artifact["path"] === "string" ? artifact["path"] : "";
-    if (!absPath || !fs.existsSync(absPath)) return null;
+    const rawPath = typeof artifact["path"] === "string" ? artifact["path"] : "";
+    const relPath = typeof artifact["outputPath"] === "string" ? artifact["outputPath"] : "";
+    const candidates = [
+      rawPath,
+      ...(workspaceRoot ? [rawPath ? resolvePath(workspaceRoot, rawPath) : "", relPath ? resolvePath(workspaceRoot, relPath) : ""] : []),
+    ].filter(Boolean);
+    const absPath = candidates.find((candidate) => fs.existsSync(candidate)) ?? "";
+    if (!absPath) return null;
     const stat = fs.statSync(absPath);
     if (!stat.isFile() || stat.size === 0 || stat.size > 5_000_000) return null;
     const name = (typeof artifact["filename"] === "string" && artifact["filename"]
@@ -1113,6 +1156,43 @@ export function artifactFileLooksTruncated(artifact: Record<string, unknown>): s
   } catch {
     return null;
   }
+}
+
+/**
+ * Describe the workspace files a run actually mutated, for the interrupted/cut-off
+ * paths. A staged build that dies mid-way has real work on disk — the skeleton plus
+ * however many subsystems landed — and the previous salvage saw NONE of it when the
+ * fills went through edit_file (whose metadata carries no outputPath, so the artifact
+ * recorder skips it). Reporting the paths, their real on-disk size, and their
+ * structural completeness is the difference between handing the parent a resumable
+ * build and handing it the 37-character "produced no usable output" string that run
+ * f08195d2 shipped after 20,129 tokens of work.
+ *
+ * Reads the filesystem, so it is only called on the terminal paths, never per
+ * iteration. Fails open: an unreadable file is reported by path alone.
+ */
+export function describeMutatedWorkspaceFiles(
+  paths: Iterable<string>,
+  workspaceRoot: string,
+): string[] {
+  const lines: string[] = [];
+  for (const relPath of paths) {
+    if (lines.length >= 6) break;
+    let sizeNote = "";
+    let truncationNote = "";
+    try {
+      const abs = resolvePath(workspaceRoot, relPath);
+      const stat = fs.existsSync(abs) ? fs.statSync(abs) : null;
+      if (!stat?.isFile()) continue;
+      sizeNote = ` (${stat.size} bytes on disk)`;
+      const reason = artifactFileLooksTruncated({ path: abs, filename: relPath }, workspaceRoot);
+      truncationNote = reason ? ` — INCOMPLETE: ${reason}` : "";
+    } catch {
+      // fall through: name the path even when it cannot be stat'd
+    }
+    lines.push(`- ${relPath}${sizeNote}${truncationNote}`);
+  }
+  return lines;
 }
 
 /**
@@ -1641,7 +1721,6 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
   // budget) for agents whose deliverable legitimately takes a long time — an
   // explicit numeric caller override (turnTimeoutOverrideMs) still wins.
   const agentTurnTimeout = agentCfg.turnTimeoutMs as number | "unbound" | undefined;
-  const agentUnbounded = agentTurnTimeout === "unbound";
   const agentTurnTimeoutMs = typeof agentTurnTimeout === "number" ? agentTurnTimeout : undefined;
   const defaultTimeoutMs = agentTurnTimeoutMs ?? (isCoordinatorAgent ? coordinatorDefaultMs : leafDefaultMs);
   // No adaptive budget when the caller set an override or the agent declared an
@@ -1649,8 +1728,33 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
   const adaptiveTimeout = opts.turnTimeoutOverrideMs === undefined && agentTurnTimeout === undefined
     ? computeAdaptiveSubAgentTimeoutMs(opts.agentName, opts.workspacePath, defaultTimeoutMs)
     : null;
-  const resolvedTurnTimeoutMs = opts.turnTimeoutOverrideMs
-    ?? (agentUnbounded ? 0 : agentTurnTimeoutMs)
+  // A caller-supplied budget is a CEILING ("do not outlive my turn"), never a GRANT
+  // ("you may run this long"), so honour the SMALLER of it and the agent's own declared
+  // budget. "unbound" declares no self-limit, so there the caller's ceiling stands alone.
+  //
+  // THIS IS A POLICY CHOICE, NOT A BUG FIX, and an earlier comment here claimed otherwise:
+  // it blamed run f08195d2 on an ephemeral's declared 300_000 being replaced by ~1.5M ms.
+  // That was false and is worth recording so it is not re-derived. Neither ephemeral entry
+  // point passes turnTimeoutOverrideMs at all — tools/ephemeral-agent-factory.ts puts
+  // turnTimeoutMs inside inlineConfig (:403, :798) and calls runSubAgentWithStats with no
+  // override — so callerCeilingMs was `undefined` there and the plain `??` chain already
+  // resolved 300_000. That run overran because the providers orphaned the abort signal the
+  // instant the stream opened, so the deadline was armed and could not reach the transport.
+  // That defect is fixed in the providers; this line had nothing to do with it.
+  //
+  // What it IS: `subAgents.<name>.turnTimeoutMs` was inert on the delegate_to_agent path.
+  // gateway/rpc.ts:842 sets turnTimeoutOverrideMs on EVERY turn (the whole gateway turn
+  // budget, 1_800_000 by default — not the remaining time), runtime.ts:1399 threads it onto
+  // the ToolContext, and tools/sub-agent.ts:1951 forwards it to every delegation. So a
+  // documented per-agent knob was silently overwritten on every delegated run: researcher's
+  // 600_000 and coder's 900_000 became 1_800_000. Taking the minimum makes the knob mean
+  // something. Costs: `--timeout 3600` no longer stretches an agent past its own declaration
+  // (use the effort dial or the agent's config, which is where a per-agent budget belongs),
+  // and the E18 soft-deadline nudge — derived in a DIFFERENT module — had to move onto the
+  // same rule or it would land after a hard deadline that is now often earlier. Both sides
+  // now call resolveTurnBudgetMs so they cannot drift again.
+  const callerCeilingMs = opts.turnTimeoutOverrideMs;
+  const resolvedTurnTimeoutMs = resolveTurnBudgetMs({ callerCeilingMs, agentTurnTimeout })
     ?? adaptiveTimeout?.timeoutMs
     ?? defaultTimeoutMs;
   // D3 (orchestration.clampSubAgentTimeoutToParent, default off): never hand a sub-agent more time
@@ -1826,7 +1930,28 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // resolvedModelConfig) produce larger, more reasoned outputs at high/max effort.
     // maxTokens only ever RAISES (never shrinks an agent's intentional larger budget).
     const effortRunProfile = currentEffortProfile();
-    const modelConfig = applyEffortModelOverlay(baseModelConfig, effortRunProfile);
+    // Same overlay chain, one more layer: the per-agent total-stream backstop. An agent
+    // that emits whole files gets 45 min instead of the flat 20 (a ~30 KB artifact is ~26
+    // min of generation at the measured ~16.8 tok/s), and every agent's cap is floored
+    // above BOTH its own declared budget and the deadline this run resolved, so
+    // DeadlineAbort — which salvages AND resynthesizes — reaches the stream first.
+    // Riding on ModelConfig means it reaches the containerized worker too (it travels in
+    // the container payload as resolvedModelConfig) with no extra plumbing.
+    //
+    // `declaredTurnTimeoutMs` is passed separately from `turnTimeoutMs` on purpose: the
+    // resolved deadline is `undefined` on a max-effort or "unbound" run, and that is
+    // precisely the run where this cap is the only wall clock left, so the agent's own
+    // declaration must still be visible to it.
+    //
+    // NOTE: the synthesis-tier provider below is built from agents.defaults.model, not
+    // from this object, so a raised cap does NOT apply to the grace/soft-deadline
+    // synthesis passes. That is intended — a grace pass must stay short — but it is
+    // silent, and it only holds when a synthesis tier is actually configured (otherwise
+    // `?? provider` reuses this one).
+    const modelConfig = applyStreamCapOverlay(
+      applyEffortModelOverlay(baseModelConfig, effortRunProfile),
+      { toolNames: effectiveToolNames, turnTimeoutMs, declaredTurnTimeoutMs: agentTurnTimeoutMs },
+    );
 
     const providerEndpoint = resolveProviderEndpoint(modelConfig, config);
 
@@ -1933,6 +2058,17 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // the lookup cost in every synthesis branch.
     const synthProvider = getChatProviderForTier("synthesis") ?? provider;
 
+    // Iteration cap: explicit --iter override wins, then the active effort profile's
+    // sub-agent budget (0 = unbounded), then the agent's configured cap, then default.
+    // Resolved HERE (before the prompt is assembled) because the staged-build directive
+    // sizes its pass budget from it — the loop below is the only other consumer.
+    const effortSubAgentIterations = effortRunProfile?.subAgentMaxIterations;
+    const maxIterations = opts.maxIterationsOverride === 0
+      ? Number.MAX_SAFE_INTEGER
+      : (opts.maxIterationsOverride
+          ?? (effortSubAgentIterations === 0 ? Number.MAX_SAFE_INTEGER : effortSubAgentIterations)
+          ?? agentCfg.maxIterations ?? DEFAULT_MAX_ITERATIONS);
+
     // Build system prompt
     const today = new Date().toLocaleDateString("en-US", {
       weekday: "long", year: "numeric", month: "long", day: "numeric",
@@ -1988,9 +2124,38 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         + "Narrow scope, batch tool calls, and finish quickly. Do not spawn further delegations "
         + "or parallel tool fan-out unless strictly required to complete the task."
       : "";
+    // Staged artifact builds. A write-capable specialist handed a whole-artifact SPEC
+    // (rather than an instruction) reasons for tens of thousands of characters and never
+    // reaches a tool call — the measured f08195d2 failure: 20,129 completion tokens,
+    // ~17,250 of them reasoning, zero tool calls, guillotined by the stream cap. The
+    // classifier is structural (holds write_file AND edit_file; task longer than
+    // STAGED_BUILD_TASK_CHAR_THRESHOLD) so no topic words decide it, and it is split
+    // across two flags: `stagedArtifactBuilds` (default ON) arms the mechanical half —
+    // this audit record and the on-disk salvage reporting on the interrupted paths —
+    // while `stagedArtifactBuildDirective` (default OFF, pass^k-gated) is what actually
+    // changes the prompt the model sees.
+    const stagedBuildFlags = effectiveOrchestration();
+    const isStagedBuild = stagedBuildFlags.stagedArtifactBuilds !== false
+      && isStagedArtifactBuildRun(effectiveToolNames, sanitizedTask);
+    const stagedBuildGuidance = isStagedBuild && stagedBuildFlags.stagedArtifactBuildDirective === true
+      ? buildStagedArtifactBuildGuidance(maxIterations, PER_PATH_EDIT_CAP)
+      : "";
+    if (isStagedBuild) {
+      logAudit(
+        "sub_agent_staged_build_detected",
+        {
+          agentName: opts.agentName,
+          taskChars: sanitizedTask.trim().length,
+          threshold: STAGED_BUILD_TASK_CHAR_THRESHOLD,
+          maxIterations,
+          directiveInjected: stagedBuildGuidance.length > 0,
+        },
+        { sessionId: subSessionId, severity: "info" },
+      );
+    }
     const systemPrompt = agentCfg.systemPrompt
-      ? `${agentCfg.systemPrompt}${modelExecutionGuidance ? `\n\n${modelExecutionGuidance}` : ""}${taskModeGuidance ? `\n\n${taskModeGuidance}` : ""}${toolInventoryGuidance ? `\n\n${toolInventoryGuidance}` : ""}${agentDiscoveryGuidance ? `\n\n${agentDiscoveryGuidance}` : ""}${discoveryFallbackNotice ? `\n\n${discoveryFallbackNotice}` : ""}${degradedNudge ? `\n\n${degradedNudge}` : ""}\n\nAgent name: ${opts.agentName}\nCurrent workspace: ${opts.workspacePath}\nToday's date: ${today}${flowGuidance ? `\n\n${flowGuidance}` : ""}${skillGuidance ? `\n\n${skillGuidance}` : ""}${memoryGuidance ? `\n\n${memoryGuidance}` : ""}`
-      : `You are a specialized AI sub-agent named "${opts.agentName}". Complete the given task and return your result.${toolInventoryGuidance ? `\n\n${toolInventoryGuidance}` : ""}${agentDiscoveryGuidance ? `\n\n${agentDiscoveryGuidance}` : ""}${discoveryFallbackNotice ? `\n\n${discoveryFallbackNotice}` : ""}${degradedNudge ? `\n\n${degradedNudge}` : ""}\n\nAgent name: ${opts.agentName}\nCurrent workspace: ${opts.workspacePath}\nToday's date: ${today}${flowGuidance ? `\n\n${flowGuidance}` : ""}${skillGuidance ? `\n\n${skillGuidance}` : ""}${memoryGuidance ? `\n\n${memoryGuidance}` : ""}`;
+      ? `${agentCfg.systemPrompt}${stagedBuildGuidance ? `\n\n${stagedBuildGuidance}` : ""}${modelExecutionGuidance ? `\n\n${modelExecutionGuidance}` : ""}${taskModeGuidance ? `\n\n${taskModeGuidance}` : ""}${toolInventoryGuidance ? `\n\n${toolInventoryGuidance}` : ""}${agentDiscoveryGuidance ? `\n\n${agentDiscoveryGuidance}` : ""}${discoveryFallbackNotice ? `\n\n${discoveryFallbackNotice}` : ""}${degradedNudge ? `\n\n${degradedNudge}` : ""}\n\nAgent name: ${opts.agentName}\nCurrent workspace: ${opts.workspacePath}\nToday's date: ${today}${flowGuidance ? `\n\n${flowGuidance}` : ""}${skillGuidance ? `\n\n${skillGuidance}` : ""}${memoryGuidance ? `\n\n${memoryGuidance}` : ""}`
+      : `You are a specialized AI sub-agent named "${opts.agentName}". Complete the given task and return your result.${stagedBuildGuidance ? `\n\n${stagedBuildGuidance}` : ""}${toolInventoryGuidance ? `\n\n${toolInventoryGuidance}` : ""}${agentDiscoveryGuidance ? `\n\n${agentDiscoveryGuidance}` : ""}${discoveryFallbackNotice ? `\n\n${discoveryFallbackNotice}` : ""}${degradedNudge ? `\n\n${degradedNudge}` : ""}\n\nAgent name: ${opts.agentName}\nCurrent workspace: ${opts.workspacePath}\nToday's date: ${today}${flowGuidance ? `\n\n${flowGuidance}` : ""}${skillGuidance ? `\n\n${skillGuidance}` : ""}${memoryGuidance ? `\n\n${memoryGuidance}` : ""}`;
 
     // Get available tools for this agent. E20: rerank by semantic
     // relevance to the current task so the model sees the most relevant
@@ -2104,14 +2269,6 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
 
     const history: LLMMessage[] = [{ role: "user", content: userContent }];
 
-    // Iteration cap: explicit --iter override wins, then the active effort profile's
-    // sub-agent budget (0 = unbounded), then the agent's configured cap, then default.
-    const effortSubAgentIterations = effortRunProfile?.subAgentMaxIterations;
-    const maxIterations = opts.maxIterationsOverride === 0
-      ? Number.MAX_SAFE_INTEGER
-      : (opts.maxIterationsOverride
-          ?? (effortSubAgentIterations === 0 ? Number.MAX_SAFE_INTEGER : effortSubAgentIterations)
-          ?? agentCfg.maxIterations ?? DEFAULT_MAX_ITERATIONS);
     let iterations = 0;
     let toolCount = 0;
     let successfulToolCount = 0;
@@ -2137,6 +2294,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     let lrgLastSample: ProgressSample = { completionTokens: 0, toolCalls: 0 };
     const artifacts: Record<string, unknown>[] = [];
     const artifactKeys = new Set<string>();
+    // Workspace-relative paths this run successfully wrote or edited, in call order.
+    // Feeds describeMutatedWorkspaceFiles on the interrupted paths so a cut-off staged
+    // build hands back what is on disk instead of discarding it.
+    const mutatedWorkspacePaths = new Set<string>();
     const toolNames: string[] = [];
     const usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
     // Track last tool call signature per tool name for consecutive-duplicate detection
@@ -2478,6 +2639,14 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     const currentPrimaryDelegationBody = (): { content: string; bytes: number } | null =>
       extractMostRecentSubstantialDelegationBody(history);
 
+    /** On-disk salvage lines for the interrupted paths. Gated by the mechanical
+     *  staged-build flag (default ON) so it can be switched off wholesale; empty
+     *  when the run mutated nothing, which keeps every existing output identical. */
+    const currentMutatedFileLines = (): string[] =>
+      (effectiveOrchestration().stagedArtifactBuilds !== false && mutatedWorkspacePaths.size > 0
+        ? describeMutatedWorkspaceFiles(mutatedWorkspacePaths, opts.workspacePath)
+        : []);
+
     const rescueSanitizedEmptyResult = async (rawResult: string): Promise<string> => {
       const visibleResult = stripHallucinatedToolTags(rawResult);
       if (visibleResult || toolCount === 0 || signal?.aborted) {
@@ -2550,6 +2719,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         artifacts,
         evidenceSnippets: resolveInterruptedEvidenceSnippets({ recentEvidenceSnippets, history }),
         primaryDelegationBody: extractMostRecentSubstantialDelegationBody(history),
+        mutatedFileLines: currentMutatedFileLines(),
       });
       log.warn(
         { agentName: opts.agentName, toolCount, successfulToolCount, iterations },
@@ -2587,6 +2757,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         artifacts,
         evidenceSnippets: usableHistorySnippets,
         primaryDelegationBody: extractMostRecentSubstantialDelegationBody(history),
+        mutatedFileLines: currentMutatedFileLines(),
       });
       log.warn(
         { agentName: opts.agentName, resultLength: rawResult.length, recoveredSnippets: usableHistorySnippets.length },
@@ -2664,7 +2835,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           path: typeof artifact["outputPath"] === "string" && artifact["outputPath"]
             ? String(artifact["outputPath"])
             : (typeof artifact["filename"] === "string" ? String(artifact["filename"]) : "artifact"),
-          reason: artifactFileLooksTruncated(artifact),
+          // Workspace root supplied: write_file records the MODEL's relative path, which
+          // only resolves against this run's workspace — without it the probe missed every
+          // file and a half-written build was branded complete.
+          reason: artifactFileLooksTruncated(artifact, opts.workspacePath),
         }))
         .filter((entry): entry is { path: string; reason: string } => Boolean(entry.reason));
       if (truncated.length > 0) {
@@ -3316,6 +3490,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           artifacts,
           evidenceSnippets: resolveInterruptedEvidenceSnippets({ recentEvidenceSnippets, history }),
           primaryDelegationBody: currentPrimaryDelegationBody(),
+          mutatedFileLines: currentMutatedFileLines(),
         });
         const stats = buildStats("timeout", interruptedOutcome);
         logSubAgentCompletionAudit(stats, output, { timeoutMs: turnTimeoutMs, stopAfterCurrentOperation: true, operatorStopped: lrgOperatorStop }, lrgOperatorStop ? "info" : "warn");
@@ -3352,6 +3527,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           artifacts,
           evidenceSnippets: resolveInterruptedEvidenceSnippets({ recentEvidenceSnippets, history }),
           primaryDelegationBody: currentPrimaryDelegationBody(),
+          mutatedFileLines: currentMutatedFileLines(),
         });
         const stats = buildStats("cancelled", interruptedOutcome);
         logSubAgentCompletionAudit(stats, output, { cancelled: true }, "warn");
@@ -3548,6 +3724,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             artifacts,
             evidenceSnippets: recentEvidenceSnippets,
             primaryDelegationBody: currentPrimaryDelegationBody(),
+            mutatedFileLines: currentMutatedFileLines(),
           });
           const stats = buildStats("cancelled", interruptedOutcome);
           logSubAgentCompletionAudit(stats, output, { cancelled: true }, "warn");
@@ -3619,6 +3796,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             artifacts,
             evidenceSnippets: resolveInterruptedEvidenceSnippets({ recentEvidenceSnippets, history }),
             primaryDelegationBody: currentPrimaryDelegationBody(),
+            mutatedFileLines: currentMutatedFileLines(),
           });
           const stats = buildStats("timeout", interruptedOutcome);
           logSubAgentCompletionAudit(
@@ -3672,6 +3850,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             artifacts,
             evidenceSnippets: resolveInterruptedEvidenceSnippets({ recentEvidenceSnippets, history }),
             primaryDelegationBody: currentPrimaryDelegationBody(),
+            mutatedFileLines: currentMutatedFileLines(),
           });
           const stats = buildStats("timeout", interruptedOutcome);
           logSubAgentCompletionAudit(stats, output, {
@@ -3752,6 +3931,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           artifacts,
           evidenceSnippets: resolveInterruptedEvidenceSnippets({ recentEvidenceSnippets, history }),
           primaryDelegationBody: currentPrimaryDelegationBody(),
+          mutatedFileLines: currentMutatedFileLines(),
         });
         const stats = buildStats("timeout", interruptedOutcome);
         logSubAgentCompletionAudit(stats, output, { timeoutMs: turnTimeoutMs, stopAfterCurrentOperation: true, operatorStopped: lrgOperatorStop }, lrgOperatorStop ? "info" : "warn");
@@ -4688,6 +4868,21 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           sourceTool: tc.name,
         });
 
+        // Staged-build salvage bookkeeping. edit_file's metadata carries no
+        // outputPath/dataUrl/externalUrl, so recordArtifacts ignores it entirely — a
+        // run that FILLED an existing skeleton and was then cut off had nothing in
+        // `artifacts` and reported nothing at all. Track the workspace-relative path
+        // of every successful file mutation so the interrupted paths below can name
+        // what is actually on disk. Cheap (a Set of strings) and independent of the
+        // artifact-attachment semantics, which stay untouched.
+        if (result.success && (STAGED_BUILD_REQUIRED_TOOLS as readonly string[]).includes(tc.name)) {
+          const meta = (result.metadata ?? {}) as Record<string, unknown>;
+          const mutatedPath = typeof meta["outputPath"] === "string" && meta["outputPath"]
+            ? String(meta["outputPath"])
+            : (typeof meta["path"] === "string" ? String(meta["path"]) : "");
+          if (mutatedPath) mutatedWorkspacePaths.add(mutatedPath);
+        }
+
         opts.onProgress?.({
           agentName: opts.agentName,
           kind: "tool_done",
@@ -5335,6 +5530,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           artifacts,
           evidenceSnippets: recoveredEvidenceSnippets,
           primaryDelegationBody: extractMostRecentSubstantialDelegationBody(history),
+          mutatedFileLines: currentMutatedFileLines(),
         })
       : `Sub-agent '${opts.agentName}' reached the maximum number of tool-call iterations (${maxIterations}) before producing usable topic-related output.`;
     // A run halted by the iteration guardrail that still GATHERED usable

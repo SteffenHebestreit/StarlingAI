@@ -4,6 +4,7 @@ import type { ChatCompletion, ChatCompletionChunk, ChatCompletionMessageParam, C
 import type { Stream } from "openai/streaming";
 import { childLogger } from "../logger.js";
 import type { ModelConfig } from "../config/schema.js";
+import { resolveStreamTotalCapMs } from "./stream-budget.js";
 import { beginProviderCall, recordProviderToken, endProviderCall } from "../observability/provider-activity-monitor.js";
 
 const log = childLogger("provider:openai-compatible");
@@ -22,15 +23,16 @@ const DEFAULT_PROVIDER_TIMEOUT_MS = 30_000;
  */
 const MAX_PROVIDER_TIMEOUT_MS = 900_000;
 
-/**
- * Hard ceiling on a SINGLE streaming call, however healthy it looks.
- *
- * The inactivity guard measures silence and re-arms per chunk, so it can never stop a
- * model that keeps emitting. 20 minutes is far above any legitimate single generation
- * on this hardware (a full build turn is minutes) and far below the 36-minute runaway
- * that motivated it.
- */
-export const MAX_STREAM_TOTAL_MS = 1_200_000;
+// The total-stream budget lives in its own leaf module (see providers/stream-budget.ts)
+// so the sub-agent's pure per-agent resolver can share the constants without importing
+// this file's provider chain. Re-exported here because every existing importer reads
+// MAX_STREAM_TOTAL_MS from this module.
+export {
+  BUILDER_MAX_STREAM_TOTAL_MS,
+  MAX_STREAM_TOTAL_CEILING_MS,
+  MAX_STREAM_TOTAL_MS,
+  resolveStreamTotalCapMs,
+} from "./stream-budget.js";
 
 /**
  * Transport dispatcher with undici's body timeout DISABLED.
@@ -808,6 +810,8 @@ export class LMStudioProvider {
   private lastHealthCheck = 0;
   private configuredMaxRetries: number;
   private requestTimeoutMs: number;
+  /** Per-agent total-stream backstop, resolved from the ModelConfig (see resolveStreamTotalCapMs). */
+  private readonly maxStreamTotalMs: number;
   private loadedModel?: string;
   private lastError?: string;
   private requestCount = 0;
@@ -828,6 +832,10 @@ export class LMStudioProvider {
     this.requestTimeoutMs = computeOpenAICompatibleRequestTimeoutMs(modelConfig, options.timeoutMs, {
       locallyServed: isLocallyServedEndpoint(baseUrl),
     });
+    // Same derivation shape as requestTimeoutMs above: read off the ModelConfig, not
+    // off the endpoint options, because the cap is a property of the AGENT's work
+    // (a builder emits a 30 KB artifact; a summarizer does not), not of the endpoint.
+    this.maxStreamTotalMs = resolveStreamTotalCapMs(modelConfig);
     this.client = new OpenAI({
       baseURL: baseUrl,
       apiKey: apiKey,
@@ -992,30 +1000,45 @@ export class LMStudioProvider {
   // single `complete()` call run for 20 min past a 5-min SDK timeout). This
   // wrapper composes the caller's signal with a setTimeout-based abort so
   // every attempt has a true wall-clock ceiling we control.
+  //
+  // SIGNAL LIFETIME — the composition is AbortSignal.any, deliberately, and the
+  // only thing this function cleans up is its own timer.
+  //
+  // The previous version bridged parent → a LOCAL controller with
+  // addEventListener and unhooked it in `finally`. For a non-streaming call that
+  // is harmless (the response is fully materialized when `fn` resolves), but at
+  // the STREAMING call site `fn` resolves the moment the HTTP stream is OPEN —
+  // before a single chunk is read. The unhook therefore ran at chunk zero and
+  // orphaned the very controller the SDK was holding (openai v4 core.js
+  // fetchWithTimeout reaches the real fetch controller ONLY by listening on
+  // `options.signal`). From that instant the turn deadline, an operator STOP and
+  // the inactivity timer all aborted a controller with no listeners, and the only
+  // thing that could still stop the stream was the total-budget guillotine —
+  // which is exactly why run f08195d2's agents died at MAX_STREAM_TOTAL_MS to the
+  // millisecond.
+  //
+  // AbortSignal.any keeps the link alive for the lifetime of the composed signal
+  // itself, so there is no un-hook step left that can run too early. Clearing a
+  // timer cannot sever anything, so this class of bug has nowhere left to hide.
   private async withHardTimeout<T>(
     parentSignal: AbortSignal | undefined,
     timeoutMs: number,
     fn: (combinedSignal: AbortSignal) => Promise<T>,
   ): Promise<T> {
-    const ac = new AbortController();
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let parentListener: (() => void) | undefined;
+    const timeoutAc = new AbortController();
     let timedOut = false;
 
-    if (parentSignal?.aborted) {
-      ac.abort(parentSignal.reason);
-    } else if (parentSignal) {
-      parentListener = () => ac.abort(parentSignal.reason);
-      parentSignal.addEventListener("abort", parentListener, { once: true });
-    }
-
-    timer = setTimeout(() => {
+    const timer = setTimeout(() => {
       timedOut = true;
-      ac.abort(new Error(`LLM call exceeded hard timeout of ${timeoutMs}ms`));
+      timeoutAc.abort(new Error(`LLM call exceeded hard timeout of ${timeoutMs}ms`));
     }, timeoutMs);
 
+    const combined = parentSignal
+      ? AbortSignal.any([parentSignal, timeoutAc.signal])
+      : timeoutAc.signal;
+
     try {
-      return await fn(ac.signal);
+      return await fn(combined);
     } catch (err) {
       // Distinguish OUR wall-clock timeout from an external/parent cancel so
       // the retry loop can treat it as terminal (a hung provider must not be
@@ -1025,8 +1048,9 @@ export class LMStudioProvider {
       }
       throw err;
     } finally {
-      if (timer !== undefined) clearTimeout(timer);
-      if (parentListener && parentSignal) parentSignal.removeEventListener("abort", parentListener);
+      // ONLY the timer. Disarming the open-phase ceiling must never disarm the
+      // caller's ability to abort what the open phase produced.
+      clearTimeout(timer);
     }
   }
 
@@ -1216,6 +1240,16 @@ export class LMStudioProvider {
 
     try {
       for await (const chunk of this.stream(messages, tools, signal)) {
+        // Second consumer-side abort check (streamOnce has the first). This is the
+        // last loop between the transport and the caller, so it is the backstop
+        // that holds even if a provider implementation of stream() has neither a
+        // live signal nor its own check. The throw lands in the catch below, where
+        // the SAME classification runs: DeadlineAbort → salvage, operator → rethrow.
+        if (signal?.aborted) {
+          throw signal.reason instanceof Error
+            ? signal.reason
+            : new Error(`LLM stream aborted by the caller: ${String(signal.reason)}`);
+        }
         switch (chunk.type) {
           case "text_delta":
             content += chunk.content ?? "";
@@ -1409,17 +1443,19 @@ export class LMStudioProvider {
     // The hardTimeout here only guards the initial `create()` call (opening
     // the HTTP stream). Per-chunk inactivity is enforced below so a hung
     // mid-stream connection can't tie up the turn indefinitely.
+    //
+    // streamAc carries the PROVIDER-side aborts (total-budget cap, inactivity
+    // stall); it is composed with the caller's signal exactly once, and that
+    // composed signal is what reaches the SDK and stays linked for the whole
+    // life of the stream. Composed with AbortSignal.any rather than a hand-rolled
+    // listener pair for the reason spelled out on withHardTimeout: there is then
+    // no un-hook step that a `finally` can run at the wrong moment and leave the
+    // caller unable to stop an open stream.
     const streamAc = new AbortController();
-    let streamParentListener: (() => void) | undefined;
-    if (signal?.aborted) {
-      streamAc.abort(signal.reason);
-    } else if (signal) {
-      streamParentListener = () => streamAc.abort(signal.reason);
-      signal.addEventListener("abort", streamParentListener, { once: true });
-    }
+    const streamSignal = signal ? AbortSignal.any([signal, streamAc.signal]) : streamAc.signal;
 
     const createStream = this.client.chat.completions.create.bind(this.client.chat.completions);
-    const stream = await this.withHardTimeout(streamAc.signal, this.requestTimeoutMs + 5000, (s) => createStream(
+    const stream = await this.withHardTimeout(streamSignal, this.requestTimeoutMs + 5000, (s) => createStream(
       {
         model: modelId,
         messages: openAIMessages,
@@ -1486,10 +1522,29 @@ export class LMStudioProvider {
     // The old `Math.max(this.requestTimeoutMs, …)` was dead code: requestTimeoutMs is
     // clamped to MAX_PROVIDER_TIMEOUT_MS (900_000), always below MAX_STREAM_TOTAL_MS
     // (1_200_000), so the max always resolved to the constant and the cap never scaled.
-    const totalCapMs = MAX_STREAM_TOTAL_MS;
+    // It scales now — per AGENT, off the ModelConfig — so an agent whose deliverable is a
+    // whole emitted file gets BUILDER_MAX_STREAM_TOTAL_MS instead of the flat default, and
+    // any agent whose own budget exceeds the default gets a cap floored above it so the
+    // deadline (which salvages AND resynthesizes) reaches the stream first. That ordering
+    // is real only because the caller's signal now survives stream-open (withHardTimeout
+    // above); it does not apply on a run with NO deadline, which is the case this cap
+    // exists for. See resolveAgentStreamCapMs in agent/sub-agent-model-config.ts.
+    const totalCapMs = this.maxStreamTotalMs;
 
     try {
       for await (const chunk of stream) {
+        // BELT AND BRACES over the composed signal above. The signal is what
+        // actually tears the transport down; this makes the CONSUMER stop too, so
+        // a future transport that quietly ignores its signal still cannot run past
+        // the caller's deadline. Re-throwing the signal's own reason keeps the
+        // existing classification intact downstream: completeViaStream reads
+        // `signal.reason`, so a DeadlineAbort salvages the partial and an operator
+        // cancel re-throws.
+        if (signal?.aborted) {
+          throw signal.reason instanceof Error
+            ? signal.reason
+            : new Error(`LLM stream aborted by the caller: ${String(signal.reason)}`);
+        }
         if (Date.now() - streamStartedAt > totalCapMs) {
           // THROW, do not break. A `break` leaves the try block normally: the catch
           // below never runs, recordRequestSuccess() fires, collectedFinishReason is
@@ -1590,7 +1645,8 @@ export class LMStudioProvider {
     } finally {
       endProviderCall(callId);
       if (inactivityTimer !== undefined) clearTimeout(inactivityTimer);
-      if (streamParentListener && signal) signal.removeEventListener("abort", streamParentListener);
+      // No listener to unhook: streamSignal is an AbortSignal.any composite, which
+      // the platform holds weakly and drops with the stream itself.
     }
 
     this.recordRequestSuccess(startedAt);

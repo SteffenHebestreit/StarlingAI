@@ -31,6 +31,73 @@ export function getEffectiveToolNames(agentName: string, configuredTools: string
   return configuredTools;
 }
 
+/**
+ * Tools a staged artifact build actually needs. BOTH halves are required, and the
+ * pair is what makes this a capability test rather than a role guess: write_file
+ * creates the skeleton, edit_file fills one stub per later pass. An agent holding
+ * only one of them cannot stage anything, so the directive would be noise. This is
+ * deliberately NOT ARTIFACT_PRODUCING_TOOLS (which also holds shell_exec, create_dir
+ * and the one-shot generate_* emitters — none of which build in passes).
+ */
+export const STAGED_BUILD_REQUIRED_TOOLS = ["write_file", "edit_file"] as const;
+
+/**
+ * Task size (characters) above which a whole-artifact build must be staged.
+ *
+ * The live probe against the serving model bracketed the failure but did not locate
+ * its knee: a 46-char task ("Write a file hello.txt containing exactly: hi") reasoned
+ * 109 chars and called its tool in ~4 s, while a 2,400-char spec with 8 numbered
+ * requirement groups produced 60,385 reasoning chars, ZERO tool calls, and was killed
+ * at the 20-minute stream cap (run f08195d2). So the knee is somewhere in (46, 2400].
+ *
+ * It is NOT in the middle. The reasoning-to-task ratio over that bracket grew from
+ * ~2.4x (109/46) to ~25x (60385/2400) — a 10x blow-up — so the transition sits much
+ * nearer the small end than the large one. The geometric midpoint of the bracket,
+ * sqrt(46 * 2400) ~= 332, is the honest centre of a multiplicative range; we round UP
+ * to 600 to buy margin against false positives. 600 chars is ~150 tokens, roughly three
+ * sentences: below it a delegation is an INSTRUCTION (which lands in seconds), above it
+ * it is a SPECIFICATION. Staging a task that did not need it costs one extra tool call;
+ * not staging one that did costs the entire run, so the asymmetry still favours firing.
+ */
+export const STAGED_BUILD_TASK_CHAR_THRESHOLD = 600;
+
+/**
+ * Structural classifier for "this run must build in passes": the agent can both
+ * create and amend a file, and the task is a specification rather than an
+ * instruction. Capability + size only — no topic words, no language tables.
+ */
+export function isStagedArtifactBuildRun(toolNames: string[] | undefined, task: string): boolean {
+  const available = new Set(toolNames ?? []);
+  if (!STAGED_BUILD_REQUIRED_TOOLS.every((toolName) => available.has(toolName))) return false;
+  return task.trim().length > STAGED_BUILD_TASK_CHAR_THRESHOLD;
+}
+
+/**
+ * The staged-build directive itself. Every capability it names is real: write_file
+ * (mode defaults to "overwrite", mode:"append" exists), edit_file (EXACT string
+ * replacement that fails on an absent or ambiguous old_string — hence the unique
+ * anchors), read_file and grep_files. There is no range/line-number patch tool, so
+ * the directive never mentions one.
+ *
+ * The pass budget is derived from the run's own maxIterations rather than fixed:
+ * the runner strips every tool on the last iteration to force a synthesis, so the
+ * usable build passes are maxIterations minus the skeleton, the verification read
+ * and that final synthesis. It is then clamped to the runner's per-path edit_file
+ * ceiling (passed in — the constant lives in the runner, which imports this module)
+ * so the directive can never promise more passes than the harness will allow.
+ */
+export function buildStagedArtifactBuildGuidance(maxIterations: number, perPathEditCap: number): string {
+  const fillPasses = Math.max(2, Math.min(maxIterations - 3, perPathEditCap));
+  return [
+    "STAGED BUILD — THIS TASK IS TOO LARGE FOR ONE PASS.",
+    "A whole artifact emitted in a single completion does not finish on this hardware: the model reasons for tens of thousands of characters and the call is killed before any tool runs. Build the artifact in passes, ONE tool call per iteration, smallest working version first.",
+    "1. SKELETON (first tool call): one write_file with a minimal but VALID whole artifact — correct outer structure that already CLOSES (for HTML: doctype, head, body and the closing </html>), every subsystem present only as a short stub, and each stub preceded by a UNIQUE anchor comment on its own line (e.g. `<!-- SECTION: physics -->`). Keep this call to a few KB.",
+    `2. FILL (one subsystem per iteration, about ${fillPasses} of them): replace exactly ONE stub per call with edit_file, passing that anchor line plus a little surrounding text as old_string. edit_file is an EXACT string replacement and FAILS unless old_string matches exactly one place, so keep every anchor distinct and add surrounding lines rather than falling back to write_file. Use grep_files to re-locate an anchor if a replacement is rejected. Never re-emit the whole file to change part of it.`,
+    "3. FINISH: read_file the artifact, confirm the structure still closes and no stub anchors remain, then report the path — not the contents.",
+    "Budget the subsystems to the passes you have and merge the small ones. If you run out of budget the artifact on disk is still valid and is handed back as a partial; a file that was never written is not.",
+  ].join("\n");
+}
+
 export function buildTaskModeGuidance(agentName: string, _task: string): string {
   // Task-text keyword branches (mail read-only, shell/ops remote-CLI, computer
   // observation-only) were removed — guidance must not be selected from topic

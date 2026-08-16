@@ -63,6 +63,7 @@ export type CoreAuditEventType =
   | "sub_agent_tool_blocked"
   | "sub_agent_max_iterations"
   | "sub_agent_reasoning"
+  | "sub_agent_staged_build_detected"
   | "agent_reasoning"
   | "parallel_delegate_started"
   | "parallel_delegate_deduplicated"

@@ -18,6 +18,7 @@
 
 import { registerTool, getAllTools, searchToolsByEmbedding, type ToolContext, type ToolResult } from "./registry.js";
 import { runSubAgent, runSubAgentWithStats } from "../agent/sub-agent.js";
+import { canWriteWorkspaceFiles } from "../agent/sub-agent-model-config.js";
 import { getConfig } from "../config/loader.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
@@ -365,7 +366,13 @@ export async function runEphemeralWorker(input: {
 
   const agentName = `ephemeral:${String(input.agentName || "kb_worker").trim().replace(/\W+/g, "_").slice(0, 64)}`;
   const maxIter = Math.min(10, Math.max(1, input.maxIterations ?? 6));
-  const resolvedTimeoutMs = input.timeoutMs !== undefined ? Math.min(600_000, Math.max(60_000, input.timeoutMs)) : undefined;
+  // Capability-dependent ceiling, same rationale as create_ephemeral_agent below: an
+  // ephemeral granted workspace-write tools gets the permanent builders' 25 min, everything
+  // else 10. The WIDE predicate is right here and the narrow stream-cap one is not: this
+  // only bounds what an architect may ASK for (resolvedTimeoutMs stays undefined unless a
+  // timeoutMs was passed), whereas the stream cap is applied to every run automatically.
+  const timeoutCeilingMs = canWriteWorkspaceFiles(tools) ? 1_500_000 : 600_000;
+  const resolvedTimeoutMs = input.timeoutMs !== undefined ? Math.min(timeoutCeilingMs, Math.max(60_000, input.timeoutMs)) : undefined;
 
   // Validate model.primary against configured models (reject hallucinated ids).
   let modelPrimary: string | undefined;
@@ -618,7 +625,7 @@ registerTool({
       },
       timeoutMs: {
         type: "number",
-        description: "Wall-clock timeout in milliseconds for the ephemeral agent run (minimum: 60000, maximum: 600000). Defaults to 60 s if omitted. Use 300000 for research tasks with multiple web_search iterations.",
+        description: "Wall-clock timeout in milliseconds for the ephemeral agent run (minimum: 60000; maximum: 600000, or 1500000 when the agent is granted file-writing tools). Defaults to 60 s if omitted. Use 300000 for research tasks with multiple web_search iterations, and 900000+ when the agent must BUILD a large file in several passes.",
       },
       task: {
         type: "string",
@@ -761,12 +768,19 @@ registerTool({
     }
 
     const maxIter = Math.min(10, Math.max(1, Number(args["maxIterations"] ?? 5) || 5));
-    // Honour an explicit timeoutMs from the caller (min 60 s, max 10 min).
+    // Honour an explicit timeoutMs from the caller (min 60 s).
     // The leaf-agent default of 60 s is far too short for research tasks with
     // multiple web_search iterations — callers should pass 300000 for those.
+    // The MAXIMUM is capability-dependent: an ephemeral granted write_file/edit_file or a
+    // document emitter can be building something, and one build pass on this hardware can
+    // legitimately run ~26 min (~30 KB ≈ 9K tokens at ~16.8 tok/s, plus the reasoning before
+    // it), so the flat 10-minute ceiling truncated the architect's own choice. Same
+    // 25-minute budget as the permanent builders; every other ephemeral keeps 10 minutes.
+    // Wide predicate on purpose — see the ceiling in runEphemeralWorker above.
     const rawTimeoutMs = typeof args["timeoutMs"] === "number" ? args["timeoutMs"] : undefined;
+    const timeoutCeilingMs = canWriteWorkspaceFiles(tools) ? 1_500_000 : 600_000;
     const resolvedTimeoutMs = rawTimeoutMs !== undefined
-      ? Math.min(600_000, Math.max(60_000, rawTimeoutMs))
+      ? Math.min(timeoutCeilingMs, Math.max(60_000, rawTimeoutMs))
       : undefined;
 
     const inlineConfig = {
