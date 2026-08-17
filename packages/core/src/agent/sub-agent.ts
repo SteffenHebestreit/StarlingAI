@@ -80,6 +80,9 @@ import {
   sanitizeSubAgentTask,
   isStagedArtifactBuildRun,
   buildStagedArtifactBuildGuidance,
+  buildStagedBuildFirstStepInstruction,
+  buildReasoningBurnCorrection,
+  REASONING_BURN_RETRY_LIMIT,
   STAGED_BUILD_TASK_CHAR_THRESHOLD,
   STAGED_BUILD_REQUIRED_TOOLS,
   UNFINISHED_STUB_MARKER,
@@ -2312,15 +2315,29 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       : "";
 
     // Build initial message
-    const userContent = opts.context
+    const baseUserContent = opts.context
       ? `Context:\n${opts.context}${a2aContext}${sharedFactsContext}\n\nTask: ${sanitizedTask}`
       : `${sanitizedTask}${a2aContext}${sharedFactsContext}`;
+    // Gated on the SAME condition that injects the system directive, so the two halves
+    // cannot disagree: if the directive is off, the user turn is untouched and the run
+    // behaves exactly as it did before this existed.
+    const userContent = stagedBuildGuidance
+      ? `${baseUserContent}${buildStagedBuildFirstStepInstruction()}`
+      : baseUserContent;
 
     const history: LLMMessage[] = [{ role: "user", content: userContent }];
 
     let iterations = 0;
     let toolCount = 0;
     let successfulToolCount = 0;
+    // Burns seen in THIS run. Counted here rather than in the provider because the
+    // provider has no run identity — it sees one stream at a time and cannot tell a
+    // second burn from a first. See REASONING_BURN_RETRY_LIMIT.
+    let reasoningBurns = 0;
+    // Cumulative reasoning already accounted for by a correction. Subtracted in
+    // sampleProgress so the supervisor's absolute budget measures reasoning since the
+    // last correction rather than since the run began.
+    let reasoningCharsBaseline = 0;
     // I11: Pre-emptive soft-deadline synthesis tracking. We fire the
     // soft-deadline synthesis at most once per sub-agent run.
     let softDeadlineSynthesisAttempted = false;
@@ -3304,7 +3321,19 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         mutatedPaths: mutatedWorkspacePaths.size,
         distinctWriteHashes,
         outputChars: outputCharsTotal,
-        reasoningChars: reasoningCharsTotal,
+        // Reasoning SINCE THE LAST CORRECTION, not since the run began.
+        //
+        // The burn rule below fires on an absolute budget, and this counter is cumulative,
+        // so a run that has already burned 45,000 characters sits permanently at or above
+        // the budget. Every subsequent sample would re-reach the same verdict on the same
+        // evidence and wind the run down — including the corrected run, whose whole point
+        // is that it has been told to stop and has not yet had a turn to obey.
+        //
+        // Rebasing keeps the rule intact rather than weakening it: the supervisor still
+        // winds down on a FRESH budget's worth of reasoning with nothing to show, which is
+        // the pathology it exists for. It just stops re-punishing the run for the burn the
+        // correction already answered.
+        reasoningChars: Math.max(0, reasoningCharsTotal - reasoningCharsBaseline),
       };
     };
 
@@ -4109,21 +4138,85 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // counters only a RETURNED call updates, and the measured failure spent its whole
       // 20.7 minutes inside ONE stream, so the supervisor had nothing to read. The
       // provider now reaches the same conclusion from the deltas as they arrive and
-      // salvages the partial; all that is left here is to act on it.
-      //
-      // Wind down and take the loop's existing wind-down branch rather than falling
-      // through: a burn returns zero tool calls, so the "no tool calls = final answer"
-      // path below would report a 45,000-character monologue as the agent's ANSWER.
-      // `continue` puts the run through attemptTimeoutSynthesis and the interrupted
-      // output builder — the same route a deadline takes. Terminating by construction:
-      // the wind-down branch returns before another completion is issued.
+      // salvages the partial; all that is left here is to decide what it MEANS.
       if (response.truncatedBy === "reasoning_burn") {
+        reasoningBurns++;
+        const burnReasoningChars = response.reasoning?.trim().length ?? 0;
+        // CORRECT THE MODEL BEFORE KILLING THE RUN.
+        //
+        // The first burn used to be fatal, and run dfe964f3 is what that cost: wound down
+        // at iteration 1 of 14, thirteen iterations unused, and the swarm re-dispatched the
+        // byte-identical task to the next-ranked agent, which began burning the same way.
+        // Nobody had told the model anything. A burn is a recoverable mistake — the model
+        // tried to compose a whole artifact in its head — and the one thing never tried was
+        // saying so and asking for a single small action.
+        //
+        // Bounded three ways, so this cannot become the spin it is correcting: the counter
+        // is per-run and the SECOND burn falls through to the wind-down below; an operator
+        // stop or cancellation is honoured first, so this can never resurrect a run a human
+        // ended; and the corrective turn consumes an iteration like any other, so the
+        // iteration cap still terminates the loop.
+        const iterationsRemain = iterations + 1 < maxIterations;
+        if (
+          reasoningBurns < REASONING_BURN_RETRY_LIMIT
+          && iterationsRemain
+          && !lrgOperatorStop
+          && !supervisorStop
+          && !opts.signal?.aborted
+          && !longRunningGenerationManager.isStopRequested(subSessionId)
+        ) {
+          // Alternation matters: this history feeds strict chat templates that reject two
+          // consecutive user turns, so the cut-off assistant turn is recorded before the
+          // correction. Its content is never empty for the same reason — a burn salvages
+          // little or nothing, and an empty assistant turn is rejected by those templates too.
+          const salvagedText = typeof response.content === "string" ? response.content.trim() : "";
+          history.push({
+            role: "assistant",
+            content: salvagedText.length > 0
+              ? salvagedText
+              : "(this turn was cut off while planning — no action was taken)",
+          });
+          history.push({
+            role: "user",
+            content: buildReasoningBurnCorrection(burnReasoningChars, isStagedBuild),
+          });
+          // Answer this burn once. Without the rebase the supervisor re-reads the same
+          // 45,000 characters on its very next sample and winds the corrected run down
+          // before it can obey — the correction would be live, green and inert.
+          reasoningCharsBaseline = reasoningCharsTotal;
+          logAudit("progress_verifier_intervened", {
+            agentName: opts.agentName,
+            runSessionId: subSessionId,
+            trigger: "mid_stream",
+            verdict: "burning",
+            action: "corrected",
+            reason: "the provider aborted an in-flight generation that was burning reasoning; "
+              + "the run was given a corrective turn demanding one concrete tool call",
+            elapsedMs: Date.now() - runStartedAt,
+            productiveToolCalls: successfulToolCount,
+            mutatedPaths: mutatedWorkspacePaths.size,
+            reasoningChars: burnReasoningChars,
+            outputChars: outputCharsTotal,
+            burnCount: reasoningBurns,
+            iterations,
+          }, { sessionId: opts.parentSessionId, severity: "warn" });
+          iterations++;
+          continue;
+        }
+        // Out of corrections (or the run is already ending). Wind down and take the loop's
+        // existing wind-down branch rather than falling through: a burn returns zero tool
+        // calls, so the "no tool calls = final answer" path below would report a
+        // 45,000-character monologue as the agent's ANSWER. `continue` puts the run through
+        // attemptTimeoutSynthesis and the interrupted output builder — the same route a
+        // deadline takes. Terminating by construction: the wind-down branch returns before
+        // another completion is issued.
         windDownForSupervisor();
         logAudit("progress_verifier_intervened", {
           agentName: opts.agentName,
           runSessionId: subSessionId,
           trigger: "mid_stream",
           verdict: "burning",
+          action: "wound_down",
           reason: "the provider aborted an in-flight generation that was burning reasoning "
             + "with no tool call and no answer text",
           elapsedMs: Date.now() - runStartedAt,
@@ -4131,6 +4224,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           mutatedPaths: mutatedWorkspacePaths.size,
           reasoningChars: reasoningCharsTotal,
           outputChars: outputCharsTotal,
+          burnCount: reasoningBurns,
           iterations,
         }, { sessionId: opts.parentSessionId, severity: "warn" });
         iterations++;

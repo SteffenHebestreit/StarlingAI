@@ -28,22 +28,55 @@ vi.mock("../audit/logger.js", async (importActual) => ({
 /**
  * WIRING for the mid-stream burn abort, on the sub-agent side.
  *
- * The provider can now stop a burning generation while it streams (see
+ * The provider can stop a burning generation while it streams (see
  * provider-mid-stream-reasoning-burn.test.ts). That is only half the fix: the salvaged
  * response comes back with ZERO tool calls, so the loop's "no tool calls = final
  * answer" branch would hand a 45,000-character monologue to the coordinator AS THE
  * AGENT'S ANSWER — the same silent-wrong-result shape the measured run produced, just
  * five minutes sooner.
  *
- * So this drives the real runSubAgent loop and asserts the run's own account of why it
- * ended, plus the audit record an operator would look for. The control run is the
- * discriminator: byte-identical response, `truncatedBy` absent, and it must be treated
- * as an ordinary (empty) answer with no wind-down.
+ * WHAT CHANGED, AND WHY THIS FILE ARGUES WITH ITS OWN PREVIOUS SELF.
+ *
+ * This suite used to assert `calls === 1` under the comment "A burning generation must
+ * not be retried — that is how a 20-minute failure becomes a 40-minute one". Run
+ * dfe964f3 priced the other side of that trade and it is worse: web_coder burned 45,001
+ * characters, the run was wound down at iteration 1 of 14, thirteen iterations went
+ * unused, and the swarm re-dispatched the byte-identical 1,709-char task to the
+ * next-ranked agent, which began burning the same way. The old assertion prevented a
+ * retry INSIDE the run and bought a retry OUTSIDE it, on a fresh agent with no memory of
+ * the failure. Cost identical, correction impossible.
+ *
+ * So the first burn now earns exactly one corrective turn. The protection the old
+ * assertion really encoded — that a burn cannot be retried UNBOUNDEDLY — is now carried
+ * by the two-burn test below, which is the one that would fail if the counter were wrong.
  */
 
 const SUPERVISOR_WIND_DOWN = "wound down by the progress supervisor";
 /** The budget the provider aborts at, salvaged and handed back. */
 const SALVAGED_REASONING_CHARS = 45_000;
+/**
+ * Wall-clock a burn actually consumes, advanced per provider call.
+ *
+ * WITHOUT THIS THE WHOLE FILE IS A LIE. superviseProgress() is gated on
+ * PROGRESS_CHECK_INTERVAL_MS (180s) of real elapsed time, so in a suite that runs in
+ * milliseconds the supervisor NEVER SAMPLES and every assertion here is made against a
+ * harness whose central safety net is switched off. Production takes 15.8 measured
+ * minutes per burn — the gate is wide open there and permanently shut here, which is
+ * exactly the gap that lets a change be green and inert at the same time.
+ *
+ * Date.now is spied rather than using fake timers because the run's deadline is a real
+ * setTimeout on an AbortController; freezing the timer queue would hang the loop.
+ */
+const BURN_WALL_CLOCK_MS = 240_000;
+
+interface StubResponse {
+  content: string | null;
+  reasoning: string;
+  tool_calls: unknown[];
+  usage: { promptTokens: number; completionTokens: number; totalTokens: number; estimated: boolean };
+  finishReason: string;
+  truncatedBy?: string;
+}
 
 function writeTempConfig(agentName: string): { tempDir: string; configPath: string } {
   const tempDir = mkdtempSync(join(tmpdir(), "starlingai-mid-stream-burn-"));
@@ -55,15 +88,19 @@ function writeTempConfig(agentName: string): { tempDir: string; configPath: stri
         systemPrompt: "Work the task.",
         tools: ["read_file"],
         maxIterations: 6,
-        turnTimeoutMs: 600_000,
+        // Comfortably above the clock this fixture advances, so a wind-down here is
+        // always the supervisor's decision and never the turn deadline's.
+        turnTimeoutMs: 1_800_000,
       },
     },
   }), "utf8");
+  // Real material for the corrected turn's tool call to land on.
+  writeFileSync(join(tempDir, "notes.txt"), "skeleton source material", "utf8");
   return { tempDir, configPath };
 }
 
 /** The provider's salvaged partial after it aborted a burning generation. */
-function burnSalvage(truncatedBy: "reasoning_burn" | undefined) {
+function burnSalvage(truncatedBy: "reasoning_burn" | undefined): StubResponse {
   return {
     content: null,
     reasoning: "r".repeat(SALVAGED_REASONING_CHARS),
@@ -74,11 +111,53 @@ function burnSalvage(truncatedBy: "reasoning_burn" | undefined) {
   };
 }
 
-async function runFixture(agentName: string, truncatedBy: "reasoning_burn" | undefined) {
+/**
+ * The ACTION a corrected run takes on its next turn.
+ *
+ * It has to be a real tool call, not prose: a run that finishes having called no tool and
+ * said little is a failure by the loop's own reckoning (buildNoProgressFailure), and
+ * rightly so — being corrected and then still not acting is not a recovery. Asserting
+ * recovery therefore means asserting the run ACTS.
+ */
+function toolCallAnswer(): StubResponse {
+  return {
+    content: null,
+    reasoning: "",
+    tool_calls: [{ id: "call_1", name: "read_file", arguments: { path: "notes.txt" } }],
+    usage: { promptTokens: 7000, completionTokens: 30, totalTokens: 7030, estimated: true },
+    finishReason: "tool_calls",
+  };
+}
+
+/** An ordinary answer — what a corrected run produces on its next turn. */
+function plainAnswer(text: string): StubResponse {
+  return {
+    content: text,
+    reasoning: "",
+    tool_calls: [],
+    usage: { promptTokens: 7000, completionTokens: 40, totalTokens: 7040, estimated: true },
+    finishReason: "stop",
+  };
+}
+
+/** Drives the real runSubAgent loop over a fixed response SEQUENCE (last one repeats). */
+async function runFixture(agentName: string, sequence: StubResponse[]) {
   const { tempDir, configPath } = writeTempConfig(agentName);
   process.env["SAI_CONFIG_PATH"] = configPath;
   vi.resetModules();
-  completeViaStreamMock.mockImplementation(() => Promise.resolve(burnSalvage(truncatedBy)));
+
+  // Advance a real clock so superviseProgress() actually samples between iterations.
+  const realNow = Date.now();
+  let elapsed = 0;
+  vi.spyOn(Date, "now").mockImplementation(() => realNow + elapsed);
+
+  let call = 0;
+  completeViaStreamMock.mockImplementation(() => {
+    const next = sequence[Math.min(call, sequence.length - 1)]!;
+    call++;
+    elapsed += BURN_WALL_CLOCK_MS;
+    return Promise.resolve(next);
+  });
 
   const { runSubAgent } = await import("../agent/sub-agent.js");
   const output = String(await runSubAgent({
@@ -91,7 +170,12 @@ async function runFixture(agentName: string, truncatedBy: "reasoning_burn" | und
   return { output, calls: completeViaStreamMock.mock.calls.length };
 }
 
-describe("sub-agent — a provider-aborted burn winds the run down", () => {
+/** The messages array handed to the Nth (0-based) provider call. */
+function messagesOfCall(index: number): Array<{ role: string; content: unknown }> {
+  return completeViaStreamMock.mock.calls[index]![0] as Array<{ role: string; content: unknown }>;
+}
+
+describe("sub-agent — a provider-aborted burn is corrected once, then fatal", () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     delete process.env["SAI_CONFIG_PATH"];
@@ -105,24 +189,108 @@ describe("sub-agent — a provider-aborted burn winds the run down", () => {
     await swarmMemory.resetSharedMemoryForTests();
   });
 
-  it("winds down, SAYS the supervisor did it, and never re-issues the completion", async () => {
-    const { output, calls } = await runFixture("burn_agent", "reasoning_burn");
+  it("gives the FIRST burn a corrective turn instead of killing the run", async () => {
+    const { output, calls } = await runFixture("burn_once_agent", [
+      burnSalvage("reasoning_burn"),
+      toolCallAnswer(),
+      plainAnswer("Wrote the skeleton."),
+    ]);
 
-    expect(output).toContain(SUPERVISOR_WIND_DOWN);
-    // The monologue is NOT presented as the answer.
-    expect(output).not.toContain("r".repeat(200));
-    // One call. A burning generation must not be retried — that is how a 20-minute
-    // failure becomes a 40-minute one.
-    expect(calls).toBe(1);
+    // The run survived its first burn, ACTED, and delivered.
+    expect(calls).toBe(3);
+    expect(output).toContain("Wrote the skeleton.");
+    expect(output).not.toContain(SUPERVISOR_WIND_DOWN);
+
+    // The correction actually reached the model, and it names the measured size —
+    // without the number the instruction is unfalsifiable to a model that cannot see
+    // its own discarded reasoning.
+    const second = messagesOfCall(1);
+    const corrective = second.filter((m) => m.role === "user").at(-1);
+    expect(String(corrective?.content)).toContain("STOP PLANNING");
+    expect(String(corrective?.content)).toContain("45,000");
 
     const intervened = auditEvents.filter((e) => e.event === "progress_verifier_intervened");
     expect(intervened).toHaveLength(1);
-    expect(intervened[0]!.payload["trigger"]).toBe("mid_stream");
-    expect(intervened[0]!.payload["verdict"]).toBe("burning");
+    expect(intervened[0]!.payload["action"]).toBe("corrected");
+    expect(intervened[0]!.payload["burnCount"]).toBe(1);
+  });
+
+  it("winds down on the SECOND burn — the correction is not retried forever", async () => {
+    // THE BOUND. This is the assertion the old `calls === 1` was really protecting, and
+    // it is the one that fails if REASONING_BURN_RETRY_LIMIT is raised or the counter is
+    // reset per iteration: an unbounded correction loop would run to the iteration cap,
+    // six calls at ~15 measured minutes each.
+    const { output, calls } = await runFixture("burn_twice_agent", [
+      burnSalvage("reasoning_burn"),
+      burnSalvage("reasoning_burn"),
+    ]);
+
+    expect(calls).toBe(2);
+    expect(output).toContain(SUPERVISOR_WIND_DOWN);
+    // The monologue is NOT presented as the answer.
+    expect(output).not.toContain("r".repeat(200));
+
+    const intervened = auditEvents.filter((e) => e.event === "progress_verifier_intervened");
+    expect(intervened).toHaveLength(2);
+    expect(intervened[0]!.payload["action"]).toBe("corrected");
+    expect(intervened[1]!.payload["action"]).toBe("wound_down");
+    expect(intervened[1]!.payload["burnCount"]).toBe(2);
+  });
+
+  it("does not let the SUPERVISOR wind down the run for the burn the correction answered", async () => {
+    // THE INERTNESS PROBE, and the reason this file advances a clock at all.
+    //
+    // sampleProgress() reports CUMULATIVE reasoning while the supervisor's burn rule is an
+    // ABSOLUTE budget, so after one 45,000-char burn the run sits permanently at the
+    // threshold. With no rebase, the next superviseProgress() sample re-reaches "burning"
+    // on the evidence the correction already answered and winds the run down — the
+    // correction ships live, green and completely inert, which is the failure mode this
+    // whole change set exists to stop repeating.
+    //
+    // Revert `reasoningCharsBaseline = reasoningCharsTotal` in sub-agent.ts and this fails.
+    const { output } = await runFixture("burn_rebase_agent", [
+      burnSalvage("reasoning_burn"),
+      toolCallAnswer(),
+      plainAnswer("Recovered and delivered."),
+    ]);
+
+    expect(output).toContain("Recovered and delivered.");
+    expect(output).not.toContain(SUPERVISOR_WIND_DOWN);
+
+    // Exactly one intervention: the correction. A second would be the supervisor
+    // re-punishing the same characters.
+    const intervened = auditEvents.filter((e) => e.event === "progress_verifier_intervened");
+    expect(intervened).toHaveLength(1);
+    expect(intervened[0]!.payload["action"]).toBe("corrected");
+  });
+
+  it("keeps the history legal for a strict chat template after a correction", async () => {
+    // A burn salvages nothing, so the naive repair — push the correction as a user turn —
+    // yields two consecutive user messages, and an assistant turn with empty content.
+    // Strict templates (the reason this repo folds system messages at all) reject both.
+    await runFixture("burn_history_agent", [
+      burnSalvage("reasoning_burn"),
+      plainAnswer("ok"),
+    ]);
+
+    const second = messagesOfCall(1);
+    for (let i = 1; i < second.length; i++) {
+      expect(
+        second[i]!.role === "user" && second[i - 1]!.role === "user",
+        `two consecutive user turns at index ${i - 1}`,
+      ).toBe(false);
+    }
+    for (const m of second) {
+      if (m.role !== "assistant") continue;
+      const hasToolCalls = Array.isArray((m as { tool_calls?: unknown[] }).tool_calls)
+        && ((m as { tool_calls?: unknown[] }).tool_calls?.length ?? 0) > 0;
+      if (hasToolCalls) continue;
+      expect(String(m.content ?? "").length, "empty assistant turn in history").toBeGreaterThan(0);
+    }
   });
 
   it("hands the operator's unbounded grant to the provider, as a live callback", async () => {
-    await runFixture("grant_agent", "reasoning_burn");
+    await runFixture("grant_agent", [burnSalvage("reasoning_burn")]);
 
     // Requirement 4 end-to-end: the option survives whatever wrapper chain
     // (boundary proxy, failover) the provider was built behind.
@@ -131,11 +299,11 @@ describe("sub-agent — a provider-aborted burn winds the run down", () => {
     expect((options!.isUnbounded as () => boolean)()).toBe(false);
   });
 
-  it("does NOT wind down the same response when the provider did not flag a burn", async () => {
+  it("does NOT correct or wind down the same response when the provider did not flag a burn", async () => {
     // THE DISCRIMINATOR. Identical content, identical reasoning volume, identical zero
-    // tool calls — only `truncatedBy` differs. If this also wound down, the branch would
-    // be reacting to "empty answer", not to the provider's decision.
-    const { output } = await runFixture("control_agent", undefined);
+    // tool calls — only `truncatedBy` differs. If this also fired, the branch would be
+    // reacting to "empty answer", not to the provider's decision.
+    const { output } = await runFixture("control_agent", [burnSalvage(undefined)]);
 
     expect(output).not.toContain(SUPERVISOR_WIND_DOWN);
     expect(auditEvents.filter((e) => e.event === "progress_verifier_intervened")).toHaveLength(0);

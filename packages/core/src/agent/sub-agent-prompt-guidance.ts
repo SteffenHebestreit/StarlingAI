@@ -90,6 +90,49 @@ export function isStagedArtifactBuildRun(toolNames: string[] | undefined, task: 
 export const UNFINISHED_STUB_MARKER = "UNFINISHED_STUB";
 
 /**
+ * How many times one run may burn its reasoning budget before the supervisor stops
+ * trying to correct it and winds the run down.
+ *
+ * Two, meaning ONE correction. The first burn is a cold-start failure mode — the model
+ * received a whole specification and tried to compose the answer in its head — and it is
+ * worth exactly one turn to say so and demand a concrete action. A model that burns again
+ * AFTER being told in plain language to stop planning is not going to be talked out of it,
+ * and each burn costs ~15 minutes of GPU on the measured hardware, so the second one ends
+ * the run. Raising this trades a bounded wait for a diminishing chance.
+ */
+export const REASONING_BURN_RETRY_LIMIT = 2;
+
+/**
+ * The corrective turn pushed into a sub-agent's history after its FIRST reasoning burn.
+ *
+ * Why a correction rather than a death: run dfe964f3 measured what killing it costs.
+ * web_coder burned 45,001 reasoning characters with zero tool calls, the run was wound
+ * down at iteration 1 of 14, and the swarm re-dispatched the byte-identical 1,709-char
+ * task to the next-ranked agent, which began burning the same way. Nothing in that loop
+ * ever told the MODEL what it had done wrong. The run had thirteen unused iterations.
+ *
+ * The text names the measured number because a model that has just produced 45,000
+ * characters of plan has no idea it did — reasoning is not in its own context on the next
+ * turn, so "you have already planned this" is unfalsifiable to it unless we quote the size.
+ *
+ * It deliberately does NOT restate the task or suggest what to build: the specification is
+ * already in the history above it, and repeating it is what invites another design pass.
+ * The one thing it adds is permission to produce something incomplete, because the burn is
+ * a model refusing to emit until it is sure, and "smallest thing that is real" is the only
+ * instruction that dissolves that.
+ */
+export function buildReasoningBurnCorrection(reasoningChars: number, stagedBuild: boolean): string {
+  return [
+    "STOP PLANNING — YOU JUST SPENT " + reasoningChars.toLocaleString("en-US") + " CHARACTERS THINKING AND PRODUCED NOTHING.",
+    "That generation was cut off. No file was written, no tool ran, and none of that thinking was kept — it is not in this conversation and you cannot recover it. Repeating it will fail the same way and end this run.",
+    stagedBuild
+      ? "Your next message must be exactly ONE " + STAGED_BUILD_REQUIRED_TOOLS[0] + " call creating the skeleton described in your instructions: a small, complete, closing file whose unbuilt parts are single " + UNFINISHED_STUB_MARKER + " lines that throw. Do not design those parts now. Naming them is the whole job of this turn."
+      : "Your next message must be exactly ONE tool call that performs the smallest concrete step of this task. Not the whole task — the first real step.",
+    "Emit that tool call immediately, before any further analysis. Something small and real beats something complete and imagined; you have more turns after this one to extend it.",
+  ].join("\n");
+}
+
+/**
  * The staged-build directive itself. Every capability it names is real: write_file
  * (mode defaults to "overwrite", mode:"append" exists), edit_file (EXACT string
  * replacement that fails on an absent or ambiguous old_string — hence the unique
@@ -125,6 +168,34 @@ export function buildStagedArtifactBuildGuidance(maxIterations: number, perPathE
     `2. FILL (one subsystem per iteration, about ${fillPasses} of them): replace exactly ONE ${UNFINISHED_STUB_MARKER} line per call with edit_file, that line as old_string and the subsystem's COMPLETE content as new_string — never a partial version, never a smaller placeholder. edit_file is an EXACT string replacement and FAILS unless old_string matches exactly one place, so keep every marker name distinct and add surrounding lines rather than falling back to write_file. Use grep_files to re-locate a marker if a replacement is rejected. Never re-emit the whole file to change part of it.`,
     `3. FINISH: read_file the artifact, confirm it closes and no ${UNFINISHED_STUB_MARKER} remains, then carry out whatever final step your own instructions require (e.g. serving and verifying the app) and report the path or the live URL — not the contents.`,
     `Budget the subsystems to the passes you have and merge the small ones. If you run out of budget the partial is handed back with its remaining ${UNFINISHED_STUB_MARKER} markers named, so it is resumable and is never mistaken for a finished artifact.`,
+  ].join("\n");
+}
+
+/**
+ * The staged-build first-step instruction, appended to the USER turn.
+ *
+ * The directive above says "SKELETON (first tool call): one write_file" and run dfe964f3
+ * logged `directiveInjected: true` — so the model was told, and burned 45,001 characters
+ * anyway. Placement is why. The directive is assembled into the SYSTEM prompt while the
+ * specification arrives as the user turn, and a model handed a 1,709-character spec of a
+ * finished artifact answers the spec. The strategy was in the room; the instruction it was
+ * actually responding to was not.
+ *
+ * So the narrowing is repeated where the ask lives, as the LAST thing in the user turn: the
+ * spec is demoted to reference material in the same breath that the turn's actual job is
+ * named. This duplicates the system directive by design — the point is position, not novelty.
+ *
+ * It is appended, never substituted. Dropping the specification from the first turn would
+ * cost the model the vocabulary it needs to NAME the subsystems, and naming them is the
+ * one thing this turn has to get right.
+ */
+export function buildStagedBuildFirstStepInstruction(): string {
+  return [
+    "",
+    "",
+    "THIS TURN: the specification above is REFERENCE MATERIAL for later passes, not the work of this turn.",
+    "Right now, produce only the skeleton — one " + STAGED_BUILD_REQUIRED_TOOLS[0] + " call, a small complete file that closes, with every part you have not built yet written as a single " + UNFINISHED_STUB_MARKER + " line that throws. Decide only what the parts are CALLED, not how they work.",
+    "Do not attempt to satisfy the specification in this turn. You have further turns for that, one part at a time.",
   ].join("\n");
 }
 

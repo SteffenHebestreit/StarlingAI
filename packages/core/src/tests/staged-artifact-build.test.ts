@@ -248,6 +248,17 @@ describe("staged artifact build — directive injection", () => {
    * all, so the run resolves the SHIPPED schema defaults — the only way to test the
    * value operators actually get.
    */
+  /**
+   * The first USER turn of the captured run.
+   *
+   * Separate from the system prompt because placement is the entire point of the
+   * first-step instruction: run dfe964f3 logged `directiveInjected: true` and burned
+   * 45,001 characters anyway. The strategy was in the system prompt; the specification
+   * the model was actually answering was in the user turn. A test that only reads the
+   * system prompt cannot tell those two situations apart.
+   */
+  let firstUserTurn = "";
+
   const runAndCaptureSystemPrompt = async (
     orchestration: Record<string, unknown> | undefined,
     task: string,
@@ -277,6 +288,7 @@ describe("staged artifact build — directive injection", () => {
     let systemPrompt = "";
     completeMock.mockImplementation((messages: Array<{ role: string; content: string }>) => {
       systemPrompt = messages.find((m) => m.role === "system")?.content ?? "";
+      firstUserTurn = messages.find((m) => m.role === "user")?.content ?? "";
       return {
         content: "Done.",
         tool_calls: [],
@@ -378,6 +390,42 @@ describe("staged artifact build — directive injection", () => {
       }),
       expect.anything(),
     );
+  });
+
+  it("narrows the USER turn too, because that is the turn the model answers", async () => {
+    // Run dfe964f3: directive injected, preconditions met, 45,001 reasoning chars, zero
+    // tools. The system prompt already said "SKELETON (first tool call): one write_file".
+    // It lost to a 1,709-char specification of a finished artifact sitting in the user
+    // turn. So the narrowing is repeated where the ask lives, LAST, demoting the spec to
+    // reference material in the same breath as it names this turn's job.
+    await runAndCaptureSystemPrompt(
+      undefined,
+      OBSERVED_BUILD_TASK,
+      ["read_file", "write_file", "edit_file", "list_files", "grep_files"],
+    );
+
+    expect(firstUserTurn).toContain("THIS TURN:");
+    expect(firstUserTurn).toContain("REFERENCE MATERIAL");
+    // Appended, never substituted — the spec is what lets the model NAME the subsystems.
+    expect(firstUserTurn).toContain(OBSERVED_BUILD_TASK.trim().slice(0, 80));
+    // ...and it is the LAST thing in the turn, after the spec.
+    expect(firstUserTurn.indexOf("THIS TURN:")).toBeGreaterThan(
+      firstUserTurn.indexOf(OBSERVED_BUILD_TASK.trim().slice(0, 80)),
+    );
+  });
+
+  it("leaves the user turn untouched when the directive is off", async () => {
+    // THE DISCRIMINATOR, and the gate that keeps the two halves from disagreeing: the
+    // user-turn narrowing hangs off the SAME condition as the system directive, so a
+    // deployment with the directive disabled behaves exactly as it did before this existed.
+    await runAndCaptureSystemPrompt(
+      { stagedArtifactBuilds: true, stagedArtifactBuildDirective: false },
+      OBSERVED_BUILD_TASK,
+      ["read_file", "write_file", "edit_file", "list_files", "grep_files"],
+    );
+
+    expect(firstUserTurn).not.toContain("THIS TURN:");
+    expect(firstUserTurn).toContain(OBSERVED_BUILD_TASK.trim().slice(0, 80));
   });
 
   it("keeps the agent's own prompt LAST so its finish contract outranks the directive", async () => {
