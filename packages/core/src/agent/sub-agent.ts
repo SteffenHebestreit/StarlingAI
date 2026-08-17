@@ -1365,9 +1365,17 @@ function rejectSuspiciousNoToolOutput(
     // on reasoning leaves almost none (observed: 97,714 reasoning characters, 32,768
     // completion tokens, zero tools, 36 minutes — the previous wording blamed
     // inlining and would have sent the next reader after the wrong cause).
+    // Say what actually happened, and do NOT name a token budget. There is no fixed
+    // completion ceiling any more: max_tokens is derived per request as
+    // contextWindow - prompt - reserve (providers/lmstudio.ts computeOutputTokenBudget).
+    // The old wording ("exhausted completion budget … raise its token budget") survived
+    // that change and became false in both halves — measured: 19,806 completion tokens
+    // against a derived budget near 113,000, stopped by the reasoning-burn supervisor,
+    // not by any ceiling. It sent every reader, and the operator, after a budget that
+    // was not the constraint. Neither branch may mention a budget the run never hit.
     reason = output.trim().length > 400
-      ? "exhausted completion budget without calling any tool — the model inlined a large artifact instead of using a focused write_file/generate_website call"
-      : "exhausted completion budget without calling any tool and produced almost no output — the budget went on reasoning rather than on a tool call; lower this agent's reasoning effort or raise its token budget";
+      ? "produced a long answer but called no tool — the model inlined a large artifact instead of using a focused write_file/generate_website call"
+      : "reasoned without acting: it generated at length, called no tool, and produced almost no output. Raising the token budget will not help — the budget was not the limit. Give it a smaller, more concrete first step, or one that names the file to write";
   }
 
   if (!reason) return null;
