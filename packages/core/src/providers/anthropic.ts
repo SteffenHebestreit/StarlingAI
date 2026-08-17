@@ -994,17 +994,17 @@ export class AnthropicProvider implements ChatProvider {
     };
     armInactivity();
 
-    // TOTAL wall-clock BACKSTOP, separate from the inactivity guard above, which
-    // measures SILENCE and re-arms on every chunk — so it can never stop a model
-    // that keeps emitting. This path had no total bound at all. The real bound is
-    // the caller's deadline signal; this exists so a caller that passes NO signal
-    // still cannot hang forever, and it matters more here than on the local
-    // provider because a runaway generation on a priced model also burns money.
-    // Per-agent (this.maxStreamTotalMs), so an agent emitting a whole file is not held to
-    // the same ceiling as a summarizer — see resolveStreamTotalCapMs. Where a deadline
-    // exists it reaches the stream first (the caller's signal now survives stream-open);
-    // where none does — max effort, "unbound", an operator grant — this is the only wall
-    // clock left, which is why the raised tier is narrow.
+    // TOTAL wall-clock BACKSTOP for a caller that passes NO signal, separate from the
+    // inactivity guard above, which measures SILENCE and re-arms on every chunk — so it
+    // can never stop a model that keeps emitting. This path had no total bound at all.
+    //
+    // The `signal === undefined` guard on the check below is what keeps it to that stated
+    // scope. It used to run unconditionally, which made it the last wall clock able to
+    // override an operator's unbounded grant: the grant suspends the sub-agent deadline
+    // and the runtime turn deadline, and this fired regardless. Every delegated call
+    // arrives with a composed signal (agent/runtime.ts always pushes wardenAbort;
+    // sub-agent.ts's composeLlmSignal passes it through even for an "unbound" agent), so
+    // this branch is now reached only by the out-of-turn callers it was written for.
     const streamStartedAt = Date.now();
     const totalCapMs = this.maxStreamTotalMs;
 
@@ -1019,7 +1019,7 @@ export class AnthropicProvider implements ChatProvider {
             ? signal.reason
             : new Error(`LLM stream aborted by the caller: ${String(signal.reason)}`);
         }
-        if (Date.now() - streamStartedAt > totalCapMs) {
+        if (signal === undefined && Date.now() - streamStartedAt > totalCapMs) {
           // THROW, do not break: a break would leave the try normally, record a
           // SUCCESS, and report the guillotined generation as a clean stop.
           const capErr = new Error(

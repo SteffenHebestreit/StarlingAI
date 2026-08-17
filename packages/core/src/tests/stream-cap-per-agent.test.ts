@@ -90,14 +90,14 @@ describe("resolveAgentStreamCapMs — tiering by capability", () => {
     expect(cap(["read_file"], 7_200_000)).toBeLessThan(7_200_000);
   });
 
-  it("honours the agent's OWN declared budget on a run with no deadline", () => {
-    // A max-effort run resolves turnTimeoutMs to `undefined` for every child, so the
-    // resolved-deadline lift sees nothing. backend_coder declared 1_500_000; that
-    // statement about how long one pass takes must survive, or narrowing the tier
-    // silently shrinks it to the flat 20 minutes.
-    expect(cap(["write_file"], undefined, 1_500_000)).toBe(1_560_000);
-    expect(cap(["write_file"], 0, 1_500_000)).toBe(1_560_000);
-    // Never a REDUCTION: a short declaration cannot pull the cap under the tier.
+  it("never reduces below the leak backstop, whatever the agent declared", () => {
+    // The declared-budget FLOOR is now inert by arithmetic, and that is the point: the
+    // backstop is one hour, no agent may declare more than 1_800_000, and the ceiling is
+    // also one hour — so `max(tier, declared + margin)` can never exceed the tier. The
+    // floor mattered while the tier was 20 minutes and a declaration could out-reach it.
+    expect(cap(["write_file"], undefined, 1_500_000)).toBe(MAX_STREAM_TOTAL_MS);
+    expect(cap(["write_file"], 0, 1_500_000)).toBe(MAX_STREAM_TOTAL_MS);
+    // Never a REDUCTION: a short declaration cannot pull the cap under the backstop.
     expect(cap(["write_file"], undefined, 600_000)).toBe(MAX_STREAM_TOTAL_MS);
     // "unbound" reaches here as `undefined` — no statement, no floor.
     expect(cap(["write_file"], undefined, undefined)).toBe(MAX_STREAM_TOTAL_MS);
@@ -205,27 +205,31 @@ async function drain(provider: LMStudioProvider): Promise<StreamChunk[]> {
 describe("LMStudioProvider.streamOnce — enforces the per-agent cap", () => {
   afterEach(() => vi.restoreAllMocks());
 
-  const GAP_MS = 1_500_000; // 25 min: over the 20-min default, under the 45-min builder budget
+  const GAP_MS = 1_500_000; // 25 min: the worst LEGITIMATE single build pass on this hardware
 
-  it("cuts a 25-minute generation at the DEFAULT cap", async () => {
+  it("does NOT cut a 25-minute generation — that is a legitimate build pass, not a runaway", async () => {
+    // This assertion is inverted from what it used to be, deliberately. The default was
+    // 20 minutes and it guillotined exactly this shape to the millisecond (run f08195d2:
+    // 1,200,000 ms, 64,587 reasoning chars, zero artifact tool calls). A capability guess
+    // is not a health signal; the cap is now an hour and only bounds a caller with no
+    // deadline at all.
     const clock = { now: Date.now() };
     vi.spyOn(Date, "now").mockImplementation(() => clock.now);
     const provider = providerWithCap(undefined);
     installFakeStream(provider, clock, GAP_MS);
 
-    await expect(drain(provider)).rejects.toThrow(/exceeded its total budget/);
+    const chunks = await drain(provider);
+    expect(chunks.filter((c) => c.type === "text_delta").map((c) => c.content).join(""))
+      .toBe("first pass second pass");
   });
 
-  it("lets the SAME generation finish for a builder agent", async () => {
+  it("cuts a generation that runs past the hour, with no caller deadline in sight", async () => {
     const clock = { now: Date.now() };
     vi.spyOn(Date, "now").mockImplementation(() => clock.now);
-    const provider = providerWithCap(BUILDER_MAX_STREAM_TOTAL_MS);
-    installFakeStream(provider, clock, GAP_MS);
+    const provider = providerWithCap(undefined);
+    installFakeStream(provider, clock, MAX_STREAM_TOTAL_MS + 60_000);
 
-    const chunks = await drain(provider);
-    const text = chunks.filter((c) => c.type === "text_delta").map((c) => c.content).join("");
-    expect(text).toBe("first pass second pass");
-    expect(chunks.at(-1)?.finishReason).toBe("stop");
+    await expect(drain(provider)).rejects.toThrow(/exceeded its total budget/);
   });
 
   it("a builder that runs past even 45 minutes is still cut, and the partial is salvaged", async () => {

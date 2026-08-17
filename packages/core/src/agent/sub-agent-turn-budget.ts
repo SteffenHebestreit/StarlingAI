@@ -63,8 +63,31 @@ export function resolveTurnBudgetMs(input: {
 export const SUB_AGENT_MIN_DELEGATION_MS = 120_000;
 
 /**
+ * The largest share of a parent's REMAINING time that may be carved out as synthesis reserve.
+ *
+ * The reserve is a fixed number of milliseconds and the deadline it carves from shrinks at every
+ * level (see resolveDelegationDeadlineMs), so a flat subtraction compounds: at the shipped
+ * 420,000 ms reserve, depth 2 removed 840,000 ms — 14 minutes of a 30-minute turn — from a child
+ * that had not started yet. Below a certain remaining time that stops being "headroom for the
+ * parent" and becomes "the child does not get to work", which is the inversion this cap fixes:
+ * a reserve may take a QUARTER of what is left, never a fixed slab of it.
+ *
+ * A quarter, not a third or a tenth, because it is the largest fraction that still leaves the
+ * child three of the four remaining completions on the audited endpoint (one orchestrator
+ * completion ≈ 124,293 ms, run 3959f3ac) — the parent needs roughly one to synthesise, and the
+ * child needs the rest to have anything worth synthesising.
+ */
+export const MAX_SYNTHESIS_RESERVE_FRACTION = 0.25;
+
+/** The reserve actually applied: the configured amount, bounded by the fraction above. Pure. */
+function effectiveReserveMs(remainingMs: number, synthesisReserveMs: number): number {
+  if (synthesisReserveMs <= 0 || remainingMs <= 0) return 0;
+  return Math.min(synthesisReserveMs, Math.floor(remainingMs * MAX_SYNTHESIS_RESERVE_FRACTION));
+}
+
+/**
  * How long a child may run given the parent turn's REMAINING time, before the child's own declared
- * budget is considered: `max(floor, (parentDeadline - now) - synthesisReserve)`.
+ * budget is considered: `max(floor, remaining - effectiveReserve(remaining))`.
  *
  * `undefined` when the parent stated no deadline — the caller must then leave the existing budget
  * alone rather than invent one.
@@ -76,8 +99,8 @@ function parentRelativeBudgetMs(
   floorMs: number,
 ): number | undefined {
   if (typeof parentDeadlineMs !== "number" || !Number.isFinite(parentDeadlineMs)) return undefined;
-  const reserveMs = synthesisReserveMs > 0 ? synthesisReserveMs : 0;
-  return Math.max(floorMs, parentDeadlineMs - nowMs - reserveMs);
+  const remainingMs = parentDeadlineMs - nowMs;
+  return Math.max(floorMs, remainingMs - effectiveReserveMs(remainingMs, synthesisReserveMs));
 }
 
 /**
@@ -94,7 +117,13 @@ function parentRelativeBudgetMs(
  *
  * Why a reserve on top: the parent still has work AFTER the child returns, and that work is not
  * free. See `orchestration.subAgentSynthesisReserveMs` in config/gateway/40-orchestration.jsonc for
- * the measured derivation of this deployment's value.
+ * the measured derivation of this deployment's value, and MAX_SYNTHESIS_RESERVE_FRACTION above for
+ * the bound that stops it compounding a nested child down to the floor.
+ *
+ * What this clamp is NOT: a health check. It knows how much room is left and nothing about whether
+ * the child is doing anything with it, so it must only ever shape the room a child is GIVEN — it
+ * must never be the thing that ends a child that is working. That job belongs to the progress
+ * supervisor, and to the operator via the long-running dock.
  *
  * Degenerate inputs, and what each one gets:
  *   - caller budget `undefined` → `undefined`. NEVER manufacture a ceiling where none existed: for
@@ -128,7 +157,10 @@ export function resolveDelegationCeilingMs(input: {
   if (!Number.isFinite(callerBudgetMs) || callerBudgetMs <= 0) return callerBudgetMs;
   const parentRelative = parentRelativeBudgetMs(parentDeadlineMs, nowMs, synthesisReserveMs, floorMs);
   if (parentRelative === undefined) {
-    return synthesisReserveMs > 0 ? Math.max(floorMs, callerBudgetMs - synthesisReserveMs) : callerBudgetMs;
+    // Same fractional bound as the parent-relative arm: a static carve-out that eats most of a
+    // short caller budget is the same defect in a different branch.
+    const reserveMs = effectiveReserveMs(callerBudgetMs, synthesisReserveMs);
+    return reserveMs > 0 ? Math.max(floorMs, callerBudgetMs - reserveMs) : callerBudgetMs;
   }
   return Math.min(callerBudgetMs, parentRelative);
 }

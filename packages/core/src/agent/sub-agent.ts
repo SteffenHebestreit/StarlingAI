@@ -15,6 +15,7 @@ import fs from "node:fs";
 // Named import: two local `path` bindings already exist in this module, and an
 // unqualified `path` default import would shadow-warn against them.
 import { resolve as resolvePath } from "node:path";
+import { createHash } from "node:crypto";
 import type { LLMMessage, ChatProvider } from "../providers/lmstudio.js";
 import { DeadlineAbort } from "../providers/lmstudio.js";
 import { trimSubAgentHistory } from "./sub-agent-history.js";
@@ -45,11 +46,14 @@ import {
 } from "./long-running-generation.js";
 import { currentEffortTier } from "../runtime/effort-context.js";
 import {
-  isHardStall,
+  classifyRunProgress,
+  classifyWriteLoop,
   buildProgressJudgePrompt,
   parseProgressVerdict,
+  ARG_SIG_REPEAT_LIMIT,
+  EMPTY_PROGRESS_SAMPLE,
+  MIN_SUBSTANTIVE_OUTPUT_CHARS,
   PROGRESS_CHECK_INTERVAL_MS,
-  STALL_LIMIT,
   type ProgressSample,
 } from "./progress-verifier.js";
 import { formatScopedMemoryGuidance } from "../memory/service.js";
@@ -917,8 +921,8 @@ const SUB_AGENT_PER_TOOL_CAPS: Partial<Record<string, number>> = {
   // (2026-05-28) showed an honest 4-file write blocked at file 4 under
   // the old flat cap of 3.
   // Raised from 12 to accommodate incremental large-file builds (write head +
-  // many mode:"append" chunks) without tripping the flat per-tool cap; the tight
-  // per-path overwrite cap (PER_PATH_WRITE_CAP=2) remains the real loop guard.
+  // many mode:"append" chunks) without tripping the flat per-tool cap; the
+  // content-hash loop rule at the call site remains the real loop guard.
   write_file: 24,
   // Raised 12 -> 24 alongside PER_PATH_EDIT_CAP. This one is a TOTAL across every
   // path, so at 12 it bound tighter than the per-path cap the moment a staged build
@@ -944,7 +948,12 @@ const PATH_KEYED_WRITE_TOOLS = new Set<string>([
   "generate_document", "generate_docx", "generate_pptx", "generate_pdf", "render_pdf",
   "export_workspace_artifact",
 ]);
-const PER_PATH_WRITE_CAP = 2;
+// NOTE: the old flat `PER_PATH_WRITE_CAP = 2` is gone. "Same path twice" is not a
+// loop — a builder legitimately rewrites one file several times while converging on
+// it — and the cap sat absurdly below its own siblings (append 24, edit 24). What IS
+// a loop is same path + same BYTES, or an A→B→A→B oscillation, and both are now
+// detected by content hash at the call site (classifyWriteLoop in progress-verifier).
+// Plain overwrites fall back to PER_PATH_EDIT_CAP as the far-out backstop.
 // write_file(mode:"append") to the same path is the incremental-build path (write
 // head → append chunks), so one file legitimately takes many appends. Bound it
 // generously to still catch a true runaway, but well above a chunked large file.
@@ -1855,6 +1864,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     deadlineAc = new AbortController();
     llmSignal = composeLlmSignal();
   };
+  // Progress-supervisor sampling timer (assigned just before the agent loop, cleared
+  // in this function's `finally`). Declared out here, next to `timeoutHandle`, purely
+  // so the teardown can reach it.
+  let supervisorTimer: ReturnType<typeof setInterval> | undefined;
 
   // Open a checkpoint for this run. The resume side of this system was complete —
   // context rebuilding, gateway routes, dashboard — but NOTHING ever wrote one, so
@@ -2292,14 +2305,36 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // this so the next loop iteration goes straight to attemptTimeoutSynthesis
     // instead of making another LLM call.
     let lrgOperatorStop = false;
+    // Set when the progress supervisor (not a deadline, not the operator) wound the run
+    // down. Read alongside turnTimeoutReached so the wind-down works on runs that have
+    // no turnTimeoutMs at all.
+    let supervisorStop = false;
     // The effort-tier long-running policy (low→stop / high→continue) is auto-applied
     // ONCE per run; this latches so it doesn't re-audit every subsequent iteration.
     let lrgAutoHandled = false;
-    // max-effort silent-unbounded + verify-progress guard state (see progress-verifier.ts).
+    // max-effort silent-unbounded grant state (see progress-verifier.ts).
     let lrgUnboundedGranted = false;            // unbounded budget granted once, silently
+    // Progress-supervisor state. Watches EVERY run at EVERY tier — see superviseProgress.
     let lrgLastProgressCheckAt = 0;             // throttle: one progress check per window
-    let lrgConsecutiveStalls = 0;               // structural hard-stalls in a row
-    let lrgLastSample: ProgressSample = { completionTokens: 0, toolCalls: 0 };
+    let lrgLastJudgeAt = 0;                     // throttle: one semantic judge call per window
+    let lrgConsecutiveStalls = 0;               // no-progress samples in a row
+    let lrgLastSample: ProgressSample = EMPTY_PROGRESS_SAMPLE;
+    // Cumulative shape counters. reasoningChars was already measured at four sites and
+    // consumed at none — it is THE pathology signal and is never counted as progress;
+    // outputChars is progress, because a long legitimate emit streams CONTENT.
+    let reasoningCharsTotal = 0;
+    let outputCharsTotal = 0;
+    // "<tool>:<path>" -> content hashes written this run, oldest first. Backs the
+    // content-shape loop rule that replaced the blunt per-path overwrite cap.
+    const writeHistory = new Map<string, string[]>();
+    // (tool, exact-args) repeat counts across the WHOLE run, for EVERY tool. Detection
+    // only — the cached-result short-circuit below stays restricted to IDEMPOTENT_TOOLS,
+    // because short-circuiting a deliberate re-poll of mutating state would be wrong.
+    const argSigRepeats = new Map<string, number>();
+    // Fingerprints of this run's substantive assistant turns. An output identical to one
+    // an earlier iteration already produced means the run has lost track and is
+    // re-emitting rather than advancing.
+    const assistantOutputSigs = new Set<string>();
     const artifacts: Record<string, unknown>[] = [];
     const artifactKeys = new Set<string>();
     // Workspace-relative paths this run successfully wrote or edited, in call order.
@@ -3232,7 +3267,144 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       }
     };
 
+    /** Point-in-time shape reading. Pure counter reads — no allocation of note, no LLM. */
+    const sampleProgress = (): ProgressSample => {
+      let distinctWriteHashes = 0;
+      for (const hashes of writeHistory.values()) distinctWriteHashes += new Set(hashes).size;
+      return {
+        productiveToolCalls: successfulToolCount,
+        mutatedPaths: mutatedWorkspacePaths.size,
+        distinctWriteHashes,
+        outputChars: outputCharsTotal,
+        reasoningChars: reasoningCharsTotal,
+      };
+    };
+
+    /**
+     * Wind this run down the way an operator `stop` does: latch the two flags the loop
+     * already reacts to, so the next iteration goes to attemptTimeoutSynthesis and the
+     * evidence collected so far is synthesised and handed back. Never a hard kill.
+     *
+     * Deliberately does NOT call longRunningGenerationManager.requestStop(). That sets a
+     * latch keyed on the ROOT (turn) session, which is right for an operator decision —
+     * the operator means the whole turn — and wrong for the supervisor now that it runs
+     * for every sub-agent: one pathological leaf would wind down its healthy siblings
+     * too. The supervisor is INSIDE the run it is judging and needs no cross-run channel
+     * to reach it.
+     */
+    const windDownForSupervisor = (): void => {
+      lrgOperatorStop = true;
+      turnTimeoutReached = true;
+      // The consumer below is `turnTimeoutReached && turnTimeoutMs`. An agent that
+      // declares no turn timeout — increasingly the point, now that supervision replaces
+      // the static budgets — would latch the flag and have nobody read it, which is
+      // exactly how a fix ships inert. This flag makes the wind-down independent of
+      // whether a deadline happens to exist.
+      supervisorStop = true;
+    };
+
+    /**
+     * THE SUPERVISOR — the thing that replaces the static limits.
+     *
+     * Cheap and pure: a few counter reads and one comparison, no LLM in the hot path.
+     * Runs for EVERY sub-agent at EVERY tier, and especially for a run that was granted
+     * unbounded budget — a run nobody is timing is the run that most needs watching.
+     *
+     * Its predecessor could never reach a verdict. It lived inside the `unbounded`
+     * branch, below a markUnbounded() call that flipped the very guard the branch sat
+     * under, so it executed at most ONCE per run while its stall rule required two
+     * consecutive samples. It is now called unconditionally at the top of each iteration
+     * AND on a timer, so a run parked inside one very long streaming completion is still
+     * visible — the old placement could only sample BETWEEN iterations.
+     */
+    const superviseProgress = (trigger: "iteration" | "timer"): void => {
+      if (lrgOperatorStop) return;
+      if (Date.now() - lrgLastProgressCheckAt < PROGRESS_CHECK_INTERVAL_MS) return;
+      lrgLastProgressCheckAt = Date.now();
+      const cur = sampleProgress();
+      const decision = classifyRunProgress(lrgLastSample, cur, lrgConsecutiveStalls);
+      lrgConsecutiveStalls = decision.consecutiveStalls;
+      lrgLastSample = cur;
+      if (decision.action === "continue") return;
+      if (decision.action === "ask") {
+        // AMBIGUOUS — a run that has produced something and gone quiet may be
+        // mid-verification. Surface it to the operator dock instead of deciding; the
+        // notify path is idempotent per run, so this cannot spam.
+        longRunningGenerationManager.notifyLongRunning({
+          agentName: opts.agentName,
+          runSessionId: subSessionId,
+          ...(opts.parentSessionId ? { parentSessionId: opts.parentSessionId } : {}),
+          reason: `${opts.agentName}: ${decision.reason}`,
+          elapsedMs: Date.now() - runStartedAt,
+          completionTokens: usage.completionTokens,
+          iterations,
+        });
+        return;
+      }
+      windDownForSupervisor();
+      logAudit("progress_verifier_intervened", {
+        agentName: opts.agentName,
+        runSessionId: subSessionId,
+        trigger,
+        verdict: decision.verdict,
+        reason: decision.reason,
+        elapsedMs: Date.now() - runStartedAt,
+        productiveToolCalls: cur.productiveToolCalls,
+        mutatedPaths: cur.mutatedPaths,
+        reasoningChars: cur.reasoningChars,
+        outputChars: cur.outputChars,
+        iterations,
+      }, { sessionId: opts.parentSessionId, severity: "warn" });
+    };
+    supervisorTimer = setInterval(() => superviseProgress("timer"), PROGRESS_CHECK_INTERVAL_MS);
+    supervisorTimer.unref?.();
+
     while (iterations < maxIterations) {
+      // SUPERVISION RUNS FIRST AND ALWAYS, before any budget/tier branch below can
+      // decide this run is somebody else's problem.
+      superviseProgress("iteration");
+
+      // SEMANTIC direction judge — opt-in (orchestration.progressVerifierSemantic,
+      // default off pending live eval), bounded, fail-open. The structural rules above
+      // see a run that has stopped DOING; a busy run can still be doing the wrong thing,
+      // which structure alone cannot see. Throttled on its own clock so the (default-on)
+      // supervisor sampling above never starves it, and vice versa. It was previously
+      // nested in the max-effort `unbounded` branch and was unreachable for the same
+      // reason the structural check was.
+      if (!lrgOperatorStop && getConfig().orchestration?.progressVerifierSemantic
+        && Date.now() - lrgLastJudgeAt >= PROGRESS_CHECK_INTERVAL_MS) {
+        lrgLastJudgeAt = Date.now();
+        try {
+          const lastAssistant = [...history].reverse().find(
+            (m) => m.role === "assistant" && typeof m.content === "string" && m.content.trim().length > 0,
+          );
+          const recentActivity = [
+            lastAssistant ? `Latest output:\n${String(lastAssistant.content).slice(0, 1200)}` : "",
+            toolNames.length ? `Recent tool calls: ${toolNames.slice(-8).join(", ")}` : "",
+          ].filter(Boolean).join("\n\n") || "(no assistant output or tool calls yet)";
+          const judgeProvider = getChatProviderForTier("routing") ?? provider;
+          const judgeResp = await judgeProvider.complete(
+            buildProgressJudgePrompt({ objective: opts.task, recentActivity }),
+            [],
+            signal,
+          );
+          const verdict = parseProgressVerdict(judgeResp.content);
+          if (verdict.verdict === "drifting") {
+            windDownForSupervisor();
+            logAudit("progress_verifier_intervened", {
+              agentName: opts.agentName,
+              runSessionId: subSessionId,
+              trigger: "semantic_judge",
+              verdict: "drifting",
+              reason: verdict.reason,
+              elapsedMs: Date.now() - runStartedAt,
+              iterations,
+            }, { sessionId: opts.parentSessionId, severity: "warn" });
+          }
+        } catch {
+          // fail-open: a judge failure must never stop a healthy run.
+        }
+      }
       // Long-running-generation handoff — NON-BLOCKING. When this run has
       // burned past the soft thresholds (wall time OR completion tokens),
       // SURFACE it to the operator dock (so the operator can stop it or
@@ -3337,61 +3509,13 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
                 completionTokens: usage.completionTokens,
               }, { sessionId: opts.parentSessionId, severity: "info" });
             }
-            // Throttled progress check: at most one per window so the judge (when
-            // enabled) can't contend with every iteration of the run it watches.
-            if (Date.now() - lrgLastProgressCheckAt >= PROGRESS_CHECK_INTERVAL_MS) {
-              lrgLastProgressCheckAt = Date.now();
-              const sample: ProgressSample = { completionTokens: usage.completionTokens, toolCalls: toolCount };
-              // (1) STRUCTURAL stall guard — always on, deterministic, no LLM, no keywords.
-              lrgConsecutiveStalls = isHardStall(lrgLastSample, sample) ? lrgConsecutiveStalls + 1 : 0;
-              lrgLastSample = sample;
-              let intervention: { verdict: "stalled" | "drifting"; reason: string } | null = null;
-              if (lrgConsecutiveStalls >= STALL_LIMIT) {
-                intervention = {
-                  verdict: "stalled",
-                  reason: `no new completion tokens or tool calls across ${lrgConsecutiveStalls} ${Math.round(PROGRESS_CHECK_INTERVAL_MS / 1000)}s windows`,
-                };
-              } else if (getConfig().orchestration?.progressVerifierSemantic) {
-                // (2) SEMANTIC direction judge — opt-in, bounded, fail-open. A busy
-                // run can still be working toward the wrong goal; one small judge
-                // call reads the objective + recent activity and flags drift. Any
-                // error/timeout/parse-failure resolves to on_track (never dead-ends).
-                try {
-                  const lastAssistant = [...history].reverse().find(
-                    (m) => m.role === "assistant" && typeof m.content === "string" && m.content.trim().length > 0,
-                  );
-                  const recentActivity = [
-                    lastAssistant ? `Latest output:\n${String(lastAssistant.content).slice(0, 1200)}` : "",
-                    toolNames.length ? `Recent tool calls: ${toolNames.slice(-8).join(", ")}` : "",
-                  ].filter(Boolean).join("\n\n") || "(no assistant output or tool calls yet)";
-                  const judgeProvider = getChatProviderForTier("routing") ?? provider;
-                  const judgeResp = await judgeProvider.complete(
-                    buildProgressJudgePrompt({ objective: opts.task, recentActivity }),
-                    [],
-                    signal,
-                  );
-                  const verdict = parseProgressVerdict(judgeResp.content);
-                  if (verdict.verdict === "drifting") intervention = { verdict: "drifting", reason: verdict.reason };
-                } catch {
-                  // fail-open: a judge failure must never stop a healthy run.
-                }
-              }
-              if (intervention) {
-                longRunningGenerationManager.requestStop(subSessionId, `progress_verifier:${intervention.verdict}`);
-                lrgOperatorStop = true;
-                turnTimeoutReached = true;
-                logAudit("progress_verifier_intervened", {
-                  agentName: opts.agentName,
-                  runSessionId: subSessionId,
-                  verdict: intervention.verdict,
-                  reason: intervention.reason,
-                  elapsedMs: Date.now() - runStartedAt,
-                  completionTokens: usage.completionTokens,
-                  toolCalls: toolCount,
-                  iterations,
-                }, { sessionId: opts.parentSessionId, severity: "warn" });
-              }
-            }
+            // The progress check that used to live here has moved to the top of the
+            // loop (superviseProgress). It was unreachable from this position: the
+            // markUnbounded() call just above flips the `!isUnbounded` guard this whole
+            // branch sits under, so the check ran at most ONCE per run while its stall
+            // rule needed two consecutive samples. It also only watched `max` effort,
+            // which is backwards — an unbounded run is the one that most needs a
+            // supervisor, but so does every other run now that the static caps are gone.
           } else if (lrgAction === "ask") {
             // Idempotent per run: only the first crossing surfaces a dock entry.
             longRunningGenerationManager.notifyLongRunning({
@@ -3467,11 +3591,14 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         }
       }
 
-      if (turnTimeoutReached && turnTimeoutMs) {
+      if (turnTimeoutReached && (turnTimeoutMs || supervisorStop)) {
         const synthesized = await attemptTimeoutSynthesis();
         if (synthesized) {
           return synthesized;
         }
+        const windDownReason = supervisorStop
+          ? "was wound down by the progress supervisor (no forward progress)"
+          : `timed out after ${turnTimeoutMs}ms after finishing the current operation`;
         const interruptedOutcome = classifyInterruptedOutcome({
           successfulToolCount,
           artifacts,
@@ -3486,11 +3613,13 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           totalTokens: usage.totalTokens,
           durationMs: Date.now() - runStartedAt,
           timeoutMs: turnTimeoutMs,
-          error: `timeout (${turnTimeoutMs}ms) reached after current operation finished`,
+          error: supervisorStop
+            ? "progress supervisor wound the run down after no forward progress"
+            : `timeout (${turnTimeoutMs}ms) reached after current operation finished`,
         });
         const output = buildInterruptedSubAgentOutput({
           agentName: opts.agentName,
-          reason: `timed out after ${turnTimeoutMs}ms after finishing the current operation`,
+          reason: windDownReason,
           swarmState: toolContext.swarmState,
           toolNames,
           toolCount,
@@ -3893,8 +4022,35 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // (behind a debug toggle) and the audit log. This is exactly where the
       // qwen "burned 4096-6144 thinking tokens and stalled" pathology shows
       // up — making it visible is the whole point of capturing reasoning.
+      // Feed the supervisor's shape counters. Both were already being measured here and
+      // at three sibling sites, and consumed nowhere.
+      const responseText = typeof response.content === "string" ? response.content : "";
+      outputCharsTotal += responseText.length;
+      // LOST TRACK: an assistant turn byte-identical to one an earlier iteration already
+      // produced means the run is re-emitting, not advancing — the shape a loop takes when
+      // it happens above the tool layer, where the per-tool guards cannot see it. The
+      // substantive-output floor keeps short acknowledgements ("Done.", "OK") from tripping
+      // it; the healthy reference run's 13 iterations were all distinct.
+      if (!lrgOperatorStop && responseText.trim().length >= MIN_SUBSTANTIVE_OUTPUT_CHARS) {
+        const outputSig = createHash("sha1").update(responseText.trim()).digest("hex").slice(0, 16);
+        if (assistantOutputSigs.has(outputSig)) {
+          windDownForSupervisor();
+          logAudit("progress_verifier_intervened", {
+            agentName: opts.agentName,
+            runSessionId: subSessionId,
+            trigger: "iteration",
+            verdict: "looping",
+            reason: "assistant output is identical to an earlier iteration — the run is re-emitting, not advancing",
+            elapsedMs: Date.now() - runStartedAt,
+            iterations,
+          }, { sessionId: opts.parentSessionId, severity: "warn" });
+        } else {
+          assistantOutputSigs.add(outputSig);
+        }
+      }
       if (response.reasoning && response.reasoning.trim()) {
         const reasoningText = response.reasoning.trim();
+        reasoningCharsTotal += reasoningText.length;
         logAudit(
           "sub_agent_reasoning",
           {
@@ -4368,11 +4524,48 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           const isAppendWrite = tc.name === "write_file"
             && typeof tc.arguments?.["mode"] === "string"
             && String(tc.arguments["mode"]).toLowerCase() === "append";
-          const pathCap = isAppendWrite
-            ? PER_PATH_APPEND_CAP
-            : tc.name === "edit_file" ? PER_PATH_EDIT_CAP : PER_PATH_WRITE_CAP;
+          const pathCap = isAppendWrite ? PER_PATH_APPEND_CAP : PER_PATH_EDIT_CAP;
           const pathKey = `${tc.name}:${writePath}`;
           const pathCount = perWritePathCount.get(pathKey) ?? 0;
+          // Content-shape loop detection, ahead of the count cap. Cheap (one sha1 of the
+          // payload), language-independent, and it sees the two things a COUNT cannot: a
+          // byte-identical rewrite the model keeps re-issuing, and an A→B→A→B flip-flop.
+          // A genuine convergence — three edits with three different bodies, which is what
+          // the healthy reference run did while fixing its own off-by-one — passes both.
+          // Also feeds the supervisor's distinctWriteHashes signal as a side effect.
+          const writePayload = String(
+            tc.arguments?.["content"] ?? tc.arguments?.["new_string"] ?? tc.arguments?.["text"] ?? "",
+          );
+          if (writePayload.length > 0) {
+            const contentHash = createHash("sha1").update(writePayload).digest("hex").slice(0, 16);
+            const hashes = writeHistory.get(pathKey) ?? [];
+            const loopKind = classifyWriteLoop(hashes, contentHash);
+            if (loopKind) {
+              const loopMsg = `Tool '${tc.name}' is looping on '${writePath}': this exact content has already `
+                + `been written this run (${loopKind}). The file on disk already has it — move on or finalize.`;
+              log.warn(
+                { agentName: opts.agentName, tool: tc.name, path: writePath, reason: loopKind },
+                "Sub-agent write loop detected (content hash)",
+              );
+              logAudit("sub_agent_tool_loop_detected", {
+                agentName: opts.agentName, tool: tc.name, path: writePath, reason: loopKind,
+              }, { sessionId: subSessionId, severity: "warn" });
+              emitSubAgentToolAudit({
+                agentName: opts.agentName,
+                tool: tc.name,
+                phase: "done",
+                args: tc.arguments,
+                toolCallId: tc.id,
+                errorText: loopMsg,
+                skippedReason: "write_content_loop",
+              });
+              toolResults.push({ role: "tool", content: loopMsg, tool_call_id: tc.id });
+              continue;
+            }
+            // Bounded: only the tail matters to either rule, and a run must not grow an
+            // unbounded history for a file it is appending to 24 times.
+            writeHistory.set(pathKey, [...hashes, contentHash].slice(-32));
+          }
           if (pathCount >= pathCap) {
             log.warn(
               { agentName: opts.agentName, tool: tc.name, path: writePath, count: pathCount, cap: pathCap, append: isAppendWrite },
@@ -4471,8 +4664,23 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         // pure-query tools so we never short-circuit a deliberate re-poll of
         // mutating state (browser session, swarm state, mail send, etc).
         const argsSig = JSON.stringify(tc.arguments);
+        const idemKey = `${tc.name}::${argsSig}`;
+        // DETECT for every tool; RETURN a cached result only for idempotent ones. The
+        // restriction below is right as a CACHING rule — never short-circuit a deliberate
+        // re-poll of mutating state — and wrong as a DETECTION rule, which is why a
+        // non-idempotent call repeating verbatim was visible to nothing at all. Counting
+        // costs one map write.
+        const argSigRepeatCount = (argSigRepeats.get(idemKey) ?? 0) + 1;
+        argSigRepeats.set(idemKey, argSigRepeatCount);
+        if (argSigRepeatCount >= ARG_SIG_REPEAT_LIMIT && !IDEMPOTENT_TOOLS.has(tc.name)) {
+          logAudit("sub_agent_tool_loop_detected", {
+            agentName: opts.agentName,
+            tool: tc.name,
+            reason: "identical_args_repeat",
+            repeats: argSigRepeatCount,
+          }, { sessionId: subSessionId, severity: "warn" });
+        }
         if (IDEMPOTENT_TOOLS.has(tc.name)) {
-          const idemKey = `${tc.name}::${argsSig}`;
           const cached = idempotentCallCache.get(idemKey);
           if (cached) {
             cached.callCount += 1;
@@ -5571,6 +5779,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     });
   } finally {
     if (timeoutHandle) clearTimeout(timeoutHandle);
+    if (supervisorTimer) clearInterval(supervisorTimer);
 
     // Tear down the live browser preview for this run (also unblocks any
     // still-pending human-assist wait with a "stopped" outcome).

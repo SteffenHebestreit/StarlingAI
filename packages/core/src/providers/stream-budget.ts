@@ -10,30 +10,42 @@
 import type { ModelConfig } from "../config/schema.js";
 
 /**
- * Hard ceiling on a SINGLE streaming call, however healthy it looks — the DEFAULT
- * for an agent that does not build files.
+ * LEAK BACKSTOP on a SINGLE streaming call made with NO caller signal.
  *
- * The inactivity guard measures silence and re-arms per chunk, so it can never stop a
- * model that keeps emitting. 20 minutes is far above any legitimate single generation
- * on this hardware (a full build turn is minutes) and far below the 36-minute runaway
- * that motivated it.
+ * It is not a health signal and no longer pretends to be one. The providers gate this
+ * check on `signal === undefined` (lmstudio.ts / anthropic.ts), so on any turn-borne call
+ * the caller's deadline — which salvages the partial AND resynthesizes — is the bound,
+ * and an operator's unbounded grant suspends that deadline all the way down. What is left
+ * here is the case the comment always claimed: a caller that stated no deadline at all
+ * must still not hang the process forever.
+ *
+ * 20 minutes was the value while this was enforced unconditionally, and it killed healthy
+ * work to the millisecond: run f08195d2's content_writer at 1,200,000 ms and an ephemeral
+ * at 1,200,302 ms, both exactly MAX_STREAM_TOTAL_MS, one of them ~6 minutes from finishing.
+ * An hour is the honest number for a leak bound — 2.2x the worst legitimate single pass
+ * this module itself computes below (~26 min) — and it is the ceiling, so there is now one
+ * bound rather than a default plus a ceiling that disagreed with it.
  */
-export const MAX_STREAM_TOTAL_MS = 1_200_000;
+export const MAX_STREAM_TOTAL_MS = 3_600_000;
 
 /**
- * The same ceiling for an agent whose deliverable is a whole file it EMITS.
+ * @deprecated The builder tier is GONE. It guessed at a capability ("this agent emits
+ * whole files, so it may stream longer") to stand in for a health signal the guess could
+ * never provide, and once the flat cap became a no-signal backstop it decided nothing.
  *
- * Arithmetic, measured on this hardware (qwen3.8-27b via LM Studio, ~16.8 completion
- * tokens/second): a ~30 KB single-file artifact is ~9K tokens to EMIT, i.e.
- * 9_000 / 16.8 ≈ 540 s of pure generation, and the reasoning block that precedes it
- * routinely costs as much again — so ONE legitimate build pass can need ~26 minutes.
- * The flat 20-minute ceiling guillotined exactly that (run f08195d2: content_writer
- * iteration 2 ran 1,200,000 ms to the millisecond, 64,587 reasoning chars, zero
- * artifact tool calls). 45 minutes leaves headroom over the ~26-minute worst
- * legitimate pass while staying a decisive signal against the 36-minute-plus runaway
- * class the cap exists to stop.
+ * Retained as an alias of {@link MAX_STREAM_TOTAL_MS}, not deleted, purely so the tier
+ * resolution in agent/sub-agent-model-config.ts and its tests keep compiling while they
+ * are unwound; collapsing it to the same value is what makes the tier inert TODAY rather
+ * than after that follow-up. It must never be given a value below MAX_STREAM_TOTAL_MS —
+ * that inversion would hand builders a SHORTER budget than summarizers.
+ *
+ * The arithmetic that produced the old 45-minute figure is preserved because the ~26-minute
+ * worst legitimate pass it derives is the basis for the hour above: on this hardware
+ * (qwen3.8-27b via LM Studio, ~16.8 completion tokens/second) a ~30 KB single-file artifact
+ * is ~9K tokens to emit, 9_000 / 16.8 ≈ 540 s of pure generation, and the reasoning block
+ * that precedes it routinely costs as much again.
  */
-export const BUILDER_MAX_STREAM_TOTAL_MS = 2_700_000;
+export const BUILDER_MAX_STREAM_TOTAL_MS = MAX_STREAM_TOTAL_MS;
 
 /**
  * Absolute bounds any per-agent cap is clamped into.
@@ -45,22 +57,24 @@ export const BUILDER_MAX_STREAM_TOTAL_MS = 2_700_000;
  *
  * It is NOT above every reachable deadline, and a comment here previously claimed it was.
  * A CALLER budget has no such bound: `--timeout 0` resolves to 7_200_000
- * (gateway/rpc.ts:197-199), gateway.turnTimeoutMs has a `.min()` and no `.max()`
+ * (gateway/rpc.ts), gateway.turnTimeoutMs has a `.min()` and no `.max()`
  * (config/schema.ts), and an effort profile allows 86_400_000. Above a ~59-minute turn
- * budget this clamp wins and the cap sits BELOW the deadline again. That is intended —
- * an hour of unbroken single-call generation is a runaway whatever the deadline says —
- * but it means "the deadline always fires first" is a property of the common case, not
- * an invariant of this module.
+ * budget this clamp wins and the resolved cap sits below the deadline.
+ *
+ * That no longer costs anything: a call made under such a deadline carries a signal, and
+ * the providers only consult the cap when there is none. The clamp bounds the no-signal
+ * case, where "an hour of unbroken single-call generation with nobody watching" is a
+ * wedged process whatever a config file says.
  */
 export const MAX_STREAM_TOTAL_CEILING_MS = 3_600_000;
 const MIN_STREAM_TOTAL_MS = 60_000;
 
 /**
- * The total-stream cap a provider instance enforces. Per-agent, because a builder
- * needs minutes a summarizer never will: the value rides in on the agent's own
- * ModelConfig — the object that already carries every per-run overlay into the single,
- * failover, Anthropic and containerized construction paths — so no provider signature
- * changes and no caller-side plumbing are involved. Unset → the 20-minute default.
+ * The no-signal leak backstop a provider instance enforces. Still per-agent — the value
+ * rides in on the agent's own ModelConfig, the object that already carries every per-run
+ * overlay into the single, failover, Anthropic and containerized construction paths — but
+ * it is no longer a capability tier: an agent may lower it deliberately, and unset means
+ * the hour above.
  */
 export function resolveStreamTotalCapMs(modelConfig: Pick<ModelConfig, "maxStreamTotalMs"> | undefined): number {
   const requested = modelConfig?.maxStreamTotalMs;

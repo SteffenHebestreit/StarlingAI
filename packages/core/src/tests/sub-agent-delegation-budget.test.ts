@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import JSON5 from "json5";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  MAX_SYNTHESIS_RESERVE_FRACTION,
   SUB_AGENT_MIN_DELEGATION_MS,
   resolveDelegationCeilingMs,
   resolveDelegationDeadlineMs,
@@ -33,7 +34,7 @@ const REMAINING_AT_DELEGATION_MS = TURN_MS - SPENT_BEFORE_DELEGATING_MS; // 1,62
 const AGENT_DECLARED_MS = 1_500_000;
 const OBSERVED_RUN_MS = 1_615_806;
 const OBSERVED_OVERSHOOT_MS = OBSERVED_RUN_MS - AGENT_DECLARED_MS; // 115,806
-const RESERVE_MS = 420_000; // config/gateway/40-orchestration.jsonc — derivation is in that file
+const RESERVE_MS = 240_000; // config/gateway/40-orchestration.jsonc — derivation is in that file
 
 /** What the runner (agent/sub-agent.ts) resolves from the ceiling this module hands down. */
 const armedBudget = (ceilingMs: number | undefined): number | undefined =>
@@ -48,19 +49,24 @@ describe("resolveDelegationCeilingMs — a child may not outlive the parent's re
       nowMs: now,
       synthesisReserveMs: RESERVE_MS,
     });
-    expect(ceiling).toBe(REMAINING_AT_DELEGATION_MS - RESERVE_MS); // 1,200,000
-    expect(armedBudget(ceiling)).toBe(1_200_000);
+    expect(ceiling).toBe(REMAINING_AT_DELEGATION_MS - RESERVE_MS); // 1,380,000
+    expect(armedBudget(ceiling)).toBe(1_380_000);
 
     // THE defect: the child must not be able to run what it ran.
     expect(armedBudget(ceiling)!).toBeLessThan(OBSERVED_RUN_MS);
 
-    // ...and the parent must keep enough to finish. Worst case the child also overshoots its own
-    // deadline by the measured 115,806 ms; the parent still keeps ~304 s, above the 248,586 ms
-    // (one synthesis + one QA/verify pass) that the reserve was sized from.
+    // ...and the parent must keep enough to finish, in the WORST case where the child also
+    // overshoots its own deadline by the measured 115,806 ms. One completion (124,293 ms) is what
+    // the parent needs to synthesise, and one completion is what it keeps — which is why the
+    // reserve is 240,000 (overshoot + completion) and not the 120,000 a "one completion" reading
+    // of it would give: that would leave the parent 4,194 ms, and a reserve that cannot survive
+    // the failure mode it was measured from is not a reserve.
     const parentHeadroomMs =
       TURN_MS - SPENT_BEFORE_DELEGATING_MS - armedBudget(ceiling)! - OBSERVED_OVERSHOOT_MS;
-    expect(parentHeadroomMs).toBe(304_194);
-    expect(parentHeadroomMs).toBeGreaterThan(248_586);
+    expect(parentHeadroomMs).toBe(124_194);
+    expect(parentHeadroomMs).toBeGreaterThan(SUB_AGENT_MIN_DELEGATION_MS);
+    expect(TURN_MS - SPENT_BEFORE_DELEGATING_MS - 1_500_000 - OBSERVED_OVERSHOOT_MS)
+      .toBeLessThan(SUB_AGENT_MIN_DELEGATION_MS); // what a 120,000 reserve would have left
 
     // DISCRIMINATOR 1 — the same reserve subtracted from the STATIC budget (what the code did
     // before) leaves the parent less than one model completion (124,293 ms), which is why this had
@@ -71,7 +77,7 @@ describe("resolveDelegationCeilingMs — a child may not outlive the parent's re
       nowMs: now,
       synthesisReserveMs: RESERVE_MS,
     });
-    expect(armedBudget(staticCarve)).toBe(1_380_000);
+    expect(armedBudget(staticCarve)).toBe(AGENT_DECLARED_MS);
     expect(TURN_MS - SPENT_BEFORE_DELEGATING_MS - armedBudget(staticCarve)! - OBSERVED_OVERSHOOT_MS)
       .toBeLessThan(124_293);
 
@@ -179,15 +185,20 @@ describe("resolveDelegationDeadlineMs — nesting compounds the reserve", () => 
     })!;
     expect(d2).toBe(d1 - RESERVE_MS);
 
-    // Depth 3: by now only 280,000 ms remain — less than the reserve itself — so the floor governs
-    // instead of the subtraction going negative. The chain converges on one completion rather than
-    // on zero, and is still strictly inside its own parent's deadline.
+    // Depth 3: 640,000 ms remain. A flat 240,000 would be 37.5% of it, so the fractional bound
+    // (MAX_SYNTHESIS_RESERVE_FRACTION) takes over and the level carves a quarter instead. That is
+    // the inversion: the chain converges on a WORKING budget for the deepest child rather than
+    // subtracting its way down to the floor, while still ending strictly inside its own parent.
     const t3 = t2 + 200_000;
+    const remainingAtD3 = d2 - t3;
     const d3 = resolveDelegationDeadlineMs({
       parentDeadlineMs: d2, nowMs: t3, synthesisReserveMs: RESERVE_MS,
     })!;
-    expect(d2 - t3).toBeLessThan(RESERVE_MS);
-    expect(d3).toBe(t3 + SUB_AGENT_MIN_DELEGATION_MS);
+    expect(remainingAtD3).toBe(640_000);
+    expect(d3 - t3).toBe(remainingAtD3 * (1 - MAX_SYNTHESIS_RESERVE_FRACTION)); // 480,000
+    // The flat subtraction would have handed this level 160,000 ms less.
+    expect(d3 - t3).toBeGreaterThan(remainingAtD3 - RESERVE_MS);
+    expect(d3 - t3).toBeGreaterThan(SUB_AGENT_MIN_DELEGATION_MS);
 
     // Monotonically non-increasing: no depth can be granted more time than the level above it,
     // so no amount of nesting pushes the subtree past the turn's own deadline.
@@ -227,8 +238,10 @@ describe("resolveDelegationDeadlineMs — nesting compounds the reserve", () => 
       parentDeadlineMs: turnDeadline, nowMs: now, synthesisReserveMs: RESERVE_MS,
     })!;
     const soft = now + resolveSoftDeadlineOffsetMs(ceiling, AGENT_DECLARED_MS);
-    expect(soft).toBeLessThan(deadline); // 70% of 1,200,000 — fires with 360 s of work left
-    expect(soft - now).toBe(840_000);
+    // 70% of 1,380,000, floored — fires with ~414 s of work left. (965,999 not 966,000: the
+    // product is 965,999.9999… in IEEE 754 and resolveSoftDeadlineOffsetMs floors it.)
+    expect(soft).toBeLessThan(deadline);
+    expect(soft - now).toBe(965_999);
   });
 });
 
@@ -315,21 +328,21 @@ describe("delegate_to_agent hands the runner a parent-relative budget", () => {
     return runSubAgentWithStatsMock.mock.calls[0]![0];
   };
 
-  it("arms the audited agent at 1,200,000 ms, not the 1,615,806 ms it ran", async () => {
+  it("arms the audited agent at 1,380,000 ms, not the 1,615,806 ms it ran", async () => {
     const args = await delegateUnderTurn(SPENT_BEFORE_DELEGATING_MS, {
       subAgentSynthesisReserveMs: RESERVE_MS,
     });
 
     // Date.now() advances a few ms between arming the fixture deadline and the delegation, so the
     // ceiling lands just under the ideal 1,200,000 — never above it.
-    expect(args.turnTimeoutOverrideMs).toBeLessThanOrEqual(1_200_000);
-    expect(args.turnTimeoutOverrideMs).toBeGreaterThan(1_195_000);
+    expect(args.turnTimeoutOverrideMs).toBeLessThanOrEqual(1_380_000);
+    expect(args.turnTimeoutOverrideMs).toBeGreaterThan(1_375_000);
     expect(armedBudget(args.turnTimeoutOverrideMs)!).toBeLessThan(OBSERVED_RUN_MS);
 
     // The deadline handed down is tightened by the same reserve, so the child's OWN delegations
     // inherit a deadline that already excludes this level's headroom.
-    expect(args._turnDeadlineMs).toBeLessThanOrEqual(Date.now() + 1_200_000);
-    expect(args._turnDeadlineMs).toBeGreaterThan(Date.now() + 1_195_000);
+    expect(args._turnDeadlineMs).toBeLessThanOrEqual(Date.now() + 1_380_000);
+    expect(args._turnDeadlineMs).toBeGreaterThan(Date.now() + 1_375_000);
     // ...and the wrap-up nudge lands inside it.
     expect(args.softDeadlineMs).toBeLessThan(args._turnDeadlineMs!);
   });
@@ -347,9 +360,13 @@ describe("delegate_to_agent hands the runner a parent-relative budget", () => {
   it("clamps to what is LEFT, not to what was configured, late in a turn", async () => {
     // 25 of the 30 minutes are gone: the old code still offered this agent its full 1,500,000 ms.
     const args = await delegateUnderTurn(1_500_000, { subAgentSynthesisReserveMs: RESERVE_MS });
-    // 300,000 remaining − 420,000 reserve is negative, so the floor applies — one completion,
-    // never 0 (which resolveTurnBudgetMs would read as unbounded).
-    expect(args.turnTimeoutOverrideMs).toBe(SUB_AGENT_MIN_DELEGATION_MS);
+    // 300,000 ms remain. A flat 240,000 reserve would leave 60,000 — under the floor — so the old
+    // rule collapsed the child to SUB_AGENT_MIN_DELEGATION_MS. The fractional bound carves 75,000
+    // instead and the child keeps 225,000: nearly twice as much, from a parent that genuinely has
+    // little left to give. Still bounded, still never 0 (which resolveTurnBudgetMs reads as
+    // unbounded), still below what the parent has.
+    expect(args.turnTimeoutOverrideMs).toBe(300_000 * (1 - MAX_SYNTHESIS_RESERVE_FRACTION));
+    expect(args.turnTimeoutOverrideMs!).toBeGreaterThan(SUB_AGENT_MIN_DELEGATION_MS);
     expect(args.turnTimeoutOverrideMs).not.toBe(0);
   });
 });

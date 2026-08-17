@@ -358,7 +358,11 @@ export {
 
 const log = childLogger("agent:runtime");
 
-const DEFAULT_MAX_TOOL_ITERATIONS = 20;
+// Iteration counts never separated a healthy run from a stuck one — the reference build
+// (run 3959f3ac) used 13 of its 14 while the two pathologies beside it used 1 and 0 — so a
+// tight ceiling only ever cut the run that was working. Relaxed; the progress supervisor,
+// which watches what a run PRODUCES, is what stops one that is not.
+const DEFAULT_MAX_TOOL_ITERATIONS = 40;
 const MAX_LENGTH_CONTINUATION_ATTEMPTS = 2;
 const MAX_CONTINUATION_OVERLAP_CHARS = 400;
 // The public turn input/output shapes (RunTurnOptions, TurnOutput) were extracted
@@ -1042,20 +1046,57 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
   const turnAbort = turnTimeoutMs ? new AbortController() : undefined;
   const inertAbort = new AbortController();
   const turnStartMs = Date.now();
+  // Hoisted above the deadline plumbing: the timers below read it to ask the
+  // long-running-generation manager whether THIS turn holds an operator grant.
+  const sessionId = opts.session.id;
   // Absolute deadline for this turn — captured when the abort timer is armed so a delegated sub-agent
   // can clamp to the parent's REMAINING budget (D3). MUTABLE: the delegation-wait exclusion (D5) pushes
   // it out while the orchestrator is BLOCKED awaiting a child, but never past turnDeadlineCeilingMs.
   let turnDeadlineMs = turnTimeoutMs ? turnStartMs + turnTimeoutMs : undefined;
-  const turnDeadlineCeilingMs = turnTimeoutMs ? turnStartMs + DELEGATION_WAIT_CEILING_MS : undefined;
+  // D5's ceiling is the turn budget PLUS a delegation-wait allowance, not the bare
+  // allowance. At the shipped config the two numbers were identical (both 1,800,000), so
+  // extendDeadlineForDelegationWait resolved to max(D, min(D+w, D)) === D and D5 could not
+  // move the deadline by a millisecond despite shipping default(true). The exclusion says
+  // "the tier budget bounds the parent's OWN work, not its children's", which only means
+  // anything if waiting on a child can push the deadline PAST the tier budget.
+  const turnDeadlineCeilingMs = turnTimeoutMs ? turnStartMs + turnTimeoutMs + DELEGATION_WAIT_CEILING_MS : undefined;
   // The abort reason is TYPED. The provider salvage discriminates an operator cancel
   // (discard the partial — the user asked for it to stop) from a wall-clock deadline
   // (keep the partial — the run wanted to finish). A bare abort() reads as a cancel,
   // so the orchestrator's own deadline would throw away content the model had already
   // produced; with the output ceiling gone a single orchestrator completion can run
   // long enough for that to be the normal case, not the rare one.
-  let timeoutHandle = turnAbort && turnTimeoutMs
-    ? setTimeout(() => turnAbort.abort(new DeadlineAbort(turnTimeoutMs)), turnTimeoutMs)
-    : undefined;
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  // The deadline is SUSPENDED, not merely re-armed, while the turn holds an operator
+  // unbounded grant. Audit 3959f3ac: the dock promised "let it finish naturally", the
+  // operator chose it at 07:35:24, and this timer overrode the operator 19 minutes later —
+  // because nothing outside sub-agent.ts could read the grant. It re-arms at the 24h
+  // ceiling rather than clearing outright, so a granted turn still cannot pin its session
+  // and abort controllers forever.
+  const armTurnDeadline = (budgetMs: number, fireInMs = budgetMs): void => {
+    if (!turnAbort) return;
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+    timeoutHandle = setTimeout(() => {
+      if (longRunningGenerationManager.isTurnUnbounded(sessionId)) {
+        // Same event the sub-agent side already logs when a grant re-arms ITS deadline
+        // (sub-agent.ts, "unbounded_grant_rearmed_deadline") — this is that decision one
+        // layer up, so it reads as one story in the audit log rather than two.
+        logAudit("long_running_generation_auto_resolved", {
+          agentName: "orchestrator",
+          runSessionId: sessionId,
+          reason: "turn_deadline_suspended_by_unbounded_grant",
+          appliedAt: "expiry",
+          turnTimeoutMs: budgetMs,
+          ceilingMs: MAX_TURN_CEILING_MS,
+        }, { sessionId, severity: "info" });
+        turnDeadlineMs = Date.now() + MAX_TURN_CEILING_MS;
+        armTurnDeadline(MAX_TURN_CEILING_MS);
+        return;
+      }
+      turnAbort.abort(new DeadlineAbort(budgetMs));
+    }, Math.max(0, fireInMs));
+  };
+  if (turnAbort && turnTimeoutMs) armTurnDeadline(turnTimeoutMs);
   // D5 (orchestration.excludeDelegationWaitFromTurnBudget): push the turn deadline out by `ms` (the
   // wall-clock the orchestrator sat BLOCKED awaiting a delegated child) and re-arm the abort, so the
   // tier budget bounds the parent's OWN work — not its children's. Bounded by the absolute ceiling;
@@ -1065,18 +1106,32 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
       return turnDeadlineMs;
     }
     turnDeadlineMs = extendDeadlineForDelegationWait(turnDeadlineMs, ms, turnDeadlineCeilingMs);
-    if (timeoutHandle) clearTimeout(timeoutHandle);
-    const extendedBudgetMs = Math.max(0, turnDeadlineMs - turnStartMs);
-    timeoutHandle = setTimeout(
-      () => turnAbort.abort(new DeadlineAbort(extendedBudgetMs)),
-      Math.max(0, turnDeadlineMs - Date.now()),
-    );
+    // Re-arm through armTurnDeadline so the grant check applies to the EXTENDED deadline
+    // too — a separate setTimeout here is how the grant got bypassed on the original path.
+    armTurnDeadline(Math.max(0, turnDeadlineMs - turnStartMs), Math.max(0, turnDeadlineMs - Date.now()));
     return turnDeadlineMs;
   };
 
+  // The grant is honoured the MOMENT the operator makes it, not at the next expiry: the
+  // deadline is a timer, and a timer cannot poll. Without this a grant made one minute
+  // before expiry would still let the abort fire and only be caught on the re-arm path.
+  const onUnboundedGrant = (grantedRoot: string): void => {
+    if (grantedRoot !== sessionId || !turnAbort || !turnTimeoutMs) return;
+    logAudit("long_running_generation_auto_resolved", {
+      agentName: "orchestrator",
+      runSessionId: sessionId,
+      reason: "turn_deadline_suspended_by_unbounded_grant",
+      appliedAt: "grant",
+      turnTimeoutMs,
+      ceilingMs: MAX_TURN_CEILING_MS,
+    }, { sessionId, severity: "info" });
+    turnDeadlineMs = Date.now() + MAX_TURN_CEILING_MS;
+    armTurnDeadline(MAX_TURN_CEILING_MS);
+  };
+  longRunningGenerationManager.on("lrg:unbounded", onUnboundedGrant);
+
   // Warden abort: allows the Warden to cancel this turn mid-flight on severe anomalies.
   const wardenAbort = new AbortController();
-  const sessionId = opts.session.id;
   registerSessionAbortController(sessionId, wardenAbort);
   // CTL-205 catch-up: a distributed cancel issued while no turn was live (or the
   // owning process was restarting) is consumed at turn start and aborts now.
@@ -1089,6 +1144,9 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
   // Fresh turn: clear any per-turn "operator stopped" latch so a stop in a
   // previous turn never auto-stops this one's long-running generations.
   longRunningGenerationManager.clearStopRequested(sessionId);
+  // A grant is TURN-scoped. Without this it would silently make every later turn of a
+  // long-lived session unbounded too — the same leak clearStopRequested exists to prevent.
+  longRunningGenerationManager.clearUnbounded(sessionId);
   // Mark this turn live so the user can steer it mid-flight (drained in the loop);
   // cleared in the finally below so the active flag never leaks across turns.
   turnSteeringManager.markTurnActive(sessionId);
@@ -1162,6 +1220,7 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
     throw err;
   } finally {
     if (timeoutHandle) clearTimeout(timeoutHandle);
+    longRunningGenerationManager.off("lrg:unbounded", onUnboundedGrant);
     deregisterSessionAbortController(sessionId);
     turnSteeringManager.markTurnDone(sessionId);
   }

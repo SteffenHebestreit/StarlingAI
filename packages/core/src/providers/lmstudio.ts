@@ -45,11 +45,16 @@ export {
  * as a sub-agent failure that looked like a model problem and was not.
  *
  * headersTimeout stays bounded — a server that never sends headers at all is a real
- * connection failure and should not wait on the silence budget.
+ * connection failure and should not wait on the silence budget. It is bounded at 10
+ * minutes, not 2: on a single-GPU local endpoint the response headers arrive only once
+ * the server has accepted and begun the request, so a queued call behind another agent's
+ * generation, or a cold model load, legitimately sees nothing for minutes. At 120 s that
+ * is a "connection failure" that was neither — the same mistake the sibling bodyTimeout
+ * was zeroed for, one field over.
  */
 const providerDispatcher = new UndiciAgent({
   bodyTimeout: 0,
-  headersTimeout: 120_000,
+  headersTimeout: 600_000,
   keepAliveTimeout: 60_000,
   keepAliveMaxTimeout: 600_000,
 });
@@ -118,39 +123,12 @@ export interface OpenAICompatibleProviderRuntimeSnapshot {
   lastHealthCheckLatencyMs?: number;
 }
 
-/** Floor on the SILENCE budget of a LOCALLY served model. Raised above 300_000 because
- *  a graded-thinking model legitimately emits nothing for ~5 minutes inside one
- *  reasoning block. It replaces the old `20_000 + maxTokens * 25` floor, which produced
- *  ~430s for the (now deleted) 16384-token pins and collapses to the bare configured
- *  30s once maxTokens is absent — which is why the floor cannot simply be dropped. */
+/** Floor on the SILENCE budget, applied to every endpoint. Raised above 300_000 because a
+ *  graded-thinking model legitimately emits nothing for ~5 minutes inside one reasoning
+ *  block. It replaces the old `20_000 + maxTokens * 25` floor, which produced ~430s for the
+ *  (now deleted) 16384-token pins and collapses to the bare configured 30s once maxTokens is
+ *  absent — which is why the floor cannot simply be dropped. */
 const MIN_PROVIDER_SILENCE_MS = 600_000;
-
-/**
- * Is this endpoint served from the local machine / local network?
- *
- * The generous silence floor exists for ONE reason: a graded-thinking model we serve
- * ourselves goes byte-silent for minutes inside a reasoning block. That reason does
- * not transfer to a remote endpoint — a cloud API that accepts a request and then
- * says nothing for ten minutes is dead, and its configured `timeoutMs` is a real
- * fail-fast instruction the failover chain depends on. Structural test (hostname
- * shape), not a provider-name list.
- */
-export function isLocallyServedEndpoint(baseUrl: string): boolean {
-  let host: string;
-  try {
-    host = new URL(baseUrl).hostname.toLowerCase();
-  } catch {
-    return true; // unparseable — keep the conservative (generous) budget
-  }
-  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local")) return true;
-  if (host === "host.docker.internal" || host.endsWith(".internal")) return true;
-  if (!host.includes(".")) return true; // bare docker-compose service name
-  if (host === "::1" || host === "[::1]") return true;
-  return /^127\./.test(host)
-    || /^10\./.test(host)
-    || /^192\.168\./.test(host)
-    || /^172\.(1[6-9]|2\d|3[01])\./.test(host);
-}
 
 /**
  * The provider's per-chunk SILENCE budget — how long the remote may send nothing
@@ -162,24 +140,25 @@ export function isLocallyServedEndpoint(baseUrl: string): boolean {
  * Now that the completion budget is derived per request there is no constant to derive
  * from, and TOTAL runtime is bounded by the caller's deadline signal, not by this.
  *
- * The floor is applied only where its justification holds. Pass `locallyServed: false`
- * for a REMOTE endpoint and the configured `providers.<name>.timeoutMs` is honoured
- * verbatim (clamped only by MAX_PROVIDER_TIMEOUT_MS), so a dead cloud endpoint hands
- * over to the failover chain in seconds instead of ten minutes. Omitting the flag
- * keeps the conservative local behaviour.
+ * The floor is NOT waived for a remote endpoint any more, and the note that used to sit
+ * here is why. It read: "a self-hosted thinking model reached over a PUBLIC hostname is
+ * classified remote and therefore gets its configured budget, not the 10-minute floor —
+ * raise providers.<name>.timeoutMs for it, otherwise a legitimate multi-minute reasoning
+ * block reads as a stall." That is a documented way to kill healthy work, defaulted ON,
+ * fixable only by an operator who has already read this file. `locallyServed: false`
+ * collapsed the floor to 0, so the bare configured 30 s became the silence budget and any
+ * reasoning block longer than half a minute was a "stall".
  *
- * Operator note: a self-hosted thinking model reached over a PUBLIC hostname is
- * classified remote and therefore gets its configured budget, not the 10-minute floor.
- * Raise `providers.<name>.timeoutMs` for it (or address it by a private/`.internal`
- * host) — otherwise a legitimate multi-minute reasoning block reads as a stall.
+ * The remote case it was written for — a DEAD cloud endpoint should hand over to the
+ * failover chain in seconds, not minutes — is a connection failure, and connection
+ * failures are caught by the dispatcher's headersTimeout above, not by the per-chunk
+ * silence budget. Silence AFTER headers is a model thinking, wherever it is hosted.
  */
 export function computeOpenAICompatibleRequestTimeoutMs(
   _modelConfig: Partial<Pick<ModelConfig, "maxTokens">>,
   configuredTimeoutMs = DEFAULT_PROVIDER_TIMEOUT_MS,
-  opts: { locallyServed?: boolean } = {},
 ): number {
-  const floor = opts.locallyServed === false ? 0 : MIN_PROVIDER_SILENCE_MS;
-  return Math.min(MAX_PROVIDER_TIMEOUT_MS, Math.max(configuredTimeoutMs, floor));
+  return Math.min(MAX_PROVIDER_TIMEOUT_MS, Math.max(configuredTimeoutMs, MIN_PROVIDER_SILENCE_MS));
 }
 
 /**
@@ -829,12 +808,10 @@ export class LMStudioProvider {
     this.baseUrl = baseUrl;
     this.modelConfig = modelConfig;
     this.configuredMaxRetries = Math.max(0, options.maxRetries ?? 1);
-    this.requestTimeoutMs = computeOpenAICompatibleRequestTimeoutMs(modelConfig, options.timeoutMs, {
-      locallyServed: isLocallyServedEndpoint(baseUrl),
-    });
+    this.requestTimeoutMs = computeOpenAICompatibleRequestTimeoutMs(modelConfig, options.timeoutMs);
     // Same derivation shape as requestTimeoutMs above: read off the ModelConfig, not
-    // off the endpoint options, because the cap is a property of the AGENT's work
-    // (a builder emits a 30 KB artifact; a summarizer does not), not of the endpoint.
+    // off the endpoint options, because the backstop is a property of the AGENT's run,
+    // not of the endpoint.
     this.maxStreamTotalMs = resolveStreamTotalCapMs(modelConfig);
     this.client = new OpenAI({
       baseURL: baseUrl,
@@ -1127,7 +1104,17 @@ export class LMStudioProvider {
       // prompt or hung. (Token-level producing-vs-prefill needs the streaming path.)
       const callId = beginProviderCall({ model: modelId, mode: "complete" });
       try {
-        const response = await this.withHardTimeout(signal, this.requestTimeoutMs + 5000, (s) => this.client.chat.completions.create(
+        // `requestTimeoutMs` is a SILENCE budget — the streaming path re-arms it on every
+        // chunk. This path has no chunks, so the same number becomes a bound on the whole
+        // generation, and at the configured 30 s→600 s floor that is far too tight for the
+        // calls that land here: the progress judge, the rescue prompts and the forced
+        // timeout synthesis. A terminal ProviderHardTimeoutError on those discards exactly
+        // the evidence they exist to preserve. Floored at 15 min (the same
+        // MAX_PROVIDER_TIMEOUT_MS this deployment already tolerates for silence) so a truly
+        // hung remote still ends, and still `+5000` so the SDK's own timeout wins the race
+        // and reports the more specific error.
+        const hardTimeoutMs = Math.max(this.requestTimeoutMs, MAX_PROVIDER_TIMEOUT_MS) + 5000;
+        const response = await this.withHardTimeout(signal, hardTimeoutMs, (s) => this.client.chat.completions.create(
           {
             model: modelId,
             messages: openAIMessages,
@@ -1515,20 +1502,27 @@ export class LMStudioProvider {
     // completeViaStream, hitting the cap keeps whatever was produced rather than
     // discarding the run.
     const streamStartedAt = Date.now();
-    // BACKSTOP only. The real bound is the caller's deadline signal (the sub-agent
-    // turn deadline, the gateway turn timeout); this exists so a caller that passes
-    // NO signal still cannot hang forever.
+    // NO-SIGNAL BACKSTOP ONLY — see the `signal === undefined` guard on the check below.
     //
-    // The old `Math.max(this.requestTimeoutMs, …)` was dead code: requestTimeoutMs is
-    // clamped to MAX_PROVIDER_TIMEOUT_MS (900_000), always below MAX_STREAM_TOTAL_MS
-    // (1_200_000), so the max always resolved to the constant and the cap never scaled.
-    // It scales now — per AGENT, off the ModelConfig — so an agent whose deliverable is a
-    // whole emitted file gets BUILDER_MAX_STREAM_TOTAL_MS instead of the flat default, and
-    // any agent whose own budget exceeds the default gets a cap floored above it so the
-    // deadline (which salvages AND resynthesizes) reaches the stream first. That ordering
-    // is real only because the caller's signal now survives stream-open (withHardTimeout
-    // above); it does not apply on a run with NO deadline, which is the case this cap
-    // exists for. See resolveAgentStreamCapMs in agent/sub-agent-model-config.ts.
+    // This comment has always said the cap exists "so a caller that passes NO signal
+    // still cannot hang forever", but the check ran unconditionally, so it was the one
+    // wall clock a granted-unbounded run could not escape: an operator grant suspends the
+    // sub-agent deadline and the runtime turn deadline, and this fired anyway. Gating on
+    // the ABSENCE of a signal makes the stated scope real, and makes the grant reach here
+    // by construction rather than by a flag the provider would have to be told about.
+    //
+    // Why that is sound rather than a hole (traced, not assumed): agent/runtime.ts always
+    // composes a signal for a turn — wardenAbort is pushed unconditionally — and
+    // agent/sub-agent.ts's composeLlmSignal returns that inherited `opts.signal` even for
+    // an agent declaring `turnTimeoutMs: "unbound"`. So every delegated call arrives with a
+    // signal, and the only callers left on this branch are the out-of-turn ones (a script,
+    // a warm-up, a test double) that genuinely state no deadline — exactly the population
+    // the backstop was written for.
+    //
+    // Historical note on the value: the old `Math.max(this.requestTimeoutMs, …)` was dead
+    // code (requestTimeoutMs is clamped to MAX_PROVIDER_TIMEOUT_MS, always below the
+    // constant). It scales per AGENT off the ModelConfig now — see resolveAgentStreamCapMs
+    // in agent/sub-agent-model-config.ts.
     const totalCapMs = this.maxStreamTotalMs;
 
     try {
@@ -1545,7 +1539,7 @@ export class LMStudioProvider {
             ? signal.reason
             : new Error(`LLM stream aborted by the caller: ${String(signal.reason)}`);
         }
-        if (Date.now() - streamStartedAt > totalCapMs) {
+        if (signal === undefined && Date.now() - streamStartedAt > totalCapMs) {
           // THROW, do not break. A `break` leaves the try block normally: the catch
           // below never runs, recordRequestSuccess() fires, collectedFinishReason is
           // still undefined so `?? "stop"` reports a CLEAN STOP, and collectedUsage is

@@ -124,6 +124,10 @@ export const DEFAULT_CONTINUE_GRANT_TOKENS = 8_000;             // +8K completio
 export interface LongRunningEvents {
   "lrg:requested": (request: LongRunningRequest) => void;
   "lrg:resolved": (requestId: LongRunningRequestId, outcome: LongRunningOutcome, operator: string) => void;
+  /** An unbounded grant now covers this ROOT (turn) session. Emitted so the enclosing
+   *  timers — which cannot poll, they only wake when they fire — suspend themselves the
+   *  moment the operator chooses, instead of at their next (possibly fatal) expiry. */
+  "lrg:unbounded": (rootSessionId: string) => void;
 }
 
 // ── Manager ───────────────────────────────────────────────────────────────────
@@ -140,12 +144,30 @@ class LongRunningGenerationManager extends EventEmitter {
   private _pending = new Map<LongRunningRequestId, PendingRequest>();
   /** Run sessions that the operator has already granted `unbounded` to. */
   private _unboundedRuns = new Set<string>();
+  /** ROOT (turn) sessions covered by an unbounded grant. The run-scoped set above is
+   *  keyed on a `sub:`-prefixed id, so it is unreadable by anything that knows only the
+   *  turn id — which is every enclosing timer (the runtime turn deadline, the gateway
+   *  watchdog). Audit 3959f3ac: the operator granted unbounded at 07:35:24 and the turn
+   *  was killed at 07:54:36 anyway, because the grant had no way to reach out of
+   *  sub-agent.ts. Mirrors _stopRequestedRoots, which already solved exactly this for
+   *  `stop`; the grant was the one decision that never used rootOf(). */
+  private _unboundedRoots = new Set<string>();
   /** Root (turn) sessions where the operator explicitly chose `stop`. Every
    *  subsequent long-running prompt in the SAME turn auto-stops instead of
    *  re-asking — otherwise a coordinator that re-delegates spawns fresh
    *  sub-agents that prompt the operator again (the ask→stop→ask loop).
    *  Cleared at the start of each turn via clearStopRequested(). */
   private _stopRequestedRoots = new Set<string>();
+
+  constructor() {
+    super();
+    // Every live turn subscribes to `lrg:unbounded` for the duration of that turn
+    // (agent/runtime.ts), on top of the long-lived dashboard subscribers. The default
+    // limit of 10 would start printing MaxListenersExceededWarning at 10 concurrent
+    // turns — a warning about correct behaviour. Unsubscription is still in the turn's
+    // `finally`; this only removes the arbitrary ceiling.
+    this.setMaxListeners(0);
+  }
 
   /**
    * Ask the operator whether to keep going. Resolves when the operator
@@ -376,6 +398,7 @@ class LongRunningGenerationManager extends EventEmitter {
 
     if (outcome === "unbounded") {
       this._unboundedRuns.add(request.runSessionId);
+      this._grantRoot(request.runSessionId);
     }
 
     // An explicit `stop` means the operator wants this turn to wind down — mark
@@ -455,6 +478,28 @@ class LongRunningGenerationManager extends EventEmitter {
    */
   markUnbounded(runSessionId: string): void {
     this._unboundedRuns.add(runSessionId);
+    this._grantRoot(runSessionId);
+  }
+
+  /** Record the grant against the ROOT turn and announce it once, so the enclosing
+   *  timers can suspend themselves immediately rather than at their next expiry. */
+  private _grantRoot(runSessionId: string): void {
+    const root = rootOf(runSessionId);
+    if (this._unboundedRoots.has(root)) return;
+    this._unboundedRoots.add(root);
+    this.emit("lrg:unbounded", root);
+  }
+
+  /** Is the TURN this session belongs to covered by an unbounded grant? The reader every
+   *  enclosing bound consults before it fires. Accepts a root id or any `sub:` descendant. */
+  isTurnUnbounded(sessionId: string): boolean {
+    return this._unboundedRoots.has(rootOf(sessionId));
+  }
+
+  /** Drop the turn's grant. Called from the same place as clearStopRequested() so a grant
+   *  in one turn can never leak into the NEXT turn of a long-lived session. */
+  clearUnbounded(sessionId: string): void {
+    this._unboundedRoots.delete(rootOf(sessionId));
   }
 
   /**
@@ -504,6 +549,7 @@ class LongRunningGenerationManager extends EventEmitter {
     this._pending.clear();
     this._requests.clear();
     this._unboundedRuns.clear();
+    this._unboundedRoots.clear();
     this._stopRequestedRoots.clear();
     this.removeAllListeners();
   }

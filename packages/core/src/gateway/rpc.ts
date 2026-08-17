@@ -32,6 +32,14 @@ import { computerSessionManager } from "../agent/computer-session.js";
 import { subscribeToNotifications } from "../runtime/notifications.js";
 import { captureComputerSessionSnapshot } from "../agent/computer-adapters/runtime.js";
 import { resolveSessionWorkspaceOverride } from "./session-workspace.js";
+import { longRunningGenerationManager } from "../agent/long-running-generation.js";
+
+/**
+ * How often the gateway turn watchdog re-checks a turn it has suspended for an operator
+ * unbounded grant. Re-arming rather than cancelling means the watchdog comes back if the
+ * grant is ever cleared, so a grant cannot silently disarm the turn deadline forever.
+ */
+const GRANTED_TURN_RECHECK_MS = 60_000;
 
 const log = childLogger("gateway:rpc");
 
@@ -180,9 +188,14 @@ function parseOverrideFlags(message: string): { clean: string; flags: OverrideFl
   const iterMatch = clean.match(/--iter\s+(\d+)\b/);
   if (iterMatch) {
     const parsedIterations = parseInt(iterMatch[1]!, 10);
+    // An operator who types --iter 80 gets 80. The old Math.min(50, …) silently returned
+    // 50 and reported nothing, which is the same class of defect as the unbounded grant an
+    // enclosing timer ignored: an explicit human number overridden in silence. 200 stays as
+    // the runaway backstop (and is what --iter 0 already meant), so a typo still cannot
+    // spin forever.
     flags.maxIterationsOverride = parsedIterations === 0
       ? 200
-      : Math.max(1, Math.min(50, parsedIterations));
+      : Math.max(1, Math.min(200, parsedIterations));
     clean = clean.replace(/\s*--iter\s+\d+\b/, "");
   }
 
@@ -739,6 +752,22 @@ export class RpcConnection {
 
         const endTimedOutSession = () => {
           if (timedOut || completed) return;
+          // The operator's unbounded grant suspends this watchdog. It is the timer that
+          // actually killed run 3959f3ac: the dock promised "let it finish naturally" at
+          // 07:35:24 and this fired at 07:54:36 anyway (turn_timeout_recovered, timeoutMs
+          // 1800000), because the grant reached the sub-agent's own deadline and nothing
+          // else. A grant honoured by some enclosing bounds and not others is the same bug
+          // as a grant honoured by none. Re-arm rather than cancel, so the watchdog resumes
+          // if the grant is ever cleared.
+          if (longRunningGenerationManager.isTurnUnbounded(sessionId)) {
+            log.info(
+              { sessionId, requestId },
+              "Gateway turn watchdog suspended — this turn holds an operator unbounded grant",
+            );
+            if (timeoutHandle) clearTimeout(timeoutHandle);
+            timeoutHandle = setTimeout(endTimedOutSession, GRANTED_TURN_RECHECK_MS);
+            return;
+          }
           timedOut = true;
           ac.abort();
           cleanupTurn();

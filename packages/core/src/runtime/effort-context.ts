@@ -66,7 +66,12 @@ export const BUILTIN_EFFORT_PROFILES: Record<EffortTier, EffortProfile> = {
   low: {
     turnTimeoutMs: 120_000,
     orchestratorMaxToolIterations: 10,
-    subAgentMaxIterations: 4,
+    // Iteration counts are not a health signal and never separated the measured runs (the
+    // healthy build used 13; the two pathologies used 1 and 0). They are relaxed across
+    // every tier so a run that IS working is never cut for counting, and the progress
+    // supervisor — which watches what a run produces — is what stops one that is not. Low
+    // stays the tightest tier because its whole contract is "least work that answers it".
+    subAgentMaxIterations: 8,
     maxDelegationDepth: 2,
     maxDelegatedResultChars: 6_000,
     // Effort-scaled child budget: a low-effort delegated specialist finishes fast (a low turn is
@@ -81,9 +86,13 @@ export const BUILTIN_EFFORT_PROFILES: Record<EffortTier, EffortProfile> = {
   },
   medium: {},
   high: {
-    turnTimeoutMs: 1_200_000,
+    // 40 min, NOT the 20 it shipped with. `high` was the only tier that SHORTENED the turn:
+    // 1_200_000 sits 10 minutes below the 1_800_000 config default, so asking for high
+    // effort took time away while HIGH_ADDENDUM promised "an expanded time and tool budget
+    // — use it". A tier cannot both instruct the model to go deeper and give it less room.
+    turnTimeoutMs: 2_400_000,
     orchestratorMaxToolIterations: 40,
-    subAgentMaxIterations: 30,
+    subAgentMaxIterations: 60,
     maxDelegationDepth: 4,
     maxParallelSlices: 3,
     maxDelegatedResultChars: 40_000,
@@ -101,7 +110,7 @@ export const BUILTIN_EFFORT_PROFILES: Record<EffortTier, EffortProfile> = {
   max: {
     turnTimeoutMs: 0,
     orchestratorMaxToolIterations: 80,
-    subAgentMaxIterations: 60,
+    subAgentMaxIterations: 200,
     maxDelegationDepth: 6,
     maxParallelSlices: 4,
     maxDelegatedResultChars: 120_000,
@@ -117,6 +126,16 @@ export const BUILTIN_EFFORT_PROFILES: Record<EffortTier, EffortProfile> = {
     qaEvidenceAnchoring: false,
     finalResponseQaGate: false,
     autoResearchOnRefusal: false,
+    // `oversight` STAYS OFF here, and it is not the progress supervisor. Despite the name,
+    // orchestration.oversight only ever ENDS work earlier: at an evidence boundary a
+    // routing-tier judge is asked "are the acceptance criteria already met?" and a DONE
+    // strips the sub-agent's tools and forces synthesis (agent/sub-agent.ts,
+    // assessOversightGoalMet — "the oversight only ever ENDS work earlier, never prolongs
+    // it"). Switching it on at max would cut short the one tier whose contract is "keep
+    // refining until the deliverable is genuinely complete" — a cap wearing a supervisor's
+    // name. Supervision of a stalled max run belongs to the progress verifier, which is
+    // always-on and free; the LLM-judged turn-wide variant is the separate,
+    // eval-gated orchestration.maxEffortTurnOversight flag.
     oversight: false,
     // autoBuildAfterResearch stays ON — it is what produces the deliverable.
     promptAddendum: MAX_ADDENDUM,

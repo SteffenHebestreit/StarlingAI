@@ -240,10 +240,26 @@
     //   124,293 ms  one artifact-verify / QA-delivery pass — verifyArtifacts, verifyArtifactsRepair
     //               and qaDeliveryLoop are all ON above, so at least one of them is not optional.
     //   = 364,392 ms + ~15% margin -> 420,000 ms (23% of the turn; schema max is 600,000).
-    // A deployment with the QA stack off wants ~300,000 (overshoot + 1.5 completions) instead.
-    // Applied to the audited run: the child would have been armed with 1,620,000 − 420,000 =
-    // 1,200,000 ms rather than 1,500,000, and the parent would have kept its 420,000 ms.
-    "subAgentSynthesisReserveMs": 420000,
+    //
+    // 420,000 was the value and it was too expensive, for a reason the derivation above cannot
+    // see: the reserve is subtracted at EVERY level of a delegation chain, from an already
+    // tightened deadline. At depth 2 that is 840,000 ms — 14 minutes of a 30-minute turn — taken
+    // from a child before it had run a single iteration. Only two of the three terms are actually
+    // per-level:
+    //   115,806 ms  the child's overshoot. Per level, and NOT droppable: every parent pays its own
+    //               child's salvage + timeout synthesis out of its own budget.
+    //   124,293 ms  one completion, to synthesise what the child returned. Per level.
+    //   124,293 ms  the artifact-verify / QA-delivery pass. NOT per level — the ROOT orchestrator
+    //               runs it once; an intermediate coordinator hands its result upward and does not.
+    //   = 240,099 ms -> 240,000 ms (13% of the turn, down from 23%).
+    // The root's extra QA pass is covered structurally instead of by inflating every level:
+    // MAX_SYNTHESIS_RESERVE_FRACTION (agent/sub-agent-turn-budget.ts) caps the reserve at a quarter
+    // of whatever is actually LEFT, so a nearly-exhausted parent stops handing its child the bare
+    // floor, and a deep chain converges on a working budget rather than on the floor.
+    // Applied to the audited run: the child is armed with 1,620,000 − 240,000 = 1,380,000 ms rather
+    // than the 1,615,806 ms it took, and the parent keeps ~124,000 ms — one full completion — even
+    // if the child also overshoots by the measured 115,806 ms.
+    "subAgentSynthesisReserveMs": 240000,
     // The runner-side half of the same rule, and the ONLY thing that bounds the two cases the
     // delegation-site ceiling deliberately leaves alone: a caller with no budget of its own (a
     // non-gateway/CLI turn) and a nested delegation, where inventing a ceiling would REPLACE a

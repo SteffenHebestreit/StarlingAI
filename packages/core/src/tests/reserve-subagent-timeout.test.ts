@@ -27,9 +27,16 @@ describe("reserveSubAgentTimeout", () => {
     expect(reserveSubAgentTimeout(1_200_000, 90_000)).toBe(1_110_000);
   });
 
-  it("never drops below the floor even with a huge reserve", () => {
-    expect(reserveSubAgentTimeout(120_000, 200_000)).toBe(60_000); // default floor
-    expect(reserveSubAgentTimeout(120_000, 200_000, 30_000)).toBe(30_000); // custom floor
+  it("a reserve larger than the budget can no longer gut it — it takes a share, not a slab", () => {
+    // Was: 120,000 − 200,000 is negative, so the child collapsed to the 60,000 floor (or to a
+    // custom one). A reserve is headroom for the parent, and headroom that exceeds the whole
+    // budget is a statement about the parent's needs, not about the child's — so
+    // MAX_SYNTHESIS_RESERVE_FRACTION bounds it at a quarter of what is there and the child keeps
+    // 90,000. The floor is still the backstop; it is simply no longer the normal outcome.
+    expect(reserveSubAgentTimeout(120_000, 200_000)).toBe(90_000);
+    expect(reserveSubAgentTimeout(120_000, 200_000)!).toBeGreaterThanOrEqual(60_000); // default floor
+    // A custom floor still binds when it sits ABOVE the fractional result.
+    expect(reserveSubAgentTimeout(40_000, 200_000, 30_000)).toBe(30_000);
   });
 
   it("treats a negative reserve as identity", () => {
