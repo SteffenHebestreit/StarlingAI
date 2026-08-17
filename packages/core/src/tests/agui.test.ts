@@ -31,8 +31,17 @@ function parseSseEvents(chunks: string[]): Array<Record<string, unknown>> {
     .flatMap(chunk => chunk.split("\n\n"))
     .map(part => part.trim())
     .filter(Boolean)
+    // Comment lines are part of the SSE grammar and carry no event — the keepalive
+    // heartbeat is written as one. A parser that JSON.parses them throws on a healthy
+    // stream, which is exactly what a real client would have done too.
+    .filter(part => !part.startsWith(":"))
     .map(part => part.replace(/^data:\s*/m, ""))
     .map(part => JSON.parse(part) as Record<string, unknown>);
+}
+
+/** SSE comment lines — the keepalive heartbeat. */
+function heartbeats(chunks: string[]): string[] {
+  return chunks.filter(chunk => chunk.startsWith(":"));
 }
 
 describe("AG-UI streaming", () => {
@@ -47,6 +56,66 @@ describe("AG-UI streaming", () => {
     const session = await import("../agent/session.js");
     for (const active of session.getAllSessions()) {
       session.endSession(active.id);
+    }
+  });
+
+  it("heartbeats through a silent turn, and stops when the turn ends", async () => {
+    // THE DEFECT THIS FIXES, measured. A delegated sub-agent call produces no SSE traffic
+    // for its whole duration (15.8 minutes in the run that prompted this). Node's own
+    // fetch aborts a silent body at 300s, and the disconnect handler in agui.ts aborts the
+    // TURN — so the client's timeout cancelled the run it was waiting on and the gateway
+    // logged a sub-agent failure at iteration 0. Silence had to become non-silent.
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agui-hb-"));
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      gateway: { jwtSecret: "a".repeat(32), turnTimeoutMs: 1_800_000 },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+
+    let releaseTurn: () => void = () => {};
+    const turnGate = new Promise<void>((resolve) => { releaseTurn = resolve; });
+
+    vi.doMock("../agent/runtime.js", () => ({
+      // A turn that produces NOTHING until released — the shape of a delegation.
+      runTurn: vi.fn(async () => {
+        await turnGate;
+        return {
+          response: "done",
+          toolCallsExecuted: 0,
+          guardrailEvents: [],
+          usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+          blocked: false,
+        };
+      }),
+    }));
+
+    vi.useFakeTimers();
+    try {
+      const { handleAguiStream } = await import("../gateway/agui.js");
+      const res = new FakeResponse();
+      const streamed = handleAguiStream(res as never, { message: "build something large" });
+
+      // Four heartbeat intervals of total silence — well past undici's 300s body timeout
+      // in real terms, and the window in which the old code wrote nothing at all.
+      await vi.advanceTimersByTimeAsync(62_000);
+      expect(heartbeats(res.chunks).length).toBeGreaterThanOrEqual(4);
+
+      releaseTurn();
+      await streamed;
+
+      // The interval is cleared on completion: a leaked one writes to a closed stream
+      // every 15s forever, which is worse than the silence it replaced.
+      const afterFinish = res.chunks.length;
+      await vi.advanceTimersByTimeAsync(62_000);
+      expect(res.chunks.length).toBe(afterFinish);
+
+      // ...and the heartbeats did not corrupt the event stream.
+      const events = parseSseEvents(res.chunks);
+      expect(events.some(event => event["type"] === "RUN_STARTED")).toBe(true);
+      expect(events.some(event => event["type"] === "RUN_FINISHED")).toBe(true);
+    } finally {
+      vi.useRealTimers();
+      rmSync(tempDir, { recursive: true, force: true });
     }
   });
 

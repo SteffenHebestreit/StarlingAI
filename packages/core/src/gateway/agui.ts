@@ -24,6 +24,26 @@ import type { InterventionNotice } from "../agent/interventions.js";
 
 const TURN_TIMEOUT_SYNTHESIS_GRACE_MS = 65_000;
 
+/**
+ * How often to write an SSE comment while the turn produces nothing.
+ *
+ * This stream is silent for the ENTIRE duration of a delegated sub-agent call — the
+ * measured ones run 15.8 minutes — and a silent socket is what every idle timeout on the
+ * path is watching for. Node's own fetch (undici) gives up after 300s with
+ * UND_ERR_BODY_TIMEOUT, and nginx's proxy_read_timeout defaults to 60s. Both are shorter
+ * than one ordinary sub-agent call.
+ *
+ * That made the failure worse than a dropped view: the disconnect handler below aborts the
+ * turn, so a client that timed out CANCELLED the very run it was waiting on, and the
+ * gateway recorded it as a sub-agent failure at iteration 0. The dashboard never hit this
+ * because it drives turns over the WebSocket RPC channel; the AG-UI endpoint is the
+ * documented HTTP integration surface and was unusable for the workload it exists to serve.
+ *
+ * Fifteen seconds sits comfortably under both defaults. A comment line is the right shape:
+ * the SSE grammar ignores it, so no client parses it as an event.
+ */
+const HEARTBEAT_INTERVAL_MS = 15_000;
+
 const log = childLogger("gateway:agui");
 
 // ─── Event helpers ────────────────────────────────────────────────────────────
@@ -104,12 +124,22 @@ export async function handleAguiStream(
 
   const abortController = new AbortController();
   let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+  let heartbeatHandle: ReturnType<typeof setInterval> | null = null;
   let timedOut = false;
 
-  const cleanupTimeout = () => {
+  // ONE cleanup for both timers rather than two functions called side by side. There are
+  // four teardown paths here, and the comment on the turn-timeout timer below records what
+  // happened last time one of them missed a handle: an orphaned timer fired after a normal
+  // completion, archived the session and wrote to a closed stream. A heartbeat INTERVAL
+  // leaking that way would not fire once, it would fire every 15s forever.
+  const cleanupTimers = () => {
     if (timeoutHandle) {
       clearTimeout(timeoutHandle);
       timeoutHandle = null;
+    }
+    if (heartbeatHandle) {
+      clearInterval(heartbeatHandle);
+      heartbeatHandle = null;
     }
   };
 
@@ -129,7 +159,7 @@ export async function handleAguiStream(
 
   // Handle client disconnect
   res.on("close", () => {
-    cleanupTimeout();
+    cleanupTimers();
     abortController.abort();
     log.debug({ runId }, "AG-UI client disconnected");
   });
@@ -139,6 +169,17 @@ export async function handleAguiStream(
   // overwrote the handle and orphaned the first, which then fired after a normal
   // completion — spuriously archiving the session and writing to a closed stream.
   timeoutHandle = setTimeout(handleTurnTimeout, turnTimeoutMs + TURN_TIMEOUT_SYNTHESIS_GRACE_MS);
+
+  // Armed next to the turn timer, and torn down by the same cleanup. `unref` so a live
+  // heartbeat can never be the reason the process stays up.
+  heartbeatHandle = setInterval(() => {
+    if (res.writableEnded) {
+      cleanupTimers();
+      return;
+    }
+    res.write(": heartbeat\n\n");
+  }, HEARTBEAT_INTERVAL_MS);
+  heartbeatHandle.unref?.();
 
   try {
     let textStarted = false;
@@ -177,7 +218,7 @@ export async function handleAguiStream(
       },
     });
 
-    cleanupTimeout();
+    cleanupTimers();
     if (timedOut) return;
 
     // Never leave the user with a silent/empty reply. If streaming produced no
@@ -209,14 +250,14 @@ export async function handleAguiStream(
     sseEvent(res, { type: "RUN_FINISHED", runId, threadId: session.id });
 
   } catch (err) {
-    cleanupTimeout();
+    cleanupTimers();
     if (timedOut) return;
     if (!abortController.signal.aborted) {
       log.error({ err, runId }, "AG-UI run error");
       sseEvent(res, { type: "RUN_ERROR", runId, message: String(err) });
     }
   } finally {
-    cleanupTimeout();
+    cleanupTimers();
     res.end();
   }
 }
