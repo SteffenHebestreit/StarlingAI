@@ -18,7 +18,7 @@ Every public schema field, where it is declared, and how many production files r
 | `admin` | packages/core/src/config/schema.ts:357 | 21 |
 | `agents` | packages/core/src/config/schema.ts:1571 | 125 |
 | `alertmanager` | packages/core/src/config/schema.ts:1038 | 1 |
-| `all` | packages/core/src/config/schema.ts:1176 | 205 |
+| `all` | packages/core/src/config/schema.ts:1176 | 206 |
 | `allowedAgents` | packages/core/src/config/schema.ts:1190 | 25 |
 | `allowedUserIds` | packages/core/src/config/schemas/channels.ts:11 | 5 |
 | `allowedUsers` | packages/core/src/config/schema.ts:779 | 10 |
@@ -329,7 +329,7 @@ Every public schema field, where it is declared, and how many production files r
 | `promptCacheWarmKeeper` | packages/core/src/config/schema.ts:1696 | 2 |
 | `promptInjectionBlock` | packages/core/src/config/schema.ts:1121 | 6 |
 | `promptPer1m` | packages/core/src/config/schema.ts:496 | 1 |
-| `protocol` | packages/core/src/config/schema.ts:686 | 44 |
+| `protocol` | packages/core/src/config/schema.ts:686 | 45 |
 | `provider` | packages/core/src/config/schema.ts:417 | 92 |
 | `providers` | packages/core/src/config/schema.ts:1113 | 76 |
 | `publicUrl` | packages/core/src/config/schema.ts:303 | 7 |
@@ -391,7 +391,7 @@ Every public schema field, where it is declared, and how many production files r
 | `signalCliPath` | packages/core/src/config/schemas/channels.ts:73 | 4 |
 | `signingSecret` | packages/core/src/config/schemas/channels.ts:35 | 6 |
 | `silenceTimeoutMs` | packages/core/src/config/schemas/multimodal.ts:76 | 2 |
-| `silent` | packages/core/src/config/schema.ts:1240 | 22 |
+| `silent` | packages/core/src/config/schema.ts:1240 | 23 |
 | `skillMatchThreshold` | packages/core/src/config/schema.ts:276 | 1 |
 | `sleepTimeConsolidation` | packages/core/src/config/schema.ts:1392 | 2 |
 | `smtpFrom` | packages/core/src/config/schemas/channels.ts:65 | 6 |
@@ -428,7 +428,7 @@ Every public schema field, where it is declared, and how many production files r
 | `terraformBinary` | packages/core/src/config/schema.ts:967 | 1 |
 | `tiers` | packages/core/src/config/schema.ts:226 | 31 |
 | `timeoutMs` | packages/core/src/config/schema.ts:66 | 81 |
-| `token` | packages/core/src/config/schema.ts:1049 | 149 |
+| `token` | packages/core/src/config/schema.ts:1049 | 151 |
 | `tokenId` | packages/core/src/config/schema.ts:948 | 1 |
 | `tokenSecret` | packages/core/src/config/schema.ts:949 | 1 |
 | `toolCallsPerTurn` | packages/core/src/config/schema.ts:256 | 1 |
@@ -448,7 +448,7 @@ Every public schema field, where it is declared, and how many production files r
 | `type` | packages/core/src/config/schema.ts:867 | 360 |
 | `ungroundedFactualAnswerGuard` | packages/core/src/config/schemas/orchestration.ts:127 | 2 |
 | `upfrontSourceSensitiveClassifier` | packages/core/src/config/schemas/orchestration.ts:160 | 2 |
-| `url` | packages/core/src/config/schema.ts:549 | 113 |
+| `url` | packages/core/src/config/schema.ts:549 | 114 |
 | `urlFetchEnforcement` | packages/core/src/config/schemas/orchestration.ts:107 | 1 |
 | `urlNotFetchedShortAnswerGuard` | packages/core/src/config/schemas/orchestration.ts:260 | 1 |
 | `urls` | packages/core/src/config/schema.ts:772 | 10 |

@@ -68,4 +68,26 @@ describe("artifactFileLooksTruncated", () => {
     expect(artifactFileLooksTruncated({ path: path.join(dir, "missing.html"), filename: "missing.html" })).toBeNull();
     expect(artifactFileLooksTruncated({ filename: "no-path.html" })).toBeNull();
   });
+
+  // The format rules above are all TERMINATOR checks, and a staged build that stops
+  // half way defeats every one of them: it wrote its closing tags in pass one. The
+  // marker is the artifact saying outright which subsystem is missing.
+  it("flags a script whose subsystem is still an unfilled staged-build marker", () => {
+    const p = writeTemp("app.js", "export function boot(){\n  throw new Error(\"UNFINISHED_STUB: physics\");\n}\n");
+    expect(artifactFileLooksTruncated({ path: p, filename: "app.js" })).toContain("UNFINISHED_STUB");
+  });
+
+  it("accepts the same script once the subsystem is written", () => {
+    // Without this pair the check above is satisfied by a function that flags every .js
+    // file, and the reason string would carry no information.
+    const p = writeTemp("app-done.js", "export function boot(){\n  return { gravity: 9.81 };\n}\n");
+    expect(artifactFileLooksTruncated({ path: p, filename: "app-done.js" })).toBeNull();
+  });
+
+  it("still does not read formats outside the staged build's own output", () => {
+    // The marker scan widened the extension list from html/json; it must not widen the
+    // fail-open contract with it. A .md file is still never judged, marker or not.
+    const p = writeTemp("plan.md", "Next up: UNFINISHED_STUB: physics");
+    expect(artifactFileLooksTruncated({ path: p, filename: "plan.md" })).toBeNull();
+  });
 });

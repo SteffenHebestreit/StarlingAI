@@ -73,6 +73,23 @@ export function isStagedArtifactBuildRun(toolNames: string[] | undefined, task: 
 }
 
 /**
+ * The token an unbuilt subsystem carries inside a staged build.
+ *
+ * The directive used to ask for a COMMENT anchor above a short stub, and session
+ * a7b8fe3e is what that costs: content_writer's skeleton carried three block comments
+ * named CSS_STUB, JS_PART1 and JS_PART2, filled the first, ran out of iterations, and
+ * shipped a 2,684-byte index.html with a script block containing nothing but the two
+ * remaining comments. Structurally perfect, completely dead, reported as complete —
+ * because a comment is SILENT: it neither breaks the artifact nor names itself to any
+ * checker. This marker is the opposite on both counts. It throws where it sits, so the
+ * half-built artifact fails at the first attempt to use it, and it is one distinctive
+ * greppable string that artifactFileLooksTruncated (sub-agent.ts) reads back off disk —
+ * so the prompt half and the mechanical half agree on one literal instead of the prompt
+ * asking for an anchor shape nothing downstream could recognise.
+ */
+export const UNFINISHED_STUB_MARKER = "UNFINISHED_STUB";
+
+/**
  * The staged-build directive itself. Every capability it names is real: write_file
  * (mode defaults to "overwrite", mode:"append" exists), edit_file (EXACT string
  * replacement that fails on an absent or ambiguous old_string — hence the unique
@@ -86,6 +103,12 @@ export function isStagedArtifactBuildRun(toolNames: string[] | undefined, task: 
  * ceiling (passed in — the constant lives in the runner, which imports this module)
  * so the directive can never promise more passes than the harness will allow.
  *
+ * That reserve of 3 buys NO input reads, which is why the preamble spends a sentence on
+ * reading. Session a7b8fe3e burned five of content_writer's ten iterations re-reading a
+ * 16,091-char source file it had already read whole at iteration 1, in four chunked
+ * read_file calls plus two re-reads of its own output — 54,586 bytes read against 141
+ * bytes written. Passes are for writing; the raw material is already in the transcript.
+ *
  * Step 3 deliberately does NOT hardcode "report the path" as the only valid finish.
  * This text is generic and is injected alongside agent prompts that end on a stricter
  * contract — backend_coder must serve_app + verify_app and return the live
@@ -97,11 +120,11 @@ export function buildStagedArtifactBuildGuidance(maxIterations: number, perPathE
   const fillPasses = Math.max(2, Math.min(maxIterations - 3, perPathEditCap));
   return [
     "STAGED BUILD — THIS TASK IS TOO LARGE FOR ONE PASS.",
-    "A whole artifact emitted in a single completion does not finish on this hardware: the model reasons for tens of thousands of characters and the call is killed before any tool runs. Build the artifact in passes, ONE tool call per iteration, smallest working version first.",
-    "1. SKELETON (first tool call): one write_file with a minimal but VALID whole artifact — correct outer structure that already CLOSES (for HTML: doctype, head, body and the closing </html>), every subsystem present only as a short stub, and each stub preceded by a UNIQUE anchor comment on its own line (e.g. `<!-- SECTION: physics -->`). Keep this call to a few KB.",
-    `2. FILL (one subsystem per iteration, about ${fillPasses} of them): replace exactly ONE stub per call with edit_file, passing that anchor line plus a little surrounding text as old_string. edit_file is an EXACT string replacement and FAILS unless old_string matches exactly one place, so keep every anchor distinct and add surrounding lines rather than falling back to write_file. Use grep_files to re-locate an anchor if a replacement is rejected. Never re-emit the whole file to change part of it.`,
-    "3. FINISH: read_file the artifact, confirm the structure still closes and no stub anchors remain, then carry out whatever final step your own instructions require (e.g. serving and verifying the app) and report the path or the live URL — not the contents.",
-    "Budget the subsystems to the passes you have and merge the small ones. If you run out of budget the artifact on disk is still valid and is handed back as a partial; a file that was never written is not.",
+    "A whole artifact emitted in a single completion does not finish on this hardware: the model reasons for tens of thousands of characters and the call is killed before any tool runs. Build the artifact in passes, ONE tool call per iteration, smallest working version first. Read each source file ONCE, whole, then work from what you read — a pass spent re-reading is a pass not spent writing, and you have few.",
+    `1. SKELETON (first tool call): one write_file, a few KB, holding a minimal whole artifact whose outer structure already CLOSES (for HTML: doctype, head, body and the closing </html>) and whose content is all FINAL. Never a placeholder comment, a TODO or an empty stub body — a commented-out gap is silent, so a run that stops there leaves a file that LOOKS finished and does nothing. Write each subsystem you have not built yet as ONE line carrying the exact token ${UNFINISHED_STUB_MARKER} and its name, throwing where that line sits in executable code: throw new Error("${UNFINISHED_STUB_MARKER}: physics"); That line is both your UNIQUE anchor and the loud signal — the harness greps for it and reports an artifact still holding one as INCOMPLETE instead of delivered.`,
+    `2. FILL (one subsystem per iteration, about ${fillPasses} of them): replace exactly ONE ${UNFINISHED_STUB_MARKER} line per call with edit_file, that line as old_string and the subsystem's COMPLETE content as new_string — never a partial version, never a smaller placeholder. edit_file is an EXACT string replacement and FAILS unless old_string matches exactly one place, so keep every marker name distinct and add surrounding lines rather than falling back to write_file. Use grep_files to re-locate a marker if a replacement is rejected. Never re-emit the whole file to change part of it.`,
+    `3. FINISH: read_file the artifact, confirm it closes and no ${UNFINISHED_STUB_MARKER} remains, then carry out whatever final step your own instructions require (e.g. serving and verifying the app) and report the path or the live URL — not the contents.`,
+    `Budget the subsystems to the passes you have and merge the small ones. If you run out of budget the partial is handed back with its remaining ${UNFINISHED_STUB_MARKER} markers named, so it is resumable and is never mistaken for a finished artifact.`,
   ].join("\n");
 }
 

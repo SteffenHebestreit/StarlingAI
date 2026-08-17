@@ -82,6 +82,7 @@ import {
   buildStagedArtifactBuildGuidance,
   STAGED_BUILD_TASK_CHAR_THRESHOLD,
   STAGED_BUILD_REQUIRED_TOOLS,
+  UNFINISHED_STUB_MARKER,
 } from "./sub-agent-prompt-guidance.js";
 import { mergeAgentModelOverride, applyEffortModelOverlay, applyStreamCapOverlay } from "./sub-agent-model-config.js";
 import { resolveTurnBudgetMs } from "./sub-agent-turn-budget.js";
@@ -1120,6 +1121,15 @@ const IDEMPOTENT_TOOLS = new Set<string>([
  * human-readable reason when the file looks truncated, null when it looks
  * complete or cannot be assessed (missing path, unreadable, other formats).
  *
+ * The one non-format check is UNFINISHED_STUB_MARKER, and it is not a heuristic
+ * either: the staged-build directive puts that exact literal in the artifact itself
+ * for every subsystem it has not written yet, so finding one is the artifact stating
+ * outright that it is unfinished. This is the check the FORMAT rules structurally
+ * cannot make — session a7b8fe3e's index.html closed its </html> perfectly and its
+ * entire game was two block comments, so every format rule passed a dead file. Scanned
+ * across the staged build's own output formats (scripts and stylesheets, not just the
+ * document), because an unfilled subsystem lives wherever the build put it.
+ *
  * `workspaceRoot` resolves RELATIVE artifact paths. write_file's metadata sets
  * `path` to the path the MODEL passed (relative, e.g. "generated/app/index.html")
  * and only `outputPath` to the workspace-relative resolved one — so without a root
@@ -1143,8 +1153,19 @@ export function artifactFileLooksTruncated(artifact: Record<string, unknown>, wo
     const name = (typeof artifact["filename"] === "string" && artifact["filename"]
       ? artifact["filename"]
       : absPath).toLowerCase();
-    if (name.endsWith(".html") || name.endsWith(".htm")) {
-      const text = fs.readFileSync(absPath, "utf8");
+    const isHtml = name.endsWith(".html") || name.endsWith(".htm");
+    const isJson = name.endsWith(".json");
+    // Formats a staged build actually emits. Anything else stays unread, so the
+    // fail-open contract for unknown formats (and the read cost) is unchanged.
+    if (!isHtml && !isJson && !/\.(?:js|mjs|cjs|jsx|ts|tsx|css)$/.test(name)) return null;
+    const text = fs.readFileSync(absPath, "utf8");
+    // Before any format rule: the artifact naming itself unfinished outranks the
+    // artifact merely parsing. A skeleton whose subsystems were never filled is
+    // syntactically flawless, so checking this second would never reach it.
+    if (text.includes(UNFINISHED_STUB_MARKER)) {
+      return `still contains an unfilled ${UNFINISHED_STUB_MARKER} marker — a staged build stopped before that subsystem was written`;
+    }
+    if (isHtml) {
       // Only judge full documents — an HTML fragment/partial template without
       // an <html> open tag has no required terminator.
       if (/<html[\s>]/i.test(text.slice(0, 2000)) && !/<\/html>/i.test(text.slice(-4000))) {
@@ -1152,8 +1173,7 @@ export function artifactFileLooksTruncated(artifact: Record<string, unknown>, wo
       }
       return null;
     }
-    if (name.endsWith(".json")) {
-      const text = fs.readFileSync(absPath, "utf8");
+    if (isJson) {
       try {
         JSON.parse(text);
       } catch {

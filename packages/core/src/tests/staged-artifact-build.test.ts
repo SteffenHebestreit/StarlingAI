@@ -1,10 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import JSON5 from "json5";
 
 import {
   STAGED_BUILD_TASK_CHAR_THRESHOLD,
+  UNFINISHED_STUB_MARKER,
   isStagedArtifactBuildRun,
   buildStagedArtifactBuildGuidance,
 } from "../agent/sub-agent-prompt-guidance.js";
@@ -141,10 +144,53 @@ describe("staged artifact build — directive", () => {
     expect(directive).not.toMatch(/\bpatch\s+lines?\b/i);
   });
 
-  it("requires a skeleton that is already VALID, with unique anchors", () => {
+  it("requires a skeleton that closes, with unique anchors", () => {
     // The whole point: a run cut off after pass 3 must leave a file that opens.
-    expect(directive).toMatch(/VALID/);
+    expect(directive).toMatch(/CLOSES/);
     expect(directive).toMatch(/UNIQUE anchor/i);
+  });
+
+  it("forbids the SILENT placeholder that shipped the dead file (session a7b8fe3e)", () => {
+    // The old text asked for "a short stub preceded by a UNIQUE anchor comment". The
+    // agent obeyed it exactly: a skeleton whose script block was two block comments,
+    // 2,684 bytes, structurally perfect, no game. Nothing about that file was wrong by
+    // the old directive's own rules, which is why the fix has to be in the rules.
+    expect(directive).toMatch(/never a placeholder comment, a TODO or an empty stub body/i);
+    expect(directive).toMatch(/silent/i);
+    // ...and the fill pass may not swap one placeholder for a smaller one.
+    expect(directive).toMatch(/COMPLETE content as new_string/);
+    expect(directive).toMatch(/never a partial version, never a smaller placeholder/i);
+  });
+
+  it("makes an unbuilt subsystem announce itself in the artifact and to the harness", () => {
+    // Loud on both channels: it throws where it sits, and it is one literal a checker
+    // can find. "Verify at the end" was already step 3 of the old directive and the run
+    // never reached it — an instruction the agent can run out of budget before reading
+    // is not a guard, so the guard is moved into the artifact itself at step 1.
+    expect(directive).toContain(UNFINISHED_STUB_MARKER);
+    expect(directive).toMatch(new RegExp(`throw new Error\\("${UNFINISHED_STUB_MARKER}: `));
+    expect(directive).toMatch(/greps for it/i);
+    expect(directive).toMatch(/INCOMPLETE/);
+    // The marker must be planted by the FIRST tool call, not by a later pass.
+    expect(directive.indexOf(UNFINISHED_STUB_MARKER)).toBeLessThan(directive.indexOf("2. FILL"));
+  });
+
+  it("spends the budget on writing, not on re-reading what it already read", () => {
+    // 54,586 bytes read against 141 bytes written: five of ten iterations went on
+    // re-reading a 16,091-char source file already read whole at iteration 1.
+    expect(directive).toMatch(/Read each source file ONCE, whole/);
+    expect(directive).toMatch(/re-reading is a pass not spent writing/i);
+    // And it must land in the PREAMBLE — before step 1 — so the model has it before it
+    // plans its first call, not buried after the fill instructions.
+    expect(directive.indexOf("ONCE, whole")).toBeLessThan(directive.indexOf("1. SKELETON"));
+  });
+
+  it("no longer tells the agent a cut-off artifact is fine as it stands", () => {
+    // The retired closing line — "the artifact on disk is still valid and is handed back
+    // as a partial" — is the sentence that blessed the dead file. A partial is only
+    // acceptable when it is LABELLED, which is what the marker buys.
+    expect(directive).not.toMatch(/still valid and is handed back/);
+    expect(directive).toMatch(/never mistaken for a finished artifact/i);
   });
 
   it("derives the pass budget from the run's own iteration cap", () => {
@@ -316,7 +362,7 @@ describe("staged artifact build — directive injection", () => {
 
     // The guidance text is in the messages the provider was actually handed.
     expect(prompt).toContain("STAGED BUILD — THIS TASK IS TOO LARGE FOR ONE PASS.");
-    expect(prompt).toContain("UNIQUE anchor comment");
+    expect(prompt).toContain(UNFINISHED_STUB_MARKER);
     // ...sized from this run's own iteration cap, not a constant.
     expect(prompt).toContain("about 11 of them");
 
@@ -372,6 +418,84 @@ describe("staged artifact build — on-disk salvage", () => {
     expect(lines[1]).not.toContain("INCOMPLETE");
   });
 
+  /**
+   * The delivered file from session a7b8fe3e, at its real shape: doctype, head, the CSS
+   * that iteration 5 really did fill, body, script, closing tags. The only thing missing
+   * is the game. Rendered from a template so the ONLY difference between the two cases
+   * below is how the unbuilt subsystems were marked.
+   */
+  const deadBundle = (part1: string, part2: string): string => [
+    "<!DOCTYPE html>",
+    "<html lang=\"en\">",
+    "<head><meta charset=\"utf-8\"><title>Game</title>",
+    "<style>body{margin:0;background:#111;color:#eee}canvas{display:block}</style>",
+    "</head>",
+    "<body><canvas id=\"c\" width=\"640\" height=\"480\"></canvas>",
+    "<script>",
+    part1,
+    part2,
+    "</script>",
+    "</body>",
+    "</html>",
+    "",
+  ].join("\n");
+
+  it("REGRESSION a7b8fe3e — a skeleton whose subsystems were never filled is NOT complete", async () => {
+    const { artifactFileLooksTruncated } = await import("../agent/sub-agent.js");
+    const root = mkdtempSync(join(tmpdir(), "sai-staged-stub-"));
+    mkdirSync(join(root, "generated"), { recursive: true });
+
+    // What actually shipped: two block comments where the game should be. Every FORMAT
+    // rule passes — the doctype is there, the </html> closes, it is not JSON — so the
+    // detector returned null and the run was reported complete. This assertion is the
+    // defect, kept as documentation of why the comment convention had to go.
+    const asComments = join(root, "generated", "comments.html");
+    writeFileSync(asComments, deadBundle("/* JS_PART1 */", "/* JS_PART2 */"), "utf8");
+    expect(artifactFileLooksTruncated({ path: asComments, filename: "comments.html" })).toBeNull();
+
+    // Same interruption, same bytes of real content, marked the way the directive now
+    // requires. Nothing about the file's structure changed — only that it says so.
+    const asMarkers = join(root, "generated", "markers.html");
+    writeFileSync(asMarkers, deadBundle(
+      `throw new Error("${UNFINISHED_STUB_MARKER}: game loop");`,
+      `throw new Error("${UNFINISHED_STUB_MARKER}: input handling");`,
+    ), "utf8");
+    const reason = artifactFileLooksTruncated({ path: asMarkers, filename: "markers.html" });
+    expect(reason).toContain(UNFINISHED_STUB_MARKER);
+    expect(reason).toContain("stopped before that subsystem was written");
+  });
+
+  it("clears once the last subsystem is filled — not a permanent brand on the file", async () => {
+    // Discriminates against a check that just fails every staged artifact: the same
+    // document with real code in place of the markers must come back clean, or the
+    // signal is noise and the next fix will be to delete it.
+    const { artifactFileLooksTruncated } = await import("../agent/sub-agent.js");
+    const root = mkdtempSync(join(tmpdir(), "sai-staged-filled-"));
+    const filled = join(root, "filled.html");
+    writeFileSync(filled, deadBundle(
+      "const ctx = document.getElementById('c').getContext('2d');",
+      "requestAnimationFrame(function tick(){ ctx.clearRect(0,0,640,480); requestAnimationFrame(tick); });",
+    ), "utf8");
+    expect(artifactFileLooksTruncated({ path: filled, filename: "filled.html" })).toBeNull();
+  });
+
+  it("carries the marker through to the salvage report the parent reads", async () => {
+    // artifactFileLooksTruncated is what describeMutatedWorkspaceFiles brands INCOMPLETE
+    // with, so an abandoned staged build is named as abandoned in the handback rather
+    // than listed as a delivered path with a byte count.
+    const { describeMutatedWorkspaceFiles } = await import("../agent/sub-agent.js");
+    const root = mkdtempSync(join(tmpdir(), "sai-staged-stub-salvage-"));
+    mkdirSync(join(root, "generated"), { recursive: true });
+    writeFileSync(
+      join(root, "generated", "app.js"),
+      `function boot(){ throw new Error("${UNFINISHED_STUB_MARKER}: physics"); }\n`,
+      "utf8",
+    );
+    const [line] = describeMutatedWorkspaceFiles(["generated/app.js"], root);
+    expect(line).toContain("INCOMPLETE");
+    expect(line).toContain(UNFINISHED_STUB_MARKER);
+  });
+
   it("skips paths that are not files on disk rather than inventing them", async () => {
     const { describeMutatedWorkspaceFiles } = await import("../agent/sub-agent.js");
     const root = mkdtempSync(join(tmpdir(), "sai-staged-salvage-"));
@@ -392,5 +516,74 @@ describe("staged artifact build — on-disk salvage", () => {
     const artifact = { path: "generated/cut.html", outputPath: "generated/cut.html", filename: "cut.html" };
     expect(artifactFileLooksTruncated(artifact)).toBeNull();
     expect(artifactFileLooksTruncated(artifact, root)).toContain("</html>");
+  });
+});
+
+// ── The pass budget the SHIPPED roster actually gets ───────────────────────────
+/**
+ * Iteration budgets are read off the committed workspace shards, never hand-supplied.
+ *
+ * The directive sizes itself from `maxIterations`, so an agent's shard value IS its
+ * pass budget — and content_writer shipped at 10 while holding the same 25-minute turn
+ * deadline and the same hand-build-in-passes instruction as web_coder and backend_coder
+ * at 14. A test that passed its own number in would have agreed with either value.
+ *
+ * The arithmetic at 10: the directive reserves 3 (skeleton, verification read, the
+ * tool-stripped final synthesis) and promises maxIterations - 3 = 7 fills, but that
+ * reserve buys ZERO input reads. Session a7b8fe3e had to read styles.css and game.js
+ * before it could concatenate them, so 7 promised fills were 5 affordable ones, and a
+ * single rejected edit_file (the directive's own recovery is grep_files then retry, two
+ * more iterations) ate two of those five. It stopped at iteration 9 of 10.
+ */
+describe("staged artifact build — the shipped iteration budget", () => {
+  const agentsDir = fileURLToPath(new URL("../../../../workspace/agents/", import.meta.url));
+  type Agent = { systemPrompt?: string; maxIterations?: number; turnTimeoutMs?: number };
+  const subAgents: Record<string, Agent> = {};
+  for (const file of readdirSync(agentsDir)) {
+    if (!file.endsWith(".jsonc")) continue;
+    const shard = JSON5.parse<{ subAgents?: Record<string, Agent> }>(readFileSync(join(agentsDir, file), "utf-8"));
+    Object.assign(subAgents, shard.subAgents ?? {});
+  }
+
+  // The whole-artifact builders: told to build in staged passes AND carrying the
+  // 25-minute deadline that only a whole-file emitter needs. `coder` matches the first
+  // half and not the second (900,000 ms — it runs scripts, its deliverable is a computed
+  // result rather than a file), so it is correctly outside this group at 10.
+  const WHOLE_ARTIFACT_TURN_TIMEOUT_MS = 1_500_000;
+  const builders = Object.entries(subAgents).filter(([, a]) =>
+    (a.systemPrompt ?? "").includes(UNFINISHED_STUB_MARKER)
+    && a.turnTimeoutMs === WHOLE_ARTIFACT_TURN_TIMEOUT_MS);
+
+  it("has a roster to measure (guards against a silently empty parse)", () => {
+    expect(Object.keys(subAgents).length).toBeGreaterThan(20);
+    expect(builders.map(([name]) => name)).toEqual(
+      expect.arrayContaining(["content_writer", "web_coder", "backend_coder"]),
+    );
+  });
+
+  it("gives every whole-artifact builder the same passes, not just the same wall clock", () => {
+    // 14 is the value PER_PATH_EDIT_CAP's own comment is sized against ("the widest
+    // builder iteration budget in the workspace is 14 … which the directive turns into
+    // 11 fill passes"). content_writer at 10 made that comment false and left one agent
+    // doing the same job on 4 fewer passes for no stated reason.
+    for (const [name, agent] of builders) {
+      expect(agent.maxIterations, `${name} hand-builds artifacts on a 25-min deadline`).toBeGreaterThanOrEqual(14);
+    }
+  });
+
+  it("turns content_writer's shipped budget into the same promise the other builders get", () => {
+    // Reverting the shard to 10 makes this "about 7 of them" and the assertion fails.
+    const contentWriter = subAgents["content_writer"];
+    expect(contentWriter).toBeDefined();
+    const promise = buildStagedArtifactBuildGuidance(contentWriter?.maxIterations ?? 0, 24);
+    expect(promise).toContain("about 11 of them");
+    expect(promise).toBe(buildStagedArtifactBuildGuidance(subAgents["web_coder"]?.maxIterations ?? 0, 24));
+  });
+
+  it("leaves an execution agent on its own budget rather than raising everything", () => {
+    // Discriminates against "bump every maxIterations": coder builds files too, but its
+    // deliverable is a run result on a 15-minute clock, so it is untouched at 10.
+    expect(subAgents["coder"]?.maxIterations).toBe(10);
+    expect(builders.map(([name]) => name)).not.toContain("coder");
   });
 });
