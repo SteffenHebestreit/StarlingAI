@@ -56,7 +56,11 @@ export async function handleAguiStream(
   // user (so the document-RAG user scope + RBAC match the identity uploads use),
   // mirroring the RPC session.create path. Without both, AG-UI turns ran under a
   // fresh random session with no userId, dropping session/user document scope.
-  let session = sessionId ? await resolveSession(sessionId) : undefined;
+  // resumeArchived: a session parked by the turn watchdog (or the idle sweep) still holds
+  // its history and the partial work of the turn that ran out of clock. Without this the
+  // createSession fallback below would mint a BRAND-NEW session under the same id and
+  // silently drop that transcript. Explicit ("manual") archives stay unresumable.
+  let session = sessionId ? await resolveSession(sessionId, { resumeArchived: true }) : undefined;
 
   // Ownership gate (decided BEFORE we commit to the SSE 200 response): don't let a
   // caller drive a turn on another user's existing session — the same invariant the
@@ -113,11 +117,13 @@ export async function handleAguiStream(
     if (timedOut || res.writableEnded) return; // already handled / stream already closed
     timedOut = true;
     abortController.abort();
-    archiveSession(session.id);
+    // "timeout" keeps the parked session resumable (and on the long retention) so the
+    // next POST to this thread continues it instead of hitting a not-found.
+    archiveSession(session.id, "timeout");
     sseEvent(res, {
       type: "RUN_ERROR",
       runId,
-      message: "Turn exceeded the timeout window and did not finish synthesis. Session archived.",
+      message: "Turn exceeded the timeout window and did not finish synthesis. The session is parked — send another message to continue it.",
     });
   };
 

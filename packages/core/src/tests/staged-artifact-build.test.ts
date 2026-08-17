@@ -47,6 +47,47 @@ const PROBE_LARGE_TASK = [
   "Keep every subsystem in its own clearly commented section of the single script block.",
 ].join("\n");
 
+/**
+ * The delegation task from run 3959f3ac, reconstructed to its measured size.
+ *
+ * That run is the reason the directive flag is default ON. The audit recorded
+ * `sub_agent_staged_build_detected {taskChars: 2473, threshold: 600, maxIterations: 14,
+ * directiveInjected: false}` — every precondition met, the mechanism announcing itself
+ * as active, and not one word of it in the prompt, because the shipped flag value was
+ * false and every existing test in this file hand-supplies that flag instead of reading
+ * what ships. 2,473 chars exactly: the assertion on the audit record below is the run's
+ * real number, so a fixture that merely "exceeds the threshold" would not reproduce it.
+ */
+const RUN_3959F3AC_TASK_CHARS = 2473;
+const RUN_3959F3AC_MAX_ITERATIONS = 14;
+const OBSERVED_BUILD_TASK = [
+  "Build a playable 2.5D Tetris web app and serve it as a live instance.",
+  "1) A Node.js/Express server that serves the static front-end and listens on 0.0.0.0 and process.env.PORT.",
+  "2) An index.html shell, a styles.css, and a game.js that holds the whole game loop.",
+  "3) A 10x20 playfield drawn on a canvas with a faux-isometric 2.5D projection and per-cell shading.",
+  "4) All seven tetromino shapes, each with its own colour and wall-kick-aware rotation in both directions.",
+  "5) Gravity on a fixed timestep, soft drop, hard drop, and a lock delay that resets on a successful move.",
+  "6) Line clearing for one to four rows at once, scored with the standard single/double/triple/tetris values.",
+  "7) A level counter that speeds gravity every ten cleared lines, plus a next-piece preview and a hold slot.",
+  "8) Keyboard controls for move, rotate, soft drop, hard drop, hold and pause, all bound and shown on screen.",
+  "9) A game-over overlay with the final score and a restart that resets every timer and flag cleanly.",
+  "10) A HUD showing score, level, lines and the preview, styled to stay legible over the board.",
+  "11) A seven-bag randomiser so the piece sequence is fair rather than uniformly random.",
+  "12) A ghost piece showing where the active tetromino would land, toggleable from the HUD.",
+  "13) A pause overlay that freezes gravity and input without losing the board or the timers.",
+  "14) A localStorage high-score entry that tolerates missing or malformed stored values.",
+  "15) A responsive layout so the board and the HUD stay usable down to a narrow viewport.",
+  "16) A soft-lock counter that forces the piece down after a bounded number of resets so a spin loop cannot stall the run.",
+  "17) A line-clear animation that holds for a few frames without blocking the fixed-timestep accumulator or the input queue.",
+  "18) An on-screen help panel listing every binding, toggled by the H key and hidden again on a second press.",
+  "Rendering order is background, settled cells, ghost, active piece, HUD, with no per-frame allocation.",
+  "Guard against a missing canvas context and against localStorage being blocked by the browser.",
+  "No external assets, no build step and no network calls at runtime; keep the dependencies to express alone.",
+  "Build the smallest working version first, then enrich it; never re-emit a whole file to change part of it.",
+  "Launch it via serve_app once it runs, verify it with verify_app, and keep looping until verification passes.",
+  "The final answer MUST include the working public URL (/api/app/<id>/...).",
+].join("\n");
+
 describe("staged artifact build — detection", () => {
   it("does not fire on the task size the probe showed WORKS", () => {
     // 46 chars, 109 reasoning chars, tool call in ~4 s. Staging this would add a
@@ -124,6 +165,7 @@ describe("staged artifact build — directive", () => {
 
 // ── Injection into the real sub-agent system prompt ────────────────────────────
 const completeMock = vi.fn();
+const logAuditMock = vi.fn();
 
 vi.mock("../providers/lmstudio.js", async (importActual) => ({
   ...(await importActual<typeof import("../providers/lmstudio.js")>()),
@@ -134,10 +176,19 @@ vi.mock("../providers/lmstudio.js", async (importActual) => ({
   },
 }));
 
+// Spread the real module: sub-agent.ts only takes logAudit from it, but other modules
+// pulled in by the same graph take the writer/reader helpers, and a bare factory would
+// leave those undefined.
+vi.mock("../audit/logger.js", async (importActual) => ({
+  ...(await importActual<typeof import("../audit/logger.js")>()),
+  logAudit: (...args: unknown[]) => logAuditMock(...args),
+}));
+
 describe("staged artifact build — directive injection", () => {
   afterEach(async () => {
     delete process.env["SAI_CONFIG_PATH"];
     completeMock.mockReset();
+    logAuditMock.mockReset();
     vi.resetModules();
     const configLoader = await import("../config/loader.js");
     configLoader.resetConfigForTests();
@@ -145,16 +196,21 @@ describe("staged artifact build — directive injection", () => {
     await swarmMemory.resetSharedMemoryForTests();
   });
 
-  /** Run one sub-agent turn and return the system message it was actually sent. */
+  /**
+   * Run one sub-agent turn and return the system message it was actually sent.
+   * `orchestration` omitted means the config file carries no orchestration block at
+   * all, so the run resolves the SHIPPED schema defaults — the only way to test the
+   * value operators actually get.
+   */
   const runAndCaptureSystemPrompt = async (
-    orchestration: Record<string, unknown>,
+    orchestration: Record<string, unknown> | undefined,
     task: string,
     tools: string[],
   ): Promise<string> => {
     const tempDir = mkdtempSync(join(tmpdir(), "sai-staged-build-"));
     const configPath = join(tempDir, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
-      orchestration,
+      ...(orchestration ? { orchestration } : {}),
       subAgents: {
         staged_builder: {
           description: "Staged build test agent",
@@ -242,6 +298,56 @@ describe("staged artifact build — directive injection", () => {
       ["write_file", "edit_file", "read_file"],
     );
     expect(prompt).not.toContain("STAGED BUILD");
+  });
+
+  it("REGRESSION run 3959f3ac — the SHIPPED default injects it, and the audit says so", async () => {
+    // No orchestration block in the config at all, so this run resolves the schema
+    // defaults. That is the whole point: every assertion above hands the flag in by
+    // hand, which is why the suite stayed green while the value that ships was false
+    // and `directiveInjected` was false on a run with all preconditions met.
+    expect(OBSERVED_BUILD_TASK.trim().length).toBe(RUN_3959F3AC_TASK_CHARS);
+
+    const prompt = await runAndCaptureSystemPrompt(
+      undefined,
+      OBSERVED_BUILD_TASK,
+      // backend_coder's effective toolset, trimmed to what the classifier reads.
+      ["read_file", "write_file", "edit_file", "list_files", "grep_files", "serve_app", "verify_app"],
+    );
+
+    // The guidance text is in the messages the provider was actually handed.
+    expect(prompt).toContain("STAGED BUILD — THIS TASK IS TOO LARGE FOR ONE PASS.");
+    expect(prompt).toContain("UNIQUE anchor comment");
+    // ...sized from this run's own iteration cap, not a constant.
+    expect(prompt).toContain("about 11 of them");
+
+    // And the audit record that reported the defect now reports the fix.
+    expect(logAuditMock).toHaveBeenCalledWith(
+      "sub_agent_staged_build_detected",
+      expect.objectContaining({
+        agentName: "staged_builder",
+        taskChars: RUN_3959F3AC_TASK_CHARS,
+        threshold: STAGED_BUILD_TASK_CHAR_THRESHOLD,
+        maxIterations: RUN_3959F3AC_MAX_ITERATIONS,
+        directiveInjected: true,
+      }),
+      expect.anything(),
+    );
+  });
+
+  it("keeps the agent's own prompt LAST so its finish contract outranks the directive", async () => {
+    // backend_coder must end on serve_app + verify_app + the live /api/app/<id>/ URL.
+    // Appended after the agent prompt, the directive's generic "FINISH ... report the
+    // path" was the last thing the model read — which is the shape of the run that
+    // wrote five files and never served them. Order is the guard.
+    const prompt = await runAndCaptureSystemPrompt(
+      undefined,
+      OBSERVED_BUILD_TASK,
+      ["read_file", "write_file", "edit_file", "list_files", "grep_files", "serve_app", "verify_app"],
+    );
+    expect(prompt.indexOf("STAGED BUILD —")).toBeGreaterThanOrEqual(0);
+    expect(prompt.indexOf("STAGED BUILD —")).toBeLessThan(prompt.indexOf("You build files."));
+    // ...and the directive itself no longer asserts the path is the only valid finish.
+    expect(prompt).toContain("report the path or the live URL");
   });
 });
 

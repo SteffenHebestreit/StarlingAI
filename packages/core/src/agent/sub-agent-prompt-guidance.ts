@@ -85,6 +85,13 @@ export function isStagedArtifactBuildRun(toolNames: string[] | undefined, task: 
  * and that final synthesis. It is then clamped to the runner's per-path edit_file
  * ceiling (passed in — the constant lives in the runner, which imports this module)
  * so the directive can never promise more passes than the harness will allow.
+ *
+ * Step 3 deliberately does NOT hardcode "report the path" as the only valid finish.
+ * This text is generic and is injected alongside agent prompts that end on a stricter
+ * contract — backend_coder must serve_app + verify_app and return the live
+ * /api/app/<id>/ URL, and a directive that closed on "report the path" would be
+ * telling it the files on disk are enough. The runner keeps the agent's own prompt
+ * LAST for the same reason (sub-agent.ts system-prompt assembly).
  */
 export function buildStagedArtifactBuildGuidance(maxIterations: number, perPathEditCap: number): string {
   const fillPasses = Math.max(2, Math.min(maxIterations - 3, perPathEditCap));
@@ -93,7 +100,7 @@ export function buildStagedArtifactBuildGuidance(maxIterations: number, perPathE
     "A whole artifact emitted in a single completion does not finish on this hardware: the model reasons for tens of thousands of characters and the call is killed before any tool runs. Build the artifact in passes, ONE tool call per iteration, smallest working version first.",
     "1. SKELETON (first tool call): one write_file with a minimal but VALID whole artifact — correct outer structure that already CLOSES (for HTML: doctype, head, body and the closing </html>), every subsystem present only as a short stub, and each stub preceded by a UNIQUE anchor comment on its own line (e.g. `<!-- SECTION: physics -->`). Keep this call to a few KB.",
     `2. FILL (one subsystem per iteration, about ${fillPasses} of them): replace exactly ONE stub per call with edit_file, passing that anchor line plus a little surrounding text as old_string. edit_file is an EXACT string replacement and FAILS unless old_string matches exactly one place, so keep every anchor distinct and add surrounding lines rather than falling back to write_file. Use grep_files to re-locate an anchor if a replacement is rejected. Never re-emit the whole file to change part of it.`,
-    "3. FINISH: read_file the artifact, confirm the structure still closes and no stub anchors remain, then report the path — not the contents.",
+    "3. FINISH: read_file the artifact, confirm the structure still closes and no stub anchors remain, then carry out whatever final step your own instructions require (e.g. serving and verifying the app) and report the path or the live URL — not the contents.",
     "Budget the subsystems to the passes you have and merge the small ones. If you run out of budget the artifact on disk is still valid and is handed back as a partial; a file that was never written is not.",
   ].join("\n");
 }

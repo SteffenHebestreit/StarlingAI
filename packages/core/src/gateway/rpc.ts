@@ -8,6 +8,7 @@ import {
   archiveSession,
   createSession,
   deleteSession,
+  describeMissingSession,
   getSession,
   getSessionRecord,
   getSessionTranscript,
@@ -541,6 +542,8 @@ export class RpcConnection {
         const sessionId = String(params["sessionId"] ?? this.activeSessionId ?? "");
         // Don't let a caller drive a turn on another user's existing session
         // (a not-yet-created session id falls through — it will be owned by them).
+        // Stays the BARE message: an ownership denial must not describe the session's
+        // fate, or the id becomes probeable for existence.
         if (sessionId && !this.canAccessSession(sessionId)) throw new Error(`Session not found: ${sessionId}`);
         let message = String(params["message"] ?? "");
         const displayContent = typeof params["displayContent"] === "string" ? String(params["displayContent"]).trim() : undefined;
@@ -697,8 +700,13 @@ export class RpcConnection {
         }
 
         if (!sessionId) throw new Error("No active session — call session.create first");
-        const session = getSession(sessionId) ?? await resolveSession(sessionId);
-        if (!session) throw new Error(`Session not found: ${sessionId}`);
+        // resumeArchived: a turn the watchdog timed out is PARKED, not ended — the
+        // recovered delivery and that turn's partial artifacts are still in its history,
+        // so "continue" must land on the same session instead of dead-ending. Explicit
+        // ("manual") archives stay unresumable and fall through to the not-found path,
+        // which now names WHICH benign cause applies (pruned / deleted / unknown here).
+        const session = getSession(sessionId) ?? await resolveSession(sessionId, { resumeArchived: true });
+        if (!session) throw new Error(`Session not found: ${sessionId} — ${describeMissingSession(sessionId)}`);
 
         const supersededRequestId = this.sessionTurnRequestIds.get(session.id);
         if (supersededRequestId && supersededRequestId !== requestId) {
@@ -751,7 +759,10 @@ export class RpcConnection {
             this.pendingInputRequests.delete(id);
             pending.resolve("");
           }
-          if (this.activeSessionId === session.id) this.activeSessionId = null;
+          // NOTE: activeSessionId is deliberately left pointing at this session. The
+          // timeout parks it rather than ending it, so a follow-up with no explicit
+          // sessionId ("continue") must still resolve here instead of failing with
+          // "No active session"; chat.send un-parks it on arrival.
           // Never dead-end into an empty bubble (audit b6f8336e, 0dc158ad turn 2):
           // the hard timeout aborts the runtime before synthesis, so recover the
           // best-available content from the session and deliver THAT instead of a
@@ -766,7 +777,10 @@ export class RpcConnection {
           if (delivery?.response) {
             try { session.addMessage({ role: "assistant", content: delivery.response }); } catch { /* archive anyway */ }
           }
-          archiveSession(session.id);
+          // "timeout", not the default "manual": this parks the session (dropped from the
+          // hot set, consolidated, kept on the long retention) while leaving it resumable,
+          // so the follow-up message continues the turn's preserved partial work.
+          archiveSession(session.id, "timeout");
           if (delivery?.response) {
             logAudit("turn_timeout_recovered", {
               requestId,
@@ -785,7 +799,7 @@ export class RpcConnection {
               data: {
                 status: "error",
                 requestId,
-                error: `Turn exceeded the timeout window and did not finish synthesis. Session archived.`,
+                error: `Turn exceeded the timeout window and did not finish synthesis. The session is parked — send another message to continue it.`,
               },
             });
           }

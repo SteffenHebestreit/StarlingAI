@@ -183,9 +183,15 @@
     // should not be classifying.
     "stagedArtifactBuilds": true,
     // Prompt half — injects the skeleton-then-edit_file directive into the sub-agent system
-    // prompt. This is tuned prompt text, so it stays OFF until a pass^k eval clears it. Flip
-    // true to run that eval; it is inert while stagedArtifactBuilds is false.
-    "stagedArtifactBuildDirective": false,
+    // prompt. Held OFF pending a pass^k eval; the eval question is now answered by measurement,
+    // so this is ON. Run 3959f3ac staged its build off a hand-copied paragraph that only 4 of the
+    // 39 write+edit-capable agents carry, and it worked: 13 iterations, 15 tool calls, 5 files,
+    // and per-iteration reasoning collapsed from 23,876 chars to ~300. The run before it, with no
+    // such paragraph, produced 60,385 reasoning chars and ZERO tool calls. This value was left at
+    // false while the schema default was flipped to true, which kept the directive inert on this
+    // deployment — an explicit shard value wins over the default (audit: directiveInjected false
+    // with every other precondition met).
+    "stagedArtifactBuildDirective": true,
 
     // Cross-agent artifact-reuse directive. Artifacts a sub-agent produces are ALREADY surfaced to
     // later delegated agents via the shared partial-results context, but as a passive "Artifacts
@@ -215,7 +221,35 @@
     // zero tool calls. When on, an autoApprove turn whose deliverable-intent saw an artifact
     // request forces the first tool call (existing forceToolChoice path), so a tool-free refusal
     // can't happen. No-op when the model already delegates (e.g. the Opus run). Structural.
-    "autonomousModeAntiRefusal": true
+    "autonomousModeAntiRefusal": true,
+
+    // Nested turn budgets (run 3959f3ac). backend_coder ran 1,615,806 ms inside an 1,800,000 ms
+    // gateway turn — 90% of it — because a caller budget is the whole STATIC turn timeout, not the
+    // time actually left when the delegation is issued. The orchestrator got the remaining ~3 min,
+    // was cut mid-synthesis (turn_scorecard finishReason "aborted_synthesized",
+    // turn_timeout_recovered{recoveredAssistantText:false}), and the five files the child had
+    // written were never delivered. A delegation now gets min(its own budget, parentRemaining −
+    // the reserve below), and the tightened deadline propagates into ITS delegations.
+    //
+    // Reserve size, derived from that run's own measurements — NOT picked:
+    //   115,806 ms  the child's overshoot past its OWN deadline (1,615,806 measured vs 1,500,000
+    //               armed): salvage + timeout synthesis + artifact collection, which happen outside
+    //               the child's budget and therefore inside the parent's.
+    //   124,293 ms  one orchestrator completion on this endpoint (1,615,806 / 13 sub-agent
+    //               iterations; corroborated by provider_stall prefills of 60-71 s plus generation).
+    //   124,293 ms  one artifact-verify / QA-delivery pass — verifyArtifacts, verifyArtifactsRepair
+    //               and qaDeliveryLoop are all ON above, so at least one of them is not optional.
+    //   = 364,392 ms + ~15% margin -> 420,000 ms (23% of the turn; schema max is 600,000).
+    // A deployment with the QA stack off wants ~300,000 (overshoot + 1.5 completions) instead.
+    // Applied to the audited run: the child would have been armed with 1,620,000 − 420,000 =
+    // 1,200,000 ms rather than 1,500,000, and the parent would have kept its 420,000 ms.
+    "subAgentSynthesisReserveMs": 420000,
+    // The runner-side half of the same rule, and the ONLY thing that bounds the two cases the
+    // delegation-site ceiling deliberately leaves alone: a caller with no budget of its own (a
+    // non-gateway/CLI turn) and a nested delegation, where inventing a ceiling would REPLACE a
+    // leaf's adaptive/default budget with the whole remaining turn instead of shortening it. It
+    // clamps AFTER the defaults resolve, so it can only reduce.
+    "clampSubAgentTimeoutToParent": true
   },
 
   // MIS-201 shadow rollout (dev-plan R2, ADR-001): record task-lifecycle swarm

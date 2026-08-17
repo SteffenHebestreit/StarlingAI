@@ -2,7 +2,8 @@
  * Sub-Agent Turn Budget
  *
  * The ONE rule for combining a caller's turn budget with a sub-agent's own declared one,
- * plus the soft-deadline offset derived from it.
+ * plus the soft-deadline offset derived from it and the parent-RELATIVE ceiling/deadline a
+ * delegation hands down.
  *
  * They live together because they drifted apart. The hard deadline is resolved in
  * agent/sub-agent.ts; the E18 soft deadline is resolved in tools/sub-agent.ts, a different
@@ -43,6 +44,122 @@ export function resolveTurnBudgetMs(input: {
   }
   if (agentTurnTimeout === "unbound") return 0;
   return agentTurnTimeout;
+}
+
+/**
+ * Floor for a parent-relative delegation budget, used when the parent turn is nearly (or already)
+ * out of time. Two independent reasons it cannot be 0:
+ *
+ *   1. `0` is not "no time" anywhere in this module — `resolveTurnBudgetMs` reads it as EXPLICITLY
+ *      UNBOUNDED. A parent that has run out of budget must never hand its child an unlimited one.
+ *   2. Below one model completion a child cannot open a stream and salvage a partial, so a smaller
+ *      grant is indistinguishable from not delegating at all. 120 s is one completion on the
+ *      audited endpoint (mean 124,293 ms over backend_coder's 13 iterations, run 3959f3ac),
+ *      rounded down to the nearest round number.
+ *
+ * The floor may exceed the parent's remaining time. That is deliberate and safe: the parent's abort
+ * signal is threaded into every child, so the real wall-clock is still bounded by the turn.
+ */
+export const SUB_AGENT_MIN_DELEGATION_MS = 120_000;
+
+/**
+ * How long a child may run given the parent turn's REMAINING time, before the child's own declared
+ * budget is considered: `max(floor, (parentDeadline - now) - synthesisReserve)`.
+ *
+ * `undefined` when the parent stated no deadline — the caller must then leave the existing budget
+ * alone rather than invent one.
+ */
+function parentRelativeBudgetMs(
+  parentDeadlineMs: number | undefined,
+  nowMs: number,
+  synthesisReserveMs: number,
+  floorMs: number,
+): number | undefined {
+  if (typeof parentDeadlineMs !== "number" || !Number.isFinite(parentDeadlineMs)) return undefined;
+  const reserveMs = synthesisReserveMs > 0 ? synthesisReserveMs : 0;
+  return Math.max(floorMs, parentDeadlineMs - nowMs - reserveMs);
+}
+
+/**
+ * The hard turn budget handed DOWN to a delegated sub-agent as its caller ceiling:
+ *
+ *   min(callerBudget, max(floor, parentRemaining − synthesisReserve))
+ *
+ * Why the parent's REMAINING time and not its configured one: a caller budget is a static number
+ * (gateway/rpc.ts sets the whole turn timeout on every turn), so a child delegated 3 minutes into a
+ * 30-minute turn was still offered the full 30 minutes. Run 3959f3ac is what that costs — a
+ * specialist declaring 1,500,000 ms ran 1,615,806 ms of an 1,800,000 ms turn (90%), the orchestrator
+ * was cut mid-synthesis (finishReason "aborted_synthesized", recoveredAssistantText false), and the
+ * files the child had written were never delivered.
+ *
+ * Why a reserve on top: the parent still has work AFTER the child returns, and that work is not
+ * free. See `orchestration.subAgentSynthesisReserveMs` in config/gateway/40-orchestration.jsonc for
+ * the measured derivation of this deployment's value.
+ *
+ * Degenerate inputs, and what each one gets:
+ *   - caller budget `undefined` → `undefined`. NEVER manufacture a ceiling where none existed: for
+ *     an agent that declares no budget of its own, `resolveTurnBudgetMs` treats a caller ceiling as
+ *     a REPLACEMENT, so inventing one here would LENGTHEN a leaf's budget from its adaptive/default
+ *     (~60 s) to the whole remaining turn. That case is covered by the runner-side clamp instead
+ *     (orchestration.clampSubAgentTimeoutToParent), which applies after the defaults resolve and can
+ *     only reduce.
+ *   - caller budget `0` / non-finite → passed through unchanged (0 = explicitly unbounded, the
+ *     max-effort profile's "as long as it needs").
+ *   - no parent deadline → the static carve-out only (`callerBudget − reserve`), i.e. exactly what
+ *     reserveSubAgentTimeout did before this became parent-relative.
+ *   - parent already past its deadline → the floor, never 0 and never negative (see
+ *     SUB_AGENT_MIN_DELEGATION_MS).
+ *
+ * A clamp only ever REDUCES: the result is never larger than `callerBudgetMs`.
+ */
+export function resolveDelegationCeilingMs(input: {
+  /** The caller's own turn budget (ToolContext.turnTimeoutOverrideMs). */
+  callerBudgetMs: number | undefined;
+  /** The parent turn's absolute epoch-ms deadline (ToolContext._turnDeadlineMs). */
+  parentDeadlineMs: number | undefined;
+  nowMs: number;
+  /** Headroom the parent keeps for synthesis + delivery after the child returns. */
+  synthesisReserveMs: number;
+  floorMs?: number;
+}): number | undefined {
+  const { callerBudgetMs, parentDeadlineMs, nowMs, synthesisReserveMs } = input;
+  const floorMs = input.floorMs ?? SUB_AGENT_MIN_DELEGATION_MS;
+  if (callerBudgetMs === undefined) return undefined;
+  if (!Number.isFinite(callerBudgetMs) || callerBudgetMs <= 0) return callerBudgetMs;
+  const parentRelative = parentRelativeBudgetMs(parentDeadlineMs, nowMs, synthesisReserveMs, floorMs);
+  if (parentRelative === undefined) {
+    return synthesisReserveMs > 0 ? Math.max(floorMs, callerBudgetMs - synthesisReserveMs) : callerBudgetMs;
+  }
+  return Math.min(callerBudgetMs, parentRelative);
+}
+
+/**
+ * The absolute deadline handed DOWN to a delegated sub-agent (ToolContext._turnDeadlineMs), tightened
+ * by the same synthesis reserve as the ceiling above: `min(parentDeadline, now + parentRelative)`.
+ *
+ * This is what makes nesting work without a depth counter. agent/sub-agent.ts propagates the deadline
+ * it RECEIVED onto the tool context of everything the child itself delegates, so each level subtracts
+ * the reserve from an already-tightened deadline: depth 1 ends by `D − reserve`, depth 2 by
+ * `D − 2×reserve`, and so on. Every level therefore keeps its own synthesis headroom, and the
+ * sequence is monotonically non-increasing — a deeper delegation can never be granted more time than
+ * a shallower one, so no amount of nesting can push the subtree past the turn's deadline.
+ *
+ * Monotone by construction: the result is never LATER than `parentDeadlineMs`. When the parent is
+ * nearly exhausted the deadline is left exactly where it was (the floor belongs to the budget, not
+ * to the deadline — pushing a deadline outward would be the one direction this must never move).
+ * `undefined` in → `undefined` out (a turn with no deadline).
+ */
+export function resolveDelegationDeadlineMs(input: {
+  parentDeadlineMs: number | undefined;
+  nowMs: number;
+  synthesisReserveMs: number;
+  floorMs?: number;
+}): number | undefined {
+  const { parentDeadlineMs, nowMs, synthesisReserveMs } = input;
+  const floorMs = input.floorMs ?? SUB_AGENT_MIN_DELEGATION_MS;
+  const parentRelative = parentRelativeBudgetMs(parentDeadlineMs, nowMs, synthesisReserveMs, floorMs);
+  if (parentRelative === undefined || parentDeadlineMs === undefined) return parentDeadlineMs;
+  return Math.min(parentDeadlineMs, nowMs + parentRelative);
 }
 
 /**

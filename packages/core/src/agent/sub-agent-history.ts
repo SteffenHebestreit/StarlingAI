@@ -7,6 +7,44 @@
  * measured: the completion budget is now DERIVED from what the prompt leaves free
  * (providers/lmstudio.ts computeOutputTokenBudget), so an unbounded history first
  * starves that budget and then overflows the served window.
+ *
+ * TWO bounds live here, and they answer different questions.
+ *
+ * 1. The DROP loop below is the overflow guard. It only runs once the request no
+ *    longer fits computePromptTokenBudget. Measured on run 3959f3ac (backend_coder,
+ *    13 iterations): contextWindow 131072 → budget
+ *      max(⌊131072×0.5⌋, min(⌊131072×0.75⌋, 131072 − 10486 − 8192)) = 98_304 tokens,
+ *    while the LAST iteration's prompt was ≈30_700 tokens — 3.2× under the threshold.
+ *    So it never fired, and no `sub_agent_history_trimmed` row exists for that run.
+ *    That is CORRECT behaviour for an overflow guard and it is not the thing to tune:
+ *    lowering the budget to "make it fire" trades a wall-clock problem for a lost-
+ *    context one, and splicing at index 1 destroys the KV prefix on every pass.
+ *
+ * 2. The DIGEST pass is the wall-clock bound, and it runs unconditionally. Fitting the
+ *    window says nothing about what the prompt COSTS: the whole history is re-sent
+ *    every iteration, so the quantity that buys latency is Σ(per-iteration prompt), not
+ *    the peak. The same run prefilled 238_357 cumulative prompt tokens across 13
+ *    completions and spent ≈60 s per iteration at chunkCount 0 (reading, not
+ *    generating). Two things dominated that sum and neither is bounded anywhere else:
+ *      • one read_file result of 25_929 chars (≈8_643 tokens at 3.0 chars/token) that
+ *        slid under MAX_TOOL_RESULT_CHARS (32_768) untouched and was then re-sent
+ *        verbatim for the remaining ~10 iterations;
+ *      • the agent's OWN emitted file bodies, echoed back as write_file/edit_file
+ *        `tool_calls[].arguments` on the assistant messages — the largest class for a
+ *        builder, and previously unclampable at any size (the clamp below refuses any
+ *        message that is not `role: "tool"`).
+ *    Both are STALE by construction: the agent has already acted on them, and the
+ *    bytes still exist on disk where read_file can fetch them back. Digesting them
+ *    stops the prompt growing monotonically with build size.
+ *
+ * The digest is pure string work — no model call. Compaction that costs an inference
+ * competes with the wall clock it exists to protect.
+ *
+ * Cost it is honest about: rewriting a message at position k breaks the provider's KV
+ * prefix from k onward for ONE request. Thereafter the prefix is stable again AND
+ * smaller, so a single re-prefill buys a permanently cheaper tail — which is why the
+ * fresh window below exists (nothing the agent just did is ever rewritten) and why the
+ * digest is idempotent (a digested message is never rewritten a second time).
  */
 import {
   computePromptTokenBudget,
@@ -19,6 +57,28 @@ import {
 /** Bound for a tool result that survives trimming because it is the last evidence. */
 const MAX_PINNED_TOOL_RESULT_CHARS = 4_000;
 const TOOL_RESULT_CLAMP_MARKER = "\n… [truncated — this tool result was clamped to fit the context window]";
+
+/** How many of the agent's own tool-calling turns stay verbatim, newest first.
+ *  2, not 1: an agent routinely reads in one turn and edits against what it read in
+ *  the next, so the result it is actively working from must survive a full round trip.
+ *  Everything older it has already acted on. */
+export const FRESH_TOOL_TURNS = 2;
+
+/** Bound a STALE tool result is digested to. Head+tail, because a file read's last
+ *  lines ("does it still close?") are evidence as much as its first. Sized so a
+ *  digested result is comfortably under the threshold that selected it — that, not a
+ *  sentinel scan, is what makes the pass idempotent across iterations. */
+const MAX_STALE_TOOL_RESULT_CHARS = 2_000;
+const STALE_RESULT_HEAD_CHARS = 1_200;
+const STALE_RESULT_TAIL_CHARS = 400;
+
+/** A stale `tool_calls[].arguments` payload is digested per STRING VALUE, so the
+ *  short fields stay intact — `path`, `action`, and the `old_string` anchor an
+ *  edit_file was aimed at remain readable, only the file BODY goes. Anything at or
+ *  under MIN is left alone (a whole small file is cheap and occasionally load-bearing);
+ *  anything above keeps KEEP chars. KEEP + marker ≪ MIN keeps it idempotent. */
+const STALE_ARG_VALUE_MIN_CHARS = 800;
+const STALE_ARG_VALUE_KEEP_CHARS = 240;
 
 /** Drops the OLDEST messages after the first — the task statement is pinned — until the
  *  estimate fits, always keeping the last `minKeep`. An assistant message carrying
@@ -36,12 +96,16 @@ export function trimSubAgentHistory(
     contextWindow: number;
     minKeep?: number;
   },
-): { dropped: number; clamped: number } {
+): { dropped: number; clamped: number; digested: number } {
   const minKeep = opts.minKeep ?? 6;
   const budget = computePromptTokenBudget(opts.contextWindow);
   const systemTokens = Math.ceil(opts.systemPromptChars / PROMPT_ESTIMATE_CHARS_PER_TOKEN);
   const fits = (): boolean =>
     systemTokens + estimatePromptTokensForRequest(history, opts.tools) <= budget;
+
+  // Wall-clock bound first: it is unconditional, so it also shrinks what the overflow
+  // guard below would otherwise have had to DROP outright.
+  const digested = digestStaleHistory(history);
 
   let dropped = 0;
   while (history.length > minKeep && !fits()) {
@@ -82,7 +146,99 @@ export function trimSubAgentHistory(
       if (fits()) break;
     }
   }
-  return { dropped, clamped };
+  return { dropped, clamped, digested };
+}
+
+/** Index at which the fresh window starts: the FRESH_TOOL_TURNS-th tool-calling
+ *  assistant message counted from the end. Everything at or after it is what the agent
+ *  is currently working from and is never rewritten. 0 when the run has not made that
+ *  many tool-calling turns yet — nothing is stale, and the caller's loop then covers
+ *  nothing. Structural (message roles only), so it holds for any agent and any task. */
+export function freshWindowStart(history: readonly LLMMessage[], freshTurns = FRESH_TOOL_TURNS): number {
+  let turns = 0;
+  for (let i = history.length - 1; i >= 1; i--) {
+    const message = history[i];
+    if (message?.role !== "assistant" || (message.tool_calls?.length ?? 0) === 0) continue;
+    turns++;
+    if (turns >= freshTurns) return i;
+  }
+  return 0;
+}
+
+/** Shrinks what the agent has already acted on. Returns how many messages changed.
+ *  Mutates in place, like the trimmer it runs inside. */
+function digestStaleHistory(history: LLMMessage[], freshTurns = FRESH_TOOL_TURNS): number {
+  const boundary = freshWindowStart(history, freshTurns);
+  let digested = 0;
+  // From 1: index 0 is the task statement, pinned here for the same reason the drop
+  // loop pins it — it is the only statement of what the run is FOR.
+  for (let i = 1; i < boundary; i++) {
+    const message = history[i];
+    if (!message) continue;
+    let changed = false;
+
+    if (message.role === "tool" && typeof message.content === "string") {
+      const digest = digestStaleToolResult(message.content);
+      if (digest !== null) {
+        message.content = digest;
+        changed = true;
+      }
+    }
+
+    for (const call of message.tool_calls ?? []) {
+      const digest = digestStaleToolCallArguments(call.function.arguments);
+      if (digest !== null) {
+        call.function.arguments = digest;
+        changed = true;
+      }
+    }
+
+    if (changed) digested++;
+  }
+  return digested;
+}
+
+/** Head+tail excerpt of an over-sized stale tool result, or null to leave it alone.
+ *  The marker names the original size and points at the recovery path: the bytes are
+ *  still on disk / still fetchable, and re-reading a window of them costs one tool call
+ *  against the ~8_600 tokens per iteration the verbatim copy was costing. */
+function digestStaleToolResult(content: string): string | null {
+  if (content.length <= MAX_STALE_TOOL_RESULT_CHARS) return null;
+  const head = content.slice(0, STALE_RESULT_HEAD_CHARS);
+  const tail = content.slice(content.length - STALE_RESULT_TAIL_CHARS);
+  const digest = `${head}\n… [${content.length - head.length - tail.length} chars elided — `
+    + `stale tool result, already acted on. Re-read the source (read_file offset/limit) `
+    + `if you still need the middle.]\n${tail}`;
+  return digest.length < content.length ? digest : null;
+}
+
+/** Same for a stale tool_call argument payload, keyed on the JSON string VALUES so the
+ *  call stays parseable — a chat template that parses `arguments` must not be handed a
+ *  stub. Anything we cannot parse, or cannot make smaller, is left exactly as it was. */
+function digestStaleToolCallArguments(argumentsJson: string): string | null {
+  if (argumentsJson.length <= STALE_ARG_VALUE_MIN_CHARS) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(argumentsJson);
+  } catch {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+
+  const digestedArgs: Record<string, unknown> = {};
+  let changed = false;
+  for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+    if (typeof value === "string" && value.length > STALE_ARG_VALUE_MIN_CHARS) {
+      digestedArgs[key] = `${value.slice(0, STALE_ARG_VALUE_KEEP_CHARS)}`
+        + `\n… [${value.length - STALE_ARG_VALUE_KEEP_CHARS} chars elided — already written to disk; read_file to see it]`;
+      changed = true;
+    } else {
+      digestedArgs[key] = value;
+    }
+  }
+  if (!changed) return null;
+  const digest = JSON.stringify(digestedArgs);
+  return digest.length < argumentsJson.length ? digest : null;
 }
 
 /** How many messages the drop at `index` covers: the message itself plus the tool

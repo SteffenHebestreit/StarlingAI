@@ -9,7 +9,11 @@ import { registerTool, getAllTools, searchToolsByEmbedding, executeTool, type Sw
 import { runSubAgent, runSubAgentWithStats } from "../agent/sub-agent.js";
 // Leaf module shared with agent/sub-agent.ts so the soft deadline and the hard deadline
 // are derived from ONE precedence rule; deriving them separately is how they drifted.
-import { resolveSoftDeadlineOffsetMs } from "../agent/sub-agent-turn-budget.js";
+import {
+  resolveDelegationCeilingMs,
+  resolveDelegationDeadlineMs,
+  resolveSoftDeadlineOffsetMs,
+} from "../agent/sub-agent-turn-budget.js";
 // Importing runArchitectFallback also runs ./ephemeral-agent-factory.ts's top-level
 // registerTool side effect, so create_ephemeral_agent stays registered when this
 // module loads. The factory imports a few shared helpers back from here
@@ -129,17 +133,26 @@ const SERVER_EXECUTION_AGENT_NAMES = new Set(["shell_agent", "ops_triage", "infr
  * Pure + identity-by-default: `reserveMs = 0` (the config default) returns the parent
  * budget unchanged, and an absent/unbounded budget is passed through untouched, so the
  * knob is a true no-op until explicitly enabled.
+ *
+ * SUPERSEDED at the delegation site, which now calls resolveDelegationCeilingMs directly:
+ * subtracting the reserve from the parent's STATIC budget was arithmetically a no-op for
+ * every agent in this repo, because the runner then takes min(ceiling, the agent's own
+ * declared budget) and every declared budget is ≤ turnTimeout − 300,000 (run 3959f3ac:
+ * backend_coder declares 1,500,000 under an 1,800,000 turn, so any reserve up to 300,000 ms
+ * changed nothing at all). Retained as the no-parent-deadline special case of that resolver.
  */
 export function reserveSubAgentTimeout(
   parentBudgetMs: number | undefined,
   reserveMs: number,
   floorMs = 60_000,
 ): number | undefined {
-  if (typeof parentBudgetMs !== "number" || !Number.isFinite(parentBudgetMs) || parentBudgetMs <= 0) {
-    return parentBudgetMs; // unbounded / absent → leave as-is
-  }
-  if (reserveMs <= 0) return parentBudgetMs; // identity (default off)
-  return Math.max(floorMs, parentBudgetMs - reserveMs);
+  return resolveDelegationCeilingMs({
+    callerBudgetMs: parentBudgetMs,
+    parentDeadlineMs: undefined,
+    nowMs: 0,
+    synthesisReserveMs: reserveMs,
+    floorMs,
+  });
 }
 
 
@@ -1927,6 +1940,34 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         handoffContext = handoffPrefix + (enrichedContext ? `\n${enrichedContext}` : "");
       }
 
+      // A delegated child must never be handed more time than the parent turn has LEFT, minus the
+      // headroom the parent needs to synthesize + deliver what comes back. The caller budget is a
+      // STATIC number (gateway/rpc.ts sets the whole turn timeout on EVERY turn), so a child
+      // delegated 3 minutes into a 30-minute turn was still offered the full 30: run 3959f3ac's
+      // backend_coder ran 1,615,806 ms of an 1,800,000 ms turn (90%) and the orchestrator was cut
+      // mid-synthesis (finishReason "aborted_synthesized", recoveredAssistantText false) with the
+      // files it had built never delivered. All three numbers below derive from the SAME resolver
+      // and the SAME reserve, so the hard ceiling, the deadline handed down and the E18 soft
+      // deadline cannot drift apart the way the hard/soft pair once did.
+      const delegationNowMs = Date.now();
+      const synthesisReserveMs = getConfig().orchestration?.subAgentSynthesisReserveMs ?? 0;
+      const delegationCeilingMs = resolveDelegationCeilingMs({
+        callerBudgetMs: ctx.turnTimeoutOverrideMs,
+        parentDeadlineMs: ctx._turnDeadlineMs,
+        nowMs: delegationNowMs,
+        synthesisReserveMs,
+      });
+      // The deadline the child — and everything IT delegates — runs to. agent/sub-agent.ts copies
+      // the deadline it RECEIVED onto its own tool context, so tightening it here is what makes
+      // nested delegation compound the reserve (depth 1 ends by D−reserve, depth 2 by D−2×reserve)
+      // instead of every level racing the same absolute instant with nothing left over for the
+      // level above it. No depth counter needed; the sequence is monotonically non-increasing.
+      const delegationDeadlineMs = resolveDelegationDeadlineMs({
+        parentDeadlineMs: ctx._turnDeadlineMs,
+        nowMs: delegationNowMs,
+        synthesisReserveMs,
+      });
+
       const subAgentArgs = {
         agentName: candidate,
         task: request.task,
@@ -1946,38 +1987,32 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         maxIterationsOverride: ctx.maxIterationsOverride,
         // Reserve synthesis headroom for the parent so a single slow sub-agent can't
         // consume the entire turn budget and leave nothing for finalize+deliver
-        // (audit b6f8336e). Identity (= ctx.turnTimeoutOverrideMs) until the reserve
-        // knob is set; soft deadline below derives from this same effective value.
-        turnTimeoutOverrideMs: reserveSubAgentTimeout(
-          ctx.turnTimeoutOverrideMs,
-          getConfig().orchestration?.subAgentSynthesisReserveMs ?? 0,
-        ),
+        // (audit b6f8336e, run 3959f3ac). Only ever REDUCES the caller budget, and is
+        // `undefined` when the caller had none — see resolveDelegationCeilingMs for why
+        // inventing one there would LENGTHEN a leaf agent's budget instead.
+        turnTimeoutOverrideMs: delegationCeilingMs,
         swarmState: ctx.swarmState,
         onSwarmState: ctx.onSwarmState,
         _turnAgentCounts: ctx._turnAgentCounts,
         _turnAgentRepeatLimitOverrides: ctx._turnAgentRepeatLimitOverrides,
         _turnTotalDelegationLimitOverride: ctx._turnTotalDelegationLimitOverride,
         _workflowExecutionStack: ctx._workflowExecutionStack,
-        // D3: propagate the parent turn's absolute deadline so the specialist clamps its hard timeout
-        // to the remaining budget (orchestration.clampSubAgentTimeoutToParent).
-        _turnDeadlineMs: ctx._turnDeadlineMs,
+        // D3: propagate the (reserve-tightened) turn deadline so the specialist clamps its hard
+        // timeout to the remaining budget (orchestration.clampSubAgentTimeoutToParent) — and so its
+        // OWN delegations clamp to a deadline that already excludes this level's headroom.
+        _turnDeadlineMs: delegationDeadlineMs,
         // E18: Soft deadline — give the specialist 70% of its effective timeout so
         // it starts wrapping up before the hard timeout fires.
         softDeadlineMs: (() => {
-          // Derive from the SAME reserved budget as the hard timeout above so the soft
-          // deadline (70%) stays proportional when a synthesis reserve is in effect, and
-          // from the SAME min(caller, declared) precedence the runner resolves the hard
-          // deadline with — see resolveSoftDeadlineOffsetMs for why that matters.
-          const reserved = reserveSubAgentTimeout(
-            ctx.turnTimeoutOverrideMs,
-            getConfig().orchestration?.subAgentSynthesisReserveMs ?? 0,
-          );
-          const softMs = Date.now() + resolveSoftDeadlineOffsetMs(reserved, agentCfg?.turnTimeoutMs);
-          // D3: don't let the wrap-up nudge land AFTER the parent turn's hard deadline (else it never
-          // fires and the specialist is guillotined mid-flight). Clamp when the clamp flag is on.
-          return (getConfig().orchestration?.clampSubAgentTimeoutToParent === true && typeof ctx._turnDeadlineMs === "number")
-            ? Math.min(softMs, ctx._turnDeadlineMs)
-            : softMs;
+          // Derive from the SAME parent-relative ceiling as the hard timeout above so the soft
+          // deadline (70%) stays proportional to the time that actually remains, and from the SAME
+          // min(caller, declared) precedence the runner resolves the hard deadline with — see
+          // resolveSoftDeadlineOffsetMs for why that matters.
+          const softMs = delegationNowMs + resolveSoftDeadlineOffsetMs(delegationCeilingMs, agentCfg?.turnTimeoutMs);
+          // Don't let the wrap-up nudge land AFTER the deadline the specialist is running to (else it
+          // never fires and the specialist is guillotined mid-flight). Unconditional: the deadline
+          // above is already parent-relative, so the two must agree whatever the clamp flag says.
+          return typeof delegationDeadlineMs === "number" ? Math.min(softMs, delegationDeadlineMs) : softMs;
         })(),
       };
 

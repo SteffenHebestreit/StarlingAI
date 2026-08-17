@@ -8,6 +8,24 @@ import { GENERATED_SUBDIR, resolvePathWithinWorkspace, resolveWorkspaceWritePath
 
 const log = childLogger("tool:filesystem");
 const MAX_FILE_SIZE = 1024 * 1024; // 1MB read limit
+/**
+ * Bound on an UNWINDOWED read — `read_file(path)` with neither offset nor limit.
+ *
+ * The only cap a read result used to meet was MAX_TOOL_RESULT_CHARS (32_768, applied in
+ * agent/sub-agent.ts), so anything under 32 KB entered the conversation whole and — the
+ * history being re-sent every iteration — was re-prefilled on every subsequent one. Run
+ * 3959f3ac paid that: a single 25_929-char read (≈8_643 tokens at 3.0 chars/token) slid
+ * under the cap and then rode along for ~10 more iterations, ≈28% of the final prompt.
+ *
+ * 16 KB (≈5_400 tokens) returns the overwhelming majority of source, config and doc
+ * files whole — this is not a behaviour change for the common read — while capping the
+ * pathological one at roughly one third of what it used to cost per iteration. Above it
+ * the caller gets head+tail, not head alone: the reason an agent re-reads a file it just
+ * built is usually to confirm the END of it still closes.
+ */
+const MAX_UNWINDOWED_READ_CHARS = 16_000;
+const UNWINDOWED_HEAD_CHARS = 12_000;
+const UNWINDOWED_TAIL_CHARS = 4_000;
 // Text-based formats agents can read and write directly.
 const ALLOWED_EXTENSIONS = new Set([
   ".txt", ".md", ".json", ".jsonc", ".jsonl", ".yaml", ".yml", ".toml", ".env.example",
@@ -138,9 +156,27 @@ function guardWritePath(path: string, workspacePath: string): { safe: boolean; r
   }
 }
 
+/** `budget` chars off one end of `content`, snapped to a line boundary when one falls
+ *  inside the slice. A minified bundle or a single-line JSON has no boundary to snap to,
+ *  so the raw slice stands rather than returning nothing. */
+function sliceAtLineBoundary(content: string, budget: number, end: "head" | "tail"): string {
+  if (end === "head") {
+    const raw = content.slice(0, budget);
+    const cut = raw.lastIndexOf("\n");
+    return cut > 0 ? raw.slice(0, cut) : raw;
+  }
+  const raw = content.slice(content.length - budget);
+  const cut = raw.indexOf("\n");
+  return cut >= 0 && cut < raw.length - 1 ? raw.slice(cut + 1) : raw;
+}
+
+function countLines(text: string): number {
+  return text.split("\n").length;
+}
+
 registerTool({
   name: "read_file",
-  description: "Read the contents of a file within the workspace directory.",
+  description: "Read the contents of a file within the workspace directory. A file over ~16 KB comes back as head+tail — pass offset/limit to read any other window of it.",
   embeddingDescription: "Open, view, inspect, or load a file. Read source code, markdown, JSON, YAML, CSV, text. Datei lesen, öffnen, einsehen, anzeigen, laden. Inhalt einer Datei abrufen.",
   costHint: "low",
   latencyHint: "low",
@@ -202,10 +238,33 @@ registerTool({
           },
         };
       }
+      const totalLines = content.split("\n").length;
+      // Unwindowed read of a large file: the caller did not ask for a window, but the
+      // whole file would be re-prefilled on every later iteration of that agent's turn.
+      // Hand back head+tail and say exactly how to get the middle.
+      if (content.length > MAX_UNWINDOWED_READ_CHARS) {
+        const head = sliceAtLineBoundary(content, UNWINDOWED_HEAD_CHARS, "head");
+        const tail = sliceAtLineBoundary(content, UNWINDOWED_TAIL_CHARS, "tail");
+        const firstTailLine = totalLines - countLines(tail) + 1;
+        const lastHeadLine = countLines(head);
+        return {
+          success: true,
+          output: `${head}\n\n[read_file returned a window: ${content.length} chars total, `
+            + `showing lines 1-${lastHeadLine} and ${firstTailLine}-${totalLines}. `
+            + `Call read_file again with offset/limit to see the elided middle.]\n\n${tail}`,
+          metadata: {
+            path, size: stat.size, ext, totalLines,
+            firstLine: 1,
+            lastLine: totalLines,
+            truncated: true,
+            returnedChars: head.length + tail.length,
+          },
+        };
+      }
       return {
         success: true,
         output: content,
-        metadata: { path, size: stat.size, ext, totalLines: content.split("\n").length },
+        metadata: { path, size: stat.size, ext, totalLines },
       };
     } catch (err) {
       log.error({ err, path }, "read_file failed");

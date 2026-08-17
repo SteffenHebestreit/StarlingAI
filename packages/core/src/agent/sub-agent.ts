@@ -2130,10 +2130,13 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // ~17,250 of them reasoning, zero tool calls, guillotined by the stream cap. The
     // classifier is structural (holds write_file AND edit_file; task longer than
     // STAGED_BUILD_TASK_CHAR_THRESHOLD) so no topic words decide it, and it is split
-    // across two flags: `stagedArtifactBuilds` (default ON) arms the mechanical half —
-    // this audit record and the on-disk salvage reporting on the interrupted paths —
-    // while `stagedArtifactBuildDirective` (default OFF, pass^k-gated) is what actually
-    // changes the prompt the model sees.
+    // across two flags: `stagedArtifactBuilds` arms the mechanical half — this audit
+    // record and the on-disk salvage reporting on the interrupted paths — while
+    // `stagedArtifactBuildDirective` is what actually changes the prompt the model
+    // sees. BOTH default ON: run 3959f3ac measured the staged shape working (13
+    // iterations, 5 files, reasoning collapsed from 23,876 chars on the plan pass to
+    // ~100-1,300 per fill pass) while `directiveInjected: false` proved the directive
+    // itself had never reached the model.
     const stagedBuildFlags = effectiveOrchestration();
     const isStagedBuild = stagedBuildFlags.stagedArtifactBuilds !== false
       && isStagedArtifactBuildRun(effectiveToolNames, sanitizedTask);
@@ -2153,9 +2156,14 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         { sessionId: subSessionId, severity: "info" },
       );
     }
+    // The staged-build directive leads, the agent's own systemPrompt follows. It is
+    // GENERIC text and several agent prompts close on a stricter finish contract
+    // (backend_coder: serve_app + verify_app + return the live /api/app/<id>/ URL);
+    // appended last, the directive's own "FINISH ... report the path" got the final
+    // word and told those agents the files on disk were the deliverable.
     const systemPrompt = agentCfg.systemPrompt
-      ? `${agentCfg.systemPrompt}${stagedBuildGuidance ? `\n\n${stagedBuildGuidance}` : ""}${modelExecutionGuidance ? `\n\n${modelExecutionGuidance}` : ""}${taskModeGuidance ? `\n\n${taskModeGuidance}` : ""}${toolInventoryGuidance ? `\n\n${toolInventoryGuidance}` : ""}${agentDiscoveryGuidance ? `\n\n${agentDiscoveryGuidance}` : ""}${discoveryFallbackNotice ? `\n\n${discoveryFallbackNotice}` : ""}${degradedNudge ? `\n\n${degradedNudge}` : ""}\n\nAgent name: ${opts.agentName}\nCurrent workspace: ${opts.workspacePath}\nToday's date: ${today}${flowGuidance ? `\n\n${flowGuidance}` : ""}${skillGuidance ? `\n\n${skillGuidance}` : ""}${memoryGuidance ? `\n\n${memoryGuidance}` : ""}`
-      : `You are a specialized AI sub-agent named "${opts.agentName}". Complete the given task and return your result.${stagedBuildGuidance ? `\n\n${stagedBuildGuidance}` : ""}${toolInventoryGuidance ? `\n\n${toolInventoryGuidance}` : ""}${agentDiscoveryGuidance ? `\n\n${agentDiscoveryGuidance}` : ""}${discoveryFallbackNotice ? `\n\n${discoveryFallbackNotice}` : ""}${degradedNudge ? `\n\n${degradedNudge}` : ""}\n\nAgent name: ${opts.agentName}\nCurrent workspace: ${opts.workspacePath}\nToday's date: ${today}${flowGuidance ? `\n\n${flowGuidance}` : ""}${skillGuidance ? `\n\n${skillGuidance}` : ""}${memoryGuidance ? `\n\n${memoryGuidance}` : ""}`;
+      ? `${stagedBuildGuidance ? `${stagedBuildGuidance}\n\n` : ""}${agentCfg.systemPrompt}${modelExecutionGuidance ? `\n\n${modelExecutionGuidance}` : ""}${taskModeGuidance ? `\n\n${taskModeGuidance}` : ""}${toolInventoryGuidance ? `\n\n${toolInventoryGuidance}` : ""}${agentDiscoveryGuidance ? `\n\n${agentDiscoveryGuidance}` : ""}${discoveryFallbackNotice ? `\n\n${discoveryFallbackNotice}` : ""}${degradedNudge ? `\n\n${degradedNudge}` : ""}\n\nAgent name: ${opts.agentName}\nCurrent workspace: ${opts.workspacePath}\nToday's date: ${today}${flowGuidance ? `\n\n${flowGuidance}` : ""}${skillGuidance ? `\n\n${skillGuidance}` : ""}${memoryGuidance ? `\n\n${memoryGuidance}` : ""}`
+      : `${stagedBuildGuidance ? `${stagedBuildGuidance}\n\n` : ""}You are a specialized AI sub-agent named "${opts.agentName}". Complete the given task and return your result.${toolInventoryGuidance ? `\n\n${toolInventoryGuidance}` : ""}${agentDiscoveryGuidance ? `\n\n${agentDiscoveryGuidance}` : ""}${discoveryFallbackNotice ? `\n\n${discoveryFallbackNotice}` : ""}${degradedNudge ? `\n\n${degradedNudge}` : ""}\n\nAgent name: ${opts.agentName}\nCurrent workspace: ${opts.workspacePath}\nToday's date: ${today}${flowGuidance ? `\n\n${flowGuidance}` : ""}${skillGuidance ? `\n\n${skillGuidance}` : ""}${memoryGuidance ? `\n\n${memoryGuidance}` : ""}`;
 
     // Get available tools for this agent. E20: rerank by semantic
     // relevance to the current task so the model sees the most relevant

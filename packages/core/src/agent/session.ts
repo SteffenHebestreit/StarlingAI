@@ -55,8 +55,20 @@ export interface SessionSettings {
   turnTimeoutSecOverride?: number;
 }
 
-/** Why a session was archived — drives which retention the pruner applies. */
-export type ArchivedReason = "idle" | "manual";
+/** Why a session was archived — drives which retention the pruner applies and whether
+ *  a follow-up message resumes it. */
+export type ArchivedReason = "idle" | "manual" | "timeout";
+
+/** Archive reasons that PARK a session rather than end it. The user never asked to stop
+ *  (the turn ran out of clock, or the sweep retired a quiet chat), so the next message
+ *  must continue THAT conversation instead of dead-ending on "Session not found" — the
+ *  timed-out turn's recovered delivery and its partial artifacts live in that history.
+ *  "manual" is deliberately excluded: an explicit archive is an explicit end. */
+const RESUMABLE_ARCHIVE_REASONS: ReadonlySet<ArchivedReason> = new Set<ArchivedReason>(["idle", "timeout"]);
+
+export function isResumableArchive(reason: ArchivedReason | undefined): boolean {
+  return reason !== undefined && RESUMABLE_ARCHIVE_REASONS.has(reason);
+}
 
 export interface AgentSessionOptions {
   sessionId?: string;
@@ -162,8 +174,10 @@ export class AgentSession {
   private archivedAt?: Date;
   /** Why this session was archived. "idle" = auto-archived by the idle sweep (a real
    *  user conversation that went quiet — kept on the long idle-retention, never the
-   *  short ephemera TTL). "manual" = explicit user/system archival or ephemeral
-   *  scene/job/workflow-worker cleanup (reclaimed on gateway.sessionTtlMs). */
+   *  short ephemera TTL). "timeout" = the gateway turn watchdog fired mid-turn (same
+   *  retention as idle, and resumable — the partial work is still in history).
+   *  "manual" = explicit user/system archival or ephemeral scene/job/workflow-worker
+   *  cleanup (reclaimed on gateway.sessionTtlMs). */
   private archivedReason?: ArchivedReason;
   private endLogged = false;
   /** Serialised byte length of the tool schemas sent to the LLM for the current turn.
@@ -479,6 +493,34 @@ export class AgentSession {
     this.touch(this.archivedAt);
     this.end();
     persistSessionStore(this);
+  }
+
+  /**
+   * Un-park a session archived for a RESUMABLE reason (timeout/idle) so a follow-up
+   * message continues this conversation. History, turn count and settings are left
+   * untouched — that is the point: the timed-out turn's recovered delivery message
+   * and the tool messages carrying its partial artifacts stay in context for the
+   * continuation. Returns false for a live session or an explicit ("manual") archive.
+   */
+  reactivate(): boolean {
+    if (!this.archivedAt || !isResumableArchive(this.archivedReason)) return false;
+    const reason = this.archivedReason;
+    this.archivedAt = undefined;
+    this.archivedReason = undefined;
+    // The session is live again, so a later real end must log session_ended again.
+    this.endLogged = false;
+    this.touch();
+    persistSessionStore(this);
+    // Dotted extension event type — the counterpart to session_ended, without widening
+    // the core audit enum. Makes "was this the same conversation?" answerable from the
+    // audit log, which is exactly what was unanswerable when a timeout looked terminal.
+    logAudit("session.resumed", { reason, turnCount: this.turnCount, messageCount: this.history.length }, {
+      sessionId: this.id,
+      userId: this.userId,
+      channel: this.channel,
+    });
+    log.info({ sessionId: this.id, reason }, "Resumed archived session");
+    return true;
   }
 
   toRecord(): PersistedSessionRecord {
@@ -873,11 +915,45 @@ export function archiveSession(id: string, reason: ArchivedReason = "manual"): b
   return true;
 }
 
-export function deleteSession(id: string): boolean {
+/** Why a session id is no longer in the store. Kept in a small ring so "not found"
+ *  can say WHICH benign thing happened instead of implying the id never existed. */
+export type SessionRemovalReason = "deleted" | "pruned";
+const REMOVAL_LEDGER_LIMIT = 500;
+const _removedSessions = new Map<string, SessionRemovalReason>();
+
+function recordSessionRemoval(id: string, reason: SessionRemovalReason): void {
+  _removedSessions.delete(id);
+  _removedSessions.set(id, reason);
+  while (_removedSessions.size > REMOVAL_LEDGER_LIMIT) {
+    const oldest = _removedSessions.keys().next();
+    if (oldest.done) break;
+    _removedSessions.delete(oldest.value);
+  }
+}
+
+/**
+ * Honest explanation for a session id this gateway cannot serve, for the "Session
+ * not found" surfaces. A missing id has several benign causes that used to be
+ * indistinguishable to the user: it aged out of retention, it was deleted, or this
+ * process simply never saw it (a restart with no persisted store, or another
+ * gateway instance owns it). Ownership denials deliberately do NOT come here —
+ * those stay opaque so an id cannot be probed for existence.
+ */
+export function describeMissingSession(id: string): string {
+  const removed = _removedSessions.get(id);
+  if (removed === "pruned") return "it aged out of the retention window and was pruned";
+  if (removed === "deleted") return "it was deleted";
+  const record = _sessions.get(id);
+  if (record?.isArchived()) return `it was archived (${record.getArchivedReason() ?? "manual"}) and cannot be resumed`;
+  return "this gateway has no record of it — it may belong to another instance or predate a restart";
+}
+
+export function deleteSession(id: string, reason: SessionRemovalReason = "deleted"): boolean {
   const session = _sessions.get(id);
   if (!session) return false;
   session.end();
   _sessions.delete(id);
+  recordSessionRemoval(id, reason);
   persistSessionStore();
   void deleteSessionFromRedis(id);
   return true;
@@ -904,8 +980,9 @@ let _sessionPrunerTimer: ReturnType<typeof setInterval> | null = null;
 
 /** Delete archived sessions past their retention. Two classes with separate windows:
  *  ephemeral/explicitly-archived sessions (scene/job/workflow workers, one-shots, user
- *  archive) age out on the short `ttlMs` (gateway.sessionTtlMs), while IDLE-archived real
- *  user conversations use the generous `idleRetentionMs` (agents.sessionIdleRetentionMs;
+ *  archive) age out on the short `ttlMs` (gateway.sessionTtlMs), while RESUMABLE archives
+ *  — idle-swept and turn-timed-out real user conversations — use the generous
+ *  `idleRetentionMs` (agents.sessionIdleRetentionMs;
  *  0 = keep indefinitely) so a chat merely idle for a day is NOT permanently deleted an
  *  hour later. Active sessions are never pruned. A non-positive window disables that
  *  class. Returns the number deleted. */
@@ -916,10 +993,13 @@ export function pruneArchivedSessions(ttlMs: number, idleRetentionMs = 0): numbe
     if (!session.isArchived()) continue;
     const archivedAt = session.getArchivedAt()?.getTime();
     if (archivedAt === undefined) continue;
-    const retention = session.getArchivedReason() === "idle" ? idleRetentionMs : ttlMs;
+    // Resumable archives (idle sweep, turn timeout) are real user conversations that
+    // still hold their work — they get the generous idle retention, never the short
+    // ephemera TTL that reclaims scene/job workers.
+    const retention = isResumableArchive(session.getArchivedReason()) ? idleRetentionMs : ttlMs;
     if (!(retention > 0)) continue; // this class's retention is disabled (keep forever)
     if (archivedAt < now - retention) {
-      deleteSession(session.id);
+      deleteSession(session.id, "pruned");
       pruned += 1;
     }
   }
@@ -984,10 +1064,19 @@ export function stopSessionPruner(): void {
  * fetches and hydrates it from Redis.
  *
  * Returns `undefined` when the session does not exist anywhere or is archived.
+ *
+ * `resumeArchived` widens that last clause for the CONTINUE path: a session parked by
+ * the turn watchdog or the idle sweep is un-parked in place and returned, so a
+ * follow-up message lands on the same history (including the partial work the timed-out
+ * turn preserved). Explicitly ("manual") archived sessions still resolve to undefined.
  */
-export async function resolveSession(id: string): Promise<AgentSession | undefined> {
+export async function resolveSession(
+  id: string,
+  opts?: { resumeArchived?: boolean },
+): Promise<AgentSession | undefined> {
   const local = _sessions.get(id);
   if (local && !local.isArchived()) return local;
+  if (local && opts?.resumeArchived) return local.reactivate() ? local : undefined;
 
   const raw = await loadSessionFromRedis(id);
   if (!raw) return undefined;
@@ -995,7 +1084,14 @@ export async function resolveSession(id: string): Promise<AgentSession | undefin
   try {
     const record = JSON.parse(raw) as PersistedSessionRecord;
     const session = AgentSession.fromRecord(record);
-    if (session.isArchived()) return undefined;
+    if (session.isArchived()) {
+      if (!opts?.resumeArchived) return undefined;
+      // Hydrate first so the un-park is persisted against the live store entry.
+      _sessions.set(session.id, session);
+      if (session.reactivate()) return session;
+      _sessions.delete(session.id); // explicit archive — leave the cache as we found it
+      return undefined;
+    }
     _sessions.set(session.id, session);
     return session;
   } catch (err) {
