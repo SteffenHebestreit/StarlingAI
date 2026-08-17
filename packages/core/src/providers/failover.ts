@@ -1,6 +1,6 @@
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
-import { type ChatProvider, type LLMMessage, type LLMResponse, type LLMToolDef, type OpenAICompatibleProviderRuntimeSnapshot, type StreamChunk } from "./lmstudio.js";
+import { type ChatProvider, type CompletionCallOptions, type LLMMessage, type LLMResponse, type LLMToolDef, type OpenAICompatibleProviderRuntimeSnapshot, type StreamCallOptions, type StreamChunk } from "./lmstudio.js";
 
 const log = childLogger("provider:failover");
 
@@ -192,8 +192,14 @@ export class FailoverChatProvider implements ChatProvider {
    *
    * A binding whose provider lacks the method still falls back to its own
    * complete(), so mixed chains behave exactly as they did before.
+   *
+   * `options` is forwarded to the binding. It carries the per-chunk observation hook
+   * and the operator's unbounded grant, so dropping it here would disarm the
+   * mid-stream burn guard on exactly the multi-binding deployments this method exists
+   * to un-break. The complete() fallback takes no options — a non-streaming call has
+   * no mid-stream to observe.
    */
-  async completeViaStream(messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal): Promise<LLMResponse> {
+  async completeViaStream(messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal, options?: CompletionCallOptions): Promise<LLMResponse> {
     const attempts: string[] = [];
     const candidates = this.availableBindings();
 
@@ -201,7 +207,7 @@ export class FailoverChatProvider implements ChatProvider {
       const binding = candidates[index]!;
       try {
         const response = binding.provider.completeViaStream
-          ? await binding.provider.completeViaStream(messages, tools, signal)
+          ? await binding.provider.completeViaStream(messages, tools, signal, options)
           : await binding.provider.complete(messages, tools, signal);
         this.markSuccess(binding, "complete");
         return response;
@@ -228,7 +234,7 @@ export class FailoverChatProvider implements ChatProvider {
     throw new Error(`All configured providers failed: ${attempts.join(" | ")}`);
   }
 
-  async *stream(messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal, options?: { toolChoice?: "auto" | "required" | "none" }): AsyncGenerator<StreamChunk> {
+  async *stream(messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal, options?: StreamCallOptions): AsyncGenerator<StreamChunk> {
     const candidates = this.availableBindings();
     const attempts: string[] = [];
 

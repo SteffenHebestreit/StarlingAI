@@ -6,6 +6,12 @@ import { childLogger } from "../logger.js";
 import type { ModelConfig } from "../config/schema.js";
 import { resolveStreamTotalCapMs } from "./stream-budget.js";
 import { beginProviderCall, recordProviderToken, endProviderCall } from "../observability/provider-activity-monitor.js";
+// The burn threshold is the supervisor's, IMPORTED rather than restated. Copying the
+// literal here is how the two would drift, and the whole point of this guard is that it
+// fires on exactly the shape agent/progress-verifier.ts already classifies as "burning".
+// The dependency is one-way at runtime: progress-verifier's only import from this module
+// is `import type`, which is erased.
+import { COLD_START_REASONING_BUDGET_CHARS, MIN_SUBSTANTIVE_OUTPUT_CHARS } from "../agent/progress-verifier.js";
 
 const log = childLogger("provider:openai-compatible");
 const DEFAULT_PROVIDER_TIMEOUT_MS = 30_000;
@@ -97,6 +103,101 @@ export function isDeadlineAbort(reason: unknown): boolean {
   return typeof reason === "object"
     && reason !== null
     && (reason as { isDeadlineAbort?: unknown }).isDeadlineAbort === true;
+}
+
+/**
+ * Abort raised by the provider itself when the generation IN FLIGHT is burning:
+ * reasoning past the supervisor's budget with no tool call and no answer text.
+ *
+ * Same contract as DeadlineAbort — the run produced something we still want, so the
+ * partial is salvaged rather than thrown away — and deliberately NOT an operator
+ * cancel, which must still propagate.
+ *
+ * It exists because the supervisor could not see this shape at all. It samples
+ * BETWEEN iterations and on a timer that reads counters only a RETURNED call updates,
+ * so a run parked inside one 20-minute completeViaStream call is invisible to it:
+ * measured run 2026-08-17 19:12→19:33, backend_coder, one single stream, 59,418
+ * reasoning characters, zero tool calls, zero iterations, and the detector built for
+ * exactly that shape never fired once. reasoningChars was only knowable after the
+ * stream ended, which is after the 20 minutes had already been spent.
+ *
+ * The message contains "aborted", which isRetryableStreamError treats as terminal —
+ * a burning generation must not be re-issued.
+ */
+export class ReasoningBurnAbort extends Error {
+  readonly isReasoningBurnAbort = true as const;
+  constructor(public readonly reasoningChars: number, public readonly contentChars: number) {
+    super(
+      `LLM stream aborted mid-generation: ${reasoningChars} reasoning characters with no tool call and `
+      + `${contentChars} characters of answer text (budget ${COLD_START_REASONING_BUDGET_CHARS}) `
+      + "— the model is thinking, not working",
+    );
+    this.name = "ReasoningBurnAbort";
+  }
+}
+
+export function isReasoningBurnAbort(reason: unknown): boolean {
+  return typeof reason === "object"
+    && reason !== null
+    && (reason as { isReasoningBurnAbort?: unknown }).isReasoningBurnAbort === true;
+}
+
+/**
+ * Live view of what an in-flight stream has produced so far.
+ *
+ * ONE object per stream, mutated in place and handed to the observer on every chunk —
+ * read it, never retain it. Counters only, and that is a requirement rather than a
+ * simplification: the observer runs per chunk on the hot path, so it must not copy the
+ * reasoning text, allocate, or log.
+ */
+export interface StreamProgress {
+  /** Reasoning characters yielded so far (dedicated deltas AND inline <think> spans). */
+  reasoningChars: number;
+  /** Answer-text characters yielded so far. Tool-call arguments are NOT counted here —
+   *  `toolCallStarted` already says the run reached the productive phase. */
+  contentChars: number;
+  /** Has the model begun emitting a tool call? The single strongest "this run is
+   *  working" signal, and the reason the healthy reference run is untouchable. */
+  toolCallStarted: boolean;
+}
+
+/** Options both completion paths accept. Separate from the streaming-only bag below so
+ *  callers of completeViaStream cannot accidentally set transport-level switches. */
+export interface CompletionCallOptions {
+  /** Per-chunk observation of the in-flight generation (see StreamProgress). */
+  onProgress?: (progress: Readonly<StreamProgress>) => void;
+  /**
+   * Does this run hold an operator's unbounded grant? A CALLBACK, not a boolean,
+   * because the grant can land WHILE the stream is running (the dock is answered
+   * mid-generation) and is consulted only at the moment the burn condition trips —
+   * never per chunk.
+   */
+  isUnbounded?: () => boolean;
+}
+
+export interface StreamCallOptions extends CompletionCallOptions {
+  toolChoice?: "auto" | "required" | "none";
+  /**
+   * Arm the mid-stream burn abort. Off by default and set by completeViaStream alone:
+   * that is the path with the partial-result salvage, so an abort there costs nothing
+   * that was already produced. A raw stream() consumer is handed the OBSERVATION either
+   * way and decides for itself.
+   */
+  guardReasoningBurn?: boolean;
+}
+
+/**
+ * The burn shape, mid-stream: thinking with nothing behind it.
+ *
+ * Same three facts agent/progress-verifier.ts's cold arm reads, and the same two
+ * constants, so the two cannot disagree about what "burning" means. The healthy
+ * reference run is safe on TWO independent counts: its opening think peaked at 23,876
+ * characters (0.53x the budget), and it then started a tool call.
+ */
+export function isReasoningBurn(progress: Readonly<StreamProgress>): boolean {
+  return !progress.toolCallStarted
+    && progress.contentChars < MIN_SUBSTANTIVE_OUTPUT_CHARS
+    && progress.reasoningChars >= COLD_START_REASONING_BUDGET_CHARS;
 }
 
 interface LMStudioProviderOptions {
@@ -365,8 +466,10 @@ export interface LLMResponse {
   /** Set when the response is known-incomplete and WHY. `finishReason: "length"` alone
    *  is ambiguous now: it is the real provider value on a genuine budget stop, and a
    *  fabricated one on the salvage path. Filling usage on salvage removes the accidental
-   *  `completionTokens === 0` discriminator, so state it explicitly instead. */
-  truncatedBy?: "output_budget" | "deadline" | "transport";
+   *  `completionTokens === 0` discriminator, so state it explicitly instead.
+   *  `reasoning_burn` is the provider's own mid-stream stop (see ReasoningBurnAbort) —
+   *  the caller must wind the run down, not retry it. */
+  truncatedBy?: "output_budget" | "deadline" | "transport" | "reasoning_burn";
 }
 
 export interface StreamChunk {
@@ -775,8 +878,8 @@ export interface ChatProvider {
    *  endpoint and accumulating deltas. Callers that want live token-progress
    *  (provider activity monitor) and the per-chunk inactivity abort on otherwise
    *  non-streaming calls prefer this when present, falling back to complete(). */
-  completeViaStream?(messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal): Promise<LLMResponse>;
-  stream(messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal, options?: { toolChoice?: "auto" | "required" | "none" }): AsyncGenerator<StreamChunk>;
+  completeViaStream?(messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal, options?: CompletionCallOptions): Promise<LLMResponse>;
+  stream(messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal, options?: StreamCallOptions): AsyncGenerator<StreamChunk>;
   embed(texts: string[], model: string): Promise<Float32Array[]>;
   isHealthy(): boolean;
 }
@@ -1216,6 +1319,7 @@ export class LMStudioProvider {
     messages: LLMMessage[],
     tools: LLMToolDef[],
     signal?: AbortSignal,
+    options?: CompletionCallOptions,
   ): Promise<LLMResponse> {
     let content = "";
     const reasoningParts: string[] = [];
@@ -1226,7 +1330,9 @@ export class LMStudioProvider {
     let usage: LLMUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 
     try {
-      for await (const chunk of this.stream(messages, tools, signal)) {
+      // guardReasoningBurn is set HERE and only here: this is the path that salvages,
+      // so a mid-stream abort keeps everything already produced.
+      for await (const chunk of this.stream(messages, tools, signal, { ...options, guardReasoningBurn: true })) {
         // Second consumer-side abort check (streamOnce has the first). This is the
         // last loop between the transport and the caller, so it is the backstop
         // that holds even if a provider implementation of stream() has neither a
@@ -1285,6 +1391,12 @@ export class LMStudioProvider {
       // and with no token ceiling that deadline is now the ONLY bound — so it fires
       // routinely on healthy long generations, and discarding their output would
       // convert every long run into a total loss.
+      // A BURN abort is the same case one step earlier: this provider stopped a
+      // generation that was producing nothing but chain-of-thought. The reasoning is
+      // still the only evidence the run leaves behind, so it salvages exactly as a
+      // deadline does — and it is never an operator cancel, so the check below cannot
+      // mistake it for one (the caller's signal is untouched; streamAc carried it).
+      const burned = isReasoningBurnAbort(err);
       const operatorCancelled = signal?.aborted === true && !isDeadlineAbort(signal.reason);
       const salvageable = content.trim().length > 0 || toolOrder.length > 0 || reasoningParts.length > 0;
       if (!salvageable || operatorCancelled) throw err;
@@ -1293,6 +1405,7 @@ export class LMStudioProvider {
         contentChars: content.length,
         toolCalls: toolOrder.length,
         reasoningChars: reasoningParts.join("").length,
+        reasoningBurn: burned,
       }, "Stream failed after producing content — salvaging the partial result instead of failing the turn");
       // Usage arrives only in the final empty-choices chunk, which a cut stream never
       // reaches — so a salvaged run reported completionTokens: 0, and the cost
@@ -1331,7 +1444,7 @@ export class LMStudioProvider {
           reasoningTokens: Math.min(estimatedReasoning, completionTokens),
         };
       }
-      truncatedBy = isDeadlineAbort(signal?.reason) ? "deadline" : "transport";
+      truncatedBy = burned ? "reasoning_burn" : isDeadlineAbort(signal?.reason) ? "deadline" : "transport";
       finishReason = "length";
     }
 
@@ -1376,7 +1489,7 @@ export class LMStudioProvider {
     messages: LLMMessage[],
     tools: LLMToolDef[],
     signal?: AbortSignal,
-    options?: { toolChoice?: "auto" | "required" | "none" }
+    options?: StreamCallOptions
   ): AsyncGenerator<StreamChunk> {
     // A transient CONNECTION drop is always worth one retry, independent of
     // configuredMaxRetries (which governs semantic/API retries and is often 0 on
@@ -1407,7 +1520,7 @@ export class LMStudioProvider {
     messages: LLMMessage[],
     tools: LLMToolDef[],
     signal?: AbortSignal,
-    options?: { toolChoice?: "auto" | "required" | "none" }
+    options?: StreamCallOptions
   ): AsyncGenerator<StreamChunk> {
     const modelId = this.parseModelId(this.modelConfig.primary);
     const openAIMessages = this.withReasoningSystemLine(modelId, normalizeMessagesForModel(messages, modelId));
@@ -1477,6 +1590,13 @@ export class LMStudioProvider {
     // Inline <think> stripping for providers that stream reasoning inside the
     // normal content field rather than a dedicated reasoning_content delta.
     let insideThink = false;
+
+    // MID-STREAM VISIBILITY. Allocated ONCE and mutated in place — the observer sees
+    // this same object on every chunk, which is what keeps the hot path free of
+    // per-chunk allocation. Nothing outside this generator could previously learn any
+    // of these three numbers until the call returned, which for the measured failure
+    // was 20.7 minutes after they stopped being useful.
+    const progress: StreamProgress = { reasoningChars: 0, contentChars: 0, toolCallStarted: false };
 
     // Per-chunk inactivity timer: if the provider stops sending data for
     // longer than the configured request timeout, abort the stream.
@@ -1575,6 +1695,7 @@ export class LMStudioProvider {
         // the OpenAI SDK delta type, so read via a cast.
         const reasoningDelta = (delta as { reasoning_content?: string }).reasoning_content;
         if (reasoningDelta) {
+          progress.reasoningChars += reasoningDelta.length;
           yield { type: "reasoning_delta", content: reasoningDelta };
         }
 
@@ -1587,22 +1708,22 @@ export class LMStudioProvider {
             if (insideThink) {
               const close = text.indexOf("</think>");
               if (close === -1) {
-                if (text) yield { type: "reasoning_delta", content: text };
+                if (text) { progress.reasoningChars += text.length; yield { type: "reasoning_delta", content: text }; }
                 text = "";
               } else {
                 const inner = text.slice(0, close);
-                if (inner) yield { type: "reasoning_delta", content: inner };
+                if (inner) { progress.reasoningChars += inner.length; yield { type: "reasoning_delta", content: inner }; }
                 text = text.slice(close + "</think>".length);
                 insideThink = false;
               }
             } else {
               const open = text.indexOf("<think>");
               if (open === -1) {
-                if (text) yield { type: "text_delta", content: text };
+                if (text) { progress.contentChars += text.length; yield { type: "text_delta", content: text }; }
                 text = "";
               } else {
                 const before = text.slice(0, open);
-                if (before) yield { type: "text_delta", content: before };
+                if (before) { progress.contentChars += before.length; yield { type: "text_delta", content: before }; }
                 text = text.slice(open + "<think>".length);
                 insideThink = true;
               }
@@ -1617,6 +1738,7 @@ export class LMStudioProvider {
               const id = tc.id ?? `tc_${idx}`;
               const name = tc.function?.name ?? "";
               toolCallBuffers.set(idx, { id, name, args: "" });
+              progress.toolCallStarted = true;
               yield { type: "tool_call_start", toolCallId: id, toolName: name };
             }
             const buf = toolCallBuffers.get(idx)!;
@@ -1631,9 +1753,45 @@ export class LMStudioProvider {
         if (finishReason) {
           collectedFinishReason = finishReason;
         }
+
+        // Hand the caller this chunk's reading. Cheap by contract: one call, no
+        // allocation, no logging — see StreamProgress.
+        options?.onProgress?.(progress);
+
+        // THE BURN ABORT. The one pathology no clock upstream can catch, because the
+        // call never returns to be judged: reasoning past the supervisor's budget with
+        // no tool call started and effectively no answer text.
+        //
+        // The operator's unbounded grant outranks it, and is read HERE rather than
+        // captured at call time so a grant answered mid-generation still lands. It is
+        // only consulted once the burn shape holds, so a granted run pays nothing per
+        // chunk and an ungranted healthy run never reaches the question at all.
+        //
+        // THROW, do not break — for the identical reason spelled out on the total-cap
+        // check above: a break would report a guillotined generation as a clean stop.
+        // Aborting streamAc first tears the transport down so the remote stops
+        // generating, then the throw routes through completeViaStream's salvage.
+        if (
+          options?.guardReasoningBurn
+          && isReasoningBurn(progress)
+          && !(options.isUnbounded?.() ?? false)
+        ) {
+          const burnErr = new ReasoningBurnAbort(progress.reasoningChars, progress.contentChars);
+          log.warn(
+            { model: modelId, reasoningChars: progress.reasoningChars, contentChars: progress.contentChars, elapsedMs: Date.now() - streamStartedAt },
+            "Aborting an in-flight generation that is burning reasoning with nothing behind it",
+          );
+          streamAc.abort(burnErr);
+          throw burnErr;
+        }
       }
     } catch (err) {
       this.recordRequestFailure(startedAt, err);
+      // The burn abort is this provider's OWN typed decision and the caller classifies
+      // on its identity (unlike a deadline, which survives on signal.reason). Wrapping
+      // it in a generic Error — what every other failure here gets — would erase that
+      // and leave the salvage unable to tell it from a transport drop.
+      if (isReasoningBurnAbort(err)) throw err;
       log.error({ err, model: modelId }, "OpenAI-compatible streaming failed");
       throw new Error(`OpenAI-compatible stream failed (model: ${modelId}): ${String(err)}`);
     } finally {

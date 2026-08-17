@@ -3859,7 +3859,17 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         // abort, which the plain non-streaming complete() lacks. Falls back to
         // complete() for any provider/mock that doesn't implement it.
         response = provider.completeViaStream
-          ? await provider.completeViaStream(messages, effectiveTools, llmSignal)
+          ? await provider.completeViaStream(messages, effectiveTools, llmSignal, {
+              // The operator's unbounded grant, readable from INSIDE the provider while
+              // the stream is still running. A callback, not a boolean: the grant
+              // routinely lands mid-generation (that is when the dock asks), and the
+              // provider consults it only at the instant its burn guard would fire.
+              // Both scopes count — the run-scoped grant this loop's own escape hatches
+              // read, and a turn-scoped grant covering the whole delegation tree.
+              isUnbounded: () =>
+                longRunningGenerationManager.isUnbounded(subSessionId)
+                || longRunningGenerationManager.isTurnUnbounded(subSessionId),
+            })
           : await provider.complete(messages, effectiveTools, llmSignal);
       } catch (err) {
         if (opts.signal?.aborted) {
@@ -4090,6 +4100,41 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           },
           { sessionId: subSessionId, severity: "info" },
         );
+      }
+
+      // THE PROVIDER STOPPED A BURNING GENERATION MID-STREAM.
+      //
+      // This is the verdict the supervisor above would have reached had it been able to
+      // see inside the call — it samples between iterations and on a timer that reads
+      // counters only a RETURNED call updates, and the measured failure spent its whole
+      // 20.7 minutes inside ONE stream, so the supervisor had nothing to read. The
+      // provider now reaches the same conclusion from the deltas as they arrive and
+      // salvages the partial; all that is left here is to act on it.
+      //
+      // Wind down and take the loop's existing wind-down branch rather than falling
+      // through: a burn returns zero tool calls, so the "no tool calls = final answer"
+      // path below would report a 45,000-character monologue as the agent's ANSWER.
+      // `continue` puts the run through attemptTimeoutSynthesis and the interrupted
+      // output builder — the same route a deadline takes. Terminating by construction:
+      // the wind-down branch returns before another completion is issued.
+      if (response.truncatedBy === "reasoning_burn") {
+        windDownForSupervisor();
+        logAudit("progress_verifier_intervened", {
+          agentName: opts.agentName,
+          runSessionId: subSessionId,
+          trigger: "mid_stream",
+          verdict: "burning",
+          reason: "the provider aborted an in-flight generation that was burning reasoning "
+            + "with no tool call and no answer text",
+          elapsedMs: Date.now() - runStartedAt,
+          productiveToolCalls: successfulToolCount,
+          mutatedPaths: mutatedWorkspacePaths.size,
+          reasoningChars: reasoningCharsTotal,
+          outputChars: outputCharsTotal,
+          iterations,
+        }, { sessionId: opts.parentSessionId, severity: "warn" });
+        iterations++;
+        continue;
       }
 
       if (turnTimeoutReached && turnTimeoutMs && response.tool_calls.length > 0) {

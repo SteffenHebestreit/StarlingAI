@@ -284,7 +284,7 @@ Every public schema field, where it is declared, and how many production files r
 | `normalizeDelegationToEnglish` | packages/core/src/config/schemas/orchestration.ts:499 | 2 |
 | `notes` | packages/core/src/config/schema.ts:776 | 38 |
 | `openaiCompatible` | packages/core/src/config/schema.ts:102 | 2 |
-| `operator` | packages/core/src/config/schema.ts:358 | 93 |
+| `operator` | packages/core/src/config/schema.ts:358 | 94 |
 | `orchestratorMaxToolIterations` | packages/core/src/config/schemas/effort.ts:23 | 1 |
 | `orchestratorTurnSloMs` | packages/core/src/config/schema.ts:1630 | 2 |
 | `orgId` | packages/core/src/config/schema.ts:1028 | 1 |

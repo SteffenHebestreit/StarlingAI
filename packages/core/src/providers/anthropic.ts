@@ -32,16 +32,22 @@ import {
   computeOutputTokenBudget,
   estimatePromptTokensForRequest,
   isDeadlineAbort,
+  isReasoningBurn,
+  isReasoningBurnAbort,
   PROMPT_ESTIMATE_CHARS_PER_TOKEN,
   ProviderHardTimeoutError,
+  ReasoningBurnAbort,
   resolveStreamTotalCapMs,
   salvageToolCallArguments,
   type ChatProvider,
+  type CompletionCallOptions,
   type LLMMessage,
   type LLMResponse,
   type LLMToolDef,
   type OpenAICompatibleProviderRuntimeSnapshot,
+  type StreamCallOptions,
   type StreamChunk,
+  type StreamProgress,
 } from "./lmstudio.js";
 import { beginProviderCall, recordProviderToken, endProviderCall } from "../observability/provider-activity-monitor.js";
 import { logAudit } from "../audit/logger.js";
@@ -819,7 +825,12 @@ export class AnthropicProvider implements ChatProvider {
    *  result accumulated from the streaming endpoint, giving the activity
    *  monitor live token progress and the per-chunk inactivity abort, and the
    *  same partial-result salvage on a stream that dies after producing work. */
-  async completeViaStream(messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal): Promise<LLMResponse> {
+  async completeViaStream(
+    messages: LLMMessage[],
+    tools: LLMToolDef[],
+    signal?: AbortSignal,
+    options?: CompletionCallOptions,
+  ): Promise<LLMResponse> {
     let content = "";
     const reasoningParts: string[] = [];
     const toolBuffers = new Map<string, { id: string; name: string; args: string }>();
@@ -829,7 +840,8 @@ export class AnthropicProvider implements ChatProvider {
     let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 
     try {
-      for await (const chunk of this.stream(messages, tools, signal)) {
+      // guardReasoningBurn is armed on this path only — it is the one with the salvage.
+      for await (const chunk of this.stream(messages, tools, signal, { ...options, guardReasoningBurn: true })) {
         // Second consumer-side abort check (stream() has the first) — the last
         // loop between the transport and the caller. Throws into the catch below,
         // where the existing operator-vs-deadline classification decides.
@@ -875,6 +887,9 @@ export class AnthropicProvider implements ChatProvider {
       // streamed AND billed, and the caller's usage accounting never saw them.
       // An OPERATOR cancel is still not a salvage case — the user asked for it to
       // stop, so that abort propagates untouched.
+      // A mid-stream BURN abort salvages on the same grounds as a deadline (see the
+      // OpenAI-compatible provider): the provider stopped it, the operator did not.
+      const burned = isReasoningBurnAbort(err);
       const operatorCancelled = signal?.aborted === true && !isDeadlineAbort(signal.reason);
       const salvageable = content.trim().length > 0 || toolOrder.length > 0 || reasoningParts.length > 0;
       if (!salvageable || operatorCancelled) throw err;
@@ -884,6 +899,7 @@ export class AnthropicProvider implements ChatProvider {
         contentChars: content.length,
         toolCalls: toolOrder.length,
         reasoningChars: reasoningParts.join("").length,
+        reasoningBurn: burned,
       }, "Anthropic stream failed after producing content — salvaging the partial result instead of failing the turn");
       // Usage only reaches us on the final `done` chunk, which a cut stream never
       // emits — so a salvaged run reported completionTokens: 0. Both stall detectors
@@ -901,7 +917,7 @@ export class AnthropicProvider implements ChatProvider {
           totalTokens: usage.promptTokens + estimated,
         };
       }
-      truncatedBy = isDeadlineAbort(signal?.reason) ? "deadline" : "transport";
+      truncatedBy = burned ? "reasoning_burn" : isDeadlineAbort(signal?.reason) ? "deadline" : "transport";
       finishReason = "length";
     }
 
@@ -940,7 +956,7 @@ export class AnthropicProvider implements ChatProvider {
     messages: LLMMessage[],
     tools: LLMToolDef[],
     signal?: AbortSignal,
-    options?: { toolChoice?: "auto" | "required" | "none" },
+    options?: StreamCallOptions,
   ): AsyncGenerator<StreamChunk> {
     const { modelId, params } = this.buildRequestBase(messages, tools, "stream", options?.toolChoice);
 
@@ -1008,6 +1024,10 @@ export class AnthropicProvider implements ChatProvider {
     const streamStartedAt = Date.now();
     const totalCapMs = this.maxStreamTotalMs;
 
+    // Live per-chunk reading of this generation — one object, mutated in place. Same
+    // contract as the OpenAI-compatible provider's (see StreamProgress).
+    const progress: StreamProgress = { reasoningChars: 0, contentChars: 0, toolCallStarted: false };
+
     try {
       for await (const event of stream) {
         // BELT AND BRACES over the composed signal above — same rationale and same
@@ -1042,6 +1062,7 @@ export class AnthropicProvider implements ChatProvider {
             if (event.content_block.type === "tool_use") {
               recordProviderToken(callId);
               toolBlockIds.set(event.index, event.content_block.id);
+              progress.toolCallStarted = true;
               yield { type: "tool_call_start", toolCallId: event.content_block.id, toolName: event.content_block.name };
             }
             break;
@@ -1049,8 +1070,10 @@ export class AnthropicProvider implements ChatProvider {
           case "content_block_delta": {
             recordProviderToken(callId);
             if (event.delta.type === "text_delta") {
+              progress.contentChars += event.delta.text.length;
               yield { type: "text_delta", content: event.delta.text };
             } else if (event.delta.type === "thinking_delta") {
+              progress.reasoningChars += event.delta.thinking.length;
               yield { type: "reasoning_delta", content: event.delta.thinking };
             } else if (event.delta.type === "input_json_delta") {
               const toolCallId = toolBlockIds.get(event.index);
@@ -1068,9 +1091,32 @@ export class AnthropicProvider implements ChatProvider {
           default:
             break;
         }
+
+        // Per-chunk observation + the mid-stream burn abort. Identical policy and
+        // identical rationale to the OpenAI-compatible provider: the supervisor cannot
+        // see inside a call that has not returned, the operator's unbounded grant is
+        // read lazily so a grant answered mid-generation still wins, and the throw (not
+        // a break) routes through completeViaStream's salvage.
+        options?.onProgress?.(progress);
+        if (
+          options?.guardReasoningBurn
+          && isReasoningBurn(progress)
+          && !(options.isUnbounded?.() ?? false)
+        ) {
+          const burnErr = new ReasoningBurnAbort(progress.reasoningChars, progress.contentChars);
+          log.warn(
+            { model: modelId, reasoningChars: progress.reasoningChars, contentChars: progress.contentChars, elapsedMs: Date.now() - streamStartedAt },
+            "Aborting an in-flight generation that is burning reasoning with nothing behind it",
+          );
+          streamAc.abort(burnErr);
+          throw burnErr;
+        }
       }
     } catch (err) {
       this.recordRequestFailure(startedAt, err);
+      // Rethrown untouched: the caller classifies a burn on the error's identity, which
+      // the generic wrap below would erase.
+      if (isReasoningBurnAbort(err)) throw err;
       log.error({ err, model: modelId }, "Anthropic streaming failed");
       throw new Error(`Anthropic stream failed (model: ${modelId}): ${String(err)}`);
     } finally {
