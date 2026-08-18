@@ -1281,6 +1281,35 @@ function scanForStubMarkers(scanRoot: string, relPrefix: string): { files: strin
   return { files, count };
 }
 
+/**
+ * A staged build cannot have succeeded while its own markers are still in the file.
+ *
+ * Every other outcome signal is derived from how the run ENDED — the loop exited cleanly,
+ * the model said it was finished — and none of them consults the artifact. Run 5 reported
+ * `outcome: "success"` on a page whose last line was
+ * `throw new Error('UNFINISHED_STUB: boot')`: four subsystems unwritten, the model simply
+ * believing it was done. A confident wrong verdict is the most expensive kind here, because
+ * it propagates: the orchestrator credits the agent, routing feedback boosts it, and the
+ * caller is told work happened that did not.
+ *
+ * The file is the evidence, so ask it. Downgrades only to `partial`, never to failure — real
+ * work did land, it is resumable, and the resume path keys off exactly these markers. Only a
+ * staged build is judged this way; an agent that never signed up to eliminate markers is not
+ * held to it. A scan failure leaves the verdict alone rather than inventing a bad one.
+ */
+export function stagedBuildHonestOutcome(
+  outcome: SubAgentOutcome,
+  isStagedBuild: boolean,
+  workspacePath: string,
+): SubAgentOutcome {
+  if (outcome !== "success" || !isStagedBuild) return outcome;
+  try {
+    return findUnfilledStubFiles(workspacePath).count > 0 ? "partial" : outcome;
+  } catch {
+    return outcome;
+  }
+}
+
 export function describeMutatedWorkspaceFiles(
   paths: Iterable<string>,
   workspaceRoot: string,
@@ -2685,10 +2714,27 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       }
     };
 
+    // A STAGED BUILD CANNOT SUCCEED WHILE ITS OWN MARKERS ARE STILL IN THE FILE.
+    //
+    // Every outcome above is derived from how the run ENDED — the loop exited cleanly, the
+    // model said it was finished — and none of them consults the artifact. Run 5 reported
+    // `outcome: success` on a page whose last line is
+    // `throw new Error('UNFINISHED_STUB: boot')`: four subsystems unwritten, and the model
+    // simply believed it was done. That is the worst shape a result can take, because a
+    // confident wrong answer propagates — the orchestrator credits the agent, the swarm's
+    // routing feedback boosts it, and the caller is told work happened that did not.
+    //
+    // The file is the evidence, so ask it. This downgrades to `partial`, never to failure:
+    // real work did land, it is resumable, and the resume path keys off exactly these
+    // markers. Only a staged build is judged this way — an agent that never signed up to
+    // eliminate markers is not held to it.
+    const honestOutcome = (outcome: SubAgentOutcome): SubAgentOutcome =>
+      stagedBuildHonestOutcome(outcome, isStagedBuild, opts.workspacePath);
+
     const buildStats = (
       terminalState: SubAgentExecutionStats["terminalState"] = "completed",
-      outcome: SubAgentOutcome = terminalState === "completed" ? "success" : "failure",
-    ): SubAgentExecutionStats => ({
+      rawOutcome: SubAgentOutcome = terminalState === "completed" ? "success" : "failure",
+    ): SubAgentExecutionStats => ((outcome: SubAgentOutcome) => ({
       agentName: opts.agentName,
       sessionId: subSessionId,
       // Measured over the LIVE conversation, not the system prompt alone. It was blind
@@ -2712,7 +2758,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       capabilities: agentCfg.capabilities ?? [],
       outcome,
       terminalState,
-    });
+    }))(honestOutcome(rawOutcome));
 
     const withArtifacts = (result: { output: string; stats: SubAgentExecutionStats }): SubAgentRunResult => (
       artifacts.length > 0

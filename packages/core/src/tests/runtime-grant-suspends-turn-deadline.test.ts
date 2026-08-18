@@ -218,6 +218,86 @@ describe("the delegation-wait exclusion can actually extend the deadline", () =>
   }, 30_000);
 });
 
+/**
+ * The turn deadline is a LIVENESS PROBE, not a budget — the last of six hard timers.
+ *
+ * Run 5 (2026-08-18): the sub-agent's own deadline extended twice on evidence of progress
+ * and the gateway clock paused for the delegation wait, and then this timer fired at
+ * exactly 30:00 and cancelled a delegate that had been building for 1,611 seconds and was
+ * still writing. The parent sits BLOCKED inside delegate_to_agent for that whole stretch,
+ * so its own liveness is its child's: every chunk the child emits arrives as a progress
+ * event. A child still producing is not a stuck turn.
+ *
+ * The pair below are each other's control: identical budget, identical over-running
+ * delegation, differing only in whether the child reports progress. Remove the deferral and
+ * the first fails; remove the deadline and the second does.
+ */
+describe("the turn deadline defers to a delegated child that is still producing", () => {
+  it("keeps the turn alive while the child emits progress, and delivers the answer", async () => {
+    const { AgentSession, runTurn, registry } = await loadRuntime();
+    const session = new AgentSession({ sessionId: "sess-live-child", channel: "test" });
+
+    registry.registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate a task to a sub-agent.",
+      parameters: { type: "object", properties: { task: { type: "string" } }, required: ["task"] },
+      async execute(_args, ctx) {
+        // A child that is working: it reports reasoning while it runs past the parent's
+        // budget, exactly as a real sub-agent's stream does.
+        for (let i = 0; i < 4; i++) {
+          ctx.onSubAgentProgress?.({
+            agentName: "web_coder", kind: "reasoning", iteration: i,
+            reasoning: `composing subsystem ${i}`,
+          });
+          await new Promise((r) => setTimeout(r, COMPLETION_MS / 4));
+        }
+        return { success: true, output: "child finished the build" };
+      },
+    });
+
+    streamMock
+      .mockImplementationOnce(() => toolStream("c1", "delegate_to_agent", { task: "build it" }))
+      .mockImplementation(() => textStream("the finished deliverable"));
+
+    const result = await runTurn({
+      session, userMessage: "delegate then report", autoApprove: true,
+      turnTimeoutOverrideMs: TURN_BUDGET_MS,
+    });
+    registry.unregisterTool("delegate_to_agent");
+
+    expect(result.response).toContain("the finished deliverable");
+  }, 30_000);
+
+  it("still kills an identical turn whose child goes silent — the deadline is not disabled", async () => {
+    const { AgentSession, runTurn, registry } = await loadRuntime();
+    const session = new AgentSession({ sessionId: "sess-silent-child", channel: "test" });
+
+    registry.registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate a task to a sub-agent.",
+      parameters: { type: "object", properties: { task: { type: "string" } }, required: ["task"] },
+      async execute() {
+        // Same duration, same shape — but nothing to show for it. This is the wedged run
+        // the deadline still has to end.
+        await new Promise((r) => setTimeout(r, COMPLETION_MS));
+        return { success: true, output: "child finished the build" };
+      },
+    });
+
+    streamMock
+      .mockImplementationOnce(() => toolStream("c1", "delegate_to_agent", { task: "build it" }))
+      .mockImplementation(() => textStream("the finished deliverable"));
+
+    const result = await runTurn({
+      session, userMessage: "delegate then report", autoApprove: true,
+      turnTimeoutOverrideMs: TURN_BUDGET_MS,
+    });
+    registry.unregisterTool("delegate_to_agent");
+
+    expect(result.response).not.toContain("the finished deliverable");
+  }, 30_000);
+});
+
 function toolStream(callId: string, toolName: string, args: Record<string, unknown>) {
   return (async function* () {
     yield { type: "tool_call_start", toolCallId: callId, toolName };

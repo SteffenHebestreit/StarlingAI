@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -189,5 +189,148 @@ describe("resume detection reads the workspace, not the task text", () => {
     expect(resume).toContain("6");
     expect(fresh).toContain("SKELETON (first tool call)");
     expect(fresh).not.toContain("NEVER call write_file");
+  });
+});
+
+describe("a missed stub edit names the markers that are actually left", () => {
+  // Importing the module is what registers its tools; getTool() is empty without it.
+  beforeAll(async () => { await import("../tools/filesystem.js"); });
+
+  it("lists the remaining markers when old_string targets an already-filled one", async () => {
+    // Run 5, iteration 10: the model aimed edit_file at `UNFINISHED_STUB: scoring`, which an
+    // earlier iteration had already filled. All it got back was "old_string not found in
+    // file", so it spent iteration 11 on grep_files and iteration 12 on read_file
+    // rediscovering the four markers the file could have named immediately — three of a
+    // fourteen-iteration budget burned on a question the file already answered.
+    const { getTool } = await import("../tools/registry.js");
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-stubmiss-"));
+    try {
+      mkdirSync(join(tempDir, "generated"), { recursive: true });
+      writeFileSync(join(tempDir, "generated", "index.html"), [
+        "<script>",
+        "function scoring() { return 42; }",           // already filled
+        `/* ${MARKER}: panels */`,
+        `/* ${MARKER}: input */`,
+        `throw new Error('${MARKER}: boot');`,
+        "</script>",
+      ].join("\n"), "utf8");
+
+      const edit = getTool("edit_file")!;
+      const result = await edit.execute(
+        { path: "index.html", old_string: `/* ${MARKER}: scoring */`, new_string: "x" },
+        { sessionId: "s", workspacePath: tempDir },
+      );
+
+      expect(result.success).toBe(false);
+      // The three markers that ARE there must be named, so the next call can land directly.
+      expect(result.error).toContain("panels");
+      expect(result.error).toContain("input");
+      expect(result.error).toContain("boot");
+      // …and not the one it wrongly aimed at, which is already gone.
+      expect(result.error).not.toContain("scoring");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("says so plainly when every marker is already filled", async () => {
+    // The other half of losing track: the build is finished and the model tries one more
+    // fill. "not found" reads as a mistake to correct; it needs to hear that it is done.
+    const { getTool } = await import("../tools/registry.js");
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-stubdone-"));
+    try {
+      mkdirSync(join(tempDir, "generated"), { recursive: true });
+      writeFileSync(join(tempDir, "generated", "index.html"), "<script>function boot(){}</script>", "utf8");
+      const edit = getTool("edit_file")!;
+      const result = await edit.execute(
+        { path: "index.html", old_string: `throw new Error('${MARKER}: boot');`, new_string: "x" },
+        { sessionId: "s", workspacePath: tempDir },
+      );
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("No " + MARKER + " markers remain");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves an ordinary miss alone — no marker noise on a normal edit", async () => {
+    const { getTool } = await import("../tools/registry.js");
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-plainmiss-"));
+    try {
+      mkdirSync(join(tempDir, "generated"), { recursive: true });
+      writeFileSync(join(tempDir, "generated", "app.js"), "const a = 1;\n", "utf8");
+      const edit = getTool("edit_file")!;
+      const result = await edit.execute(
+        { path: "app.js", old_string: "const b = 2;", new_string: "x" },
+        { sessionId: "s", workspacePath: tempDir },
+      );
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("old_string not found");
+      expect(result.error).not.toContain(MARKER);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("a staged build cannot report success while its markers remain", () => {
+  it("downgrades success to partial when the artifact still throws on a marker", async () => {
+    // Run 5 ended `outcome: "success"` on a page whose last line was
+    // throw new Error('UNFINISHED_STUB: boot') — four subsystems unwritten. Every other
+    // outcome signal reads how the run ENDED; none of them looked at the file.
+    const { stagedBuildHonestOutcome } = await import("../agent/sub-agent.js");
+    const dir = mkdtempSync(join(tmpdir(), "sai-honest-outcome-"));
+    try {
+      mkdirSync(join(dir, "generated", "neon-tetris"), { recursive: true });
+      writeFileSync(
+        join(dir, "generated", "neon-tetris", "index.html"),
+        `<script>const core=1;
+throw new Error('${MARKER}: boot');</script>`,
+        "utf8",
+      );
+      expect(stagedBuildHonestOutcome("success", true, dir)).toBe("partial");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves a genuinely finished staged build alone", async () => {
+    // THE DISCRIMINATOR: a rule that downgraded every staged build would make the outcome
+    // field meaningless in the other direction.
+    const { stagedBuildHonestOutcome } = await import("../agent/sub-agent.js");
+    const dir = mkdtempSync(join(tmpdir(), "sai-honest-done-"));
+    try {
+      mkdirSync(join(dir, "generated", "game"), { recursive: true });
+      writeFileSync(join(dir, "generated", "game", "index.html"), "<script>const done=1;</script>", "utf8");
+      expect(stagedBuildHonestOutcome("success", true, dir)).toBe("success");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not judge a run that never signed up to fill markers", async () => {
+    const { stagedBuildHonestOutcome } = await import("../agent/sub-agent.js");
+    const dir = mkdtempSync(join(tmpdir(), "sai-honest-nonstaged-"));
+    try {
+      mkdirSync(join(dir, "generated"), { recursive: true });
+      writeFileSync(join(dir, "generated", "leftover.js"), `throw new Error('${MARKER}: x');`, "utf8");
+      // A research agent must not inherit someone else's unfinished artifact as its verdict.
+      expect(stagedBuildHonestOutcome("success", false, dir)).toBe("success");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("never turns a failure into something better, or worse", async () => {
+    const { stagedBuildHonestOutcome } = await import("../agent/sub-agent.js");
+    const dir = mkdtempSync(join(tmpdir(), "sai-honest-fail-"));
+    try {
+      mkdirSync(join(dir, "generated"), { recursive: true });
+      writeFileSync(join(dir, "generated", "a.js"), `throw new Error('${MARKER}: x');`, "utf8");
+      expect(stagedBuildHonestOutcome("failure", true, dir)).toBe("failure");
+      expect(stagedBuildHonestOutcome("partial", true, dir)).toBe("partial");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

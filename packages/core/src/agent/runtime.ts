@@ -221,6 +221,7 @@ import { lookupTrajectoryInjection, computeTurnEnforcementSignals } from "./turn
 // D5 delegation-wait budget math (shared with the gateway hard-timeout layer; kept out of this
 // heavily-mocked module so gateway/rpc.ts can import it without going through runtime.js).
 import { DELEGATION_WAIT_CEILING_MS, extendDeadlineForDelegationWait } from "./delegation-budget.js";
+import { DEADLINE_LIVENESS_RECHECK_MS } from "./sub-agent-turn-budget.js";
 
 // Pure response/tool-call collapsing + delegation arg helpers (god-file seam).
 import {
@@ -1067,6 +1068,15 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
   // produced; with the output ceiling gone a single orchestrator completion can run
   // long enough for that to be the normal case, not the rare one.
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  // Liveness beat for the deadline above. Every delegated child's reasoning chunk and tool
+  // call passes through here, which is the only evidence the parent has while it sits
+  // blocked in delegate_to_agent. Declared before armTurnDeadline so the timer closes over
+  // it rather than over a temporal-dead-zone binding.
+  let lastSubAgentProgressAt = 0;
+  const noteSubAgentProgress: NonNullable<RunTurnOptions["onSubAgentProgress"]> = (event) => {
+    lastSubAgentProgressAt = Date.now();
+    opts.onSubAgentProgress?.(event);
+  };
   // The deadline is SUSPENDED, not merely re-armed, while the turn holds an operator
   // unbounded grant. Audit 3959f3ac: the dock promised "let it finish naturally", the
   // operator chose it at 07:35:24, and this timer overrode the operator 19 minutes later —
@@ -1091,6 +1101,38 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
         }, { sessionId, severity: "info" });
         turnDeadlineMs = Date.now() + MAX_TURN_CEILING_MS;
         armTurnDeadline(MAX_TURN_CEILING_MS);
+        return;
+      }
+      // THE LAST HARD TIMER, AND THE ONE THAT ACTUALLY KILLED RUN 5.
+      //
+      // The sub-agent's own deadline became a liveness probe and correctly extended twice;
+      // the gateway clock correctly paused for the delegation wait. Then this fired at
+      // exactly 30:00 and cancelled a delegate that had been building for 1,611 seconds and
+      // was still writing — the same wrong premise one layer up, that elapsed time is
+      // evidence of a stuck run.
+      //
+      // The parent spends that whole time BLOCKED inside delegate_to_agent, so its own
+      // liveness is its child's: every reasoning chunk and tool call the child emits arrives
+      // here as a progress event. A child that produced within the last recheck window is
+      // working, and aborting it discards real output — while a genuinely wedged child goes
+      // silent and stops deferring within one window. The child runs under its own
+      // loop and drift supervision, so nothing here needs to re-judge the CONTENT; it only
+      // needs to stop treating the clock as the judge.
+      const sinceProgressMs = lastSubAgentProgressAt > 0 ? Date.now() - lastSubAgentProgressAt : Infinity;
+      const withinCeiling = Date.now() - turnStartMs < MAX_TURN_CEILING_MS;
+      if (sinceProgressMs < DEADLINE_LIVENESS_RECHECK_MS && withinCeiling) {
+        logAudit("progress_verifier_intervened", {
+          agentName: "orchestrator",
+          runSessionId: sessionId,
+          verdict: "on_track",
+          action: "turn_deadline_extended",
+          reason: "delegated_child_still_producing",
+          sinceProgressMs,
+          recheckMs: DEADLINE_LIVENESS_RECHECK_MS,
+          turnTimeoutMs: budgetMs,
+        }, { sessionId, severity: "info" });
+        turnDeadlineMs = Date.now() + DEADLINE_LIVENESS_RECHECK_MS;
+        armTurnDeadline(budgetMs, DEADLINE_LIVENESS_RECHECK_MS);
         return;
       }
       turnAbort.abort(new DeadlineAbort(budgetMs));
@@ -1166,7 +1208,7 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
     // reasoning/prompt/iteration knobs pick it up without threading a parameter
     // through every helper.
     const out = await runWithEffortContext(opts.effortTier, () =>
-      _runTurn(opts, signal, turnAbort?.signal ?? inertAbort.signal, {
+      _runTurn({ ...opts, onSubAgentProgress: noteSubAgentProgress }, signal, turnAbort?.signal ?? inertAbort.signal, {
         deadlineMs: turnDeadlineMs,
         extendForDelegationWait: extendTurnDeadlineForDelegationWait,
       }));

@@ -681,7 +681,28 @@ registerTool({
     try {
       const content = readFileSync(resolved, "utf-8");
       if (!content.includes(oldStr)) {
-        return { success: false, output: "", error: "old_string not found in file" };
+        // "old_string not found in file" is true and useless: it tells the caller the edit
+        // missed but not what to aim at instead. During a staged build the overwhelmingly
+        // common cause is targeting a marker that an earlier iteration already filled — the
+        // model lost track of its own progress — and recovering from the bare message costs
+        // a grep_files round trip, which on a 14-iteration budget is real headroom spent on
+        // rediscovering something the file already knows.
+        //
+        // So when the miss was aimed at a stub marker, answer the question the caller is
+        // actually asking: which markers are still there. Naming them lets the next call
+        // land instead of hunting.
+        const missedAStub = oldStr.includes(UNFINISHED_STUB_MARKER);
+        const remaining = missedAStub
+          ? content.split("\n")
+              .filter(line => line.includes(UNFINISHED_STUB_MARKER))
+              .map(line => line.trim())
+              .slice(0, 20)
+          : [];
+        const hint = !missedAStub ? ""
+          : remaining.length > 0
+            ? ` This file still holds ${remaining.length} unfilled marker(s) — target one of these exactly: ${remaining.join(" | ")}`
+            : ` No ${UNFINISHED_STUB_MARKER} markers remain in this file; every subsystem is already filled.`;
+        return { success: false, output: "", error: `old_string not found in file.${hint}` };
       }
       // Count first. `String.replace` with a string pattern rewrites only the FIRST
       // match, and this reported `replacements: 1` unconditionally — so an ambiguous
