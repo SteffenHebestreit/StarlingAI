@@ -3,6 +3,7 @@ import {
   detectReasoningDrift,
   deriveTaskAnchors,
   detectReasoningLoop,
+  looksLikeCode,
   REASONING_LOOP_MIN_SHINGLES,
   REASONING_LOOP_REPEAT_RATIO,
 } from "../agent/progress-verifier.js";
@@ -178,5 +179,58 @@ describe("detectReasoningDrift — the model has lost the thread", () => {
     );
     const verdict = detectReasoningDrift(deriveTaskAnchors(TASK_EN), wandered);
     expect(verdict.drifting, `coverage was ${verdict.coverage}`).toBe(true);
+  });
+});
+
+/**
+ * THE FALSE POSITIVE THAT ACTUALLY HAPPENED, and the two corrections it forced.
+ *
+ * Run d5747607, first real run after drift shipped: content_writer read the half-built
+ * artifact, then spent 50,045 NOVEL characters (repeat ratio 0.032) drafting the CSS and JS
+ * to fill its remaining markers — and drift aborted it. CSS and JS contain none of a task's
+ * prose vocabulary, so the rule punished the single most productive step in the run.
+ *
+ * It also broke the argument used to justify guessing the threshold in the first place. I
+ * claimed a false trip "costs one iteration, not the run"; aborting mid-stream destroyed
+ * ~15 minutes of composition. So:
+ *
+ *   1. Composition is exempt — a code-like window cannot be judged by prose vocabulary.
+ *   2. Drift no longer ABORTS. A loop is safe to cut mid-stream because re-tread text is
+ *      worthless; drift is not, because the model may be writing the deliverable. It is an
+ *      observation, acted on between iterations where nothing in flight can be lost.
+ */
+describe("drift — composing the artifact is not losing the thread", () => {
+  const TASK = "Baue ein vollständiges spielbares Tetris-Spiel als Single-Page-Website mit "
+    + "2.5D-Optik, Tastatursteuerung und Punktezähler.";
+
+  const cssBlock = `
+.board { display: grid; grid-template-columns: repeat(10, 1fr); gap: 1px; }
+.cell { position: relative; transform: translateZ(0); background: #111; }
+.cell::before { content: ""; position: absolute; inset: 0; transform: skewY(-12deg); }
+#hud { display: flex; justify-content: space-between; font-variant-numeric: tabular-nums; }
+function draw(ctx, x, y) { ctx.fillRect(x * CELL, y * CELL, CELL - 1, CELL - 1); }
+`.repeat(120).slice(0, 13_000);
+
+  it("recognises a composition window as code, not prose", () => {
+    expect(looksLikeCode(cssBlock)).toBe(true);
+    // ...and ordinary reasoning prose is not mistaken for code.
+    expect(looksLikeCode("I need to check the playfield boundaries before rotating the piece. ".repeat(200))).toBe(false);
+  });
+
+  it("does NOT flag a model drafting CSS/JS for its own task", () => {
+    // The measured false positive, as a regression test. Remove the looksLikeCode guard in
+    // detectReasoningDrift and this fails.
+    const verdict = detectReasoningDrift(deriveTaskAnchors(TASK), cssBlock);
+    expect(verdict.drifting, `coverage was ${verdict.coverage}`).toBe(false);
+  });
+
+  it("drift is NOT grounds for a mid-stream abort — only a loop is", async () => {
+    // THE STRUCTURAL FIX, asserted where it matters: the predicate the provider aborts on.
+    // Drift being true must never be enough, because the in-flight text may be the artifact.
+    const { isReasoningBurn } = await import("../providers/lmstudio.js");
+    const base = { reasoningChars: 50_045, contentChars: 0, toolCallStarted: false, reasoningRepeatRatio: 0.032, reasoningAnchorCoverage: 0 };
+
+    expect(isReasoningBurn({ ...base, reasoningLoopDetected: false, reasoningDriftDetected: true })).toBe(false);
+    expect(isReasoningBurn({ ...base, reasoningLoopDetected: true, reasoningDriftDetected: false })).toBe(true);
   });
 });

@@ -1127,7 +1127,7 @@ export class AnthropicProvider implements ChatProvider {
         if (
           options?.guardReasoningBurn
           && isReasoningBurn(progress)
-          && (progress.reasoningLoopDetected || progress.reasoningDriftDetected || !(options.isUnbounded?.() ?? false))
+          && (progress.reasoningLoopDetected || !(options.isUnbounded?.() ?? false))
         ) {
           const burnErr = new ReasoningBurnAbort(progress.reasoningChars, progress.contentChars);
           log.warn(

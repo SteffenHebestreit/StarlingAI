@@ -105,13 +105,22 @@ export const REASONING_LOOP_REPEAT_RATIO = 0.5;
  * "Tastatursteuerung") are long, and length is exactly what separates a content word from a
  * function word without needing a stopword list in either language.
  *
- * DELIBERATELY HARD TO TRIP, because the false positive is expensive and easy to imagine:
- * a model debugging a rolling hash for a Tetris task is legitimately not saying "Tetris" for
- * a while. So drift requires ALL of: the run has produced nothing yet, the window is full,
- * essentially NONE of the task's anchors appear in it, and that holds across
- * REASONING_DRIFT_SUSTAINED_SAMPLES consecutive samples rather than one unlucky window.
- * Like the loop rule it is uncalibrated, and like the loop rule its first trip is a
- * corrective turn rather than a kill — the coverage number is logged so it can be fitted.
+ * DELIBERATELY HARD TO TRIP, and MEASURED to still have been too eager. Run d5747607 fired
+ * this rule on content_writer 50,045 novel characters (repeat ratio 0.032) into drafting the
+ * CSS and JS that would fill its own markers — CSS contains no prose vocabulary, so the rule
+ * punished the most productive step in the run and cost ~15 minutes of composition. Two
+ * consequences, both load-bearing:
+ *
+ *   - a code-like window is EXEMPT (looksLikeCode): absence of task words in code is
+ *     expected, not evidence of anything;
+ *   - drift NEVER aborts mid-stream. A loop is safe to cut because re-tread text is
+ *     worthless by definition; drift is not, because the in-flight text may be the
+ *     deliverable. It is recorded, logged per iteration, and left to the between-iteration
+ *     supervisor, whose stall rule acts where nothing in flight can be destroyed — that
+ *     rule independently caught the same run.
+ *
+ * It still requires a full window, essentially no anchors present, and
+ * REASONING_DRIFT_SUSTAINED_SAMPLES consecutive samples. Uncalibrated; coverage is logged.
  */
 export const REASONING_ANCHOR_MIN_CHARS = 5;
 /** Cap on anchors kept. The longest words are the most distinctive; more adds noise. */
@@ -120,6 +129,29 @@ export const REASONING_ANCHOR_MAX_TERMS = 40;
 export const REASONING_DRIFT_COVERAGE = 0.05;
 /** Consecutive drifting samples before it latches. One tangent is not lost. */
 export const REASONING_DRIFT_SUSTAINED_SAMPLES = 3;
+
+/**
+ * Is this window code/markup rather than prose?
+ *
+ * Density of the characters that structure code — braces, brackets, semicolons, angle
+ * brackets, colons, equals — against total length. Prose uses them sparingly; a CSS block,
+ * a JS function or an HTML fragment cannot avoid them. Language-independent by construction,
+ * since it reads punctuation rather than words.
+ *
+ * The threshold is deliberately low (3%): the cost of treating composition as prose is a
+ * false drift trip that destroys in-flight work, while the cost of treating prose as code is
+ * only that the drift rule stays quiet. The asymmetry is the whole point.
+ */
+export const CODE_SYMBOL_DENSITY = 0.03;
+
+export function looksLikeCode(window: string): boolean {
+  if (window.length === 0) return false;
+  let symbols = 0;
+  for (const ch of window) {
+    if (ch === "{" || ch === "}" || ch === ";" || ch === "<" || ch === ">" || ch === "=" || ch === "(" || ch === ")") symbols++;
+  }
+  return symbols / window.length >= CODE_SYMBOL_DENSITY;
+}
 
 /**
  * The task's own distinctive words — the vocabulary a run that is still on task keeps using.
@@ -150,6 +182,17 @@ export function detectReasoningDrift(
   if (anchors.length < 5 || window.length < REASONING_LOOP_WINDOW_CHARS) {
     return { drifting: false, coverage: 1 };
   }
+  // COMPOSING THE ARTIFACT IS NOT LOSING THE THREAD, and this guard is the whole reason
+  // this rule is safe to have at all. Run d5747607 measured the alternative: content_writer
+  // read the half-built file, then spent 50,045 novel characters (repeat ratio 0.032)
+  // drafting the CSS and JS to fill its markers — and was aborted for drift, because CSS
+  // and JS contain none of a task's PROSE vocabulary. The rule punished the single most
+  // productive step in the run and threw away ~15 minutes of composition.
+  //
+  // Code is separable from prose without knowing any language: it is dense in symbols that
+  // prose barely uses. When the window looks like code, the anchor rule simply does not
+  // apply — absence of task words there is expected, not evidence of anything.
+  if (looksLikeCode(window)) return { drifting: false, coverage: 1 };
   const haystack = window.toLowerCase();
   let hits = 0;
   for (const anchor of anchors) {

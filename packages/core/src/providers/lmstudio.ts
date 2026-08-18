@@ -232,8 +232,17 @@ export function isReasoningBurn(progress: Readonly<StreamProgress>): boolean {
   if (progress.contentChars >= MIN_SUBSTANTIVE_OUTPUT_CHARS) return false;
   // Content first. Length is the backstop, and it now sits far enough away that reaching it
   // is itself the finding rather than the policy (see REASONING_ABSOLUTE_CEILING_CHARS).
+  // A LOOP ABORTS; DRIFT DOES NOT. Re-tread text is worthless by definition, so cutting a
+  // loop mid-stream throws away nothing. Drift is the opposite risk: run d5747607 aborted a
+  // model 50,045 novel characters into drafting the CSS/JS that would fill its markers, and
+  // ~15 minutes of composition died with it. Absence of the task's PROSE vocabulary is not
+  // evidence the model is lost when what it is producing is code.
+  //
+  // So drift stays an OBSERVATION — recorded on the progress object, logged per iteration,
+  // and available to the between-iteration supervisor, which acts at a boundary where no
+  // in-flight work can be destroyed. The stall rule already stops a run that drifts and
+  // then produces nothing; it did exactly that on the measured run, independently.
   return progress.reasoningLoopDetected
-    || progress.reasoningDriftDetected
     || progress.reasoningChars >= REASONING_ABSOLUTE_CEILING_CHARS;
 }
 
@@ -1854,7 +1863,7 @@ export class LMStudioProvider {
         if (
           options?.guardReasoningBurn
           && isReasoningBurn(progress)
-          && (progress.reasoningLoopDetected || progress.reasoningDriftDetected || !(options.isUnbounded?.() ?? false))
+          && (progress.reasoningLoopDetected || !(options.isUnbounded?.() ?? false))
         ) {
           const burnErr = new ReasoningBurnAbort(progress.reasoningChars, progress.contentChars);
           log.warn(
