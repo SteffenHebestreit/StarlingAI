@@ -1227,19 +1227,35 @@ export function artifactFileLooksTruncated(artifact: Record<string, unknown>, wo
  * Bounded hard (depth, file count, file size) and fails open to "not a resume", because being
  * wrong here costs one redundant skeleton while blocking the scan would cost every resume run.
  */
-export function findUnfilledStubFiles(workspaceRoot: string): { files: string[]; count: number } {
+/** One unfilled marker, located precisely enough to be used as an edit_file old_string. */
+export interface StubMarkerSite {
+  /** Workspace-relative path, e.g. generated/neon-tetris/index.html */
+  file: string;
+  /** 1-based line number, as read_file and grep_files report it. */
+  line: number;
+  /** The marker line verbatim, trimmed — the exact string edit_file must match. */
+  text: string;
+}
+
+export function findUnfilledStubFiles(workspaceRoot: string): { files: string[]; count: number; markers: StubMarkerSite[] } {
   // Artifacts only. A marker outside generated/ is prose about the convention, not a build.
   const artifactRoot = resolvePath(workspaceRoot, GENERATED_SUBDIR);
-  if (!fs.existsSync(artifactRoot)) return { files: [], count: 0 };
+  if (!fs.existsSync(artifactRoot)) return { files: [], count: 0, markers: [] };
   return scanForStubMarkers(artifactRoot, GENERATED_SUBDIR);
 }
 
-function scanForStubMarkers(scanRoot: string, relPrefix: string): { files: string[]; count: number } {
+function scanForStubMarkers(scanRoot: string, relPrefix: string): { files: string[]; count: number; markers: StubMarkerSite[] } {
   const SKIP = new Set(["node_modules", ".git", ".starlingai", "dist", "build", ".cache"]);
   const MAX_FILES = 400;
   const MAX_BYTES = 2_000_000;
   const MAX_DEPTH = 6;
   const files: string[] = [];
+  // Located, not just counted. The scan already reads every file to count markers, so
+  // recording where each one sits costs nothing and saves the agent from rediscovering it:
+  // run 6 spent seven of fourteen iterations paging a 446-line file to find one marker the
+  // scanner had already walked past.
+  const markers: StubMarkerSite[] = [];
+  const MAX_MARKERS = 24;
   let count = 0;
   let seen = 0;
 
@@ -1270,6 +1286,13 @@ function scanForStubMarkers(scanRoot: string, relPrefix: string): { files: strin
         if (hits > 0) {
           count += hits;
           if (files.length < 8) files.push(relPath);
+          const lines = text.split("\n");
+          for (let i = 0; i < lines.length && markers.length < MAX_MARKERS; i++) {
+            const line = lines[i];
+            if (line !== undefined && line.includes(UNFINISHED_STUB_MARKER)) {
+              markers.push({ file: relPath, line: i + 1, text: line.trim() });
+            }
+          }
         }
       } catch { /* unreadable/binary — not a resume signal */ }
     }
@@ -1278,7 +1301,7 @@ function scanForStubMarkers(scanRoot: string, relPrefix: string): { files: strin
   try {
     walk(scanRoot, relPrefix, 0);
   } catch { /* fail open */ }
-  return { files, count };
+  return { files, count, markers };
 }
 
 /**
@@ -2333,11 +2356,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // evidence is not in the task text, it is on disk.
     const stagedResume = isStagedBuild
       ? findUnfilledStubFiles(opts.workspacePath)
-      : { files: [] as string[], count: 0 };
+      : { files: [] as string[], count: 0, markers: [] as StubMarkerSite[] };
     const isResumeBuild = stagedResume.count > 0;
     const stagedBuildGuidance = isStagedBuild && stagedBuildFlags.stagedArtifactBuildDirective === true
       ? (isResumeBuild
-          ? buildStagedBuildResumeGuidance(stagedResume.files, stagedResume.count)
+          ? buildStagedBuildResumeGuidance(stagedResume.files, stagedResume.count, stagedResume.markers)
           : buildStagedArtifactBuildGuidance(maxIterations, PER_PATH_EDIT_CAP))
       : "";
     if (isStagedBuild) {

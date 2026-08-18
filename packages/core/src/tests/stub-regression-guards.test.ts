@@ -334,3 +334,48 @@ throw new Error('${MARKER}: boot');</script>`,
     }
   });
 });
+
+describe("the resume directive hands over located markers, not a search task", () => {
+  it("reports each marker's file, line and exact text", async () => {
+    // Run 6 spent seven of fourteen iterations paging a 446-line file to find the single
+    // marker left in it, because the directive said "locate the markers" and the scan that
+    // had already walked past every one of them reported only a count and a filename.
+    const { findUnfilledStubFiles } = await import("../agent/sub-agent.js");
+    const dir = mkdtempSync(join(tmpdir(), "sai-marker-sites-"));
+    try {
+      mkdirSync(join(dir, "generated", "neon-tetris"), { recursive: true });
+      writeFileSync(
+        join(dir, "generated", "neon-tetris", "index.html"),
+        ["<script>", "const core = 1;", `/* ${MARKER}: loop */`, "const tail = 2;"].join("\n"),
+        "utf8",
+      );
+
+      const found = findUnfilledStubFiles(dir);
+      expect(found.count).toBe(1);
+      expect(found.markers).toHaveLength(1);
+      const site = found.markers[0]!;
+      expect(site.file).toContain("index.html");
+      expect(site.line).toBe(3);                       // 1-based, as read_file reports it
+      expect(site.text).toBe(`/* ${MARKER}: loop */`); // usable verbatim as old_string
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("puts those locations in the directive and drops the search instruction", async () => {
+    const { buildStagedBuildResumeGuidance } = await import("../agent/sub-agent-prompt-guidance.js");
+    const withSites = buildStagedBuildResumeGuidance(
+      ["generated/neon-tetris/index.html"], 1,
+      [{ file: "generated/neon-tetris/index.html", line: 365, text: `/* ${MARKER}: loop */` }],
+    );
+    expect(withSites).toContain("generated/neon-tetris/index.html:365");
+    expect(withSites).toContain(`/* ${MARKER}: loop */`);
+    expect(withSites).toContain("do NOT need to search");
+
+    // THE DISCRIMINATOR: with no located markers the directive must still tell the agent how
+    // to find them, or a scan that failed would leave it with no instruction at all.
+    const withoutSites = buildStagedBuildResumeGuidance(["generated/app/index.html"], 2);
+    expect(withoutSites).toContain("grep_files");
+    expect(withoutSites).not.toContain("do NOT need to search");
+  });
+});

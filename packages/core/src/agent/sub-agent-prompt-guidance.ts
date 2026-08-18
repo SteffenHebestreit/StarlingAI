@@ -228,12 +228,29 @@ export function buildStagedBuildFirstStepInstruction(): string {
  * the OPPOSITE of a skeleton, so this text inverts the two rules that matter — never write_file
  * the whole artifact, and start from what is already there.
  */
-export function buildStagedBuildResumeGuidance(markerFiles: readonly string[], markerCount: number): string {
+export function buildStagedBuildResumeGuidance(
+  markerFiles: readonly string[],
+  markerCount: number,
+  markerSites: readonly { file: string; line: number; text: string }[] = [],
+): string {
   const shown = markerFiles.slice(0, 4).join(", ");
+  // The scan that produced this count already walked past every marker, so name them.
+  // Without this the directive said "go locate them", and run 6 obeyed literally: seven of
+  // fourteen iterations paging a 446-line file to find the one marker left in it. A located
+  // marker is also the exact old_string edit_file needs, so this removes the search AND the
+  // most common cause of a rejected replacement.
+  const located = markerSites.slice(0, 12)
+    .map(site => `   ${site.file}:${site.line}  ${site.text}`)
+    .join("\n");
   return [
     "RESUME AN EXISTING BUILD — DO NOT START OVER.",
     `A previous pass already wrote this artifact and left ${markerCount} unfilled ${UNFINISHED_STUB_MARKER} marker(s) in: ${shown}. The work already on disk is REAL and is worth more than anything you can emit in one call.`,
-    `1. READ the file once (read_file), or ${"grep_files"} for ${UNFINISHED_STUB_MARKER} to locate the markers exactly.`,
+    ...(located
+      ? [`These are the markers, already located for you — each line below is the exact old_string to replace:\n${located}`]
+      : []),
+    located
+      ? `1. You do NOT need to search for them. Read only the code AROUND a marker if you need its context (read_file with offset/limit), then fill it.`
+      : `1. READ the file once (read_file), or ${"grep_files"} for ${UNFINISHED_STUB_MARKER} to locate the markers exactly.`,
     `2. Replace ONE ${UNFINISHED_STUB_MARKER} line per call with edit_file, that line as old_string and the subsystem's COMPLETE code as new_string. Several such calls in one turn is good and is the fastest way through.`,
     `3. FINISH: confirm no ${UNFINISHED_STUB_MARKER} remains, and if it is an HTML page and you hold verify_page, RUN IT and fix whatever it reports before saying you are done. Then carry out whatever final step your own instructions require.`,
     `NEVER call write_file on this artifact. Re-emitting the whole file replaces finished subsystems with placeholders and destroys the passes that produced them — the harness will reject such a write, and the attempt costs you an iteration.`,
