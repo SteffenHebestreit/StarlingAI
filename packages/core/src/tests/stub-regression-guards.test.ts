@@ -379,3 +379,42 @@ describe("the resume directive hands over located markers, not a search task", (
     expect(withoutSites).not.toContain("do NOT need to search");
   });
 });
+
+describe("a build that keeps reading is told to write", () => {
+  it("names the exact marker and forbids further reads", async () => {
+    // Runs 6 and 7 called a tool on EVERY iteration — read_file, read_file, grep_files,
+    // read_file — so the announced-without-acting nudge (which needs a turn with no tool
+    // call at all) never fired, and a busy non-circling agent sailed past every guard while
+    // the marker count never moved. Run 6 burned seven of fourteen iterations that way.
+    const { buildReadOnlyStreakCorrection } = await import("../agent/sub-agent-prompt-guidance.js");
+    const text = buildReadOnlyStreakCorrection({
+      streak: 4,
+      markerCount: 1,
+      markerSites: [{ file: "generated/neon-tetris/index.html", line: 365, text: `/* ${MARKER}: loop */` }],
+      iterationsLeft: 6,
+    });
+
+    expect(text).toContain("WITHOUT WRITING");
+    expect(text).toContain("generated/neon-tetris/index.html line 365");
+    expect(text).toContain(`/* ${MARKER}: loop */`);   // usable verbatim as old_string
+    expect(text).toContain("edit_file");
+    expect(text).toContain("6 iteration(s) left");
+  });
+
+  it("holds a streak limit that allows a real look-around but not an endless one", async () => {
+    const { STAGED_BUILD_READ_ONLY_STREAK_LIMIT } = await import("../agent/sub-agent-prompt-guidance.js");
+    // Enough for locate + read context + check one reference; short of the measured pattern.
+    expect(STAGED_BUILD_READ_ONLY_STREAK_LIMIT).toBeGreaterThanOrEqual(2);
+    expect(STAGED_BUILD_READ_ONLY_STREAK_LIMIT).toBeLessThanOrEqual(5);
+  });
+
+  it("counts a write iteration as a write — the streak must be resettable", async () => {
+    // THE DISCRIMINATOR for the streak logic: edit_file and write_file are what make an
+    // iteration productive, so a run alternating read/edit must never accumulate a streak.
+    const { STAGED_BUILD_REQUIRED_TOOLS } = await import("../agent/sub-agent-prompt-guidance.js");
+    expect(STAGED_BUILD_REQUIRED_TOOLS).toContain("edit_file");
+    expect(STAGED_BUILD_REQUIRED_TOOLS).toContain("write_file");
+    expect(STAGED_BUILD_REQUIRED_TOOLS).not.toContain("read_file");
+    expect(STAGED_BUILD_REQUIRED_TOOLS).not.toContain("grep_files");
+  });
+});

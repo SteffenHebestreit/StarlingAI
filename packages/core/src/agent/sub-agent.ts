@@ -82,6 +82,8 @@ import {
   buildStagedArtifactBuildGuidance,
   buildStagedBuildResumeGuidance,
   buildStagedBuildFirstStepInstruction,
+  buildReadOnlyStreakCorrection,
+  STAGED_BUILD_READ_ONLY_STREAK_LIMIT,
   buildReasoningBurnCorrection,
   REASONING_BURN_RETRY_LIMIT,
   ANNOUNCEMENT_NUDGE_LIMIT,
@@ -2535,6 +2537,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // Times this run announced a next step without taking it. Bounded so a model that will
     // only ever narrate cannot spin to the iteration cap being told to act.
     let announcementNudges = 0;
+    // Consecutive iterations in which a staged build called tools but wrote nothing. The
+    // announced-without-acting nudge cannot see this shape: the run IS calling tools, so
+    // every existing guard reads it as busy and non-circling.
+    let readOnlyStreak = 0;
+    let readOnlyCorrections = 0;
     // Highest reasoning repeat ratio observed during the current generation (0 = all novel).
     // Logged per iteration purely to build the distribution the threshold needs.
     let iterationRepeatRatio = 0;
@@ -3645,6 +3652,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     supervisorTimer.unref?.();
 
     while (iterations < maxIterations) {
+      // Tools used by THIS iteration alone. `toolNames` accumulates over the whole run, so
+      // it cannot answer "did this pass change anything", which is what the read-only streak
+      // check below needs.
+      const iterationToolNames: string[] = [];
       // SUPERVISION RUNS FIRST AND ALWAYS, before any budget/tier branch below can
       // decide this run is somebody else's problem.
       superviseProgress("iteration");
@@ -4989,6 +5000,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         });
 
         toolNames.push(tc.name);
+        iterationToolNames.push(tc.name);
 
         // Per-tool call cap — prevent wasteful loops on a single tool.
         // For path-keyed write tools, the primary cap is per-(tool, path):
@@ -6043,6 +6055,63 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           { sessionId: subSessionId, severity: "warn" },
         );
         break;
+      }
+
+      // A BUILD THAT KEEPS LOOKING INSTEAD OF WRITING.
+      //
+      // The announced-without-acting nudge above fires only when a turn returns text and no
+      // tool call. Runs 6 and 7 never matched it: they called a tool on every single
+      // iteration — read_file, read_file, grep_files, read_file — so a busy, non-circling,
+      // tool-using agent sailed past every guard while the marker count never moved. Run 6
+      // spent seven of its fourteen iterations that way and wrote nothing; run 7 was still
+      // reading at eleven.
+      //
+      // Reading is not the failure, unbounded reading is, and the distinguishing evidence is
+      // structural rather than textual: tools ran, none of them could change a file. The
+      // correction hands back the marker's exact location and text — both already known —
+      // and asks for the call. Bounded like its siblings: it corrects, it does not kill, and
+      // after the limit the run is left to end on its own terms.
+      const wroteThisIteration = iterationToolNames.some(name => STAGED_BUILD_REQUIRED_TOOLS.includes(name as typeof STAGED_BUILD_REQUIRED_TOOLS[number]));
+      if (isStagedBuild && iterationToolNames.length > 0 && !wroteThisIteration) readOnlyStreak++;
+      else if (wroteThisIteration) readOnlyStreak = 0;
+
+      if (
+        isStagedBuild
+        && readOnlyStreak >= STAGED_BUILD_READ_ONLY_STREAK_LIMIT
+        && readOnlyCorrections < ANNOUNCEMENT_NUDGE_LIMIT
+        && iterations + 1 < maxIterations
+        && !lrgOperatorStop
+        && !supervisorStop
+        && !opts.signal?.aborted
+        && !longRunningGenerationManager.isStopRequested(subSessionId)
+      ) {
+        const remaining = findUnfilledStubFiles(opts.workspacePath);
+        if (remaining.count > 0) {
+          readOnlyCorrections++;
+          history.push({
+            role: "user",
+            content: buildReadOnlyStreakCorrection({
+              streak: readOnlyStreak,
+              markerCount: remaining.count,
+              markerSites: remaining.markers,
+              iterationsLeft: maxIterations - iterations - 1,
+            }),
+          });
+          logAudit("progress_verifier_intervened", {
+            agentName: opts.agentName,
+            runSessionId: subSessionId,
+            trigger: "iteration",
+            verdict: "reading_without_writing",
+            action: "corrected",
+            reason: "a staged build called only read-only tools for consecutive iterations while markers remained",
+            readOnlyStreak,
+            unfilledMarkers: remaining.count,
+            markerFiles: remaining.files.slice(0, 4),
+            correctionCount: readOnlyCorrections,
+            iterations,
+          }, { sessionId: opts.parentSessionId, severity: "warn" });
+          readOnlyStreak = 0;
+        }
       }
       iterations++;
     }

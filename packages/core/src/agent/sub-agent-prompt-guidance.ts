@@ -228,6 +228,45 @@ export function buildStagedBuildFirstStepInstruction(): string {
  * the OPPOSITE of a skeleton, so this text inverts the two rules that matter — never write_file
  * the whole artifact, and start from what is already there.
  */
+/**
+ * How many consecutive READ-ONLY iterations a staged build may spend before it is told to
+ * write. Three is enough for a genuine look-around (locate, read the surrounding code, check
+ * one reference) and short of the pattern that has now cost two runs.
+ */
+export const STAGED_BUILD_READ_ONLY_STREAK_LIMIT = 3;
+
+/**
+ * The correction for a build that keeps LOOKING instead of writing.
+ *
+ * Distinct from the announced-without-acting nudge, which only fires when a turn returns
+ * text and no tool call at all. Runs 6 and 7 never hit that: they called a tool every single
+ * iteration — read_file, read_file, grep_files, read_file — so every existing guard saw a
+ * busy, non-circling, tool-using agent and had nothing to object to. Run 6 spent seven of
+ * fourteen iterations that way and never wrote the one marker it had left.
+ *
+ * Reading is not the failure; unbounded reading is. The marker's exact location and text are
+ * already known, so this hands them back and asks for the call.
+ */
+export function buildReadOnlyStreakCorrection(params: {
+  streak: number;
+  markerCount: number;
+  markerSites: readonly { file: string; line: number; text: string }[];
+  iterationsLeft: number;
+}): string {
+  const target = params.markerSites[0];
+  return [
+    `${params.streak} ITERATIONS IN A ROW WITHOUT WRITING ANYTHING — and the artifact is still unfinished.`,
+    `${params.markerCount} ${UNFINISHED_STUB_MARKER} marker(s) remain. You have already read this file; more reading will not tell you anything new about what to write.`,
+    ...(target
+      ? [`The next one is ${target.file} line ${target.line}, and this is the exact old_string:
+   ${target.text}`]
+      : []),
+    `Your next message must be an edit_file call replacing that line with the subsystem's COMPLETE code. No preamble, no further reads.`,
+    `If you need a detail you have not got, write the subsystem with your best reasonable implementation rather than reading again — a working version you can refine beats a marker that throws.`,
+    `You have ${params.iterationsLeft} iteration(s) left.`,
+  ].join("\n");
+}
+
 export function buildStagedBuildResumeGuidance(
   markerFiles: readonly string[],
   markerCount: number,
