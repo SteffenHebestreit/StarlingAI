@@ -17,6 +17,7 @@ import type { ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import { archiveSession, createSession, resolveSession } from "../agent/session.js";
 import { runTurn } from "../agent/runtime.js";
+import { DELEGATION_WAIT_CEILING_MS, extendDeadlineForDelegationWait } from "../agent/delegation-budget.js";
 import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
 import { roleRank } from "./auth.js";
@@ -168,6 +169,33 @@ export async function handleAguiStream(
   // handler so disconnect cleanup is wired first. A second timer here previously
   // overwrote the handle and orphaned the first, which then fired after a normal
   // completion — spuriously archiving the session and writing to a closed stream.
+  // D5 PARITY: the gateway clock must pause for the time the turn spends WAITING ON A CHILD,
+  // or it guillotines a build whose runtime budget legitimately stopped counting.
+  //
+  // rpc.ts has done this since D5; this path never did, and run d5747607 is the bill. A resume
+  // build was making real progress — six successful edit_file calls in its last iteration, the
+  // artifact grown from 9,410 to 13,474 bytes — and the turn was aborted at 31:05, which is
+  // exactly turnTimeoutMs (30 min) plus the synthesis grace. The delegation alone had run 25
+  // of those minutes. Worse, an aborted turn never reaches finalization, so QA and the artifact
+  // probe both logged not_run: the clock did not just kill the build, it killed the only gate
+  // that would have reported the build unfinished.
+  //
+  // Same shape as the RPC path deliberately, including the absolute ceiling — a turn may be
+  // extended by delegation wait, never made immortal by it.
+  let gatewayDeadlineMs = 0;
+  let gatewayDeadlineCeilingMs = 0;
+  if (turnTimeoutMs > 0) {
+    const armedAt = Date.now();
+    gatewayDeadlineMs = armedAt + turnTimeoutMs + TURN_TIMEOUT_SYNTHESIS_GRACE_MS;
+    gatewayDeadlineCeilingMs = armedAt + DELEGATION_WAIT_CEILING_MS + TURN_TIMEOUT_SYNTHESIS_GRACE_MS;
+  }
+  const extendGatewayDeadline = (ms: number): void => {
+    if (gatewayDeadlineMs <= 0 || timedOut || res.writableEnded || ms <= 0) return;
+    gatewayDeadlineMs = extendDeadlineForDelegationWait(gatewayDeadlineMs, ms, gatewayDeadlineCeilingMs);
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+    timeoutHandle = setTimeout(handleTurnTimeout, Math.max(0, gatewayDeadlineMs - Date.now()));
+  };
+
   timeoutHandle = setTimeout(handleTurnTimeout, turnTimeoutMs + TURN_TIMEOUT_SYNTHESIS_GRACE_MS);
 
   // Armed next to the turn timer, and torn down by the same cleanup. `unref` so a live
@@ -189,6 +217,9 @@ export async function handleAguiStream(
       session,
       userMessage: message,
       signal: abortController.signal,
+      // Keep the gateway's hard timeout in lockstep with the runtime's delegation-wait
+      // exclusion. Without this the two clocks disagree and the shorter one wins.
+      onDelegationWaitMs: extendGatewayDeadline,
 
       onChunk: (text) => {
         if (!textStarted) {

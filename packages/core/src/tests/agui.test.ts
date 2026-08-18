@@ -279,3 +279,74 @@ describe("AG-UI streaming", () => {
     }
   });
 });
+/**
+ * D5 PARITY — the gateway clock must pause while the turn waits on a child.
+ *
+ * Run d5747607 is the bill for this being absent. A resume build was making real progress —
+ * six successful edit_file calls in its final iteration, the artifact grown 9,410 → 13,474
+ * bytes — and the turn was aborted at 31:05: exactly turnTimeoutMs (30 min) plus the 65s
+ * synthesis grace, while the delegation alone had consumed 25 of those minutes. rpc.ts has
+ * excluded delegation wait since D5; this path never did, so the same build survives on the
+ * dashboard and dies over HTTP.
+ *
+ * The second cost is worse than the lost build: an aborted turn never reaches finalization,
+ * so QA and the artifact probe both logged not_run. The clock killed the only gate that
+ * would have reported the artifact unfinished.
+ */
+describe("AG-UI turn deadline", () => {
+  it("hands runTurn a delegation-wait hook, and extending it defers the abort", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agui-d5-"));
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      gateway: { jwtSecret: "a".repeat(32), turnTimeoutMs: 30_000 },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+
+    let seenHook: ((ms: number) => void) | undefined;
+    let releaseTurn: () => void = () => {};
+    const turnGate = new Promise<void>((resolve) => { releaseTurn = resolve; });
+
+    vi.doMock("../agent/runtime.js", () => ({
+      runTurn: vi.fn(async (opts: Record<string, unknown>) => {
+        seenHook = opts["onDelegationWaitMs"] as ((ms: number) => void) | undefined;
+        await turnGate;
+        return {
+          response: "built it",
+          toolCallsExecuted: 6,
+          guardrailEvents: [],
+          usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+          blocked: false,
+        };
+      }),
+    }));
+
+    vi.useFakeTimers();
+    try {
+      const { handleAguiStream } = await import("../gateway/agui.js");
+      const res = new FakeResponse();
+      const streamed = handleAguiStream(res as never, { message: "build the game" });
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      // THE WIRING. Without the hook the runtime cannot tell this clock anything.
+      expect(typeof seenHook, "runTurn must receive onDelegationWaitMs").toBe("function");
+
+      // A child blocked the turn for 25s of a 30s budget — push the deadline out by that.
+      seenHook!(25_000);
+
+      // Past the ORIGINAL deadline (30s + 65s grace). Un-extended, the turn is dead here.
+      await vi.advanceTimersByTimeAsync(96_000);
+      const events = parseSseEvents(res.chunks);
+      expect(
+        events.some((e) => e["type"] === "RUN_ERROR"),
+        "the turn must not be aborted while its budget was paused for a child",
+      ).toBe(false);
+
+      releaseTurn();
+      await streamed;
+      expect(parseSseEvents(res.chunks).some((e) => e["type"] === "RUN_FINISHED")).toBe(true);
+    } finally {
+      vi.useRealTimers();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});
