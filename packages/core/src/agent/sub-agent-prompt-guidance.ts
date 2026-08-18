@@ -267,6 +267,32 @@ export function buildReadOnlyStreakCorrection(params: {
   ].join("\n");
 }
 
+/**
+ * The correction for a build whose own page check said the page is broken.
+ *
+ * Run 8 filled its last marker, called verify_page, was told the page throws on its first
+ * inline script, made two edits, and finished reporting success — never asking again. Zero
+ * markers is what a COMPLETE artifact looks like; it says nothing about a WORKING one, and
+ * the run had already produced the evidence that it was not.
+ *
+ * `stale` distinguishes the two ways this goes wrong: a check that failed outright, and a
+ * check that passed but has since been edited past, which verified different bytes.
+ */
+export function buildPageCheckCorrection(params: {
+  stale: boolean;
+  iterationsLeft: number;
+}): string {
+  return [
+    params.stale
+      ? "YOU EDITED THE PAGE AFTER ITS LAST SUCCESSFUL CHECK — that check no longer describes this file."
+      : "YOUR OWN verify_page RUN SAID THIS PAGE DOES NOT RUN, and you have not re-checked it since.",
+    "Every subsystem being written is not the same as the page working: an artifact with no unfinished markers can still throw on its first line and looks finished from the outside.",
+    "Call verify_page now. If it fails, fix the FIRST error it names and call it again — the later errors are usually consequences of the first.",
+    "Do not report this page as done while its check fails.",
+    `You have ${params.iterationsLeft} iteration(s) left.`,
+  ].join("\n");
+}
+
 export function buildStagedBuildResumeGuidance(
   markerFiles: readonly string[],
   markerCount: number,

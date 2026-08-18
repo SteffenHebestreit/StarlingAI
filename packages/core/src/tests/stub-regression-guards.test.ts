@@ -408,13 +408,78 @@ describe("a build that keeps reading is told to write", () => {
     expect(STAGED_BUILD_READ_ONLY_STREAK_LIMIT).toBeLessThanOrEqual(5);
   });
 
-  it("counts a write iteration as a write — the streak must be resettable", async () => {
-    // THE DISCRIMINATOR for the streak logic: edit_file and write_file are what make an
-    // iteration productive, so a run alternating read/edit must never accumulate a streak.
-    const { STAGED_BUILD_REQUIRED_TOOLS } = await import("../agent/sub-agent-prompt-guidance.js");
-    expect(STAGED_BUILD_REQUIRED_TOOLS).toContain("edit_file");
-    expect(STAGED_BUILD_REQUIRED_TOOLS).toContain("write_file");
-    expect(STAGED_BUILD_REQUIRED_TOOLS).not.toContain("read_file");
-    expect(STAGED_BUILD_REQUIRED_TOOLS).not.toContain("grep_files");
+  it("measures progress by the marker count, which a cosmetic edit cannot fake", async () => {
+    // Run 8, iteration 3: the model DID call edit_file — and spent it refining the keyboard
+    // handler, code that already worked, while the one marker it owed went untouched. A
+    // "did a write tool run" test reads that as progress and hands the run another three
+    // iterations of reading. The count is the thing that cannot be faked.
+    const { findUnfilledStubFiles } = await import("../agent/sub-agent.js");
+    const dir = mkdtempSync(join(tmpdir(), "sai-marker-progress-"));
+    try {
+      mkdirSync(join(dir, "generated", "g"), { recursive: true });
+      const file = join(dir, "generated", "g", "index.html");
+
+      writeFileSync(file, `const a=1;
+/* ${MARKER}: loop */`, "utf8");
+      expect(findUnfilledStubFiles(dir).count).toBe(1);
+
+      // An edit elsewhere in the file: real bytes changed, marker count unmoved.
+      writeFileSync(file, `const a=2;
+/* ${MARKER}: loop */`, "utf8");
+      expect(findUnfilledStubFiles(dir).count).toBe(1);
+
+      // The fill itself is what moves it.
+      writeFileSync(file, "const a=2;\nfunction loop(){}", "utf8");
+      expect(findUnfilledStubFiles(dir).count).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("zero markers is not the same as a working page", () => {
+  it("refuses success when the run's own page check failed", async () => {
+    // Run 8: filled its last marker, called verify_page, was told the page throws on its
+    // first inline script, edited twice, finished reporting success. Markers were zero and
+    // the page was dead — the evidence was already in the run's own history.
+    const { stagedBuildHonestOutcome } = await import("../agent/sub-agent.js");
+    const dir = mkdtempSync(join(tmpdir(), "sai-pagecheck-"));
+    try {
+      mkdirSync(join(dir, "generated", "g"), { recursive: true });
+      writeFileSync(join(dir, "generated", "g", "index.html"), "<script>const done=1;</script>", "utf8");
+
+      expect(stagedBuildHonestOutcome("success", true, dir, { lastPassed: false })).toBe("partial");
+      // A pass that has since been edited past verified different bytes.
+      expect(stagedBuildHonestOutcome("success", true, dir, { lastPassed: true, mutatedSince: true })).toBe("partial");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("still allows success for a checked, unmodified, marker-free page", async () => {
+    // THE DISCRIMINATOR: a rule that never returned success would make the field useless.
+    const { stagedBuildHonestOutcome } = await import("../agent/sub-agent.js");
+    const dir = mkdtempSync(join(tmpdir(), "sai-pagecheck-ok-"));
+    try {
+      mkdirSync(join(dir, "generated", "g"), { recursive: true });
+      writeFileSync(join(dir, "generated", "g", "index.html"), "<script>const done=1;</script>", "utf8");
+
+      expect(stagedBuildHonestOutcome("success", true, dir, { lastPassed: true, mutatedSince: false })).toBe("success");
+      // A build that never ran a page check is judged on markers alone, as before.
+      expect(stagedBuildHonestOutcome("success", true, dir, {})).toBe("success");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("tells a finishing run to re-check rather than merely recording the failure", async () => {
+    const { buildPageCheckCorrection } = await import("../agent/sub-agent-prompt-guidance.js");
+    const failed = buildPageCheckCorrection({ stale: false, iterationsLeft: 3 });
+    expect(failed).toContain("DOES NOT RUN");
+    expect(failed).toContain("verify_page");
+    expect(failed).toContain("FIRST error");
+
+    const stale = buildPageCheckCorrection({ stale: true, iterationsLeft: 3 });
+    expect(stale).toContain("AFTER ITS LAST SUCCESSFUL CHECK");
   });
 });

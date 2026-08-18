@@ -83,6 +83,7 @@ import {
   buildStagedBuildResumeGuidance,
   buildStagedBuildFirstStepInstruction,
   buildReadOnlyStreakCorrection,
+  buildPageCheckCorrection,
   STAGED_BUILD_READ_ONLY_STREAK_LIMIT,
   buildReasoningBurnCorrection,
   REASONING_BURN_RETRY_LIMIT,
@@ -1326,8 +1327,15 @@ export function stagedBuildHonestOutcome(
   outcome: SubAgentOutcome,
   isStagedBuild: boolean,
   workspacePath: string,
+  pageCheck: { lastPassed?: boolean; mutatedSince?: boolean } = {},
 ): SubAgentOutcome {
   if (outcome !== "success" || !isStagedBuild) return outcome;
+  // Filling every marker is necessary for a working page and nowhere near sufficient. Run 8
+  // reached zero markers on a page that throws on its first inline script, and its own
+  // verify_page run had already said so. A check that FAILED, or one that passed and was
+  // then edited past, both leave "it works" unestablished.
+  if (pageCheck.lastPassed === false) return "partial";
+  if (pageCheck.lastPassed === true && pageCheck.mutatedSince === true) return "partial";
   try {
     return findUnfilledStubFiles(workspacePath).count > 0 ? "partial" : outcome;
   } catch {
@@ -2542,6 +2550,13 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // every existing guard reads it as busy and non-circling.
     let readOnlyStreak = 0;
     let readOnlyCorrections = 0;
+    // Marker count as of the previous iteration. Seeded from the resume scan so the first
+    // iteration of a resumed build is compared against what it inherited.
+    let lastMarkerCount = stagedResume.count;
+    // undefined until the run checks its own page at least once.
+    let lastPageCheckPassed: boolean | undefined;
+    let mutatedSincePageCheck = false;
+    let pageCheckCorrections = 0;
     // Highest reasoning repeat ratio observed during the current generation (0 = all novel).
     // Logged per iteration purely to build the distribution the threshold needs.
     let iterationRepeatRatio = 0;
@@ -2774,7 +2789,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // markers. Only a staged build is judged this way — an agent that never signed up to
     // eliminate markers is not held to it.
     const honestOutcome = (outcome: SubAgentOutcome): SubAgentOutcome =>
-      stagedBuildHonestOutcome(outcome, isStagedBuild, opts.workspacePath);
+      stagedBuildHonestOutcome(outcome, isStagedBuild, opts.workspacePath, {
+        lastPassed: lastPageCheckPassed,
+        mutatedSince: mutatedSincePageCheck,
+      });
 
     const buildStats = (
       terminalState: SubAgentExecutionStats["terminalState"] = "completed",
@@ -5371,6 +5389,21 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         // exhausting the sub-agent's context budget and dropping subsequent tool calls.
         resultContent = truncateToolResult(resultContent, tc.name);
 
+        // THE RUN'S OWN VERDICT ON WHETHER ITS PAGE RUNS.
+        //
+        // Run 8 called verify_page, was told the page throws on its first inline script,
+        // edited twice, and then reported outcome "success" without ever asking again — and
+        // the marker check passed it, because filling every marker is necessary for a working
+        // page and nowhere near sufficient. The evidence was already in the run's own history;
+        // nothing was reading it back.
+        if (tc.name === "verify_page") {
+          lastPageCheckPassed = result.success;
+          mutatedSincePageCheck = false;
+        } else if (STAGED_BUILD_REQUIRED_TOOLS.includes(tc.name as typeof STAGED_BUILD_REQUIRED_TOOLS[number]) && result.success) {
+          // Any edit after a passing check makes that check stale — it verified other bytes.
+          mutatedSincePageCheck = true;
+        }
+
         if (result.success) {
           successfulToolCount += 1;
           // Track substantive evidence for share_finding nudge (Phase A5)
@@ -6057,6 +6090,47 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         break;
       }
 
+      // A PAGE THAT FAILED ITS OWN CHECK IS NOT FINISHED.
+      //
+      // Zero markers is what a COMPLETE artifact looks like and says nothing about a WORKING
+      // one. Run 8 filled its last marker, ran verify_page, was told the page throws on its
+      // first inline script, edited twice and reported success — never asking again. The
+      // evidence was already in the run's own history; nothing read it back. Handing it back
+      // costs one iteration and is the difference between a delivered game and a blank page.
+      if (
+        isStagedBuild
+        && lastPageCheckPassed !== undefined
+        && (lastPageCheckPassed === false || mutatedSincePageCheck)
+        && pageCheckCorrections < ANNOUNCEMENT_NUDGE_LIMIT
+        && iterations + 1 < maxIterations
+        && !lrgOperatorStop
+        && !supervisorStop
+        && !opts.signal?.aborted
+        && !longRunningGenerationManager.isStopRequested(subSessionId)
+        && response.tool_calls.length === 0
+      ) {
+        pageCheckCorrections++;
+        history.push({
+          role: "user",
+          content: buildPageCheckCorrection({
+            stale: lastPageCheckPassed === true,
+            iterationsLeft: maxIterations - iterations - 1,
+          }),
+        });
+        logAudit("progress_verifier_intervened", {
+          agentName: opts.agentName,
+          runSessionId: subSessionId,
+          trigger: "iteration",
+          verdict: lastPageCheckPassed === false ? "page_check_failed" : "page_check_stale",
+          action: "corrected",
+          reason: "the run was finishing while its own verify_page verdict said the page does not run",
+          correctionCount: pageCheckCorrections,
+          iterations,
+        }, { sessionId: opts.parentSessionId, severity: "warn" });
+        iterations++;
+        continue;
+      }
+
       // A BUILD THAT KEEPS LOOKING INSTEAD OF WRITING.
       //
       // The announced-without-acting nudge above fires only when a turn returns text and no
@@ -6071,9 +6145,21 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // correction hands back the marker's exact location and text — both already known —
       // and asks for the call. Bounded like its siblings: it corrects, it does not kill, and
       // after the limit the run is left to end on its own terms.
-      const wroteThisIteration = iterationToolNames.some(name => STAGED_BUILD_REQUIRED_TOOLS.includes(name as typeof STAGED_BUILD_REQUIRED_TOOLS[number]));
-      if (isStagedBuild && iterationToolNames.length > 0 && !wroteThisIteration) readOnlyStreak++;
-      else if (wroteThisIteration) readOnlyStreak = 0;
+      // Progress is measured on the ARTIFACT, not on whether a write tool ran. Run 8's third
+      // iteration called edit_file — and spent it refining the keyboard handler, code that
+      // already worked, while the one marker it owed went untouched. A write-tool test would
+      // have read that as progress and handed the run another three iterations of reading.
+      // The marker count moving is the thing that cannot be faked: it drops when a subsystem
+      // is filled, and rises when a fresh skeleton is written, so a change in either
+      // direction is real work while an unchanged count is not.
+      const markerCountNow = isStagedBuild
+        ? findUnfilledStubFiles(opts.workspacePath).count
+        : 0;
+      if (isStagedBuild) {
+        if (markerCountNow !== lastMarkerCount) readOnlyStreak = 0;
+        else if (iterationToolNames.length > 0) readOnlyStreak++;
+        lastMarkerCount = markerCountNow;
+      }
 
       if (
         isStagedBuild
