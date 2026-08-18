@@ -297,6 +297,24 @@ export interface ProgressSample {
   outputChars: number;
   /** Cumulative reasoning characters. DIAGNOSTIC ONLY — never counts as progress. */
   reasoningChars: number;
+  /**
+   * Characters the CURRENTLY STREAMING generation has produced so far.
+   *
+   * Every other field here only moves when a call RETURNS, and run d5747607 is what that
+   * costs: composing one large edit takes ~17 minutes at the measured 16.8 tok/s, during
+   * which no counter moves at all, so two 180s windows read as a stall and the run was wound
+   * down mid-composition — the same productive step drift had killed a round earlier.
+   *
+   * This field was deliberately absent before, and the reason was sound at the time: the old
+   * guard trusted a climbing token counter and a 60,385-char monologue back-fills ~20,000
+   * tokens, so a burner never looked stalled. What changed is that the stream is now judged
+   * on CONTENT — a generation that is circling is aborted by the provider before it can earn
+   * any credit here — so "tokens are arriving" is finally safe to read as work.
+   */
+  liveReasoningChars: number;
+  /** Is that in-flight generation circling? Set from the stream's content sampler; a looping
+   *  stream must never buy itself forward-progress credit. */
+  liveLoopSuspected: boolean;
 }
 
 export const EMPTY_PROGRESS_SAMPLE: ProgressSample = {
@@ -305,6 +323,8 @@ export const EMPTY_PROGRESS_SAMPLE: ProgressSample = {
   distinctWriteHashes: 0,
   outputChars: 0,
   reasoningChars: 0,
+  liveReasoningChars: 0,
+  liveLoopSuspected: false,
 };
 
 /** What the supervisor wants the caller to do about a sample. */
@@ -329,7 +349,12 @@ export function hasForwardProgress(prev: ProgressSample, cur: ProgressSample): b
   return cur.productiveToolCalls > prev.productiveToolCalls
     || cur.mutatedPaths > prev.mutatedPaths
     || cur.distinctWriteHashes > prev.distinctWriteHashes
-    || (cur.outputChars - prev.outputChars) >= MIN_SUBSTANTIVE_OUTPUT_CHARS;
+    || (cur.outputChars - prev.outputChars) >= MIN_SUBSTANTIVE_OUTPUT_CHARS
+    // A generation actively producing NON-CIRCLING text is working, not stalled. Gated on
+    // the loop flag so this cannot become the old "counter is climbing" hole again: a
+    // circling stream is aborted upstream and never reaches a second window here.
+    || (!cur.liveLoopSuspected
+      && (cur.liveReasoningChars - prev.liveReasoningChars) >= MIN_SUBSTANTIVE_OUTPUT_CHARS);
 }
 
 /**

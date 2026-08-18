@@ -2436,6 +2436,12 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // Highest reasoning repeat ratio observed during the current generation (0 = all novel).
     // Logged per iteration purely to build the distribution the threshold needs.
     let iterationRepeatRatio = 0;
+    // In-flight generation size and loop verdict, refreshed per chunk. These are what let the
+    // supervisor tell "composing a large edit" from "stalled": every other counter it reads
+    // only moves when a call RETURNS, and a 17-minute composition returns nothing until it is
+    // done. Reset at the top of each iteration so the delta a window sees is this generation's.
+    let liveReasoningChars = 0;
+    let liveLoopSuspected = false;
     // Cumulative reasoning already accounted for by a correction. Subtracted in
     // sampleProgress so the supervisor's absolute budget measures reasoning since the
     // last correction rather than since the run began.
@@ -3436,6 +3442,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         // the pathology it exists for. It just stops re-punishing the run for the burn the
         // correction already answered.
         reasoningChars: Math.max(0, reasoningCharsTotal - reasoningCharsBaseline),
+        liveReasoningChars,
+        liveLoopSuspected,
       };
     };
 
@@ -3991,11 +3999,16 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         // complete() for any provider/mock that doesn't implement it.
         // Reset per iteration: the ratio describes THIS generation, not the run.
         iterationRepeatRatio = 0;
+        liveReasoningChars = 0;
         response = provider.completeViaStream
           ? await provider.completeViaStream(messages, effectiveTools, llmSignal, {
               // Cheap observation so the loop threshold can be fitted from real runs
               // instead of guessed. A number per chunk, never the reasoning text.
-              onProgress: (p) => { iterationRepeatRatio = p.reasoningRepeatRatio; },
+              onProgress: (p) => {
+                iterationRepeatRatio = p.reasoningRepeatRatio;
+                liveReasoningChars = p.reasoningChars;
+                liveLoopSuspected = p.reasoningLoopDetected;
+              },
               // The operator's unbounded grant, readable from INSIDE the provider while
               // the stream is still running. A callback, not a boolean: the grant
               // routinely lands mid-generation (that is when the dock asks), and the

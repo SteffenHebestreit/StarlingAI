@@ -381,3 +381,53 @@ describe("progress-verifier — verdict parser (fail-open)", () => {
     expect(parseProgressVerdict('{"verdict":"confused"}').verdict).toBe("on_track");
   });
 });
+
+/**
+ * COMPOSING A LARGE EDIT IS NOT STALLING — the third time this same productive step was
+ * killed by a different rule, and the reason it kept happening.
+ *
+ * Run d5747607: web_coder read the half-built artifact, then spent ~17 minutes in ONE
+ * generation drafting the fills. Every counter the supervisor reads only moves when a call
+ * RETURNS, so two 180s windows saw nothing move and wound the run down mid-composition.
+ * A round earlier the identical step was aborted by drift; before that, by a character
+ * budget. Three rules, one blind spot: a model that is writing is invisible to a sampler
+ * that only watches for finished work.
+ *
+ * The old design deliberately refused to count tokens as progress, and was RIGHT to at the
+ * time — a 60,385-char monologue back-fills ~20,000 tokens, so a burner never looked stalled
+ * either. What changed is that the stream is now judged on content: a circling generation is
+ * aborted before it can earn credit here, so "tokens are arriving" finally means work.
+ */
+describe("progress supervisor — a streaming generation is work in progress", () => {
+  it("does NOT stall a run whose in-flight generation is producing novel text", () => {
+    const composing = (chars: number) => sample({
+      productiveToolCalls: 3, // it read the file first — so the WARM arm applies
+      liveReasoningChars: chars,
+    });
+    // Two consecutive windows with no returned call — exactly the shape that was wound down.
+    const w1 = composing(9_000);
+    const w2 = composing(18_000);
+    expect(hasForwardProgress(w1, w2)).toBe(true);
+    expect(classifyRunProgress(w1, w2, STALL_LIMIT).action).toBe("continue");
+  });
+
+  it("STILL stalls when the generation is circling — the old hole stays shut", () => {
+    // THE DISCRIMINATOR. Identical token growth; only the content verdict differs. Without
+    // the liveLoopSuspected gate this rule would re-open the exact hole the counter-based
+    // guard had, where a monologue's climbing counter read as progress forever.
+    const circling = (chars: number) => sample({
+      productiveToolCalls: 3,
+      liveReasoningChars: chars,
+      liveLoopSuspected: true,
+    });
+    const w1 = circling(9_000);
+    const w2 = circling(18_000);
+    expect(hasForwardProgress(w1, w2)).toBe(false);
+    expect(classifyRunProgress(w1, w2, STALL_LIMIT).action).not.toBe("continue");
+  });
+
+  it("a generation that produces almost nothing between windows is still a stall", () => {
+    const barely = (chars: number) => sample({ productiveToolCalls: 3, liveReasoningChars: chars });
+    expect(hasForwardProgress(barely(9_000), barely(9_050))).toBe(false);
+  });
+});
