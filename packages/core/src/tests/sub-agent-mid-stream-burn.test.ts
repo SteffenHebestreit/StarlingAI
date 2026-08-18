@@ -419,6 +419,45 @@ describe("sub-agent deadline — a liveness probe, not a budget", () => {
     expect(shouldDeferDeadline({ liveReasoningChars: 80_810, liveLoopSuspected: true, minProducedChars: MIN })).toBe(false);
   });
 
+  it("DEFERS a freshly started generation that has not accumulated reasoning yet", async () => {
+    // Run 6: the sub-agent deferred correctly at 20:34:35, then aborted at 20:39:40 "while a
+    // completion was still generating". liveReasoningChars is reset to zero when each
+    // iteration's stream begins, so the accumulated-chars test can only answer "has THIS
+    // generation said a lot yet" — and iteration 13 had finished at 20:37:31, leaving the
+    // re-check to land on a young iteration 14 with almost nothing counted. On this model
+    // time-to-first-token alone is about a minute, so every iteration has a window in which
+    // a live run is indistinguishable from a dead one by that measure.
+    const { shouldDeferDeadline } = await import("../agent/sub-agent-turn-budget.js");
+    expect(shouldDeferDeadline({
+      liveReasoningChars: 40, liveLoopSuspected: false, minProducedChars: MIN,
+      msSinceLastProgress: 4_000, progressWindowMs: 300_000,
+    })).toBe(true);
+  });
+
+  it("still ends a run whose stream has gone quiet, and one with no stream at all", async () => {
+    // THE DISCRIMINATOR for the recency clause: it must rescue a young generation without
+    // granting immunity to a dead one. A stale last-chunk stops deferring on the next check,
+    // and no in-flight stream (undefined) is not a defer at all.
+    const { shouldDeferDeadline } = await import("../agent/sub-agent-turn-budget.js");
+    expect(shouldDeferDeadline({
+      liveReasoningChars: 40, liveLoopSuspected: false, minProducedChars: MIN,
+      msSinceLastProgress: 900_000, progressWindowMs: 300_000,
+    })).toBe(false);
+    expect(shouldDeferDeadline({
+      liveReasoningChars: 40, liveLoopSuspected: false, minProducedChars: MIN,
+      msSinceLastProgress: undefined, progressWindowMs: 300_000,
+    })).toBe(false);
+  });
+
+  it("REFUSES a circling generation even when it is chunking away happily", async () => {
+    // Recency must not become the loop detector's back door: a burner emits constantly.
+    const { shouldDeferDeadline } = await import("../agent/sub-agent-turn-budget.js");
+    expect(shouldDeferDeadline({
+      liveReasoningChars: 40, liveLoopSuspected: true, minProducedChars: MIN,
+      msSinceLastProgress: 100, progressWindowMs: 300_000,
+    })).toBe(false);
+  });
+
   it("re-checks on a sane interval — long enough to be worth having, short enough to notice death", async () => {
     const { DEADLINE_LIVENESS_RECHECK_MS } = await import("../agent/sub-agent-turn-budget.js");
     expect(DEADLINE_LIVENESS_RECHECK_MS).toBeGreaterThanOrEqual(60_000);

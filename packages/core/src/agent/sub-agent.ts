@@ -2008,6 +2008,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
   // here because the DEADLINE reads it: a timer must be able to see that a model is writing.
   let liveReasoningChars = 0;
   let liveLoopSuspected = false;
+  // When the in-flight stream last delivered anything, and whether one is running at all.
+  // liveReasoningChars restarts at zero each iteration, so it cannot distinguish a young
+  // generation from a dead one; this can.
+  let lastStreamProgressAt = 0;
+  let streamInFlight = false;
   let deadlineExtensions = 0;
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
   const onDeadline = (): void => {
@@ -2030,7 +2035,16 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // — the loop detector, the supervisor, maxIterations, inactivity, the ceiling, the
     // operator. What remains here is the one judgement a timer can make honestly: nothing
     // is being produced.
-    if (shouldDeferDeadline({ liveReasoningChars, liveLoopSuspected, minProducedChars: MIN_SUBSTANTIVE_OUTPUT_CHARS })) {
+    const msSinceLastProgress = streamInFlight && lastStreamProgressAt > 0
+      ? Date.now() - lastStreamProgressAt
+      : undefined;
+    if (shouldDeferDeadline({
+      liveReasoningChars,
+      liveLoopSuspected,
+      minProducedChars: MIN_SUBSTANTIVE_OUTPUT_CHARS,
+      msSinceLastProgress,
+      progressWindowMs: DEADLINE_LIVENESS_RECHECK_MS,
+    })) {
       deadlineExtensions++;
       logAudit("progress_verifier_intervened", {
         agentName: opts.agentName,
@@ -2040,6 +2054,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         action: "deadline_extended",
         reason: "the turn deadline fired while the generation was still producing non-circling text",
         liveReasoningChars,
+        msSinceLastProgress,
         recheckMs: DEADLINE_LIVENESS_RECHECK_MS,
         recheckCount: deadlineExtensions,
       }, { sessionId: opts.parentSessionId, severity: "info" });
@@ -4103,6 +4118,15 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         // Reset per iteration: the ratio describes THIS generation, not the run.
         iterationRepeatRatio = 0;
         liveReasoningChars = 0;
+        // A generation that has just STARTED is alive even before its first token — on this
+        // model time-to-first-token alone is around a minute.
+        //
+        // ONLY on the streaming path. The whole justification for recency is that the stream
+        // can see the model working; plain complete() reports nothing until it returns, so
+        // there "started recently" would mean "alive" for as long as it hung. Where there is
+        // no visibility the deadline stays the authority, exactly as before.
+        streamInFlight = Boolean(provider.completeViaStream);
+        lastStreamProgressAt = Date.now();
         response = provider.completeViaStream
           ? await provider.completeViaStream(messages, effectiveTools, llmSignal, {
               // Cheap observation so the loop threshold can be fitted from real runs
@@ -4111,6 +4135,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
                 iterationRepeatRatio = p.reasoningRepeatRatio;
                 liveReasoningChars = p.reasoningChars;
                 liveLoopSuspected = p.reasoningLoopDetected;
+                lastStreamProgressAt = Date.now();
               },
               // The operator's unbounded grant, readable from INSIDE the provider while
               // the stream is still running. A callback, not a boolean: the grant
@@ -4123,7 +4148,12 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
                 || longRunningGenerationManager.isTurnUnbounded(subSessionId),
             })
           : await provider.complete(messages, effectiveTools, llmSignal);
+        // The stream is done; from here until the next one starts there is no generation
+        // to be alive, so recency must stop voting. Without this a run that finished its
+        // last completion would defer its deadline forever on a stale timestamp.
+        streamInFlight = false;
       } catch (err) {
+        streamInFlight = false;
         if (opts.signal?.aborted) {
           const interruptedOutcome = classifyInterruptedOutcome({
             successfulToolCount,

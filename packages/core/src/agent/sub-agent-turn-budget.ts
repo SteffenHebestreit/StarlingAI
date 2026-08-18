@@ -255,7 +255,27 @@ export function shouldDeferDeadline(live: {
   liveReasoningChars: number;
   liveLoopSuspected: boolean;
   minProducedChars: number;
+  /** Wall-clock since the in-flight stream last delivered anything. Undefined when no
+   *  generation is running, which is not a defer. */
+  msSinceLastProgress?: number;
+  /** How stale that last chunk may be and still count as alive. */
+  progressWindowMs?: number;
 }): boolean {
   if (live.liveLoopSuspected) return false;
-  return live.liveReasoningChars >= live.minProducedChars;
+  if (live.liveReasoningChars >= live.minProducedChars) return true;
+  // A CHAR COUNT ALONE CANNOT SEE A YOUNG ITERATION.
+  //
+  // liveReasoningChars is reset to zero when each iteration's stream begins, so the
+  // accumulated-chars test only answers "has THIS generation said a lot yet". Run 6 died on
+  // the gap: iteration 13 finished at 20:37:31, the deadline re-checked at 20:39:40 into a
+  // freshly started iteration 14, saw a near-zero count, and aborted a sub-agent that was
+  // mid-completion — after correctly deferring five minutes earlier. On this model
+  // time-to-first-token alone is around a minute, so there is a real window every iteration
+  // in which a live run looks identical to a dead one by this measure.
+  //
+  // Recency answers the question the count was standing in for. A stream that delivered
+  // something within the window is alive whatever its running total; one that has gone
+  // quiet stops deferring on the very next check.
+  return live.msSinceLastProgress !== undefined
+    && live.msSinceLastProgress < (live.progressWindowMs ?? DEADLINE_LIVENESS_RECHECK_MS);
 }
