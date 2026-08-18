@@ -103,6 +103,18 @@ export const UNFINISHED_STUB_MARKER = "UNFINISHED_STUB";
 export const REASONING_BURN_RETRY_LIMIT = 2;
 
 /**
+ * How many times a run may announce its next step without taking it before the loop lets it end.
+ *
+ * Two. Run db88fa5b returned "Now I'll fill the styles stub with the full CSS subsystem" as its
+ * FINAL answer with six iterations unused, and the same session's predecessors ended on "Next
+ * turn: start filling the first marker (core) via edit_file" and "I'm running out of budget — one
+ * iteration remains". Three runs, three announcements, three deliveries of a scaffold. One
+ * hand-back is usually enough to convert an intention into a call; a model still narrating after
+ * two is narrating, and the run should end honestly rather than burn its cap being asked again.
+ */
+export const ANNOUNCEMENT_NUDGE_LIMIT = 2;
+
+/**
  * The corrective turn pushed into a sub-agent's history after its FIRST reasoning burn.
  *
  * Why a correction rather than a death: run dfe964f3 measured what killing it costs.

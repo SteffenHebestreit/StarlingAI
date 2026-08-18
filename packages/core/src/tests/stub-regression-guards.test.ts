@@ -132,6 +132,38 @@ describe("resume detection reads the workspace, not the task text", () => {
     }
   });
 
+  it("IGNORES the marker where it is documentation, not evidence", async () => {
+    // THE db88fa5b REGRESSION. Four agent systemPrompts in workspace/agents/10-core-agents.jsonc
+    // TEACH the staged-build convention and therefore contain the literal token. The first
+    // version of this scan walked the whole workspace, found them, and reported
+    // `mode: "resume", unfilledMarkers: 13` on a brand-new "build me a Tetris game" request —
+    // telling a fresh build "RESUME AN EXISTING BUILD … NEVER call write_file". On every run,
+    // forever. Scope is the entire correctness of this function: the token is evidence of an
+    // unfinished build only where builds are written.
+    const { findUnfilledStubFiles } = await import("../agent/sub-agent.js");
+    const dir = mkdtempSync(join(tmpdir(), "sai-resume-scope-"));
+    try {
+      mkdirSync(join(dir, "agents"), { recursive: true });
+      writeFileSync(
+        join(dir, "agents", "10-core-agents.jsonc"),
+        `{"subAgents":{"web_coder":{"systemPrompt":"... write each section as one line carrying the exact token ${MARKER} and its name ..."}}}`,
+        "utf8",
+      );
+      writeFileSync(join(dir, "README.md"), `We mark unbuilt parts with ${MARKER}.`, "utf8");
+
+      expect(findUnfilledStubFiles(dir).count, "config prose must not read as a resume").toBe(0);
+
+      // ...and a real unfinished artifact in the output zone still does.
+      mkdirSync(join(dir, "generated", "game"), { recursive: true });
+      writeFileSync(join(dir, "generated", "game", "app.js"), `throw new Error("${MARKER}: loop");`, "utf8");
+      const found = findUnfilledStubFiles(dir);
+      expect(found.count).toBe(1);
+      expect(found.files.join(",")).toContain("app.js");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("reports NOTHING for a clean workspace — a fresh build must stay fresh", async () => {
     const { findUnfilledStubFiles } = await import("../agent/sub-agent.js");
     const dir = mkdtempSync(join(tmpdir(), "sai-resume-clean-"));

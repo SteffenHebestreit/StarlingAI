@@ -84,10 +84,12 @@ import {
   buildStagedBuildFirstStepInstruction,
   buildReasoningBurnCorrection,
   REASONING_BURN_RETRY_LIMIT,
+  ANNOUNCEMENT_NUDGE_LIMIT,
   STAGED_BUILD_TASK_CHAR_THRESHOLD,
   STAGED_BUILD_REQUIRED_TOOLS,
   UNFINISHED_STUB_MARKER,
 } from "./sub-agent-prompt-guidance.js";
+import { GENERATED_SUBDIR } from "../tools/workspace-path.js";
 import { mergeAgentModelOverride, applyEffortModelOverlay, applyStreamCapOverlay } from "./sub-agent-model-config.js";
 import { resolveTurnBudgetMs } from "./sub-agent-turn-budget.js";
 import {
@@ -1213,12 +1215,26 @@ export function artifactFileLooksTruncated(artifact: Record<string, unknown>, wo
  * skeleton, destroying six filled subsystems. What distinguishes the two cases is not in the
  * task text at all, it is on disk.
  *
- * Only the harness ever writes this token, so a hit is unambiguous and no topic words are
- * involved. Bounded hard (depth, file count, file size) and fails open to "not a resume",
- * because being wrong here costs one redundant skeleton while blocking the scan would cost
- * every resume run.
+ * SCOPED TO THE ARTIFACT ZONE, and that scope is the whole correctness of this function.
+ * The first version walked the entire workspace and run db88fa5b is what it cost: four of the
+ * agent systemPrompts in workspace/agents/10-core-agents.jsonc TEACH the staged-build
+ * convention and therefore contain the literal token, so the scan reported
+ * `mode: "resume", unfilledMarkers: 13` on a brand-new "build me a Tetris game" request and
+ * told a fresh build "RESUME AN EXISTING BUILD — DO NOT START OVER … NEVER call write_file".
+ * Every run, forever. The token is only EVIDENCE of an unfinished build where builds are
+ * written; anywhere else it is documentation about builds, which is the opposite of evidence.
+ *
+ * Bounded hard (depth, file count, file size) and fails open to "not a resume", because being
+ * wrong here costs one redundant skeleton while blocking the scan would cost every resume run.
  */
 export function findUnfilledStubFiles(workspaceRoot: string): { files: string[]; count: number } {
+  // Artifacts only. A marker outside generated/ is prose about the convention, not a build.
+  const artifactRoot = resolvePath(workspaceRoot, GENERATED_SUBDIR);
+  if (!fs.existsSync(artifactRoot)) return { files: [], count: 0 };
+  return scanForStubMarkers(artifactRoot, GENERATED_SUBDIR);
+}
+
+function scanForStubMarkers(scanRoot: string, relPrefix: string): { files: string[]; count: number } {
   const SKIP = new Set(["node_modules", ".git", ".starlingai", "dist", "build", ".cache"]);
   const MAX_FILES = 400;
   const MAX_BYTES = 2_000_000;
@@ -1260,7 +1276,7 @@ export function findUnfilledStubFiles(workspaceRoot: string): { files: string[];
   };
 
   try {
-    walk(workspaceRoot, "", 0);
+    walk(scanRoot, relPrefix, 0);
   } catch { /* fail open */ }
   return { files, count };
 }
@@ -2414,6 +2430,9 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // provider has no run identity — it sees one stream at a time and cannot tell a
     // second burn from a first. See REASONING_BURN_RETRY_LIMIT.
     let reasoningBurns = 0;
+    // Times this run announced a next step without taking it. Bounded so a model that will
+    // only ever narrate cannot spin to the iteration cap being told to act.
+    let announcementNudges = 0;
     // Cumulative reasoning already accounted for by a correction. Subtracted in
     // sampleProgress so the supervisor's absolute budget measures reasoning since the
     // last correction rather than since the run began.
@@ -4351,6 +4370,68 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
 
       // No tool calls — final answer
       if (response.tool_calls.length === 0) {
+        // AN ANNOUNCEMENT IS NOT A DELIVERABLE WHILE THE ARTIFACT IS STILL UNFINISHED.
+        //
+        // Run db88fa5b ended here, and it is the clearest failure measured so far. web_coder
+        // had used 8 of 14 iterations and 13 tool calls; its ninth turn returned exactly one
+        // sentence — "Now I'll fill the styles stub with the full CSS subsystem (board 3D
+        // scene, cells, panels, overlays)." — with no tool call. That is a model saying what
+        // it is ABOUT to do. The loop read "no tool calls = final answer", ended the run with
+        // six iterations unused, and the user was handed a scaffold plus a status report.
+        //
+        // The empty-response rescue below does not catch it: the response is not empty, it is
+        // an intention. The distinguishing evidence is not in the text (that would be a
+        // phrase-matching heuristic, and models announce in every language) — it is on disk:
+        // markers this build left behind mean the artifact it was asked for is demonstrably
+        // unfinished, whatever the turn says. So we do not accept the turn, we hand it back.
+        //
+        // Bounded exactly like the burn correction: iterations must remain, an operator stop
+        // or cancellation wins first, and after ANNOUNCEMENT_NUDGE_LIMIT the run is allowed to
+        // end so a model that will not act cannot spin to the iteration cap.
+        if (
+          isStagedBuild
+          && announcementNudges < ANNOUNCEMENT_NUDGE_LIMIT
+          && iterations + 1 < maxIterations
+          && !lrgOperatorStop
+          && !supervisorStop
+          && !opts.signal?.aborted
+          && !longRunningGenerationManager.isStopRequested(subSessionId)
+        ) {
+          const remaining = findUnfilledStubFiles(opts.workspacePath);
+          if (remaining.count > 0) {
+            announcementNudges++;
+            const announced = normalizeSubAgentOutput(response.content).trim();
+            history.push({
+              role: "assistant",
+              content: announced.length > 0 ? announced : "(no action taken)",
+            });
+            history.push({
+              role: "user",
+              content: [
+                `YOU DESCRIBED THE NEXT STEP BUT DID NOT TAKE IT — and the artifact is not finished.`,
+                `${remaining.count} ${UNFINISHED_STUB_MARKER} marker(s) are still on disk in: ${remaining.files.slice(0, 4).join(", ")}.`,
+                `Saying what you are about to do is not doing it, and this run does not end while those markers remain.`,
+                `Your next message must be an edit_file call replacing ONE of those marker lines with that subsystem's complete code — that line as old_string. No preamble, no plan, just the call.`,
+                `You have ${maxIterations - iterations - 1} iteration(s) left; several edit_file calls in one turn is the fastest way through.`,
+              ].join("\n"),
+            });
+            logAudit("progress_verifier_intervened", {
+              agentName: opts.agentName,
+              runSessionId: subSessionId,
+              trigger: "iteration",
+              verdict: "announced_without_acting",
+              action: "corrected",
+              reason: "the run returned an intention with no tool call while unfilled markers remained on disk",
+              unfilledMarkers: remaining.count,
+              markerFiles: remaining.files.slice(0, 4),
+              nudgeCount: announcementNudges,
+              iterations,
+            }, { sessionId: opts.parentSessionId, severity: "warn" });
+            iterations++;
+            continue;
+          }
+        }
+
         let result = normalizeSubAgentOutput(response.content);
 
         // Recovery: if the agent used tools (gathered real content) but returned

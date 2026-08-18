@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -78,15 +78,25 @@ interface StubResponse {
   truncatedBy?: string;
 }
 
-function writeTempConfig(agentName: string): { tempDir: string; configPath: string } {
+function writeTempConfig(agentName: string, stagedBuild = false): { tempDir: string; configPath: string } {
   const tempDir = mkdtempSync(join(tmpdir(), "starlingai-mid-stream-burn-"));
   const configPath = join(tempDir, "starlingai.json");
+  if (stagedBuild) {
+    // An UNFINISHED artifact in the output zone: the on-disk evidence that the run's
+    // deliverable is not done, whatever its final turn claims.
+    mkdirSync(join(tempDir, "generated", "game"), { recursive: true });
+    writeFileSync(
+      join(tempDir, "generated", "game", "app.js"),
+      `throw new Error("UNFINISHED_STUB: styles");`,
+      "utf8",
+    );
+  }
   writeFileSync(configPath, JSON.stringify({
     subAgents: {
       [agentName]: {
         description: "Mid-stream burn fixture",
         systemPrompt: "Work the task.",
-        tools: ["read_file"],
+        tools: stagedBuild ? ["read_file", "write_file", "edit_file"] : ["read_file"],
         maxIterations: 6,
         // Comfortably above the clock this fixture advances, so a wind-down here is
         // always the supervisor's decision and never the turn deadline's.
@@ -140,9 +150,21 @@ function plainAnswer(text: string): StubResponse {
   };
 }
 
+
+/** The ANNOUNCEMENT shape: a model saying what it is about to do, with no tool call. */
+function announcement(): StubResponse {
+  return {
+    content: "Now I'll fill the styles stub with the full CSS subsystem (board 3D scene, cells, panels, overlays).",
+    reasoning: "",
+    tool_calls: [],
+    usage: { promptTokens: 7000, completionTokens: 30, totalTokens: 7030, estimated: true },
+    finishReason: "stop",
+  };
+}
+
 /** Drives the real runSubAgent loop over a fixed response SEQUENCE (last one repeats). */
-async function runFixture(agentName: string, sequence: StubResponse[]) {
-  const { tempDir, configPath } = writeTempConfig(agentName);
+async function runFixture(agentName: string, sequence: StubResponse[], opts?: { stagedBuild?: boolean }) {
+  const { tempDir, configPath } = writeTempConfig(agentName, opts?.stagedBuild ?? false);
   process.env["SAI_CONFIG_PATH"] = configPath;
   vi.resetModules();
 
@@ -160,9 +182,14 @@ async function runFixture(agentName: string, sequence: StubResponse[]) {
   });
 
   const { runSubAgent } = await import("../agent/sub-agent.js");
+  // A staged build needs a SPECIFICATION-sized task (> STAGED_BUILD_TASK_CHAR_THRESHOLD),
+  // which is what makes the classifier fire — same structural condition as production.
+  const task = opts?.stagedBuild
+    ? "Build a complete playable browser game as one self-contained page. ".repeat(12)
+    : "Do something useful.";
   const output = String(await runSubAgent({
     agentName,
-    task: "Do something useful.",
+    task,
     parentSessionId: `mid-stream-burn-${agentName}`,
     workspacePath: tempDir,
   }));
@@ -287,6 +314,48 @@ describe("sub-agent — a provider-aborted burn is corrected once, then fatal", 
       if (hasToolCalls) continue;
       expect(String(m.content ?? "").length, "empty assistant turn in history").toBeGreaterThan(0);
     }
+  });
+
+  it("refuses to accept an ANNOUNCEMENT as the final answer while markers remain", async () => {
+    // RUN db88fa5b, exactly. web_coder had used 8 of 14 iterations and 13 tool calls, then
+    // returned one sentence — "Now I'll fill the styles stub with the full CSS subsystem" —
+    // with no tool call. The loop read "no tool calls = final answer", ended the run with six
+    // iterations unused, and the user got a scaffold and a status report. The model wanted to
+    // finish; the harness would not let it.
+    //
+    // The trigger is on-disk evidence, not phrasing: markers remain, so the artifact is
+    // demonstrably unfinished whatever the turn says. No phrase list, works in any language.
+    const { output, calls } = await runFixture("announce_agent", [
+      announcement(),
+      toolCallAnswer(),
+      plainAnswer("Filled the styles subsystem."),
+    ], { stagedBuild: true });
+
+    expect(calls).toBeGreaterThanOrEqual(2);
+    expect(output).toContain("Filled the styles subsystem.");
+    expect(output).not.toContain("Now I'll fill the styles stub");
+
+    const second = messagesOfCall(1);
+    const handedBack = second.filter((m) => m.role === "user").at(-1);
+    expect(String(handedBack?.content)).toContain("YOU DESCRIBED THE NEXT STEP BUT DID NOT TAKE IT");
+    expect(String(handedBack?.content)).toContain("UNFINISHED_STUB");
+
+    const intervened = auditEvents.filter((e) => e.event === "progress_verifier_intervened");
+    expect(intervened.some((e) => e.payload["verdict"] === "announced_without_acting")).toBe(true);
+  });
+
+  it("ACCEPTS a final answer when no markers remain — the run really is done", async () => {
+    // THE DISCRIMINATOR. Identical shape, identical absence of a tool call; only the on-disk
+    // evidence differs. Without this the guard would refuse to let any staged build end.
+    const { output, calls } = await runFixture("announce_done_agent", [
+      plainAnswer("The artifact is complete and verified."),
+    ]);
+
+    expect(calls).toBe(1);
+    expect(output).toContain("The artifact is complete and verified.");
+    expect(
+      auditEvents.filter((e) => e.payload["verdict"] === "announced_without_acting"),
+    ).toHaveLength(0);
   });
 
   it("hands the operator's unbounded grant to the provider, as a live callback", async () => {
