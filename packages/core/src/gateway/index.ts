@@ -29,7 +29,7 @@ import { mountFederationRoutes } from "./federation-router.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { handleFederationDelegateStream } from "./federation-stream.js";
 import { RpcConnection } from "./rpc.js";
-import { getAllSessions } from "../agent/session.js";
+import { getAllSessions, getSession } from "../agent/session.js";
 import { probeDockerReachability } from "../agent/container-runner.js";
 import {
   buildSessionAuditMarkdownDetached,
@@ -2789,6 +2789,65 @@ export function createGateway() {
     // active mirrors steered here, but expose it explicitly so the client knows
     // whether to fall back to a normal new-message send.
     return c.json({ steered, active: turnSteeringManager.isTurnActive(sessionId) });
+  });
+
+  // Cancel an in-flight turn — gracefully by default, hard only when asked.
+  //
+  // Closing the SSE stream already aborts a turn, but it aborts it the hard way and only
+  // from the one client holding the stream. Two primitives already existed for this and
+  // neither was reachable per-session: requestStop() latches a graceful wind-down that the
+  // sub-agent loop's isStopRequested poll turns into a synthesised best-available result
+  // (so a half-finished build still comes back with its artifact), and the swarm's
+  // requestDistributedSessionCancel() hard-aborts the turn across instances.
+  //
+  // Graceful is the default because on a long build the difference is a partial artifact
+  // versus none. `force` is for a run that is genuinely wedged and will not reach its next
+  // poll. The stop latch is cleared at the start of each orchestrator turn, so neither
+  // choice carries into the next message.
+  app.post("/api/sessions/:sessionId/stop", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const sessionId = c.req.param("sessionId")?.trim();
+    if (!sessionId) return c.json({ error: "sessionId is required" }, 400);
+
+    let force = false;
+    try {
+      const body = await c.req.json() as { force?: unknown };
+      force = body?.force === true;
+    } catch {
+      // No body is the common case for a plain cancel — treat it as graceful, not a 400.
+    }
+
+    // Same ownership invariant the AG-UI stream enforces before it will drive a turn: a
+    // caller may not stop another user's run. Opaque 404 so the response does not confirm
+    // that the session id exists.
+    const caller = await authenticatedUser(c.req.header("Authorization"));
+    if (getConfig().auth?.enabled === true) {
+      const session = getSession(sessionId);
+      const owner = session?.userId;
+      const isAdmin = userHasRole(caller, "operator");
+      if (owner !== undefined && owner !== caller?.username && !isAdmin) {
+        return c.json({ error: "Session not found" }, 404);
+      }
+    }
+
+    // Report whether a turn was actually running. A stop against an idle session is not an
+    // error — the client may be racing the turn's own completion — but the caller needs to
+    // know, so it can stop showing a "cancelling…" state that will never resolve.
+    const active = turnSteeringManager.isTurnActive(sessionId);
+    const actor = caller?.username ?? "user";
+
+    if (force) {
+      const { requestDistributedSessionCancel } = await import("../swarm/control.js");
+      const { commandId, abortedLocally } = await requestDistributedSessionCancel(sessionId, {
+        reason: "user_cancel", actor,
+      });
+      return c.json({ stopping: active, active, mode: "force", commandId, abortedLocally });
+    }
+
+    longRunningGenerationManager.requestStop(sessionId, `user_cancel:${actor}`);
+    return c.json({ stopping: active, active, mode: "graceful" });
   });
 
   // ── Site credentials + guardrails config routes — extracted to ./security-config-routes.ts ──

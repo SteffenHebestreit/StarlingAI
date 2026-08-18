@@ -155,6 +155,70 @@ describe("gateway HTTP bridge", () => {
     }
   }, gatewayTestTimeoutMs);
 
+  it("cancels an in-flight turn gracefully, and only for an authenticated caller", async () => {
+    // Cancelling used to mean dropping the SSE connection, which hard-aborts the turn and
+    // throws away a long build's staged work. This route reaches the graceful wind-down
+    // latch instead, so the run synthesises a best-available result on its next poll.
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-stop-"));
+    const port = 18200 + Math.floor(Math.random() * 1000);
+    const configPath = join(tempDir, "starlingai.json");
+
+    writeFileSync(configPath, JSON.stringify({
+      gateway: { port, jwtSecret: "s".repeat(32) },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    delete process.env["SAI_JWT_SECRET"];
+    process.env["SAI_MASTER_KEY"] = "m".repeat(32);
+    process.env["SAI_CRED_STORE"] = join(tempDir, PRODUCT.stateDirName, "credentials.enc");
+    process.env["SAI_AUDIT_LOG"] = join(tempDir, PRODUCT.stateDirName, "audit.jsonl");
+
+    vi.resetModules();
+
+    const [{ createGateway }, auth, longRunning] = await Promise.all([
+      import("../gateway/index.js"),
+      import("../gateway/auth.js"),
+      import("../agent/long-running-generation.js"),
+    ]);
+
+    const gateway = createGateway();
+    await gateway.start();
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    try {
+      await waitForHealth(`${baseUrl}/healthz`);
+      const sessionId = "stop-route-session";
+      longRunning.longRunningGenerationManager.clearStopRequested(sessionId);
+
+      // An unauthenticated caller must not be able to stop anyone's run.
+      const anon = await fetch(`${baseUrl}/api/sessions/${sessionId}/stop`, { method: "POST" });
+      expect(anon.status).toBe(401);
+      expect(longRunning.longRunningGenerationManager.isStopRequested(sessionId)).toBe(false);
+
+      const token = await auth.createToken("admin", { role: "admin" });
+      const res = await fetch(`${baseUrl}/api/sessions/${sessionId}/stop`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json() as Record<string, unknown>;
+      // Graceful is the default — a bare POST must never hard-abort.
+      expect(body["mode"]).toBe("graceful");
+      // No turn is running here, so `active` is false; the stop still latches, which is what
+      // makes it safe to fire against a turn that is racing its own completion.
+      expect(body["active"]).toBe(false);
+      expect(longRunning.longRunningGenerationManager.isStopRequested(sessionId)).toBe(true);
+
+      longRunning.longRunningGenerationManager.clearStopRequested(sessionId);
+    } finally {
+      await gateway.stop();
+      auth.resetAuthStateForTests();
+      await flushAuditLogForTests();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, gatewayTestTimeoutMs);
+
   it("allows configured browser origins for direct gateway access", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-cors-"));
     const port = 18100 + Math.floor(Math.random() * 1000);

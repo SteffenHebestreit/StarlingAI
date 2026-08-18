@@ -755,6 +755,64 @@ export const useGatewayStore = defineStore("gateway", () => {
     if (_pendingStreamText) { streamingText.value += _pendingStreamText; _pendingStreamText = ""; }
   }
 
+  // Reasoning gets the same rAF coalescing as the text lane, and for the same reason: a
+  // build turn emits tens of thousands of reasoning characters, and a reactive write per
+  // token would re-render the panel on each one.
+  //
+  // It also gets something the text lane does not need — a bounded tail. Reasoning is a
+  // live view of what an agent is doing right now, not a transcript; the full
+  // chain-of-thought is already in the audit log. Retaining all of it would grow the
+  // rendered DOM without bound on exactly the long runs where the panel matters most, so
+  // each lane keeps its last REASONING_TAIL_CHARS and drops the rest from the head.
+  const REASONING_TAIL_CHARS = 8_000;
+  function boundedTail(existing: string, addition: string): string {
+    const combined = existing + addition;
+    return combined.length > REASONING_TAIL_CHARS ? combined.slice(-REASONING_TAIL_CHARS) : combined;
+  }
+
+  let _pendingReasoning = "";
+  const _pendingSubAgentReasoning = new Map<string, string>();
+  let _reasoningRaf: number | null = null;
+  // `force` mirrors flushStreamTextNow: the residual must still land when the turn has
+  // already flipped isStreaming false, or the last reasoning before completion is lost from
+  // the message we are about to build. A stale rAF callback (force=false) still discards.
+  function flushPendingReasoning(force = false): void {
+    _reasoningRaf = null;
+    if (!isStreaming.value && !force) { _pendingReasoning = ""; _pendingSubAgentReasoning.clear(); return; }
+    if (_pendingReasoning) {
+      streamingReasoning.value = boundedTail(streamingReasoning.value, _pendingReasoning);
+      _pendingReasoning = "";
+    }
+    if (_pendingSubAgentReasoning.size > 0) {
+      // One entry per agent, in first-seen order, so the panel shows a stable lane per
+      // delegate rather than an interleaved scroll of everyone's thoughts.
+      const next = streamingSubAgentReasoning.value.map(entry => ({ ...entry }));
+      for (const [agent, text] of _pendingSubAgentReasoning) {
+        const existing = next.find(entry => entry.agent === agent);
+        if (existing) existing.text = boundedTail(existing.text, text);
+        else next.push({ agent, text: boundedTail("", text) });
+      }
+      streamingSubAgentReasoning.value = next;
+      _pendingSubAgentReasoning.clear();
+    }
+  }
+  function scheduleReasoningFlush(): void {
+    if (_reasoningRaf !== null) return;
+    if (typeof requestAnimationFrame === "function") _reasoningRaf = requestAnimationFrame(() => flushPendingReasoning());
+    else flushPendingReasoning();
+  }
+  function appendReasoning(text: string, agent?: string): void {
+    if (!text) return;
+    if (agent) _pendingSubAgentReasoning.set(agent, (_pendingSubAgentReasoning.get(agent) ?? "") + text);
+    else _pendingReasoning += text;
+    scheduleReasoningFlush();
+  }
+  function flushReasoningNow(): void {
+    if (_reasoningRaf !== null && typeof cancelAnimationFrame === "function") cancelAnimationFrame(_reasoningRaf);
+    _reasoningRaf = null;
+    flushPendingReasoning(true);
+  }
+
   const isError = ref(false);       // true when last turn ended in an error
   const turnLikelyStalled = ref(false);
   const authFailed = ref(false);    // true when connection was rejected due to bad token
@@ -2010,8 +2068,17 @@ export const useGatewayStore = defineStore("gateway", () => {
       const data = msg["data"] as Record<string, unknown>;
       if (data["requestId"] === pendingRequestId.value) {
         notePendingTurnActivity();
-        // Deliberately discard provider chain-of-thought. The backend keeps
-        // aggregate token/latency telemetry and surfaces safe phase updates.
+        // The reasoning lanes were built end-to-end — reset, persisted onto the finished
+        // message, rendered by MessageBubble behind its toggle — but this handler dropped
+        // every event, so both were always empty. On a delegated build that left the user
+        // watching a spinner for twenty-odd minutes with no way to tell work from a hang,
+        // which is also the state in which they need to decide whether to stop the run.
+        //
+        // `delegated` splits the two lanes: a sub-agent's thinking is attributed to the
+        // agent that produced it, the orchestrator's own stays in the main lane.
+        const text = typeof data["text"] === "string" ? data["text"] : "";
+        const sourceAgent = typeof data["sourceAgent"] === "string" ? data["sourceAgent"] : undefined;
+        if (text) appendReasoning(text, data["delegated"] === true ? (sourceAgent ?? "sub-agent") : undefined);
       }
       return;
     }
@@ -2175,6 +2242,7 @@ export const useGatewayStore = defineStore("gateway", () => {
 
       if (status === "ok" || status === "blocked") {
         flushStreamTextNow(); // apply any buffered streamed text before snapshotting it
+        flushReasoningNow();  // …and the buffered reasoning, which is snapshotted with it
         // Replace streaming placeholder with final message
         const idx = messages.value.findIndex(m => m.id === "streaming");
         const isBlocked = status === "blocked";

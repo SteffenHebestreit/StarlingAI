@@ -93,15 +93,15 @@
         </div>
       </div>
 
-      <!-- Sub-agent reasoning (debug) -->
+      <!-- Sub-agent reasoning — live while the delegate works, collapsed once it is history -->
       <div v-if="subAgentReasoning.length" class="thinking-section thinking-section--subagent">
-        <div class="thinking-header" @click="subAgentReasoningOpen = !subAgentReasoningOpen">
+        <div class="thinking-header" @click="toggleSubAgentReasoning()">
           <span class="thinking-toggle-label">
-            {{ subAgentReasoningOpen ? 'Hide' : 'Show' }} sub-agent thinking ({{ subAgentReasoning.length }})
+            {{ showSubAgentReasoning ? 'Hide' : 'Show' }} sub-agent thinking ({{ subAgentReasoning.length }})
           </span>
-          <span class="thinking-chevron">{{ subAgentReasoningOpen ? '▲' : '▼' }}</span>
+          <span class="thinking-chevron">{{ showSubAgentReasoning ? '▲' : '▼' }}</span>
         </div>
-        <div v-if="subAgentReasoningOpen" class="thinking-body">
+        <div v-if="showSubAgentReasoning" class="thinking-body">
           <div
             v-for="(entry, i) in subAgentReasoning"
             :key="`subreason-${i}`"
@@ -617,7 +617,19 @@ const isThinking = computed(() => {
 });
 
 // ── Sub-agent reasoning (debug toggle) ───────────────────────────────────────
+// Open while the delegate is still working — a live process view is the whole point of the
+// panel, and collapsing it by default is what made a twenty-minute build indistinguishable
+// from a hang. Once the turn is finished the same content is history, so it collapses back
+// out of the transcript. An explicit click always wins from then on.
 const subAgentReasoningOpen = ref(false);
+const subAgentReasoningUserToggled = ref(false);
+const showSubAgentReasoning = computed(() =>
+  subAgentReasoningUserToggled.value ? subAgentReasoningOpen.value : props.isStreaming);
+function toggleSubAgentReasoning(): void {
+  const next = !showSubAgentReasoning.value;
+  subAgentReasoningUserToggled.value = true;
+  subAgentReasoningOpen.value = next;
+}
 const subAgentReasoning = computed(() => {
   if (props.isStreaming) return props.streamingSubAgentReasoning ?? [];
   return props.message.subAgentReasoning ?? [];

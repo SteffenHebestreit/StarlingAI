@@ -247,6 +247,65 @@ export async function handleAguiStream(
       onIntervention: (notice: InterventionNotice) => {
         sseEvent(res, { type: "OPERATOR_INTERVENTION", runId, notice });
       },
+
+      // DELEGATED WORK IS WHERE THE TIME GOES, AND THIS STREAM SAID NOTHING ABOUT IT.
+      //
+      // Every callback above reports the ORCHESTRATOR. But a build turn spends nearly all of
+      // its wall clock inside one delegate_to_agent call — 25 of 31 minutes on the measured
+      // runs — during which this stream emitted a heartbeat comment and nothing else. From
+      // the outside a working build and a hung one looked identical, which is also why a
+      // client could not make an informed decision to stop one.
+      //
+      // The runtime has published these events all along and rpc.ts has consumed them since
+      // the dashboard was built; this path simply never subscribed. Same event, same
+      // semantics — `delegated: true` and the sub-agent's name so a client can render the
+      // child's thinking in its own lane rather than splicing it into the assistant's.
+      onSubAgentProgress: (event) => {
+        if (event.kind === "reasoning" && event.reasoning) {
+          sseEvent(res, {
+            type: "THINKING_TEXT_MESSAGE_CONTENT",
+            messageId,
+            delta: event.reasoning,
+            sourceAgent: event.agentName,
+            delegated: true,
+          });
+          return;
+        }
+        if (event.kind === "tool_start" && event.toolName) {
+          sseEvent(res, {
+            type: "TOOL_CALL_STARTED",
+            toolCallId: event.toolCallId ?? `${event.agentName}_${event.iteration}`,
+            toolCallName: event.toolName,
+            parentMessageId: messageId,
+            args: event.args,
+            sourceAgent: event.agentName,
+            delegated: true,
+          });
+          return;
+        }
+        if (event.kind === "tool_done" && event.toolName) {
+          sseEvent(res, {
+            type: "TOOL_CALL_ENDED",
+            toolCallId: event.toolCallId ?? `${event.agentName}_${event.iteration}`,
+            toolCallName: event.toolName,
+            output: event.result,
+            metadata: event.metadata,
+            sourceAgent: event.agentName,
+            delegated: true,
+          });
+          return;
+        }
+        if (event.kind === "started" || event.kind === "completed") {
+          sseEvent(res, {
+            type: "SUB_AGENT_STATUS",
+            runId,
+            agentName: event.agentName,
+            status: event.kind,
+            iteration: event.iteration,
+            ...(event.summary ? { summary: event.summary } : {}),
+          });
+        }
+      },
     });
 
     cleanupTimers();

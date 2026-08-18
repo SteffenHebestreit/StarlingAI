@@ -183,6 +183,78 @@ describe("AG-UI streaming", () => {
     }
   });
 
+  it("forwards a delegated sub-agent's thinking and tool calls to the stream", async () => {
+    // Regression: this path subscribed to none of the sub-agent progress events, so a turn
+    // that delegated a long build emitted heartbeats and nothing else for as long as the
+    // delegate ran. The stream must carry the child's reasoning and tool activity, tagged
+    // with the agent that produced it so a client can keep it out of the assistant's lane.
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agui-"));
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      gateway: { jwtSecret: "a".repeat(32), turnTimeoutMs: 30_000 },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+
+    vi.doMock("../agent/runtime.js", () => ({
+      runTurn: vi.fn(async (opts: Record<string, unknown>) => {
+        const onSubAgentProgress = opts["onSubAgentProgress"] as
+          ((event: Record<string, unknown>) => void) | undefined;
+
+        onSubAgentProgress?.({ agentName: "web_coder", kind: "started", iteration: 0 });
+        onSubAgentProgress?.({
+          agentName: "web_coder", kind: "reasoning", iteration: 1,
+          reasoning: "I need a 2.5D projection for the well",
+        });
+        onSubAgentProgress?.({
+          agentName: "web_coder", kind: "tool_start", iteration: 1,
+          toolName: "write_file", toolCallId: "call_1", args: { path: "index.html" },
+        });
+        onSubAgentProgress?.({
+          agentName: "web_coder", kind: "tool_done", iteration: 1,
+          toolName: "write_file", toolCallId: "call_1", result: "wrote 13474 bytes",
+        });
+        onSubAgentProgress?.({ agentName: "web_coder", kind: "completed", iteration: 2 });
+        (opts["onChunk"] as ((t: string) => void) | undefined)?.("done");
+
+        return {
+          response: "done", toolCallsExecuted: 1, guardrailEvents: [],
+          usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 }, blocked: false,
+        };
+      }),
+    }));
+
+    try {
+      const { handleAguiStream } = await import("../gateway/agui.js");
+      const res = new FakeResponse();
+      await handleAguiStream(res as never, { message: "build tetris" });
+
+      const events = parseSseEvents(res.chunks);
+
+      // The child's chain-of-thought reaches the client, attributed and marked delegated so
+      // it is never spliced into the orchestrator's own thinking panel.
+      const thinking = events.filter(e => e["type"] === "THINKING_TEXT_MESSAGE_CONTENT"
+        && e["delegated"] === true);
+      expect(thinking).toHaveLength(1);
+      expect(thinking[0]?.["delta"]).toBe("I need a 2.5D projection for the well");
+      expect(thinking[0]?.["sourceAgent"]).toBe("web_coder");
+
+      const started = events.find(e => e["type"] === "TOOL_CALL_STARTED" && e["delegated"] === true);
+      expect(started?.["toolCallName"]).toBe("write_file");
+      expect(started?.["toolCallId"]).toBe("call_1");
+
+      const ended = events.find(e => e["type"] === "TOOL_CALL_ENDED" && e["delegated"] === true);
+      expect(ended?.["output"]).toBe("wrote 13474 bytes");
+
+      // started/completed are lifecycle, not content — they get their own event type rather
+      // than masquerading as assistant tool calls.
+      const status = events.filter(e => e["type"] === "SUB_AGENT_STATUS");
+      expect(status.map(e => e["status"])).toEqual(["started", "completed"]);
+      expect(status[0]?.["agentName"]).toBe("web_coder");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("runs the turn under the requested sessionId + authenticated userId (document-RAG scope)", async () => {
     // Regression: handleAguiStream previously called createSession without the
     // requested sessionId or a userId, so session/user-scoped documents dropped
