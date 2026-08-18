@@ -11,7 +11,13 @@ import { beginProviderCall, recordProviderToken, endProviderCall } from "../obse
 // fires on exactly the shape agent/progress-verifier.ts already classifies as "burning".
 // The dependency is one-way at runtime: progress-verifier's only import from this module
 // is `import type`, which is erased.
-import { COLD_START_REASONING_BUDGET_CHARS, MIN_SUBSTANTIVE_OUTPUT_CHARS } from "../agent/progress-verifier.js";
+import {
+  MIN_SUBSTANTIVE_OUTPUT_CHARS,
+  REASONING_ABSOLUTE_CEILING_CHARS,
+  REASONING_LOOP_WINDOW_CHARS,
+  REASONING_SAMPLE_INTERVAL_CHARS,
+  detectReasoningLoop,
+} from "../agent/progress-verifier.js";
 
 const log = childLogger("provider:openai-compatible");
 const DEFAULT_PROVIDER_TIMEOUT_MS = 30_000;
@@ -129,7 +135,7 @@ export class ReasoningBurnAbort extends Error {
   constructor(public readonly reasoningChars: number, public readonly contentChars: number) {
     super(
       `LLM stream aborted mid-generation: ${reasoningChars} reasoning characters with no tool call and `
-      + `${contentChars} characters of answer text (budget ${COLD_START_REASONING_BUDGET_CHARS}) `
+      + `${contentChars} characters of answer text (ceiling ${REASONING_ABSOLUTE_CEILING_CHARS}) `
       + "— the model is thinking, not working",
     );
     this.name = "ReasoningBurnAbort";
@@ -159,6 +165,16 @@ export interface StreamProgress {
   /** Has the model begun emitting a tool call? The single strongest "this run is
    *  working" signal, and the reason the healthy reference run is untouchable. */
   toolCallStarted: boolean;
+  /**
+   * Has a CONTENT sample found the reasoning going in circles?
+   *
+   * The one non-counter field, and the reason the doc above says "counters only" rather
+   * than "counters only, no exceptions": deciding on length alone cannot tell a model
+   * working hard from a model stuck, so the stream keeps a bounded tail of reasoning
+   * (REASONING_LOOP_WINDOW_CHARS, never more) and samples it every
+   * REASONING_SAMPLE_INTERVAL_CHARS. Latched: once circling, re-checking cannot unstick it.
+   */
+  reasoningLoopDetected: boolean;
 }
 
 /** Options both completion paths accept. Separate from the streaming-only bag below so
@@ -195,9 +211,12 @@ export interface StreamCallOptions extends CompletionCallOptions {
  * characters (0.53x the budget), and it then started a tool call.
  */
 export function isReasoningBurn(progress: Readonly<StreamProgress>): boolean {
-  return !progress.toolCallStarted
-    && progress.contentChars < MIN_SUBSTANTIVE_OUTPUT_CHARS
-    && progress.reasoningChars >= COLD_START_REASONING_BUDGET_CHARS;
+  if (progress.toolCallStarted) return false;
+  if (progress.contentChars >= MIN_SUBSTANTIVE_OUTPUT_CHARS) return false;
+  // Content first. Length is the backstop, and it now sits far enough away that reaching it
+  // is itself the finding rather than the policy (see REASONING_ABSOLUTE_CEILING_CHARS).
+  return progress.reasoningLoopDetected
+    || progress.reasoningChars >= REASONING_ABSOLUTE_CEILING_CHARS;
 }
 
 interface LMStudioProviderOptions {
@@ -1596,7 +1615,26 @@ export class LMStudioProvider {
     // per-chunk allocation. Nothing outside this generator could previously learn any
     // of these three numbers until the call returned, which for the measured failure
     // was 20.7 minutes after they stopped being useful.
-    const progress: StreamProgress = { reasoningChars: 0, contentChars: 0, toolCallStarted: false };
+    const progress: StreamProgress = { reasoningChars: 0, contentChars: 0, toolCallStarted: false, reasoningLoopDetected: false };
+    // Bounded tail of reasoning for the content sampler. Never exceeds the window, so the
+    // memory held is ~12 KB regardless of how long the generation runs.
+    let reasoningTail = "";
+    let charsSinceLoopSample = 0;
+    const sampleReasoningForLoop = (delta: string): void => {
+      if (progress.reasoningLoopDetected || !options?.guardReasoningBurn) return;
+      reasoningTail = (reasoningTail + delta).slice(-REASONING_LOOP_WINDOW_CHARS);
+      charsSinceLoopSample += delta.length;
+      if (charsSinceLoopSample < REASONING_SAMPLE_INTERVAL_CHARS) return;
+      charsSinceLoopSample = 0;
+      const verdict = detectReasoningLoop(reasoningTail);
+      if (verdict.looping) {
+        progress.reasoningLoopDetected = true;
+        log.warn(
+          { model: modelId, reasoningChars: progress.reasoningChars, repeatRatio: Number(verdict.repeatRatio.toFixed(3)) },
+          "Reasoning is re-treading ground — content sample says this generation is circling",
+        );
+      }
+    };
 
     // Per-chunk inactivity timer: if the provider stops sending data for
     // longer than the configured request timeout, abort the stream.
@@ -1695,7 +1733,7 @@ export class LMStudioProvider {
         // the OpenAI SDK delta type, so read via a cast.
         const reasoningDelta = (delta as { reasoning_content?: string }).reasoning_content;
         if (reasoningDelta) {
-          progress.reasoningChars += reasoningDelta.length;
+          progress.reasoningChars += reasoningDelta.length; sampleReasoningForLoop(reasoningDelta);
           yield { type: "reasoning_delta", content: reasoningDelta };
         }
 
@@ -1708,11 +1746,11 @@ export class LMStudioProvider {
             if (insideThink) {
               const close = text.indexOf("</think>");
               if (close === -1) {
-                if (text) { progress.reasoningChars += text.length; yield { type: "reasoning_delta", content: text }; }
+                if (text) { progress.reasoningChars += text.length; sampleReasoningForLoop(text); yield { type: "reasoning_delta", content: text }; }
                 text = "";
               } else {
                 const inner = text.slice(0, close);
-                if (inner) { progress.reasoningChars += inner.length; yield { type: "reasoning_delta", content: inner }; }
+                if (inner) { progress.reasoningChars += inner.length; sampleReasoningForLoop(inner); yield { type: "reasoning_delta", content: inner }; }
                 text = text.slice(close + "</think>".length);
                 insideThink = false;
               }
@@ -1771,10 +1809,17 @@ export class LMStudioProvider {
         // check above: a break would report a guillotined generation as a clean stop.
         // Aborting streamAc first tears the transport down so the remote stops
         // generating, then the throw routes through completeViaStream's salvage.
+        // THE GRANT WAIVES LENGTH, NOT PATHOLOGY.
+        //
+        // An operator answering the dock is saying "this may take as long as it needs" —
+        // they are not saying "keep going even if it is going in circles", and run db88fa5b
+        // is what conflating those costs: the grant disarmed the whole guard and one
+        // iteration then spent 80,810 characters and 29 minutes to move a single <div>.
+        // So a detected loop still trips through a grant; only the resource ceiling yields.
         if (
           options?.guardReasoningBurn
           && isReasoningBurn(progress)
-          && !(options.isUnbounded?.() ?? false)
+          && (progress.reasoningLoopDetected || !(options.isUnbounded?.() ?? false))
         ) {
           const burnErr = new ReasoningBurnAbort(progress.reasoningChars, progress.contentChars);
           log.warn(

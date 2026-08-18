@@ -5,7 +5,8 @@ import {
   hasForwardProgress,
   buildProgressJudgePrompt,
   parseProgressVerdict,
-  COLD_START_REASONING_BUDGET_CHARS,
+  REASONING_ABSOLUTE_CEILING_CHARS,
+  detectReasoningLoop,
   EMPTY_PROGRESS_SAMPLE,
   MIN_SUBSTANTIVE_OUTPUT_CHARS,
   PROGRESS_CHECK_INTERVAL_MS,
@@ -117,14 +118,19 @@ describe("progress supervisor — the healthy run must survive every rule", () =
     const openingThink = sample({ reasoningChars: 23_876 });
     const d = classifyRunProgress(EMPTY_PROGRESS_SAMPLE, openingThink, 0);
     expect(d.action).toBe("continue");
-    expect(openingThink.reasoningChars).toBeLessThan(COLD_START_REASONING_BUDGET_CHARS);
+    expect(openingThink.reasoningChars).toBeLessThan(REASONING_ABSOLUTE_CEILING_CHARS);
   });
 
-  it("keeps a healthy margin over the healthy run and under both pathologies", () => {
-    // The budget is only defensible if it sits between the measured shapes. If a future
-    // edit narrows either margin this fails loudly rather than silently killing runs.
-    expect(COLD_START_REASONING_BUDGET_CHARS / 23_876).toBeGreaterThan(1.5);
-    expect(COLD_START_REASONING_BUDGET_CHARS / 60_385).toBeLessThan(0.8);
+  it("the ceiling sits FAR above every measured shape — it is a backstop, not a classifier", () => {
+    // This assertion used to say the opposite: that 45,000 sat BETWEEN the healthy run and
+    // the pathologies, because length was how the two were told apart. It no longer is.
+    // Length cannot distinguish them without also killing long honest work, so the decision
+    // moved into the stream where the reasoning TEXT is (detectReasoningLoop, and see
+    // reasoning-loop-detector.test.ts for the separation that replaced this one). What is
+    // left here must clear every measured shape by a wide margin, or it is still a classifier.
+    for (const measured of [23_876, 60_385, 64_587, 80_810]) {
+      expect(REASONING_ABSOLUTE_CEILING_CHARS / measured).toBeGreaterThan(3);
+    }
   });
 
   it("does not stall a run that is emitting content without calling tools", () => {
@@ -155,21 +161,30 @@ describe("progress supervisor — both pathologies must be stopped, early", () =
     expect(stoppedAtMin).toBe(9);
   });
 
-  it("stops ephemeral for burning, ~5 minutes before it actually died", () => {
-    const { decisions, stoppedAtWindow } = replay(EPHEMERAL_BAD);
+  it("still stops a cold run that reaches the RESOURCE ceiling", () => {
+    // The measured ephemeral run (60,385 chars) no longer trips this arm — see the
+    // deliberate-weakening test below, and reasoning-loop-detector.test.ts for where that
+    // decision now lives. What must remain true is that the backstop is connected: a cold
+    // run consuming ceiling-scale reasoning with nothing to show is still wound down.
+    const atCeiling = EPHEMERAL_BAD.map((sm) => sample({
+      ...sm,
+      reasoningChars: sm.reasoningChars * 6,
+    }));
+    const { decisions, stoppedAtWindow } = replay(atCeiling);
+    expect(atCeiling.at(-1)!.reasoningChars).toBeGreaterThan(REASONING_ABSOLUTE_CEILING_CHARS);
     expect(stoppedAtWindow).not.toBeNull();
     expect(decisions.at(-1)!.verdict).toBe("burning");
     expect(decisions.at(-1)!.action).toBe("wind_down");
-    // It ran 20 min; the budget bites the window after reasoning crosses 45,000 — 15 min in.
-    const stoppedAtMin = (stoppedAtWindow! * WINDOW_S) / 60;
-    expect(stoppedAtMin).toBe(15);
   });
 
   it("does not let a 37-character result buy the burner an exemption", () => {
     // The zero-tool run's entire output was 37 chars. Treating any output at all as
     // "it produced something" would have downgraded this to a dock prompt.
     expect(EPHEMERAL_BAD.at(-1)!.outputChars).toBeLessThan(MIN_SUBSTANTIVE_OUTPUT_CHARS);
-    const d = classifyRunProgress(EMPTY_PROGRESS_SAMPLE, EPHEMERAL_BAD.at(-1)!, 0);
+    // Scaled to the backstop, since that is the magnitude this arm now judges at. The rule
+    // under test is unchanged: a token of output must not buy an exemption from it.
+    const atCeiling = sample({ ...EPHEMERAL_BAD.at(-1)!, reasoningChars: REASONING_ABSOLUTE_CEILING_CHARS + 1 });
+    const d = classifyRunProgress(EMPTY_PROGRESS_SAMPLE, atCeiling, 0);
     expect(d.action).toBe("wind_down");
   });
 });
@@ -194,8 +209,25 @@ describe("progress supervisor — discrimination proof (revert the fix, watch it
     for (let i = 1; i < EPHEMERAL_BAD.length; i++) {
       expect(revertedIsHardStall(EPHEMERAL_BAD[i - 1]!, EPHEMERAL_BAD[i]!)).toBe(false);
     }
-    // The new rule stops it. Same fixture, opposite verdict — the signal, not the test, is doing the work.
-    expect(replay(EPHEMERAL_BAD).stoppedAtWindow).not.toBeNull();
+    // WHERE THE DECISION WENT. The counter-based rule no longer stops this either — not
+    // because it regressed, but because volume was never the distinguishing fact: the same
+    // 60,385 characters could be a model circling or a model doing hard work, and this arm
+    // cannot see which. The signal that CAN see it reads the reasoning text, so the proof
+    // moved with it: identical volume, opposite verdict, decided on content.
+    expect(replay(EPHEMERAL_BAD).stoppedAtWindow).toBeNull();
+
+    const circling = Array.from({ length: 60 }, () =>
+      "Wait, let me reconsider the rotation. The SRS kick table for the J piece has five "
+      + "offsets and I must apply them in order against the board bounds before accepting it. "
+      + "Actually, let me reconsider the rotation. The SRS kick table has five offsets.").join("\n");
+    const working = Array.from({ length: 400 }, (_, i) =>
+      `Step ${i}: column ${i % 10} maps to offset ${i * 3}, kick entry ${i % 4}, wall bound `
+      + `${320 - i}; the pivot moved ${i} units since the last case.`).join("\n");
+
+    expect(circling.length).toBeGreaterThan(10_000);
+    expect(working.length).toBeGreaterThan(10_000);
+    expect(detectReasoningLoop(circling).looping).toBe(true);
+    expect(detectReasoningLoop(working).looping).toBe(false);
   });
 
   it("the old rule sees the 28-minute content_writer stall as FORWARD PROGRESS too", () => {
@@ -217,12 +249,18 @@ describe("progress supervisor — discrimination proof (revert the fix, watch it
     }
   });
 
-  it("raising the budget past the measured pathologies un-stops the burner", () => {
-    // Proves the 45,000 threshold — not merely the arm's existence — is load-bearing.
-    const overBudget = EPHEMERAL_BAD.filter((s) => s.reasoningChars >= COLD_START_REASONING_BUDGET_CHARS);
-    expect(overBudget.length).toBeGreaterThan(0);
-    const stillUnderARaisedBudget = EPHEMERAL_BAD.filter((s) => s.reasoningChars >= 70_000);
-    expect(stillUnderARaisedBudget).toHaveLength(0);
+  it("no longer stops the 60,385-char burner between iterations — and that is deliberate", () => {
+    // A DELIBERATE WEAKENING, recorded so nobody re-tightens it by accident. This arm reads
+    // counters only; it cannot see whether that reasoning was circling or productive, and
+    // stopping on volume alone is what would have killed a 15-minute honest think. The
+    // measured ephemeral pathology therefore passes here now, and is caught upstream instead:
+    // the provider samples the reasoning text mid-stream and aborts when it repeats.
+    const worstMeasured = Math.max(...EPHEMERAL_BAD.map((s) => s.reasoningChars));
+    expect(worstMeasured).toBeGreaterThan(45_000);
+    expect(worstMeasured).toBeLessThan(REASONING_ABSOLUTE_CEILING_CHARS);
+    for (const s of EPHEMERAL_BAD) {
+      expect(classifyRunProgress(EMPTY_PROGRESS_SAMPLE, s, 0).action).not.toBe("wind_down");
+    }
   });
 
   it("a wall-clock rule short enough to catch them would have killed the healthy run", () => {
@@ -242,7 +280,11 @@ describe("progress supervisor — ambiguous shapes go to the dock, not to a kill
   });
 
   it("asks instead of stopping when a tool-less run is over budget but genuinely emitting", () => {
-    const writer = sample({ reasoningChars: 60_000, outputChars: 40_000 });
+    // Scaled to BACKSTOP magnitude on purpose: this arm is no longer a classifier at
+    // 45,000, so the measured 60,000 no longer reaches it. What is still worth asserting is
+    // the arm's SHAPE — a tool-less run that is nonetheless emitting real output is
+    // ambiguous (it may be a legitimate writer) and goes to the dock rather than being cut.
+    const writer = sample({ reasoningChars: REASONING_ABSOLUTE_CEILING_CHARS + 1, outputChars: 40_000 });
     const d = classifyRunProgress(EMPTY_PROGRESS_SAMPLE, writer, 0);
     expect(d.action).toBe("ask");
     expect(d.verdict).toBe("burning");

@@ -3,7 +3,6 @@ import { AnthropicProvider } from "../providers/anthropic.js";
 import { FailoverChatProvider } from "../providers/failover.js";
 import { wrapProviderWithBoundary } from "../providers/llm-boundary.js";
 import { LMStudioProvider, type ChatProvider, type CompletionCallOptions, type LLMResponse, type StreamChunk } from "../providers/lmstudio.js";
-import { COLD_START_REASONING_BUDGET_CHARS } from "../agent/progress-verifier.js";
 import type { ModelConfig } from "../config/schema.js";
 
 /**
@@ -46,6 +45,39 @@ const PATHOLOGY_REASONING_CHARS = 59_418;
 const HEALTHY_OPENING_REASONING_CHARS = 23_876;
 const CHUNK_CHARS = 1_000;
 
+/**
+ * The two SHAPES a long think can have. This distinction is the whole policy.
+ *
+ * The fixtures used to be `"r".repeat(n)` — filler chosen to reach a character count back
+ * when the count was the decision. It cannot be used now for the reason that made the old
+ * policy wrong: 45,000 identical characters ARE a loop, so filler would trip the content
+ * check instantly and every test would pass for the wrong reason.
+ *
+ * `progressive` says something new in every sentence — a model working hard. `looping`
+ * re-derives one paragraph forever — a model stuck. Measured separation on these two
+ * generators is 0.0000 vs 0.97 repeat ratio, either side of a 0.5 threshold.
+ */
+type Shape = "progressive" | "looping";
+
+function reasoningText(shape: Shape, total: number): string {
+  const parts: string[] = [];
+  let i = 0;
+  while (parts.join("\n").length < total) {
+    parts.push(shape === "progressive"
+      ? `Step ${i}: column ${i % 10} maps to offset ${i * 3}, so the kick entry is ${i % 4} `
+        + `and the wall bound becomes ${320 - i}; the pivot moved ${i} units since the last `
+        + `case, which changes the spawn row for piece ${String.fromCharCode(65 + (i % 7))}.`
+      : "Wait, let me reconsider the rotation. The SRS kick table for the J piece has five "
+        + "offsets and I must apply them in order against the board bounds before accepting "
+        + "it. Actually, let me reconsider the rotation. The SRS kick table has five offsets.");
+    i++;
+  }
+  // The providers trim the joined reasoning, so a payload that happens to be sliced on a
+  // newline comes back one character short and every length assertion here misses by one.
+  // Swap the edge whitespace rather than trimming it, so the length stays exactly `total`.
+  return parts.join("\n").slice(0, total).replace(/^\s/, ".").replace(/\s$/, ".");
+}
+
 /** How many transport chunks `total` characters take at CHUNK_CHARS each. */
 function chunkCount(total: number): number {
   return Math.ceil(total / CHUNK_CHARS);
@@ -62,7 +94,8 @@ interface Tally {
  * its signal deliberately: the consumer must stop on its own, exactly as the sibling
  * abort-reaches-transport fixtures do.
  */
-function lmBurner(opts: { total: number; tally: Tally; toolCallAfter?: boolean; contentChars?: number }) {
+function lmBurner(opts: { total: number; tally: Tally; toolCallAfter?: boolean; contentChars?: number; shape?: Shape }) {
+  const payload = reasoningText(opts.shape ?? "progressive", opts.total);
   const provider = new LMStudioProvider("http://localhost:1234/v1", "k", base, { maxRetries: 0 });
   (provider as unknown as { client: unknown }).client = {
     chat: {
@@ -76,7 +109,7 @@ function lmBurner(opts: { total: number; tally: Tally; toolCallAfter?: boolean; 
             const size = Math.min(CHUNK_CHARS, opts.total - emitted);
             emitted += size;
             opts.tally.produced += 1;
-            yield { choices: [{ delta: { reasoning_content: "r".repeat(size) }, finish_reason: null }] };
+            yield { choices: [{ delta: { reasoning_content: payload.slice(emitted - size, emitted) }, finish_reason: null }] };
             await new Promise((r) => setImmediate(r));
           }
           if (opts.toolCallAfter) {
@@ -99,7 +132,8 @@ function lmBurner(opts: { total: number; tally: Tally; toolCallAfter?: boolean; 
 }
 
 /** The same fixture shapes on the Anthropic wire (thinking_delta / tool_use blocks). */
-function anthropicBurner(opts: { total: number; tally: Tally; toolCallAfter?: boolean }) {
+function anthropicBurner(opts: { total: number; tally: Tally; toolCallAfter?: boolean; shape?: Shape }) {
+  const payload = reasoningText(opts.shape ?? "progressive", opts.total);
   const provider = new AnthropicProvider("https://api.anthropic.com", "sk-ant-api03-key", anthropicBase, { maxRetries: 0 });
   (provider as unknown as { client: unknown }).client = {
     messages: {
@@ -111,7 +145,7 @@ function anthropicBurner(opts: { total: number; tally: Tally; toolCallAfter?: bo
           const size = Math.min(CHUNK_CHARS, opts.total - emitted);
           emitted += size;
           opts.tally.produced += 1;
-          yield { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "r".repeat(size) } };
+          yield { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: payload.slice(emitted - size, emitted) } };
           await new Promise((r) => setImmediate(r));
         }
         if (opts.toolCallAfter) {
@@ -132,17 +166,15 @@ function anthropicBurner(opts: { total: number; tally: Tally; toolCallAfter?: bo
 describe("mid-stream reasoning burn — OpenAI-compatible provider", () => {
   it("aborts the burning generation WHILE IT STREAMS and keeps the partial", async () => {
     const tally: Tally = { produced: 0 };
-    const provider = lmBurner({ total: PATHOLOGY_REASONING_CHARS, tally });
+    const provider = lmBurner({ total: PATHOLOGY_REASONING_CHARS, tally, shape: "looping" });
 
     const res = await provider.completeViaStream([{ role: "user", content: "build it" }], []);
 
-    // Stopped AT the budget, not at the end of the monologue. The two halves are the
-    // whole point: the second number is what the old code returned.
+    // Stopped because the CONTENT says it is circling — and stopped far sooner than any
+    // character budget would have, because a loop is recognisable long before 45,000.
     expect(res.reasoning).toBeDefined();
-    expect(res.reasoning!.length).toBe(COLD_START_REASONING_BUDGET_CHARS);
     expect(res.reasoning!.length).toBeLessThan(PATHOLOGY_REASONING_CHARS);
     // MID-STREAM, measured at the transport: it was never asked for the rest.
-    expect(tally.produced).toBe(chunkCount(COLD_START_REASONING_BUDGET_CHARS));
     expect(tally.produced).toBeLessThan(chunkCount(PATHOLOGY_REASONING_CHARS));
     // Salvaged, and labelled — the caller must be able to tell this from a transport
     // drop or a deadline, because it means "wind down", not "retry".
@@ -167,19 +199,21 @@ describe("mid-stream reasoning burn — OpenAI-compatible provider", () => {
     expect(tally.produced).toBe(chunkCount(HEALTHY_OPENING_REASONING_CHARS));
   });
 
-  it("leaves a run that thinks right up to the budget and THEN acts", async () => {
+  it("LETS A LONG THINK RUN when it keeps saying new things — length is not the pathology", async () => {
+    // THE POLICY, and the limitation the old guard carried made obsolete. Previously a run
+    // whose opening think passed 45,000 characters before its first tool call was cut, and
+    // that was the acknowledged trade. It is no longer a trade: 59,418 characters of
+    // PROGRESSIVE reasoning followed by a tool call is a model working, and it runs to
+    // completion untouched. Only circling stops a run now.
     const tally: Tally = { produced: 0 };
-    // One character short of the budget, then the tool call. The boundary is honest
-    // about what this guard does and does not promise: a run whose opening think runs
-    // PAST 45,000 before its first tool call IS cut — that is the trade the threshold
-    // buys, and the measured healthy peak sits at 23,876, 0.53x of it.
-    const provider = lmBurner({ total: COLD_START_REASONING_BUDGET_CHARS - 1, tally, toolCallAfter: true });
+    const provider = lmBurner({ total: PATHOLOGY_REASONING_CHARS, tally, toolCallAfter: true, shape: "progressive" });
 
     const res = await provider.completeViaStream([{ role: "user", content: "build it" }], []);
 
     expect(res.tool_calls).toHaveLength(1);
-    expect(res.reasoning!.length).toBe(COLD_START_REASONING_BUDGET_CHARS - 1);
+    expect(res.reasoning!.length).toBe(PATHOLOGY_REASONING_CHARS);
     expect(res.truncatedBy).toBeUndefined();
+    expect(tally.produced).toBe(chunkCount(PATHOLOGY_REASONING_CHARS));
   });
 
   it("leaves a tool-free writer that is PRODUCING TEXT alone past the budget", async () => {
@@ -193,9 +227,9 @@ describe("mid-stream reasoning burn — OpenAI-compatible provider", () => {
     expect(res.truncatedBy).toBeUndefined();
   });
 
-  it("does NOT cut a run holding the operator's unbounded grant", async () => {
+  it("does NOT cut a long PROGRESSIVE run holding the operator's unbounded grant", async () => {
     const tally: Tally = { produced: 0 };
-    const provider = lmBurner({ total: PATHOLOGY_REASONING_CHARS, tally });
+    const provider = lmBurner({ total: PATHOLOGY_REASONING_CHARS, tally, shape: "progressive" });
 
     const res = await provider.completeViaStream([{ role: "user", content: "build it" }], [], undefined, {
       isUnbounded: () => true,
@@ -204,6 +238,21 @@ describe("mid-stream reasoning burn — OpenAI-compatible provider", () => {
     expect(res.reasoning!.length).toBe(PATHOLOGY_REASONING_CHARS);
     expect(res.truncatedBy).toBeUndefined();
     expect(tally.produced).toBe(chunkCount(PATHOLOGY_REASONING_CHARS));
+  });
+
+  it("STILL cuts a LOOPING run holding the grant — the grant waives length, not pathology", async () => {
+    // Run db88fa5b is the cost of conflating the two: the grant disarmed the whole guard
+    // and one iteration then spent 80,810 characters and 29 minutes to move a single <div>.
+    // An operator answering the dock means "take the time you need", never "keep circling".
+    const tally: Tally = { produced: 0 };
+    const provider = lmBurner({ total: PATHOLOGY_REASONING_CHARS, tally, shape: "looping" });
+
+    const res = await provider.completeViaStream([{ role: "user", content: "build it" }], [], undefined, {
+      isUnbounded: () => true,
+    });
+
+    expect(res.truncatedBy).toBe("reasoning_burn");
+    expect(tally.produced).toBeLessThan(chunkCount(PATHOLOGY_REASONING_CHARS));
   });
 
   it("surfaces reasoning-chars-so-far to the caller AS THEY ARRIVE, not at the end", async () => {
@@ -228,12 +277,12 @@ describe("mid-stream reasoning burn — OpenAI-compatible provider", () => {
 describe("mid-stream reasoning burn — Anthropic provider", () => {
   it("aborts the burning generation mid-stream and keeps the partial", async () => {
     const tally: Tally = { produced: 0 };
-    const provider = anthropicBurner({ total: PATHOLOGY_REASONING_CHARS, tally });
+    const provider = anthropicBurner({ total: PATHOLOGY_REASONING_CHARS, tally, shape: "looping" });
 
     const res = await provider.completeViaStream([{ role: "user", content: "build it" }], []);
 
-    expect(res.reasoning!.length).toBe(COLD_START_REASONING_BUDGET_CHARS);
-    expect(tally.produced).toBe(chunkCount(COLD_START_REASONING_BUDGET_CHARS));
+    expect(res.reasoning!.length).toBeLessThan(PATHOLOGY_REASONING_CHARS);
+    expect(tally.produced).toBeLessThan(chunkCount(PATHOLOGY_REASONING_CHARS));
     expect(res.truncatedBy).toBe("reasoning_burn");
     expect(res.finishReason).toBe("length");
   });

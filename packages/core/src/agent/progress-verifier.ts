@@ -12,9 +12,10 @@
  * Three pathologies, three detectors, all pure and all structural (no keywords, no
  * topic awareness, no LLM in the hot path):
  *
- *  1. BURNING — reasoning pouring out with no productive action behind it. Bounded
- *     by a reasoning-character BUDGET, not a clock (see
- *     COLD_START_REASONING_BUDGET_CHARS for why a clock cannot work here).
+ *  1. BURNING — reasoning going in CIRCLES with no productive action behind it. Judged
+ *     on the reasoning text itself (detectReasoningLoop), sampled inside the stream;
+ *     a character ceiling remains only as a resource backstop. Neither a clock nor a
+ *     length can tell a model working hard from a model stuck, and both were tried.
  *  2. STALLED — the run has produced something, then nothing new across
  *     consecutive windows: no productive tool call, no workspace change, no new
  *     content hash, no substantive new output.
@@ -47,27 +48,101 @@ export const PROGRESS_CHECK_INTERVAL_MS = 180_000;
  *  every ~108s on average (15 calls over 26.9 min), so it never came within 3x. */
 export const STALL_LIMIT = 2;
 
+
 /**
- * Reasoning budget for a run that has produced NOTHING yet.
+ * ── CONTENT DECIDES, LENGTH ONLY BACKSTOPS ───────────────────────────────────────
  *
- * Measured, from three reference runs, and the single most important number here.
- * The pathologies were *descriptively* obvious inside two minutes — but as a
- * THRESHOLD two minutes is fatal: at that point the healthy run looked identical
- * to both of them. Its first iteration was 23,876 reasoning chars with zero tool
- * calls, which at the measured ~16.8 completion tok/s is ~7.9 MINUTES of pure
- * thinking on a run that went on to make 15 tool calls and write 5 files. Any
- * wall-clock rule short enough to catch the pathologies kills it.
+ * The budget above is a proxy, and run db88fa5b showed what the proxy costs in both
+ * directions: an operator grant waived it and one iteration then spent 80,810 characters
+ * and 29 minutes to move a single <div>, while a legitimate 15-minute think would have
+ * been killed at 45,000 for the crime of being long. Length is not the pathology. Thinking
+ * that goes in circles is, and so is thinking that has lost the thread.
  *
- * A reasoning-character budget separates them where a clock cannot:
- *   healthy peak before first tool call   23,876
- *   ephemeral (0 tool calls, 20 min)      60,385
- *   content_writer (1 tool call, 28.8 min) 64,587
- * 45,000 sits 1.9x above the healthy peak and 0.74x below both failures. It fires
- * at roughly 15 minutes for a burner and never for the reference run — the
- * earliest point at which the two shapes are genuinely distinguishable rather than
- * merely different in hindsight.
+ * So the mid-stream check now SAMPLES THE TEXT every REASONING_SAMPLE_INTERVAL_CHARS and
+ * asks whether the model is re-treading ground, and the character ceiling is demoted to a
+ * resource backstop sitting far away.
+ *
+ * WHY REPETITION AND NOT AN LLM JUDGE. The obvious design — hand the reasoning to a model
+ * and ask "is this stuck?" — is wrong on this hardware specifically: there is ONE GPU, it
+ * is already saturated by the generation being judged, and the judge would be the same
+ * model that is stuck. A structural check costs microseconds, needs no GPU, cannot itself
+ * hang, and is language-independent — which matters because this repo's tasks arrive in
+ * German as often as English and a phrase list would only ever cover one of them.
+ *
+ * WHAT IS NOT CALIBRATED, STATED PLAINLY. The audit deliberately records reasoningChars but
+ * NOT reasoning text ("Preserve observability without persisting provider reasoning"), so
+ * there is no stored corpus to fit this threshold against — unlike every other constant in
+ * this file, which is derived from measured runs. 0.5 is therefore a deliberately
+ * conservative guess: half of a 12,000-character window must be literal re-tread before it
+ * counts. It is safe to guess here ONLY because a trip is cheap — the first one hands the
+ * run a corrective turn rather than killing it (see REASONING_BURN_RETRY_LIMIT), so a false
+ * positive costs one iteration, not the run. If this ever needs tightening, log the ratio
+ * on real runs first and fit it; do not nudge the number on a hunch.
  */
-export const COLD_START_REASONING_BUDGET_CHARS = 45_000;
+export const REASONING_SAMPLE_INTERVAL_CHARS = 2_000;
+/** Tail of reasoning examined per sample. Bounds both the work and the memory held. */
+export const REASONING_LOOP_WINDOW_CHARS = 12_000;
+/** Shingle size. Long enough that ordinary phrase reuse is not a repeat; short enough that
+ *  a re-derived paragraph is. */
+export const REASONING_LOOP_SHINGLE_CHARS = 120;
+/** Below this many shingles the window is too short for the ratio to mean anything. */
+export const REASONING_LOOP_MIN_SHINGLES = 40;
+/** Fraction of the window that must be duplicated before it reads as circling. */
+export const REASONING_LOOP_REPEAT_RATIO = 0.5;
+
+/**
+ * Absolute ceiling on one generation's reasoning — a RESOURCE backstop, not the policy.
+ *
+ * The policy is detectReasoningLoop. This exists so a single stream cannot consume
+ * unbounded wall-clock and GPU if the loop detector never fires (novel text forever), and
+ * it is set far above anything measured: the worst observed run was 80,810 characters, so
+ * 300,000 is ~3.7x that and roughly 100 minutes at the measured 16.8 tok/s. A run that
+ * reaches it is not "thinking too long", it is a run nobody is going to want the answer to.
+ */
+export const REASONING_ABSOLUTE_CEILING_CHARS = 300_000;
+
+/**
+ * Is this reasoning going in circles?
+ *
+ * Shingles the tail of the text and measures how much of it is duplicate. Normalization is
+ * lowercase + whitespace collapse and nothing else: no stemming, no stopwords, no language
+ * assumptions. Pure and allocation-light — hashes are computed over the character stream
+ * rather than by slicing substrings, so a sample costs one pass over at most
+ * REASONING_LOOP_WINDOW_CHARS.
+ *
+ * Returns the ratio as well as the verdict so a caller can log what it saw; the number is
+ * the evidence anyone tightening the threshold will need.
+ */
+export function detectReasoningLoop(text: string): { looping: boolean; repeatRatio: number; shingles: number } {
+  const normalized = text.slice(-REASONING_LOOP_WINDOW_CHARS).toLowerCase().replace(/\s+/g, " ");
+  const total = normalized.length - REASONING_LOOP_SHINGLE_CHARS + 1;
+  if (total < REASONING_LOOP_MIN_SHINGLES) {
+    return { looping: false, repeatRatio: 0, shingles: Math.max(0, total) };
+  }
+
+  // EVERY offset, not every Nth. A strided scan only sees repeats whose period happens to be
+  // a multiple of the stride: the first version of this used stride 60 and scored a fixture
+  // that was 98% duplicate at ratio 0.0, because the repeating block was ~350 characters and
+  // no two sampled offsets ever landed on the same phase. A rolling hash makes stride 1 cost
+  // one multiply-add per character, so there is no reason to sample at all.
+  const BASE = 131;
+  let removeFactor = 1;
+  for (let i = 1; i < REASONING_LOOP_SHINGLE_CHARS; i++) removeFactor = Math.imul(removeFactor, BASE) >>> 0;
+
+  let hash = 0;
+  for (let i = 0; i < REASONING_LOOP_SHINGLE_CHARS; i++) {
+    hash = (Math.imul(hash, BASE) + normalized.charCodeAt(i)) >>> 0;
+  }
+  const seen = new Set<number>([hash]);
+  for (let i = REASONING_LOOP_SHINGLE_CHARS; i < normalized.length; i++) {
+    const outgoing = Math.imul(normalized.charCodeAt(i - REASONING_LOOP_SHINGLE_CHARS), removeFactor) >>> 0;
+    hash = (Math.imul((hash - outgoing) >>> 0, BASE) + normalized.charCodeAt(i)) >>> 0;
+    seen.add(hash);
+  }
+
+  const repeatRatio = 1 - (seen.size / total);
+  return { looping: repeatRatio >= REASONING_LOOP_REPEAT_RATIO, repeatRatio, shingles: total };
+}
 
 /**
  * How much assistant output counts as actually having produced something.
@@ -171,14 +246,19 @@ export function classifyRunProgress(
   const producedSomething = cur.mutatedPaths > 0;
   const tookAction = cur.productiveToolCalls > 0 || producedSomething;
   if (!tookAction) {
-    if (cur.reasoningChars >= COLD_START_REASONING_BUDGET_CHARS) {
+    // BACKSTOP, NOT POLICY. This arm sees only counters — it runs between iterations and
+    // has no reasoning text to judge — so it can no longer be the thing that decides a run
+    // is stuck. That decision moved into the stream, where the text is (detectReasoningLoop).
+    // What is left here is a resource ceiling: a cold run reaching it has consumed a fleet's
+    // worth of GPU without producing anything, and that is worth stopping whatever it says.
+    if (cur.reasoningChars >= REASONING_ABSOLUTE_CEILING_CHARS) {
       const wrote = cur.outputChars >= MIN_SUBSTANTIVE_OUTPUT_CHARS;
       return {
         action: wrote ? "ask" : "wind_down",
         verdict: "burning",
         consecutiveStalls: 0,
         reason: `${cur.reasoningChars} reasoning chars with no productive tool call and no workspace change `
-          + `(budget ${COLD_START_REASONING_BUDGET_CHARS}, output ${cur.outputChars} chars) — `
+          + `(ceiling ${REASONING_ABSOLUTE_CEILING_CHARS}, output ${cur.outputChars} chars) — `
           + `the run is thinking, not working`,
       };
     }

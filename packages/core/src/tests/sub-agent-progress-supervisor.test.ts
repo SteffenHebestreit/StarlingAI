@@ -40,8 +40,16 @@ vi.mock("../providers/lmstudio.js", async (importActual) => ({
  *   worker   same reasoning volume, but genuinely working    -> never touched
  */
 
-/** Enough reasoning per iteration to cross COLD_START_REASONING_BUDGET_CHARS on the 3rd. */
-const REASONING_PER_ITERATION = 20_000;
+/**
+ * Enough reasoning per iteration to cross REASONING_ABSOLUTE_CEILING_CHARS on the 3rd.
+ *
+ * Was 20,000, sized to the old 45,000 budget. That budget is gone: length no longer decides
+ * whether a run is stuck (the reasoning TEXT does, sampled inside the stream), and what is
+ * left between iterations is a resource backstop three times higher than anything measured.
+ * This fixture therefore has to reach backstop scale for the WIRING it proves — that the
+ * supervisor is connected to the loop and can wind a run down — to be exercised at all.
+ */
+const REASONING_PER_ITERATION = 120_000;
 const CLOCK_STEP_MS = 200_000; // one supervisor window (180s) plus slack
 const SUPERVISOR_WIND_DOWN = "wound down by the progress supervisor";
 

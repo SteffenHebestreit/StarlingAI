@@ -49,6 +49,8 @@ import {
   type StreamChunk,
   type StreamProgress,
 } from "./lmstudio.js";
+// Content sampler — the decision is "is this circling", not "is this long".
+import { REASONING_LOOP_WINDOW_CHARS, REASONING_SAMPLE_INTERVAL_CHARS, detectReasoningLoop } from "../agent/progress-verifier.js";
 import { beginProviderCall, recordProviderToken, endProviderCall } from "../observability/provider-activity-monitor.js";
 import { logAudit } from "../audit/logger.js";
 
@@ -1026,7 +1028,22 @@ export class AnthropicProvider implements ChatProvider {
 
     // Live per-chunk reading of this generation — one object, mutated in place. Same
     // contract as the OpenAI-compatible provider's (see StreamProgress).
-    const progress: StreamProgress = { reasoningChars: 0, contentChars: 0, toolCallStarted: false };
+    // reasoningLoopDetected stays false here: this provider is the OBSERVATION path only —
+    // it does not arm the mid-stream abort, so no sampler runs and nothing may latch it.
+    const progress: StreamProgress = { reasoningChars: 0, contentChars: 0, toolCallStarted: false, reasoningLoopDetected: false };
+    // Same content sampler as the OpenAI-compatible provider, for the same reason: the
+    // decision is "is this circling", not "is this long", and a guard wired into one
+    // provider and not the other is a guard that silently does not exist on half the fleet.
+    let reasoningTail = "";
+    let charsSinceLoopSample = 0;
+    const sampleReasoningForLoop = (delta: string): void => {
+      if (progress.reasoningLoopDetected || !options?.guardReasoningBurn) return;
+      reasoningTail = (reasoningTail + delta).slice(-REASONING_LOOP_WINDOW_CHARS);
+      charsSinceLoopSample += delta.length;
+      if (charsSinceLoopSample < REASONING_SAMPLE_INTERVAL_CHARS) return;
+      charsSinceLoopSample = 0;
+      if (detectReasoningLoop(reasoningTail).looping) progress.reasoningLoopDetected = true;
+    };
 
     try {
       for await (const event of stream) {
@@ -1073,7 +1090,7 @@ export class AnthropicProvider implements ChatProvider {
               progress.contentChars += event.delta.text.length;
               yield { type: "text_delta", content: event.delta.text };
             } else if (event.delta.type === "thinking_delta") {
-              progress.reasoningChars += event.delta.thinking.length;
+              progress.reasoningChars += event.delta.thinking.length; sampleReasoningForLoop(event.delta.thinking);
               yield { type: "reasoning_delta", content: event.delta.thinking };
             } else if (event.delta.type === "input_json_delta") {
               const toolCallId = toolBlockIds.get(event.index);
@@ -1098,10 +1115,11 @@ export class AnthropicProvider implements ChatProvider {
         // read lazily so a grant answered mid-generation still wins, and the throw (not
         // a break) routes through completeViaStream's salvage.
         options?.onProgress?.(progress);
+        // The grant waives LENGTH, not pathology — same split as the OpenAI-compatible path.
         if (
           options?.guardReasoningBurn
           && isReasoningBurn(progress)
-          && !(options.isUnbounded?.() ?? false)
+          && (progress.reasoningLoopDetected || !(options.isUnbounded?.() ?? false))
         ) {
           const burnErr = new ReasoningBurnAbort(progress.reasoningChars, progress.contentChars);
           log.warn(
