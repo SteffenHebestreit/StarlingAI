@@ -91,7 +91,7 @@ import {
 } from "./sub-agent-prompt-guidance.js";
 import { GENERATED_SUBDIR } from "../tools/workspace-path.js";
 import { mergeAgentModelOverride, applyEffortModelOverlay, applyStreamCapOverlay } from "./sub-agent-model-config.js";
-import { resolveTurnBudgetMs } from "./sub-agent-turn-budget.js";
+import { resolveTurnBudgetMs, DEADLINE_COMPOSITION_EXTENSION_MS, DEADLINE_COMPOSITION_EXTENSION_LIMIT } from "./sub-agent-turn-budget.js";
 import {
   extractInfraFailureSignature,
   liveToolFamily,
@@ -1952,19 +1952,55 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
   const signal = opts.signal;
   // Escape hatch 1 (grant BEFORE the deadline): never fire at all. Aborting here would
   // kill the completion the operator was just promised would finish.
-  const timeoutHandle = turnTimeoutMs
-    ? setTimeout(() => {
-        if (longRunningGenerationManager.isUnbounded(subSessionId)) {
-          log.info(
-            { agentName: opts.agentName, runSessionId: subSessionId, turnTimeoutMs },
-            "Turn deadline suppressed — this run was granted unbounded budget",
-          );
-          return;
-        }
-        turnTimeoutReached = true;
-        deadlineAc.abort(new DeadlineAbort(turnTimeoutMs));
-      }, turnTimeoutMs)
-    : undefined;
+  // In-flight generation state, refreshed per chunk by the streaming hook below. Declared
+  // here because the DEADLINE reads it: a timer must be able to see that a model is writing.
+  let liveReasoningChars = 0;
+  let liveLoopSuspected = false;
+  let deadlineExtensions = 0;
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  const onDeadline = (): void => {
+    if (longRunningGenerationManager.isUnbounded(subSessionId)) {
+      log.info(
+        { agentName: opts.agentName, runSessionId: subSessionId, turnTimeoutMs },
+        "Turn deadline suppressed — this run was granted unbounded budget",
+      );
+      return;
+    }
+    // Escape hatch 3: DO NOT KILL A RUN THAT IS STILL WRITING.
+    //
+    // The fifth timer to end the same productive step. `coder` reasoned 52,116 characters
+    // across two iterations composing the fills for its markers and this deadline cut it at
+    // 891,072 ms of its 900,000 ms budget, before one edit_file was emitted. A clock cannot
+    // see that a model is working — but the stream can, and now says so.
+    //
+    // Bounded to DEADLINE_COMPOSITION_EXTENSION_LIMIT slices, and refused outright when the
+    // generation is circling, so this is an extension rather than an exemption.
+    if (
+      deadlineExtensions < DEADLINE_COMPOSITION_EXTENSION_LIMIT
+      && !liveLoopSuspected
+      && liveReasoningChars >= MIN_SUBSTANTIVE_OUTPUT_CHARS
+    ) {
+      deadlineExtensions++;
+      logAudit("progress_verifier_intervened", {
+        agentName: opts.agentName,
+        runSessionId: subSessionId,
+        trigger: "timer",
+        verdict: "on_track",
+        action: "deadline_extended",
+        reason: "the turn deadline fired while the generation was still producing non-circling text",
+        liveReasoningChars,
+        extensionMs: DEADLINE_COMPOSITION_EXTENSION_MS,
+        extensionsUsed: deadlineExtensions,
+      }, { sessionId: opts.parentSessionId, severity: "info" });
+      timeoutHandle = setTimeout(onDeadline, DEADLINE_COMPOSITION_EXTENSION_MS);
+      return;
+    }
+    turnTimeoutReached = true;
+    // Only reachable when a deadline was armed, which requires a positive budget; the
+    // fallback keeps the abort well-typed without inventing a second source of truth.
+    deadlineAc.abort(new DeadlineAbort(turnTimeoutMs ?? 0));
+  };
+  if (turnTimeoutMs) timeoutHandle = setTimeout(onDeadline, turnTimeoutMs);
   // Escape hatch 2 (grant AFTER the deadline already fired): swap in a fresh, un-aborted
   // controller so the run can actually call the model again. Nothing re-arms the timer —
   // an unbounded grant suspends the deadline for good, exactly as its comment promises;
@@ -2440,8 +2476,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // supervisor tell "composing a large edit" from "stalled": every other counter it reads
     // only moves when a call RETURNS, and a 17-minute composition returns nothing until it is
     // done. Reset at the top of each iteration so the delta a window sees is this generation's.
-    let liveReasoningChars = 0;
-    let liveLoopSuspected = false;
+
     // Cumulative reasoning already accounted for by a correction. Subtracted in
     // sampleProgress so the supervisor's absolute budget measures reasoning since the
     // last correction rather than since the run began.

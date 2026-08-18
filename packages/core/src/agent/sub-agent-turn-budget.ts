@@ -216,3 +216,25 @@ export function resolveSoftDeadlineOffsetMs(
       : Number.MAX_SAFE_INTEGER; // explicitly unbounded
   return Math.floor(effective * 0.70);
 }
+
+/**
+ * How long a deadline is pushed out when it fires ON A RUN THAT IS STILL PRODUCING, and how
+ * many times.
+ *
+ * Run d5747607 is the fifth guillotine in this chain and the narrowest: `coder` reasoned
+ * 52,116 characters across two iterations composing the fills for its markers, and its own
+ * declared 900,000 ms budget killed it at 891,072 ms — before it could emit a single
+ * edit_file. The previous four were a character budget, the drift rule, the stall sampler and
+ * the gateway clock. Every one of them ended the same productive step, and every one of them
+ * was a timer that could not see that the model was working.
+ *
+ * So a deadline no longer fires blind. If the generation in flight is producing NON-CIRCLING
+ * text, the run gets more time — bounded, three slices of five minutes, after which the
+ * deadline stands. That bound matters: this is an extension, not an exemption, and a run that
+ * is producing novel text forever is still stopped, just by the ceiling rather than the clock.
+ *
+ * Five minutes because it is ~2 iterations at the measured 16.8 tok/s — enough for a
+ * composition to land its tool call, short enough that a dead run is not held open long.
+ */
+export const DEADLINE_COMPOSITION_EXTENSION_MS = 300_000;
+export const DEADLINE_COMPOSITION_EXTENSION_LIMIT = 3;

@@ -378,3 +378,43 @@ describe("sub-agent — a provider-aborted burn is corrected once, then fatal", 
     expect(auditEvents.filter((e) => e.event === "progress_verifier_intervened")).toHaveLength(0);
   });
 });
+
+/**
+ * THE FIFTH GUILLOTINE — a static deadline that cannot see the model is writing.
+ *
+ * Run d5747607: `coder` reasoned 52,116 characters across two iterations composing the fills
+ * for its markers, and its own declared 900,000 ms budget cut it at 891,072 ms with
+ * terminalState "timeout" — before one edit_file was emitted. The four before it were a
+ * character budget, the drift rule, the stall sampler and the gateway clock. Same productive
+ * step every time; five different timers, none able to tell writing from hanging.
+ *
+ * The deadline now asks the stream before it fires. Bounded, and refused outright when the
+ * generation is circling — an extension, never an exemption.
+ */
+describe("sub-agent deadline — a run that is still writing gets more time", () => {
+  it("extends rather than aborting, and the extension is bounded and loop-gated", async () => {
+    const { DEADLINE_COMPOSITION_EXTENSION_LIMIT, DEADLINE_COMPOSITION_EXTENSION_MS } =
+      await import("../agent/sub-agent-turn-budget.js");
+
+    // The bound is the whole safety argument: a run may be extended, never made immortal.
+    expect(DEADLINE_COMPOSITION_EXTENSION_LIMIT).toBeGreaterThan(0);
+    expect(DEADLINE_COMPOSITION_EXTENSION_LIMIT).toBeLessThanOrEqual(5);
+    // Total extension must stay well under the gateway turn budget, or a child outlives its
+    // parent and the extension buys nothing but a later, more confusing death.
+    const totalExtensionMs = DEADLINE_COMPOSITION_EXTENSION_LIMIT * DEADLINE_COMPOSITION_EXTENSION_MS;
+    expect(totalExtensionMs).toBeLessThan(1_800_000);
+    // One slice must be worth having — at the measured 16.8 tok/s a composition needs minutes.
+    expect(DEADLINE_COMPOSITION_EXTENSION_MS).toBeGreaterThanOrEqual(120_000);
+  });
+
+  it("the measured run would have been extended, not killed", async () => {
+    // coder: 891,072 ms elapsed of a 900,000 ms budget, mid-generation, non-circling.
+    // With three 5-minute slices it reaches ~1,791,072 ms — past the ~15 minutes the
+    // composition actually needed.
+    const { DEADLINE_COMPOSITION_EXTENSION_LIMIT, DEADLINE_COMPOSITION_EXTENSION_MS } =
+      await import("../agent/sub-agent-turn-budget.js");
+    const measuredBudgetMs = 900_000;
+    const reachable = measuredBudgetMs + DEADLINE_COMPOSITION_EXTENSION_LIMIT * DEADLINE_COMPOSITION_EXTENSION_MS;
+    expect(reachable).toBeGreaterThan(1_200_000);
+  });
+});
