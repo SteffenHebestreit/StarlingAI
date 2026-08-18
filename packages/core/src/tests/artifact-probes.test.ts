@@ -181,3 +181,71 @@ describe("structural completeness — the unfilled-placeholder failure", () => {
     expect(findLocalAssetRefs('<link rel="icon" href="favicon.ico">')).toEqual([]);
   });
 });
+
+/**
+ * THE DELIVERABLE IS THE PAGE, NOT THE FILE THAT HAPPENED TO BE WRITTEN LAST.
+ *
+ * Run db88fa5b shipped a broken app with `artifactProbeStatus: "pass"`. The probed artifact
+ * was index.html — genuinely clean — while the styles.css it loads on the very next line
+ * still carried an UNFINISHED_STUB marker. The refs were already being DISCOVERED here (a
+ * soft self_contained receipt names them); they were simply never opened, so a marker one
+ * `<link>` away was invisible to the gate that exists to catch exactly that.
+ */
+describe("artifact probe — follows what the page loads", () => {
+  const APP = "probe-fixtures/app";
+
+  it("HARD-fails the page when a stylesheet it loads is unfinished", async () => {
+    await mkdir(join(WORKSPACE, APP), { recursive: true });
+    await writeFile(
+      join(WORKSPACE, APP, "index.html"),
+      `<!doctype html><html><head><link rel="stylesheet" href="styles.css"/></head>`
+      + `<body><h1>Neon Tetris</h1><script src="app.js"></script></body></html>`,
+      "utf8",
+    );
+    await writeFile(join(WORKSPACE, APP, "styles.css"), `.box { color: red }\n/* UNFINISHED_STUB: styles */`, "utf8");
+    await writeFile(join(WORKSPACE, APP, "app.js"), "const game = 1;", "utf8");
+
+    const report = await probeArtifacts([{ kind: "file", location: `${APP}/index.html` }], { workspacePath: WORKSPACE });
+
+    expect(report.status).toBe("fail");
+    const followed = report.receipts.find((r) => r.target.includes("styles.css"));
+    expect(followed, "the stylesheet the page loads must be probed").toBeDefined();
+    expect(followed!.severity).toBe("hard");
+    expect(followed!.detail).toContain("UNFINISHED_STUB");
+  });
+
+  it("still PASSES when every file the page loads is finished", async () => {
+    // THE DISCRIMINATOR. Same shape, same references, same soft self_contained note — only
+    // the contents of the referenced files differ. Without this the rule would fail every
+    // multi-file site, which is most of them.
+    const OK = "probe-fixtures/app-ok";
+    await mkdir(join(WORKSPACE, OK), { recursive: true });
+    await writeFile(
+      join(WORKSPACE, OK, "index.html"),
+      `<!doctype html><html><head><link rel="stylesheet" href="styles.css"/></head>`
+      + `<body><h1>Neon Tetris</h1><script src="app.js"></script></body></html>`,
+      "utf8",
+    );
+    await writeFile(join(WORKSPACE, OK, "styles.css"), ".box { color: red }", "utf8");
+    await writeFile(join(WORKSPACE, OK, "app.js"), "const game = 1;", "utf8");
+
+    const report = await probeArtifacts([{ kind: "file", location: `${OK}/index.html` }], { workspacePath: WORKSPACE });
+
+    expect(report.status).not.toBe("fail");
+    expect(report.receipts.some((r) => r.probe === "self_contained")).toBe(true);
+  });
+
+  it("does not walk out of the workspace via a crafted reference", async () => {
+    const ESC = "probe-fixtures/app-escape";
+    await mkdir(join(WORKSPACE, ESC), { recursive: true });
+    await writeFile(
+      join(WORKSPACE, ESC, "index.html"),
+      `<!doctype html><html><head><link rel="stylesheet" href="../../../../../../etc/passwd.css"/></head><body>x</body></html>`,
+      "utf8",
+    );
+
+    const report = await probeArtifacts([{ kind: "file", location: `${ESC}/index.html` }], { workspacePath: WORKSPACE });
+
+    expect(report.receipts.some((r) => r.target.includes("passwd"))).toBe(false);
+  });
+});

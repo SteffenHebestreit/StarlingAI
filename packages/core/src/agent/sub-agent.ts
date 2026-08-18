@@ -2433,6 +2433,9 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // Times this run announced a next step without taking it. Bounded so a model that will
     // only ever narrate cannot spin to the iteration cap being told to act.
     let announcementNudges = 0;
+    // Highest reasoning repeat ratio observed during the current generation (0 = all novel).
+    // Logged per iteration purely to build the distribution the threshold needs.
+    let iterationRepeatRatio = 0;
     // Cumulative reasoning already accounted for by a correction. Subtracted in
     // sampleProgress so the supervisor's absolute budget measures reasoning since the
     // last correction rather than since the run began.
@@ -3986,8 +3989,13 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         // on the prompt vs stalled) and inherits stream()'s per-chunk inactivity
         // abort, which the plain non-streaming complete() lacks. Falls back to
         // complete() for any provider/mock that doesn't implement it.
+        // Reset per iteration: the ratio describes THIS generation, not the run.
+        iterationRepeatRatio = 0;
         response = provider.completeViaStream
           ? await provider.completeViaStream(messages, effectiveTools, llmSignal, {
+              // Cheap observation so the loop threshold can be fitted from real runs
+              // instead of guessed. A number per chunk, never the reasoning text.
+              onProgress: (p) => { iterationRepeatRatio = p.reasoningRepeatRatio; },
               // The operator's unbounded grant, readable from INSIDE the provider while
               // the stream is still running. A callback, not a boolean: the grant
               // routinely lands mid-generation (that is when the dock asks), and the
@@ -4225,6 +4233,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             reasoningChars: reasoningText.length,
             // Preserve observability without persisting provider reasoning.
             reasoningCaptured: true,
+            // The SHAPE of that reasoning as a single number. This is the corpus that
+            // turns REASONING_LOOP_REPEAT_RATIO from a conservative guess into a fitted
+            // threshold: pair it with this iteration's tool calls and a healthy-vs-stuck
+            // distribution falls out of ordinary use, with no reasoning text stored.
+            repeatRatio: Number(iterationRepeatRatio.toFixed(3)),
           },
           { sessionId: subSessionId, severity: "info" },
         );

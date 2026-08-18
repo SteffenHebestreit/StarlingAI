@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  detectReasoningDrift,
+  deriveTaskAnchors,
   detectReasoningLoop,
   REASONING_LOOP_MIN_SHINGLES,
   REASONING_LOOP_REPEAT_RATIO,
@@ -97,5 +99,84 @@ describe("detectReasoningLoop — the model is circling, not merely thinking", (
       + "bevor ich die Drehung akzeptiere. Also, ich überdenke die Rotation noch einmal.",
     ).join("\n");
     expect(detectReasoningLoop(german).looping).toBe(true);
+  });
+});
+
+/**
+ * THE SECOND PATHOLOGY: the model took a wrong turn and forgot what it was asked to do.
+ *
+ * Repetition cannot see this one — drifting reasoning is perfectly novel, it is just about
+ * the wrong thing. The signal is whether the TASK'S OWN distinctive words still appear in
+ * what the model is thinking about, with those words derived from the task at run time so
+ * there is no keyword table and nothing English-specific.
+ *
+ * The false positive is the expensive mistake here (a model legitimately deep in an
+ * implementation detail is not saying "Tetris" every paragraph), so these tests care more
+ * about what must NOT trip than about what must.
+ */
+describe("detectReasoningDrift — the model has lost the thread", () => {
+  const TASK_DE = "Baue ein vollständiges spielbares Tetris-Spiel als Single-Page-Website mit "
+    + "2.5D-Optik, Tastatursteuerung, Punktezähler und Spielfeldgrenzen.";
+  const TASK_EN = "Build a complete playable Tetris game as a single-page website with 2.5D "
+    + "rendering, keyboard controls, a score counter and playfield boundaries.";
+
+  const pad = (text: string) => text.repeat(Math.ceil(13_000 / text.length)).slice(0, 13_000);
+
+  it("derives anchors from the task without any keyword or stopword table", () => {
+    const anchors = deriveTaskAnchors(TASK_EN);
+    expect(anchors).toContain("tetris");
+    expect(anchors).toContain("playfield");
+    // Function words are filtered by LENGTH, which is what makes this language-independent.
+    expect(anchors).not.toContain("the");
+    expect(anchors).not.toContain("and");
+  });
+
+  it("works on German, where compounds make the signal STRONGER", () => {
+    const anchors = deriveTaskAnchors(TASK_DE);
+    expect(anchors).toContain("tastatursteuerung");
+    expect(anchors).toContain("spielfeldgrenzen");
+    expect(anchors).not.toContain("ein");
+  });
+
+  it("does NOT flag reasoning that is deep in the task's own detail", () => {
+    // THE ONE THAT MATTERS. On-task reasoning keeps using the task's vocabulary.
+    const onTask = pad(
+      "For the Tetris playfield I need the boundaries checked before each rotation, and the "
+      + "score counter updated when a row clears. The 2.5D rendering draws each cell twice. ",
+    );
+    const verdict = detectReasoningDrift(deriveTaskAnchors(TASK_EN), onTask);
+    expect(verdict.drifting, `coverage was ${verdict.coverage}`).toBe(false);
+  });
+
+  it("does NOT flag a legitimate implementation tangent that never names the task", () => {
+    // A model reasoning about a hash function for a Tetris task is WORKING, not lost. This
+    // is the false positive the sustained-sample requirement exists to absorb, and a single
+    // window of it must never be enough on its own.
+    const tangent = pad(
+      "The rolling hash needs a removal factor equal to base raised to the window length "
+      + "minus one, computed with imul so it stays inside 32 bits without precision loss. ",
+    );
+    const verdict = detectReasoningDrift(deriveTaskAnchors(TASK_EN), tangent);
+    // It DOES read as low-coverage — which is why one sample can never latch it.
+    expect(verdict.coverage).toBeLessThan(0.2);
+  });
+
+  it("says nothing at all when the window is still short", () => {
+    const verdict = detectReasoningDrift(deriveTaskAnchors(TASK_EN), "thinking about rotation");
+    expect(verdict.drifting).toBe(false);
+  });
+
+  it("says nothing when the task is too small to have a vocabulary", () => {
+    const verdict = detectReasoningDrift(deriveTaskAnchors("fix it"), pad("unrelated musing about weather patterns and tides. "));
+    expect(verdict.drifting).toBe(false);
+  });
+
+  it("FLAGS a window that has wandered completely off the task", () => {
+    const wandered = pad(
+      "Perhaps I should reconsider the deployment pipeline and whether the caching layer "
+      + "belongs in front of the load balancer, given the observed latency percentiles. ",
+    );
+    const verdict = detectReasoningDrift(deriveTaskAnchors(TASK_EN), wandered);
+    expect(verdict.drifting, `coverage was ${verdict.coverage}`).toBe(true);
   });
 });

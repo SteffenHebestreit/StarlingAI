@@ -8,7 +8,7 @@
  */
 import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
-import { resolve } from "node:path";
+import { dirname, resolve, sep } from "node:path";
 import { childLogger } from "../logger.js";
 import { validateArtifactBytes, checkFormatMatchesExtension, validateHtmlText, extensionOf } from "./artifact-validators.js";
 import type { QaJudgeArtifactRef } from "./qa-tool-judge.js";
@@ -275,6 +275,51 @@ export function findLocalAssetRefs(text: string): string[] {
   return [...new Set(refs)];
 }
 
+/**
+ * Open the .css/.js a page loads and check THEM for unfinished markers.
+ *
+ * Bounded on every axis a page could abuse: at most MAX_FOLLOWED_REFS files, each under
+ * the same byte cap as a probed artifact, each resolved and then checked to still sit
+ * inside the workspace so a crafted `href="../../etc/passwd"` cannot walk out.
+ */
+const MAX_FOLLOWED_REFS = 6;
+
+async function probeReferencedAssets(
+  workspacePath: string,
+  htmlLocation: string,
+  refs: readonly string[],
+): Promise<ArtifactProbeReceipt[]> {
+  const receipts: ArtifactProbeReceipt[] = [];
+  const workspaceRoot = resolve(workspacePath);
+  const htmlDir = dirname(resolve(workspacePath, htmlLocation));
+
+  for (const ref of refs.slice(0, MAX_FOLLOWED_REFS)) {
+    const started = Date.now();
+    const absolute = resolve(htmlDir, ref);
+    if (absolute !== workspaceRoot && !absolute.startsWith(workspaceRoot + sep)) continue;
+    try {
+      const info = await stat(absolute);
+      if (!info.isFile() || info.size === 0 || info.size > MAX_PROBE_BYTES) continue;
+      const assetText = (await readFile(absolute)).toString("utf8");
+      const completeness = checkStructuralCompleteness(ref, assetText);
+      if (completeness?.status === "fail") {
+        receipts.push({
+          target: `${htmlLocation} → ${ref}`,
+          probe: "completeness",
+          status: "fail",
+          severity: "hard",
+          detail: `the page loads '${ref}', and that file is unfinished: ${completeness.detail}`,
+          durationMs: Date.now() - started,
+        });
+      }
+    } catch {
+      // Missing or unreadable — soft by design (it may be produced at serve time), and the
+      // self_contained receipt above already names the reference.
+    }
+  }
+  return receipts;
+}
+
 async function probeFile(workspacePath: string, location: string): Promise<ArtifactProbeReceipt[]> {
   const started = Date.now();
   const absolute = resolve(workspacePath, location);
@@ -333,6 +378,19 @@ async function probeFile(workspacePath: string, location: string): Promise<Artif
       contentHash,
       durationMs: 0,
     });
+    // THE DELIVERABLE IS THE PAGE, NOT THE FILE THAT HAPPENED TO BE WRITTEN LAST.
+    //
+    // Run db88fa5b: the probed artifact was index.html — clean, no markers — while the
+    // styles.css it loads on the very next line still carried `UNFINISHED_STUB: styles`.
+    // The report said `artifactProbeStatus: "pass"` and the user was handed an unstyled,
+    // half-built page. The refs were ALREADY discovered here (a soft note is written about
+    // them two lines up); they were simply never opened.
+    //
+    // A marker in a file the page loads is a hard failure of the page, exactly as it would
+    // be inline: `<link href="styles.css">` makes that file part of the artifact. A
+    // MISSING ref stays soft — it may legitimately be produced at serve time — so only
+    // content that is present and demonstrably unfinished can spend a rebuild.
+    receipts.push(...await probeReferencedAssets(workspacePath, location, localRefs));
   }
   return receipts;
 }

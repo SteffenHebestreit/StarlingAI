@@ -50,7 +50,7 @@ import {
   type StreamProgress,
 } from "./lmstudio.js";
 // Content sampler — the decision is "is this circling", not "is this long".
-import { REASONING_LOOP_WINDOW_CHARS, REASONING_SAMPLE_INTERVAL_CHARS, detectReasoningLoop } from "../agent/progress-verifier.js";
+import { REASONING_LOOP_WINDOW_CHARS, REASONING_SAMPLE_INTERVAL_CHARS, REASONING_DRIFT_SUSTAINED_SAMPLES, detectReasoningLoop, detectReasoningDrift, deriveTaskAnchors } from "../agent/progress-verifier.js";
 import { beginProviderCall, recordProviderToken, endProviderCall } from "../observability/provider-activity-monitor.js";
 import { logAudit } from "../audit/logger.js";
 
@@ -1030,7 +1030,9 @@ export class AnthropicProvider implements ChatProvider {
     // contract as the OpenAI-compatible provider's (see StreamProgress).
     // reasoningLoopDetected stays false here: this provider is the OBSERVATION path only —
     // it does not arm the mid-stream abort, so no sampler runs and nothing may latch it.
-    const progress: StreamProgress = { reasoningChars: 0, contentChars: 0, toolCallStarted: false, reasoningLoopDetected: false };
+    const progress: StreamProgress = { reasoningChars: 0, contentChars: 0, toolCallStarted: false, reasoningLoopDetected: false, reasoningRepeatRatio: 0, reasoningDriftDetected: false, reasoningAnchorCoverage: 1 };
+    const taskAnchors = deriveTaskAnchors(String(messages.find((m) => m.role === "user")?.content ?? ""));
+    let consecutiveDriftSamples = 0;
     // Same content sampler as the OpenAI-compatible provider, for the same reason: the
     // decision is "is this circling", not "is this long", and a guard wired into one
     // provider and not the other is a guard that silently does not exist on half the fleet.
@@ -1042,7 +1044,13 @@ export class AnthropicProvider implements ChatProvider {
       charsSinceLoopSample += delta.length;
       if (charsSinceLoopSample < REASONING_SAMPLE_INTERVAL_CHARS) return;
       charsSinceLoopSample = 0;
-      if (detectReasoningLoop(reasoningTail).looping) progress.reasoningLoopDetected = true;
+      const drift = detectReasoningDrift(taskAnchors, reasoningTail);
+      progress.reasoningAnchorCoverage = Math.min(progress.reasoningAnchorCoverage, drift.coverage);
+      consecutiveDriftSamples = drift.drifting ? consecutiveDriftSamples + 1 : 0;
+      if (consecutiveDriftSamples >= REASONING_DRIFT_SUSTAINED_SAMPLES) progress.reasoningDriftDetected = true;
+      const verdict = detectReasoningLoop(reasoningTail);
+      progress.reasoningRepeatRatio = Math.max(progress.reasoningRepeatRatio, verdict.repeatRatio);
+      if (verdict.looping) progress.reasoningLoopDetected = true;
     };
 
     try {
@@ -1119,7 +1127,7 @@ export class AnthropicProvider implements ChatProvider {
         if (
           options?.guardReasoningBurn
           && isReasoningBurn(progress)
-          && (progress.reasoningLoopDetected || !(options.isUnbounded?.() ?? false))
+          && (progress.reasoningLoopDetected || progress.reasoningDriftDetected || !(options.isUnbounded?.() ?? false))
         ) {
           const burnErr = new ReasoningBurnAbort(progress.reasoningChars, progress.contentChars);
           log.warn(

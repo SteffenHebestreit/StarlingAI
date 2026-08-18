@@ -16,7 +16,10 @@ import {
   REASONING_ABSOLUTE_CEILING_CHARS,
   REASONING_LOOP_WINDOW_CHARS,
   REASONING_SAMPLE_INTERVAL_CHARS,
+  REASONING_DRIFT_SUSTAINED_SAMPLES,
   detectReasoningLoop,
+  detectReasoningDrift,
+  deriveTaskAnchors,
 } from "../agent/progress-verifier.js";
 
 const log = childLogger("provider:openai-compatible");
@@ -175,6 +178,20 @@ export interface StreamProgress {
    * REASONING_SAMPLE_INTERVAL_CHARS. Latched: once circling, re-checking cannot unstick it.
    */
   reasoningLoopDetected: boolean;
+  /**
+   * Highest repeat ratio any content sample has seen (0 = all novel, 1 = pure re-tread).
+   *
+   * Recorded so the threshold can eventually be FITTED rather than guessed. It is the one
+   * constant in progress-verifier.ts with no measured basis, because the audit deliberately
+   * keeps reasoning text out of the log — so the number, not the text, is what gets
+   * persisted: enough to build a distribution of healthy vs stuck runs, nothing that
+   * reconstructs what the model was thinking.
+   */
+  reasoningRepeatRatio: number;
+  /** Has the run sustainedly stopped reasoning about the task? (see detectReasoningDrift) */
+  reasoningDriftDetected: boolean;
+  /** Lowest task-anchor coverage any sample has seen. Logged for later fitting. */
+  reasoningAnchorCoverage: number;
 }
 
 /** Options both completion paths accept. Separate from the streaming-only bag below so
@@ -216,6 +233,7 @@ export function isReasoningBurn(progress: Readonly<StreamProgress>): boolean {
   // Content first. Length is the backstop, and it now sits far enough away that reaching it
   // is itself the finding rather than the policy (see REASONING_ABSOLUTE_CEILING_CHARS).
   return progress.reasoningLoopDetected
+    || progress.reasoningDriftDetected
     || progress.reasoningChars >= REASONING_ABSOLUTE_CEILING_CHARS;
 }
 
@@ -1615,7 +1633,13 @@ export class LMStudioProvider {
     // per-chunk allocation. Nothing outside this generator could previously learn any
     // of these three numbers until the call returned, which for the measured failure
     // was 20.7 minutes after they stopped being useful.
-    const progress: StreamProgress = { reasoningChars: 0, contentChars: 0, toolCallStarted: false, reasoningLoopDetected: false };
+    const progress: StreamProgress = { reasoningChars: 0, contentChars: 0, toolCallStarted: false, reasoningLoopDetected: false, reasoningRepeatRatio: 0, reasoningDriftDetected: false, reasoningAnchorCoverage: 1 };
+    // The task's own vocabulary, taken from the FIRST user turn — that is the request; later
+    // user turns are tool results and corrections, which carry their own words.
+    const taskAnchors = deriveTaskAnchors(
+      String(messages.find((m) => m.role === "user")?.content ?? ""),
+    );
+    let consecutiveDriftSamples = 0;
     // Bounded tail of reasoning for the content sampler. Never exceeds the window, so the
     // memory held is ~12 KB regardless of how long the generation runs.
     let reasoningTail = "";
@@ -1626,7 +1650,18 @@ export class LMStudioProvider {
       charsSinceLoopSample += delta.length;
       if (charsSinceLoopSample < REASONING_SAMPLE_INTERVAL_CHARS) return;
       charsSinceLoopSample = 0;
+      const drift = detectReasoningDrift(taskAnchors, reasoningTail);
+      progress.reasoningAnchorCoverage = Math.min(progress.reasoningAnchorCoverage, drift.coverage);
+      consecutiveDriftSamples = drift.drifting ? consecutiveDriftSamples + 1 : 0;
+      if (consecutiveDriftSamples >= REASONING_DRIFT_SUSTAINED_SAMPLES && !progress.reasoningDriftDetected) {
+        progress.reasoningDriftDetected = true;
+        log.warn(
+          { model: modelId, reasoningChars: progress.reasoningChars, anchorCoverage: Number(drift.coverage.toFixed(3)) },
+          "Reasoning has lost the thread — the task's own vocabulary has been absent for several samples",
+        );
+      }
       const verdict = detectReasoningLoop(reasoningTail);
+      progress.reasoningRepeatRatio = Math.max(progress.reasoningRepeatRatio, verdict.repeatRatio);
       if (verdict.looping) {
         progress.reasoningLoopDetected = true;
         log.warn(
@@ -1819,7 +1854,7 @@ export class LMStudioProvider {
         if (
           options?.guardReasoningBurn
           && isReasoningBurn(progress)
-          && (progress.reasoningLoopDetected || !(options.isUnbounded?.() ?? false))
+          && (progress.reasoningLoopDetected || progress.reasoningDriftDetected || !(options.isUnbounded?.() ?? false))
         ) {
           const burnErr = new ReasoningBurnAbort(progress.reasoningChars, progress.contentChars);
           log.warn(

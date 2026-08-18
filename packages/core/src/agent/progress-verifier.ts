@@ -91,6 +91,75 @@ export const REASONING_LOOP_MIN_SHINGLES = 40;
 export const REASONING_LOOP_REPEAT_RATIO = 0.5;
 
 /**
+ * ── LOST THE THREAD ──────────────────────────────────────────────────────────────
+ *
+ * The second pathology, and a different shape from circling: the model took a wrong turn
+ * and is now reasoning about something that is not the task. Repetition cannot see it —
+ * drifting reasoning is perfectly novel, it is simply about the wrong thing.
+ *
+ * The signal is lexical coverage of the TASK'S OWN distinctive words in the recent window.
+ * Those words are derived at run time from the task text; there is no keyword table, no
+ * topic list, and nothing language-specific — which matters because a hardcoded list would
+ * cover English and silently fail on the German half of this deployment's traffic. German
+ * actually reads BETTER here than English: its compounds ("Spielfeldgrenzen",
+ * "Tastatursteuerung") are long, and length is exactly what separates a content word from a
+ * function word without needing a stopword list in either language.
+ *
+ * DELIBERATELY HARD TO TRIP, because the false positive is expensive and easy to imagine:
+ * a model debugging a rolling hash for a Tetris task is legitimately not saying "Tetris" for
+ * a while. So drift requires ALL of: the run has produced nothing yet, the window is full,
+ * essentially NONE of the task's anchors appear in it, and that holds across
+ * REASONING_DRIFT_SUSTAINED_SAMPLES consecutive samples rather than one unlucky window.
+ * Like the loop rule it is uncalibrated, and like the loop rule its first trip is a
+ * corrective turn rather than a kill — the coverage number is logged so it can be fitted.
+ */
+export const REASONING_ANCHOR_MIN_CHARS = 5;
+/** Cap on anchors kept. The longest words are the most distinctive; more adds noise. */
+export const REASONING_ANCHOR_MAX_TERMS = 40;
+/** At or below this fraction of anchors present, the window is not about the task. */
+export const REASONING_DRIFT_COVERAGE = 0.05;
+/** Consecutive drifting samples before it latches. One tangent is not lost. */
+export const REASONING_DRIFT_SUSTAINED_SAMPLES = 3;
+
+/**
+ * The task's own distinctive words — the vocabulary a run that is still on task keeps using.
+ *
+ * Length filter instead of a stopword list, on purpose: "the/and/for/der/die/und/ist" are
+ * short in both languages this deployment sees, while content words are not. Longest first
+ * so the cap keeps the most distinctive terms rather than an arbitrary slice.
+ */
+export function deriveTaskAnchors(taskText: string): string[] {
+  const seen = new Set<string>();
+  for (const raw of taskText.toLowerCase().split(/[^\p{L}\p{N}]+/u)) {
+    if (raw.length >= REASONING_ANCHOR_MIN_CHARS) seen.add(raw);
+  }
+  return [...seen].sort((a, b) => b.length - a.length).slice(0, REASONING_ANCHOR_MAX_TERMS);
+}
+
+/**
+ * Has this window stopped being about the task?
+ *
+ * Coverage is the fraction of the task's anchors that appear anywhere in the window. Pure;
+ * returns the number as well as the verdict so it can be logged and later fitted.
+ */
+export function detectReasoningDrift(
+  anchors: readonly string[],
+  window: string,
+): { drifting: boolean; coverage: number } {
+  // Too few anchors to judge — a one-line task has no vocabulary to lose.
+  if (anchors.length < 5 || window.length < REASONING_LOOP_WINDOW_CHARS) {
+    return { drifting: false, coverage: 1 };
+  }
+  const haystack = window.toLowerCase();
+  let hits = 0;
+  for (const anchor of anchors) {
+    if (haystack.includes(anchor)) hits++;
+  }
+  const coverage = hits / anchors.length;
+  return { drifting: coverage <= REASONING_DRIFT_COVERAGE, coverage };
+}
+
+/**
  * Absolute ceiling on one generation's reasoning — a RESOURCE backstop, not the policy.
  *
  * The policy is detectReasoningLoop. This exists so a single stream cannot consume
