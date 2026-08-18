@@ -12,6 +12,7 @@ import { resolve } from "node:path";
 import { childLogger } from "../logger.js";
 import { validateArtifactBytes, checkFormatMatchesExtension, validateHtmlText, extensionOf } from "./artifact-validators.js";
 import type { QaJudgeArtifactRef } from "./qa-tool-judge.js";
+import { UNFINISHED_STUB_MARKER } from "./sub-agent-prompt-guidance.js";
 
 const log = childLogger("agent:artifact-probes");
 
@@ -207,6 +208,26 @@ function codeBlocks(text: string, ext: string): Array<{ label: string; body: str
 
 /** null when the extension is out of scope for this check. */
 export function checkStructuralCompleteness(location: string, text: string): { status: "pass" | "fail"; detail: string } | null {
+  // THE HARNESS'S OWN MARKER, checked before anything else and before the extension gate.
+  //
+  // The rules below read COMMENT BODIES, and run 2dc5832c is what that misses: the staged-build
+  // directive asks for `throw new Error("UNFINISHED_STUB: core");` — deliberately executable, so
+  // the half-built file fails loudly instead of looking finished — and executable code is not a
+  // comment. The delivered file carried eight of them, threw on its first line in the user's
+  // browser, and this probe reported `artifactProbeStatus: "pass"`.
+  //
+  // No extension gate: the marker is a token this codebase invented and only this codebase emits,
+  // so its presence is unambiguous in any file type (run a7b8fe3e left one in a .css, where an
+  // unfilled marker is SILENT — the page loads unstyled and looks merely ugly rather than broken).
+  const stubCount = text.split(UNFINISHED_STUB_MARKER).length - 1;
+  if (stubCount > 0) {
+    return {
+      status: "fail",
+      detail: `${stubCount} ${UNFINISHED_STUB_MARKER} marker(s) still in the file — the staged build wrote a `
+        + "skeleton and never filled these subsystems, so this is a scaffold, not a finished artifact",
+    };
+  }
+
   const ext = extensionOf(location);
   if (!COMPLETENESS_EXTENSIONS.has(ext)) return null;
 

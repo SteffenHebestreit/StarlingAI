@@ -46,6 +46,7 @@ import "./render-pdf.js";
 import "./code-navigation.js";
 import "./website.js";
 import "./serve-app.js";
+import "./page-check.js";
 import "./extractors.js";
 import "./artifact-emitters.js";
 import "./office-output.js";

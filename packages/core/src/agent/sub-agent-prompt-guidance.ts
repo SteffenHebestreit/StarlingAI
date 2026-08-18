@@ -166,7 +166,7 @@ export function buildStagedArtifactBuildGuidance(maxIterations: number, perPathE
     "A whole artifact emitted in a single completion does not finish on this hardware: the model reasons for tens of thousands of characters and the call is killed before any tool runs. Build the artifact in passes, ONE tool call per iteration, smallest working version first. Read each source file ONCE, whole, then work from what you read — a pass spent re-reading is a pass not spent writing, and you have few.",
     `1. SKELETON (first tool call): one write_file, a few KB, holding a minimal whole artifact whose outer structure already CLOSES (for HTML: doctype, head, body and the closing </html>) and whose content is all FINAL. Never a placeholder comment, a TODO or an empty stub body — a commented-out gap is silent, so a run that stops there leaves a file that LOOKS finished and does nothing. Write each subsystem you have not built yet as ONE line carrying the exact token ${UNFINISHED_STUB_MARKER} and its name, throwing where that line sits in executable code: throw new Error("${UNFINISHED_STUB_MARKER}: physics"); That line is both your UNIQUE anchor and the loud signal — the harness greps for it and reports an artifact still holding one as INCOMPLETE instead of delivered.`,
     `2. FILL (one subsystem per iteration, about ${fillPasses} of them): replace exactly ONE ${UNFINISHED_STUB_MARKER} line per call with edit_file, that line as old_string and the subsystem's COMPLETE content as new_string — never a partial version, never a smaller placeholder. edit_file is an EXACT string replacement and FAILS unless old_string matches exactly one place, so keep every marker name distinct and add surrounding lines rather than falling back to write_file. Use grep_files to re-locate a marker if a replacement is rejected. Never re-emit the whole file to change part of it.`,
-    `3. FINISH: read_file the artifact, confirm it closes and no ${UNFINISHED_STUB_MARKER} remains, then carry out whatever final step your own instructions require (e.g. serving and verifying the app) and report the path or the live URL — not the contents.`,
+    `3. FINISH: read_file the artifact and confirm no ${UNFINISHED_STUB_MARKER} remains. If it is an HTML page and you hold verify_page, RUN IT — verify_page executes the page's scripts and reports what they throw. A page that serves a 200 and dies on its first line looks identical to a finished one from the outside, so reading the code is not evidence it works. FAIL means fix the named error and run it again; do not report a page as done while verify_page fails. Then carry out whatever final step your own instructions require (e.g. serving and verifying the app) and report the path or the live URL — not the contents.`,
     `Budget the subsystems to the passes you have and merge the small ones. If you run out of budget the partial is handed back with its remaining ${UNFINISHED_STUB_MARKER} markers named, so it is resumable and is never mistaken for a finished artifact.`,
   ].join("\n");
 }
@@ -196,6 +196,35 @@ export function buildStagedBuildFirstStepInstruction(): string {
     "THIS TURN: the specification above is REFERENCE MATERIAL for later passes, not the work of this turn.",
     "Right now, produce only the skeleton — one " + STAGED_BUILD_REQUIRED_TOOLS[0] + " call, a small complete file that closes, with every part you have not built yet written as a single " + UNFINISHED_STUB_MARKER + " line that throws. Decide only what the parts are CALLED, not how they work.",
     "Do not attempt to satisfy the specification in this turn. You have further turns for that, one part at a time.",
+  ].join("\n");
+}
+
+/**
+ * The directive for a run whose skeleton ALREADY EXISTS on disk.
+ *
+ * Run 2dc5832c is the failure this replaces, and it is the worst one measured so far. The
+ * staged-build classifier is size-and-tools only, so it fires identically on "build me X" and
+ * on "the file exists, finish it" — and the directive it injects opens with "SKELETON (first
+ * tool call): one write_file". All four delegations in that session logged
+ * directiveInjected: true, and the fourth answered a finish-it task by writing a fresh
+ * 4,037-byte skeleton over a file in which six of eight subsystems had just been filled by
+ * thirteen iterations of edit_file. The instruction was followed exactly; it was the wrong
+ * instruction.
+ *
+ * Detection is structural and needs no topic words: unfilled markers exist on disk, and the
+ * harness is the only thing that ever writes that token. Given that, the correct first move is
+ * the OPPOSITE of a skeleton, so this text inverts the two rules that matter — never write_file
+ * the whole artifact, and start from what is already there.
+ */
+export function buildStagedBuildResumeGuidance(markerFiles: readonly string[], markerCount: number): string {
+  const shown = markerFiles.slice(0, 4).join(", ");
+  return [
+    "RESUME AN EXISTING BUILD — DO NOT START OVER.",
+    `A previous pass already wrote this artifact and left ${markerCount} unfilled ${UNFINISHED_STUB_MARKER} marker(s) in: ${shown}. The work already on disk is REAL and is worth more than anything you can emit in one call.`,
+    `1. READ the file once (read_file), or ${"grep_files"} for ${UNFINISHED_STUB_MARKER} to locate the markers exactly.`,
+    `2. Replace ONE ${UNFINISHED_STUB_MARKER} line per call with edit_file, that line as old_string and the subsystem's COMPLETE code as new_string. Several such calls in one turn is good and is the fastest way through.`,
+    `3. FINISH: confirm no ${UNFINISHED_STUB_MARKER} remains, and if it is an HTML page and you hold verify_page, RUN IT and fix whatever it reports before saying you are done. Then carry out whatever final step your own instructions require.`,
+    `NEVER call write_file on this artifact. Re-emitting the whole file replaces finished subsystems with placeholders and destroys the passes that produced them — the harness will reject such a write, and the attempt costs you an iteration.`,
   ].join("\n");
 }
 

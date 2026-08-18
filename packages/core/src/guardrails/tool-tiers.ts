@@ -1221,6 +1221,12 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: true,
     requiresSandbox: false, // manages docker itself on the host network — cannot run inside a sandbox
   },
+  verify_page: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Execute a built page's JavaScript against a minimal DOM and report uncaught errors",
+    requiresPerCallApproval: false, // read-only self-check, runs in the builder's fix loop
+    requiresSandbox: false, // node:vm with a bare context, no network, no filesystem beyond the read
+  },
   verify_app: {
     tier: ToolTier.TWO_EXECUTE,
     description: "Verify a serve_app app boots and serves (server-side HTTP/content check + container error logs)",

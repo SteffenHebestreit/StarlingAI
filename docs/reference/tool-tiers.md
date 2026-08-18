@@ -258,6 +258,7 @@ Code/command execution; per-invocation approval; always sandboxed.
 | `tool_dev_start` | per-call | required | Start a tool development session in the Docker sandbox |
 | `tool_dev_test` | — | required | Run tests against tool code in the Docker sandbox |
 | `verify_app` | — | — | Verify a serve_app app boots and serves (server-side HTTP/content check + container error logs) |
+| `verify_page` | — | — | Execute a built page's JavaScript against a minimal DOM and report uncaught errors |
 | `vscode_command` | per-call | — | Execute an arbitrary VS Code command (escape hatch) |
 | `vscode_run_terminal_command` | per-call | — | Run a command in VS Code integrated terminal |
 

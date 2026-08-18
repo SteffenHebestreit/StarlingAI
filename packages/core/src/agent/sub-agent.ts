@@ -80,6 +80,7 @@ import {
   sanitizeSubAgentTask,
   isStagedArtifactBuildRun,
   buildStagedArtifactBuildGuidance,
+  buildStagedBuildResumeGuidance,
   buildStagedBuildFirstStepInstruction,
   buildReasoningBurnCorrection,
   REASONING_BURN_RETRY_LIMIT,
@@ -1203,6 +1204,67 @@ export function artifactFileLooksTruncated(artifact: Record<string, unknown>, wo
  * Reads the filesystem, so it is only called on the terminal paths, never per
  * iteration. Fails open: an unreadable file is reported by path alone.
  */
+/**
+ * Files in the workspace that still carry unfilled staged-build markers.
+ *
+ * This is the RESUME detector. The staged-build classifier reads only task size and tool
+ * capability, so it cannot tell "build me X" from "X exists, finish it" — and run 2dc5832c
+ * shows what that costs: a finish-it task got the skeleton directive and answered it with a
+ * skeleton, destroying six filled subsystems. What distinguishes the two cases is not in the
+ * task text at all, it is on disk.
+ *
+ * Only the harness ever writes this token, so a hit is unambiguous and no topic words are
+ * involved. Bounded hard (depth, file count, file size) and fails open to "not a resume",
+ * because being wrong here costs one redundant skeleton while blocking the scan would cost
+ * every resume run.
+ */
+export function findUnfilledStubFiles(workspaceRoot: string): { files: string[]; count: number } {
+  const SKIP = new Set(["node_modules", ".git", ".starlingai", "dist", "build", ".cache"]);
+  const MAX_FILES = 400;
+  const MAX_BYTES = 2_000_000;
+  const MAX_DEPTH = 6;
+  const files: string[] = [];
+  let count = 0;
+  let seen = 0;
+
+  const walk = (dir: string, rel: string, depth: number): void => {
+    if (depth > MAX_DEPTH || seen >= MAX_FILES) return;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (seen >= MAX_FILES) return;
+      if (entry.name.startsWith(".") && entry.name !== ".") continue;
+      if (SKIP.has(entry.name)) continue;
+      const abs = resolvePath(dir, entry.name);
+      const relPath = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        walk(abs, relPath, depth + 1);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      seen++;
+      try {
+        if (fs.statSync(abs).size > MAX_BYTES) continue;
+        const text = fs.readFileSync(abs, "utf-8");
+        const hits = text.split(UNFINISHED_STUB_MARKER).length - 1;
+        if (hits > 0) {
+          count += hits;
+          if (files.length < 8) files.push(relPath);
+        }
+      } catch { /* unreadable/binary — not a resume signal */ }
+    }
+  };
+
+  try {
+    walk(workspaceRoot, "", 0);
+  } catch { /* fail open */ }
+  return { files, count };
+}
+
 export function describeMutatedWorkspaceFiles(
   paths: Iterable<string>,
   workspaceRoot: string,
@@ -2184,8 +2246,19 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     const stagedBuildFlags = effectiveOrchestration();
     const isStagedBuild = stagedBuildFlags.stagedArtifactBuilds !== false
       && isStagedArtifactBuildRun(effectiveToolNames, sanitizedTask);
+    // RESUME vs FRESH. The classifier above reads task size and tool capability, which cannot
+    // distinguish "build me X" from "X exists, finish it" — and run 2dc5832c is what that costs:
+    // a finish-it delegation received the skeleton directive and answered it with a skeleton,
+    // destroying six subsystems that thirteen prior iterations had filled. The distinguishing
+    // evidence is not in the task text, it is on disk.
+    const stagedResume = isStagedBuild
+      ? findUnfilledStubFiles(opts.workspacePath)
+      : { files: [] as string[], count: 0 };
+    const isResumeBuild = stagedResume.count > 0;
     const stagedBuildGuidance = isStagedBuild && stagedBuildFlags.stagedArtifactBuildDirective === true
-      ? buildStagedArtifactBuildGuidance(maxIterations, PER_PATH_EDIT_CAP)
+      ? (isResumeBuild
+          ? buildStagedBuildResumeGuidance(stagedResume.files, stagedResume.count)
+          : buildStagedArtifactBuildGuidance(maxIterations, PER_PATH_EDIT_CAP))
       : "";
     if (isStagedBuild) {
       logAudit(
@@ -2196,6 +2269,9 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           threshold: STAGED_BUILD_TASK_CHAR_THRESHOLD,
           maxIterations,
           directiveInjected: stagedBuildGuidance.length > 0,
+          mode: isResumeBuild ? "resume" : "fresh",
+          unfilledMarkers: stagedResume.count,
+          markerFiles: stagedResume.files.slice(0, 4),
         },
         { sessionId: subSessionId, severity: "info" },
       );
@@ -2321,7 +2397,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // Gated on the SAME condition that injects the system directive, so the two halves
     // cannot disagree: if the directive is off, the user turn is untouched and the run
     // behaves exactly as it did before this existed.
-    const userContent = stagedBuildGuidance
+    // Skeleton-first is a FRESH-build instruction only. Appending it to a resume turn is the
+    // regression that made run 2dc5832c worse rather than better: it told a model whose artifact
+    // already existed to "produce only the skeleton" and to not attempt the specification, which
+    // is precisely the write that destroyed the filled subsystems.
+    const userContent = stagedBuildGuidance && !isResumeBuild
       ? `${baseUserContent}${buildStagedBuildFirstStepInstruction()}`
       : baseUserContent;
 

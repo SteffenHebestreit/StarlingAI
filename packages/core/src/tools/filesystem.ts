@@ -5,6 +5,7 @@ import { childLogger } from "../logger.js";
 import { logAudit } from "../audit/logger.js";
 import { getConfig } from "../config/loader.js";
 import { GENERATED_SUBDIR, resolvePathWithinWorkspace, resolveWorkspaceWritePath } from "./workspace-path.js";
+import { UNFINISHED_STUB_MARKER } from "../agent/sub-agent-prompt-guidance.js";
 
 const log = childLogger("tool:filesystem");
 const MAX_FILE_SIZE = 1024 * 1024; // 1MB read limit
@@ -418,6 +419,35 @@ export function commonPrefixLength(a: string, b: string): number {
   return i;
 }
 
+/**
+ * Would this overwrite REPLACE FINISHED WORK WITH PLACEHOLDERS?
+ *
+ * Run 2dc5832c is why this exists. web_coder spent 13 iterations filling six of eight
+ * UNFINISHED_STUB subsystems with real code via edit_file; the orchestrator then
+ * re-delegated, and the next run answered with ONE write_file carrying a fresh 4,037-byte
+ * skeleton holding all eight markers again. Every filled subsystem was destroyed in a
+ * single call, and the file that reached the user threw on its first line.
+ *
+ * The rule is the narrowest one that catches it: an overwrite may not RAISE the number of
+ * unfilled markers in a file. Fewer is progress, equal is a harmless re-skeleton of a
+ * skeleton, more is always work being thrown away. It reads one literal — the same token
+ * the staged-build directive tells the model to write and artifactFileLooksTruncated greps
+ * back off disk — so the prompt half and the mechanical half still agree on one string.
+ *
+ * Unlike the churn nudge above this BLOCKS, because here refusing the write is what
+ * preserves the work rather than what risks it. edit_file remains available and is the
+ * correct tool for the job the model was attempting.
+ */
+export function evaluateStubRegression(
+  existing: string,
+  content: string,
+): { regressed: boolean; existingStubs: number; newStubs: number } {
+  const count = (text: string): number => text.split(UNFINISHED_STUB_MARKER).length - 1;
+  const existingStubs = count(existing);
+  const newStubs = count(content);
+  return { regressed: newStubs > existingStubs, existingStubs, newStubs };
+}
+
 /** Pure write-churn decision for the regeneration nudge (orchestration.detectWriteChurnOverwrite).
  *  A file rebuilt from the top after a completion-limit cut-off reproduces its opening identically,
  *  so a substantial (≥500-byte) file whose OVERWRITE shares ≥90% of the first 2 KB is a regeneration,
@@ -517,6 +547,36 @@ registerTool({
     // 2 KB; no content/topic heuristics) and attach a SOFT append nudge. Computed BEFORE the write (the old
     // content is about to be replaced); a full replacement with different content diverges early and is
     // never flagged. Never blocks the write — work is preserved.
+    // BLOCK an overwrite that would replace finished work with placeholders (run 2dc5832c:
+    // six filled subsystems destroyed by one skeleton write). Checked before the write, and
+    // before the churn nudge, because a stub regression is never a nudge-and-continue case —
+    // the whole point is that the bytes on disk are worth more than the bytes in the call.
+    if (mode === "overwrite" && fileExists) {
+      try {
+        const previous = readFileSync(resolved, "utf-8");
+        const regression = evaluateStubRegression(previous, content);
+        if (regression.regressed) {
+          logAudit("guardrail_flagged", {
+            type: "write_file_stub_regression_blocked",
+            path: relativePath,
+            existingStubs: regression.existingStubs,
+            newStubs: regression.newStubs,
+            existingChars: previous.length,
+            newChars: content.length,
+          }, { sessionId: ctx.sessionId, severity: "warn" });
+          return {
+            success: false,
+            output: "",
+            error: `Refusing to overwrite '${relativePath}': the file on disk has ${regression.existingStubs} `
+              + `unfinished ${UNFINISHED_STUB_MARKER} marker(s) and your replacement has ${regression.newStubs}. `
+              + `That would DESTROY work already on disk and hand back a less complete file. Do not re-emit this `
+              + `file from the top. Read it, then replace ONE ${UNFINISHED_STUB_MARKER} line at a time with `
+              + `edit_file, using that line as old_string.`,
+          };
+        }
+      } catch { /* read failure — fall through; never block a write on an unreadable file */ }
+    }
+
     let churnNudge = "";
     if (mode === "overwrite" && fileExists && getConfig().orchestration?.detectWriteChurnOverwrite === true) {
       try {

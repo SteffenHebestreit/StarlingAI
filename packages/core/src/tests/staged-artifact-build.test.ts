@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -263,8 +263,9 @@ describe("staged artifact build — directive injection", () => {
     orchestration: Record<string, unknown> | undefined,
     task: string,
     tools: string[],
+    workspaceDir?: string,
   ): Promise<string> => {
-    const tempDir = mkdtempSync(join(tmpdir(), "sai-staged-build-"));
+    const tempDir = workspaceDir ?? mkdtempSync(join(tmpdir(), "sai-staged-build-"));
     const configPath = join(tempDir, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
       ...(orchestration ? { orchestration } : {}),
@@ -390,6 +391,39 @@ describe("staged artifact build — directive injection", () => {
       }),
       expect.anything(),
     );
+  });
+
+  it("switches to RESUME when the workspace already holds unfilled markers", async () => {
+    // THE REGRESSION PROBE for run 2dc5832c, and for the skeleton-first instruction added the
+    // night before it. The classifier reads task size and tools, so a "finish the existing file"
+    // delegation is indistinguishable from "build me one" — and it received "SKELETON (first tool
+    // call): one write_file" plus a user turn saying "produce only the skeleton". The fourth run
+    // obeyed exactly that and overwrote six filled subsystems with eight fresh markers.
+    //
+    // Revert either half (the resume branch in sub-agent.ts, or the `!isResumeBuild` condition on
+    // the user-turn instruction) and this fails.
+    const seeded = mkdtempSync(join(tmpdir(), "sai-staged-resume-"));
+    mkdirSync(join(seeded, "generated", "game"), { recursive: true });
+    writeFileSync(
+      join(seeded, "generated", "game", "index.html"),
+      `<script>throw new Error("${UNFINISHED_STUB_MARKER}: core");</script>`,
+      "utf8",
+    );
+
+    const prompt = await runAndCaptureSystemPrompt(
+      undefined,
+      OBSERVED_BUILD_TASK,
+      ["read_file", "write_file", "edit_file", "list_files", "grep_files"],
+      seeded,
+    );
+
+    expect(prompt).toContain("RESUME AN EXISTING BUILD");
+    expect(prompt).toContain("NEVER call write_file");
+    expect(prompt).not.toContain("STAGED BUILD — THIS TASK IS TOO LARGE FOR ONE PASS.");
+    // ...and the user turn must NOT carry the skeleton-first instruction on a resume.
+    expect(firstUserTurn).not.toContain("THIS TURN:");
+
+    rmSync(seeded, { recursive: true, force: true });
   });
 
   it("narrows the USER turn too, because that is the turn the model answers", async () => {
