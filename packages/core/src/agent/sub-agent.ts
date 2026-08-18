@@ -91,7 +91,7 @@ import {
 } from "./sub-agent-prompt-guidance.js";
 import { GENERATED_SUBDIR } from "../tools/workspace-path.js";
 import { mergeAgentModelOverride, applyEffortModelOverlay, applyStreamCapOverlay } from "./sub-agent-model-config.js";
-import { resolveTurnBudgetMs, DEADLINE_COMPOSITION_EXTENSION_MS, DEADLINE_COMPOSITION_EXTENSION_LIMIT } from "./sub-agent-turn-budget.js";
+import { resolveTurnBudgetMs, DEADLINE_LIVENESS_RECHECK_MS, shouldDeferDeadline } from "./sub-agent-turn-budget.js";
 import {
   extractInfraFailureSignature,
   liveToolFamily,
@@ -1966,20 +1966,19 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       );
       return;
     }
-    // Escape hatch 3: DO NOT KILL A RUN THAT IS STILL WRITING.
+    // THE DEADLINE IS A LIVENESS PROBE, NOT A BUDGET.
     //
     // The fifth timer to end the same productive step. `coder` reasoned 52,116 characters
     // across two iterations composing the fills for its markers and this deadline cut it at
     // 891,072 ms of its 900,000 ms budget, before one edit_file was emitted. A clock cannot
     // see that a model is working — but the stream can, and now says so.
     //
-    // Bounded to DEADLINE_COMPOSITION_EXTENSION_LIMIT slices, and refused outright when the
-    // generation is circling, so this is an extension rather than an exemption.
-    if (
-      deadlineExtensions < DEADLINE_COMPOSITION_EXTENSION_LIMIT
-      && !liveLoopSuspected
-      && liveReasoningChars >= MIN_SUBSTANTIVE_OUTPUT_CHARS
-    ) {
+    // No slice limit: tuning a clock was the mistake five times over. A run producing
+    // non-circling text is working, and is stopped by the things that can actually see that
+    // — the loop detector, the supervisor, maxIterations, inactivity, the ceiling, the
+    // operator. What remains here is the one judgement a timer can make honestly: nothing
+    // is being produced.
+    if (shouldDeferDeadline({ liveReasoningChars, liveLoopSuspected, minProducedChars: MIN_SUBSTANTIVE_OUTPUT_CHARS })) {
       deadlineExtensions++;
       logAudit("progress_verifier_intervened", {
         agentName: opts.agentName,
@@ -1989,10 +1988,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         action: "deadline_extended",
         reason: "the turn deadline fired while the generation was still producing non-circling text",
         liveReasoningChars,
-        extensionMs: DEADLINE_COMPOSITION_EXTENSION_MS,
-        extensionsUsed: deadlineExtensions,
+        recheckMs: DEADLINE_LIVENESS_RECHECK_MS,
+        recheckCount: deadlineExtensions,
       }, { sessionId: opts.parentSessionId, severity: "info" });
-      timeoutHandle = setTimeout(onDeadline, DEADLINE_COMPOSITION_EXTENSION_MS);
+      timeoutHandle = setTimeout(onDeadline, DEADLINE_LIVENESS_RECHECK_MS);
       return;
     }
     turnTimeoutReached = true;

@@ -391,30 +391,37 @@ describe("sub-agent — a provider-aborted burn is corrected once, then fatal", 
  * The deadline now asks the stream before it fires. Bounded, and refused outright when the
  * generation is circling — an extension, never an exemption.
  */
-describe("sub-agent deadline — a run that is still writing gets more time", () => {
-  it("extends rather than aborting, and the extension is bounded and loop-gated", async () => {
-    const { DEADLINE_COMPOSITION_EXTENSION_LIMIT, DEADLINE_COMPOSITION_EXTENSION_MS } =
-      await import("../agent/sub-agent-turn-budget.js");
+describe("sub-agent deadline — a liveness probe, not a budget", () => {
+  const MIN = 200;
 
-    // The bound is the whole safety argument: a run may be extended, never made immortal.
-    expect(DEADLINE_COMPOSITION_EXTENSION_LIMIT).toBeGreaterThan(0);
-    expect(DEADLINE_COMPOSITION_EXTENSION_LIMIT).toBeLessThanOrEqual(5);
-    // Total extension must stay well under the gateway turn budget, or a child outlives its
-    // parent and the extension buys nothing but a later, more confusing death.
-    const totalExtensionMs = DEADLINE_COMPOSITION_EXTENSION_LIMIT * DEADLINE_COMPOSITION_EXTENSION_MS;
-    expect(totalExtensionMs).toBeLessThan(1_800_000);
-    // One slice must be worth having — at the measured 16.8 tok/s a composition needs minutes.
-    expect(DEADLINE_COMPOSITION_EXTENSION_MS).toBeGreaterThanOrEqual(120_000);
+  it("DEFERS while the generation is producing non-circling text", async () => {
+    // Run d5747607: `coder` was 52,116 characters into composing the fills for its markers
+    // when its own 900,000 ms budget cut it at 891,072 ms, terminalState "timeout", with not
+    // one edit_file emitted. It was the FIFTH timer to end that same step — after a character
+    // budget, the drift rule, the stall sampler and the gateway clock — and the fifth patch
+    // would have been another tuned number. A clock cannot tell writing from hanging, so it
+    // is no longer the authority: while text is being produced, the deadline asks again.
+    const { shouldDeferDeadline } = await import("../agent/sub-agent-turn-budget.js");
+    expect(shouldDeferDeadline({ liveReasoningChars: 52_116, liveLoopSuspected: false, minProducedChars: MIN })).toBe(true);
   });
 
-  it("the measured run would have been extended, not killed", async () => {
-    // coder: 891,072 ms elapsed of a 900,000 ms budget, mid-generation, non-circling.
-    // With three 5-minute slices it reaches ~1,791,072 ms — past the ~15 minutes the
-    // composition actually needed.
-    const { DEADLINE_COMPOSITION_EXTENSION_LIMIT, DEADLINE_COMPOSITION_EXTENSION_MS } =
-      await import("../agent/sub-agent-turn-budget.js");
-    const measuredBudgetMs = 900_000;
-    const reachable = measuredBudgetMs + DEADLINE_COMPOSITION_EXTENSION_LIMIT * DEADLINE_COMPOSITION_EXTENSION_MS;
-    expect(reachable).toBeGreaterThan(1_200_000);
+  it("ENDS the run when nothing is being produced — the one call a timer can make honestly", async () => {
+    const { shouldDeferDeadline } = await import("../agent/sub-agent-turn-budget.js");
+    expect(shouldDeferDeadline({ liveReasoningChars: 0, liveLoopSuspected: false, minProducedChars: MIN })).toBe(false);
+    expect(shouldDeferDeadline({ liveReasoningChars: 12, liveLoopSuspected: false, minProducedChars: MIN })).toBe(false);
+  });
+
+  it("REFUSES to defer a circling generation, however much it is producing", async () => {
+    // THE DISCRIMINATOR, and the reason this is a deferral rather than an exemption. Without
+    // the loop gate, "keep going while producing" would hand the burner exactly the immunity
+    // the loop detector exists to deny it.
+    const { shouldDeferDeadline } = await import("../agent/sub-agent-turn-budget.js");
+    expect(shouldDeferDeadline({ liveReasoningChars: 80_810, liveLoopSuspected: true, minProducedChars: MIN })).toBe(false);
+  });
+
+  it("re-checks on a sane interval — long enough to be worth having, short enough to notice death", async () => {
+    const { DEADLINE_LIVENESS_RECHECK_MS } = await import("../agent/sub-agent-turn-budget.js");
+    expect(DEADLINE_LIVENESS_RECHECK_MS).toBeGreaterThanOrEqual(60_000);
+    expect(DEADLINE_LIVENESS_RECHECK_MS).toBeLessThanOrEqual(600_000);
   });
 });
