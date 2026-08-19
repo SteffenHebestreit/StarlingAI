@@ -2062,6 +2062,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
   let lastStreamProgressAt = 0;
   let streamInFlight = false;
   let deadlineExtensions = 0;
+  // THE WALL THAT ACTUALLY APPLIES. The soft deadline and the pre-deadline synthesis both
+  // computed their trigger from the ORIGINAL turnTimeoutMs, so a run whose hard deadline the
+  // liveness probe had already extended twice was still wrapped up on the original schedule.
+  // Run 10 was cut at iteration 4, mid-repair, having just been judged on_track twice.
+  let effectiveDeadlineAt = turnTimeoutMs ? Date.now() + turnTimeoutMs : undefined;
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
   const onDeadline = (): void => {
     if (longRunningGenerationManager.isUnbounded(subSessionId)) {
@@ -2094,6 +2099,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       progressWindowMs: DEADLINE_LIVENESS_RECHECK_MS,
     })) {
       deadlineExtensions++;
+      effectiveDeadlineAt = Date.now() + DEADLINE_LIVENESS_RECHECK_MS;
       logAudit("progress_verifier_intervened", {
         agentName: opts.agentName,
         runSessionId: subSessionId,
@@ -3936,7 +3942,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         // gives the synthesis pass a real chance to fire even when the
         // last tool round took 30-40s.
         const reservedSynthesisMs = Math.max(30_000, Math.min(75_000, Math.round(turnTimeoutMs * 0.33)));
-        if (elapsed >= turnTimeoutMs - reservedSynthesisMs) {
+        // Reserve the window before the deadline that is REAL, which is the one the liveness
+        // probe has been moving. Measuring against the original budget wraps up a run the
+        // supervisor has explicitly judged to be working.
+        const wallAt = effectiveDeadlineAt ?? (runStartedAt + turnTimeoutMs);
+        if (Date.now() >= wallAt - reservedSynthesisMs) {
           softDeadlineSynthesisAttempted = true;
           logAudit(
             "sub_agent_soft_deadline",
@@ -4092,11 +4102,26 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // E18: Soft deadline — inject a wrap-up nudge once when the caller-supplied
       // deadline expires. Coordinators set this to ~70% of their own budget so
       // specialists begin wrapping up before the hard timeout fires.
+      // A caller-set soft deadline is still a clock, and it must answer to the same evidence
+      // the hard one does: telling a run that is demonstrably producing to "wrap up within
+      // 1-2 iterations" ends it just as effectively as aborting it, and reads as the model's
+      // own choice in the transcript. Deferred while the generation is alive and not
+      // circling; a quiet or looping run gets the nudge as before.
+      const softDeadlineDeferred = shouldDeferDeadline({
+        liveReasoningChars,
+        liveLoopSuspected,
+        minProducedChars: MIN_SUBSTANTIVE_OUTPUT_CHARS,
+        msSinceLastProgress: streamInFlight && lastStreamProgressAt > 0
+          ? Date.now() - lastStreamProgressAt
+          : undefined,
+        progressWindowMs: DEADLINE_LIVENESS_RECHECK_MS,
+      });
       if (
         opts.softDeadlineMs !== undefined
         && !softDeadlineInjected
         && Date.now() >= opts.softDeadlineMs
         && toolCount > 0
+        && !softDeadlineDeferred
       ) {
         softDeadlineInjected = true;
         effectiveSystemPrompt +=

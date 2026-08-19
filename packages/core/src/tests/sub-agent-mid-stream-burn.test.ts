@@ -458,6 +458,26 @@ describe("sub-agent deadline — a liveness probe, not a budget", () => {
     })).toBe(false);
   });
 
+  it("defers a SOFT deadline on the same evidence as the hard one", async () => {
+    // Run 10: the hard deadline was extended twice, both logged on_track, and the run was
+    // still wrapped up at iteration 4 — because the soft deadline and the pre-deadline
+    // synthesis both computed their trigger from the ORIGINAL turnTimeoutMs and never saw
+    // the extensions. Telling a producing run to "wrap up within 1-2 iterations" ends it as
+    // surely as aborting it, and it reads as the model's own choice in the transcript.
+    const { shouldDeferDeadline } = await import("../agent/sub-agent-turn-budget.js");
+    // Chars deliberately BELOW the substantive bar, so this isolates the recency path —
+    // the shape a soft deadline lands on mid-iteration, which is where run 10 was cut.
+    expect(shouldDeferDeadline({
+      liveReasoningChars: 5, liveLoopSuspected: false, minProducedChars: MIN,
+      msSinceLastProgress: 3_000, progressWindowMs: 300_000,
+    })).toBe(true);
+    // …and a run with no generation in flight still gets wrapped up.
+    expect(shouldDeferDeadline({
+      liveReasoningChars: 5, liveLoopSuspected: false, minProducedChars: MIN,
+      msSinceLastProgress: undefined, progressWindowMs: 300_000,
+    })).toBe(false);
+  });
+
   it("re-checks on a sane interval — long enough to be worth having, short enough to notice death", async () => {
     const { DEADLINE_LIVENESS_RECHECK_MS } = await import("../agent/sub-agent-turn-budget.js");
     expect(DEADLINE_LIVENESS_RECHECK_MS).toBeGreaterThanOrEqual(60_000);
