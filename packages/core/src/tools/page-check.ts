@@ -33,6 +33,7 @@ import { createContext, runInContext } from "node:vm";
 import { childLogger } from "../logger.js";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { resolvePathWithinWorkspace } from "./workspace-path.js";
+import { describeErrorSite, SCRIPT_VM_FILENAME } from "./error-site.js";
 
 const log = childLogger("tools:page-check");
 
@@ -251,10 +252,16 @@ export function runScripts(scripts: ScriptSource[], ids: Set<string>): RunReport
 
   for (const script of scripts) {
     try {
-      runInContext(script.code, context, { timeout: SCRIPT_TIMEOUT_MS, displayErrors: true });
+      runInContext(script.code, context, {
+        timeout: SCRIPT_TIMEOUT_MS,
+        displayErrors: true,
+        // Named so the failing frame is identifiable in the stack, which is where the line
+        // and column live.
+        filename: SCRIPT_VM_FILENAME,
+      });
     } catch (err) {
       const message = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
-      report.errors.push(`${script.label} — ${message}`);
+      report.errors.push(`${script.label} — ${message}${describeErrorSite(err, script.code)}`);
       // Later scripts usually depend on the failed one; keep going so the report names the
       // FIRST cause rather than only the last symptom, but stop after a few.
       if (report.errors.length >= 4) return report;
@@ -270,7 +277,7 @@ export function runScripts(scripts: ScriptSource[], ids: Set<string>): RunReport
       report.framesRun++;
     } catch (err) {
       const message = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
-      report.errors.push(`animation frame ${i + 1} — ${message}`);
+      report.errors.push(`animation frame ${i + 1} — ${message}${describeErrorSite(err, scripts.map(s2 => s2.code).join("\n"))}`);
       break;
     }
   }
