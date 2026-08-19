@@ -83,6 +83,7 @@ import {
   buildStagedBuildResumeGuidance,
   buildStagedBuildFirstStepInstruction,
   buildReadOnlyStreakCorrection,
+  buildReadOnlyRepairCorrection,
   buildPageCheckCorrection,
   STAGED_BUILD_READ_ONLY_STREAK_LIMIT,
   buildReasoningBurnCorrection,
@@ -6250,17 +6251,29 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         && !opts.signal?.aborted
         && !longRunningGenerationManager.isStopRequested(subSessionId)
       ) {
+        // REPAIR HAS NO MARKERS TO POINT AT. This guard originally required markers still on
+        // disk, which is right for a fill but silently disables the correction for the mode
+        // that needs it just as much: a repair run has zero markers by definition, so run 11
+        // could read forever with nothing to stop it. The work is named by the failing page
+        // instead.
         const remaining = findUnfilledStubFiles(opts.workspacePath);
-        if (remaining.count > 0) {
+        const stillBroken = remaining.count === 0 ? findBrokenBuiltPages(opts.workspacePath) : [];
+        if (remaining.count > 0 || stillBroken.length > 0) {
           readOnlyCorrections++;
           history.push({
             role: "user",
-            content: buildReadOnlyStreakCorrection({
-              streak: readOnlyStreak,
-              markerCount: remaining.count,
-              markerSites: remaining.markers,
-              iterationsLeft: maxIterations - iterations - 1,
-            }),
+            content: remaining.count > 0
+              ? buildReadOnlyStreakCorrection({
+                  streak: readOnlyStreak,
+                  markerCount: remaining.count,
+                  markerSites: remaining.markers,
+                  iterationsLeft: maxIterations - iterations - 1,
+                })
+              : buildReadOnlyRepairCorrection({
+                  streak: readOnlyStreak,
+                  brokenPages: stillBroken,
+                  iterationsLeft: maxIterations - iterations - 1,
+                }),
           });
           logAudit("progress_verifier_intervened", {
             agentName: opts.agentName,
@@ -6272,6 +6285,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             readOnlyStreak,
             unfilledMarkers: remaining.count,
             markerFiles: remaining.files.slice(0, 4),
+            brokenPages: stillBroken.slice(0, 2),
             correctionCount: readOnlyCorrections,
             iterations,
           }, { sessionId: opts.parentSessionId, severity: "warn" });

@@ -293,6 +293,29 @@ export function buildPageCheckCorrection(params: {
   ].join("\n");
 }
 
+/**
+ * The read-without-writing correction for a REPAIR run, which has no markers to point at.
+ *
+ * Same failure, different mode: the agent circles the file gathering context and never edits.
+ * In a fill there is always a marker to name; in a repair the work is named by the fault the
+ * page itself reported, so that is what gets handed back.
+ */
+export function buildReadOnlyRepairCorrection(params: {
+  streak: number;
+  brokenPages: readonly string[];
+  iterationsLeft: number;
+}): string {
+  return [
+    `${params.streak} ITERATIONS IN A ROW WITHOUT CHANGING ANYTHING — and the page is still broken.`,
+    "You have read this file. More reading will not tell you anything new about what to change.",
+    "This is what running it reports:",
+    ...params.brokenPages.slice(0, 2).map((p) => `   ${p}`),
+    "Your next message must be an edit_file call that changes the code responsible. No preamble, no further reads.",
+    "If you are not certain of the ideal fix, make the smallest change that could plausibly correct it and call verify_page — a wrong attempt you can measure beats another read.",
+    `You have ${params.iterationsLeft} iteration(s) left.`,
+  ].join("\n");
+}
+
 export function buildStagedBuildResumeGuidance(
   markerFiles: readonly string[],
   markerCount: number,

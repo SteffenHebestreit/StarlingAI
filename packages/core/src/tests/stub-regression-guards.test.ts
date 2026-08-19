@@ -545,3 +545,25 @@ describe("a build whose page does not work is not a finished build", () => {
     expect(text).not.toContain("Replace ONE");
   });
 });
+
+describe("the read-without-writing correction also works in repair mode", () => {
+  it("names the failing page when there are no markers to point at", async () => {
+    // The streak correction was written for a FILL and gated on markers still being on disk.
+    // A repair run has zero markers by definition, so that gate silently disabled the one
+    // guard that stops an agent reading forever — in the mode that needs it just as much.
+    const { buildReadOnlyRepairCorrection } = await import("../agent/sub-agent-prompt-guidance.js");
+    const text = buildReadOnlyRepairCorrection({
+      streak: 4,
+      brokenPages: ["generated/neon-tetris/index.html: canvas 'board' is 440x313, but the page painted into x -320..160"],
+      iterationsLeft: 7,
+    });
+
+    expect(text).toContain("WITHOUT CHANGING ANYTHING");
+    expect(text).toContain("440x313");
+    expect(text).toContain("edit_file");
+    expect(text).toContain("verify_page");
+    expect(text).toContain("7 iteration(s) left");
+    // It must not send a repair run hunting for markers that do not exist.
+    expect(text).not.toContain(MARKER);
+  });
+});
