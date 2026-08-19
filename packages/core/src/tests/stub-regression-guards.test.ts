@@ -408,6 +408,27 @@ describe("a build that keeps reading is told to write", () => {
     expect(STAGED_BUILD_READ_ONLY_STREAK_LIMIT).toBeLessThanOrEqual(5);
   });
 
+  it("counts an edit as progress when there are no markers left to move", async () => {
+    // Run 12, live: repair mode holds the marker count at zero forever, so "the count
+    // changed" never resets the streak — and the correction fired at an agent that had just
+    // landed two real edits to fitCanvas. What counts as progress depends on the mode: a
+    // fill is judged by markers moving, a repair by an edit happening at all, with the page
+    // check judging on the next pass whether it helped.
+    const { findUnfilledStubFiles } = await import("../agent/sub-agent.js");
+    const dir = mkdtempSync(join(tmpdir(), "sai-repair-progress-"));
+    try {
+      mkdirSync(join(dir, "generated", "g"), { recursive: true });
+      const file = join(dir, "generated", "g", "index.html");
+      writeFileSync(file, "<script>const a=1;</script>", "utf8");
+      // No markers before or after a repair edit — the count cannot express this work.
+      expect(findUnfilledStubFiles(dir).count).toBe(0);
+      writeFileSync(file, "<script>const a=2;</script>", "utf8");
+      expect(findUnfilledStubFiles(dir).count).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("measures progress by the marker count, which a cosmetic edit cannot fake", async () => {
     // Run 8, iteration 3: the model DID call edit_file — and spent it refining the keyboard
     // handler, code that already worked, while the one marker it owed went untouched. A

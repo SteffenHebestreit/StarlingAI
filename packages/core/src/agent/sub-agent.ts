@@ -6236,7 +6236,21 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         ? findUnfilledStubFiles(opts.workspacePath).count
         : 0;
       if (isStagedBuild) {
-        if (markerCountNow !== lastMarkerCount) readOnlyStreak = 0;
+        // WHAT COUNTS AS PROGRESS DEPENDS ON THE MODE, and using one mode's measure for both
+        // is the same mistake a third time. A FILL is judged by the marker count moving,
+        // because an edit elsewhere in the file is not the work. A REPAIR has no markers at
+        // all — the count sits at zero forever — so that test never resets the streak and
+        // the correction fires at an agent that is editing. Run 12 landed two real edits to
+        // fitCanvas and was nagged anyway on the very next read.
+        //
+        // In a repair the requested action IS the edit, and whether it helped is the page
+        // check's judgement on the next pass, not this counter's.
+        const wroteThisIteration = iterationToolNames.some(
+          (name) => STAGED_BUILD_REQUIRED_TOOLS.includes(name as typeof STAGED_BUILD_REQUIRED_TOOLS[number]),
+        );
+        const madeProgress = markerCountNow !== lastMarkerCount
+          || (markerCountNow === 0 && wroteThisIteration);
+        if (madeProgress) readOnlyStreak = 0;
         else if (iterationToolNames.length > 0) readOnlyStreak++;
         lastMarkerCount = markerCountNow;
       }
