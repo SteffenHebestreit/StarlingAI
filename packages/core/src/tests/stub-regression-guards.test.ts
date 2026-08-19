@@ -588,3 +588,38 @@ describe("the read-without-writing correction also works in repair mode", () => 
     expect(text).not.toContain(MARKER);
   });
 });
+
+describe("an incomplete artifact still earns a corrective build", () => {
+  it("reports work outstanding for a partial build and for a broken page", async () => {
+    // The clean-slate validation run: a real 20 KB artifact with two subsystems unwritten,
+    // probe=fail, qa=fail — and the corrective build was skipped, because its gate asked only
+    // "was an artifact produced at all". That gate was written for the model that DESCRIBES an
+    // app instead of building one; a build that exists and does not work needs it just as
+    // much, and the QA loop cannot close the gap because its improve() rewrites the answer,
+    // never the file. Only a build can fix a build.
+    const { findUnfilledStubFiles, findBrokenBuiltPages } = await import("../agent/sub-agent.js");
+    const dir = mkdtempSync(join(tmpdir(), "sai-incomplete-artifact-"));
+    try {
+      mkdirSync(join(dir, "generated", "t"), { recursive: true });
+      const file = join(dir, "generated", "t", "index.html");
+
+      // Shape 1: partially filled — markers remain.
+      writeFileSync(file, `<script>const core=1;
+throw new Error('${MARKER}: input');</script>`, "utf8");
+      expect(findUnfilledStubFiles(dir).count).toBeGreaterThan(0);
+
+      // Shape 2: no markers, but the page does not run.
+      writeFileSync(file, "<script>const a=1; const a=2;</script>", "utf8");
+      expect(findUnfilledStubFiles(dir).count).toBe(0);
+      expect(findBrokenBuiltPages(dir).length).toBeGreaterThan(0);
+
+      // THE DISCRIMINATOR: a finished, working artifact must NOT trigger a rebuild, or every
+      // successful turn would pay for an extra delegation.
+      writeFileSync(file, "<html><body><script>const done=1;</script></body></html>", "utf8");
+      expect(findUnfilledStubFiles(dir).count).toBe(0);
+      expect(findBrokenBuiltPages(dir)).toHaveLength(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

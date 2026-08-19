@@ -18,6 +18,7 @@
 // severities, conditions, and ordering are byte-identical to the inline original.
 
 import { logAudit } from "../audit/logger.js";
+import { findUnfilledStubFiles, findBrokenBuiltPages } from "./sub-agent.js";
 import { getConfig } from "../config/loader.js";
 import { effectiveOrchestration } from "../runtime/effort-context.js";
 import { executeTool, type ToolContext } from "../tools/registry.js";
@@ -627,6 +628,18 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
 
   // Completion QA gate (normal-stop path): the user asked to BUILD an interactive/served
   // app, the model finished a turn (finishReason stop) describing a CONCEPT, but no real
+  // Unfilled markers or a page that does not run, read straight off disk — the same evidence
+  // the sub-agent's own resume detection uses, so the corrective build it triggers arrives in
+  // repair mode with the fault named rather than starting over.
+  const turnLeftAnIncompleteArtifact = (workspacePath: string): boolean => {
+    try {
+      if (findUnfilledStubFiles(workspacePath).count > 0) return true;
+      return findBrokenBuiltPages(workspacePath).length > 0;
+    } catch {
+      return false;   // a scan failure must never manufacture a rebuild
+    }
+  };
+
   // artifact was produced → run ONE corrective build and ship the built app instead of the
   // description. Scoped to app/served deliverables (web_coder/backend_coder) so plain
   // reports/decks the model already wrote inline still ship as-is. Bounded by the shared
@@ -637,7 +650,20 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
     && !signal.aborted
     && deliverableIntent.wantsArtifact
     && deliverableIntent.isAppBuild
-    && ctx.collectTurnArtifactAttachments(session).length === 0
+    && (
+      ctx.collectTurnArtifactAttachments(session).length === 0
+      // AN ARTIFACT THAT EXISTS BUT DOES NOT WORK NEEDS THE BUILD JUST AS MUCH.
+      //
+      // This gate asked only "was an artifact produced", because it was written for the
+      // model that DESCRIBES an app instead of building one. The clean-slate validation run
+      // hit the other shape: a real 20 KB artifact with two subsystems unwritten, failing its
+      // probe and its QA gate — and because a file existed, the one mechanism that could have
+      // finished it was skipped, and the turn shipped a partial with an honest apology.
+      //
+      // The QA loop cannot close this itself: its improve() rewrites the ANSWER, never the
+      // file. Only a build can fix a build, and the evidence for needing one is on disk.
+      || turnLeftAnIncompleteArtifact(session.getWorkspacePath())
+    )
   ) {
     const factsCtx = initialDynamicGuidance?.sourceSensitive
       ? ((await getSharedFactsEvidenceForFinalSynthesis(session.id))?.evidence ?? "")
