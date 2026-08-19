@@ -146,9 +146,10 @@ function buildDomContext(ids: Set<string>, report: RunReport): Record<string, un
         // guessing at its geometry would be worse than admitting we cannot see it.
         if (kind !== undefined && String(kind) !== "2d") return makeCtx2d();
         if (!recording) {
+          // Getters, not values: the page may resize this canvas after taking its context.
           recording = createRecordingContext(
-            Number(el["width"]) || 300,
-            Number(el["height"]) || 600,
+            () => Number(el["width"]) || 300,
+            () => Number(el["height"]) || 600,
           );
           if (id) report.canvasPainting.set(id, recording.report);
         }
@@ -274,6 +275,48 @@ export function runScripts(scripts: ScriptSource[], ids: Set<string>): RunReport
     }
   }
   return report;
+}
+
+/**
+ * Is this built page actually working? The same judgement verify_page makes, callable from
+ * the runner rather than only by an agent that remembers to ask.
+ *
+ * WHY THIS EXISTS. Resume detection asks one question — are there unfilled markers on disk —
+ * and treats a build with none as finished. Run 9 reached zero markers and left a page whose
+ * first script dies on `SyntaxError: Identifier 'started' has already been declared`; the
+ * previous run left one that runs and paints its playfield off the side of its own canvas.
+ * Both look complete to a marker count, so the orchestrator had nothing to resume and simply
+ * stopped. A build is not done because the placeholders are gone; it is done when the thing
+ * it built works.
+ */
+export function checkBuiltPage(absHtmlPath: string, relLabel: string): { ok: boolean; detail: string } {
+  let html: string;
+  try {
+    html = readFileSync(absHtmlPath, "utf-8");
+  } catch {
+    return { ok: true, detail: "" };   // unreadable is not evidence of breakage
+  }
+  const { scripts, externalMisses } = collectScripts(html, absHtmlPath);
+  if (scripts.length === 0 && externalMisses.length === 0) return { ok: true, detail: "" };
+
+  let report: RunReport;
+  try {
+    report = runScripts(scripts, collectElementIds(html));
+  } catch {
+    return { ok: true, detail: "" };   // a harness failure must never invent a defect
+  }
+
+  const problems = [...report.errors, ...report.consoleErrors.map((c) => `console.error — ${c}`)];
+  if (externalMisses.length > 0) {
+    problems.push(`missing local script file(s): ${externalMisses.join(", ")}`);
+  }
+  for (const [id, read] of report.canvasPainting) {
+    const verdict = judgeCanvasPainting(id, read());
+    if (verdict.status === "fail") problems.push(verdict.detail);
+  }
+
+  if (problems.length === 0) return { ok: true, detail: "" };
+  return { ok: false, detail: `${relLabel}: ${problems[0]}` };
 }
 
 registerTool({

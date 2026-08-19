@@ -483,3 +483,65 @@ describe("zero markers is not the same as a working page", () => {
     expect(stale).toContain("AFTER ITS LAST SUCCESSFUL CHECK");
   });
 });
+
+describe("a build whose page does not work is not a finished build", () => {
+  it("finds a built page whose script throws, and one that paints off its canvas", async () => {
+    // Resume detection asked only "are there unfilled markers". Run 9 reached zero markers
+    // and left a page dying on `SyntaxError: Identifier 'started' has already been declared`;
+    // the run before it left one that runs and paints its playfield off the side of its own
+    // canvas. Both read as complete to a marker count, so nothing was handed back and the
+    // user was the first thing in the loop to look at the result.
+    const { findBrokenBuiltPages } = await import("../agent/sub-agent.js");
+    const dir = mkdtempSync(join(tmpdir(), "sai-broken-page-"));
+    try {
+      mkdirSync(join(dir, "generated", "a"), { recursive: true });
+      mkdirSync(join(dir, "generated", "b"), { recursive: true });
+
+      writeFileSync(join(dir, "generated", "a", "index.html"),
+        "<html><body><script>const started=1; const started=2;</script></body></html>", "utf8");
+
+      // Runs cleanly, paints far outside a 300x600 canvas — the measured projection bug.
+      writeFileSync(join(dir, "generated", "b", "index.html"),
+        "<html><body><canvas id=\"board\"></canvas><script>"
+        + "const c=document.getElementById('board').getContext('2d');"
+        + "c.fillRect(-800,10,20,20); c.fillRect(-700,50,20,20);"
+        + "</script></body></html>", "utf8");
+
+      const broken = findBrokenBuiltPages(dir);
+      expect(broken).toHaveLength(2);
+      expect(broken.join(" ")).toContain("already been declared");
+      expect(broken.join(" ")).toContain("outside the canvas");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("stays silent on a page that works — the discriminator", async () => {
+    // A scan that flagged healthy builds would put every finished artifact back into repair.
+    const { findBrokenBuiltPages } = await import("../agent/sub-agent.js");
+    const dir = mkdtempSync(join(tmpdir(), "sai-good-page-"));
+    try {
+      mkdirSync(join(dir, "generated", "g"), { recursive: true });
+      writeFileSync(join(dir, "generated", "g", "index.html"),
+        "<html><body><canvas id=\"board\"></canvas><script>"
+        + "const c=document.getElementById('board').getContext('2d'); c.fillRect(10,10,40,40);"
+        + "</script></body></html>", "utf8");
+      expect(findBrokenBuiltPages(dir)).toHaveLength(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("hands the agent the fault to repair instead of markers that are not there", async () => {
+    const { buildStagedBuildResumeGuidance } = await import("../agent/sub-agent-prompt-guidance.js");
+    const text = buildStagedBuildResumeGuidance([], 0, [], [
+      "generated/neon-tetris/index.html: canvas 'board' is 440x313, but the page painted into x -320..160",
+    ]);
+    expect(text).toContain("FIX THE EXISTING BUILD");
+    expect(text).toContain("440x313");
+    expect(text).toContain("verify_page");
+    expect(text).toContain("NEVER call write_file");
+    // It must not send an agent hunting for markers when there are none left.
+    expect(text).not.toContain("Replace ONE");
+  });
+});

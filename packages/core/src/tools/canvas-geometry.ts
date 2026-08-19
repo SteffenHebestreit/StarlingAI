@@ -91,29 +91,37 @@ const RECT_LIKE = new Set(["fillRect", "strokeRect", "rect"]);
  * every setter accepted, exactly as the previous stub did) while accumulating where the page
  * painted.
  */
-export function createRecordingContext(canvasWidth: number, canvasHeight: number): {
+export function createRecordingContext(
+  // READ LAZILY, NOT SNAPSHOTTED. Pages routinely call getContext() first and size the
+  // canvas afterwards — neon-tetris does exactly that, taking its context at parse time and
+  // resizing in fitCanvas() on the first frame. Capturing the dimensions up front measured
+  // the drawing against the shim's placeholder 300x600 instead of the canvas the page
+  // actually built, which is a quiet way to be wrong about the very thing this reports.
+  readWidth: () => number,
+  readHeight: () => number,
+): {
   ctx: Record<string, unknown>;
   report: () => CanvasPaintReport;
 } {
   let matrix: Matrix = { ...IDENTITY };
   const stack: Matrix[] = [];
   let drawCalls = 0;
-  let outsidePoints = 0;
-  let totalPoints = 0;
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  // Device-space points, kept so the in/out test can run against the canvas's FINAL size.
+  // Bounded: the extremes are what the verdict needs, and a page drawing tens of thousands
+  // of cells must not be able to grow this without limit.
+  const MAX_SAMPLES = 20_000;
+  const points: { x: number; y: number }[] = [];
 
   const notePoint = (ux: number, uy: number): void => {
     if (!Number.isFinite(ux) || !Number.isFinite(uy)) return;
     const p = apply(matrix, ux, uy);
     if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) return;
-    totalPoints++;
     if (p.x < minX) minX = p.x;
     if (p.y < minY) minY = p.y;
     if (p.x > maxX) maxX = p.x;
     if (p.y > maxY) maxY = p.y;
-    // A tolerance of one pixel keeps a shape drawn flush to the edge from reading as an
-    // escape; the failures this catches miss by hundreds of pixels, not by rounding.
-    if (p.x < -1 || p.y < -1 || p.x > canvasWidth + 1 || p.y > canvasHeight + 1) outsidePoints++;
+    if (points.length < MAX_SAMPLES) points.push(p);
   };
 
   const noop = (): void => {};
@@ -150,7 +158,7 @@ export function createRecordingContext(canvasWidth: number, canvasHeight: number
   const ctx = new Proxy({}, {
     get: (_t, prop) => {
       if (typeof prop !== "string") return undefined;
-      if (prop === "canvas") return { width: canvasWidth, height: canvasHeight };
+      if (prop === "canvas") return { width: readWidth(), height: readHeight() };
       if (prop === "measureText") return () => ({ width: 0 });
       if (prop === "getImageData") return () => ({ data: new Uint8ClampedArray(4) });
       if (prop === "createLinearGradient" || prop === "createRadialGradient") {
@@ -186,14 +194,23 @@ export function createRecordingContext(canvasWidth: number, canvasHeight: number
 
   return {
     ctx,
-    report: () => ({
-      drawCalls,
-      bounds: totalPoints > 0 ? { minX, minY, maxX, maxY } : null,
-      outsidePoints,
-      totalPoints,
-      width: canvasWidth,
-      height: canvasHeight,
-    }),
+    report: () => {
+      const width = Math.max(1, readWidth() || 1);
+      const height = Math.max(1, readHeight() || 1);
+      // A tolerance of one pixel keeps a shape drawn flush to the edge from reading as an
+      // escape; the failures this catches miss by hundreds of pixels, not by rounding.
+      const outsidePoints = points.filter(
+        (p) => p.x < -1 || p.y < -1 || p.x > width + 1 || p.y > height + 1,
+      ).length;
+      return {
+        drawCalls,
+        bounds: points.length > 0 ? { minX, minY, maxX, maxY } : null,
+        outsidePoints,
+        totalPoints: points.length,
+        width,
+        height,
+      };
+    },
   };
 }
 

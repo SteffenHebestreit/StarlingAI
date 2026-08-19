@@ -297,7 +297,23 @@ export function buildStagedBuildResumeGuidance(
   markerFiles: readonly string[],
   markerCount: number,
   markerSites: readonly { file: string; line: number; text: string }[] = [],
+  /** Built pages that do not work, as their own scripts reported it. */
+  brokenPages: readonly string[] = [],
 ): string {
+  // REPAIR IS ALSO A RESUME. A build whose markers are gone but whose page throws on its
+  // first line, or paints its content off the side of its own canvas, is not finished — and
+  // told "resume", an agent with nothing left to fill would otherwise go looking for markers
+  // that are not there. Naming the defect makes the work obvious.
+  if (markerCount === 0 && brokenPages.length > 0) {
+    return [
+      "FIX THE EXISTING BUILD — DO NOT START OVER.",
+      `Every ${UNFINISHED_STUB_MARKER} marker is filled, but the page does not work. This is what running it reports:`,
+      ...brokenPages.slice(0, 3).map((p) => `   ${p}`),
+      "The work already on disk is REAL. Read the code around the fault, fix THAT, and call verify_page again — do not rewrite the file.",
+      "A drawing that lands outside its canvas is a projection/transform bug, not a missing feature: the page runs perfectly and shows the user nothing.",
+      "NEVER call write_file on this artifact. Re-emitting the whole file destroys the passes that produced it, and the harness will reject the write.",
+    ].join("\n");
+  }
   const shown = markerFiles.slice(0, 4).join(", ");
   // The scan that produced this count already walked past every marker, so name them.
   // Without this the directive said "go locate them", and run 6 obeyed literally: seven of

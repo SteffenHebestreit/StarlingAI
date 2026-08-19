@@ -93,6 +93,7 @@ import {
   UNFINISHED_STUB_MARKER,
 } from "./sub-agent-prompt-guidance.js";
 import { GENERATED_SUBDIR } from "../tools/workspace-path.js";
+import { checkBuiltPage } from "../tools/page-check.js";
 import { mergeAgentModelOverride, applyEffortModelOverlay, applyStreamCapOverlay } from "./sub-agent-model-config.js";
 import { resolveTurnBudgetMs, DEADLINE_LIVENESS_RECHECK_MS, shouldDeferDeadline } from "./sub-agent-turn-budget.js";
 import {
@@ -1323,6 +1324,43 @@ function scanForStubMarkers(scanRoot: string, relPrefix: string): { files: strin
  * staged build is judged this way; an agent that never signed up to eliminate markers is not
  * held to it. A scan failure leaves the verdict alone rather than inventing a bad one.
  */
+/**
+ * Built pages under generated/ that do not work, as their own executed scripts report it.
+ *
+ * Bounded deliberately: only .html files, only the output zone, and only the first few, so
+ * this stays a fast pre-flight rather than a second test suite. It runs at the START of a
+ * staged build to decide whether there is repair work waiting, which is the moment a marker
+ * count alone gave the wrong answer twice running.
+ */
+export function findBrokenBuiltPages(workspaceRoot: string): string[] {
+  const artifactRoot = resolvePath(workspaceRoot, GENERATED_SUBDIR);
+  if (!fs.existsSync(artifactRoot)) return [];
+  const MAX_PAGES = 4;
+  const MAX_DEPTH = 4;
+  const broken: string[] = [];
+
+  const walk = (dir: string, rel: string, depth: number): void => {
+    if (depth > MAX_DEPTH || broken.length >= MAX_PAGES) return;
+    let entries: fs.Dirent[];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      if (broken.length >= MAX_PAGES) return;
+      if (entry.name.startsWith(".")) continue;
+      const abs = resolvePath(dir, entry.name);
+      const relPath = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) { walk(abs, relPath, depth + 1); continue; }
+      if (!entry.isFile() || !/\.html?$/i.test(entry.name)) continue;
+      try {
+        const verdict = checkBuiltPage(abs, relPath);
+        if (!verdict.ok) broken.push(verdict.detail);
+      } catch { /* a harness failure must never invent a defect */ }
+    }
+  };
+
+  try { walk(artifactRoot, GENERATED_SUBDIR, 0); } catch { /* fail open */ }
+  return broken;
+}
+
 export function stagedBuildHonestOutcome(
   outcome: SubAgentOutcome,
   isStagedBuild: boolean,
@@ -2382,10 +2420,25 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     const stagedResume = isStagedBuild
       ? findUnfilledStubFiles(opts.workspacePath)
       : { files: [] as string[], count: 0, markers: [] as StubMarkerSite[] };
-    const isResumeBuild = stagedResume.count > 0;
+    // A BUILD IS NOT DONE BECAUSE THE PLACEHOLDERS ARE GONE.
+    //
+    // Resume detection asked one question — are there unfilled markers on disk — so a build
+    // with none read as finished and there was nothing to hand back. Run 9 left a page whose
+    // first script dies on a duplicate declaration; the run before it left one that runs
+    // and paints its playfield off the side of its own canvas. Zero markers both times, so
+    // the orchestrator saw a completed artifact and stopped, and the user was the first
+    // thing in the loop to actually look at it.
+    //
+    // Executing the built page answers the question the marker count was standing in for.
+    // Only consulted when the markers are gone: while they remain there is already work
+    // queued, and a half-built page failing is expected rather than informative.
+    const brokenPages = isStagedBuild && stagedResume.count === 0
+      ? findBrokenBuiltPages(opts.workspacePath)
+      : [];
+    const isResumeBuild = stagedResume.count > 0 || brokenPages.length > 0;
     const stagedBuildGuidance = isStagedBuild && stagedBuildFlags.stagedArtifactBuildDirective === true
       ? (isResumeBuild
-          ? buildStagedBuildResumeGuidance(stagedResume.files, stagedResume.count, stagedResume.markers)
+          ? buildStagedBuildResumeGuidance(stagedResume.files, stagedResume.count, stagedResume.markers, brokenPages)
           : buildStagedArtifactBuildGuidance(maxIterations, PER_PATH_EDIT_CAP))
       : "";
     if (isStagedBuild) {
@@ -2400,6 +2453,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           mode: isResumeBuild ? "resume" : "fresh",
           unfilledMarkers: stagedResume.count,
           markerFiles: stagedResume.files.slice(0, 4),
+          brokenPages: brokenPages.slice(0, 3),
         },
         { sessionId: subSessionId, severity: "info" },
       );

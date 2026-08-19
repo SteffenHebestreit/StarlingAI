@@ -19,7 +19,7 @@ import {
 
 describe("the recorder measures where a page actually painted", () => {
   it("records draw calls inside the canvas as in-bounds", () => {
-    const { ctx, report } = createRecordingContext(300, 600);
+    const { ctx, report } = createRecordingContext(() => 300, () => 600);
     (ctx["fillRect"] as (...a: number[]) => void)(10, 10, 40, 40);
     (ctx["fillRect"] as (...a: number[]) => void)(100, 200, 30, 30);
 
@@ -33,7 +33,7 @@ describe("the recorder measures where a page actually painted", () => {
     // THE CORE OF THE DESIGN. Arguments to fillRect are in the context's CURRENT user space,
     // and any 2.5D projection sets a transform first. A recorder that stored raw arguments
     // would be confidently wrong in exactly the cases it exists to catch.
-    const { ctx, report } = createRecordingContext(300, 600);
+    const { ctx, report } = createRecordingContext(() => 300, () => 600);
     (ctx["translate"] as (...a: number[]) => void)(-500, 0);
     (ctx["fillRect"] as (...a: number[]) => void)(10, 10, 20, 20);   // device x ≈ -490
 
@@ -44,7 +44,7 @@ describe("the recorder measures where a page actually painted", () => {
   });
 
   it("honours save/restore so a scoped transform does not leak", () => {
-    const { ctx, report } = createRecordingContext(300, 600);
+    const { ctx, report } = createRecordingContext(() => 300, () => 600);
     (ctx["save"] as () => void)();
     (ctx["translate"] as (...a: number[]) => void)(-900, 0);
     (ctx["restore"] as () => void)();
@@ -58,7 +58,7 @@ describe("the recorder measures where a page actually painted", () => {
 
 describe("the verdict names what is wrong, and stays quiet when nothing is", () => {
   it("fails a canvas the page never drew on — the blank HOLD/NEXT panels", () => {
-    const { report } = createRecordingContext(120, 120);
+    const { report } = createRecordingContext(() => 120, () => 120);
     const verdict = judgeCanvasPainting("holdCanvas", report());
     expect(verdict.status).toBe("fail");
     expect(verdict.detail).toContain("never drew anything");
@@ -66,7 +66,7 @@ describe("the verdict names what is wrong, and stays quiet when nothing is", () 
 
   it("fails the measured neon-tetris board and quotes the numbers", () => {
     // Reproduced to scale: a 300x600 canvas painted from x -320 to 160.
-    const { ctx, report } = createRecordingContext(300, 600);
+    const { ctx, report } = createRecordingContext(() => 300, () => 600);
     const rect = ctx["fillRect"] as (...a: number[]) => void;
     rect(-320, 32, 10, 10);
     rect(150, 500, 10, 10);
@@ -84,7 +84,7 @@ describe("the verdict names what is wrong, and stays quiet when nothing is", () 
     // before anything was measured — a slightly less broken projection would have passed. A
     // page that paints mostly in-bounds but escapes by more than a whole canvas width is
     // still misplaced, and that judgement does not depend on the guessed number.
-    const { ctx, report } = createRecordingContext(300, 600);
+    const { ctx, report } = createRecordingContext(() => 300, () => 600);
     const rect = ctx["fillRect"] as (...a: number[]) => void;
     for (let i = 0; i < 20; i++) rect(10 + i, 10, 5, 5);   // 20 points well inside
     rect(-400, 10, 5, 5);                                   // one point 1.3 canvases out
@@ -97,7 +97,7 @@ describe("the verdict names what is wrong, and stays quiet when nothing is", () 
   it("PASSES a page that merely clips at its edges — the discriminator", () => {
     // A guard that fired on any overspill would be noise: pieces sliding in, shapes clipped
     // by design, and strokes straddling the border are all normal. This must stay quiet.
-    const { ctx, report } = createRecordingContext(300, 600);
+    const { ctx, report } = createRecordingContext(() => 300, () => 600);
     const rect = ctx["fillRect"] as (...a: number[]) => void;
     for (let i = 0; i < 20; i++) rect(20, 20 * i, 40, 18);
     rect(-8, 300, 20, 20);      // straddling the left edge
