@@ -367,6 +367,26 @@ async function probeFile(workspacePath: string, location: string): Promise<Artif
   if (completeness) {
     receipts.push({ target: location, probe: "completeness", status: completeness.status, detail: completeness.detail, severity: "hard", contentHash, durationMs: Date.now() - t2 });
   }
+  // FINISHED IS NOT THE SAME AS WORKING. Everything above reads the file; none of it runs
+  // it, so this signed off `probe: "pass"` on the validation-run page that dies with
+  // `ReferenceError: state is not defined` before drawing a thing. The QA gate then had a
+  // passing probe and a failing verdict and no idea which to believe. Executing the page is
+  // the whole point of verify_page and costs one bounded run.
+  if (/^\.html?$/.test(extensionOf(location))) {
+    const t3 = Date.now();
+    const { checkBuiltPage } = await import("../tools/page-check.js");
+    const runs = checkBuiltPage(absolute, location);
+    receipts.push({
+      target: location,
+      probe: "runs",
+      status: runs.ok ? "pass" : "fail",
+      detail: runs.ok ? "executes without uncaught errors and paints inside its canvas" : runs.detail,
+      severity: "hard",
+      contentHash,
+      durationMs: Date.now() - t3,
+    });
+  }
+
   const localRefs = /^\.html?$/.test(extensionOf(location)) ? findLocalAssetRefs(text) : [];
   if (localRefs.length > 0) {
     receipts.push({
