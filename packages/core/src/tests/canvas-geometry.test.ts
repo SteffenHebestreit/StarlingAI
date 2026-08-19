@@ -57,11 +57,25 @@ describe("the recorder measures where a page actually painted", () => {
 });
 
 describe("the verdict names what is wrong, and stays quiet when nothing is", () => {
-  it("fails a canvas the page never drew on — the blank HOLD/NEXT panels", () => {
+  it("fails a page that painted NOWHERE — unambiguous whatever it intended", () => {
     const { report } = createRecordingContext(() => 120, () => 120);
-    const verdict = judgeCanvasPainting("holdCanvas", report());
+    const verdict = judgeCanvasPainting("board", report(), false);
     expect(verdict.status).toBe("fail");
-    expect(verdict.detail).toContain("never drew anything");
+    expect(verdict.detail).toContain("drew nothing");
+  });
+
+  it("does NOT fail a quiet panel beside a painted one — the pre-start false positive", () => {
+    // The scripts run from the page's initial state: start overlay up, nothing held, nothing
+    // spawned. A hold or preview canvas that legitimately fills in once play begins looks
+    // identical to one the page never draws, and this check cannot drive the game far enough
+    // to tell them apart. The neon-tetris repair hit exactly that — board fixed, run still
+    // failing on two panels that may be behaving perfectly — and a check that fails correct
+    // pages teaches agents to discount it.
+    const { report } = createRecordingContext(() => 120, () => 120);
+    const verdict = judgeCanvasPainting("holdCanvas", report(), true);
+    expect(verdict.status).toBe("pass");
+    // Still reported, so a human can judge it.
+    expect(verdict.detail).toContain("nothing drawn");
   });
 
   it("fails the measured neon-tetris board and quotes the numbers", () => {

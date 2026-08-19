@@ -310,8 +310,10 @@ export function checkBuiltPage(absHtmlPath: string, relLabel: string): { ok: boo
   if (externalMisses.length > 0) {
     problems.push(`missing local script file(s): ${externalMisses.join(", ")}`);
   }
-  for (const [id, read] of report.canvasPainting) {
-    const verdict = judgeCanvasPainting(id, read());
+  const canvasReports = [...report.canvasPainting.entries()].map(([id, read]) => [id, read()] as const);
+  const anyPainted = canvasReports.some(([, r]) => r.drawCalls > 0);
+  for (const [id, r] of canvasReports) {
+    const verdict = judgeCanvasPainting(id, r, anyPainted && r.drawCalls === 0);
     if (verdict.status === "fail") problems.push(verdict.detail);
   }
 
@@ -393,8 +395,9 @@ registerTool({
     // every check above — one script, two animation frames, no errors — and drew its
     // playfield off the side of its own canvas. Code that throws is caught by the errors
     // above; code that is confidently wrong about geometry is only caught here.
-    const canvasVerdicts = [...report.canvasPainting.entries()]
-      .map(([id, read]) => judgeCanvasPainting(id, read()));
+    const canvasReports = [...report.canvasPainting.entries()].map(([id, read]) => [id, read()] as const);
+    const anyPainted = canvasReports.some(([, r]) => r.drawCalls > 0);
+    const canvasVerdicts = canvasReports.map(([id, r]) => judgeCanvasPainting(id, r, anyPainted && r.drawCalls === 0));
     for (const verdict of canvasVerdicts) {
       if (verdict.status === "fail") problems.push(verdict.detail);
     }

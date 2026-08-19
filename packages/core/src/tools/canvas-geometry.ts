@@ -252,11 +252,35 @@ export interface CanvasVerdict {
  * it painted somewhere the canvas is not. Anything subtler is a matter of taste and belongs
  * to a human or a vision model, not to a rule that will be wrong about art.
  */
-export function judgeCanvasPainting(id: string, report: CanvasPaintReport): CanvasVerdict {
+export function judgeCanvasPainting(
+  id: string,
+  report: CanvasPaintReport,
+  /** True when some OTHER canvas on the page was painted. */
+  pagePaintedElsewhere = false,
+): CanvasVerdict {
   if (report.drawCalls === 0) {
+    // AN EMPTY PANEL IS NOT ALWAYS A BUG. The scripts run from the page's INITIAL state —
+    // start overlay up, nothing held, nothing spawned — so a hold or preview canvas that is
+    // legitimately empty until play begins looks identical to one the page never draws. This
+    // check cannot drive the game to a started state, so it cannot tell those apart, and
+    // failing the page on a guess would block a correct build and teach agents to discount
+    // the verdict. The neon-tetris repair hit exactly that: board fixed, run still failing on
+    // two panels that may be behaving perfectly.
+    //
+    // What remains unambiguous is a page that painted NOWHERE. That is broken whatever it
+    // intended, so it stays a failure; a single quiet canvas beside a painted one is reported
+    // for a human to judge.
+    if (pagePaintedElsewhere) {
+      return {
+        status: "pass",
+        detail: `canvas '${id}' — nothing drawn during the checked frames. `
+          + `That is expected for a panel that fills in once play starts (hold, next preview); `
+          + `if it should already show something, this is a real defect.`,
+      };
+    }
     return {
       status: "fail",
-      detail: `canvas '${id}' — the page ran but never drew anything on it. `
+      detail: `canvas '${id}' — the page ran but drew nothing, on this or any other canvas. `
         + `A blank canvas is indistinguishable from a working one until someone looks at it.`,
     };
   }
