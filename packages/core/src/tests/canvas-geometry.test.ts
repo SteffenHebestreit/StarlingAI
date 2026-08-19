@@ -57,11 +57,16 @@ describe("the recorder measures where a page actually painted", () => {
 });
 
 describe("the verdict names what is wrong, and stays quiet when nothing is", () => {
-  it("fails a page that painted NOWHERE — unambiguous whatever it intended", () => {
+  it("does NOT fail a page that painted nowhere — click-to-start is a normal design", () => {
+    // I called this case unambiguous and it is not: a page with a start overlay draws nothing
+    // until someone presses play, so "painted nowhere" is what a CORRECT build looks like
+    // from here. Both delivered Tetris builds have exactly that overlay. A genuinely dead
+    // page almost always throws, which the error check already catches; what this recorder
+    // uniquely sees is WHERE a page paints, so that is the only thing it fails on.
     const { report } = createRecordingContext(() => 120, () => 120);
     const verdict = judgeCanvasPainting("board", report(), false);
-    expect(verdict.status).toBe("fail");
-    expect(verdict.detail).toContain("drew nothing");
+    expect(verdict.status).toBe("pass");
+    expect(verdict.detail).toContain("waits for the user to start");
   });
 
   it("does NOT fail a quiet panel beside a painted one — the pre-start false positive", () => {

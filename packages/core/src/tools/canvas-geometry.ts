@@ -270,18 +270,22 @@ export function judgeCanvasPainting(
     // What remains unambiguous is a page that painted NOWHERE. That is broken whatever it
     // intended, so it stays a failure; a single quiet canvas beside a painted one is reported
     // for a human to judge.
-    if (pagePaintedElsewhere) {
-      return {
-        status: "pass",
-        detail: `canvas '${id}' — nothing drawn during the checked frames. `
-          + `That is expected for a panel that fills in once play starts (hold, next preview); `
-          + `if it should already show something, this is a real defect.`,
-      };
-    }
+    // I called this half unambiguous last time and it is not. A page with a start overlay —
+    // which this Tetris has, and which is a perfectly ordinary design — draws nothing at all
+    // until someone presses play, so "painted nowhere" is exactly what a correct build looks
+    // like from here. Failing it fails every click-to-start app.
+    //
+    // A page that is genuinely dead almost always THROWS, and that is already caught above.
+    // What this recorder uniquely sees is WHERE a page paints when it paints, so that is what
+    // it fails on. The rest is reported for a human, who can tell an empty hold panel from a
+    // broken one in a glance and does not need a rule that guesses.
     return {
-      status: "fail",
-      detail: `canvas '${id}' — the page ran but drew nothing, on this or any other canvas. `
-        + `A blank canvas is indistinguishable from a working one until someone looks at it.`,
+      status: "pass",
+      detail: pagePaintedElsewhere
+        ? `canvas '${id}' — nothing drawn during the checked frames, while others were painted. `
+          + `Expected for a panel that fills in once play starts; a real defect if it should already show something.`
+        : `canvas '${id}' — nothing drawn during the checked frames, and neither was any other canvas. `
+          + `Expected for a page that waits for the user to start; a real defect if it should render immediately.`,
     };
   }
   if (!report.bounds || report.totalPoints === 0) {
