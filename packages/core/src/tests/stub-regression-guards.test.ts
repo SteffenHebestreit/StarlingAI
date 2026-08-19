@@ -623,3 +623,41 @@ throw new Error('${MARKER}: input');</script>`, "utf8");
     }
   });
 });
+
+describe("a run that never checked its page is not a run that passed", () => {
+  it("refuses success when the agent skipped verify_page and the page is broken", async () => {
+    // Validation run 2: eight edits, every marker filled, outcome "success" — on a page that
+    // dies with `Cannot read properties of undefined` before it draws anything. The agent
+    // never called verify_page, and the honest-outcome check consulted the page verdict only
+    // when one had been PRODUCED, so saying nothing was as good as passing.
+    const { stagedBuildHonestOutcome } = await import("../agent/sub-agent.js");
+    const dir = mkdtempSync(join(tmpdir(), "sai-never-checked-"));
+    try {
+      mkdirSync(join(dir, "generated", "g"), { recursive: true });
+      writeFileSync(join(dir, "generated", "g", "index.html"),
+        "<html><body><script>const x = undefined; x.toLocaleString();</script></body></html>", "utf8");
+
+      // No page-check evidence at all — the run simply never looked.
+      expect(stagedBuildHonestOutcome("success", true, dir, {})).toBe("partial");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("still passes a working page the agent never checked — the discriminator", async () => {
+    // Not checking is not itself a defect; shipping something broken is. A run that never
+    // called verify_page and produced a page that works must still be a success.
+    const { stagedBuildHonestOutcome } = await import("../agent/sub-agent.js");
+    const dir = mkdtempSync(join(tmpdir(), "sai-never-checked-ok-"));
+    try {
+      mkdirSync(join(dir, "generated", "g"), { recursive: true });
+      writeFileSync(join(dir, "generated", "g", "index.html"),
+        "<html><body><canvas id=\"b\"></canvas><script>"
+        + "document.getElementById('b').getContext('2d').fillRect(5,5,20,20);"
+        + "</script></body></html>", "utf8");
+      expect(stagedBuildHonestOutcome("success", true, dir, {})).toBe("success");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

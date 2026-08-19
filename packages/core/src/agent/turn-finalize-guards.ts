@@ -649,9 +649,11 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
     && !ctx.getQaCorrectiveBuildUsed()
     && !signal.aborted
     && deliverableIntent.wantsArtifact
-    && deliverableIntent.isAppBuild
     && (
-      ctx.collectTurnArtifactAttachments(session).length === 0
+      // "Described it instead of building it" stays scoped to app builds: for a deck or a
+      // report the model writing the content inline IS the deliverable, and forcing a build
+      // there would be wrong.
+      (deliverableIntent.isAppBuild && ctx.collectTurnArtifactAttachments(session).length === 0)
       // AN ARTIFACT THAT EXISTS BUT DOES NOT WORK NEEDS THE BUILD JUST AS MUCH.
       //
       // This gate asked only "was an artifact produced", because it was written for the
@@ -662,6 +664,14 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
       //
       // The QA loop cannot close this itself: its improve() rewrites the ANSWER, never the
       // file. Only a build can fix a build, and the evidence for needing one is on disk.
+      // A BROKEN ARTIFACT IS BROKEN WHOEVER BUILT IT.
+      //
+      // isAppBuild is `builder !== "content_writer"` — which agent won the bid — and the
+      // second validation run routed a playable browser game to content_writer. So a page
+      // that throws before it draws was classified as not-an-app-build and skipped the one
+      // guard that could have repaired it, on the basis of a routing decision that has
+      // nothing to do with whether the file works. The disk evidence is structural and does
+      // not care who wrote it.
       || turnLeftAnIncompleteArtifact(session.getWorkspacePath())
     )
   ) {

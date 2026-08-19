@@ -1376,7 +1376,21 @@ export function stagedBuildHonestOutcome(
   if (pageCheck.lastPassed === false) return "partial";
   if (pageCheck.lastPassed === true && pageCheck.mutatedSince === true) return "partial";
   try {
-    return findUnfilledStubFiles(workspacePath).count > 0 ? "partial" : outcome;
+    if (findUnfilledStubFiles(workspacePath).count > 0) return "partial";
+    // A RUN THAT NEVER CHECKED IS NOT A RUN THAT PASSED.
+    //
+    // The clauses above consult the page verdict only when the agent PRODUCED one, so an
+    // agent that simply never calls verify_page escapes the check by saying nothing. The
+    // second validation run did exactly that: eight edits, every marker filled, `outcome:
+    // success` — on a page that dies with `Cannot read properties of undefined (reading
+    // 'toLocaleString')` before it draws a thing.
+    //
+    // Silence is not evidence. When the run did not check, the check runs here instead; it
+    // is the same scan the resume path uses and costs one pass over the output zone.
+    if (pageCheck.lastPassed === undefined && findBrokenBuiltPages(workspacePath).length > 0) {
+      return "partial";
+    }
+    return outcome;
   } catch {
     return outcome;
   }
