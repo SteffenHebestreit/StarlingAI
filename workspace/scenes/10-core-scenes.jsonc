@@ -184,6 +184,23 @@
           "default": "correctness, completeness, safety"
         }
       }
+    },
+    "verified_app_build": {
+      "description": "Build a runnable browser app or game — a playable game, an interactive canvas page, a small web tool — and prove it works by EXECUTING it before reporting done. Use this whenever the deliverable is something the user will open and interact with. It is the generate -> test -> fix loop made explicit, because a build that is only read is a build that is only hoped for: every measured failure of this pipeline shipped a file that looked finished and died on its first line. Auch für deutschsprachige Anfragen: ein spielbares Browser-Spiel, eine interaktive Canvas-Seite oder eine kleine Web-Anwendung bauen, testen und die Fehler beheben, bis die Seite wirklich läuft.",
+      "task": "Build a WORKING app for: {{request}}.\n\nThis scene exists because reading code is not evidence that it runs. Every measured failure of this pipeline shipped a file that looked finished and died on its first line, and every one would have been caught by executing it once. So the test step is not optional and not delegable to an agent that only reads.\n\n1) BUILD: delegate to web_coder (browser/canvas/DOM apps) or backend_coder (apps needing a server). Large builds are staged: one small skeleton whose unbuilt parts are single UNFINISHED_STUB lines that throw, then ONE edit_file per stub filling it with complete code. Never re-emit the whole file to change part of it.\n\n2) RUN IT: the builder MUST call verify_page on the built HTML before saying it is done. verify_page executes every script against a DOM and reports the exact error with its line, the source, and a caret under the column - plus where the page painted on each canvas, because a drawing that lands outside its canvas runs perfectly and shows the user nothing.\n\n3) FIX AND RE-RUN: on FAIL, fix the FIRST error it names (the later ones are usually consequences of it) and call verify_page again. Repeat until it passes. Do NOT delegate this to a reviewer to READ the file - a reader cannot tell a working page from a broken one, and the error already says where the fault is. If two fixes in a row do not move the verdict, change approach rather than repeating the edit.\n\n4) ONLY THEN REPORT: state the artifact path and what verify_page returned. If it still fails, say so plainly with the outstanding error - never describe a page as playable while its own check fails.\n\nquality_supervisor is available for a completeness pass against the request AFTER the page runs, never instead of running it.",
+      "allowedAgents": [
+        "web_coder",
+        "backend_coder",
+        "coder",
+        "quality_supervisor"
+      ],
+      "expectArtifact": true,
+      "params": {
+        "request": {
+          "description": "The app or game to build (what it is, and how the user will use it)",
+          "default": "the app described in the conversation"
+        }
+      }
     }
   }
 }
