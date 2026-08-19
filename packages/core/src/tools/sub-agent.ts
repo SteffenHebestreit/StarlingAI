@@ -2689,15 +2689,27 @@ registerTool({
         items: {
           type: "object",
           properties: {
-            id: { type: "string" },
-            title: { type: "string" },
-            agentName: { type: "string" },
-            task: { type: "string" },
-            context: { type: "string" },
-            dependsOn: { type: "array", items: { type: "string" } },
-            fallbackAgents: { type: "array", items: { type: "string" } },
-            routingQuery: { type: "string" },
-            skillMatchThreshold: { type: "number" },
+            id: { type: "string", description: "Unique node id within this graph, referenced by other nodes' dependsOn." },
+            title: { type: "string", description: "Short human-readable label for the node, shown in swarm state." },
+            agentName: { type: "string", description: "Exact specialist to run this node. Omit to let routing choose." },
+            task: {
+              type: "string",
+              // Session e95eec63: the node's task read "…They pasted their current config and
+              // want a detailed tutorial of what to change." The config itself was never
+              // passed, the specialist could not see the conversation, and it answered with
+              // an entirely invented address plan — 10.66.66.0/24 where the user's pasted
+              // file says 10.10.0.1/24. A task that REFERS to material it does not carry is a
+              // request to make something up.
+              description: "What the specialist must do, stated in full. The sub-agent CANNOT see the conversation, so never refer to material the user provided ('their config', 'the pasted file', 'the attached log') without putting that material in this node's context.",
+            },
+            context: {
+              type: "string",
+              description: "Verbatim material this task depends on — a pasted config, log, code, error output, or prior findings. The sub-agent has no access to the conversation; anything it must reason over has to be here, copied exactly rather than summarized.",
+            },
+            dependsOn: { type: "array", items: { type: "string" }, description: "Ids of nodes that must finish before this one starts." },
+            fallbackAgents: { type: "array", items: { type: "string" }, description: "Configured agent names to try in order if the first choice fails. Never invent names." },
+            routingQuery: { type: "string", description: "Short phrase describing the CAPABILITY this node needs, used for routing when agentName is omitted. Describe the skill, not the request." },
+            skillMatchThreshold: { type: "number", description: "Minimum routing similarity (0-1) before this node falls back to an ephemeral agent." },
           },
           required: ["id", "task"],
         },

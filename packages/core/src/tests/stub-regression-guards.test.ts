@@ -661,3 +661,33 @@ describe("a run that never checked its page is not a run that passed", () => {
     }
   });
 });
+
+describe("a delegated task cannot refer to material it does not carry", () => {
+  it("describes every run_task_graph node field, especially context", async () => {
+    // Session e95eec63: the node task read "…They pasted their current config and want a
+    // detailed tutorial of what to change." The config was never passed. The specialist
+    // cannot see the conversation, so it invented an address plan — 10.66.66.0/24 where the
+    // user's pasted file says 10.10.0.1/24 — and the answer was confidently wrong about the
+    // user's own network.
+    //
+    // The node's `context` field existed the whole time as a bare { type: "string" } with no
+    // description at all, while delegate_to_agent's equivalent IS described — and in the
+    // tetris session the same orchestrator used that one correctly. An undocumented field is
+    // an unusable field.
+    const { getTool } = await import("../tools/registry.js");
+    await import("../tools/sub-agent.js");
+
+    const tool = getTool("run_task_graph");
+    expect(tool, "run_task_graph must be registered").toBeTruthy();
+    const params = tool!.parameters as Record<string, any>;
+    const node = params["properties"]["nodes"]["items"]["properties"] as Record<string, any>;
+
+    const bare = Object.entries(node).filter(([, v]) => !v?.description).map(([k]) => k);
+    expect(bare, `these node fields carry no description: ${bare.join(", ")}`).toHaveLength(0);
+
+    // The context field must say the thing that was actually missing: the sub-agent is blind
+    // to the conversation, so referenced material has to travel with the task.
+    expect(String(node["context"].description)).toMatch(/conversation/i);
+    expect(String(node["task"].description)).toMatch(/context/i);
+  });
+});
