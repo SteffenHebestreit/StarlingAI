@@ -28,6 +28,7 @@
 
 import { readFileSync, existsSync, statSync } from "node:fs";
 import { dirname, resolve as resolvePath } from "node:path";
+import { createRecordingContext, judgeCanvasPainting, type CanvasPaintReport } from "./canvas-geometry.js";
 import { createContext, runInContext } from "node:vm";
 import { childLogger } from "../logger.js";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
@@ -93,6 +94,8 @@ interface RunReport {
   errors: string[];
   consoleErrors: string[];
   framesRun: number;
+  /** Where the page actually painted, per canvas it touched. Empty for a page with none. */
+  canvasPainting: Map<string, () => CanvasPaintReport>;
 }
 
 /**
@@ -115,7 +118,10 @@ function buildDomContext(ids: Set<string>, report: RunReport): Record<string, un
     set: () => true,
   });
 
-  const makeElement = (tag: string): Record<string, unknown> => {
+  const makeElement = (tag: string, id?: string): Record<string, unknown> => {
+    // One recorder per canvas element, created lazily on the first getContext so a page that
+    // never draws still reports zero draw calls rather than nothing at all.
+    let recording: { ctx: Record<string, unknown>; report: () => CanvasPaintReport } | undefined;
     const el: Record<string, unknown> = {
       tagName: tag.toUpperCase(),
       style: {},
@@ -135,7 +141,19 @@ function buildDomContext(ids: Set<string>, report: RunReport): Record<string, un
       removeEventListener: noop,
       focus: noop,
       getBoundingClientRect: () => ({ x: 0, y: 0, width: 300, height: 600, top: 0, left: 0, right: 300, bottom: 600 }),
-      getContext: () => makeCtx2d(),
+      getContext: (kind?: unknown) => {
+        // Only 2D is recorded. A WebGL page paints through a completely different API and
+        // guessing at its geometry would be worse than admitting we cannot see it.
+        if (kind !== undefined && String(kind) !== "2d") return makeCtx2d();
+        if (!recording) {
+          recording = createRecordingContext(
+            Number(el["width"]) || 300,
+            Number(el["height"]) || 600,
+          );
+          if (id) report.canvasPainting.set(id, recording.report);
+        }
+        return recording.ctx;
+      },
       querySelector: () => null,
       querySelectorAll: () => [],
     };
@@ -147,7 +165,7 @@ function buildDomContext(ids: Set<string>, report: RunReport): Record<string, un
     if (!ids.has(id)) return null;
     let el = elementCache.get(id);
     if (!el) {
-      el = makeElement(/canvas/i.test(id) ? "canvas" : "div");
+      el = makeElement(/canvas/i.test(id) ? "canvas" : "div", id);
       el["id"] = id;
       elementCache.set(id, el);
     }
@@ -224,7 +242,7 @@ function buildDomContext(ids: Set<string>, report: RunReport): Record<string, un
 
 /** Execute every script in one shared context, then pump frames. First error per script wins. */
 export function runScripts(scripts: ScriptSource[], ids: Set<string>): RunReport {
-  const report: RunReport = { errors: [], consoleErrors: [], framesRun: 0 };
+  const report: RunReport = { errors: [], consoleErrors: [], framesRun: 0, canvasPainting: new Map() };
   const sandbox = buildDomContext(ids, report);
   // `globalThis` inside the context must be the context itself, so top-level `var`/function
   // declarations in one script are visible to the next exactly as they are in a browser.
@@ -328,6 +346,16 @@ registerTool({
       problems.push(`missing local script file(s) the page loads: ${externalMisses.join(", ")}`);
     }
 
+    // WHERE THE PAGE PAINTED, not merely whether it survived painting. neon-tetris passed
+    // every check above — one script, two animation frames, no errors — and drew its
+    // playfield off the side of its own canvas. Code that throws is caught by the errors
+    // above; code that is confidently wrong about geometry is only caught here.
+    const canvasVerdicts = [...report.canvasPainting.entries()]
+      .map(([id, read]) => judgeCanvasPainting(id, read()));
+    for (const verdict of canvasVerdicts) {
+      if (verdict.status === "fail") problems.push(verdict.detail);
+    }
+
     if (problems.length > 0) {
       return {
         success: false,
@@ -342,9 +370,16 @@ registerTool({
 
     return {
       success: true,
-      output: `PASS — '${rel}' runs: ${scripts.length} script(s) executed, ${report.framesRun} animation frame(s) survived, no uncaught errors. `
-        + "(Logic check only — it does not prove the page LOOKS right.)",
-      metadata: { path: rel, scripts: scripts.length, framesRun: report.framesRun },
+      output: `PASS — '${rel}' runs: ${scripts.length} script(s) executed, ${report.framesRun} animation frame(s) survived, no uncaught errors.`
+        + (canvasVerdicts.length > 0
+          ? "\n" + canvasVerdicts.map((v) => `  - ${v.detail}`).join("\n")
+          : "")
+        + "\n(Logic and drawing-geometry check. It does not judge colour, layout or whether the result looks GOOD — "
+        + "if you can render or screenshot the page, look at it before calling it done.)",
+      metadata: {
+        path: rel, scripts: scripts.length, framesRun: report.framesRun,
+        canvases: canvasVerdicts.length,
+      },
     };
   },
 });
