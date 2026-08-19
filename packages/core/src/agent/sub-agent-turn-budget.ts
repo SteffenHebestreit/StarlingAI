@@ -242,6 +242,17 @@ export function resolveSoftDeadlineOffsetMs(
 export const DEADLINE_LIVENESS_RECHECK_MS = 300_000;
 
 /**
+ * Reasoning characters between liveness heartbeats a sub-agent sends its parent.
+ *
+ * Progress events fire once per ITERATION, so a delegate inside one long generation is
+ * silent for as long as that generation runs — validation run 4 spent thirteen minutes on a
+ * single fill, and every layer above it that defers to liveness saw nothing. 2,000 chars is
+ * roughly a beat every few seconds on the measured model: frequent enough that no deferral
+ * window mistakes composition for death, rare enough that it is not a token-rate firehose.
+ */
+export const STREAM_HEARTBEAT_CHARS = 2_000;
+
+/**
  * Should a fired turn deadline DEFER instead of ending the run?
  *
  * The whole policy, in one predicate, so it can be tested without a clock. Defer while the

@@ -96,7 +96,7 @@ import {
 import { GENERATED_SUBDIR } from "../tools/workspace-path.js";
 import { checkBuiltPage } from "../tools/page-check.js";
 import { mergeAgentModelOverride, applyEffortModelOverlay, applyStreamCapOverlay } from "./sub-agent-model-config.js";
-import { resolveTurnBudgetMs, DEADLINE_LIVENESS_RECHECK_MS, shouldDeferDeadline } from "./sub-agent-turn-budget.js";
+import { resolveTurnBudgetMs, DEADLINE_LIVENESS_RECHECK_MS, STREAM_HEARTBEAT_CHARS, shouldDeferDeadline } from "./sub-agent-turn-budget.js";
 import {
   extractInfraFailureSignature,
   liveToolFamily,
@@ -2075,6 +2075,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
   // liveReasoningChars restarts at zero each iteration, so it cannot distinguish a young
   // generation from a dead one; this can.
   let lastStreamProgressAt = 0;
+  /** Reasoning chars at the last liveness heartbeat sent to the parent. */
+  let lastHeartbeatChars = 0;
   let streamInFlight = false;
   let deadlineExtensions = 0;
   // THE WALL THAT ACTUALLY APPLIES. The soft deadline and the pre-deadline synthesis both
@@ -4250,6 +4252,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         // no visibility the deadline stays the authority, exactly as before.
         streamInFlight = Boolean(provider.completeViaStream);
         lastStreamProgressAt = Date.now();
+        lastHeartbeatChars = 0;
         response = provider.completeViaStream
           ? await provider.completeViaStream(messages, effectiveTools, llmSignal, {
               // Cheap observation so the loop threshold can be fitted from real runs
@@ -4259,6 +4262,27 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
                 liveReasoningChars = p.reasoningChars;
                 liveLoopSuspected = p.reasoningLoopDetected;
                 lastStreamProgressAt = Date.now();
+                // THE PARENT CANNOT HEAR A CHILD THAT ONLY SPEAKS BETWEEN ITERATIONS.
+                //
+                // Progress events are emitted once per ITERATION, so a delegate inside one
+                // long generation is silent for as long as that generation runs. Validation
+                // run 4 spent thirteen minutes composing a single fill, and the orchestrator
+                // — whose own deadline defers on exactly this signal — saw nothing at all and
+                // concluded, correctly on the evidence it had, that the run was dead.
+                //
+                // Every layer that defers to liveness needs the heartbeat, not just this one.
+                // Sampled rather than per-chunk: a token-rate beat would be thousands of
+                // events per generation for a question answered just as well by one every
+                // few seconds.
+                if (p.reasoningChars - lastHeartbeatChars >= STREAM_HEARTBEAT_CHARS) {
+                  lastHeartbeatChars = p.reasoningChars;
+                  opts.onProgress?.({
+                    agentName: opts.agentName,
+                    kind: "thinking",
+                    iteration: iterations + 1,
+                    summary: `${opts.agentName} is composing (${p.reasoningChars.toLocaleString("en-US")} chars).`,
+                  });
+                }
               },
               // The operator's unbounded grant, readable from INSIDE the provider while
               // the stream is still running. A callback, not a boolean: the grant

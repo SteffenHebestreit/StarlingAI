@@ -478,6 +478,22 @@ describe("sub-agent deadline — a liveness probe, not a budget", () => {
     })).toBe(false);
   });
 
+  it("beats often enough that no deferral window mistakes composition for death", async () => {
+    // Validation run 4: the delegate spent thirteen minutes inside ONE generation. Progress
+    // events fire per ITERATION, so it emitted nothing the whole time, and the orchestrator —
+    // whose deadline defers on exactly that signal — saw silence and aborted a run that was
+    // streaming. Fixing the child's own deadline was not enough; every layer above it needs
+    // the heartbeat too.
+    const { STREAM_HEARTBEAT_CHARS, DEADLINE_LIVENESS_RECHECK_MS } = await import("../agent/sub-agent-turn-budget.js");
+
+    // At the measured ~16.8 tok/s and ~3.0 chars/token, 2,000 chars is a beat every ~40 s —
+    // comfortably inside every deferral window, and nowhere near a per-token firehose.
+    const charsPerSecond = 16.8 * 3.0;
+    const secondsBetweenBeats = STREAM_HEARTBEAT_CHARS / charsPerSecond;
+    expect(secondsBetweenBeats * 1000).toBeLessThan(DEADLINE_LIVENESS_RECHECK_MS / 2);
+    expect(STREAM_HEARTBEAT_CHARS).toBeGreaterThanOrEqual(500);
+  });
+
   it("re-checks on a sane interval — long enough to be worth having, short enough to notice death", async () => {
     const { DEADLINE_LIVENESS_RECHECK_MS } = await import("../agent/sub-agent-turn-budget.js");
     expect(DEADLINE_LIVENESS_RECHECK_MS).toBeGreaterThanOrEqual(60_000);
