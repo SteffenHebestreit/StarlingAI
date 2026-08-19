@@ -127,6 +127,15 @@ export async function handleAguiStream(
   let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
   let heartbeatHandle: ReturnType<typeof setInterval> | null = null;
   let timedOut = false;
+  // Last sign of life from the turn — its own text, its reasoning, or any delegate's
+  // progress. The clock below consults this instead of deciding on elapsed time alone.
+  let lastTurnActivityAt = 0;
+  const turnStartedAt = Date.now();
+  /** How long a quiet turn may sit before the clock stops deferring. */
+  const GATEWAY_LIVENESS_RECHECK_MS = 300_000;
+  /** Absolute ceiling, so a chatty-but-stuck turn cannot defer forever. */
+  const MAX_GATEWAY_TURN_MS = 86_400_000;
+  const noteTurnActivity = (): void => { lastTurnActivityAt = Date.now(); };
 
   // ONE cleanup for both timers rather than two functions called side by side. There are
   // four teardown paths here, and the comment on the turn-timeout timer below records what
@@ -146,6 +155,28 @@ export async function handleAguiStream(
 
   const handleTurnTimeout = () => {
     if (timedOut || res.writableEnded) return; // already handled / stream already closed
+    // THE EIGHTH CLOCK, AND THE LAST ONE STILL DECIDING ON ELAPSED TIME ALONE.
+    //
+    // Validation run 3 was cancelled at 31:05 — five seconds after the runtime supervisor had
+    // judged it on_track and extended, and while the delegate was mid-composition. The
+    // sub-agent deadline, the runtime turn deadline and the soft deadline all defer to
+    // evidence now; this one aborted regardless, so all three deferrals were overruled by the
+    // outermost timer that could not see any of it.
+    //
+    // It can see it now: every reasoning chunk and tool call from a delegate arrives here as
+    // a progress event. A stream that delivered something within the recheck window is alive;
+    // one that has gone quiet stops deferring on the next check, and the absolute ceiling
+    // still bounds the whole thing.
+    const sinceProgressMs = lastTurnActivityAt > 0 ? Date.now() - lastTurnActivityAt : Infinity;
+    const withinCeiling = Date.now() - turnStartedAt < MAX_GATEWAY_TURN_MS;
+    if (sinceProgressMs < GATEWAY_LIVENESS_RECHECK_MS && withinCeiling) {
+      log.info(
+        { runId, sinceProgressMs, recheckMs: GATEWAY_LIVENESS_RECHECK_MS },
+        "Gateway turn deadline deferred — the turn is still producing",
+      );
+      timeoutHandle = setTimeout(handleTurnTimeout, GATEWAY_LIVENESS_RECHECK_MS);
+      return;
+    }
     timedOut = true;
     abortController.abort();
     // "timeout" keeps the parked session resumable (and on the long retention) so the
@@ -227,10 +258,12 @@ export async function handleAguiStream(
           textStarted = true;
         }
         if (text && text.trim().length > 0) streamedMeaningfulText = true;
+        noteTurnActivity();
         sseEvent(res, { type: "TEXT_MESSAGE_CONTENT", messageId, delta: text });
       },
 
       onReasoning: (text) => {
+        noteTurnActivity();
         // Chain-of-thought stream. Emitted as a distinct event so clients can
         // render it in a collapsible "thinking" panel separate from the answer.
         sseEvent(res, { type: "THINKING_TEXT_MESSAGE_CONTENT", messageId, delta: text });
@@ -261,6 +294,7 @@ export async function handleAguiStream(
       // semantics — `delegated: true` and the sub-agent's name so a client can render the
       // child's thinking in its own lane rather than splicing it into the assistant's.
       onSubAgentProgress: (event) => {
+        noteTurnActivity();
         if (event.kind === "reasoning" && event.reasoning) {
           sseEvent(res, {
             type: "THINKING_TEXT_MESSAGE_CONTENT",

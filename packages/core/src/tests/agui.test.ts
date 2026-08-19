@@ -183,6 +183,49 @@ describe("AG-UI streaming", () => {
     }
   });
 
+  it("defers the gateway turn clock while the turn is still producing", async () => {
+    // Validation run 3 died at 31:05 — five seconds after the runtime supervisor judged it
+    // on_track and extended, and while the delegate was mid-composition. Three deferrals
+    // inside the runtime were overruled by the outermost clock, which could not see any of
+    // the evidence they were reading. It can now: every delegate chunk arrives here.
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agui-live-"));
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      // A tiny budget so the clock fires well inside the test; the ratio is what matters.
+      gateway: { jwtSecret: "a".repeat(32), turnTimeoutMs: 150 },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+
+    vi.doMock("../agent/runtime.js", () => ({
+      runTurn: vi.fn(async (opts: Record<string, unknown>) => {
+        const onSubAgentProgress = opts["onSubAgentProgress"] as ((e: Record<string, unknown>) => void) | undefined;
+        // Keep producing past the budget, exactly as a live delegate does.
+        for (let i = 0; i < 6; i++) {
+          onSubAgentProgress?.({ agentName: "web_coder", kind: "reasoning", iteration: i, reasoning: `step ${i}` });
+          await new Promise((r) => setTimeout(r, 60));
+        }
+        (opts["onChunk"] as ((t: string) => void) | undefined)?.("the finished deliverable");
+        return {
+          response: "the finished deliverable", toolCallsExecuted: 1, guardrailEvents: [],
+          usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 }, blocked: false,
+        };
+      }),
+    }));
+
+    try {
+      const { handleAguiStream } = await import("../gateway/agui.js");
+      const res = new FakeResponse();
+      await handleAguiStream(res as never, { message: "build it" });
+
+      const events = parseSseEvents(res.chunks);
+      // The turn survived its budget and delivered, instead of being cut mid-composition.
+      expect(events.some(e => e["type"] === "RUN_ERROR")).toBe(false);
+      expect(res.chunks.join("")).toContain("the finished deliverable");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   it("forwards a delegated sub-agent's thinking and tool calls to the stream", async () => {
     // Regression: this path subscribed to none of the sub-agent progress events, so a turn
     // that delegated a long build emitted heartbeats and nothing else for as long as the
