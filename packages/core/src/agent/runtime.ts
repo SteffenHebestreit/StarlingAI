@@ -1077,6 +1077,24 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
     lastSubAgentProgressAt = Date.now();
     opts.onSubAgentProgress?.(event);
   };
+  // THE ORCHESTRATOR IS A GENERATION TOO.
+  //
+  // The beat above covers a turn BLOCKED on a delegate, which is where the long stretches
+  // usually are — but not always. Session e95eec63 spent 1,084,567 ms inside the
+  // orchestrator's OWN first completion, 38,668 characters of reasoning before a single tool
+  // call, with no sub-agent yet in existence to report anything. Its deadline was watching a
+  // signal that could not fire, and concluded the turn was dead.
+  //
+  // Its own text and reasoning are the same kind of evidence on the same clock, so they feed
+  // the same timestamp.
+  const noteChunk: NonNullable<RunTurnOptions["onChunk"]> = (text) => {
+    lastSubAgentProgressAt = Date.now();
+    opts.onChunk?.(text);
+  };
+  const noteReasoning: NonNullable<RunTurnOptions["onReasoning"]> = (text) => {
+    lastSubAgentProgressAt = Date.now();
+    opts.onReasoning?.(text);
+  };
   // The deadline is SUSPENDED, not merely re-armed, while the turn holds an operator
   // unbounded grant. Audit 3959f3ac: the dock promised "let it finish naturally", the
   // operator chose it at 07:35:24, and this timer overrode the operator 19 minutes later —
@@ -1208,7 +1226,12 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
     // reasoning/prompt/iteration knobs pick it up without threading a parameter
     // through every helper.
     const out = await runWithEffortContext(opts.effortTier, () =>
-      _runTurn({ ...opts, onSubAgentProgress: noteSubAgentProgress }, signal, turnAbort?.signal ?? inertAbort.signal, {
+      _runTurn({
+        ...opts,
+        onSubAgentProgress: noteSubAgentProgress,
+        onChunk: noteChunk,
+        onReasoning: noteReasoning,
+      }, signal, turnAbort?.signal ?? inertAbort.signal, {
         deadlineMs: turnDeadlineMs,
         extendForDelegationWait: extendTurnDeadlineForDelegationWait,
       }));

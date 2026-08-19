@@ -40,6 +40,10 @@ import { longRunningGenerationManager } from "../agent/long-running-generation.j
  * grant is ever cleared, so a grant cannot silently disarm the turn deadline forever.
  */
 const GRANTED_TURN_RECHECK_MS = 60_000;
+/** How long a quiet turn may sit before the gateway watchdog stops deferring to it. */
+const TURN_LIVENESS_RECHECK_MS = 300_000;
+/** Absolute ceiling, so a turn that chatters without finishing cannot defer forever. */
+const MAX_GATEWAY_TURN_MS = 86_400_000;
 
 const log = childLogger("gateway:rpc");
 
@@ -733,6 +737,11 @@ export class RpcConnection {
         let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
         let timedOut = false;
         let completed = false;
+        // Last sign of life from this turn — its own text, its reasoning, or any delegate's
+        // progress. The watchdog below consults it instead of deciding on elapsed time alone.
+        let lastTurnActivityAt = 0;
+        const turnStartedAt = Date.now();
+        const noteTurnActivity = (): void => { lastTurnActivityAt = Date.now(); };
 
         const cleanupTurn = () => {
           if (timeoutHandle) {
@@ -766,6 +775,29 @@ export class RpcConnection {
             );
             if (timeoutHandle) clearTimeout(timeoutHandle);
             timeoutHandle = setTimeout(endTimedOutSession, GRANTED_TURN_RECHECK_MS);
+            return;
+          }
+          // THE SAME CLOCK, ON THE OTHER SURFACE.
+          //
+          // agui.ts got this deferral; this did not, and this is the path the dashboard
+          // actually uses — so session e95eec63 was cut at 31 minutes by the one gateway
+          // watchdog that still decided on elapsed time alone, having spent 18 of those
+          // minutes inside a single orchestrator completion. Fixing one surface and not its
+          // twin has been the recurring shape of this whole area: the heartbeat, the
+          // delegation-wait clock and the sub-agent event stream each landed on AG-UI first
+          // and had to be chased onto RPC afterwards.
+          //
+          // A turn that produced something within the recheck window is alive and the
+          // watchdog re-arms; one that has gone quiet stops deferring on the very next
+          // check, and the absolute ceiling still bounds a turn that chatters forever.
+          const sinceActivityMs = lastTurnActivityAt > 0 ? Date.now() - lastTurnActivityAt : Infinity;
+          if (sinceActivityMs < TURN_LIVENESS_RECHECK_MS && Date.now() - turnStartedAt < MAX_GATEWAY_TURN_MS) {
+            log.info(
+              { sessionId, requestId, sinceActivityMs },
+              "Gateway turn watchdog deferred — the turn is still producing",
+            );
+            if (timeoutHandle) clearTimeout(timeoutHandle);
+            timeoutHandle = setTimeout(endTimedOutSession, TURN_LIVENESS_RECHECK_MS);
             return;
           }
           timedOut = true;
@@ -888,9 +920,11 @@ export class RpcConnection {
           // D5: keep the gateway hard-timeout in lockstep with the runtime's delegation-wait exclusion.
           onDelegationWaitMs: extendGatewayDeadline,
           onChunk: (text) => {
+            noteTurnActivity();
             this.sendEvent({ type: "agent.chunk", data: { requestId, text } });
           },
           onReasoning: (text) => {
+            noteTurnActivity();
             this.sendEvent({ type: "agent.reasoning", data: { requestId, text } });
           },
           onStatus: (status) => {
@@ -912,6 +946,7 @@ export class RpcConnection {
             });
           },
           onSubAgentProgress: (event) => {
+            noteTurnActivity();
             if (event.kind === "reasoning" && event.reasoning) {
               this.sendEvent({
                 type: "agent.reasoning",
