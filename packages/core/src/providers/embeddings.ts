@@ -254,6 +254,41 @@ export function buildAgentTokenIdf(agents: Array<[string, SubAgentConfig]>): Map
   return idf;
 }
 
+/**
+ * How much routing signal one raw query token carries, judged against the agent corpus.
+ *
+ * IDF over the catalog answers the question a router actually has: does this word tell the
+ * agents apart? "answer", "user", "question", "want" appear across most agent descriptions
+ * and discriminate nothing; "wireguard", "raspberry", "pfsense" appear in few or none and
+ * are the whole signal.
+ *
+ * A token the catalog never mentions scores HIGHEST rather than zero. It contributes nothing
+ * to lexical matching, but this feeds a SEMANTIC search, where the embedding model knows what
+ * WireGuard is whether or not an agent description happens to say the word — and a domain
+ * noun no agent lists is exactly the part of a task worth keeping.
+ *
+ * Tokens are normalized the same way the corpus was, so lookups line up; a compound scores as
+ * its rarest part, so "V-Server" is not dragged down to the rarity of "server" alone.
+ */
+export function routingTokenRarity(token: string, idf: Map<string, number>): number {
+  const parts = normalizeSearchText(token).split(" ").filter((p) => p.length >= 2);
+  if (parts.length === 0) return 0;
+  let best = 0;
+  for (const part of parts) {
+    const score = idf.get(part) ?? UNKNOWN_TOKEN_RARITY;
+    if (score > best) best = score;
+  }
+  return best;
+}
+
+/**
+ * Rarity assigned to a token absent from every agent description. Above any value
+ * buildAgentTokenIdf can produce — its rarest possible token (present in exactly one agent
+ * out of a realistic catalog) sits near 3.5, and the absent-token limit of the same formula
+ * is ~4.6 — so "never mentioned" ranks above "mentioned once" without being unbounded.
+ */
+const UNKNOWN_TOKEN_RARITY = 10;
+
 export function scoreAgentKeywordMatch(
   query: string,
   agentName: string,

@@ -9,7 +9,8 @@
  */
 
 import { getConfig } from "../config/loader.js";
-import { buildAgentTokenIdf, isEmbeddingAvailable, scoreAgentKeywordMatch, searchByEmbedding } from "../providers/embeddings.js";
+import { buildAgentTokenIdf, isEmbeddingAvailable, routingTokenRarity, scoreAgentKeywordMatch, searchByEmbedding } from "../providers/embeddings.js";
+import type { SubAgentConfig } from "../config/schema.js";
 import { getEmbeddingProvider } from "../providers/index.js";
 import { readPromotedAgents } from "../agent/promoted-agents.js";
 import { readRecentOutcomes, computeAgentCostProfile, computeOutcomeRoutingMultiplier, extractTaskKeywords, type AgentCostProfile } from "../agent/outcomes.js";
@@ -224,18 +225,55 @@ export function countRoutingQueryContentTokens(query: string): number {
  * Returns null when the query is already short enough that shortening
  * wouldn't change behavior.
  */
-export function shortenOverspecifiedRoutingQuery(query: string): string | null {
+export function shortenOverspecifiedRoutingQuery(
+  query: string,
+  /** Corpus rarity to rank by. Defaults to the live agent catalog; injected in tests. */
+  corpusIdf?: Map<string, number>,
+): string | null {
   const tokens = query.split(/\s+/).filter(Boolean);
   if (tokens.length <= 6) return null;
 
-  const distinctive: string[] = [];
+  const candidates: string[] = [];
   for (const token of tokens) {
     const lower = token.toLowerCase();
     if (lower.length < 3) continue;
     if (ROUTING_QUERY_STOP_WORDS.has(lower)) continue;
     if (ROUTING_QUERY_FILLER.has(lower)) continue;
-    distinctive.push(token);
-    if (distinctive.length >= 5) break;
+    candidates.push(token);
+  }
+  if (candidates.length === 0) return null;
+
+  // KEEP THE INFORMATIVE TOKENS, NOT THE FIRST ONES.
+  //
+  // This used to take the leading five, on the stated assumption that they "tend to capture
+  // the user's primary domain". That holds for a query a user typed. It is false for a
+  // DELEGATED task, which always opens with framing — "Answer the user's question: they
+  // want to…", "Build a…", "Investigate whether…" — and carries its subject downstream.
+  //
+  // Session e95eec63 is what the assumption cost: a WireGuard question shortened to
+  // "Answer user's question: they want", which routed to prompt_optimizer — a PROMPT-review
+  // agent — at 0.793, logged as high confidence. The fragment was not a bad match for that
+  // agent; it was an accurate match for boilerplate, because every word of the actual
+  // subject had been discarded before routing began.
+  //
+  // Rarity across the agent corpus answers the question position was standing in for: a word
+  // in most agent descriptions tells them apart from nothing. Ties keep document order, and
+  // the winners are re-sorted into reading order so the shortened query still parses as a
+  // phrase for the embedding search rather than a bag of words.
+  const idf = corpusIdf ?? buildAgentTokenIdf(routableAgentEntries());
+  const ranked = candidates
+    .map((token, index) => ({ token, index, rarity: routingTokenRarity(token, idf) }))
+    .sort((a, b) => (b.rarity - a.rarity) || (a.index - b.index))
+    .slice(0, 5)
+    .sort((a, b) => a.index - b.index);
+
+  const seen = new Set<string>();
+  const distinctive: string[] = [];
+  for (const entry of ranked) {
+    const key = entry.token.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    distinctive.push(entry.token);
   }
 
   if (distinctive.length === 0) return null;
@@ -243,6 +281,14 @@ export function shortenOverspecifiedRoutingQuery(query: string): string | null {
   // Don't return a "shortened" query that's actually the same as the input.
   if (shortened === query.trim()) return null;
   return shortened;
+}
+
+/** Catalog the router can actually pick from: configured sub-agents plus promoted ones. */
+function routableAgentEntries(): Array<[string, SubAgentConfig]> {
+  const config = getConfig();
+  const promoted = Object.entries(readPromotedAgents(config.workspacePath))
+    .filter((entry): entry is [string, SubAgentConfig] => Boolean(entry[1]));
+  return [...Object.entries(config.subAgents), ...promoted];
 }
 
 export async function resolveAgentRouting(

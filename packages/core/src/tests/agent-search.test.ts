@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   buildAgentIndex,
+  buildAgentTokenIdf,
   buildAgentSearchDocument,
   inferAgentSearchKeywords,
   resetEmbeddingSearchStateForTests,
@@ -1389,6 +1390,68 @@ describe("circuit breaker", () => {
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("shortenOverspecifiedRoutingQuery keeps the informative half of a DELEGATED task", () => {
+  // Session e95eec63. A WireGuard question was shortened to "Answer user's question: they
+  // want" and routed to prompt_optimizer — a PROMPT-review agent — at 0.793, logged as high
+  // confidence. The fragment was not a bad match for that agent; it was an accurate match for
+  // boilerplate, because every word of the actual subject had been dropped before routing.
+  //
+  // The old rule kept the LEADING five distinctive tokens, on the stated assumption that they
+  // "tend to capture the user's primary domain". True of a query a user typed; false of a
+  // delegated task, which always opens with framing and carries its subject downstream.
+  const DELEGATED_TASK = "Answer the user's question: they want to configure a second WireGuard "
+    + "peer on the V-Server so they can reach their Raspberry Pi cluster from outside via the "
+    + "existing tunnel. They pasted their current config and want a detailed tutorial.";
+
+  // A catalog whose agents talk about answering user questions — which every real catalog
+  // does, and which is exactly why those words discriminate nothing.
+  const CORPUS = buildAgentTokenIdf([
+    ["prompt_optimizer", {
+      description: "Reviews prompts and answers questions about what the user wants to change.",
+      capabilities: ["prompt review", "answer quality"], tags: ["prompt", "question", "answer"],
+    }],
+    ["researcher", {
+      description: "Answers a user question with sourced research and detailed findings.",
+      capabilities: ["research"], tags: ["question", "answer", "detailed"],
+    }],
+    ["shell_agent", {
+      description: "Runs commands on servers and inspects running processes.",
+      capabilities: ["server operations"], tags: ["shell", "server"],
+    }],
+  ] as never);
+
+  it("drops the instruction wrapper and keeps the subject", () => {
+    const result = shortenOverspecifiedRoutingQuery(DELEGATED_TASK, CORPUS);
+    expect(result).not.toBeNull();
+    const lower = result!.toLowerCase();
+
+    // The subject survives...
+    expect(lower).toContain("wireguard");
+    // ...and the boilerplate the old rule kept does not.
+    expect(lower).not.toContain("answer");
+    expect(lower).not.toContain("question");
+  });
+
+  it("still caps the query and returns it in reading order", () => {
+    const result = shortenOverspecifiedRoutingQuery(DELEGATED_TASK, CORPUS);
+    expect(result!.split(/\s+/).length).toBeLessThanOrEqual(5);
+    // Winners are re-sorted into document order so the query still reads as a phrase for the
+    // embedding search rather than as a reversed bag of words.
+    const lower = result!.toLowerCase();
+    if (lower.includes("wireguard") && lower.includes("peer")) {
+      expect(lower.indexOf("wireguard")).toBeLessThan(lower.indexOf("peer"));
+    }
+  });
+
+  it("falls back to document order when the corpus cannot discriminate", () => {
+    // Nothing indexed: every token is equally unknown, so there is nothing to rank by and the
+    // old leading-tokens behaviour is the honest default rather than an arbitrary one.
+    const result = shortenOverspecifiedRoutingQuery(DELEGATED_TASK, new Map());
+    expect(result).not.toBeNull();
+    expect(result!.split(/\s+/)[0]).toBe("Answer");
   });
 });
 
