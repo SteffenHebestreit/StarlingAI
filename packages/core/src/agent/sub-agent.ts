@@ -5741,12 +5741,38 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         // of every successful file mutation so the interrupted paths below can name
         // what is actually on disk. Cheap (a Set of strings) and independent of the
         // artifact-attachment semantics, which stay untouched.
-        if (result.success && (STAGED_BUILD_REQUIRED_TOOLS as readonly string[]).includes(tc.name)) {
-          const meta = (result.metadata ?? {}) as Record<string, unknown>;
+        // Any successful call that WROTE something invalidates the read caches below,
+        // not just the two staged-build writers: generate_website and friends move the
+        // same bytes and report it the same way, through an outputPath in metadata.
+        const wroteMeta = (result.metadata ?? {}) as Record<string, unknown>;
+        const reportedOutputPath = typeof wroteMeta["outputPath"] === "string" && wroteMeta["outputPath"];
+        if (result.success && ((STAGED_BUILD_REQUIRED_TOOLS as readonly string[]).includes(tc.name) || reportedOutputPath)) {
+          const meta = wroteMeta;
           const mutatedPath = typeof meta["outputPath"] === "string" && meta["outputPath"]
             ? String(meta["outputPath"])
             : (typeof meta["path"] === "string" ? String(meta["path"]) : "");
           if (mutatedPath) mutatedWorkspacePaths.add(mutatedPath);
+
+          // A CACHED READ OF A FILE THAT HAS SINCE CHANGED IS A WRONG ANSWER.
+          //
+          // Both caches above key on (tool name, arguments) and neither knows the
+          // workspace moved underneath them, so after this write every earlier read of
+          // the same path replays pre-write bytes. That makes the build -> test -> fix
+          // loop structurally unable to converge, which is exactly what session
+          // 88dda7d2 hit: web_coder ran verify_page (FAIL), edit_file (fixed the
+          // SyntaxError), verify_page again -- and got the FAILING verdict from before
+          // its own fix, reporting "I could not capture a fresh PASS/FAIL line". The
+          // cached-failure note even tells it "Do NOT call it again", so the loop is
+          // trained to stop testing at the moment testing would have paid off.
+          //
+          // read_file has the same hole through IDEMPOTENT_TOOLS: edit a file, read it
+          // back to check the edit, receive the bytes from before the edit.
+          //
+          // Dropping both caches on a successful write costs a few repeated calls and
+          // buys the only thing that matters here -- that a check performed after a
+          // change reflects the change.
+          idempotentCallCache.clear();
+          lastToolCallSig.clear();
         }
 
         opts.onProgress?.({
