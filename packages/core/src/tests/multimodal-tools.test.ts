@@ -483,6 +483,34 @@ describe("multimodal and browser direct tools", () => {
     expect(existsSync(join(tempDir, "hello.wav"))).toBe(true);
   });
 
+  it("reports the path the bytes are actually at, not the one that was asked for", async () => {
+    // THE DISCRIMINATOR the assertion above cannot be. It runs unscoped, where the requested
+    // and resolved paths coincide, so it holds whichever one the tool reports. Under a
+    // scope-confined agent the write is re-rooted and the raw request is no longer where the
+    // file is — and the reported path is what the artifact probe, the serve routes and the
+    // model's own next read all follow.
+    const { runWithRequestContext } = await import("../runtime/request-context.js");
+    const fakeWav = new Uint8Array([0x52, 0x49, 0x46, 0x46, 0x00]);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(fakeWav, {
+      status: 200,
+      headers: { "Content-Type": "audio/wav" },
+    })));
+
+    const { getTool } = await import("../tools/registry.js");
+    const result = await runWithRequestContext({ workspaceScope: "generated" }, () =>
+      getTool("synthesize_speech")!.execute({ text: "Hello", outputPath: "notes/hello.wav" }, {
+        sessionId: "session-tts-scoped",
+        workspacePath: tempDir,
+      }));
+
+    expect(result.success).toBe(true);
+    const reported = String(result.metadata?.["outputPath"] ?? "");
+    expect(reported).toBe("generated/notes/hello.wav");
+    expect(existsSync(join(tempDir, reported))).toBe(true);
+    // ...and the raw request is preserved rather than lost, for anyone debugging the gap.
+    expect(result.metadata?.["requestedPath"]).toBe("notes/hello.wav");
+  });
+
   it("splits long OpenAI-compatible TTS requests and merges the WAV output before writing it", async () => {
     const loaderModule = await import("../config/loader.js");
     const realConfig = loaderModule.getConfig();

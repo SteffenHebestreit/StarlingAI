@@ -11,7 +11,7 @@ Every public schema field, where it is declared, and how many production files r
 | `a2a` | packages/core/src/config/schema.ts:385 | 11 |
 | `accessKeyId` | packages/core/src/config/schema.ts:445 | 2 |
 | `accessToken` | packages/core/src/config/schemas/channels.ts:51 | 8 |
-| `account` | packages/core/src/config/schemas/channels.ts:71 | 40 |
+| `account` | packages/core/src/config/schemas/channels.ts:71 | 41 |
 | `acquireTimeoutMs` | packages/core/src/config/schema.ts:1550 | 1 |
 | `activeModelPreset` | packages/core/src/config/schema.ts:1581 | 2 |
 | `addHosts` | packages/core/src/config/schema.ts:672 | 1 |

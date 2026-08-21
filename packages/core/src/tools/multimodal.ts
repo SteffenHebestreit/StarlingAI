@@ -271,11 +271,17 @@ registerTool({
       await mkdir(resolve(resolvedOutput.resolved, ".."), { recursive: true });
       await writeFile(resolvedOutput.resolved, audio);
 
+      // REPORT WHERE THE FILE IS, NOT WHERE IT WAS ASKED FOR. The write goes to the RESOLVED
+      // path — which the zoning may re-root, and which the per-user artifact partition
+      // certainly does — while the raw request was what came back in the output text and the
+      // artifact record. Anything that later opens the reported path (the artifact probe, the
+      // serve routes, the model's own next read) was looking somewhere the file is not.
       return {
         success: true,
-        output: `Audio saved to ${outputPath}`,
+        output: `Audio saved to ${resolvedOutput.relativePath}`,
         metadata: {
-          outputPath,
+          outputPath: resolvedOutput.relativePath,
+          requestedPath: outputPath,
           bytes: audio.byteLength,
           contentType: response.headers.get("content-type") ?? "audio/wav",
         },
@@ -397,12 +403,14 @@ registerTool({
       await mkdir(resolve(resolvedOutput.resolved, ".."), { recursive: true });
       await writeFile(resolvedOutput.resolved, imageBytes);
 
+      // Same as synthesize_speech above: the resolved path is the one the bytes are at.
       return {
         success: true,
-        output: `Image generated successfully. Saved to ${outputPath}`,
+        output: `Image generated successfully. Saved to ${resolvedOutput.relativePath}`,
         metadata: {
-          outputPath,
-          filename: basename(outputPath),
+          outputPath: resolvedOutput.relativePath,
+          requestedPath: outputPath,
+          filename: basename(resolvedOutput.relativePath),
           bytes: imageBytes.byteLength,
           contentType: result.mimeType,
           dataUrl: `data:${result.mimeType};base64,${result.imageBase64}`,

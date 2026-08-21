@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { globToRegExp } from "../tools/code-navigation.js";
+import { runWithRequestContext } from "../runtime/request-context.js";
 
 /**
  * glob_files / grep_files close the two questions the workspace could not answer:
@@ -103,5 +104,62 @@ describe("glob_files / grep_files", () => {
     expect(r.metadata?.["returned"]).toBe(1);
     expect(r.metadata?.["matched"]).toBe(2);
     expect(r.metadata?.["truncated"]).toBe(true);
+  });
+});
+
+/**
+ * A DEFAULT ROOT IS STILL A ROOT.
+ *
+ * Both tools resolved an EXPLICIT `path` through the zone-aware resolver and then took
+ * ctx.workspacePath RAW when none was given — so the confinement applied only to the callers
+ * who named a directory. A scope-confined agent calling glob_files with just a pattern listed
+ * the platform's own config zones and docs, which is the thing scoping exists to prevent.
+ * workspace-search.ts resolves "." for exactly this reason, with a comment saying so.
+ */
+describe("glob_files / grep_files respect the working zone by default", () => {
+  const cleanup: string[] = [];
+  let ws: string;
+
+  beforeEach(() => {
+    ws = mkdtempSync(join(tmpdir(), "sai-nav-zone-"));
+    cleanup.push(ws);
+    mkdirSync(join(ws, "agents"), { recursive: true });
+    mkdirSync(join(ws, "generated", "app"), { recursive: true });
+    writeFileSync(join(ws, "agents", "10-core-agents.jsonc"), "{ \"secret\": \"platform config\" }\n");
+    writeFileSync(join(ws, "generated", "app", "index.ts"), "const mine = 1;\n");
+  });
+
+  afterEach(() => { for (const d of cleanup.splice(0)) rmSync(d, { recursive: true, force: true }); });
+
+  async function tool(name: string) {
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/code-navigation.js"),
+    ]);
+    return getTool(name)!;
+  }
+  const ctx = () => ({ sessionId: "s", workspacePath: ws }) as never;
+  const scoped = <T,>(fn: () => T): T => runWithRequestContext({ workspaceScope: "generated" }, fn);
+
+  it("globs only the working zone for a scope-confined agent", async () => {
+    const t = await tool("glob_files");
+    const r = await scoped(() => t.execute({ pattern: "**/*" }, ctx()));
+    const out = String(r.output);
+    expect(out).toContain("index.ts");
+    expect(out).not.toContain("10-core-agents.jsonc");
+  });
+
+  it("greps only the working zone for a scope-confined agent", async () => {
+    const t = await tool("grep_files");
+    const r = await scoped(() => t.execute({ pattern: "platform config" }, ctx()));
+    expect(String(r.output)).not.toContain("10-core-agents.jsonc");
+  });
+
+  it("still sees the whole workspace when the agent is not scope-confined — the discriminator", async () => {
+    // Core/maintenance agents and runtime internals run unscoped and maintain those very
+    // files; confining them would be a different bug.
+    const t = await tool("glob_files");
+    const r = await t.execute({ pattern: "**/*.jsonc" }, ctx());
+    expect(String(r.output)).toContain("10-core-agents.jsonc");
   });
 });

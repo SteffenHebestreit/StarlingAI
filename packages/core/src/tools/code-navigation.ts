@@ -114,13 +114,19 @@ registerTool({
     if (!pattern) return fail("pattern is required");
     const limit = Math.min(MAX_RESULTS, Math.max(1, Number(args["limit"]) || MAX_RESULTS));
 
-    let root = ctx.workspacePath;
+    // The DEFAULT root goes through the resolver too. Taking ctx.workspacePath raw skipped the
+    // zoning that the explicit-path branch below applies: a scope-confined agent calling this
+    // with no `path` listed and read the platform's own config zones, which is exactly what the
+    // scoping exists to prevent — and, now that the artifact zone is per-user, one account's
+    // files from another's. workspace-search.ts resolves "." for the same reason.
+    let root = resolvePathWithinWorkspace(".", ctx.workspacePath).resolved;
     const sub = typeof args["path"] === "string" ? args["path"].trim() : "";
     if (sub) {
       try { root = resolvePathWithinWorkspace(sub, ctx.workspacePath).resolved; }
       catch { return fail("path must be a relative path within the workspace"); }
       if (!existsSync(root)) return fail(`Directory not found: ${sub}`);
     }
+    if (!existsSync(root)) return fail("No files to search yet — nothing has been written to your working zone.");
 
     let re: RegExp;
     try { re = globToRegExp(pattern); }
@@ -186,13 +192,19 @@ registerTool({
     try { re = new RegExp(pattern, args["ignore_case"] === true ? "i" : ""); }
     catch (err) { return fail(`Invalid regular expression: ${err instanceof Error ? err.message : String(err)}`); }
 
-    let root = ctx.workspacePath;
+    // The DEFAULT root goes through the resolver too. Taking ctx.workspacePath raw skipped the
+    // zoning that the explicit-path branch below applies: a scope-confined agent calling this
+    // with no `path` listed and read the platform's own config zones, which is exactly what the
+    // scoping exists to prevent — and, now that the artifact zone is per-user, one account's
+    // files from another's. workspace-search.ts resolves "." for the same reason.
+    let root = resolvePathWithinWorkspace(".", ctx.workspacePath).resolved;
     const sub = typeof args["path"] === "string" ? args["path"].trim() : "";
     if (sub) {
       try { root = resolvePathWithinWorkspace(sub, ctx.workspacePath).resolved; }
       catch { return fail("path must be a relative path within the workspace"); }
       if (!existsSync(root)) return fail(`Directory not found: ${sub}`);
     }
+    if (!existsSync(root)) return fail("No files to search yet — nothing has been written to your working zone.");
 
     const globStr = typeof args["glob"] === "string" ? args["glob"].trim() : "";
     let globRe: RegExp | null = null;
