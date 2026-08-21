@@ -91,7 +91,12 @@ afterEach(() => {
 async function crawlAndWait(id: string): Promise<void> {
   const started = await startKbCrawl(id);
   if (!started.ok) throw new Error(`startKbCrawl failed: ${started.error}`);
-  const deadline = Date.now() + 10_000;
+  // The harness's patience, not the property under test. Ten seconds holds when this file runs
+  // alone and does not under the full suite with v8 coverage instrumentation and parallel
+  // workers — it failed there once, on "prunes a page that genuinely disappeared", and passed
+  // in isolation and on the immediate re-run. CI is slower and busier than a dev box, so the
+  // bound is set where only a genuinely stuck crawl can reach it.
+  const deadline = Date.now() + 30_000;
   for (;;) {
     const kb = await getKnowledgeBase(id);
     if (kb && kb.status !== "crawling" && !isCrawlActive(id)) return;

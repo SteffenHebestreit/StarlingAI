@@ -4,7 +4,7 @@ import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
 import { logAudit } from "../audit/logger.js";
 import { getConfig } from "../config/loader.js";
-import { GENERATED_SUBDIR, resolvePathWithinWorkspace, resolveWorkspaceWritePath } from "./workspace-path.js";
+import { generatedZoneDir, resolvePathWithinWorkspace, resolveWorkspaceWritePath } from "./workspace-path.js";
 import { UNFINISHED_STUB_MARKER } from "../agent/sub-agent-prompt-guidance.js";
 
 const log = childLogger("tool:filesystem");
@@ -299,7 +299,7 @@ registerTool({
     if (!existsSync(resolved)) {
       // A scope-confined agent listing its still-empty working zone (generated/
       // only exists after the first write): report an empty zone, not an error.
-      if (resolved === resolve(ctx.workspacePath, GENERATED_SUBDIR)) {
+      if (resolved === generatedZoneDir(ctx.workspacePath)) {
         return { success: true, output: "(empty — no files generated yet; create files with write_file)", metadata: { path, count: 0 } };
       }
       return { success: false, output: "", error: `Path not found: ${path}` };

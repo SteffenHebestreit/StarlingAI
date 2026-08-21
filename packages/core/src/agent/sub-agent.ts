@@ -93,7 +93,7 @@ import {
   STAGED_BUILD_REQUIRED_TOOLS,
   UNFINISHED_STUB_MARKER,
 } from "./sub-agent-prompt-guidance.js";
-import { GENERATED_SUBDIR } from "../tools/workspace-path.js";
+import { generatedZoneRel } from "../tools/workspace-path.js";
 import { checkBuiltPage } from "../tools/page-check.js";
 import { mergeAgentModelOverride, applyEffortModelOverlay, applyStreamCapOverlay } from "./sub-agent-model-config.js";
 import { resolveTurnBudgetMs, resolveTimeRemainingMs, DEADLINE_LIVENESS_RECHECK_MS, STREAM_HEARTBEAT_CHARS, shouldDeferDeadline } from "./sub-agent-turn-budget.js";
@@ -1314,9 +1314,12 @@ export function findUnfilledStubFiles(
   scope?: ArtifactScanScope,
 ): { files: string[]; count: number; markers: StubMarkerSite[] } {
   // Artifacts only. A marker outside generated/ is prose about the convention, not a build.
-  const artifactRoot = resolvePath(workspaceRoot, GENERATED_SUBDIR);
+  // The zone is the AMBIENT USER'S partition of it, so one account's unfinished build is not
+  // evidence about another's — the same reason the mtime scope above exists, one tenant over.
+  const zoneRel = generatedZoneRel();
+  const artifactRoot = resolvePath(workspaceRoot, zoneRel);
   if (!fs.existsSync(artifactRoot)) return { files: [], count: 0, markers: [] };
-  return scanForStubMarkers(artifactRoot, GENERATED_SUBDIR, scope);
+  return scanForStubMarkers(artifactRoot, zoneRel, scope);
 }
 
 function scanForStubMarkers(scanRoot: string, relPrefix: string, scope?: ArtifactScanScope): { files: string[]; count: number; markers: StubMarkerSite[] } {
@@ -1405,7 +1408,8 @@ function scanForStubMarkers(scanRoot: string, relPrefix: string, scope?: Artifac
  * count alone gave the wrong answer twice running.
  */
 export async function findBrokenBuiltPages(workspaceRoot: string, scope?: ArtifactScanScope): Promise<string[]> {
-  const artifactRoot = resolvePath(workspaceRoot, GENERATED_SUBDIR);
+  const zoneRel = generatedZoneRel();
+  const artifactRoot = resolvePath(workspaceRoot, zoneRel);
   if (!fs.existsSync(artifactRoot)) return [];
   const MAX_PAGES = 4;
   const MAX_DEPTH = 4;
@@ -1430,7 +1434,7 @@ export async function findBrokenBuiltPages(workspaceRoot: string, scope?: Artifa
     }
   };
 
-  try { walk(artifactRoot, GENERATED_SUBDIR, 0); } catch { /* fail open */ }
+  try { walk(artifactRoot, zoneRel, 0); } catch { /* fail open */ }
   for (const page of pages) {
     try {
       const verdict = await checkBuiltPage(page.abs, page.relPath);

@@ -1,6 +1,7 @@
 import { stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { currentWorkspaceScope } from "../runtime/request-context.js";
+import { activeUserScopeSegment, USERS_SUBDIR } from "../runtime/user-scope.js";
 
 /** True when a filesystem path exists (stat succeeds), false otherwise. */
 export async function pathExists(target: string): Promise<boolean> {
@@ -37,6 +38,59 @@ export const GENERATED_SUBDIR = "generated";
 
 /** User-uploaded files (chat attachments) — readable by every agent. */
 export const UPLOADS_SUBDIR = "uploads";
+
+/**
+ * THE ARTIFACT ZONE IS ONE DIRECTORY SHARED BY EVERY TURN THE DEPLOYMENT HAS EVER RUN.
+ *
+ * That is fine for a single operator and wrong the moment two accounts use the same gateway:
+ * one user's half-finished build is evidence to another user's resume detection, one user's
+ * corrective-build gate fires on another user's broken page, and every artifact is readable by
+ * anyone with a token. Durable user memory, the user-model and personality already partition
+ * per account (runtime/user-scope.ts); this is the same rule applied to the working zone.
+ *
+ * Workspace-relative, because that is what every caller here deals in: `generated` when there
+ * is no user to partition by — auth off, or an unattended run — and `generated/users/<segment>`
+ * when there is. The segment comes from the same single rule as every other user-scoped store,
+ * so a store and an artifact can never disagree about which bucket a user has.
+ *
+ * The TOP segment stays `generated` either way, which is what keeps the zone-membership tests
+ * below (and the config loader's non-config-zone sweep) correct without knowing about any of
+ * this.
+ */
+export function generatedZoneRel(): string {
+  const segment = activeUserScopeSegment();
+  return segment ? `${GENERATED_SUBDIR}/${USERS_SUBDIR}/${segment}` : GENERATED_SUBDIR;
+}
+
+/** The absolute artifact zone for the ambient user. */
+export function generatedZoneDir(workspacePath: string): string {
+  return resolve(workspacePath, generatedZoneRel());
+}
+
+/**
+ * Put a path that addresses the artifact zone into the AMBIENT USER'S partition of it.
+ *
+ * Three cases, and the middle one is the reason this exists rather than a `join` at each call
+ * site. Already in this user's partition: left alone. In ANOTHER user's partition: refused —
+ * the same shape of refusal as escaping the workspace, because it is the same kind of mistake.
+ * Addressing the zone without naming a partition (`generated/app/index.html` — the form every
+ * tool description in this repo teaches the model to type): re-rooted into this user's
+ * partition, so that `write_file("generated/x")` followed by `read_file("generated/x")` is the
+ * same file, which is the property the whole zone-rooting design rests on.
+ */
+function partitionGeneratedPath(relativePath: string, workspacePath: string): { resolved: string; relativePath: string } | null {
+  const zoneRel = generatedZoneRel();
+  if (zoneRel === GENERATED_SUBDIR) return null;                       // nothing to partition by
+  const top = relativePath.split("/")[0] ?? "";
+  if (top !== GENERATED_SUBDIR) return null;                           // not the artifact zone
+  if (relativePath === zoneRel || relativePath.startsWith(`${zoneRel}/`)) return null;  // already mine
+  if (relativePath.startsWith(`${GENERATED_SUBDIR}/${USERS_SUBDIR}/`)) {
+    throw new Error("Path belongs to another user's artifact zone");
+  }
+  const rest = relativePath === GENERATED_SUBDIR ? "" : relativePath.slice(GENERATED_SUBDIR.length + 1);
+  const scoped = rest ? `${zoneRel}/${rest}` : zoneRel;
+  return { resolved: resolve(workspacePath, scoped), relativePath: scoped };
+}
 
 /**
  * Swarm-invented dynamic tools (JSON bundles managed by tools/dynamic-tools.ts).
@@ -100,11 +154,16 @@ export function resolvePathWithinWorkspace(inputPath: string, workspacePath: str
     const topSegment = relativePath === "." ? "" : (relativePath.split("/")[0] ?? "");
     if (!SCOPED_VISIBLE_ZONES.has(topSegment)) {
       const scopedRel = relativePath === "." ? GENERATED_SUBDIR : `${GENERATED_SUBDIR}/${relativePath}`;
-      return { resolved: resolve(workspacePath, scopedRel), relativePath: scopedRel };
+      return partitionGeneratedPath(scopedRel, workspacePath)
+        ?? { resolved: resolve(workspacePath, scopedRel), relativePath: scopedRel };
     }
   }
 
-  return { resolved: resolvedPath, relativePath };
+  // Last, so it applies to a path that arrived naming the zone AND to one the scope re-rooting
+  // just put there. This is also what makes the gateway's workspace routes user-scoped: they
+  // resolve through here under the ambient caller, so a request for another account's artifact
+  // is refused and a request for `generated/...` reads the caller's own.
+  return partitionGeneratedPath(relativePath, workspacePath) ?? { resolved: resolvedPath, relativePath };
 }
 
 /**
@@ -128,9 +187,13 @@ export function resolveWorkspaceWritePath(inputPath: string, workspacePath: stri
   if (currentWorkspaceScope() === "full") {
     return within;
   }
+  // `within` has already been partitioned by the resolver above, so a path under the zone is
+  // this user's by construction — a path naming another user's partition threw before reaching
+  // here rather than being silently accepted as an already-rooted write.
   if (within.relativePath === GENERATED_SUBDIR || within.relativePath.startsWith(`${GENERATED_SUBDIR}/`)) {
     return within;
   }
-  const rel = within.relativePath === "." ? GENERATED_SUBDIR : `${GENERATED_SUBDIR}/${within.relativePath}`;
+  const zoneRel = generatedZoneRel();
+  const rel = within.relativePath === "." ? zoneRel : `${zoneRel}/${within.relativePath}`;
   return { resolved: resolve(workspacePath, rel), relativePath: rel };
 }

@@ -8,9 +8,10 @@ import type { Hono } from "hono";
 import { readFile, writeFile, stat, readdir, mkdir } from "node:fs/promises";
 import { basename, extname, resolve, sep } from "node:path";
 import { ZipFile } from "yazl";
-import { verifyToken, extractBearerToken } from "./auth.js";
+import { verifyToken, extractBearerToken, authenticatedUser } from "./auth.js";
 import { getConfig } from "../config/loader.js";
-import { resolvePathWithinWorkspace } from "../tools/workspace-path.js";
+import { resolvePathWithinWorkspace, UPLOADS_SUBDIR } from "../tools/workspace-path.js";
+import { runWithRequestContext, currentUserId } from "../runtime/request-context.js";
 import { getServedApp, injectBaseHref } from "../tools/serve-app.js";
 import { buildContentDisposition } from "./content-disposition.js";
 import { logAudit } from "../audit/logger.js";
@@ -46,6 +47,23 @@ const WORKSPACE_PREVIEW_CSP = [
 ].join("; ");
 
 export function registerWorkspaceRoutes(app: Hono): void {
+  /**
+   * THESE ROUTES CARRY THEIR OWN IDENTITY.
+   *
+   * The artifact zone they resolve is per-user, and the /api/* middleware in gateway/index.ts
+   * is what normally establishes the ambient caller. Depending on that is exactly the kind of
+   * dependency that fails silently: mount this file without the middleware — a test harness, a
+   * second app instance, a future refactor — and every resolution below quietly falls back to
+   * the SHARED zone, serving one account's artifacts to another with no error anywhere. So the
+   * context is established here too. Idempotent: when the outer middleware already set it, this
+   * resolves the same username from the same header.
+   */
+  app.use("/api/workspace/*", async (c, next) => {
+    if (currentUserId()) return next();
+    const caller = await authenticatedUser(c.req.header("Authorization"));
+    return runWithRequestContext({ userId: caller?.username }, () => next());
+  });
+
   function guessWorkspaceContentType(filePath: string): string {
     const extension = extname(filePath).toLowerCase();
     const contentTypes: Record<string, string> = {
@@ -128,6 +146,11 @@ export function registerWorkspaceRoutes(app: Hono): void {
 
   function mapWorkspaceRouteError(error: unknown): { status: 400 | 404 | 500; message: string } {
     if (error instanceof Error) {
+      // Opaque, and 404 rather than 403: a distinct status would confirm the other account's
+      // file is there, which is most of what an enumeration wants to learn.
+      if (/another user's artifact zone/i.test(error.message)) {
+        return { status: 404, message: "Workspace path not found" };
+      }
       if (/workspace boundary|relative path within the workspace/i.test(error.message)) {
         return { status: 400, message: "Path must stay within the workspace" };
       }
@@ -219,10 +242,15 @@ export function registerWorkspaceRoutes(app: Hono): void {
       return c.json({ error: "file field is required" }, 400);
     }
 
+    // THE DESTINATION IS RESOLVED, NOT ACCEPTED. This route builds its own path with a
+    // `resolve` + prefix check and never goes through resolvePathWithinWorkspace, so the
+    // caller-supplied subdir was the one workspace write in the gateway answering to nobody's
+    // zone rules — "generated/users/<someone-else>" matches that character class and lands in
+    // their partition. It goes through the same resolver every tool uses now.
     const subdirRaw = formData.get("subdir");
-    const subdir = (typeof subdirRaw === "string" && /^[\w/-]+$/.test(subdirRaw))
+    const requestedSubdir = (typeof subdirRaw === "string" && /^[\w/-]+$/.test(subdirRaw))
       ? subdirRaw
-      : "uploads";
+      : UPLOADS_SUBDIR;
 
     // Sanitise filename: keep extension, replace unsafe characters
     const ext = extname(uploadedFile.name);
@@ -232,7 +260,16 @@ export function registerWorkspaceRoutes(app: Hono): void {
       .slice(0, 120) + ext;
 
     const workspaceRoot = getConfig().workspacePath;
-    const targetDir = resolve(workspaceRoot, subdir);
+    let subdir: string;
+    let targetDir: string;
+    try {
+      const resolvedSubdir = resolveWorkspaceTarget(requestedSubdir);
+      subdir = resolvedSubdir.relativePath;
+      targetDir = resolvedSubdir.resolved;
+    } catch (error) {
+      const mapped = mapWorkspaceRouteError(error);
+      return c.json({ error: mapped.message }, mapped.status);
+    }
     const targetPath = resolve(targetDir, safeName);
 
     // Prevent path traversal
@@ -375,9 +412,16 @@ export function registerWorkspaceRoutes(app: Hono): void {
   // with all relative imports resolved correctly, including fonts and images.
   app.get("/api/workspace/preview", async (c) => {
     const queryToken = c.req.query("token")?.trim();
-    if (!queryToken || !await verifyToken(queryToken)) {
+    // THE /api/* MIDDLEWARE NEVER SAW THIS CALLER. It reads the Authorization header, and an
+    // iframe cannot set one — which is exactly why the token rides in the query string here.
+    // So the identity is established from the verified payload instead; without it every
+    // per-user path this route resolves resolves as nobody's, and the caller would be served
+    // a 404 for their own artifact.
+    const previewPayload = queryToken ? await verifyToken(queryToken) : null;
+    if (!previewPayload) {
       return c.text("Unauthorized", 401);
     }
+    const previewUserId = typeof previewPayload.sub === "string" ? previewPayload.sub : undefined;
 
     const root = c.req.query("root")?.trim();
     const file = c.req.query("file")?.trim() || "index.html";
@@ -388,7 +432,7 @@ export function registerWorkspaceRoutes(app: Hono): void {
     let rootResolved: string;
     let fileResolved: string;
     try {
-      const rootTarget = resolveWorkspaceTarget(root);
+      const rootTarget = runWithRequestContext({ userId: previewUserId }, () => resolveWorkspaceTarget(root));
       rootResolved = rootTarget.resolved;
 
       // Resolve the requested file within the root (not the workspace) to
@@ -439,7 +483,11 @@ export function registerWorkspaceRoutes(app: Hono): void {
     const queryToken = c.req.query("token")?.trim();
     const cookieToken = /(?:^|;\s*)sai_site_token=([^;]+)/.exec(c.req.header("Cookie") ?? "")?.[1];
     const token = queryToken || (cookieToken ? decodeURIComponent(cookieToken) : undefined) || extractBearerToken(c.req.header("Authorization"));
-    if (!token || !await verifyToken(token)) return c.text("Unauthorized", 401);
+    // Same reason as the preview route above: a browser fetching a page's own stylesheet sends
+    // the cookie, not an Authorization header, so the caller has to be read off the token.
+    const sitePayload = token ? await verifyToken(token) : null;
+    if (!sitePayload) return c.text("Unauthorized", 401);
+    const siteUserId = typeof sitePayload.sub === "string" ? sitePayload.sub : undefined;
 
     let root: string;
     try {
@@ -461,7 +509,7 @@ export function registerWorkspaceRoutes(app: Hono): void {
 
     let fileResolved: string;
     try {
-      const rootTarget = resolveWorkspaceTarget(root);
+      const rootTarget = runWithRequestContext({ userId: siteUserId }, () => resolveWorkspaceTarget(root));
       const candidate = resolve(rootTarget.resolved, file.replace(/^\/+/, ""));
       if (!candidate.startsWith(rootTarget.resolved + sep) && candidate !== rootTarget.resolved) {
         return c.text("File path escapes root directory", 400);

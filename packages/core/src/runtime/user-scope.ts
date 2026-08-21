@@ -53,14 +53,36 @@ function partitioningEnabled(): boolean {
  * user's bucket instead of the ambient one.
  */
 export function userScopedDir(base: string, userId: string | undefined = currentUserId()): string {
-  if (!partitioningEnabled()) return base;
+  const segment = activeUserScopeSegment(userId);
+  return segment ? resolve(base, USERS_SUBDIR, segment) : base;
+}
+
+/**
+ * The on-disk bucket segment for the ambient (or given) user, or `undefined` when this store
+ * must stay shared.
+ *
+ * `undefined` means BOTH of the ways partitioning can be off: multi-user auth disabled, and
+ * auth enabled but no user in the ambient context. That second case matters — gating a
+ * partition on the auth FLAG alone would send an unattended run, an inbound MCP call or any
+ * other path with no ambient user into a `users/undefined`-shaped bucket, or worse, split one
+ * logical store across two locations depending on which entry point wrote it. A partition is
+ * only ever applied when there is a specific user to apply it to.
+ *
+ * Exported so callers that need the SEGMENT rather than a directory — a workspace-relative
+ * zone path, say — derive it from the same single rule as every user-scoped store.
+ */
+export function activeUserScopeSegment(userId: string | undefined = currentUserId()): string | undefined {
+  if (!partitioningEnabled()) return undefined;
   // A sweep enumerating existing buckets supplies the exact on-disk segment — use it
   // verbatim rather than re-deriving (and double-hashing) it from a userId.
-  const segment = currentUserScopeSegment();
-  if (segment) return resolve(base, USERS_SUBDIR, segment);
-  if (!userId) return base;
-  return resolve(base, USERS_SUBDIR, safeUserSegment(userId));
+  const preResolved = currentUserScopeSegment();
+  if (preResolved) return preResolved;
+  if (!userId) return undefined;
+  return safeUserSegment(userId);
 }
+
+/** The `users` directory name, shared with the workspace zone resolver. */
+export { USERS_SUBDIR };
 
 /**
  * The per-user store segments that exist under `<base>/users` — for background
