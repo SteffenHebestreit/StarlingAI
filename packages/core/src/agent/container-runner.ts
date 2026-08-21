@@ -27,6 +27,7 @@ import type { SubAgentConfig, ModelConfig } from "../config/schema.js";
 import { emitSwarmEvent } from "../swarm/bus.js";
 import { resolveDockerWorkspaceMountSource } from "../tools/workspace-mount.js";
 import { logAudit } from "../audit/logger.js";
+import { currentUserId } from "../runtime/request-context.js";
 
 const log = childLogger("agent:container-runner");
 
@@ -48,6 +49,19 @@ export interface ContainerTaskPayload {
   task: string;
   context?: string;
   parentSessionId: string;
+  /**
+   * The authenticated user this run belongs to.
+   *
+   * IDENTITY DOES NOT CROSS A PROCESS BOUNDARY BY ITSELF. Every in-process path keeps the
+   * owning user through AsyncLocalStorage — the turn establishes it (agent/runtime.ts), each
+   * tool call re-establishes it, and a delegated sub-agent inherits it. A CONTAINERIZED
+   * sub-agent is a different process with an empty store, and this is the DEFAULT execution
+   * mode (agents.defaultContainerized defaults true), so anything that resolves a per-user
+   * path inside it silently resolved to the shared one. Carrying the id in the payload and
+   * re-establishing the context at the entrypoint is what makes the container agree with the
+   * gateway about whose work it is doing.
+   */
+  userId?: string;
   workspacePath: string;
   agentConfig: SubAgentConfig;
   resolvedModelConfig: ModelConfig;
@@ -159,6 +173,38 @@ function recoverPartialOutput(stdout: string): string {
   return textLines.sort((a, b) => b.length - a.length)[0]!.slice(0, 400);
 }
 
+/**
+ * The payload handed to the container, built where it can be tested.
+ *
+ * Extracted for one field: `userId`. Everything else about a containerized run is observable
+ * only by spawning docker, but whether the owning user crosses the process boundary is exactly
+ * the thing that decides whether the container and the gateway agree about which user's
+ * artifacts they are looking at — so it is pinned here rather than hoped for.
+ */
+export function buildContainerTaskPayload(
+  opts: SubAgentRunOptions,
+  agentCfg: SubAgentConfig,
+  resolvedModelConfig: ModelConfig,
+  providerBaseUrl: string,
+  providerApiKey: string,
+): ContainerTaskPayload {
+  return {
+    agentName: opts.agentName,
+    task: opts.task,
+    context: opts.context,
+    parentSessionId: opts.parentSessionId,
+    // `?? currentUserId()`: the in-process runner uses the same fallback (tools/registry.ts),
+    // so a caller that did not thread userId still hands the container the ambient owner
+    // rather than dropping to the shared bucket.
+    userId: opts.userId ?? currentUserId(),
+    workspacePath: opts.workspacePath,
+    agentConfig: agentCfg,
+    resolvedModelConfig,
+    providerBaseUrl,
+    providerApiKey,
+  };
+}
+
 export async function runSubAgentInContainer(
   opts: SubAgentRunOptions,
   agentCfg: SubAgentConfig,
@@ -174,17 +220,7 @@ export async function runSubAgentInContainer(
 
   const network = NEEDS_INTERNET.has(opts.agentName) ? "bridge" : "none";
 
-  const payload: ContainerTaskPayload = {
-    agentName: opts.agentName,
-    task: opts.task,
-    context: opts.context,
-    parentSessionId: opts.parentSessionId,
-    workspacePath: opts.workspacePath,
-    agentConfig: agentCfg,
-    resolvedModelConfig,
-    providerBaseUrl,
-    providerApiKey,
-  };
+  const payload = buildContainerTaskPayload(opts, agentCfg, resolvedModelConfig, providerBaseUrl, providerApiKey);
 
   const dockerArgs = [
     "run", "--rm", "--init",

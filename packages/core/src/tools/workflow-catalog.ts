@@ -9,6 +9,7 @@ import { getJobDefinition, listAllJobs, resolveJobSteps, type JobSummary } from 
 import { getScene, listAllScenes, type SceneSummary } from "../credentials/scenes.js";
 import { getEmbeddingProvider } from "../providers/index.js";
 import { registerTool, type SwarmTaskState, type ToolContext, type ToolResult } from "./registry.js";
+import { currentUserId } from "../runtime/request-context.js";
 
 type WorkflowType = "scene" | "job";
 
@@ -912,10 +913,18 @@ async function runSceneInline(
   const workflowTaskId = `workflow:scene:${scene.name}`;
   ensureWorkflowSwarmState(ctx, task, workflowTaskId, scene.name);
 
+    // THE RUN BELONGS TO WHOEVER ASKED FOR IT. A hardcoded synthetic owner here does not just
+    // mislabel the session: agent/runtime.ts wraps the ENTIRE turn in this userId, so every
+    // per-user store the workflow touches — durable memory, the user-model, personality, and
+    // any per-user path — resolved to a `workflow:<name>` bucket instead of the caller's. The
+    // scene-trigger route already states the correct rule (gateway/index.ts: the caller's
+    // username so per-user resources "resolve exactly as if they ran the scene from chat",
+    // with the synthetic identity only as the no-caller fallback), and scene-worker.ts honours
+    // whatever the enqueuer set. This is the one path that was not following it.
   const session = createSession({
     sessionId: `workflow:${ctx.sessionId}:${scene.name}:${randomUUID()}`,
     channel: "workflow",
-    userId: `workflow:${scene.name}`,
+    userId: ctx.userId ?? currentUserId() ?? `workflow:${scene.name}`,
     workspacePath: ctx.workspacePath,
   });
 
@@ -1054,10 +1063,12 @@ async function runJobInline(
     ...(ctx._workflowExecutionStack ?? []),
     buildWorkflowExecutionKey(job.name, "job"),
   ];
+  // Same rule as the scene path above: the caller owns the run, the synthetic identity is
+  // only the fallback for a trigger with no user behind it.
   const session = createSession({
     sessionId: `workflow:${ctx.sessionId}:${job.name}:${randomUUID()}`,
     channel: "workflow",
-    userId: `workflow:${job.name}`,
+    userId: ctx.userId ?? currentUserId() ?? `workflow:${job.name}`,
     workspacePath: ctx.workspacePath,
   });
 

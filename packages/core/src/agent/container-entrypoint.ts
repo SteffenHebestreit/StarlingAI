@@ -54,6 +54,7 @@ async function main(): Promise<void> {
     task,
     context,
     parentSessionId,
+    userId,
     workspacePath,
     agentConfig,
     resolvedModelConfig,
@@ -82,6 +83,9 @@ async function main(): Promise<void> {
   const toolContext: ToolContext = {
     sessionId: subSessionId,
     workspacePath,
+    // Whose work this is. Without it every per-user store and path inside this container
+    // resolves to the shared bucket while the gateway that spawned it resolves to the user's.
+    userId,
     approvalCallback: undefined,
     allowedTools: agentConfig.tools,
   };
