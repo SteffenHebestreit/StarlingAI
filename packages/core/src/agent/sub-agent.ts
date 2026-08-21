@@ -96,7 +96,7 @@ import {
 import { GENERATED_SUBDIR } from "../tools/workspace-path.js";
 import { checkBuiltPage } from "../tools/page-check.js";
 import { mergeAgentModelOverride, applyEffortModelOverlay, applyStreamCapOverlay } from "./sub-agent-model-config.js";
-import { resolveTurnBudgetMs, DEADLINE_LIVENESS_RECHECK_MS, STREAM_HEARTBEAT_CHARS, shouldDeferDeadline } from "./sub-agent-turn-budget.js";
+import { resolveTurnBudgetMs, resolveTimeRemainingMs, DEADLINE_LIVENESS_RECHECK_MS, STREAM_HEARTBEAT_CHARS, shouldDeferDeadline } from "./sub-agent-turn-budget.js";
 import {
   extractInfraFailureSignature,
   liveToolFamily,
@@ -1242,14 +1242,84 @@ export interface StubMarkerSite {
   text: string;
 }
 
-export function findUnfilledStubFiles(workspaceRoot: string): { files: string[]; count: number; markers: StubMarkerSite[] } {
+/**
+ * WHOSE ARTIFACT IS THIS? `generated/` IS SHARED BY EVERY TURN THE DEPLOYMENT HAS EVER RUN.
+ *
+ * The workspace path defaults to one global directory (session.ts → config.workspacePath), so
+ * "there is an unfinished artifact on disk" is, unscoped, the claim "some turn, ever, left one".
+ * That is how a fresh Snake build came to be handed "RESUME AN EXISTING BUILD — DO NOT START
+ * OVER" pointed at last week's half-finished Tetris, and how one never-cleaned page could spend
+ * a corrective build on every artifact-shaped turn from every user thereafter.
+ *
+ * `modifiedSinceMs` is the scope: only files written at or after that moment are evidence about
+ * the work in hand. Callers pass the start of the run (for a verdict about what THIS run left)
+ * or the start of the session (for resume, which is legitimately about an earlier turn — just
+ * not an earlier week). Omitted means the old whole-zone behaviour, which is right only for a
+ * caller that genuinely means "anything, ever".
+ */
+export interface ArtifactScanScope {
+  modifiedSinceMs?: number;
+}
+
+/**
+ * When did this conversation start caring about the artifact zone?
+ *
+ * Resume is legitimately about an EARLIER TURN — "finish the game you started" is the case the
+ * whole mechanism exists for — so it cannot be scoped to this run or this turn. It can be
+ * scoped to this conversation, which is what separates "the build I asked you for ten minutes
+ * ago" from "someone else's abandoned Tetris". The first time a session delegates anything is
+ * a good enough origin: every artifact of ITS OWN is written after that moment, and every
+ * artifact belonging to a session that finished earlier is not.
+ *
+ * Bounded and self-evicting: this is a timestamp per live conversation, not a cache.
+ */
+const sessionArtifactEpochMs = new Map<string, number>();
+const MAX_TRACKED_SESSION_EPOCHS = 512;
+/**
+ * How far back an artifact this conversation never touched can still be resumable.
+ *
+ * The session epoch alone is too sharp: a gateway restart, or a user who comes back in a new
+ * conversation and says "finish the game", would both find their own work out of scope and get
+ * a fresh skeleton written over it. The window keeps those working while still discarding the
+ * artifact nobody has touched since yesterday — which is the one that was hijacking fresh
+ * builds. Whichever cutoff is EARLIER wins, so this only ever widens the session's own scope.
+ */
+const RESUMABLE_ARTIFACT_MAX_AGE_MS = 2 * 60 * 60 * 1000;
+export function sessionArtifactEpoch(sessionId: string): number {
+  const existing = sessionArtifactEpochMs.get(sessionId);
+  if (existing !== undefined) return existing;
+  if (sessionArtifactEpochMs.size >= MAX_TRACKED_SESSION_EPOCHS) {
+    // Oldest insertion first — Map preserves it, and a session whose epoch is evicted simply
+    // falls back to a fresh one, which is the conservative direction (fewer false resumes).
+    const oldest = sessionArtifactEpochMs.keys().next();
+    if (!oldest.done) sessionArtifactEpochMs.delete(oldest.value);
+  }
+  const now = Date.now();
+  sessionArtifactEpochMs.set(sessionId, now);
+  return now;
+}
+
+/** True when this file is inside the caller's scope — unscoped, or written since it began. */
+function withinScanScope(abs: string, scope: ArtifactScanScope | undefined): boolean {
+  if (scope?.modifiedSinceMs === undefined) return true;
+  try {
+    return fs.statSync(abs).mtimeMs >= scope.modifiedSinceMs;
+  } catch {
+    return false;   // cannot date it, cannot claim it
+  }
+}
+
+export function findUnfilledStubFiles(
+  workspaceRoot: string,
+  scope?: ArtifactScanScope,
+): { files: string[]; count: number; markers: StubMarkerSite[] } {
   // Artifacts only. A marker outside generated/ is prose about the convention, not a build.
   const artifactRoot = resolvePath(workspaceRoot, GENERATED_SUBDIR);
   if (!fs.existsSync(artifactRoot)) return { files: [], count: 0, markers: [] };
-  return scanForStubMarkers(artifactRoot, GENERATED_SUBDIR);
+  return scanForStubMarkers(artifactRoot, GENERATED_SUBDIR, scope);
 }
 
-function scanForStubMarkers(scanRoot: string, relPrefix: string): { files: string[]; count: number; markers: StubMarkerSite[] } {
+function scanForStubMarkers(scanRoot: string, relPrefix: string, scope?: ArtifactScanScope): { files: string[]; count: number; markers: StubMarkerSite[] } {
   const SKIP = new Set(["node_modules", ".git", ".starlingai", "dist", "build", ".cache"]);
   const MAX_FILES = 400;
   const MAX_BYTES = 2_000_000;
@@ -1283,6 +1353,7 @@ function scanForStubMarkers(scanRoot: string, relPrefix: string): { files: strin
         continue;
       }
       if (!entry.isFile()) continue;
+      if (!withinScanScope(abs, scope)) continue;
       seen++;
       try {
         if (fs.statSync(abs).size > MAX_BYTES) continue;
@@ -1333,32 +1404,39 @@ function scanForStubMarkers(scanRoot: string, relPrefix: string): { files: strin
  * staged build to decide whether there is repair work waiting, which is the moment a marker
  * count alone gave the wrong answer twice running.
  */
-export function findBrokenBuiltPages(workspaceRoot: string): string[] {
+export async function findBrokenBuiltPages(workspaceRoot: string, scope?: ArtifactScanScope): Promise<string[]> {
   const artifactRoot = resolvePath(workspaceRoot, GENERATED_SUBDIR);
   if (!fs.existsSync(artifactRoot)) return [];
   const MAX_PAGES = 4;
   const MAX_DEPTH = 4;
   const broken: string[] = [];
+  const pages: Array<{ abs: string; relPath: string }> = [];
 
+  // Collect first, execute after: checkBuiltPage now runs each page in a child process, and a
+  // directory walk is not the place to await one.
   const walk = (dir: string, rel: string, depth: number): void => {
-    if (depth > MAX_DEPTH || broken.length >= MAX_PAGES) return;
+    if (depth > MAX_DEPTH || pages.length >= MAX_PAGES) return;
     let entries: fs.Dirent[];
     try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
     for (const entry of entries) {
-      if (broken.length >= MAX_PAGES) return;
+      if (pages.length >= MAX_PAGES) return;
       if (entry.name.startsWith(".")) continue;
       const abs = resolvePath(dir, entry.name);
       const relPath = rel ? `${rel}/${entry.name}` : entry.name;
       if (entry.isDirectory()) { walk(abs, relPath, depth + 1); continue; }
       if (!entry.isFile() || !/\.html?$/i.test(entry.name)) continue;
-      try {
-        const verdict = checkBuiltPage(abs, relPath);
-        if (!verdict.ok) broken.push(verdict.detail);
-      } catch { /* a harness failure must never invent a defect */ }
+      if (!withinScanScope(abs, scope)) continue;
+      pages.push({ abs, relPath });
     }
   };
 
   try { walk(artifactRoot, GENERATED_SUBDIR, 0); } catch { /* fail open */ }
+  for (const page of pages) {
+    try {
+      const verdict = await checkBuiltPage(page.abs, page.relPath);
+      if (!verdict.ok) broken.push(verdict.detail);
+    } catch { /* a harness failure must never invent a defect */ }
+  }
   return broken;
 }
 
@@ -1366,7 +1444,18 @@ export function stagedBuildHonestOutcome(
   outcome: SubAgentOutcome,
   isStagedBuild: boolean,
   workspacePath: string,
-  pageCheck: { lastPassed?: boolean; mutatedSince?: boolean } = {},
+  pageCheck: {
+    lastPassed?: boolean;
+    mutatedSince?: boolean;
+    /**
+     * Did an unverified page fail when the runner last executed one? Passed IN rather than
+     * scanned here: executing a page now costs a child process, and this is called from the
+     * synchronous path every terminal return goes through. `undefined` means "not established"
+     * — the silence arm below then abstains rather than guessing.
+     */
+    unverifiedPageBroken?: boolean;
+  } = {},
+  scope?: ArtifactScanScope,
 ): SubAgentOutcome {
   if (outcome !== "success" || !isStagedBuild) return outcome;
   // Filling every marker is necessary for a working page and nowhere near sufficient. Run 8
@@ -1376,7 +1465,7 @@ export function stagedBuildHonestOutcome(
   if (pageCheck.lastPassed === false) return "partial";
   if (pageCheck.lastPassed === true && pageCheck.mutatedSince === true) return "partial";
   try {
-    if (findUnfilledStubFiles(workspacePath).count > 0) return "partial";
+    if (findUnfilledStubFiles(workspacePath, scope).count > 0) return "partial";
     // A RUN THAT NEVER CHECKED IS NOT A RUN THAT PASSED.
     //
     // The clauses above consult the page verdict only when the agent PRODUCED one, so an
@@ -1387,7 +1476,7 @@ export function stagedBuildHonestOutcome(
     //
     // Silence is not evidence. When the run did not check, the check runs here instead; it
     // is the same scan the resume path uses and costs one pass over the output zone.
-    if (pageCheck.lastPassed === undefined && findBrokenBuiltPages(workspacePath).length > 0) {
+    if (pageCheck.lastPassed === undefined && pageCheck.unverifiedPageBroken === true) {
       return "partial";
     }
     return outcome;
@@ -2440,8 +2529,19 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // a finish-it delegation received the skeleton directive and answered it with a skeleton,
     // destroying six subsystems that thirteen prior iterations had filled. The distinguishing
     // evidence is not in the task text, it is on disk.
+    //
+    // Scoped to this conversation. `generated/` is shared by every turn the deployment has ever
+    // run, so unscoped this evidence says "some turn, ever, left an unfinished build" — which
+    // handed a fresh Snake build "RESUME AN EXISTING BUILD — DO NOT START OVER" pointed at last
+    // week's Tetris, complete with its marker lines as the edits to make.
+    const resumeScope: ArtifactScanScope = {
+      modifiedSinceMs: Math.min(
+        sessionArtifactEpoch(opts.parentSessionId ?? subSessionId),
+        Date.now() - RESUMABLE_ARTIFACT_MAX_AGE_MS,
+      ),
+    };
     const stagedResume = isStagedBuild
-      ? findUnfilledStubFiles(opts.workspacePath)
+      ? findUnfilledStubFiles(opts.workspacePath, resumeScope)
       : { files: [] as string[], count: 0, markers: [] as StubMarkerSite[] };
     // A BUILD IS NOT DONE BECAUSE THE PLACEHOLDERS ARE GONE.
     //
@@ -2456,7 +2556,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // Only consulted when the markers are gone: while they remain there is already work
     // queued, and a half-built page failing is expected rather than informative.
     const brokenPages = isStagedBuild && stagedResume.count === 0
-      ? findBrokenBuiltPages(opts.workspacePath)
+      ? await findBrokenBuiltPages(opts.workspacePath, resumeScope)
       : [];
     const isResumeBuild = stagedResume.count > 0 || brokenPages.length > 0;
     const stagedBuildGuidance = isStagedBuild && stagedBuildFlags.stagedArtifactBuildDirective === true
@@ -2633,6 +2733,17 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // undefined until the run checks its own page at least once.
     let lastPageCheckPassed: boolean | undefined;
     let mutatedSincePageCheck = false;
+    /**
+     * SILENCE IS NOT EVIDENCE, but establishing that costs a child process now.
+     *
+     * An agent that never calls verify_page used to escape the page gate by saying nothing, so
+     * the runner checks on its behalf. Executing a page is no longer an in-process call it can
+     * make from anywhere, so the answer is computed at the points that already await — the
+     * read-only-streak correction and the run's own wind-down — and read from here by the
+     * synchronous outcome path. `undefined` means nobody established it, and the outcome rule
+     * abstains rather than guessing.
+     */
+    let unverifiedPageBroken: boolean | undefined;
     let pageCheckCorrections = 0;
     // Highest reasoning repeat ratio observed during the current generation (0 = all novel).
     // Logged per iteration purely to build the distribution the threshold needs.
@@ -2869,7 +2980,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       stagedBuildHonestOutcome(outcome, isStagedBuild, opts.workspacePath, {
         lastPassed: lastPageCheckPassed,
         mutatedSince: mutatedSincePageCheck,
-      });
+        unverifiedPageBroken,
+      }, resumeScope);
 
     const buildStats = (
       terminalState: SubAgentExecutionStats["terminalState"] = "completed",
@@ -4073,11 +4185,18 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // When running low on iterations, take increasingly aggressive
       // measures to force the agent to synthesize instead of tool-calling.
       const remaining = maxIterations - iterations;
-      const elapsedMs = Date.now() - runStartedAt;
       const synthesisBufferMs = turnTimeoutMs
         ? Math.max(3_000, Math.min(10_000, Math.round(turnTimeoutMs * 0.15)))
         : undefined;
-      const timeRemainingMs = turnTimeoutMs ? Math.max(0, turnTimeoutMs - elapsedMs) : undefined;
+      // Against the deferred wall, not the static budget — see resolveTimeRemainingMs. With
+      // the static one this pinned at 0 for the whole extended lifetime of a deferred run, so
+      // the branch below stripped the run's tools on every remaining iteration.
+      const timeRemainingMs = resolveTimeRemainingMs({
+        turnTimeoutMs,
+        runStartedAt,
+        effectiveDeadlineAt,
+        nowMs: Date.now(),
+      });
       const timeBudgetCritical = toolCount > 0
         && synthesisBufferMs !== undefined
         && timeRemainingMs !== undefined
@@ -4298,9 +4417,21 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         // The stream is done; from here until the next one starts there is no generation
         // to be alive, so recency must stop voting. Without this a run that finished its
         // last completion would defer its deadline forever on a stale timestamp.
+        //
+        // THE CHAR COUNT IS THE SAME KIND OF STALENESS. `liveReasoningChars` answers "has
+        // THIS generation said a lot yet", and shouldDeferDeadline's first arm returns true
+        // on it without consulting recency — so leaving the finished generation's total
+        // standing made every later check defer on a run with no generation at all. That
+        // suppressed the E18 wrap-up nudge (evaluated at the TOP of the next iteration,
+        // before the reset at the stream call below) for the whole rest of the run, and let
+        // a run wedged in a non-returning tool call re-arm its hard deadline forever.
         streamInFlight = false;
+        liveReasoningChars = 0;
+        liveLoopSuspected = false;
       } catch (err) {
         streamInFlight = false;
+        liveReasoningChars = 0;
+        liveLoopSuspected = false;
         if (opts.signal?.aborted) {
           const interruptedOutcome = classifyInterruptedOutcome({
             successfulToolCount,
@@ -4703,7 +4834,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           && !opts.signal?.aborted
           && !longRunningGenerationManager.isStopRequested(subSessionId)
         ) {
-          const remaining = findUnfilledStubFiles(opts.workspacePath);
+          const remaining = findUnfilledStubFiles(opts.workspacePath, resumeScope);
           if (remaining.count > 0) {
             announcementNudges++;
             const announced = normalizeSubAgentOutput(response.content).trim();
@@ -6251,8 +6382,12 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         && !supervisorStop
         && !opts.signal?.aborted
         && !longRunningGenerationManager.isStopRequested(subSessionId)
-        && response.tool_calls.length === 0
       ) {
+        // NOT gated on a tool-free turn. It was, and that state is unreachable here: the loop
+        // handles `tool_calls.length === 0` far above and either returns or continues, so this
+        // block — the whole point of which is to hand a run back its own failing page verdict —
+        // never executed once. It belongs exactly here instead, after the tool results are
+        // appended, which is where its sibling corrections already inject.
         pageCheckCorrections++;
         history.push({
           role: "user",
@@ -6297,7 +6432,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // is filled, and rises when a fresh skeleton is written, so a change in either
       // direction is real work while an unchanged count is not.
       const markerCountNow = isStagedBuild
-        ? findUnfilledStubFiles(opts.workspacePath).count
+        ? findUnfilledStubFiles(opts.workspacePath, resumeScope).count
         : 0;
       if (isStagedBuild) {
         // WHAT COUNTS AS PROGRESS DEPENDS ON THE MODE, and using one mode's measure for both
@@ -6334,8 +6469,9 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         // that needs it just as much: a repair run has zero markers by definition, so run 11
         // could read forever with nothing to stop it. The work is named by the failing page
         // instead.
-        const remaining = findUnfilledStubFiles(opts.workspacePath);
-        const stillBroken = remaining.count === 0 ? findBrokenBuiltPages(opts.workspacePath) : [];
+        const remaining = findUnfilledStubFiles(opts.workspacePath, resumeScope);
+        const stillBroken = remaining.count === 0 ? await findBrokenBuiltPages(opts.workspacePath, resumeScope) : [];
+        unverifiedPageBroken = remaining.count === 0 ? stillBroken.length > 0 : unverifiedPageBroken;
         if (remaining.count > 0 || stillBroken.length > 0) {
           readOnlyCorrections++;
           history.push({
@@ -6572,6 +6708,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // successful search_workflows that returned "no workflows matched" succeeded
     // as a call but gathered nothing, and stays a failure.
     const gatheredSharedFindings = shareFindinCallCount > 0 || autoSharedFindingCount > 0;
+    // The run is ending without the agent ever having checked its own page. Establish the
+    // answer here, where awaiting is free, so the outcome rule below can use it.
+    if (isStagedBuild && lastPageCheckPassed === undefined && unverifiedPageBroken === undefined) {
+      unverifiedPageBroken = (await findBrokenBuiltPages(opts.workspacePath, resumeScope)).length > 0;
+    }
     const maxIterationsStats = completedFromArtifact
       ? buildStats("completed", "success")
       : buildStats(

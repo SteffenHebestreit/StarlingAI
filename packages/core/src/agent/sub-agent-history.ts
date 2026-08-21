@@ -80,6 +80,24 @@ const STALE_RESULT_TAIL_CHARS = 400;
 const STALE_ARG_VALUE_MIN_CHARS = 800;
 const STALE_ARG_VALUE_KEEP_CHARS = 240;
 
+/**
+ * A DELEGATED DELIVERABLE IS NOT A STALE FILE READ.
+ *
+ * Everything else this pass shrinks can be recovered — the digest even says how ("re-read the
+ * source"). A completed sub-agent's answer can not: it lives in this array and nowhere else,
+ * and three separate salvage paths relay it verbatim to the caller when the run runs out of
+ * time, each gated on the body still being at least PASSTHROUGH_DELEGATION_MIN_BYTES. Digested
+ * to ~1,750 chars it falls under that bar, so a coordinator that delegated, made two more tool
+ * calls and then hit its deadline handed back a snippet instead of the specialist's work —
+ * exactly the loss the passthrough was built to prevent, and with a recovery instruction that
+ * points at a file that does not exist.
+ *
+ * So a delegation result is exempt from the wall-clock digest. It is not exempt from the
+ * overflow DROP below: when the prompt genuinely does not fit, dropping the oldest messages is
+ * still correct, and the salvage paths read the newest delegation anyway.
+ */
+const DELEGATION_RESULT_PREFIX_RE = /^\s*(Delegated result from|Parallel delegation completed|Task graph (completed|finished))/i;
+
 /** Drops the OLDEST messages after the first — the task statement is pinned — until the
  *  estimate fits, always keeping the last `minKeep`. An assistant message carrying
  *  tool_calls is dropped together with the tool results that answer it: splitting the
@@ -177,7 +195,8 @@ function digestStaleHistory(history: LLMMessage[], freshTurns = FRESH_TOOL_TURNS
     if (!message) continue;
     let changed = false;
 
-    if (message.role === "tool" && typeof message.content === "string") {
+    if (message.role === "tool" && typeof message.content === "string"
+      && !DELEGATION_RESULT_PREFIX_RE.test(message.content)) {
       const digest = digestStaleToolResult(message.content);
       if (digest !== null) {
         message.content = digest;

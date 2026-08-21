@@ -272,3 +272,53 @@ describe("read_file windows an unwindowed large read", () => {
     expect(result.metadata).not.toMatchObject({ truncated: true });
   });
 });
+
+/**
+ * THE ONE THING IN THIS ARRAY THAT IS NOT RECOVERABLE.
+ *
+ * Every other stale result can be re-read; the digest even says so. A completed sub-agent's
+ * answer lives here and nowhere else, and three salvage paths relay it verbatim when the run
+ * runs out of clock — each gated on the body still being at least 3,000 bytes. Digested to
+ * ~1,750 it stopped qualifying, so a coordinator that delegated, made two more tool calls and
+ * then hit its deadline handed back a snippet instead of the specialist's work.
+ */
+describe("the history digest and a delegated deliverable", () => {
+  const DELIVERABLE = "Delegated result from content_writer — TASK COMPLETED\n\n" + "x".repeat(16_000);
+  const FILE_READ = "line one of a big file\n" + "y".repeat(16_000);
+
+  const historyWithBoth = (): LLMMessage[] => ([
+    { role: "user", content: "build the deck" },
+    { role: "assistant", content: "", tool_calls: [{ id: "1", name: "delegate_to_agent", function: { name: "delegate_to_agent", arguments: "{}" } }] },
+    { role: "tool", tool_call_id: "1", content: DELIVERABLE },
+    { role: "assistant", content: "", tool_calls: [{ id: "2", name: "read_file", function: { name: "read_file", arguments: "{}" } }] },
+    { role: "tool", tool_call_id: "2", content: FILE_READ },
+    { role: "assistant", content: "", tool_calls: [{ id: "3", name: "share_finding", function: { name: "share_finding", arguments: "{}" } }] },
+    { role: "tool", tool_call_id: "3", content: "ok" },
+    { role: "assistant", content: "", tool_calls: [{ id: "4", name: "share_finding", function: { name: "share_finding", arguments: "{}" } }] },
+    { role: "tool", tool_call_id: "4", content: "ok" },
+  ] as unknown as LLMMessage[]);
+
+  it("leaves the delegation result whole while still digesting the file read beside it", () => {
+    const history = historyWithBoth();
+    const result = trimSubAgentHistory(history, { systemPromptChars: 100, tools: [], contextWindow: 131_072 });
+
+    // The stale file read is exactly what the digest is for.
+    expect(String(history[4]!.content).length).toBeLessThan(FILE_READ.length);
+    expect(result.digested).toBeGreaterThan(0);
+
+    // The deliverable is stale by the same measure and must survive it intact: 1,737 chars is
+    // what it became, and 3,000 is the bar every passthrough extractor checks.
+    expect(history[2]!.content).toBe(DELIVERABLE);
+    expect(String(history[2]!.content).length).toBeGreaterThan(3_000);
+  });
+
+  it("recognises the other two delegation result shapes as well", () => {
+    for (const prefix of ["Parallel delegation completed", "Task graph completed"]) {
+      const history = historyWithBoth();
+      history[2]!.content = `${prefix} — 3 agents\n\n${"z".repeat(16_000)}`;
+      const before = String(history[2]!.content);
+      trimSubAgentHistory(history, { systemPromptChars: 100, tools: [], contextWindow: 131_072 });
+      expect(history[2]!.content).toBe(before);
+    }
+  });
+});

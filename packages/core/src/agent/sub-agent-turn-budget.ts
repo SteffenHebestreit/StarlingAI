@@ -262,6 +262,29 @@ export const STREAM_HEARTBEAT_CHARS = 2_000;
  * refused immediately and falls through to the abort, so "keep going" is never available to
  * the pathology the loop detector exists to catch.
  */
+/**
+ * How much of the run's budget is actually left, measured against the wall that MOVES.
+ *
+ * The deadline is a liveness probe now: onDeadline re-arms `effectiveDeadlineAt` every time it
+ * defers, so a healthy run routinely lives past its original `turnTimeoutMs`. Anything that
+ * asks "how long do I have" by subtracting elapsed time from the STATIC budget reads zero for
+ * the whole extended lifetime — which is how the tool-stripping "TIME BUDGET CRITICAL" branch
+ * came to fire on every iteration of a deferred run and take its tools away permanently.
+ *
+ * `undefined` when the run is unbounded, which is not "no time left".
+ */
+export function resolveTimeRemainingMs(input: {
+  turnTimeoutMs?: number;
+  runStartedAt: number;
+  /** The re-armed wall, when a deadline is armed. Falls back to the static budget. */
+  effectiveDeadlineAt?: number;
+  nowMs: number;
+}): number | undefined {
+  if (!input.turnTimeoutMs) return undefined;
+  const wallAt = input.effectiveDeadlineAt ?? (input.runStartedAt + input.turnTimeoutMs);
+  return Math.max(0, wallAt - input.nowMs);
+}
+
 export function shouldDeferDeadline(live: {
   liveReasoningChars: number;
   liveLoopSuspected: boolean;

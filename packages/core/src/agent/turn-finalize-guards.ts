@@ -131,6 +131,16 @@ export interface TerminalGuardContext {
    */
   readonly skipDraftRecovery?: boolean;
 
+  /**
+   * When this turn began (wall clock). The disk evidence below — unfilled markers, a page that
+   * does not run — lives in a `generated/` zone shared by every turn the deployment has ever
+   * run, so without this the claim "THIS turn left an incomplete artifact" is really "some
+   * turn, ever, did", and one never-cleaned page spends a corrective build on every
+   * artifact-shaped turn from every user thereafter. Undefined falls back to the whole zone,
+   * which is the old behaviour and is only right for a caller that means exactly that.
+   */
+  readonly turnStartedAtMs?: number;
+
   // --- turn-state signals, read-only within this run ---
   readonly currentTurnHasExecutableOrchestration: boolean;
   readonly forcedSynthesisFired: boolean;
@@ -199,7 +209,7 @@ export interface TerminalGuardContext {
 export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Promise<string> {
   const { signal, session, provider, userMessage, toolContext, deliverableIntent, initialDynamicGuidance, guardrailEvents } = ctx;
   const { rawResponse, iterationCount, effectiveToolIterations, terminalFinishReason, toolCallsRequested } = ctx;
-  const { currentTurnHasExecutableOrchestration } = ctx;
+  const { currentTurnHasExecutableOrchestration, turnStartedAtMs } = ctx;
 
   let finalResponse = await ctx.finalizeUserFacingAssistantResponse(rawResponse, effectiveToolIterations, session, provider, signal);
 
@@ -631,10 +641,11 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
   // Unfilled markers or a page that does not run, read straight off disk — the same evidence
   // the sub-agent's own resume detection uses, so the corrective build it triggers arrives in
   // repair mode with the fault named rather than starting over.
-  const turnLeftAnIncompleteArtifact = (workspacePath: string): boolean => {
+  const artifactScope = { modifiedSinceMs: turnStartedAtMs };
+  const turnLeftAnIncompleteArtifact = async (workspacePath: string): Promise<boolean> => {
     try {
-      if (findUnfilledStubFiles(workspacePath).count > 0) return true;
-      return findBrokenBuiltPages(workspacePath).length > 0;
+      if (findUnfilledStubFiles(workspacePath, artifactScope).count > 0) return true;
+      return (await findBrokenBuiltPages(workspacePath, artifactScope)).length > 0;
     } catch {
       return false;   // a scan failure must never manufacture a rebuild
     }
@@ -644,16 +655,22 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
   // description. Scoped to app/served deliverables (web_coder/backend_coder) so plain
   // reports/decks the model already wrote inline still ship as-is. Bounded by the shared
   // qaCorrectiveBuildUsed latch. (The forced-terminal path has its own build gate above.)
-  if (
-    effectiveOrchestration().finalResponseQaGate
+  // Hoisted out of the condition below: establishing whether a page runs now costs a child
+  // process, so it is only asked when everything cheaper has already said yes.
+  const qaGateEligible = effectiveOrchestration().finalResponseQaGate
     && !ctx.getQaCorrectiveBuildUsed()
     && !signal.aborted
-    && deliverableIntent.wantsArtifact
+    && deliverableIntent.wantsArtifact;
+  const describedInsteadOfBuilding = qaGateEligible
+    && deliverableIntent.isAppBuild
+    && ctx.collectTurnArtifactAttachments(session).length === 0;
+  if (
+    qaGateEligible
     && (
       // "Described it instead of building it" stays scoped to app builds: for a deck or a
       // report the model writing the content inline IS the deliverable, and forcing a build
       // there would be wrong.
-      (deliverableIntent.isAppBuild && ctx.collectTurnArtifactAttachments(session).length === 0)
+      describedInsteadOfBuilding
       // AN ARTIFACT THAT EXISTS BUT DOES NOT WORK NEEDS THE BUILD JUST AS MUCH.
       //
       // This gate asked only "was an artifact produced", because it was written for the
@@ -672,7 +689,7 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
       // guard that could have repaired it, on the basis of a routing decision that has
       // nothing to do with whether the file works. The disk evidence is structural and does
       // not care who wrote it.
-      || turnLeftAnIncompleteArtifact(session.getWorkspacePath())
+      || (!describedInsteadOfBuilding && await turnLeftAnIncompleteArtifact(session.getWorkspacePath()))
     )
   ) {
     const factsCtx = initialDynamicGuidance?.sourceSensitive

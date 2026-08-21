@@ -359,15 +359,29 @@ describe("staged artifact build — directive injection", () => {
     expect(prompt).not.toContain("STAGED BUILD");
   });
 
-  it("REGRESSION run 3959f3ac — the SHIPPED default injects it, and the audit says so", async () => {
-    // No orchestration block in the config at all, so this run resolves the schema
-    // defaults. That is the whole point: every assertion above hands the flag in by
-    // hand, which is why the suite stayed green while the value that ships was false
-    // and `directiveInjected` was false on a run with all preconditions met.
+  it("REGRESSION run 3959f3ac — what this DEPLOYMENT ships injects it, and the audit says so", async () => {
+    // Every other assertion here hands the flag in by hand, which is why the suite stayed
+    // green while the value that actually SHIPPED was false and `directiveInjected` was false
+    // on a run with every precondition met. So this one reads the number that ships.
+    //
+    // It reads it from the config SHARD, not from the schema default: the directive rewrites
+    // the system prompt of 39 of the 49 shipped agents, so it defaults OFF for anyone who
+    // forks this repo and is turned ON here, next to the measurement that justifies it. The
+    // regression this test exists for is "the deployment believes it is on while the model
+    // never sees a word of it" — and that is a question about the shard.
+    const shard = JSON5.parse(readFileSync(
+      new URL("../../../../config/gateway/40-orchestration.jsonc", import.meta.url), "utf8",
+    )) as { orchestration?: Record<string, unknown> };
+    expect(shard.orchestration?.["stagedArtifactBuilds"]).toBe(true);
+    expect(shard.orchestration?.["stagedArtifactBuildDirective"]).toBe(true);
+
     expect(OBSERVED_BUILD_TASK.trim().length).toBe(RUN_3959F3AC_TASK_CHARS);
 
     const prompt = await runAndCaptureSystemPrompt(
-      undefined,
+      {
+        stagedArtifactBuilds: shard.orchestration?.["stagedArtifactBuilds"],
+        stagedArtifactBuildDirective: shard.orchestration?.["stagedArtifactBuildDirective"],
+      },
       OBSERVED_BUILD_TASK,
       // backend_coder's effective toolset, trimmed to what the classifier reads.
       ["read_file", "write_file", "edit_file", "list_files", "grep_files", "serve_app", "verify_app"],
@@ -411,7 +425,7 @@ describe("staged artifact build — directive injection", () => {
     );
 
     const prompt = await runAndCaptureSystemPrompt(
-      undefined,
+      { stagedArtifactBuilds: true, stagedArtifactBuildDirective: true },
       OBSERVED_BUILD_TASK,
       ["read_file", "write_file", "edit_file", "list_files", "grep_files"],
       seeded,
@@ -433,7 +447,7 @@ describe("staged artifact build — directive injection", () => {
     // turn. So the narrowing is repeated where the ask lives, LAST, demoting the spec to
     // reference material in the same breath as it names this turn's job.
     await runAndCaptureSystemPrompt(
-      undefined,
+      { stagedArtifactBuilds: true, stagedArtifactBuildDirective: true },
       OBSERVED_BUILD_TASK,
       ["read_file", "write_file", "edit_file", "list_files", "grep_files"],
     );
@@ -468,7 +482,7 @@ describe("staged artifact build — directive injection", () => {
     // path" was the last thing the model read — which is the shape of the run that
     // wrote five files and never served them. Order is the guard.
     const prompt = await runAndCaptureSystemPrompt(
-      undefined,
+      { stagedArtifactBuilds: true, stagedArtifactBuildDirective: true },
       OBSERVED_BUILD_TASK,
       ["read_file", "write_file", "edit_file", "list_files", "grep_files", "serve_app", "verify_app"],
     );

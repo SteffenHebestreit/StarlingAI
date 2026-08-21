@@ -48,7 +48,13 @@ describe("write_file refuses to replace finished work with placeholders", () => 
       expect(evaluateStubRegression(eight, two).regressed).toBe(false);   // filling in
       expect(evaluateStubRegression(eight, eight).regressed).toBe(false); // no loss
       expect(evaluateStubRegression(eight, none).regressed).toBe(false);  // finished
-      expect(evaluateStubRegression(none, two).regressed).toBe(true);     // finished → stubbed
+      // Finished → stubbed is a REBUILD, not the mid-build clobber this blocks. It is reported
+      // rather than refused: nothing is being interrupted, the staged-build directive orders
+      // exactly this skeleton as a large build's first call, and an agent holding no delete
+      // tool had no way to satisfy the refusal. See "stub regression — mid-build versus
+      // finished" below.
+      expect(evaluateStubRegression(none, two).regressed).toBe(false);
+      expect(evaluateStubRegression(none, two).replacesFinished).toBe(true);
     });
   });
 
@@ -528,7 +534,7 @@ describe("a build whose page does not work is not a finished build", () => {
         + "c.fillRect(-800,10,20,20); c.fillRect(-700,50,20,20);"
         + "</script></body></html>", "utf8");
 
-      const broken = findBrokenBuiltPages(dir);
+      const broken = await findBrokenBuiltPages(dir);
       expect(broken).toHaveLength(2);
       expect(broken.join(" ")).toContain("already been declared");
       expect(broken.join(" ")).toContain("outside the canvas");
@@ -547,7 +553,7 @@ describe("a build whose page does not work is not a finished build", () => {
         "<html><body><canvas id=\"board\"></canvas><script>"
         + "const c=document.getElementById('board').getContext('2d'); c.fillRect(10,10,40,40);"
         + "</script></body></html>", "utf8");
-      expect(findBrokenBuiltPages(dir)).toHaveLength(0);
+      expect(await findBrokenBuiltPages(dir)).toHaveLength(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -611,13 +617,13 @@ throw new Error('${MARKER}: input');</script>`, "utf8");
       // Shape 2: no markers, but the page does not run.
       writeFileSync(file, "<script>const a=1; const a=2;</script>", "utf8");
       expect(findUnfilledStubFiles(dir).count).toBe(0);
-      expect(findBrokenBuiltPages(dir).length).toBeGreaterThan(0);
+      expect((await findBrokenBuiltPages(dir)).length).toBeGreaterThan(0);
 
       // THE DISCRIMINATOR: a finished, working artifact must NOT trigger a rebuild, or every
       // successful turn would pay for an extra delegation.
       writeFileSync(file, "<html><body><script>const done=1;</script></body></html>", "utf8");
       expect(findUnfilledStubFiles(dir).count).toBe(0);
-      expect(findBrokenBuiltPages(dir)).toHaveLength(0);
+      expect(await findBrokenBuiltPages(dir)).toHaveLength(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -630,15 +636,19 @@ describe("a run that never checked its page is not a run that passed", () => {
     // dies with `Cannot read properties of undefined` before it draws anything. The agent
     // never called verify_page, and the honest-outcome check consulted the page verdict only
     // when one had been PRODUCED, so saying nothing was as good as passing.
-    const { stagedBuildHonestOutcome } = await import("../agent/sub-agent.js");
+    const { stagedBuildHonestOutcome, findBrokenBuiltPages } = await import("../agent/sub-agent.js");
     const dir = mkdtempSync(join(tmpdir(), "sai-never-checked-"));
     try {
       mkdirSync(join(dir, "generated", "g"), { recursive: true });
       writeFileSync(join(dir, "generated", "g", "index.html"),
         "<html><body><script>const x = undefined; x.toLocaleString();</script></body></html>", "utf8");
 
-      // No page-check evidence at all — the run simply never looked.
-      expect(stagedBuildHonestOutcome("success", true, dir, {})).toBe("partial");
+      // The composition the runner performs: executing the page is a child process now, so the
+      // runner establishes the answer where it can await and the outcome rule reads it.
+      const pageBroken = (await findBrokenBuiltPages(dir)).length > 0;
+      expect(pageBroken).toBe(true);
+      // No page-check evidence from the agent at all — the run simply never looked.
+      expect(stagedBuildHonestOutcome("success", true, dir, { unverifiedPageBroken: pageBroken })).toBe("partial");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -647,7 +657,7 @@ describe("a run that never checked its page is not a run that passed", () => {
   it("still passes a working page the agent never checked — the discriminator", async () => {
     // Not checking is not itself a defect; shipping something broken is. A run that never
     // called verify_page and produced a page that works must still be a success.
-    const { stagedBuildHonestOutcome } = await import("../agent/sub-agent.js");
+    const { stagedBuildHonestOutcome, findBrokenBuiltPages } = await import("../agent/sub-agent.js");
     const dir = mkdtempSync(join(tmpdir(), "sai-never-checked-ok-"));
     try {
       mkdirSync(join(dir, "generated", "g"), { recursive: true });
@@ -655,7 +665,9 @@ describe("a run that never checked its page is not a run that passed", () => {
         "<html><body><canvas id=\"b\"></canvas><script>"
         + "document.getElementById('b').getContext('2d').fillRect(5,5,20,20);"
         + "</script></body></html>", "utf8");
-      expect(stagedBuildHonestOutcome("success", true, dir, {})).toBe("success");
+      const pageBroken = (await findBrokenBuiltPages(dir)).length > 0;
+      expect(pageBroken).toBe(false);
+      expect(stagedBuildHonestOutcome("success", true, dir, { unverifiedPageBroken: pageBroken })).toBe("success");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -689,5 +701,42 @@ describe("a delegated task cannot refer to material it does not carry", () => {
     // to the conversation, so referenced material has to travel with the task.
     expect(String(node["context"].description)).toMatch(/conversation/i);
     expect(String(node["task"].description)).toMatch(/context/i);
+  });
+});
+
+/**
+ * A REBUILD IS NOT THE CLOBBER THIS GUARD WAS BUILT FOR.
+ *
+ * Run 2dc5832c: 13 iterations had filled six of eight markers when a re-delegation answered
+ * with a fresh skeleton holding all eight again — every filled subsystem destroyed in one
+ * call. That file had markers left; it was mid-build. A FINISHED file is the other case, and
+ * blocking it made "rebuild this from scratch, differently" impossible for an agent holding
+ * no delete tool — while the staged-build directive, now default-on, orders exactly that
+ * skeleton as the first call of any large build.
+ */
+describe("stub regression — mid-build versus finished", () => {
+  it("still refuses a skeleton over a partially filled build", async () => {
+    const { evaluateStubRegression } = await import("../tools/filesystem.js");
+    const partial = "const a = 1; throw new Error('UNFINISHED_STUB: physics');";
+    const skeleton = "throw new Error('UNFINISHED_STUB: physics'); throw new Error('UNFINISHED_STUB: render');";
+    const verdict = evaluateStubRegression(partial, skeleton);
+    expect(verdict.regressed).toBe(true);
+    expect(verdict.replacesFinished).toBe(false);
+  });
+
+  it("allows — and reports — a skeleton over a finished file", async () => {
+    const { evaluateStubRegression } = await import("../tools/filesystem.js");
+    const finished = "const a = 1; render();";
+    const skeleton = "throw new Error('UNFINISHED_STUB: physics');";
+    const verdict = evaluateStubRegression(finished, skeleton);
+    expect(verdict.regressed).toBe(false);
+    expect(verdict.replacesFinished).toBe(true);
+  });
+
+  it("leaves an equal or falling marker count alone, as before", async () => {
+    const { evaluateStubRegression } = await import("../tools/filesystem.js");
+    const two = "throw new Error('UNFINISHED_STUB: a'); throw new Error('UNFINISHED_STUB: b');";
+    expect(evaluateStubRegression(two, two).regressed).toBe(false);
+    expect(evaluateStubRegression(two, "throw new Error('UNFINISHED_STUB: a');").regressed).toBe(false);
   });
 });

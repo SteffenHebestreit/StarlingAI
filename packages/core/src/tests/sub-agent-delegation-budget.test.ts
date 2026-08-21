@@ -10,6 +10,7 @@ import {
   resolveDelegationCeilingMs,
   resolveDelegationDeadlineMs,
   resolveSoftDeadlineOffsetMs,
+  resolveTimeRemainingMs,
   resolveTurnBudgetMs,
 } from "../agent/sub-agent-turn-budget.js";
 import type { SubAgentRunOptions, SubAgentRunResult } from "../agent/sub-agent.js";
@@ -396,5 +397,45 @@ describe("config/gateway/40-orchestration.jsonc actually enables the fix", () =>
     const parsed = OrchestrationSchema.parse(shard.orchestration);
     expect(parsed.subAgentSynthesisReserveMs).toBe(RESERVE_MS);
     expect(parsed.clampSubAgentTimeoutToParent).toBe(true);
+  });
+});
+
+/**
+ * THE BUDGET IS NOT THE WALL ANY MORE.
+ *
+ * af2cea9 turned the turn deadline into a liveness probe that re-arms while the run is still
+ * producing, so a healthy run routinely lives past its own turnTimeoutMs. Anything still
+ * subtracting elapsed time from the STATIC budget reads "no time left" for that entire
+ * extended lifetime — which is what the tool-stripping TIME BUDGET CRITICAL branch did,
+ * taking a working run's tools away on every iteration and never giving them back.
+ */
+describe("resolveTimeRemainingMs — measured against the wall that moves", () => {
+  const START = 1_000_000;
+
+  it("uses the static budget while no deadline has been deferred", () => {
+    expect(resolveTimeRemainingMs({
+      turnTimeoutMs: 600_000, runStartedAt: START, effectiveDeadlineAt: undefined, nowMs: START + 100_000,
+    })).toBe(500_000);
+  });
+
+  it("follows the re-armed deadline once the run has been deferred past its budget", () => {
+    // 10 s past a 600 s budget, with the deadline re-armed 300 s out: the run has 300 s, not 0.
+    const deferredTo = START + 610_000 + 300_000;
+    expect(resolveTimeRemainingMs({
+      turnTimeoutMs: 600_000, runStartedAt: START, effectiveDeadlineAt: deferredTo, nowMs: START + 610_000,
+    })).toBe(300_000);
+    // The old expression is what the branch used to see, and it is the bug:
+    expect(Math.max(0, 600_000 - 610_000)).toBe(0);
+  });
+
+  it("still reaches zero for a run that genuinely runs out", () => {
+    expect(resolveTimeRemainingMs({
+      turnTimeoutMs: 600_000, runStartedAt: START, effectiveDeadlineAt: START + 600_000, nowMs: START + 700_000,
+    })).toBe(0);
+  });
+
+  it("is undefined for an unbounded run rather than zero", () => {
+    expect(resolveTimeRemainingMs({ turnTimeoutMs: undefined, runStartedAt: START, nowMs: START + 9_000_000 })).toBeUndefined();
+    expect(resolveTimeRemainingMs({ turnTimeoutMs: 0, runStartedAt: START, nowMs: START })).toBeUndefined();
   });
 });

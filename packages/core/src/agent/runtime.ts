@@ -3078,6 +3078,9 @@ async function _runTurn(
       const terminalGuardCtx: TerminalGuardContext = {
         signal,
         session,
+        // Scopes the guard's disk evidence to what THIS turn left, in a generated/ zone
+        // shared by every turn the deployment has ever run.
+        turnStartedAtMs: turnStartedAt,
         provider,
         userMessage,
         toolContext,
@@ -4396,6 +4399,7 @@ async function _runTurn(
   const backstopGuardCtx: TerminalGuardContext = {
     signal,
     session,
+    turnStartedAtMs: turnStartedAt,
     provider,
     userMessage,
     toolContext,
