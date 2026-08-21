@@ -25,7 +25,7 @@
     "runtime-guidance:evaluate": "tsx src/scripts/runtime-guidance-live-eval.ts",
     "test:watch": "vitest",
     "check": "tsc --noEmit",
-    "lint": "eslint src",
+    "lint": "eslint src --max-warnings 0",
     "memory:vault": "tsx src/cli/memory-vault.ts",
     "agents:evaluate": "tsx src/agent/evaluation-cli.ts",
     "packs:evaluate": "tsx src/agent/eval-pack-cli.ts",

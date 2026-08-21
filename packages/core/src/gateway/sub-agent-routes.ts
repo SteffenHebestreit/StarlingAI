@@ -141,7 +141,7 @@ export function registerSubAgentRoutes(app: Hono): void {
     if (!existsSync(outcomesFile)) return c.json({ agents: [], totalEntries: 0 });
 
     type OutcomeRow = { ts: string; agent: string; task: string; outcome: string; iterations: number; totalTokens: number; lesson?: string };
-    let entries: OutcomeRow[] = [];
+    let entries: OutcomeRow[];
     try {
       entries = readFileSync(outcomesFile, "utf-8")
         .trim().split("\n").filter(Boolean)

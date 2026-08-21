@@ -55,14 +55,19 @@ export default tseslint.config(
         ignoreRestSiblings: true,
       }],
 
-      // ── Out of scope for this gate (tracked as follow-ups, not blocking) ──
-      // eslint-10 added these to "recommended"; they are best-practice/style, not
-      // the bug classes this gate targets, and fixing them en masse is churn.
+      // ── Warnings, and the gate runs at --max-warnings 0 ──────────────────
+      // These were carried as non-blocking noise while the backlog stood at 53. It is
+      // zero now, so a warning here fails the build exactly like an error; they stay
+      // "warn" only because that is the severity their messages are written for.
       "preserve-caught-error": "off",       // adding { cause } everywhere — separate effort
-      "no-useless-assignment": "warn",      // some real dead-stores; clean incrementally
-      // Style-adjacent, not a runtime bug class. The autofixer declines these
-      // (they sit in regex/string contexts where removing a backslash could
-      // change matching), so hand-editing is risky — keep visible as warnings.
+      // Every one of the 17 was a defensive initializer the next statement always
+      // overwrote. Each was removed by DELETING the initializer and letting TypeScript's
+      // definite-assignment analysis prove the variable is written before it is read —
+      // if tsc accepts it, the store really was dead.
+      "no-useless-assignment": "warn",
+      // Cleared via ESLint's own `removeEscape` suggestion, which is documented to
+      // maintain current functionality — applied by exact source range rather than by
+      // hand, so a backslash that matters in a regex was never at risk.
       "no-useless-escape": "warn",
       "@typescript-eslint/no-explicit-any": "off",
       "@typescript-eslint/ban-ts-comment": "off",

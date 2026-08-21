@@ -298,7 +298,7 @@ function handleEvent(event: AuditEvent, opts?: { rehydrate?: boolean }): void {
   const cfg = getConfig().cost;
   if (!cfg.enabled) return;
 
-  let usage: { promptTokens: number; completionTokens: number; totalTokens: number } | null = null;
+  let usage: { promptTokens: number; completionTokens: number; totalTokens: number } | null;
   let agentName: string | null = null;
   let model: string | null = null;
 

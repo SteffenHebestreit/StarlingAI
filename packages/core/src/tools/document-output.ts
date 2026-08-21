@@ -698,7 +698,7 @@ function renderMermaidSource(input: { title: string; diagram: string; theme: Mer
   const trimmed = input.diagram.trim();
   const hasInitBlock = /^%%\{\s*init:/i.test(trimmed);
   const titleComment = input.title ? `%% ${input.title}\n` : "";
-  const themeBlock = hasInitBlock ? "" : `%%{init: { \"theme\": \"${input.theme}\" }}%%\n`;
+  const themeBlock = hasInitBlock ? "" : `%%{init: { "theme": "${input.theme}" }}%%\n`;
   return `${titleComment}${themeBlock}${ensureTrailingNewline(trimmed)}`;
 }
 

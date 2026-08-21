@@ -47,7 +47,7 @@ function truncate(value: string, max: number): string {
  * model can always override via `include`.
  */
 function deriveRecallPlan(query: string): { intent: string; priority: Set<Section>; order: Section[] } {
-  let guidance: ReturnType<typeof buildDynamicTurnGuidance> = null;
+  let guidance: ReturnType<typeof buildDynamicTurnGuidance>;
   try { guidance = buildDynamicTurnGuidance(query); } catch { guidance = null; }
 
   if (guidance?.swarmMaintenanceSensitive) {

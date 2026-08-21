@@ -83,7 +83,7 @@ export function registerDocumentRoutes(app: Hono): void {
 
     try {
       const { basename } = await import("node:path");
-      const safe = basename(uploadedFile.name).replace(/[^\w.\-]+/g, "_").slice(-180) || "upload";
+      const safe = basename(uploadedFile.name).replace(/[^\w.-]+/g, "_").slice(-180) || "upload";
       // Scope-specific upload folder so files are grouped + cleaned with their scope.
       const dirKey = scope === "session" ? sessionId : scope === "user" ? `user-${user!.username}` : "workspace";
       const finalName = `${Date.now()}-${safe}`;

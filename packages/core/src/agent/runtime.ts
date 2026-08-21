@@ -2402,7 +2402,7 @@ async function _runTurn(
         approvedRunCandidateRetryUsed = true;
         approvedRunCandidateEnforcementPrompt = [
           "COMPLIANCE CORRECTION: the user just approved a recent n8n RUN_CANDIDATE follow-up.",
-          `You MUST call run_workflow now with name \"${approvedRunCandidateFollowUp.workflowName}\", workflowType \"${approvedRunCandidateFollowUp.workflowType}\", and params.workflowName \"${approvedRunCandidateFollowUp.candidateName}\".`,
+          `You MUST call run_workflow now with name "${approvedRunCandidateFollowUp.workflowName}", workflowType "${approvedRunCandidateFollowUp.workflowType}", and params.workflowName "${approvedRunCandidateFollowUp.candidateName}".`,
           "Do NOT call search_agents, search_workflows, delegate_to_agent, parallel_delegate, run_task_graph, or give a tool-free answer first.",
           "Any response that skips this exact run_workflow call is invalid for this turn.",
         ].join(" ");
@@ -3797,7 +3797,9 @@ async function _runTurn(
         lastToolCallSig: _lastToolCallSig,
         toolResultMessages,
       };
-      resultText = await postProcessToolResult(resultText, toolResultPostProcessContext);
+      // The return value is the inline-era leftover: what reaches the model is what this
+      // appends to `toolResultMessages`, and nothing below reads the text again.
+      await postProcessToolResult(resultText, toolResultPostProcessContext);
 
       if (workflowExecutionCorrectionExhausted) {
         session.addMessages(toolResultMessages);
@@ -5132,7 +5134,7 @@ const INLINE_ARTIFACT_LANGS = ["html", "javascript", "js", "ts", "tsx", "jsx", "
 
 export function looksLikeRunawayInlineArtifact(content: string): boolean {
   if (content.length < INLINE_ARTIFACT_FENCE_BYTES) return false;
-  const fenceRe = /```([a-zA-Z0-9_+\-]*)\n([\s\S]*?)(?:```|$)/g;
+  const fenceRe = /```([a-zA-Z0-9_+-]*)\n([\s\S]*?)(?:```|$)/g;
   let match: RegExpExecArray | null;
   while ((match = fenceRe.exec(content)) !== null) {
     const lang = (match[1] ?? "").toLowerCase();

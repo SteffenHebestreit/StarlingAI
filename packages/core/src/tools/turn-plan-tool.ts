@@ -141,7 +141,7 @@ async function maybeRequestPlanApproval(plan: TurnPlan, ctx: ToolContext, width:
     steps: plan.steps.length,
   }, { sessionId: ctx.sessionId, severity: "warn" });
 
-  let approved = false;
+  let approved: boolean;
   try {
     approved = await ctx.approvalCallback("record_plan", {
       summary: "Approve this plan before the swarm executes it?",

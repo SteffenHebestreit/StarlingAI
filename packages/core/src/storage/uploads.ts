@@ -26,7 +26,7 @@ export async function scanAndStoreUpload(
   contentType: string,
   meta: Record<string, unknown> = {},
 ): Promise<ScanStoreResult> {
-  let scanned = false;
+  let scanned: boolean;
   try {
     const verdict = await scanBytes(bytes);
     scanned = verdict.skipped !== true;

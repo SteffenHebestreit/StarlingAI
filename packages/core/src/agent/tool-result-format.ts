@@ -56,7 +56,7 @@ export function looksLikeDelegatedFailureEvidence(value: string): boolean {
   const preview = value.trim().slice(0, 600);
   if (!preview) return false;
   if (/^sub-agent produced no final response\.?$/i.test(preview)) return true;
-  if (/<\|channel\>\w+/i.test(preview)) return true;
+  if (/<\|channel>\w+/i.test(preview)) return true;
   if (looksLikeProviderErrorEcho(preview)) return true;
   return /^error:/i.test(preview)
     || /\b(no results|not found|unable to|failed to|timed out|cancelled|incomplete|max.{0,20}iterations|could not complete|did not complete|cannot complete|cannot proceed|delegation limit|already failed|not permitted|produced no final response|no usable delegated result returned)\b/i.test(preview)

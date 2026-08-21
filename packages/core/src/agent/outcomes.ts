@@ -196,7 +196,7 @@ export function formatOutcomesForPrompt(workspacePath: string): string {
   }
 
   const failingAgents = [...stats.entries()]
-    .filter(([name, s]) => !name.startsWith("ephemeral:"))
+    .filter(([name]) => !name.startsWith("ephemeral:"))
     .filter(([, s]) => s.failure + s.partial >= PROMPT_MIN_ADVERSE_OUTCOMES)
     .sort((left, right) => {
       const leftAdverse = left[1].failure + left[1].partial;

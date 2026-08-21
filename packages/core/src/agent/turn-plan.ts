@@ -92,7 +92,7 @@ function unwrapPlanEnvelope(raw: Record<string, unknown>): Record<string, unknow
     // into a warden stop. Coerce the string into the objective so the turn records
     // a minimal plan and proceeds. Sibling keys (e.g. riskTier) are preserved.
     if (typeof inner === "string" && inner.trim()) {
-      return { ...raw, objective: inner.replace(/^\s*objective\s*[:\-]\s*/i, "").trim() };
+      return { ...raw, objective: inner.replace(/^\s*objective\s*[:-]\s*/i, "").trim() };
     }
   }
   return raw;

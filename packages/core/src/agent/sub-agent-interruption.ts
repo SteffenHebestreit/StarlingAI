@@ -450,7 +450,7 @@ export function buildArtifactCompletionOutput(params: {
 /** Strip hallucinated tool-call XML that some models emit in text output. */
 export function stripHallucinatedToolTags(text: string): string {
   let stripped = text
-    .replace(/<\|channel\>\w+\s*/g, "")
+    .replace(/<\|channel>\w+\s*/g, "")
     .replace(/<tool_call>[\s\S]*?<\/tool_call>/g, "")
     .replace(/<function=[^>]*>[\s\S]*?<\/function>/g, "")
     .replace(/<\/tool_call>/g, "");

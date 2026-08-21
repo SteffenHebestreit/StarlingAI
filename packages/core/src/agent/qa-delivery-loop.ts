@@ -195,7 +195,7 @@ export async function runQaDeliveryLoop(
     }
 
     const useEscalate = cheapImproveExhausted && !!deps.escalate;
-    let improved: string | null = null;
+    let improved: string | null;
     try {
       improved = useEscalate
         ? await deps.escalate!(current, verdict.flaws ?? "", criteria)

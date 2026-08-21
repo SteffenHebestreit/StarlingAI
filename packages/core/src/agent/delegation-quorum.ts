@@ -66,6 +66,11 @@ export async function awaitQuorum<T>(
   if (settled < n) {
     await new Promise<void>((res) => {
       let done = false;
+      // `let`, not `const`, and not assigned at its declaration: `finish` closes over `handle`
+      // and `schedule` is injectable (opts.setTimeoutFn). A stub that invokes the callback
+      // synchronously would hit the temporal dead zone on a `const` and throw; as a `let` it
+      // reads `undefined` and clearTimeout(undefined) is a no-op.
+      // eslint-disable-next-line prefer-const
       let handle: unknown;
       // Clear the grace timer when the stragglers settle first (the common fast case) so it does
       // not stay armed for the full graceMs after awaitQuorum returns — a live ref'd timer per

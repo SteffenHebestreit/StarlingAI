@@ -111,13 +111,14 @@ export async function assembleTurnSystemMessages(
     applyRoutingTone,
     buildTemporalContextPrompt,
   } = params;
-  // Skill slugs and the prompt-metrics object are carried in/out: on a context-
-  // injecting iteration the body reassigns them; otherwise the passed-in values
-  // pass through unchanged (identical to the outer `let`s the loop previously
-  // mutated in place).
+  // Skill slugs are carried in/out: on a context-injecting iteration the body reassigns them;
+  // otherwise the passed-in values pass through unchanged (identical to the outer `let`s the
+  // loop previously mutated in place). The metrics object is NOT carried in — every path
+  // through this function measures the prompt it has just assembled, so the incoming value is
+  // never the one returned.
   let injectedSkillSlugs = params.injectedSkillSlugs;
   let heldOutSkillSlugs = params.heldOutSkillSlugs;
-  let lastPromptMetrics = params.lastPromptMetrics;
+  let lastPromptMetrics: ReturnType<typeof measurePrompt>;
     let systemPrompt = session.getSystemPrompt();
     // Split orchestration prompt (agents.performance.splitOrchestrationPrompt, default off): the
     // ~13KB orchestration block (Swarm Rules → Orchestration Strategy) is only needed on turns that

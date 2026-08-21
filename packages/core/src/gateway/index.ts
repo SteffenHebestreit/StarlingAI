@@ -2031,7 +2031,7 @@ export function createGateway() {
     try {
       const { basename } = await import("node:path");
       // Sanitize to a bare, safe filename (no traversal) and de-collide with a timestamp.
-      const safe = basename(uploadedFile.name).replace(/[^\w.\-]+/g, "_").slice(-180) || "upload";
+      const safe = basename(uploadedFile.name).replace(/[^\w.-]+/g, "_").slice(-180) || "upload";
       const finalName = `${Date.now()}-${safe}`;
       const relativePath = `uploads/${sessionId}/${finalName}`;
       const bytes = Buffer.from(await uploadedFile.arrayBuffer());
@@ -2070,7 +2070,7 @@ export function createGateway() {
     // Buffer image bytes once — needed for both upstream and the vision fallback
     const imageBytes = isImage ? fileBytes : null;
 
-    let markdownFromUpstream = "";
+    let markdownFromUpstream: string;
 
     if (multimodalConfig.files.mcpServer) {
       try {
@@ -2776,7 +2776,7 @@ export function createGateway() {
     const sessionId = c.req.param("sessionId")?.trim();
     if (!sessionId) return c.json({ error: "sessionId is required" }, 400);
 
-    let message = "";
+    let message: string;
     try {
       const body = await c.req.json() as { message?: unknown };
       message = typeof body?.message === "string" ? body.message : "";

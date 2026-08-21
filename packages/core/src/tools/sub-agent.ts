@@ -821,14 +821,14 @@ function maybeEnrichServerDelegationContext(agentName: string, task: string, con
       `- port: ${port}`,
       `- username: ${username}`,
       authMethod ? `- authMethod: ${authMethod}` : "",
-      `Use ssh_exec with nodeName=\"${nodeName}\" so the runtime can reuse the configured target and credentials instead of rediscovering them.`,
+      `Use ssh_exec with nodeName="${nodeName}" so the runtime can reuse the configured target and credentials instead of rediscovering them.`,
       /\b(docker|container|containers)\b/i.test(task)
         ? "This is a direct remote inventory task. Prefer one SSH command such as docker ps or docker ps --format '{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Ports}}' and then stop."
         : "Prefer a direct remote command first and only inspect local config files if that remote call fails and you need to verify the configuration.",
       "Do not spend multiple iterations browsing local runtime or workspace files when the target is already identified above.",
     ].filter(Boolean).join("\n");
 
-    if (context?.includes(`nodeName: ${nodeName}`) || context?.includes(`nodeName=\"${nodeName}\"`)) {
+    if (context?.includes(`nodeName: ${nodeName}`) || context?.includes(`nodeName="${nodeName}"`)) {
       return context;
     }
     return context ? `${context}\n\n${addition}` : addition;
@@ -2301,13 +2301,11 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           budgetReservation,
           budgetActual ?? { tokens: 0, toolCalls: 0, activeTimeMs: 0 },
         ).catch(() => { /* ledger TTL bounds a lost reconcile */ });
-        budgetReservation = null;
       }
       // CAP-204: free the provider slot on every terminal path.
       if (capacityRenewTimer) clearInterval(capacityRenewTimer);
       if (capacityPermit) {
         await releaseProviderPermit(capacityPermit).catch(() => { /* permit TTL self-heals */ });
-        capacityPermit = null;
       }
     }
   }

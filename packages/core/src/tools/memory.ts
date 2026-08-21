@@ -1456,7 +1456,7 @@ registerTool({
       if (matches.length === 0) {
         return {
           success: true,
-          output: `No shared facts matched \"${query}\" for this session.`,
+          output: `No shared facts matched "${query}" for this session.`,
           metadata: { count: 0, query },
         };
       }
@@ -1466,7 +1466,7 @@ registerTool({
         .join("\n");
       return {
         success: true,
-        output: `## Shared Session Facts matching \"${query}\" (${matches.length})\n\n${formattedMatches}`,
+        output: `## Shared Session Facts matching "${query}" (${matches.length})\n\n${formattedMatches}`,
         metadata: { count: matches.length, query },
       };
     }

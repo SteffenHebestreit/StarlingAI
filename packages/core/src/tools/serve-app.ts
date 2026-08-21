@@ -208,9 +208,10 @@ export function buildServeRunArgs(app: ServedApp, hostAppDir: string): string[] 
   ];
 }
 
-function defaultStartCommand(entry: string, internalPort: number): string {
+function defaultStartCommand(entry: string): string {
   // Install deps when a manifest is present, then start. The app MUST bind
-  // 0.0.0.0:$PORT (we pass PORT) so the gateway can reach it by container name.
+  // 0.0.0.0:$PORT — PORT reaches the container through its environment, not through
+  // this command, which is why the port is not a parameter here.
   const safeEntry = entry.replace(/[^\w./-]/g, "");
   return `if [ -f package.json ]; then npm install --no-audit --no-fund --loglevel=error || exit 1; fi; `
     + `if [ -f package.json ] && grep -q '"start"' package.json; then exec npm start; else exec node ${safeEntry || "server.js"}; fi`;
@@ -264,7 +265,7 @@ async function startApp(args: Record<string, unknown>, ctx: ToolContext): Promis
   const entry = String(args["entry"] ?? "server.js");
   const command = (typeof args["command"] === "string" && args["command"].trim())
     ? String(args["command"]).trim()
-    : defaultStartCommand(entry, internalPort);
+    : defaultStartCommand(entry);
 
   const app: ServedApp = {
     id,

@@ -266,7 +266,7 @@ export function looksLikeCompleteHtmlDocument(value: string): boolean {
 export function stripLargeCodeFences(value: string): string {
   const v = value ?? "";
   if (!v) return v;
-  const cleaned = v.replace(/```[a-zA-Z0-9_+\-]*\n[\s\S]*?```/g, (block) =>
+  const cleaned = v.replace(/```[a-zA-Z0-9_+-]*\n[\s\S]*?```/g, (block) =>
     block.length >= 1500 ? "_(Code in der angehängten Datei — hier nicht eingefügt. / Code is in the attached file, not inlined here.)_" : block,
   );
   return cleaned.replace(/\n{3,}/g, "\n\n").trim();

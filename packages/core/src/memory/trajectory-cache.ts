@@ -211,7 +211,7 @@ export async function lookupTrajectory(
   const filePath = resolve(workspacePath, CACHE_FILE);
   if (!existsSync(filePath)) return null;
 
-  let queryEmbedding: Float32Array | null = null;
+  let queryEmbedding: Float32Array | null;
   try {
     queryEmbedding = await computeQueryEmbedding(query.toLowerCase().trim());
   } catch {

@@ -393,7 +393,7 @@ registerTool({
       comment,
     };
 
-    let normalizedMatchersForCatch: typeof normalizedMatchers = [];
+    let normalizedMatchersForCatch: typeof normalizedMatchers;
     try {
       normalizedMatchersForCatch = normalizedMatchers;
       const response = await fetchWithTimeout(

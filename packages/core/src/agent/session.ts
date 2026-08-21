@@ -623,7 +623,7 @@ export class AgentSession {
           timestamp: message.timestamp,
           swarmState: getTranscriptSwarmState(message.metadata),
           toolCalls: message.tool_calls.map((toolCall) => {
-            let args: Record<string, unknown> = {};
+            let args: Record<string, unknown>;
             try {
               args = JSON.parse(toolCall.function.arguments) as Record<string, unknown>;
             } catch {
@@ -1250,7 +1250,7 @@ function isManagedDefaultSystemPrompt(prompt: string): boolean {
   return prompt.startsWith(MANAGED_DEFAULT_PROMPT_PREFIX) || prompt.startsWith(LEGACY_MANAGED_DEFAULT_PROMPT_PREFIX);
 }
 
-function buildOrchestrationExamples(config: ReturnType<typeof getConfig>, delegateOnly: boolean, orchestrationOnly: boolean): string {
+function buildOrchestrationExamples(config: ReturnType<typeof getConfig>): string {
   const agentKeys = Object.keys(config.subAgents || {});
   if (agentKeys.length === 0) {
     return "- No specialist agents are configured. Use the direct tools available to you.";
@@ -1431,7 +1431,7 @@ ${toolDiscoverySection}
 
 ## Orchestration Strategy
 Use these only when direct tools are not enough. All of these require delegate_to_agent(agentName: "...", task: "..."):
-${buildOrchestrationExamples(config, delegateOnly, orchestrationOnly)}
+${buildOrchestrationExamples(config)}
 - Before a non-trivial delegation, call recall_context(query) once to pull what is already known — user preferences, prior decisions, this session's working facts, and learned skills — so routing and task wording are informed rather than guessed.
 - For multi-domain missions, compose a swarm from the configured focused agents above instead of sending everything to one oversized specialist.
 - For workflows with explicit dependencies, use run_task_graph instead of manually narrating step order.
