@@ -18,7 +18,7 @@ import {
 import type { SessionTranscriptAttachment, SessionSummary } from "../agent/session.js";
 import { roleRank } from "./auth.js";
 import { runTurn, buildTimeoutDeliveryMessage } from "../agent/runtime.js";
-import { DELEGATION_WAIT_CEILING_MS, extendDeadlineForDelegationWait } from "../agent/delegation-budget.js";
+import { extendDeadlineForDelegationWait, resolveDelegationWaitCeilingMs } from "../agent/delegation-budget.js";
 import { resolveEffortProfile, resolveEffortTier } from "../runtime/effort-context.js";
 import type { EffortTier } from "../config/schema.js";
 import { listAllScenes } from "../credentials/scenes.js";
@@ -872,10 +872,13 @@ export class RpcConnection {
         // at the same absolute ceiling (+ synthesis grace so the runtime aborts + synthesizes first).
         let gatewayDeadlineMs = 0;
         let gatewayDeadlineCeilingMs = 0;
+        // Same correction as agui.ts / runtime.ts: the ceiling is the turn budget PLUS the
+        // delegation-wait allowance. With the bare allowance it equalled the deadline at the
+        // shipped config, so this surface's D5 extension was a no-op too.
         if (effectiveTurnTimeoutMs > 0) {
           const armedAt = Date.now();
           gatewayDeadlineMs = armedAt + effectiveTurnTimeoutMs + TURN_TIMEOUT_SYNTHESIS_GRACE_MS;
-          gatewayDeadlineCeilingMs = armedAt + DELEGATION_WAIT_CEILING_MS + TURN_TIMEOUT_SYNTHESIS_GRACE_MS;
+          gatewayDeadlineCeilingMs = resolveDelegationWaitCeilingMs(armedAt, effectiveTurnTimeoutMs, TURN_TIMEOUT_SYNTHESIS_GRACE_MS);
           timeoutHandle = setTimeout(endTimedOutSession, effectiveTurnTimeoutMs + TURN_TIMEOUT_SYNTHESIS_GRACE_MS);
         }
         const extendGatewayDeadline = (ms: number): void => {

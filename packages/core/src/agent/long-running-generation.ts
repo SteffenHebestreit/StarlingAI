@@ -509,14 +509,21 @@ class LongRunningGenerationManager extends EventEmitter {
    * `isStopRequested` poll synthesises the best-available result on its next
    * iteration and hands it back to the orchestrator. Idempotent.
    */
-  requestStop(runSessionId: string, reason = "progress_verifier"): void {
+  /**
+   * @param actor who asked for the stop. Defaults to the automated stall detector, which is
+   *   what this was hardcoded to — so the user-facing stop button in the dashboard filed its
+   *   cancellations under `progress_verifier`, and a re-stop after an automated one logged
+   *   nothing at all because of the idempotent early return. A human cancel is always recorded.
+   */
+  requestStop(runSessionId: string, reason = "progress_verifier", actor = "progress_verifier"): void {
     const root = rootOf(runSessionId);
-    if (this._stopRequestedRoots.has(root)) return;
-    this._stopRequestedRoots.add(root);
+    const alreadyLatched = this._stopRequestedRoots.has(root);
+    if (!alreadyLatched) this._stopRequestedRoots.add(root);
     logAudit("long_running_generation_stopped", {
-      agentName: "progress_verifier",
+      agentName: actor,
       runSessionId,
       reason,
+      ...(alreadyLatched ? { alreadyStopped: true } : {}),
     }, { severity: "info" });
   }
 

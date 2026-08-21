@@ -15,9 +15,14 @@
 
 import type { ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
-import { archiveSession, createSession, resolveSession } from "../agent/session.js";
+import { archiveSession, createSession, getSessionRecord, resolveSession } from "../agent/session.js";
+import { longRunningGenerationManager } from "../agent/long-running-generation.js";
+
+/** How often the watchdog re-checks a turn it suspended for an operator grant. Same cadence
+ *  as the RPC surface, so the two clocks behave identically under a grant. */
+const GRANTED_TURN_RECHECK_MS = 60_000;
 import { runTurn } from "../agent/runtime.js";
-import { DELEGATION_WAIT_CEILING_MS, extendDeadlineForDelegationWait } from "../agent/delegation-budget.js";
+import { extendDeadlineForDelegationWait, resolveDelegationWaitCeilingMs } from "../agent/delegation-budget.js";
 import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
 import { roleRank } from "./auth.js";
@@ -81,6 +86,22 @@ export async function handleAguiStream(
   // its history and the partial work of the turn that ran out of clock. Without this the
   // createSession fallback below would mint a BRAND-NEW session under the same id and
   // silently drop that transcript. Explicit ("manual") archives stay unresumable.
+  // READ THE OWNER BEFORE WAKING THE SESSION UP. `resolveSession(..., resumeArchived)` is not
+  // a read: it clears archivedAt, resets endLogged, persists, hydrates from Redis and writes a
+  // `session.resumed` audit entry. Doing that first meant a request the gate below DENIES had
+  // already un-parked the victim's session. getSessionRecord answers the ownership question
+  // without touching anything; the resume happens once the caller is allowed to have it.
+  const existingRecord = sessionId ? getSessionRecord(sessionId) : undefined;
+  if (existingRecord && getConfig().auth?.enabled === true) {
+    const owner = existingRecord.userId;
+    const isAdmin = !!caller?.role && roleRank(caller.role) >= roleRank("operator");
+    if (owner !== undefined && owner !== userId && !isAdmin) {
+      log.warn({ sessionId, owner, caller: userId ?? "(none)" }, "AG-UI stream denied: session owned by another user");
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Session not found" }));
+      return;
+    }
+  }
   let session = sessionId ? await resolveSession(sessionId, { resumeArchived: true }) : undefined;
 
   // Ownership gate (decided BEFORE we commit to the SSE 200 response): don't let a
@@ -155,6 +176,15 @@ export async function handleAguiStream(
 
   const handleTurnTimeout = () => {
     if (timedOut || res.writableEnded) return; // already handled / stream already closed
+    // AN OPERATOR GRANT THIS CLOCK DOES NOT KNOW ABOUT IS NOT A GRANT. rpc.ts and runtime.ts
+    // both suspend for `isTurnUnbounded`; this one did not, so the surface a browser actually
+    // streams from could still guillotine a turn the operator had explicitly told to take as
+    // long as it needs. Re-arm rather than cancel, so the watchdog resumes if the grant clears.
+    if (longRunningGenerationManager.isTurnUnbounded(session.id)) {
+      log.info({ runId, sessionId: session.id }, "AG-UI turn watchdog suspended — operator unbounded grant");
+      timeoutHandle = setTimeout(handleTurnTimeout, GRANTED_TURN_RECHECK_MS);
+      return;
+    }
     // THE EIGHTH CLOCK, AND THE LAST ONE STILL DECIDING ON ELAPSED TIME ALONE.
     //
     // Validation run 3 was cancelled at 31:05 — five seconds after the runtime supervisor had
@@ -215,10 +245,16 @@ export async function handleAguiStream(
   // extended by delegation wait, never made immortal by it.
   let gatewayDeadlineMs = 0;
   let gatewayDeadlineCeilingMs = 0;
+    // THE CEILING IS THE BUDGET PLUS THE ALLOWANCE, NOT THE ALLOWANCE.
+    // At the shipped config gateway.turnTimeoutMs and DELEGATION_WAIT_CEILING_MS are the
+    // same 1,800,000, so `armedAt + DELEGATION_WAIT_CEILING_MS + grace` equalled the deadline
+    // itself and extendDeadlineForDelegationWait collapsed to max(D, min(D+w, D)) === D — the
+    // clock this commit exists to pause could not move by a millisecond. runtime.ts carries
+    // the corrected form for the same reason.
   if (turnTimeoutMs > 0) {
     const armedAt = Date.now();
     gatewayDeadlineMs = armedAt + turnTimeoutMs + TURN_TIMEOUT_SYNTHESIS_GRACE_MS;
-    gatewayDeadlineCeilingMs = armedAt + DELEGATION_WAIT_CEILING_MS + TURN_TIMEOUT_SYNTHESIS_GRACE_MS;
+    gatewayDeadlineCeilingMs = resolveDelegationWaitCeilingMs(armedAt, turnTimeoutMs, TURN_TIMEOUT_SYNTHESIS_GRACE_MS);
   }
   const extendGatewayDeadline = (ms: number): void => {
     if (gatewayDeadlineMs <= 0 || timedOut || res.writableEnded || ms <= 0) return;

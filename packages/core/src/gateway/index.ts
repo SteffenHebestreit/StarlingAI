@@ -29,7 +29,7 @@ import { mountFederationRoutes } from "./federation-router.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { handleFederationDelegateStream } from "./federation-stream.js";
 import { RpcConnection } from "./rpc.js";
-import { getAllSessions, getSession } from "../agent/session.js";
+import { getAllSessions, getSessionRecord } from "../agent/session.js";
 import { probeDockerReachability } from "../agent/container-runner.js";
 import {
   buildSessionAuditMarkdownDetached,
@@ -2824,11 +2824,19 @@ export function createGateway() {
     // that the session id exists.
     const caller = await authenticatedUser(c.req.header("Authorization"));
     if (getConfig().auth?.enabled === true) {
-      const session = getSession(sessionId);
-      const owner = session?.userId;
+      // AN OWNER THIS PROCESS CANNOT SEE IS NOT AN ABSENT OWNER. `getSession` reads the hot
+      // in-memory set only: it returns undefined for an ARCHIVED session and for one held by
+      // another gateway instance, and the check below then read that as "unowned" and allowed
+      // any authenticated caller through — including on the `force` path, which cancels the
+      // turn cluster-wide. getSessionRecord sees archived sessions too, and an id this
+      // instance cannot resolve at all is refused rather than assumed free.
+      const session = getSessionRecord(sessionId);
       const isAdmin = userHasRole(caller, "operator");
-      if (owner !== undefined && owner !== caller?.username && !isAdmin) {
-        return c.json({ error: "Session not found" }, 404);
+      if (!isAdmin) {
+        if (!session) return c.json({ error: "Session not found" }, 404);
+        if (session.userId !== undefined && session.userId !== caller?.username) {
+          return c.json({ error: "Session not found" }, 404);
+        }
       }
     }
 
@@ -2846,7 +2854,9 @@ export function createGateway() {
       return c.json({ stopping: active, active, mode: "force", commandId, abortedLocally });
     }
 
-    longRunningGenerationManager.requestStop(sessionId, `user_cancel:${actor}`);
+    // Attributed to the person, not to the stall detector whose default name the audit
+     // record otherwise carries.
+    longRunningGenerationManager.requestStop(sessionId, `user_cancel:${actor}`, actor);
     return c.json({ stopping: active, active, mode: "graceful" });
   });
 

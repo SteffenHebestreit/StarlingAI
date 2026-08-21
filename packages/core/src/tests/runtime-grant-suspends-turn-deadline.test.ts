@@ -213,7 +213,14 @@ describe("the delegation-wait exclusion can actually extend the deadline", () =>
 
     // Before the wait: at most the plain budget. After it: strictly beyond, by roughly the
     // time the orchestrator sat blocked on the child.
-    expect(deadlineAtDelegation!).toBeLessThanOrEqual(startedAt + DELEGATION_WAIT_CEILING_MS);
+    //
+    // The tolerance is the gap between two clock reads, not slack in the assertion. The
+    // runtime arms its deadline from its OWN `Date.now()` inside runTurnImpl, a few statements
+    // after the one above, so any millisecond that elapses between them makes an exact
+    // comparison false — which is how this failed at 1787332956668 <= 1787332956667 under a
+    // loaded full-suite run while passing every time in isolation. The second assertion is what
+    // discriminates the fix and needs no tolerance at all.
+    expect(deadlineAtDelegation!).toBeLessThanOrEqual(startedAt + DELEGATION_WAIT_CEILING_MS + 5_000);
     expect(turnContext?._turnDeadlineMs).toBeGreaterThan(startedAt + DELEGATION_WAIT_CEILING_MS);
   }, 30_000);
 });

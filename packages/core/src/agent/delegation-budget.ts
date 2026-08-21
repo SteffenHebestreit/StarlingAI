@@ -17,3 +17,21 @@ export function extendDeadlineForDelegationWait(currentDeadlineMs: number, waitM
   if (waitMs <= 0) return currentDeadlineMs;
   return Math.max(currentDeadlineMs, Math.min(currentDeadlineMs + waitMs, ceilingMs));
 }
+
+/**
+ * The ceiling that goes with a deadline armed at `armedAtMs` for `turnTimeoutMs`.
+ *
+ * THE CEILING IS THE BUDGET *PLUS* THE ALLOWANCE. Both gateway surfaces used the bare
+ * allowance — `armedAt + DELEGATION_WAIT_CEILING_MS + grace` — which at the shipped config
+ * (gateway.turnTimeoutMs 1,800,000, the same number as the ceiling constant) is EXACTLY the
+ * deadline, so extendDeadlineForDelegationWait collapsed to max(D, min(D+w, D)) === D and the
+ * whole D5 exclusion was arithmetically incapable of moving either clock. The exclusion only
+ * means anything if waiting on a child can push a turn PAST its own budget.
+ *
+ * Lives here, with the other half of the pair, so the two surfaces cannot drift apart again.
+ * runtime.ts computes the same shape without the synthesis grace: it must abort and synthesise
+ * BEFORE the gateway gives up on it.
+ */
+export function resolveDelegationWaitCeilingMs(armedAtMs: number, turnTimeoutMs: number, graceMs = 0): number {
+  return armedAtMs + turnTimeoutMs + DELEGATION_WAIT_CEILING_MS + graceMs;
+}
