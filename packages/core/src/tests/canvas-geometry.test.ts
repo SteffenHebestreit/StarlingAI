@@ -134,3 +134,41 @@ describe("the verdict names what is wrong, and stays quiet when nothing is", () 
     expect(OFF_CANVAS_OVERSHOOT_FACTOR).toBeGreaterThanOrEqual(1);
   });
 });
+
+/**
+ * drawImage IS THREE FUNCTIONS WEARING ONE NAME.
+ *
+ * Reading args 1-2 as the destination is right for drawImage(img, dx, dy) and wrong for the
+ * 9-argument sprite-sheet form, where they are the source rectangle INSIDE THE ATLAS. Every
+ * sprite-based page therefore had its atlas measured instead of its canvas — the one class of
+ * page whose geometry this exists to judge.
+ */
+describe("drawImage — the destination is arity-dependent", () => {
+  const img = { width: 1024, height: 1024 };
+
+  it("reads the destination from args 5-6 in the 9-argument form", () => {
+    const rec = createRecordingContext(() => 400, () => 300);
+    // Source tile far outside the canvas; destination comfortably inside it.
+    (rec.ctx["drawImage"] as (...a: unknown[]) => void)(img, 900, 900, 64, 64, 20, 30, 64, 64);
+    const report = rec.report();
+    expect(report.bounds).toEqual({ minX: 20, minY: 30, maxX: 84, maxY: 94 });
+    expect(report.outsidePoints).toBe(0);
+    expect(judgeCanvasPainting("stage", report).status).toBe("pass");
+  });
+
+  it("reads args 1-2 in the 3- and 5-argument forms", () => {
+    const three = createRecordingContext(() => 400, () => 300);
+    (three.ctx["drawImage"] as (...a: unknown[]) => void)(img, 10, 12);
+    expect(three.report().bounds).toEqual({ minX: 10, minY: 12, maxX: 10, maxY: 12 });
+
+    const five = createRecordingContext(() => 400, () => 300);
+    (five.ctx["drawImage"] as (...a: unknown[]) => void)(img, 10, 12, 40, 50);
+    expect(five.report().bounds).toEqual({ minX: 10, minY: 12, maxX: 50, maxY: 62 });
+  });
+
+  it("still catches a sprite genuinely blitted off the canvas", () => {
+    const rec = createRecordingContext(() => 400, () => 300);
+    (rec.ctx["drawImage"] as (...a: unknown[]) => void)(img, 0, 0, 64, 64, -900, 30, 64, 64);
+    expect(judgeCanvasPainting("stage", rec.report()).status).toBe("fail");
+  });
+});

@@ -20,268 +20,193 @@
  * "done". It is deliberately NOT a rendering test: it proves the script parses, initialises,
  * and survives one animation frame. That is the band almost every measured failure sat in.
  *
- * NOT A SECURITY SANDBOX. `vm` isolates globals, not the process, so the context is built
- * bare — no require, no process, no passthrough to the host globalThis — and every run is
- * wall-clock bounded. It executes the swarm's own generated front-end code, which this system
- * already runs far less carefully inside serve_app containers.
+ * `vm` IS NOT A SANDBOX, SO THE PAGE DOES NOT RUN HERE. It isolates globals, not realms: every
+ * host function the shim puts in the context hands the page `.constructor`, and through it the
+ * host `Function` — `document.getElementById.constructor("return process")()` returns the real
+ * `process`, with the gateway's environment and `child_process` behind it. Measured: that page
+ * read 125 env keys, ran `execSync`, and wrote outside the workspace while this check reported
+ * it healthy. And it needs no tool call, because the artifact probe executes every delivered
+ * .html on its own.
+ *
+ * So execution moved out of this process entirely (runScriptsIsolated → page-check-worker.ts):
+ * a child node with a scrubbed environment, a working directory in the OS temp dir, a hard
+ * kill, and no shared memory with the gateway. An escape there finds no secrets, no sessions
+ * and no event loop to block. The child runs as the same OS user and can still reach the
+ * filesystem — full containment belongs to the sandbox runner (shell_exec / run_script); this
+ * is the bounded check that can run on every build without one.
  */
-
 import { readFileSync, existsSync, statSync } from "node:fs";
-import { dirname, resolve as resolvePath } from "node:path";
-import { createRecordingContext, judgeCanvasPainting, type CanvasPaintReport } from "./canvas-geometry.js";
-import { createContext, runInContext } from "node:vm";
+import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { tmpdir } from "node:os";
+import { judgeCanvasPainting, type CanvasPaintReport } from "./canvas-geometry.js";
 import { childLogger } from "../logger.js";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { resolvePathWithinWorkspace } from "./workspace-path.js";
-import { describeErrorSite, SCRIPT_VM_FILENAME } from "./error-site.js";
+import {
+  collectScripts,
+  collectDeclaredElements,
+  collectElementIds,
+  type DeclaredElement,
+  type RunReport,
+  type ScriptSource,
+} from "./page-check-runner.js";
+
+export {
+  collectScripts,
+  collectDeclaredElements,
+  collectElementIds,
+  runScripts,
+  type DeclaredElement,
+  type RunReport,
+  type ScriptSource,
+} from "./page-check-runner.js";
 
 const log = childLogger("tools:page-check");
 
-/** Wall-clock ceiling for one script. A game loop that never yields must not hang the gateway. */
-const SCRIPT_TIMEOUT_MS = 3_000;
-/** Frames pumped after load, so the render path runs and not merely the declarations. */
-const FRAMES_TO_PUMP = 2;
+/**
+ * Parent-side ceiling on ONE isolated check. Deliberately well above the in-vm per-script
+ * ceiling (3 s each, plus two frames) so the vm's own timeout produces a useful error message
+ * first; this fires only for the cases the vm cannot see — a child wedged outside JS, or one
+ * that never writes its answer.
+ */
+const ISOLATED_RUN_TIMEOUT_MS = 25_000;
+/** A page cannot talk its way into unbounded parent memory. */
+const ISOLATED_MAX_OUTPUT_BYTES = 4_000_000;
 
-interface ScriptSource {
-  label: string;
-  code: string;
+/**
+ * How to start the worker, most-likely-correct first. Deployed we run compiled JS next to this
+ * file; from source (vitest, `pnpm dev`) the sibling is still TypeScript, which recent Node
+ * runs directly and older Node needs `tsx` for — tsx being the devDependency every other
+ * source-mode entrypoint in this package already uses. The first candidate that answers is
+ * cached, so the fallback costs one spawn per process, not one per check.
+ */
+function workerCommandCandidates(): string[][] {
+  const candidates: string[][] = [];
+  const compiled = fileURLToPath(new URL("./page-check-worker.js", import.meta.url));
+  if (existsSync(compiled)) candidates.push([compiled]);
+  const source = fileURLToPath(new URL("./page-check-worker.ts", import.meta.url));
+  if (existsSync(source)) {
+    candidates.push([source]);
+    try {
+      const tsx = pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href;
+      candidates.push(["--import", tsx, source]);
+    } catch { /* tsx is a devDependency; absent in a production install, where the .js exists */ }
+  }
+  return candidates;
 }
+let workerCommand: string[] | undefined;
 
-/** Inline <script> bodies plus same-directory <script src> files, in document order. */
-export function collectScripts(html: string, htmlPath: string): { scripts: ScriptSource[]; externalMisses: string[] } {
-  const scripts: ScriptSource[] = [];
-  const externalMisses: string[] = [];
-  const tagRe = /<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi;
-  let match: RegExpExecArray | null;
-  let index = 0;
-  while ((match = tagRe.exec(html)) !== null) {
-    index++;
-    const attrs = match[1] ?? "";
-    const body = match[2] ?? "";
-    // Skip data blocks (application/json, importmap, text/template …). Only real JS is executed.
-    const typeMatch = /type\s*=\s*["']([^"']+)["']/i.exec(attrs);
-    const type = typeMatch?.[1]?.toLowerCase();
-    if (type && !/javascript|module/.test(type)) continue;
-
-    const srcMatch = /\bsrc\s*=\s*["']([^"']+)["']/i.exec(attrs);
-    if (srcMatch?.[1]) {
-      const ref = srcMatch[1];
-      if (/^(https?:)?\/\//i.test(ref)) continue; // remote — out of scope, never fetched
-      const abs = resolvePath(dirname(htmlPath), ref);
-      if (existsSync(abs) && statSync(abs).isFile()) {
-        scripts.push({ label: ref, code: readFileSync(abs, "utf-8") });
-      } else {
-        externalMisses.push(ref);
-      }
-      continue;
+/**
+ * The environment the page gets: as close to nothing as node will start with.
+ *
+ * This is the half of the isolation that matters most. An escape inside the child reaches a
+ * `process` whose `env` holds no ANTHROPIC_API_KEY, no JWT secret, no Postgres URL — because
+ * they were never handed down. NODE_OPTIONS is dropped deliberately too: inherited flags are a
+ * way to smuggle a loader into the child.
+ */
+function scrubbedChildEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  if (process.platform === "win32") {
+    // Windows resolves DLLs against these; node will not start cleanly without them.
+    for (const key of ["SystemRoot", "SYSTEMROOT", "windir", "TEMP", "TMP", "PATHEXT"]) {
+      const value = process.env[key];
+      if (value) env[key] = value;
     }
-    if (body.trim()) scripts.push({ label: `inline script #${index}`, code: body });
   }
-  return { scripts, externalMisses };
+  return env;
 }
 
-/** Element ids the document actually defines — the set getElementById may resolve. */
-export function collectElementIds(html: string): Set<string> {
-  const ids = new Set<string>();
-  const re = /\bid\s*=\s*["']([^"']+)["']/gi;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(html)) !== null) {
-    if (m[1]) ids.add(m[1]);
-  }
-  return ids;
-}
-
-interface RunReport {
-  errors: string[];
-  consoleErrors: string[];
-  framesRun: number;
-  /** Where the page actually painted, per canvas it touched. Empty for a page with none. */
-  canvasPainting: Map<string, () => CanvasPaintReport>;
+function spawnWorker(argv: string[], payload: string): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, argv, {
+      cwd: tmpdir(),                 // a relative write cannot reach the workspace
+      env: scrubbedChildEnv(),
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const killTimer = setTimeout(() => {
+      // The vm timeout bounds JS; this bounds everything else. SIGKILL because a page that got
+      // this far has already ignored one deadline.
+      child.kill("SIGKILL");
+    }, ISOLATED_RUN_TIMEOUT_MS);
+    const finish = (fn: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(killTimer);
+      fn();
+    };
+    child.stdout.on("data", (chunk: Buffer) => {
+      if (stdout.length > ISOLATED_MAX_OUTPUT_BYTES) { child.kill("SIGKILL"); return; }
+      stdout += chunk.toString("utf8");
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      if (stderr.length < 8_000) stderr += chunk.toString("utf8");
+    });
+    child.on("error", (err) => finish(() => reject(err)));
+    child.on("close", (code) => finish(() => resolve({ code, stdout, stderr })));
+    child.stdin.on("error", () => { /* the child died before reading; `close` reports it */ });
+    child.stdin.end(payload);
+  });
 }
 
 /**
- * Minimal DOM. getElementById returns null for an id the HTML does NOT define, which is the
- * whole point: that mismatch is invisible to review and fatal at runtime, and it is exactly
- * what shipped in run 2dc5832c (`getElementById("board")` against `id="board-canvas"`).
+ * Run a page's scripts in a child process and bring the report home.
+ *
+ * `null` means the check could not be RUN — no worker on disk, a spawn that failed, a child
+ * that answered with nothing parseable. That is not evidence about the page, and every caller
+ * treats it that way: a harness failure must never invent a defect.
  */
-function buildDomContext(ids: Set<string>, report: RunReport): Record<string, unknown> {
-  const noop = (): void => {};
-  const makeCtx2d = (): Record<string, unknown> => new Proxy({}, {
-    get: (_t, prop) => {
-      if (prop === "canvas") return makeElement("canvas");
-      if (prop === "measureText") return () => ({ width: 0 });
-      if (prop === "getImageData") return () => ({ data: new Uint8ClampedArray(4) });
-      if (prop === "createLinearGradient" || prop === "createRadialGradient") {
-        return () => ({ addColorStop: noop });
+export async function runScriptsIsolated(
+  scripts: ScriptSource[],
+  ids: Set<string>,
+  declared: Map<string, DeclaredElement>,
+): Promise<RunReport | null> {
+  const payload = JSON.stringify({ scripts, ids: [...ids], declared: [...declared.entries()] });
+  const candidates = workerCommand ? [workerCommand] : workerCommandCandidates();
+  let lastStderr = "";
+  for (const argv of candidates) {
+    let result: { code: number | null; stdout: string; stderr: string };
+    try {
+      result = await spawnWorker(argv, payload);
+    } catch (err) {
+      lastStderr = err instanceof Error ? err.message : String(err);
+      continue;
+    }
+    if (!result.stdout.trim()) {
+      // A killed child (hung page) exits without writing. That IS a verdict about the page,
+      // not a broken harness — but only once we know this command works at all.
+      if (workerCommand && result.code !== 0) {
+        return {
+          errors: [`the page did not finish within ${Math.round(ISOLATED_RUN_TIMEOUT_MS / 1000)}s and was stopped`],
+          consoleErrors: [], framesRun: 0, canvasPainting: new Map(),
+        };
       }
-      return typeof prop === "string" ? noop : undefined;
-    },
-    set: () => true,
-  });
-
-  const makeElement = (tag: string, id?: string): Record<string, unknown> => {
-    // One recorder per canvas element, created lazily on the first getContext so a page that
-    // never draws still reports zero draw calls rather than nothing at all.
-    let recording: { ctx: Record<string, unknown>; report: () => CanvasPaintReport } | undefined;
-    const el: Record<string, unknown> = {
-      tagName: tag.toUpperCase(),
-      style: {},
-      classList: { add: noop, remove: noop, toggle: noop, contains: () => false },
-      dataset: {},
-      width: 300,
-      height: 600,
-      clientWidth: 300,
-      clientHeight: 600,
-      textContent: "",
-      innerHTML: "",
-      appendChild: noop,
-      removeChild: noop,
-      setAttribute: noop,
-      getAttribute: () => null,
-      addEventListener: noop,
-      removeEventListener: noop,
-      focus: noop,
-      getBoundingClientRect: () => ({ x: 0, y: 0, width: 300, height: 600, top: 0, left: 0, right: 300, bottom: 600 }),
-      getContext: (kind?: unknown) => {
-        // Only 2D is recorded. A WebGL page paints through a completely different API and
-        // guessing at its geometry would be worse than admitting we cannot see it.
-        if (kind !== undefined && String(kind) !== "2d") return makeCtx2d();
-        if (!recording) {
-          // Getters, not values: the page may resize this canvas after taking its context.
-          recording = createRecordingContext(
-            () => Number(el["width"]) || 300,
-            () => Number(el["height"]) || 600,
-          );
-          if (id) report.canvasPainting.set(id, recording.report);
-        }
-        return recording.ctx;
-      },
-      querySelector: () => null,
-      querySelectorAll: () => [],
-    };
-    return el;
-  };
-
-  const elementCache = new Map<string, Record<string, unknown>>();
-  const elementFor = (id: string): Record<string, unknown> | null => {
-    if (!ids.has(id)) return null;
-    let el = elementCache.get(id);
-    if (!el) {
-      el = makeElement(/canvas/i.test(id) ? "canvas" : "div", id);
-      el["id"] = id;
-      elementCache.set(id, el);
+      lastStderr = result.stderr;
+      continue;
     }
-    return el;
-  };
-
-  const documentObj: Record<string, unknown> = {
-    getElementById: (id: unknown) => elementFor(String(id)),
-    querySelector: (sel: unknown) => {
-      const s = String(sel);
-      return s.startsWith("#") ? elementFor(s.slice(1)) : makeElement("div");
-    },
-    querySelectorAll: () => [],
-    createElement: (tag: unknown) => makeElement(String(tag)),
-    addEventListener: noop,
-    removeEventListener: noop,
-    body: makeElement("body"),
-    documentElement: makeElement("html"),
-    readyState: "complete",
-  };
-
-  const frameCallbacks: Array<(t: number) => void> = [];
-  const windowObj: Record<string, unknown> = {
-    document: documentObj,
-    devicePixelRatio: 1,
-    innerWidth: 1280,
-    innerHeight: 800,
-    addEventListener: noop,
-    removeEventListener: noop,
-    requestAnimationFrame: (cb: (t: number) => void) => { frameCallbacks.push(cb); return frameCallbacks.length; },
-    cancelAnimationFrame: noop,
-    setTimeout: (cb: () => void) => { void cb; return 0; },
-    clearTimeout: noop,
-    setInterval: () => 0,
-    clearInterval: noop,
-    localStorage: { getItem: () => null, setItem: noop, removeItem: noop, clear: noop },
-    performance: { now: () => 0 },
-    alert: noop,
-    matchMedia: () => ({ matches: false, addEventListener: noop, addListener: noop }),
-  };
-
-  const consoleObj = {
-    log: noop,
-    info: noop,
-    warn: noop,
-    debug: noop,
-    error: (...args: unknown[]) => { report.consoleErrors.push(args.map((a) => String(a)).join(" ")); },
-  };
-
-  return {
-    window: windowObj,
-    document: documentObj,
-    console: consoleObj,
-    navigator: { userAgent: "StarlingAI-verify_page" },
-    location: { href: "file:///verify_page", search: "", hash: "" },
-    Image: function Image(this: Record<string, unknown>) { return makeElement("img"); },
-    __frames: frameCallbacks,
-    requestAnimationFrame: windowObj["requestAnimationFrame"],
-    cancelAnimationFrame: noop,
-    setTimeout: windowObj["setTimeout"],
-    clearTimeout: noop,
-    setInterval: windowObj["setInterval"],
-    clearInterval: noop,
-    localStorage: windowObj["localStorage"],
-    performance: windowObj["performance"],
-    devicePixelRatio: 1,
-    innerWidth: 1280,
-    innerHeight: 800,
-    alert: noop,
-    addEventListener: noop,
-    removeEventListener: noop,
-  };
-}
-
-/** Execute every script in one shared context, then pump frames. First error per script wins. */
-export function runScripts(scripts: ScriptSource[], ids: Set<string>): RunReport {
-  const report: RunReport = { errors: [], consoleErrors: [], framesRun: 0, canvasPainting: new Map() };
-  const sandbox = buildDomContext(ids, report);
-  // `globalThis` inside the context must be the context itself, so top-level `var`/function
-  // declarations in one script are visible to the next exactly as they are in a browser.
-  const context = createContext(sandbox);
-
-  for (const script of scripts) {
     try {
-      runInContext(script.code, context, {
-        timeout: SCRIPT_TIMEOUT_MS,
-        displayErrors: true,
-        // Named so the failing frame is identifiable in the stack, which is where the line
-        // and column live.
-        filename: SCRIPT_VM_FILENAME,
-      });
-    } catch (err) {
-      const message = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
-      report.errors.push(`${script.label} — ${message}${describeErrorSite(err, script.code)}`);
-      // Later scripts usually depend on the failed one; keep going so the report names the
-      // FIRST cause rather than only the last symptom, but stop after a few.
-      if (report.errors.length >= 4) return report;
+      const parsed = JSON.parse(result.stdout) as {
+        errors: string[]; consoleErrors: string[]; framesRun: number;
+        canvases: Array<[string, CanvasPaintReport]>;
+      };
+      workerCommand = argv;
+      return {
+        errors: parsed.errors ?? [],
+        consoleErrors: parsed.consoleErrors ?? [],
+        framesRun: parsed.framesRun ?? 0,
+        canvasPainting: new Map((parsed.canvases ?? []).map(([id, report]) => [id, () => report])),
+      };
+    } catch {
+      lastStderr = result.stderr || result.stdout.slice(0, 500);
     }
   }
-
-  const frames = (context as unknown as Record<string, unknown>)["__frames"] as Array<(t: number) => void> | undefined;
-  for (let i = 0; i < FRAMES_TO_PUMP && frames && frames.length > 0; i++) {
-    const cb = frames.shift();
-    if (!cb) break;
-    try {
-      runInContext("(__cb) => __cb(0)", context, { timeout: SCRIPT_TIMEOUT_MS })(cb);
-      report.framesRun++;
-    } catch (err) {
-      const message = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
-      report.errors.push(`animation frame ${i + 1} — ${message}${describeErrorSite(err, scripts.map(s2 => s2.code).join("\n"))}`);
-      break;
-    }
-  }
-  return report;
+  log.warn({ stderr: lastStderr.slice(0, 500) }, "page check could not start its isolated runner");
+  return null;
 }
 
 /**
@@ -296,7 +221,7 @@ export function runScripts(scripts: ScriptSource[], ids: Set<string>): RunReport
  * stopped. A build is not done because the placeholders are gone; it is done when the thing
  * it built works.
  */
-export function checkBuiltPage(absHtmlPath: string, relLabel: string): { ok: boolean; detail: string } {
+export async function checkBuiltPage(absHtmlPath: string, relLabel: string): Promise<{ ok: boolean; detail: string }> {
   let html: string;
   try {
     html = readFileSync(absHtmlPath, "utf-8");
@@ -306,16 +231,25 @@ export function checkBuiltPage(absHtmlPath: string, relLabel: string): { ok: boo
   const { scripts, externalMisses } = collectScripts(html, absHtmlPath);
   if (scripts.length === 0 && externalMisses.length === 0) return { ok: true, detail: "" };
 
-  let report: RunReport;
+  let report: RunReport | null;
   try {
-    report = runScripts(scripts, collectElementIds(html));
+    report = await runScriptsIsolated(scripts, collectElementIds(html), collectDeclaredElements(html));
   } catch {
     return { ok: true, detail: "" };   // a harness failure must never invent a defect
   }
+  if (!report) return { ok: true, detail: "" };   // the check could not run; that is not a defect
 
   const problems = [...report.errors, ...report.consoleErrors.map((c) => `console.error — ${c}`)];
-  if (externalMisses.length > 0) {
-    problems.push(`missing local script file(s): ${externalMisses.join(", ")}`);
+  // A REF THIS PROBE CANNOT OPEN IS NOT PROOF THE PAGE IS BROKEN.
+  //
+  // The sibling `self_contained` receipt reports the very same references and is deliberately
+  // SOFT, because a multi-file site is a legitimate deliverable and a part may still be on its
+  // way to disk. This verdict is HARD — it downgrades a finished build to "partial" and can
+  // spend a corrective build — so it fires only when the misses leave the page with nothing to
+  // run at all, which is unambiguous whatever the page intended. The verify_page tool still
+  // names every miss to the agent, where it is advice rather than a gate.
+  if (externalMisses.length > 0 && scripts.length === 0) {
+    problems.push(`no runnable script: the page loads ${externalMisses.join(", ")}, which is not on disk`);
   }
   const canvasReports = [...report.canvasPainting.entries()].map(([id, read]) => [id, read()] as const);
   const anyPainted = canvasReports.some(([, r]) => r.drawCalls > 0);
@@ -371,6 +305,7 @@ registerTool({
 
     const { scripts, externalMisses } = collectScripts(html, resolved);
     const ids = collectElementIds(html);
+    const declared = collectDeclaredElements(html);
 
     if (scripts.length === 0) {
       const missNote = externalMisses.length > 0
@@ -385,12 +320,21 @@ registerTool({
       };
     }
 
-    let report: RunReport;
+    let report: RunReport | null;
     try {
-      report = runScripts(scripts, ids);
+      report = await runScriptsIsolated(scripts, ids, declared);
     } catch (err) {
       log.error({ err, path: rel }, "verify_page harness failure");
       return { success: false, output: "", error: `verify_page could not run '${rel}': ${err instanceof Error ? err.message : String(err)}` };
+    }
+    if (!report) {
+      // Say so rather than passing the page: an agent that reads "PASS" here would take it as
+      // evidence the build works, which is exactly the claim this check could not make.
+      return {
+        success: false,
+        output: "",
+        error: `verify_page could not start its isolated runner, so '${rel}' was NOT checked. This is a harness problem, not a defect in your page — do not treat it as either a pass or a failure.`,
+      };
     }
 
     const problems = [...report.errors, ...report.consoleErrors.map((c) => `console.error — ${c}`)];
@@ -436,3 +380,4 @@ registerTool({
     };
   },
 });
+

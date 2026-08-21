@@ -40,6 +40,12 @@ beforeAll(async () => {
   await writeFile(resolve(ROOT, "staged-build-dead.html"), DEAD_BUNDLE);
   await writeFile(resolve(ROOT, "staged-build-inlined.html"), INLINED_BUNDLE);
   await writeFile(resolve(ROOT, "linked.html"), '<html><head><link rel="stylesheet" href="styles.css"></head><body><h1>Hi</h1><script src="./game.js"></script></body></html>');
+  // The two files linked.html loads, written for real. A multi-file site is only the
+  // legitimate deliverable this fixture stands for while the parts it names EXIST — the
+  // `runs` probe opens what the page loads, and a page whose only script is a 404 is a
+  // broken page, not a soft style note.
+  await writeFile(resolve(ROOT, "styles.css"), "h1 { color: #eee; }\n");
+  await writeFile(resolve(ROOT, "game.js"), "document.querySelector('h1');\n");
 });
 afterAll(async () => {
   await rm(WORKSPACE, { recursive: true, force: true });

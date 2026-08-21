@@ -1225,7 +1225,12 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     tier: ToolTier.TWO_EXECUTE,
     description: "Execute a built page's JavaScript against a minimal DOM and report uncaught errors",
     requiresPerCallApproval: false, // read-only self-check, runs in the builder's fix loop
-    requiresSandbox: false, // node:vm with a bare context, no network, no filesystem beyond the read
+    // The page runs in a CHILD PROCESS with a scrubbed environment, a working directory outside
+    // the workspace and a hard kill (tools/page-check.ts runScriptsIsolated). It is not a
+    // container: the child runs as the same OS user and can still reach the filesystem, so this
+    // says "not sandbox-managed", not "harmless". It was previously in-process, where the vm
+    // context leaked host-realm functions and a page could reach process.env and child_process.
+    requiresSandbox: false
   },
   verify_app: {
     tier: ToolTier.TWO_EXECUTE,

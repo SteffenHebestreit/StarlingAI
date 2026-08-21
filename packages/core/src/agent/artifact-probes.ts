@@ -375,7 +375,7 @@ async function probeFile(workspacePath: string, location: string): Promise<Artif
   if (/^\.html?$/.test(extensionOf(location))) {
     const t3 = Date.now();
     const { checkBuiltPage } = await import("../tools/page-check.js");
-    const runs = checkBuiltPage(absolute, location);
+    const runs = await checkBuiltPage(absolute, location);
     receipts.push({
       target: location,
       probe: "runs",

@@ -80,8 +80,33 @@ const POINT_ARGS: Record<string, number[][]> = {
   bezierCurveTo: [[0, 1], [2, 3], [4, 5]],
   fillText: [[1, 2]],
   strokeText: [[1, 2]],
+  // drawImage is arity-dependent and is handled on its own below: in the 9-argument form
+  // args 1 and 2 are sx/sy INSIDE THE SOURCE IMAGE, not a position on the canvas.
   drawImage: [[1, 2]],
 };
+
+/**
+ * WHERE drawImage ACTUALLY PUTS THE PIXELS.
+ *
+ * Three signatures, and only one of them has the destination at args 1-2:
+ *   drawImage(img, dx, dy)                                     → dest args 1,2
+ *   drawImage(img, dx, dy, dw, dh)                             → dest args 1,2 + size 3,4
+ *   drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh)             → dest args 5,6 + size 7,8
+ * Reading 1-2 regardless measured the sprite ATLAS instead of the canvas for every
+ * sprite-sheet page — the exact class of page whose geometry this exists to judge.
+ */
+function drawImageDestination(args: unknown[]): { x: number; y: number; w: number; h: number } | null {
+  if (args.length >= 9) {
+    return { x: Number(args[5]), y: Number(args[6]), w: Number(args[7]), h: Number(args[8]) };
+  }
+  if (args.length >= 5) {
+    return { x: Number(args[1]), y: Number(args[2]), w: Number(args[3]), h: Number(args[4]) };
+  }
+  if (args.length >= 3) {
+    return { x: Number(args[1]), y: Number(args[2]), w: 0, h: 0 };
+  }
+  return null;
+}
 
 /** Methods where args 2 and 3 are a WIDTH and HEIGHT relative to args 0 and 1, not a point. */
 const RECT_LIKE = new Set(["fillRect", "strokeRect", "rect"]);
@@ -171,6 +196,14 @@ export function createRecordingContext(
       if (pointSpec) {
         return (...args: unknown[]) => {
           drawCalls++;
+          if (prop === "drawImage") {
+            const dest = drawImageDestination(args);
+            if (dest) {
+              notePoint(dest.x, dest.y);
+              if (dest.w || dest.h) notePoint(dest.x + dest.w, dest.y + dest.h);
+            }
+            return undefined;
+          }
           const isRect = RECT_LIKE.has(prop);
           const x0 = Number(args[0]), y0 = Number(args[1]);
           if (isRect) {
