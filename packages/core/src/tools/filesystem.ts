@@ -429,10 +429,18 @@ export function commonPrefixLength(a: string, b: string): number {
  * single call, and the file that reached the user threw on its first line.
  *
  * The rule is the narrowest one that catches it: an overwrite may not RAISE the number of
- * unfilled markers in a file. Fewer is progress, equal is a harmless re-skeleton of a
- * skeleton, more is always work being thrown away. It reads one literal — the same token
- * the staged-build directive tells the model to write and artifactFileLooksTruncated greps
- * back off disk — so the prompt half and the mechanical half still agree on one string.
+ * unfilled markers in a file THAT IS STILL BEING BUILT. Fewer is progress, equal is a harmless
+ * re-skeleton of a skeleton, more is work being thrown away. It reads one literal — the same
+ * token the staged-build directive tells the model to write and artifactFileLooksTruncated
+ * greps back off disk — so the prompt half and the mechanical half still agree on one string.
+ *
+ * A FINISHED FILE (zero markers) IS A DIFFERENT CASE and is deliberately NOT blocked. The
+ * staged-build directive, now default-on, orders a skeleton as the FIRST tool call of any
+ * large build — so "rebuild this from scratch, differently" over a completed artifact hit this
+ * guard and was refused, with a message telling the model to edit marker lines that do not
+ * exist in that file, on a run holding no delete tool. Nothing was being interrupted there:
+ * the file was done, and replacing a done file is what a rebuild IS. It is reported instead of
+ * refused, so the deliberate rebuild proceeds and an accidental one is still visible.
  *
  * Unlike the churn nudge above this BLOCKS, because here refusing the write is what
  * preserves the work rather than what risks it. edit_file remains available and is the
@@ -441,11 +449,16 @@ export function commonPrefixLength(a: string, b: string): number {
 export function evaluateStubRegression(
   existing: string,
   content: string,
-): { regressed: boolean; existingStubs: number; newStubs: number } {
+): { regressed: boolean; replacesFinished: boolean; existingStubs: number; newStubs: number } {
   const count = (text: string): number => text.split(UNFINISHED_STUB_MARKER).length - 1;
   const existingStubs = count(existing);
   const newStubs = count(content);
-  return { regressed: newStubs > existingStubs, existingStubs, newStubs };
+  return {
+    regressed: existingStubs > 0 && newStubs > existingStubs,
+    replacesFinished: existingStubs === 0 && newStubs > 0,
+    existingStubs,
+    newStubs,
+  };
 }
 
 /** Pure write-churn decision for the regeneration nudge (orchestration.detectWriteChurnOverwrite).
@@ -555,6 +568,17 @@ registerTool({
       try {
         const previous = readFileSync(resolved, "utf-8");
         const regression = evaluateStubRegression(previous, content);
+        if (regression.replacesFinished) {
+          // Allowed, but never silent: this is the shape of a deliberate rebuild AND the shape
+          // of a clobber that arrives one iteration too late to be distinguished from one.
+          logAudit("guardrail_flagged", {
+            type: "write_file_skeleton_over_finished_file",
+            path: relativePath,
+            newStubs: regression.newStubs,
+            existingChars: previous.length,
+            newChars: content.length,
+          }, { sessionId: ctx.sessionId, severity: "info" });
+        }
         if (regression.regressed) {
           logAudit("guardrail_flagged", {
             type: "write_file_stub_regression_blocked",

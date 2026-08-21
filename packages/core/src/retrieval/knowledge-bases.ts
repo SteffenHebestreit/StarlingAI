@@ -294,7 +294,12 @@ function validateWorker(worker: unknown): KbResult<KbWorkerSpec | undefined> {
   }
   if (w["timeoutMs"] !== undefined) {
     const n = Number(w["timeoutMs"]);
-    if (Number.isFinite(n)) spec.timeoutMs = Math.min(600_000, Math.max(60_000, Math.trunc(n)));
+    // Sanity bound only. The real ceiling is capability-dependent and lives with the runner
+    // (runEphemeralWorker's timeoutCeilingMs): a worker granted workspace-write tools may have
+    // the builders' 25 minutes, everything else 10. Clamping to the narrow number HERE made
+    // that ceiling unreachable — the wider branch could never be observed, because its only
+    // caller had already cut the value down. Whatever survives this is clamped again there.
+    if (Number.isFinite(n)) spec.timeoutMs = Math.min(1_500_000, Math.max(60_000, Math.trunc(n)));
   }
   if (w["model"] !== undefined && w["model"] !== null) {
     if (typeof w["model"] !== "object") return { ok: false, error: "worker.model must be an object" };
