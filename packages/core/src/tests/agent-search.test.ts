@@ -1446,12 +1446,21 @@ describe("shortenOverspecifiedRoutingQuery keeps the informative half of a DELEG
     }
   });
 
-  it("falls back to document order when the corpus cannot discriminate", () => {
-    // Nothing indexed: every token is equally unknown, so there is nothing to rank by and the
-    // old leading-tokens behaviour is the honest default rather than an arbitrary one.
+  it("keeps the SUBJECT when the corpus cannot discriminate, not the framing", () => {
+    // Nothing indexed: every token scores the same absent-token maximum, so the sort collapses
+    // to its tie-break — and this is not a hypothetical. Measured against the REAL 49-agent
+    // catalog, "want", "know", "wireguard", "raspberry" and "tunnel" all tie at that maximum,
+    // because no agent description happens to contain any of them. With ties breaking toward
+    // document order the shortener returned "want know how configure second" and dropped every
+    // domain noun — the exact defect the rarity ranking was added to fix, restored through its
+    // own fallback. A delegated task opens with framing and carries its subject downstream, so
+    // the later token wins a tie.
     const result = shortenOverspecifiedRoutingQuery(DELEGATED_TASK, new Map());
     expect(result).not.toBeNull();
-    expect(result!.split(/\s+/)[0]).toBe("Answer");
+    const lower = result!.toLowerCase();
+    expect(lower).not.toContain("answer");
+    expect(lower).not.toContain("question");
+    expect(lower).toContain("wireguard");
   });
 });
 
@@ -1467,6 +1476,9 @@ describe("shortenOverspecifiedRoutingQuery", () => {
     );
     expect(result).not.toBeNull();
     expect(result!.split(/\s+/).length).toBeLessThanOrEqual(5);
+    // No instruction wrapper to strip and no corpus opinion to rank by, so this keeps the
+    // leading distinctive tokens exactly as before: the fix changes where the shortener starts
+    // READING, and a user-typed query starts at its own subject already.
     expect(result).toContain("hardware");
   });
 

@@ -347,13 +347,14 @@ describe("an abort reaches an OPEN stream — AnthropicProvider", () => {
     expect(res.usage).not.toEqual({ promptTokens: 0, completionTokens: 0, totalTokens: 0 });
     expect(res.usage.completionTokens).toBeGreaterThan(0);
     expect(res.usage.totalTokens).toBeGreaterThan(0);
-    // NOTE, deliberately asserted as it stands: this provider's salvage does NOT
-    // reconstruct the prompt side (anthropic.ts:893-903 keeps usage.promptTokens,
-    // which is still 0 because message_start's input_tokens only reaches the caller
-    // on the final `done` chunk a cut stream never emits). The OpenAI-compatible
-    // salvage does estimate it. The asymmetry is real and out of scope here; this
-    // assertion pins the current behaviour so closing it is a deliberate change.
-    expect(res.usage.promptTokens).toBe(0);
+    // The asymmetry this used to pin is CLOSED, deliberately. `usage` is assigned only on
+    // the final `done` chunk a cut stream never emits, so the prompt side came back as 0 —
+    // and on the only PRICED provider that under-reported a salvaged turn by the whole
+    // prompt, usually the larger half. It is now estimated, exactly as the OpenAI-compatible
+    // salvage beside it does, and the record says it was inferred rather than metered.
+    expect(res.usage.promptTokens).toBeGreaterThan(0);
+    expect(res.usage.totalTokens).toBe(res.usage.promptTokens + res.usage.completionTokens);
+    expect(res.usage.estimated).toBe(true);
   });
 
   it("(c) an OPERATOR cancel mid-stream RE-THROWS instead of salvaging", async () => {

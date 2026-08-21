@@ -1,6 +1,13 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { ConfigSchema, ModelConfigSchema } from "../config/schema.js";
-import { AnthropicProvider, enforceToolResultPairing, isAnthropicOAuthCredential, toAnthropicMessages } from "../providers/anthropic.js";
+import {
+  ANTHROPIC_NONSTREAMING_MAX_OUTPUT_TOKENS,
+  AnthropicProvider,
+  enforceToolResultPairing,
+  isAnthropicOAuthCredential,
+  resolveAnthropicNonStreamingMaxOutputTokens,
+  toAnthropicMessages,
+} from "../providers/anthropic.js";
 import {
   applyActiveModelPreset,
   getActiveModelPreset,
@@ -437,5 +444,29 @@ describe("enforceToolResultPairing", () => {
       role: "user",
       content: [{ type: "text", text: "[tool result]\nstray output" }],
     });
+  });
+});
+
+/**
+ * THE API IS STRICTER THAN THE BLANKET NUMBER FOR SOME MODELS.
+ *
+ * A non-streaming request over 8,192 output tokens is refused outright for the opus-4
+ * families — a 400 that isRetryableProviderError declines to retry and failover does not
+ * recognise, so every judge, rescue and synthesis call on such a model hard-fails. The blanket
+ * 16,384 was sent regardless, and the SDK's own client-side guard is bypassed because this
+ * provider always configures a request timeout.
+ */
+describe("Anthropic non-streaming output ceiling", () => {
+  it("clamps the opus-4 families to the 8,192 the API enforces", () => {
+    expect(resolveAnthropicNonStreamingMaxOutputTokens("claude-opus-4-1-20250805")).toBe(8_192);
+    expect(resolveAnthropicNonStreamingMaxOutputTokens("claude-opus-4-0")).toBe(8_192);
+  });
+
+  it("leaves every other model on the blanket non-streaming ceiling", () => {
+    expect(resolveAnthropicNonStreamingMaxOutputTokens("claude-opus-5")).toBe(ANTHROPIC_NONSTREAMING_MAX_OUTPUT_TOKENS);
+    expect(resolveAnthropicNonStreamingMaxOutputTokens("claude-sonnet-4-5")).toBe(ANTHROPIC_NONSTREAMING_MAX_OUTPUT_TOKENS);
+    // Never above it: this is a second ceiling, not a replacement for the first.
+    expect(resolveAnthropicNonStreamingMaxOutputTokens("claude-something-unknown"))
+      .toBeLessThanOrEqual(ANTHROPIC_NONSTREAMING_MAX_OUTPUT_TOKENS);
   });
 });

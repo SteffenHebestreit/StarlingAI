@@ -118,6 +118,34 @@ export const ANTHROPIC_FALLBACK_MAX_OUTPUT_TOKENS = 8_192;
  */
 export const ANTHROPIC_NONSTREAMING_MAX_OUTPUT_TOKENS = 16_384;
 
+/**
+ * PER-MODEL non-streaming ceilings, where the API is stricter than the blanket number above.
+ *
+ * The blanket 16,384 is not a ceiling the API agrees with everywhere: for the opus-4 families
+ * the Messages API refuses any non-streaming request over 8,192 ("8192 is the maximum allowed
+ * number of output tokens for claude-opus-4-1 with non-streaming requests"). That is a 400 with
+ * no retry — isRetryableProviderError declines a non-429 4xx and failover matches none of the
+ * words in the message — so every judge, rescue and synthesis call on such a model would hard
+ * fail. The SDK ships this table and guards it client-side, but only when no client timeout is
+ * configured, and this provider always sets one.
+ *
+ * Longest matching prefix wins, as with the streaming table above.
+ */
+const ANTHROPIC_NONSTREAMING_MODEL_LIMITS: ReadonlyArray<{ prefix: string; maxOutputTokens: number }> = [
+  { prefix: "claude-opus-4-1", maxOutputTokens: 8_192 },
+  { prefix: "claude-opus-4-0", maxOutputTokens: 8_192 },
+];
+
+/** The non-streaming ceiling for `modelId`: the per-model one where the API states one. */
+export function resolveAnthropicNonStreamingMaxOutputTokens(modelId: string): number {
+  let best: { prefix: string; maxOutputTokens: number } | undefined;
+  for (const entry of ANTHROPIC_NONSTREAMING_MODEL_LIMITS) {
+    if (!modelId.startsWith(entry.prefix)) continue;
+    if (!best || entry.prefix.length > best.prefix.length) best = entry;
+  }
+  return Math.min(ANTHROPIC_NONSTREAMING_MAX_OUTPUT_TOKENS, best?.maxOutputTokens ?? Number.MAX_SAFE_INTEGER);
+}
+
 /** The output ceiling Anthropic itself enforces for `modelId`. Exported for tests. */
 export function resolveAnthropicMaxOutputTokens(modelId: string): number {
   let best: { prefix: string; maxOutputTokens: number } | undefined;
@@ -626,8 +654,9 @@ export class AnthropicProvider implements ChatProvider {
     tools: readonly LLMToolDef[],
     mode: "complete" | "stream",
   ): number {
-    const ceilings = [resolveAnthropicMaxOutputTokens(parseModelId(this.modelConfig.primary))];
-    if (mode === "complete") ceilings.push(ANTHROPIC_NONSTREAMING_MAX_OUTPUT_TOKENS);
+    const modelId = parseModelId(this.modelConfig.primary);
+    const ceilings = [resolveAnthropicMaxOutputTokens(modelId)];
+    if (mode === "complete") ceilings.push(resolveAnthropicNonStreamingMaxOutputTokens(modelId));
     if (this.modelConfig.maxTokens !== undefined) ceilings.push(this.modelConfig.maxTokens);
     return computeOutputTokenBudget({
       contextWindow: this.modelConfig.contextWindow,
@@ -839,7 +868,8 @@ export class AnthropicProvider implements ChatProvider {
     const toolOrder: string[] = [];
     let finishReason = "stop";
     let truncatedBy: LLMResponse["truncatedBy"];
-    let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+    let usage: { promptTokens: number; completionTokens: number; totalTokens: number; estimated?: boolean } =
+      { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 
     try {
       // guardReasoningBurn is armed on this path only — it is the one with the salvage.
@@ -908,15 +938,27 @@ export class AnthropicProvider implements ChatProvider {
       // read "did completionTokens increase?" as progress, and the cost aggregator
       // would under-report output Anthropic already billed. Estimate it, and say so
       // via truncatedBy.
-      if (usage.completionTokens === 0) {
+      //
+      // THE PROMPT SIDE IS MISSING FOR THE SAME REASON. `usage` is only ever assigned on that
+      // final chunk, so a cut stream reported promptTokens 0 as well — and this is the only
+      // PRICED provider, so a salvaged turn under-reported its cost by the whole prompt, which
+      // is usually the larger half. The LM Studio salvage beside it estimates both and flags
+      // the record; this now matches.
+      if (usage.completionTokens === 0 || usage.promptTokens === 0) {
         const producedChars = content.length
           + reasoningParts.join("").length
           + toolOrder.reduce((sum, id) => sum + (toolBuffers.get(id)?.args.length ?? 0), 0);
-        const estimated = Math.ceil(producedChars / PROMPT_ESTIMATE_CHARS_PER_TOKEN);
+        const estimated = usage.completionTokens > 0
+          ? usage.completionTokens
+          : Math.ceil(producedChars / PROMPT_ESTIMATE_CHARS_PER_TOKEN);
+        const promptTokens = usage.promptTokens > 0
+          ? usage.promptTokens
+          : estimatePromptTokensForRequest(messages, tools);
         usage = {
-          promptTokens: usage.promptTokens,
+          promptTokens,
           completionTokens: estimated,
-          totalTokens: usage.promptTokens + estimated,
+          totalTokens: promptTokens + estimated,
+          estimated: true,
         };
       }
       truncatedBy = burned ? "reasoning_burn" : isDeadlineAbort(signal?.reason) ? "deadline" : "transport";

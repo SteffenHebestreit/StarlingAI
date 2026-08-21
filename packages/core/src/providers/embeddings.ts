@@ -269,13 +269,21 @@ export function buildAgentTokenIdf(agents: Array<[string, SubAgentConfig]>): Map
  *
  * Tokens are normalized the same way the corpus was, so lookups line up; a compound scores as
  * its rarest part, so "V-Server" is not dragged down to the rarity of "server" alone.
+ *
+ * ABSENT FROM THE CORPUS IS NOT THE SAME AS UNKNOWN TO THE CORPUS. The IDF map is built from
+ * tokenizeSearchText, which STRIPS the stop words — so "how", "please", "what" are guaranteed
+ * missing from it and were collecting the maximum rarity, tying with the domain nouns and then
+ * winning the tie-break on position. Asking the corpus tokenizer whether it would have kept the
+ * word at all separates the two cases with the list the corpus itself uses, rather than a
+ * second list of words to maintain.
  */
 export function routingTokenRarity(token: string, idf: Map<string, number>): number {
   const parts = normalizeSearchText(token).split(" ").filter((p) => p.length >= 2);
   if (parts.length === 0) return 0;
   let best = 0;
   for (const part of parts) {
-    const score = idf.get(part) ?? UNKNOWN_TOKEN_RARITY;
+    const known = idf.get(part);
+    const score = known ?? (tokenizeSearchText(part).length === 0 ? 0 : UNKNOWN_TOKEN_RARITY);
     if (score > best) best = score;
   }
   return best;

@@ -196,6 +196,29 @@ const ROUTING_QUERY_FILLER = new Set<string>([
   "via", "etc",
 ]);
 
+/**
+ * Remove the instruction wrapper a DELEGATED task opens with.
+ *
+ * "Answer the user's question: …", "Build a WORKING app for: …", "Investigate whether: …" —
+ * a delegation states its mode first and its subject after, and the subject is the only half
+ * that tells one agent from another. Ranking could not remove it: measured against the real
+ * 49-agent catalog the framing words and the domain nouns score the SAME absent-token rarity,
+ * so the ranking fell through to document order and kept the wrapper. Cutting it structurally
+ * is what makes the ranking behind it mean anything.
+ *
+ * Deliberately narrow: a colon inside the opening clause only, with substantial text after it.
+ * A user-typed query rarely opens that way, and one that does ("error: cannot find module")
+ * loses only its label.
+ */
+export function stripDelegationFraming(query: string): string {
+  const colon = query.indexOf(":");
+  if (colon < 0) return query;
+  const head = query.slice(0, colon);
+  if (head.split(/\s+/).filter(Boolean).length > 8) return query;   // not an opening clause
+  const rest = query.slice(colon + 1).trim();
+  return rest.split(/\s+/).filter(Boolean).length >= 6 ? rest : query;
+}
+
 /** Count meaningful content words in a routing query.  Used to detect
  *  over-specified queries that fragment the embedding similarity. */
 export function countRoutingQueryContentTokens(query: string): number {
@@ -230,7 +253,7 @@ export function shortenOverspecifiedRoutingQuery(
   /** Corpus rarity to rank by. Defaults to the live agent catalog; injected in tests. */
   corpusIdf?: Map<string, number>,
 ): string | null {
-  const tokens = query.split(/\s+/).filter(Boolean);
+  const tokens = stripDelegationFraming(query).split(/\s+/).filter(Boolean);
   if (tokens.length <= 6) return null;
 
   const candidates: string[] = [];
@@ -257,9 +280,18 @@ export function shortenOverspecifiedRoutingQuery(
   // subject had been discarded before routing began.
   //
   // Rarity across the agent corpus answers the question position was standing in for: a word
-  // in most agent descriptions tells them apart from nothing. Ties keep document order, and
-  // the winners are re-sorted into reading order so the shortened query still parses as a
-  // phrase for the embedding search rather than a bag of words.
+  // in most agent descriptions tells them apart from nothing. The winners are re-sorted into
+  // reading order so the shortened query still parses as a phrase for the embedding search
+  // rather than a bag of words.
+  //
+  // RARITY ONLY RANKS WHERE THE CORPUS HAS AN OPINION, and for the query this exists to fix it
+  // has none: measured against the real 49-agent catalog, "want", "know", "wireguard",
+  // "raspberry" and "tunnel" ALL score the absent-token maximum, because no agent description
+  // happens to contain any of them. The sort then falls through to its tie-break — document
+  // order — which is the leading-tokens rule this replaced. That is why the FRAMING is removed
+  // before ranking rather than ranked against (see stripDelegationFraming above): with the
+  // wrapper gone, document order lands on the subject instead of on "answer the user's
+  // question". Ties keep document order so the result still reads as a phrase.
   const idf = corpusIdf ?? buildAgentTokenIdf(routableAgentEntries());
   const ranked = candidates
     .map((token, index) => ({ token, index, rarity: routingTokenRarity(token, idf) }))
