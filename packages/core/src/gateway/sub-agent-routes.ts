@@ -111,11 +111,19 @@ export function registerSubAgentRoutes(app: Hono): void {
       return c.json({ error: "Invalid JSON body" }, 400);
     }
     const allowed = ["primary", "baseUrl", "apiKey", "temperature", "maxTokens", "topP", "topK", "minP", "repeatPenalty", "seed", "contextWindow", "enableThinking", "reasoningEffort"];
+    // NULL MEANS CLEAR. A UI field emptied to "derive it per request" has no value to send,
+    // and `undefined` does not survive JSON.stringify — the body arrived as `{}` and this loop
+    // left the old pin in place, so the affordance could be used exactly once, to set it.
     const patch: Record<string, unknown> = {};
+    const cleared: string[] = [];
     for (const key of allowed) {
-      if (key in body) patch[key] = body[key];
+      if (!(key in body)) continue;
+      if (body[key] === null) cleared.push(key);
+      else patch[key] = body[key];
     }
-    agent.model = { ...(agent.model ?? {}), ...patch } as typeof agent.model;
+    const nextModel = { ...(agent.model ?? {}), ...patch } as Record<string, unknown>;
+    for (const key of cleared) delete nextModel[key];
+    agent.model = nextModel as typeof agent.model;
     log.info({ agent: name, patch }, "Sub-agent model config patched");
     return c.json({ name, model: agent.model });
   });

@@ -1556,7 +1556,7 @@
                       :value="agent.model.maxTokens ?? ''"
                       placeholder="derived"
                       title="Leave empty to derive the output budget per request from the context window. A value here is a hard ceiling."
-                      @change="agentsStore.patchModel(agent.name, { maxTokens: ($event.target as HTMLInputElement).value ? +($event.target as HTMLInputElement).value : undefined })"
+                      @change="agentsStore.patchModel(agent.name, { maxTokens: ($event.target as HTMLInputElement).value ? +($event.target as HTMLInputElement).value : null })"
                       class="input-box text-sm" />
                   </div>
                   <div>
@@ -1564,7 +1564,7 @@
                     <input type="number" step="0.01" min="0" max="1"
                       :value="agent.model.topP ?? ''"
                       placeholder="default"
-                      @change="agentsStore.patchModel(agent.name, { topP: ($event.target as HTMLInputElement).value ? +($event.target as HTMLInputElement).value : undefined })"
+                      @change="agentsStore.patchModel(agent.name, { topP: ($event.target as HTMLInputElement).value ? +($event.target as HTMLInputElement).value : null })"
                       class="input-box text-sm" />
                   </div>
                   <div>
@@ -1572,7 +1572,7 @@
                     <input type="number" step="1" min="1" max="200"
                       :value="agent.model.topK ?? ''"
                       placeholder="default"
-                      @change="agentsStore.patchModel(agent.name, { topK: ($event.target as HTMLInputElement).value ? +($event.target as HTMLInputElement).value : undefined })"
+                      @change="agentsStore.patchModel(agent.name, { topK: ($event.target as HTMLInputElement).value ? +($event.target as HTMLInputElement).value : null })"
                       class="input-box text-sm" />
                   </div>
                   <div>
@@ -1580,7 +1580,7 @@
                     <input type="number" step="0.01" min="0" max="1"
                       :value="agent.model.minP ?? ''"
                       placeholder="default"
-                      @change="agentsStore.patchModel(agent.name, { minP: ($event.target as HTMLInputElement).value ? +($event.target as HTMLInputElement).value : undefined })"
+                      @change="agentsStore.patchModel(agent.name, { minP: ($event.target as HTMLInputElement).value ? +($event.target as HTMLInputElement).value : null })"
                       class="input-box text-sm" />
                   </div>
                   <div>
@@ -1588,7 +1588,7 @@
                     <input type="number" step="0.05" min="0.5" max="2"
                       :value="agent.model.repeatPenalty ?? ''"
                       placeholder="default"
-                      @change="agentsStore.patchModel(agent.name, { repeatPenalty: ($event.target as HTMLInputElement).value ? +($event.target as HTMLInputElement).value : undefined })"
+                      @change="agentsStore.patchModel(agent.name, { repeatPenalty: ($event.target as HTMLInputElement).value ? +($event.target as HTMLInputElement).value : null })"
                       class="input-box text-sm" />
                   </div>
                   <div>
@@ -1596,7 +1596,7 @@
                     <input type="number" step="1"
                       :value="agent.model.seed ?? ''"
                       placeholder="random"
-                      @change="agentsStore.patchModel(agent.name, { seed: ($event.target as HTMLInputElement).value ? +($event.target as HTMLInputElement).value : undefined })"
+                      @change="agentsStore.patchModel(agent.name, { seed: ($event.target as HTMLInputElement).value ? +($event.target as HTMLInputElement).value : null })"
                       class="input-box text-sm" />
                   </div>
                   <div>
