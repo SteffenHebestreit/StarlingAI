@@ -28,7 +28,7 @@ Every public schema field, where it is declared, and how many production files r
 | `alwaysEscalateTerms` | packages/core/src/config/schema.ts:1452 | 1 |
 | `ansibleBinary` | packages/core/src/config/schema.ts:968 | 1 |
 | `ansiblePlaybookBinary` | packages/core/src/config/schema.ts:969 | 1 |
-| `api` | packages/core/src/config/schema.ts:79 | 115 |
+| `api` | packages/core/src/config/schema.ts:79 | 116 |
 | `apiKey` | packages/core/src/config/schema.ts:65 | 26 |
 | `apiUrl` | packages/core/src/config/schema.ts:944 | 1 |
 | `approvalChannel` | packages/core/src/config/schema.ts:1199 | 10 |

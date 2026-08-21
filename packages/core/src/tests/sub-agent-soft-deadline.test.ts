@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveSoftDeadlineOffsetMs, resolveTurnBudgetMs } from "../agent/sub-agent-turn-budget.js";
-import { reserveSubAgentTimeout } from "../tools/sub-agent.js";
+import { resolveDelegationCeilingMs, resolveSoftDeadlineOffsetMs, resolveTurnBudgetMs } from "../agent/sub-agent-turn-budget.js";
 
 /**
  * The E18 wrap-up nudge must land BEFORE the hard deadline that will abort the run.
@@ -74,7 +73,11 @@ describe("resolveSoftDeadlineOffsetMs", () => {
   });
 
   it("stays proportional when a synthesis reserve is carved out", () => {
-    const reserved = reserveSubAgentTimeout(DEFAULT_TURN_MS, 300_000);
+    // The no-parent-deadline arm of the resolver — what the delegation site computes for a
+    // caller that states a budget but no deadline.
+    const reserved = resolveDelegationCeilingMs({
+      callerBudgetMs: DEFAULT_TURN_MS, parentDeadlineMs: undefined, nowMs: 0, synthesisReserveMs: 300_000,
+    });
     expect(reserved).toBe(1_500_000);
     // The agent's own 900_000 still binds; the reserve only lowers the ceiling.
     expect(resolveSoftDeadlineOffsetMs(reserved, 900_000)).toBe(630_000);

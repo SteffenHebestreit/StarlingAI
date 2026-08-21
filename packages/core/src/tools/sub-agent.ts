@@ -122,40 +122,6 @@ export {
 
 const SERVER_EXECUTION_AGENT_NAMES = new Set(["shell_agent", "ops_triage", "infrastructure_agent"]);
 
-/**
- * Carve a synthesis-headroom reserve out of the parent turn budget before handing it
- * to a delegated sub-agent as that sub-agent's OWN hard timeout. A sub-agent today
- * inherits the FULL parent budget, so one slow node can consume the entire turn and
- * leave the orchestrator zero time to synthesize + deliver (audit b6f8336e). When
- * `reserveMs > 0`, the sub-agent gets at most `parentBudget − reserve` (never below
- * `floorMs`), guaranteeing the parent keeps `reserve` ms to finalize.
- *
- * Pure + identity-by-default: `reserveMs = 0` (the config default) returns the parent
- * budget unchanged, and an absent/unbounded budget is passed through untouched, so the
- * knob is a true no-op until explicitly enabled.
- *
- * SUPERSEDED at the delegation site, which now calls resolveDelegationCeilingMs directly:
- * subtracting the reserve from the parent's STATIC budget was arithmetically a no-op for
- * every agent in this repo, because the runner then takes min(ceiling, the agent's own
- * declared budget) and every declared budget is ≤ turnTimeout − 300,000 (run 3959f3ac:
- * backend_coder declares 1,500,000 under an 1,800,000 turn, so any reserve up to 300,000 ms
- * changed nothing at all). Retained as the no-parent-deadline special case of that resolver.
- */
-export function reserveSubAgentTimeout(
-  parentBudgetMs: number | undefined,
-  reserveMs: number,
-  floorMs = 60_000,
-): number | undefined {
-  return resolveDelegationCeilingMs({
-    callerBudgetMs: parentBudgetMs,
-    parentDeadlineMs: undefined,
-    nowMs: 0,
-    synthesisReserveMs: reserveMs,
-    floorMs,
-  });
-}
-
-
 function buildSemanticRoutingMetadata(resolution: AgentRoutingResolution): Record<string, unknown> {
   const status = getEmbeddingSearchStatus();
   const configuredModel = getConfig().agents.defaults.model.embeddingModel;
