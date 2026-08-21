@@ -32,17 +32,30 @@ async function main() {
       throw new Error("pnpm pack did not produce a tarball");
     }
 
-    const tarballPath = path.join(tempDir, tarball);
-    const listing = await runCommand("tar", ["-tzf", tarballPath], packageDir);
+    // LIST IT FROM ITS OWN DIRECTORY, BY BARE NAME. Handing tar an absolute Windows path
+    // makes GNU tar read the drive letter as a remote host — "tar (child): Cannot connect to
+    // C: resolve failed" — because `host:path` is its remote syntax. `--force-local` fixes
+    // that for GNU tar and is rejected by the bsdtar Windows itself ships, so which tar is
+    // first on PATH would decide whether the check runs at all. A relative name has no colon
+    // in it and both accept it, with no platform branch here.
+    const listing = await runCommand("tar", ["-tzf", tarball], tempDir);
     if (listing.code !== 0) {
       throw new Error(listing.stderr || listing.stdout || `tar listing failed with exit code ${listing.code}`);
     }
 
-    const blockedFiles = listing.stdout
+    const entries = listing.stdout
       .split(/\r?\n/)
       .map(line => line.trim())
-      .filter(Boolean)
-      .filter(line => blockedPatterns.some(pattern => pattern.test(line)));
+      .filter(Boolean);
+
+    // A PASS HAS TO BE BACKED BY A LISTING. tar exiting 0 with nothing on stdout would fall
+    // through every filter below and print "passed security check" having examined no files
+    // at all — which is how this gate would report success on a tarball it could not read.
+    if (entries.length === 0) {
+      throw new Error(`tar listed no entries in ${tarball} — the artifact could not be inspected, so nothing was checked`);
+    }
+
+    const blockedFiles = entries.filter(line => blockedPatterns.some(pattern => pattern.test(line)));
 
     if (blockedFiles.length > 0) {
       console.error(`Blocked files found in packed artifact for ${packageName}:`);
@@ -53,7 +66,7 @@ async function main() {
       return;
     }
 
-    console.log(`Packed artifact for ${packageName} passed security check.`);
+    console.log(`Packed artifact for ${packageName} passed security check (${entries.length} files inspected).`);
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
