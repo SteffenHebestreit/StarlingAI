@@ -67,7 +67,8 @@
       "@opentelemetry/propagator-jaeger": "^2.10.0",
       "postcss": "^8.5.26",
       "brace-expansion@1": "^1.1.18",
-      "nanoid@3": "^3.3.18"
+      "nanoid@3": "^3.3.18",
+      "deepmerge-ts": "^8.0.0"
     },
     "auditConfig": {
       "ignoreGhsas": [
