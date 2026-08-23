@@ -89,7 +89,7 @@ Every public schema field, where it is declared, and how many production files r
 | `config` | packages/core/src/config/schema.ts:1109 | 227 |
 | `configRemovals` | packages/core/src/config/schema.ts:1567 | 2 |
 | `consolidationIntervalMs` | packages/core/src/config/schema.ts:1394 | 1 |
-| `container` | packages/core/src/config/schema.ts:678 | 62 |
+| `container` | packages/core/src/config/schema.ts:678 | 63 |
 | `contextWindow` | packages/core/src/config/schema.ts:119 | 10 |
 | `control` | packages/core/src/config/schema.ts:1542 | 46 |
 | `coordinatorToolCaps` | packages/core/src/config/schemas/orchestration.ts:695 | 4 |
@@ -277,7 +277,7 @@ Every public schema field, where it is declared, and how many production files r
 | `moderateInputs` | packages/core/src/config/schema.ts:1139 | 1 |
 | `moderateToolOutputs` | packages/core/src/config/schema.ts:1140 | 1 |
 | `monthlyUsd` | packages/core/src/config/schema.ts:507 | 2 |
-| `mounts` | packages/core/src/config/schema.ts:669 | 5 |
+| `mounts` | packages/core/src/config/schema.ts:669 | 6 |
 | `name` | packages/core/src/config/schema.ts:1794 | 276 |
 | `network` | packages/core/src/config/schema.ts:670 | 43 |
 | `node` | packages/core/src/config/schema.ts:945 | 193 |

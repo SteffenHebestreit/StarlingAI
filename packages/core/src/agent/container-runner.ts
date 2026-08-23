@@ -25,7 +25,7 @@ import { assertSafeDockerRunArgs } from "../tools/docker-safety.js";
 import type { SubAgentRunOptions } from "./sub-agent.js";
 import type { SubAgentConfig, ModelConfig } from "../config/schema.js";
 import { emitSwarmEvent } from "../swarm/bus.js";
-import { resolveDockerWorkspaceMountSource } from "../tools/workspace-mount.js";
+import { resolveDockerWorkspaceBind } from "../tools/workspace-mount.js";
 import { logAudit } from "../audit/logger.js";
 import { currentUserId } from "../runtime/request-context.js";
 
@@ -233,7 +233,10 @@ export async function runSubAgentInContainer(
     "--cap-drop", "ALL",
     "--network", network,
     // Mount workspace volume so tools can read/write files
-    "-v", `${resolveDockerWorkspaceMountSource(opts.workspacePath)}:${opts.workspacePath}`,
+    // Bound where the mount source actually belongs — see resolveDockerWorkspaceBind. Binding
+    // it at opts.workspacePath put the repo root one segment off, so every path this container
+    // resolved under the workspace pointed at a directory that does not exist.
+    "-v", resolveDockerWorkspaceBind(opts.workspacePath),
     "--interactive",
     image,
   ];

@@ -19,7 +19,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
-import { resolveDockerWorkspaceMountSource } from "./workspace-mount.js";
+import { resolveHostWorkspacePath } from "./workspace-mount.js";
 import { assertSafeDockerRunArgs } from "./docker-safety.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
@@ -283,7 +283,10 @@ async function startApp(args: Record<string, unknown>, ctx: ToolContext): Promis
   };
   apps.set(id, app);
 
-  const hostAppDir = `${resolveDockerWorkspaceMountSource(ctx.workspacePath).replace(/[/\\]+$/, "")}/${root}`;
+  const hostAppDir = resolveHostWorkspacePath(ctx.workspacePath, root);
+  if (!hostAppDir) {
+    return { success: false, output: "", error: "serve_app needs a host workspace path to bind; this deployment mounts the workspace as a named volume, which cannot be bound by subdirectory." };
+  }
   logAudit("serve_app_started", { id, container: app.containerName, root, network: app.network, image: app.image }, { sessionId: ctx.sessionId, severity: "warn" });
 
   const serveRunArgs = buildServeRunArgs(app, hostAppDir);

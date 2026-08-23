@@ -8,7 +8,11 @@ import {
 import { runWithRequestContext } from "../runtime/request-context.js";
 import type { SubAgentRunOptions } from "../agent/sub-agent.js";
 import type { ModelConfig, SubAgentConfig } from "../config/schema.js";
-import { resolveDockerWorkspaceMountSource } from "../tools/workspace-mount.js";
+import {
+  resolveDockerWorkspaceBind,
+  resolveDockerWorkspaceMountSource,
+  resolveHostWorkspacePath,
+} from "../tools/workspace-mount.js";
 
 describe("container runner diagnostics", () => {
   it("parses readiness markers with bootstrap timing", () => {
@@ -140,5 +144,55 @@ describe("the container payload carries the owning user", () => {
   it("never lets an ambient user override an explicit one", () => {
     const payload = runWithRequestContext({ userId: "bob" }, () => build(opts({ userId: "alice" })));
     expect(payload.userId).toBe("alice");
+  });
+});
+
+/**
+ * THE MOUNT SOURCE IS NOT THE WORKSPACE.
+ *
+ * The shipped compose deployment binds the REPO root at /workspace on purpose — the
+ * self-improvement agents run git there — so the workspace is the `workspace/` directory
+ * inside it, which is why SAI_WORKSPACE_CONFIG_PATH is `/workspace/workspace`. Two call sites
+ * did not account for that offset, and both were verified wrong against the running stack:
+ * `-v <repo>:/workspace/workspace` put the repo where the workspace should be, and
+ * `/workspace/workspace/generated` came back "No such file or directory" with the real tree one
+ * level deeper. Containerized sub-agents are the DEFAULT execution mode, so that was every
+ * default sub-agent addressing a workspace that was not there.
+ */
+describe("workspace binds account for the mount source's offset", () => {
+  const DOCKERIZED = { mountSource: "/run/desktop/mnt/host/f/StarlingAI", fallbackVolume: "gc-workspace" };
+
+  it("binds the mount source at /workspace, so workspacePath resolves underneath it", () => {
+    // NOT `<source>:/workspace/workspace` — that is the off-by-one.
+    expect(resolveDockerWorkspaceBind("/workspace/workspace", DOCKERIZED))
+      .toBe("/run/desktop/mnt/host/f/StarlingAI:/workspace");
+  });
+
+  it("binds at the workspace's own path when the source IS the workspace", () => {
+    // Outside a container there is no /workspace mapping; the in-container tools resolve
+    // against the same absolute path the host uses.
+    expect(resolveDockerWorkspaceBind("/srv/sai/workspace", { mountSource: "", fallbackVolume: "" }))
+      .toBe("/srv/sai/workspace:/srv/sai/workspace");
+  });
+
+  it("re-applies the workspace offset when building a host path for a subdirectory", () => {
+    // serve_app binds ONE app directory, so it needs the host path rather than the tree.
+    expect(resolveHostWorkspacePath("/workspace/workspace", "generated/my-app", DOCKERIZED))
+      .toBe("/run/desktop/mnt/host/f/StarlingAI/workspace/generated/my-app");
+  });
+
+  it("adds no offset when the workspace is not under /workspace", () => {
+    expect(resolveHostWorkspacePath("/srv/sai/workspace", "generated/my-app", { mountSource: "", fallbackVolume: "" }))
+      .toBe("/srv/sai/workspace/generated/my-app");
+  });
+
+  it("refuses to build a host path out of a named volume", () => {
+    // A volume has no host path to append to; the old code produced "gc-workspace/generated/x"
+    // and docker created a directory of that name.
+    expect(resolveHostWorkspacePath("/workspace/workspace", "generated/my-app", { mountSource: "", fallbackVolume: "gc-workspace" }))
+      .toBeNull();
+    // The whole-tree bind still works in that deployment — only the subdirectory form cannot.
+    expect(resolveDockerWorkspaceBind("/workspace/workspace", { mountSource: "", fallbackVolume: "gc-workspace" }))
+      .toBe("gc-workspace:/workspace");
   });
 });
