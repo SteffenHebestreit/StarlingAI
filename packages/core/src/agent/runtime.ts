@@ -871,6 +871,12 @@ export function classifyPostOrchestrationDisposition(
   const taskGraphFailureDisposition = getConfig().orchestration?.taskGraphFailureDisposition === true;
   const orchestrationResults = toolResultMessages.filter((message) => {
     const text = typeof message.content === "string" ? message.content : "";
+    // execute_plan dispatches the delegations and workflows the markers below name, one level down,
+    // so its OWN result carries none of them and matched nothing here. An iteration whose only call
+    // was execute_plan therefore classified as "none" — which skips the entire post-orchestration
+    // block, including the plan-driven continuation written for exactly this path and the failure
+    // branch that arms the failed-research honesty backstop. Same defect class as the D2 note above.
+    if ((message.metadata ?? {})["planExecution"] === true) return true;
     const isWorkflowExecutionResult = /^Workflow\s+.+\s+\[[^\]]+\]\s+(blocked|completed)\./i.test(text);
     const isIncompleteTaskGraph = taskGraphFailureDisposition && text.includes("Task graph finished with incomplete status");
     return text.includes("Observed evidence:")
@@ -911,6 +917,17 @@ export function classifyPostOrchestrationDisposition(
 
     if (USER_INTERACTION_CUE_RE.test(text)) {
       return "ask_user";
+    }
+
+    if (metadata["planExecution"] === true) {
+      const count = (key: string): number => (typeof metadata[key] === "number" ? metadata[key] as number : 0);
+      // A plan with a failed step did not deliver its objective — classified as a delegation
+      // failure so the failed-research honesty backstop arms, exactly as a failed graph is.
+      if (count("failed") > 0) return "failure";
+      // Steps the orchestrator still owes (its own, or blocked behind them) are not a failure: the
+      // tool has said what remains, so continue the plan rather than synthesize over the gap.
+      if (count("manual") + count("pending") > 0) sawContinuationCue = true;
+      continue;
     }
 
     if (/^Delegated result from .+ — TASK FAILED\./m.test(text)) {

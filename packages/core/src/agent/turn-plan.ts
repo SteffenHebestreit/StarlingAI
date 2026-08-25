@@ -417,7 +417,10 @@ export function decidePlanContinuation(input: PlanContinuationInput): PlanContin
     // had finished work that had in fact failed.
     const settled = outcomes.filter((o) => o.status === "done").length;
     const outstanding = outcomes.some((o) => o.status === "pending" || o.status === "manual");
-    if (!enabled || !lastDelegationSucceeded || !outstanding) {
+    // The same single-deliverable exemption the counting branch has: a plan with one dispatchable
+    // step is finished when that step is, and nudging it onward only re-delegates the same work.
+    const dispatchable = plan.steps.filter((step) => step.kind !== "direct").length;
+    if (!enabled || !lastDelegationSucceeded || !outstanding || dispatchable < 2) {
       return { continue: false, done: settled, total: outcomes.length };
     }
     if (executedDelegations >= delegationCap) return { continue: false, done: settled, total: outcomes.length };

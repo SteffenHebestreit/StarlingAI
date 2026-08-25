@@ -954,3 +954,31 @@ describe("runtime turn guidance", () => {
     expect(d2).toBe("failure");
   });
 });
+
+describe("classifyPostOrchestrationDisposition — a plan that executed", () => {
+  // execute_plan dispatches the delegations and workflows whose result shapes this classifier
+  // recognizes, one level down, so its OWN result carries none of their markers. Unrecognized, an
+  // iteration whose only call was execute_plan classified as "none" — skipping the entire
+  // post-orchestration block, including the plan-driven continuation written for that very path.
+  const planResult = (metadata: Record<string, unknown>) => ([{
+    role: "tool" as const,
+    content: "Plan: 2/2 step(s) completed.",
+    tool_call_id: "t1",
+    metadata: { planExecution: true, ...metadata },
+  }]);
+
+  it("is orchestration, not nothing", () => {
+    expect(classifyPostOrchestrationDisposition(planResult({ failed: 0, manual: 0, pending: 0 })))
+      .toBe("synthesize");
+  });
+
+  it("is a failure when a step failed, so the honesty backstop arms", () => {
+    expect(classifyPostOrchestrationDisposition(planResult({ failed: 1, manual: 0, pending: 0 })))
+      .toBe("failure");
+  });
+
+  it("continues while the orchestrator still owes a step", () => {
+    expect(classifyPostOrchestrationDisposition(planResult({ failed: 0, manual: 1, pending: 1 })))
+      .toBe("continue");
+  });
+});

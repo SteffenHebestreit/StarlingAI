@@ -404,6 +404,10 @@ ${describe(stranded)}`);
           : `${malformed.length} plan step(s) depend on ids the plan does not define`,
       }),
       metadata: {
+        // The turn's post-orchestration classifier keys on this. execute_plan is an orchestration
+        // result ONE LEVEL UP — it dispatches the delegations and workflows whose result shapes
+        // that classifier recognizes, so its own result carries none of them.
+        planExecution: true,
         steps: plan.steps.length,
         done: done.length,
         failed: failed.length,

@@ -159,6 +159,18 @@ describe("decidePlanContinuation — measuring the plan against what ran", () =>
     }).continue).toBe(false);
   });
 
+  it("does not push a one-deliverable plan onward, whichever branch decides it", () => {
+    // The counting branch has always exempted a single dispatchable step; the outcomes branch that
+    // now takes precedence did not, so the same plan was finished on one path and pushed on the other.
+    const single = plan([
+      step({ id: "s1", kind: "delegate" }),
+      step({ id: "s2", kind: "direct" }),
+    ], { outcomes: [{ id: "s1", status: "done" }, { id: "s2", status: "manual" }] });
+    expect(decidePlanContinuation({
+      plan: single, executedDelegations: 1, delegationCap: 5, lastDelegationSucceeded: true, enabled: true,
+    }).continue).toBe(false);
+  });
+
   it("does not count a FAILED step as one it finished", () => {
     // The directive reports "done N of M". Counting a failed step among them told the model it had
     // finished work that had in fact failed.
