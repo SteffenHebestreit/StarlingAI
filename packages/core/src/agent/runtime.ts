@@ -3214,7 +3214,13 @@ async function _runTurn(
         tc.name === "parallel_delegate" ||
         tc.name === "run_task_graph" ||
         tc.name === "swarm_delegate" ||
-        tc.name === "create_ephemeral_agent"
+        tc.name === "create_ephemeral_agent" ||
+        // A workflow IS orchestration progress, and the plan-continuation input has always
+        // documented this counter as "delegations/workflows" — it just never counted one, so a
+        // plan step that ran a scene registered as nothing having happened.
+        // execute_plan is deliberately absent: it dispatches into the tools above, so counting
+        // it too would double-count every step it runs.
+        tc.name === "run_workflow"
       ) {
         _turnDelegationCount += 1;
       } else if (tc.name === "share_finding") {

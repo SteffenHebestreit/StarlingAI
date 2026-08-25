@@ -518,6 +518,15 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  execute_plan: {
+    // Dispatches ONLY into delegate_to_agent / run_workflow, each of which is tier-gated,
+    // capped and approval-checked in its own right — this adds a scheduler, not a capability,
+    // so it sits with record_plan rather than above the tools it calls.
+    tier: ToolTier.ONE_WRITE,
+    description: "Execute the recorded turn plan in dependency order, dispatching each step by its kind",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
   skill_manage: {
     tier: ToolTier.ONE_WRITE,
     description: "Create, patch, pin, archive, and maintain Skill Library procedures and support files",

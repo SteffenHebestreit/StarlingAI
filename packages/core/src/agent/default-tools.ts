@@ -28,6 +28,12 @@ export const ALWAYS_AVAILABLE_MAIN_TOOL_NAMES = [
   // short structured plan (objective, reuse-or-delegate steps, acceptance
   // criteria) that QA checks against and the operator dock can surface/approve.
   "record_plan",
+  // ...and the scheduler that runs it. The plan has always been able to express a mixed,
+  // dependency-ordered, partly-parallel piece of work; without this the orchestrator had to
+  // flatten it back into prose and re-issue the steps by hand, so the order it recorded and the
+  // order it ran were unrelated. Grants no new capability — it dispatches into
+  // delegate_to_agent / run_workflow, which are gated and capped in their own right.
+  "execute_plan",
   // Just-in-time planning context: one read-only call that aggregates the user
   // model, working-memory facts, long-term memory, recent sessions, and skills —
   // so the planner can hydrate context before delegating instead of the prompt

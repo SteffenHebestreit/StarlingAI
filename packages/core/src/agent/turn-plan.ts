@@ -25,10 +25,29 @@ export interface TurnPlanStep {
   kind: TurnPlanStepKind;
   /** Target agent for a delegate step (optional). */
   agent?: string;
+  /**
+   * Scene or job name for a `reuse` step.
+   *
+   * The mirror of `agent` above, and what makes a reuse step DISPATCHABLE rather than a note
+   * to self: "run an existing workflow" cannot be executed by anything that does not know
+   * which one. Optional, because a plan may legitimately name the workflow only in prose —
+   * the executor then reports the step as one the orchestrator has to run itself.
+   */
+  workflow?: string;
   /** Steps sharing a parallelGroup may run concurrently (independent work). */
   parallelGroup?: number;
   /** Ids of steps that must complete first. */
   dependsOn?: string[];
+}
+
+/** What became of one step. `pending` steps have not been attempted this turn. */
+export type TurnPlanStepStatus = "pending" | "running" | "done" | "failed" | "manual";
+
+export interface TurnPlanStepOutcome {
+  id: string;
+  status: TurnPlanStepStatus;
+  /** Short note: the failure, or why the step is the orchestrator's to run. */
+  detail?: string;
 }
 
 export interface TurnPlan {
@@ -40,6 +59,14 @@ export interface TurnPlan {
   /** True when the planned fan-out is wide (more parallel work than the caps). */
   wide: boolean;
   createdAt: string;
+  /**
+   * What actually happened to each step, written by the plan executor.
+   *
+   * Without this the only record of execution is a COUNT of delegation tool calls, which cannot
+   * say which step ran, cannot see a `reuse` step at all, and cannot tell a step the
+   * orchestrator did itself from one nobody did. Present only once the executor has run.
+   */
+  outcomes?: TurnPlanStepOutcome[];
 }
 
 const MAX_STEPS = 12;
@@ -161,6 +188,8 @@ export function normalizeTurnPlan(rawInput: Record<string, unknown>): TurnPlan {
     };
     const agent = clampString(obj["agent"] ?? obj["agentName"] ?? obj["agent_name"]);
     if (agent) step.agent = agent;
+    const workflow = clampString(obj["workflow"] ?? obj["workflowName"] ?? obj["scene"] ?? obj["job"]);
+    if (workflow) step.workflow = workflow;
     const group = obj["parallelGroup"] ?? obj["parallel_group"];
     if (typeof group === "number" && Number.isFinite(group)) step.parallelGroup = group;
     const deps = clampStringList(obj["dependsOn"] ?? obj["depends_on"], MAX_STEPS);
@@ -286,7 +315,26 @@ export interface PlanContinuationDecision {
  */
 export function decidePlanContinuation(input: PlanContinuationInput): PlanContinuationDecision {
   const { plan, executedDelegations, delegationCap, lastDelegationSucceeded, enabled } = input;
-  const total = plan?.steps.length ?? 0;
+  // WHAT ACTUALLY RAN, when anything knows. execute_plan records a per-step outcome, so the
+  // question "is the plan finished" has a real answer: no step still waiting to be dispatched.
+  // Counting is the fallback for a plan the orchestrator executed by hand.
+  const outcomes = plan?.outcomes;
+  if (plan && outcomes && outcomes.length > 0) {
+    const settled = outcomes.filter((o) => o.status === "done" || o.status === "failed").length;
+    const outstanding = outcomes.some((o) => o.status === "pending" || o.status === "manual");
+    if (!enabled || !lastDelegationSucceeded || !outstanding) {
+      return { continue: false, done: settled, total: outcomes.length };
+    }
+    if (executedDelegations >= delegationCap) return { continue: false, done: settled, total: outcomes.length };
+    return { continue: true, done: settled, total: outcomes.length };
+  }
+  // COUNT ONLY WHAT THE COUNTER COUNTS. `executedDelegations` comes from the turn's delegation
+  // tally, which counts delegate_to_agent / parallel_delegate / run_task_graph / swarm_delegate /
+  // create_ephemeral_agent — and run_workflow, which a `reuse` step uses. It does NOT count a
+  // `direct` step, which is the orchestrator's own tool call. Measuring those against ALL steps
+  // made a completed mixed plan read as unfinished and pushed the orchestrator to keep
+  // delegating past the end of its own plan.
+  const total = plan?.steps.filter((step) => step.kind !== "direct").length ?? 0;
   const noContinue: PlanContinuationDecision = { continue: false, done: executedDelegations, total };
   if (!enabled || !plan || !lastDelegationSucceeded) return noContinue;
   if (total < 2) return noContinue;                          // single-deliverable plan → synthesize as before

@@ -148,6 +148,7 @@ Write operations inside the workspace; session-level consent once.
 | `curate_memory` | — | — | Review durable memory health and optionally consolidate duplicates |
 | `delete_file` | per-call | — | Delete file within workspace (with confirmation) |
 | `edit_file` | — | — | Apply patch/edit to file within workspace |
+| `execute_plan` | — | — | Execute the recorded turn plan in dependency order, dispatching each step by its kind |
 | `export_evidence_ledger` | — | — | Write a validated evidence ledger artifact into the workspace and share its path |
 | `fetch_image` | — | — | Download + verify a real image from a URL/page and save it into the workspace |
 | `forget_document` | — | — | Remove a document from the engram library (scope reference or hard delete) |

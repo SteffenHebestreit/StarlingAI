@@ -50,6 +50,7 @@ registerTool({
             description: { type: "string", description: "One line describing the step." },
             kind: { type: "string", enum: ["reuse", "delegate", "direct"], description: "reuse = run an existing scene/job/workflow; delegate = hand to an agent; direct = you do it." },
             agent: { type: "string", description: "Target agent name for a delegate step." },
+            workflow: { type: "string", description: "Scene or job name for a reuse step — set this and execute_plan can run the step for you; without it the step is yours to run." },
             parallelGroup: { type: "number", description: "Steps sharing a parallelGroup are independent and may run concurrently." },
             dependsOn: { type: "array", items: { type: "string" }, description: "Ids of steps that must finish first." },
           },
@@ -113,7 +114,8 @@ registerTool({
       success: true,
       output: `Plan recorded (${plan.steps.length} step${plan.steps.length === 1 ? "" : "s"}, risk: ${plan.riskTier}). `
         + (execParts.length > 0
-          ? `Recording a plan is NOT execution. Now CALL the orchestration tools to ${execParts.join(", and ")}. Do NOT write the final answer until those steps have actually run; a tool-free answer after only record_plan does not satisfy this plan.`
+          ? `Recording a plan is NOT execution. CALL execute_plan to run this plan in its own dependency order — it dispatches each step by kind (delegate to the specialist, reuse to the named workflow), runs a parallelGroup concurrently, feeds each step's result to the steps that depend on it, and hands \`direct\` steps back to you. `
+            + `Or drive it yourself and ${execParts.join(", and ")}. Either way: do NOT write the final answer until those steps have actually run; a tool-free answer after only record_plan does not satisfy this plan.`
           : `Now execute it and make sure the final answer meets the acceptance criteria.`)
         + budgetWarning,
       metadata: { stepCount: plan.steps.length, riskTier: plan.riskTier, wide: plan.wide, ...(budgetWarning ? { budgetWarning: true } : {}) },

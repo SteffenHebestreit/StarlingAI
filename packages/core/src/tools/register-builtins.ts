@@ -37,6 +37,7 @@ import "./user-model.js";
 import "./tool-pipeline.js";
 import "./memory.js";
 import "./turn-plan-tool.js";
+import "./plan-executor.js";
 import "./recall-context.js";
 import "./workspace-search.js";
 import "./web.js";
