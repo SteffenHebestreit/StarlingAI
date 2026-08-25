@@ -31,8 +31,10 @@ export const ALWAYS_AVAILABLE_MAIN_TOOL_NAMES = [
   // ...and the scheduler that runs it. The plan has always been able to express a mixed,
   // dependency-ordered, partly-parallel piece of work; without this the orchestrator had to
   // flatten it back into prose and re-issue the steps by hand, so the order it recorded and the
-  // order it ran were unrelated. Grants no new capability — it dispatches into
-  // delegate_to_agent / run_workflow, which are gated and capped in their own right.
+  // order it ran were unrelated. Grants no new capability: every step goes out through the normal
+  // tool path, so the tier gate, the sandbox contract, approval prompts and audit apply as they
+  // would to a directly-issued call, and the executor honours this turn's allowedTools rather than
+  // reaching outside the caller's grant.
   "execute_plan",
   // Just-in-time planning context: one read-only call that aggregates the user
   // model, working-memory facts, long-term memory, recent sessions, and skills —

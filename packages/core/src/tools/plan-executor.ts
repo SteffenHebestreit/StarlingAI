@@ -27,6 +27,7 @@ import { childLogger } from "../logger.js";
 import { logAudit } from "../audit/logger.js";
 import { loadTurnPlan, persistTurnPlan, type TurnPlan, type TurnPlanStep, type TurnPlanStepOutcome, type TurnPlanStepStatus } from "../agent/turn-plan.js";
 import { planFrontier, planCycle } from "../agent/plan-frontier.js";
+import { BLOCKED_STEP_TOOLS } from "./tool-pipeline.js";
 
 const log = childLogger("tool:execute_plan");
 
@@ -92,6 +93,12 @@ function dispatchFor(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<st
     if (step.tool === "execute_plan") {
       return { manual: "a plan cannot run itself as one of its own steps" };
     }
+    // Delegation belongs to `delegate` and `reuse` steps, where the plan accounts for it — as a
+    // step of its own, in the dependency order, counted against the turn's delegate budget. Hidden
+    // inside a `direct` step it is fan-out the plan does not know it is doing.
+    if (BLOCKED_STEP_TOOLS.has(step.tool)) {
+      return { manual: `\`${step.tool}\` fans out to other agents — make it a delegate or reuse step so the plan accounts for it, or run it yourself` };
+    }
     return { tool: step.tool, args: { ...(step.toolArgs ?? {}) } };
   }
   if (step.kind === "reuse") {
@@ -110,6 +117,12 @@ function dispatchFor(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<st
 async function runStep(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<string, string>, ctx: ToolContext): Promise<StepRun> {
   const dispatch = dispatchFor(plan, step, results);
   if ("manual" in dispatch) return { status: "manual", detail: dispatch.manual };
+  // ToolContext.allowedTools is a contract on every tool that fans out to other tools: it must not
+  // reach outside the caller's grant. This one dispatches a tool name the MODEL wrote into a plan,
+  // so without the check a step could name anything the tier gate happens to permit.
+  if (ctx.allowedTools && !ctx.allowedTools.includes(dispatch.tool)) {
+    return { status: "failed", detail: `'${dispatch.tool}' is not in this agent's allowed tool set` };
+  }
 
   try {
     const result = await executeTool(dispatch.tool, dispatch.args, ctx);

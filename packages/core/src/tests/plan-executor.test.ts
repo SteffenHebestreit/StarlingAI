@@ -143,6 +143,33 @@ describe("execute_plan dispatches each step to the tool that runs that kind", ()
     expect(result.output).toMatch(/cannot run itself/);
   });
 
+  it("will not reach outside the caller's granted tools", async () => {
+    // ToolContext.allowedTools is a stated contract on tools that fan out to other tools. This one
+    // dispatches a tool name the MODEL wrote into a plan, so the check is what stops a step from
+    // naming anything the tier gate happens to permit.
+    await persistTurnPlan(SESSION, basePlan([
+      { id: "s1", description: "read the config", kind: "direct", tool: "read_file", toolArgs: { path: "x" } },
+    ]));
+
+    const result = await getTool("execute_plan")!.execute(
+      {},
+      { sessionId: SESSION, workspacePath: "/w", allowedTools: ["web_search"] } as never,
+    );
+    expect(calls).toHaveLength(0);
+    expect(result.success).toBe(false);
+    expect(result.output).toMatch(/not in this agent's allowed tool set/);
+  });
+
+  it("keeps fan-out out of a `direct` step, where the plan would not account for it", async () => {
+    await persistTurnPlan(SESSION, basePlan([
+      { id: "s1", description: "spread the work", kind: "direct", tool: "parallel_delegate", toolArgs: {} },
+    ]));
+
+    const result = await run();
+    expect(calls).toHaveLength(0);
+    expect(result.output).toMatch(/make it a delegate or reuse step/);
+  });
+
   it("hands a `direct` step back and reports what is waiting on it", async () => {
     await persistTurnPlan(SESSION, basePlan([
       { id: "s1", description: "decide the framing", kind: "direct" },
