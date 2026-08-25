@@ -11,7 +11,7 @@ Every public schema field, where it is declared, and how many production files r
 | `a2a` | packages/core/src/config/schema.ts:385 | 11 |
 | `accessKeyId` | packages/core/src/config/schema.ts:445 | 2 |
 | `accessToken` | packages/core/src/config/schemas/channels.ts:51 | 8 |
-| `account` | packages/core/src/config/schemas/channels.ts:71 | 44 |
+| `account` | packages/core/src/config/schemas/channels.ts:71 | 46 |
 | `acquireTimeoutMs` | packages/core/src/config/schema.ts:1550 | 1 |
 | `activeModelPreset` | packages/core/src/config/schema.ts:1581 | 2 |
 | `addHosts` | packages/core/src/config/schema.ts:672 | 1 |
@@ -55,7 +55,7 @@ Every public schema field, where it is declared, and how many production files r
 | `blockOn` | packages/core/src/config/schema.ts:1142 | 1 |
 | `botToken` | packages/core/src/config/schemas/channels.ts:10 | 9 |
 | `bucket` | packages/core/src/config/schema.ts:444 | 15 |
-| `budget` | packages/core/src/config/schema.ts:1507 | 74 |
+| `budget` | packages/core/src/config/schema.ts:1507 | 75 |
 | `budgets` | packages/core/src/config/schema.ts:505 | 13 |
 | `candidateTopK` | packages/core/src/config/schemas/retrieval.ts:54 | 2 |
 | `capabilities` | packages/core/src/config/schema.ts:817 | 42 |
@@ -152,14 +152,14 @@ Every public schema field, where it is declared, and how many production files r
 | `enableThinking` | packages/core/src/config/schema.ts:186 | 15 |
 | `endpoint` | packages/core/src/config/schema.ts:442 | 61 |
 | `endpointUnits` | packages/core/src/config/schema.ts:1548 | 1 |
-| `enforce` | packages/core/src/config/schema.ts:517 | 22 |
+| `enforce` | packages/core/src/config/schema.ts:517 | 23 |
 | `engramApiKey` | packages/core/src/config/schemas/retrieval.ts:43 | 2 |
 | `engramBaseUrl` | packages/core/src/config/schemas/retrieval.ts:41 | 2 |
 | `env` | packages/core/src/config/schema.ts:660 | 104 |
 | `evidence` | packages/core/src/config/schema.ts:1534 | 81 |
 | `evidenceAnchoringLengthScaled` | packages/core/src/config/schemas/orchestration.ts:273 | 1 |
 | `evidenceAnchoringOnGatheredEvidence` | packages/core/src/config/schemas/orchestration.ts:253 | 1 |
-| `excludeDelegationWaitFromTurnBudget` | packages/core/src/config/schemas/orchestration.ts:483 | 2 |
+| `excludeDelegationWaitFromTurnBudget` | packages/core/src/config/schemas/orchestration.ts:483 | 3 |
 | `expectArtifact` | packages/core/src/config/schema.ts:1195 | 6 |
 | `exposeAgents` | packages/core/src/config/schema.ts:573 | 7 |
 | `exposeScenes` | packages/core/src/config/schema.ts:734 | 1 |
@@ -269,7 +269,7 @@ Every public schema field, where it is declared, and how many production files r
 | `minStepsToAuthor` | packages/core/src/config/schema.ts:1340 | 2 |
 | `minVramMb` | packages/core/src/config/schema.ts:808 | 1 |
 | `mode` | packages/core/src/config/schema.ts:457 | 101 |
-| `model` | packages/core/src/config/schema.ts:1137 | 178 |
+| `model` | packages/core/src/config/schema.ts:1137 | 179 |
 | `modelModeration` | packages/core/src/config/schema.ts:1133 | 4 |
 | `modelPresets` | packages/core/src/config/schema.ts:1578 | 1 |
 | `modelPresetScope` | packages/core/src/config/schema.ts:1593 | 3 |
@@ -278,7 +278,7 @@ Every public schema field, where it is declared, and how many production files r
 | `moderateToolOutputs` | packages/core/src/config/schema.ts:1140 | 1 |
 | `monthlyUsd` | packages/core/src/config/schema.ts:507 | 2 |
 | `mounts` | packages/core/src/config/schema.ts:669 | 6 |
-| `name` | packages/core/src/config/schema.ts:1794 | 278 |
+| `name` | packages/core/src/config/schema.ts:1794 | 279 |
 | `network` | packages/core/src/config/schema.ts:670 | 43 |
 | `node` | packages/core/src/config/schema.ts:945 | 194 |
 | `normalizeDelegationToEnglish` | packages/core/src/config/schemas/orchestration.ts:507 | 2 |
@@ -291,7 +291,7 @@ Every public schema field, where it is declared, and how many production files r
 | `otlpEndpoint` | packages/core/src/config/schema.ts:533 | 2 |
 | `otlpHeaders` | packages/core/src/config/schema.ts:535 | 1 |
 | `outputSecretScan` | packages/core/src/config/schema.ts:1122 | 5 |
-| `oversight` | packages/core/src/config/schemas/effort.ts:52 | 10 |
+| `oversight` | packages/core/src/config/schemas/effort.ts:52 | 9 |
 | `pageSpeedInsightsApiKey` | packages/core/src/config/schema.ts:1061 | 1 |
 | `pageTimeoutMs` | packages/core/src/config/schemas/retrieval.ts:143 | 1 |
 | `params` | packages/core/src/config/schema.ts:1189 | 52 |
@@ -366,10 +366,10 @@ Every public schema field, where it is declared, and how many production files r
 | `riskGatedQA` | packages/core/src/config/schemas/effort.ts:47 | 6 |
 | `role` | packages/core/src/config/schema.ts:821 | 90 |
 | `rolesClaim` | packages/core/src/config/schema.ts:380 | 1 |
-| `routing` | packages/core/src/config/schema.ts:227 | 67 |
+| `routing` | packages/core/src/config/schema.ts:227 | 68 |
 | `sampleRate` | packages/core/src/config/schema.ts:537 | 2 |
 | `sandboxShellExec` | packages/core/src/config/schema.ts:1124 | 2 |
-| `scene` | packages/core/src/config/schema.ts:1213 | 66 |
+| `scene` | packages/core/src/config/schema.ts:1213 | 67 |
 | `scopes` | packages/core/src/config/schema.ts:376 | 22 |
 | `searchTimeoutMs` | packages/core/src/config/schemas/retrieval.ts:46 | 2 |
 | `searxngBaseUrl` | packages/core/src/config/schemas/retrieval.ts:26 | 1 |
@@ -404,7 +404,7 @@ Every public schema field, where it is declared, and how many production files r
 | `splitOrchestrationPrompt` | packages/core/src/config/schema.ts:1687 | 2 |
 | `stagedArtifactBuildDirective` | packages/core/src/config/schemas/orchestration.ts:432 | 1 |
 | `stagedArtifactBuilds` | packages/core/src/config/schemas/orchestration.ts:406 | 1 |
-| `steps` | packages/core/src/config/schema.ts:1256 | 40 |
+| `steps` | packages/core/src/config/schema.ts:1256 | 41 |
 | `stopPhrases` | packages/core/src/config/schemas/multimodal.ts:75 | 2 |
 | `store` | packages/core/src/config/schema.ts:1489 | 134 |
 | `subAgentDisagreementVerify` | packages/core/src/config/schemas/orchestration.ts:578 | 2 |
@@ -434,9 +434,9 @@ Every public schema field, where it is declared, and how many production files r
 | `toolCallsPerTurn` | packages/core/src/config/schema.ts:256 | 1 |
 | `toolCapMultiplier` | packages/core/src/config/schemas/effort.ts:45 | 1 |
 | `toolMode` | packages/core/src/config/schema.ts:262 | 5 |
-| `toolName` | packages/core/src/config/schemas/multimodal.ts:17 | 65 |
+| `toolName` | packages/core/src/config/schemas/multimodal.ts:17 | 66 |
 | `toolRerankMinTools` | packages/core/src/config/schemas/orchestration.ts:585 | 2 |
-| `tools` | packages/core/src/config/schema.ts:824 | 167 |
+| `tools` | packages/core/src/config/schema.ts:824 | 168 |
 | `topK` | packages/core/src/config/schema.ts:160 | 7 |
 | `topP` | packages/core/src/config/schema.ts:159 | 4 |
 | `transport` | packages/core/src/config/schema.ts:657 | 25 |

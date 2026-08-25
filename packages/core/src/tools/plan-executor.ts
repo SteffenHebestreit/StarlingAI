@@ -112,6 +112,8 @@ function buildStepTask(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<
 
 interface StepRun {
   status: TurnPlanStepStatus;
+  /** The call this step actually made, for the turn to account for as its own. */
+  call?: { tool: string; success: boolean; workflowNotFound?: boolean };
   detail?: string;
   result?: string;
   /** Artifacts the step produced, propagated so the parent turn can surface them as downloads. */
@@ -175,6 +177,9 @@ function dispatchTargetOf(step: TurnPlanStep): string | null {
 async function runStep(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<string, string>, ctx: ToolContext): Promise<StepRun> {
   const dispatch = dispatchFor(plan, step, results);
   if ("manual" in dispatch) return { status: "manual", detail: dispatch.manual };
+  /** Stamped on every outcome below, so nothing dispatched goes unreported to the turn. */
+  const made = (success: boolean, workflowNotFound = false): StepRun["call"] =>
+    ({ tool: dispatch.tool, success, ...(workflowNotFound ? { workflowNotFound: true } : {}) });
   // ToolContext.allowedTools is a contract on every tool that fans out to other tools: it must not
   // reach outside the caller's grant. This one dispatches a tool name the MODEL wrote into a plan,
   // so without the check a step could name anything the tier gate happens to permit.
@@ -195,7 +200,7 @@ async function runStep(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<
   try {
     const result = await executeTool(dispatch.tool, dispatch.args, ctx);
     if (!result.success) {
-      return { status: "failed", detail: (result.error ?? "step failed").slice(0, 300) };
+      return { status: "failed", detail: (result.error ?? "step failed").slice(0, 300), call: made(false) };
     }
     // A DELEGATION CAN FAIL ON A SUCCESSFUL ToolResult. delegate_to_agent returns success:true and
     // carries the verdict in metadata: the sub-agent's own <final_answer status="failure">, a
@@ -213,6 +218,7 @@ async function runStep(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<
         return {
           status: "failed",
           detail: `the specialist reported failure (${outcome ?? terminalState ?? "no usable result"})`,
+          call: made(false),
         };
       }
     }
@@ -224,6 +230,7 @@ async function runStep(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<
       return {
         status: "failed",
         detail: `no workflow named "${step.workflow}" exists — re-record the step with a real workflow name, or make it a delegate step`,
+        call: made(true, true),
       };
     }
     // Artifacts have to be forwarded explicitly: collectTurnArtifactAttachments walks the metadata
@@ -235,10 +242,15 @@ async function runStep(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<
     return {
       status: "done",
       result: result.output,
+      call: made(true),
       ...(Array.isArray(stepArtifacts) && stepArtifacts.length > 0 ? { artifacts: stepArtifacts } : {}),
     };
   } catch (err) {
-    return { status: "failed", detail: err instanceof Error ? err.message.slice(0, 300) : String(err).slice(0, 300) };
+    return {
+      status: "failed",
+      detail: err instanceof Error ? err.message.slice(0, 300) : String(err).slice(0, 300),
+      call: made(false),
+    };
   }
 }
 
@@ -355,6 +367,8 @@ registerTool({
     const ran: string[] = [];
     /** Dispatched successfully IN THIS CALL — what the turn may add to its own counters. */
     const dispatchedOk: string[] = [];
+    /** Every call this run made, reported so the TURN applies its own accounting to each. */
+    const nestedCalls: Array<{ tool: string; success: boolean; workflowNotFound?: boolean }> = [];
     // Steps the delegate budget has deferred. Held out of the frontier rather than breaking the
     // loop: planFrontier hands back ONE step per round unless a parallelGroup widens it, so
     // stopping at the first capped delegate abandoned everything behind it — including `direct`
@@ -394,6 +408,7 @@ registerTool({
         batch.map((step) => runStep(plan, step, results, batchCtx).then((run) => ({ step, run }))),
       );
       for (const { step, run } of outcomes) {
+        if (run.call) nestedCalls.push(run.call);
         if (run.status === "done") dispatchedOk.push(step.id);
         statuses.set(step.id, run.status);
         if (run.detail) details.set(step.id, run.detail);
@@ -535,16 +550,14 @@ registerTool({
         manual: manual.length,
         pending: pending.length,
         executed: ran,
-        // THIS CALL's successful delegations, not the plan's running total. The turn ADDS this to
-        // its delegation count, so reporting every done step again on a resumed call counted the
-        // same delegations two and three times over — and that number is the turn scorecard's,
-        // gates the shared-facts refresh, and feeds the oversight judge. Failed steps are excluded
-        // because a `reuse` step whose workflow does not exist never delegated at all, and counting
-        // it would re-open the defect that run_workflow's call-time counting was reverted for
-        // (audit 1303e254). A plain `direct` tool step is not orchestration either.
+        // EVERY CALL THIS RUN MADE, for the turn to account for as its own — the delegation tally,
+        // the workflow-completed flag, the per-turn budget, and whatever else that tail grows.
+        // Reported rather than re-derived here: the turn owns those rules, and re-deriving them was
+        // what made every one of them go missing for plan steps in the first place
+        // (agent/turn-tool-contribution.ts).
+        nestedCalls,
+        // Reported for the audit line and the report, not consumed by the turn.
         delegated: dispatchedOk.filter((id) => byId.get(id)?.kind !== "direct").length,
-        // Whether a workflow actually RAN here, so the turn can stop demanding one it already got.
-        workflowsRun: dispatchedOk.filter((id) => byId.get(id)?.kind === "reuse").length,
         ...(artifacts.length > 0 ? { artifacts } : {}),
       },
     };

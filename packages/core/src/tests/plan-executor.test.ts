@@ -534,12 +534,21 @@ describe("execute_plan dispatches each step to the tool that runs that kind", ()
     expect(second.metadata?.["delegated"]).toBe(0);   // nothing was dispatched this call
   });
 
-  it("reports that a workflow ran, so the turn stops demanding one", async () => {
+  it("reports every call it made, so the turn applies its own accounting to each", async () => {
+    // Not a bespoke count per behaviour — the calls themselves. The turn owns the rules for what a
+    // call contributes (delegation tally, workflow-completed flag, per-turn budget), and
+    // re-deriving them here is what made each of them go missing for plan steps in the first place.
     await persistTurnPlan(SESSION, basePlan([
-      { id: "s1", description: "run the flow", kind: "reuse", workflow: "research_pack" },
+      { id: "s1", description: "run the flow", kind: "reuse", workflow: "research_pack", parallelGroup: 1 },
+      { id: "s2", description: "research", kind: "delegate", parallelGroup: 1 },
+      { id: "s3", description: "decide the framing", kind: "direct", parallelGroup: 1 },
     ]));
+
     const result = await run();
-    expect(result.metadata?.["workflowsRun"]).toBe(1);
+    expect(result.metadata?.["nestedCalls"]).toEqual([
+      { tool: "run_workflow", success: true },
+      { tool: "delegate_to_agent", success: true },
+    ]);   // s3 dispatched nothing, so it contributes nothing
   });
 
   it("takes the loadable set from the caller, not the deployment config", async () => {

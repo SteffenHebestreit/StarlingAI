@@ -40,6 +40,12 @@ import { childLogger } from "../logger.js";
 import type { AgentSession, SessionHistoryMessage } from "./session.js";
 import { classifyToolIntervention } from "./interventions.js";
 import { getMainAssistantToolNames, getLoadableDirectMainToolNames, type MainAssistantToolMode } from "./default-tools.js";
+import {
+  DELEGATION_WAIT_TOOL_NAMES,
+  toolCallContribution,
+  toolResultContribution,
+  readNestedToolCalls,
+} from "./turn-tool-contribution.js";
 import { longRunningGenerationManager } from "./long-running-generation.js";
 import { turnSteeringManager } from "./turn-steering.js";
 import { registerSessionAbortController, deregisterSessionAbortController } from "./warden.js";
@@ -1044,18 +1050,6 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
     markOrchestratorIdle();
   }
 }
-
-/** Tools where the orchestrator BLOCKS awaiting delegated children — their wall-clock duration is the
- *  "parent waiting for kids" time excluded from the turn budget by D5 (excludeDelegationWaitFromTurnBudget). */
-const DELEGATION_WAIT_TOOL_NAMES = new Set([
-  "delegate_to_agent", "swarm_delegate", "parallel_delegate", "run_task_graph", "run_workflow",
-  // execute_plan blocks on exactly the same children — it just issues them a level down, where this
-  // loop cannot see them. Left out, a plan of four five-minute steps had none of its waiting
-  // credited back: the deadline never moved, later steps were handed the floor of the budget, and
-  // the runtime and gateway cut the turn off mid-plan. The better the plan, the worse it got — and
-  // the plan-first guidance now tells the model to take exactly this path.
-  "execute_plan",
-]);
 
 async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
   const config = getConfig();
@@ -3250,22 +3244,12 @@ async function _runTurn(
       }
 
       toolCallsRequested += 1;
-      // F29: Count delegation and share_finding calls for the turn scorecard
-      if (
-        tc.name === "delegate_to_agent" ||
-        tc.name === "parallel_delegate" ||
-        tc.name === "run_task_graph" ||
-        tc.name === "swarm_delegate" ||
-        tc.name === "create_ephemeral_agent"
-        // run_workflow is deliberately NOT here. This block runs BEFORE the call, and bumps on the
-        // raw request, so counting it made a workflow that never ran — an ambiguous name, an
-        // unknown scene, a recursive re-entry — read as executed orchestration. That poisoned
-        // signal disables the whole honesty chain for a source-sensitive turn (audit 1303e254);
-        // the honest signal is workflowRunCompletedThisTurn, set below on result.success.
-        // execute_plan is likewise absent here: it dispatches nothing until it runs, and what it
-        // actually dispatched is counted from its result.
-      ) {
-        _turnDelegationCount += 1;
+      // F29: Count delegation and share_finding calls for the turn scorecard. The call-time half of
+      // the tail (agent/turn-tool-contribution.ts) — shared with the plan executor, so a step it
+      // dispatches counts exactly as the same call would here.
+      const contribution = toolCallContribution(tc.name);
+      if (contribution.delegations > 0) {
+        _turnDelegationCount += contribution.delegations;
       } else if (tc.name === "share_finding") {
         _turnShareFindingCount += 1;
         // G33: Collect finding text for trajectory cache
@@ -3619,7 +3603,7 @@ async function _runTurn(
           : [];
       } else if (tc.name === "run_workflow" && workflowMatchesFromResult.length > 0) {
         workflowSearchMatches = mergeWorkflowCatalogMatches(workflowSearchMatches, workflowMatchesFromResult);
-      } else if (tc.name === "run_workflow" && result.success) {
+      } else if (toolResultContribution(tc.name, result).workflowCompleted) {
         workflowRunCompletedThisTurn = true;
       }
 
@@ -3628,19 +3612,20 @@ async function _runTurn(
       // refresh before final synthesis is gated on this counter, as is the evidence-anchoring
       // grounding gate, and the scorecard reported delegationCount 0 for a turn that ran N
       // specialists. Counted from the result, so only steps that really dispatched count.
-      if (tc.name === "execute_plan") {
-        const delegated = result.metadata?.["delegated"];
-        if (typeof delegated === "number" && delegated > 0) {
-          _turnDelegationCount += delegated;
-        }
-        // A `reuse` step IS a workflow execution; it just runs through executeTool inside the plan,
-        // where the run_workflow branch above never sees it. Without this the workflow-execution
-        // guard still believed no workflow had run and issued a COMPLIANCE CORRECTION demanding one
-        // the plan had already completed.
-        const workflowsRun = result.metadata?.["workflowsRun"];
-        if (typeof workflowsRun === "number" && workflowsRun > 0) {
+      // THE SAME TAIL, FOR THE CALLS A TOOL MADE ON THE TURN'S BEHALF. execute_plan reports each
+      // step it dispatched, and every one is accounted for exactly as if the model had asked for it
+      // here: the delegation tally, the workflow-completed flag, the per-turn budget. This is the
+      // seam that stops the next behaviour added above from silently skipping plan steps.
+      for (const nested of readNestedToolCalls(result.metadata)) {
+        const nestedContribution = toolCallContribution(nested.tool);
+        _turnDelegationCount += nestedContribution.delegations;
+        if (toolResultContribution(nested.tool, {
+          success: nested.success,
+          ...(nested.workflowNotFound ? { metadata: { workflowNotFound: true } } : {}),
+        }).workflowCompleted) {
           workflowRunCompletedThisTurn = true;
         }
+        _turnToolCallCounts.set(nested.tool, (_turnToolCallCounts.get(nested.tool) ?? 0) + 1);
       }
 
       pendingSearchAgentSuggestion = tc.name === "search_agents"
