@@ -40,6 +40,27 @@ export const GENERATED_SUBDIR = "generated";
 export const UPLOADS_SUBDIR = "uploads";
 
 /**
+ * THE WORKING ROOT FOR THE AMBIENT USER: `<shared>/users/<segment>`, or the shared root when
+ * there is nobody to partition by (auth off, or an unattended run).
+ *
+ * This is the boundary the in-process partition could not be. A path resolver can refuse a
+ * path; it cannot stop a sandboxed `shell_exec` from reading a sibling directory, because the
+ * container is handed a mount, not a resolver. Giving each user their own ROOT makes the mount
+ * itself the boundary: bind that directory and there is no sibling to reach, and `..` is
+ * already refused by the workspace-escape check.
+ *
+ * CONFIG AND PLATFORM STATE STAY AT THE SHARED ROOT. The config zones (agents/, jobs/, scenes/,
+ * tools/) describe the deployment, are authored through validated tools, and are swept by the
+ * config loader — they are not one person's work. Same for the ledgers under the state dir. The
+ * two maintenance agents that edit those zones run with workspaceAccess "full" and keep the
+ * shared root; everyone else gets their own.
+ */
+export function userWorkspaceRoot(sharedRoot: string, userId?: string): string {
+  const segment = activeUserScopeSegment(userId);
+  return segment ? resolve(sharedRoot, USERS_SUBDIR, segment) : sharedRoot;
+}
+
+/**
  * THE ARTIFACT ZONE IS ONE DIRECTORY SHARED BY EVERY TURN THE DEPLOYMENT HAS EVER RUN.
  *
  * That is fine for a single operator and wrong the moment two accounts use the same gateway:
@@ -58,8 +79,9 @@ export const UPLOADS_SUBDIR = "uploads";
  * this.
  */
 export function generatedZoneRel(): string {
-  const segment = activeUserScopeSegment();
-  return segment ? `${GENERATED_SUBDIR}/${USERS_SUBDIR}/${segment}` : GENERATED_SUBDIR;
+  // Plain, always. The user segment lives in the ROOT now (userWorkspaceRoot above) — applying
+  // it here as well would produce <root>/users/<seg>/generated/users/<seg>.
+  return GENERATED_SUBDIR;
 }
 
 /** The absolute artifact zone for the ambient user. */
@@ -67,30 +89,6 @@ export function generatedZoneDir(workspacePath: string): string {
   return resolve(workspacePath, generatedZoneRel());
 }
 
-/**
- * Put a path that addresses the artifact zone into the AMBIENT USER'S partition of it.
- *
- * Three cases, and the middle one is the reason this exists rather than a `join` at each call
- * site. Already in this user's partition: left alone. In ANOTHER user's partition: refused —
- * the same shape of refusal as escaping the workspace, because it is the same kind of mistake.
- * Addressing the zone without naming a partition (`generated/app/index.html` — the form every
- * tool description in this repo teaches the model to type): re-rooted into this user's
- * partition, so that `write_file("generated/x")` followed by `read_file("generated/x")` is the
- * same file, which is the property the whole zone-rooting design rests on.
- */
-function partitionGeneratedPath(relativePath: string, workspacePath: string): { resolved: string; relativePath: string } | null {
-  const zoneRel = generatedZoneRel();
-  if (zoneRel === GENERATED_SUBDIR) return null;                       // nothing to partition by
-  const top = relativePath.split("/")[0] ?? "";
-  if (top !== GENERATED_SUBDIR) return null;                           // not the artifact zone
-  if (relativePath === zoneRel || relativePath.startsWith(`${zoneRel}/`)) return null;  // already mine
-  if (relativePath.startsWith(`${GENERATED_SUBDIR}/${USERS_SUBDIR}/`)) {
-    throw new Error("Path belongs to another user's artifact zone");
-  }
-  const rest = relativePath === GENERATED_SUBDIR ? "" : relativePath.slice(GENERATED_SUBDIR.length + 1);
-  const scoped = rest ? `${zoneRel}/${rest}` : zoneRel;
-  return { resolved: resolve(workspacePath, scoped), relativePath: scoped };
-}
 
 /**
  * Swarm-invented dynamic tools (JSON bundles managed by tools/dynamic-tools.ts).
@@ -154,16 +152,11 @@ export function resolvePathWithinWorkspace(inputPath: string, workspacePath: str
     const topSegment = relativePath === "." ? "" : (relativePath.split("/")[0] ?? "");
     if (!SCOPED_VISIBLE_ZONES.has(topSegment)) {
       const scopedRel = relativePath === "." ? GENERATED_SUBDIR : `${GENERATED_SUBDIR}/${relativePath}`;
-      return partitionGeneratedPath(scopedRel, workspacePath)
-        ?? { resolved: resolve(workspacePath, scopedRel), relativePath: scopedRel };
+      return { resolved: resolve(workspacePath, scopedRel), relativePath: scopedRel };
     }
   }
 
-  // Last, so it applies to a path that arrived naming the zone AND to one the scope re-rooting
-  // just put there. This is also what makes the gateway's workspace routes user-scoped: they
-  // resolve through here under the ambient caller, so a request for another account's artifact
-  // is refused and a request for `generated/...` reads the caller's own.
-  return partitionGeneratedPath(relativePath, workspacePath) ?? { resolved: resolvedPath, relativePath };
+  return { resolved: resolvedPath, relativePath };
 }
 
 /**

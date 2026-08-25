@@ -19,7 +19,8 @@ import { safeUserSegment } from "../runtime/user-scope.js";
  */
 describe("workspace routes answer to the caller's own artifact zone", () => {
   const ws = mkdtempSync(join(tmpdir(), "sai-route-scope-"));
-  const zone = (user: string) => join(ws, "generated", "users", safeUserSegment(user));
+  // The user's ROOT, with their working zones inside it — the layout the routes resolve against.
+  const zone = (user: string) => join(ws, "users", safeUserSegment(user), "generated");
 
   mkdirSync(zone("alice"), { recursive: true });
   mkdirSync(zone("bob"), { recursive: true });
@@ -55,11 +56,13 @@ describe("workspace routes answer to the caller's own artifact zone", () => {
   });
 
   it("refuses another account's artifact, opaquely", async () => {
-    const bobs = `generated/users/${safeUserSegment("bob")}/secret.html`;
+    // Aimed at another account's root, which is outside this caller's own.
+    const bobs = `../${safeUserSegment("bob")}/generated/secret.html`;
     const res = await asUser("alice", bobs);
-    // 404, not 403: a distinct status confirms the file is there, which is most of what an
-    // enumeration wants to learn.
-    expect(res.status).toBe(404);
+    // 400 (escapes the workspace), and still opaque about existence: with the ROOT as the
+    // boundary the answer is identical whether or not that file is there, because the request
+    // never gets far enough to look.
+    expect(res.status).toBe(400);
     expect(await res.text()).not.toContain("bob's");
   });
 

@@ -162,10 +162,23 @@ describe("the container payload carries the owning user", () => {
 describe("workspace binds account for the mount source's offset", () => {
   const DOCKERIZED = { mountSource: "/run/desktop/mnt/host/f/StarlingAI", fallbackVolume: "gc-workspace" };
 
-  it("binds the mount source at /workspace, so workspacePath resolves underneath it", () => {
-    // NOT `<source>:/workspace/workspace` — that is the off-by-one.
+  it("binds the host equivalent of the path it was handed, at that same path", () => {
+    // The off-by-one was `<source>:/workspace/workspace`, which put the REPO where the workspace
+    // should be. The fix maps the container path to its host equivalent instead — and binding
+    // exactly that directory is also what makes a per-user root a boundary rather than a
+    // convention: there is no sibling in the mount to reach.
     expect(resolveDockerWorkspaceBind("/workspace/workspace", DOCKERIZED))
-      .toBe("/run/desktop/mnt/host/f/StarlingAI:/workspace");
+      .toBe("/run/desktop/mnt/host/f/StarlingAI/workspace:/workspace/workspace");
+  });
+
+  it("binds only the user's own root when the workspace is partitioned", () => {
+    expect(resolveDockerWorkspaceBind("/workspace/workspace/users/alice-abc123", DOCKERIZED))
+      .toBe("/run/desktop/mnt/host/f/StarlingAI/workspace/users/alice-abc123:/workspace/workspace/users/alice-abc123");
+  });
+
+  it("falls back to the whole tree when the source is a volume it cannot subdivide", () => {
+    expect(resolveDockerWorkspaceBind("/workspace/workspace", { mountSource: "", fallbackVolume: "gc-workspace" }))
+      .toBe("gc-workspace:/workspace");
   });
 
   it("binds at the workspace's own path when the source IS the workspace", () => {
@@ -191,8 +204,5 @@ describe("workspace binds account for the mount source's offset", () => {
     // and docker created a directory of that name.
     expect(resolveHostWorkspacePath("/workspace/workspace", "generated/my-app", { mountSource: "", fallbackVolume: "gc-workspace" }))
       .toBeNull();
-    // The whole-tree bind still works in that deployment — only the subdirectory form cannot.
-    expect(resolveDockerWorkspaceBind("/workspace/workspace", { mountSource: "", fallbackVolume: "gc-workspace" }))
-      .toBe("gc-workspace:/workspace");
   });
 });

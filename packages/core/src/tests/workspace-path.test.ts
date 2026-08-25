@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { resolve } from "node:path";
-import { resolvePathWithinWorkspace, resolveWorkspaceWritePath, generatedZoneRel, GENERATED_SUBDIR } from "../tools/workspace-path.js";
+import { resolvePathWithinWorkspace, resolveWorkspaceWritePath, generatedZoneRel, userWorkspaceRoot, GENERATED_SUBDIR } from "../tools/workspace-path.js";
 import { runWithRequestContext } from "../runtime/request-context.js";
 import { safeUserSegment } from "../runtime/user-scope.js";
 import * as configLoader from "../config/loader.js";
@@ -131,100 +131,69 @@ describe("write-zoning: scope-confined agents cannot write live-config zones via
  * multi-user auth has no user to partition by and must keep writing where it always did,
  * rather than into a bucket named after nobody.
  */
-describe("the artifact zone partitions per user", () => {
-  const WSP = resolve("/tmp/ws");
+describe("the workspace root is per-user", () => {
+  const SHARED = resolve("/tmp/ws");
   const mockAuth = (enabled: boolean): void => {
     vi.spyOn(configLoader, "getConfig").mockReturnValue(
       { auth: { enabled } } as unknown as ReturnType<typeof configLoader.getConfig>,
     );
   };
   const asUser = <T,>(userId: string, fn: () => T): T => runWithRequestContext({ userId }, fn);
-  const alice = () => `generated/users/${safeUserSegment("alice")}`;
+  const aliceRoot = () => resolve(SHARED, "users", safeUserSegment("alice"));
 
   afterEach(() => { vi.restoreAllMocks(); });
 
   it("is a no-op with auth off — the single-operator default is untouched", () => {
     mockAuth(false);
-    expect(asUser("alice", () => generatedZoneRel())).toBe(GENERATED_SUBDIR);
-    expect(asUser("alice", () => resolveWorkspaceWritePath("index.html", WSP)).relativePath)
-      .toBe("generated/index.html");
+    expect(asUser("alice", () => userWorkspaceRoot(SHARED))).toBe(SHARED);
   });
 
   it("is a no-op with auth ON but no ambient user — an unattended run stays shared", () => {
-    // The trap this avoids: gating on the flag alone sends a scheduled job, an inbound MCP
-    // call or a webhook trigger into a bucket named after nobody, and splits one logical zone
-    // across two locations depending on which entry point wrote it.
+    // The trap: gating on the flag alone sends a scheduled job, an inbound MCP call or a webhook
+    // trigger into a root named after nobody, and splits one logical workspace in two.
     mockAuth(true);
-    expect(generatedZoneRel()).toBe(GENERATED_SUBDIR);
-    expect(resolveWorkspaceWritePath("index.html", WSP).relativePath).toBe("generated/index.html");
+    expect(userWorkspaceRoot(SHARED)).toBe(SHARED);
   });
 
-  it("roots a write into the ambient user's partition", () => {
+  it("gives each account its own root under the shared one", () => {
     mockAuth(true);
-    const r = asUser("alice", () => resolveWorkspaceWritePath("app/index.html", WSP));
-    expect(r.relativePath).toBe(`${alice()}/app/index.html`);
-    expect(r.resolved).toBe(resolve(WSP, r.relativePath));
+    expect(asUser("alice", () => userWorkspaceRoot(SHARED))).toBe(aliceRoot());
+    expect(asUser("bob", () => userWorkspaceRoot(SHARED))).not.toBe(aliceRoot());
   });
 
-  it("re-roots the `generated/...` form every tool description teaches", () => {
-    // THE CASE THAT DECIDES WHETHER THIS WORKS AT ALL. Prompts, tool descriptions and the
-    // stub-marker paths the runner reports all use `generated/x` — if that short-circuits as
-    // "already rooted" it lands in the shared zone and the partition is decorative.
+  it("puts the working zones inside that root, with no second partition", () => {
+    // The zone name stays plain: the user segment lives in the ROOT, and applying it here too
+    // would produce <root>/users/<seg>/generated/users/<seg>.
     mockAuth(true);
-    expect(asUser("alice", () => resolveWorkspaceWritePath("generated/app/index.html", WSP)).relativePath)
-      .toBe(`${alice()}/app/index.html`);
-    expect(asUser("alice", () => resolvePathWithinWorkspace("generated/app/index.html", WSP)).relativePath)
-      .toBe(`${alice()}/app/index.html`);
+    expect(asUser("alice", () => generatedZoneRel())).toBe(GENERATED_SUBDIR);
+    const r = asUser("alice", () => resolveWorkspaceWritePath("app/index.html", aliceRoot()));
+    expect(r.relativePath).toBe("generated/app/index.html");
+    expect(r.resolved).toBe(resolve(aliceRoot(), "generated/app/index.html"));
   });
 
-  it("keeps read-after-write on the same file, whichever form is used", () => {
+  it("makes a sibling account unreachable by the boundary that already existed", () => {
+    // No new refusal rule: another account is simply outside this root, so it escapes the
+    // workspace boundary exactly like any other outside path. That is the point of moving the
+    // partition up — a mount of this root has no sibling in it to reach.
     mockAuth(true);
-    const written = asUser("alice", () => resolveWorkspaceWritePath("app/index.html", WSP));
-
-    // Zone-addressed forms resolve to the written file from any execution: this is the
-    // property the partition had to preserve, since `generated/app/index.html` is what tool
-    // output, prompts and artifact records hand back to the model.
-    for (const form of ["generated/app/index.html", written.relativePath]) {
-      expect(asUser("alice", () => resolvePathWithinWorkspace(form, WSP)).resolved).toBe(written.resolved);
-    }
-
-    // The BARE form resolves workspace-wide unless the agent is scope-confined — unchanged
-    // pre-existing behaviour (see "leaves reads workspace-wide" above). Under the scope every
-    // real agent runs with, it lands on the same file the write did.
-    const scoped = runWithRequestContext({ userId: "alice", workspaceScope: "generated" },
-      () => resolvePathWithinWorkspace("app/index.html", WSP));
-    expect(scoped.resolved).toBe(written.resolved);
+    const bobSegment = safeUserSegment("bob");
+    expect(() => asUser("alice", () => resolvePathWithinWorkspace(`../${bobSegment}/generated/x`, aliceRoot())))
+      .toThrow(/escapes workspace boundary/);
   });
 
-  it("refuses a path that names another account's partition", () => {
+  it("keeps the config zones out of the user root, where the shared root still has them", () => {
+    // agents/ jobs/ scenes/ tools/ describe the DEPLOYMENT and are swept by the config loader.
+    // They live at the shared root; the two workspaceAccess:"full" agents work from there.
     mockAuth(true);
-    const bobs = `generated/users/${safeUserSegment("bob")}/secret.html`;
-    expect(() => asUser("alice", () => resolvePathWithinWorkspace(bobs, WSP)))
-      .toThrow(/another user's artifact zone/);
-    expect(() => asUser("alice", () => resolveWorkspaceWritePath(bobs, WSP)))
-      .toThrow(/another user's artifact zone/);
+    expect(asUser("alice", () => userWorkspaceRoot(SHARED)).startsWith(SHARED)).toBe(true);
+    expect(asUser("alice", () => userWorkspaceRoot(SHARED))).not.toBe(SHARED);
   });
 
-  it("gives two accounts two zones, and neither the bare one", () => {
-    mockAuth(true);
-    const a = asUser("alice", () => resolveWorkspaceWritePath("index.html", WSP)).resolved;
-    const b = asUser("bob", () => resolveWorkspaceWritePath("index.html", WSP)).resolved;
-    expect(a).not.toBe(b);
-    expect(a).not.toBe(resolve(WSP, "generated", "index.html"));
-  });
-
-  it("keeps the TOP segment `generated`, which the zone-membership tests read", () => {
-    // SCOPED_VISIBLE_ZONES and the config loader's non-config sweep both test the depth-0
-    // directory name. A partition that changed it would drag the whole subtree into the
-    // config merge.
-    mockAuth(true);
-    expect(asUser("alice", () => generatedZoneRel()).split("/")[0]).toBe(GENERATED_SUBDIR);
-  });
-
-  it("still re-roots a scope-confined agent out of the platform zones, into its own partition", () => {
+  it("still re-roots a scope-confined agent into its own working zone", () => {
     mockAuth(true);
     const r = runWithRequestContext({ userId: "alice", workspaceScope: "generated" },
-      () => resolvePathWithinWorkspace("agents/10-core-agents.jsonc", WSP));
-    expect(r.relativePath).toBe(`${alice()}/agents/10-core-agents.jsonc`);
+      () => resolvePathWithinWorkspace("agents/10-core-agents.jsonc", aliceRoot()));
+    expect(r.relativePath).toBe("generated/agents/10-core-agents.jsonc");
+    expect(r.resolved.startsWith(aliceRoot())).toBe(true);
   });
 });

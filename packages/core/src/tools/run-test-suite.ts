@@ -10,7 +10,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
-import { resolveDockerWorkspaceMountSource } from "./workspace-mount.js";
+import { resolveDockerWorkspaceBind } from "./workspace-mount.js";
 import { assertSafeDockerRunArgs } from "./docker-safety.js";
 
 const log = childLogger("tool:run-test-suite");
@@ -115,7 +115,9 @@ registerTool({
         ? rawWorkdir
         : "/workspace";
 
-    const workspaceMountSource = resolveDockerWorkspaceMountSource(ctx.workspacePath);
+    // The WORKSPACE at /workspace — see resolveDockerWorkspaceBind. Binding the deployment
+    // mount source there made /workspace the repo in the compose layout.
+    const workspaceBind = resolveDockerWorkspaceBind(ctx.workspacePath, { at: "/workspace" });
 
     const dockerArgs = [
       "run", "--rm",
@@ -125,7 +127,7 @@ registerTool({
       "--pids-limit=128",
       "--cap-drop=ALL",
       "--security-opt=no-new-privileges",
-      "-v", `${workspaceMountSource}:/workspace`,
+      "-v", workspaceBind,
       "-w", workdir,
       SANDBOX_IMAGE,
       "sh", "-lc", fullCommand,

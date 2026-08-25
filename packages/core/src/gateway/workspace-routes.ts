@@ -10,7 +10,7 @@ import { basename, extname, resolve, sep } from "node:path";
 import { ZipFile } from "yazl";
 import { verifyToken, extractBearerToken, authenticatedUser } from "./auth.js";
 import { getConfig } from "../config/loader.js";
-import { resolvePathWithinWorkspace, UPLOADS_SUBDIR } from "../tools/workspace-path.js";
+import { resolvePathWithinWorkspace, userWorkspaceRoot, UPLOADS_SUBDIR } from "../tools/workspace-path.js";
 import { runWithRequestContext, currentUserId } from "../runtime/request-context.js";
 import { getServedApp, injectBaseHref } from "../tools/serve-app.js";
 import { buildContentDisposition } from "./content-disposition.js";
@@ -141,16 +141,16 @@ export function registerWorkspaceRoutes(app: Hono): void {
   }
 
   function resolveWorkspaceTarget(requestedPath: string): { resolved: string; relativePath: string } {
-    return resolvePathWithinWorkspace(requestedPath, getConfig().workspacePath);
+    // THE CALLER'S OWN ROOT. These routes hand workspace files back over HTTP, so resolving
+    // them against the shared root would serve one account the other's work no matter how the
+    // filesystem is partitioned. Rooting at the ambient caller means a request for
+    // "generated/index.html" reads THEIR generated/, and a path aimed at another account
+    // escapes this root and is refused by the workspace-boundary check like any other escape.
+    return resolvePathWithinWorkspace(requestedPath, userWorkspaceRoot(getConfig().workspacePath));
   }
 
   function mapWorkspaceRouteError(error: unknown): { status: 400 | 404 | 500; message: string } {
     if (error instanceof Error) {
-      // Opaque, and 404 rather than 403: a distinct status would confirm the other account's
-      // file is there, which is most of what an enumeration wants to learn.
-      if (/another user's artifact zone/i.test(error.message)) {
-        return { status: 404, message: "Workspace path not found" };
-      }
       if (/workspace boundary|relative path within the workspace/i.test(error.message)) {
         return { status: 400, message: "Path must stay within the workspace" };
       }

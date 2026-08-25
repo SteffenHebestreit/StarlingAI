@@ -6,7 +6,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
-import { resolveDockerWorkspaceMountSource } from "./workspace-mount.js";
+import { resolveDockerWorkspaceBind } from "./workspace-mount.js";
 import { assertSafeDockerRunArgs } from "./docker-safety.js";
 import { isSensitiveWorkspacePath } from "./filesystem.js";
 
@@ -73,7 +73,12 @@ registerTool({
       }
     }
 
-    const workspaceMountSource = resolveDockerWorkspaceMountSource(ctx.workspacePath);
+    // The WORKSPACE at /workspace, not the deployment's mount source. See
+    // resolveDockerWorkspaceBind: binding the source there made /workspace the repo, so this
+    // sandbox's own contract ("paths are relative to /workspace") was false — and, now that
+    // the workspace root is per-user, binding it is also what keeps one account's shell out of
+    // another's files.
+    const workspaceBind = resolveDockerWorkspaceBind(ctx.workspacePath, { at: "/workspace" });
     const wrappedCommand = buildSandboxCommand(command, workdir);
 
     const dockerArgs = [
@@ -86,7 +91,7 @@ registerTool({
       "--tmpfs=/tmp:size=64m",            // Writable /tmp in memory
       "--cap-drop=ALL",                   // Drop all capabilities
       "--security-opt=no-new-privileges",
-      "-v", `${workspaceMountSource}:/workspace`,
+      "-v", workspaceBind,
       "-w", workdir,
       ...envArgs,
       SANDBOX_IMAGE,
@@ -254,7 +259,7 @@ registerTool({
       }
     }
 
-    const workspaceMountSource = resolveDockerWorkspaceMountSource(ctx.workspacePath);
+    const workspaceBind = resolveDockerWorkspaceBind(ctx.workspacePath, { at: "/workspace" });
 
     const dockerArgs = [
       "run", "--rm",
@@ -266,7 +271,7 @@ registerTool({
       "--tmpfs=/tmp:size=64m",
       "--cap-drop=ALL",
       "--security-opt=no-new-privileges",
-      "-v", `${workspaceMountSource}:/workspace`,
+      "-v", workspaceBind,
       "-w", "/workspace",
       ...envArgs,
       SANDBOX_IMAGE,

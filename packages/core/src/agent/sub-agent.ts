@@ -2620,15 +2620,21 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       );
     }
 
+    // A "full" agent maintains the deployment itself — it edits the config shards and runs
+    // git — so it works from the SHARED root, not from whoever asked it to. This is the one
+    // place scope and root are chosen together, which is why the exemption lives here.
+    const isFullScopeAgent = agentCfg.workspaceAccess === "full";
+    const effectiveWorkspacePath = isFullScopeAgent ? getConfig().workspacePath : opts.workspacePath;
+
     const toolContext: ToolContext = {
       sessionId: subSessionId,
-      workspacePath: opts.workspacePath,
+      workspacePath: effectiveWorkspacePath,
       // Workspace zoning: working agents see only generated/ + uploads/ (paths
       // outside re-root into generated/, mirroring the write rooting) so they
       // physically cannot wander into the platform's config zones or burn time
       // reading its docs (audit 0ac7d3fc). Core/self-maintenance agents opt in
       // to the whole workspace via workspaceAccess:"full" in their agent config.
-      workspaceScope: agentCfg.workspaceAccess === "full" ? "full" : "generated",
+      workspaceScope: isFullScopeAgent ? "full" : "generated",
       userId: opts.userId,
       ...(opts.kbAccessSessionId ? { kbAccessSessionId: opts.kbAccessSessionId } : {}),
       currentAgentName: opts.agentName,
@@ -2938,7 +2944,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     const recordOutcome = (
       fields: Parameters<typeof appendOutcome>[1],
     ): void => {
-      appendOutcome(opts.workspacePath, {
+      // The outcomes ledger describes the DEPLOYMENT's agents, and every reader resolves it
+      // against the shared root (tools/agent-routing.ts, gateway/sub-agent-routes.ts). Writing
+      // it against a per-user execution root would split one ledger into one per account, with
+      // the readers seeing only whatever the shared root happened to collect.
+      appendOutcome(getConfig().workspacePath, {
         ...fields,
         taskKeywords,
         sharedFindingsCount: shareFindinCallCount,

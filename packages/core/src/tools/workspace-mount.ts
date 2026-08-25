@@ -49,13 +49,53 @@ function mountSourceMapsToWorkspaceRoot(workspacePath: string): boolean {
  *
  * Outside a container the mount source IS the workspace, so it is bound at its own path, which
  * is what the in-container tools resolve against.
+ *
+ * AND IT BINDS EXACTLY THE DIRECTORY IT WAS HANDED. Once a workspace root is per-user
+ * (tools/workspace-path.ts userWorkspaceRoot), binding the deployment-wide source at /workspace
+ * would hand every container the whole tree including every other account — the resolver inside
+ * would confine it, but a shell inside the container answers to the mount, not the resolver. So
+ * the host equivalent of `workspacePath` is bound at `workspacePath`, and a container simply has
+ * no sibling directory to reach.
+ *
+ * Falls back to the whole-tree bind when the source is a named volume, which has no host path to
+ * subdivide — that deployment keeps today's behaviour rather than silently getting an empty
+ * mount, and the caller is the one that decides whether that is acceptable.
  */
 export function resolveDockerWorkspaceBind(
   workspacePath: string,
-  options: DockerWorkspaceMountOptions = {},
+  options: DockerWorkspaceBindOptions = {},
 ): string {
   const source = resolveDockerWorkspaceMountSource(workspacePath, options);
-  return `${source}:${mountSourceMapsToWorkspaceRoot(workspacePath) ? "/workspace" : workspacePath}`;
+  const at = options.at;
+  if (!mountSourceMapsToWorkspaceRoot(workspacePath)) return `${source}:${at ?? workspacePath}`;
+  const host = resolveHostPathUnderWorkspace(workspacePath, source);
+  if (!host) return `${source}:${at ?? "/workspace"}`;
+  return `${host}:${at ?? workspacePath}`;
+}
+
+export interface DockerWorkspaceBindOptions extends DockerWorkspaceMountOptions {
+  /**
+   * Expose the workspace at THIS container path instead of at its own.
+   *
+   * The shell sandboxes need it: their whole contract with the model is that `/workspace` is
+   * the workspace and paths are relative to it — run_script literally executes
+   * `/workspace/<path>` for a workspace-relative path the model gives it. They were binding the
+   * deployment mount SOURCE there, which in the compose layout is the repo, so `/workspace` was
+   * the repo and `/workspace/generated` did not exist: a script an agent had just written could
+   * not be executed, and a relative write landed at the repo root. Binding the workspace itself
+   * at `/workspace` makes the contract true, and — since that path is now per-user — also makes
+   * the mount the boundary, because a sandbox has no sibling account in it to reach.
+   */
+  at?: string;
+}
+
+/** The host path for a container path under /workspace, or null for a named-volume source. */
+function resolveHostPathUnderWorkspace(containerPath: string, source: string): string | null {
+  const trimmed = source.replace(/[/\\]+$/, "");
+  const looksLikeHostPath = trimmed.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(trimmed);
+  if (!looksLikeHostPath) return null;
+  const offset = containerPath.replace(/\\/g, "/").slice("/workspace".length);
+  return `${trimmed}${offset}`;
 }
 
 /**
@@ -75,14 +115,13 @@ export function resolveHostWorkspacePath(
   relativePath: string,
   options: DockerWorkspaceMountOptions = {},
 ): string | null {
-  const source = resolveDockerWorkspaceMountSource(workspacePath, options).replace(/[/\\]+$/, "");
-  const looksLikeHostPath = source.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(source);
-  if (!looksLikeHostPath) return null;
-  const offset = mountSourceMapsToWorkspaceRoot(workspacePath)
-    ? workspacePath.replace(/\\/g, "/").slice("/workspace".length)
-    : "";
+  const source = resolveDockerWorkspaceMountSource(workspacePath, options);
+  const base = mountSourceMapsToWorkspaceRoot(workspacePath)
+    ? resolveHostPathUnderWorkspace(workspacePath, source)
+    : source.replace(/[/\\]+$/, "");
+  if (base === null) return null;
   const rel = relativePath.replace(/^[/\\]+/, "");
-  return `${source}${offset}/${rel}`;
+  return `${base}/${rel}`;
 }
 
 /**

@@ -11,12 +11,12 @@ Every public schema field, where it is declared, and how many production files r
 | `a2a` | packages/core/src/config/schema.ts:385 | 11 |
 | `accessKeyId` | packages/core/src/config/schema.ts:445 | 2 |
 | `accessToken` | packages/core/src/config/schemas/channels.ts:51 | 8 |
-| `account` | packages/core/src/config/schemas/channels.ts:71 | 41 |
+| `account` | packages/core/src/config/schemas/channels.ts:71 | 44 |
 | `acquireTimeoutMs` | packages/core/src/config/schema.ts:1550 | 1 |
 | `activeModelPreset` | packages/core/src/config/schema.ts:1581 | 2 |
 | `addHosts` | packages/core/src/config/schema.ts:672 | 1 |
 | `admin` | packages/core/src/config/schema.ts:357 | 21 |
-| `agents` | packages/core/src/config/schema.ts:1571 | 127 |
+| `agents` | packages/core/src/config/schema.ts:1571 | 128 |
 | `alertmanager` | packages/core/src/config/schema.ts:1038 | 1 |
 | `all` | packages/core/src/config/schema.ts:1176 | 212 |
 | `allowedAgents` | packages/core/src/config/schema.ts:1190 | 25 |
@@ -89,7 +89,7 @@ Every public schema field, where it is declared, and how many production files r
 | `config` | packages/core/src/config/schema.ts:1109 | 227 |
 | `configRemovals` | packages/core/src/config/schema.ts:1567 | 2 |
 | `consolidationIntervalMs` | packages/core/src/config/schema.ts:1394 | 1 |
-| `container` | packages/core/src/config/schema.ts:678 | 63 |
+| `container` | packages/core/src/config/schema.ts:678 | 64 |
 | `contextWindow` | packages/core/src/config/schema.ts:119 | 10 |
 | `control` | packages/core/src/config/schema.ts:1542 | 46 |
 | `coordinatorToolCaps` | packages/core/src/config/schemas/orchestration.ts:695 | 4 |
@@ -126,10 +126,10 @@ Every public schema field, where it is declared, and how many production files r
 | `delegationTimeoutMs` | packages/core/src/config/schema.ts:575 | 4 |
 | `deliverableConsistencyQa` | packages/core/src/config/schemas/orchestration.ts:367 | 1 |
 | `deliverableConsistencyQaMaxRounds` | packages/core/src/config/schemas/orchestration.ts:370 | 1 |
-| `description` | packages/core/src/config/schema.ts:551 | 163 |
+| `description` | packages/core/src/config/schema.ts:551 | 162 |
 | `detectWriteChurnOverwrite` | packages/core/src/config/schemas/orchestration.ts:391 | 2 |
 | `digest` | packages/core/src/config/schema.ts:1795 | 33 |
-| `dir` | packages/core/src/config/schema.ts:1784 | 41 |
+| `dir` | packages/core/src/config/schema.ts:1784 | 42 |
 | `disabled` | packages/core/src/config/schema.ts:795 | 98 |
 | `disabledGroups` | packages/core/src/config/schema.ts:1813 | 3 |
 | `disabledTools` | packages/core/src/config/schema.ts:1815 | 3 |
@@ -269,7 +269,7 @@ Every public schema field, where it is declared, and how many production files r
 | `minStepsToAuthor` | packages/core/src/config/schema.ts:1340 | 2 |
 | `minVramMb` | packages/core/src/config/schema.ts:808 | 1 |
 | `mode` | packages/core/src/config/schema.ts:457 | 100 |
-| `model` | packages/core/src/config/schema.ts:1137 | 175 |
+| `model` | packages/core/src/config/schema.ts:1137 | 176 |
 | `modelModeration` | packages/core/src/config/schema.ts:1133 | 4 |
 | `modelPresets` | packages/core/src/config/schema.ts:1578 | 1 |
 | `modelPresetScope` | packages/core/src/config/schema.ts:1593 | 3 |
@@ -445,7 +445,7 @@ Every public schema field, where it is declared, and how many production files r
 | `trustModelRouting` | packages/core/src/config/schema.ts:271 | 1 |
 | `trustProxyHeader` | packages/core/src/config/schema.ts:427 | 1 |
 | `turnTimeoutMs` | packages/core/src/config/schema.ts:299 | 22 |
-| `type` | packages/core/src/config/schema.ts:867 | 364 |
+| `type` | packages/core/src/config/schema.ts:867 | 363 |
 | `ungroundedFactualAnswerGuard` | packages/core/src/config/schemas/orchestration.ts:127 | 2 |
 | `upfrontSourceSensitiveClassifier` | packages/core/src/config/schemas/orchestration.ts:160 | 2 |
 | `url` | packages/core/src/config/schema.ts:549 | 115 |
@@ -473,6 +473,6 @@ Every public schema field, where it is declared, and how many production files r
 | `webhookKey` | packages/core/src/config/schema.ts:1188 | 7 |
 | `webhookUrl` | packages/core/src/config/schema.ts:869 | 1 |
 | `windowMs` | packages/core/src/config/schema.ts:258 | 8 |
-| `workspaceAccess` | packages/core/src/config/schema.ts:843 | 3 |
+| `workspaceAccess` | packages/core/src/config/schema.ts:843 | 5 |
 | `workspaceName` | packages/core/src/config/schemas/retrieval.ts:109 | 3 |
 | `workspacePath` | packages/core/src/config/schema.ts:1824 | 114 |

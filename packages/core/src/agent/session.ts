@@ -11,6 +11,7 @@ import {
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
+import { userWorkspaceRoot } from "../tools/workspace-path.js";
 import type { EffortTier } from "../config/schema.js";
 import { formatMainAssistantPersonalityGuidance } from "../personality/service.js";
 import { formatOutcomesForPrompt } from "./outcomes.js";
@@ -210,7 +211,12 @@ export class AgentSession {
     this.userId = opts.userId;
     this.userRole = opts.userRole;
     this.createdAt = opts.createdAt ?? new Date();
-    this.workspacePath = opts.workspacePath ?? getConfig().workspacePath;
+    // THE ROOT IS THE USER'S. Everything a turn does with files hangs off this — the
+    // orchestrator's own tools, every delegated sub-agent, artifact collection, the probe — so
+    // partitioning HERE keeps one turn's work in one place. Config zones and the deployment's
+    // own state stay at the shared root, which the two workspaceAccess:"full" agents keep (see
+    // agent/sub-agent.ts) and which the config loader always reads directly.
+    this.workspacePath = userWorkspaceRoot(opts.workspacePath ?? getConfig().workspacePath, opts.userId);
     this.systemPrompt = opts.systemPrompt ?? defaultSystemPrompt(this.workspacePath);
     this.updatedAt = opts.updatedAt ?? this.createdAt;
     this.archivedAt = opts.archivedAt;
