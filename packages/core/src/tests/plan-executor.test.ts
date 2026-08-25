@@ -328,6 +328,67 @@ describe("execute_plan dispatches each step to the tool that runs that kind", ()
     expect(result.metadata?.["delegated"]).toBe(1);
   });
 
+  it("fails a reuse step whose workflow does not exist, instead of recording it done", async () => {
+    // run_workflow deliberately reports a routing miss as SUCCESS (audit bd3d60dc), flagged
+    // workflowNotFound. Taken at face value the step was counted in "N/N completed" and its
+    // "no saved workflow matches…" prose was carried into the dependent step as the research.
+    respond = (name) => (name === "run_workflow"
+      ? { success: true, output: 'No saved workflow matches "research pack" — this is NOT an error.', metadata: { workflowNotFound: true } }
+      : { success: true, output: "ok" });
+    await persistTurnPlan(SESSION, basePlan([
+      { id: "s1", description: "gather", kind: "reuse", workflow: "research pack" },
+      { id: "s2", description: "write", kind: "delegate", dependsOn: ["s1"] },
+    ]));
+
+    const result = await run();
+    expect(result.success).toBe(false);
+    expect(result.output).toMatch(/no workflow named "research pack" exists/);
+    expect(calls.map((c) => c.name)).toEqual(["run_workflow"]);   // s2 never got the miss as input
+  });
+
+  it("reports a step stranded two hops back, instead of leaving it out of every section", async () => {
+    await persistTurnPlan(SESSION, basePlan([
+      { id: "s1", description: "decide the framing", kind: "direct" },
+      { id: "s2", description: "write it up", kind: "delegate", dependsOn: ["s1"] },
+      { id: "s3", description: "review it", kind: "delegate", dependsOn: ["s2"] },
+    ]));
+
+    const result = await run();
+    expect(result.output).toMatch(/YOURS TO DO[\s\S]*s1/);
+    expect(result.output).toMatch(/WAITING[\s\S]*s2/);
+    expect(result.output).toMatch(/NOT RUN[\s\S]*s3/);   // s3 appeared nowhere at all
+  });
+
+  it("says so when the plan normalized down to no steps", async () => {
+    await persistTurnPlan(SESSION, basePlan([]));
+    const result = await run();
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/no steps/);
+    expect(result.output).not.toMatch(/Synthesize the final answer/);
+  });
+
+  it("stops dispatching when the turn is cancelled", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    await persistTurnPlan(SESSION, basePlan([{ id: "s1", description: "research", kind: "delegate" }]));
+
+    await getTool("execute_plan")!.execute({}, { sessionId: SESSION, workspacePath: "/w", signal: controller.signal } as never);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("marks a carried result as truncated, so a fragment is not read as the whole finding", async () => {
+    const long = "F".repeat(3_000);
+    respond = (name) => ({ success: true, output: name === "web_search" ? long : "ok" });
+    await persistTurnPlan(SESSION, basePlan([
+      { id: "s1", description: "research", kind: "direct", tool: "web_search", toolArgs: {} },
+      { id: "s2", description: "write", kind: "delegate", dependsOn: ["s1"] },
+    ]));
+
+    await run();
+    const task = String(calls[1]?.args["task"] ?? "");
+    expect(task).toMatch(/truncated/);
+  });
+
   it("refuses a plan whose dependencies form a cycle", async () => {
     await persistTurnPlan(SESSION, basePlan([
       { id: "a", description: "a", kind: "delegate", dependsOn: ["b"] },

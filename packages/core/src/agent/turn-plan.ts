@@ -10,7 +10,10 @@
  * per-session slot (NOT the shared-facts hash) so the raw JSON never leaks into
  * human-facing context.
  */
-import { writeTurnPlan, readTurnPlan, clearTurnPlan } from "../swarm/memory.js";
+import { writeTurnPlan, readTurnPlan, clearTurnPlan, PLAN_VALUE_MAX } from "../swarm/memory.js";
+import { childLogger } from "../logger.js";
+
+const log = childLogger("turn-plan");
 
 export type TurnPlanStepKind = "reuse" | "delegate" | "direct";
 export type TurnRiskTier = "low" | "high";
@@ -279,8 +282,46 @@ export function countParallelWidth(steps: TurnPlanStep[]): number {
   return maxGroup;
 }
 
+/** A copy whose per-step results are clipped to `budget`, or dropped entirely at 0. */
+function withResultBudget(plan: TurnPlan, budget: number): TurnPlan {
+  const outcomes = (plan.outcomes ?? []).map((outcome) => {
+    if (!outcome.result) return outcome;
+    if (budget <= 0) {
+      const stripped: TurnPlanStepOutcome = { id: outcome.id, status: outcome.status };
+      if (outcome.detail) stripped.detail = outcome.detail;
+      return stripped;
+    }
+    return { ...outcome, result: outcome.result.slice(0, budget) };
+  });
+  return { ...plan, outcomes };
+}
+
+/**
+ * Serialize the plan so that it FITS.
+ *
+ * The store caps the value with a hard slice and the reader JSON.parses what comes back, so a plan
+ * one character over the limit does not come back truncated — it does not come back AT ALL, and a
+ * turn in the middle of its own plan is told that no plan was ever recorded. Step results made that
+ * easy to reach: they are the only unbounded thing in a plan, and also exactly what a resumed call
+ * needs. So they are what gets shed, largest-affordable budget first, and the plan itself survives.
+ */
+function serializePlanWithinStoreBudget(plan: TurnPlan): string {
+  let json = JSON.stringify(plan);
+  if (json.length <= PLAN_VALUE_MAX) return json;
+
+  for (const budget of [1_000, 400, 120, 0]) {
+    json = JSON.stringify(withResultBudget(plan, budget));
+    if (json.length <= PLAN_VALUE_MAX) return json;
+  }
+  // Nothing of ours left to shed — the steps themselves are oversized (a model-supplied toolArgs
+  // blob, most likely). Drop the outcomes rather than the plan: re-running a completed step is
+  // recoverable, losing the plan mid-turn is not.
+  log.warn({ chars: json.length, limit: PLAN_VALUE_MAX }, "Turn plan too large for the store — dropped step outcomes");
+  return JSON.stringify({ ...plan, outcomes: [] as TurnPlanStepOutcome[] });
+}
+
 export async function persistTurnPlan(sessionId: string, plan: TurnPlan): Promise<void> {
-  await writeTurnPlan(rootSessionId(sessionId), JSON.stringify(plan));
+  await writeTurnPlan(rootSessionId(sessionId), serializePlanWithinStoreBudget(plan));
 }
 
 export async function loadTurnPlan(sessionId: string): Promise<TurnPlan | null> {
@@ -372,7 +413,9 @@ export function decidePlanContinuation(input: PlanContinuationInput): PlanContin
   // Counting is the fallback for a plan the orchestrator executed by hand.
   const outcomes = plan?.outcomes;
   if (plan && outcomes && outcomes.length > 0) {
-    const settled = outcomes.filter((o) => o.status === "done" || o.status === "failed").length;
+    // DONE MEANS DONE. Counting `failed` here made the [CONTINUE PLAN] directive tell the model it
+    // had finished work that had in fact failed.
+    const settled = outcomes.filter((o) => o.status === "done").length;
     const outstanding = outcomes.some((o) => o.status === "pending" || o.status === "manual");
     if (!enabled || !lastDelegationSucceeded || !outstanding) {
       return { continue: false, done: settled, total: outcomes.length };

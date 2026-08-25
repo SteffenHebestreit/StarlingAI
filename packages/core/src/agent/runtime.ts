@@ -3655,6 +3655,10 @@ async function _runTurn(
         if (typeof loaded === "string" && loaded && !allowedToolNameSet.has(loaded)) {
           allowedToolNameSet.add(loaded);
           allowedToolNames = [...allowedToolNames, loaded];
+          // The tool context captured the list once, at turn start. Tools that fan out check it to
+          // stay inside the caller's grant, so leaving it stale means a just-loaded tool is refused
+          // to the very turn that loaded it.
+          toolContext.allowedTools = allowedToolNames;
           tools = getToolsAsLLMDefs(allowedToolNames);
           session.setToolSchemasChars(JSON.stringify(tools).length);
           logAudit("tool_loaded_into_turn", {

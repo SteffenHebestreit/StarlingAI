@@ -25,6 +25,9 @@ const log = childLogger("tool:pipeline");
 /** Tools that must not run as pipeline steps — they fan out or recurse. */
 export const BLOCKED_STEP_TOOLS = new Set<string>([
   "run_tool_pipeline",
+  // Fans out exactly like the rest of this list, and nests: a plan whose step runs a pipeline
+  // whose step runs the plan re-enters with the same pending step until the turn gives out.
+  "execute_plan",
   "delegate_to_agent",
   "parallel_delegate",
   "swarm_delegate",

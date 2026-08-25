@@ -59,6 +59,18 @@ describe("planFrontier — what can run now", () => {
     expect(planFrontier(ungrouped, statuses({})).batch.map((s) => s.id)).toEqual(["a"]);
   });
 
+  it("does not let a parallelGroup carry in a member whose own dependency is unmet", () => {
+    // The group widens the batch from what is RUNNABLE, not from the plan: sharing a group says
+    // these may run concurrently, never that they may run early.
+    const p = plan([
+      step({ id: "a", parallelGroup: 1 }),
+      step({ id: "b", parallelGroup: 1, dependsOn: ["c"] }),
+      step({ id: "c" }),
+    ]);
+    expect(planFrontier(p, statuses({})).batch.map((s) => s.id)).toEqual(["a"]);
+    expect(planFrontier(p, statuses({ c: "done" })).batch.map((s) => s.id)).toEqual(["a", "b"]);
+  });
+
   it("blocks a step whose dependency will never settle", () => {
     const p = plan([
       step({ id: "s1", kind: "direct" }),
@@ -145,6 +157,23 @@ describe("decidePlanContinuation — measuring the plan against what ran", () =>
     expect(decidePlanContinuation({
       plan: finished, executedDelegations: 0, delegationCap: 5, lastDelegationSucceeded: true, enabled: true,
     }).continue).toBe(false);
+  });
+
+  it("does not count a FAILED step as one it finished", () => {
+    // The directive reports "done N of M". Counting a failed step among them told the model it had
+    // finished work that had in fact failed.
+    const decision = decidePlanContinuation({
+      plan: plan(mixed.steps, {
+        outcomes: [
+          { id: "s1", status: "done" },
+          { id: "s2", status: "failed" },
+          { id: "s3", status: "pending" },
+        ],
+      }),
+      executedDelegations: 2, delegationCap: 5, lastDelegationSucceeded: true, enabled: true,
+    });
+    expect(decision.done).toBe(1);
+    expect(decision.total).toBe(3);
   });
 
   it("never continues past the delegate cap, or after a failure, or when disabled", () => {

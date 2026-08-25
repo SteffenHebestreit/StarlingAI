@@ -262,7 +262,10 @@ export async function readAllFacts(sessionId: string): Promise<Record<string, st
 // current turn (JSON). Kept OUT of the facts hash so the raw JSON never leaks
 // into human-facing shared-facts context dumps; sub-agents and QA read it
 // explicitly via readTurnPlan. Scoped to the root session id by the caller.
-const PLAN_VALUE_MAX = 8000;        // chars — a plan is short; cap prevents bloat
+// chars — a plan is short; cap prevents bloat. Exported because the cap is a HARD SLICE and the
+// reader JSON.parses: anything written over this length comes back as invalid JSON and the plan
+// reads as absent, so the writer's caller has to fit the plan itself rather than discover the loss.
+export const PLAN_VALUE_MAX = 8000;
 const planKey = (sid: string) => `starlingai:mem:${sid}:turnplan`;
 const _turnPlans = new Map<string, string>();
 

@@ -238,6 +238,35 @@ describe("turn plan — persistence (root-session scoped)", () => {
     expect(fromSub?.steps[0]?.description).toBe("step one");
   });
 
+  it("survives a plan whose step results exceed the store's cap, instead of vanishing", async () => {
+    // The store caps the value with a HARD SLICE and loadTurnPlan JSON.parses what comes back, so a
+    // plan one character over does not return truncated — it does not return at all, and a turn in
+    // the middle of its own plan is told no plan was ever recorded. Step results are the only
+    // unbounded part, and exactly what a resumed call needs, so they are what gets shed.
+    const huge = "x".repeat(20_000);
+    await persistTurnPlan("plan-root", {
+      objective: "do the thing",
+      acceptanceCriteria: [],
+      stopConditions: [],
+      riskTier: "low",
+      wide: false,
+      createdAt: new Date(0).toISOString(),
+      steps: [
+        { id: "s1", description: "research", kind: "delegate" },
+        { id: "s2", description: "write", kind: "delegate" },
+      ],
+      outcomes: [
+        { id: "s1", status: "done", result: huge },
+        { id: "s2", status: "done", result: huge },
+      ],
+    });
+
+    const loaded = await loadTurnPlan("plan-root");
+    expect(loaded).not.toBeNull();                       // the whole plan used to disappear here
+    expect(loaded?.steps.map((s) => s.id)).toEqual(["s1", "s2"]);
+    expect(loaded?.outcomes?.every((o) => o.status === "done")).toBe(true);
+  });
+
   it("returns null when no plan was recorded", async () => {
     expect(await loadTurnPlan("plan-root")).toBeNull();
   });
@@ -287,6 +316,6 @@ describe("record_plan — a reuse step that names no workflow", () => {
     const output = await record([
       { id: "s1", description: "gather", kind: "reuse", workflow: "research_pack" },
     ]);
-    expect(output).not.toMatch(/names no workflow/);
+    expect(output).not.toMatch(/no workflow/);
   });
 });

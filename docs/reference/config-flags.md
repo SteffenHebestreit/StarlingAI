@@ -55,7 +55,7 @@ Every public schema field, where it is declared, and how many production files r
 | `blockOn` | packages/core/src/config/schema.ts:1142 | 1 |
 | `botToken` | packages/core/src/config/schemas/channels.ts:10 | 9 |
 | `bucket` | packages/core/src/config/schema.ts:444 | 15 |
-| `budget` | packages/core/src/config/schema.ts:1507 | 72 |
+| `budget` | packages/core/src/config/schema.ts:1507 | 73 |
 | `budgets` | packages/core/src/config/schema.ts:505 | 13 |
 | `candidateTopK` | packages/core/src/config/schemas/retrieval.ts:54 | 2 |
 | `capabilities` | packages/core/src/config/schema.ts:817 | 42 |
@@ -100,7 +100,7 @@ Every public schema field, where it is declared, and how many production files r
 | `currency` | packages/core/src/config/schema.ts:503 | 11 |
 | `customInstructions` | packages/core/src/config/schema.ts:263 | 2 |
 | `dailyUsd` | packages/core/src/config/schema.ts:506 | 2 |
-| `default` | packages/core/src/config/schema.ts:1152 | 221 |
+| `default` | packages/core/src/config/schema.ts:1152 | 222 |
 | `defaultAlertmanager` | packages/core/src/config/schema.ts:1035 | 1 |
 | `defaultContainerized` | packages/core/src/config/schema.ts:1607 | 4 |
 | `defaultGithub` | packages/core/src/config/schema.ts:1057 | 1 |
@@ -218,7 +218,7 @@ Every public schema field, where it is declared, and how many production files r
 | `leanToolCatalog` | packages/core/src/config/schema.ts:1652 | 3 |
 | `liftMinSamplesPerArm` | packages/core/src/config/schema.ts:1369 | 1 |
 | `loginUrl` | packages/core/src/config/schema.ts:771 | 6 |
-| `matches` | packages/core/src/config/schema.ts:495 | 82 |
+| `matches` | packages/core/src/config/schema.ts:495 | 83 |
 | `maxActiveTimeMs` | packages/core/src/config/schema.ts:1514 | 2 |
 | `maxBodyBytes` | packages/core/src/config/schema.ts:301 | 3 |
 | `maxChars` | packages/core/src/config/schema.ts:1141 | 20 |
@@ -268,7 +268,7 @@ Every public schema field, where it is declared, and how many production files r
 | `minRerankScore` | packages/core/src/config/schemas/retrieval.ts:61 | 2 |
 | `minStepsToAuthor` | packages/core/src/config/schema.ts:1340 | 2 |
 | `minVramMb` | packages/core/src/config/schema.ts:808 | 1 |
-| `mode` | packages/core/src/config/schema.ts:457 | 100 |
+| `mode` | packages/core/src/config/schema.ts:457 | 101 |
 | `model` | packages/core/src/config/schema.ts:1137 | 178 |
 | `modelModeration` | packages/core/src/config/schema.ts:1133 | 4 |
 | `modelPresets` | packages/core/src/config/schema.ts:1578 | 1 |
@@ -366,7 +366,7 @@ Every public schema field, where it is declared, and how many production files r
 | `riskGatedQA` | packages/core/src/config/schemas/effort.ts:47 | 5 |
 | `role` | packages/core/src/config/schema.ts:821 | 89 |
 | `rolesClaim` | packages/core/src/config/schema.ts:380 | 1 |
-| `routing` | packages/core/src/config/schema.ts:227 | 66 |
+| `routing` | packages/core/src/config/schema.ts:227 | 67 |
 | `sampleRate` | packages/core/src/config/schema.ts:537 | 2 |
 | `sandboxShellExec` | packages/core/src/config/schema.ts:1124 | 2 |
 | `scene` | packages/core/src/config/schema.ts:1213 | 66 |
@@ -406,7 +406,7 @@ Every public schema field, where it is declared, and how many production files r
 | `stagedArtifactBuilds` | packages/core/src/config/schemas/orchestration.ts:406 | 1 |
 | `steps` | packages/core/src/config/schema.ts:1256 | 40 |
 | `stopPhrases` | packages/core/src/config/schemas/multimodal.ts:75 | 2 |
-| `store` | packages/core/src/config/schema.ts:1489 | 133 |
+| `store` | packages/core/src/config/schema.ts:1489 | 134 |
 | `subAgentDisagreementVerify` | packages/core/src/config/schemas/orchestration.ts:578 | 2 |
 | `subAgentMaxIterations` | packages/core/src/config/schemas/effort.ts:25 | 2 |
 | `subAgentMaxTokens` | packages/core/src/config/schemas/effort.ts:33 | 2 |

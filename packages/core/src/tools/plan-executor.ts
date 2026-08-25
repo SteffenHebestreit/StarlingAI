@@ -29,6 +29,7 @@ import { loadTurnPlan, persistTurnPlan, type TurnPlan, type TurnPlanStep, type T
 import { planFrontier, planCycle } from "../agent/plan-frontier.js";
 import { BLOCKED_STEP_TOOLS } from "./tool-pipeline.js";
 import { getPerTurnToolCallLimit } from "../agent/delegation-response-collapse.js";
+import { getLoadableDirectMainToolNames } from "../agent/default-tools.js";
 
 const log = childLogger("tool:execute_plan");
 
@@ -70,7 +71,12 @@ function buildStepTask(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<
   if (upstream.length > 0) {
     parts.push(
       "RESULTS THIS STEP DEPENDS ON — use them; do not re-derive or re-ask for them:\n"
-      + upstream.map((entry) => `[${entry.id}] ${entry.text.slice(0, CARRIED_RESULT_CHARS)}`).join("\n\n"),
+      + upstream.map((entry) => {
+        const slice = entry.text.slice(0, CARRIED_RESULT_CHARS);
+        // Unmarked truncation is worse than a short excerpt: the step is told to use this and not
+        // re-derive it, so a fragment cut mid-sentence reads as the complete finding.
+        return `[${entry.id}] ${slice}${slice.length < entry.text.length ? "\n…(truncated — ask for the rest if you need it)" : ""}`;
+      }).join("\n\n"),
     );
   }
   if (plan.acceptanceCriteria.length > 0) {
@@ -132,7 +138,14 @@ async function runStep(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<
   // ToolContext.allowedTools is a contract on every tool that fans out to other tools: it must not
   // reach outside the caller's grant. This one dispatches a tool name the MODEL wrote into a plan,
   // so without the check a step could name anything the tier gate happens to permit.
-  if (ctx.allowedTools && !ctx.allowedTools.includes(dispatch.tool)) {
+  // ...but the lean tool catalog withholds the direct capability tools from the turn and lets the
+  // orchestrator pull one in with load_tool, so the grant alone is narrower than the caller's real
+  // reach: checking it by itself refused every `direct` step naming a normal tool. The loadable set
+  // is "what this tool mode already permits", so honouring it widens nothing.
+  const reachable = !ctx.allowedTools
+    || ctx.allowedTools.includes(dispatch.tool)
+    || getLoadableDirectMainToolNames().includes(dispatch.tool);
+  if (!reachable) {
     return { status: "failed", detail: `'${dispatch.tool}' is not in this agent's allowed tool set` };
   }
 
@@ -140,6 +153,16 @@ async function runStep(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<
     const result = await executeTool(dispatch.tool, dispatch.args, ctx);
     if (!result.success) {
       return { status: "failed", detail: (result.error ?? "step failed").slice(0, 300) };
+    }
+    // A workflow that does not exist comes back SUCCESSFUL: run_workflow deliberately returns a
+    // routing miss rather than an error (audit bd3d60dc), flagged as workflowNotFound. Taken at
+    // face value the step was recorded `done`, counted in "N/N completed", and its "no saved
+    // workflow matches…" prose was carried into the dependent steps as though it were research.
+    if (step.kind === "reuse" && result.metadata?.["workflowNotFound"] === true) {
+      return {
+        status: "failed",
+        detail: `no workflow named "${step.workflow}" exists — re-record the step with a real workflow name, or make it a delegate step`,
+      };
     }
     // Artifacts have to be forwarded explicitly: collectTurnArtifactAttachments walks the metadata
     // of the turn's TOOL MESSAGES, and a step's result is not one — it is a nested call inside this
@@ -186,6 +209,12 @@ registerTool({
     const plan = await loadTurnPlan(ctx.sessionId);
     if (!plan) {
       return fail("No plan recorded this turn. Call record_plan first, then execute_plan.");
+    }
+    if (plan.steps.length === 0) {
+      // Reachable without the model doing anything odd: normalizeTurnPlan drops any step it cannot
+      // read a description from, so a whole plan can normalize to nothing. Reported as finished, it
+      // told the orchestrator to write the final answer for a plan that never existed.
+      return fail("The recorded plan has no steps — record_plan could not read any. Re-record it with a description on each step.");
     }
     const cycle = planCycle(plan);
     if (cycle.length > 0) {
@@ -240,6 +269,9 @@ registerTool({
     let blocked: ReturnType<typeof planFrontier>["blocked"] = [];
 
     for (let round = 0; round < MAX_ROUNDS; round++) {
+      // The turn can be cancelled mid-plan; without this the scheduler walks the rest of it and
+      // dispatches specialists nobody is waiting for any more.
+      if (ctx.signal?.aborted) break;
       const frontier = planFrontier(plan, statuses);
       blocked = frontier.blocked;
       if (frontier.batch.length === 0) break;
@@ -332,6 +364,14 @@ registerTool({
     }
     if (blocked.length > 0) {
       sections.push(`WAITING — cannot run yet:\n${blocked.map((b) => `  - ${b.step.id} — ${b.reason}`).join("\n")}`);
+    }
+    // Everything still pending that planFrontier did not name as blocked — a step sitting two hops
+    // behind a manual or failed one is in neither list, and so was reported nowhere at all.
+    const blockedIds = new Set(blocked.map((b) => b.step.id));
+    const stranded = pending.filter((o) => !blockedIds.has(o.id));
+    if (stranded.length > 0) {
+      sections.push(`NOT RUN — waiting further back in the chain:
+${describe(stranded)}`);
     }
     if (malformed.length > 0) {
       sections.push(`THE PLAN IS MALFORMED: ${malformed.map((b) => b.step.id).join(", ")} depend on ids the plan never defines, so they can never run. `
