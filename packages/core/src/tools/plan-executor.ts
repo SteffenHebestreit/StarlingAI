@@ -15,10 +15,12 @@
  * propagation and audit. The scheduler is the only new logic, and it lives next door in
  * agent/plan-frontier.ts where it can be tested without running anything.
  *
- * A `direct` step stays the orchestrator's: the plan describes it in prose and names no tool or
- * arguments, so there is nothing to dispatch. Those are reported back as work to do, along with
- * anything blocked behind them — and because the executor records per-step outcomes, calling it
- * again after doing them continues where it stopped.
+ * All three kinds dispatch: `delegate` to the agent, `reuse` to the named workflow, `direct` to
+ * the tool the step names — so one plan can chain tools, agents and workflows in a single
+ * dependency order. A `direct` step that names no tool is reasoning rather than a call, and stays
+ * the orchestrator's: those are reported back as work to do, along with anything blocked behind
+ * them, and because the executor records per-step outcomes, calling it again after doing them
+ * continues where it stopped.
  */
 import { registerTool, executeTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
@@ -72,22 +74,45 @@ interface StepRun {
   result?: string;
 }
 
+/**
+ * What a step dispatches to, or null when it is the orchestrator's own work.
+ *
+ * All three kinds go out through the normal tool path, so each inherits the tier gate, the
+ * sandbox contract, approval prompts and audit exactly as a directly-issued call would — the
+ * executor grants nothing that the caller could not already do.
+ */
+function dispatchFor(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<string, string>):
+  { tool: string; args: Record<string, unknown> } | { manual: string } {
+  if (step.kind === "direct") {
+    if (!step.tool) {
+      return { manual: "a `direct` step with no `tool` is yours: the plan names nothing to dispatch" };
+    }
+    // A plan that lists itself as one of its own steps would re-enter here with the same plan and
+    // the same pending step, forever — the round limit is per-call and does not survive nesting.
+    if (step.tool === "execute_plan") {
+      return { manual: "a plan cannot run itself as one of its own steps" };
+    }
+    return { tool: step.tool, args: { ...(step.toolArgs ?? {}) } };
+  }
+  if (step.kind === "reuse") {
+    if (!step.workflow) {
+      return { manual: "no workflow named on this reuse step — set `workflow` in the plan, or run it yourself" };
+    }
+    return { tool: "run_workflow", args: { name: step.workflow, context: buildStepTask(plan, step, results) } };
+  }
+  return {
+    tool: "delegate_to_agent",
+    args: { ...(step.agent ? { agentName: step.agent } : {}), task: buildStepTask(plan, step, results) },
+  };
+}
+
 /** Dispatch one step to the tool that already knows how to run that kind of work. */
 async function runStep(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<string, string>, ctx: ToolContext): Promise<StepRun> {
-  if (step.kind === "direct") {
-    return { status: "manual", detail: "a `direct` step is yours: the plan names no tool or arguments to dispatch" };
-  }
-  if (step.kind === "reuse" && !step.workflow) {
-    return { status: "manual", detail: "no workflow named on this reuse step — set `workflow` in the plan, or run it yourself" };
-  }
-
-  const task = buildStepTask(plan, step, results);
-  const [toolName, args] = step.kind === "reuse"
-    ? ["run_workflow", { name: step.workflow, context: task }] as const
-    : ["delegate_to_agent", { ...(step.agent ? { agentName: step.agent } : {}), task }] as const;
+  const dispatch = dispatchFor(plan, step, results);
+  if ("manual" in dispatch) return { status: "manual", detail: dispatch.manual };
 
   try {
-    const result = await executeTool(toolName, args as Record<string, unknown>, ctx);
+    const result = await executeTool(dispatch.tool, dispatch.args, ctx);
     if (!result.success) {
       return { status: "failed", detail: (result.error ?? "step failed").slice(0, 300) };
     }
@@ -101,9 +126,9 @@ registerTool({
   name: "execute_plan",
   description:
     "Execute the plan you recorded with record_plan: runs its steps in dependency order, running a parallelGroup concurrently, "
-    + "dispatching each step by its kind — `delegate` steps to the specialist, `reuse` steps to the named workflow — and passing "
-    + "each step's result to the steps that declared a dependency on it. `direct` steps stay yours: it reports them (and anything "
-    + "waiting on them) so you can do them and call execute_plan again to continue. Use this instead of re-issuing the plan's steps "
+    + "dispatching each step by its kind — `delegate` steps to the specialist, `reuse` steps to the named workflow, `direct` steps "
+    + "to the tool the step names — and passing each result to the steps that declared a dependency on it. A `direct` step with no "
+    + "tool stays yours: it reports those (and anything waiting on them) so you can do them and call execute_plan again to continue. Use this instead of re-issuing the plan's steps "
     + "as separate tool calls; the plan's order and parallelism are then actually honoured rather than reconstructed.",
   parameters: {
     type: "object",

@@ -34,6 +34,21 @@ export interface TurnPlanStep {
    * the executor then reports the step as one the orchestrator has to run itself.
    */
   workflow?: string;
+  /**
+   * Tool to run for a `direct` step, and the arguments to run it with.
+   *
+   * The third leg. `agent` makes a delegate step dispatchable and `workflow` makes a reuse step
+   * dispatchable; this makes a direct step dispatchable, so one plan can chain tools, agents and
+   * workflows in a single dependency order instead of the orchestrator hand-carrying the tool
+   * calls between the delegations. Optional, because a direct step is often reasoning rather than
+   * a call ("decide the framing") — without a tool it stays the orchestrator's own work.
+   *
+   * Args are literal: a tool takes structured arguments, so unlike a delegate step there is no
+   * prose slot to carry an upstream result into. A step that genuinely needs a previous step's
+   * OUTPUT as input belongs to the agent that can read it.
+   */
+  tool?: string;
+  toolArgs?: Record<string, unknown>;
   /** Steps sharing a parallelGroup may run concurrently (independent work). */
   parallelGroup?: number;
   /** Ids of steps that must complete first. */
@@ -190,6 +205,12 @@ export function normalizeTurnPlan(rawInput: Record<string, unknown>): TurnPlan {
     if (agent) step.agent = agent;
     const workflow = clampString(obj["workflow"] ?? obj["workflowName"] ?? obj["scene"] ?? obj["job"]);
     if (workflow) step.workflow = workflow;
+    const tool = clampString(obj["tool"] ?? obj["toolName"] ?? obj["tool_name"]);
+    if (tool) step.tool = tool;
+    const toolArgs = obj["toolArgs"] ?? obj["tool_args"] ?? obj["args"] ?? obj["arguments"];
+    if (toolArgs && typeof toolArgs === "object" && !Array.isArray(toolArgs)) {
+      step.toolArgs = toolArgs as Record<string, unknown>;
+    }
     const group = obj["parallelGroup"] ?? obj["parallel_group"];
     if (typeof group === "number" && Number.isFinite(group)) step.parallelGroup = group;
     const deps = clampStringList(obj["dependsOn"] ?? obj["depends_on"], MAX_STEPS);

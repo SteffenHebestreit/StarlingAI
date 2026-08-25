@@ -48,9 +48,11 @@ registerTool({
           properties: {
             id: { type: "string", description: "Short id, e.g. 's1' (referenced by dependsOn)." },
             description: { type: "string", description: "One line describing the step." },
-            kind: { type: "string", enum: ["reuse", "delegate", "direct"], description: "reuse = run an existing scene/job/workflow; delegate = hand to an agent; direct = you do it." },
+            kind: { type: "string", enum: ["reuse", "delegate", "direct"], description: "reuse = run an existing scene/job/workflow; delegate = hand to an agent; direct = a tool call or your own work." },
             agent: { type: "string", description: "Target agent name for a delegate step." },
             workflow: { type: "string", description: "Scene or job name for a reuse step — set this and execute_plan can run the step for you; without it the step is yours to run." },
+            tool: { type: "string", description: "Tool name for a direct step — set this (with toolArgs) and execute_plan runs the tool as part of the plan, in its dependency order. Leave unset for a direct step that is your own reasoning; the step is then handed back to you." },
+            toolArgs: { type: "object", description: "Arguments for `tool`. Literal values only — a tool takes structured arguments, so it cannot receive an earlier step's output; make a step that needs one a delegate step." },
             parallelGroup: { type: "number", description: "Steps sharing a parallelGroup are independent and may run concurrently." },
             dependsOn: { type: "array", items: { type: "string" }, description: "Ids of steps that must finish first." },
           },
@@ -107,6 +109,13 @@ registerTool({
     // unverified answer. Warn the orchestrator UP FRONT so it sets expectations with the user instead
     // of silently attempting a doomed run. Structural (delegate-step count + riskTier + effort tier);
     // no topic/keyword matching. Advisory only — it never blocks the plan.
+    // A reuse step whose workflow is named only in prose is not dispatchable — execute_plan can
+    // only hand it back. Cheaper to say so now, while the plan is still being written, than to
+    // discover it as a step that quietly became the orchestrator's own work.
+    const unnamedReuse = plan.steps.filter((s) => s.kind === "reuse" && !s.workflow).map((s) => s.id);
+    const unnamedReuseNote = unnamedReuse.length > 0
+      ? ` NOTE: reuse step${unnamedReuse.length === 1 ? "" : "s"} ${unnamedReuse.join(", ")} name${unnamedReuse.length === 1 ? "s" : ""} no workflow, so execute_plan cannot run ${unnamedReuse.length === 1 ? "it" : "them"} — re-record with \`workflow\` set to the scene/job name, or run ${unnamedReuse.length === 1 ? "it" : "them"} yourself.`
+      : "";
     const budgetWarning = shouldWarnLowEffortBigPlan(currentEffortTier(), plan.riskTier, delegateStepCount)
       ? ` ⚠️ BUDGET NOTE: ${delegateStepCount} delegate steps at HIGH risk under LOW effort (~2 min budget) — this will very likely NOT finish in time. Prefer telling the user to re-run at a higher effort tier (medium/high) or with a longer --timeout; if you proceed anyway, keep the scope tight and make any partial result's limitations explicit in your final answer.`
       : "";
@@ -117,7 +126,7 @@ registerTool({
           ? `Recording a plan is NOT execution. CALL execute_plan to run this plan in its own dependency order — it dispatches each step by kind (delegate to the specialist, reuse to the named workflow), runs a parallelGroup concurrently, feeds each step's result to the steps that depend on it, and hands \`direct\` steps back to you. `
             + `Or drive it yourself and ${execParts.join(", and ")}. Either way: do NOT write the final answer until those steps have actually run; a tool-free answer after only record_plan does not satisfy this plan.`
           : `Now execute it and make sure the final answer meets the acceptance criteria.`)
-        + budgetWarning,
+        + unnamedReuseNote + budgetWarning,
       metadata: { stepCount: plan.steps.length, riskTier: plan.riskTier, wide: plan.wide, ...(budgetWarning ? { budgetWarning: true } : {}) },
     };
   },

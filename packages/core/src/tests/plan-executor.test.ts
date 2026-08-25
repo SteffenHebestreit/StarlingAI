@@ -116,6 +116,33 @@ describe("execute_plan dispatches each step to the tool that runs that kind", ()
     expect(maxInFlight).toBe(1);     // ...but never at the same time
   });
 
+  it("runs a `direct` step's own tool, chaining tools with agents in one plan", async () => {
+    // The third leg. `agent` makes a delegate step dispatchable and `workflow` makes a reuse step
+    // dispatchable; without this a plan could not run a plain tool call in its own order, and the
+    // orchestrator had to hand-carry them between the delegations.
+    await persistTurnPlan(SESSION, basePlan([
+      { id: "s1", description: "look it up", kind: "direct", tool: "web_search", toolArgs: { query: "rfc 9110" } },
+      { id: "s2", description: "write it up", kind: "delegate", agent: "content_writer", dependsOn: ["s1"] },
+    ]));
+
+    const result = await run();
+    expect(result.success).toBe(true);
+    expect(calls.map((c) => c.name)).toEqual(["web_search", "delegate_to_agent"]);
+    expect(calls[0]?.args).toEqual({ query: "rfc 9110" });   // literal args, not a prose task
+  });
+
+  it("refuses a plan that lists itself as one of its own steps", async () => {
+    // The round limit is per-call, so it does not survive nesting: this would re-enter with the
+    // same plan and the same pending step until the stack or the turn gave out.
+    await persistTurnPlan(SESSION, basePlan([
+      { id: "s1", description: "run the plan", kind: "direct", tool: "execute_plan" },
+    ]));
+
+    const result = await run();
+    expect(calls).toHaveLength(0);
+    expect(result.output).toMatch(/cannot run itself/);
+  });
+
   it("hands a `direct` step back and reports what is waiting on it", async () => {
     await persistTurnPlan(SESSION, basePlan([
       { id: "s1", description: "decide the framing", kind: "direct" },

@@ -227,3 +227,38 @@ describe("turn plan — persistence (root-session scoped)", () => {
     expect(rendered).toContain("tests pass");
   });
 });
+
+/**
+ * A reuse step is only dispatchable if it says WHICH workflow. The plan schema has always let the
+ * model describe it in prose alone, and execute_plan can then do nothing but hand the step back —
+ * so record_plan says so while the plan is still being written.
+ */
+const { getTool } = await import("../tools/registry.js");
+await import("../tools/turn-plan-tool.js");
+
+describe("record_plan — a reuse step that names no workflow", () => {
+  const record = async (steps: unknown[]): Promise<string> => {
+    const result = await getTool("record_plan")!.execute(
+      { objective: "ship it", steps },
+      { sessionId: "record-plan-note", workspacePath: "/w" } as never,
+    );
+    return result.output;
+  };
+
+  it("names the offending step, and points at execute_plan for the rest", async () => {
+    const output = await record([
+      { id: "s1", description: "gather", kind: "reuse", workflow: "research_pack" },
+      { id: "s2", description: "run the usual publishing flow", kind: "reuse" },
+    ]);
+    expect(output).toMatch(/reuse step s2 names no workflow/);
+    expect(output).not.toMatch(/s1 names no workflow/);
+    expect(output).toMatch(/CALL execute_plan/);
+  });
+
+  it("says nothing when every reuse step names one", async () => {
+    const output = await record([
+      { id: "s1", description: "gather", kind: "reuse", workflow: "research_pack" },
+    ]);
+    expect(output).not.toMatch(/names no workflow/);
+  });
+});

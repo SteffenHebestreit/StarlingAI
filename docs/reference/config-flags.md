@@ -16,7 +16,7 @@ Every public schema field, where it is declared, and how many production files r
 | `activeModelPreset` | packages/core/src/config/schema.ts:1581 | 2 |
 | `addHosts` | packages/core/src/config/schema.ts:672 | 1 |
 | `admin` | packages/core/src/config/schema.ts:357 | 21 |
-| `agents` | packages/core/src/config/schema.ts:1571 | 128 |
+| `agents` | packages/core/src/config/schema.ts:1571 | 129 |
 | `alertmanager` | packages/core/src/config/schema.ts:1038 | 1 |
 | `all` | packages/core/src/config/schema.ts:1176 | 214 |
 | `allowedAgents` | packages/core/src/config/schema.ts:1190 | 25 |
@@ -436,7 +436,7 @@ Every public schema field, where it is declared, and how many production files r
 | `toolMode` | packages/core/src/config/schema.ts:262 | 5 |
 | `toolName` | packages/core/src/config/schemas/multimodal.ts:17 | 65 |
 | `toolRerankMinTools` | packages/core/src/config/schemas/orchestration.ts:585 | 2 |
-| `tools` | packages/core/src/config/schema.ts:824 | 166 |
+| `tools` | packages/core/src/config/schema.ts:824 | 167 |
 | `topK` | packages/core/src/config/schema.ts:160 | 7 |
 | `topP` | packages/core/src/config/schema.ts:159 | 4 |
 | `transport` | packages/core/src/config/schema.ts:657 | 25 |
