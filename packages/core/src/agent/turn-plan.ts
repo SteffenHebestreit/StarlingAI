@@ -357,6 +357,18 @@ function serializePlanWithinStoreBudget(plan: TurnPlan): string {
     log.warn({ chars: json.length }, "Turn plan too large for the store — dropped step toolArgs");
     return json;
   }
+  // Statuses only — id + status is about thirty bytes a step, and it is the difference between a
+  // resumed call continuing and re-dispatching every completed step with a fresh budget. Losing the
+  // detail and the result text is a degraded record; losing the statuses is a re-run.
+  const statusesOnly = {
+    ...argless,
+    outcomes: (argless.outcomes ?? []).map((outcome) => ({ id: outcome.id, status: outcome.status })),
+  };
+  const statusJson = JSON.stringify(statusesOnly);
+  if (statusJson.length <= PLAN_VALUE_MAX) {
+    log.warn({ chars: statusJson.length }, "Turn plan too large for the store — kept step statuses only");
+    return statusJson;
+  }
   const bare = JSON.stringify({ ...argless, outcomes: [] as TurnPlanStepOutcome[] });
   if (bare.length <= PLAN_VALUE_MAX) {
     log.warn({ chars: bare.length }, "Turn plan too large for the store — dropped step outcomes");

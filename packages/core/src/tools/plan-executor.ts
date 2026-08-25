@@ -33,6 +33,24 @@ import { withDelegationFanoutAllowance } from "./sub-agent.js";
 
 const log = childLogger("tool:execute_plan");
 
+/**
+ * Defang the framing markers that the orchestrator's OWN tool-output guardrail blocks on.
+ *
+ * checkToolOutput BLOCKS rather than neutralizes, which is right for the orchestrator's controlled
+ * tools — but this tool's output is mostly untrusted delegated content, re-emitted as the
+ * orchestrator's own. A step whose result merely quoted an HTML-ish role tag therefore replaced the
+ * ENTIRE report with "Tool output blocked by guardrails", while the metadata still said N done and
+ * 0 failed, so the turn synthesized over it. And it could not be retried: the results are already
+ * persisted, so the next call re-emits the same text and is blocked again. input.ts's own note says
+ * untrusted content must be neutralized instead — the content is preserved, only the exact tokens
+ * are rewritten.
+ */
+function defangFramingMarkers(text: string): string {
+  return text
+    .replace(/<(\s*\/?\s*)(system|assistant|human|user|tool_result)\b/gi, "&lt;$1$2")
+    .replace(/\[(function_results?)\]/gi, "[$1 ]");
+}
+
 /** Hard stop on scheduler rounds, so a plan that never settles cannot spin. */
 const MAX_ROUNDS = 16;
 /** How much of a completed step's result is carried to the steps that depend on it. */
@@ -82,7 +100,7 @@ function buildStepTask(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<
         const slice = entry.text.slice(0, CARRIED_RESULT_CHARS);
         // Unmarked truncation is worse than a short excerpt: the step is told to use this and not
         // re-derive it, so a fragment cut mid-sentence reads as the complete finding.
-        return `[${entry.id}] ${slice}${slice.length < entry.text.length ? "\n…(truncated — ask for the rest if you need it)" : ""}`;
+        return `[${entry.id}] ${defangFramingMarkers(slice)}${slice.length < entry.text.length ? "\n…(truncated — ask for the rest if you need it)" : ""}`;
       }).join("\n\n"),
     );
   }
@@ -117,6 +135,11 @@ function dispatchFor(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<st
     // the same pending step, forever — the round limit is per-call and does not survive nesting.
     if (step.tool === "execute_plan") {
       return { manual: "a plan cannot run itself as one of its own steps" };
+    }
+    // Re-recording mid-execution is a no-op with a misleading receipt: this call persists the plan
+    // it is already holding, outcomes and all, the moment the round loop ends.
+    if (step.tool === "record_plan") {
+      return { manual: "a step cannot re-record the plan while that plan is executing — finish this run, then record a new plan" };
     }
     // Delegation belongs to `delegate` and `reuse` steps, where the plan accounts for it — as a
     // step of its own, in the dependency order, counted against the turn's delegate budget. Hidden
@@ -325,6 +348,10 @@ registerTool({
     const spentOnTurn = (tool: string): number =>
       Math.max(spent.get(tool) ?? 0, ctx.getTurnToolCallCount?.(tool) ?? 0);
 
+    // A deferral spends a round without dispatching, so a fixed ceiling under-ran a plan that hit
+    // its budget a few times — and the leftovers were then labelled as waiting on something.
+    const maxRounds = Math.max(MAX_ROUNDS, plan.steps.length * 2 + 4);
+    let exitReason: "settled" | "rounds" | "aborted" = "settled";
     const ran: string[] = [];
     /** Dispatched successfully IN THIS CALL — what the turn may add to its own counters. */
     const dispatchedOk: string[] = [];
@@ -336,10 +363,11 @@ registerTool({
     const deferred = new Set<string>();
     let blocked: ReturnType<typeof planFrontier>["blocked"] = [];
 
-    for (let round = 0; round < MAX_ROUNDS; round++) {
+    let round = 0;
+    for (; round < maxRounds; round++) {
       // The turn can be cancelled mid-plan; without this the scheduler walks the rest of it and
       // dispatches specialists nobody is waiting for any more.
-      if (ctx.signal?.aborted) break;
+      if (ctx.signal?.aborted) { exitReason = "aborted"; break; }
       const frontier = planFrontier(plan, statuses, deferred);
       blocked = frontier.blocked;
       if (frontier.batch.length === 0) break;
@@ -353,6 +381,7 @@ registerTool({
         return true;
       });
       if (batch.length === 0) continue;
+      if (round === maxRounds - 1) exitReason = "rounds";
 
       for (const step of batch) statuses.set(step.id, "running");
       // The per-agent repeat cap is 2 per turn, so a parallelGroup of three steps sharing one
@@ -431,7 +460,7 @@ registerTool({
       if (budget <= 0) { omitted += 1; continue; }
       const slice = text.slice(0, Math.min(REPORTED_RESULT_CHARS, budget));
       budget -= slice.length;
-      reported.push(`[${outcome.id}] ${byId.get(outcome.id)?.description ?? ""}\n${slice}${slice.length < text.length ? "\n…(clipped)" : ""}`);
+      reported.push(`[${outcome.id}] ${byId.get(outcome.id)?.description ?? ""}\n${defangFramingMarkers(slice)}${slice.length < text.length ? "\n…(clipped)" : ""}`);
     }
 
     const sections = [`Plan: ${done.length}/${plan.steps.length} step(s) completed.`];
@@ -452,8 +481,17 @@ registerTool({
     const blockedIds = new Set(blocked.map((b) => b.step.id));
     const stranded = pending.filter((o) => !blockedIds.has(o.id));
     if (stranded.length > 0) {
-      sections.push(`NOT RUN — waiting further back in the chain:
-${describe(stranded)}`);
+      // Say which it is. "Waiting further back in the chain" was printed for steps the budget had
+      // deferred, for a cancelled turn, and for a scheduler that simply ran out of rounds — none of
+      // which are waiting on anything.
+      const why = exitReason === "aborted"
+        ? "the turn was cancelled before these ran"
+        : exitReason === "rounds"
+          ? "the scheduler reached its round limit"
+          : stranded.every((o) => deferred.has(o.id))
+            ? "the per-turn budget was spent before these ran"
+            : "waiting further back in the chain";
+      sections.push(`NOT RUN — ${why}:\n${describe(stranded)}`);
     }
     if (malformed.length > 0) {
       sections.push(`THE PLAN IS MALFORMED: ${malformed.map((b) => b.step.id).join(", ")} depend on ids the plan never defines, so they can never run. `

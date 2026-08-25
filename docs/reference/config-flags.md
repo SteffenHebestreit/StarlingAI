@@ -364,7 +364,7 @@ Every public schema field, where it is declared, and how many production files r
 | `retrievalTopK` | packages/core/src/config/schemas/retrieval.ts:52 | 3 |
 | `reuseSessionEvidenceOnRefinement` | packages/core/src/config/schemas/orchestration.ts:520 | 1 |
 | `riskGatedQA` | packages/core/src/config/schemas/effort.ts:47 | 6 |
-| `role` | packages/core/src/config/schema.ts:821 | 89 |
+| `role` | packages/core/src/config/schema.ts:821 | 90 |
 | `rolesClaim` | packages/core/src/config/schema.ts:380 | 1 |
 | `routing` | packages/core/src/config/schema.ts:227 | 67 |
 | `sampleRate` | packages/core/src/config/schema.ts:537 | 2 |
