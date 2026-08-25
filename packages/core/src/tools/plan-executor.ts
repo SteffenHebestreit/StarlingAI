@@ -210,6 +210,15 @@ registerTool({
     if (!plan) {
       return fail("No plan recorded this turn. Call record_plan first, then execute_plan.");
     }
+    // A PLAN BELONGS TO THE TURN THAT RECORDED IT. The slot outlives the turn (session TTL) and
+    // nothing clears it, so a later turn calling execute_plan without record_plan reloaded the last
+    // turn's plan WITH its outcomes, dispatched nothing because every step was already done, and
+    // handed back the OLD turn's results under "Every step has run — synthesize the final answer
+    // from the results above": stale evidence answering a question it was never about.
+    const recordedAt = Date.parse(plan.createdAt);
+    if (ctx.turnStartedAt !== undefined && Number.isFinite(recordedAt) && recordedAt < ctx.turnStartedAt) {
+      return fail("The stored plan was recorded in an EARLIER turn, so it is not this turn's plan and its results are not this turn's evidence. Call record_plan for what you are doing now, then execute_plan.");
+    }
     if (plan.steps.length === 0) {
       // Reachable without the model doing anything odd: normalizeTurnPlan drops any step it cannot
       // read a description from, so a whole plan can normalize to nothing. Reported as finished, it
@@ -266,23 +275,29 @@ registerTool({
     let capHit = false;
 
     const ran: string[] = [];
+    // Steps the delegate budget has deferred. Held out of the frontier rather than breaking the
+    // loop: planFrontier hands back ONE step per round unless a parallelGroup widens it, so
+    // stopping at the first capped delegate abandoned everything behind it — including `direct`
+    // and `reuse` steps the delegate budget does not govern, and the orchestrator's own steps,
+    // which were then never reported as YOURS TO DO.
+    const deferred = new Set<string>();
     let blocked: ReturnType<typeof planFrontier>["blocked"] = [];
 
     for (let round = 0; round < MAX_ROUNDS; round++) {
       // The turn can be cancelled mid-plan; without this the scheduler walks the rest of it and
       // dispatches specialists nobody is waiting for any more.
       if (ctx.signal?.aborted) break;
-      const frontier = planFrontier(plan, statuses);
+      const frontier = planFrontier(plan, statuses, deferred);
       blocked = frontier.blocked;
       if (frontier.batch.length === 0) break;
 
       const batch = frontier.batch.filter((step) => {
         if (step.kind !== "delegate" || delegateCap === undefined) return true;
-        if (delegateDispatched >= delegateCap) { capHit = true; return false; }
+        if (delegateDispatched >= delegateCap) { capHit = true; deferred.add(step.id); return false; }
         delegateDispatched += 1;
         return true;
       });
-      if (batch.length === 0) break;
+      if (batch.length === 0) continue;
 
       for (const step of batch) statuses.set(step.id, "running");
       const outcomes = await Promise.all(
@@ -394,15 +409,16 @@ ${describe(stranded)}`);
         : "Every step has run. Synthesize the final answer from the results above, against the acceptance criteria.",
     );
 
-    const ok = failed.length === 0 && malformed.length === 0;
+    // REPORTED, NOT THROWN. The turn replaces a failed tool's output with "Error: <error>", so
+    // returning success:false for a plan with one failed step discarded the whole report — the
+    // successful steps' results, which step failed, and the retry instruction — leaving the model
+    // with a bare "1 plan step(s) failed" and no way to act on it. The plan RAN; what happened to
+    // each step is in the report, and the turn's disposition classifier reads metadata.failed, so
+    // the failure still classifies as one. run_workflow does the same for a routing miss (audit
+    // bd3d60dc) and for the same reason.
     return {
-      success: ok,
+      success: true,
       output: sections.join("\n\n"),
-      ...(ok ? {} : {
-        error: failed.length > 0
-          ? `${failed.length} plan step(s) failed`
-          : `${malformed.length} plan step(s) depend on ids the plan does not define`,
-      }),
       metadata: {
         // The turn's post-orchestration classifier keys on this. execute_plan is an orchestration
         // result ONE LEVEL UP — it dispatches the delegations and workflows whose result shapes
@@ -414,10 +430,14 @@ ${describe(stranded)}`);
         manual: manual.length,
         pending: pending.length,
         executed: ran,
-        // Only the steps that actually delegated or ran a workflow. The turn counts this as its
-        // delegation total, and that signal gates the honesty chain — a plan step that merely
-        // called a tool is not orchestration and must not be reported as it.
-        delegated: ran.filter((id) => byId.get(id)?.kind !== "direct").length,
+        // Only the steps that actually delegated or ran a workflow AND SUCCEEDED. The turn adds
+        // this to its delegation total, which gates the honesty chain, so counting a failed step
+        // here re-opens the very defect this reverted run_workflow's call-time counting for
+        // (audit 1303e254): a `reuse` step whose workflow does not exist, or one refused before
+        // dispatch, would report as executed orchestration and release the compliance gates for a
+        // turn in which nothing ran. A plain `direct` tool step is excluded too — a tool call is
+        // not orchestration.
+        delegated: done.filter((o) => byId.get(o.id)?.kind !== "direct").length,
         ...(artifacts.length > 0 ? { artifacts } : {}),
       },
     };

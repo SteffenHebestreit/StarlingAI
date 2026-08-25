@@ -156,7 +156,7 @@ describe("execute_plan dispatches each step to the tool that runs that kind", ()
       { sessionId: SESSION, workspacePath: "/w", allowedTools: ["web_search"] } as never,
     );
     expect(calls).toHaveLength(0);
-    expect(result.success).toBe(false);
+    expect(result.metadata?.["failed"]).toBe(1);
     expect(result.output).toMatch(/not in this agent's allowed tool set/);
   });
 
@@ -210,7 +210,10 @@ describe("execute_plan dispatches each step to the tool that runs that kind", ()
     ]));
 
     const result = await run();
-    expect(result.success).toBe(false);
+    // NOT success:false — the turn would then replace this whole report with "Error: …", losing
+    // which step failed, what the others produced, and the retry instruction. metadata.failed is
+    // the signal, and it is what the turn's disposition classifier reads.
+    expect(result.metadata?.["failed"]).toBe(1);
     expect(result.output).toMatch(/FAILED/);
     expect(result.output).toMatch(/specialist unavailable/);
     expect(calls).toHaveLength(1);                        // s2 was never dispatched
@@ -270,9 +273,9 @@ describe("execute_plan dispatches each step to the tool that runs that kind", ()
     await persistTurnPlan(SESSION, basePlan([{ id: "s1", description: "research", kind: "delegate" }]));
 
     const first = await run();
-    expect(first.success).toBe(false);
+    expect(first.metadata?.["failed"]).toBe(1);
     const second = await getTool("execute_plan")!.execute({ retry: ["s1"] }, ctx());
-    expect(second.success).toBe(true);
+    expect(second.metadata?.["failed"]).toBe(0);
     expect(second.output).toContain("second time lucky");
   });
 
@@ -286,7 +289,6 @@ describe("execute_plan dispatches each step to the tool that runs that kind", ()
 
     const result = await run();
     expect(calls).toHaveLength(0);
-    expect(result.success).toBe(false);
     expect(result.output).toMatch(/MALFORMED/);
     expect(result.output).not.toMatch(/Synthesize the final answer/);
   });
@@ -341,7 +343,7 @@ describe("execute_plan dispatches each step to the tool that runs that kind", ()
     ]));
 
     const result = await run();
-    expect(result.success).toBe(false);
+    expect(result.metadata?.["failed"]).toBe(1);
     expect(result.output).toMatch(/no workflow named "research pack" exists/);
     expect(calls.map((c) => c.name)).toEqual(["run_workflow"]);   // s2 never got the miss as input
   });
@@ -387,6 +389,66 @@ describe("execute_plan dispatches each step to the tool that runs that kind", ()
     await run();
     const task = String(calls[1]?.args["task"] ?? "");
     expect(task).toMatch(/truncated/);
+  });
+
+  it("counts only steps that really delegated AND succeeded", async () => {
+    // The turn adds this to _turnDelegationCount, which gates the honesty chain. Counting a FAILED
+    // reuse step here re-opens audit 1303e254 from the other end: a workflow that never ran would
+    // read as executed orchestration and release the compliance gates for a turn in which nothing
+    // happened. That is the exact defect the call-time counting of run_workflow was reverted for.
+    respond = (name) => (name === "run_workflow"
+      ? { success: true, output: "No saved workflow matches this request.", metadata: { workflowNotFound: true } }
+      : { success: true, output: "ok" });
+    await persistTurnPlan(SESSION, basePlan([
+      { id: "s1", description: "gather", kind: "reuse", workflow: "nope", parallelGroup: 1 },
+      { id: "s2", description: "write", kind: "delegate", parallelGroup: 1 },
+    ]));
+
+    const result = await run();
+    expect(result.metadata?.["failed"]).toBe(1);
+    expect(result.metadata?.["executed"]).toEqual(["s1", "s2"]);
+    expect(result.metadata?.["delegated"]).toBe(1);   // s2 only — s1 ran no workflow
+  });
+
+  it("keeps going past a capped delegate step for work the cap does not govern", async () => {
+    // planFrontier hands back ONE step per round unless a parallelGroup widens it, so breaking out
+    // at the first capped delegate abandoned everything behind it — including direct and reuse
+    // steps the delegate budget does not govern, and the orchestrator's own steps, which then never
+    // appeared under YOURS TO DO.
+    await persistTurnPlan(SESSION, basePlan([
+      ...Array.from({ length: 6 }, (_, i) => ({ id: `d${i}`, description: `job ${i}`, kind: "delegate" as const })),
+      { id: "t1", description: "look it up", kind: "direct" as const, tool: "web_search", toolArgs: {} },
+      { id: "w1", description: "run the flow", kind: "reuse" as const, workflow: "flow" },
+      { id: "m1", description: "decide the framing", kind: "direct" as const },
+    ]));
+
+    const result = await run();
+    const names = calls.map((c) => c.name);
+    expect(names.filter((n) => n === "delegate_to_agent")).toHaveLength(5);   // the cap
+    expect(names).toContain("web_search");                                   // not capped
+    expect(names).toContain("run_workflow");                                 // not capped
+    expect(result.output).toMatch(/YOURS TO DO[\s\S]*m1/);                   // still reported
+    expect(result.output).toMatch(/DELEGATE BUDGET REACHED/);
+  });
+
+  it("will not replay a plan recorded in an earlier turn as this turn's evidence", async () => {
+    // The plan slot outlives the turn, and nothing clears it. A later turn calling execute_plan
+    // without record_plan reloaded the previous plan WITH its outcomes, dispatched nothing because
+    // everything was already done, and returned the old results under "Every step has run —
+    // synthesize the final answer from the results above".
+    await persistTurnPlan(SESSION, {
+      ...basePlan([{ id: "s1", description: "research", kind: "delegate" }]),
+      createdAt: new Date(1_000).toISOString(),
+      outcomes: [{ id: "s1", status: "done", result: "Q3 revenue was 4.2M EUR" }],
+    });
+
+    const result = await getTool("execute_plan")!.execute(
+      {},
+      { sessionId: SESSION, workspacePath: "/w", turnStartedAt: 5_000 } as never,
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/EARLIER turn/);
+    expect(result.output).not.toContain("Q3 revenue");
   });
 
   it("refuses a plan whose dependencies form a cycle", async () => {

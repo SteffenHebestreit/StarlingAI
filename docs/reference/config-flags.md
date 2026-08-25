@@ -55,7 +55,7 @@ Every public schema field, where it is declared, and how many production files r
 | `blockOn` | packages/core/src/config/schema.ts:1142 | 1 |
 | `botToken` | packages/core/src/config/schemas/channels.ts:10 | 9 |
 | `bucket` | packages/core/src/config/schema.ts:444 | 15 |
-| `budget` | packages/core/src/config/schema.ts:1507 | 73 |
+| `budget` | packages/core/src/config/schema.ts:1507 | 74 |
 | `budgets` | packages/core/src/config/schema.ts:505 | 13 |
 | `candidateTopK` | packages/core/src/config/schemas/retrieval.ts:54 | 2 |
 | `capabilities` | packages/core/src/config/schema.ts:817 | 42 |
@@ -95,7 +95,7 @@ Every public schema field, where it is declared, and how many production files r
 | `coordinatorToolCaps` | packages/core/src/config/schemas/orchestration.ts:695 | 4 |
 | `corsAllowedOrigins` | packages/core/src/config/schema.ts:305 | 2 |
 | `cpus` | packages/core/src/config/schema.ts:798 | 11 |
-| `createdAt` | packages/core/src/config/schema.ts:346 | 50 |
+| `createdAt` | packages/core/src/config/schema.ts:346 | 51 |
 | `crossAgentArtifactReuse` | packages/core/src/config/schemas/orchestration.ts:441 | 2 |
 | `currency` | packages/core/src/config/schema.ts:503 | 11 |
 | `customInstructions` | packages/core/src/config/schema.ts:263 | 2 |
@@ -156,7 +156,7 @@ Every public schema field, where it is declared, and how many production files r
 | `engramApiKey` | packages/core/src/config/schemas/retrieval.ts:43 | 2 |
 | `engramBaseUrl` | packages/core/src/config/schemas/retrieval.ts:41 | 2 |
 | `env` | packages/core/src/config/schema.ts:660 | 104 |
-| `evidence` | packages/core/src/config/schema.ts:1534 | 80 |
+| `evidence` | packages/core/src/config/schema.ts:1534 | 81 |
 | `evidenceAnchoringLengthScaled` | packages/core/src/config/schemas/orchestration.ts:273 | 1 |
 | `evidenceAnchoringOnGatheredEvidence` | packages/core/src/config/schemas/orchestration.ts:253 | 1 |
 | `excludeDelegationWaitFromTurnBudget` | packages/core/src/config/schemas/orchestration.ts:483 | 2 |

@@ -265,7 +265,7 @@ export async function readAllFacts(sessionId: string): Promise<Record<string, st
 // chars — a plan is short; cap prevents bloat. Exported because the cap is a HARD SLICE and the
 // reader JSON.parses: anything written over this length comes back as invalid JSON and the plan
 // reads as absent, so the writer's caller has to fit the plan itself rather than discover the loss.
-export const PLAN_VALUE_MAX = 8000;
+export const PLAN_VALUE_MAX = 32000;
 const planKey = (sid: string) => `starlingai:mem:${sid}:turnplan`;
 const _turnPlans = new Map<string, string>();
 

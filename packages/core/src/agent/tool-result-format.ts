@@ -66,6 +66,12 @@ export function looksLikeDelegatedFailureEvidence(value: string): boolean {
     || /\b(blocker:|missing source data|required .* unavailable|requested .* unavailable|not available in the current workspace|not available in the workspace|could not be fulfilled with exact figures|cannot be generated at this time|please provide the structured json data to proceed|please provide the source data to proceed|please provide .*json data|i need .*structured json.* to proceed|i need .*data to proceed|task cannot be completed|table does not exist|confirmed non-existent|no source provided the specific .* data)\b/i.test(preview);
 }
 
+/**
+ * Ceiling on execute_plan's model-visible report. Deliberately far above the other tools' evidence
+ * caps: this one text stands in for every step of a plan, where the others each describe one call.
+ */
+const PLAN_REPORT_MAX_CHARS = 24_000;
+
 export function buildModelVisibleToolResult(
   toolName: string,
   resultText: string,
@@ -224,6 +230,17 @@ export function buildModelVisibleToolResult(
       `Observed evidence:\n${successEvidence || "No usable delegated result returned."}`,
     ].filter(Boolean);
     return parts.join("\n");
+  }
+
+  if (toolName === "execute_plan") {
+    // THE REPORT IS THE DELIVERABLE. It carries every completed step's result — and a `direct` or
+    // `reuse` step's output reaches the model through no other channel, since those run as nested
+    // calls inside the tool and never become tool messages of their own. Without a branch here it
+    // fell through to the 600-char fallback below, which also collapses newlines: the orchestrator
+    // received the roll-call plus a fragment of the first step, cut mid-word, and was told to write
+    // the final answer from results it could not see. The executor has already budgeted this text
+    // per step and in total; this only bounds the worst case.
+    return truncatePlainText(resultText, PLAN_REPORT_MAX_CHARS);
   }
 
   if (toolName === "parallel_delegate") {

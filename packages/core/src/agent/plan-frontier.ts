@@ -38,7 +38,16 @@ const SETTLED: ReadonlySet<TurnPlanStepStatus> = new Set<TurnPlanStepStatus>(["d
  * which the schema defines as "independent and may run concurrently", widens the batch. Anything
  * else runs one at a time, in plan order, which is what a reader of the plan would expect.
  */
-export function planFrontier(plan: TurnPlan, statuses: ReadonlyMap<string, TurnPlanStepStatus>): PlanFrontier {
+export function planFrontier(
+  plan: TurnPlan,
+  statuses: ReadonlyMap<string, TurnPlanStepStatus>,
+  /**
+   * Steps to leave out of this frontier without settling them — the caller has deferred them (it
+   * has spent its delegate budget, say). They are not blocked and not failed; they simply cannot be
+   * the head this round, and the steps AFTER them must still get their turn.
+   */
+  deferred: ReadonlySet<string> = new Set(),
+): PlanFrontier {
   const byId = new Map(plan.steps.map((step) => [step.id, step]));
   const statusOf = (id: string): TurnPlanStepStatus => statuses.get(id) ?? "pending";
   const settled = (id: string): boolean => SETTLED.has(statusOf(id));
@@ -48,6 +57,7 @@ export function planFrontier(plan: TurnPlan, statuses: ReadonlyMap<string, TurnP
 
   for (const step of plan.steps) {
     if (statusOf(step.id) !== "pending") continue;
+    if (deferred.has(step.id)) continue;
     const deps = step.dependsOn ?? [];
     const missing = deps.filter((dep) => !byId.has(dep));
     if (missing.length > 0) {

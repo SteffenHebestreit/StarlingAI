@@ -94,6 +94,8 @@ export interface TurnPlan {
 }
 
 const MAX_STEPS = 12;
+/** Cap on one step's serialized toolArgs — see the note where it is applied. */
+const MAX_TOOL_ARGS_CHARS = 4_000;
 const MAX_CRITERIA = 12;
 const MAX_STRING = 600;
 
@@ -220,7 +222,13 @@ export function normalizeTurnPlan(rawInput: Record<string, unknown>): TurnPlan {
     if (tool) step.tool = tool;
     const toolArgs = obj["toolArgs"] ?? obj["tool_args"] ?? obj["args"] ?? obj["arguments"];
     if (toolArgs && typeof toolArgs === "object" && !Array.isArray(toolArgs)) {
-      step.toolArgs = toolArgs as Record<string, unknown>;
+      // Every other field here is clamped; this one was not, and it is the one the model fills with
+      // free content (a report body for write_file, say). The plan is stored in a capped slot, so an
+      // unclamped field is how a plan becomes too large to store — and a plan too large to store is
+      // a plan that silently does not exist.
+      const serialized = JSON.stringify(toolArgs);
+      if (serialized.length <= MAX_TOOL_ARGS_CHARS) step.toolArgs = toolArgs as Record<string, unknown>;
+      else step.description = `${step.description} [toolArgs omitted: ${serialized.length} chars exceeds the ${MAX_TOOL_ARGS_CHARS}-char limit — the step will be handed back to you]`;
     }
     const group = obj["parallelGroup"] ?? obj["parallel_group"];
     if (typeof group === "number" && Number.isFinite(group)) step.parallelGroup = group;
@@ -313,11 +321,34 @@ function serializePlanWithinStoreBudget(plan: TurnPlan): string {
     json = JSON.stringify(withResultBudget(plan, budget));
     if (json.length <= PLAN_VALUE_MAX) return json;
   }
-  // Nothing of ours left to shed — the steps themselves are oversized (a model-supplied toolArgs
-  // blob, most likely). Drop the outcomes rather than the plan: re-running a completed step is
-  // recoverable, losing the plan mid-turn is not.
-  log.warn({ chars: json.length, limit: PLAN_VALUE_MAX }, "Turn plan too large for the store — dropped step outcomes");
-  return JSON.stringify({ ...plan, outcomes: [] as TurnPlanStepOutcome[] });
+  // Still over with every result gone. Shed the step arguments next — bulky, and re-derivable from
+  // the step description — and only then the outcomes, which are the expensive thing to lose: a
+  // resumed call seeds its statuses from them, so dropping them re-dispatches every completed step
+  // with a fresh delegate budget, and a plan that overflows every time can never finish.
+  const argless = { ...plan, steps: plan.steps.map((step) => ({ ...step, toolArgs: undefined })) };
+  json = JSON.stringify(argless);
+  if (json.length <= PLAN_VALUE_MAX) {
+    log.warn({ chars: json.length }, "Turn plan too large for the store — dropped step toolArgs");
+    return json;
+  }
+  const bare = JSON.stringify({ ...argless, outcomes: [] as TurnPlanStepOutcome[] });
+  if (bare.length <= PLAN_VALUE_MAX) {
+    log.warn({ chars: bare.length }, "Turn plan too large for the store — dropped step outcomes");
+    return bare;
+  }
+  // MEASURED, always. Returning an oversized string here is not a degraded write, it is a DELETED
+  // plan: the store slices mid-JSON and every later read parses nothing and answers null. A
+  // normalized plan cannot get this far — MAX_STEPS descriptions clamped to 600 fit the cap with
+  // room to spare — so this guards a plan built in code rather than recorded by the model, and
+  // exists so that no path out of this function can return something the store will destroy.
+  const trimmed = { ...argless, outcomes: [] as TurnPlanStepOutcome[], steps: [...argless.steps] };
+  while (trimmed.steps.length > 1 && JSON.stringify(trimmed).length > PLAN_VALUE_MAX) trimmed.steps.pop();
+  const trimmedJson = JSON.stringify(trimmed);
+  log.error(
+    { chars: bare.length, limit: PLAN_VALUE_MAX, keptSteps: trimmed.steps.length, ofSteps: plan.steps.length },
+    "Turn plan exceeds the store even without outcomes — stored a truncated step list",
+  );
+  return trimmedJson.length <= PLAN_VALUE_MAX ? trimmedJson : JSON.stringify({ ...trimmed, steps: [] });
 }
 
 export async function persistTurnPlan(sessionId: string, plan: TurnPlan): Promise<void> {

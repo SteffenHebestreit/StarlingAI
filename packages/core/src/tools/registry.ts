@@ -212,6 +212,11 @@ export interface ToolContext {
    */
   signal?: AbortSignal;
   /**
+   * When the current turn began (epoch ms). Lets a tool tell this turn's state from a previous
+   * turn's leftovers — the turn-plan slot, for one, outlives the turn that recorded it.
+   */
+  turnStartedAt?: number;
+  /**
    * Per-turn agent invocation counters for loop enforcement.
    * Tracks how many times each agent has been called this turn.
    * Internal — populated automatically on first delegation.

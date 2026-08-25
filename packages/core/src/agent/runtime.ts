@@ -1534,6 +1534,7 @@ async function _runTurn(
     onComputerSessionState: opts.onComputerSessionState,
     allowedAgents: opts.allowedAgents,
     allowedTools: allowedToolNames,
+    turnStartedAt,
     humanInLoopSteps: opts.humanInLoopSteps,
     autoApprove: opts.autoApprove,
     maxIterationsOverride: opts.maxIterationsOverride,

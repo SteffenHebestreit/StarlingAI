@@ -267,6 +267,42 @@ describe("turn plan — persistence (root-session scoped)", () => {
     expect(loaded?.outcomes?.every((o) => o.status === "done")).toBe(true);
   });
 
+  it("keeps a plan readable even when its own steps overflow the store", async () => {
+    // The last rung used to return without measuring, so an oversized plan was still written over
+    // the cap and read back as null — while record_plan reported success. toolArgs is the field the
+    // model fills with free content, and was the only unclamped one in the normalizer.
+    await persistTurnPlan("plan-root", {
+      objective: "write the report",
+      acceptanceCriteria: [],
+      stopConditions: [],
+      riskTier: "low",
+      wide: false,
+      createdAt: new Date(0).toISOString(),
+      steps: Array.from({ length: 8 }, (_, i) => ({
+        id: `s${i}`,
+        description: "x".repeat(600),
+        kind: "direct" as const,
+        tool: "write_file",
+        toolArgs: { content: "y".repeat(20_000) },
+      })),
+      outcomes: Array.from({ length: 8 }, (_, i) => ({ id: `s${i}`, status: "done" as const, result: "z".repeat(9_000) })),
+    });
+
+    const loaded = await loadTurnPlan("plan-root");
+    expect(loaded).not.toBeNull();
+    expect(loaded?.objective).toBe("write the report");
+    expect(loaded?.steps.length).toBeGreaterThan(0);
+  });
+
+  it("drops a toolArgs blob too large to store, and says so on the step", () => {
+    const plan = normalizeTurnPlan({
+      objective: "write it",
+      steps: [{ id: "s1", description: "save the report", kind: "direct", tool: "write_file", toolArgs: { content: "x".repeat(20_000) } }],
+    });
+    expect(plan.steps[0]?.toolArgs).toBeUndefined();
+    expect(plan.steps[0]?.description).toMatch(/toolArgs omitted/);
+  });
+
   it("returns null when no plan was recorded", async () => {
     expect(await loadTurnPlan("plan-root")).toBeNull();
   });

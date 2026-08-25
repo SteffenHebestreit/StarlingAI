@@ -955,6 +955,28 @@ describe("runtime turn guidance", () => {
   });
 });
 
+describe("buildModelVisibleToolResult — execute_plan", () => {
+  // What the tool RETURNS is not what the model sees. Without a branch, execute_plan's report fell
+  // through to the 600-char fallback, which also collapses newlines: the orchestrator got the
+  // roll-call plus a fragment of the first step and was told to write the answer from results it
+  // could not see. A direct or reuse step's output has no other channel — those run as nested calls
+  // inside the tool and never become tool messages of their own.
+  const report = [
+    "Plan: 2/2 step(s) completed.",
+    "COMPLETED:\n  - s1 (direct) look up the prices\n  - s2 (delegate) write it up",
+    `RESULTS — write the final answer from these:\n\n[s1] look up the prices\n${"PRICE ".repeat(200)}\n\n[s2] write it up\n${"DRAFT ".repeat(200)}`,
+    "Every step has run. Synthesize the final answer from the results above, against the acceptance criteria.",
+  ].join("\n\n");
+
+  it("keeps both steps' results and the closing instruction", () => {
+    const visible = buildModelVisibleToolResult("execute_plan", report, { planExecution: true });
+    expect(visible).toContain("PRICE");
+    expect(visible).toContain("DRAFT");
+    expect(visible).toContain("Synthesize the final answer");
+    expect(visible).toContain("\n");          // the fallback collapses every newline
+  });
+});
+
 describe("classifyPostOrchestrationDisposition — a plan that executed", () => {
   // execute_plan dispatches the delegations and workflows whose result shapes this classifier
   // recognizes, one level down, so its OWN result carries none of their markers. Unrecognized, an
