@@ -313,7 +313,7 @@ describe("execute_plan dispatches each step to the tool that runs that kind", ()
 
     const result = await run();
     expect(calls).toHaveLength(5);
-    expect(result.output).toMatch(/DELEGATE BUDGET REACHED/);
+    expect(result.output).toMatch(/PER-TURN BUDGET REACHED for delegate_to_agent/);
     expect(result.output).toMatch(/Do NOT write the final answer/);
   });
 
@@ -428,7 +428,7 @@ describe("execute_plan dispatches each step to the tool that runs that kind", ()
     expect(names).toContain("web_search");                                   // not capped
     expect(names).toContain("run_workflow");                                 // not capped
     expect(result.output).toMatch(/YOURS TO DO[\s\S]*m1/);                   // still reported
-    expect(result.output).toMatch(/DELEGATE BUDGET REACHED/);
+    expect(result.output).toMatch(/PER-TURN BUDGET REACHED for delegate_to_agent/);
   });
 
   it("will not replay a plan recorded in an earlier turn as this turn's evidence", async () => {
@@ -449,6 +449,51 @@ describe("execute_plan dispatches each step to the tool that runs that kind", ()
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/EARLIER turn/);
     expect(result.output).not.toContain("Q3 revenue");
+  });
+
+  it("charges a reuse step to run_workflow's own per-turn limit, not the delegate one", async () => {
+    // A `reuse` step IS a run_workflow call, whose per-turn limit is 2 — capping only `delegate`
+    // steps left it wide open, and the executor dispatches from inside one tool call where the
+    // turn's own cap can never see it.
+    await persistTurnPlan(SESSION, basePlan(
+      Array.from({ length: 5 }, (_, i) => ({ id: `w${i}`, description: `flow ${i}`, kind: "reuse" as const, workflow: `flow${i}` })),
+    ));
+
+    const result = await run();
+    expect(calls.filter((c) => c.name === "run_workflow")).toHaveLength(2);
+    expect(result.output).toMatch(/PER-TURN BUDGET REACHED for run_workflow/);
+  });
+
+  it("does not hand `retry` a fresh per-turn budget", async () => {
+    // The budget is derived from the steps already dispatched, so deriving it AFTER retry moved a
+    // failed step back to pending forgot that step's dispatch — and every retry re-armed the cap.
+    let attempt = 0;
+    respond = () => (++attempt <= 5
+      ? { success: false, output: "", error: "unavailable" }
+      : { success: true, output: "ok" });
+    await persistTurnPlan(SESSION, basePlan(
+      Array.from({ length: 6 }, (_, i) => ({ id: `d${i}`, description: `job ${i}`, kind: "delegate" as const })),
+    ));
+
+    await run();
+    expect(calls).toHaveLength(5);                       // the cap
+    calls.length = 0;
+    await getTool("execute_plan")!.execute({ retry: ["d0", "d1"] }, ctx());
+    expect(calls).toHaveLength(0);                       // budget already spent, not re-armed
+  });
+
+  it("keeps the clipped marker on a stored result, so a resume does not read it as complete", async () => {
+    respond = () => ({ success: true, output: "R".repeat(9_000) });
+    await persistTurnPlan(SESSION, basePlan([
+      { id: "s1", description: "research", kind: "delegate" },
+      { id: "s2", description: "decide the framing", kind: "direct" },
+    ]));
+    await run();
+
+    const stored = await loadTurnPlan(SESSION);
+    expect(stored?.outcomes?.find((o) => o.id === "s1")?.result).toMatch(/clipped/);
+    const second = await run();
+    expect(second.output).toMatch(/clipped/);
   });
 
   it("refuses a plan whose dependencies form a cycle", async () => {

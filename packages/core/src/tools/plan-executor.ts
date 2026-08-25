@@ -131,6 +131,16 @@ function dispatchFor(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<st
   };
 }
 
+/**
+ * The tool a step will dispatch to, or null when it is the orchestrator's own work. Kept beside
+ * dispatchFor so the per-turn budget is charged to the same tool the step actually calls.
+ */
+function dispatchTargetOf(step: TurnPlanStep): string | null {
+  if (step.kind === "delegate") return "delegate_to_agent";
+  if (step.kind === "reuse") return step.workflow ? "run_workflow" : null;
+  return step.tool && step.tool !== "execute_plan" && !BLOCKED_STEP_TOOLS.has(step.tool) ? step.tool : null;
+}
+
 /** Dispatch one step to the tool that already knows how to run that kind of work. */
 async function runStep(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<string, string>, ctx: ToolContext): Promise<StepRun> {
   const dispatch = dispatchFor(plan, step, results);
@@ -258,21 +268,29 @@ registerTool({
       }
       return applied;
     };
+    // BUDGET FIRST, RETRY SECOND. The per-turn spend is derived from the steps that have already
+    // been dispatched, so deriving it after `retry` moved a failed step back to pending would
+    // forget that step's dispatch and hand the caller a fresh budget every time it retried.
+    const spent = new Map<string, number>();
+    for (const step of plan.steps) {
+      const status = statuses.get(step.id) ?? "pending";
+      if (status !== "done" && status !== "failed") continue;
+      const tool = dispatchTargetOf(step);
+      if (tool) spent.set(tool, (spent.get(tool) ?? 0) + 1);
+    }
+
     const marked = accept(idList(args["completed"]), (status) => status !== "done", "done", "done by the orchestrator");
     const retried = accept(idList(args["retry"]), (status) => status === "failed" || status === "manual", "pending", "retried");
     for (const id of retried) details.delete(id);
     // A step left "running" by an interrupted earlier call is retried rather than stranded.
     for (const [id, status] of statuses) if (status === "running") statuses.set(id, "pending");
 
-    // execute_plan issues its delegations from INSIDE one tool call, so the turn loop's per-turn
-    // cap never sees them. Left unbounded, a 12-step plan fans out 12 times in a turn that believes
-    // it allows 5. Already-settled delegate steps count, so a resumed call continues the same
-    // turn's budget rather than starting a fresh one.
-    const delegateCap = getPerTurnToolCallLimit("delegate_to_agent");
-    let delegateDispatched = plan.steps.filter(
-      (step) => step.kind === "delegate" && ["done", "failed"].includes(statuses.get(step.id) ?? "pending"),
-    ).length;
-    let capHit = false;
+    // execute_plan dispatches from INSIDE one tool call, so the turn loop's per-turn caps never see
+    // any of it. Left unbounded, a 12-step plan fans out 12 times in a turn that believes it allows
+    // 5 — and capping only `delegate` steps left run_workflow's own limit of 2 just as open, since a
+    // `reuse` step is a run_workflow call by another name. Every step is now charged to the tool it
+    // actually dispatches, against that tool's own limit.
+    let capHit: string | null = null;
 
     const ran: string[] = [];
     // Steps the delegate budget has deferred. Held out of the frontier rather than breaking the
@@ -292,9 +310,11 @@ registerTool({
       if (frontier.batch.length === 0) break;
 
       const batch = frontier.batch.filter((step) => {
-        if (step.kind !== "delegate" || delegateCap === undefined) return true;
-        if (delegateDispatched >= delegateCap) { capHit = true; deferred.add(step.id); return false; }
-        delegateDispatched += 1;
+        const tool = dispatchTargetOf(step);
+        const limit = tool ? getPerTurnToolCallLimit(tool) : undefined;
+        if (!tool || limit === undefined) return true;
+        if ((spent.get(tool) ?? 0) >= limit) { capHit = tool; deferred.add(step.id); return false; }
+        spent.set(tool, (spent.get(tool) ?? 0) + 1);
         return true;
       });
       if (batch.length === 0) continue;
@@ -320,7 +340,12 @@ registerTool({
         id: step.id,
         status,
         ...(detail ? { detail } : {}),
-        ...(result ? { result: result.slice(0, REPORTED_RESULT_CHARS) } : {}),
+        // The marker goes into the STORED text. A resumed call reads this back as the step's whole
+        // result and compares it against itself, so a silently-clipped one would be presented as
+        // complete — the same unmarked-truncation problem as the carried upstream results.
+        ...(result
+          ? { result: result.length > REPORTED_RESULT_CHARS ? `${result.slice(0, REPORTED_RESULT_CHARS)}\n…(clipped)` : result }
+          : {}),
       };
     });
     await persistTurnPlan(ctx.sessionId, { ...plan, outcomes: finalOutcomes });
@@ -393,7 +418,7 @@ ${describe(stranded)}`);
         + `Re-record the plan with dependsOn naming real step ids (s1, s2, …), then execute_plan again.`);
     }
     if (capHit) {
-      sections.push(`DELEGATE BUDGET REACHED (${delegateCap} per turn): the remaining delegate step(s) were not dispatched. `
+      sections.push(`PER-TURN BUDGET REACHED for ${capHit} (${getPerTurnToolCallLimit(capHit)} per turn): the step(s) needing it were not dispatched. `
         + `Narrow the plan, do them yourself, or tell the user what is missing.`);
     }
     if (marked.length > 0 || retried.length > 0 || unknownIds.length > 0) {
