@@ -144,6 +144,34 @@ describe("turn plan — normalization", () => {
     expect(plan.steps).toHaveLength(1);
   });
 
+  it("gives every step a unique id — everything downstream keys steps BY id", () => {
+    // The auto-mint `s${steps.length + 1}` cannot see an explicit id the model gives a LATER step,
+    // so this plan produced ["s1","s1"] without repeating anything. Two steps then share one status
+    // entry: the first to run marks the id done, the second is skipped as already-settled, and the
+    // plan reports 2/2 completed with one deliverable never produced.
+    const plan = normalizeTurnPlan({
+      objective: "write the paper",
+      steps: [
+        { description: "gather sources", kind: "delegate", agent: "researcher" },
+        { id: "s1", description: "write the paper", kind: "delegate", agent: "content_writer" },
+      ],
+    });
+    expect(plan.steps.map((s) => s.id)).toEqual(["s2", "s1"]);
+    expect(new Set(plan.steps.map((s) => s.id)).size).toBe(2);
+  });
+
+  it("renames a repeated id rather than letting two steps collapse into one", () => {
+    const plan = normalizeTurnPlan({
+      objective: "x",
+      steps: [
+        { id: "a", description: "first", kind: "delegate" },
+        { id: "a", description: "second", kind: "delegate" },
+      ],
+    });
+    expect(new Set(plan.steps.map((s) => s.id)).size).toBe(2);
+    expect(plan.steps[0]?.id).toBe("a");
+  });
+
   it("marks a plan wide when more than two steps share a parallel group", () => {
     const plan = normalizeTurnPlan({
       objective: "Wide fan-out",

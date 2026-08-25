@@ -63,6 +63,12 @@ export interface TurnPlanStepOutcome {
   status: TurnPlanStepStatus;
   /** Short note: the failure, or why the step is the orchestrator's to run. */
   detail?: string;
+  /**
+   * What the step produced, clipped. Persisted because the executor's whole purpose is to hand
+   * these back: without it a resumed call reports a step as `done` while the work it produced is
+   * gone, and the orchestrator is told to synthesize an answer from results it cannot see.
+   */
+  result?: string;
 }
 
 export interface TurnPlan {
@@ -197,7 +203,9 @@ export function normalizeTurnPlan(rawInput: Record<string, unknown>): TurnPlan {
     const kindRaw = clampString(obj["kind"] ?? obj["tag"]).toLowerCase();
     const kind: TurnPlanStepKind = kindRaw === "reuse" || kindRaw === "direct" ? kindRaw : "delegate";
     const step: TurnPlanStep = {
-      id: clampString(obj["id"]) || `s${steps.length + 1}`,
+      // Deliberately provisional — uniqueness is settled in one pass after the loop, because
+      // `s${steps.length + 1}` cannot see an explicit id the model gives a LATER step.
+      id: clampString(obj["id"]),
       description,
       kind,
     };
@@ -216,6 +224,29 @@ export function normalizeTurnPlan(rawInput: Record<string, unknown>): TurnPlan {
     const deps = clampStringList(obj["dependsOn"] ?? obj["depends_on"], MAX_STEPS);
     if (deps.length > 0) step.dependsOn = deps;
     steps.push(step);
+  }
+
+  // EVERY CONSUMER KEYS A STEP BY ITS ID — the scheduler's status map, the dependsOn edges, the
+  // per-step outcomes. Two steps sharing one id therefore collapse into one: the first to run
+  // marks the id `done`, the second is skipped as already-settled, and the plan reports both as
+  // completed while one of them never ran. Reachable without the model repeating an id at all —
+  // it need only leave one step's id blank and name a later step "s1".
+  const usedIds = new Set<string>();
+  // Explicit ids are reserved FIRST, across the whole plan: a dependsOn edge naming "s1" has to
+  // keep pointing at the step the model called "s1", even when an earlier step left its own id
+  // blank and would otherwise have been minted into that name. A repeated explicit id is cleared
+  // here and re-minted below — first occurrence keeps it.
+  for (const step of steps) {
+    if (!step.id) continue;
+    if (usedIds.has(step.id)) step.id = "";
+    else usedIds.add(step.id);
+  }
+  let nextAutoId = 1;
+  for (const step of steps) {
+    if (step.id) continue;
+    while (usedIds.has(`s${nextAutoId}`)) nextAutoId += 1;
+    step.id = `s${nextAutoId}`;
+    usedIds.add(step.id);
   }
 
   // Accept snake_case aliases for the multi-word keys. Local models routinely emit

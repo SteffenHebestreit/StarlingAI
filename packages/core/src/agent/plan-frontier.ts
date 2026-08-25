@@ -15,8 +15,15 @@ import type { TurnPlan, TurnPlanStep, TurnPlanStepStatus } from "./turn-plan.js"
 export interface PlanFrontier {
   /** Steps to run now. More than one only when the plan put them in a parallelGroup. */
   batch: TurnPlanStep[];
-  /** Steps that can never run: they depend on something manual, failed, or missing. */
-  blocked: Array<{ step: TurnPlanStep; reason: string }>;
+  /**
+   * Steps that cannot run as things stand.
+   *
+   * `missing` and `dead` are not the same event and must not be reported as one. A dependency the
+   * plan never defined is a MALFORMED PLAN — nothing will ever satisfy it, and the caller should
+   * say so rather than call the plan finished. A dependency that is `manual` or `failed` is
+   * ordinary outstanding work: the orchestrator can do it and come back.
+   */
+  blocked: Array<{ step: TurnPlanStep; reason: string; kind: "missing" | "dead" }>;
 }
 
 /** A step is finished, one way or another, and no longer blocks its dependents. */
@@ -44,7 +51,7 @@ export function planFrontier(plan: TurnPlan, statuses: ReadonlyMap<string, TurnP
     const deps = step.dependsOn ?? [];
     const missing = deps.filter((dep) => !byId.has(dep));
     if (missing.length > 0) {
-      blocked.push({ step, reason: `depends on ${missing.join(", ")}, which the plan does not define` });
+      blocked.push({ step, reason: `depends on ${missing.join(", ")}, which the plan does not define`, kind: "missing" });
       continue;
     }
     const unsettled = deps.filter((dep) => !settled(dep));
@@ -59,7 +66,7 @@ export function planFrontier(plan: TurnPlan, statuses: ReadonlyMap<string, TurnP
       return status === "failed" || status === "manual";
     });
     if (dead.length > 0) {
-      blocked.push({ step, reason: `depends on ${dead.join(", ")}, which did not complete` });
+      blocked.push({ step, reason: `depends on ${dead.join(", ")}, which did not complete`, kind: "dead" });
     }
   }
 

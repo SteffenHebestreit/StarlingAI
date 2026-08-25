@@ -3214,13 +3214,14 @@ async function _runTurn(
         tc.name === "parallel_delegate" ||
         tc.name === "run_task_graph" ||
         tc.name === "swarm_delegate" ||
-        tc.name === "create_ephemeral_agent" ||
-        // A workflow IS orchestration progress, and the plan-continuation input has always
-        // documented this counter as "delegations/workflows" — it just never counted one, so a
-        // plan step that ran a scene registered as nothing having happened.
-        // execute_plan is deliberately absent: it dispatches into the tools above, so counting
-        // it too would double-count every step it runs.
-        tc.name === "run_workflow"
+        tc.name === "create_ephemeral_agent"
+        // run_workflow is deliberately NOT here. This block runs BEFORE the call, and bumps on the
+        // raw request, so counting it made a workflow that never ran — an ambiguous name, an
+        // unknown scene, a recursive re-entry — read as executed orchestration. That poisoned
+        // signal disables the whole honesty chain for a source-sensitive turn (audit 1303e254);
+        // the honest signal is workflowRunCompletedThisTurn, set below on result.success.
+        // execute_plan is likewise absent here: it dispatches nothing until it runs, and what it
+        // actually dispatched is counted from its result.
       ) {
         _turnDelegationCount += 1;
       } else if (tc.name === "share_finding") {
@@ -3580,6 +3581,18 @@ async function _runTurn(
         workflowRunCompletedThisTurn = true;
       }
 
+      // execute_plan delegates from INSIDE one tool call, so the loop above never sees those
+      // delegations and the turn ended believing it had orchestrated nothing: the shared-facts
+      // refresh before final synthesis is gated on this counter, as is the evidence-anchoring
+      // grounding gate, and the scorecard reported delegationCount 0 for a turn that ran N
+      // specialists. Counted from the result, so only steps that really dispatched count.
+      if (tc.name === "execute_plan") {
+        const delegated = result.metadata?.["delegated"];
+        if (typeof delegated === "number" && delegated > 0) {
+          _turnDelegationCount += delegated;
+        }
+      }
+
       pendingSearchAgentSuggestion = tc.name === "search_agents"
         ? extractAgentRoutingSuggestionFromMetadata(result.metadata)
         : undefined;
@@ -3852,7 +3865,12 @@ async function _runTurn(
           const delegateCap = getConfig().orchestration?.perTurnCaps?.["delegate_to_agent"] ?? 5;
           const planDecision = decidePlanContinuation({
             plan: continuationPlan,
-            executedDelegations: _turnDelegationCount,
+            // A `reuse` step that ran is progress against the plan, but the delegation counter
+            // deliberately does not count run_workflow at call time (a workflow that never ran
+            // must not read as executed orchestration — audit 1303e254). The success-gated flag is
+            // the honest half of that pair, so it is added HERE, where the question is only
+            // "has the plan progressed", and not to the signal the honesty chain reads.
+            executedDelegations: _turnDelegationCount + (workflowRunCompletedThisTurn ? 1 : 0),
             delegationCap: delegateCap,
             lastDelegationSucceeded: true,
             enabled: true,

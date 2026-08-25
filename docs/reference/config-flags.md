@@ -406,7 +406,7 @@ Every public schema field, where it is declared, and how many production files r
 | `stagedArtifactBuilds` | packages/core/src/config/schemas/orchestration.ts:406 | 1 |
 | `steps` | packages/core/src/config/schema.ts:1256 | 40 |
 | `stopPhrases` | packages/core/src/config/schemas/multimodal.ts:75 | 2 |
-| `store` | packages/core/src/config/schema.ts:1489 | 132 |
+| `store` | packages/core/src/config/schema.ts:1489 | 133 |
 | `subAgentDisagreementVerify` | packages/core/src/config/schemas/orchestration.ts:578 | 2 |
 | `subAgentMaxIterations` | packages/core/src/config/schemas/effort.ts:25 | 2 |
 | `subAgentMaxTokens` | packages/core/src/config/schemas/effort.ts:33 | 2 |

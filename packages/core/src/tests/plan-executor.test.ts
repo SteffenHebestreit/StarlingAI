@@ -216,6 +216,118 @@ describe("execute_plan dispatches each step to the tool that runs that kind", ()
     expect(calls).toHaveLength(1);                        // s2 was never dispatched
   });
 
+  it("hands each step's result back — the report is what the final answer gets written from", async () => {
+    // The tool told the orchestrator "synthesize the final answer from their results" and returned
+    // the roll-call without them. A `direct` or `reuse` step's output reaches the model through no
+    // other channel at all, so the instruction was to write up work it could not see.
+    respond = (name) => ({ success: true, output: name === "web_search" ? "PRICE LIST: widget A = 12.50 EUR" : "done" });
+    await persistTurnPlan(SESSION, basePlan([
+      { id: "s1", description: "look up the prices", kind: "direct", tool: "web_search", toolArgs: { query: "prices" } },
+    ]));
+
+    const result = await run();
+    expect(result.output).toContain("PRICE LIST: widget A = 12.50 EUR");
+    expect(result.output).toMatch(/RESULTS/);
+  });
+
+  it("keeps a step's result across calls, so a resumed plan has not lost it", async () => {
+    respond = () => ({ success: true, output: "THE FINDING: rfc-9110 section 9" });
+    await persistTurnPlan(SESSION, basePlan([
+      { id: "s1", description: "research", kind: "delegate" },
+      { id: "s2", description: "decide the framing", kind: "direct" },
+    ]));
+    await run();
+
+    const stored = await loadTurnPlan(SESSION);
+    expect(stored?.outcomes?.find((o) => o.id === "s1")?.result).toContain("THE FINDING");
+    // ...and a second call still reports it rather than announcing a step whose output is gone.
+    const second = await run();
+    expect(second.output).toContain("THE FINDING: rfc-9110 section 9");
+  });
+
+  it("discharges a manual step through `completed`, and then runs what was waiting on it", async () => {
+    // Without this the advertised resume is a no-op forever: `manual` is not `pending` so it is
+    // never re-offered, and it never settles, so its dependents are blocked for good.
+    await persistTurnPlan(SESSION, basePlan([
+      { id: "s1", description: "decide the framing", kind: "direct" },
+      { id: "s2", description: "write it up", kind: "delegate", dependsOn: ["s1"] },
+    ]));
+    const first = await run();
+    expect(calls).toHaveLength(0);
+    expect(first.output).toMatch(/YOURS TO DO/);
+
+    const second = await getTool("execute_plan")!.execute({ completed: ["s1"] }, ctx());
+    expect(calls.map((c) => c.name)).toEqual(["delegate_to_agent"]);
+    expect(second.output).toMatch(/Marked done: s1/);
+    expect(second.output).toMatch(/Synthesize the final answer/);
+  });
+
+  it("retries a failed step when asked, instead of stranding it", async () => {
+    let attempt = 0;
+    respond = () => (++attempt === 1
+      ? { success: false, output: "", error: "specialist unavailable" }
+      : { success: true, output: "second time lucky" });
+    await persistTurnPlan(SESSION, basePlan([{ id: "s1", description: "research", kind: "delegate" }]));
+
+    const first = await run();
+    expect(first.success).toBe(false);
+    const second = await getTool("execute_plan")!.execute({ retry: ["s1"] }, ctx());
+    expect(second.success).toBe(true);
+    expect(second.output).toContain("second time lucky");
+  });
+
+  it("calls a plan malformed rather than finished when a dependency names an id it never defines", async () => {
+    // normalizeTurnPlan mints ids s1..sN but copies dependsOn verbatim, so a model that writes
+    // dependsOn:["research vendor A"] produces exactly this. Nothing read dependsOn before, so the
+    // mismatch was harmless; the executor made it load-bearing, and reported 0 steps run as success.
+    await persistTurnPlan(SESSION, basePlan([
+      { id: "s1", description: "write it up", kind: "delegate", dependsOn: ["research vendor A"] },
+    ]));
+
+    const result = await run();
+    expect(calls).toHaveLength(0);
+    expect(result.success).toBe(false);
+    expect(result.output).toMatch(/MALFORMED/);
+    expect(result.output).not.toMatch(/Synthesize the final answer/);
+  });
+
+  it("propagates a step's artifacts, so what a plan built is still downloadable", async () => {
+    // collectTurnArtifactAttachments walks the metadata of the turn's TOOL MESSAGES, and a step's
+    // result is not one — it is a nested call inside this tool. Dropped, the user is told the deck
+    // was built and gets no link, and the auto-build can re-fire for work already done.
+    respond = () => ({ success: true, output: "built", metadata: { artifacts: [{ path: "deck.html" }] } });
+    await persistTurnPlan(SESSION, basePlan([{ id: "s1", description: "build the deck", kind: "delegate" }]));
+
+    const result = await run();
+    expect(result.metadata?.["artifacts"]).toEqual([{ path: "deck.html" }]);
+  });
+
+  it("stops at the per-turn delegate cap instead of fanning out past it", async () => {
+    // The executor delegates from inside ONE tool call, so the turn loop's cap never sees those
+    // dispatches. Unbounded, a 12-step plan fans out 12 times in a turn that allows 5.
+    await persistTurnPlan(SESSION, basePlan(
+      Array.from({ length: 7 }, (_, i) => ({ id: `s${i + 1}`, description: `job ${i}`, kind: "delegate" as const, parallelGroup: 1 })),
+    ));
+
+    const result = await run();
+    expect(calls).toHaveLength(5);
+    expect(result.output).toMatch(/DELEGATE BUDGET REACHED/);
+    expect(result.output).toMatch(/Do NOT write the final answer/);
+  });
+
+  it("reports only real delegations, so a plain tool step is not counted as orchestration", async () => {
+    // The turn adds this to its delegation total, and that signal gates the honesty chain: a step
+    // that merely called a tool is not orchestration and must not read as it.
+    await persistTurnPlan(SESSION, basePlan([
+      { id: "s1", description: "look it up", kind: "direct", tool: "web_search", toolArgs: {} },
+      { id: "s2", description: "write it up", kind: "delegate" },
+    ]));
+
+    const result = await run();
+    expect(result.metadata?.["executed"]).toEqual(["s1", "s2"]);
+    expect(result.metadata?.["delegated"]).toBe(1);
+  });
+
   it("refuses a plan whose dependencies form a cycle", async () => {
     await persistTurnPlan(SESSION, basePlan([
       { id: "a", description: "a", kind: "delegate", dependsOn: ["b"] },
