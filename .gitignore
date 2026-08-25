@@ -62,6 +62,11 @@ workspace/runtime/runtime.overrides.json
 # workspace/presentation/. None of it is source — keep it out of the repo.
 workspace/generated/
 workspace/presentation/
+# Per-user workspace roots (tools/workspace-path.ts userWorkspaceRoot): each account's own
+# generated/ and uploads/ live under workspace/users/<segment>/. Same reasoning as the two lines
+# above — none of it is source — and the rules above do not reach it, because the zone name is no
+# longer the top segment.
+workspace/users/
 
 # Document-RAG uploads: files attached in chat or uploaded to the user/workspace
 # library, plus the .registry.json manifest. Runtime user data embedded into
