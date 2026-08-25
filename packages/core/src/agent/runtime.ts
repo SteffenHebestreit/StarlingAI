@@ -44,6 +44,7 @@ import {
   DELEGATION_WAIT_TOOL_NAMES,
   toolCallContribution,
   toolResultContribution,
+  nestedCallContribution,
   readNestedToolCalls,
 } from "./turn-tool-contribution.js";
 import { longRunningGenerationManager } from "./long-running-generation.js";
@@ -3616,15 +3617,10 @@ async function _runTurn(
       // step it dispatched, and every one is accounted for exactly as if the model had asked for it
       // here: the delegation tally, the workflow-completed flag, the per-turn budget. This is the
       // seam that stops the next behaviour added above from silently skipping plan steps.
-      for (const nested of readNestedToolCalls(result.metadata)) {
-        const nestedContribution = toolCallContribution(nested.tool);
+      for (const nested of readNestedToolCalls(tc.name, result.metadata)) {
+        const nestedContribution = nestedCallContribution(nested);
         _turnDelegationCount += nestedContribution.delegations;
-        if (toolResultContribution(nested.tool, {
-          success: nested.success,
-          ...(nested.workflowNotFound ? { metadata: { workflowNotFound: true } } : {}),
-        }).workflowCompleted) {
-          workflowRunCompletedThisTurn = true;
-        }
+        if (nestedContribution.workflowCompleted) workflowRunCompletedThisTurn = true;
         _turnToolCallCounts.set(nested.tool, (_turnToolCallCounts.get(nested.tool) ?? 0) + 1);
       }
 
@@ -4005,7 +4001,7 @@ async function _runTurn(
         const partialEvidenceSynthesis =
           synthesisArtifacts.length === 0
           && getConfig().orchestration?.honestSynthesisOnPartialEvidence === true
-          && _turnDelegationCount > 0
+          && (_turnDelegationCount > 0 || workflowRunCompletedThisTurn)
           && findRecentJunkDelegationResult(toolResultMessages) !== null;
         if (partialEvidenceSynthesis) {
           logAudit("guardrail_flagged", {
@@ -4097,7 +4093,11 @@ async function _runTurn(
     // any facts that sub-agents published to shared session memory.  This prevents
     // the orchestrator from hallucinating training-data values (e.g. wrong mic
     // interface type) when a researcher has already verified and shared the truth.
-    if (_turnDelegationCount > 0) {
+    // A workflow's sub-agents publish to the same shared memory a delegated specialist does, and
+    // the delegation tally deliberately excludes run_workflow — so a turn whose orchestration WAS a
+    // workflow wrote its final answer without the facts it had just verified. Same combined signal
+    // the rest of the turn uses for "real orchestration ran".
+    if (_turnDelegationCount > 0 || workflowRunCompletedThisTurn) {
       _sharedFindingsSystemMessage = await formatSharedFactsForFinalSynthesis(session.id);
     }
 

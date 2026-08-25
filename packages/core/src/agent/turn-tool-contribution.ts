@@ -82,8 +82,45 @@ export interface NestedToolCall {
   workflowNotFound?: boolean;
 }
 
+/**
+ * Tools trusted to report the calls they made on the turn's behalf.
+ *
+ * NOT every tool result's metadata is ours. The infrastructure tools merge a REMOTE webhook's
+ * `metadata` object into their result verbatim (tools/infrastructure-shared.ts, tools/proxmox.ts),
+ * so reading `nestedCalls` off any result at all would let a remote endpoint forge delegations: the
+ * turn's tally and workflow flag would say real orchestration happened, which is precisely the
+ * signal that disables the honesty chain (audit 1303e254) — reachable from a payload rather than
+ * from a tool name. An allowlist keeps the reporter side of this seam ours.
+ */
+const NESTED_CALL_REPORTERS: ReadonlySet<string> = new Set(["execute_plan"]);
+
+/**
+ * What a call a tool made on the turn's behalf contributes.
+ *
+ * Deliberately asymmetric with `toolCallContribution`, and the asymmetry is the honest half: the
+ * loop must decide before its call returns, so it counts a delegation on the request. A reporter
+ * already knows the outcome, so a delegation that was refused before any specialist ran — an
+ * exhausted mission budget, a blocked tier, a saturated swarm — is not counted as orchestration
+ * that happened.
+ */
+export function nestedCallContribution(call: NestedToolCall): ToolCallContribution & ToolResultContribution {
+  const base = toolCallContribution(call.tool);
+  return {
+    delegations: call.success ? base.delegations : 0,
+    isDelegationWait: base.isDelegationWait,
+    workflowCompleted: toolResultContribution(call.tool, {
+      success: call.success,
+      ...(call.workflowNotFound ? { metadata: { workflowNotFound: true } } : {}),
+    }).workflowCompleted,
+  };
+}
+
 /** Read a tool result's reported nested calls, tolerating anything malformed. */
-export function readNestedToolCalls(metadata: Record<string, unknown> | undefined): NestedToolCall[] {
+export function readNestedToolCalls(
+  toolName: string,
+  metadata: Record<string, unknown> | undefined,
+): NestedToolCall[] {
+  if (!NESTED_CALL_REPORTERS.has(toolName)) return [];
   const raw = metadata?.["nestedCalls"];
   if (!Array.isArray(raw)) return [];
   const calls: NestedToolCall[] = [];
