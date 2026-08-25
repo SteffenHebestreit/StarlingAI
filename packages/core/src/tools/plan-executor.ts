@@ -29,7 +29,6 @@ import { loadTurnPlan, persistTurnPlan, type TurnPlan, type TurnPlanStep, type T
 import { planFrontier, planCycle } from "../agent/plan-frontier.js";
 import { BLOCKED_STEP_TOOLS } from "./tool-pipeline.js";
 import { getPerTurnToolCallLimit } from "../agent/delegation-response-collapse.js";
-import { getLoadableDirectMainToolNames } from "../agent/default-tools.js";
 
 const log = childLogger("tool:execute_plan");
 
@@ -61,9 +60,16 @@ function fail(error: string): ToolResult {
  * dependency on — which is exactly what `dependsOn` was already asserting is needed.
  */
 function buildStepTask(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<string, string>): string {
+  // THE STEP LEADS. delegate_to_agent dedups by a signature over the first 240 characters of the
+  // task (buildTaskSignature in tools/sub-agent.ts), so opening every step with the same objective
+  // banner made all of a plan's delegate steps signature-identical: the second step was SERVED THE
+  // FIRST STEP'S OUTPUT as its own completed result, and the third onward failed as exhausted
+  // reuse — a plan of five distinct steps running once and reporting two done, three failed, with
+  // one step's evidence printed under two others' names. The id is in there because two steps may
+  // legitimately share a description.
   const parts = [
+    `STEP ${step.id} — ${step.description}`,
     `OBJECTIVE (the whole turn): ${plan.objective}`,
-    `YOUR STEP: ${step.description}`,
   ];
   const upstream = (step.dependsOn ?? [])
     .map((id) => ({ id, text: results.get(id) }))
@@ -151,10 +157,13 @@ async function runStep(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<
   // ...but the lean tool catalog withholds the direct capability tools from the turn and lets the
   // orchestrator pull one in with load_tool, so the grant alone is narrower than the caller's real
   // reach: checking it by itself refused every `direct` step naming a normal tool. The loadable set
-  // is "what this tool mode already permits", so honouring it widens nothing.
+  // must come from the CALLER though, not from the config: the runtime narrows a turn's tool mode
+  // on the fly — a source- or artifact-sensitive turn is downgraded to orchestration_only — and
+  // reading the deployment's configured mode here handed those turns back every direct tool the
+  // runtime had just taken away, through a plan step.
   const reachable = !ctx.allowedTools
     || ctx.allowedTools.includes(dispatch.tool)
-    || getLoadableDirectMainToolNames().includes(dispatch.tool);
+    || (ctx.loadableTools ?? []).includes(dispatch.tool);
   if (!reachable) {
     return { status: "failed", detail: `'${dispatch.tool}' is not in this agent's allowed tool set` };
   }
@@ -293,6 +302,8 @@ registerTool({
     let capHit: string | null = null;
 
     const ran: string[] = [];
+    /** Dispatched successfully IN THIS CALL — what the turn may add to its own counters. */
+    const dispatchedOk: string[] = [];
     // Steps the delegate budget has deferred. Held out of the frontier rather than breaking the
     // loop: planFrontier hands back ONE step per round unless a parallelGroup widens it, so
     // stopping at the first capped delegate abandoned everything behind it — including `direct`
@@ -324,6 +335,7 @@ registerTool({
         batch.map((step) => runStep(plan, step, results, ctx).then((run) => ({ step, run }))),
       );
       for (const { step, run } of outcomes) {
+        if (run.status === "done") dispatchedOk.push(step.id);
         statuses.set(step.id, run.status);
         if (run.detail) details.set(step.id, run.detail);
         if (run.result) results.set(step.id, run.result);
@@ -455,14 +467,16 @@ ${describe(stranded)}`);
         manual: manual.length,
         pending: pending.length,
         executed: ran,
-        // Only the steps that actually delegated or ran a workflow AND SUCCEEDED. The turn adds
-        // this to its delegation total, which gates the honesty chain, so counting a failed step
-        // here re-opens the very defect this reverted run_workflow's call-time counting for
-        // (audit 1303e254): a `reuse` step whose workflow does not exist, or one refused before
-        // dispatch, would report as executed orchestration and release the compliance gates for a
-        // turn in which nothing ran. A plain `direct` tool step is excluded too — a tool call is
-        // not orchestration.
-        delegated: done.filter((o) => byId.get(o.id)?.kind !== "direct").length,
+        // THIS CALL's successful delegations, not the plan's running total. The turn ADDS this to
+        // its delegation count, so reporting every done step again on a resumed call counted the
+        // same delegations two and three times over — and that number is the turn scorecard's,
+        // gates the shared-facts refresh, and feeds the oversight judge. Failed steps are excluded
+        // because a `reuse` step whose workflow does not exist never delegated at all, and counting
+        // it would re-open the defect that run_workflow's call-time counting was reverted for
+        // (audit 1303e254). A plain `direct` tool step is not orchestration either.
+        delegated: dispatchedOk.filter((id) => byId.get(id)?.kind !== "direct").length,
+        // Whether a workflow actually RAN here, so the turn can stop demanding one it already got.
+        workflowsRun: dispatchedOk.filter((id) => byId.get(id)?.kind === "reuse").length,
         ...(artifacts.length > 0 ? { artifacts } : {}),
       },
     };

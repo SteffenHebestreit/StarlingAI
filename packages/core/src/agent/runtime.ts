@@ -39,7 +39,7 @@ import {
 import { childLogger } from "../logger.js";
 import type { AgentSession, SessionHistoryMessage } from "./session.js";
 import { classifyToolIntervention } from "./interventions.js";
-import { getMainAssistantToolNames, type MainAssistantToolMode } from "./default-tools.js";
+import { getMainAssistantToolNames, getLoadableDirectMainToolNames, type MainAssistantToolMode } from "./default-tools.js";
 import { longRunningGenerationManager } from "./long-running-generation.js";
 import { turnSteeringManager } from "./turn-steering.js";
 import { registerSessionAbortController, deregisterSessionAbortController } from "./warden.js";
@@ -1534,6 +1534,7 @@ async function _runTurn(
     onComputerSessionState: opts.onComputerSessionState,
     allowedAgents: opts.allowedAgents,
     allowedTools: allowedToolNames,
+    loadableTools: getLoadableDirectMainToolNames(effectiveToolMode),
     turnStartedAt,
     humanInLoopSteps: opts.humanInLoopSteps,
     autoApprove: opts.autoApprove,
@@ -3608,6 +3609,14 @@ async function _runTurn(
         const delegated = result.metadata?.["delegated"];
         if (typeof delegated === "number" && delegated > 0) {
           _turnDelegationCount += delegated;
+        }
+        // A `reuse` step IS a workflow execution; it just runs through executeTool inside the plan,
+        // where the run_workflow branch above never sees it. Without this the workflow-execution
+        // guard still believed no workflow had run and issued a COMPLIANCE CORRECTION demanding one
+        // the plan had already completed.
+        const workflowsRun = result.metadata?.["workflowsRun"];
+        if (typeof workflowsRun === "number" && workflowsRun > 0) {
+          workflowRunCompletedThisTurn = true;
         }
       }
 

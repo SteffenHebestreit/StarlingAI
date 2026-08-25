@@ -496,6 +496,77 @@ describe("execute_plan dispatches each step to the tool that runs that kind", ()
     expect(second.output).toMatch(/clipped/);
   });
 
+  it("gives each delegate step a task the swarm can tell apart", async () => {
+    // delegate_to_agent dedups on a signature over the first 240 chars of the task. Opening every
+    // step with the same objective banner made a plan's steps signature-identical: the second was
+    // served the FIRST step's output as its own result, and the rest failed as exhausted reuse — a
+    // five-step plan running once and reporting one step's evidence under three others' names.
+    const objective = "Compare the five leading vendors on price, support and integration depth, and produce a recommendation memo for the board with sources for every figure quoted.";
+    await persistTurnPlan(SESSION, {
+      ...basePlan([
+        { id: "s1", description: "research pricing", kind: "delegate", parallelGroup: 1 },
+        { id: "s2", description: "research support", kind: "delegate", parallelGroup: 1 },
+      ]),
+      objective,
+    });
+
+    await run();
+    const tasks = calls.map((c) => String(c.args["task"] ?? ""));
+    expect(tasks).toHaveLength(2);
+    // The window the swarm actually hashes.
+    expect(tasks[0]?.slice(0, 240)).not.toBe(tasks[1]?.slice(0, 240));
+    expect(tasks[0]?.startsWith("STEP s1")).toBe(true);
+  });
+
+  it("reports only THIS call's delegations, so a resume does not re-count them", async () => {
+    // The turn ADDS this to its delegation total. Reporting every done step again on resume counted
+    // the same delegation two and three times — into the scorecard, the shared-facts gate and the
+    // oversight judge.
+    await persistTurnPlan(SESSION, basePlan([
+      { id: "s1", description: "decide the framing", kind: "direct" },
+      { id: "s2", description: "research", kind: "delegate" },
+    ]));
+
+    const first = await run();
+    expect(first.metadata?.["delegated"]).toBe(1);
+
+    const second = await getTool("execute_plan")!.execute({ completed: ["s1"] }, ctx());
+    expect(second.metadata?.["delegated"]).toBe(0);   // nothing was dispatched this call
+  });
+
+  it("reports that a workflow ran, so the turn stops demanding one", async () => {
+    await persistTurnPlan(SESSION, basePlan([
+      { id: "s1", description: "run the flow", kind: "reuse", workflow: "research_pack" },
+    ]));
+    const result = await run();
+    expect(result.metadata?.["workflowsRun"]).toBe(1);
+  });
+
+  it("takes the loadable set from the caller, not the deployment config", async () => {
+    // The runtime narrows a turn's tool mode on the fly — a source-sensitive turn is downgraded to
+    // orchestration_only — so reading the CONFIGURED mode here handed those turns back every direct
+    // tool the runtime had just taken away, through a plan step.
+    await persistTurnPlan(SESSION, basePlan([
+      { id: "s1", description: "scan it", kind: "direct", tool: "nmap_scan", toolArgs: {} },
+    ]));
+
+    const denied = await getTool("execute_plan")!.execute(
+      {},
+      { sessionId: SESSION, workspacePath: "/w", allowedTools: ["delegate_to_agent"], loadableTools: [] } as never,
+    );
+    expect(calls).toHaveLength(0);
+    expect(denied.output).toMatch(/not in this agent's allowed tool set/);
+
+    await persistTurnPlan(SESSION, basePlan([
+      { id: "s1", description: "scan it", kind: "direct", tool: "nmap_scan", toolArgs: {} },
+    ]));
+    await getTool("execute_plan")!.execute(
+      {},
+      { sessionId: SESSION, workspacePath: "/w", allowedTools: ["delegate_to_agent"], loadableTools: ["nmap_scan"] } as never,
+    );
+    expect(calls.map((c) => c.name)).toEqual(["nmap_scan"]);
+  });
+
   it("refuses a plan whose dependencies form a cycle", async () => {
     await persistTurnPlan(SESSION, basePlan([
       { id: "a", description: "a", kind: "delegate", dependsOn: ["b"] },

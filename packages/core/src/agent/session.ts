@@ -316,7 +316,13 @@ export class AgentSession {
           // relay faithfully.  A 500-char cap truncated evidence and caused
           // hallucinations.  Use 2000 chars for delegation results, 500 for others.
           const isDelegation = /^(delegate_to_agent|parallel_delegate|create_ephemeral_agent|run_task_graph|run_workflow)$/.test(call.function.name);
-          const snippetLimit = isDelegation ? 2000 : 500;
+          // execute_plan's result stands in for a WHOLE PLAN — every step's evidence at once, and
+          // the only channel a `direct` or `reuse` step's output has, since those run as nested
+          // calls that never become tool messages of their own. At the delegation cap it lost every
+          // step after the first; at the default 500 it lost the first one too, along with the
+          // instruction to synthesize from them. It is the collapsed view that the answer-writing
+          // iteration reads, so this is the number that decides what the answer can be based on.
+          const snippetLimit = call.function.name === "execute_plan" ? 12000 : (isDelegation ? 2000 : 500);
           // Use an explicit marker instead of a bare ellipsis. Local models
           // sometimes mistake "…" for evidence that was cut off in the
           // current turn and then falsely claim "abgeschnitten" /

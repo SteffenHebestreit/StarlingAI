@@ -299,9 +299,32 @@ function withResultBudget(plan: TurnPlan, budget: number): TurnPlan {
       if (outcome.detail) stripped.detail = outcome.detail;
       return stripped;
     }
-    return { ...outcome, result: outcome.result.slice(0, budget) };
+    if (outcome.result.length <= budget) return outcome;
+    // Marked, like every other truncation here: a resumed call reads this back as the step's whole
+    // result, so an unmarked cut presents a mid-sentence fragment as the complete finding.
+    return { ...outcome, result: `${outcome.result.slice(0, budget)}\n…(clipped)` };
   });
   return { ...plan, outcomes };
+}
+
+/**
+ * A copy with the step arguments removed — and with the tools removed alongside them.
+ *
+ * Dropping `toolArgs` alone leaves a step that still NAMES a tool, and the executor would then
+ * dispatch that tool with an empty argument object: write_file with no path, an http_request with
+ * no url. A step whose arguments could not be stored is a step the orchestrator has to run itself,
+ * so it is handed back as one.
+ */
+function withoutToolArgs(plan: TurnPlan): TurnPlan {
+  return {
+    ...plan,
+    steps: plan.steps.map((step) => (step.toolArgs === undefined && step.tool === undefined ? step : {
+      ...step,
+      tool: undefined,
+      toolArgs: undefined,
+      description: `${step.description} [arguments too large to store — run this step yourself]`,
+    })),
+  };
 }
 
 /**
@@ -325,7 +348,10 @@ function serializePlanWithinStoreBudget(plan: TurnPlan): string {
   // the step description — and only then the outcomes, which are the expensive thing to lose: a
   // resumed call seeds its statuses from them, so dropping them re-dispatches every completed step
   // with a fresh delegate budget, and a plan that overflows every time can never finish.
-  const argless = { ...plan, steps: plan.steps.map((step) => ({ ...step, toolArgs: undefined })) };
+  // CUMULATIVE: built on the results-already-shed copy, not on the original. Rebuilding from `plan`
+  // put every full result back, so a plan that would have fitted with results AND arguments shed
+  // instead fell through to having its whole execution record deleted.
+  const argless = withoutToolArgs(withResultBudget(plan, 0));
   json = JSON.stringify(argless);
   if (json.length <= PLAN_VALUE_MAX) {
     log.warn({ chars: json.length }, "Turn plan too large for the store — dropped step toolArgs");

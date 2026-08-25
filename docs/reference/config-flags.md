@@ -100,7 +100,7 @@ Every public schema field, where it is declared, and how many production files r
 | `currency` | packages/core/src/config/schema.ts:503 | 11 |
 | `customInstructions` | packages/core/src/config/schema.ts:263 | 2 |
 | `dailyUsd` | packages/core/src/config/schema.ts:506 | 2 |
-| `default` | packages/core/src/config/schema.ts:1152 | 222 |
+| `default` | packages/core/src/config/schema.ts:1152 | 221 |
 | `defaultAlertmanager` | packages/core/src/config/schema.ts:1035 | 1 |
 | `defaultContainerized` | packages/core/src/config/schema.ts:1607 | 4 |
 | `defaultGithub` | packages/core/src/config/schema.ts:1057 | 1 |
@@ -291,7 +291,7 @@ Every public schema field, where it is declared, and how many production files r
 | `otlpEndpoint` | packages/core/src/config/schema.ts:533 | 2 |
 | `otlpHeaders` | packages/core/src/config/schema.ts:535 | 1 |
 | `outputSecretScan` | packages/core/src/config/schema.ts:1122 | 5 |
-| `oversight` | packages/core/src/config/schemas/effort.ts:52 | 9 |
+| `oversight` | packages/core/src/config/schemas/effort.ts:52 | 10 |
 | `pageSpeedInsightsApiKey` | packages/core/src/config/schema.ts:1061 | 1 |
 | `pageTimeoutMs` | packages/core/src/config/schemas/retrieval.ts:143 | 1 |
 | `params` | packages/core/src/config/schema.ts:1189 | 52 |
@@ -448,7 +448,7 @@ Every public schema field, where it is declared, and how many production files r
 | `type` | packages/core/src/config/schema.ts:867 | 365 |
 | `ungroundedFactualAnswerGuard` | packages/core/src/config/schemas/orchestration.ts:127 | 2 |
 | `upfrontSourceSensitiveClassifier` | packages/core/src/config/schemas/orchestration.ts:160 | 2 |
-| `url` | packages/core/src/config/schema.ts:549 | 115 |
+| `url` | packages/core/src/config/schema.ts:549 | 116 |
 | `urlFetchEnforcement` | packages/core/src/config/schemas/orchestration.ts:107 | 1 |
 | `urlNotFetchedShortAnswerGuard` | packages/core/src/config/schemas/orchestration.ts:260 | 1 |
 | `urls` | packages/core/src/config/schema.ts:772 | 10 |

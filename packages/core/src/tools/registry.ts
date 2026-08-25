@@ -184,6 +184,13 @@ export interface ToolContext {
    */
   allowedTools?: string[];
   /**
+   * Tools the caller could pull into this turn with load_tool — the lean catalog withholds them
+   * from the initial grant, so `allowedTools` alone understates the caller's real reach. Set from
+   * the turn's EFFECTIVE tool mode, which the runtime narrows per turn, so it never widens a turn
+   * the runtime deliberately restricted.
+   */
+  loadableTools?: string[];
+  /**
    * Tool names that MUST pause for human approval regardless of tier defaults.
    * Enforced unconditionally — cannot be bypassed by config or tier settings.
    */

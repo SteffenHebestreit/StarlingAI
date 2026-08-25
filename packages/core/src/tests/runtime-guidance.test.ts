@@ -977,6 +977,28 @@ describe("buildModelVisibleToolResult — execute_plan", () => {
   });
 });
 
+describe("collapsed history — what the answer-writing iteration can still see", () => {
+  // The prompt for the iteration that writes the answer is built from getCollapsedHistory(), which
+  // replaces each tool result with a snippet. At the default 500 chars execute_plan's report lost
+  // every step's evidence AND the instruction to synthesize from it — so fixing the model-visible
+  // formatting alone changed nothing for the iteration that actually matters.
+  it("keeps a plan's report long enough to answer from", async () => {
+    const { AgentSession } = await import("../agent/session.js");
+    const session = new AgentSession({ sessionId: "collapsed-history-test", channel: "test" });
+    const report = `Plan: 2/2 step(s) completed.\n\nRESULTS — write the final answer from these:\n\n[s1] ${"PRICE ".repeat(300)}\n\n[s2] ${"DRAFT ".repeat(300)}\n\nEvery step has run. Synthesize the final answer from the results above.`;
+    session.addMessage({
+      role: "assistant",
+      content: "",
+      tool_calls: [{ id: "c1", type: "function", function: { name: "execute_plan", arguments: "{}" } }],
+    } as never);
+    session.addMessage({ role: "tool", tool_call_id: "c1", content: report } as never);
+
+    const collapsed = JSON.stringify(session.getCollapsedHistory());
+    expect(collapsed).toContain("DRAFT");                        // the LAST step's evidence
+    expect(collapsed).toContain("Synthesize the final answer");  // and the instruction
+  });
+});
+
 describe("classifyPostOrchestrationDisposition — a plan that executed", () => {
   // execute_plan dispatches the delegations and workflows whose result shapes this classifier
   // recognizes, one level down, so its OWN result carries none of their markers. Unrecognized, an

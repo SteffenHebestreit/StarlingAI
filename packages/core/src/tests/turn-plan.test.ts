@@ -303,6 +303,60 @@ describe("turn plan — persistence (root-session scoped)", () => {
     expect(plan.steps[0]?.description).toMatch(/toolArgs omitted/);
   });
 
+  it("hands back a step whose arguments could not be stored, instead of running it with none", async () => {
+    // Dropping toolArgs alone leaves a step that still NAMES a tool, and the executor would then
+    // dispatch it with an empty argument object — write_file with no path, http_request with no url.
+    await persistTurnPlan("plan-root", {
+      objective: "write the reports",
+      acceptanceCriteria: [],
+      stopConditions: [],
+      riskTier: "low",
+      wide: false,
+      createdAt: new Date(0).toISOString(),
+      steps: Array.from({ length: 10 }, (_, i) => ({
+        id: `s${i}`,
+        description: "save a report",
+        kind: "direct" as const,
+        tool: "write_file",
+        toolArgs: { content: "x".repeat(3_800) },
+      })),
+    });
+
+    const loaded = await loadTurnPlan("plan-root");
+    expect(loaded).not.toBeNull();
+    expect(loaded?.steps[0]?.toolArgs).toBeUndefined();
+    expect(loaded?.steps[0]?.tool).toBeUndefined();          // ...so nothing dispatches it
+    expect(loaded?.steps[0]?.description).toMatch(/run this step yourself/);
+  });
+
+  it("sheds cumulatively — arguments go on top of results, not instead of them", async () => {
+    // The argless copy used to be rebuilt from the ORIGINAL plan, putting every full result back, so
+    // a plan that would have fitted with results AND arguments shed had its whole execution record
+    // deleted instead — and a resumed call then re-dispatched every completed step.
+    await persistTurnPlan("plan-root", {
+      objective: "o",
+      acceptanceCriteria: [],
+      stopConditions: [],
+      riskTier: "low",
+      wide: false,
+      createdAt: new Date(0).toISOString(),
+      // Sized so the result budgets alone can never fit it: the arguments are over the cap by
+      // themselves, so the argless rung is the one that decides, and it is built on the shed copy.
+      steps: Array.from({ length: 10 }, (_, i) => ({
+        id: `s${i}`,
+        description: "step",
+        kind: "direct" as const,
+        tool: "write_file",
+        toolArgs: { content: "a".repeat(3_800) },
+      })),
+      outcomes: Array.from({ length: 10 }, (_, i) => ({ id: `s${i}`, status: "done" as const, result: "r".repeat(9_000) })),
+    });
+
+    const loaded = await loadTurnPlan("plan-root");
+    expect(loaded?.outcomes).toHaveLength(10);              // the record survived
+    expect(loaded?.outcomes?.every((o) => o.status === "done")).toBe(true);
+  });
+
   it("returns null when no plan was recorded", async () => {
     expect(await loadTurnPlan("plan-root")).toBeNull();
   });
