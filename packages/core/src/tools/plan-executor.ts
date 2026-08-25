@@ -29,6 +29,7 @@ import { loadTurnPlan, persistTurnPlan, type TurnPlan, type TurnPlanStep, type T
 import { planFrontier, planCycle } from "../agent/plan-frontier.js";
 import { BLOCKED_STEP_TOOLS } from "./tool-pipeline.js";
 import { getPerTurnToolCallLimit } from "../agent/delegation-response-collapse.js";
+import { withDelegationFanoutAllowance } from "./sub-agent.js";
 
 const log = childLogger("tool:execute_plan");
 
@@ -173,6 +174,25 @@ async function runStep(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<
     if (!result.success) {
       return { status: "failed", detail: (result.error ?? "step failed").slice(0, 300) };
     }
+    // A DELEGATION CAN FAIL ON A SUCCESSFUL ToolResult. delegate_to_agent returns success:true and
+    // carries the verdict in metadata: the sub-agent's own <final_answer status="failure">, a
+    // partial fallback, or a terminalState that is not "completed". Reading only the boolean
+    // recorded such a step as `done` and carried its "I could not verify X" text into the dependent
+    // steps as the evidence they were waiting for — with metadata.failed 0, so the turn synthesized
+    // over it and the failed-research backstop never armed. The direct path relabels these
+    // TASK FAILED (tool-result-format.ts) and the disposition classifier reads the same fields.
+    if (step.kind === "delegate") {
+      const meta = result.metadata ?? {};
+      const terminalState = typeof meta["terminalState"] === "string" ? String(meta["terminalState"]) : undefined;
+      const outcome = typeof meta["delegationOutcome"] === "string" ? String(meta["delegationOutcome"]) : undefined;
+      const partial = outcome === "partial";
+      if (meta["delegationSucceeded"] === false || outcome === "failure" || (!partial && terminalState && terminalState !== "completed")) {
+        return {
+          status: "failed",
+          detail: `the specialist reported failure (${outcome ?? terminalState ?? "no usable result"})`,
+        };
+      }
+    }
     // A workflow that does not exist comes back SUCCESSFUL: run_workflow deliberately returns a
     // routing miss rather than an error (audit bd3d60dc), flagged as workflowNotFound. Taken at
     // face value the step was recorded `done`, counted in "N/N completed", and its "no saved
@@ -280,6 +300,8 @@ registerTool({
     // BUDGET FIRST, RETRY SECOND. The per-turn spend is derived from the steps that have already
     // been dispatched, so deriving it after `retry` moved a failed step back to pending would
     // forget that step's dispatch and hand the caller a fresh budget every time it retried.
+    // Seeded from the TURN's own tally where the caller exposes it, so a plan cannot spend a second
+    // full budget after the orchestrator has already spent one by hand.
     const spent = new Map<string, number>();
     for (const step of plan.steps) {
       const status = statuses.get(step.id) ?? "pending";
@@ -300,6 +322,8 @@ registerTool({
     // `reuse` step is a run_workflow call by another name. Every step is now charged to the tool it
     // actually dispatches, against that tool's own limit.
     let capHit: string | null = null;
+    const spentOnTurn = (tool: string): number =>
+      Math.max(spent.get(tool) ?? 0, ctx.getTurnToolCallCount?.(tool) ?? 0);
 
     const ran: string[] = [];
     /** Dispatched successfully IN THIS CALL — what the turn may add to its own counters. */
@@ -324,15 +348,21 @@ registerTool({
         const tool = dispatchTargetOf(step);
         const limit = tool ? getPerTurnToolCallLimit(tool) : undefined;
         if (!tool || limit === undefined) return true;
-        if ((spent.get(tool) ?? 0) >= limit) { capHit = tool; deferred.add(step.id); return false; }
-        spent.set(tool, (spent.get(tool) ?? 0) + 1);
+        if (spentOnTurn(tool) >= limit) { capHit = tool; deferred.add(step.id); return false; }
+        spent.set(tool, spentOnTurn(tool) + 1);
         return true;
       });
       if (batch.length === 0) continue;
 
       for (const step of batch) statuses.set(step.id, "running");
+      // The per-agent repeat cap is 2 per turn, so a parallelGroup of three steps sharing one
+      // specialist was refused at the third — every other fan-out tool raises the allowance for the
+      // batch it is about to issue, and this one did not.
+      const batchCtx = batch.length > 1
+        ? withDelegationFanoutAllowance(ctx, batch.map((step) => step.agent), batch.length)
+        : ctx;
       const outcomes = await Promise.all(
-        batch.map((step) => runStep(plan, step, results, ctx).then((run) => ({ step, run }))),
+        batch.map((step) => runStep(plan, step, results, batchCtx).then((run) => ({ step, run }))),
       );
       for (const { step, run } of outcomes) {
         if (run.status === "done") dispatchedOk.push(step.id);

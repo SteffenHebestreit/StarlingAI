@@ -167,7 +167,7 @@ Every public schema field, where it is declared, and how many production files r
 | `expression` | packages/core/src/config/schema.ts:1226 | 18 |
 | `extensions` | packages/core/src/config/schema.ts:1823 | 20 |
 | `failedResearchHonestyBackstop` | packages/core/src/config/schemas/orchestration.ts:115 | 1 |
-| `fallback` | packages/core/src/config/schema.ts:109 | 80 |
+| `fallback` | packages/core/src/config/schema.ts:109 | 81 |
 | `finalResponseQaGate` | packages/core/src/config/schemas/effort.ts:49 | 3 |
 | `firstTokenSloMs` | packages/core/src/config/schema.ts:1634 | 1 |
 | `forcePathStyle` | packages/core/src/config/schema.ts:447 | 2 |
@@ -363,7 +363,7 @@ Every public schema field, where it is declared, and how many production files r
 | `retireMinUses` | packages/core/src/config/schema.ts:1346 | 2 |
 | `retrievalTopK` | packages/core/src/config/schemas/retrieval.ts:52 | 3 |
 | `reuseSessionEvidenceOnRefinement` | packages/core/src/config/schemas/orchestration.ts:520 | 1 |
-| `riskGatedQA` | packages/core/src/config/schemas/effort.ts:47 | 5 |
+| `riskGatedQA` | packages/core/src/config/schemas/effort.ts:47 | 6 |
 | `role` | packages/core/src/config/schema.ts:821 | 89 |
 | `rolesClaim` | packages/core/src/config/schema.ts:380 | 1 |
 | `routing` | packages/core/src/config/schema.ts:227 | 67 |

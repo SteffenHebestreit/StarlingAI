@@ -191,6 +191,12 @@ export interface ToolContext {
    */
   loadableTools?: string[];
   /**
+   * How many times the turn has already called a tool. A tool that dispatches other tools reads
+   * this so its own budget continues the turn's rather than starting a second one; the turn loop
+   * cannot see the nested calls to count them itself.
+   */
+  getTurnToolCallCount?: (toolName: string) => number;
+  /**
    * Tool names that MUST pause for human approval regardless of tier defaults.
    * Enforced unconditionally — cannot be bypassed by config or tier settings.
    */

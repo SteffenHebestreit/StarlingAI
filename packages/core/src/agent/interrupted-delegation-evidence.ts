@@ -210,7 +210,11 @@ function findRecentDelegateEvidence(
     const isWorkflowResult = WORKFLOW_TOOL_RESULT_RE.test(content)
       || typeof meta["workflowName"] === "string";
     const isDelegate = DELEGATE_TOOL_RESULT_RE.test(content) || looksLikeDelegateMetadata(meta);
-    if (!isDelegate && !isWorkflowResult) continue;
+    // A plan's report is delegated evidence too — it carries every step's result — but it is shaped
+    // like neither of the above, so this backstop skipped it entirely and a turn that ran its whole
+    // plan and then hit an LLM error at synthesis had nothing left to recover from.
+    const isPlanResult = meta["planExecution"] === true;
+    if (!isDelegate && !isWorkflowResult && !isPlanResult) continue;
 
     const evidenceMatch = EVIDENCE_SECTION_RE.exec(content);
     const rawEvidence = evidenceMatch

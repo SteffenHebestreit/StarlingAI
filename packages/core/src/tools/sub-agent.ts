@@ -248,7 +248,7 @@ function getTotalDelegationLimit(ctx: ToolContext): number {
   return Math.max(DEFAULT_MAX_TOTAL_DELEGATIONS_PER_TURN, ctx._turnTotalDelegationLimitOverride ?? DEFAULT_MAX_TOTAL_DELEGATIONS_PER_TURN);
 }
 
-function withDelegationFanoutAllowance(ctx: ToolContext, agentNames: Array<string | undefined>, plannedDelegations: number): ToolContext {
+export function withDelegationFanoutAllowance(ctx: ToolContext, agentNames: Array<string | undefined>, plannedDelegations: number): ToolContext {
   const counts = new Map<string, number>();
   for (const agentName of agentNames) {
     const normalized = agentName?.trim();

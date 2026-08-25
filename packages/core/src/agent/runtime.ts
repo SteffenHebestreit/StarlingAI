@@ -9,7 +9,7 @@ import { assembleTurnSystemMessages } from "./turn-system-prompt.js";
 import { markOrchestratorActivity, markOrchestratorIdle } from "./cache-warmer.js";
 import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type SwarmState, type ToolContext } from "../tools/registry.js";
 import { isToolAllowed } from "../guardrails/tool-tiers.js";
-import { loadTurnPlan, decidePlanContinuation, renderPlanContinuationDirective } from "./turn-plan.js";
+import { loadTurnPlan, clearTurnPlanForSession, decidePlanContinuation, renderPlanContinuationDirective } from "./turn-plan.js";
 import { runQaDeliveryLoop, parseQaVerdict, resolveQaVerdictStatus, type QaVerdict, type QaVerdictStatus } from "./qa-delivery-loop.js";
 import {
   buildDeliverableConsistencyCheckMessages,
@@ -915,10 +915,11 @@ export function classifyPostOrchestrationDisposition(
       && delegationPartial
       && (looksLikeInterruptedDelegationWithoutUsableEvidence(text) || (!hasInterruptedShape && looksLikeOrchestrationOnlyEvidence(observedEvidence)));
 
-    if (USER_INTERACTION_CUE_RE.test(text)) {
-      return "ask_user";
-    }
 
+    // BEFORE the text sniffers below. The plan's report embeds every step's result verbatim, so a
+    // step whose output merely contains "please confirm" or "which one" would hijack the whole
+    // turn's disposition to ask_user — a genuine mid-plan clarification blocks in the ask_user tool
+    // itself rather than being inferred from text here.
     if (metadata["planExecution"] === true) {
       const count = (key: string): number => (typeof metadata[key] === "number" ? metadata[key] as number : 0);
       // A plan with a failed step did not deliver its objective — classified as a delegation
@@ -928,6 +929,10 @@ export function classifyPostOrchestrationDisposition(
       // tool has said what remains, so continue the plan rather than synthesize over the gap.
       if (count("manual") + count("pending") > 0) sawContinuationCue = true;
       continue;
+    }
+
+    if (USER_INTERACTION_CUE_RE.test(text)) {
+      return "ask_user";
     }
 
     if (/^Delegated result from .+ — TASK FAILED\./m.test(text)) {
@@ -1044,10 +1049,24 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
  *  "parent waiting for kids" time excluded from the turn budget by D5 (excludeDelegationWaitFromTurnBudget). */
 const DELEGATION_WAIT_TOOL_NAMES = new Set([
   "delegate_to_agent", "swarm_delegate", "parallel_delegate", "run_task_graph", "run_workflow",
+  // execute_plan blocks on exactly the same children — it just issues them a level down, where this
+  // loop cannot see them. Left out, a plan of four five-minute steps had none of its waiting
+  // credited back: the deadline never moved, later steps were handed the floor of the budget, and
+  // the runtime and gateway cut the turn off mid-plan. The better the plan, the worse it got — and
+  // the plan-first guidance now tells the model to take exactly this path.
+  "execute_plan",
 ]);
 
 async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
   const config = getConfig();
+  // A PLAN BELONGS TO ONE TURN. The slot lives for the session TTL and nothing ever cleared it, so
+  // every reader of it could be handed the PREVIOUS turn's plan: riskGatedQA judged this turn's
+  // answer against last turn's acceptance criteria and inherited its riskTier, the oversight judge
+  // read last turn's objective, decidePlanContinuation rendered [CONTINUE PLAN] for work already
+  // finished, and execute_plan replayed last turn's results as this turn's evidence. runTurn is
+  // called once per user message, and approvals resume inside the turn rather than re-entering it,
+  // so clearing here is exactly "start of turn".
+  await clearTurnPlanForSession(opts.session.id);
   // Per-turn timeout — inline override wins, then the active effort profile's timeout
   // (0 = "unleashed"), then config, then default 15 min. (The gateway normally folds
   // the profile timeout into turnTimeoutOverrideMs already; this fallback covers
@@ -1535,6 +1554,10 @@ async function _runTurn(
     allowedAgents: opts.allowedAgents,
     allowedTools: allowedToolNames,
     loadableTools: getLoadableDirectMainToolNames(effectiveToolMode),
+    // Live, not a snapshot: a tool that dispatches other tools has to spend the SAME per-turn
+    // budget this loop is spending, or the turn enforces its caps twice over — five delegations
+    // by hand and then five more inside a plan, in a turn that advertises five.
+    getTurnToolCallCount: (tool: string) => _turnToolCallCounts.get(tool) ?? 0,
     turnStartedAt,
     humanInLoopSteps: opts.humanInLoopSteps,
     autoApprove: opts.autoApprove,

@@ -1021,6 +1021,23 @@ describe("classifyPostOrchestrationDisposition — a plan that executed", () => 
       .toBe("failure");
   });
 
+  it("is not hijacked by a step result that happens to say \"please confirm\"", () => {
+    // The report embeds every step's output verbatim, and the ask_user cue is a text sniff over the
+    // whole tool result — so a researcher writing "please confirm the figures with the vendor" would
+    // have turned the entire turn into a clarification request. A genuine mid-plan question blocks
+    // in the ask_user tool itself.
+    const withCue = [{
+      role: "tool" as const,
+      content: `Plan: 1/1 step(s) completed.
+
+RESULTS:
+[s1] Which one did you mean? Please confirm.`,
+      tool_call_id: "t1",
+      metadata: { planExecution: true, failed: 0, manual: 0, pending: 0 },
+    }];
+    expect(classifyPostOrchestrationDisposition(withCue)).toBe("synthesize");
+  });
+
   it("continues while the orchestrator still owes a step", () => {
     expect(classifyPostOrchestrationDisposition(planResult({ failed: 0, manual: 1, pending: 1 })))
       .toBe("continue");

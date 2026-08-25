@@ -11,7 +11,7 @@ import type { TurnPlan } from "../agent/turn-plan.js";
  * the right tool per kind and the upstream results carried into the task — which is the thing a
  * one-line step description cannot supply on its own.
  */
-const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+const calls: Array<{ name: string; args: Record<string, unknown>; ctx?: Record<string, unknown> }> = [];
 let respond: (name: string, args: Record<string, unknown>) => ToolResult;
 /** Highest number of dispatches in flight at once — how concurrency is observed below. */
 let inFlight = 0;
@@ -21,8 +21,8 @@ vi.mock("../tools/registry.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../tools/registry.js")>();
   return {
     ...actual,
-    executeTool: vi.fn(async (name: string, args: Record<string, unknown>) => {
-      calls.push({ name, args });
+    executeTool: vi.fn(async (name: string, args: Record<string, unknown>, toolCtx?: Record<string, unknown>) => {
+      calls.push({ name, args, ctx: toolCtx });
       inFlight += 1;
       maxInFlight = Math.max(maxInFlight, inFlight);
       // A real tick, so two dispatches issued together actually overlap here rather than
@@ -565,6 +565,59 @@ describe("execute_plan dispatches each step to the tool that runs that kind", ()
       { sessionId: SESSION, workspacePath: "/w", allowedTools: ["delegate_to_agent"], loadableTools: ["nmap_scan"] } as never,
     );
     expect(calls.map((c) => c.name)).toEqual(["nmap_scan"]);
+  });
+
+  it("fails a step whose specialist reported failure on a successful ToolResult", async () => {
+    // delegate_to_agent returns success:true and carries the verdict in metadata — the sub-agent's
+    // own <final_answer status="failure">, a partial fallback, or a terminalState that is not
+    // "completed". Reading only the boolean recorded the step done and carried its "I could not
+    // verify X" text into the dependent step as the evidence it was waiting for.
+    respond = () => ({
+      success: true,
+      output: "I could not verify the figures.",
+      metadata: { delegationOutcome: "failure", terminalState: "failed" },
+    });
+    await persistTurnPlan(SESSION, basePlan([
+      { id: "s1", description: "research", kind: "delegate" },
+      { id: "s2", description: "write", kind: "delegate", dependsOn: ["s1"] },
+    ]));
+
+    const result = await run();
+    expect(result.metadata?.["failed"]).toBe(1);
+    expect(result.output).toMatch(/specialist reported failure/);
+    expect(calls).toHaveLength(1);                     // s2 never got the non-answer as evidence
+  });
+
+  it("continues the turn's tool budget instead of starting a second one", async () => {
+    // The turn loop cannot see a plan's nested dispatches, and the plan could not see the turn's —
+    // so five delegations by hand followed by a plan gave the plan a fresh five.
+    await persistTurnPlan(SESSION, basePlan(
+      Array.from({ length: 3 }, (_, i) => ({ id: `d${i}`, description: `job ${i}`, kind: "delegate" as const })),
+    ));
+
+    await getTool("execute_plan")!.execute(
+      {},
+      { sessionId: SESSION, workspacePath: "/w", getTurnToolCallCount: () => 4 } as never,
+    );
+    expect(calls).toHaveLength(1);                     // 4 already spent of 5, so one more only
+  });
+
+  it("raises the per-agent allowance for a parallel batch on one specialist", async () => {
+    // Every other fan-out tool raises the repeat cap for the batch it is about to issue; without it
+    // a parallelGroup of three steps sharing a specialist was refused at the third.
+    respond = () => ({ success: true, output: "ok" });
+    await persistTurnPlan(SESSION, basePlan(
+      Array.from({ length: 3 }, (_, i) => ({
+        id: `p${i}`, description: `angle ${i}`, kind: "delegate" as const, agent: "researcher", parallelGroup: 1,
+      })),
+    ));
+
+    await run();
+
+    expect(calls).toHaveLength(3);
+    // The dispatch context, not the call count — the cap itself lives inside the mocked tool.
+    const overrides = calls[0]?.ctx?.["_turnAgentRepeatLimitOverrides"] as Record<string, number> | undefined;
+    expect(overrides?.["researcher"]).toBeGreaterThanOrEqual(3);
   });
 
   it("refuses a plan whose dependencies form a cycle", async () => {
