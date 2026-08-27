@@ -392,6 +392,22 @@ describe("record_plan — a reuse step that names no workflow", () => {
     return result.output;
   };
 
+  it("refuses a plan with no steps, instead of recording an empty one", async () => {
+    // Not hypothetical: a live run against the local model recorded
+    // {objective: "typo guard", steps: []}. It logged "Turn plan recorded", answered "Now execute
+    // it", and left the turn with a persisted plan whose every count is zero — which riskGatedQA
+    // then judges against and decidePlanContinuation then measures.
+    const result = await getTool("record_plan")!.execute(
+      { objective: "typo guard", steps: [] },
+      { sessionId: "record-plan-empty", workspacePath: "/w" } as never,
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/at least one step/);
+
+    const { loadTurnPlan } = await import("../agent/turn-plan.js");
+    expect(await loadTurnPlan("record-plan-empty")).toBeNull();   // and nothing was persisted
+  });
+
   it("names the offending step, and points at execute_plan for the rest", async () => {
     const output = await record([
       { id: "s1", description: "gather", kind: "reuse", workflow: "research_pack" },

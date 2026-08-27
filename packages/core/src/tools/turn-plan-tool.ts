@@ -67,8 +67,22 @@ registerTool({
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const plan = normalizeTurnPlan(args);
-    if (!plan.objective && plan.steps.length === 0) {
-      return { success: false, output: "", error: "A plan needs at least an objective or one step." };
+    // A PLAN WITH NO STEPS IS NOT A PLAN. The old check only refused one that was ALSO missing its
+    // objective, so `{objective: "typo guard", steps: []}` — an actual local-model emission, seen in
+    // a live run — recorded successfully, logged "Turn plan recorded", and answered "Now execute it",
+    // with nothing to execute. Downstream it is worse than useless: it persists over whatever the
+    // turn had, hands riskGatedQA zero acceptance criteria, and gives decidePlanContinuation a plan
+    // whose every count is zero. Refusing it turns a silent no-op into a correction the model can act
+    // on, which is the whole value of the checkpoint.
+    if (plan.steps.length === 0) {
+      return {
+        success: false,
+        output: "",
+        error: "A plan needs at least one step. Each step is an object with a `description` (what will be done) and a `kind`: "
+          + "\"delegate\" to hand it to a specialist, \"reuse\" to run an existing workflow (name it in `workflow`), or "
+          + "\"direct\" for a tool call you make yourself (name it in `tool`). Re-record with the steps you intend to run — "
+          + "or, if this turn needs no plan, skip record_plan and just answer.",
+      };
     }
     await persistTurnPlan(ctx.sessionId, plan);
     const width = countParallelWidth(plan.steps);
