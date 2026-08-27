@@ -269,7 +269,7 @@ Every public schema field, where it is declared, and how many production files r
 | `minStepsToAuthor` | packages/core/src/config/schema.ts:1340 | 2 |
 | `minVramMb` | packages/core/src/config/schema.ts:808 | 1 |
 | `mode` | packages/core/src/config/schema.ts:457 | 101 |
-| `model` | packages/core/src/config/schema.ts:1137 | 179 |
+| `model` | packages/core/src/config/schema.ts:1137 | 180 |
 | `modelModeration` | packages/core/src/config/schema.ts:1133 | 4 |
 | `modelPresets` | packages/core/src/config/schema.ts:1578 | 1 |
 | `modelPresetScope` | packages/core/src/config/schema.ts:1593 | 3 |
@@ -363,7 +363,7 @@ Every public schema field, where it is declared, and how many production files r
 | `retireMinUses` | packages/core/src/config/schema.ts:1346 | 2 |
 | `retrievalTopK` | packages/core/src/config/schemas/retrieval.ts:52 | 3 |
 | `reuseSessionEvidenceOnRefinement` | packages/core/src/config/schemas/orchestration.ts:520 | 1 |
-| `riskGatedQA` | packages/core/src/config/schemas/effort.ts:47 | 6 |
+| `riskGatedQA` | packages/core/src/config/schemas/effort.ts:47 | 7 |
 | `role` | packages/core/src/config/schema.ts:821 | 90 |
 | `rolesClaim` | packages/core/src/config/schema.ts:380 | 1 |
 | `routing` | packages/core/src/config/schema.ts:227 | 68 |
@@ -391,7 +391,7 @@ Every public schema field, where it is declared, and how many production files r
 | `signalCliPath` | packages/core/src/config/schemas/channels.ts:73 | 4 |
 | `signingSecret` | packages/core/src/config/schemas/channels.ts:35 | 6 |
 | `silenceTimeoutMs` | packages/core/src/config/schemas/multimodal.ts:76 | 2 |
-| `silent` | packages/core/src/config/schema.ts:1240 | 26 |
+| `silent` | packages/core/src/config/schema.ts:1240 | 27 |
 | `skillMatchThreshold` | packages/core/src/config/schema.ts:276 | 1 |
 | `sleepTimeConsolidation` | packages/core/src/config/schema.ts:1392 | 2 |
 | `smtpFrom` | packages/core/src/config/schemas/channels.ts:65 | 6 |
