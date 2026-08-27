@@ -8,6 +8,7 @@ import { readAllFacts } from "../swarm/memory.js";
 import { upsertMemoryToGraph, graphL0Layer, graphRerank, graphTrackRetrieval } from "./graph-service.js";
 import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
+import { deploymentWorkspaceRoot } from "../tools/workspace-path.js";
 import { logAudit } from "../audit/logger.js";
 import { isEmbeddingAvailable, computeQueryEmbedding, computeTextEmbeddings, cosineSimilarity } from "../providers/embeddings.js";
 
@@ -903,7 +904,13 @@ async function readSessionMemoryRecords(sessionId: string): Promise<MemoryRecord
 function readAgentMemoryRecords(workspacePath: string, targetAgent?: string): MemoryRecord[] {
   const records: MemoryRecord[] = [];
 
-  for (const outcome of readRecentOutcomes(workspacePath, 60)) {
+  // The agent outcomes ledger is DEPLOYMENT-scoped: it describes this deployment's agents, and
+  // every other reader resolves it against the shared root. The path threaded through here is the
+  // caller's execution root, which per-user workspaces make one account's directory — so this read
+  // saw that account's slice of the ledger, which is empty, and an agent's lessons stopped
+  // appearing. Mapped back rather than replaced with config, because this function's OTHER reads
+  // (user-scoped memory above) are correctly per-user and must keep the caller's path.
+  for (const outcome of readRecentOutcomes(deploymentWorkspaceRoot(workspacePath), 60)) {
     if (targetAgent && outcome.agent !== targetAgent) continue;
     if (!outcome.lesson?.trim()) continue;
 

@@ -294,9 +294,16 @@ function normalizeArchitectModel(model: unknown): import("../config/schema.js").
  */
 function maybePromoteEphemeral(
   agentName: string,
-  workspacePath: string,
   cfg: import("../config/schema.js").SubAgentConfig,
 ): void {
+  // BOTH LEDGERS ARE DEPLOYMENT-SCOPED, not per-user. Every reader of the promoted catalog resolves
+  // it against the shared root (tools/agent-routing.ts, tools/sub-agent.ts, swarm/bidder-worker.ts,
+  // tools/memory.ts — fifteen sites), and the outcomes ledger is documented the same way where it is
+  // written in agent/sub-agent.ts. This was handed the caller's execution root, which per-user
+  // workspaces made the CALLING USER's directory: the promotion was written where nothing reads it,
+  // and the success rate deciding it was computed from one account's slice of the history. An
+  // ephemeral agent that earned its place therefore never appeared, silently.
+  const workspacePath = getConfig().workspacePath;
   const outcomes = readRecentOutcomes(workspacePath, 100);
   const relevant = outcomes.filter(o => o.agent === agentName);
   const successes = relevant.filter(o => o.outcome === "success").length;
@@ -566,7 +573,7 @@ export async function runArchitectFallback(task: string, ctx: ToolContext): Prom
   );
 
   if (success) {
-    maybePromoteEphemeral(ephemeralName, ctx.workspacePath, inlineConfig);
+    maybePromoteEphemeral(ephemeralName, inlineConfig);
   }
 
   return {

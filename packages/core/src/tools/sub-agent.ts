@@ -3848,7 +3848,8 @@ registerTool({
       // gradually prefers the direct specialist for this task class. Learning signal
       // only — no hard rule, and a partial dedup (3→2) still counts as real partitioning.
       if (dispatchTasks.length === 1 && runnableTasks.length > 1 && ctx.currentAgentName) {
-        appendOutcome(ctx.workspacePath, {
+        // Shared root — this is the deployment's routing history, not the caller's.
+        appendOutcome(getConfig().workspacePath, {
           ts: new Date().toISOString(),
           agent: ctx.currentAgentName,
           task: (dispatchTasks[0]?.task ?? "").slice(0, 300),

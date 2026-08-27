@@ -1691,7 +1691,10 @@ function rejectSuspiciousNoToolOutput(
     { sessionId: stats.sessionId, severity: "warn" }
   );
 
-  appendOutcome(opts.workspacePath, {
+  // Shared root, like every other writer and reader of this ledger — see the note at the
+  // appendOutcome call in the run's own finalizer. A per-user root splits one deployment ledger
+  // into one per account, and the readers only ever look at the shared one.
+  appendOutcome(getConfig().workspacePath, {
     ts: new Date().toISOString(),
     agent: opts.agentName,
     task: opts.task.slice(0, 200),

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { resolve } from "node:path";
-import { resolvePathWithinWorkspace, resolveWorkspaceWritePath, generatedZoneRel, userWorkspaceRoot, GENERATED_SUBDIR } from "../tools/workspace-path.js";
+import { join, resolve } from "node:path";
+import { resolvePathWithinWorkspace, resolveWorkspaceWritePath, generatedZoneRel, userWorkspaceRoot, deploymentWorkspaceRoot, GENERATED_SUBDIR } from "../tools/workspace-path.js";
 import { runWithRequestContext } from "../runtime/request-context.js";
 import { safeUserSegment } from "../runtime/user-scope.js";
 import * as configLoader from "../config/loader.js";
@@ -195,5 +195,29 @@ describe("the workspace root is per-user", () => {
       () => resolvePathWithinWorkspace("agents/10-core-agents.jsonc", aliceRoot()));
     expect(r.relativePath).toBe("generated/agents/10-core-agents.jsonc");
     expect(r.resolved.startsWith(aliceRoot())).toBe(true);
+  });
+});
+
+describe("deploymentWorkspaceRoot", () => {
+  // The inverse of userWorkspaceRoot, for the ledgers that describe the DEPLOYMENT rather than a
+  // person. Code holding only its own execution root would otherwise read one account's slice of
+  // them — which is empty, and silently so: an agent's lessons simply stop appearing.
+  it("maps a per-user root back to the shared one", () => {
+    expect(deploymentWorkspaceRoot(join("/srv", "workspace", "users", "steffen-67913ee9be1346dc")))
+      .toBe(join("/srv", "workspace"));
+  });
+
+  it("leaves a root that is not per-user alone", () => {
+    expect(deploymentWorkspaceRoot(join("/srv", "workspace"))).toBe(join("/srv", "workspace"));
+    expect(deploymentWorkspaceRoot(join("/tmp", "some-test-dir"))).toBe(join("/tmp", "some-test-dir"));
+    // "users" as a leaf is a directory named users, not a per-user root.
+    expect(deploymentWorkspaceRoot(join("/srv", "workspace", "users")))
+      .toBe(join("/srv", "workspace", "users"));
+  });
+
+  it("round-trips with userWorkspaceRoot", () => {
+    const shared = join("/srv", "workspace");
+    const perUser = join(shared, "users", "someone-0123456789abcdef");
+    expect(deploymentWorkspaceRoot(perUser)).toBe(shared);
   });
 });

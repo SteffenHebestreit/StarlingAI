@@ -1,5 +1,5 @@
 import { stat } from "node:fs/promises";
-import { isAbsolute, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { currentWorkspaceScope } from "../runtime/request-context.js";
 import { activeUserScopeSegment, USERS_SUBDIR } from "../runtime/user-scope.js";
 
@@ -58,6 +58,23 @@ export const UPLOADS_SUBDIR = "uploads";
 export function userWorkspaceRoot(sharedRoot: string, userId?: string): string {
   const segment = activeUserScopeSegment(userId);
   return segment ? resolve(sharedRoot, USERS_SUBDIR, segment) : sharedRoot;
+}
+
+/**
+ * The DEPLOYMENT root behind any execution root — the inverse of the above.
+ *
+ * The ledgers that describe the deployment rather than a person (the agent outcomes ledger, the
+ * promoted-agents catalog) live at the shared root, as the note above says. Code that holds only
+ * its own execution root would otherwise read one account's slice of them and find nothing, which
+ * is silent: an agent's lessons simply stop appearing. Callers that can reach config should just
+ * use `getConfig().workspacePath`; this is for the ones that legitimately stay parameterized
+ * because their other reads ARE per-user.
+ *
+ * Anything that is not a per-user root is returned unchanged.
+ */
+export function deploymentWorkspaceRoot(workspacePath: string): string {
+  const parent = dirname(workspacePath);
+  return basename(parent) === USERS_SUBDIR ? dirname(parent) : workspacePath;
 }
 
 /**

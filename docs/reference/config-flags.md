@@ -11,12 +11,12 @@ Every public schema field, where it is declared, and how many production files r
 | `a2a` | packages/core/src/config/schema.ts:385 | 11 |
 | `accessKeyId` | packages/core/src/config/schema.ts:445 | 2 |
 | `accessToken` | packages/core/src/config/schemas/channels.ts:51 | 8 |
-| `account` | packages/core/src/config/schemas/channels.ts:71 | 46 |
+| `account` | packages/core/src/config/schemas/channels.ts:71 | 49 |
 | `acquireTimeoutMs` | packages/core/src/config/schema.ts:1550 | 1 |
 | `activeModelPreset` | packages/core/src/config/schema.ts:1581 | 2 |
 | `addHosts` | packages/core/src/config/schema.ts:672 | 1 |
 | `admin` | packages/core/src/config/schema.ts:357 | 21 |
-| `agents` | packages/core/src/config/schema.ts:1571 | 129 |
+| `agents` | packages/core/src/config/schema.ts:1571 | 130 |
 | `alertmanager` | packages/core/src/config/schema.ts:1038 | 1 |
 | `all` | packages/core/src/config/schema.ts:1176 | 215 |
 | `allowedAgents` | packages/core/src/config/schema.ts:1190 | 25 |
@@ -391,7 +391,7 @@ Every public schema field, where it is declared, and how many production files r
 | `signalCliPath` | packages/core/src/config/schemas/channels.ts:73 | 4 |
 | `signingSecret` | packages/core/src/config/schemas/channels.ts:35 | 6 |
 | `silenceTimeoutMs` | packages/core/src/config/schemas/multimodal.ts:76 | 2 |
-| `silent` | packages/core/src/config/schema.ts:1240 | 25 |
+| `silent` | packages/core/src/config/schema.ts:1240 | 26 |
 | `skillMatchThreshold` | packages/core/src/config/schema.ts:276 | 1 |
 | `sleepTimeConsolidation` | packages/core/src/config/schema.ts:1392 | 2 |
 | `smtpFrom` | packages/core/src/config/schemas/channels.ts:65 | 6 |
@@ -436,7 +436,7 @@ Every public schema field, where it is declared, and how many production files r
 | `toolMode` | packages/core/src/config/schema.ts:262 | 5 |
 | `toolName` | packages/core/src/config/schemas/multimodal.ts:17 | 66 |
 | `toolRerankMinTools` | packages/core/src/config/schemas/orchestration.ts:585 | 2 |
-| `tools` | packages/core/src/config/schema.ts:824 | 168 |
+| `tools` | packages/core/src/config/schema.ts:824 | 169 |
 | `topK` | packages/core/src/config/schema.ts:160 | 7 |
 | `topP` | packages/core/src/config/schema.ts:159 | 4 |
 | `transport` | packages/core/src/config/schema.ts:657 | 25 |

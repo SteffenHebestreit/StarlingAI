@@ -864,11 +864,12 @@ registerTool({
     const parts = ctx.sessionId.split(":");
     const agentName = parts.length >= 3 ? parts[2]! : "unknown";
 
-    // Read the most recent outcome for this agent and attach the lesson
-    const recents = readRecentOutcomes(ctx.workspacePath, 20);
+    // Read the most recent outcome for this agent and attach the lesson. Shared root: the ledger
+    // describes the deployment's agents, and a per-user root reads one account's slice of it.
+    const recents = readRecentOutcomes(getConfig().workspacePath, 20);
     const latest = [...recents].reverse().find(o => o.agent === agentName);
 
-    appendOutcome(ctx.workspacePath, {
+    appendOutcome(getConfig().workspacePath, {
       ts: new Date().toISOString(),
       agent: agentName,
       task: latest?.task ?? "(lesson recorded explicitly)",
