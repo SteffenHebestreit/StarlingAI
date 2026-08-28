@@ -44,38 +44,10 @@
         </div>
       </div>
 
-      <!-- Execution steps (prefer delegated sub-agent actions over wrapper tool calls) -->
-      <div v-if="executionItems.length" class="tool-status-wrap">
-        <div class="tool-status" @click="toolHistoryOpen = !toolHistoryOpen">
-          <span class="tool-status__icon">⚙</span>
-          <span class="tool-status__label">{{ activeExecutionLabel }}</span>
-          <span class="tool-status__chevron">{{ toolHistoryOpen ? '▲' : '▼' }}</span>
-        </div>
-        <div v-if="toolHistoryOpen" class="tool-history">
-          <div class="tool-history__header">{{ executionHistoryHeader }}</div>
-          <div
-            v-for="(item, i) in executionItems"
-            :key="`${item.kind}-${item.key}`"
-            class="tool-history__item-wrap"
-          >
-            <div class="tool-history__item">
-              <span class="tool-history__step">{{ i + 1 }}</span>
-              <div class="tool-history__details">
-                <span class="tool-history__name">{{ item.name }}</span>
-                <span v-if="item.meta" class="tool-history__meta">{{ item.meta }}</span>
-              </div>
-              <span :class="['tool-history__status', `tool-history__status--${item.status}`]">
-                {{ item.statusSymbol }}
-              </span>
-            </div>
-            <div v-if="item.result" class="tool-history__result">
-              <pre>{{ item.result.length > 600 ? item.result.substring(0, 600) + '…' : item.result }}</pre>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Thinking section -->
+      <!-- Thinking FIRST. While a turn runs, what the model is reasoning about is the thing worth
+           watching; the tool roll-call below is the audit trail. This used to sit under a
+           fully-expanded step list, which pushed live reasoning off-screen exactly when it was
+           happening. -->
       <div v-if="displayThinkingContent || isThinking" class="thinking-section">
         <div class="thinking-header" @click="thinkingOpen = !thinkingOpen">
           <span v-if="isThinking" class="thinking-indicators">
@@ -113,6 +85,39 @@
         </div>
       </div>
 
+      <!-- Execution steps — the audit trail, below the reasoning and collapsed unless asked for.
+           The list is bounded and scrolls: a long turn used to render every step and every 600-char
+           result inline, so a single message could be pages long. -->
+      <div v-if="executionItems.length" class="tool-status-wrap">
+        <div class="tool-status" @click="toggleToolHistory()">
+          <span class="tool-status__icon">⚙</span>
+          <span class="tool-status__label">{{ activeExecutionLabel }}</span>
+          <span class="tool-status__chevron">{{ toolHistoryOpen ? '▲' : '▼' }}</span>
+        </div>
+        <div v-if="toolHistoryOpen" class="tool-history">
+          <div class="tool-history__header">{{ executionHistoryHeader }}</div>
+          <div
+            v-for="(item, i) in executionItems"
+            :key="`${item.kind}-${item.key}`"
+            class="tool-history__item-wrap"
+          >
+            <div class="tool-history__item">
+              <span class="tool-history__step">{{ i + 1 }}</span>
+              <div class="tool-history__details">
+                <span class="tool-history__name">{{ item.name }}</span>
+                <span v-if="item.meta" class="tool-history__meta">{{ item.meta }}</span>
+              </div>
+              <span :class="['tool-history__status', `tool-history__status--${item.status}`]">
+                {{ item.statusSymbol }}
+              </span>
+            </div>
+            <div v-if="item.result" class="tool-history__result">
+              <pre>{{ item.result.length > 600 ? item.result.substring(0, 600) + '…' : item.result }}</pre>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- Image attachments -->
       <div v-if="imageAttachments.length" class="message-attachments">
         <figure
@@ -132,65 +137,6 @@
             <button class="artifact-action" @click="downloadAttachment(att)">Download</button>
           </figcaption>
         </figure>
-      </div>
-
-      <div v-if="artifactAttachments.length" class="artifact-list">
-        <div
-          v-for="(att, i) in artifactAttachments"
-          :key="`${att.filename}-${i}`"
-          class="artifact-card"
-        >
-          <div class="artifact-card__body">
-            <div class="artifact-card__eyebrow">{{ attachmentLabel(att) }}</div>
-            <div class="artifact-card__title">{{ att.title || att.filename }}</div>
-            <div class="artifact-card__meta">
-              <span>{{ att.filename }}</span>
-              <span v-if="att.size">{{ formatAttachmentSize(att.size) }}</span>
-            </div>
-            <div v-if="att.previewMode === 'mermaid'" class="artifact-card__preview artifact-card__preview--mermaid">
-              <div v-if="mermaidPreviewLoading[mermaidAttachmentKey(att)]" class="artifact-card__placeholder">Rendering diagram…</div>
-              <div v-else-if="mermaidPreviewErrors[mermaidAttachmentKey(att)]" class="artifact-card__placeholder artifact-card__placeholder--error">
-                {{ mermaidPreviewErrors[mermaidAttachmentKey(att)] }}
-              </div>
-              <div
-                v-else-if="mermaidPreviewSvg[mermaidAttachmentKey(att)]"
-                class="mermaid-inline-diagram"
-                v-html="mermaidPreviewSvg[mermaidAttachmentKey(att)]"
-              />
-            </div>
-          </div>
-          <div class="artifact-card__actions">
-            <button
-              v-if="isPreviewable(att)"
-              class="artifact-action"
-              :disabled="artifactPreviewLoading === att.filename"
-              @click="previewAttachment(att)"
-            >
-              {{ artifactPreviewLoading === att.filename ? 'Loading…' : 'Preview' }}
-            </button>
-            <button
-              v-if="att.externalUrl"
-              class="artifact-action"
-              @click="openExternalAttachment(att)"
-            >
-              Open
-            </button>
-            <button
-              v-else-if="!att.isDirectory && (att.dataUrl || att.relativePath)"
-              class="artifact-action"
-              @click="downloadAttachment(att)"
-            >
-              Download
-            </button>
-            <button
-              v-if="att.relativePath"
-              class="artifact-action"
-              @click="downloadAttachment(att, true)"
-            >
-              {{ att.isDirectory ? 'Download ZIP' : 'ZIP' }}
-            </button>
-          </div>
-        </div>
       </div>
 
       <!-- Main content -->
@@ -218,6 +164,45 @@
       >
         {{ contentCollapsed ? 'Show more ▼' : 'Show less ▲' }}
       </button>
+
+      <!-- Diagrams stay VISIBLE — a mermaid artifact is the answer in picture form, not a file
+           attached to it. Only its position changes: under the reply rather than above it. -->
+      <div v-if="mermaidAttachments.length" class="artifact-diagrams">
+        <div
+          v-for="(att, i) in mermaidAttachments"
+          :key="`mermaid-${att.filename}-${i}`"
+          class="artifact-diagram"
+        >
+          <div v-if="mermaidPreviewLoading[mermaidAttachmentKey(att)]" class="artifact-diagram__placeholder">Rendering diagram…</div>
+          <div v-else-if="mermaidPreviewErrors[mermaidAttachmentKey(att)]" class="artifact-diagram__placeholder artifact-diagram__placeholder--error">
+            {{ mermaidPreviewErrors[mermaidAttachmentKey(att)] }}
+          </div>
+          <div
+            v-else-if="mermaidPreviewSvg[mermaidAttachmentKey(att)]"
+            class="mermaid-inline-diagram"
+            v-html="mermaidPreviewSvg[mermaidAttachmentKey(att)]"
+          />
+        </div>
+      </div>
+
+      <!-- Artifacts — AFTER the answer, and as links rather than cards.
+           They used to render above the content as full cards with inline previews, which pushed
+           the actual reply below the fold on any turn that produced a file. The rich view already
+           exists in the side panel; here one line each is enough to open, preview or download. -->
+      <div v-if="artifactAttachments.length" class="artifact-links">
+        <button
+          v-for="(att, i) in artifactAttachments"
+          :key="`${att.filename}-${i}`"
+          class="artifact-link"
+          :disabled="artifactPreviewLoading === att.filename"
+          :title="`${att.filename}${att.size ? ' · ' + formatAttachmentSize(att.size) : ''}`"
+          @click="onArtifactLinkClick(att)"
+        >
+          <span class="artifact-link__icon">{{ att.isDirectory ? '🗂' : '📄' }}</span>
+          <span class="artifact-link__title">{{ att.title || att.filename }}</span>
+          <span v-if="att.size" class="artifact-link__size">{{ formatAttachmentSize(att.size) }}</span>
+        </button>
+      </div>
 
       <!-- Timestamp + usage row -->
       <div class="message-footer">
@@ -552,6 +537,9 @@ const gateway = useGatewayStore();
 const COLLAPSE_CHAR_THRESHOLD = 400;
 
 const toolHistoryOpen = ref(false);
+/** Set once the reader opens or closes the step list themselves, so the automatic open/close stops
+ *  fighting them for the rest of the message's life. */
+const userToggledToolHistory = ref(false);
 const thinkingOpen = ref(false);
 const lightboxUrl = ref<string | null>(null);
 const artifactPreview = ref<ArtifactPreviewState | null>(null);
@@ -802,13 +790,25 @@ const activeExecutionLabel = computed(() => {
   return `${items.length} tool call${items.length !== 1 ? "s" : ""} completed`;
 });
 
+/**
+ * The step list opens while work is running and closes again when it stops.
+ *
+ * It used to only ever open. Every finished message in the transcript therefore kept its whole tool
+ * history expanded — each step plus 600 characters of each result — so scrolling back through a
+ * session meant scrolling past every tool call the assistant had ever made, and the reply itself
+ * was pushed below the fold. Reopening it is one click, and a message the user opened by hand stays
+ * open because `userToggledToolHistory` suppresses the automatic close.
+ */
 watch(
   () => [props.isStreaming, executionItems.value.some((item) => item.status === "running")],
   ([isStreamingNow, hasRunningItems]) => {
+    if (userToggledToolHistory.value) return;
     if (isStreamingNow && hasRunningItems) {
       toolHistoryOpen.value = true;
       contentCollapsed.value = false;
+      return;
     }
+    toolHistoryOpen.value = false;
   },
   { immediate: true },
 );
@@ -1087,7 +1087,7 @@ async function renderInlineMermaidBlocks(): Promise<void> {
       mount.innerHTML = await renderMermaidSvg(source, "inline-message");
     } catch (error) {
       mount.replaceWith(Object.assign(document.createElement("div"), {
-        className: "artifact-card__placeholder artifact-card__placeholder--error",
+        className: "artifact-diagram__placeholder artifact-diagram__placeholder--error",
         textContent: `Diagram preview failed: ${error instanceof Error ? error.message : String(error)}`,
       }));
     }
@@ -1227,9 +1227,34 @@ async function previewAttachment(attachment: ChatAttachment): Promise<void> {
   }
 }
 
+function toggleToolHistory(): void {
+  userToggledToolHistory.value = true;
+  toolHistoryOpen.value = !toolHistoryOpen.value;
+}
+
 function openExternalAttachment(attachment: ChatAttachment): void {
   if (!attachment.externalUrl) return;
   window.open(attachment.externalUrl, "_blank", "noopener,noreferrer");
+}
+
+/**
+ * One click, the obvious action for that artifact.
+ *
+ * The card this replaced offered Preview / Open / Download / ZIP as four buttons stacked above the
+ * reply. A link in the footer has room for one, so it picks the action a person actually wants:
+ * see it if it can be shown, follow it if it lives elsewhere, otherwise save it. The other actions
+ * remain on the artifact in the side panel.
+ */
+async function onArtifactLinkClick(attachment: ChatAttachment): Promise<void> {
+  if (isPreviewable(attachment)) {
+    await previewAttachment(attachment);
+    return;
+  }
+  if (attachment.externalUrl) {
+    openExternalAttachment(attachment);
+    return;
+  }
+  await downloadAttachment(attachment, Boolean(attachment.isDirectory));
 }
 
 /**
@@ -1544,78 +1569,83 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
-.artifact-list {
+
+.artifact-diagrams {
   display: grid;
-  gap: 0.6rem;
-  margin-bottom: 0.65rem;
+  gap: 0.5rem;
+  margin-top: 0.6rem;
 }
 
-.artifact-card {
+.artifact-diagram {
+  padding: 0.5rem;
+  background: rgba(0, 0, 0, 0.2);
+  border: 1px solid rgba(168, 85, 247, 0.18);
+  border-radius: 0.6rem;
+  /* Bounded like everything else in the bubble; the full-size view is the preview/side panel. */
+  max-height: 420px;
+  overflow: auto;
+}
+
+.artifact-diagram__placeholder {
+  font-size: 0.75rem;
+  color: #8b7fa8;
+}
+
+.artifact-diagram__placeholder--error {
+  color: #fca5a5;
+}
+
+/* Artifact links — one compact row per file, under the answer. The card version of this sat above
+   the reply with an inline preview each, which is what pushed the actual response off-screen. */
+.artifact-links {
   display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.5rem;
+}
+
+.artifact-link {
+  display: inline-flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  padding: 0.75rem 0.85rem;
-  border-radius: 0.9rem;
-  background: rgba(11, 16, 29, 0.56);
-  border: 1px solid rgba(125, 211, 252, 0.2);
+  gap: 0.4rem;
+  max-width: 100%;
+  padding: 0.25rem 0.55rem;
+  font-size: 0.75rem;
+  color: #c4b5fd;
+  background: rgba(168, 85, 247, 0.08);
+  border: 1px solid rgba(168, 85, 247, 0.22);
+  border-radius: 0.5rem;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
 }
 
-.artifact-card__body {
-  min-width: 0;
-  display: grid;
-  gap: 0.18rem;
+.artifact-link:hover:not(:disabled) {
+  background: rgba(168, 85, 247, 0.16);
+  border-color: rgba(168, 85, 247, 0.4);
 }
 
-.artifact-card__eyebrow {
-  color: #7dd3fc;
-  font-size: 0.68rem;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+.artifact-link:disabled {
+  opacity: 0.6;
+  cursor: progress;
 }
 
-.artifact-card__title {
-  color: #f4f0ff;
-  font-weight: 600;
+.artifact-link__icon {
+  flex: none;
+  opacity: 0.8;
+}
+
+.artifact-link__title {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.artifact-card__meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  color: #b8a7d9;
-  font-size: 0.72rem;
+.artifact-link__size {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  color: #8b7fa8;
 }
 
-.artifact-card__actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.4rem;
-}
-
-.artifact-card__preview {
-  margin-top: 0.65rem;
-  border-radius: 0.8rem;
-  overflow: hidden;
-}
-
-.artifact-card__preview--mermaid {
-  background: rgba(245, 248, 255, 0.96);
-  border: 1px solid rgba(125, 211, 252, 0.22);
-  padding: 0.7rem;
-}
-
-.artifact-card__placeholder {
-  color: #5b6b8a;
-  font-size: 0.74rem;
-}
-
-.artifact-card__placeholder--error {
-  color: #b91c1c;
-}
 
 .mermaid-inline-diagram :deep(svg) {
   width: 100%;
@@ -1894,7 +1924,10 @@ onBeforeUnmount(() => {
   background: rgba(15, 12, 28, 0.95);
   border: 1px solid rgba(168, 85, 247, 0.25);
   border-radius: 0.75rem;
-  overflow: hidden;
+  /* Bounded: a turn with a dozen tool calls used to render all of them plus 600 characters of each
+     result, so one message could run for pages. It scrolls inside itself instead. */
+  max-height: 320px;
+  overflow-y: auto;
   box-shadow: 0 8px 32px rgba(0,0,0,0.5);
   backdrop-filter: blur(16px);
 }
