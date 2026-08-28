@@ -46,6 +46,7 @@ import {
   toolResultContribution,
   nestedCallContribution,
   readNestedToolCalls,
+  STATE_DEPENDENT_TOOL_NAMES,
 } from "./turn-tool-contribution.js";
 import { longRunningGenerationManager } from "./long-running-generation.js";
 import { turnSteeringManager } from "./turn-steering.js";
@@ -1585,7 +1586,7 @@ async function _runTurn(
   const _recentOutputsByTool = new Map<string, string[]>();
   const _turnToolCallCounts = new Map<string, number>();
   const _lastToolResultByName = new Map<string, string>();
-  const _lastToolCallSig = new Map<string, { args: string; result: string; metadata?: Record<string, unknown> }>();
+  const _lastToolCallSig = new Map<string, { args: string; result: string; metadata?: Record<string, unknown>; success?: boolean }>();
   const IDENTICAL_OUTPUT_LOOP_THRESHOLD = 3;
   // Iteration-level loop detection — tracks tool-name sets across iterations.
   const _iterationToolSets: string[] = [];
@@ -3498,7 +3499,22 @@ async function _runTurn(
 
       const argsSig = JSON.stringify(tc.arguments ?? {});
       const cachedToolCall = _lastToolCallSig.get(tc.name);
-      if (tc.name !== "delegate_to_agent" && cachedToolCall && cachedToolCall.args === argsSig) {
+      // The identical-arguments cache assumes a tool's result is a function of its ARGUMENTS. For a
+      // tool that reads state another tool writes, that is false, and the cache turns the second
+      // call into a silent no-op. execute_plan is the sharpest case: it takes no required arguments
+      // at all, so every call has the signature "{}" — a plan recorded AFTER an execute_plan call
+      // could never be run, and the documented resume (do the manual steps, then call again with
+      // their ids) could never work either. Seen in production: execute_plan was called before
+      // record_plan, failed with "No plan recorded this turn", and the two calls after the plan was
+      // recorded were both served that failure from the cache. The turn then reported a previous
+      // turn's completed plan as this turn's work, and the work was never done.
+      const resultDependsOnState = STATE_DEPENDENT_TOOL_NAMES.has(tc.name);
+      if (
+        !resultDependsOnState
+        && cachedToolCall
+        && cachedToolCall.args === argsSig
+        && cachedToolCall.success !== false
+      ) {
         const cachedResultText = `${cachedToolCall.result}\n\n[Note: This is a cached result — you already called '${tc.name}' with identical arguments earlier in this turn. Do NOT call it again. Use this result and move to a different step.]`;
         _lastToolResultByName.set(tc.name, cachedToolCall.result);
 

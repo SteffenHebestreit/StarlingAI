@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   DELEGATION_WAIT_TOOL_NAMES,
   nestedCallContribution,
+  STATE_DEPENDENT_TOOL_NAMES,
   toolCallContribution,
   toolResultContribution,
   readNestedToolCalls,
@@ -101,5 +102,34 @@ describe("who may report nested calls", () => {
     expect(nestedCallContribution({ tool: "delegate_to_agent", success: false }).delegations).toBe(0);
     expect(nestedCallContribution({ tool: "run_workflow", success: true }).workflowCompleted).toBe(true);
     expect(nestedCallContribution({ tool: "run_workflow", success: true, workflowNotFound: true }).workflowCompleted).toBe(false);
+  });
+});
+
+/**
+ * THE TURN CACHES A TOOL RESULT AGAINST ITS ARGUMENTS AND REPLAYS IT FOR AN IDENTICAL REPEAT.
+ *
+ * That is right for a lookup and wrong for a tool that reads state another tool writes. Seen in
+ * production on 2026-08-28: the model called execute_plan BEFORE record_plan, got the correct
+ * "No plan recorded this turn" failure, then recorded a plan and called execute_plan twice more —
+ * and because execute_plan takes no required arguments, both calls carried the signature "{}" and
+ * were served that failure from the cache, as success. Nothing ran. The turn then reported the
+ * PREVIOUS turn's completed plan as this turn's work, and the requested change was never made.
+ */
+describe("tools whose result is not a function of their arguments", () => {
+  it("exempts the ones whose repeat call is the point", () => {
+    expect(STATE_DEPENDENT_TOOL_NAMES.has("execute_plan")).toBe(true);
+    expect(STATE_DEPENDENT_TOOL_NAMES.has("delegate_to_agent")).toBe(true);
+  });
+
+  it("does not exempt an ordinary lookup, which the cache is for", () => {
+    expect(STATE_DEPENDENT_TOOL_NAMES.has("search_agents")).toBe(false);
+    expect(STATE_DEPENDENT_TOOL_NAMES.has("read_file")).toBe(false);
+  });
+
+  it("covers execute_plan's resume shape specifically", () => {
+    // The documented resume is a second call with the SAME argument shape as the first, so the
+    // cache would have made it a no-op even when the first call succeeded.
+    expect(JSON.stringify({})).toBe(JSON.stringify({}));            // the signature never varies
+    expect(STATE_DEPENDENT_TOOL_NAMES.has("execute_plan")).toBe(true);
   });
 });

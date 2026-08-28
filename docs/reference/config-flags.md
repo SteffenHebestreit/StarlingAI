@@ -391,7 +391,7 @@ Every public schema field, where it is declared, and how many production files r
 | `signalCliPath` | packages/core/src/config/schemas/channels.ts:73 | 4 |
 | `signingSecret` | packages/core/src/config/schemas/channels.ts:35 | 6 |
 | `silenceTimeoutMs` | packages/core/src/config/schemas/multimodal.ts:76 | 2 |
-| `silent` | packages/core/src/config/schema.ts:1240 | 27 |
+| `silent` | packages/core/src/config/schema.ts:1240 | 28 |
 | `skillMatchThreshold` | packages/core/src/config/schema.ts:276 | 1 |
 | `sleepTimeConsolidation` | packages/core/src/config/schema.ts:1392 | 2 |
 | `smtpFrom` | packages/core/src/config/schemas/channels.ts:65 | 6 |

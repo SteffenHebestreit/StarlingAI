@@ -44,7 +44,7 @@ export interface ToolResultPostProcessContext {
 
   // --- mutable collectors mutated in place (same references as the enclosing turn) ---
   readonly guardrailEvents: Array<{ type: string; details: string }>;
-  readonly lastToolCallSig: Map<string, { args: string; result: string; metadata?: Record<string, unknown> }>;
+  readonly lastToolCallSig: Map<string, { args: string; result: string; metadata?: Record<string, unknown>; success?: boolean }>;
   readonly toolResultMessages: Array<LLMMessage & { metadata?: Record<string, unknown> }>;
 }
 
@@ -120,6 +120,11 @@ export const postProcessToolResult = async (
     args: argsSig,
     result: resultText,
     metadata: result.metadata,
+    // A FAILED call is not a result to replay. Without this the cache stored the failure text and
+    // the replay reported it as success:true — a tool that had errored came back as one that had
+    // worked, and the model wrote its answer as though the work were done. The sub-agent loop has
+    // always recorded this; the turn loop did not.
+    success: result.success,
   });
 
   if (ctx.onToolResult) ctx.onToolResult(tc.id, tc.name, resultText, result.metadata);

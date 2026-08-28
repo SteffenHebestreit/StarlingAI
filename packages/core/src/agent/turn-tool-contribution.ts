@@ -38,6 +38,23 @@ export const DELEGATION_WAIT_TOOL_NAMES: ReadonlySet<string> = new Set([
   "execute_plan",
 ]);
 
+/**
+ * Tools whose result is NOT a function of their arguments.
+ *
+ * The turn caches a tool's result against its arguments and replays it for an identical repeat
+ * call. That is right for a lookup and wrong for a tool that reads state another tool writes: the
+ * repeat is the whole point, and serving the old answer makes it a silent no-op. Anything added
+ * here must be a tool whose second identical call is legitimately expected to do something new.
+ */
+export const STATE_DEPENDENT_TOOL_NAMES: ReadonlySet<string> = new Set([
+  // Each call delegates again; two identical delegations are two pieces of work.
+  "delegate_to_agent",
+  // Takes no required arguments, so its signature never varies — and its result depends entirely on
+  // the plan and the outcomes recorded against it, both of which change between calls. Its resume
+  // path is a second call with the same shape.
+  "execute_plan",
+]);
+
 /** What is known BEFORE the call runs, from the tool name alone. */
 export interface ToolCallContribution {
   /** How much this call adds to the turn's delegation tally. */
