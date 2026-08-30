@@ -6,8 +6,8 @@
     },
     "defaults": {
       "model": {
-        "primary": "lmstudio/qwen/qwen3.8-27b",
-        "fallback": "lmstudio/qwen/qwen3.8-27b",
+        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
+        "fallback": "lmstudio/qwen/qwen3.6-35b-a3b",
         // Qwen 3.8 replaced the on/off enable_thinking toggle with graded
         // reasoning_effort (none|low|medium|xhigh), and enable_thinking is IGNORED by
         // its template — measured on this server 2026-08-15, enable_thinking:false
@@ -47,7 +47,7 @@
         // model instead and make it cheap with reasoning_effort "none" (measured: 0
         // reasoning chars, the fastest configuration available).
         "tiers": {
-          "routing": "lmstudio/qwen/qwen3.8-27b"
+          "routing": "lmstudio/qwen/qwen3.6-35b-a3b"
         }
       }
     },
