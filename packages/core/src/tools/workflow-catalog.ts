@@ -1009,6 +1009,10 @@ async function runSceneInline(
       allowedAgents,
       humanInLoopSteps: mergedHumanInLoopSteps,
       autoApprove: ctx.autoApprove,
+      // The nested turn inherits the parent's channel to the user, so ask_user works inside a
+      // workflow step — and the unattended fallback (keyed on autoApprove) never fires while a
+      // person is present.
+      inputCallback: ctx.inputCallback,
       maxIterationsOverride: ctx.maxIterationsOverride,
       turnTimeoutOverrideMs: ctx.turnTimeoutOverrideMs,
       _workflowExecutionStack: workflowExecutionStack,
@@ -1172,6 +1176,7 @@ async function runJobInline(
           allowedAgents,
           humanInLoopSteps: mergeHumanInLoopSteps(ctx.humanInLoopSteps, step.humanInLoopSteps),
           autoApprove: ctx.autoApprove,
+          inputCallback: ctx.inputCallback,
           maxIterationsOverride: ctx.maxIterationsOverride,
           turnTimeoutOverrideMs: ctx.turnTimeoutOverrideMs,
           _workflowExecutionStack: workflowExecutionStack,

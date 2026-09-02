@@ -84,6 +84,17 @@ export function looksLikeDelegatedFailureEvidence(value: string): boolean {
  */
 const PLAN_REPORT_MAX_CHARS = 24_000;
 
+/**
+ * An EXPLICIT success verdict: the sub-agent closed with `<final_answer status="success">`, which
+ * tools/sub-agent.ts records as `delegationVerdict: "explicit"`. The runtime's own
+ * `delegationOutcome` / `delegationSucceeded` are defaults minted on every normally-ending
+ * delegation (a five-phrase heuristic over the first 300 characters) and carry no verdict —
+ * a result that says "task cannot be completed, please provide the data" arrives with both set.
+ */
+export function isExplicitDelegationSuccess(metadata?: Record<string, unknown>): boolean {
+  return metadata?.["delegationVerdict"] === "explicit" && metadata["delegationOutcome"] === "success";
+}
+
 export function buildModelVisibleToolResult(
   toolName: string,
   resultText: string,
@@ -121,12 +132,11 @@ export function buildModelVisibleToolResult(
     const delegationPartial = delegationOutcome === "partial"
       && !partialIsProviderErrorEcho
       && !partialHasNoUsableEvidence;
-    // The sub-agent runtime's own verdict is structured metadata; the prose sniff exists for
-    // results that carry none. A specialist that reported SUCCESS and then wrote "the first
-    // attempt failed to reach the site, so I used the cached copy" was reframed as TASK FAILED by
-    // the regex, and the orchestrator told the user the work had failed while holding the finished
-    // deliverable. An explicit success is trusted; the sniff still governs the unlabelled case.
-    const reportedSuccess = delegationOutcome === "success" || metadata?.["delegationSucceeded"] === true;
+    // Only an EXPLICIT verdict beats the prose sniff: a specialist that closed with
+    // `<final_answer status="success">` and mentioned a failed attempt on the way is still a
+    // success. The runtime's defaulted "success" is not a verdict (see isExplicitDelegationSuccess);
+    // trusting it silenced the needs-data / blocker signatures for every completed delegation.
+    const reportedSuccess = isExplicitDelegationSuccess(metadata);
     const delegationFailed = rawWorkspaceToolDump
       || delegationOutcome === "failure"
       || partialIsProviderErrorEcho

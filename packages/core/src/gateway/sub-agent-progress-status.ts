@@ -6,6 +6,14 @@ export interface SubAgentLifecycleStatus {
   iteration: number;
 }
 
+/** A status line is a glance, not a transcript — and federated peers author summaries too. */
+const MAX_STATUS_CHARS = 200;
+
+function statusLine(summary: string | undefined, fallback: string): string {
+  const text = summary?.trim() || fallback;
+  return text.length > MAX_STATUS_CHARS ? `${text.slice(0, MAX_STATUS_CHARS - 1)}…` : text;
+}
+
 /**
  * The status line a sub-agent lifecycle event becomes for the dashboard.
  *
@@ -19,10 +27,10 @@ export function subAgentProgressStatus(
   event: Pick<SubAgentProgressEvent, "kind" | "agentName" | "iteration" | "summary">,
 ): SubAgentLifecycleStatus | null {
   if (event.kind === "started") {
-    return { phase: "delegating", message: event.summary?.trim() || `${event.agentName} started`, iteration: event.iteration };
+    return { phase: "delegating", message: statusLine(event.summary, `${event.agentName} started`), iteration: event.iteration };
   }
   if (event.kind === "completed") {
-    return { phase: "delegating", message: event.summary?.trim() || `${event.agentName} finished`, iteration: event.iteration };
+    return { phase: "delegating", message: statusLine(event.summary, `${event.agentName} finished`), iteration: event.iteration };
   }
   return null;
 }

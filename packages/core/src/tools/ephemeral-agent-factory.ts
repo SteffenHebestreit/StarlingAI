@@ -24,7 +24,9 @@ import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { readRecentOutcomes } from "../agent/outcomes.js";
 import { getToolTier, ToolTier } from "../guardrails/tool-tiers.js";
-import { promoteEphemeralAgent, PROMOTION_MIN_SUCCESSES, PROMOTION_MIN_SUCCESS_RATE } from "../agent/promoted-agents.js";
+import { promoteEphemeralAgent, withPromotedAgents, PROMOTION_MIN_SUCCESSES, PROMOTION_MIN_SUCCESS_RATE } from "../agent/promoted-agents.js";
+import { buildAgentIndex } from "../providers/embeddings.js";
+import { getEmbeddingProvider } from "../providers/index.js";
 import { formatSharedContextForPrompt } from "../swarm/memory.js";
 import { isWebReachingToolName, looksLikeFailureResult, looksLikeArtifactDeliverableMiss } from "./sub-agent.js";
 
@@ -316,6 +318,12 @@ function maybePromoteEphemeral(
   const config = getConfig();
   if (config.subAgents[promotedName]) return;
   promoteEphemeralAgent(workspacePath, promotedName, cfg);
+  // The semantic index is otherwise rebuilt only at startup and on a config reload, so a fresh
+  // promotion stayed invisible to semantic routing and search_agents until the next restart.
+  const embeddingModel = config.agents.defaults.model.embeddingModel;
+  if (embeddingModel) {
+    buildAgentIndex(withPromotedAgents(config.subAgents, workspacePath), getEmbeddingProvider(), embeddingModel).catch(() => undefined);
+  }
 }
 
 /**

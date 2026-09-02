@@ -2,6 +2,7 @@
  * Agent Runtime — the main agent loop.
  * LLM call → parse tool calls → execute (with guardrails) → loop → final response
  */
+import { startsTurn, currentTurnStartIndex } from "./turn-boundary.js";
 import { unattendedInputCallback } from "../tools/ask-user.js";
 import { runArtifactVerificationGate, buildFailureCaveat, buildUnverifiableCaveat } from "./artifact-verification-gate.js";
 import { applyActiveModelPreset, getChatProvider, getChatProviderForTier, getChatProviderWithOverride } from "../providers/index.js";
@@ -119,6 +120,7 @@ export { looksLikeRegurgitatedPriorAnswer } from "./runtime-utils.js";
 // (which stays here) uses looksLikeDelegatedFailureEvidence from this module.
 import {
   buildModelVisibleToolResult,
+  isExplicitDelegationSuccess,
   looksLikeDelegatedFailureEvidence,
   looksLikeStructuralDelegationFailure,
 } from "./tool-result-format.js";
@@ -653,8 +655,19 @@ const FORCE_ORCHESTRATION_TOOLS = new Set([
 
 /** Keep only orchestration/delegation tools so a forced tool call can ONLY be
  * satisfied by an action that advances the turn. Exported for testing. */
-export function filterForcedOrchestrationTools<T extends { name: string }>(tools: readonly T[]): T[] {
-  return tools.filter((tool) => FORCE_ORCHESTRATION_TOOLS.has(tool.name));
+export function filterForcedOrchestrationTools<T extends { name: string }>(
+  tools: readonly T[],
+  plan?: { planRecorded: boolean },
+): T[] {
+  return tools.filter((tool) => {
+    // ONE-SHOT record_plan. execute_plan can only run a plan that exists, and record_plan was
+    // hidden on every forced iteration — so on a first forced iteration execute_plan was a
+    // guaranteed "No plan recorded". While no plan exists the model may record one (once); the
+    // moment it exists, execute_plan is the way forward and record_plan is an escape hatch again.
+    if (tool.name === "record_plan") return plan?.planRecorded === false;
+    if (tool.name === "execute_plan") return plan?.planRecorded !== false;
+    return FORCE_ORCHESTRATION_TOOLS.has(tool.name);
+  });
 }
 
 function shouldBypassTerminalSynthesisWithEvidence(
@@ -999,10 +1012,11 @@ export function classifyPostOrchestrationDisposition(
       // Sniff only the delegated EVIDENCE, never the harness-built instruction
       // preamble above it — preamble wording must not be classifiable as a
       // failure signal (same defect class as the workflow case above).
-      // An explicit success from the sub-agent runtime is not overridden by the prose sniff (the
-      // same rule as the model-visible frame in tool-result-format.ts).
+      // Only an EXPLICIT success verdict (a `<final_answer status="success">` close) is trusted
+      // over the prose sniff — the same rule as the model-visible frame in tool-result-format.ts.
+      // The runtime's defaulted "success" is not a verdict.
       || (!delegationPartial && looksLikeStructuralDelegationFailure(observedEvidence))
-      || (!delegationPartial && delegationOutcome !== "success" && looksLikeDelegatedFailureEvidence(observedEvidence))
+      || (!delegationPartial && !isExplicitDelegationSuccess(metadata) && looksLikeDelegatedFailureEvidence(observedEvidence))
     ) {
       return "failure";
     }
@@ -1769,7 +1783,7 @@ async function _runTurn(
     let foundCurrentUser = false;
     for (let i = hist.length - 1; i >= Math.max(0, hist.length - 40); i--) {
       const msg = hist[i];
-      if (msg?.role === "user") {
+      if (msg && startsTurn(msg)) {
         if (!foundCurrentUser) { foundCurrentUser = true; continue; }
         // Reached the start of the prior turn — stop here
         break;
@@ -1909,6 +1923,9 @@ async function _runTurn(
           content: "[USER STEERING — sent mid-turn] The user added the following while you were working. "
             + "Take it into account in the REMAINING steps of this turn: adjust course, drop now-irrelevant work, and prioritise it. "
             + "Do not restart from scratch or re-do already-completed steps.\n" + joined,
+          // Injected INSIDE the turn: every "current turn" reader keys on user messages WITHOUT
+          // this marker (agent/turn-boundary.ts), so steering does not cut the turn in two.
+          metadata: { midTurn: true },
         });
         logAudit("turn_steering_injected", {
           count: steering.length,
@@ -1996,6 +2013,7 @@ async function _runTurn(
             role: "user",
             content: "[OVERSIGHT — max-effort progress check] A progress monitor judged this turn is not converging on the deliverable. "
               + "Apply this correction in your NEXT step — do NOT restart from scratch or re-do finished work:\n" + oversight.directive,
+            metadata: { midTurn: true },
           });
           logAudit("turn_oversight_redirected", {
             iteration: iterationCount,
@@ -2171,7 +2189,8 @@ async function _runTurn(
       // direct memory/self tools so tool_choice:"required" can only be satisfied by a
       // real orchestration/delegation tool. Without this the slow model loops on
       // memory_store and never delegates (audit be828e39).
-      const forcedTools = wantForceToolChoice ? filterForcedOrchestrationTools(activeTools) : activeTools;
+      const forcedPlanState = wantForceToolChoice ? { planRecorded: (await loadTurnPlan(session.id)) !== null } : undefined;
+      const forcedTools = wantForceToolChoice ? filterForcedOrchestrationTools(activeTools, forcedPlanState) : activeTools;
       const forceToolChoice = wantForceToolChoice && forcedTools.length > 0;
       const streamTools = forceToolChoice ? forcedTools : activeTools;
       llmResponse = await collectStream(
@@ -5088,10 +5107,7 @@ export function buildTimeoutDeliveryMessage(
   opts: { effortTier?: string; timeoutMs: number },
 ): { response: string; recoveredAssistantText: boolean } {
   const history = session.getHistory() as ReadonlyArray<{ role: string; content?: string | null }>;
-  let lastUserIdx = -1;
-  for (let i = history.length - 1; i >= 0; i -= 1) {
-    if (history[i]!.role === "user") { lastUserIdx = i; break; }
-  }
+  const lastUserIdx = currentTurnStartIndex(history);
   // Substantial assistant text produced AFTER this turn's opening user message.
   let turnAssistantText = "";
   for (let i = history.length - 1; i > lastUserIdx; i -= 1) {
@@ -5168,7 +5184,7 @@ export function collectTurnArtifactAttachments(session: AgentSession): Array<Rec
   // persisted assistant turns.
   for (let i = history.length - 1; i >= 0; i--) {
     const msg = history[i] as unknown as RawMessage;
-    if (msg.role === "user") break;
+    if (startsTurn(msg)) break;
     if (msg.role !== "tool") continue;
     if (!msg.metadata || typeof msg.metadata !== "object") continue;
     extractArtifactsFromMetadata(msg.metadata, attachments, seen);

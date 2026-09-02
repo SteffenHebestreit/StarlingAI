@@ -1865,15 +1865,20 @@ export function createGateway() {
       return c.json({ error: "Invalid JSON body" }, 400);
     }
 
-    const merged = mergeOrchestrationConfigUpdate(getConfig().orchestration, body);
-    if (!merged.ok) {
-      return c.json({ error: merged.error, details: merged.details }, 400);
+    // A bad body is a 400 before anything is touched: validate against the live section. The
+    // merge that persists runs INSIDE the mutator, over the RAW stored section — merging over the
+    // resolved config would write every materialized default and overlay value back into the
+    // store, and would race a shard edit made while the request was in flight.
+    const preview = mergeOrchestrationConfigUpdate(getConfig().orchestration, body);
+    if (!preview.ok) {
+      return c.json({ error: preview.error, details: preview.details }, 400);
     }
-    const orchestrationUpdate = merged.value;
 
     try {
       const updatedConfig = updateConfig((raw) => {
-        raw["orchestration"] = orchestrationUpdate;
+        const merged = mergeOrchestrationConfigUpdate(raw["orchestration"], body);
+        if (!merged.ok) throw new Error(merged.error);
+        raw["orchestration"] = merged.stored;
       });
       return c.json(updatedConfig.orchestration);
     } catch (error) {

@@ -13,4 +13,10 @@ describe("sub-agent lifecycle → dashboard status", () => {
       expect(subAgentProgressStatus({ kind, agentName: "researcher", iteration: 1 })).toBeNull();
     }
   });
+
+  it("caps the line — a summary is a status, not a transcript (federated peers author them too)", () => {
+    const message = subAgentProgressStatus({ kind: "completed", agentName: "peer", iteration: 1, summary: "x".repeat(2_000) })?.message ?? "";
+    expect(message.length).toBeLessThanOrEqual(200);
+    expect(message.endsWith("…")).toBe(true);
+  });
 });

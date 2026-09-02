@@ -14,6 +14,19 @@ const RERANKER_COOLDOWN_MS = 60_000;
 let _consecutiveFailures = 0;
 let _circuitOpenUntil = 0;
 
+/** The sidecar is up and answered, but refused THIS request (a 4xx other than 408/429). */
+class RerankerRequestRejected extends Error {
+  constructor(readonly status: number) {
+    super(`reranker rejected the request with HTTP ${status}`);
+  }
+}
+
+/** A non-2xx answer never reaches the caller as a result: a rejection for this query, or a failure for the breaker. */
+function rejectOrFail(status: number): never {
+  if (status >= 400 && status < 500 && status !== 408 && status !== 429) throw new RerankerRequestRejected(status);
+  throw new Error(`reranker responded ${status}`);
+}
+
 function recordRerankerSuccess(): void {
   _consecutiveFailures = 0;
   _circuitOpenUntil = 0;
@@ -76,7 +89,13 @@ export async function rerankCandidates(
     recordRerankerSuccess();
     return result;
   } catch (error) {
-    // Thrown = timeout (abort) or network refusal — the stall/unreachable signal.
+    if (error instanceof RerankerRequestRejected) {
+      // Payload too large, unknown model name: this query keeps base order, but the sidecar is
+      // healthy — counting it would open the circuit for every other query.
+      log.warn({ status: error.status, mode: reranker.mode }, "Reranker rejected the request — keeping base routing order");
+      return null;
+    }
+    // Thrown = timeout (abort), network refusal or a 5xx — the stall/unreachable signal.
     recordRerankerFailure(Date.now());
     log.warn({ error, mode: reranker.mode }, "Reranker unavailable — keeping base routing order");
     return null;
@@ -117,7 +136,7 @@ async function rerankViaTei(
     // null it reached the caller as a SUCCESS, the breaker never counted it, and a reranker
     // answering 500 on every request (the deployed TEI sidecar, at the time of writing) was
     // called on every document-RAG query — a full round trip ahead of the first token, each time.
-    throw new Error(`TEI reranker responded ${response.status}`);
+    rejectOrFail(response.status);
   }
 
   const body = await response.json() as
@@ -195,8 +214,8 @@ async function rerankViaLlm(
   });
 
   if (!response.ok) {
-    log.warn({ status: response.status }, "LLM reranker request failed — keeping base routing order");
-    return null;
+    // Same rule as the TEI backend: a non-2xx answer must reach the breaker.
+    rejectOrFail(response.status);
   }
 
   const body = await response.json() as {

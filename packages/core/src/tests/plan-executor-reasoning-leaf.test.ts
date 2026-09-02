@@ -31,15 +31,15 @@ const plan = (steps: TurnPlan["steps"]): TurnPlan => ({
 const run = () => getTool("execute_plan")!.execute({}, { sessionId: SESSION, workspacePath: "/w" } as never);
 
 /**
- * A tool-less `direct` step that nothing depends on is the plan describing the reply the
- * orchestrator writes next. Reported as YOURS TO DO it demanded another execute_plan({completed})
- * round trip for work that IS the reply.
+ * A tool-less `direct` step that consumes other steps' results and that nothing depends on is the
+ * plan describing the reply the orchestrator writes next. Reported as YOURS TO DO it demanded
+ * another execute_plan({completed}) round trip for work that IS the reply.
  */
 describe("execute_plan — a trailing reasoning step is the answer, not a blocker", () => {
   beforeEach(() => { calls.length = 0; });
   afterEach(() => { vi.clearAllMocks(); });
 
-  it("reports a tool-less direct step nothing depends on as done", async () => {
+  it("reports a tool-less direct step that consumes results and that nothing depends on as done — and names it as the final step", async () => {
     await persistTurnPlan(SESSION, plan([
       { id: "s1", description: "gather the facts", kind: "delegate", agent: "researcher" },
       { id: "s2", description: "summarize the findings for the user", kind: "direct", dependsOn: ["s1"] },
@@ -49,6 +49,9 @@ describe("execute_plan — a trailing reasoning step is the answer, not a blocke
     expect(result.metadata?.["done"]).toBe(2);
     expect(result.metadata?.["manual"]).toBe(0);
     expect(result.output).not.toMatch(/YOURS TO DO/);
+    // Said plainly: nothing ran it; if it needs a tool after all, that tool has not been called.
+    expect(result.output).toMatch(/FINAL STEP[\s\S]*s2[\s\S]*summarize the findings/);
+    expect(result.output).toMatch(/did not run/);
   });
 
   it("keeps a standalone tool-less step as the orchestrator's own work", async () => {

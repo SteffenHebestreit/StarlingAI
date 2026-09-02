@@ -19,9 +19,25 @@ describe("PUT /api/orchestration/config merges over the stored section", () => {
     expect(result.value.planFirst).toBe(false);
   });
 
+  it("merges a nested cap map key by key instead of replacing it", () => {
+    // A dashboard form that knows one cap must not tombstone the caps the shards define.
+    const withCaps = OrchestrationSchema.parse({ perTurnCaps: { delegate_to_agent: 5, web_search: 20 } });
+    const result = mergeOrchestrationConfigUpdate(withCaps, { perTurnCaps: { web_search: 30 } });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.perTurnCaps).toEqual({ delegate_to_agent: 5, web_search: 30 });
+  });
+
+  it("persists only the keys that were stored or sent — never the materialized defaults", () => {
+    const result = mergeOrchestrationConfigUpdate({ planFirst: false }, { qaDeliveryLoop: true });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.stored).toEqual({ planFirst: false, qaDeliveryLoop: true });
+    expect(typeof result.value.stablePromptPrefix).toBe("boolean");   // the resolved view is complete
+  });
+
   it("rejects a body that fails validation", () => {
-    const result = mergeOrchestrationConfigUpdate(stored, { planFirst: "yes" });
-    expect(result.ok).toBe(false);
+    expect(mergeOrchestrationConfigUpdate(stored, { planFirst: "yes" }).ok).toBe(false);
   });
 
   it("is a full, well-formed section even over an empty store", () => {
@@ -29,6 +45,6 @@ describe("PUT /api/orchestration/config merges over the stored section", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.planFirst).toBe(false);
-    expect(typeof result.value.qaDeliveryLoop).toBe("boolean");
+    expect(result.stored).toEqual({ planFirst: false });
   });
 });

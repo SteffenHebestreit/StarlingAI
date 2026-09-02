@@ -382,6 +382,8 @@ registerTool({
     const ran: string[] = [];
     /** Dispatched successfully IN THIS CALL — what the turn may add to its own counters. */
     const dispatchedOk: string[] = [];
+    /** Tool-less final steps reported as done because they ARE the reply — named, so the model does them. */
+    const reasoningLeaves: string[] = [];
     /** Every call this run made, reported so the TURN applies its own accounting to each. */
     const nestedCalls: Array<{ tool: string; success: boolean; workflowNotFound?: boolean }> = [];
     // Steps the delegate budget has deferred. Held out of the frontier rather than breaking the
@@ -428,6 +430,7 @@ registerTool({
         if (run.status === "manual" && isReasoningOnlyLeaf(plan, step)) {
           statuses.set(step.id, "done");
           details.set(step.id, "reasoning step — nothing to dispatch; it is the answer you write next");
+          reasoningLeaves.push(step.id);
           continue;
         }
         statuses.set(step.id, run.status);
@@ -503,6 +506,14 @@ registerTool({
     if (reported.length > 0) {
       sections.push(`RESULTS — write the final answer from these:\n\n${reported.join("\n\n")}`
         + (omitted > 0 ? `\n\n(${omitted} further result(s) omitted for length.)` : ""));
+    }
+    if (reasoningLeaves.length > 0) {
+      // Counted as done because nothing dispatches it — but said plainly, so a step that names
+      // real work the model forgot to give a tool ("write the file", "send the mail") is not
+      // quietly reported as finished.
+      sections.push(`FINAL STEP — yours, in the reply (nothing dispatches it):\n`
+        + reasoningLeaves.map((id) => `  - ${id} — ${byId.get(id)?.description ?? ""}`).join("\n")
+        + `\nIt did not run. If it needs a tool after all (writing a file, sending mail), call that tool now, before answering.`);
     }
     if (failed.length > 0) sections.push(`FAILED — retry with execute_plan({retry:["<id>"]}), reroute, or tell the user:\n${describe(failed)}`);
     if (manual.length > 0) {

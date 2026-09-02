@@ -13,6 +13,7 @@
  * container-failure, runtime-evidence-dump). It must NEVER import from runtime.js —
  * keep it cycle-free.
  */
+import { currentTurnStartIndex } from "./turn-boundary.js";
 import { looksLikeProviderErrorEcho } from "./container-failure.js";
 import {
   DELEGATE_TOOL_RESULT_RE,
@@ -170,14 +171,15 @@ function measureEvidenceCoverage(
   };
 }
 
-/** Index of the most recent `user` message, or -1. Marks the current turn's start. */
+/**
+ * Index of the user message that opened the current turn, or -1. A mid-turn steering or
+ * oversight message is user-role but does not open a turn (agent/turn-boundary.ts) — keyed on the
+ * bare role, the scoped backstops dropped this turn's pre-steering evidence.
+ */
 function lastUserMessageIndex(
-  history: readonly { role: string }[],
+  history: readonly { role: string; metadata?: Record<string, unknown> }[],
 ): number {
-  for (let i = history.length - 1; i >= 0; i--) {
-    if (history[i]?.role === "user") return i;
-  }
-  return -1;
+  return currentTurnStartIndex(history);
 }
 
 function findRecentDelegateEvidence(

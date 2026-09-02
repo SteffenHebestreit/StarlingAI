@@ -2256,6 +2256,11 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           attemptedAgents,
           delegationSucceeded: true,
           delegationOutcome: delegationOutcome ?? "success",
+          // Where the outcome came from. "explicit" = the sub-agent closed with a
+          // `<final_answer status>` tag; "heuristic" = the runtime's default (a five-phrase regex
+          // over the first 300 characters), which is not a verdict and must not silence the
+          // orchestrator's failure sniff.
+          delegationVerdict: parsedOutcome?.status ? "explicit" : "heuristic",
           // MIS-202: the attempt links to its effective (narrowed) contract.
           ...(contractId ? { contractId } : {}),
           // Mark runtime-authored research slices: their output is synthesis

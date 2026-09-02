@@ -25,6 +25,7 @@ import {
 } from "./session-redis.js";
 
 import { PRODUCT } from "../product/index.js";
+import { startsTurn } from "./turn-boundary.js";
 
 const log = childLogger("agent:session");
 const TRANSIENT_TURN_SYSTEM_PREFIXES = [
@@ -291,10 +292,11 @@ export class AgentSession {
     }
     // The plan report's 12K allowance is for the turn that is answering from it. Once that turn
     // is over the report is history like any other delegation result — held at the delegation
-    // cap, not carried in full into every later turn's prompt.
+    // cap, not carried in full into every later turn's prompt. A mid-turn steering message is
+    // user-role but does not open a turn (agent/turn-boundary.ts).
     let currentTurnStart = -1;
     for (let k = this.history.length - 1; k >= 0; k -= 1) {
-      if (this.history[k]!.role === "user") { currentTurnStart = k; break; }
+      if (startsTurn(this.history[k]!)) { currentTurnStart = k; break; }
     }
     let i = 0;
     while (i < this.history.length) {
@@ -422,7 +424,7 @@ export class AgentSession {
   hasTransientNoteThisTurn(prefix: string): boolean {
     for (let index = this.history.length - 1; index >= 0; index -= 1) {
       const message = this.history[index]!;
-      if (message.role === "user") return false;
+      if (startsTurn(message)) return false;
       if (message.role === "system" && typeof message.content === "string" && message.content.startsWith(prefix)) return true;
     }
     return false;
