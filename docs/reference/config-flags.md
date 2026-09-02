@@ -18,7 +18,7 @@ Every public schema field, where it is declared, and how many production files r
 | `admin` | packages/core/src/config/schema.ts:357 | 21 |
 | `agents` | packages/core/src/config/schema.ts:1571 | 130 |
 | `alertmanager` | packages/core/src/config/schema.ts:1038 | 1 |
-| `all` | packages/core/src/config/schema.ts:1176 | 215 |
+| `all` | packages/core/src/config/schema.ts:1176 | 216 |
 | `allowedAgents` | packages/core/src/config/schema.ts:1190 | 25 |
 | `allowedUserIds` | packages/core/src/config/schemas/channels.ts:11 | 5 |
 | `allowedUsers` | packages/core/src/config/schema.ts:779 | 10 |
@@ -269,7 +269,7 @@ Every public schema field, where it is declared, and how many production files r
 | `minStepsToAuthor` | packages/core/src/config/schema.ts:1340 | 2 |
 | `minVramMb` | packages/core/src/config/schema.ts:808 | 1 |
 | `mode` | packages/core/src/config/schema.ts:457 | 101 |
-| `model` | packages/core/src/config/schema.ts:1137 | 180 |
+| `model` | packages/core/src/config/schema.ts:1137 | 181 |
 | `modelModeration` | packages/core/src/config/schema.ts:1133 | 4 |
 | `modelPresets` | packages/core/src/config/schema.ts:1578 | 1 |
 | `modelPresetScope` | packages/core/src/config/schema.ts:1593 | 3 |
