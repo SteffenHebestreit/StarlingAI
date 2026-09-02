@@ -85,6 +85,26 @@ export interface AssembleTurnSystemMessagesResult {
   heldOutSkillSlugs: string[];
 }
 
+/**
+ * Place the per-turn guidance so the leading system run stays byte-identical across iterations.
+ *
+ * With `stable` on, the request is head → history → guidance: the head is the KV-cache key and
+ * never changes within a turn, and the guidance lands after the history, where every provider
+ * already handles a non-leading system message (folded to user-role context in position by the
+ * LM Studio provider, delivered as user-turn context by the Anthropic one). With it off, the
+ * previous shape is preserved: every system message leads, and the head differs per iteration.
+ */
+export function composeTurnMessages(
+  head: readonly LLMMessage[],
+  history: readonly LLMMessage[],
+  guidance: readonly LLMMessage[],
+  stable: boolean,
+): LLMMessage[] {
+  return stable
+    ? [...head, ...history, ...guidance]
+    : [...head, ...guidance, ...history];
+}
+
 export async function assembleTurnSystemMessages(
   params: AssembleTurnSystemMessagesParams,
 ): Promise<AssembleTurnSystemMessagesResult> {
@@ -365,7 +385,17 @@ export async function assembleTurnSystemMessages(
       ? "HONESTY ON CURRENCY: Do NOT claim or imply your answer is based on current, live, recent, latest, or external data (market data, news, prices, current events, 'as of today/this year') unless you actually retrieved it via a tool THIS turn. If the answer materially depends on such data, route it to a research-capable specialist and validate it — never assert it from memory, and never frame a from-memory answer as if it were freshly sourced."
       : "";
 
-    const buildSystemMessages = (): LLMMessage[] => [
+    // THE HEAD IS THE CACHE KEY. LM Studio / llama.cpp reuse the KV cache for the longest
+    // unchanged prefix of the rendered prompt, and the chat template renders the tool block
+    // right after the leading run of system messages (which the provider folds into one).
+    // Anything in that run that differs between two calls invalidates everything behind it —
+    // the ~9K-token tool block and the whole history. Measured on this box: an identical prefix
+    // prefilled in 1.36 s; 200 varying characters ahead of it, 6.25 s. So the head holds ONLY
+    // what is invariant within a turn: the base prompt, the (per-turn) orchestration module, the
+    // date, and the catalog notice. Everything that changes per iteration — language/identity,
+    // dynamic guidance, the plan nudge, the discovery capsule, shared findings — is emitted as
+    // the TAIL, after the history, where the provider relabels it as the most recent context.
+    const buildStableHead = (): LLMMessage[] => [
       { role: "system", content: systemPrompt },
       // Orchestration module (split-prompt mode): injected right after the lean base so the base
       // stays the shared, cacheable prefix; present only on orchestration-intent turns.
@@ -377,6 +407,8 @@ export async function assembleTurnSystemMessages(
       // needed. Only present when the catalog is actually withheld, so it costs
       // nothing in the default configuration.
       ...(leanToolCatalogNotice ? [{ role: "system" as const, content: leanToolCatalogNotice }] : []),
+    ];
+    const buildTurnGuidance = (): LLMMessage[] => [
       ...(languageAndIdentityGuidance ? [{ role: "system" as const, content: languageAndIdentityGuidance }] : []),
       ...(priorEvidenceFollowUpPrompt ? [{ role: "system" as const, content: priorEvidenceFollowUpPrompt }] : []),
       ...(sessionEvidenceReuseNudge ? [{ role: "system" as const, content: sessionEvidenceReuseNudge }] : []),
@@ -410,6 +442,9 @@ export async function assembleTurnSystemMessages(
       // from training data (e.g. mic interface type, verified part specs, etc.).
       ...(sharedFindingsSystemMessage ? [{ role: "system" as const, content: sharedFindingsSystemMessage }] : []),
     ];
+    // The union, for measurement and the budget trimmer, which reason about the system text as
+    // one block regardless of where the provider ends up placing it.
+    const buildSystemMessages = (): LLMMessage[] => [...buildStableHead(), ...buildTurnGuidance()];
 
     let systemMessages = buildSystemMessages();
     lastPromptMetrics = measurePrompt(systemMessages, collapsedHistory, session.getToolSchemasChars());
@@ -542,7 +577,12 @@ export async function assembleTurnSystemMessages(
       }
     }
 
-    const messages: LLMMessage[] = [...systemMessages, ...collapsedHistory];
+    const messages: LLMMessage[] = composeTurnMessages(
+      buildStableHead(),
+      collapsedHistory,
+      buildTurnGuidance(),
+      getConfig().orchestration?.stablePromptPrefix ?? true,
+    );
     return {
       messages,
       collapsedHistory,

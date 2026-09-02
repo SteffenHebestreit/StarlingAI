@@ -384,6 +384,21 @@ export function getChatProviderWithOverride(override: Partial<ModelConfig>): Cha
  *   - "synthesis" → consumed by runtime.forceSynthesis to run the final
  *                   user-facing rewrite on a lighter / faster model
  */
+/**
+ * What a tier asks of the model beyond its identity.
+ *
+ * The ROUTING tier exists for yes/no verdicts — is this question source-sensitive, does this
+ * short message need escalating, is this draft ungrounded. It inherited the default model's
+ * `enableThinking: true`, and the qwen3.6 family only honours that switch (it ignores
+ * `reasoningEffort`), so every one of those verdicts reasoned first: measured 6.1 s and ~1,000
+ * reasoning characters per yes/no on the single GPU, one to three of them serialized before the
+ * user's first token. A verdict call defaults to thinking-off, expressed both ways so it survives
+ * a model swap; a caller that genuinely needs deliberation passes an override, which wins.
+ */
+export function tierModelDefaults(tier: "routing" | "synthesis"): Partial<ModelConfig> {
+  return tier === "routing" ? { enableThinking: false, reasoningEffort: "none" } : {};
+}
+
 export function getChatProviderForTier(
   tier: "routing" | "synthesis",
   override: Partial<ModelConfig> = {},
@@ -395,7 +410,7 @@ export function getChatProviderForTier(
   if (getActiveModelPreset(config)) return null;
   const tierModel = config.agents.defaults.model.tiers?.[tier];
   if (!tierModel) return null;
-  return getChatProviderWithOverride({ ...override, primary: tierModel });
+  return getChatProviderWithOverride({ ...tierModelDefaults(tier), ...override, primary: tierModel });
 }
 
 export function getEmbeddingProvider(): LMStudioProvider {

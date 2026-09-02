@@ -19,6 +19,14 @@ export const OrchestrationSchema = z.object({
    *  checkpoint that QA checks against and the operator dock can surface for
    *  high-stakes approval. Trivial turns still answer directly. Default: true. */
   planFirst: z.boolean().default(true),
+  /** When true, the per-turn guidance (language/identity, plan nudge, discovery capsule, shared
+   *  findings, …) is placed AFTER the conversation history instead of inside the leading system
+   *  run, so the leading run — base prompt, orchestration module, date — is byte-identical across
+   *  the iterations of a turn and the provider's KV-cache prefix survives them. Measured on the
+   *  single-GPU deployment: an identical prefix prefills in ~1.4 s, one with 200 varying
+   *  characters ahead of it in ~6.3 s; the ~9K-token tool block sits behind the head. Off restores
+   *  the previous all-system-leading shape. Default: true. */
+  stablePromptPrefix: z.boolean().default(true),
   /** When true, high-stakes turns (sourced factual claims, approval-gated
    *  actions, or a plan the orchestrator flagged high-risk) get an automatic
    *  verification pass that checks the answer against the plan's acceptance
