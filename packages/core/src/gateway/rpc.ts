@@ -4,6 +4,7 @@
  */
 import type WebSocket from "ws";
 import { randomUUID } from "node:crypto";
+import { subAgentProgressStatus } from "./sub-agent-progress-status.js";
 import {
   archiveSession,
   createSession,
@@ -974,6 +975,17 @@ export class RpcConnection {
                   sourceAgent: event.agentName,
                   delegated: true,
                 },
+              });
+              return;
+            }
+
+            // A specialist's start and finish are status, not tool events: without them the pill
+            // froze on the orchestrator's last phase for the minutes a specialist ran tool-less.
+            const lifecycle = subAgentProgressStatus(event);
+            if (lifecycle) {
+              this.sendEvent({
+                type: "status",
+                data: { requestId, status: lifecycle.phase, message: lifecycle.message, iteration: lifecycle.iteration, sourceAgent: event.agentName, delegated: true },
               });
               return;
             }

@@ -34,6 +34,19 @@ export function readPromotedAgents(workspacePath: string): Record<string, SubAge
   }
 }
 
+/**
+ * The catalog the semantic index should cover: the configured agents plus the promoted ones.
+ * Promoted agents are merged into ROUTING at query time, but the embedding index was built from
+ * config.subAgents alone — so a promoted agent could win keyword routing and still never appear
+ * as a semantic candidate, and search_agents never surfaced it. A configured name wins a clash.
+ */
+export function withPromotedAgents(
+  subAgents: Record<string, SubAgentConfig>,
+  workspacePath: string,
+): Record<string, SubAgentConfig> {
+  return { ...readPromotedAgents(workspacePath), ...subAgents };
+}
+
 export function writePromotedAgents(workspacePath: string, agents: Record<string, SubAgentConfig>): void {
   const dir = resolve(workspacePath, PRODUCT.stateDirName);
   mkdirSync(dir, { recursive: true });

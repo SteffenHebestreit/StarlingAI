@@ -2232,7 +2232,7 @@ export const useGatewayStore = defineStore("gateway", () => {
         return;
       }
 
-      if (["routing", "synthesizing", "guardrail"].includes(status)) {
+      if (["routing", "synthesizing", "guardrail", "delegating"].includes(status)) {
         const message = String(data["message"] ?? "").trim();
         if (message) {
           updateStreamingStatus(message, { appendHistory: true });

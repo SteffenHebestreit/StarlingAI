@@ -53,6 +53,8 @@ export interface AssembleTurnSystemMessagesParams {
   session: AgentSession;
   iterationCount: number;
   userMessage: string;
+  /** The turn's agent grant (a scene, a restricted session); the discovery capsule honours it. */
+  allowedAgents?: readonly string[];
   initialDynamicGuidance: DynamicTurnGuidance | null;
   documentRagFoundDocs: boolean;
   trajectoryInjectionContext: string;
@@ -112,6 +114,7 @@ export async function assembleTurnSystemMessages(
     session,
     iterationCount,
     userMessage,
+    allowedAgents,
     initialDynamicGuidance,
     documentRagFoundDocs,
     trajectoryInjectionContext,
@@ -220,7 +223,8 @@ export async function assembleTurnSystemMessages(
             let timer: ReturnType<typeof setTimeout> | undefined;
             try {
               return await Promise.race([
-                prefetchCapabilityCandidates(userMessage),
+                // Scoped to the grant: unscoped, the capsule named agents the turn could not call.
+                prefetchCapabilityCandidates(userMessage, allowedAgents ? { allowedAgents: [...allowedAgents] } : undefined),
                 new Promise<string>((resolve) => { timer = setTimeout(() => resolve(""), DISCOVERY_PREFETCH_BUDGET_MS); }),
               ]);
             } finally {

@@ -206,6 +206,14 @@ export interface TerminalGuardContext {
  * mutated state back after the call. Every branch, condition, audit event, severity, and the
  * ordering are the inline span moved verbatim (only enclosing free-var reads became ctx.x).
  */
+/**
+ * The riskGatedQA one-shot criteria verification is redundant when the QA delivery loop will check
+ * the same criteria — and the loop is a no-op without criteria, so then the one-shot stays.
+ */
+export function oneShotCriteriaVerifyIsRedundant(qaDeliveryLoopOn: boolean, criteriaCount: number): boolean {
+  return qaDeliveryLoopOn && criteriaCount > 0;
+}
+
 export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Promise<string> {
   const { signal, session, provider, userMessage, toolContext, deliverableIntent, initialDynamicGuidance, guardrailEvents } = ctx;
   const { rawResponse, iterationCount, effectiveToolIterations, terminalFinishReason, toolCallsRequested } = ctx;
@@ -230,7 +238,7 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
     )
   ) {
     const sharedFactsEvidence = await getSharedFactsEvidenceForFinalSynthesis(session.id, 6_000);
-    const delegateEvidence = findRecentDelegateEvidence(session.getHistory());
+    const delegateEvidence = findRecentDelegateEvidence(session.getHistory(), { scopeToCurrentTurn: true });
     const recoveryEvidence = chooseBetterRecoveryEvidence(delegateEvidence, sharedFactsEvidence, { preferHigherScore: true });
     if (recoveryEvidence && !looksLikeWeakRecoveryEvidence(recoveryEvidence.evidence)) {
       const synthesized = await ctx.forceSynthesis(
@@ -277,7 +285,7 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
       || hasRecentSourceSensitivePartialDelegation(session.getHistory())
     )
   ) {
-    const delegateEvidence = findRecentDelegateEvidence(session.getHistory());
+    const delegateEvidence = findRecentDelegateEvidence(session.getHistory(), { scopeToCurrentTurn: true });
     const sharedFactsEvidence = await getSharedFactsEvidenceForFinalSynthesis(session.id);
     const recoveryEvidence = chooseBetterRecoveryEvidence(delegateEvidence, sharedFactsEvidence);
     if (recoveryEvidence) {
@@ -452,7 +460,15 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
       }
     }
 
-    if (risk === "high" && !evidenceAnchoringRepairRan) {
+    // With the QA delivery loop on, the same criteria are checked again a few lines down, and the
+    // loop's check is the one that can send the answer back for more work — so this one-shot
+    // verification was a second full-context synthesis call (30–90 s on the single GPU) whose
+    // verdict the loop then re-derived. It runs only where the loop will not.
+    const qaLoopWillVerify = oneShotCriteriaVerifyIsRedundant(
+      effectiveOrchestration().qaDeliveryLoop === true,
+      qaPlan?.acceptanceCriteria.length ?? 0,
+    );
+    if (risk === "high" && !evidenceAnchoringRepairRan && !qaLoopWillVerify) {
       if (qaPlan && qaPlan.acceptanceCriteria.length > 0 && finalResponse.trim().length > 200 && !signal.aborted) {
         acceptanceCriteriaQaRan = true;
         const verifyInstruction = "Before finalizing, verify your answer meets ALL of these acceptance criteria for the user's task:\n"
@@ -839,7 +855,7 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
     && ctx.collectTurnArtifactAttachments(session).length === 0
     && claimsArtifactWrittenButUnproduced(finalResponse)
   ) {
-    finalResponse = "> ⚠️ **Die angeforderte Datei wurde in diesem Schritt NICHT erstellt** (der Build lief in eine Zeitüberschreitung). Der folgende Inhalt ist nur ein Text-Entwurf — bestätige, dann lasse ich den Inhalts-Spezialisten die Datei jetzt bauen.\n> _The requested file was **not** created this turn (the build timed out). The content below is a text draft only — confirm and I'll have the content specialist build the file now._\n\n"
+    finalResponse = "> ⚠️ **Die angeforderte Datei wurde in diesem Schritt NICHT erstellt** (der Bau wurde nicht abgeschlossen). Der folgende Inhalt ist nur ein Text-Entwurf — bestätige, dann lasse ich den Inhalts-Spezialisten die Datei jetzt bauen.\n> _The requested file was **not** created this turn (the build did not complete). The content below is a text draft only — confirm and I'll have the content specialist build the file now._\n\n"
       + finalResponse;
     guardrailEvents.push({ type: "guardrail_flagged", details: "artifact_completion_claim_unbacked_bannered" });
     logAudit("guardrail_flagged", {

@@ -2645,6 +2645,9 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       allowedTools: effectiveToolNames,
       approvalCallback: opts.approvalCallback,
       humanInLoopSteps: opts.humanInLoopSteps,
+      // The child's own delegations report to the same progress sink as the parent's, so a nested
+      // specialist's start, finish and tool calls reach the dashboard instead of stopping one level down.
+      onSubAgentProgress: opts.onProgress,
       onComputerAction: opts.onComputerAction,
       onComputerScreenshot: opts.onComputerScreenshot,
       onComputerSessionState: opts.onComputerSessionState,

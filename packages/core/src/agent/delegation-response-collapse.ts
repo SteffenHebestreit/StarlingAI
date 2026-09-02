@@ -67,7 +67,7 @@ export function buildDelegationLoopResponse(
   reason: "identical-output" | "limit" = "identical-output",
 ): string {
   const normalized = latestOutput.trim() || "The delegated agent returned no usable output.";
-  const evidence = findRecentDelegateEvidence(session.getHistory());
+  const evidence = findRecentDelegateEvidence(session.getHistory(), { scopeToCurrentTurn: true });
   const bestAvailable = evidence?.evidence?.trim() || normalized;
 
   if (reason === "limit") {

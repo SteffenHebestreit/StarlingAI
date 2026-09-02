@@ -113,8 +113,11 @@ async function rerankViaTei(
   });
 
   if (!response.ok) {
-    log.warn({ status: response.status }, "TEI reranker request failed — keeping base routing order");
-    return null;
+    // A non-2xx answer is the sidecar failing, not the sidecar declining to score. Returned as
+    // null it reached the caller as a SUCCESS, the breaker never counted it, and a reranker
+    // answering 500 on every request (the deployed TEI sidecar, at the time of writing) was
+    // called on every document-RAG query — a full round trip ahead of the first token, each time.
+    throw new Error(`TEI reranker responded ${response.status}`);
   }
 
   const body = await response.json() as

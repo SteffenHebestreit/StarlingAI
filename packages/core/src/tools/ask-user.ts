@@ -1,5 +1,27 @@
 import { registerTool } from "./registry.js";
 
+/**
+ * What the model reads when the wait ended without an answer. The gateway resolves a timed-out
+ * prompt with "", and an empty tool output read as an answer — the model re-asked, or answered on
+ * the user's behalf. Naming the condition tells it what to do instead.
+ */
+export const NO_ANSWER_OUTPUT =
+  "No answer arrived before the wait ended. Do not ask again this turn: continue with your best assumption, "
+  + "state that assumption in the reply, and tell the user how to correct it.";
+
+/**
+ * The answer an unattended run gives ask_user. Without an input channel the tool refused every
+ * call, and a model in auto mode looped on the refusal; a run that has no one to ask is told so
+ * and sent on with its best assumption instead.
+ */
+export const UNATTENDED_ANSWER =
+  "This run is unattended (auto mode): no user can answer. Continue with your best assumption, "
+  + "state it explicitly in the reply, and say what should be confirmed afterwards.";
+
+export async function unattendedInputCallback(): Promise<string> {
+  return UNATTENDED_ANSWER;
+}
+
 registerTool({
   name: "ask_user",
   description:
@@ -50,11 +72,11 @@ registerTool({
         ? args["timeoutMs"]
         : 120_000;
 
-    const answer = await context.inputCallback(question, choices?.length ? choices : undefined, timeoutMs);
+    const answer = (await context.inputCallback(question, choices?.length ? choices : undefined, timeoutMs)).trim();
 
     return {
       success: true,
-      output: answer,
+      output: answer || NO_ANSWER_OUTPUT,
     };
   },
 });

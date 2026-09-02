@@ -52,17 +52,29 @@ export function stripWorkflowPreamble(value: string): string {
   return value.replace(/^Workflow\s+\S+\s+\[(?:scene|job)\]\s+\S[^\n]*\n\n?/, "").trim();
 }
 
-export function looksLikeDelegatedFailureEvidence(value: string): boolean {
+/**
+ * Failure signatures the sub-agent runtime cannot see from where it stands: an empty placeholder
+ * where the answer should be, a provider/HTTP error echoed as the answer, a container that never
+ * ran, a leaked channel marker. These override even an explicit success verdict, because that
+ * verdict was minted by the same run that produced them.
+ */
+export function looksLikeStructuralDelegationFailure(value: string): boolean {
   const preview = value.trim().slice(0, 600);
   if (!preview) return false;
   if (/^sub-agent produced no final response\.?$/i.test(preview)) return true;
   if (/<\|channel>\w+/i.test(preview)) return true;
   if (looksLikeProviderErrorEcho(preview)) return true;
+  return /\b(container error|containerized delegation failed|sandbox (?:bootstrap|startup|start) failed|bootstrap failed|runtime crash(?:ed)?|terminated unexpectedly)\b/i.test(preview);
+}
+
+export function looksLikeDelegatedFailureEvidence(value: string): boolean {
+  const preview = value.trim().slice(0, 600);
+  if (!preview) return false;
+  if (looksLikeStructuralDelegationFailure(preview)) return true;
   return /^error:/i.test(preview)
     || /\b(no results|not found|unable to|failed to|timed out|cancelled|incomplete|max.{0,20}iterations|could not complete|did not complete|cannot complete|cannot proceed|delegation limit|already failed|not permitted|produced no final response|no usable delegated result returned)\b/i.test(preview)
     || /\bis already running via\s+(?:[a-z0-9_:-]*(?:_agent|_coordinator)|researcher|another agent)\b/i.test(preview)
     || /\bNo (?:agents|workflows) matched\b/i.test(preview)
-    || /\b(container error|containerized delegation failed|sandbox (?:bootstrap|startup|start) failed|bootstrap failed|runtime crash(?:ed)?|terminated unexpectedly)\b/i.test(preview)
     || /\b(blocker:|missing source data|required .* unavailable|requested .* unavailable|not available in the current workspace|not available in the workspace|could not be fulfilled with exact figures|cannot be generated at this time|please provide the structured json data to proceed|please provide the source data to proceed|please provide .*json data|i need .*structured json.* to proceed|i need .*data to proceed|task cannot be completed|table does not exist|confirmed non-existent|no source provided the specific .* data)\b/i.test(preview);
 }
 
@@ -109,14 +121,23 @@ export function buildModelVisibleToolResult(
     const delegationPartial = delegationOutcome === "partial"
       && !partialIsProviderErrorEcho
       && !partialHasNoUsableEvidence;
+    // The sub-agent runtime's own verdict is structured metadata; the prose sniff exists for
+    // results that carry none. A specialist that reported SUCCESS and then wrote "the first
+    // attempt failed to reach the site, so I used the cached copy" was reframed as TASK FAILED by
+    // the regex, and the orchestrator told the user the work had failed while holding the finished
+    // deliverable. An explicit success is trusted; the sniff still governs the unlabelled case.
+    const reportedSuccess = delegationOutcome === "success" || metadata?.["delegationSucceeded"] === true;
     const delegationFailed = rawWorkspaceToolDump
       || delegationOutcome === "failure"
       || partialIsProviderErrorEcho
       || partialHasNoUsableEvidence
       || (!delegationPartial && (
-        metadata?.["delegationSucceeded"] === false
-        || /^error:/i.test(cleaned)
-        || looksLikeDelegatedFailureEvidence(cleaned)
+        looksLikeStructuralDelegationFailure(cleaned)
+        || (!reportedSuccess && (
+          metadata?.["delegationSucceeded"] === false
+          || /^error:/i.test(cleaned)
+          || looksLikeDelegatedFailureEvidence(cleaned)
+        ))
       ));
 
     if (agentName === "computer_use_agent") {

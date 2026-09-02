@@ -657,11 +657,16 @@ export async function buildAgentIndex(
 export async function searchByEmbedding(
   query: string,
   provider: LMStudioProvider,
-  topN = 5
+  topN = 5,
+  opts: { allowedAgents?: readonly string[] } = {},
 ): Promise<EmbeddingSearchResult[]> {
   if (!_available || _index.length === 0) return [];
 
-  const cacheKey = buildEmbeddingQueryCacheKey(query, topN);
+  // The caller's allowed set is applied BEFORE the top-N cut. Applied after it (as every caller
+  // did), a scene or restricted turn whose agents ranked ninth and lower got no semantic
+  // candidates at all and fell back to keyword routing, silently.
+  const allowed = opts.allowedAgents ? new Set(opts.allowedAgents) : null;
+  const cacheKey = buildEmbeddingQueryCacheKey(query, topN, allowed);
   const cached = readCachedEmbeddingQuery(cacheKey);
   if (cached) {
     return cached;
@@ -671,6 +676,7 @@ export async function searchByEmbedding(
     const queryVector = await getOrComputeQueryEmbedding(query, provider, _embeddingModel);
     if (!queryVector) return [];
     const results = _index
+      .filter(entry => !allowed || allowed.has(entry.agentName))
       .map(entry => ({ agentName: entry.agentName, description: entry.description, score: cosineSimilarity(queryVector, entry.vector) }))
       .sort((a, b) => b.score - a.score)
       .slice(0, topN);
@@ -841,8 +847,10 @@ function scheduleEmbeddingRetry(): void {
   log.info({ model: _embeddingModel, retryInMs: delay }, "Scheduled embedding index rebuild retry");
 }
 
-function buildEmbeddingQueryCacheKey(query: string, topN: number): string {
-  return `${_embeddingModel}::${topN}::${normalizeSearchText(query)}`;
+function buildEmbeddingQueryCacheKey(query: string, topN: number, allowed: ReadonlySet<string> | null = null): string {
+  // The scope is part of the key: a scoped query must not be served the unscoped top-N.
+  const scope = allowed ? [...allowed].sort().join(",") : "*";
+  return `${_embeddingModel}::${topN}::${scope}::${normalizeSearchText(query)}`;
 }
 
 function readCachedEmbeddingQuery(cacheKey: string): EmbeddingSearchResult[] | null {

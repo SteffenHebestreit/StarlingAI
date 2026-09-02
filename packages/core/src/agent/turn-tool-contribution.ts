@@ -31,6 +31,10 @@ const DELEGATION_COUNTING_TOOL_NAMES: ReadonlySet<string> = new Set([
  * (excludeDelegationWaitFromTurnBudget).
  */
 export const DELEGATION_WAIT_TOOL_NAMES: ReadonlySet<string> = new Set([
+  // Waiting on a human is not model time either: a two-minute ask_user consumed the turn budget
+  // the way a stalled model did, and the turn timed out on the user's answer.
+  "ask_user",
+  "request_human_assist",
   "delegate_to_agent", "swarm_delegate", "parallel_delegate", "run_task_graph", "run_workflow",
   // execute_plan blocks on exactly the same children — it just issues them a level down. Left out,
   // a plan of four five-minute steps had none of its waiting credited back: the deadline never
@@ -47,6 +51,10 @@ export const DELEGATION_WAIT_TOOL_NAMES: ReadonlySet<string> = new Set([
  * here must be a tool whose second identical call is legitimately expected to do something new.
  */
 export const STATE_DEPENDENT_TOOL_NAMES: ReadonlySet<string> = new Set([
+  // A question's answer is not a function of its arguments — the identical-arguments cache
+  // replayed the first answer for every later identical question in the turn.
+  "ask_user",
+  "request_human_assist",
   // Each call delegates again; two identical delegations are two pieces of work.
   "delegate_to_agent",
   // Takes no required arguments, so its signature never varies — and its result depends entirely on

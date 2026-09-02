@@ -2,6 +2,8 @@
  * Agent Runtime — the main agent loop.
  * LLM call → parse tool calls → execute (with guardrails) → loop → final response
  */
+import { unattendedInputCallback } from "../tools/ask-user.js";
+import { runArtifactVerificationGate, buildFailureCaveat, buildUnverifiableCaveat } from "./artifact-verification-gate.js";
 import { applyActiveModelPreset, getChatProvider, getChatProviderForTier, getChatProviderWithOverride } from "../providers/index.js";
 import { DeadlineAbort, salvageToolCallArguments } from "../providers/lmstudio.js";
 import type { ChatProvider, LLMMessage, LLMResponse, StreamChunk } from "../providers/lmstudio.js";
@@ -118,6 +120,7 @@ export { looksLikeRegurgitatedPriorAnswer } from "./runtime-utils.js";
 import {
   buildModelVisibleToolResult,
   looksLikeDelegatedFailureEvidence,
+  looksLikeStructuralDelegationFailure,
 } from "./tool-result-format.js";
 
 // Re-export the originally-exported buildModelVisibleToolResult so existing imports
@@ -511,7 +514,7 @@ function resolveEmptyAssistantResponseFallback(
 
   const history = session.getHistory();
   if (hasRecentForcedSynthesisNudge(history)) {
-    const evidence = findRecentDelegateEvidence(history);
+    const evidence = findRecentDelegateEvidence(history, { scopeToCurrentTurn: true });
     if (evidence) {
       logAudit(
         "guardrail_flagged",
@@ -642,6 +645,10 @@ const FORCE_ORCHESTRATION_TOOLS = new Set([
   "search_workflows",
   "list_agents",
   "create_ephemeral_agent",
+  // execute_plan dispatches every step of the recorded plan — the one call that advances a
+  // planned turn the most, and the one call a forced iteration could not make: the model
+  // recorded a plan, was forced to delegate, and had to re-issue the plan's first step by hand.
+  "execute_plan",
 ]);
 
 /** Keep only orchestration/delegation tools so a forced tool call can ONLY be
@@ -992,7 +999,10 @@ export function classifyPostOrchestrationDisposition(
       // Sniff only the delegated EVIDENCE, never the harness-built instruction
       // preamble above it — preamble wording must not be classifiable as a
       // failure signal (same defect class as the workflow case above).
-      || (!delegationPartial && looksLikeDelegatedFailureEvidence(observedEvidence))
+      // An explicit success from the sub-agent runtime is not overridden by the prose sniff (the
+      // same rule as the model-visible frame in tool-result-format.ts).
+      || (!delegationPartial && looksLikeStructuralDelegationFailure(observedEvidence))
+      || (!delegationPartial && delegationOutcome !== "success" && looksLikeDelegatedFailureEvidence(observedEvidence))
     ) {
       return "failure";
     }
@@ -1542,7 +1552,9 @@ async function _runTurn(
     userId: session.userId,
     userRole: session.userRole,
     approvalCallback: resolvedApprovalCallback,
-    inputCallback: opts.inputCallback,
+    // An unattended run (auto mode, no input channel) answers ask_user itself — "no user is here,
+    // continue on your stated assumption". Before, the tool refused and the model looped on it.
+    inputCallback: opts.inputCallback ?? (opts.autoApprove ? unattendedInputCallback : undefined),
     onSubAgentProgress: opts.onSubAgentProgress,
     onComputerAction: opts.onComputerAction,
     onComputerScreenshot: opts.onComputerScreenshot,
@@ -2048,6 +2060,7 @@ async function _runTurn(
       session,
       iterationCount,
       userMessage,
+      allowedAgents: opts.allowedAgents,
       initialDynamicGuidance,
       documentRagFoundDocs,
       trajectoryInjectionContext,
@@ -2226,7 +2239,7 @@ async function _runTurn(
       }
     } catch (err) {
       log.error({ err, sessionId: session.id }, "LLM call failed");
-      const delegateEvidence = findRecentDelegateEvidence(session.getHistory());
+      const delegateEvidence = findRecentDelegateEvidence(session.getHistory(), { scopeToCurrentTurn: true });
       const sharedFactsEvidence = await getSharedFactsEvidenceForFinalSynthesis(session.id);
       const recoveryEvidence = chooseBetterRecoveryEvidence(delegateEvidence, sharedFactsEvidence, { preferHigherScore: false });
       if (recoveryEvidence) {
@@ -3033,7 +3046,7 @@ async function _runTurn(
             log.warn({ err, sessionId: session.id }, "Auto-research delegation on refusal failed");
           }
           const autoEvidence = await getSharedFactsEvidenceForFinalSynthesis(session.id);
-          const autoDelegateEvidence = findRecentDelegateEvidence(session.getHistory());
+          const autoDelegateEvidence = findRecentDelegateEvidence(session.getHistory(), { scopeToCurrentTurn: true });
           const recovery = chooseBetterRecoveryEvidence(autoDelegateEvidence, autoEvidence, { preferHigherScore: true });
           if (recovery && !looksLikeWeakRecoveryEvidence(recovery.evidence)) {
             const synthesized = await forceSynthesis(
@@ -3967,7 +3980,33 @@ async function _runTurn(
           ? extractSingleRelayableDeliverable(toolResultMessages, _turnDelegationCount)
           : null;
         if (relayDeliverable) {
-          const finalResponse = sanitizeUserFacingAssistantResponse(relayDeliverable, iterationCount);
+          let finalResponse = sanitizeUserFacingAssistantResponse(relayDeliverable, iterationCount);
+          // This early return bypasses the terminal guards, and with them the artifact verification
+          // gate — so the one path that ships a delegated deliverable VERBATIM was the one path that
+          // never opened the file it shipped. Same gate, same caveats, before the answer is persisted.
+          const relayVerification = await runArtifactVerificationGate({
+            session,
+            signal,
+            toolContext,
+            collectTurnArtifactAttachments,
+            incrementDelegationCount: () => { _turnDelegationCount += 1; },
+          });
+          if (relayVerification.status === "fail") {
+            finalResponse += buildFailureCaveat(relayVerification.failures);
+            guardrailEvents.push({ type: "guardrail_flagged", details: "artifact_verification_failed" });
+            logAudit("guardrail_flagged", {
+              type: "artifact_verification_failed",
+              path: "single_deliverable_relay",
+              failures: relayVerification.failures,
+              repairAttempts: relayVerification.repairAttempts,
+              probedCount: relayVerification.probedCount,
+            }, { sessionId: session.id, channel: session.channel, severity: "error" });
+          } else if (relayVerification.status === "repaired") {
+            guardrailEvents.push({ type: "guardrail_flagged", details: "artifact_verification_repaired" });
+          } else if (relayVerification.status === "unverifiable" && relayVerification.failures) {
+            finalResponse += buildUnverifiableCaveat(relayVerification.failures);
+            guardrailEvents.push({ type: "guardrail_flagged", details: "artifact_verification_unverifiable" });
+          }
           persistAssistantTurnState(session, finalResponse, getTurnSwarmState());
           if (opts.onChunk) opts.onChunk(finalResponse);
           const performance = buildTurnPerformanceMetrics({
@@ -4090,7 +4129,9 @@ async function _runTurn(
         }
       }
 
-      if (toolResultMessages.length > 0) {
+      // Once per turn: appended after every tool round it compounded — several identical copies
+      // in one turn's history, all re-sent on every later iteration of the same turn.
+      if (toolResultMessages.length > 0 && !session.hasTransientNoteThisTurn("[USER INTERACTION OWNERSHIP]")) {
         session.addMessage({
           role: "system",
           content:
@@ -4202,7 +4243,7 @@ async function _runTurn(
 
   // Exceeded max iterations (or iteration-level loop) — force a synthesis response from the LLM
   opts.onStatus?.({ phase: "synthesizing", message: "Writing the final response from the evidence gathered so far.", iteration: iterationCount });
-  const terminalDelegateEvidence = findRecentDelegateEvidence(session.getHistory());
+  const terminalDelegateEvidence = findRecentDelegateEvidence(session.getHistory(), { scopeToCurrentTurn: true });
   const terminalSharedFactsEvidence = await getSharedFactsEvidenceForFinalSynthesis(session.id);
   const terminalEvidenceBackstop = chooseBetterRecoveryEvidence(
     terminalDelegateEvidence,

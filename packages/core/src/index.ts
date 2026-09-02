@@ -7,6 +7,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig, watchConfig, getConfig } from "./config/loader.js";
 import { buildAgentIndex } from "./providers/embeddings.js";
+import { withPromotedAgents } from "./agent/promoted-agents.js";
 import { getEmbeddingProvider, initProviders } from "./providers/index.js";
 import { initPostgresAudit } from "./audit/postgres.js";
 import { flushAuditLog } from "./audit/logger.js";
@@ -329,7 +330,7 @@ export async function main() {
         if (!changedSections.includes("providers") && !changedSections.includes("_initial") && (changedSections.includes("agents") || changedSections.includes("subAgents"))) {
           const embeddingModel = newConfig.agents.defaults.model.embeddingModel;
           if (embeddingModel) {
-            buildAgentIndex(newConfig.subAgents ?? {}, getEmbeddingProvider(), embeddingModel).catch(() => undefined);
+            buildAgentIndex(withPromotedAgents(newConfig.subAgents ?? {}, newConfig.workspacePath), getEmbeddingProvider(), embeddingModel).catch(() => undefined);
           }
         }
         if (["providers", "agents", "subAgents", "retrieval", "guardrails", "multimodal", "_initial"].some((section) => changedSections.includes(section))) {

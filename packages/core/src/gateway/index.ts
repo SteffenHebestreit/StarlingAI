@@ -71,7 +71,8 @@ import { turnSteeringManager } from "../agent/turn-steering.js";
 import { getLoadedDynamicTools, listPromotionCandidates, approvePromotion, rejectPromotion, getDynamicToolStats } from "../tools/dynamic-tools.js";
 import { listCapabilityGaps } from "../agent/self-improve.js";
 import { getWardenAlerts } from "../agent/warden.js";
-import { ModelConfigSchema, MultimodalSchema, RetrievalRerankerSchema, OrchestrationSchema, SkillLibrarySchema, ToolPipelineSchema, DocumentRagSchema, EffortSchema, EFFORT_TIERS } from "../config/schema.js";
+import { ModelConfigSchema, MultimodalSchema, RetrievalRerankerSchema, SkillLibrarySchema, ToolPipelineSchema, DocumentRagSchema, EffortSchema, EFFORT_TIERS } from "../config/schema.js";
+import { mergeOrchestrationConfigUpdate } from "./orchestration-config-merge.js";
 import { getMcpConnections } from "../mcp/registry.js";
 import {
   upstreamUrl,
@@ -1864,14 +1865,15 @@ export function createGateway() {
       return c.json({ error: "Invalid JSON body" }, 400);
     }
 
-    const parsed = OrchestrationSchema.safeParse(body);
-    if (!parsed.success) {
-      return c.json({ error: "Invalid orchestration configuration", details: parsed.error.flatten() }, 400);
+    const merged = mergeOrchestrationConfigUpdate(getConfig().orchestration, body);
+    if (!merged.ok) {
+      return c.json({ error: merged.error, details: merged.details }, 400);
     }
+    const orchestrationUpdate = merged.value;
 
     try {
       const updatedConfig = updateConfig((raw) => {
-        raw["orchestration"] = parsed.data;
+        raw["orchestration"] = orchestrationUpdate;
       });
       return c.json(updatedConfig.orchestration);
     } catch (error) {

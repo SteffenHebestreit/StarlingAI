@@ -17,7 +17,7 @@
  * safe under ESM.
  */
 import { childLogger } from "../logger.js";
-import { readAllFacts } from "../swarm/memory.js";
+import { currentTurnFactKeys, readAllFacts } from "../swarm/memory.js";
 import {
   isJunkEvidenceValue,
   looksLikeRawSharedFactsDump,
@@ -40,12 +40,21 @@ import type { ChatProvider } from "../providers/lmstudio.js";
 
 const log = childLogger("agent:runtime");
 
+/** Negative when `left` is on the current turn and `right` is not; positive the other way; 0 when alike. */
+function rankCurrentTurnFirst(thisTurn: ReadonlySet<string>, left: string, right: string): number {
+  return (thisTurn.has(left) ? 0 : 1) - (thisTurn.has(right) ? 0 : 1);
+}
+
 export async function formatSharedFactsForFinalSynthesis(sessionId: string, maxChars = 4_000): Promise<string> {
   try {
     const facts = await readAllFacts(sessionId);
+    const thisTurn = currentTurnFactKeys(sessionId);
     const entries = Object.entries(facts)
       .filter(([, value]) => value.trim().length > 0)
-      .sort(([left], [right]) => left.localeCompare(right));
+      // THIS TURN'S FINDINGS FIRST. The list is the evidence for the answer to THIS question, and
+      // a prior turn's facts sorted ahead of it by key alone — the facts-side twin of audit
+      // 2f4f5fe6, where an old deliverable became the answer to an unrelated later question.
+      .sort(([left], [right]) => rankCurrentTurnFirst(thisTurn, left, right) || left.localeCompare(right));
     if (entries.length === 0) return "";
 
     const lines: string[] = [];
@@ -83,6 +92,7 @@ export async function getSharedFactsEvidenceForFinalSynthesis(
 ): Promise<{ evidence: string; itemCount: number } | null> {
   try {
     const facts = await readAllFacts(sessionId);
+    const thisTurn = currentTurnFactKeys(sessionId);
     const entries = Object.entries(facts)
       .filter(([, value]) => value.trim().length > 0)
       // Raw tool dumps (PDF bytes, bare HTTP probes) are not user-facing evidence
@@ -92,6 +102,9 @@ export async function getSharedFactsEvidenceForFinalSynthesis(
       // first; auto_<agent>_<tool>_<hash> raw shares last. The old plain
       // alphabetical sort let auto_* junk crowd out the verified findings.
       .sort(([left], [right]) => {
+        // This turn's findings before any prior turn's (see formatSharedFactsForFinalSynthesis).
+        const turn = rankCurrentTurnFirst(thisTurn, left, right);
+        if (turn !== 0) return turn;
         const lj = left.startsWith("auto_") ? 1 : 0;
         const rj = right.startsWith("auto_") ? 1 : 0;
         if (lj !== rj) return lj - rj;

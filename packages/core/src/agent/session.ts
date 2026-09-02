@@ -31,6 +31,9 @@ const TRANSIENT_TURN_SYSTEM_PREFIXES = [
   "[SYNTHESIS REQUIRED]",
   "[WARDEN STOP — FORCED SYNTHESIS]",
   "[CONTINUE ORCHESTRATION]",
+  // The plan-continuation directive is per-iteration guidance; kept, it told a later turn to
+  // finish a plan the turn boundary had already cleared.
+  "[CONTINUE PLAN]",
   "[USER RESPONSE REQUIRED]",
   "[DELEGATION FAILED]",
   "[USER INTERACTION OWNERSHIP]",
@@ -286,6 +289,13 @@ export class AgentSession {
     if (this.earlierSummary) {
       collapsed.push({ role: "system", content: this.earlierSummary });
     }
+    // The plan report's 12K allowance is for the turn that is answering from it. Once that turn
+    // is over the report is history like any other delegation result — held at the delegation
+    // cap, not carried in full into every later turn's prompt.
+    let currentTurnStart = -1;
+    for (let k = this.history.length - 1; k >= 0; k -= 1) {
+      if (this.history[k]!.role === "user") { currentTurnStart = k; break; }
+    }
     let i = 0;
     while (i < this.history.length) {
       const msg = this.history[i]!;
@@ -322,7 +332,9 @@ export class AgentSession {
           // step after the first; at the default 500 it lost the first one too, along with the
           // instruction to synthesize from them. It is the collapsed view that the answer-writing
           // iteration reads, so this is the number that decides what the answer can be based on.
-          const snippetLimit = call.function.name === "execute_plan" ? 12000 : (isDelegation ? 2000 : 500);
+          const snippetLimit = call.function.name === "execute_plan"
+            ? (i > currentTurnStart ? 12000 : 2000)
+            : (isDelegation ? 2000 : 500);
           // Use an explicit marker instead of a bare ellipsis. Local models
           // sometimes mistake "…" for evidence that was cut off in the
           // current turn and then falsely claim "abgeschnitten" /
@@ -399,6 +411,21 @@ export class AgentSession {
     this.touch();
     this.maybeTrimHistory();
     persistSessionStore(this);
+  }
+
+  /**
+   * Whether a transient system note with this prefix is already on the current turn (after the
+   * last user message). The per-iteration guidance notes are meant to be stated once per turn;
+   * appended after every tool round they compounded — five copies of the same ownership note in
+   * one turn's history, all re-sent on every iteration.
+   */
+  hasTransientNoteThisTurn(prefix: string): boolean {
+    for (let index = this.history.length - 1; index >= 0; index -= 1) {
+      const message = this.history[index]!;
+      if (message.role === "user") return false;
+      if (message.role === "system" && typeof message.content === "string" && message.content.startsWith(prefix)) return true;
+    }
+    return false;
   }
 
   pruneTransientTurnSystemMessages(): void {

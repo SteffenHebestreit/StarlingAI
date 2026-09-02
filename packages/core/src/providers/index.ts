@@ -1,4 +1,5 @@
 import { getConfig } from "../config/loader.js";
+import { withPromotedAgents } from "../agent/promoted-agents.js";
 import { LMStudioProvider, type ChatProvider, type OpenAICompatibleProviderRuntimeSnapshot } from "./lmstudio.js";
 import { AnthropicProvider, ANTHROPIC_DEFAULT_BASE_URL } from "./anthropic.js";
 import { loadStoredTokenSet, getValidAccessToken, startAnthropicTokenRefresher, anthropicRefreshDisabledReason } from "./anthropic-oauth.js";
@@ -658,7 +659,7 @@ export async function initProviders(): Promise<void> {
     // Build semantic agent search index if an embedding model is configured
     const embeddingModel = config.agents.defaults.model.embeddingModel;
     if (embeddingModel) {
-      const subAgents = config.subAgents ?? {};
+      const subAgents = withPromotedAgents(config.subAgents ?? {}, config.workspacePath);
       buildAgentIndex(subAgents, getEmbeddingProvider(), embeddingModel).catch(() => undefined);
     }
   } catch (err) {

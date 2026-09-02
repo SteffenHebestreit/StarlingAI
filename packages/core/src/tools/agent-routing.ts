@@ -372,7 +372,7 @@ export async function resolveAgentRouting(
     try {
       semanticSearchAttempted = true;
       const provider = getEmbeddingProvider();
-      const results = await searchByEmbedding(raw, provider, 8);
+      const results = await searchByEmbedding(raw, provider, 8, opts?.allowedAgents ? { allowedAgents: opts.allowedAgents } : {});
       for (const result of results) {
         if (opts?.allowedAgents && !opts.allowedAgents.includes(result.agentName)) continue;
         semanticScores.set(result.agentName, Math.max(0, (result.score + 1) / 2));

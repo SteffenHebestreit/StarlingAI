@@ -173,6 +173,21 @@ function dispatchTargetOf(step: TurnPlanStep): string | null {
   return step.tool && step.tool !== "execute_plan" && !BLOCKED_STEP_TOOLS.has(step.tool) ? step.tool : null;
 }
 
+/**
+ * A tool-less `direct` step that consumes other steps' results and that nothing depends on: the
+ * plan's description of the reply the orchestrator writes next ("summarize the findings"). Reported as YOURS TO
+ * DO it demanded another execute_plan({completed}) round trip — and showed the dashboard a plan
+ * "2/3 complete" with nothing left to run — for work that IS the reply.
+ */
+function isReasoningOnlyLeaf(plan: TurnPlan, step: TurnPlanStep): boolean {
+  if (step.kind !== "direct" || step.tool) return false;
+  // It consumes other steps' results and nothing consumes its own: the synthesis. A standalone
+  // tool-less step ("decide the framing") consumes nothing — it is the orchestrator's own work,
+  // still handed over as YOURS TO DO.
+  if ((step.dependsOn ?? []).length === 0) return false;
+  return !plan.steps.some((other) => other.id !== step.id && (other.dependsOn ?? []).includes(step.id));
+}
+
 /** Dispatch one step to the tool that already knows how to run that kind of work. */
 async function runStep(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<string, string>, ctx: ToolContext): Promise<StepRun> {
   const dispatch = dispatchFor(plan, step, results);
@@ -410,6 +425,11 @@ registerTool({
       for (const { step, run } of outcomes) {
         if (run.call) nestedCalls.push(run.call);
         if (run.status === "done") dispatchedOk.push(step.id);
+        if (run.status === "manual" && isReasoningOnlyLeaf(plan, step)) {
+          statuses.set(step.id, "done");
+          details.set(step.id, "reasoning step — nothing to dispatch; it is the answer you write next");
+          continue;
+        }
         statuses.set(step.id, run.status);
         if (run.detail) details.set(step.id, run.detail);
         if (run.result) results.set(step.id, run.result);
