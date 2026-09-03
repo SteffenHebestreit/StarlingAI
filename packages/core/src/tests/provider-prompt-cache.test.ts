@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { LMStudioProvider } from "../providers/lmstudio.js";
+import { afterEach, describe, expect, it } from "vitest";
+import { LMStudioProvider, noteRejectedReasoningEffort, _resetRejectedReasoningEffortsForTests } from "../providers/lmstudio.js";
 import type { ModelConfig } from "../config/schema.js";
 
 /**
@@ -38,6 +38,8 @@ function mockProvider(cfg: Partial<ModelConfig>) {
   return { provider, captured };
 }
 
+afterEach(() => _resetRejectedReasoningEffortsForTests());
+
 describe("LMStudioProvider promptCache → top-level cache_prompt", () => {
   it("sends cache_prompt:true when promptCache is enabled", async () => {
     const { provider, captured } = mockProvider({ promptCache: true });
@@ -55,11 +57,20 @@ describe("LMStudioProvider promptCache → top-level cache_prompt", () => {
     const { provider, captured } = mockProvider({ promptCache: true, primary: "lmstudio/qwen/qwen3.8-27b", reasoningEffort: "none" });
     await provider.complete([{ role: "user", content: "hi" }], []);
     expect(captured[0]!["extra_body"]).toBeUndefined();
-    // "none" is the CONFIG intent; the wire value is "low", because LM Studio rejects
-    // anything outside xhigh|medium|low and a rejected field is skipped entirely —
-    // which would silently leave the model on its xhigh default.
-    expect(captured[0]!["reasoning_effort"]).toBe("low");
+    // "none" reaches the wire as itself. It used to be folded to "low" on the strength of a
+    // warning about LM Studio's per-model CONFIG field; the API is its own surface and names its
+    // own set ("Supported values: none, minimal, low, medium, high, xhigh"), and "low" still
+    // thinks — measured 1,752 reasoning chars in 6.5 s against 0 chars in 0.39 s for "none".
+    expect(captured[0]!["reasoning_effort"]).toBe("none");
     expect(captured[0]!["chat_template_kwargs"]).toBeUndefined();
     expect(captured[0]!["cache_prompt"]).toBe(true);
+  });
+
+  it("steps down to a level an older backend accepts once that backend refuses this one", async () => {
+    const { provider, captured } = mockProvider({ promptCache: true, primary: "lmstudio/qwen/qwen3.8-27b", reasoningEffort: "none" });
+    // What an older LM Studio answers: it takes only xhigh|medium|low.
+    noteRejectedReasoningEffort("http://localhost:1234/v1", "none");
+    await provider.complete([{ role: "user", content: "hi" }], []);
+    expect(captured[0]!["reasoning_effort"]).toBe("low");
   });
 });

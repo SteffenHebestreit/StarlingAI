@@ -172,6 +172,34 @@ export function trimSubAgentHistory(
  *  is currently working from and is never rewritten. 0 when the run has not made that
  *  many tool-calling turns yet — nothing is stale, and the caller's loop then covers
  *  nothing. Structural (message roles only), so it holds for any agent and any task. */
+/**
+ * Where a sub-agent iteration's nudges go.
+ *
+ * The head is the KV-cache key: the provider folds the leading system run into one message and
+ * the chat template renders the tool block right behind it, so a single character appended to the
+ * system prompt re-prefills the tool block AND the whole accumulated history. Measured on a
+ * 24,731-token sub-agent context: unchanged head 0.33 s; the same request with the budget-warning
+ * text appended to the system message 41.29 s; that identical text moved to a trailing message
+ * 0.87 s. Three of the loop's six nudges are one-shot latches, so each of them broke the prefix
+ * twice — once when it appeared and once when it was gone.
+ *
+ * Delivered after the history, a non-leading system message is relabelled as context in position
+ * by the provider and read as the most recent instruction, which is exactly what a per-iteration
+ * nudge is. The same rule the orchestrator got in 2066738, one level down.
+ */
+export function composeSubAgentMessages(
+  systemPrompt: string,
+  history: readonly LLMMessage[],
+  nudges: readonly string[],
+): LLMMessage[] {
+  const trailing = nudges.filter((n) => n.trim().length > 0).join("\n\n");
+  return [
+    { role: "system", content: systemPrompt },
+    ...history,
+    ...(trailing ? [{ role: "system" as const, content: trailing }] : []),
+  ];
+}
+
 export function freshWindowStart(history: readonly LLMMessage[], freshTurns = FRESH_TOOL_TURNS): number {
   let turns = 0;
   for (let i = history.length - 1; i >= 1; i--) {

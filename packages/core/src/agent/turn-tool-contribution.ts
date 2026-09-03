@@ -51,6 +51,13 @@ export const DELEGATION_WAIT_TOOL_NAMES: ReadonlySet<string> = new Set([
  * here must be a tool whose second identical call is legitimately expected to do something new.
  */
 export const STATE_DEPENDENT_TOOL_NAMES: ReadonlySet<string> = new Set([
+  // The orchestrator's only view of what its delegations are doing. Both take NO arguments, so
+  // every call in a turn has the identical signature and the cache replayed the first snapshot
+  // for the rest of the turn — a coordinator polling "what is still running" was answered with
+  // the state from before anything ran. Both are in-memory reads with no model call, so exempting
+  // them costs nothing.
+  "get_swarm_state",
+  "get_swarm_budget",
   // A question's answer is not a function of its arguments — the identical-arguments cache
   // replayed the first answer for every later identical question in the turn.
   "ask_user",
@@ -117,7 +124,7 @@ export interface NestedToolCall {
  * signal that disables the honesty chain (audit 1303e254) — reachable from a payload rather than
  * from a tool name. An allowlist keeps the reporter side of this seam ours.
  */
-const NESTED_CALL_REPORTERS: ReadonlySet<string> = new Set(["execute_plan"]);
+const NESTED_CALL_REPORTERS: ReadonlySet<string> = new Set(["execute_plan", "parallel_delegate"]);
 
 /**
  * What a call a tool made on the turn's behalf contributes.

@@ -18,7 +18,7 @@ import { resolve as resolvePath } from "node:path";
 import { createHash } from "node:crypto";
 import type { LLMMessage, ChatProvider } from "../providers/lmstudio.js";
 import { DeadlineAbort } from "../providers/lmstudio.js";
-import { trimSubAgentHistory } from "./sub-agent-history.js";
+import { composeSubAgentMessages, trimSubAgentHistory } from "./sub-agent-history.js";
 import { getConfig } from "../config/loader.js";
 import { currentEffortProfile, effectiveOrchestration, effectiveSubAgentTurnSloMs } from "../runtime/effort-context.js";
 import { getToolsAsLLMDefs, rerankToolsForTask, executeTool, normalizeToolCall, type ToolContext, type SwarmState, type ToolResult } from "../tools/registry.js";
@@ -4221,15 +4221,27 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         && synthesisBufferMs !== undefined
         && timeRemainingMs !== undefined
         && timeRemainingMs <= synthesisBufferMs;
-      let effectiveSystemPrompt = systemPrompt;
+      // THE SUB-AGENT'S HEAD IS A CACHE KEY TOO. Wave A (2066738) made the ORCHESTRATOR's
+      // leading system run byte-identical across a turn's iterations; this loop, where most of a
+      // delegating turn's iterations actually run, kept appending its nudges onto the system
+      // message and threw the prefix away every time one appeared or vanished. Measured on a
+      // 24,731-token sub-agent context: an unchanged head prefills in 0.33 s, the same request
+      // with the BUDGET WARNING appended to the system message 41.29 s, and the identical text
+      // moved to a trailing message 0.87 s. Three of the six nudges are one-shot latches, so they
+      // break the prefix twice each — once appearing, once gone.
+      //
+      // So the nudges are collected here and delivered AFTER the history, where the provider
+      // relabels a non-leading system message as context in place (foldSystemMessages) and the
+      // model reads them as the most recent instruction — which is what a per-iteration nudge is.
+      const iterationNudges: string[] = [];
       let effectiveTools = tools;
 
       if (timeBudgetCritical) {
         effectiveTools = [];
-        effectiveSystemPrompt +=
-          `\n\n⚠️ TIME BUDGET CRITICAL: Only about ${timeRemainingMs}ms remain before timeout. ` +
+        iterationNudges.push(
+          `⚠️ TIME BUDGET CRITICAL: Only about ${timeRemainingMs}ms remain before timeout. ` +
           "NO MORE TOOLS AVAILABLE. Produce your COMPLETE final answer NOW from the evidence already gathered. " +
-          "Include the key facts, URLs, and extracts you already retrieved.";
+          "Include the key facts, URLs, and extracts you already retrieved.");
         log.info(
           { agentName: opts.agentName, iterations, toolCount, timeRemainingMs, synthesisBufferMs },
           "Time budget nearly exhausted — stripping tools to force synthesis",
@@ -4237,22 +4249,26 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       } else if (remaining === 1 && toolCount > 0) {
         // HARD: last iteration — strip ALL tools so the LLM *cannot* make
         // any more tool calls and is forced to produce a text answer.
+        // The tool list is stripped as well, which does change the rendered template ahead of the
+        // history. That is deliberate and kept: it is the only hard guarantee that no further tool
+        // call can be made. It costs one prefix break on the LAST iteration, where there is no
+        // later iteration to benefit from the cache anyway.
         effectiveTools = [];
-        effectiveSystemPrompt +=
-          "\n\n⚠️ FINAL ITERATION — NO MORE TOOLS AVAILABLE. " +
+        iterationNudges.push(
+          "⚠️ FINAL ITERATION — NO MORE TOOLS AVAILABLE. " +
           "You have used all your tool-call iterations. Produce your COMPLETE final answer NOW. " +
           "Synthesize everything you have gathered from previous tool calls — include ALL content, " +
           "URLs, facts, and extracts verbatim. Do NOT summarize away details. " +
-          "Your response is the ONLY output the coordinator will receive from you.";
+          "Your response is the ONLY output the coordinator will receive from you.");
         log.info(
           { agentName: opts.agentName, iterations, maxIterations, toolCount },
           "Last iteration reached — stripping tools to force synthesis",
         );
       } else if (remaining === 2 && toolCount > 0) {
-        effectiveSystemPrompt +=
-          `\n\n⚠️ BUDGET WARNING: You have only ${remaining} iterations remaining (out of ${maxIterations}). ` +
+        iterationNudges.push(
+          `⚠️ BUDGET WARNING: You have only ${remaining} iterations remaining (out of ${maxIterations}). ` +
           "You have already gathered substantial content. Stop calling tools UNLESS critical information is still missing. " +
-          "Use your next response to produce your complete final answer with all facts, URLs, and evidence you have collected so far.";
+          "Use your next response to produce your complete final answer with all facts, URLs, and evidence you have collected so far.");
       }
 
       // E18: Soft deadline — inject a wrap-up nudge once when the caller-supplied
@@ -4280,11 +4296,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         && !softDeadlineDeferred
       ) {
         softDeadlineInjected = true;
-        effectiveSystemPrompt +=
-          "\n\n⚠️ SOFT DEADLINE REACHED: Your allocated time budget for this task is expiring. " +
+        iterationNudges.push(
+          "⚠️ SOFT DEADLINE REACHED: Your allocated time budget for this task is expiring. " +
           "Plan to wrap up within the next 1–2 iterations: " +
           "call share_finding with any important evidence you have gathered, " +
-          "then produce your complete final answer.";
+          "then produce your complete final answer.");
         log.info(
           { agentName: opts.agentName, iterations, softDeadlineMs: opts.softDeadlineMs },
           "Soft deadline reached — injecting wrap-up nudge",
@@ -4301,10 +4317,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         && iterations >= Math.floor(maxIterations * 0.7)
       ) {
         softDeadlineInjected = true; // reuse the flag so this fires only once
-        effectiveSystemPrompt +=
-          "\n\n⚠️ ITERATION BUDGET WARNING: You have used many iterations without calling any tools. " +
+        iterationNudges.push(
+          "⚠️ ITERATION BUDGET WARNING: You have used many iterations without calling any tools. " +
           "If you need to gather information, call the appropriate tools now. " +
-          "If you already have enough context, produce your final answer immediately.";
+          "If you already have enough context, produce your final answer immediately.");
         log.info(
           { agentName: opts.agentName, iterations, maxIterations, toolCount },
           "§12: Iteration-budget nudge injected (no tool calls at 70% of budget)",
@@ -4318,12 +4334,12 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // full fan-out.
       if (!degradedMidTurnApplied && isSessionDegraded(subSessionId)) {
         degradedMidTurnApplied = true;
-        effectiveSystemPrompt +=
-          "\n\n⚠️ VELOCITY WARNING (mid-turn): The warden flagged this session "
+        iterationNudges.push(
+          "⚠️ VELOCITY WARNING (mid-turn): The warden flagged this session "
           + "as approaching a tool-storm / messaging-flood threshold while you were "
           + "running. Narrow scope, batch tool calls, and finish quickly. Do not "
           + "spawn further delegations or parallel tool fan-out unless strictly "
-          + "required to complete the task.";
+          + "required to complete the task.");
         if (effectiveTools.length > 6) {
           effectiveTools = effectiveTools.slice(0, 6);
         }
@@ -4341,8 +4357,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // INPUT bound. The completion budget is derived from what the prompt leaves
       // free, so an append-only history would starve it before it overflows the
       // window. Trim BEFORE assembling the request, not after.
+      // The nudges still occupy context wherever they sit, so they still count against the input
+      // bound — only their POSITION changed.
+      const nudgeMessage = iterationNudges.join("\n\n");
       const trimmed = trimSubAgentHistory(history, {
-        systemPromptChars: effectiveSystemPrompt.length,
+        systemPromptChars: systemPrompt.length + nudgeMessage.length,
         tools: effectiveTools,
         contextWindow: modelConfig.contextWindow,
       });
@@ -4360,10 +4379,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         );
       }
 
-      const messages: LLMMessage[] = [
-        { role: "system", content: effectiveSystemPrompt },
-        ...history,
-      ];
+      const messages: LLMMessage[] = composeSubAgentMessages(systemPrompt, history, iterationNudges);
 
       opts.onProgress?.({
         agentName: opts.agentName,

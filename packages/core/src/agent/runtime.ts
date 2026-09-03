@@ -1087,6 +1087,9 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
   // called once per user message, and approvals resume inside the turn rather than re-entering it,
   // so clearing here is exactly "start of turn".
   await clearTurnPlanForSession(opts.session.id);
+  // The base prompt is held still for this turn from here on — a personality or outcomes write
+  // mid-turn must not re-prefill the whole request behind it.
+  opts.session.beginTurnSystemPrompt();
   // Per-turn timeout — inline override wins, then the active effort profile's timeout
   // (0 = "unleashed"), then config, then default 15 min. (The gateway normally folds
   // the profile timeout into turnTimeoutOverrideMs already; this fallback covers

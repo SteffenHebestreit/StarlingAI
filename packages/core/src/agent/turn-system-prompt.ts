@@ -142,7 +142,9 @@ export async function assembleTurnSystemMessages(
   let injectedSkillSlugs = params.injectedSkillSlugs;
   let heldOutSkillSlugs = params.heldOutSkillSlugs;
   let lastPromptMetrics: ReturnType<typeof measurePrompt>;
-    let systemPrompt = session.getSystemPrompt();
+    // Snapshotted for the turn: rebuilding it here read two files that a turn can change while it
+    // runs, and the head is the cache key. See AgentSession.getTurnSystemPrompt.
+    let systemPrompt = session.getTurnSystemPrompt();
     // Split orchestration prompt (agents.performance.splitOrchestrationPrompt, default off): the
     // ~13KB orchestration block (Swarm Rules → Orchestration Strategy) is only needed on turns that
     // actually orchestrate. Lift it out of the always-on base so a direct-answer turn pays a roughly

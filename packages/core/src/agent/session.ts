@@ -390,6 +390,8 @@ export class AgentSession {
     return merged;
   }
 
+  private _turnSystemPrompt?: string;
+
   getSystemPrompt(): string {
     const prompt = isManagedDefaultSystemPrompt(this.systemPrompt)
       ? defaultSystemPrompt(this.workspacePath)
@@ -428,6 +430,28 @@ export class AgentSession {
       if (message.role === "system" && typeof message.content === "string" && message.content.startsWith(prefix)) return true;
     }
     return false;
+  }
+
+  /**
+   * The base prompt, held still for the duration of one turn.
+   *
+   * `getSystemPrompt()` REBUILDS the managed prompt on every call, and two of its inputs are
+   * mutable files that a turn can change while it runs: the assistant personality (an uncached
+   * read, and the orchestrator holds the tool that writes it, with prompt text telling it to
+   * persist a rename in the same turn) and the agent-outcome ledger (its cache is invalidated on
+   * every append, and sub-agents append mid-turn). The head is the KV-cache key, so either write
+   * re-prefills the tool block and the whole history for the rest of the turn — measured ~9 s for
+   * a 31-character change. A change now takes effect at the next turn boundary, where the prefix
+   * is rebuilt anyway.
+   */
+  getTurnSystemPrompt(): string {
+    if (this._turnSystemPrompt === undefined) this._turnSystemPrompt = this.getSystemPrompt();
+    return this._turnSystemPrompt;
+  }
+
+  /** Drop the snapshot so the next turn picks up whatever the last one changed. */
+  beginTurnSystemPrompt(): void {
+    this._turnSystemPrompt = undefined;
   }
 
   pruneTransientTurnSystemMessages(): void {

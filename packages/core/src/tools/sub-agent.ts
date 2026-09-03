@@ -3966,6 +3966,12 @@ registerTool({
         taskCount: dispatchTasks.length,
         succeeded,
         failed: results.length - succeeded,
+        // ONE CALL, N DELEGATIONS. The turn counts a fan-out as a single delegation, so a plan
+        // whose step dispatched three specialists in one call looked one-third done and
+        // decidePlanContinuation told the model to redo steps that had already run. Reported the
+        // way execute_plan reports its steps, so the turn's own accounting applies to each child
+        // (agent/turn-tool-contribution.ts).
+        nestedCalls: results.map((result) => ({ tool: "delegate_to_agent", success: result.success === true })),
         ...(disagreementMarker ? { subAgentDisagreement: true } : {}),
         ...(aggregatedArtifacts.length > 0 ? { artifacts: aggregatedArtifacts } : {}),
         ...(duplicatesRemoved > 0 ? { requestedTaskCount: runnableTasks.length, duplicatesRemoved } : {}),

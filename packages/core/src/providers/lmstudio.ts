@@ -708,8 +708,12 @@ export type ThinkingFamily = "qwen-effort" | "enable_thinking" | "deepseek" | "g
  *  4,395 / 6,789 baseline). So routing 3.8 through the enable_thinking family
  *  would leave it with no working control at all.
  *
- *  Matched on the 3.8+ version marker rather than a bare "qwen" so 3.5/3.6 keep
- *  the enable_thinking mechanism that does work for them. */
+ *  The 3.5/3.6 half of that sentence was wrong, and was measured wrong on
+ *  2026-09-03: `enable_thinking:false` is inert on qwen3.6-35b-a3b too (identical
+ *  reasoning to sending no control at all). The family split still holds — it
+ *  decides which control is DOCUMENTED for the model — but the enable_thinking
+ *  branch now sends `reasoning_effort` alongside the flag, so both generations
+ *  actually stop thinking on this backend. See resolveThinkingControls. */
 const QWEN_EFFORT_VERSION_RE = /qwen-?3\.(?:[89]|\d{2,})/;
 
 export function detectThinkingFamily(modelId: string): ThinkingFamily {
@@ -733,11 +737,20 @@ function normalizeQwenEffort(effort: ReasoningEffort): ReasoningEffort {
 /**
  * The value actually put on the wire for `reasoning_effort`.
  *
- * LM Studio accepts ONLY xhigh | medium | low and rejects anything else outright:
+ * An older LM Studio warned that only xhigh|medium|low were valid for the per-model
+ * REASONING LEVEL CONFIG FIELD:
  *
  *   [WARN] Reasoning setting 'off' is not a valid option for reasoning level field
  *   '…qwen.qwen3.8-27b.reasoningEffort'. Valid options are: xhigh, medium, low.
  *   Skipping this field.
+ *
+ * That warning was read as a constraint on the API too, so "none" was folded to "low" and
+ * every caller asking for no thinking got thinking. The API is its own surface and says so:
+ * sending an invalid value returns 400 `Invalid 'reasoning_effort' value: 'off'. Supported
+ * values: none, minimal, low, medium, high, xhigh.` Measured on qwen3.6-35b-a3b the difference
+ * between the two is total — "low" 1,752 reasoning chars in 6.5 s, "none" 0 chars in 0.39 s.
+ * So the requested value goes out as itself, and effortForEndpoint steps it down only if a
+ * particular endpoint has actually refused it.
  *
  * "Skipping this field" is the dangerous part. A rejected value does not mean "no
  * thinking" — it means NO SETTING, so the model falls back to its own default, and
@@ -758,10 +771,57 @@ function normalizeQwenEffort(effort: ReasoningEffort): ReasoningEffort {
  * reasoning as possible" — but it resolves to the cheapest rung the server accepts,
  * not to silence.
  */
-function wireQwenEffort(effort: ReasoningEffort): "xhigh" | "medium" | "low" {
+function wireQwenEffort(effort: ReasoningEffort): WireEffort {
   if (effort === "xhigh" || effort === "high") return "xhigh";
   if (effort === "medium") return "medium";
-  return "low";   // "low" and "none" alike — "none" is not accepted by LM Studio
+  if (effort === "low") return "low";
+  return "none";
+}
+
+/** What goes on the wire for `reasoning_effort`. */
+export type WireEffort = "none" | "low" | "medium" | "xhigh";
+
+/**
+ * Endpoints that rejected a `reasoning_effort` value, by base URL.
+ *
+ * An older LM Studio accepted only xhigh|medium|low and answered 400 for anything else; the
+ * build measured here (2026-09-03) answers `Invalid 'reasoning_effort' value: 'off'. Supported
+ * values: none, minimal, low, medium, high, xhigh.` So the correct value is sent first, and a
+ * backend that refuses it says so once — after which every later call to that endpoint steps
+ * down the ladder instead of failing.
+ */
+const _rejectedEfforts = new Map<string, Set<string>>();
+
+export function noteRejectedReasoningEffort(endpoint: string, value: string): void {
+  let set = _rejectedEfforts.get(endpoint);
+  if (!set) { set = new Set(); _rejectedEfforts.set(endpoint, set); }
+  set.add(value);
+}
+
+/** Test-only: forget what endpoints have rejected. */
+export function _resetRejectedReasoningEffortsForTests(): void {
+  _rejectedEfforts.clear();
+}
+
+/**
+ * The value to send now: the requested one, or the next rung down if this endpoint has already
+ * refused it. "none" steps down to "low" (thinking on, but the request succeeds) and then to
+ * nothing at all — a degradation, never a hard failure.
+ */
+export function effortForEndpoint(endpoint: string, effort: WireEffort): WireEffort | undefined {
+  const rejected = _rejectedEfforts.get(endpoint);
+  if (!rejected) return effort;
+  const ladder: WireEffort[] = effort === "none" ? ["none", "low"] : [effort];
+  for (const rung of ladder) if (!rejected.has(rung)) return rung;
+  return undefined;
+}
+
+/** True for the provider error that says this endpoint will not take that reasoning_effort. */
+export function isRejectedReasoningEffortError(err: unknown): boolean {
+  const status = (err as { status?: number } | undefined)?.status;
+  if (status !== 400) return false;
+  const message = String((err as { message?: unknown } | undefined)?.message ?? "");
+  return /reasoning_effort/i.test(message);
 }
 
 /** Effort for gpt-oss-style models: explicit reasoningEffort wins; otherwise map
@@ -804,13 +864,32 @@ export function resolveThinkingControls(
       // Sending both is correct on either backend and costs one extra field. It also
       // means a future LM Studio fix, or a move to vLLM, degrades to still-off
       // rather than to silently-thinking.
-      // One control, always a value the server accepts. enable_thinking is NOT sent
-      // for this family: measured inert on qwen3.8 here, so it would be a field that
-      // looks like an off-switch while doing nothing — worse than no field at all.
+      // One control, and the value the server names as valid. enable_thinking is NOT sent for
+      // this family: measured inert on qwen3.8 here, so it would be a field that looks like an
+      // off-switch while doing nothing — worse than no field at all.
       return { reasoningEffort: wireQwenEffort(effort) };
     }
-    case "enable_thinking":
-      return cfg.enableThinking !== undefined ? { chatTemplateKwargs: { enable_thinking: cfg.enableThinking } } : {};
+    case "enable_thinking": {
+      // BOTH CONTROLS, because on this backend the documented one does nothing. Measured
+      // 2026-09-03 against qwen/qwen3.6-35b-a3b on LM Studio, judge-shaped prompt, 400-token cap:
+      //   no control                     1,678 reasoning chars, 400 reasoning tokens, 6.8 s, EMPTY answer
+      //   enable_thinking:false          1,678 / 400 / 6.5 s, EMPTY answer  ← byte-identical to no control
+      //   reasoning_effort:"none"            0 /   0 / 0.35 s, "YES"
+      // So the flag is not merely slow, it is inert: the verdict calls it was meant to make cheap
+      // were still reasoning, and reasoning ate the whole token budget so they returned nothing.
+      // The flag is still sent — vLLM and Qwen's own card honour it, and it is the documented
+      // mechanism — with the effort field alongside for backends that honour that instead.
+      const effort = cfg.reasoningEffort
+        ? normalizeQwenEffort(cfg.reasoningEffort)
+        : cfg.enableThinking === false ? "none" : undefined;
+      const thinkingOff = cfg.enableThinking === false || effort === "none";
+      return {
+        ...(cfg.enableThinking !== undefined ? { chatTemplateKwargs: { enable_thinking: cfg.enableThinking } } : {}),
+        // Only ever sent to turn thinking DOWN. Forcing a level upward is the model's own default
+        // here, and a graded level is not part of this family's documented contract.
+        ...(thinkingOff && effort ? { reasoningEffort: wireQwenEffort(effort) } : {}),
+      };
+    }
     case "deepseek":
       return cfg.enableThinking !== undefined ? { chatTemplateKwargs: { thinking: cfg.enableThinking } } : {};
     case "gpt-oss": {
@@ -1074,6 +1153,22 @@ export class LMStudioProvider {
    * top-level `reasoning_effort:"none"` → 0 reasoning chars, the same value
    * nested under `extra_body` → 2323. Keep these top-level.
    */
+  /**
+   * Learn from a `reasoning_effort` rejection: record it against this endpoint so the retry — and
+   * every later call — sends the next rung down instead. Returns true when it recorded one, which
+   * also tells the caller this failure is worth retrying.
+   */
+  private noteReasoningEffortRejection(modelId: string, err: unknown): boolean {
+    if (!isRejectedReasoningEffortError(err)) return false;
+    const requested = resolveThinkingControls(modelId, this.modelConfig).reasoningEffort;
+    const sent = requested ? effortForEndpoint(this.baseUrl, requested as WireEffort) : undefined;
+    if (!sent) return false;
+    noteRejectedReasoningEffort(this.baseUrl, sent);
+    log.warn({ endpoint: this.baseUrl, model: modelId, value: sent },
+      "Endpoint rejected this reasoning_effort — stepping down for the retry and every later call");
+    return true;
+  }
+
   private buildProviderExtensions(modelId: string): Record<string, unknown> | undefined {
     const fields: Record<string, unknown> = {};
     const controls = resolveThinkingControls(modelId, this.modelConfig);
@@ -1081,7 +1176,10 @@ export class LMStudioProvider {
       fields["chat_template_kwargs"] = controls.chatTemplateKwargs;
     }
     if (controls.reasoningEffort) {
-      fields["reasoning_effort"] = controls.reasoningEffort;
+      // Stepped down if THIS endpoint has already refused the value (see effortForEndpoint);
+      // an older LM Studio takes only xhigh|medium|low, and a 400 must not end a turn.
+      const wire = effortForEndpoint(this.baseUrl, controls.reasoningEffort as WireEffort);
+      if (wire) fields["reasoning_effort"] = wire;
     }
     if (this.modelConfig.promptCache) {
       // llama.cpp / LM Studio: reuse the KV cache for the common prompt prefix
@@ -1329,6 +1427,7 @@ export class LMStudioProvider {
       } catch (err: unknown) {
         endProviderCall(callId);
         this.recordRequestFailure(startedAt, err);
+        this.noteReasoningEffortRejection(modelId, err);
         // A hard-timeout is terminal: retrying a hung/too-slow provider only
         // multiplies the wall-clock hang (e.g. 4 × 5-min = 20-min delegation).
         // Surface it immediately so the orchestrator can fall back or synthesize.
@@ -1550,7 +1649,8 @@ export class LMStudioProvider {
         }
         return;
       } catch (err) {
-        if (yielded === 0 && attempt < maxAttempts && !signal?.aborted && isRetryableStreamError(err)) {
+        const effortRejected = this.noteReasoningEffortRejection(this.parseModelId(this.modelConfig.primary), err);
+        if (yielded === 0 && attempt < maxAttempts && !signal?.aborted && (effortRejected || isRetryableStreamError(err))) {
           log.warn(
             { err: String(err), model: this.parseModelId(this.modelConfig.primary), attempt, maxAttempts },
             "transient stream drop before first chunk — retrying",

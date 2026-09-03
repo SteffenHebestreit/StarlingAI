@@ -405,7 +405,7 @@ Every public schema field, where it is declared, and how many production files r
 | `stablePromptPrefix` | packages/core/src/config/schemas/orchestration.ts:29 | 1 |
 | `stagedArtifactBuildDirective` | packages/core/src/config/schemas/orchestration.ts:440 | 1 |
 | `stagedArtifactBuilds` | packages/core/src/config/schemas/orchestration.ts:414 | 1 |
-| `steps` | packages/core/src/config/schema.ts:1256 | 41 |
+| `steps` | packages/core/src/config/schema.ts:1256 | 43 |
 | `stopPhrases` | packages/core/src/config/schemas/multimodal.ts:75 | 2 |
 | `store` | packages/core/src/config/schema.ts:1489 | 135 |
 | `subAgentDisagreementVerify` | packages/core/src/config/schemas/orchestration.ts:586 | 2 |
@@ -419,7 +419,7 @@ Every public schema field, where it is declared, and how many production files r
 | `supersedeStaleFacts` | packages/core/src/config/schema.ts:1402 | 1 |
 | `suppressUnvalidatedDraftStreaming` | packages/core/src/config/schemas/orchestration.ts:181 | 1 |
 | `synthesis` | packages/core/src/config/schema.ts:228 | 52 |
-| `systemPrompt` | packages/core/src/config/schema.ts:823 | 17 |
+| `systemPrompt` | packages/core/src/config/schema.ts:823 | 18 |
 | `tags` | packages/core/src/config/schema.ts:553 | 60 |
 | `task` | packages/core/src/config/schema.ts:1187 | 119 |
 | `taskConditionalPrompt` | packages/core/src/config/schema.ts:1676 | 1 |
