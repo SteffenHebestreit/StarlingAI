@@ -45,6 +45,15 @@ describe("thinking-off reaches the wire for the enable_thinking family", () => {
       .toEqual({ chatTemplateKwargs: { enable_thinking: true } });
   });
 
+  it("a pinned graded effort beats the legacy toggle — the precedence the agent configs document", () => {
+    // researcher and mission_coordinator pin { reasoningEffort: "medium", enableThinking: false }
+    // with the comment "explicit effort overrides the enableThinking toggle, which predates graded
+    // effort". Seen live after the rebuild: those agents' calls carry effort "medium" and think a
+    // little (53–84 reasoning tokens), which is the configured intent, not an inert switch.
+    expect(resolveThinkingControls("qwen/qwen3.6-35b-a3b", { enableThinking: false, reasoningEffort: "medium" }))
+      .toEqual({ chatTemplateKwargs: { enable_thinking: false }, reasoningEffort: "medium" });
+  });
+
   it("still emits nothing without a signal", () => {
     expect(resolveThinkingControls("qwen/qwen3.6-35b-a3b", {})).toEqual({});
   });

@@ -12,6 +12,15 @@ WORKDIR /srv/reranker
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
+# On a CUDA host, transformers' Qwen3 forward pass reaches triton, which JIT-compiles a
+# small CUDA helper at first use and needs a C compiler to do it. python:3.12-slim ships
+# none, so every /rerank answered 500 ("Failed to find C compiler") while /health — which
+# never touches the model — stayed green. After the pip layer, so the torch download
+# stays cached.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gcc libc6-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY app.py ./
 
 EXPOSE 8091
