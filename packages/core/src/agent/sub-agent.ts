@@ -759,12 +759,26 @@ export function buildFactsFirstSynthesisMessages(task: string, curatedFindings: 
  * failure/abort (caller then keeps the heuristic extract — never drops evidence).
  * One short model call; gated + bounded by the caller.
  */
+/**
+ * The distillation call's own clock. It runs inside the researcher's sequential tool loop with
+ * the run's deadline deliberately EXCLUDED (that deadline must not abort tool work), so without a
+ * bound of its own the only ceiling was the provider's 905 s hard timeout — measured at 193 s for
+ * one call on the deployed model with thinking on, and its output is discarded when late anyway.
+ * A TOKEN cap is the wrong bound: measured, `max_tokens: 300` returned finish_reason "length" with
+ * empty content, which the caller reads as "nothing relevant" and DELETES the finding. A time
+ * bound degrades to the heuristic extract instead — evidence is never lost. Generous on purpose:
+ * on the (non-thinking) routing tier the call takes about a second.
+ */
+export const DISTILL_CALL_DEADLINE_MS = 60_000;
+
 export async function distillFindingForSharedFacts(params: {
   objective: string;
   toolName: string;
   rawEvidence: string;
   provider: ChatProvider;
   signal?: AbortSignal;
+  /** Per-call bound; see DISTILL_CALL_DEADLINE_MS. */
+  deadlineMs?: number;
 }): Promise<string | null> {
   const objective = params.objective.replace(/\s+/g, " ").trim().slice(0, 600);
   const raw = params.rawEvidence.slice(0, 6000);
@@ -796,7 +810,9 @@ export async function distillFindingForSharedFacts(params: {
     },
   ];
   try {
-    const response = await params.provider.complete(messages, [], params.signal);
+    const deadline = AbortSignal.timeout(params.deadlineMs ?? DISTILL_CALL_DEADLINE_MS);
+    const signal = params.signal ? AbortSignal.any([params.signal, deadline]) : deadline;
+    const response = await params.provider.complete(messages, [], signal);
     const distilled = (response.content ?? "").trim();
     if (!distilled || /^NONE\b/i.test(distilled)) return "";
     return distilled;

@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { logAudit } from "../audit/logger.js";
 import { Agent as UndiciAgent } from "undici";
 import type { ChatCompletion, ChatCompletionChunk, ChatCompletionMessageParam, ChatCompletionTool } from "openai/resources/chat/completions";
 import type { Stream } from "openai/streaming";
@@ -716,6 +717,12 @@ export type ThinkingFamily = "qwen-effort" | "enable_thinking" | "deepseek" | "g
  *  actually stop thinking on this backend. See resolveThinkingControls. */
 const QWEN_EFFORT_VERSION_RE = /qwen-?3\.(?:[89]|\d{2,})/;
 
+/** The reasoning share of completion tokens, where the backend reports it (LM Studio and OpenAI do). */
+function reasoningTokensOf(usage: unknown): number | undefined {
+  const details = (usage as { completion_tokens_details?: { reasoning_tokens?: unknown } } | undefined)?.completion_tokens_details;
+  return typeof details?.reasoning_tokens === "number" ? details.reasoning_tokens : undefined;
+}
+
 export function detectThinkingFamily(modelId: string): ThinkingFamily {
   const m = modelId.toLowerCase();
   if (m.includes("gpt-oss") || m.includes("gpt_oss")) return "gpt-oss";
@@ -1115,6 +1122,50 @@ export class LMStudioProvider {
     };
   }
 
+  /**
+   * One audit row per model call: what was asked of the model and what it did.
+   *
+   * Two of this deployment's costs were re-derived from the client side every time anyone asked —
+   * whether a call re-prefilled its prefix, and whether a verdict call thought — and the
+   * thinking-off switch shipped in 2066738 was inert on the deployed model for a month with nobody
+   * the wiser, because no row recorded what went on the wire against what came back. Here both
+   * are on the same row: a re-prefill is a time-to-first-token spike at unchanged promptTokens,
+   * and an off-switch that never reached the wire is reasoningTokens > 0 on a call whose
+   * `controls` say it was off. The audit log holds no turns since 2026-08-30; this is the row that
+   * turns measurements taken once into assertions checked on every turn.
+   */
+  private auditModelCall(input: {
+    modelId: string;
+    mode: "complete" | "stream";
+    startedAt: number;
+    firstTokenAt?: number;
+    usage: { promptTokens: number; completionTokens: number; reasoningTokens?: number } | undefined;
+    finishReason: string | undefined;
+    toolCount: number;
+    messageCount: number;
+  }): void {
+    const now = Date.now();
+    const ext = this.buildProviderExtensions(input.modelId) ?? {};
+    const kwargs = ext["chat_template_kwargs"] as Record<string, unknown> | undefined;
+    logAudit("provider_model_call", {
+      model: input.modelId,
+      mode: input.mode,
+      durationMs: now - input.startedAt,
+      ...(input.firstTokenAt !== undefined ? { ttftMs: input.firstTokenAt - input.startedAt } : {}),
+      promptTokens: input.usage?.promptTokens ?? null,
+      completionTokens: input.usage?.completionTokens ?? null,
+      reasoningTokens: input.usage?.reasoningTokens ?? null,
+      finishReason: input.finishReason ?? null,
+      toolCount: input.toolCount,
+      messageCount: input.messageCount,
+      controls: {
+        reasoningEffort: ext["reasoning_effort"] ?? null,
+        enableThinking: kwargs?.["enable_thinking"] ?? kwargs?.["thinking"] ?? null,
+        cachePrompt: ext["cache_prompt"] === true,
+      },
+    }, { severity: "info" });
+  }
+
   private recordRequestSuccess(startedAt: number): void {
     const finishedAt = Date.now();
     const latencyMs = finishedAt - startedAt;
@@ -1403,6 +1454,22 @@ export class LMStudioProvider {
         }));
 
         this.recordRequestSuccess(startedAt);
+        {
+          const reasoningTokens = reasoningTokensOf(response.usage);
+          this.auditModelCall({
+            modelId,
+            mode: "complete",
+            startedAt,
+            usage: {
+              promptTokens: response.usage?.prompt_tokens ?? 0,
+              completionTokens: response.usage?.completion_tokens ?? 0,
+              ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
+            },
+            finishReason: choice.finish_reason ?? undefined,
+            toolCount: openAITools.length,
+            messageCount: openAIMessages.length,
+          });
+        }
 
         // `reasoning_content` is an LM Studio / vLLM extension for thinking
         // models — not in the OpenAI SDK types, so read it via a cast. Also
@@ -1729,6 +1796,7 @@ export class LMStudioProvider {
     const toolCallBuffers = new Map<number, { id: string; name: string; args: string }>();
     let collectedFinishReason: string | undefined;
     let collectedUsage: StreamChunk["usage"] | undefined;
+    let firstChunkAt: number | undefined;
     const startedAt = Date.now();
     // In-flight visibility: track token progress so the monitor can tell
     // producing (tokens flowing) from prefill (no first token yet) from stalled.
@@ -1829,6 +1897,7 @@ export class LMStudioProvider {
 
     try {
       for await (const chunk of stream) {
+        firstChunkAt ??= Date.now();
         // BELT AND BRACES over the composed signal above. The signal is what
         // actually tears the transport down; this makes the CONSUMER stop too, so
         // a future transport that quietly ignores its signal still cannot run past
@@ -1860,10 +1929,12 @@ export class LMStudioProvider {
         armInactivity();
         // Usage arrives in a final chunk with empty choices (stream_options.include_usage)
         if (chunk.usage) {
+          const reasoningTokens = reasoningTokensOf(chunk.usage);
           collectedUsage = {
             promptTokens: chunk.usage.prompt_tokens ?? 0,
             completionTokens: chunk.usage.completion_tokens ?? 0,
             totalTokens: chunk.usage.total_tokens ?? 0,
+            ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
           };
         }
 
@@ -1991,6 +2062,16 @@ export class LMStudioProvider {
     }
 
     this.recordRequestSuccess(startedAt);
+    this.auditModelCall({
+      modelId,
+      mode: "stream",
+      startedAt,
+      ...(firstChunkAt !== undefined ? { firstTokenAt: firstChunkAt } : {}),
+      usage: collectedUsage,
+      finishReason: collectedFinishReason,
+      toolCount: openAITools.length,
+      messageCount: openAIMessages.length,
+    });
     yield { type: "done", finishReason: collectedFinishReason ?? "stop", usage: collectedUsage };
   }
 

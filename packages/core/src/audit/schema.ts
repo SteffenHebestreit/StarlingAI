@@ -72,6 +72,7 @@ export type CoreAuditEventType =
   | "turn_performance"
   | "event_loop_lag"
   | "provider_stall"
+  | "provider_model_call"
   | "scene_job_completed"
   | "scene_job_failed"
   | "scene_job_cancelled"

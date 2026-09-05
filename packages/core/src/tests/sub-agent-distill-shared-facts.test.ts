@@ -85,4 +85,26 @@ describe("distillFindingForSharedFacts", () => {
     expect(sysMsg).toMatch(/Do NOT add your own notes, caveats, corrections/i);
     expect(sysMsg).toMatch(/Copy each value exactly as the source states it/i);
   });
+  it("abandons a distillation that outlives its own deadline — the caller keeps the heuristic extract", async () => {
+    // The call runs inside the researcher's tool loop with the run deadline deliberately excluded,
+    // so without a clock of its own the only ceiling was the provider's 905 s hard timeout. A token
+    // cap is the wrong bound (measured: it returns empty content, which reads as "nothing relevant"
+    // and DELETES the finding); a time bound degrades to the heuristic extract.
+    const provider = {
+      complete: vi.fn((_messages: LLMMessage[], _tools: unknown, signal?: AbortSignal) =>
+        new Promise((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+        })),
+    } as unknown as ChatProvider;
+    const started = Date.now();
+    const out = await distillFindingForSharedFacts({
+      objective: "opening hours",
+      toolName: "web_fetch",
+      rawEvidence: "x".repeat(500),
+      provider,
+      deadlineMs: 25,
+    });
+    expect(out).toBeNull();
+    expect(Date.now() - started).toBeLessThan(4_000);
+  });
 });
