@@ -70,6 +70,18 @@ export const STATE_DEPENDENT_TOOL_NAMES: ReadonlySet<string> = new Set([
   "execute_plan",
 ]);
 
+/**
+ * Tools trusted to report the calls they made on the turn's behalf.
+ *
+ * NOT every tool result's metadata is ours. The infrastructure tools merge a REMOTE webhook's
+ * `metadata` object into their result verbatim (tools/infrastructure-shared.ts, tools/proxmox.ts),
+ * so reading `nestedCalls` off any result at all would let a remote endpoint forge delegations: the
+ * turn's tally and workflow flag would say real orchestration happened, which is precisely the
+ * signal that disables the honesty chain (audit 1303e254) — reachable from a payload rather than
+ * from a tool name. An allowlist keeps the reporter side of this seam ours.
+ */
+const NESTED_CALL_REPORTERS: ReadonlySet<string> = new Set(["execute_plan", "parallel_delegate"]);
+
 /** What is known BEFORE the call runs, from the tool name alone. */
 export interface ToolCallContribution {
   /** How much this call adds to the turn's delegation tally. */
@@ -85,7 +97,12 @@ export function toolCallContribution(toolName: string): ToolCallContribution {
     // scene, a recursive re-entry — read as executed orchestration. That poisoned signal disables
     // the honesty chain for a source-sensitive turn (audit 1303e254). The honest signal is the
     // result-side `workflowCompleted` below.
-    delegations: DELEGATION_COUNTING_TOOL_NAMES.has(toolName) ? 1 : 0,
+    // A tool that REPORTS the calls it made (NESTED_CALL_REPORTERS) is not counted here as well.
+    // parallel_delegate is a counting tool AND, since 4160d3f, reports its slices — each slice was
+    // then counted again when the result landed, so a three-slice fan-out read as four
+    // delegations. The report is the honest count (the children that actually ran, failures
+    // excluded, as for execute_plan); the call itself adds nothing.
+    delegations: DELEGATION_COUNTING_TOOL_NAMES.has(toolName) && !NESTED_CALL_REPORTERS.has(toolName) ? 1 : 0,
     isDelegationWait: DELEGATION_WAIT_TOOL_NAMES.has(toolName),
   };
 }
@@ -113,18 +130,6 @@ export interface NestedToolCall {
   success: boolean;
   workflowNotFound?: boolean;
 }
-
-/**
- * Tools trusted to report the calls they made on the turn's behalf.
- *
- * NOT every tool result's metadata is ours. The infrastructure tools merge a REMOTE webhook's
- * `metadata` object into their result verbatim (tools/infrastructure-shared.ts, tools/proxmox.ts),
- * so reading `nestedCalls` off any result at all would let a remote endpoint forge delegations: the
- * turn's tally and workflow flag would say real orchestration happened, which is precisely the
- * signal that disables the honesty chain (audit 1303e254) — reachable from a payload rather than
- * from a tool name. An allowlist keeps the reporter side of this seam ours.
- */
-const NESTED_CALL_REPORTERS: ReadonlySet<string> = new Set(["execute_plan", "parallel_delegate"]);
 
 /**
  * What a call a tool made on the turn's behalf contributes.

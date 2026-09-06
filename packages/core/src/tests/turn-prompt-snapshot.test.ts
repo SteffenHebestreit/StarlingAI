@@ -4,6 +4,7 @@ import {
   STATE_DEPENDENT_TOOL_NAMES,
   readNestedToolCalls,
   nestedCallContribution,
+  toolCallContribution,
 } from "../agent/turn-tool-contribution.js";
 
 const makeSession = () => new AgentSession({
@@ -64,6 +65,24 @@ describe("a fan-out reports its children to the turn", () => {
     expect(calls).toHaveLength(3);
     const delegations = calls.filter((c) => nestedCallContribution(c).delegations > 0);
     expect(delegations).toHaveLength(2);   // the failed slice is not orchestration that happened
+  });
+
+  it("counts a fan-out as its children, not its children plus itself", () => {
+    // parallel_delegate is a delegation-counting tool AND reports its slices. Counted at call time
+    // as well as per slice, a three-slice fan-out read as four delegations — one more than ran.
+    expect(toolCallContribution("parallel_delegate").delegations).toBe(0);
+    expect(toolCallContribution("parallel_delegate").isDelegationWait).toBe(true);   // still parent-waiting time
+    expect(toolCallContribution("delegate_to_agent").delegations).toBe(1);           // a non-reporter counts itself
+    const nested = readNestedToolCalls("parallel_delegate", {
+      nestedCalls: [
+        { tool: "delegate_to_agent", success: true },
+        { tool: "delegate_to_agent", success: true },
+        { tool: "delegate_to_agent", success: true },
+      ],
+    });
+    const total = toolCallContribution("parallel_delegate").delegations
+      + nested.reduce((n, c) => n + nestedCallContribution(c).delegations, 0);
+    expect(total).toBe(3);
   });
 
   it("reads nothing from a tool that does not report children", () => {

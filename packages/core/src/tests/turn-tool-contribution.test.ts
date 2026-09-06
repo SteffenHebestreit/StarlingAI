@@ -24,9 +24,17 @@ describe("what a tool call contributes to the turn", () => {
     // never ran — an ambiguous name, an unknown scene, a recursive re-entry — read as executed
     // orchestration, which disables the honesty chain for a source-sensitive turn (audit 1303e254).
     expect(toolCallContribution("delegate_to_agent").delegations).toBe(1);
-    expect(toolCallContribution("parallel_delegate").delegations).toBe(1);
     expect(toolCallContribution("run_workflow").delegations).toBe(0);
     expect(toolCallContribution("web_search").delegations).toBe(0);
+    // parallel_delegate counted 1 here until it began REPORTING its slices (4160d3f). A reporter's
+    // own call must add nothing, or every slice is counted twice over — once here and once from
+    // the report — and a three-slice fan-out reads as four delegations. Same rule as execute_plan,
+    // which was never in the counting set for exactly this reason.
+    expect(toolCallContribution("parallel_delegate").delegations).toBe(0);
+    expect(toolCallContribution("parallel_delegate").isDelegationWait).toBe(true);
+    // The ones that do NOT report their children still count themselves.
+    expect(toolCallContribution("run_task_graph").delegations).toBe(1);
+    expect(toolCallContribution("swarm_delegate").delegations).toBe(1);
   });
 
   it("counts a workflow only once it has actually run", () => {
