@@ -93,7 +93,7 @@ import {
   STAGED_BUILD_REQUIRED_TOOLS,
   UNFINISHED_STUB_MARKER,
 } from "./sub-agent-prompt-guidance.js";
-import { generatedZoneRel } from "../tools/workspace-path.js";
+import { generatedZoneRel, resolveWorkspaceWritePath } from "../tools/workspace-path.js";
 import { buildArtifactTextPreview } from "../tools/artifact-preview.js";
 import { checkBuiltPage } from "../tools/page-check.js";
 import { mergeAgentModelOverride, applyEffortModelOverlay, applyStreamCapOverlay } from "./sub-agent-model-config.js";
@@ -2906,6 +2906,21 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // "<tool>:<path>" -> content hashes written this run, oldest first. Backs the
     // content-shape loop rule that replaced the blunt per-path overwrite cap.
     const writeHistory = new Map<string, string[]>();
+    /**
+     * Workspace paths THIS run wrote, normalised through the write resolver so a read spelled
+     * differently ("report.md" vs the returned "generated/report.md") still matches. Used to
+     * keep a run's own output from re-entering the shared-facts ledger as evidence — see the
+     * auto-share guard in the tool loop.
+     */
+    const pathsWrittenThisRun = new Set<string>();
+    const normalizeArtifactPath = (raw: unknown): string | null => {
+      if (typeof raw !== "string" || raw.trim().length === 0) return null;
+      try {
+        return resolveWorkspaceWritePath(raw.trim(), opts.workspacePath).relativePath;
+      } catch {
+        return raw.trim();   // outside the workspace — compare literally rather than not at all
+      }
+    };
     // (tool, exact-args) repeat counts across the WHOLE run, for EVERY tool. Detection
     // only — the cached-result short-circuit below stays restricted to IDEMPOTENT_TOOLS,
     // because short-circuiting a deliberate re-poll of mutating state would be wrong.
@@ -5915,6 +5930,44 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           // (audit 1ac79471: content_writer's context led with a search_agents dump
           // recommending browser_agent for a build). Guard ONLY the snippet+share
           // section — the rest of the per-tool loop body must still run.
+          // A RUN'S OWN OUTPUT IS NOT EVIDENCE FOR ITS OWN CLAIMS.
+          //
+          // Shared facts are what the swarm treats as gathered knowledge: the final synthesis
+          // and the evidence backstop read from them, and a finding carries a provenance-shaped
+          // key naming the agent and tool that produced it. read_file is not excluded from
+          // auto-share — correctly, since reading an uploaded document or another agent's
+          // output IS gathering. But a staged build reads its own artifact back as its FINISH
+          // step, and that read is the agent's own prose returning as a fact.
+          //
+          // Session 00b3675d: paper_author wrote a report, read it back, and the read auto-
+          // shared as `auto_paper_author_read_file_15g6ems`. Its next report then cited that
+          // key as corroborating a plan it had labelled "UNVERIFIED — no official source
+          // confirms this plan exists" and "Source of report: User testimony only". The user
+          // had just told it, correctly, that the plan exists. The loop closed with the
+          // agent's own doubt cited as independent verification of itself.
+          //
+          // Only this run's OWN writes are excluded, matched on the resolved path, so nothing
+          // gathered from elsewhere is lost.
+          if (result.success && PATH_KEYED_WRITE_TOOLS.has(tc.name)) {
+            const written = normalizeArtifactPath(
+              tc.arguments?.["path"] ?? tc.arguments?.["output_file"] ?? tc.arguments?.["filename"],
+            );
+            if (written) pathsWrittenThisRun.add(written);
+          }
+          const readsBackOwnOutput = tc.name === "read_file"
+            && (() => {
+              const p = normalizeArtifactPath(tc.arguments?.["path"]);
+              return p !== null && pathsWrittenThisRun.has(p);
+            })();
+          if (readsBackOwnOutput) {
+            logAudit("sub_agent_tool_call", {
+              agentName: opts.agentName,
+              tool: tc.name,
+              phase: "shared_finding_skipped",
+              reason: "read_back_of_own_write",
+              path: typeof tc.arguments?.["path"] === "string" ? tc.arguments["path"] : null,
+            }, { sessionId: subSessionId, severity: "info" });
+          }
           const snippetThreshold = recoveredInterruptedEvidence ? 80 : 180;
           if (isUsefulEvidence && !ROUTING_METADATA_TOOL_NAMES.has(tc.name) && usefulTrimmed.length >= snippetThreshold) {
             const snippet = truncateToolAuditText(usefulTrimmed, 900);
@@ -5926,7 +5979,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
               // stored, or null if skipped. Count only the extracted length so that
               // cumulativeUsefulEvidenceBytes reflects actual stored knowledge
               // density — not raw dump volume inflated by search headers and URLs.
-              const extractedFinding = await autoShareUsefulFinding({
+              // The read-back of this run's own write is kept out of shared facts (above)
+              // but still reaches recentEvidenceSnippets: that is the run's own working
+              // memory, where re-reading what it wrote is exactly the point.
+              const extractedFinding = readsBackOwnOutput ? null : await autoShareUsefulFinding({
                 sessionId: subSessionId,
                 agentName: opts.agentName,
                 toolName: tc.name,
