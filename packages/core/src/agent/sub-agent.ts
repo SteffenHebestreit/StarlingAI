@@ -94,6 +94,7 @@ import {
   UNFINISHED_STUB_MARKER,
 } from "./sub-agent-prompt-guidance.js";
 import { generatedZoneRel } from "../tools/workspace-path.js";
+import { buildArtifactTextPreview } from "../tools/artifact-preview.js";
 import { checkBuiltPage } from "../tools/page-check.js";
 import { mergeAgentModelOverride, applyEffortModelOverlay, applyStreamCapOverlay } from "./sub-agent-model-config.js";
 import { resolveTurnBudgetMs, resolveTimeRemainingMs, DEADLINE_LIVENESS_RECHECK_MS, STREAM_HEARTBEAT_CHARS, shouldDeferDeadline } from "./sub-agent-turn-budget.js";
@@ -1187,6 +1188,47 @@ const CODE_ARTIFACT_RE = /\.(?:html?|json|js|mjs|cjs|jsx|ts|tsx|css)$/;
 function pathIsInsideArtifactZone(absPath: string): boolean {
   const zone = generatedZoneRel();
   return absPath.split(/[\\/]+/).includes(zone);
+}
+
+/**
+ * THE ARTIFACT RECORD IS A SNAPSHOT, AND A STAGED BUILD OUTLIVES IT.
+ *
+ * write_file's metadata carries `size` and `textPreview` taken at write time, and it is the
+ * only tool whose metadata `recordArtifacts` can see at all: edit_file returns
+ * `{ path, replacements }` with no outputPath, so a fill pass records nothing. In a staged
+ * build pass one writes the skeleton and every later pass edits it, so the record keeps
+ * describing the skeleton while the file grows underneath it. Session 00b3675d attached a
+ * 469-byte stub preview to a finished 16 KB report — the user was shown scaffolding for a
+ * document that was complete on disk.
+ *
+ * Re-reading is cheap and the file is the truth, so the attachment describes the artifact as
+ * it now IS rather than as it was first created. Fail-open in every direction: a file since
+ * moved, deleted, unreadable, or past the size cap keeps the metadata it already had, which is
+ * exactly the previous behaviour. Only `workspace_file` artifacts are touched — a dataUrl or
+ * externalUrl artifact has no on-disk state to refresh.
+ */
+export function refreshWorkspaceArtifactSnapshot(
+  artifact: Record<string, unknown>,
+  workspacePath: string,
+): Record<string, unknown> {
+  const copy = { ...artifact };
+  if (copy["artifactKind"] !== "workspace_file") return copy;
+  try {
+    const rel = typeof copy["outputPath"] === "string" ? copy["outputPath"] : "";
+    const raw = typeof copy["path"] === "string" ? copy["path"] : "";
+    const candidate = [rel, raw]
+      .filter(Boolean)
+      .map((p) => resolvePath(workspacePath, p))
+      .find((p) => fs.existsSync(p));
+    if (!candidate) return copy;
+    const stat = fs.statSync(candidate);
+    if (!stat.isFile() || stat.size > 5_000_000) return copy;
+    const text = fs.readFileSync(candidate, "utf8");
+    copy["size"] = text.length;
+    const preview = buildArtifactTextPreview(text);
+    if (preview) copy["textPreview"] = preview;
+  } catch { /* unreadable — keep the write-time snapshot */ }
+  return copy;
 }
 
 export function artifactFileLooksTruncated(artifact: Record<string, unknown>, workspaceRoot?: string): string | null {
@@ -3091,7 +3133,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
 
     const withArtifacts = (result: { output: string; stats: SubAgentExecutionStats }): SubAgentRunResult => (
       artifacts.length > 0
-        ? { ...result, artifacts: artifacts.map((artifact) => ({ ...artifact })) }
+        ? { ...result, artifacts: artifacts.map((artifact) => refreshWorkspaceArtifactSnapshot(artifact, opts.workspacePath)) }
         : result
     );
 

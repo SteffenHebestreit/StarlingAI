@@ -6,6 +6,7 @@ import { logAudit } from "../audit/logger.js";
 import { getConfig } from "../config/loader.js";
 import { generatedZoneDir, resolvePathWithinWorkspace, resolveWorkspaceWritePath } from "./workspace-path.js";
 import { UNFINISHED_STUB_MARKER } from "../agent/sub-agent-prompt-guidance.js";
+import { buildArtifactTextPreview } from "./artifact-preview.js";
 
 const log = childLogger("tool:filesystem");
 const MAX_FILE_SIZE = 1024 * 1024; // 1MB read limit
@@ -867,12 +868,6 @@ function inferArtifactPreviewMode(contentType: string): "image" | "html" | "pdf"
   if (contentType.startsWith("text/") || contentType.includes("yaml") || contentType.includes("xml") || contentType.includes("mermaid")) return "text";
   // Office docs, archives and other binary formats → trigger browser download
   return "download";
-}
-
-function buildArtifactTextPreview(content: string): string | undefined {
-  const compact = content.replace(/\s+/g, " ").trim();
-  if (!compact) return undefined;
-  return compact.length > 1_200 ? `${compact.slice(0, 1_197)}...` : compact;
 }
 
 function safeEntryCount(dir: string): number {
