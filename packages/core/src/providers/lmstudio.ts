@@ -732,6 +732,13 @@ export function detectThinkingFamily(modelId: string): ThinkingFamily {
   return "none";
 }
 
+/**
+ * Levels that ask for real deliberation, as opposed to asking for less of it. Only these veto an
+ * `enableThinking: false` on the enable_thinking family — "low" and "minimal" sit alongside the
+ * off-switch rather than against it, so a config that pairs them with it means the floor.
+ */
+const DELIBERATE_THINKING_EFFORTS: ReadonlySet<string> = new Set(["medium", "high", "xhigh"]);
+
 /** "none" and "xhigh" are Qwen 3.8+ levels; gpt-oss/o-series use low|medium|high. */
 export type ReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh";
 
@@ -877,24 +884,41 @@ export function resolveThinkingControls(
       return { reasoningEffort: wireQwenEffort(effort) };
     }
     case "enable_thinking": {
-      // BOTH CONTROLS, because on this backend the documented one does nothing. Measured
-      // 2026-09-03 against qwen/qwen3.6-35b-a3b on LM Studio, judge-shaped prompt, 400-token cap:
-      //   no control                     1,678 reasoning chars, 400 reasoning tokens, 6.8 s, EMPTY answer
-      //   enable_thinking:false          1,678 / 400 / 6.5 s, EMPTY answer  ← byte-identical to no control
-      //   reasoning_effort:"none"            0 /   0 / 0.35 s, "YES"
-      // So the flag is not merely slow, it is inert: the verdict calls it was meant to make cheap
-      // were still reasoning, and reasoning ate the whole token budget so they returned nothing.
-      // The flag is still sent — vLLM and Qwen's own card honour it, and it is the documented
-      // mechanism — with the effort field alongside for backends that honour that instead.
-      const effort = cfg.reasoningEffort
-        ? normalizeQwenEffort(cfg.reasoningEffort)
-        : cfg.enableThinking === false ? "none" : undefined;
-      const thinkingOff = cfg.enableThinking === false || effort === "none";
+      // THIS FAMILY HAS EXACTLY TWO REACHABLE STATES, and a graded level is not one of them.
+      // Measured against qwen/qwen3.6-35b-a3b on LM Studio (temperature 0, max_tokens 3000, so no
+      // cap saturates the comparison; identical prompt each time):
+      //   no control                          1,968 reasoning tokens, prompt_tokens 61
+      //   reasoning_effort "low"              2,261 / 61
+      //   reasoning_effort "medium"           1,565 / 61
+      //   reasoning_effort "xhigh"            1,182 / 61
+      //   enable_thinking:false               2,128 / 61
+      //   enable_thinking:false + "low"       1,481 / 61
+      //   reasoning_effort "none"                 0 / 63
+      // Repeats drew from the same spread whatever the graded value was, and prompt_tokens moves
+      // only for "none" — the chat template itself changes there and nowhere else. So on this
+      // backend every graded rung is inert, they are not even ordered, `enable_thinking` is inert
+      // too, and "none" is the only control that does anything.
+      //
+      // Two consequences. A graded pin must NEVER be put on the wire here: it changes nothing and
+      // it makes the provider_model_call row read as though a level had been applied — the exact
+      // dishonesty that audit row exists to expose. And a graded pin must not SUPPRESS "none":
+      // shipped as it was, `{enableThinking:false, reasoningEffort:"low"}` sent an inert pair and
+      // reasoned at the model's full default, so the LOW effort tier — whose contract is the least
+      // work that answers the question — was the one tier that always thought hardest.
+      //
+      // A pin at medium or above still vetoes the off-switch, because that is what it is for: the
+      // agent shards that carry `{enableThinking:false, reasoningEffort:"medium"}` say so in their
+      // own comment ("explicit effort overrides the enableThinking toggle, which predates graded
+      // effort"). Vetoed, the model keeps its default — which is deliberation, what those agents
+      // asked for — and no field claims otherwise.
+      const pinned = cfg.reasoningEffort ? normalizeQwenEffort(cfg.reasoningEffort) : undefined;
+      const pinVetoesTheOffSwitch = pinned !== undefined && DELIBERATE_THINKING_EFFORTS.has(pinned);
+      const thinkingOff = pinned === "none" || (cfg.enableThinking === false && !pinVetoesTheOffSwitch);
       return {
+        // Still sent: vLLM and Qwen's own card honour it, and it is this family's documented
+        // mechanism. Inert here, but never misleading — it says what was asked, not what landed.
         ...(cfg.enableThinking !== undefined ? { chatTemplateKwargs: { enable_thinking: cfg.enableThinking } } : {}),
-        // Only ever sent to turn thinking DOWN. Forcing a level upward is the model's own default
-        // here, and a graded level is not part of this family's documented contract.
-        ...(thinkingOff && effort ? { reasoningEffort: wireQwenEffort(effort) } : {}),
+        ...(thinkingOff ? { reasoningEffort: "none" as const } : {}),
       };
     }
     case "deepseek":

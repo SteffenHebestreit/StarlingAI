@@ -48,10 +48,35 @@ describe("thinking-off reaches the wire for the enable_thinking family", () => {
   it("a pinned graded effort beats the legacy toggle — the precedence the agent configs document", () => {
     // researcher and mission_coordinator pin { reasoningEffort: "medium", enableThinking: false }
     // with the comment "explicit effort overrides the enableThinking toggle, which predates graded
-    // effort". Seen live after the rebuild: those agents' calls carry effort "medium" and think a
-    // little (53–84 reasoning tokens), which is the configured intent, not an inert switch.
-    expect(resolveThinkingControls("qwen/qwen3.6-35b-a3b", { enableThinking: false, reasoningEffort: "medium" }))
-      .toEqual({ chatTemplateKwargs: { enable_thinking: false }, reasoningEffort: "medium" });
+    // effort". Vetoed, the model keeps its default — which IS deliberation, what those agents
+    // asked for — and no field claims a level was applied when none was.
+    for (const effort of ["medium", "high", "xhigh"] as const) {
+      expect(resolveThinkingControls("qwen/qwen3.6-35b-a3b", { enableThinking: false, reasoningEffort: effort }))
+        .toEqual({ chatTemplateKwargs: { enable_thinking: false } });
+    }
+  });
+
+  it("never puts a graded level on the wire for this family — it is inert, and the audit row would claim it landed", () => {
+    // Measured on qwen3.6 at max_tokens 3000 (no cap saturating the comparison): low 2,261 /
+    // medium 1,565 / xhigh 1,182 / no control 1,968 reasoning tokens, all at prompt_tokens 61 —
+    // the same spread whatever was asked, and not even ordered. prompt_tokens moves to 63 only for
+    // "none", where the chat template itself changes. A level that cannot land must not be sent:
+    // provider_model_call would record it as applied.
+    for (const effort of ["low", "medium", "xhigh"] as const) {
+      expect(resolveThinkingControls("qwen/qwen3.6-35b-a3b", { enableThinking: true, reasoningEffort: effort }).reasoningEffort)
+        .toBeUndefined();
+    }
+  });
+
+  it("a graded pin must not suppress the one control that works — the LOW effort tier reasoned hardest", () => {
+    // The low tier is { reasoningEffort: "low", enableThinking: false } and its contract is the
+    // least work that answers the question. Shipped as it was, the pin won and BOTH fields were
+    // inert, so the cheapest tier ran at the model's full default. "low" and "minimal" sit
+    // alongside the off-switch, not against it.
+    for (const effort of ["low", "none"] as const) {
+      expect(resolveThinkingControls("qwen/qwen3.6-35b-a3b", { enableThinking: false, reasoningEffort: effort }))
+        .toEqual({ chatTemplateKwargs: { enable_thinking: false }, reasoningEffort: "none" });
+    }
   });
 
   it("still emits nothing without a signal", () => {
