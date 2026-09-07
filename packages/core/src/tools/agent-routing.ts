@@ -575,11 +575,11 @@ export function agentIsResearchCapable(agentName: string): boolean {
  * not primary research — applied to the coordination clause, which never got it.
  *
  * The coordination clause is right for a coordinator and wrong for a WRITER that happens
- * to hold `delegate_to_agent`. Of the 49 configured agents, 14 pass
+ * to hold `delegate_to_agent`. Of the 48 agents this repo configures, 14 pass
  * `agentCfgIsResearchCapable` but only 8 gather directly; of the six credited on
- * coordination alone, five are coordinators and one — paper_author, whose own
- * description says it drafts "from an already-collected evidence ledger" and is
- * "distinct from researcher" — is not. Session 00b3675d handed it four consecutive
+ * coordination alone, four are coordinators and two are WRITERS — meeting_briefing_agent,
+ * and paper_author, whose own description says it drafts "from an already-collected
+ * evidence ledger" and is "distinct from researcher". Session 00b3675d handed it four consecutive
  * source-sensitive delegations at high confidence (topResultScore 0.845-0.866) and its
  * sub-sessions made 0 web_search, 0 web_fetch and, on three of the four, 0
  * delegate_to_agent calls: three pricing reports written from model memory, each
