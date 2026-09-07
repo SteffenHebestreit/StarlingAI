@@ -8,7 +8,7 @@ import {
   filterCandidatesByExecutionCapability,
   explicitAgentsCoverTaskExecution,
 } from "../tools/sub-agent.js";
-import { reorderByResearchCapability } from "../tools/agent-routing.js";
+import { reorderByResearchCapability, agentCfgGathersDirectly } from "../tools/agent-routing.js";
 import type { AgentRoutingCandidate } from "../tools/agent-routing.js";
 
 /**
@@ -268,5 +268,82 @@ describe("explicit-delegation execution guard (research-redirect false positive)
   it("returns false when the task needs no execution capability, so it never widens the redirect", () => {
     expect(explicitAgentsCoverTaskExecution(["computer_use_agent"], "research the best providers online with pricing", lookup)).toBe(false);
     expect(explicitAgentsCoverTaskExecution([], loginTask, lookup)).toBe(false);
+  });
+});
+
+/**
+ * The ranking key is DIRECT gathering, not "can delegate" (live session 00b3675d,
+ * 2026-09-07). paper_author is a writer whose own description says it drafts "from an
+ * already-collected evidence ledger" and is "distinct from researcher" — but its tool
+ * list holds `delegate_to_agent`, so `agentCfgIsResearchCapable` credited it via
+ * COORDINATION_TOOL_NAMES and it topped `search_agents` on four consecutive
+ * source-sensitive delegations (topResultScore 0.845-0.866). The model named no agent on
+ * any of them; the runtime injects the top result (four `tool_call_recovered` rows,
+ * reason "reuse_search_agents_top_result"), so the RANKING is the router. Its sub-sessions
+ * made 0 web_search and 0 web_fetch calls — and on three of the four, 0 delegate_to_agent
+ * calls too — yet each reported delegationOutcome "success": three pricing reports written
+ * from model memory, one of which denied that a vendor the user personally subscribes to
+ * has subscription plans at all.
+ *
+ * The fix is one argument at the ranking site. The VETO stays `agentCfgIsResearchCapable`,
+ * so a coordinator handed a genuine multi-area mission is still allowed to fan it out —
+ * that is the last block below, and it is the reason the redirect in sub-agent.ts was left
+ * alone.
+ */
+describe("direct-gathering ranking key (session 00b3675d)", () => {
+  // Deployed shapes, verbatim from workspace/agents/*.jsonc.
+  const paperAuthor = { tools: [
+    "search_agents", "delegate_to_agent", "read_shared_facts", "read_file", "write_file",
+    "edit_file", "generate_document", "generate_pdf", "generate_docx", "regex_test", "datetime_arithmetic",
+  ] };
+  const researcher = { tools: ["web_search", "web_fetch", "url_inspect"] };
+  const missionCoordinator = { tools: ["delegate_to_agent", "parallel_delegate", "run_task_graph"] };
+
+  it("does not credit a writer that merely holds delegate_to_agent", () => {
+    expect(agentCfgGathersDirectly(paperAuthor)).toBe(false);
+    expect(agentCfgIsResearchCapable(paperAuthor)).toBe(true); // the defect, as shipped
+  });
+
+  it("credits agents that reach the web themselves, and no one else", () => {
+    expect(agentCfgGathersDirectly(researcher)).toBe(true);
+    expect(agentCfgGathersDirectly({ tools: ["web_search", "browser_navigate", "browser_snapshot"] })).toBe(true);
+    expect(agentCfgGathersDirectly(missionCoordinator)).toBe(false);
+    // Same url_inspect carve-out as the clause above it: probing a known URL is not gathering.
+    expect(agentCfgGathersDirectly({ tools: ["url_inspect", "read_file", "share_finding"] })).toBe(false);
+  });
+
+  it("never blocks tool-inheritors or unknown/ephemeral agents", () => {
+    expect(agentCfgGathersDirectly({})).toBe(true);
+    expect(agentCfgGathersDirectly(undefined)).toBe(true);
+  });
+
+  it("demotes the writer below the researcher — the T1 ranking, replayed", () => {
+    const c = (name: string): AgentRoutingCandidate => ({ name } as AgentRoutingCandidate);
+    const gathers = (name: string) => name === "researcher";
+    const { results, needsFallback } = reorderByResearchCapability(
+      [c("paper_author"), c("researcher"), c("content_writer")], true, gathers,
+    );
+    expect(results.map((r) => r.name)).toEqual(["researcher", "paper_author", "content_writer"]);
+    expect(needsFallback).toBe(false);
+  });
+
+  it("flags needsFallback when the ranking is writers and coordinators only — T2/T4/T5", () => {
+    // The researcher was not in those three rankings at all, which is why demotion alone
+    // could not have saved them: the caller has to PREPEND the specialist.
+    const c = (name: string): AgentRoutingCandidate => ({ name } as AgentRoutingCandidate);
+    const gathers = (name: string) => name === "researcher";
+    const { results, needsFallback } = reorderByResearchCapability(
+      [c("paper_author"), c("content_writer"), c("mission_coordinator")], true, gathers,
+    );
+    expect(needsFallback).toBe(true);
+    expect(results.map((r) => r.name)).toEqual(["paper_author", "content_writer", "mission_coordinator"]);
+  });
+
+  it("leaves the redirect VETO wide, so a coordinator keeps its multi-area mission", () => {
+    // sub-agent.ts's redirect governs EXPLICIT delegations too. Narrowing it to direct
+    // gathering would hijack `delegate_to_agent(mission_coordinator)` on a research-flavoured
+    // mission and hand it to a single researcher. Only the ranking key moved.
+    expect(agentCfgIsResearchCapable(missionCoordinator)).toBe(true);
+    expect(agentCfgIsResearchCapable({ tools: ["delegate_to_agent", "swarm_delegate"] })).toBe(true);
   });
 });

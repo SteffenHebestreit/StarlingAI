@@ -30,6 +30,7 @@ import {
   resolveAgentRouting,
   taskRequiresExternalResearch,
   agentIsResearchCapable,
+  agentGathersDirectly,
   preferResearchCapableCandidates,
   agentCfgIsMetaFactory,
   agentIsMetaFactory,
@@ -1187,6 +1188,21 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
     } else if (capable.length < candidateQueue.length) {
       candidateQueue = capable;
     }
+    // Leave a trace of WHO ended up carrying a source-sensitive delegation and whether it can
+    // reach the web itself. The branch above narrowed silently, and the far more common case —
+    // session 00b3675d — never reached it at all: a writer holding `delegate_to_agent` passes
+    // `agentIsResearchCapable`, so nothing narrowed, nothing was logged, and four pricing
+    // reports were written from model memory with `delegationOutcome: "success"`. This row is
+    // the cheap form of the settling measurement (what fraction of source-sensitive delegations
+    // land on something that actually gathers): one field instead of a join across sub-session
+    // subtrees for `web_search`/`web_fetch` calls.
+    logAudit("delegation_research_candidate_selected", {
+      taskTitle: title,
+      selected: candidateQueue[0] ?? null,
+      gathersDirectly: candidateQueue[0] ? agentGathersDirectly(candidateQueue[0]) : null,
+      narrowed: capable.length > 0 && capable.length < candidateQueue.length,
+      explicitAgentRequested,
+    }, { sessionId: ctx.sessionId });
   }
 
   while (true) {

@@ -569,6 +569,40 @@ export function agentIsResearchCapable(agentName: string): boolean {
 }
 
 /**
+ * Whether an agent gathers external evidence ITSELF, rather than merely being able
+ * to hand the task to something that does. The same distinction `isWebGatheringToolName`
+ * already draws one clause up — it excludes url_inspect because probing a known URL is
+ * not primary research — applied to the coordination clause, which never got it.
+ *
+ * The coordination clause is right for a coordinator and wrong for a WRITER that happens
+ * to hold `delegate_to_agent`. Of the 49 configured agents, 14 pass
+ * `agentCfgIsResearchCapable` but only 8 gather directly; of the six credited on
+ * coordination alone, five are coordinators and one — paper_author, whose own
+ * description says it drafts "from an already-collected evidence ledger" and is
+ * "distinct from researcher" — is not. Session 00b3675d handed it four consecutive
+ * source-sensitive delegations at high confidence (topResultScore 0.845-0.866) and its
+ * sub-sessions made 0 web_search, 0 web_fetch and, on three of the four, 0
+ * delegate_to_agent calls: three pricing reports written from model memory, each
+ * reporting delegationOutcome "success". One told the user Anthropic has no
+ * subscription plans minutes after the user said they hold one.
+ *
+ * Used ONLY as the RANKING key (see preferResearchCapableCandidates). The veto that
+ * decides whether a delegation is redirected stays `agentCfgIsResearchCapable`, so a
+ * coordinator asked to run a multi-area mission is still allowed to fan it out.
+ */
+export function agentCfgGathersDirectly(cfg: { tools?: string[] } | undefined): boolean {
+  if (!cfg) return true;
+  if (!cfg.tools) return true; // inherits the full tool set
+  return cfg.tools.some(isWebGatheringToolName);
+}
+
+/** Config-backed {@link agentCfgGathersDirectly}. */
+export function agentGathersDirectly(agentName: string): boolean {
+  const config = getConfig();
+  return agentCfgGathersDirectly(config.subAgents[agentName] ?? readPromotedAgents(config.workspacePath)[agentName]);
+}
+
+/**
  * Whether an agent is a meta/factory agent — one whose job is to MINT other
  * agents (it holds create_ephemeral_agent). Such an agent must never be picked
  * by UNDIRECTED routing/bidding for an ordinary task: electing "the thing that
@@ -699,7 +733,18 @@ export function preferResearchCapableCandidates(
   const { results: reordered, needsFallback } = reorderByResearchCapability(
     results,
     taskRequiresExternalResearch(query),
-    agentIsResearchCapable,
+    // Rank on who gathers DIRECTLY, not on who could delegate. A coordinator that can
+    // reach a researcher is still a legitimate pick — it just does not outrank the
+    // researcher for a research query, which is the same preference
+    // pickResearchFallbackAgent already documents ("a single research task does not
+    // need a coordinator-of-coordinator hop"). This is the layer that decides: the
+    // model named no agent on any of session 00b3675d's four delegations; the runtime
+    // injects search_agents' topResult (four tool_call_recovered rows,
+    // reason "reuse_search_agents_top_result"), so the ranking IS the router.
+    // Ordering only — reorderByResearchCapability returns the list untouched when the
+    // set is empty, all-capable, or the query is not research, and needsFallback below
+    // PREPENDS the specialist rather than removing anyone.
+    agentGathersDirectly,
   );
   if (!needsFallback) return reordered;
   const fallbackName = pickResearchFallbackAgent([]);

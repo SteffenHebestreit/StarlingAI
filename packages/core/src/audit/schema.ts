@@ -184,6 +184,7 @@ export type CoreAuditEventType =
   | "delegation_bidding_filtered_capability_incapable"
   | "delegation_bidding_filtered_meta_factory"
   | "delegation_explicit_redirected_research_incapable"
+  | "delegation_research_candidate_selected"
   | "delegation_render_research_redirect_skipped"
   | "delegation_routing_embedding_degraded"
   | "delegation_routing_shortened_recovered"
