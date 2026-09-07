@@ -18,6 +18,15 @@ describe("artifactFileLooksTruncated", () => {
     return p;
   };
 
+  /** Same, but inside the artifact zone — where a marker is the artifact, not a mention of one. */
+  const writeArtifact = (name: string, content: string): string => {
+    const zone = path.join(dir, "generated");
+    fs.mkdirSync(zone, { recursive: true });
+    const p = path.join(zone, name);
+    fs.writeFileSync(p, content, "utf8");
+    return p;
+  };
+
   beforeAll(() => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), "sai-artifact-trunc-"));
   });
@@ -84,10 +93,70 @@ describe("artifactFileLooksTruncated", () => {
     expect(artifactFileLooksTruncated({ path: p, filename: "app-done.js" })).toBeNull();
   });
 
-  it("still does not read formats outside the staged build's own output", () => {
-    // The marker scan widened the extension list from html/json; it must not widen the
-    // fail-open contract with it. A .md file is still never judged, marker or not.
+  it("does not judge a prose file OUTSIDE the artifact zone — it is discussing the convention", () => {
+    // A plan or design note may name the marker without being an unfinished artifact. That
+    // is why prose is scoped by location rather than extension: scanForStubMarkers states
+    // the same rule for itself — "a marker outside generated/ is prose about the
+    // convention, not a build".
     const p = writeTemp("plan.md", "Next up: UNFINISHED_STUB: physics");
     expect(artifactFileLooksTruncated({ path: p, filename: "plan.md" })).toBeNull();
+  });
+
+  it("judges a SCRIPT anywhere — there the marker is a statement that throws", () => {
+    // The location scope applies to prose only. In code the directive writes the marker as
+    // executable code, so it cannot be the file talking about the convention.
+    const p = writeTemp("loose.js", "throw new Error(\"UNFINISHED_STUB: physics\");");
+    expect(artifactFileLooksTruncated({ path: p, filename: "loose.js" })).toContain("UNFINISHED_STUB");
+  });
+
+  /**
+   * The marker check is a check on the artifact's own words, not on its syntax, so gating it
+   * behind a web-format allowlist made it blind to exactly the builds paper_author runs.
+   * Session 00b3675d ran four staged builds whose artifacts were Markdown; every one was
+   * reported complete because .md was not on the list. scanForStubMarkers — the other half of
+   * the same contract — reads every file it walks, so the two halves disagreed about which
+   * files count.
+   */
+  it("flags an unfilled marker in a MARKDOWN artifact (session 00b3675d)", () => {
+    const p = writeArtifact("openai_vs_anthropic_subscription_comparison.md", [
+      "# Subscription comparison",
+      "",
+      "## Executive summary",
+      "Both vendors offer individual and team tiers.",
+      "",
+      "## Pricing table",
+      "UNFINISHED_STUB: pricing_table",
+      "",
+      "## Recommendation",
+      "See above.",
+    ].join("\n"));
+    const reason = artifactFileLooksTruncated({ path: p, filename: "openai_vs_anthropic_subscription_comparison.md" });
+    expect(reason).toBeTruthy();
+    expect(reason).toContain("UNFINISHED_STUB");
+  });
+
+  it("flags an unfilled marker in a plain-text artifact too", () => {
+    const p = writeArtifact("notes.txt", "Findings\n\nUNFINISHED_STUB: sources\n");
+    expect(artifactFileLooksTruncated({ path: p, filename: "notes.txt" })).toBeTruthy();
+  });
+
+  it("passes a COMPLETE markdown artifact — the widening must not flag prose", () => {
+    const p = writeArtifact("complete.md", [
+      "# Subscription comparison",
+      "",
+      "| Plan | Price |",
+      "| --- | --- |",
+      "| Pro | $20/mo |",
+      "",
+      "Every section is written.",
+    ].join("\n"));
+    expect(artifactFileLooksTruncated({ path: p, filename: "complete.md" })).toBeNull();
+  });
+
+  it("does not read binary containers as text, even inside the zone", () => {
+    // generate_pdf/generate_docx output: unreadable as UTF-8, judged by no format rule, and
+    // skipped before the read so widening the check costs nothing on that path.
+    const p = writeArtifact("report.pdf", "%PDF-1.7\n%binary\nUNFINISHED_STUB should not be read here\n");
+    expect(artifactFileLooksTruncated({ path: p, filename: "report.pdf" })).toBeNull();
   });
 });

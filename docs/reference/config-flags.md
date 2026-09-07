@@ -301,7 +301,7 @@ Every public schema field, where it is declared, and how many production files r
 | `passwordSelector` | packages/core/src/config/schema.ts:774 | 5 |
 | `pattern` | packages/core/src/config/schema.ts:1236 | 54 |
 | `patterns` | packages/core/src/config/schema.ts:1179 | 26 |
-| `pdf` | packages/core/src/config/schemas/render.ts:18 | 22 |
+| `pdf` | packages/core/src/config/schemas/render.ts:18 | 23 |
 | `peers` | packages/core/src/config/schema.ts:571 | 15 |
 | `performance` | packages/core/src/config/schema.ts:1628 | 32 |
 | `permitTtlMs` | packages/core/src/config/schema.ts:1552 | 2 |

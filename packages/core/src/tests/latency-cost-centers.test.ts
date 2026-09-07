@@ -97,6 +97,60 @@ describe("cost center 2 — single-deliverable relay", () => {
     expect(extractSingleRelayableDeliverable([{ role: "tool", content: wrapDelegate(DELIVERABLE, { state: "TASK FAILED." }) }], 1)).toBeNull();
   });
 
+  it("does not relay a staged BUILD LOG as the deliverable (session 00b3675d)", () => {
+    // What three of that session's five turns actually put in front of the user, after they
+    // asked what a subscription costs. Long enough to clear the 800-char floor and structured
+    // enough to clear the shape test below — structure is not the same question as substance.
+    const buildLog = [
+      "## Build progress — staged artifact",
+      "",
+      "The skeleton was written in pass one and each subsystem filled in its own iteration,",
+      "one edit_file call per marker, exactly as the staged-build directive requires.",
+      "",
+      "| # | Marker | Iteration | Status | Bytes written |",
+      "| --- | --- | --- | --- | --- |",
+      "| 1 | UNFINISHED_STUB: executive_summary | 2 | Filled | 1,204 |",
+      "| 2 | UNFINISHED_STUB: pricing_table | 3 | Filled | 2,918 |",
+      "| 3 | UNFINISHED_STUB: plan_comparison | 4 | Filled | 3,447 |",
+      "| 4 | UNFINISHED_STUB: cost_per_seat | 5 | Filled | 1,882 |",
+      "| 5 | UNFINISHED_STUB: enterprise_tiers | 6 | Filled | 2,061 |",
+      "| 6 | UNFINISHED_STUB: recommendation | 7 | Filled | 1,533 |",
+      "| 7 | UNFINISHED_STUB: sources | 8 | Filled | 964 |",
+      "| 8 | UNFINISHED_STUB: appendix | 9 | Filled | 1,275 |",
+      "| 9 | UNFINISHED_STUB: methodology | 10 | Filled | 1,690 |",
+      "| 10 | UNFINISHED_STUB: revision_history | 11 | Filled | 604 |",
+      "",
+      "All markers resolved across 13 iterations with edit_file, one subsystem per pass.",
+      "No marker remains in the file; read_file confirmed the document closes cleanly and",
+      "every section named in the skeleton now carries its final content.",
+      "",
+      "Final artifact: generated/openai_vs_anthropic_subscription_comparison.md (254 lines)",
+      "The document is complete and ready for review by the requesting user.",
+    ].join("\n");
+    // Guard the guard: a fixture under the length floor would be rejected for the wrong
+    // reason and this test would pass with the build-log check deleted.
+    expect(buildLog.length).toBeGreaterThan(800);
+    expect(extractSingleRelayableDeliverable([{ role: "tool", content: wrapDelegate(buildLog) }], 1)).toBeNull();
+  });
+
+  it("does not relay an artifact still carrying an unfilled marker", () => {
+    // The other thing the sentinel means: not a log about the build, but the build itself
+    // still saying it is unfinished. Neither may skip synthesis.
+    const halfBuilt = DELIVERABLE.replace(
+      "| BLE | 5.3 |",
+      "| BLE | UNFINISHED_STUB: radio_specs |",
+    );
+    expect(extractSingleRelayableDeliverable([{ role: "tool", content: wrapDelegate(halfBuilt) }], 1)).toBeNull();
+  });
+
+  it("still relays a genuine deliverable that happens to be table-heavy", () => {
+    // The guard keys on the system's own sentinel, not on tables — a real comparison table
+    // is exactly what this relay exists to pass through.
+    const relayed = extractSingleRelayableDeliverable([{ role: "tool", content: wrapDelegate(DELIVERABLE) }], 1);
+    expect(relayed).not.toBeNull();
+    expect(relayed).toContain("| Wi-Fi | Wi-Fi 6 |");
+  });
+
   it("does not relay when two delegate results are present in the batch", () => {
     const messages = [
       { role: "tool", content: wrapDelegate(DELIVERABLE) },

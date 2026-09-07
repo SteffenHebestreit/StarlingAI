@@ -1165,6 +1165,30 @@ const IDEMPOTENT_TOOLS = new Set<string>([
  * Callers that already hold an absolute path (runtime.ts, turn-corrective.ts) are
  * unaffected: an absolute path that exists is used as-is.
  */
+/**
+ * Artifact containers that cannot meaningfully be read as text. Everything else is read,
+ * because the unfinished-marker check below is a check on the artifact's own words rather
+ * than on its syntax, and prose formats carry it exactly as code formats do.
+ */
+const BINARY_ARTIFACT_RE = /\.(?:pdf|docx?|xlsx?|pptx?|zip|gz|tar|7z|rar|png|jpe?g|gif|webp|avif|bmp|ico|tiff?|svgz|mp[34]|wav|ogg|webm|mov|avi|woff2?|ttf|otf|eot|wasm|exe|dll|so|dylib|bin|db|sqlite3?)$/;
+
+/**
+ * Formats where the unfinished marker can only be the sentinel itself: the staged-build
+ * directive writes it as a statement that THROWS where it sits, so it is executable code
+ * rather than something the file could be discussing. Judged wherever such a file lives.
+ */
+const CODE_ARTIFACT_RE = /\.(?:html?|json|js|mjs|cjs|jsx|ts|tsx|css)$/;
+
+/**
+ * Whether a path sits inside the artifact zone. `generatedZoneRel()` documents that the TOP
+ * segment stays `generated` under every layout, which is what makes a segment test correct
+ * without knowing about per-user partitioning.
+ */
+function pathIsInsideArtifactZone(absPath: string): boolean {
+  const zone = generatedZoneRel();
+  return absPath.split(/[\\/]+/).includes(zone);
+}
+
 export function artifactFileLooksTruncated(artifact: Record<string, unknown>, workspaceRoot?: string): string | null {
   try {
     const rawPath = typeof artifact["path"] === "string" ? artifact["path"] : "";
@@ -1182,9 +1206,26 @@ export function artifactFileLooksTruncated(artifact: Record<string, unknown>, wo
       : absPath).toLowerCase();
     const isHtml = name.endsWith(".html") || name.endsWith(".htm");
     const isJson = name.endsWith(".json");
-    // Formats a staged build actually emits. Anything else stays unread, so the
-    // fail-open contract for unknown formats (and the read cost) is unchanged.
-    if (!isHtml && !isJson && !/\.(?:js|mjs|cjs|jsx|ts|tsx|css)$/.test(name)) return null;
+    // THE MARKER CHECK IS NOT A FORMAT RULE, and it used to sit behind one. The list held
+    // html/json/js/ts/css — "formats a staged build actually emits" — which was true while a
+    // staged build meant a web build. But isStagedArtifactBuildRun fires on tool capability
+    // and task size alone, so it fires just as readily on paper_author, whose entire output
+    // is Markdown. Session 00b3675d ran four such builds under generated/; their artifacts
+    // were .md, and this returned null for every one — "cannot be assessed", which the
+    // callers read as complete. scanForStubMarkers, the OTHER half of the same contract,
+    // reads every file it walks whatever its extension, so the resume path could see a
+    // marker the completeness verdict structurally could not.
+    //
+    // Widening it by extension alone would have cost the fail-open contract a prose file
+    // deserves: in a script the marker is a statement that throws, but in a document the
+    // same token can be the document TALKING about the convention (a plan that says "next
+    // up: UNFINISHED_STUB: physics" is not an unfinished artifact). So prose is judged by
+    // LOCATION instead — the rule scanForStubMarkers already states for itself, "a marker
+    // outside generated/ is prose about the convention, not a build". Inside the artifact
+    // zone a marker is the artifact; outside it, it is discussion.
+    if (BINARY_ARTIFACT_RE.test(name)) return null;
+    const markerIsAlwaysTheSentinel = CODE_ARTIFACT_RE.test(name);
+    if (!markerIsAlwaysTheSentinel && !pathIsInsideArtifactZone(absPath)) return null;
     const text = fs.readFileSync(absPath, "utf8");
     // Before any format rule: the artifact naming itself unfinished outranks the
     // artifact merely parsing. A skeleton whose subsystems were never filled is

@@ -20,6 +20,7 @@ import {
   looksLikeRawSharedFactsDump,
   looksLikeRawWorkspaceToolDump,
 } from "./runtime-evidence-dump.js";
+import { UNFINISHED_STUB_MARKER } from "./sub-agent-prompt-guidance.js";
 
 /**
  * Cost-center 2 (audit 5d51862f): a meta-reasoning preamble the specialist sometimes
@@ -108,6 +109,20 @@ export function extractSingleRelayableDeliverable(
     || looksLikeRawWorkspaceToolDump(evidence)
     || looksLikeOrchestrationOnlyEvidence(evidence)
   ) return null;
+  // A BUILD LOG IS NOT THE BUILD, and the shape test below cannot tell them apart —
+  // it asks whether the text is structured, not whether it is the answer. A staged
+  // build's progress table is extremely structured. Session 00b3675d relayed one to the
+  // user on three separate turns: ten rows of
+  // "| 1 | UNFINISHED_STUB: executive_summary | Filled |" followed by
+  // "Final artifact: … (254 lines)". Twelve table rows, so it sailed through as a
+  // presentable deliverable. The user had asked what a subscription costs.
+  //
+  // UNFINISHED_STUB_MARKER is the system's own sentinel, placed by the staged-build
+  // directive and already read back off disk by artifactFileLooksTruncated. Text carrying
+  // it is either a log ABOUT the artifact or an artifact still admitting it is unfinished.
+  // Neither is a finished deliverable, and neither may skip synthesis: returning null
+  // hands the turn back to the normal path, which summarises the real content instead.
+  if (evidence.includes(UNFINISHED_STUB_MARKER)) return null;
   const tableRows = (evidence.match(/^\s*\|.+\|\s*$/gm) ?? []).length;
   const headings = (evidence.match(/^#{1,6}\s/gm) ?? []).length;
   const bullets = (evidence.match(/^\s*[-*+]\s+\S/gm) ?? []).length;
