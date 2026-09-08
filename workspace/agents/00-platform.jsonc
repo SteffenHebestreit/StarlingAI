@@ -6,8 +6,19 @@
     },
     "defaults": {
       "model": {
-        "primary": "lmstudio/qwen/qwen3.6-35b-a3b",
-        "fallback": "lmstudio/qwen/qwen3.6-35b-a3b",
+        // DeepSeek V4 Flash (Q4 GGUF) on the dual Strix Halo box, fronted by llama-swap at
+        // 192.168.12.11:8080 (SAI_PRIMARY_MODEL_URL). The model id carries NO vendor segment:
+        // llama-swap routes on the bare id and answers "no router for requested model" for
+        // `deepseek/...` or `qwen/...`.
+        //
+        // THINKING CONTROL DIFFERS FROM QWEN, and none of the wave D/G measurements carry over.
+        // detectThinkingFamily sees "deepseek" and takes that branch, which sends
+        // `chat_template_kwargs.thinking` — a DIFFERENT key from the enable_thinking family's
+        // `enable_thinking`, and it sends no reasoning_effort at all. Whether this backend
+        // honours it is unmeasured; the routing tier below stays on qwen, where "none" IS
+        // measured to work.
+        "primary": "lmstudio/deepseek-v4-flash",
+        "fallback": "lmstudio/deepseek-v4-flash",
         // Qwen 3.8 replaced the on/off enable_thinking toggle with graded
         // reasoning_effort (none|low|medium|xhigh), and enable_thinking is IGNORED by
         // its template — measured on this server 2026-08-15, enable_thinking:false
@@ -68,7 +79,7 @@
         // model instead and make it cheap with reasoning_effort "none" (measured: 0
         // reasoning chars, the fastest configuration available).
         "tiers": {
-          "routing": "lmstudio/qwen/qwen3.6-35b-a3b"
+          "routing": "lmstudio/qwen3.6-35b-a3b"
         }
       }
     },
