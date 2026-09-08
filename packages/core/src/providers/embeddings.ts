@@ -767,6 +767,34 @@ export async function computeTextEmbeddings(texts: string[]): Promise<Array<Floa
   return results;
 }
 
+/**
+ * Qwen3-Embedding IS ASYMMETRIC, and we were using it symmetrically.
+ *
+ * The model card specifies that a QUERY carries an instruction and a DOCUMENT does not:
+ *
+ *   Instruct: {task description}
+ *   Query: {query}
+ *
+ * Corpus text is embedded bare. Qwen reports ~1-5% MTEB retrieval loss when the instruction is
+ * omitted, and the asymmetry is the point — instructing both sides, or neither, throws away the
+ * separation the model was trained to produce. Every call in this repo went through
+ * `provider.embed(text)` with no distinction, so queries and documents were embedded identically.
+ *
+ * Applied HERE and only here. getOrComputeQueryEmbedding is the query path; buildAgentIndex and
+ * computeTextEmbeddings are the corpus path and must stay bare — wrapping those would re-symmetrise
+ * it one layer down. The cache key is built from the RAW text, so the wrapper cannot fork the cache.
+ *
+ * Gated on the model actually being a Qwen3 embedding model: the format is that family's
+ * convention, and prepending it to a model that was not trained on it is just noise in the input.
+ */
+const QWEN3_EMBED_INSTRUCTION =
+  "Given a web search query, retrieve relevant passages that answer the query";
+
+export function wrapEmbeddingQueryForModel(text: string, model: string): string {
+  if (!/qwen\d*[-.]?\d*-?embedding/i.test(model)) return text;
+  return `Instruct: ${QWEN3_EMBED_INSTRUCTION}\nQuery: ${text}`;
+}
+
 async function getOrComputeQueryEmbedding(
   text: string,
   provider: LMStudioProvider,
@@ -775,7 +803,7 @@ async function getOrComputeQueryEmbedding(
   const normalized = normalizeSearchText(text);
   if (!normalized) {
     try {
-      const [vec] = await provider.embed([text], model);
+      const [vec] = await provider.embed([wrapEmbeddingQueryForModel(text, model)], model);
       return isDegenerateVector(vec) ? null : vec!;
     } catch (err) {
       recordEmbeddingFailure(err);
@@ -792,7 +820,7 @@ async function getOrComputeQueryEmbedding(
   if (inflight) return inflight;
   const promise = (async () => {
     try {
-      const [vec] = await provider.embed([text], model);
+      const [vec] = await provider.embed([wrapEmbeddingQueryForModel(text, model)], model);
       if (isDegenerateVector(vec)) return null; // miss, not a poisoned cache entry
       _queryVectorCache.set(cacheKey, { storedAt: Date.now(), vector: vec! });
       if (_queryVectorCache.size > QUERY_VECTOR_CACHE_MAX_ENTRIES) {
