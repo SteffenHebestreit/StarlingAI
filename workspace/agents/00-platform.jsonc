@@ -28,6 +28,27 @@
         // The model serves 262144 and is loaded at full context; 32768 was sized for
         // the previous 35B. Half the window leaves generous prefill headroom.
         "contextWindow": 131072,
+        // A SINGLE CALL'S OUTPUT BUDGET, STATED — because unstated means "the rest of the
+        // window". computeOutputTokenBudget derives max_tokens from contextWindow minus the
+        // prompt when maxTokens is absent, and no agent declared one: the orchestrator call in
+        // session 40dbcb5f was issued with max_tokens 106,912. At this box's measured decode
+        // rate that is 19-27 MINUTES of permitted generation, which is precisely how long that
+        // call ran before the client gave up. The model was not misbehaving; it had been told
+        // it could write 107k tokens.
+        //
+        // 32,000 is sized off what generation here actually costs, not off the window:
+        //   largest completion in 279 audited calls   6,838 tokens (128.8 s, finishReason stop)
+        //   second largest                            2,923
+        //   worst legitimate case this repo documents ~18,000 (a ~30 KB single-file artifact at
+        //     ~9K tokens plus a reasoning block "routinely as much again" — stream-budget.ts)
+        // So it clips nothing observed and nothing documented, and it is a BUDGET rather than a
+        // clock: a contended GPU takes longer for the same answer instead of having it cut off.
+        //
+        // It is not a guillotine either. finishReason "length" routes into
+        // continueLengthLimitedResponse (MAX_LENGTH_CONTINUATION_ATTEMPTS = 2), so a legitimately
+        // long answer is stitched across up to three calls while a runaway is re-decided twice
+        // instead of streaming unchecked to the end of the context window.
+        "maxTokens": 32000,
         // temperature/topP are deliberately UNSET so the provider applies Qwen's
         // published per-mode sampling (recommendedQwenSampling): 1.0/0.95 for
         // thinking, 0.7/0.80 for reasoning_effort "none". Pinning topP here defeats
