@@ -719,6 +719,20 @@ export async function computeQueryEmbedding(text: string): Promise<Float32Array 
 }
 
 /**
+ * The same embedding, for a SEARCH QUERY being matched against a bare-embedded passage corpus.
+ * This is the only path that gets the Qwen3 instruct prefix — see wrapEmbeddingQueryForModel
+ * for why the distinction is not cosmetic.
+ *
+ * Use it when the corpus is prose that ANSWERS the query (durable memory records, the pgvector
+ * document store). Do NOT use it to embed corpus text, to compare two queries with each other,
+ * or to rank structured capability metadata such as agent or tool descriptions.
+ */
+export async function computeRetrievalQueryEmbedding(text: string): Promise<Float32Array | null> {
+  if (!_available || !_lastProvider || !_embeddingModel) return null;
+  return getOrComputeQueryEmbedding(text, _lastProvider, _embeddingModel, true);
+}
+
+/**
  * Batched, cache-aware embedding for a set of texts (e.g. retrieval candidates
  * that have no stored vector, such as session shared-facts or agent lessons).
  * Cached vectors are returned from the same query-vector cache; every uncached
@@ -780,9 +794,23 @@ export async function computeTextEmbeddings(texts: string[]): Promise<Array<Floa
  * separation the model was trained to produce. Every call in this repo went through
  * `provider.embed(text)` with no distinction, so queries and documents were embedded identically.
  *
- * Applied HERE and only here. getOrComputeQueryEmbedding is the query path; buildAgentIndex and
- * computeTextEmbeddings are the corpus path and must stay bare — wrapping those would re-symmetrise
- * it one layer down. The cache key is built from the RAW text, so the wrapper cannot fork the cache.
+ * OPT-IN, and that is the whole point. An earlier version applied this inside
+ * getOrComputeQueryEmbedding on the grounds that it "is the query path". It is not: the same
+ * function embeds CORPUS text at vector-store.ts vectorUpsert/vectorUpsertMany and at
+ * trajectory-cache.ts, so the unconditional version prefixed documents with the query
+ * instruction — precisely the re-symmetrisation this note warns about, one call away.
+ *
+ * Measured on the serving cluster, corpus bare in both arms:
+ *   query -> passage (memory records, document store)   separation 0.1798 -> 0.2345, 6/6 rank-1
+ *   query -> agent capability blob (agent routing)      0.6923 -> 0.4126 on the weather query;
+ *                                                        threshold clears 2/8 -> 0/8
+ * So it belongs on exactly the case its instruction string names — retrieving PASSAGES that
+ * answer a query — and nowhere else. Structured capability metadata is not a passage, and
+ * agent routing gates on an ABSOLUTE score, which the prefix shifts down across the board.
+ *
+ * Reach it through computeRetrievalQueryEmbedding. Everything else keeps computeQueryEmbedding
+ * and stays bare, including both sides of a query-to-query comparison such as the trajectory
+ * cache. The flag is part of the cache key, so the two forms cannot collide.
  *
  * Gated on the model actually being a Qwen3 embedding model: the format is that family's
  * convention, and prepending it to a model that was not trained on it is just noise in the input.
@@ -799,18 +827,24 @@ async function getOrComputeQueryEmbedding(
   text: string,
   provider: LMStudioProvider,
   model: string,
+  asRetrievalQuery = false,
 ): Promise<Float32Array | null> {
+  const prepared = asRetrievalQuery ? wrapEmbeddingQueryForModel(text, model) : text;
   const normalized = normalizeSearchText(text);
   if (!normalized) {
     try {
-      const [vec] = await provider.embed([wrapEmbeddingQueryForModel(text, model)], model);
+      const [vec] = await provider.embed([prepared], model);
       return isDegenerateVector(vec) ? null : vec!;
     } catch (err) {
       recordEmbeddingFailure(err);
       return null;
     }
   }
-  const cacheKey = `${model}::${normalized}`;
+  // The flag is PART OF THE KEY. It stopped being safe to key on raw text alone the moment the
+  // wrapper became conditional: the same string embedded bare (corpus, agent routing) and
+  // wrapped (passage retrieval) produces two different vectors, and a shared key would hand one
+  // caller the other's — silently, with a plausible-looking similarity score.
+  const cacheKey = `${model}::${asRetrievalQuery ? "q" : "raw"}::${normalized}`;
   const cached = _queryVectorCache.get(cacheKey);
   if (cached && Date.now() - cached.storedAt <= QUERY_VECTOR_CACHE_TTL_MS) {
     return cached.vector;
@@ -820,7 +854,7 @@ async function getOrComputeQueryEmbedding(
   if (inflight) return inflight;
   const promise = (async () => {
     try {
-      const [vec] = await provider.embed([wrapEmbeddingQueryForModel(text, model)], model);
+      const [vec] = await provider.embed([prepared], model);
       if (isDegenerateVector(vec)) return null; // miss, not a poisoned cache entry
       _queryVectorCache.set(cacheKey, { storedAt: Date.now(), vector: vec! });
       if (_queryVectorCache.size > QUERY_VECTOR_CACHE_MAX_ENTRIES) {

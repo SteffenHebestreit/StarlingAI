@@ -17,7 +17,7 @@
  */
 import pg from "pg";
 import { childLogger } from "../logger.js";
-import { computeQueryEmbedding } from "../providers/embeddings.js";
+import { computeQueryEmbedding, computeRetrievalQueryEmbedding } from "../providers/embeddings.js";
 
 const log = childLogger("db:vector-store");
 const { Pool } = pg;
@@ -261,7 +261,9 @@ export async function vectorSearch(
   const pool = getPool();
   if (!pool) return null;
 
-  const vec = typeof query === "string" ? await computeQueryEmbedding(query) : query;
+  // Retrieval query. vectorUpsert embeds stored content through computeQueryEmbedding, which
+  // stays BARE — so wrapping here is what creates the asymmetry the model was trained on.
+  const vec = typeof query === "string" ? await computeRetrievalQueryEmbedding(query) : query;
   if (!vec || vec.length !== _dim) return null;
 
   const k = Math.max(1, Math.min(MAX_K, opts.k ?? 8));

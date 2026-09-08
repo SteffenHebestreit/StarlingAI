@@ -10,7 +10,7 @@ import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
 import { deploymentWorkspaceRoot } from "../tools/workspace-path.js";
 import { logAudit } from "../audit/logger.js";
-import { isEmbeddingAvailable, computeQueryEmbedding, computeTextEmbeddings, cosineSimilarity } from "../providers/embeddings.js";
+import { isEmbeddingAvailable, computeQueryEmbedding, computeRetrievalQueryEmbedding, computeTextEmbeddings, cosineSimilarity } from "../providers/embeddings.js";
 
 import { PRODUCT } from "../product/index.js";
 import { userScopedDir } from "../runtime/user-scope.js";
@@ -235,7 +235,9 @@ export async function searchMemoryRecords(
   // records that have a stored vector.  Cheap — no per-record model calls.
   let queryVec: Float32Array | null = null;
   if (normalizedQuery && isEmbeddingAvailable()) {
-    try { queryVec = await computeQueryEmbedding(normalizedQuery); } catch { queryVec = null; }
+    // Retrieval query: the corpus (_refreshDurableEmbedding, computeTextEmbeddings) is
+    // embedded bare, so this is the asymmetric half and takes the instruct prefix.
+    try { queryVec = await computeRetrievalQueryEmbedding(normalizedQuery); } catch { queryVec = null; }
   }
 
   // Backfill embeddings for candidates that have no stored vector — primarily

@@ -13,13 +13,25 @@ import { wrapEmbeddingQueryForModel } from "../providers/embeddings.js";
  * with no distinction, so queries and documents were encoded identically and the separation the
  * model was trained to produce was discarded.
  *
- * MEASURED, and reported honestly: on AGENT ROUTING this changes nothing. Against the live
- * 49-agent corpus with 20 unambiguous routing queries, bare and instructed scored identically —
- * 18/20 top-1, MRR 0.950, same ranking on every query. That task is easy (short, highly
- * distinctive descriptions) and was already near ceiling. The wrapper is kept because it is the
- * documented contract for this model and because the long-passage retrieval paths (shared facts,
- * memory, document RAG) are where the asymmetry is supposed to pay — not on the strength of a
- * routing improvement that was looked for and not found.
+ * THE ORIGINAL NOTE HERE SAID "on AGENT ROUTING this changes nothing — 18/20 top-1, MRR 0.950,
+ * same ranking on every query". That measurement was real but it measured the WRONG QUANTITY.
+ * It compared RANKING. Agent routing does not gate on ranking; it gates on an ABSOLUTE score
+ * (agent-routing.ts:94, floor 0.72 against the rescaled (cos+1)/2), and the instruction shifts
+ * absolute cosine down hard while leaving the order roughly intact — which is exactly why a
+ * ranking-only eval saw nothing:
+ *
+ *   web_task_coordinator vs "weather forecast for tomorrow current conditions"
+ *     bare     cos 0.6923 -> 0.8461  >= 0.72  qualifies
+ *     wrapped  cos 0.4118 -> 0.7059  <  0.72  zeroed, and dropped before the visible gate
+ *
+ * Session b9d9cf01 is what that cost: 0 of 49 agents matched a query that is nearly verbatim
+ * web_task_coordinator's own description, and a weather question was misrouted to researcher.
+ *
+ * The wrapper is KEPT, because on the task its instruction string actually names — a query
+ * against passages that answer it — it measurably pays: mean separation 0.1798 -> 0.2345 over
+ * six query/passage pairs, 6/6 rank-1. It is now reached only through
+ * computeRetrievalQueryEmbedding. Where it must NOT go, and why, is asserted behaviourally in
+ * embedding-query-asymmetry.test.ts.
  */
 describe("Qwen3-Embedding query instruction", () => {
   const QWEN = "text-embedding-qwen3-embedding-0.6b";
@@ -56,17 +68,37 @@ describe("Qwen3-Embedding query instruction", () => {
     }
   });
 
-  it("is applied to the query path only — the corpus must stay bare", async () => {
-    // Instructing BOTH sides re-symmetrises the encoding and throws away the separation, so this
-    // pins the boundary: buildAgentIndex and computeTextEmbeddings embed corpus text and must not
-    // route through the wrapper.
+  it("never reaches the corpus builders", async () => {
+    // Instructing BOTH sides re-symmetrises the encoding and throws away the separation this
+    // exists to create. The previous version of this test also counted call sites and required
+    // at least three; that number encoded the UNCONDITIONAL application which is the very thing
+    // that broke agent routing, so it is gone. The boundary it was reaching for — corpus text
+    // never passes through the wrapper — is what is asserted here, and the behavioural contract
+    // (which paths instruct and which do not) lives in embedding-query-asymmetry.test.ts.
     const src = await import("node:fs").then((fs) =>
       fs.readFileSync("src/providers/embeddings.ts", "utf8"));
-    const wrapped = [...src.matchAll(/wrapEmbeddingQueryForModel\(/g)].length;
-    // one definition, one export-site reference in the doc comment path, two call sites
-    expect(wrapped).toBeGreaterThanOrEqual(3);
-    // The corpus builders must not mention it.
-    const corpusRegion = src.slice(src.indexOf("async function buildAgentIndexInner"), src.indexOf("export async function searchByEmbedding"));
-    expect(corpusRegion).not.toContain("wrapEmbeddingQueryForModel");
+
+    // The anchors are asserted to EXIST first. The previous version searched for
+    // "async function buildAgentIndexInner" — the real name is _buildAgentIndexInner, with a
+    // leading underscore — so indexOf returned -1, the slice came back empty, and
+    // "".not.toContain(...) passed without ever reading the corpus builder.
+    // One anchor, not two: the body runs to the next top-level export. Naming a second anchor
+    // is how the original went wrong — it is one rename away from silently selecting nothing.
+    const bodyOf = (declaration: string): string => {
+      const start = src.indexOf(declaration);
+      expect(start, `declaration not found: ${declaration}`).toBeGreaterThan(-1);
+      const next = src.indexOf("\nexport ", start + declaration.length);
+      const body = src.slice(start, next === -1 ? src.length : next);
+      expect(body.length, `empty body for: ${declaration}`).toBeGreaterThan(declaration.length);
+      return body;
+    };
+
+    // Both corpus paths: the agent index builder and the batch text embedder.
+    for (const declaration of [
+      "async function _buildAgentIndexInner",
+      "export async function computeTextEmbeddings",
+    ]) {
+      expect(bodyOf(declaration)).not.toContain("wrapEmbeddingQueryForModel");
+    }
   });
 });
