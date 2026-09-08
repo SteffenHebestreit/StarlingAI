@@ -123,6 +123,30 @@ export interface QaDeliveryDeps {
   strict?: boolean;
 }
 
+/**
+ * Whether the reviewer must be ASKED to ground its PASS in a concrete fact.
+ *
+ * Three flags demand it, and the third is the one that was missing. `qaEvidenceRequired` asks
+ * for it directly. `qaToolJudge` implies it, because an uninspected bare PASS from a judge that
+ * never opened the artifact is exactly the rubber stamp the judge exists to prevent. And
+ * `qaStrictVerdicts` implies it most sharply of all: strict's whole contract is that a PASS
+ * carrying no verifiable evidence is not trusted — so a strict deployment that never REQUESTS
+ * evidence instructs its reviewer to "reply exactly: PASS", then downgrades that bare PASS to
+ * `unverified` and caveats the answer. Every pass. The caveat becomes a constant, and a constant
+ * warning is indistinguishable from no warning at all.
+ *
+ * Measured live (2026-09-08, same prompt, 4 runs per arm): strict alone caveated 3 of 4, every
+ * one `status=unverified, rounds=0`; strict with the request caveated 0 of 4 — two evidence-backed
+ * passes and one true FAIL that repaired a fabricated release into an honest gap.
+ */
+export function qaRequiresEvidence(flags: {
+  requireEvidence?: boolean;
+  qaToolJudge?: boolean;
+  qaStrictVerdicts?: boolean;
+}): boolean {
+  return flags.requireEvidence === true || flags.qaToolJudge === true || flags.qaStrictVerdicts === true;
+}
+
 export interface QaDeliveryResult {
   /** The answer to deliver (improved if any round helped, else the original). */
   answer: string;

@@ -18,7 +18,7 @@ Every public schema field, where it is declared, and how many production files r
 | `admin` | packages/core/src/config/schema.ts:357 | 21 |
 | `agents` | packages/core/src/config/schema.ts:1571 | 130 |
 | `alertmanager` | packages/core/src/config/schema.ts:1038 | 1 |
-| `all` | packages/core/src/config/schema.ts:1176 | 217 |
+| `all` | packages/core/src/config/schema.ts:1176 | 218 |
 | `allowedAgents` | packages/core/src/config/schema.ts:1190 | 27 |
 | `allowedUserIds` | packages/core/src/config/schemas/channels.ts:11 | 5 |
 | `allowedUsers` | packages/core/src/config/schema.ts:779 | 10 |
@@ -338,9 +338,9 @@ Every public schema field, where it is declared, and how many production files r
 | `qaDeliveryLoopMaxRounds` | packages/core/src/config/schemas/orchestration.ts:305 | 1 |
 | `qaDeterministicProbes` | packages/core/src/config/schemas/orchestration.ts:335 | 1 |
 | `qaEvidenceAnchoring` | packages/core/src/config/schemas/effort.ts:48 | 3 |
-| `qaEvidenceRequired` | packages/core/src/config/schemas/orchestration.ts:321 | 4 |
+| `qaEvidenceRequired` | packages/core/src/config/schemas/orchestration.ts:321 | 5 |
 | `qaStrictVerdicts` | packages/core/src/config/schemas/orchestration.ts:329 | 2 |
-| `qaToolJudge` | packages/core/src/config/schemas/orchestration.ts:362 | 2 |
+| `qaToolJudge` | packages/core/src/config/schemas/orchestration.ts:362 | 3 |
 | `quorumEarlySynthesis` | packages/core/src/config/schemas/orchestration.ts:573 | 2 |
 | `quorumFraction` | packages/core/src/config/schemas/orchestration.ts:576 | 1 |
 | `quorumStragglerGraceMs` | packages/core/src/config/schemas/orchestration.ts:579 | 1 |

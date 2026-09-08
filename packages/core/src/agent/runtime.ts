@@ -13,7 +13,7 @@ import { markOrchestratorActivity, markOrchestratorIdle } from "./cache-warmer.j
 import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type SwarmState, type ToolContext } from "../tools/registry.js";
 import { isToolAllowed } from "../guardrails/tool-tiers.js";
 import { loadTurnPlan, clearTurnPlanForSession, decidePlanContinuation, renderPlanContinuationDirective } from "./turn-plan.js";
-import { runQaDeliveryLoop, parseQaVerdict, resolveQaVerdictStatus, type QaVerdict, type QaVerdictStatus } from "./qa-delivery-loop.js";
+import { runQaDeliveryLoop, parseQaVerdict, resolveQaVerdictStatus, qaRequiresEvidence, type QaVerdict, type QaVerdictStatus } from "./qa-delivery-loop.js";
 import {
   buildDeliverableConsistencyCheckMessages,
   buildDeliverableConsistencyRepairInstruction,
@@ -4730,7 +4730,27 @@ async function runQaDeliveryGate(
   // Enabling qaToolJudge forces evidence discipline on its OWN: an uninspected bare PASS from the
   // judge must still be downgraded to unverified, which previously only happened if the separate
   // qaEvidenceRequired flag was also on — contradicting the judge's contract. OR them here.
-  const effectiveRequireEvidence = requireEvidence || qaToolJudgeOn;
+  //
+  // qaStrictVerdicts belongs in the same OR, for the same reason and more sharply: strict's entire
+  // contract is "a PASS carrying no verifiable evidence is not trusted". Without evidence being
+  // REQUESTED, the reviewer is instructed to "reply exactly: PASS" — so every pass is bare by
+  // construction, every bare pass is downgraded to unverified, and the user is told that every
+  // answer is unconfirmed. The caveat then carries no information: it is a constant.
+  //
+  // Measured on this deployment, same prompt, 4 runs per arm (2026-09-08). Strict WITHOUT the
+  // evidence request: 3 of 4 shipped the caveat, every one of them `status=unverified, rounds=0`
+  // — a rubber stamp downgraded, not a finding; one of those answers carried exact versions,
+  // release dates and two source URLs from 33 gathering calls and was still stamped "the QA check
+  // did NOT confirm this answer against concrete evidence". Strict WITH it: 0 of 4 caveated —
+  // two evidence-backed passes, and one genuine FAIL that ran 2 repair rounds and replaced a
+  // fabricated release with an honest "not provided in current evidence". Turning the caveat off
+  // would have hidden the symptom; asking for the evidence it demands is what makes it mean
+  // something.
+  const effectiveRequireEvidence = qaRequiresEvidence({
+    requireEvidence,
+    qaToolJudge: qaToolJudgeOn,
+    qaStrictVerdicts: effectiveOrchestration().qaStrictVerdicts,
+  });
   let artifactProbeStatus: ArtifactProbeStatus = qaToolJudgeOn ? "not_applicable" : "not_requested";
   let artifactProbeCount = 0;
   const toolJudgeCheck = async (current: string, crit: string[], refs: QaJudgeArtifactRef[]): Promise<QaVerdict> =>

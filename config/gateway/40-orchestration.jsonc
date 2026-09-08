@@ -22,6 +22,12 @@
     // QA-confirmed. Enabled here because this deployment's qaDeliveryLoop is otherwise
     // experimental-without-labeling; committed pass^5 baseline: eval/baselines/
     // agent-fable-root-pass5.json (2026-07-16). Schema default remains OFF.
+    // Without this, the reviewer is instructed to "reply exactly: PASS" — and qaStrictVerdicts
+    // then treats that bare PASS as untrustworthy, so EVERY pass is caveated. Measured on this
+    // deployment: a 33-tool answer carrying exact versions, dates and two source URLs shipped
+    // under "the QA check did NOT confirm this answer against concrete evidence". Asking the
+    // reviewer to ground its PASS is what makes the tri-state mean anything.
+    "qaEvidenceRequired": true,
     "qaStrictVerdicts": true,
     // QA-304: deterministic artifact probes before the QA verdict — objective
     // FAILs for truncated/broken/dead artifacts, receipts for valid ones. No

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { runQaDeliveryLoop, parseQaVerdict, verdictHasEvidence, type QaDeliveryDeps } from "../agent/qa-delivery-loop.js";
+import { runQaDeliveryLoop, parseQaVerdict, verdictHasEvidence, type QaDeliveryDeps, qaRequiresEvidence} from "../agent/qa-delivery-loop.js";
 
 const CRITERIA = ["names a winner", "cites sources"];
 
@@ -267,3 +267,43 @@ describe("runQaDeliveryLoop — no-PASS-without-evidence invariant (qaEvidenceRe
     expect(r.unverified).toBe(false);
   });
 });
+
+/**
+ * Strict verdicts must ASK for what they refuse to trust.
+ *
+ * Measured on the deployment (2026-09-08, same prompt, 4 runs per arm). Strict on, evidence not
+ * requested: 3 of 4 answers shipped the "the QA check did NOT confirm this answer against
+ * concrete evidence" caveat, and every one of those verdicts was `status=unverified, rounds=0`
+ * — the reviewer was told to "reply exactly: PASS", said PASS, and was downgraded for obeying.
+ * One of the caveated answers carried exact versions, release dates and two source URLs from 33
+ * gathering calls. Strict on WITH evidence requested: 0 of 4 caveated — two evidence-backed
+ * passes, and one real FAIL whose two repair rounds replaced a fabricated Redis release with an
+ * honest "not provided in current evidence".
+ */
+describe("qaRequiresEvidence — strict implies the evidence request", () => {
+  it("asks for evidence whenever strict verdicts are on", () => {
+    expect(qaRequiresEvidence({ qaStrictVerdicts: true })).toBe(true);
+  });
+
+  it("still honours the two flags that already implied it", () => {
+    expect(qaRequiresEvidence({ requireEvidence: true })).toBe(true);
+    expect(qaRequiresEvidence({ qaToolJudge: true })).toBe(true);
+  });
+
+  it("asks for nothing when no flag demands it — the legacy path is unchanged", () => {
+    expect(qaRequiresEvidence({})).toBe(false);
+    expect(qaRequiresEvidence({ requireEvidence: false, qaToolJudge: false, qaStrictVerdicts: false })).toBe(false);
+  });
+
+  it("never lets strict run without the request — the combination that caveats every pass", () => {
+    // The defect, stated as an invariant: there is no flag combination in which the loop
+    // downgrades a bare PASS while the reviewer was never asked to supply a ground.
+    for (const requireEvidence of [true, false]) {
+      for (const qaToolJudge of [true, false]) {
+        const flags = { requireEvidence, qaToolJudge, qaStrictVerdicts: true };
+        expect(qaRequiresEvidence(flags)).toBe(true);
+      }
+    }
+  });
+});
+

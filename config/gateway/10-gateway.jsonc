@@ -22,9 +22,17 @@
       // turns. A direct answer pays a ~half-size prompt; delegation tools + the
       // honesty/core sections stay regardless. Validating routing quality here.
       "splitOrchestrationPrompt": true,
-      // Keep the orchestrator base-prompt KV prefix warm during idle so the first
-      // turn after boot / a delegating turn doesn't pay the cold prefill.
-      "promptCacheWarmKeeper": true
+      // OFF: measured 2026-09-08, it warms a shape no turn sends. The warm-up fires
+      // complete([system: leanBase, user: "."], []) — an EMPTY tools array — at 3,439
+      // prompt tokens, while every orchestrator turn carries the 36-tool block at ~13,700.
+      // The server renders tools at/before the system text, so the warmed prefix is not a
+      // prefix of the real one. Probed against the serving model: the real TOOLS shape took
+      // 21.83s cold, 21.46s straight after the tool-less warm, and 0.42s after one identical
+      // TOOLS call — i.e. the warm-up buys 0.4s of 21.8s, while a real warm is 52x. Live
+      // audit agrees: with this ON, a first turn still paid a 21.3s TTFT, and the warmer
+      // itself burned ~4.4s of GPU per idle window. Re-enable only alongside warming the
+      // tool block too, which is what would actually have to change.
+      "promptCacheWarmKeeper": false
     }
   },
   "gateway": {
