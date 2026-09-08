@@ -313,3 +313,39 @@ export function shouldDeferDeadline(live: {
   return live.msSinceLastProgress !== undefined
     && live.msSinceLastProgress < (live.progressWindowMs ?? DEADLINE_LIVENESS_RECHECK_MS);
 }
+
+/**
+ * How much of the deadline to hold back so the run can WRITE ITS ANSWER.
+ *
+ * The reserve is a promise — leave enough time for one final synthesis call — and it was kept
+ * by a constant: `max(30s, min(75s, budget * 0.33))`. A constant only keeps that promise on a
+ * model as fast as the constant assumed. Its own code comment said as much: the 75 s ceiling
+ * was chosen so synthesis could fire "even when the last tool round took 30-40 s".
+ *
+ * Session 3f15dc63 is what it costs when one call is slower than the whole reserve. A
+ * "what is the weather tomorrow" turn: researcher held the complete forecast in shared facts
+ * at 528 s, entered synthesis with 75 s reserved, and its synthesis call spent 121.8 s in
+ * PREFILL ALONE (159.5 s total, an 18,140-token prompt on deepseek-v4-flash, which cannot
+ * reuse KV state at all). The reserve expired mid-prefill, the agent hit its hard deadline and
+ * returned `partial`, and the parent coordinator then burned another 283.9 s re-synthesising an
+ * answer that already existed. Turn total 20.1 minutes; the answer was ready at 8.8.
+ *
+ * So the floor comes from the run's OWN measurement — the slowest model call it has already
+ * made — rather than from a guess about the deployment. A fast backend is unaffected (its calls
+ * sit far below 75 s, so the old value still wins) and a slow one reserves what it actually
+ * needs. The 25% headroom is because the synthesis prompt is the largest the run will send: it
+ * carries every tool result the research phase gathered.
+ *
+ * The 60% ceiling is the counterweight. Past that the reserve eats the work it exists to
+ * summarise, and an agent that cannot fit both its research and one synthesis call inside its
+ * deadline has a deadline problem, not a reserve problem — that belongs in turnTimeoutMs.
+ */
+export function resolveSynthesisReserveMs(input: {
+  turnTimeoutMs: number;
+  /** Longest single model call observed in THIS run. 0 before the first call returns. */
+  slowestModelCallMs: number;
+}): number {
+  const constantFloor = Math.max(30_000, Math.min(75_000, Math.round(input.turnTimeoutMs * 0.33)));
+  const observedFloor = Math.round(Math.max(0, input.slowestModelCallMs) * 1.25);
+  return Math.min(Math.round(input.turnTimeoutMs * 0.6), Math.max(constantFloor, observedFloor));
+}

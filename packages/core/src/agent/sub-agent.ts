@@ -97,7 +97,7 @@ import { generatedZoneRel, resolveWorkspaceWritePath } from "../tools/workspace-
 import { buildArtifactTextPreview } from "../tools/artifact-preview.js";
 import { checkBuiltPage } from "../tools/page-check.js";
 import { mergeAgentModelOverride, applyEffortModelOverlay, applyStreamCapOverlay } from "./sub-agent-model-config.js";
-import { resolveTurnBudgetMs, resolveTimeRemainingMs, DEADLINE_LIVENESS_RECHECK_MS, STREAM_HEARTBEAT_CHARS, shouldDeferDeadline } from "./sub-agent-turn-budget.js";
+import { resolveSynthesisReserveMs, resolveTurnBudgetMs, resolveTimeRemainingMs, DEADLINE_LIVENESS_RECHECK_MS, STREAM_HEARTBEAT_CHARS, shouldDeferDeadline } from "./sub-agent-turn-budget.js";
 import {
   extractInfraFailureSignature,
   liveToolFamily,
@@ -2875,6 +2875,9 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // I11: Pre-emptive soft-deadline synthesis tracking. We fire the
     // soft-deadline synthesis at most once per sub-agent run.
     let softDeadlineSynthesisAttempted = false;
+    /** The longest single model call this run has made, used to size the synthesis reserve
+     *  from the deployment's real latency instead of a constant. See the reserve below. */
+    let slowestModelCallMs = 0;
     // Long-running generation soft thresholds — the point past which the run
     // is SURFACED (non-blocking) to the operator dock. Static now that the
     // handoff no longer pauses for an operator "continue" grant.
@@ -4204,7 +4207,27 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         // a couple of seconds before the hard wall. A larger reservation
         // gives the synthesis pass a real chance to fire even when the
         // last tool round took 30-40s.
-        const reservedSynthesisMs = Math.max(30_000, Math.min(75_000, Math.round(turnTimeoutMs * 0.33)));
+        //
+        // THAT LAST SENTENCE IS THE BUG, and it is a constant sized for a model this
+        // deployment no longer runs. The reserve is a promise — "keep enough time to write
+        // the answer" — and 75 s cannot keep it when one call costs more than 75 s.
+        //
+        // Session 3f15dc63, a "what is the weather tomorrow" turn: researcher had the whole
+        // forecast in shared facts at 528 s, entered synthesis with 75 s reserved, and its
+        // synthesis call spent 121.8 s in PREFILL ALONE (159.5 s total, 18,140-token prompt on
+        // deepseek-v4-flash, which cannot reuse KV state). The reserve expired mid-prefill, the
+        // agent hit its hard deadline, returned `partial`, and the parent coordinator then spent
+        // a further 283.9 s re-synthesising an answer that already existed. The turn took
+        // 20.1 minutes; the answer was ready at 8.8.
+        //
+        // So size it from what a call ACTUALLY costs here. slowestModelCallMs is this run's own
+        // measurement, so a fast deployment keeps the old 75 s behaviour (its calls are far
+        // quicker) and a slow one reserves what it needs, with 25% headroom because the
+        // synthesis prompt is the largest one the run will send. Bounded at 60% of the budget:
+        // past that the reserve would eat the work it exists to summarise, and an agent that
+        // cannot fit both research and one synthesis call inside its deadline has a deadline
+        // problem, not a reserve problem.
+        const reservedSynthesisMs = resolveSynthesisReserveMs({ turnTimeoutMs, slowestModelCallMs });
         // Reserve the window before the deadline that is REAL, which is the one the liveness
         // probe has been moving. Measuring against the original budget wraps up a run the
         // supervisor has explicitly judged to be working.
@@ -4522,6 +4545,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         streamInFlight = Boolean(provider.completeViaStream);
         lastStreamProgressAt = Date.now();
         lastHeartbeatChars = 0;
+        const modelCallStartedAt = Date.now();
         response = provider.completeViaStream
           ? await provider.completeViaStream(messages, effectiveTools, llmSignal, {
               // Cheap observation so the loop threshold can be fitted from real runs
@@ -4564,6 +4588,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
                 || longRunningGenerationManager.isTurnUnbounded(subSessionId),
             })
           : await provider.complete(messages, effectiveTools, llmSignal);
+        // WHAT ONE CALL COSTS HERE, observed rather than assumed. The synthesis reserve
+        // below is a deadline promise — "leave enough time to write the answer" — and a
+        // promise sized by a constant is only kept on a model as fast as the constant.
+        slowestModelCallMs = Math.max(slowestModelCallMs, Date.now() - modelCallStartedAt);
         // The stream is done; from here until the next one starts there is no generation
         // to be alive, so recency must stop voting. Without this a run that finished its
         // last completion would defer its deadline forever on a stale timestamp.
