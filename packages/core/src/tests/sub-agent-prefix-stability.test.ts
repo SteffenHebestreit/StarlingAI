@@ -61,6 +61,7 @@ const TASK_REVENUE = "Summarise the quarterly revenue spreadsheet and reconcile 
 
 interface Captured {
   head: string;
+  userTurn: string;
   tail: string;
   rerankKey: string | undefined;
   promptChars: number;
@@ -120,8 +121,10 @@ describe("sub-agent prompt prefix is stable across tasks", () => {
     (await import("../config/loader.js")).resetConfigForTests();
 
     let systemMessages: string[] = [];
+    let userTurn = "";
     completeMock.mockImplementation((messages: Array<{ role: string; content: string }>) => {
       systemMessages = messages.filter((m) => m.role === "system").map((m) => m.content);
+      userTurn = messages.find((m) => m.role === "user")?.content ?? "";
       return {
         content: "Done.",
         tool_calls: [],
@@ -140,6 +143,7 @@ describe("sub-agent prompt prefix is stable across tasks", () => {
 
     return {
       head: systemMessages[0] ?? "",
+      userTurn,
       tail: systemMessages.slice(1).join("\n\n"),
       rerankKey: rerankSpy.mock.calls.at(-1)?.[0] as string | undefined,
       promptChars: result.stats.promptChars,
@@ -167,14 +171,25 @@ describe("sub-agent prompt prefix is stable across tasks", () => {
     expect(head).not.toContain("rollback");
   });
 
-  it("still DELIVERS the retrieved guidance, after the history", async () => {
+  it("still DELIVERS the retrieved guidance, with the task", async () => {
     const dir = makeWorkspace();
-    const { tail } = await run(TASK_NGINX, dir);
+    const { userTurn } = await run(TASK_NGINX, dir);
 
     // Guards the lazy version of this fix: deleting the guidance would also make the head
     // stable, and would silently drop what the agent had learned.
-    expect(tail).toContain("Learned Flow Guidance");
-    expect(tail).toContain("nginx");
+    expect(userTurn).toContain("Learned Flow Guidance");
+    expect(userTurn).toContain("nginx");
+  });
+
+  it("does NOT put run-constant context in a trailing message", async () => {
+    const dir = makeWorkspace();
+    const { tail } = await run(TASK_NGINX, dir);
+
+    // A trailing message sits behind a history that grows every iteration, so anything
+    // constant for the run would be re-prefilled on EVERY call — up to maxIterations times.
+    // That recurrence can exceed the single cold head+tool prefill this change saves, which
+    // is why the context rides with history[0] instead. The tail is for per-iteration nudges.
+    expect(tail).not.toContain("Learned Flow Guidance");
   });
 
   it("retrieves DIFFERENT guidance per task — so the fixture really discriminates", async () => {
@@ -184,19 +199,27 @@ describe("sub-agent prompt prefix is stable across tasks", () => {
 
     // Without this, the head could be identical merely because nothing was ever retrieved,
     // and the first test would pass against the unfixed code too.
-    expect(a.tail).not.toBe(b.tail);
-    expect(a.tail).toContain("nginx");
-    expect(b.tail).toContain("revenue");
+    //
+    // Compare ONLY the retrieved block. Asserting on the whole user turn is vacuous here: the
+    // turn also carries the task, and the tasks themselves contain "nginx" and "revenue", so
+    // `toContain("nginx")` passes with the retrieval deleted entirely.
+    const guidanceOf = (turn: string): string => {
+      const start = turn.indexOf("## Learned Flow Guidance");
+      return start === -1 ? "" : turn.slice(start);
+    };
+    expect(guidanceOf(a.userTurn)).not.toBe("");
+    expect(guidanceOf(b.userTurn)).not.toBe("");
+    expect(guidanceOf(a.userTurn)).not.toBe(guidanceOf(b.userTurn));
   });
 
   it("puts the context back in the head when stablePromptPrefix is off", async () => {
     // The kill switch has to actually switch. Same flag name as the orchestrator's, so an
     // operator who turns it off gets the pre-cache-fix shape in BOTH places, not one of them.
     const dir = makeWorkspace({ stablePromptPrefix: false });
-    const { head, tail } = await run(TASK_NGINX, dir);
+    const { head, userTurn } = await run(TASK_NGINX, dir);
 
     expect(head).toContain("Learned Flow Guidance");
-    expect(tail).not.toContain("Learned Flow Guidance");
+    expect(userTurn).not.toContain("Learned Flow Guidance");
   });
 
   it("still counts the moved context in promptChars", async () => {
@@ -208,8 +231,8 @@ describe("sub-agent prompt prefix is stable across tasks", () => {
     const seeded = await run(TASK_NGINX, makeWorkspace(undefined, true));
     const empty = await run(TASK_NGINX, makeWorkspace(undefined, false));
 
-    expect(seeded.tail).toContain("Learned Flow Guidance");
-    expect(empty.tail).not.toContain("Learned Flow Guidance");
+    expect(seeded.userTurn).toContain("Learned Flow Guidance");
+    expect(empty.userTurn).not.toContain("Learned Flow Guidance");
     expect(seeded.promptChars).toBeGreaterThan(empty.promptChars);
   });
 

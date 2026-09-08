@@ -2708,20 +2708,32 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // for the same reason; this is the same mechanism, not a new one.
     //
     // stagedBuildGuidance deliberately does NOT move: the comment above explains that it has
-    // to lead, and at the tail it would again outrank the agents' own finish contracts. It is
-    // default-off (orchestration.stagedArtifactBuildDirective); when an eval flips it on it
-    // will cost one cold prefill for tasks over STAGED_BUILD_TASK_CHAR_THRESHOLD, which is a
-    // real cost to weigh in that eval rather than a reason to move it here.
-    // The task-derived half of what used to live in the system prompt. Order runs
-    // least-urgent to most: the retrievals are reference material, the routing and warden
-    // notices are instructions about THIS run, and the per-iteration nudges appended after
-    // these are the most immediate thing the model should act on.
+    // to lead, and behind the agent's own prompt it would again outrank its finish contract.
+    //
+    // The cost is real and it is LIVE: the zod default is false but
+    // config/gateway/40-orchestration.jsonc sets stagedArtifactBuildDirective TRUE, so on this
+    // deployment any task over STAGED_BUILD_TASK_CHAR_THRESHOLD given to a write+edit-capable
+    // agent puts task-derived text at position 0 and that run's head is NOT frozen. It is
+    // computed once (stagedResume/brokenPages resolve before the iteration loop), so such a
+    // run still reuses its prefix ACROSS its own iterations and only loses reuse across runs —
+    // exactly where it stood before this change. Fixing that means making the directive
+    // invariant, not moving it, and that is a prompt-text change behind its own eval.
+    // The task-derived half of what used to live in the system prompt: three RAG retrievals
+    // keyed on the task text, plus the routing and warden notices for this run. All five are
+    // constant for the run and none of them belong in the frozen head.
+    //
+    // They ride with the TASK (history[0]), not in a trailing message. Both positions sit
+    // behind the head, so either keeps the tool block cached — the difference is RECURRENCE.
+    // A trailing message sits after a history that grows every iteration, so it falls outside
+    // the reusable prefix and re-prefills on EVERY call: ~1,000 tokens x maxIterations (25 for
+    // browser_agent and computer_use_agent) can cost more than the single cold head+tool
+    // prefill this whole change buys back. history[0] is inside the per-run prefix, so it is
+    // prefilled once; the trimmer pins it (sub-agent-history.ts:219) so it cannot be dropped;
+    // and buildStagedBuildFirstStepInstruction already attaches run-constant text there.
     //
     // Gated on the SAME flag the orchestrator uses for the same decision
-    // (orchestration.stablePromptPrefix, default on) — composeTurnMessages has ordered the
-    // orchestrator's turn guidance behind the history since the lean-base wave, and this is
-    // that arrangement applied to the sub-agent, not a second mechanism. With the flag off,
-    // the task-derived context goes back inside the system prompt, ahead of the tool schemas.
+    // (orchestration.stablePromptPrefix, default on). With the flag off, the blocks go back
+    // inside the system prompt, ahead of the tool schemas, as they were.
     const stablePrefix = effectiveOrchestration().stablePromptPrefix ?? true;
     const taskDerivedContext = [
       flowGuidance,
@@ -2731,7 +2743,9 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       degradedNudge,
     ].filter((entry) => entry.trim().length > 0);
     const legacyPromptSuffix = stablePrefix ? "" : taskDerivedContext.map((entry) => `\n\n${entry}`).join("");
-    const runContextTail: string[] = stablePrefix ? taskDerivedContext : [];
+    const runContextBlock = stablePrefix && taskDerivedContext.length > 0
+      ? `\n\n${taskDerivedContext.join("\n\n")}`
+      : "";
 
     const systemPrompt = agentCfg.systemPrompt
       ? `${stagedBuildGuidance ? `${stagedBuildGuidance}\n\n` : ""}${agentCfg.systemPrompt}${modelExecutionGuidance ? `\n\n${modelExecutionGuidance}` : ""}${taskModeGuidance ? `\n\n${taskModeGuidance}` : ""}${toolInventoryGuidance ? `\n\n${toolInventoryGuidance}` : ""}${agentDiscoveryGuidance ? `\n\n${agentDiscoveryGuidance}` : ""}\n\nAgent name: ${opts.agentName}\nCurrent workspace: ${opts.workspacePath}\nToday's date: ${today}${legacyPromptSuffix}`
@@ -2878,9 +2892,12 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // regression that made run 2dc5832c worse rather than better: it told a model whose artifact
     // already existed to "produce only the skeleton" and to not attempt the specification, which
     // is precisely the write that destroyed the filled subsystems.
+    // runContextBlock is reference material, so it precedes the first-step instruction and
+    // leaves that directive the last word — the same ordering rule the staged-build comment
+    // above records for the system prompt.
     const userContent = stagedBuildGuidance && !isResumeBuild
-      ? `${baseUserContent}${buildStagedBuildFirstStepInstruction()}`
-      : baseUserContent;
+      ? `${baseUserContent}${runContextBlock}${buildStagedBuildFirstStepInstruction()}`
+      : `${baseUserContent}${runContextBlock}`;
 
     const history: LLMMessage[] = [{ role: "user", content: userContent }];
 
@@ -3188,19 +3205,14 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // context window reported the same number as its first iteration — useless for
       // the one question this stat now has to answer (how much of the window the INPUT
       // ate, and therefore how little was left for the derived output budget).
-      // runContextTail is part of the input for the same reason: freezing the prefix moved
-      // the flow/skill/memory retrievals out of systemPrompt and behind the history, but they
-      // still occupy the window — only their POSITION changed. Counting the head alone would
-      // under-report by up to ~3 KB of retrieved text and quietly overstate how much room was
-      // left for the output budget, which is the one question this stat exists to answer.
-      promptChars: systemPrompt.length
-        + runContextTail.reduce((sum, entry) => sum + entry.length, 0)
-        + history.reduce(
-          (sum, message) => sum
-            + (message.content?.length ?? 0)
-            + (message.tool_calls ?? []).reduce((n, call) => n + call.function.arguments.length, 0),
-          0,
-        ),
+      // The task-derived context needs no term of its own: freezing the prefix moved it into
+      // history[0], which this sum already walks. An explicit term here would double-count it.
+      promptChars: systemPrompt.length + history.reduce(
+        (sum, message) => sum
+          + (message.content?.length ?? 0)
+          + (message.tool_calls ?? []).reduce((n, call) => n + call.function.arguments.length, 0),
+        0,
+      ),
       userContentChars: userContent.length,
       toolCount,
       toolNames: [...toolNames],
@@ -4434,11 +4446,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // So the nudges are collected here and delivered AFTER the history, where the provider
       // relabels a non-leading system message as context in place (foldSystemMessages) and the
       // model reads them as the most recent instruction — which is what a per-iteration nudge is.
-      // Seeded with the task-derived context lifted out of the system prompt, so the frozen
-      // head stays byte-identical across every run of this agent and the tool block behind it
-      // stays cached. These are constant for the run; the per-iteration nudges pushed below
-      // are appended after them and so keep the last word.
-      const iterationNudges: string[] = [...runContextTail];
+      // Only genuinely PER-ITERATION content belongs here. Run-constant context rides with
+      // history[0] instead (see runContextBlock): a trailing message is re-prefilled on every
+      // call because the history in front of it grows, so putting run-constant text here
+      // multiplies its prefill cost by the iteration count.
+      const iterationNudges: string[] = [];
       let effectiveTools = tools;
 
       if (timeBudgetCritical) {
