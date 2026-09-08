@@ -3,6 +3,9 @@
  * LLM call → parse tool calls → execute (with guardrails) → loop → final response
  */
 import { startsTurn, currentTurnStartIndex } from "./turn-boundary.js";
+// The system's one definition of "substantive output" — shared with the mid-stream burn
+// shape so a salvaged partial and a burn verdict cannot disagree about what counts as prose.
+import { MIN_SUBSTANTIVE_OUTPUT_CHARS } from "./progress-verifier.js";
 import { unattendedInputCallback } from "../tools/ask-user.js";
 import { runArtifactVerificationGate, buildFailureCaveat, buildUnverifiableCaveat } from "./artifact-verification-gate.js";
 import { applyActiveModelPreset, getChatProvider, getChatProviderForTier, getChatProviderWithOverride } from "../providers/index.js";
@@ -2261,6 +2264,62 @@ async function _runTurn(
       }
     } catch (err) {
       log.error({ err, sessionId: session.id }, "LLM call failed");
+      // THE MODEL'S OWN PARTIAL OUTRANKS THE EVIDENCE BACKSTOP.
+      //
+      // collectStream now attaches what it had accumulated when the stream was cut. That is a
+      // better answer than anything reassembled from delegate evidence below, because it IS the
+      // answer this turn was writing — and until it existed, a cut orchestrator call delivered
+      // nothing whatever it had produced. Session 40dbcb5f: nineteen minutes, prose in hand,
+      // zero characters to the user.
+      //
+      // Only substantive prose qualifies. A cut that produced a sentence fragment is not worth
+      // shipping over the evidence path, and reasoning alone is never shown — it is the model's
+      // scratchpad, not its answer. The caveat is mandatory: this text did not finish.
+      const partial = (err as { partialResponse?: LLMResponse } | null)?.partialResponse;
+      const partialText = typeof partial?.content === "string" ? partial.content.trim() : "";
+      if (partialText.length >= MIN_SUBSTANTIVE_OUTPUT_CHARS) {
+        const cleaned = sanitizeUserFacingAssistantResponse(partialText, 0);
+        if (cleaned.trim().length >= MIN_SUBSTANTIVE_OUTPUT_CHARS) {
+          const finalResponse = prependTurnIncompleteCaveat(cleaned);
+          persistAssistantTurnState(session, finalResponse, getTurnSwarmState());
+          if (opts.onChunk) opts.onChunk(finalResponse);
+          logAudit("guardrail_flagged", {
+            type: "llm_error_partial_salvaged",
+            error: String(err).slice(0, 300),
+            partialChars: cleaned.length,
+            reasoningChars: partial?.reasoning?.length ?? 0,
+          }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+          const performance = buildTurnPerformanceMetrics({
+            turnStartedAt,
+            firstModelResponseMs,
+            llmCalls,
+            llmTimeMs,
+            toolCallsRequested,
+            toolExecutionTimeMs,
+            lastPromptMetrics,
+            completionChars: finalResponse.length,
+            finishReason: "llm_error_partial_salvaged",
+            blocked: false,
+            toolIterations: iterationCount,
+          });
+          logAudit("turn_performance", { ...performance, usage: totalUsage }, {
+            sessionId: session.id, channel: session.channel, severity: "info",
+          });
+          logAudit("message_sent", { length: finalResponse.length, toolCalls: iterationCount, usage: totalUsage, performance }, {
+            sessionId: session.id, channel: session.channel, severity: "info",
+          });
+          return {
+            response: finalResponse,
+            toolCallsExecuted: iterationCount,
+            guardrailEvents,
+            usage: totalUsage,
+            blocked: false,
+            swarmState: getTurnSwarmState(),
+            performance,
+            qualityScorecard: buildCurrentTurnScorecard(finalResponse.length, "llm_error_partial_salvaged"),
+          };
+        }
+      }
       const delegateEvidence = findRecentDelegateEvidence(session.getHistory(), { scopeToCurrentTurn: true });
       const sharedFactsEvidence = await getSharedFactsEvidenceForFinalSynthesis(session.id);
       const recoveryEvidence = chooseBetterRecoveryEvidence(delegateEvidence, sharedFactsEvidence, { preferHigherScore: false });
@@ -5375,7 +5434,7 @@ async function continueLengthLimitedResponse(
  * Consume a streaming LLM generator into a complete LLMResponse.
  * Optionally defers text until the response is known not to contain tool calls.
  */
-async function collectStream(
+export async function collectStream(
   generator: AsyncGenerator<StreamChunk>,
   onChunk?: (text: string) => void,
   options: { deferTextUntilToolDecision?: boolean; onReasoning?: (text: string) => void } = {},
@@ -5387,27 +5446,73 @@ async function collectStream(
   let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
   let sawToolCall = false;
 
-  for await (const chunk of generator) {
-    if (chunk.type === "reasoning_delta" && chunk.content) {
-      reasoning += chunk.content;
-      // Reasoning always streams live — it precedes the answer and the UI
-      // collapses it once the first answer token arrives.
-      options.onReasoning?.(chunk.content);
-    } else if (chunk.type === "text_delta" && chunk.content) {
-      content += chunk.content;
-      if (!options.deferTextUntilToolDecision) {
-        onChunk?.(chunk.content);
+  // WHAT WAS ALREADY PRODUCED SURVIVES THE CUT.
+  //
+  // This loop had no catch, so any throw from the provider discarded every character
+  // accumulated above it. That is the orchestrator's whole answer path: completeViaStream
+  // owns the partial-result salvage and the sub-agents get it, while the orchestrator calls
+  // provider.stream() through here and got none of it. Session 40dbcb5f is what that costs
+  // the user — one call ran nineteen minutes, the runtime was holding reasoning and prose
+  // when it ended, and the turn delivered nothing at all.
+  //
+  // Salvage is unconditional and the throw is NOT swallowed: a cut still fails the turn, and
+  // the caller still classifies on the error's identity (a DeadlineAbort resynthesizes, an
+  // operator cancel propagates, a ReasoningBurnAbort is the provider's own verdict). The only
+  // thing that changes is that the partial reaches the caller instead of the floor, marked
+  // `incomplete` so nothing downstream can mistake a guillotined answer for a finished one.
+  const salvage = (): LLMResponse => {
+    const tool_calls_partial = [...toolCallBuffers.values()].map((buf) => ({
+      id: buf.id,
+      name: buf.name,
+      arguments: (buf.args.trim() ? salvageToolCallArguments(buf.args) : {}) ?? {},
+    }));
+    return {
+      content: content || null,
+      ...(reasoning ? { reasoning } : {}),
+      // A half-streamed tool call cannot be dispatched — its arguments may be truncated
+      // mid-JSON — so a cut yields the TEXT it produced and drops the incomplete calls.
+      tool_calls: tool_calls_partial.filter((t) => t.name && Object.keys(t.arguments).length > 0),
+      usage,
+      finishReason: "incomplete",
+    };
+  };
+
+  try {
+    for await (const chunk of generator) {
+      if (chunk.type === "reasoning_delta" && chunk.content) {
+        reasoning += chunk.content;
+        // Reasoning always streams live — it precedes the answer and the UI
+        // collapses it once the first answer token arrives.
+        options.onReasoning?.(chunk.content);
+      } else if (chunk.type === "text_delta" && chunk.content) {
+        content += chunk.content;
+        if (!options.deferTextUntilToolDecision) {
+          onChunk?.(chunk.content);
+        }
+      } else if (chunk.type === "tool_call_start" && chunk.toolCallId && chunk.toolName) {
+        sawToolCall = true;
+        toolCallBuffers.set(chunk.toolCallId, { id: chunk.toolCallId, name: chunk.toolName, args: "" });
+      } else if (chunk.type === "tool_call_delta" && chunk.toolCallId && chunk.argumentsDelta) {
+        const buf = toolCallBuffers.get(chunk.toolCallId);
+        if (buf) buf.args += chunk.argumentsDelta;
+      } else if (chunk.type === "done") {
+        if (chunk.finishReason) finishReason = chunk.finishReason;
+        if (chunk.usage) usage = chunk.usage;
       }
-    } else if (chunk.type === "tool_call_start" && chunk.toolCallId && chunk.toolName) {
-      sawToolCall = true;
-      toolCallBuffers.set(chunk.toolCallId, { id: chunk.toolCallId, name: chunk.toolName, args: "" });
-    } else if (chunk.type === "tool_call_delta" && chunk.toolCallId && chunk.argumentsDelta) {
-      const buf = toolCallBuffers.get(chunk.toolCallId);
-      if (buf) buf.args += chunk.argumentsDelta;
-    } else if (chunk.type === "done") {
-      if (chunk.finishReason) finishReason = chunk.finishReason;
-      if (chunk.usage) usage = chunk.usage;
     }
+  } catch (err) {
+    const partial = salvage();
+    if ((partial.content?.length ?? 0) > 0 || (partial.reasoning?.length ?? 0) > 0) {
+      log.warn(
+        {
+          contentChars: partial.content?.length ?? 0,
+          reasoningChars: partial.reasoning?.length ?? 0,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        "Stream ended early — salvaging the partial the orchestrator had already produced",
+      );
+    }
+    throw Object.assign(err instanceof Error ? err : new Error(String(err)), { partialResponse: partial });
   }
 
   const tool_calls = [...toolCallBuffers.values()].map(buf => ({

@@ -2085,6 +2085,45 @@ export class LMStudioProvider {
       // the platform holds weakly and drops with the stream itself.
     }
 
+    // THE LOOP ENDING IS NOT THE CALL FINISHING.
+    //
+    // openai@4.104.0 swallows a caller abort: streaming.js does
+    // `catch (e) { if (e instanceof Error && e.name === "AbortError") return; throw e; }`.
+    // A bare `controller.abort()` — which is what the gateway issues on client disconnect
+    // (gateway/agui.ts, `res.on("close")`) — produces a DOMException named exactly
+    // "AbortError", so the SSE iterator returns SILENTLY, this `for await` exits normally,
+    // no catch runs, and everything below then records a guillotined generation as a clean
+    // one: recordRequestSuccess(), an audit row saying finishReason "stop", and null usage
+    // because the include_usage chunk never arrived.
+    //
+    // That is the same laundering the total-cap check above refuses to commit ("THROW, do
+    // not break"), happening one layer up inside the SDK — and it is not hypothetical.
+    // Session 40dbcb5f has a call that ran 1,146,845 ms on record as a successful stop with
+    // null tokens, which is why the incident could not be read from its own audit trail. The
+    // asymmetry is the tell: this provider's OWN aborts (inactivity stall, total cap,
+    // reasoning burn) carry an Error whose name is not "AbortError" and still rethrow
+    // correctly, so only the CALLER's aborts vanish — the deadline, the warden, the client.
+    //
+    // The row is still written, because how long a doomed call ran is exactly what a
+    // postmortem needs; it is written with the truth in finishReason instead.
+    if (signal?.aborted || streamAc.signal.aborted) {
+      const reason = signal?.aborted ? signal.reason : streamAc.signal.reason;
+      this.recordRequestFailure(startedAt, reason);
+      this.auditModelCall({
+        modelId,
+        mode: "stream",
+        startedAt,
+        ...(firstChunkAt !== undefined ? { firstTokenAt: firstChunkAt } : {}),
+        usage: collectedUsage,
+        finishReason: "aborted",
+        toolCount: openAITools.length,
+        messageCount: openAIMessages.length,
+      });
+      throw reason instanceof Error
+        ? reason
+        : new Error(`LLM stream aborted before it finished: ${String(reason)}`);
+    }
+
     this.recordRequestSuccess(startedAt);
     this.auditModelCall({
       modelId,
