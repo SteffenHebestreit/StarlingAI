@@ -36,9 +36,22 @@
         // its own and reads these defaults directly, so leaving it out silently ran
         // the orchestrator with thinking disabled — the opposite of the intent here.
         "enableThinking": true,
-        // The model serves 262144 and is loaded at full context; 32768 was sized for
-        // the previous 35B. Half the window leaves generous prefill headroom.
-        "contextWindow": 131072,
+        // SIZED TO THE PRIMARY, and read from the server rather than assumed.
+        // llama.cpp splits `-c` across `-np` slots, so the per-slot window is what a
+        // request actually gets. Read off /props on 2026-09-08:
+        //   deepseek-v4-flash  -c 65536 -np 1  -> 65,536 per slot   (the primary; this number)
+        //   qwen3.6-35b-a3b    -c 32768 -np 4  ->  8,192 per slot   (the routing tier)
+        // 131072 was left over from the previous server and was 2x too large for deepseek
+        // and 16x too large for qwen — and an over-declared window is not harmless: the
+        // trimmers size the prompt against it, and llama.cpp drops the FRONT of an
+        // oversized prompt, which is the system message.
+        //
+        // ModelConfigSchema's `tiers` overrides the model NAME only — context window is
+        // inherited — so this one number serves both. It is sized to the primary because
+        // that is where the large prompts run; routing-tier prompts are structurally small
+        // (531-2,802 tokens measured across a full turn, against an 8,192 slot). If a
+        // routing prompt ever approaches 8k, that margin is where it will break first.
+        "contextWindow": 65536,
         // A SINGLE CALL'S OUTPUT BUDGET, STATED — because unstated means "the rest of the
         // window". computeOutputTokenBudget derives max_tokens from contextWindow minus the
         // prompt when maxTokens is absent, and no agent declared one: the orchestrator call in
@@ -59,7 +72,16 @@
         // continueLengthLimitedResponse (MAX_LENGTH_CONTINUATION_ATTEMPTS = 2), so a legitimately
         // long answer is stitched across up to three calls while a runaway is re-decided twice
         // instead of streaming unchecked to the end of the context window.
-        "maxTokens": 32000,
+        // Re-derived at the CURRENT decode rate, because a token budget is only a
+        // time bound once you know tok/s. Measured 2026-09-08 after the server was
+        // reconfigured: deepseek-v4-flash 13.6 tok/s, qwen3.6-35b-a3b 106.7 aggregate
+        // across its 4 slots. At 13.6 tok/s the previous 32,000 was a THIRTY-NINE MINUTE
+        // single call — worse than the 19-minute incident that prompted the cap. 8,000
+        // still clears the largest completion ever recorded here (6,838 tokens, in 279
+        // audited calls) and bounds a runaway to ~10 minutes instead of 39, while
+        // continueLengthLimitedResponse (2 retries) still stitches a legitimately long
+        // answer across three calls.
+        "maxTokens": 8000,
         // temperature/topP are deliberately UNSET so the provider applies Qwen's
         // published per-mode sampling (recommendedQwenSampling): 1.0/0.95 for
         // thinking, 0.7/0.80 for reasoning_effort "none". Pinning topP here defeats
