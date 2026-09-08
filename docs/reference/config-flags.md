@@ -49,7 +49,7 @@ Every public schema field, where it is declared, and how many production files r
 | `autoReconnect` | packages/core/src/config/schema.ts:756 | 1 |
 | `autoResearchOnRefusal` | packages/core/src/config/schemas/effort.ts:50 | 3 |
 | `autoStart` | packages/core/src/config/schema.ts:661 | 3 |
-| `backend` | packages/core/src/config/schema.ts:472 | 61 |
+| `backend` | packages/core/src/config/schema.ts:472 | 62 |
 | `baseUrl` | packages/core/src/config/schema.ts:64 | 36 |
 | `bearerToken` | packages/core/src/config/schema.ts:623 | 4 |
 | `blockOn` | packages/core/src/config/schema.ts:1142 | 1 |
@@ -126,7 +126,7 @@ Every public schema field, where it is declared, and how many production files r
 | `delegationTimeoutMs` | packages/core/src/config/schema.ts:575 | 4 |
 | `deliverableConsistencyQa` | packages/core/src/config/schemas/orchestration.ts:375 | 1 |
 | `deliverableConsistencyQaMaxRounds` | packages/core/src/config/schemas/orchestration.ts:378 | 1 |
-| `description` | packages/core/src/config/schema.ts:551 | 163 |
+| `description` | packages/core/src/config/schema.ts:551 | 164 |
 | `detectWriteChurnOverwrite` | packages/core/src/config/schemas/orchestration.ts:399 | 2 |
 | `digest` | packages/core/src/config/schema.ts:1795 | 33 |
 | `dir` | packages/core/src/config/schema.ts:1784 | 42 |
@@ -402,7 +402,7 @@ Every public schema field, where it is declared, and how many production files r
 | `softRoutingEnforcement` | packages/core/src/config/schema.ts:1721 | 3 |
 | `speakReplySummaryMaxSentences` | packages/core/src/config/schemas/multimodal.ts:56 | 3 |
 | `splitOrchestrationPrompt` | packages/core/src/config/schema.ts:1687 | 2 |
-| `stablePromptPrefix` | packages/core/src/config/schemas/orchestration.ts:29 | 1 |
+| `stablePromptPrefix` | packages/core/src/config/schemas/orchestration.ts:29 | 2 |
 | `stagedArtifactBuildDirective` | packages/core/src/config/schemas/orchestration.ts:440 | 1 |
 | `stagedArtifactBuilds` | packages/core/src/config/schemas/orchestration.ts:414 | 1 |
 | `steps` | packages/core/src/config/schema.ts:1256 | 43 |

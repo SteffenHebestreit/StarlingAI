@@ -2692,20 +2692,77 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // (backend_coder: serve_app + verify_app + return the live /api/app/<id>/ URL);
     // appended last, the directive's own "FINISH ... report the path" got the final
     // word and told those agents the files on disk were the deliverable.
-    const systemPrompt = agentCfg.systemPrompt
-      ? `${stagedBuildGuidance ? `${stagedBuildGuidance}\n\n` : ""}${agentCfg.systemPrompt}${modelExecutionGuidance ? `\n\n${modelExecutionGuidance}` : ""}${taskModeGuidance ? `\n\n${taskModeGuidance}` : ""}${toolInventoryGuidance ? `\n\n${toolInventoryGuidance}` : ""}${agentDiscoveryGuidance ? `\n\n${agentDiscoveryGuidance}` : ""}${discoveryFallbackNotice ? `\n\n${discoveryFallbackNotice}` : ""}${degradedNudge ? `\n\n${degradedNudge}` : ""}\n\nAgent name: ${opts.agentName}\nCurrent workspace: ${opts.workspacePath}\nToday's date: ${today}${flowGuidance ? `\n\n${flowGuidance}` : ""}${skillGuidance ? `\n\n${skillGuidance}` : ""}${memoryGuidance ? `\n\n${memoryGuidance}` : ""}`
-      : `${stagedBuildGuidance ? `${stagedBuildGuidance}\n\n` : ""}You are a specialized AI sub-agent named "${opts.agentName}". Complete the given task and return your result.${toolInventoryGuidance ? `\n\n${toolInventoryGuidance}` : ""}${agentDiscoveryGuidance ? `\n\n${agentDiscoveryGuidance}` : ""}${discoveryFallbackNotice ? `\n\n${discoveryFallbackNotice}` : ""}${degradedNudge ? `\n\n${degradedNudge}` : ""}\n\nAgent name: ${opts.agentName}\nCurrent workspace: ${opts.workspacePath}\nToday's date: ${today}${flowGuidance ? `\n\n${flowGuidance}` : ""}${skillGuidance ? `\n\n${skillGuidance}` : ""}${memoryGuidance ? `\n\n${memoryGuidance}` : ""}`;
+    // THIS STRING IS A CACHE KEY. Measured on the serving cluster 2026-09-08: llama.cpp
+    // reuses KV state for the longest BYTE-identical prefix and holds many prefixes at once
+    // (six distinct 4.7k-token prefixes stayed simultaneously warm, 0.41 s each). A prefix
+    // that repeats exactly re-prefills in 0.41 s; one that differs ANYWHERE re-prefills in
+    // full — 40 s on deepseek-v4-flash. And the tool block renders directly after this
+    // system message, so a difference here also re-prefills the tool schemas, which are the
+    // bulk of the prompt (infrastructure_agent: 40,717 chars of schema to 2,394 of prompt).
+    //
+    // So the head holds only what is a function of the AGENT and the day: its own prompt,
+    // its model, its tool inventory, its name/workspace/date. Everything derived from the
+    // TASK moves to the tail — flow/skill/memory guidance are RAG retrievals keyed on the
+    // task text, so they differ on every run and used to invalidate everything behind them.
+    // composeSubAgentMessages already delivers the per-iteration nudges after the history
+    // for the same reason; this is the same mechanism, not a new one.
+    //
+    // stagedBuildGuidance deliberately does NOT move: the comment above explains that it has
+    // to lead, and at the tail it would again outrank the agents' own finish contracts. It is
+    // default-off (orchestration.stagedArtifactBuildDirective); when an eval flips it on it
+    // will cost one cold prefill for tasks over STAGED_BUILD_TASK_CHAR_THRESHOLD, which is a
+    // real cost to weigh in that eval rather than a reason to move it here.
+    // The task-derived half of what used to live in the system prompt. Order runs
+    // least-urgent to most: the retrievals are reference material, the routing and warden
+    // notices are instructions about THIS run, and the per-iteration nudges appended after
+    // these are the most immediate thing the model should act on.
+    //
+    // Gated on the SAME flag the orchestrator uses for the same decision
+    // (orchestration.stablePromptPrefix, default on) — composeTurnMessages has ordered the
+    // orchestrator's turn guidance behind the history since the lean-base wave, and this is
+    // that arrangement applied to the sub-agent, not a second mechanism. With the flag off,
+    // the task-derived context goes back inside the system prompt, ahead of the tool schemas.
+    const stablePrefix = effectiveOrchestration().stablePromptPrefix ?? true;
+    const taskDerivedContext = [
+      flowGuidance,
+      skillGuidance,
+      memoryGuidance,
+      discoveryFallbackNotice,
+      degradedNudge,
+    ].filter((entry) => entry.trim().length > 0);
+    const legacyPromptSuffix = stablePrefix ? "" : taskDerivedContext.map((entry) => `\n\n${entry}`).join("");
+    const runContextTail: string[] = stablePrefix ? taskDerivedContext : [];
 
-    // Get available tools for this agent. E20: rerank by semantic
-    // relevance to the current task so the model sees the most relevant
-    // tools first — useful when the tool list is large and the model's
+    const systemPrompt = agentCfg.systemPrompt
+      ? `${stagedBuildGuidance ? `${stagedBuildGuidance}\n\n` : ""}${agentCfg.systemPrompt}${modelExecutionGuidance ? `\n\n${modelExecutionGuidance}` : ""}${taskModeGuidance ? `\n\n${taskModeGuidance}` : ""}${toolInventoryGuidance ? `\n\n${toolInventoryGuidance}` : ""}${agentDiscoveryGuidance ? `\n\n${agentDiscoveryGuidance}` : ""}\n\nAgent name: ${opts.agentName}\nCurrent workspace: ${opts.workspacePath}\nToday's date: ${today}${legacyPromptSuffix}`
+      : `${stagedBuildGuidance ? `${stagedBuildGuidance}\n\n` : ""}You are a specialized AI sub-agent named "${opts.agentName}". Complete the given task and return your result.${toolInventoryGuidance ? `\n\n${toolInventoryGuidance}` : ""}${agentDiscoveryGuidance ? `\n\n${agentDiscoveryGuidance}` : ""}\n\nAgent name: ${opts.agentName}\nCurrent workspace: ${opts.workspacePath}\nToday's date: ${today}${legacyPromptSuffix}`;
+
+    // Get available tools for this agent. E20: rerank by semantic relevance so the model sees
+    // the most relevant tools first — useful when the tool list is large and the model's
     // attention budget is finite.
     let tools = getToolsAsLLMDefs(effectiveToolNames);
     // Rerank by semantic relevance only above a toolset-size threshold (B24): a small
     // toolset fits the model's attention, so we skip the embed round-trip. The threshold is
     // configurable (orchestration.toolRerankMinTools, default 6 = the long-standing value).
+    //
+    // THE RANKING KEY IS THE AGENT, NOT THE TASK. Ranked against the task text, the same
+    // agent got a different tool ORDER for every task it was given. Measured directly against
+    // the serving cluster — one system prompt, twenty tool schemas, only the ORDER changed:
+    //
+    //   tools in order A, first sight ....... 46.72 s   4561 tok reprocessed
+    //   the same order A again ..............  0.43 s      4 tok   WARM
+    //   the SAME tools, rotated ............. 47.17 s   4561 tok   cold
+    //   back to order A .....................  0.42 s      4 tok   WARM
+    //
+    // 4,561 of those tokens ARE the tool block, so it sits inside the cached prefix and a
+    // rotation costs a full cold prefill — 109x. Ranking against the agent's own role
+    // statement keeps the block byte-identical across all of that agent's runs, and is the
+    // better key besides: a specialist's useful tools follow from its job, not from how one
+    // task happened to be worded. 45 of the 49 configured agents carry more than
+    // toolRerankMinTools tools, so this is very nearly all of them.
     try {
-      tools = await rerankToolsForTask(tools, sanitizedTask, effectiveOrchestration().toolRerankMinTools ?? 6);
+      const toolRankingKey = agentCfg.description?.trim() || opts.agentName;
+      tools = await rerankToolsForTask(tools, toolRankingKey, effectiveOrchestration().toolRerankMinTools ?? 6);
     } catch (err) {
       log.debug({ err, agentName: opts.agentName }, "Tool rerank failed — using registration order");
     }
@@ -3131,12 +3188,19 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // context window reported the same number as its first iteration — useless for
       // the one question this stat now has to answer (how much of the window the INPUT
       // ate, and therefore how little was left for the derived output budget).
-      promptChars: systemPrompt.length + history.reduce(
-        (sum, message) => sum
-          + (message.content?.length ?? 0)
-          + (message.tool_calls ?? []).reduce((n, call) => n + call.function.arguments.length, 0),
-        0,
-      ),
+      // runContextTail is part of the input for the same reason: freezing the prefix moved
+      // the flow/skill/memory retrievals out of systemPrompt and behind the history, but they
+      // still occupy the window — only their POSITION changed. Counting the head alone would
+      // under-report by up to ~3 KB of retrieved text and quietly overstate how much room was
+      // left for the output budget, which is the one question this stat exists to answer.
+      promptChars: systemPrompt.length
+        + runContextTail.reduce((sum, entry) => sum + entry.length, 0)
+        + history.reduce(
+          (sum, message) => sum
+            + (message.content?.length ?? 0)
+            + (message.tool_calls ?? []).reduce((n, call) => n + call.function.arguments.length, 0),
+          0,
+        ),
       userContentChars: userContent.length,
       toolCount,
       toolNames: [...toolNames],
@@ -4370,7 +4434,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // So the nudges are collected here and delivered AFTER the history, where the provider
       // relabels a non-leading system message as context in place (foldSystemMessages) and the
       // model reads them as the most recent instruction — which is what a per-iteration nudge is.
-      const iterationNudges: string[] = [];
+      // Seeded with the task-derived context lifted out of the system prompt, so the frozen
+      // head stays byte-identical across every run of this agent and the tool block behind it
+      // stays cached. These are constant for the run; the per-iteration nudges pushed below
+      // are appended after them and so keep the last word.
+      const iterationNudges: string[] = [...runContextTail];
       let effectiveTools = tools;
 
       if (timeBudgetCritical) {
