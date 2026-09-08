@@ -922,7 +922,29 @@ export function resolveThinkingControls(
       };
     }
     case "deepseek":
-      return cfg.enableThinking !== undefined ? { chatTemplateKwargs: { thinking: cfg.enableThinking } } : {};
+      // `thinking: false` CORRUPTS THE RESPONSE on this backend, so it is never sent.
+      //
+      // Measured against deepseek-v4-flash on llama.cpp (llama-swap, 2026-09-08), same prompt,
+      // temperature 0:
+      //   omitted            695 reasoning chars, clean answer          0/2 leaked
+      //   thinking: true     802 reasoning chars, clean answer
+      //   thinking: false      0 reasoning chars, answer BEGINS "</think>"   4/4 leaked
+      // The flag works — it does turn reasoning off — but it leaves the chat template in a state
+      // that emits the closing think tag into CONTENT. Deterministic, every call.
+      //
+      // It is not only cosmetic. Session 40dbcb5f shipped a user-facing answer that opened
+      // `</think>\n\n<|DSML|tool_calls>\n<|DSML|invoke name="share_finding">` — ~490 characters of
+      // DeepSeek's internal tool markup as prose, from `researcher`, which declares
+      // enableThinking:false. The same malformed template state that leaks the tag also renders a
+      // tool call as text instead of emitting tool_calls. 26 of the 49 configured agents declare
+      // enableThinking:false, so on this model that was more than half the swarm, on every call.
+      //
+      // Omitting the kwarg gives the model's default, which IS deliberation — so a thinking-off
+      // agent loses the speed it asked for and keeps a correct answer. That is the right way round:
+      // this family exposes no graded effort here (reasoningEffort is dropped below), so there is no
+      // cheaper rung to fall back to, and a corrupted deliverable costs more than a slower one.
+      // Revisit if a llama.cpp build fixes the template; the measurement above is the check.
+      return cfg.enableThinking === true ? { chatTemplateKwargs: { thinking: true } } : {};
     case "gpt-oss": {
       const effort = resolveReasoningEffort(cfg);
       return effort ? { reasoningEffort: effort, systemReasoningLine: `Reasoning: ${effort}` } : {};

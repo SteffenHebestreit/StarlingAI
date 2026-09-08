@@ -41,8 +41,21 @@ describe("thinking control — resolveThinkingControls (family-aware)", () => {
   it("DeepSeek uses the DIFFERENT key chat_template_kwargs.thinking", () => {
     expect(resolveThinkingControls("deepseek-v3.1", { enableThinking: true }))
       .toEqual({ chatTemplateKwargs: { thinking: true } });
-    expect(resolveThinkingControls("deepseek-v3.1", { enableThinking: false }))
-      .toEqual({ chatTemplateKwargs: { thinking: false } });
+  });
+
+  it("NEVER sends thinking:false to DeepSeek — it corrupts the response, it does not just quieten it", () => {
+    // Measured on deepseek-v4-flash via llama.cpp (2026-09-08), same prompt, temperature 0:
+    //   omitted          695 reasoning chars, clean answer,   0/2 leaked
+    //   thinking: true   802 reasoning chars, clean answer
+    //   thinking: false    0 reasoning chars, answer BEGINS "</think>",  4/4 leaked
+    // The flag works and leaves the template emitting its closing think tag into CONTENT.
+    // Session 40dbcb5f shipped ~490 chars of "</think> <|DSML|invoke name=..." to a user from
+    // `researcher`, which declares enableThinking:false — the same malformed state renders a tool
+    // call as prose. 26 of 49 agents declare enableThinking:false, so this was most of the swarm.
+    expect(resolveThinkingControls("deepseek-v3.1", { enableThinking: false })).toEqual({});
+    // A graded effort cannot smuggle it back: this family drops reasoningEffort entirely.
+    expect(resolveThinkingControls("deepseek-v3.1", { enableThinking: false, reasoningEffort: "none" })).toEqual({});
+    expect(resolveThinkingControls("deepseek-v4-flash", { enableThinking: false, reasoningEffort: "medium" })).toEqual({});
   });
 
   it("gpt-oss uses reasoning_effort + a system 'Reasoning:' line (the form LM Studio honors)", () => {
