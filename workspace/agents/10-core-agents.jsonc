@@ -7,6 +7,9 @@
       "capabilities": ["multi-agent mission execution", "parallel slice partitioning", "task-graph dependency sequencing", "cross-topic result synthesis", "drafting handoff to author specialists", "final quality gating", "acceptance-checklist tracking", "ephemeral agent spin-up"],
       "tags": ["coordination", "orchestration", "parallel", "task-graph", "dependencies", "synthesis", "quality-gate", "acceptance", "mission", "multi-area", "execution"],
       "model": {
+        // CAPABILITY: plans and fans out multi-area missions. Pinned so a later default flip to the faster caching model
+        // cannot silently demote it.
+        "primary": "lmstudio/deepseek-v4-flash",
         // Reasoning role: deliberation rung. Explicit effort overrides the
         // enableThinking toggle below, which predates graded effort and would
         // otherwise map to "none" (thinking fully off) on Qwen 3.8.
@@ -76,6 +79,9 @@
       "capabilities": ["phased project planning", "task breakdown", "roadmapping", "milestone definition", "timeline estimation", "dependency ordering", "acceptance-criteria definition", "execution handoff to coordinator"],
       "tags": ["planning", "project", "roadmap", "milestones", "timeline", "task-breakdown", "phases", "acceptance-criteria"],
       "model": {
+        // CAPABILITY: multi-step planning. Pinned so a later default flip to the faster caching model
+        // cannot silently demote it.
+        "primary": "lmstudio/deepseek-v4-flash",
         "enableThinking": true,
         "temperature": 0.2
       },
@@ -166,6 +172,15 @@
       "capabilities": ["text summarization", "structured bullet summaries", "tl;dr creation", "key-point extraction", "faithful value-preserving condensation"],
       "tags": ["summary", "summarize", "tldr", "key-points", "condensation"],
       "model": {
+        // SPEED TIER — deepseek cannot reuse KV state at all (CSA/HCA, architectural):
+        // an unchanged 3,894-token prefix re-prefills in 20.9 s every request. qwen reuses
+        // ~45% of its prefix, ~40% faster, and decodes ~55 tok/s against 13.6.
+        // contextWindow is REQUIRED alongside: the slot is 8,192 (-c 32768 / -np 4) and
+        // mergeAgentModelOverride inherits what you omit, so `primary` alone would size
+        // prompts against 65,536 and llama.cpp would silently drop the system message.
+        // Base prompt 2277 tok against computePromptTokenBudget(8192) = 4,096.
+        "primary": "lmstudio/qwen3.6-35b-a3b",
+        "contextWindow": 8192,
         "enableThinking": false,
         "temperature": 0.15
       },
@@ -186,6 +201,9 @@
       "capabilities": ["blog and editorial writing", "product and marketing copy", "newsletter writing", "press-release drafting", "social-media copy", "user-facing documentation", "brand tone adaptation", "static website generation", "microsite and docs-site authoring", "reveal.js slide-deck generation"],
       "tags": ["content", "copywriting", "blog", "newsletter", "marketing", "press-release", "social-media", "documentation", "static-website", "microsite", "docs-site", "presentation", "slide-deck", "reveal.js"],
       "model": {
+        // CONTEXT: base prompt ~9,463 tok. Pinned so a later default flip to the faster caching model
+        // cannot silently demote it.
+        "primary": "lmstudio/deepseek-v4-flash",
         "enableThinking": false,
         "temperature": 0.3
       },
@@ -232,6 +250,9 @@
       "capabilities": ["javascript execution", "typescript execution", "sandboxed scripting", "calculation and algorithmic logic", "format and data transformation", "utility prototyping"],
       "tags": ["code", "sandbox", "javascript", "typescript", "script", "execute", "calculation", "transform"],
       "model": {
+        // CAPABILITY: writes and runs code. Pinned so a later default flip to the faster caching model
+        // cannot silently demote it.
+        "primary": "lmstudio/deepseek-v4-flash",
         // Execution specialist: light reasoning is enough — the deliberation rung
         // ("medium") is for planning/analysis roles. Measured low→1.3k reasoning
         // chars vs medium→1.6k, and both far below xhigh→9k.
@@ -272,7 +293,10 @@
       // (audits 77944865, 0ac7d3fc, a438ef4a) and the file content was lost at the provider parser.
       // The provider now derives the completion budget from what the context window has left
       // (computeOutputTokenBudget), which is strictly more headroom than the old 16384 pin.
-      "model": { "enableThinking": true, "temperature": 0.2 },
+      "model": {
+        // CAPABILITY: writes front-end code. Pinned so a later default flip to the faster caching model
+        // cannot silently demote it.
+        "primary": "lmstudio/deepseek-v4-flash", "enableThinking": true, "temperature": 0.2 },
       "maxIterations": 14,
       // 25 min. The chunked-build discipline below means a complete app is 4-6 full completions
       // (skeleton + data batches + logic); the 240s default killed the iSAQB quiz build mid-chunk-2
@@ -290,7 +314,10 @@
       "tags": ["backend", "server", "nodejs", "express", "rest-api", "serve-app", "live-container", "fullstack", "dynamic-webapp"],
       // No maxTokens pin: same single-completion headroom as web_coder — a full server.js +
       // package.json write must never be cut mid-arguments by the completion cap.
-      "model": { "enableThinking": true, "temperature": 0.2 },
+      "model": {
+        // CAPABILITY: writes servers and APIs. Pinned so a later default flip to the faster caching model
+        // cannot silently demote it.
+        "primary": "lmstudio/deepseek-v4-flash", "enableThinking": true, "temperature": 0.2 },
       "maxIterations": 14,
       // 25 min: chunked builds (server + skeleton + appended data batches + serve_app round trip)
       // need 4-6 full completions and one pass alone can run ~26 min on this hardware; the 240s
@@ -305,6 +332,9 @@
       "capabilities": ["source-code reading", "symbol and reference lookup", "call-site tracing", "config-value extraction", "architecture review", "static bug diagnosis", "security and edge-case review", "workspace code retrieval"],
       "tags": ["code-analysis", "workspace-search", "symbol-lookup", "references", "static-review", "bug-diagnosis", "architecture", "code-at-rest"],
       "model": {
+        // CAPABILITY: reads and diagnoses existing code. Pinned so a later default flip to the faster caching model
+        // cannot silently demote it.
+        "primary": "lmstudio/deepseek-v4-flash",
         // Reasoning role: deliberation rung. Explicit effort overrides the
         // enableThinking toggle below, which predates graded effort and would
         // otherwise map to "none" (thinking fully off) on Qwen 3.8.
@@ -334,6 +364,9 @@
       "capabilities": ["git commit and staging", "branching and checkout", "git push and tagging", "repository cloning", "github pull-request opening", "pr comments", "ci check-run inspection", "github actions dispatch", "github release publishing"],
       "tags": ["git", "version-control", "commit", "branch", "push", "tag", "github", "pull-request", "ci-checks", "actions-dispatch", "release"],
       "model": {
+        // CAPABILITY: repo operations plus the reasoning around them. Pinned so a later default flip to the faster caching model
+        // cannot silently demote it.
+        "primary": "lmstudio/deepseek-v4-flash",
         "enableThinking": true,
         "temperature": 0.1
       },
@@ -442,6 +475,9 @@
       "capabilities": ["git-diff review", "pull-request change review", "per-hunk risk classification", "merge-readiness verdict", "test-coverage gap detection", "doc/changelog gap detection", "commit-range walkthrough"],
       "tags": ["diff-review", "pr-review", "merge-readiness", "change-risk", "coverage-gap", "branch-comparison", "commit-walkthrough"],
       "model": {
+        // CAPABILITY: reviews diffs for defects before merge. Pinned so a later default flip to the faster caching model
+        // cannot silently demote it.
+        "primary": "lmstudio/deepseek-v4-flash",
         "enableThinking": true,
         "temperature": 0.2
       },
