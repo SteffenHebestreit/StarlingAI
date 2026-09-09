@@ -709,12 +709,14 @@ export type ThinkingFamily = "qwen-effort" | "enable_thinking" | "deepseek" | "g
  *  4,395 / 6,789 baseline). So routing 3.8 through the enable_thinking family
  *  would leave it with no working control at all.
  *
- *  The 3.5/3.6 half of that sentence was wrong, and was measured wrong on
- *  2026-09-03: `enable_thinking:false` is inert on qwen3.6-35b-a3b too (identical
- *  reasoning to sending no control at all). The family split still holds — it
- *  decides which control is DOCUMENTED for the model — but the enable_thinking
- *  branch now sends `reasoning_effort` alongside the flag, so both generations
- *  actually stop thinking on this backend. See resolveThinkingControls. */
+ *  The 3.5/3.6 half of that sentence was measured on LM STUDIO (2026-09-03), where
+ *  `enable_thinking:false` was inert on qwen3.6-35b-a3b too. That reading does not
+ *  travel: re-measured on the llama.cpp serving cluster (2026-09-09) the same flag
+ *  is a complete off-switch, 9,395 reasoning chars -> 0. So "inert" is a fact about
+ *  a BACKEND, never about the family. The family split still holds — it decides
+ *  which control is DOCUMENTED for the model — and resolveThinkingControls now
+ *  reconciles the two backends per case rather than always sending both.
+ *  See resolveThinkingControls. */
 const QWEN_EFFORT_VERSION_RE = /qwen-?3\.(?:[89]|\d{2,})/;
 
 /** The reasoning share of completion tokens, where the backend reports it (LM Studio and OpenAI do). */
@@ -937,10 +939,17 @@ export function resolveThinkingControls(
       // the model's default, which IS deliberation — what the veto is for. `enable_thinking: true`
       // is still sent when asked for: it agrees with the veto rather than contradicting it.
       //
-      // Whether the GRADED rungs do anything here is a separate and still-open question: they
-      // leave prompt_tokens at 54 and a single run per rung sat inside the run-to-run drift of the
-      // baseline itself (9,395 vs 8,468 on two identical calls), so it is unmeasured, not proven
-      // either way. Nothing below depends on the answer.
+      // The GRADED rungs were the sibling question, and they ARE inert on the amount — which is
+      // what makes keeping them off the wire right, not merely harmless. Measured on the cluster
+      // 2026-09-09 with 5 repeats per rung (temperature 0, one prompt, no run capped), reasoning
+      // chars as mean [min-max]:
+      //   no control   8,095 [5,258-9,177]      high    9,078 [9,052-9,119]
+      //   low          8,877 [8,448-9,152]      xhigh   9,119 [9,119-9,119]
+      //   medium       8,545 [8,024-9,148]
+      // The spread BETWEEN rung means is 574 chars against a within-condition baseline range of
+      // 3,919, and no rung's range sits clear of the baseline's. A single run per rung would have
+      // "shown" an ordering that is really just drift — which is why the earlier single-run read
+      // was left unresolved rather than believed. prompt_tokens stays 54 throughout.
       const pinned = cfg.reasoningEffort ? normalizeQwenEffort(cfg.reasoningEffort) : undefined;
       const pinVetoesTheOffSwitch = pinned !== undefined && DELIBERATE_THINKING_EFFORTS.has(pinned);
       const thinkingOff = pinned === "none" || (cfg.enableThinking === false && !pinVetoesTheOffSwitch);
