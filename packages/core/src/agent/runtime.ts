@@ -2223,7 +2223,42 @@ async function _runTurn(
           reasoningCaptured: true,
         }, { sessionId: session.id, channel: session.channel, severity: "info" });
       }
-      if (llmResponse.tool_calls.length === 0 && llmResponse.finishReason === "length") {
+      // A FORCED CALL THAT RETURNED PROSE IS A FAILED TOOL CALL, NOT A TRUNCATED ANSWER.
+      //
+      // continueLengthLimitedResponse exists for a real answer the completion cap cut in half.
+      // It is the wrong instrument here. When forceToolChoice was set, the model was REQUIRED to
+      // emit an orchestration tool call; prose means it did not, and the turn already knows that
+      // prose cannot stand — the same conditions that set mustOrchestrateBeforeAnswering are what
+      // `tool_free_research_answer_rejected` fires on afterwards. Continuing it spends the
+      // completion budget extending an answer the runtime is already committed to rejecting.
+      //
+      // Session 887379b3 is the bill: a forced call burned its full 8,000 tokens (150.0 s), the
+      // continuation burned 8,000 more (155.3 s), the second continuation another 8,000 (143.2 s)
+      // — 448 s of a 506 s turn, 24,000 tokens generated and every one discarded, and the answer
+      // was then rejected exactly as predicted. The turn's own guardrail had flagged it
+      // `upfront_source_sensitive_detected` 2 minutes before the first burn began.
+      //
+      // Skipping the continuation leaves llmResponse as the cut prose. The iteration loop then
+      // proceeds as it does for any tool-free answer on an orchestration turn: the routing nudge
+      // fires and the next call gets its chance to delegate — which is what eventually produced
+      // the answer in that session anyway, 448 s later than it needed to.
+      const forcedCallReturnedProse = forceToolChoice
+        && llmResponse.tool_calls.length === 0
+        && llmResponse.finishReason === "length";
+      if (forcedCallReturnedProse) {
+        logAudit("guardrail_flagged", {
+          type: "forced_tool_call_burned_budget",
+          iteration: iterationCount,
+          completionChars: llmResponse.content?.length ?? 0,
+          toolsOffered: streamTools.length,
+          finishReason: "length",
+        }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+        guardrailEvents.push({
+          type: "forced_tool_call_burned_budget",
+          details: `forced tool call returned ${llmResponse.content?.length ?? 0} chars of prose and hit the completion cap; continuation skipped`,
+        });
+      }
+      if (!forcedCallReturnedProse && llmResponse.tool_calls.length === 0 && llmResponse.finishReason === "length") {
         const continued = await continueLengthLimitedResponse(provider, messages, llmResponse, signal, chunkSink);
         llmResponse = continued.response;
         llmCalls += continued.additionalCalls;
