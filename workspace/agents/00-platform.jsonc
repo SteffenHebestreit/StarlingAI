@@ -9,8 +9,13 @@
         // Qwen3.6-35B-A3B (MoE, 3B active, Q4 GGUF) on the dual Strix Halo box, fronted by
         // llama-swap at 192.168.12.11:8080 (SAI_PRIMARY_MODEL_URL). The model id carries NO
         // vendor segment: llama-swap routes on the bare id and answers "no router for
-        // requested model" for `deepseek/...` or `qwen/...`. `corsair/<id>` is an ALIAS onto
-        // the same backend, not a second instance — measured, it shares the prefix cache.
+        // requested model" for `deepseek/...` or `qwen/...`. `corsair/<id>` is the OTHER
+        // STATION's local id — a second instance, NOT an alias. This comment shipped claiming the
+        // opposite ("shares the prefix cache"); the probe behind that claim was ordering-
+        // confounded, because the `qwen-27b` SELECTOR ran first and landed on the same station,
+        // so the warmth came from the selector, not from corsair. Re-measured with a prefix
+        // neither had seen: corsair/qwen3.6-27b cold 31.15 s / 7,504 tok, then qwen3.6-27b on the
+        // SAME prefix cold again, 24.11 s / 7,504 tok. Two caches, two machines.
         //
         // DEEPSEEK-V4-FLASH IS GONE from the station, which is why this moved. Measured
         // 2026-09-09 over an identical 5,933-token prefix:

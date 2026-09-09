@@ -911,13 +911,44 @@ export function resolveThinkingControls(
       // own comment ("explicit effort overrides the enableThinking toggle, which predates graded
       // effort"). Vetoed, the model keeps its default — which is deliberation, what those agents
       // asked for — and no field claims otherwise.
+      // THE VETO ONLY WORKS IF THE FLAG STAYS OFF THE WIRE.
+      //
+      // Everything above was measured on LM Studio, where `enable_thinking` was inert — which is
+      // what made it safe to keep sending it while suppressing "none". bb395d5 moved the swarm to
+      // llama.cpp-served qwen3.6 and re-checked only WHICH family branch is taken, not whether the
+      // branch's premise survived. It did not. Measured on the serving cluster 2026-09-09, one
+      // prompt, temperature 0, max_tokens 4000, finish_reason "stop" every run:
+      //
+      //                                        qwen            qwen-27b
+      //   no control                      9,395 reasoning   10,392 reasoning
+      //   enable_thinking:false               0 reasoning        0 reasoning
+      //   reasoning_effort:"none"             0 reasoning        0 reasoning
+      //
+      // Identical to "none", and prompt_tokens moves 54 -> 56 with the flag alone — the chat
+      // template changes, which the note above says happens for "none" and nowhere else. So on
+      // this backend the flag is a complete off-switch, and sending it while suppressing "none"
+      // defeated the veto exactly: mission_coordinator and researcher are the only two agents
+      // carrying {enableThinking:false, reasoningEffort:"medium"} — the pair whose own shard
+      // comment says the graded pin overrides the toggle — and both ran with reasoning fully off
+      // while `provider_model_call` recorded reasoningEffort:null, which reads as "no control
+      // landed, model default deliberation". A silent inversion of the stated intent.
+      //
+      // So when the pin vetoes the off-switch, the flag is withheld too. Nothing on the wire means
+      // the model's default, which IS deliberation — what the veto is for. `enable_thinking: true`
+      // is still sent when asked for: it agrees with the veto rather than contradicting it.
+      //
+      // Whether the GRADED rungs do anything here is a separate and still-open question: they
+      // leave prompt_tokens at 54 and a single run per rung sat inside the run-to-run drift of the
+      // baseline itself (9,395 vs 8,468 on two identical calls), so it is unmeasured, not proven
+      // either way. Nothing below depends on the answer.
       const pinned = cfg.reasoningEffort ? normalizeQwenEffort(cfg.reasoningEffort) : undefined;
       const pinVetoesTheOffSwitch = pinned !== undefined && DELIBERATE_THINKING_EFFORTS.has(pinned);
       const thinkingOff = pinned === "none" || (cfg.enableThinking === false && !pinVetoesTheOffSwitch);
+      const flagWouldContradictTheVeto = cfg.enableThinking === false && pinVetoesTheOffSwitch;
       return {
-        // Still sent: vLLM and Qwen's own card honour it, and it is this family's documented
-        // mechanism. Inert here, but never misleading — it says what was asked, not what landed.
-        ...(cfg.enableThinking !== undefined ? { chatTemplateKwargs: { enable_thinking: cfg.enableThinking } } : {}),
+        ...(cfg.enableThinking !== undefined && !flagWouldContradictTheVeto
+          ? { chatTemplateKwargs: { enable_thinking: cfg.enableThinking } }
+          : {}),
         ...(thinkingOff ? { reasoningEffort: "none" as const } : {}),
       };
     }

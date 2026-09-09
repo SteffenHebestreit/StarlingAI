@@ -45,14 +45,45 @@ describe("thinking-off reaches the wire for the enable_thinking family", () => {
       .toEqual({ chatTemplateKwargs: { enable_thinking: true } });
   });
 
-  it("a pinned graded effort beats the legacy toggle — the precedence the agent configs document", () => {
+  it("a pinned graded effort beats the legacy toggle — and the flag is withheld, not just the level", () => {
     // researcher and mission_coordinator pin { reasoningEffort: "medium", enableThinking: false }
     // with the comment "explicit effort overrides the enableThinking toggle, which predates graded
-    // effort". Vetoed, the model keeps its default — which IS deliberation, what those agents
-    // asked for — and no field claims a level was applied when none was.
+    // effort". Vetoed, the model must keep its default — which IS deliberation, what those agents
+    // asked for.
+    //
+    // THIS TEST USED TO ASSERT { chatTemplateKwargs: { enable_thinking: false } } and passed,
+    // green, while the outcome was the exact opposite of the sentence above. It asserted the wire
+    // SHAPE and justified it with "the flag is inert here" — a premise measured on LM Studio. On
+    // the llama.cpp qwen3.6 backend the swarm actually runs (bb395d5), the flag alone is a
+    // complete off-switch: 9,395 -> 0 reasoning chars on qwen, 10,392 -> 0 on qwen-27b, identical
+    // to reasoning_effort "none", with prompt_tokens moving 54 -> 56 because the chat template
+    // changes. So the veto has to withhold the flag as well, or it vetoes nothing.
     for (const effort of ["medium", "high", "xhigh"] as const) {
-      expect(resolveThinkingControls("qwen/qwen3.6-35b-a3b", { enableThinking: false, reasoningEffort: effort }))
-        .toEqual({ chatTemplateKwargs: { enable_thinking: false } });
+      for (const id of ["qwen/qwen3.6-35b-a3b", "lmstudio/qwen", "lmstudio/qwen-27b"]) {
+        expect(
+          resolveThinkingControls(id, { enableThinking: false, reasoningEffort: effort }),
+          `${id} @ ${effort} must put NOTHING on the wire — anything sent here turns thinking off`,
+        ).toEqual({});
+      }
+    }
+  });
+
+  it("still sends enable_thinking:true under a graded pin — that agrees with the veto", () => {
+    // Only the flag that CONTRADICTS the veto is withheld. An agent asking for thinking ON with a
+    // graded pin is not in conflict, so the flag still goes out; withholding it here would be the
+    // over-broad version of the fix.
+    for (const id of ["lmstudio/qwen", "lmstudio/qwen-27b"]) {
+      expect(resolveThinkingControls(id, { enableThinking: true, reasoningEffort: "medium" }))
+        .toEqual({ chatTemplateKwargs: { enable_thinking: true } });
+    }
+  });
+
+  it("an UNVETOED off-switch still turns thinking off, by both mechanisms", () => {
+    // The other thirteen enableThinking:false agents carry no graded pin. Nothing about them
+    // changes: they asked for thinking off and they get it.
+    for (const id of ["lmstudio/qwen", "lmstudio/qwen-27b"]) {
+      expect(resolveThinkingControls(id, { enableThinking: false }))
+        .toEqual({ chatTemplateKwargs: { enable_thinking: false }, reasoningEffort: "none" });
     }
   });
 
