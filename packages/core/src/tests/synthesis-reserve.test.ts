@@ -11,7 +11,9 @@ import { resolveSynthesisReserveMs } from "../agent/sub-agent-turn-budget.js";
  * Session 3f15dc63 — a "what is the weather tomorrow" turn — is what happens when one call
  * costs more than the whole reserve. researcher held the complete forecast in shared facts at
  * 528 s, entered synthesis with 75 s reserved, and its synthesis call spent 121.8 s in PREFILL
- * ALONE (159.5 s total, 18,140-token prompt, deepseek-v4-flash, which cannot reuse KV state).
+ * ALONE (159.5 s total, 18,140-token prompt, deepseek-v4-flash). The parenthetical here used to add "which cannot reuse KV
+ * state" — that was measured FALSE on 2026-09-08: an unchanged prefix re-prefilled in
+ * 0.44 s / 4 tokens. The reserve fix stands on the 159.5 s call, not on that claim.
  * The reserve expired mid-prefill, the agent returned `partial`, and its parent then spent
  * another 283.9 s re-synthesising an answer that already existed. 20.1 minutes for a forecast
  * that was ready at 8.8.

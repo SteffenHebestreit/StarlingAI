@@ -131,15 +131,6 @@
       "capabilities": ["pentest finding validation", "false positive detection", "cvss score review", "evidence quality audit", "reproduction-step review", "coverage gap analysis"],
       "tags": ["pentest", "qa", "validation", "false-positive", "cvss", "coverage", "security"],
       "model": {
-        // SPEED TIER — deepseek cannot reuse KV state at all (CSA/HCA, architectural):
-        // an unchanged 3,894-token prefix re-prefills in 20.9 s every request. qwen reuses
-        // ~45% of its prefix, ~40% faster, and decodes ~55 tok/s against 13.6.
-        // contextWindow is REQUIRED alongside: the slot is 8,192 (-c 32768 / -np 4) and
-        // mergeAgentModelOverride inherits what you omit, so `primary` alone would size
-        // prompts against 65,536 and llama.cpp would silently drop the system message.
-        // Base prompt 2407 tok against computePromptTokenBudget(8192) = 4,096.
-        "primary": "lmstudio/qwen3.6-35b-a3b",
-        "contextWindow": 8192,
         "enableThinking": true,
         "temperature": 0.1
       },
@@ -196,15 +187,6 @@
       "capabilities": ["browser evidence interpretation", "visual inspection", "exact value extraction", "screenshot reading", "snapshot reading", "table extraction from images"],
       "tags": ["browser", "vision", "analysis", "screenshot", "snapshot", "image", "ocr", "extraction"],
       "model": {
-        // SPEED TIER — deepseek cannot reuse KV state at all (CSA/HCA, architectural):
-        // an unchanged 3,894-token prefix re-prefills in 20.9 s every request. qwen reuses
-        // ~45% of its prefix, ~40% faster, and decodes ~55 tok/s against 13.6.
-        // contextWindow is REQUIRED alongside: the slot is 8,192 (-c 32768 / -np 4) and
-        // mergeAgentModelOverride inherits what you omit, so `primary` alone would size
-        // prompts against 65,536 and llama.cpp would silently drop the system message.
-        // Base prompt 2065 tok against computePromptTokenBudget(8192) = 4,096.
-        "primary": "lmstudio/qwen3.6-35b-a3b",
-        "contextWindow": 8192,
         "enableThinking": false,
         "temperature": 0.1
       },
@@ -226,9 +208,6 @@
       "tags": ["computer", "desktop", "vscode", "automation", "remote", "vnc", "rdp", "ip-address", "lm-studio", "screen", "windows", "mouse", "keyboard"],
       "container": { "disabled": true }, // uses computer_* tools that require in-process gateway connection to the computer-remote service
       "model": {
-        // CONTEXT: base prompt ~8,466 tok. Pinned so a later default flip to the faster caching model
-        // cannot silently demote it.
-        "primary": "lmstudio/deepseek-v4-flash",
         "enableThinking": false,
         "temperature": 0.2
       },
@@ -279,9 +258,6 @@
       "capabilities": ["infrastructure automation", "vm provisioning", "terraform workflows", "terraform plan review", "service readiness checks", "ansible playbooks", "ansible tasks", "ansible vault", "kubernetes inspection", "kubectl read-only", "helm release inventory", "kubernetes deployments", "prometheus queries", "alertmanager silences", "grafana dashboards", "grafana alert rules", "ssh execution", "ssh uploads", "ssh downloads", "docker deployment"],
       "tags": ["infrastructure", "provisioning", "terraform", "ansible", "vault", "kubernetes", "k8s", "kubectl", "helm", "prometheus", "promql", "alertmanager", "silence", "grafana", "dashboard", "alerting", "ssh", "scp", "proxmox", "vm", "deployment"],
       "model": {
-        // CONTEXT: base prompt ~14,370 tok — over any qwen slot on the table. Pinned so a later default flip to the faster caching model
-        // cannot silently demote it.
-        "primary": "lmstudio/deepseek-v4-flash",
         "enableThinking": true,
         "temperature": 0.1
       },
@@ -482,9 +458,15 @@
       "capabilities": ["swarm maintenance", "agent prompt editing", "tool routing", "workspace configuration", "repo self-improvement", "scene creation", "job creation", "workflow catalog editing"],
       "tags": ["swarm", "maintenance", "agents", "tooling", "routing", "workspace", "workflow", "scene", "job", "create", "catalog", "selfimprovement"],
       "model": {
-        // CAPABILITY: edits this repo's own agent/scene/job definitions. Pinned so a later default flip to the faster caching model
-        // cannot silently demote it.
-        "primary": "lmstudio/deepseek-v4-flash",
+        // DEPTH TIER. Dense 27b: ~20-23 tok/s and 26.7 s cold prefill against the
+        // MoE default's 57-60 tok/s and 9.8 s, so it is spent only where reasoning
+        // depth is the bottleneck rather than latency. Two slots, so keep this set
+        // small: a coordinator fanning out to several of these serialises on them.
+        // contextWindow is stated because mergeAgentModelOverride inherits what you
+        // omit, and 65536 is this model's exact slot - over-declaring makes
+        // llama.cpp drop the FRONT of the prompt, which is the system message.
+        "primary": "lmstudio/qwen3.6-27b",
+        "contextWindow": 65536,
         "enableThinking": true,
         "temperature": 0.1
       },
@@ -516,9 +498,15 @@
       "capabilities": ["tool development", "tool testing", "self-improvement", "dynamic tool creation", "sandbox execution", "typescript tool authoring"],
       "tags": ["selfimprovement", "tools", "development", "testing", "sandbox", "typescript"],
       "model": {
-        // CAPABILITY: writes new tool code into the repo. Pinned so a later default flip to the faster caching model
-        // cannot silently demote it.
-        "primary": "lmstudio/deepseek-v4-flash",
+        // DEPTH TIER. Dense 27b: ~20-23 tok/s and 26.7 s cold prefill against the
+        // MoE default's 57-60 tok/s and 9.8 s, so it is spent only where reasoning
+        // depth is the bottleneck rather than latency. Two slots, so keep this set
+        // small: a coordinator fanning out to several of these serialises on them.
+        // contextWindow is stated because mergeAgentModelOverride inherits what you
+        // omit, and 65536 is this model's exact slot - over-declaring makes
+        // llama.cpp drop the FRONT of the prompt, which is the system message.
+        "primary": "lmstudio/qwen3.6-27b",
+        "contextWindow": 65536,
         "enableThinking": true,
         "temperature": 0.1
       },
@@ -543,17 +531,6 @@
       "capabilities": ["prompt review", "prompt change proposal", "tool-use convergence analysis", "stopping-condition tuning", "grounding improvement", "routing-fit assessment"],
       "tags": ["prompts", "prompt", "quality", "convergence", "tuning", "review"],
       "model": {
-        // SPEED TIER. deepseek cannot reuse KV state at all (CSA/HCA, architectural):
-        // an unchanged 3,894-token prefix re-prefills in 20.9 s on every request. qwen
-        // reuses ~45% of its prefix, comes back ~40% faster, and decodes ~55 tok/s
-        // against 13.6. This agent fits, so it runs on the model that caches.
-        //
-        // contextWindow is REQUIRED next to it: the slot is 8,192 (-c 32768 / -np 4) and
-        // mergeAgentModelOverride inherits what you omit, so `primary` alone would size
-        // prompts against 65,536 and llama.cpp would silently drop the system message.
-        // Base prompt 2165 tok against a computePromptTokenBudget(8192) of 4,096.
-        "primary": "lmstudio/qwen3.6-35b-a3b",
-        "contextWindow": 8192,
         "enableThinking": true,
         "temperature": 0.1
       },

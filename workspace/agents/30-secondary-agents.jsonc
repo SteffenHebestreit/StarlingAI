@@ -281,9 +281,15 @@
       "capabilities": ["live sql query execution", "analytical query authoring", "query optimization", "schema exploration", "schema design", "index recommendation", "migration script writing", "explain plan analysis", "query result export", "postgresql", "mysql", "mariadb"],
       "tags": ["database", "sql", "postgres", "mysql", "mariadb", "query", "schema", "migration", "index", "explain", "optimization"],
       "model": {
-        // CAPABILITY: query analysis and optimisation. Pinned so a later default flip to the faster caching model
-        // cannot silently demote it.
-        "primary": "lmstudio/deepseek-v4-flash",
+        // DEPTH TIER. Dense 27b: ~20-23 tok/s and 26.7 s cold prefill against the
+        // MoE default's 57-60 tok/s and 9.8 s, so it is spent only where reasoning
+        // depth is the bottleneck rather than latency. Two slots, so keep this set
+        // small: a coordinator fanning out to several of these serialises on them.
+        // contextWindow is stated because mergeAgentModelOverride inherits what you
+        // omit, and 65536 is this model's exact slot - over-declaring makes
+        // llama.cpp drop the FRONT of the prompt, which is the system message.
+        "primary": "lmstudio/qwen3.6-27b",
+        "contextWindow": 65536,
         "enableThinking": true,
         "temperature": 0.1
       },
@@ -335,17 +341,6 @@
       "capabilities": ["policy review", "approval-requirement analysis", "compliance screening", "credential-handling review", "data-sensitivity assessment", "authorization-claim verification", "risk classification"],
       "tags": ["policy", "compliance", "approval", "guardrail", "privacy", "data-sensitivity", "authorization"],
       "model": {
-        // SPEED TIER. deepseek cannot reuse KV state at all (CSA/HCA, architectural):
-        // an unchanged 3,894-token prefix re-prefills in 20.9 s on every request. qwen
-        // reuses ~45% of its prefix, comes back ~40% faster, and decodes ~55 tok/s
-        // against 13.6. This agent fits, so it runs on the model that caches.
-        //
-        // contextWindow is REQUIRED next to it: the slot is 8,192 (-c 32768 / -np 4) and
-        // mergeAgentModelOverride inherits what you omit, so `primary` alone would size
-        // prompts against 65,536 and llama.cpp would silently drop the system message.
-        // Base prompt 2455 tok against a computePromptTokenBudget(8192) of 4,096.
-        "primary": "lmstudio/qwen3.6-35b-a3b",
-        "contextWindow": 8192,
         "enableThinking": true,
         "temperature": 0.1
       },

@@ -6,19 +6,32 @@
     },
     "defaults": {
       "model": {
-        // DeepSeek V4 Flash (Q4 GGUF) on the dual Strix Halo box, fronted by llama-swap at
-        // 192.168.12.11:8080 (SAI_PRIMARY_MODEL_URL). The model id carries NO vendor segment:
-        // llama-swap routes on the bare id and answers "no router for requested model" for
-        // `deepseek/...` or `qwen/...`.
+        // Qwen3.6-35B-A3B (MoE, 3B active, Q4 GGUF) on the dual Strix Halo box, fronted by
+        // llama-swap at 192.168.12.11:8080 (SAI_PRIMARY_MODEL_URL). The model id carries NO
+        // vendor segment: llama-swap routes on the bare id and answers "no router for
+        // requested model" for `deepseek/...` or `qwen/...`. `corsair/<id>` is an ALIAS onto
+        // the same backend, not a second instance — measured, it shares the prefix cache.
         //
-        // THINKING CONTROL DIFFERS FROM QWEN, and none of the wave D/G measurements carry over.
-        // detectThinkingFamily sees "deepseek" and takes that branch, which sends
-        // `chat_template_kwargs.thinking` — a DIFFERENT key from the enable_thinking family's
-        // `enable_thinking`, and it sends no reasoning_effort at all. Whether this backend
-        // honours it is unmeasured; the routing tier below stays on qwen, where "none" IS
-        // measured to work.
-        "primary": "lmstudio/deepseek-v4-flash",
-        "fallback": "lmstudio/deepseek-v4-flash",
+        // DEEPSEEK-V4-FLASH IS GONE from the station, which is why this moved. Measured
+        // 2026-09-09 over an identical 5,933-token prefix:
+        //                    prefill cold   warm     generation    8k-token burn
+        //   qwen3.6-35b-a3b       9.8 s     0.33 s   60 tok/s          132 s
+        //   qwen3.6-27b (dense)  26.7 s     0.99 s   22 tok/s          361 s
+        //   deepseek (removed)   41.0 s     0.44 s   13.4 tok/s        598 s
+        // Every failure this wave was MECHANICAL — reasoning burns, cold prefill, a routing
+        // threshold — so the default is the fast MoE and the dense 27b is spent only where
+        // depth is the bottleneck (see the DEPTH TIER pins in the agent shards).
+        //
+        // THE FALLBACK IS A DIFFERENT MODEL ON PURPOSE. It pointed at the primary, which is
+        // no fallback at all: when the station dropped deepseek, both halves died together.
+        //
+        // Both ids land in detectThinkingFamily's `enable_thinking` branch — QWEN_EFFORT_VERSION_RE
+        // is /qwen-?3\.(?:[89]|\d{2,})/ and matches 3.8+ only — so the two tiers take the same
+        // controls. That also means the fifteen agents declaring `enableThinking: false` now
+        // actually stop thinking: on deepseek that flag was deliberately never sent, because
+        // `thinking: false` corrupted its output.
+        "primary": "lmstudio/qwen3.6-35b-a3b",
+        "fallback": "lmstudio/qwen3.6-27b",
         // Qwen 3.8 replaced the on/off enable_thinking toggle with graded
         // reasoning_effort (none|low|medium|xhigh), and enable_thinking is IGNORED by
         // its template — measured on this server 2026-08-15, enable_thinking:false
@@ -39,18 +52,19 @@
         // SIZED TO THE PRIMARY, and read from the server rather than assumed.
         // llama.cpp splits `-c` across `-np` slots, so the per-slot window is what a
         // request actually gets. Read off /props on 2026-09-08:
-        //   deepseek-v4-flash  -c 65536 -np 1  -> 65,536 per slot   (the primary; this number)
-        //   qwen3.6-35b-a3b    -c 32768 -np 4  ->  8,192 per slot   (the routing tier)
-        // 131072 was left over from the previous server and was 2x too large for deepseek
-        // and 16x too large for qwen — and an over-declared window is not harmless: the
+        //   qwen3.6-35b-a3b   -np 4  -> 131,072 per slot  (the primary and the routing tier)
+        //   qwen3.6-27b       -np 2  ->  65,536 per slot  (the depth tier / fallback)
+        // 65536 is DELIBERATELY below the primary's slot: it is the 27b's exact ceiling, so one
+        // number is safe for both, and under-declaring only costs headroom. Over-declaring is
+        // what is not harmless — the
         // trimmers size the prompt against it, and llama.cpp drops the FRONT of an
         // oversized prompt, which is the system message.
         //
         // ModelConfigSchema's `tiers` overrides the model NAME only — context window is
         // inherited — so this one number serves both. It is sized to the primary because
-        // that is where the large prompts run; routing-tier prompts are structurally small
-        // (531-2,802 tokens measured across a full turn, against an 8,192 slot). If a
-        // routing prompt ever approaches 8k, that margin is where it will break first.
+        // that is where the large prompts run. The old 8,192-per-slot squeeze is gone, and with
+        // it the per-agent `contextWindow: 8192` pins it forced — those capped the prompt budget
+        // at 4,096 tokens against a slot that now holds 131,072.
         "contextWindow": 65536,
         // A SINGLE CALL'S OUTPUT BUDGET, STATED — because unstated means "the rest of the
         // window". computeOutputTokenBudget derives max_tokens from contextWindow minus the
