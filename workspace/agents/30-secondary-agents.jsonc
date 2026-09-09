@@ -288,7 +288,7 @@
         // contextWindow is stated because mergeAgentModelOverride inherits what you
         // omit, and 65536 is this model's exact slot - over-declaring makes
         // llama.cpp drop the FRONT of the prompt, which is the system message.
-        "primary": "lmstudio/qwen3.6-27b",
+        "primary": "lmstudio/qwen-27b",
         "contextWindow": 65536,
         "enableThinking": true,
         "temperature": 0.1

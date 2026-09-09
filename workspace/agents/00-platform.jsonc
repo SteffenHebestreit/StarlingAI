@@ -30,8 +30,14 @@
         // controls. That also means the fifteen agents declaring `enableThinking: false` now
         // actually stop thinking: on deepseek that flag was deliberately never sent, because
         // `thinking: false` corrupted its output.
-        "primary": "lmstudio/qwen3.6-35b-a3b",
-        "fallback": "lmstudio/qwen3.6-27b",
+        // THE ID IS A SELECTOR, NOT A STATION. `qwen` and `qwen-27b` are llama-swap
+        // selectors that fill evox2 to 4 concurrent requests and then spill the rest to
+        // corsair over USB4; `qwen3.6-35b-a3b` and `corsair/qwen3.6-35b-a3b` address ONE
+        // machine each. Pinning a station forfeits the second GPU: 106.6 tok/s against
+        // 188.8 aggregate at the measured 8-concurrent sweet spot. Two stations give
+        // 1.77x rather than 2x — the peer proxy hop costs the difference.
+        "primary": "lmstudio/qwen",
+        "fallback": "lmstudio/qwen-27b",
         // Qwen 3.8 replaced the on/off enable_thinking toggle with graded
         // reasoning_effort (none|low|medium|xhigh), and enable_thinking is IGNORED by
         // its template — measured on this server 2026-08-15, enable_thinking:false
@@ -115,7 +121,7 @@
         // model instead and make it cheap with reasoning_effort "none" (measured: 0
         // reasoning chars, the fastest configuration available).
         "tiers": {
-          "routing": "lmstudio/qwen3.6-35b-a3b"
+          "routing": "lmstudio/qwen"
         }
       }
     },

@@ -239,7 +239,7 @@
         // contextWindow is stated because mergeAgentModelOverride inherits what you
         // omit, and 65536 is this model's exact slot - over-declaring makes
         // llama.cpp drop the FRONT of the prompt, which is the system message.
-        "primary": "lmstudio/qwen3.6-27b",
+        "primary": "lmstudio/qwen-27b",
         "contextWindow": 65536,
         // Execution specialist: light reasoning is enough — the deliberation rung
         // ("medium") is for planning/analysis roles. Measured low→1.3k reasoning
@@ -289,7 +289,7 @@
         // contextWindow is stated because mergeAgentModelOverride inherits what you omit,
         // and 65536 is this model's exact slot: over-declaring makes llama.cpp drop
         // the FRONT of the prompt, which is the system message.
-        "primary": "lmstudio/qwen3.6-27b", "contextWindow": 65536, "enableThinking": true, "temperature": 0.2 },
+        "primary": "lmstudio/qwen-27b", "contextWindow": 65536, "enableThinking": true, "temperature": 0.2 },
       "maxIterations": 14,
       // 25 min. The chunked-build discipline below means a complete app is 4-6 full completions
       // (skeleton + data batches + logic); the 240s default killed the iSAQB quiz build mid-chunk-2
@@ -315,7 +315,7 @@
         // contextWindow is stated because mergeAgentModelOverride inherits what you omit,
         // and 65536 is this model's exact slot: over-declaring makes llama.cpp drop
         // the FRONT of the prompt, which is the system message.
-        "primary": "lmstudio/qwen3.6-27b", "contextWindow": 65536, "enableThinking": true, "temperature": 0.2 },
+        "primary": "lmstudio/qwen-27b", "contextWindow": 65536, "enableThinking": true, "temperature": 0.2 },
       "maxIterations": 14,
       // 25 min: chunked builds (server + skeleton + appended data batches + serve_app round trip)
       // need 4-6 full completions and one pass alone can run ~26 min on this hardware; the 240s
@@ -337,7 +337,7 @@
         // contextWindow is stated because mergeAgentModelOverride inherits what you
         // omit, and 65536 is this model's exact slot - over-declaring makes
         // llama.cpp drop the FRONT of the prompt, which is the system message.
-        "primary": "lmstudio/qwen3.6-27b",
+        "primary": "lmstudio/qwen-27b",
         "contextWindow": 65536,
         // Reasoning role: deliberation rung. Explicit effort overrides the
         // enableThinking toggle below, which predates graded effort and would
@@ -375,7 +375,7 @@
         // contextWindow is stated because mergeAgentModelOverride inherits what you
         // omit, and 65536 is this model's exact slot - over-declaring makes
         // llama.cpp drop the FRONT of the prompt, which is the system message.
-        "primary": "lmstudio/qwen3.6-27b",
+        "primary": "lmstudio/qwen-27b",
         "contextWindow": 65536,
         "enableThinking": true,
         "temperature": 0.1
@@ -492,7 +492,7 @@
         // contextWindow is stated because mergeAgentModelOverride inherits what you
         // omit, and 65536 is this model's exact slot - over-declaring makes
         // llama.cpp drop the FRONT of the prompt, which is the system message.
-        "primary": "lmstudio/qwen3.6-27b",
+        "primary": "lmstudio/qwen-27b",
         "contextWindow": 65536,
         "enableThinking": true,
         "temperature": 0.2
