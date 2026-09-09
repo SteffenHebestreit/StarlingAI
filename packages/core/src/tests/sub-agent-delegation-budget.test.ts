@@ -314,17 +314,36 @@ describe("delegate_to_agent hands the runner a parent-relative budget", () => {
       import("../tools/registry.js"),
       import("../tools/sub-agent.js"),
     ]);
-    await getTool("delegate_to_agent")!.execute(
-      { agentName: "budget_probe", task: "Build the app" },
-      {
-        sessionId: "session-delegation-budget",
-        workspacePath: "/workspace",
-        // Exactly what gateway/rpc.ts + agent/runtime.ts put on the ToolContext: the STATIC turn
-        // budget, and the absolute deadline armed at turn start.
-        turnTimeoutOverrideMs: TURN_MS,
-        _turnDeadlineMs: Date.now() + (TURN_MS - spentMs),
-      },
-    );
+    // THE CLOCK IS FROZEN FOR THE CALL, AND THAT IS THE POINT.
+    //
+    // The deadline is armed as `Date.now() + (TURN_MS - spentMs)` and the code under test derives
+    // the remaining budget as `_turnDeadlineMs - Date.now()`. Two reads of a moving clock: if a
+    // single millisecond lands between them, "300,000 remaining" becomes 299,999 and every
+    // assertion below — which are exact, because the fractional bound they check is exact — is off
+    // by one. CI run 34410099958 failed exactly that way ("expected 224999 to be 225000") on a
+    // commit that touched nothing near delegation budgets, and the same suite had been green one
+    // commit earlier. A wall-clock race, not a regression.
+    //
+    // Freezing rather than widening the assertion to a tolerance: the tolerance would have to be
+    // "a few milliseconds", which is not a property of the fractional bound at all — it would make
+    // the test unable to distinguish the arithmetic being wrong from the clock having ticked.
+    const frozenNow = Date.now();
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(frozenNow);
+    try {
+      await getTool("delegate_to_agent")!.execute(
+        { agentName: "budget_probe", task: "Build the app" },
+        {
+          sessionId: "session-delegation-budget",
+          workspacePath: "/workspace",
+          // Exactly what gateway/rpc.ts + agent/runtime.ts put on the ToolContext: the STATIC turn
+          // budget, and the absolute deadline armed at turn start.
+          turnTimeoutOverrideMs: TURN_MS,
+          _turnDeadlineMs: frozenNow + (TURN_MS - spentMs),
+        },
+      );
+    } finally {
+      nowSpy.mockRestore();
+    }
     expect(runSubAgentWithStatsMock).toHaveBeenCalledTimes(1);
     return runSubAgentWithStatsMock.mock.calls[0]![0];
   };
