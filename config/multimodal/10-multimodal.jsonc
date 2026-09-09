@@ -6,9 +6,13 @@
       "toolName": "file_to_markdown",
       "timeoutMs": 60000,
       // Vision LLM — same model as the primary, Qwen 3.6 is multimodal (vision + tool calling).
+      // Address the llama-swap SELECTOR, not one station's local id: `qwen3.6-35b-a3b` names a
+      // single instance, so pinning it forfeits the second station (the same defect a7e210e fixed
+      // for the swarm). Measured: both stations decode an image and answer from it, so the
+      // selector is free to route either way.
       // visionTimeoutMs is separate from timeoutMs (which is for the file-to-markdown service)
       // because local LLM inference on large screenshots can take well over 60 s.
-      "visionModel": "lmstudio/qwen3.6-35b-a3b",
+      "visionModel": "lmstudio/qwen",
       "visionTimeoutMs": 120000
     },
     // Speech-to-text. baseUrl comes from SAI_MULTIMODAL_STT_URL at runtime.
