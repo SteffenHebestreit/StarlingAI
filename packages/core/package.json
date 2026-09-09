@@ -58,7 +58,7 @@
     "mysql2": "^3.22.6",
     "neo4j-driver": "^6.2.0",
     "node-fetch": "^3.3.2",
-    "nodemailer": "^9.0.3",
+    "nodemailer": "^9.1.0",
     "openai": "^4.104.0",
     "openid-client": "^6.8.4",
     "pdf-lib": "^1.17.1",
