@@ -107,7 +107,17 @@
           <!-- Claude model picker — which model the "Claude" preset runs.
                Shown whenever Claude is usable (subscription OR API key). -->
           <div v-if="connected || claudePresetExists" class="mt-4 border-t border-white/10 pt-4">
-            <label class="block text-[12px] font-medium text-gray-300">Claude model</label>
+            <div class="flex items-center justify-between gap-2">
+              <label class="block text-[12px] font-medium text-gray-300">Claude model</label>
+              <button
+                class="shrink-0 rounded-md border border-white/10 px-2 py-1 text-[11px] text-gray-300 transition hover:border-orange-400/40 hover:text-gray-100 disabled:opacity-50"
+                :disabled="store.anthropicModelsRefreshing"
+                title="Ask Anthropic which models this account can use"
+                @click="store.refreshAnthropicModels()"
+              >
+                {{ store.anthropicModelsRefreshing ? "Refreshing…" : "Refresh list" }}
+              </button>
+            </div>
             <p class="mt-0.5 text-[11px] text-gray-500">
               Used by the header switch. Applies immediately — even mid-session — and persists.
             </p>
@@ -118,7 +128,7 @@
                 :disabled="store.modelSaving"
               >
                 <option v-for="choice in store.anthropicModelChoices" :key="choice.id" :value="choice.id">
-                  {{ choice.label }} — {{ choice.hint }}
+                  {{ choice.hint ? `${choice.label} — ${choice.hint}` : choice.label }}
                 </option>
                 <option value="__custom__">Custom model id…</option>
               </select>
@@ -142,6 +152,13 @@
             />
             <p class="mt-1.5 text-[11px] text-gray-500">
               Current: <span class="font-mono text-gray-400">{{ store.anthropicModel }}</span>
+              <span v-if="store.anthropicModelSource === 'live'" class="text-gray-600">
+                · list from Anthropic{{ refreshedAtLabel }}
+              </span>
+              <span v-else class="text-gray-600">· built-in list</span>
+            </p>
+            <p v-if="store.anthropicModelsWarning" class="mt-1.5 text-[11px] text-amber-300">
+              {{ store.anthropicModelsWarning }}
             </p>
             <p v-if="store.modelError" class="mt-1.5 text-[11px] text-red-300">{{ store.modelError }}</p>
 
@@ -202,8 +219,19 @@ const customModel = ref("");
 const effectiveModel = computed(() =>
   selectedModel.value === "__custom__" ? customModel.value.trim() : selectedModel.value,
 );
+// Date-only: the exact minute of a catalogue refresh is noise, and a bare
+// timestamp next to "from Anthropic" reads as when the MODEL changed.
+const refreshedAtLabel = computed(() => {
+  const at = store.anthropicModelsRefreshedAt;
+  if (!at) return "";
+  const parsed = new Date(at);
+  return Number.isNaN(parsed.getTime()) ? "" : `, ${parsed.toLocaleDateString()}`;
+});
 
 onMounted(() => {
+  // The store outlives this modal (v-if), so a warning from an earlier refresh
+  // would otherwise reappear on reopen, long after the condition cleared.
+  store.anthropicModelsWarning = "";
   void store.fetchAnthropicModel();
 });
 
@@ -211,7 +239,16 @@ onMounted(() => {
 // the custom field for ids outside the curated list.
 watch(
   () => [store.anthropicModel, store.anthropicModelChoices] as const,
-  ([model, choices]) => {
+  ([model, choices], previous) => {
+    // Only re-sync when the SAVED model actually changed, or on the first run.
+    // The choices array is in the source so a late-arriving list can still
+    // resolve the current model out of the custom field - but a refresh that
+    // leaves the saved model untouched must not reset what the user has picked
+    // or typed. Before the Refresh button this array was written once per mount,
+    // so the distinction never came up.
+    const modelChanged = !previous || previous[0] !== model;
+    const stillUnresolved = selectedModel.value === "__custom__" && customModel.value === "";
+    if (!modelChanged && !stillUnresolved) return;
     if (choices.some((c) => c.id === model)) {
       selectedModel.value = model;
     } else if (model) {

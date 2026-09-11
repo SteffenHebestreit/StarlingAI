@@ -40,6 +40,13 @@ export const useModelPresetStore = defineStore("modelPreset", () => {
   // Which Claude model the implicit "claude" preset uses (providers.anthropic.defaultModel).
   const anthropicModel = ref("claude-sonnet-4-6");
   const anthropicModelChoices = ref<Array<{ id: string; label: string; hint: string }>>([]);
+  // Where the list came from: "live" = Anthropic's own /v1/models, "builtin" =
+  // the shipped fallback. Shown to the user, because a list that is merely the
+  // build's guess should not look like the account's actual catalogue.
+  const anthropicModelSource = ref<"live" | "builtin">("builtin");
+  const anthropicModelsRefreshedAt = ref<string | null>(null);
+  const anthropicModelsRefreshing = ref(false);
+  const anthropicModelsWarning = ref("");
   const modelSaving = ref(false);
   const modelError = ref("");
 
@@ -187,11 +194,59 @@ export const useModelPresetStore = defineStore("modelPreset", () => {
         headers: { Authorization: `Bearer ${gateway.token}` },
       });
       if (!res.ok) return;
-      const body = await res.json() as { model: string; choices: Array<{ id: string; label: string; hint: string }> };
+      const body = await res.json() as {
+        model: string;
+        choices: Array<{ id: string; label: string; hint: string }>;
+        source?: "live" | "builtin";
+        refreshedAt?: string | null;
+      };
       anthropicModel.value = body.model;
       anthropicModelChoices.value = body.choices;
+      anthropicModelSource.value = body.source ?? "builtin";
+      anthropicModelsRefreshedAt.value = body.refreshedAt ?? null;
     } catch {
       // best-effort; keep prior values
+    }
+  }
+
+  /**
+   * Re-ask Anthropic which models this credential can use.
+   *
+   * The gateway answers 200 with the built-in list and a `warning` when it
+   * cannot list (an inference-scoped subscription token may not be allowed to
+   * call /v1/models), so a failed refresh leaves a usable picker rather than an
+   * error state — surface the warning, keep the choices.
+   */
+  async function refreshAnthropicModels(): Promise<void> {
+    if (!gateway.token || anthropicModelsRefreshing.value) return;
+    anthropicModelsRefreshing.value = true;
+    anthropicModelsWarning.value = "";
+    try {
+      const res = await window.fetch(`${baseUrl()}/api/models/anthropic/model/refresh`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${gateway.token}` },
+      });
+      const body = await res.json().catch(() => null) as {
+        choices?: Array<{ id: string; label: string; hint: string }>;
+        source?: "live" | "builtin";
+        refreshedAt?: string | null;
+        warning?: string;
+        error?: string;
+      } | null;
+      if (!res.ok) throw new Error(body?.error ?? `HTTP ${res.status}`);
+      // A 200 whose body will not parse leaves `body` null. Relabelling the list
+      // already on screen as "builtin" on the strength of a body we could not
+      // read would mislabel content we are still displaying, so treat an
+      // unreadable success as the failure it is.
+      if (!body) throw new Error("Gateway returned an unreadable response");
+      if (body.choices) anthropicModelChoices.value = body.choices;
+      anthropicModelSource.value = body.source ?? "builtin";
+      anthropicModelsRefreshedAt.value = body.refreshedAt ?? null;
+      anthropicModelsWarning.value = body.warning ?? "";
+    } catch (err) {
+      anthropicModelsWarning.value = String(err instanceof Error ? err.message : err);
+    } finally {
+      anthropicModelsRefreshing.value = false;
     }
   }
 
@@ -252,6 +307,8 @@ export const useModelPresetStore = defineStore("modelPreset", () => {
     active, activePrimary, defaultPrimary, presets, scope, loaded, switching, error, available,
     oauthConnected, oauthExpiresAt, oauthBusy, oauthError,
     anthropicModel, anthropicModelChoices, modelSaving, modelError,
+    anthropicModelSource, anthropicModelsRefreshedAt, anthropicModelsRefreshing,
+    anthropicModelsWarning, refreshAnthropicModels,
     fetch, activate, setScope, fetchOAuthStatus, startOAuth, completeOAuth, disconnectOAuth,
     fetchAnthropicModel, setAnthropicModel,
   };

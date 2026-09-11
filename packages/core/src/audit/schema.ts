@@ -48,6 +48,7 @@ export type CoreAuditEventType =
   | "model_preset_switched"
   | "anthropic_oauth_connected"
   | "anthropic_oauth_disconnected"
+  | "anthropic_models_refreshed"
   | "agent_message_sent"
   | "channel_delivery_failed"
   | "agent_routing_evaluated"

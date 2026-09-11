@@ -58,18 +58,150 @@ const log = childLogger("provider:anthropic");
 
 export const ANTHROPIC_DEFAULT_BASE_URL = "https://api.anthropic.com";
 
+export interface AnthropicModelChoice {
+  id: string;
+  label: string;
+  /** May be empty when the API reports neither token count — render accordingly. */
+  hint: string;
+  /** Anthropic's own max_tokens for this id, when the listing reported one. */
+  maxOutputTokens?: number;
+}
+
 /**
- * Curated current-model choices for the dashboard picker. Static on purpose:
- * subscription OAuth tokens are inference-scoped and may not be allowed to
- * call /v1/models, so a live listing can't be relied on. The dashboard also
- * accepts a free-text model id for anything not listed here.
+ * FALLBACK model choices for the dashboard picker — used when the live listing
+ * is unavailable, not as the primary source.
+ *
+ * This list was the only source until it went stale (it still offered Sonnet 4.6
+ * as "the default" months after Opus 5 and Sonnet 5 shipped), which is the
+ * failure mode any hand-maintained model list has: nothing about it breaks, it
+ * just quietly stops describing reality. fetchAnthropicModelChoices() asks
+ * Anthropic instead; this list is what answers when that call cannot be made.
+ *
+ * It still has to exist, because the reason the list was static is real:
+ * subscription OAuth tokens are inference-scoped and may not be permitted to
+ * call /v1/models. The dashboard also accepts a free-text model id, so neither
+ * path can strand a user on an id we have not heard of.
  */
-export const ANTHROPIC_MODEL_CHOICES: ReadonlyArray<{ id: string; label: string; hint: string }> = [
-  { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", hint: "Best speed/intelligence balance (default)" },
-  { id: "claude-opus-4-8", label: "Claude Opus 4.8", hint: "Most capable Opus — long-horizon agentic work" },
-  { id: "claude-fable-5", label: "Claude Fable 5", hint: "Most powerful tier — highest cost" },
+export const ANTHROPIC_MODEL_CHOICES: ReadonlyArray<AnthropicModelChoice> = [
+  { id: "claude-opus-5", label: "Claude Opus 5", hint: "Most capable Opus — long-horizon agentic work" },
+  { id: "claude-sonnet-5", label: "Claude Sonnet 5", hint: "Best speed/intelligence balance" },
+  { id: "claude-fable-5-1", label: "Claude Fable 5.1", hint: "Most powerful tier — highest cost" },
   { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", hint: "Fastest and most cost-effective" },
+  { id: "claude-opus-4-8", label: "Claude Opus 4.8", hint: "Previous-generation Opus" },
+  // Retained because providers.anthropic.defaultModel still falls back to this id:
+  // dropping it would leave the picker resolving the active model to "custom".
+  { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", hint: "Previous-generation Sonnet" },
 ];
+
+const MODEL_LIST_PAGE_SIZE = 100;
+/**
+ * Anthropic serves a few dozen models; 20 pages of 100 is far past any real
+ * catalogue and exists only so a non-advancing cursor terminates.
+ */
+const MAX_MODEL_LIST_PAGES = 20;
+
+/**
+ * Output ceilings learned from a live listing, keyed by exact model id.
+ *
+ * ANTHROPIC_MODEL_OUTPUT_LIMITS below is a hand-maintained PREFIX table whose
+ * miss case is 8,192 — and a too-low ceiling silently truncates an answer. That
+ * was tolerable while the dashboard offered six curated ids that all had an
+ * entry. It stopped being tolerable the moment the picker started offering
+ * whatever Anthropic lists: this change is what made the miss case reachable
+ * through the UI, so it also has to close it. The API reports each model's real
+ * `max_tokens`, so when a listing has run we use that number instead of guessing
+ * from a prefix.
+ *
+ * Process-local, like the route's catalogue cache: it is an optimisation over a
+ * guess, never a source of truth to persist.
+ */
+const learnedOutputLimits = new Map<string, number>();
+
+/** Record Anthropic's own output ceiling for a model id. Exported for tests. */
+export function rememberAnthropicOutputLimit(modelId: string, maxOutputTokens: number): void {
+  if (Number.isFinite(maxOutputTokens) && maxOutputTokens > 0) learnedOutputLimits.set(modelId, maxOutputTokens);
+}
+
+/** Drop every learned ceiling. Exported for tests; also used when a credential changes. */
+export function forgetAnthropicOutputLimits(): void {
+  learnedOutputLimits.clear();
+}
+
+/** "1M" / "200K" / "8192" — token counts as the picker should show them. */
+function formatTokenCount(tokens: number): string {
+  if (tokens >= 1_000_000 && tokens % 1_000_000 === 0) return `${tokens / 1_000_000}M`;
+  if (tokens >= 1_000 && tokens % 1_000 === 0) return `${tokens / 1_000}K`;
+  return String(tokens);
+}
+
+/**
+ * Ask Anthropic which models this credential can actually use.
+ *
+ * GET /v1/models is GA and needs no beta header. It returns newest-first, so the
+ * order is taken as-is rather than re-sorted — release order is what the picker
+ * wants and the API is the authority on it.
+ *
+ * An EMPTY list counts as a failure, not as "no models available": a blank
+ * picker is indistinguishable from a broken one for the user, and falling back
+ * to the curated list at least offers something selectable. Every other error
+ * (403 on an inference-scoped OAuth token, network, timeout) propagates to the
+ * caller, which decides whether to fall back — this function does not swallow it
+ * and silently hand back the static list under a "live" label.
+ */
+export async function fetchAnthropicModelChoices(opts: {
+  credential: string;
+  baseUrl?: string;
+  oauthMode?: boolean;
+  timeoutMs?: number;
+}): Promise<AnthropicModelChoice[]> {
+  const oauthMode = opts.oauthMode ?? isAnthropicOAuthCredential(opts.credential);
+  const client = new Anthropic({
+    baseURL: opts.baseUrl || ANTHROPIC_DEFAULT_BASE_URL,
+    // Same null-slotting as the provider constructor: passing both a key and a
+    // token is rejected by the API, and an unset slot would otherwise be filled
+    // from the environment.
+    apiKey: oauthMode ? null : opts.credential,
+    authToken: oauthMode ? opts.credential : null,
+    timeout: opts.timeoutMs ?? 15_000,
+    maxRetries: 1,
+    ...(oauthMode ? { defaultHeaders: { "anthropic-beta": OAUTH_BETA_HEADER } } : {}),
+  });
+
+  const choices: AnthropicModelChoice[] = [];
+  const deadline = Date.now() + (opts.timeoutMs ?? 15_000) * 2;
+  let pages = 0;
+
+  // Iterate PAGES, not items. The item-level async iterator would paginate too,
+  // but it hides the page boundary, and the bound that matters here is a page
+  // count: `timeout` is per HTTP ATTEMPT, not per listing, so an upstream that
+  // keeps answering has_more:true with a cursor it never advances would spin
+  // forever inside a request the route cannot abort. Counting items instead
+  // would make the bound depend on page size and let a one-item-per-page stall
+  // run for thousands of round trips before tripping.
+  const first = await client.models.list({ limit: MODEL_LIST_PAGE_SIZE });
+  for await (const page of first.iterPages()) {
+    pages += 1;
+    if (pages > MAX_MODEL_LIST_PAGES || Date.now() > deadline) {
+      throw new Error(`Anthropic model listing did not terminate within ${MAX_MODEL_LIST_PAGES} pages`);
+    }
+    for (const model of page.getPaginatedItems()) {
+      const parts: string[] = [];
+      if (model.max_input_tokens) parts.push(`${formatTokenCount(model.max_input_tokens)} context`);
+      if (model.max_tokens) parts.push(`${formatTokenCount(model.max_tokens)} output`);
+      choices.push({
+        id: model.id,
+        label: model.display_name || model.id,
+        hint: parts.join(" · "),
+        ...(model.max_tokens ? { maxOutputTokens: model.max_tokens } : {}),
+      });
+      // Anthropic's own ceiling for this id, which beats any prefix guess. See
+      // rememberAnthropicOutputLimit for why this matters after this change.
+      if (model.max_tokens) rememberAnthropicOutputLimit(model.id, model.max_tokens);
+    }
+  }
+  if (choices.length === 0) throw new Error("Anthropic returned an empty model list");
+  return choices;
+}
 /**
  * Anthropic's REAL per-model output ceiling.
  *
@@ -148,6 +280,9 @@ export function resolveAnthropicNonStreamingMaxOutputTokens(modelId: string): nu
 
 /** The output ceiling Anthropic itself enforces for `modelId`. Exported for tests. */
 export function resolveAnthropicMaxOutputTokens(modelId: string): number {
+  // Anthropic's own number for this exact id wins over any prefix guess.
+  const learned = learnedOutputLimits.get(modelId);
+  if (learned !== undefined) return learned;
   let best: { prefix: string; maxOutputTokens: number } | undefined;
   for (const entry of ANTHROPIC_MODEL_OUTPUT_LIMITS) {
     if (!modelId.startsWith(entry.prefix)) continue;
