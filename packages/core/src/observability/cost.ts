@@ -37,10 +37,17 @@ const DEFAULT_RATE_CARD: { matches: string; promptPer1m: number; completionPer1m
   // the previous single `^claude-(opus|sonnet|haiku)-?4` row billed Opus AND Haiku at
   // the Sonnet $3/$15 rate (Opus ~40% undercount, and budget alerts fired off it).
   // First match wins, so the bare 4.x ids resolve here before the Claude-3 rows.
+  // Claude 5 family. Added when the dashboard picker stopped being a curated
+  // list of six ids and started offering whatever Anthropic lists: an unpriced
+  // model is not an error, it silently bills $0, so cost.budgets alerts cannot
+  // fire for it. A rate card is the same kind of hand-maintained table as the
+  // model list was, with the same rot.
+  { matches: "^claude-opus-5", promptPer1m: 5, completionPer1m: 25, label: "Claude Opus 5" },
+  { matches: "^claude-sonnet-5", promptPer1m: 2, completionPer1m: 10, label: "Claude Sonnet 5" },
+  { matches: "^claude-(fable|mythos)-5", promptPer1m: 10, completionPer1m: 50, label: "Claude Fable/Mythos 5.x" },
   { matches: "^claude-opus-4", promptPer1m: 5, completionPer1m: 25, label: "Claude Opus 4.x" },
   { matches: "^claude-sonnet-4", promptPer1m: 3, completionPer1m: 15, label: "Claude Sonnet 4.x" },
   { matches: "^claude-haiku-4", promptPer1m: 1, completionPer1m: 5, label: "Claude Haiku 4.x" },
-  // Claude Fable 5: public rate not wired here yet — add a row when known (no match = $0).
   { matches: "^claude-3-5-sonnet", promptPer1m: 3, completionPer1m: 15 },
   { matches: "^claude-3-5-haiku", promptPer1m: 1, completionPer1m: 5 },
   { matches: "^claude-3-(opus|sonnet)", promptPer1m: 15, completionPer1m: 75 },
