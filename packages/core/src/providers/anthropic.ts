@@ -587,6 +587,21 @@ function toAnthropicToolChoice(
   }
 }
 
+/**
+ * `finishReason` for a FAILED attempt's audit row, on the same split the OpenAI-compatible
+ * provider's abort branch records: anything that STOPPED an otherwise-working generation — the
+ * caller's deadline or cancel, the inactivity stall, the total-budget cap, the reasoning-burn
+ * guard — is "aborted"; a transport or API failure is "error". The distinction is the one an
+ * analysis needs, because an aborted call's duration is a measurement of patience while an
+ * errored one's is a measurement of the failure.
+ */
+function auditFinishReasonForFailure(err: unknown, aborted: boolean): "aborted" | "error" {
+  if (aborted || isReasoningBurnAbort(err) || isDeadlineAbort(err)) return "aborted";
+  // The SDK surfaces a caller abort as a DOMException named "AbortError" (see the laundering
+  // note in the OpenAI-compatible provider) — it carries none of the identities above.
+  return (err as { name?: unknown } | undefined)?.name === "AbortError" ? "aborted" : "error";
+}
+
 export class AnthropicProvider implements ChatProvider {
   private client: Anthropic;
   private modelConfig: ModelConfig;
@@ -788,11 +803,16 @@ export class AnthropicProvider implements ChatProvider {
     messages: readonly LLMMessage[],
     tools: readonly LLMToolDef[],
     mode: "complete" | "stream",
+    perCallCeiling?: number,
   ): number {
     const modelId = parseModelId(this.modelConfig.primary);
     const ceilings = [resolveAnthropicMaxOutputTokens(modelId)];
     if (mode === "complete") ceilings.push(resolveAnthropicNonStreamingMaxOutputTokens(modelId));
     if (this.modelConfig.maxTokens !== undefined) ceilings.push(this.modelConfig.maxTokens);
+    // A caller's ceiling for THIS call only — one more ceiling, never a raise.
+    if (typeof perCallCeiling === "number" && Number.isFinite(perCallCeiling) && perCallCeiling > 0) {
+      ceilings.push(Math.floor(perCallCeiling));
+    }
     return computeOutputTokenBudget({
       contextWindow: this.modelConfig.contextWindow,
       estimatedPromptTokens: estimatePromptTokensForRequest(messages, tools),
@@ -805,6 +825,7 @@ export class AnthropicProvider implements ChatProvider {
     tools: LLMToolDef[],
     mode: "complete" | "stream",
     toolChoice?: "auto" | "required" | "none",
+    perCallMaxTokens?: number,
   ) {
     const modelId = parseModelId(this.modelConfig.primary);
     const { system, messages: anthropicMessages } = toAnthropicMessages(messages);
@@ -851,7 +872,7 @@ export class AnthropicProvider implements ChatProvider {
       modelId,
       params: {
         model: modelId,
-        max_tokens: this.resolveMaxTokens(messages, tools, mode),
+        max_tokens: this.resolveMaxTokens(messages, tools, mode, perCallMaxTokens),
         ...(systemParam ? { system: systemParam } : {}),
         messages: anthropicMessages,
         ...(anthropicTools.length > 0
@@ -913,8 +934,57 @@ export class AnthropicProvider implements ChatProvider {
     return true;
   }
 
-  async complete(messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal): Promise<LLMResponse> {
-    const { modelId, params } = this.buildRequestBase(messages, tools, "complete");
+  /**
+   * One audit row per model call ATTEMPT — success or failure — the same field set as
+   * LMStudioProvider.auditModelCall so the audit analysis reads both providers alike. This
+   * provider emitted NO such rows: four Claude sub-agent runs and two Claude-orchestrated turns
+   * (2026-09-13) were absent from every per-call figure. `controls` mirrors the
+   * OpenAI-compatible row's keys; the thinking ones are null because this provider sends no
+   * thinking parameter (see the file header).
+   *
+   * Both failure paths write one too. Emitting only on the normal return is the survivor bias
+   * the September audit diagnosed in the openai SDK's laundered aborts: the calls that matter
+   * to a duration or reasoning percentile are precisely the ones that ran long and were cut,
+   * and a percentile computed over the survivors reads them as absent rather than as slow.
+   * LMStudioProvider.streamOnce has recorded its abort path this way all along; this matches it.
+   */
+  private auditModelCall(input: {
+    modelId: string;
+    mode: "complete" | "stream";
+    startedAt: number;
+    firstTokenAt?: number;
+    usage: { promptTokens: number; completionTokens: number } | undefined;
+    finishReason: string | undefined;
+    toolCount: number;
+    messageCount: number;
+    /** Thinking characters captured by the stream parser; null where no parser runs (complete()). */
+    reasoningChars: number | null;
+  }): void {
+    const now = Date.now();
+    logAudit("provider_model_call", {
+      model: input.modelId,
+      mode: input.mode,
+      durationMs: now - input.startedAt,
+      ...(input.firstTokenAt !== undefined ? { ttftMs: input.firstTokenAt - input.startedAt } : {}),
+      promptTokens: input.usage?.promptTokens ?? null,
+      completionTokens: input.usage?.completionTokens ?? null,
+      // The Messages API reports no reasoning split in usage.
+      reasoningTokens: null,
+      reasoningChars: input.reasoningChars,
+      finishReason: input.finishReason ?? null,
+      toolCount: input.toolCount,
+      messageCount: input.messageCount,
+      controls: {
+        reasoningEffort: null,
+        enableThinking: null,
+        cachePrompt: this.promptCaching,
+      },
+    }, { severity: "info" });
+  }
+
+  async complete(messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal, options?: CompletionCallOptions): Promise<LLMResponse> {
+    // options.controls is a documented no-op here: this provider sends no thinking parameter (file header).
+    const { modelId, params } = this.buildRequestBase(messages, tools, "complete", options?.toolChoice, options?.maxTokens);
 
     let attempt = 0;
     const maxAttempts = this.configuredMaxRetries + 1;
@@ -947,6 +1017,16 @@ export class AnthropicProvider implements ChatProvider {
         const promptTokens = (usage.input_tokens ?? 0)
           + (usage.cache_read_input_tokens ?? 0)
           + (usage.cache_creation_input_tokens ?? 0);
+        this.auditModelCall({
+          modelId,
+          mode: "complete",
+          startedAt,
+          usage: { promptTokens, completionTokens: usage.output_tokens ?? 0 },
+          finishReason: mapStopReason(response.stop_reason),
+          toolCount: tools.length,
+          messageCount: messages.length,
+          reasoningChars: null,
+        });
         return {
           content: content.trim().length > 0 ? content : null,
           tool_calls: toolCalls,
@@ -963,6 +1043,18 @@ export class AnthropicProvider implements ChatProvider {
       } catch (err: unknown) {
         endProviderCall(callId);
         this.recordRequestFailure(startedAt, err);
+        // How long the failed attempt ran is exactly what a postmortem needs; no usage came
+        // back, and there is no stream parser on this path, so those stay null.
+        this.auditModelCall({
+          modelId,
+          mode: "complete",
+          startedAt,
+          usage: undefined,
+          finishReason: auditFinishReasonForFailure(err, signal?.aborted === true),
+          toolCount: tools.length,
+          messageCount: messages.length,
+          reasoningChars: null,
+        });
         if (err instanceof ProviderHardTimeoutError) {
           log.error({ attempt, timeoutMs: err.timeoutMs, model: modelId }, "Anthropic completion hit hard timeout — not retrying");
           throw err;
@@ -1137,7 +1229,8 @@ export class AnthropicProvider implements ChatProvider {
     signal?: AbortSignal,
     options?: StreamCallOptions,
   ): AsyncGenerator<StreamChunk> {
-    const { modelId, params } = this.buildRequestBase(messages, tools, "stream", options?.toolChoice);
+    // options.controls is a documented no-op here as well — see complete().
+    const { modelId, params } = this.buildRequestBase(messages, tools, "stream", options?.toolChoice, options?.maxTokens);
 
     // streamAc carries the provider-side aborts (total-budget cap, inactivity
     // stall), composed ONCE with the caller's signal. The composite is what the
@@ -1177,6 +1270,7 @@ export class AnthropicProvider implements ChatProvider {
     let promptTokens = 0;
     let outputTokens = 0;
     let collectedStopReason: string | undefined;
+    let firstChunkAt: number | undefined;
     const startedAt = Date.now();
     const callId = beginProviderCall({ model: modelId, mode: "stream" });
 
@@ -1232,6 +1326,7 @@ export class AnthropicProvider implements ChatProvider {
 
     try {
       for await (const event of stream) {
+        firstChunkAt ??= Date.now();
         // BELT AND BRACES over the composed signal above — same rationale and same
         // classification as the OpenAI-compatible provider: re-throwing the
         // signal's own reason lets completeViaStream salvage a DeadlineAbort and
@@ -1317,6 +1412,21 @@ export class AnthropicProvider implements ChatProvider {
       }
     } catch (err) {
       this.recordRequestFailure(startedAt, err);
+      // The row goes out BEFORE the rethrow, with the truth in finishReason and the tokens and
+      // thinking characters seen so far — the reasoning-burn abort in particular is a call whose
+      // whole significance is how much reasoning it produced, and dropping it left the burn
+      // invisible to the very percentiles that would size it.
+      this.auditModelCall({
+        modelId,
+        mode: "stream",
+        startedAt,
+        ...(firstChunkAt !== undefined ? { firstTokenAt: firstChunkAt } : {}),
+        usage: { promptTokens, completionTokens: outputTokens },
+        finishReason: auditFinishReasonForFailure(err, signal?.aborted === true || streamAc.signal.aborted),
+        toolCount: tools.length,
+        messageCount: messages.length,
+        reasoningChars: progress.reasoningChars,
+      });
       // Rethrown untouched: the caller classifies a burn on the error's identity, which
       // the generic wrap below would erase.
       if (isReasoningBurnAbort(err)) throw err;
@@ -1329,6 +1439,18 @@ export class AnthropicProvider implements ChatProvider {
     }
 
     this.recordRequestSuccess(startedAt);
+    this.auditModelCall({
+      modelId,
+      mode: "stream",
+      startedAt,
+      ...(firstChunkAt !== undefined ? { firstTokenAt: firstChunkAt } : {}),
+      usage: { promptTokens, completionTokens: outputTokens },
+      finishReason: mapStopReason(collectedStopReason),
+      toolCount: tools.length,
+      messageCount: messages.length,
+      // Every thinking_delta the parser routed to reasoning_delta — the burn guard's counter.
+      reasoningChars: progress.reasoningChars,
+    });
     yield {
       type: "done",
       finishReason: mapStopReason(collectedStopReason),

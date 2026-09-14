@@ -65,7 +65,13 @@ function writeTempConfig(agentName: string, maxIterations: number): { tempDir: s
         systemPrompt: "Work the task.",
         tools: ["read_shared_facts", "read_file"],
         maxIterations,
-        turnTimeoutMs: 600_000,
+        // The schema maximum, and above the clock these fixtures actually advance (the
+        // worker's 8 calls x CLOCK_STEP_MS; the other two wind down on the 4th), so a
+        // wind-down here is the supervisor's decision and never the time budget's. At 600 s
+        // the budget went critical on the 4th call; that only stayed invisible while "no
+        // more tools" meant an emptied list the stub ignored. It is tool_choice "none" now,
+        // and a tool call returned under it is discarded rather than executed.
+        turnTimeoutMs: 1_800_000,
       },
     },
   }), "utf8");

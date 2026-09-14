@@ -405,9 +405,25 @@ export function getChatProviderForTier(
   override: Partial<ModelConfig> = {},
 ): ChatProvider | null {
   const config = getConfig();
-  // While a model preset is active (dashboard Local ⇄ Claude switch) the tier
-  // ladder is bypassed — tier models are tuned for the local stack, and a
-  // capability test should run every path on the preset model.
+  // While a model preset is active (dashboard Local ⇄ Claude switch) the tier ladder is
+  // bypassed — tier models are tuned for the local stack, and a capability test should
+  // run every path on the preset model.
+  //
+  // A branch returning a preset-model provider here was tried and WITHDRAWN. Returning a
+  // provider from this function means building one out of `config.agents.defaults.model`,
+  // and three things break at once: (1) SCOPE — getChatProviderWithOverride applies the
+  // preset with no scope context, and presetAppliesUnderScope answers true for an absent
+  // ctx, so under modelPresetScope "coordinator_qa" a worker deliberately left on local
+  // qwen would have every distillation, judge and synthesis call routed to the preset
+  // model; (2) CONFIG DIVERGENCE — the caller's own agent contextWindow, the effort
+  // overlay's maxTokens and its failover chain are all absent from the defaults, so the
+  // tier provider is a different model config from the one the caller runs on; (3)
+  // CIRCUIT STATE — a fresh FailoverChatProvider per call throws away the breaker state
+  // the cached provider holds, so a dead endpoint is retried in full on every tier call.
+  // The rule the call sites already implement is the right one: null here, and each site
+  // falls back to ITS OWN merged model config carrying the tier's controls — see sub-agent.ts's
+  // synthProvider, the distillation provider and the progress-judge provider, each written
+  // `getChatProviderForTier(tier) ?? createChatProvider({ ...modelConfig, ...tierModelDefaults(tier) }, providerEndpoint)`.
   if (getActiveModelPreset(config)) return null;
   const tierModel = config.agents.defaults.model.tiers?.[tier];
   if (!tierModel) return null;

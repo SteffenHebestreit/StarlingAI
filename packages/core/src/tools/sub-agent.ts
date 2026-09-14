@@ -73,7 +73,8 @@ export {
 import { extractInlineHtmlDocument, looksLikeCompleteHtmlDocument } from "../agent/deliverable-intent.js";
 import { getConfig } from "../config/loader.js";
 import { getEmbeddingSearchStatus } from "../providers/embeddings.js";
-import { getEmbeddingProvider, getChatProviderForTier, getChatProvider } from "../providers/index.js";
+import { applyActiveModelPreset, createChatProvider, getEmbeddingProvider, getChatProviderForTier, tierModelDefaults } from "../providers/index.js";
+import type { ChatProvider } from "../providers/lmstudio.js";
 import { effectiveOrchestration } from "../runtime/effort-context.js";
 import { normalizeDelegationTaskLanguage } from "../agent/delegation-language.js";
 import { logAudit } from "../audit/logger.js";
@@ -3505,6 +3506,34 @@ registerTool({
   },
 });
 
+/**
+ * The provider for the delegation-language normalizer: a translate-and-tag micro-call on the
+ * routing tier, issued twice per delegation (once in each of the two delegate tools).
+ *
+ * The fallback used to be getChatProvider() — the orchestrator's own instance, thinking ON — so
+ * with no routing tier configured a "translate this task to English" call reasoned first. And no
+ * routing tier is not the exotic case: getChatProviderForTier returns null for EVERY call while
+ * a model preset is active (the dashboard Local ⇄ Claude switch), which is the deployment this
+ * was measured in. Build instead from the caller's own merged model config with the routing
+ * tier's controls laid over it, which is what every other verdict-shaped call site now does.
+ *
+ * "The caller's own merged config" here is agents.defaults.model with the active preset applied:
+ * these tools run in the orchestrator's process on the orchestrator's turn, and the main
+ * assistant has no model block of its own (agents.mainAssistant carries toolMode and
+ * trustModelRouting only) — agents.defaults.model IS its configuration, the same input
+ * getChatProvider() builds the orchestrator from.
+ *
+ * Exported for testing.
+ */
+export function delegationLanguageProvider(): ChatProvider {
+  const config = getConfig();
+  return getChatProviderForTier("routing")
+    ?? createChatProvider({
+      ...applyActiveModelPreset(config.agents.defaults.model, config),
+      ...tierModelDefaults("routing"),
+    });
+}
+
 // ─── delegate_to_agent ────────────────────────────────────────────────────────
 
 registerTool({
@@ -3550,7 +3579,7 @@ registerTool({
     // the sub-agent's work, carrying an output-language directive so the deliverable still
     // comes back in the user's language. Context evidence is left verbatim. Gated, fail-open.
     if (task && effectiveOrchestration().normalizeDelegationToEnglish) {
-      const normalized = await normalizeDelegationTaskLanguage({ task, provider: getChatProviderForTier("routing") ?? getChatProvider(), signal: ctx.signal });
+      const normalized = await normalizeDelegationTaskLanguage({ task, provider: delegationLanguageProvider(), signal: ctx.signal });
       if (normalized.sourceLanguage !== "English") {
         logAudit("delegation_task_normalized_to_english", { sourceLanguage: normalized.sourceLanguage }, { sessionId: ctx.sessionId, severity: "info" });
         task = normalized.task;
@@ -3649,7 +3678,7 @@ registerTool({
     // Work internally in English (same as the directed path): translate a non-English task
     // for routing + the sub-agent's work, with an output-language directive. Gated, fail-open.
     if (task && effectiveOrchestration().normalizeDelegationToEnglish) {
-      const normalized = await normalizeDelegationTaskLanguage({ task, provider: getChatProviderForTier("routing") ?? getChatProvider(), signal: ctx.signal });
+      const normalized = await normalizeDelegationTaskLanguage({ task, provider: delegationLanguageProvider(), signal: ctx.signal });
       if (normalized.sourceLanguage !== "English") {
         logAudit("delegation_task_normalized_to_english", { sourceLanguage: normalized.sourceLanguage }, { sessionId: ctx.sessionId, severity: "info" });
         task = normalized.task;

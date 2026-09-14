@@ -8,7 +8,7 @@ import { startsTurn, currentTurnStartIndex } from "./turn-boundary.js";
 import { MIN_SUBSTANTIVE_OUTPUT_CHARS } from "./progress-verifier.js";
 import { unattendedInputCallback } from "../tools/ask-user.js";
 import { runArtifactVerificationGate, buildFailureCaveat, buildUnverifiableCaveat } from "./artifact-verification-gate.js";
-import { applyActiveModelPreset, getChatProvider, getChatProviderForTier, getChatProviderWithOverride } from "../providers/index.js";
+import { applyActiveModelPreset, createChatProvider, getChatProvider, getChatProviderForTier, getChatProviderWithOverride, tierModelDefaults } from "../providers/index.js";
 import { DeadlineAbort, salvageToolCallArguments } from "../providers/lmstudio.js";
 import type { ChatProvider, LLMMessage, LLMResponse, StreamChunk } from "../providers/lmstudio.js";
 import { assembleTurnSystemMessages } from "./turn-system-prompt.js";
@@ -382,6 +382,39 @@ const log = childLogger("agent:runtime");
 const DEFAULT_MAX_TOOL_ITERATIONS = 40;
 const MAX_LENGTH_CONTINUATION_ATTEMPTS = 2;
 const MAX_CONTINUATION_OVERLAP_CHARS = 400;
+/**
+ * A FORCED TOOL CALL IS A DISPATCH, NOT A DELIBERATION.
+ *
+ * Audit log turn 2, 10 Sept, "wie wird das wetter morgen?": the forced iteration (tool_choice
+ * "required", 10 orchestration tools, the orchestrator's thinking ON) reasoned for 8,000 tokens,
+ * finished with reason "length" and ZERO tool calls — 150.0 s of a 208 s turn. 1f4a295 refuses
+ * to continue such a call (forced_tool_call_burned_budget), so the burn itself is what remains.
+ * The call only has to name an agent and a task. Thinking-off removes the burn; the ceiling
+ * bounds a runaway that gets past it: the largest forced-call arguments observed are a
+ * record_plan with steps + acceptance criteria ≈1,200 tokens and a coordinator task ≈500 chars,
+ * so 4,000 clears them and caps a runaway at ~2 min at the measured 34.5 tok/s instead of the
+ * 150 s above.
+ *
+ * NOT ON THE PLAN CALL. The burn above was the DISPATCH iteration. But
+ * filterForcedOrchestrationTools offers record_plan exactly while no plan exists, so the FIRST
+ * forced iteration of an orchestration turn is the call that writes the plan — steps and
+ * acceptance criteria, the one piece of real deliberation the turn does, measured at 13.1 s with
+ * thinking ON and a plan at the end of it. Silencing that call is not the same trade, so the
+ * controls are applied only once `forcedPlanState.planRecorded` is true; the token ceiling
+ * applies to both (it was sized to clear a record_plan in the first place).
+ *
+ * FAMILY CAVEAT — where "thinking off" is a prompt line, not a flag. The off-switch was measured
+ * on qwen over llama.cpp, where enable_thinking is a request field and costs nothing structural.
+ * On the gpt-oss family this provider implements effort as a `Reasoning: <effort>` system message
+ * PREPENDED at position 0 (lmstudio.ts withReasoningSystemLine, with "none" folded up to "low"),
+ * so a per-call override would rewrite the first line of the prompt for one iteration and back
+ * again for the next — two full re-prefills of the whole conversation on a block-granular prefix
+ * cache. No gpt-oss model is configured in this deployment (every station is qwen), so this is a
+ * caveat for whoever configures one, not a live cost: the fix then is a per-family decision, not
+ * dropping the control.
+ */
+const FORCED_TOOL_CALL_CONTROLS = { enableThinking: false, reasoningEffort: "none" } as const;
+const FORCED_TOOL_CALL_MAX_TOKENS = 4000;
 // The public turn input/output shapes (RunTurnOptions, TurnOutput) were extracted
 // to the leaf module ./turn-types.ts (god-file seam) so the turn-preparation
 // helpers can depend on them without importing runtime.js. Re-exported here so
@@ -1360,6 +1393,30 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
 // ./turn-prepare.ts (god-file seam). They thread state explicitly and depend on
 // no main-loop closure. Imported above; _runTurn calls them exactly as before.
 
+/**
+ * Issue the up-front source-sensitivity judge call WITHOUT waiting for it, so it overlaps the
+ * work between here and the await site (document-RAG retrieval) instead of running in series
+ * in front of the orchestrator's first token. Returns null when there is no routing tier
+ * (the caller logs that). The promise never rejects unhandled: a second consumer swallows the
+ * rejection, and the await site observes the same rejection through `verdict` for its fail-safe
+ * path. `abort()` cancels the request when the turn turns out not to need the verdict — the
+ * signal is the turn signal composed with a controller of its own, so a turn cancel still
+ * reaches the call.
+ */
+function startUpfrontSourceSensitiveClassifier(
+  userMessage: string,
+  turnSignal: AbortSignal,
+): { verdict: Promise<string>; abort: () => void } | null {
+  const classifierProvider = getChatProviderForTier("routing");
+  if (!classifierProvider) return null;
+  const abortController = new AbortController();
+  const verdict = classifierProvider
+    .complete(buildSourceSensitiveQuestionJudgeMessages(userMessage), [], AbortSignal.any([turnSignal, abortController.signal]))
+    .then((resp) => resp.content ?? "");
+  verdict.catch(() => { /* consumed at the await site, or discarded after abort() */ });
+  return { verdict, abort: () => abortController.abort() };
+}
+
 async function _runTurn(
   opts: RunTurnOptions,
   signal: AbortSignal,
@@ -1427,6 +1484,37 @@ async function _runTurn(
   });
   if (fastLaneOutput) return fastLaneOutput;
 
+  // ── Up-front source-sensitivity classifier: STARTED here, awaited below ─────
+  // The classifier is a routing-tier call that reads only the user message, and it used to
+  // run in series in front of the orchestrator's first token. It is now issued as soon as
+  // its cheap preconditions are known — but NOT before the fast lane, which is the whole
+  // point of where this sits.
+  //
+  // Starting it any earlier put it on the same llama-swap selector the receptionist uses
+  // (both resolve to lmstudio/qwen) on a turn whose verdict nobody would ever read: measured
+  // on the station, one 25-token call takes 2.1 s alone but 4.06 s with four in flight, so a
+  // trivial "hi" paid contention for a discarded answer — and the discard itself was not free
+  // either, because an aborted complete() used to log at ERROR and count a provider failure
+  // (fixed in providers/lmstudio.ts, same wave). Below the fast-lane return, a turn the front
+  // desk answered issues no classifier call at all.
+  //
+  // What the placement buys on the turns that DO get here is the overlap with
+  // prepareDocumentRag: the engram search is CPU/IO work on another host, so that overlap is
+  // free. Overlap with the orchestrator's own first GPU call is NOT claimed — no real turn was
+  // measured for it. The preconditions known at this point (flag, tool mode, no computer-access
+  // turn, a routing tier) decide whether the request is worth issuing; the two that are not
+  // known yet (a reuse-prior-evidence follow-up, a document-RAG-grounded turn) are re-checked
+  // at the await site, which aborts the request when either holds. The verdict handling and
+  // audit rows live there, unchanged. `null` means no routing tier, so the await site can
+  // still log `upfront_source_sensitive_no_routing_tier`.
+  const upfrontClassifier = (
+    effectiveOrchestration().upfrontSourceSensitiveClassifier === true
+    && getConfig().agents.mainAssistant.toolMode === "orchestration_only"
+    && !detectedDynamicGuidance?.computerAccessSensitive
+  )
+    ? startUpfrontSourceSensitiveClassifier(userMessage, signal)
+    : null;
+
   // ── Document RAG augmentation ───────────────────────────────────────────────
   // Runs AFTER the fast lane, so trivial turns never pay the engram search cost.
   // Auto-ingests files attached this turn into the session corpus (engram, via
@@ -1456,7 +1544,9 @@ async function _runTurn(
   // "research, then answer". Bounded: one routing-tier call per orchestration_only turn; skipped for a
   // reuse-prior-evidence follow-up, a computer-access turn, or a document-RAG-grounded turn (that
   // answer is grounded in the attached file, not memory). Fail-SAFE to off on any error — the
-  // post-draft guards remain the backstop.
+  // post-draft guards remain the backstop. The request itself was issued above — after the fast
+  // lane declined the turn, overlapping the document-RAG search; this is where its verdict is
+  // consumed.
   let upfrontSourceSensitive = false;
   if (
     effectiveOrchestration().upfrontSourceSensitiveClassifier === true
@@ -1465,10 +1555,9 @@ async function _runTurn(
     && !detectedDynamicGuidance?.computerAccessSensitive
     && !documentRagFoundDocs
   ) {
-    const classifierProvider = getChatProviderForTier("routing");
-    if (classifierProvider) {
+    if (upfrontClassifier) {
       try {
-        const verdictRaw = (await classifierProvider.complete(buildSourceSensitiveQuestionJudgeMessages(userMessage), [], signal)).content ?? "";
+        const verdictRaw = await upfrontClassifier.verdict;
         upfrontSourceSensitive = parseUngroundedClaimVerdict(verdictRaw);
         // Always log the verdict (not just the positive case) so the audit shows the classifier RAN
         // and what it decided — otherwise a silent "no" is indistinguishable from the classifier being
@@ -1484,6 +1573,9 @@ async function _runTurn(
       // model is distinguishable in the audit from the classifier running and returning "clear".
       logAudit("guardrail_flagged", { type: "upfront_source_sensitive_no_routing_tier" }, { sessionId: session.id, severity: "info" });
     }
+  } else {
+    // A follow-up reusing prior evidence, or a document-grounded turn: the verdict is not wanted.
+    upfrontClassifier?.abort();
   }
   const effectiveToolMode: MainAssistantToolMode | undefined = detectedDynamicGuidance?.computerAccessSensitive && !detectedDynamicGuidance?.pentestSensitive
     ? "delegate_only"
@@ -1829,12 +1921,34 @@ async function _runTurn(
   const turnEffortProfile = currentEffortProfile();
   const turnThinking = opts.enableThinking ?? turnEffortProfile?.enableThinking;
   const turnReasoningEffort = turnEffortProfile?.reasoningEffort;
+  const turnModelOverride = {
+    ...(turnThinking !== undefined ? { enableThinking: turnThinking } : {}),
+    ...(turnReasoningEffort !== undefined ? { reasoningEffort: turnReasoningEffort } : {}),
+  };
   const provider = (turnThinking !== undefined || turnReasoningEffort !== undefined)
-    ? getChatProviderWithOverride({
-        ...(turnThinking !== undefined ? { enableThinking: turnThinking } : {}),
-        ...(turnReasoningEffort !== undefined ? { reasoningEffort: turnReasoningEffort } : {}),
-      })
+    ? getChatProviderWithOverride(turnModelOverride)
     : getChatProvider();
+  // The orchestrator's OWN merged model config — the exact input the two lines above build
+  // `provider` from (the main assistant has no model block of its own; agents.defaults.model IS
+  // its config), with this turn's effort overlay and the active preset applied. Tier-shaped calls
+  // below fall back to THIS config with tierModelDefaults laid over it when the tier ladder
+  // returns null, instead of borrowing `provider` — which is the thinking-ON orchestrator.
+  // getChatProviderForTier returns null whenever a model preset is active, so under the
+  // dashboard's Claude preset that fallback is the ONLY path a judge/synthesis call takes.
+  const orchestratorModelConfig = applyActiveModelPreset(
+    { ...getConfig().agents.defaults.model, ...turnModelOverride },
+    getConfig(),
+  );
+  // Built at most once per TURN. The oversight judge below runs inside the tool-iteration
+  // loop, and every construction walks resolveProviderChain and returns a fresh
+  // FailoverChatProvider with its circuit state closed — so a primary that is down would be
+  // re-tried in full by each verdict instead of once (the same per-call cost that made the
+  // tier ladder's model-preset branch untenable; see providers/index.ts).
+  let routingTierProviderMemo: ChatProvider | undefined;
+  const routingTierProvider = (): ChatProvider => (routingTierProviderMemo ??= (
+    getChatProviderForTier("routing")
+    ?? createChatProvider({ ...orchestratorModelConfig, ...tierModelDefaults("routing") })
+  ));
   // Tool development sessions have no iteration cap — they use convergence-based completion
   // and lease/heartbeat oversight via the tool-dev-warden instead.
   const isToolDevSession = !!opts._toolDevSessionId;
@@ -1995,8 +2109,13 @@ async function _runTurn(
         ].filter(Boolean).join("\n\n") || "(no orchestrator output or tool calls yet)";
         let oversight = { verdict: "on_track" as "on_track" | "stuck" | "redirect", directive: "", reason: "" };
         try {
-          const judgeProvider = getChatProviderForTier("routing") ?? provider;
-          const oversightResp = await judgeProvider.complete(
+          // A progress verdict is a routing-shaped call: read the activity, answer
+          // on_track/stuck/redirect. `?? provider` ran it on the orchestrator itself, thinking ON
+          // — the same shape the sub-agent progress judge was fixed for. With no routing tier
+          // (and there is none under an active model preset) it now builds from the
+          // orchestrator's own merged config with the routing tier's thinking-off controls over
+          // it, so the verdict costs a verdict rather than a reasoning pass mid-turn.
+          const oversightResp = await routingTierProvider().complete(
             buildTurnOversightPrompt({
               objective: oversightPlan?.objective?.trim() || userMessage,
               ...(oversightPlan?.acceptanceCriteria?.length ? { acceptanceCriteria: oversightPlan.acceptanceCriteria } : {}),
@@ -2200,7 +2319,21 @@ async function _runTurn(
       const forceToolChoice = wantForceToolChoice && forcedTools.length > 0;
       const streamTools = forceToolChoice ? forcedTools : activeTools;
       llmResponse = await collectStream(
-        provider.stream(messages, streamTools, signal, forceToolChoice ? { toolChoice: "required" } : undefined),
+        provider.stream(
+          messages,
+          streamTools,
+          signal,
+          forceToolChoice
+            ? {
+                toolChoice: "required",
+                // Thinking-off is for the DISPATCH. While no plan exists the forced call is the
+                // one that records it (record_plan is the only plan tool on offer then), and that
+                // call's whole job is the deliberation — see FORCED_TOOL_CALL_CONTROLS.
+                ...(forcedPlanState?.planRecorded !== false ? { controls: FORCED_TOOL_CALL_CONTROLS } : {}),
+                maxTokens: FORCED_TOOL_CALL_MAX_TOKENS,
+              }
+            : undefined,
+        ),
         chunkSink,
         {
           deferTextUntilToolDecision: streamTools.length > 0,
@@ -4736,7 +4869,12 @@ export function buildLeanSynthesisPrompt(opts: { assistantName?: string } = {}):
 
 export async function forceSynthesis(
   session: AgentSession,
-  provider: ChatProvider,
+  /** The turn's orchestrator provider. No longer used — see the synthesis-provider comment
+   *  below: this call must not run on the thinking-on orchestrator, and every one of the
+   *  seventeen call sites passes that same provider. Kept in the signature (and in the
+   *  ctx.forceSynthesis contract the extracted guard modules call through) rather than
+   *  churning them all. */
+  _provider: ChatProvider,
   signal: AbortSignal,
   instruction: string,
 ): Promise<string | null> {
@@ -4778,7 +4916,25 @@ export async function forceSynthesis(
     // E25: prefer the synthesis-tier provider when configured — smaller,
     // instruction-tuned models produce tighter final answers and avoid the
     // reasoning-model tendency to re-narrate tool calls during rewrite.
-    const synthesisProvider = getChatProviderForTier("synthesis") ?? provider;
+    //
+    // With no synthesis tier — which is every turn under an active model preset, since
+    // getChatProviderForTier returns null there — `?? provider` handed a WRITING call to the
+    // thinking-on orchestrator: rewrite prose from evidence already in the context, the exact
+    // shape sub-agent.ts runs under SYNTHESIS_CALL_CONTROLS. It reasons its way through a rewrite
+    // it has all the material for. The fallback below runs that call thinking-off instead.
+    // Two honest notes on it: (1) forceSynthesis takes a ChatProvider, not a ModelConfig, so
+    // there is no caller config in scope here — this rebuilds the orchestrator's own merged
+    // config from agents.defaults.model (the main assistant has no model block of its own) with
+    // the active preset applied; the turn-effort overlay it omits sets exactly the two fields
+    // this call overrides anyway. (2) The controls are written out rather than taken from
+    // tierModelDefaults("synthesis"), which is deliberately {} — the QA VERDICT calls below keep
+    // their deliberation, and that stays as it is.
+    const synthesisProvider = getChatProviderForTier("synthesis")
+      ?? createChatProvider({
+        ...applyActiveModelPreset(getConfig().agents.defaults.model, getConfig()),
+        enableThinking: false,
+        reasoningEffort: "none",
+      });
 
     try {
       const response = await synthesisProvider.complete(messages, [], synthAbort.signal);

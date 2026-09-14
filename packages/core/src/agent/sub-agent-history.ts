@@ -20,12 +20,25 @@
  *    lowering the budget to "make it fire" trades a wall-clock problem for a lost-
  *    context one, and splicing at index 1 destroys the KV prefix on every pass.
  *
- * 2. The DIGEST pass is the wall-clock bound, and it runs unconditionally. Fitting the
- *    window says nothing about what the prompt COSTS: the whole history is re-sent
- *    every iteration, so the quantity that buys latency is Σ(per-iteration prompt), not
- *    the peak. The same run prefilled 238_357 cumulative prompt tokens across 13
- *    completions and spent ≈60 s per iteration at chunkCount 0 (reading, not
- *    generating). Two things dominated that sum and neither is bounded anywhere else:
+ * 2. The DIGEST pass is the wall-clock bound, and it runs in BATCHES. Fitting the
+ *    window says nothing about what the prompt COSTS — but on a prefix-caching backend
+ *    the cost is not the bytes re-SENT, it is the bytes re-PREFILLED. Audit log 9-13
+ *    Sept 2026, 11 reconstructed sub-agent runs, 141 mid-run calls: warm 40-49K-token
+ *    prompts reached first token in 1.1-1.4 s (0.02-0.06 ms/token), while on 32 of the
+ *    141 calls the prompt SHRANK between adjacent calls of one run (19_082 → 14_556
+ *    tokens between messages 23 and 25) and every one of those paid a cold TTFT of
+ *    10-16 s at the measured 1.1 ms/token cold rate — although the model had already
+ *    seen everything but the new messages. The mechanism was this pass running
+ *    unconditionally: the fresh window slides one turn per iteration, so it rewrote
+ *    whatever had just left the window EVERY iteration, a mid-prefix mutation that
+ *    re-prefills everything behind it (the fresh window itself, typically 8-16K tokens
+ *    of fetched pages). Of the 49 worst mid-run calls (>6 s beyond append cost), 17
+ *    were these rewrites: 206 s. So the pass is a dry run until the stale mass it would
+ *    remove reaches DIGEST_BATCH_MIN_CHARS, and then digests EVERY stale candidate in
+ *    one request — the prefix breaks once per batch, not once per iteration.
+ *    What it removes is unchanged. Run 3959f3ac (backend_coder, 13 completions,
+ *    238_357 cumulative prompt tokens, ≈60 s per iteration at chunkCount 0) had two
+ *    classes dominate, and neither is bounded anywhere else:
  *      • one read_file result of 25_929 chars (≈8_643 tokens at 3.0 chars/token) that
  *        slid under MAX_TOOL_RESULT_CHARS (32_768) untouched and was then re-sent
  *        verbatim for the remaining ~10 iterations;
@@ -35,7 +48,16 @@
  *        message that is not `role: "tool"`).
  *    Both are STALE by construction: the agent has already acted on them, and the
  *    bytes still exist on disk where read_file can fetch them back. Digesting them
- *    stops the prompt growing monotonically with build size.
+ *    stops the prompt growing monotonically with build size — in a batch, on the
+ *    iteration the stale mass crosses the threshold, not on the iteration each of them
+ *    went stale. (Carried warm, a 25K-char read costs ≈0.2-0.5 s per iteration; the
+ *    rewrite that removes it costs 8-16 s once.)
+ *
+ * BOTH runners call this. agent/sub-agent.ts runs in-process; agent/container-entrypoint.ts
+ * runs inside the agent-worker image, and that is where most delegated runs actually execute
+ * (`agents.defaultContainerized` defaults true and 22 workspace agents declare no container
+ * flag). While the entrypoint composed its own `[{role:"system"}, ...history]` without this
+ * pass, the bound below was absent from exactly the path the run above was measured on.
  *
  * The digest is pure string work — no model call. Compaction that costs an inference
  * competes with the wall clock it exists to protect.
@@ -43,8 +65,10 @@
  * Cost it is honest about: rewriting a message at position k breaks the provider's KV
  * prefix from k onward for ONE request. Thereafter the prefix is stable again AND
  * smaller, so a single re-prefill buys a permanently cheaper tail — which is why the
- * fresh window below exists (nothing the agent just did is ever rewritten) and why the
- * digest is idempotent (a digested message is never rewritten a second time).
+ * fresh window below exists (nothing the agent just did is ever rewritten), why the
+ * digest is idempotent (a digested message is never rewritten a second time), and why
+ * it is batched (one break per DIGEST_BATCH_MIN_CHARS of stale mass, never one per
+ * message that went stale).
  */
 import {
   computePromptTokenBudget,
@@ -63,6 +87,26 @@ const TOOL_RESULT_CLAMP_MARKER = "\n… [truncated — this tool result was clam
  *  the next, so the result it is actively working from must survive a full round trip.
  *  Everything older it has already acted on. */
 export const FRESH_TOOL_TURNS = 2;
+
+/** Stale mass (chars the digest would remove, summed over every stale candidate) below
+ *  which the pass is DEFERRED. ≈13K tokens at 3 chars/token.
+ *
+ *  What the two measured numbers actually trade, stated honestly: one digest is one
+ *  mid-prefix mutation and it re-prefills everything behind it — the fresh window,
+ *  typically 8-16K tokens of fetched pages, ≈8-16 s at the measured 1.1 ms/token cold
+ *  rate — while re-sending 13K tokens of stale bytes warm costs ≈0.4 s per ITERATION
+ *  (0.02-0.06 ms/token). So a 40K batch repays its own break only after ≈20-40 further
+ *  iterations, and run 3959f3ac — the run this is calibrated on — made 13 completions
+ *  in total. On a short run a single batch is NOT wall-clock-positive, and this comment
+ *  used to claim it was.
+ *
+ *  The threshold sits here for the OTHER reason the pass exists: the digest bounds
+ *  prompt GROWTH, and the completion budget is derived from what the prompt leaves free
+ *  (providers/lmstudio.ts computeOutputTokenBudget), so unbounded stale mass starves the
+ *  output budget and then overflows the window. 40K chars ≈13K tokens is the point where
+ *  that matters and where one break is a price worth paying for it; below it the bytes
+ *  are cheap to carry AND harmless to the budget, so the pass stays a dry run. */
+export const DIGEST_BATCH_MIN_CHARS = 40_000;
 
 /** Bound a STALE tool result is digested to. Head+tail, because a file read's last
  *  lines ("does it still close?") are evidence as much as its first. Sized so a
@@ -114,16 +158,47 @@ export function trimSubAgentHistory(
     contextWindow: number;
     minKeep?: number;
   },
-): { dropped: number; clamped: number; digested: number } {
+): {
+  dropped: number;
+  clamped: number;
+  digested: number;
+  /** Chars the digest actually removed this call (0 when it did not run). */
+  digestedStaleChars: number;
+  /** Which trigger fired, or null when the pass was a dry run. The two are not the same
+   *  event: "batch" is the healthy one break per DIGEST_BATCH_MIN_CHARS of stale mass,
+   *  while "overflow" is the exception below the threshold — and on a small-window model
+   *  the exception fires EVERY iteration on whatever just went stale, which is one prefix
+   *  break per iteration, i.e. exactly the cost this unit was written to remove. Without
+   *  the trigger on the row the log cannot tell that pathology from a healthy 40K batch. */
+  digestTrigger: "batch" | "overflow" | null;
+  deferredStaleChars: number;
+} {
   const minKeep = opts.minKeep ?? 6;
   const budget = computePromptTokenBudget(opts.contextWindow);
   const systemTokens = Math.ceil(opts.systemPromptChars / PROMPT_ESTIMATE_CHARS_PER_TOKEN);
   const fits = (): boolean =>
     systemTokens + estimatePromptTokensForRequest(history, opts.tools) <= budget;
 
-  // Wall-clock bound first: it is unconditional, so it also shrinks what the overflow
-  // guard below would otherwise have had to DROP outright.
-  const digested = digestStaleHistory(history);
+  // Wall-clock bound first, in BATCHES. The digest is a dry run until the stale mass it
+  // would remove reaches DIGEST_BATCH_MIN_CHARS; then every candidate goes in one pass,
+  // so the KV prefix breaks once per batch instead of once per iteration (the fresh
+  // window slides one turn per iteration, so an unconditional pass rewrote a message —
+  // and re-prefilled the whole window behind it — every single time). The overflow path
+  // is the exception: when the request does not fit, digest before DROPPING outright.
+  const plan = planStaleDigest(history);
+  let digested = 0;
+  let digestedStaleChars = 0;
+  let digestTrigger: "batch" | "overflow" | null = null;
+  let deferredStaleChars = 0;
+  if (plan.pendingStaleChars > 0 && (plan.pendingStaleChars >= DIGEST_BATCH_MIN_CHARS || !fits())) {
+    // The plan is a dry run of the same pure string work apply() performs, so its
+    // pendingStaleChars IS the mass removed — reported, not re-measured.
+    digestTrigger = plan.pendingStaleChars >= DIGEST_BATCH_MIN_CHARS ? "batch" : "overflow";
+    digestedStaleChars = plan.pendingStaleChars;
+    digested = plan.apply();
+  } else {
+    deferredStaleChars = plan.pendingStaleChars;
+  }
 
   let dropped = 0;
   while (history.length > minKeep && !fits()) {
@@ -164,7 +239,7 @@ export function trimSubAgentHistory(
       if (fits()) break;
     }
   }
-  return { dropped, clamped, digested };
+  return { dropped, clamped, digested, digestedStaleChars, digestTrigger, deferredStaleChars };
 }
 
 /** Index at which the fresh window starts: the FRESH_TOOL_TURNS-th tool-calling
@@ -211,38 +286,55 @@ export function freshWindowStart(history: readonly LLMMessage[], freshTurns = FR
   return 0;
 }
 
-/** Shrinks what the agent has already acted on. Returns how many messages changed.
- *  Mutates in place, like the trimmer it runs inside. */
-function digestStaleHistory(history: LLMMessage[], freshTurns = FRESH_TOOL_TURNS): number {
+/** Everything the digest WOULD shrink, computed without touching the history. The
+ *  per-candidate digests are pure and idempotent, so the dry run is the same string
+ *  work the pass itself does — `pendingStaleChars` is exactly what `apply()` removes. */
+interface StaleDigestPlan {
+  /** Σ over stale candidates of (current length − digested length). */
+  pendingStaleChars: number;
+  /** Rewrites every candidate in one pass. Returns how many messages changed. */
+  apply(): number;
+}
+
+/** What the agent has already acted on, and what each piece digests to. */
+function planStaleDigest(history: LLMMessage[], freshTurns = FRESH_TOOL_TURNS): StaleDigestPlan {
   const boundary = freshWindowStart(history, freshTurns);
-  let digested = 0;
+  const edits: Array<{ message: LLMMessage; content: string | null; args: Array<{ index: number; digest: string }> }> = [];
+  let pendingStaleChars = 0;
   // From 1: index 0 is the task statement, pinned here for the same reason the drop
   // loop pins it — it is the only statement of what the run is FOR.
   for (let i = 1; i < boundary; i++) {
     const message = history[i];
     if (!message) continue;
-    let changed = false;
+    let content: string | null = null;
+    const args: Array<{ index: number; digest: string }> = [];
 
     if (message.role === "tool" && typeof message.content === "string"
       && !DELEGATION_RESULT_PREFIX_RE.test(message.content)) {
-      const digest = digestStaleToolResult(message.content);
-      if (digest !== null) {
-        message.content = digest;
-        changed = true;
-      }
+      content = digestStaleToolResult(message.content);
+      if (content !== null) pendingStaleChars += message.content.length - content.length;
     }
 
-    for (const call of message.tool_calls ?? []) {
+    (message.tool_calls ?? []).forEach((call, index) => {
       const digest = digestStaleToolCallArguments(call.function.arguments);
-      if (digest !== null) {
-        call.function.arguments = digest;
-        changed = true;
-      }
-    }
+      if (digest === null) return;
+      pendingStaleChars += call.function.arguments.length - digest.length;
+      args.push({ index, digest });
+    });
 
-    if (changed) digested++;
+    if (content !== null || args.length > 0) edits.push({ message, content, args });
   }
-  return digested;
+
+  return {
+    pendingStaleChars,
+    apply: () => {
+      for (const edit of edits) {
+        if (edit.content !== null) edit.message.content = edit.content;
+        for (const { index, digest } of edit.args) edit.message.tool_calls![index]!.function.arguments = digest;
+      }
+      return edits.length;
+    },
+  };
 }
 
 /** Head+tail excerpt of an over-sized stale tool result, or null to leave it alone.

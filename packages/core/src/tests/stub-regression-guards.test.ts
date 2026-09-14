@@ -186,7 +186,7 @@ describe("resume detection reads the workspace, not the task text", () => {
       await import("../agent/sub-agent-prompt-guidance.js");
 
     const resume = buildStagedBuildResumeGuidance(["generated/game/index.html"], 6);
-    const fresh = buildStagedArtifactBuildGuidance(14, 6);
+    const fresh = buildStagedArtifactBuildGuidance();
 
     // The two directives must say OPPOSITE things about write_file — that opposition is the
     // entire fix. Run 2dc5832c handed a resume task the fresh text and lost six subsystems.

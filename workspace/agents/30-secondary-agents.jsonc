@@ -6,8 +6,7 @@
       "capabilities": ["structured-data analysis", "csv computation", "json data inspection", "spreadsheet aggregation", "group-by and pivot", "trend analysis", "statistical anomaly detection", "kpi computation"],
       "tags": ["data", "analysis", "csv", "json", "xlsx", "spreadsheet", "metrics", "kpi", "trend", "aggregation", "statistics", "tabular"],
       "model": {
-        "enableThinking": true,
-        "temperature": 0.1
+        "enableThinking": true
       },
       "maxIterations": 10,
       "container": { "disabled": true }, // Tier 0/1 tools only — in-process is safe
@@ -41,8 +40,7 @@
       "capabilities": ["log parsing", "error pattern extraction", "log anomaly detection", "latency outlier analysis", "access log analysis", "stack-trace triage", "security-log signal detection", "incident timeline reconstruction", "correlation id tracing"],
       "tags": ["logs", "log-analysis", "errors", "stacktrace", "journald", "nginx", "container-logs", "access-log", "latency", "correlation-id", "incident"],
       "model": {
-        "enableThinking": true,
-        "temperature": 0.1
+        "enableThinking": true
       },
       "maxIterations": 14,
       "container": { "disabled": true }, // read-only tools only — in-process is safe
@@ -68,8 +66,7 @@
       "capabilities": ["document intake", "attachment extraction", "file-format classification", "metadata extraction", "exact text extraction", "PDF form filling", "spreadsheet reading", "OCR preparation", "jupyter notebook extraction", "email-file parsing", "icalendar parsing", "audio and video transcription"],
       "tags": ["documents", "files", "intake", "attachments", "pdf", "docx", "xlsx", "csv", "ipynb", "notebook", "eml", "mbox", "email-file", "ics", "icalendar", "audio", "video", "transcription", "extraction", "ocr", "metadata"],
       "model": {
-        "enableThinking": true,
-        "temperature": 0.1
+        "enableThinking": true
       },
       "maxIterations": 10,
       "container": { "disabled": true }, // Tier 0/1 tools only — in-process is safe
@@ -99,8 +96,7 @@
       "capabilities": ["academic writing", "technical paper drafting", "literature review drafting", "source-grounded report drafting", "white paper drafting", "citation and reference management"],
       "tags": ["papers", "report", "citations", "references", "literature-review", "whitepaper", "academic", "scientific"],
       "model": {
-        "enableThinking": true,
-        "temperature": 0.15
+        "enableThinking": true
       },
       "maxIterations": 10,
       "container": { "disabled": true }, // Tier 0/1 tools only — in-process is safe
@@ -152,8 +148,7 @@
       "capabilities": ["mermaid diagram authoring", "workflow flowcharts", "architecture and dependency graphs", "sequence diagrams", "timeline diagrams", "mindmaps"],
       "tags": ["diagram", "mermaid", "flowchart", "sequence-diagram", "architecture-diagram", "timeline", "graph", "mindmap"],
       "model": {
-        "enableThinking": true,
-        "temperature": 0.1
+        "enableThinking": true
       },
       "maxIterations": 10,
       "container": { "disabled": true },
@@ -177,8 +172,7 @@
       "capabilities": ["html chart rendering", "numeric data visualization", "time-series charting", "html data tables", "line/bar/area charts", "scatter and combo charts"],
       "tags": ["chart", "html", "plot", "data-visualization", "table", "bar-chart", "line-chart", "scatter", "timeseries"],
       "model": {
-        "enableThinking": true,
-        "temperature": 0.1
+        "enableThinking": true
       },
       "maxIterations": 10,
       "container": { "disabled": true },
@@ -256,8 +250,7 @@
       "capabilities": ["http endpoint testing", "rest api calls", "graphql queries", "webhook reachability testing", "response schema validation", "auth header handling", "endpoint health checks"],
       "tags": ["api", "http", "rest", "graphql", "endpoint", "webhook", "request", "response-validation", "integration-testing"],
       "model": {
-        "enableThinking": true,
-        "temperature": 0.1
+        "enableThinking": true
       },
       "maxIterations": 14,
       "systemPrompt": "You are an HTTP API integration specialist. Use http_request to interact with REST and GraphQL endpoints. Start by reading any shared facts or documentation about the target API. Build requests methodically: verify base URL and authentication first with a simple GET or health-check, then proceed to the actual operations. Inspect response status codes, headers, and body carefully. When testing, cover success cases, error cases, and edge cases. For authentication, use headers (Bearer tokens, API keys) — never embed credentials in URLs. Publish API discoveries (endpoints, schemas, rate limits, error patterns) via share_finding so other agents can reuse them. When building integrations, write clean request/response examples to files for documentation. Never fabricate API responses or endpoint URLs you have not actually called.",
@@ -290,8 +283,7 @@
         // llama.cpp drop the FRONT of the prompt, which is the system message.
         "primary": "lmstudio/qwen-27b",
         "contextWindow": 65536,
-        "enableThinking": true,
-        "temperature": 0.1
+        "enableThinking": true
       },
       "maxIterations": 14,
       "systemPrompt": "You are the SQL and database specialist for PostgreSQL and MySQL/MariaDB. Handle live querying, analytical query authoring, schema exploration, optimization, and migration writing. Always retrieve credentials with get_site_credentials before calling sql_query. ALWAYS use parameterised placeholders ($1, $2 for Postgres; ? for MySQL) — never interpolate user-supplied values into the SQL string. Prefer read-only queries (SELECT, SHOW, DESCRIBE, information_schema) unless the user explicitly requests modifications. When the schema is unknown, explore first: list tables from information_schema.tables, then DESCRIBE or SELECT column names from information_schema.columns before running analytical or migration queries. For analytical queries, prefer explicit JOIN types and add a short comment explaining what each CTE or subquery computes. Cap results with LIMIT or the max_rows parameter to avoid overwhelming context; if too many rows, aggregate with COUNT/GROUP BY/AVG/SUM and return the summary. For schema migrations, write idempotent scripts: IF NOT EXISTS on CREATE, IF EXISTS on DROP, wrap multiple changes in a transaction. For index recommendations, inspect existing indexes (pg_indexes or SHOW INDEX) first, then recommend only indexes that would materially help based on cardinality and filter selectivity. For performance analysis, use EXPLAIN ANALYZE (Postgres) or EXPLAIN FORMAT=JSON (MySQL) and interpret plan nodes rather than pasting raw output. Export useful results via spreadsheet_write or write_file. Never expose raw connection strings — mask the password portion in any log or summary. Publish completed queries, scripts, rationale, expected performance impact, and any destructive or lock-heavy operations via share_finding.",
@@ -316,8 +308,7 @@
       "capabilities": ["citation verification", "claim-to-source checking", "fabricated reference detection", "broken-url detection", "quote drift detection", "bibliography audit"],
       "tags": ["citation-check", "fact-checking", "fabrication-detection", "quote-drift", "bibliography-audit", "unsupported-claims"],
       "model": {
-        "enableThinking": true,
-        "temperature": 0.1
+        "enableThinking": true
       },
       "maxIterations": 10,
       "container": { "disabled": true }, // Tier 0/1 tools only — in-process is safe
@@ -341,8 +332,7 @@
       "capabilities": ["policy review", "approval-requirement analysis", "compliance screening", "credential-handling review", "data-sensitivity assessment", "authorization-claim verification", "risk classification"],
       "tags": ["policy", "compliance", "approval", "guardrail", "privacy", "data-sensitivity", "authorization"],
       "model": {
-        "enableThinking": true,
-        "temperature": 0.1
+        "enableThinking": true
       },
       "maxIterations": 8,
       "container": { "disabled": true }, // Tier 0/1 tools only — in-process is safe

@@ -187,3 +187,35 @@ describe("FailoverChatProvider", () => {
     });
   });
 });
+/**
+ * The per-call options (thinking-off for one call, a max_tokens ceiling, tool_choice) are what
+ * the forced-tool-call fix consumes, and the Claude preset makes every deployment a
+ * multi-binding chain. A wrapper that dropped them would disarm that fix exactly where it
+ * matters — the same class of bypass completeViaStream shipped once.
+ */
+describe("FailoverChatProvider forwards per-call options on complete()", () => {
+  it("hands the SAME options object to the binding's complete()", async () => {
+    const primaryComplete = vi.fn(async (..._args: Parameters<ChatProvider["complete"]>) => createResponse("ok"));
+    const provider = new FailoverChatProvider([
+      createBinding("primary", "http://primary/v1", createProvider({ complete: primaryComplete })),
+    ]);
+    const options = { toolChoice: "required" as const, maxTokens: 512, controls: { enableThinking: false, reasoningEffort: "none" as const } };
+
+    await provider.complete([] as LLMMessage[], [] as LLMToolDef[], undefined, options);
+
+    expect(primaryComplete).toHaveBeenCalledTimes(1);
+    expect(primaryComplete.mock.calls[0]![3]).toBe(options);
+  });
+
+  it("the completeViaStream → complete() fallback for a binding without completeViaStream forwards them too", async () => {
+    const primaryComplete = vi.fn(async (..._args: Parameters<ChatProvider["complete"]>) => createResponse("ok"));
+    const provider = new FailoverChatProvider([
+      createBinding("primary", "http://primary/v1", createProvider({ complete: primaryComplete })),
+    ]);
+    const options = { maxTokens: 256, controls: { reasoningEffort: "none" as const } };
+
+    await provider.completeViaStream([] as LLMMessage[], [] as LLMToolDef[], undefined, options);
+
+    expect(primaryComplete.mock.calls[0]![3]).toBe(options);
+  });
+});

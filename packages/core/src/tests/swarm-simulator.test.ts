@@ -46,6 +46,11 @@ vi.mock("../providers/index.js", () => {
     getChatProvider: () => provider,
     getChatProviderWithOverride: () => provider,
     getChatProviderForTier: () => null,
+    // No tier configured: the tier-shaped calls (oversight judge, forceSynthesis) build their
+    // own instance from the caller's merged config rather than borrowing the thinking-on
+    // orchestrator, so the factory answers here too — same stub, same scripted completions.
+    createChatProvider: () => provider,
+    tierModelDefaults: (tier: string) => (tier === "routing" ? { enableThinking: false, reasoningEffort: "none" } : {}),
   };
 });
 

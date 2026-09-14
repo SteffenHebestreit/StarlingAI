@@ -28,6 +28,13 @@ vi.mock("../providers/index.js", () => {
     getChatProvider: () => provider,
     getChatProviderWithOverride: () => provider,
     getChatProviderForTier: () => null,
+    // With no tier configured, the tier-shaped calls (the oversight judge, forceSynthesis)
+    // build their own instance from the caller's merged config instead of borrowing the
+    // thinking-on orchestrator — so the factory has to answer here too. Same stub: what these
+    // tests pin is the runtime's control flow, not which instance the call landed on
+    // (runtime-tier-fallback-controls.test.ts pins that).
+    createChatProvider: () => provider,
+    tierModelDefaults: (tier: string) => (tier === "routing" ? { enableThinking: false, reasoningEffort: "none" } : {}),
   };
 });
 

@@ -41,6 +41,7 @@ import { childLogger } from "../logger.js";
 import { buildWardenIntervention, type InterventionNotice } from "./interventions.js";
 import { computerSessionManager } from "./computer-session.js";
 import { startToolDevWarden, stopToolDevWarden } from "./tool-dev-warden.js";
+import { isRunInternalWithdrawalReason } from "./run-blocked-tool-reasons.js";
 
 const log = childLogger("agent:warden");
 
@@ -323,12 +324,17 @@ export function startWarden(): void {
     }
 
     // ── Blocked tool accumulation (escape attempts) ──────────────────────────
-    // "evidence_cap_enforced" blocks are normal synthesis enforcement — the
-    // agent's evidence-gathering tools were stripped once sufficient evidence
-    // was collected. Do NOT count these toward the escape-attempt threshold;
-    // they are false positives and would pollute the circuit-breaker log.
+    // Only a call to a tool the agent never held ("not_in_agent_tools") is an escape
+    // attempt. Every reason in RUN_INTERNAL_WITHDRAWAL_REASONS is the runtime taking a
+    // tool away mid-run — evidence cap reached, approval gate unresolved, search backend
+    // degraded, delegations cascade-failed — and those rows exist only BECAUSE the
+    // withdrawn tool deliberately stays on the wire (dropping it re-prefills the whole
+    // prompt: 7,027 tokens / 7.28 s versus 0.40 s warm, measured in sub-agent.ts). The
+    // model retrying a tool the runtime just withdrew is not probing the sandbox, so
+    // counting it here would answer the prefix-stability fix with an error alert, a
+    // synthetic failure outcome against a healthy agent, and a possible session abort.
     if (event.type === "sub_agent_tool_blocked" && event.sessionId
-        && event.data["reason"] !== "evidence_cap_enforced") {
+        && !isRunInternalWithdrawalReason(event.data["reason"])) {
       const agentName = String(event.data["agentName"] ?? "unknown");
       const existing = _blockedAttempts.get(event.sessionId);
       _blockedAttempts.set(event.sessionId, {

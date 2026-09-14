@@ -10,6 +10,7 @@ import {
   UNFINISHED_STUB_MARKER,
   isStagedArtifactBuildRun,
   buildStagedArtifactBuildGuidance,
+  buildStagedBuildFirstStepInstruction,
 } from "../agent/sub-agent-prompt-guidance.js";
 
 /**
@@ -125,7 +126,7 @@ describe("staged artifact build — detection", () => {
 });
 
 describe("staged artifact build — directive", () => {
-  const directive = buildStagedArtifactBuildGuidance(14, 24);
+  const directive = buildStagedArtifactBuildGuidance();
 
   it("names only tool capabilities that actually exist", () => {
     expect(directive).toContain("write_file");
@@ -193,19 +194,43 @@ describe("staged artifact build — directive", () => {
     expect(directive).toMatch(/never mistaken for a finished artifact/i);
   });
 
-  it("derives the pass budget from the run's own iteration cap", () => {
+  it("carries no run-derived number: the head is the KV-cache key", () => {
+    // The directive used to say "about 11 of them". What the effort tier changes about a
+    // sub-agent is maxIterations plus the model overlay — enableThinking, reasoningEffort and
+    // (only for an agent that already pinned one) maxTokens — and NONE of those render into
+    // the head; maxIterations did, through this interpolated count, so every tier owned its
+    // own cold head. The measurement behind that is the station probe: a byte-identical head
+    // restored from host RAM after 8 evictions (16 tokens processed), while a head differing
+    // by one number is a full cold prefill.
+    expect(directive).not.toMatch(/about \d+ of them/);
+    expect(directive).not.toMatch(/\b(?:11|24)\b/);
+    // ...and the FILL step still tells the model where the count went.
+    expect(directive).toContain("2. FILL (one subsystem per iteration; the task states how many passes you have)");
+  });
+
+  it("derives the pass budget from the run's own iteration cap — in the USER turn", () => {
     // Reserve the skeleton, the verification read and the tool-stripped final synthesis.
-    expect(buildStagedArtifactBuildGuidance(14, 24)).toContain("about 11 of them");
-    expect(buildStagedArtifactBuildGuidance(10, 24)).toContain("about 7 of them");
+    expect(buildStagedBuildFirstStepInstruction(14, 24)).toContain("about 11 fill passes");
+    expect(buildStagedBuildFirstStepInstruction(10, 24)).toContain("about 7 fill passes");
   });
 
   it("never promises more passes than PER_PATH_EDIT_CAP allows", () => {
     // Discriminates against a fixed pass budget: with an unbounded iteration cap the
-    // directive must still stop at the harness ceiling, or the agent plans 30 fills and
+    // instruction must still stop at the harness ceiling, or the agent plans 30 fills and
     // gets blocked at the cap with the artifact half-stubbed.
-    expect(buildStagedArtifactBuildGuidance(Number.MAX_SAFE_INTEGER, 24)).toContain("about 24 of them");
+    expect(buildStagedBuildFirstStepInstruction(Number.MAX_SAFE_INTEGER, 24)).toContain("about 24 fill passes");
     // ...and a tiny iteration budget never goes below a floor of 2.
-    expect(buildStagedArtifactBuildGuidance(3, 24)).toContain("about 2 of them");
+    expect(buildStagedBuildFirstStepInstruction(3, 24)).toContain("about 2 fill passes");
+  });
+
+  it("keeps the first-step sentences the count was added next to", () => {
+    const instruction = buildStagedBuildFirstStepInstruction(14, 24);
+    expect(instruction).toContain("THIS TURN: the specification above is REFERENCE MATERIAL for later passes, not the work of this turn.");
+    expect(instruction).toContain("Decide only what the parts are CALLED, not how they work.");
+    expect(instruction).toContain("Do not attempt to satisfy the specification in this turn. You have further turns for that, one part at a time.");
+    // The count sits between naming the parts and the closing "do not attempt" line.
+    expect(instruction.indexOf("about 11 fill passes")).toBeGreaterThan(instruction.indexOf("CALLED"));
+    expect(instruction.indexOf("about 11 fill passes")).toBeLessThan(instruction.indexOf("Do not attempt"));
   });
 });
 
@@ -264,6 +289,8 @@ describe("staged artifact build — directive injection", () => {
     task: string,
     tools: string[],
     workspaceDir?: string,
+    /** Stands in for the effort tier's sub-agent budget (200 under tier max). */
+    maxIterationsOverride?: number,
   ): Promise<string> => {
     const tempDir = workspaceDir ?? mkdtempSync(join(tmpdir(), "sai-staged-build-"));
     const configPath = join(tempDir, "starlingai.json");
@@ -304,9 +331,34 @@ describe("staged artifact build — directive injection", () => {
       task,
       parentSessionId: `parent-${Math.random().toString(36).slice(2)}`,
       workspacePath: tempDir,
+      ...(maxIterationsOverride !== undefined ? { maxIterationsOverride } : {}),
     });
     return systemPrompt;
   };
+
+  it("sends the SAME system prompt bytes under a 14- and a 200-iteration budget", async () => {
+    // THE CACHE-KEY PROBE. The effort tier changes maxIterations and nothing else about
+    // the agent, and the head used to carry "about 11 of them" vs "about 24 of them" —
+    // one number, two cold prefills. Compare the bytes that went on the wire.
+    // One workspace for both runs: the head names it ("Current workspace: ..."), and
+    // that is a function of the AGENT's deployment, not of the tier.
+    const shared = mkdtempSync(join(tmpdir(), "sai-staged-tier-"));
+    const tools = ["read_file", "write_file", "edit_file", "list_files", "grep_files"];
+    const flags = { stagedArtifactBuilds: true, stagedArtifactBuildDirective: true };
+    const at14 = await runAndCaptureSystemPrompt(flags, OBSERVED_BUILD_TASK, tools, shared, 14);
+    const userTurnAt14 = firstUserTurn;
+    const at200 = await runAndCaptureSystemPrompt(flags, OBSERVED_BUILD_TASK, tools, shared, 200);
+    const userTurnAt200 = firstUserTurn;
+    rmSync(shared, { recursive: true, force: true });
+
+    expect(at14).toContain("STAGED BUILD — THIS TASK IS TOO LARGE FOR ONE PASS.");
+    expect(at200).toBe(at14);
+    // The budget still reaches the model — in the user turn, sized from the run's own cap
+    // (14 - 3 = 11; 200 - 3 clamped to PER_PATH_EDIT_CAP = 24).
+    expect(userTurnAt14).toContain("about 11 fill passes");
+    expect(userTurnAt200).toContain("about 24 fill passes");
+    expect(userTurnAt14).not.toContain("about 24 fill passes");
+  });
 
   it("injects the directive at ITERATION 0 when the prompt flag is on", async () => {
     // Iteration 0 is the only one that matters: the measured failure never completed a
@@ -390,8 +442,10 @@ describe("staged artifact build — directive injection", () => {
     // The guidance text is in the messages the provider was actually handed.
     expect(prompt).toContain("STAGED BUILD — THIS TASK IS TOO LARGE FOR ONE PASS.");
     expect(prompt).toContain(UNFINISHED_STUB_MARKER);
-    // ...sized from this run's own iteration cap, not a constant.
-    expect(prompt).toContain("about 11 of them");
+    // ...and the pass budget is NOT in it (the head is the cache key); it is sized from
+    // this run's own iteration cap in the user turn instead.
+    expect(prompt).not.toMatch(/about \d+ of them/);
+    expect(firstUserTurn).toContain("about 11 fill passes");
 
     // And the audit record that reported the defect now reports the fix.
     expect(logAuditMock).toHaveBeenCalledWith(
@@ -668,12 +722,12 @@ describe("staged artifact build — the shipped iteration budget", () => {
   });
 
   it("turns content_writer's shipped budget into the same promise the other builders get", () => {
-    // Reverting the shard to 10 makes this "about 7 of them" and the assertion fails.
+    // Reverting the shard to 10 makes this "about 7 fill passes" and the assertion fails.
     const contentWriter = subAgents["content_writer"];
     expect(contentWriter).toBeDefined();
-    const promise = buildStagedArtifactBuildGuidance(contentWriter?.maxIterations ?? 0, 24);
-    expect(promise).toContain("about 11 of them");
-    expect(promise).toBe(buildStagedArtifactBuildGuidance(subAgents["web_coder"]?.maxIterations ?? 0, 24));
+    const promise = buildStagedBuildFirstStepInstruction(contentWriter?.maxIterations ?? 0, 24);
+    expect(promise).toContain("about 11 fill passes");
+    expect(promise).toBe(buildStagedBuildFirstStepInstruction(subAgents["web_coder"]?.maxIterations ?? 0, 24));
   });
 
   it("leaves an execution agent on its own budget rather than raising everything", () => {

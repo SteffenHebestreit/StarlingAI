@@ -151,14 +151,20 @@ export function buildReasoningBurnCorrection(reasoningChars: number, stagedBuild
  * anchors), read_file and grep_files. There is no range/line-number patch tool, so
  * the directive never mentions one.
  *
- * The pass budget is derived from the run's own maxIterations rather than fixed:
- * the runner strips every tool on the last iteration to force a synthesis, so the
- * usable build passes are maxIterations minus the skeleton, the verification read
- * and that final synthesis. It is then clamped to the runner's per-path edit_file
- * ceiling (passed in — the constant lives in the runner, which imports this module)
- * so the directive can never promise more passes than the harness will allow.
+ * THIS TEXT IS PART OF THE CACHE KEY, so it carries NO number derived from the run.
+ * It used to interpolate the pass budget ("about 11 of them"), and the effort tier changes
+ * maxIterations (14 configured, 200 under tier max in the audit log) — so every tier owned
+ * its own cold head. The justification is the STATION PROBE, not an incident: a byte-identical
+ * head restores from host RAM even after 8 evictions (16 tokens processed), while a head that
+ * differs by one number is a full cold prefill. (The two parallel researchers of 2026-09-12
+ * that were once cited here prove nothing about this: they ran CONCURRENTLY, and concurrent
+ * requests never share the prefix cache on this backend, so both were cold whatever the head
+ * said — and nothing established their tier differed from the run 26 minutes earlier.) The
+ * pass count now rides in the USER turn (buildStagedBuildFirstStepInstruction), which is
+ * per-run anyway, and the FILL step points the model there.
  *
- * That reserve of 3 buys NO input reads, which is why the preamble spends a sentence on
+ * The reserve of 3 that budget assumes (skeleton, verification read, tool-stripped final
+ * synthesis) buys NO input reads, which is why the preamble spends a sentence on
  * reading. Session a7b8fe3e burned five of content_writer's ten iterations re-reading a
  * 16,091-char source file it had already read whole at iteration 1, in four chunked
  * read_file calls plus two re-reads of its own output — 54,586 bytes read against 141
@@ -171,13 +177,12 @@ export function buildReasoningBurnCorrection(reasoningChars: number, stagedBuild
  * telling it the files on disk are enough. The runner keeps the agent's own prompt
  * LAST for the same reason (sub-agent.ts system-prompt assembly).
  */
-export function buildStagedArtifactBuildGuidance(maxIterations: number, perPathEditCap: number): string {
-  const fillPasses = Math.max(2, Math.min(maxIterations - 3, perPathEditCap));
+export function buildStagedArtifactBuildGuidance(): string {
   return [
     "STAGED BUILD — THIS TASK IS TOO LARGE FOR ONE PASS.",
     "A whole artifact emitted in a single completion does not finish on this hardware: the model reasons for tens of thousands of characters and the call is killed before any tool runs. Build the artifact in passes, ONE tool call per iteration, smallest working version first. Read each source file ONCE, whole, then work from what you read — a pass spent re-reading is a pass not spent writing, and you have few.",
     `1. SKELETON (first tool call): one write_file, a few KB, holding a minimal whole artifact whose outer structure already CLOSES (for HTML: doctype, head, body and the closing </html>) and whose content is all FINAL. Never a placeholder comment, a TODO or an empty stub body — a commented-out gap is silent, so a run that stops there leaves a file that LOOKS finished and does nothing. Write each subsystem you have not built yet as ONE line carrying the exact token ${UNFINISHED_STUB_MARKER} and its name, throwing where that line sits in executable code: throw new Error("${UNFINISHED_STUB_MARKER}: physics"); That line is both your UNIQUE anchor and the loud signal — the harness greps for it and reports an artifact still holding one as INCOMPLETE instead of delivered.`,
-    `2. FILL (one subsystem per iteration, about ${fillPasses} of them): replace exactly ONE ${UNFINISHED_STUB_MARKER} line per call with edit_file, that line as old_string and the subsystem's COMPLETE content as new_string — never a partial version, never a smaller placeholder. edit_file is an EXACT string replacement and FAILS unless old_string matches exactly one place, so keep every marker name distinct and add surrounding lines rather than falling back to write_file. Use grep_files to re-locate a marker if a replacement is rejected. Never re-emit the whole file to change part of it.`,
+    `2. FILL (one subsystem per iteration; the task states how many passes you have): replace exactly ONE ${UNFINISHED_STUB_MARKER} line per call with edit_file, that line as old_string and the subsystem's COMPLETE content as new_string — never a partial version, never a smaller placeholder. edit_file is an EXACT string replacement and FAILS unless old_string matches exactly one place, so keep every marker name distinct and add surrounding lines rather than falling back to write_file. Use grep_files to re-locate a marker if a replacement is rejected. Never re-emit the whole file to change part of it.`,
     `3. FINISH: read_file the artifact and confirm no ${UNFINISHED_STUB_MARKER} remains. If it is an HTML page and you hold verify_page, RUN IT — verify_page executes the page's scripts and reports what they throw. A page that serves a 200 and dies on its first line looks identical to a finished one from the outside, so reading the code is not evidence it works. FAIL means fix the named error and run it again; do not report a page as done while verify_page fails. verify_page also reports WHERE the page painted on each canvas — a page whose drawing lands outside its own canvas runs perfectly and shows the user nothing, so treat an off-canvas or never-drawn-on verdict as a real defect in your projection maths, not a warning. LOOK AT IT IF YOU CAN: if you hold browser_navigate and browser_screenshot, open the page, screenshot it, and inspect that image (analyze_image if you cannot see it directly) before reporting done — a check that the code runs is not a check that a human sees what you intended. Then carry out whatever final step your own instructions require (e.g. serving and verifying the app) and report the path or the live URL — not the contents.`,
     `Budget the subsystems to the passes you have and merge the small ones. If you run out of budget the partial is handed back with its remaining ${UNFINISHED_STUB_MARKER} markers named, so it is resumable and is never mistaken for a finished artifact.`,
   ].join("\n");
@@ -200,13 +205,22 @@ export function buildStagedArtifactBuildGuidance(maxIterations: number, perPathE
  * It is appended, never substituted. Dropping the specification from the first turn would
  * cost the model the vocabulary it needs to NAME the subsystems, and naming them is the
  * one thing this turn has to get right.
+ *
+ * The pass budget lives HERE, not in the system directive, because this turn is per-run
+ * anyway while the directive is the KV-cache key (see buildStagedArtifactBuildGuidance).
+ * It is the run's own maxIterations minus the skeleton, the verification read and the
+ * tool-stripped final synthesis, clamped to the runner's per-path edit_file ceiling
+ * (passed in — the constant lives in the runner, which imports this module) so the
+ * turn can never promise more passes than the harness will allow.
  */
-export function buildStagedBuildFirstStepInstruction(): string {
+export function buildStagedBuildFirstStepInstruction(maxIterations: number, perPathEditCap: number): string {
+  const fillPasses = Math.max(2, Math.min(maxIterations - 3, perPathEditCap));
   return [
     "",
     "",
     "THIS TURN: the specification above is REFERENCE MATERIAL for later passes, not the work of this turn.",
     "Right now, produce only the skeleton — one " + STAGED_BUILD_REQUIRED_TOOLS[0] + " call, a small complete file that closes, with every part you have not built yet written as a single " + UNFINISHED_STUB_MARKER + " line that throws. Decide only what the parts are CALLED, not how they work.",
+    "You have about " + fillPasses + " fill passes after this turn, one part each — name no more parts than that, and merge the small ones.",
     "Do not attempt to satisfy the specification in this turn. You have further turns for that, one part at a time.",
   ].join("\n");
 }

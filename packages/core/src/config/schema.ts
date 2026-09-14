@@ -117,7 +117,13 @@ export const ModelConfigSchema = z.object({
    *  because the configured value was already pinned at the schema maximum while
    *  the box serves 262144, i.e. half the real window was unreachable from config. */
   contextWindow: z.number().int().min(2048).max(1_048_576).default(32768),
-  temperature: z.number().min(0).max(2).default(0.3),
+  /** OPTIONAL. Unset means "the provider decides": Qwen gets its model card's per-mode
+   *  sampling, anything else 0.3 (providers/lmstudio.ts DEFAULT_TEMPERATURE). The
+   *  former `.default(0.3)` made every agent look pinned, so the provider could not tell
+   *  a deliberate 0.2 from the default and discarded both on Qwen. A value set here is a
+   *  PIN: honoured with thinking off, refused (one warning) with thinking on — Qwen's model
+   *  cards document repetition loops at low temperature in thinking mode. */
+  temperature: z.number().min(0).max(2).optional(),
   /** OPTIONAL hard pin on completion tokens.
    *
    *  Leave it UNSET. When unset the provider derives the budget per request as

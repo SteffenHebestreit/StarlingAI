@@ -181,8 +181,16 @@ export function wrapProviderWithBoundary<T extends ChatProvider>(provider: T): T
   return new Proxy(provider, {
     get(target, prop, receiver) {
       if (prop === "complete") {
-        return async (messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal) =>
-          applyAfterResponse(await target.complete(applyBeforeRequest(messages), tools, signal));
+        // `options` is forwarded for the same reason the completeViaStream arm forwards it,
+        // though on a different footing: nothing reaches this arm today (createChatProvider
+        // builds only LMStudioProvider, AnthropicProvider or FailoverChatProvider, all three
+        // implement completeViaStream, and both call sites branch on it first). This closes a
+        // latent contract hole — completeViaStream is OPTIONAL on ChatProvider, so a conforming
+        // provider that implements complete() alone would silently lose the per-call thinking
+        // controls, max_tokens ceiling and tool_choice. Not a production drop; closed so the
+        // optional method cannot become load-bearing by accident.
+        return async (messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal, options?: CompletionCallOptions) =>
+          applyAfterResponse(await target.complete(applyBeforeRequest(messages), tools, signal, options));
       }
       if (prop === "completeViaStream" && typeof target.completeViaStream === "function") {
         // `options` is forwarded, not dropped: it carries the per-chunk observation hook

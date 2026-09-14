@@ -195,8 +195,10 @@ export interface StreamProgress {
   reasoningAnchorCoverage: number;
 }
 
-/** Options both completion paths accept. Separate from the streaming-only bag below so
- *  callers of completeViaStream cannot accidentally set transport-level switches. */
+/** Options both completion paths accept — toolChoice, the per-call thinking controls and
+ *  the per-call maxTokens ceiling are honoured by complete() AND stream() in both providers.
+ *  Separate from the streaming-only bag below so callers of completeViaStream cannot
+ *  accidentally set transport-level switches. */
 export interface CompletionCallOptions {
   /** Per-chunk observation of the in-flight generation (see StreamProgress). */
   onProgress?: (progress: Readonly<StreamProgress>) => void;
@@ -207,10 +209,27 @@ export interface CompletionCallOptions {
    * never per chunk.
    */
   isUnbounded?: () => boolean;
+  /**
+   * Thinking controls for THIS call only, merged over the instance's ModelConfig.
+   *
+   * Until now the only knobs were per provider instance, so nothing could turn thinking
+   * off for one call on an agent whose config has it on. Measured on the live cluster
+   * 2026-09-13: a forced tool call (tool_choice "required") issued with the orchestrator's
+   * thinking ON reasoned for 8,000 tokens, hit finish_reason "length" with ZERO tool calls,
+   * and cost 150 s of a 208 s turn. A key the caller leaves undefined means "no opinion",
+   * not "unset the instance value".
+   */
+  controls?: { enableThinking?: boolean; reasoningEffort?: ReasoningEffort };
+  /** Per-call output ceiling: max_tokens becomes min(the derived budget, this). The same
+   *  8,000-token burn above ran to the whole derived budget because nothing could cap ONE call. */
+  maxTokens?: number;
+  /** tool_choice for THIS call. Lives here, not in the streaming bag: both providers now
+   *  read it on the non-streaming path too, and the forced-tool-call callers reach the
+   *  model through completeViaStream, which is typed on this interface. */
+  toolChoice?: "auto" | "required" | "none";
 }
 
 export interface StreamCallOptions extends CompletionCallOptions {
-  toolChoice?: "auto" | "required" | "none";
   /**
    * Arm the mid-stream burn abort. Off by default and set by completeViaStream alone:
    * that is the path with the partial-result salvage, so an abort there costs nothing
@@ -677,6 +696,65 @@ export function recommendedQwenSampling(
   return cfg.enableThinking ? { temperature: 0.6, topP: 0.95 } : { temperature: 0.7, topP: 0.8 };
 }
 
+/** What `temperature` was before ModelConfigSchema made it optional. Kept HERE, not in the
+ *  schema, so that a model with no recommendation of its own is sampled exactly as before —
+ *  the schema default existed only to be discarded, see resolveSamplingForCall. */
+const DEFAULT_TEMPERATURE = 0.3;
+
+/**
+ * The sampling that goes on the wire for ONE call, from the controls in force for that call
+ * and what the operator pinned.
+ *
+ * Before this, `temperature` had a schema default (0.3) so every agent carried one, and the
+ * Qwen branch replaced it whenever topP was unset — researcher 0.2, mission_coordinator 0.1,
+ * paper_author 0.15 all reached the wire as the recommendation. The 00-platform.jsonc
+ * comment promised the opposite. For thinking-ON calls the discard was accidentally right:
+ * Qwen's model cards say greedy/near-greedy decoding in thinking mode loops and degrades, so
+ * a pin there is refused on purpose (reported back so the provider can say so once). For
+ * thinking-OFF calls the pin is what the operator meant, and it now wins.
+ *
+ * Whether thinking is ON is read off THE FIELDS THIS REQUEST WILL ACTUALLY CARRY, not off the
+ * raw config and not off resolveThinkingControls either: `{enableThinking:false,
+ * reasoningEffort:"medium"}` is the vetoed pair that sends NOTHING and therefore runs the
+ * model's default — thinking — so it must get thinking-mode sampling, not the pin; and an
+ * endpoint that has 400'd on "none" gets "low" instead (effortForEndpoint's ladder), which is
+ * thinking ON however the config reads. An explicit topP means the operator chose the whole
+ * sampling deliberately and nothing here touches it (unchanged behaviour).
+ */
+export interface WireThinkingView {
+  /** `reasoning_effort` exactly as the body will carry it — after effortForEndpoint's ladder. */
+  reasoningEffort?: WireEffort | undefined;
+  /** `chat_template_kwargs.enable_thinking` exactly as the body will carry it. */
+  enableThinking?: boolean | undefined;
+}
+
+export function resolveSamplingForCall(
+  modelId: string,
+  wire: WireThinkingView,
+  pinned: { temperature?: number; topP?: number },
+): { temperature: number; topP?: number; ignoredTemperaturePin?: number } {
+  const pinnedTemp = pinned.temperature;
+  if (pinned.topP !== undefined) {
+    return { temperature: pinnedTemp ?? DEFAULT_TEMPERATURE, topP: pinned.topP };
+  }
+  if (!isQwenModelId(modelId)) return { temperature: pinnedTemp ?? DEFAULT_TEMPERATURE };
+
+  // Off only when an off-switch actually goes out; anything else (a graded level, a stepped-up
+  // rung, a vetoed pair, no field at all) leaves this hybrid family thinking by default.
+  const thinkingOn = wire.reasoningEffort !== "none" && wire.enableThinking !== false;
+  const rec = recommendedQwenSampling(modelId, { enableThinking: thinkingOn });
+  if (!rec) return { temperature: pinnedTemp ?? DEFAULT_TEMPERATURE };
+
+  if (thinkingOn) {
+    return {
+      temperature: rec.temperature,
+      topP: rec.topP,
+      ...(pinnedTemp !== undefined ? { ignoredTemperaturePin: pinnedTemp } : {}),
+    };
+  }
+  return { temperature: pinnedTemp ?? rec.temperature, topP: rec.topP };
+}
+
 /** Reasoning/thinking control mechanism by model family (researched June 2026).
  *  Families are grouped by the API MECHANISM they share, not the vendor:
  *  - enable_thinking → chat_template_kwargs { enable_thinking: bool }. Shared by
@@ -817,6 +895,24 @@ export function noteRejectedReasoningEffort(endpoint: string, value: string): vo
 /** Test-only: forget what endpoints have rejected. */
 export function _resetRejectedReasoningEffortsForTests(): void {
   _rejectedEfforts.clear();
+}
+
+/**
+ * Temperature pins already reported as refused, keyed `${baseUrl}|${modelId}|${pin}`.
+ *
+ * Module-level for the same reason _rejectedEfforts is: a provider INSTANCE is not a lifetime
+ * anyone would recognise as "once". sub-agent.ts builds a fresh createChatProvider per
+ * delegated run, runtime.ts one per turn under an effort profile, and getChatProviderForTier /
+ * getChatProviderWithOverride hand back a fresh instance per call — so an instance-scoped latch
+ * is one warning per RUN, i.e. a line in the log for every thinking-on agent that carries a pin,
+ * which is nearly all of them. Keyed on the triple rather than a bare boolean so a second agent,
+ * model or endpoint still gets its own line; the operator needs to know which pin was refused.
+ */
+const _warnedTemperaturePins = new Set<string>();
+
+/** Test-only: forget which refused pins have been reported. */
+export function _resetTemperaturePinWarningsForTests(): void {
+  _warnedTemperaturePins.clear();
 }
 
 /**
@@ -1091,7 +1187,10 @@ export function normalizeMessagesForModel(
 export interface ChatProvider {
   checkHealth(): Promise<{ healthy: boolean; loadedModel?: string; error?: string }>;
   verifyToolCallSupport(modelId: string): Promise<boolean>;
-  complete(messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal): Promise<LLMResponse>;
+  /** `options` is optional: toolChoice, per-call thinking controls and a per-call
+   *  max_tokens ceiling apply on both completion paths. NOT the streaming bag — a
+   *  non-streaming call has no mid-stream, so guardReasoningBurn would be inert here. */
+  complete(messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal, options?: CompletionCallOptions): Promise<LLMResponse>;
   /** Optional: a complete()-shaped result obtained by consuming the streaming
    *  endpoint and accumulating deltas. Callers that want live token-progress
    *  (provider activity monitor) and the per-chunk inactivity abort on otherwise
@@ -1228,10 +1327,24 @@ export class LMStudioProvider {
     usage: { promptTokens: number; completionTokens: number; reasoningTokens?: number } | undefined;
     finishReason: string | undefined;
     toolCount: number;
+    /** The CALLER-VISIBLE message count — `messages.length`, before normalizeMessagesForModel
+     *  folds system turns and withReasoningSystemLine prepends the gpt-oss line. The provider's
+     *  own wire array was reported here once, and it meant a different thing from the Anthropic
+     *  row's (system hoisted out, same-role turns merged), so the two providers' rows were not
+     *  comparable in the one analysis that reads both. */
     messageCount: number;
+    /** The extension fields built for THIS request — not recomputed from instance config,
+     *  which would report the instance defaults for a call that overrode them per call. */
+    extensions: Record<string, unknown> | undefined;
+    /** Reasoning characters this provider's parser saw in the response. `reasoningTokens`
+     *  is null on every one of the last four days' 196 rows — llama.cpp folds reasoning
+     *  into completion_tokens and reports no split — so this is the only reasoning-share
+     *  figure the row can carry. 0 means the parser ran and saw none; null means there
+     *  was no response to read. */
+    reasoningChars: number | null;
   }): void {
     const now = Date.now();
-    const ext = this.buildProviderExtensions(input.modelId) ?? {};
+    const ext = input.extensions ?? {};
     const kwargs = ext["chat_template_kwargs"] as Record<string, unknown> | undefined;
     logAudit("provider_model_call", {
       model: input.modelId,
@@ -1241,6 +1354,7 @@ export class LMStudioProvider {
       promptTokens: input.usage?.promptTokens ?? null,
       completionTokens: input.usage?.completionTokens ?? null,
       reasoningTokens: input.usage?.reasoningTokens ?? null,
+      reasoningChars: input.reasoningChars,
       finishReason: input.finishReason ?? null,
       toolCount: input.toolCount,
       messageCount: input.messageCount,
@@ -1295,9 +1409,9 @@ export class LMStudioProvider {
    * every later call — sends the next rung down instead. Returns true when it recorded one, which
    * also tells the caller this failure is worth retrying.
    */
-  private noteReasoningEffortRejection(modelId: string, err: unknown): boolean {
+  private noteReasoningEffortRejection(modelId: string, err: unknown, controlsOverride?: CompletionCallOptions["controls"]): boolean {
     if (!isRejectedReasoningEffortError(err)) return false;
-    const requested = resolveThinkingControls(modelId, this.modelConfig).reasoningEffort;
+    const requested = resolveThinkingControls(modelId, this.effectiveControls(controlsOverride)).reasoningEffort;
     const sent = requested ? effortForEndpoint(this.baseUrl, requested as WireEffort) : undefined;
     if (!sent) return false;
     noteRejectedReasoningEffort(this.baseUrl, sent);
@@ -1306,9 +1420,73 @@ export class LMStudioProvider {
     return true;
   }
 
-  private buildProviderExtensions(modelId: string): Record<string, unknown> | undefined {
+  /**
+   * The thinking controls in force for ONE call: the instance ModelConfig with the
+   * caller's per-call override laid over it. Only a key the caller actually set wins —
+   * an undefined in the bag is "no opinion", so a caller passing `{ reasoningEffort:
+   * "none" }` does not silently drop the instance's enableThinking on the floor.
+   */
+  private effectiveControls(
+    override?: CompletionCallOptions["controls"],
+  ): { enableThinking?: boolean; reasoningEffort?: ReasoningEffort } {
+    return {
+      ...(this.modelConfig.enableThinking !== undefined ? { enableThinking: this.modelConfig.enableThinking } : {}),
+      ...(this.modelConfig.reasoningEffort !== undefined ? { reasoningEffort: this.modelConfig.reasoningEffort } : {}),
+      ...(override?.enableThinking !== undefined ? { enableThinking: override.enableThinking } : {}),
+      ...(override?.reasoningEffort !== undefined ? { reasoningEffort: override.reasoningEffort } : {}),
+    };
+  }
+
+  /**
+   * The two halves of one request's thinking decision, resolved TOGETHER: the extension fields
+   * the body will carry, and the sampling that has to match them.
+   *
+   * They used to be resolved apart and they DRIFTED. The sampling read
+   * resolveThinkingControls(...).reasoningEffort while the body carried
+   * effortForEndpoint(baseUrl, effort), whose ladder steps a refused "none" up to "low". So on
+   * an endpoint that had already 400'd on "none" (the older LM Studio build documented at
+   * effortForEndpoint) a thinking-OFF call went out with reasoning_effort "low" — thinking ON —
+   * carrying the agent's thinking-off low-temperature pin: exactly the near-greedy-with-thinking
+   * pairing resolveSamplingForCall exists to refuse, and silently. Called per ATTEMPT, because
+   * the ladder can step between attempts of the same call.
+   */
+  private resolveCallShape(
+    modelId: string,
+    controlsOverride?: CompletionCallOptions["controls"],
+  ): { extensions: Record<string, unknown> | undefined; sampling: { temperature: number; topP?: number } } {
+    const extensions = this.buildProviderExtensions(modelId, controlsOverride);
+    const kwargs = extensions?.["chat_template_kwargs"] as Record<string, unknown> | undefined;
+    const effort = extensions?.["reasoning_effort"];
+    const enableThinking = kwargs?.["enable_thinking"];
+    const wire: WireThinkingView = {
+      ...(typeof effort === "string" ? { reasoningEffort: effort as WireEffort } : {}),
+      ...(typeof enableThinking === "boolean" ? { enableThinking } : {}),
+    };
+    const sampling = resolveSamplingForCall(modelId, wire, {
+      temperature: this.modelConfig.temperature,
+      topP: this.modelConfig.topP,
+    });
+    if (sampling.ignoredTemperaturePin !== undefined) {
+      // Once per process per endpoint|model|pin — see _warnedTemperaturePins for why an
+      // instance-scoped latch was one line per delegated run.
+      const key = `${this.baseUrl}|${modelId}|${sampling.ignoredTemperaturePin}`;
+      if (!_warnedTemperaturePins.has(key)) {
+        _warnedTemperaturePins.add(key);
+        log.warn(
+          { model: modelId, pinnedTemperature: sampling.ignoredTemperaturePin, temperature: sampling.temperature, topP: sampling.topP },
+          "temperature pin ignored in thinking mode — Qwen documents repetition loops at low temperature with thinking on",
+        );
+      }
+    }
+    return { extensions, sampling: { temperature: sampling.temperature, topP: sampling.topP } };
+  }
+
+  private buildProviderExtensions(
+    modelId: string,
+    controlsOverride?: CompletionCallOptions["controls"],
+  ): Record<string, unknown> | undefined {
     const fields: Record<string, unknown> = {};
-    const controls = resolveThinkingControls(modelId, this.modelConfig);
+    const controls = resolveThinkingControls(modelId, this.effectiveControls(controlsOverride));
     if (controls.chatTemplateKwargs) {
       fields["chat_template_kwargs"] = controls.chatTemplateKwargs;
     }
@@ -1329,8 +1507,12 @@ export class LMStudioProvider {
   /** Prepend the gpt-oss `Reasoning: <effort>` system line — the only reasoning-
    *  effort control LM Studio honors over the API (it ignores reasoning_effort,
    *  #988). No-op for every other family. */
-  private withReasoningSystemLine(modelId: string, msgs: ChatCompletionMessageParam[]): ChatCompletionMessageParam[] {
-    const line = resolveThinkingControls(modelId, this.modelConfig).systemReasoningLine;
+  private withReasoningSystemLine(
+    modelId: string,
+    msgs: ChatCompletionMessageParam[],
+    controlsOverride?: CompletionCallOptions["controls"],
+  ): ChatCompletionMessageParam[] {
+    const line = resolveThinkingControls(modelId, this.effectiveControls(controlsOverride)).systemReasoningLine;
     return line ? [{ role: "system", content: line } as ChatCompletionMessageParam, ...msgs] : msgs;
   }
 
@@ -1348,12 +1530,17 @@ export class LMStudioProvider {
    *  request. The fix belongs where the per-endpoint config is built (a per-endpoint
    *  `contextWindow`), not here — this class is handed one number and has no way to
    *  learn the served window without probing the endpoint. */
-  private resolveMaxTokens(messages: readonly LLMMessage[], tools: readonly LLMToolDef[]): number {
-    return computeOutputTokenBudget({
+  private resolveMaxTokens(messages: readonly LLMMessage[], tools: readonly LLMToolDef[], perCallCeiling?: number): number {
+    const budget = computeOutputTokenBudget({
       contextWindow: this.modelConfig.contextWindow,
       estimatedPromptTokens: estimatePromptTokensForRequest(messages, tools),
       declaredMaxTokens: this.modelConfig.maxTokens,
     });
+    // A caller's ceiling for THIS call only. Same finiteness guard as the declared
+    // ceiling: a NaN here would serialise as `max_tokens: null`.
+    return typeof perCallCeiling === "number" && Number.isFinite(perCallCeiling) && perCallCeiling > 0
+      ? Math.min(budget, Math.floor(perCallCeiling))
+      : budget;
   }
 
   // The OpenAI SDK's `timeout` option has been observed not to fire when
@@ -1455,10 +1642,11 @@ export class LMStudioProvider {
   async complete(
     messages: LLMMessage[],
     tools: LLMToolDef[],
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    options?: CompletionCallOptions,
   ): Promise<LLMResponse> {
     const modelId = this.parseModelId(this.modelConfig.primary);
-    const openAIMessages = this.withReasoningSystemLine(modelId, normalizeMessagesForModel(messages, modelId));
+    const openAIMessages = this.withReasoningSystemLine(modelId, normalizeMessagesForModel(messages, modelId), options?.controls);
     const openAITools: ChatCompletionTool[] = tools.map(t => ({
       type: "function",
       function: { name: t.name, description: t.description, parameters: t.parameters },
@@ -1468,20 +1656,16 @@ export class LMStudioProvider {
     const maxAttempts = this.configuredMaxRetries + 1;
     const retryDelay = 2000;
 
-    // Qwen3.5 thinking-mode: auto-apply recommended sampling params when enableThinking is set
-    // and the user has not explicitly overridden topP. Explicit topP always wins.
-    let effectiveTemp = this.modelConfig.temperature;
-    let effectiveTopP = this.modelConfig.topP;
-    if (effectiveTopP === undefined) {
-      const rec = recommendedQwenSampling(modelId, this.modelConfig);
-      if (rec) {
-        effectiveTemp = rec.temperature;
-        effectiveTopP = rec.topP;
-      }
-    }
-
     while (attempt < maxAttempts) {
       const startedAt = Date.now();
+      // Extensions and sampling for THIS attempt, from one helper so they cannot disagree
+      // (resolveCallShape): Qwen thinking-on takes the model card's numbers and refuses a
+      // temperature pin; thinking-off honours the pin; an explicit topP is never touched.
+      // Rebuilt per attempt because a rejected reasoning_effort steps the ladder — and steps
+      // the thinking state, which is why the sampling has to be rebuilt with it.
+      const { extensions, sampling } = this.resolveCallShape(modelId, options?.controls);
+      const effectiveTemp = sampling.temperature;
+      const effectiveTopP = sampling.topP;
       // In-flight visibility: a non-streaming complete() is a black box (no token
       // deltas), so the monitor can only report how long it has been awaiting a
       // response — but that alone surfaces a remote that's stuck on a 20K-token
@@ -1503,9 +1687,11 @@ export class LMStudioProvider {
             model: modelId,
             messages: openAIMessages,
             tools: openAITools.length > 0 ? openAITools : undefined,
-            tool_choice: openAITools.length > 0 ? "auto" : undefined,
+            // Same default and the same per-call override as the streaming path: the
+            // forced-tool-call callers (options.toolChoice "required") land on BOTH.
+            tool_choice: openAITools.length > 0 ? (options?.toolChoice ?? "auto") : undefined,
             temperature: effectiveTemp,
-            max_tokens: this.resolveMaxTokens(messages, tools),
+            max_tokens: this.resolveMaxTokens(messages, tools, options?.maxTokens),
             ...(effectiveTopP !== undefined && { top_p: effectiveTopP }),
             ...(this.modelConfig.topK !== undefined && { top_k: this.modelConfig.topK }),
             ...(this.modelConfig.minP !== undefined && { min_p: this.modelConfig.minP }),
@@ -1515,7 +1701,7 @@ export class LMStudioProvider {
             // TOP LEVEL — `extra_body` is a Python-SDK client-side concept and never
             // appears on the wire, so nesting them there silently dropped all of them.
             // Outer cast suppresses the unknown-property error.
-            ...(this.buildProviderExtensions(modelId) ?? {}),
+            ...(extensions ?? {}),
           } as Parameters<typeof this.client.chat.completions.create>[0],
           { signal: s }
         )) as ChatCompletion;
@@ -1523,6 +1709,13 @@ export class LMStudioProvider {
 
         const choice = response.choices[0];
         if (!choice) throw new Error("Empty response from OpenAI-compatible provider");
+
+        // `reasoning_content` is an LM Studio / vLLM extension for thinking
+        // models — not in the OpenAI SDK types, so read it via a cast. Also
+        // strips any inline <think> blocks out of the answer content. Split
+        // BEFORE the audit row so the row can carry the reasoning length.
+        const reasoningField = (choice.message as { reasoning_content?: string }).reasoning_content;
+        const split = splitReasoning(choice.message.content, reasoningField);
 
         const toolCalls = (choice.message.tool_calls ?? []).map(tc => ({
           id: tc.id,
@@ -1553,15 +1746,11 @@ export class LMStudioProvider {
             },
             finishReason: choice.finish_reason ?? undefined,
             toolCount: openAITools.length,
-            messageCount: openAIMessages.length,
+            messageCount: messages.length,
+            extensions,
+            reasoningChars: split.reasoning?.length ?? 0,
           });
         }
-
-        // `reasoning_content` is an LM Studio / vLLM extension for thinking
-        // models — not in the OpenAI SDK types, so read it via a cast. Also
-        // strips any inline <think> blocks out of the answer content.
-        const reasoningField = (choice.message as { reasoning_content?: string }).reasoning_content;
-        const split = splitReasoning(choice.message.content, reasoningField);
 
         return {
           content: split.content,
@@ -1579,8 +1768,50 @@ export class LMStudioProvider {
         };
       } catch (err: unknown) {
         endProviderCall(callId);
+        // A CALLER CANCEL IS NOT A PROVIDER FAILURE.
+        //
+        // This path could not tell "the caller aborted me on purpose" from "the remote broke":
+        // every abort ran recordRequestFailure (failureCount + lastError on this instance, which
+        // is what the health snapshot and the failover breaker read) and logged
+        // "OpenAI-compatible completion failed" at ERROR. The speculative source-sensitivity
+        // classifier aborts on the commonest turn shapes there are — an evidence-reuse follow-up,
+        // a document-grounded turn — so the routing-tier instance collected a fake failure and an
+        // error row per turn. The streaming path already treats its own cancel as a distinct
+        // outcome (an audit row with finishReason "aborted", no error log); this brings the
+        // non-streaming path to the same reading of the event, and additionally keeps the health
+        // counters clean, because nothing about a cancel says the remote is unwell.
+        // The throw is unchanged — the caller still sees the failure it aborted for.
+        // THE ROW IS WRITTEN ON EVERY OUTCOME, NOT ONLY ON THE ONES THAT RETURNED.
+        //
+        // This catch used to leave no provider_model_call row at all, so every latency and
+        // reasoning percentile read off this path counted survivors only — the exact bias the
+        // September audit found when the openai SDK laundered caller aborts into clean stops,
+        // and the one the sibling fix has just closed on the Anthropic provider. The streaming
+        // path already writes an "aborted" row (see streamOnce's abort branch); this brings the
+        // non-streaming path to the same reading. Usage is undefined here because a call that
+        // threw reported none — the DURATION is the figure that was being lost.
+        const auditFailure = (finishReason: "aborted" | "error"): void => {
+          this.auditModelCall({
+            modelId,
+            mode: "complete",
+            startedAt,
+            usage: undefined,
+            finishReason,
+            toolCount: openAITools.length,
+            messageCount: messages.length,
+            extensions,
+            reasoningChars: null,
+          });
+        };
+        if (signal?.aborted) {
+          auditFailure("aborted");
+          log.debug({ err, attempt, model: modelId }, "OpenAI-compatible completion cancelled by the caller");
+          const msg = err instanceof Error ? err.message : String(err);
+          throw new Error(`OpenAI-compatible request failed (model: ${modelId}): ${msg}`);
+        }
+        auditFailure(err instanceof ProviderHardTimeoutError ? "aborted" : "error");
         this.recordRequestFailure(startedAt, err);
-        this.noteReasoningEffortRejection(modelId, err);
+        this.noteReasoningEffortRejection(modelId, err, options?.controls);
         // A hard-timeout is terminal: retrying a hung/too-slow provider only
         // multiplies the wall-clock hang (e.g. 4 × 5-min = 20-min delegation).
         // Surface it immediately so the orchestrator can fall back or synthesize.
@@ -1589,7 +1820,9 @@ export class LMStudioProvider {
           throw err;
         }
         attempt++;
-        if (signal?.aborted || attempt >= maxAttempts) {
+        // (`signal?.aborted` used to be an OR here; the cancel branch above now owns that case,
+        // so what is left is the retry budget.)
+        if (attempt >= maxAttempts) {
           log.error({ err, attempt, model: modelId }, "OpenAI-compatible completion failed");
           const msg = err instanceof Error ? err.message : String(err);
           throw new Error(`OpenAI-compatible request failed (model: ${modelId}): ${msg}`);
@@ -1802,7 +2035,7 @@ export class LMStudioProvider {
         }
         return;
       } catch (err) {
-        const effortRejected = this.noteReasoningEffortRejection(this.parseModelId(this.modelConfig.primary), err);
+        const effortRejected = this.noteReasoningEffortRejection(this.parseModelId(this.modelConfig.primary), err, options?.controls);
         if (yielded === 0 && attempt < maxAttempts && !signal?.aborted && (effortRejected || isRetryableStreamError(err))) {
           log.warn(
             { err: String(err), model: this.parseModelId(this.modelConfig.primary), attempt, maxAttempts },
@@ -1822,22 +2055,19 @@ export class LMStudioProvider {
     options?: StreamCallOptions
   ): AsyncGenerator<StreamChunk> {
     const modelId = this.parseModelId(this.modelConfig.primary);
-    const openAIMessages = this.withReasoningSystemLine(modelId, normalizeMessagesForModel(messages, modelId));
+    const openAIMessages = this.withReasoningSystemLine(modelId, normalizeMessagesForModel(messages, modelId), options?.controls);
     const openAITools: ChatCompletionTool[] = tools.map(t => ({
       type: "function",
       function: { name: t.name, description: t.description, parameters: t.parameters },
     }));
 
-    // Qwen3.5 thinking-mode: same auto-sampling logic as complete()
-    let streamEffectiveTemp = this.modelConfig.temperature;
-    let streamEffectiveTopP = this.modelConfig.topP;
-    if (streamEffectiveTopP === undefined) {
-      const rec = recommendedQwenSampling(modelId, this.modelConfig);
-      if (rec) {
-        streamEffectiveTemp = rec.temperature;
-        streamEffectiveTopP = rec.topP;
-      }
-    }
+    // Same per-attempt shape as complete() — see resolveCallShape. streamOnce IS the attempt
+    // (stream() re-enters it on a retry), so building here rebuilds both halves after a
+    // reasoning_effort rejection has stepped the ladder. The extensions are handed to the
+    // audit row unchanged, so the row reports what THIS call sent rather than instance defaults.
+    const { extensions, sampling } = this.resolveCallShape(modelId, options?.controls);
+    const streamEffectiveTemp = sampling.temperature;
+    const streamEffectiveTopP = sampling.topP;
 
     // The hardTimeout here only guards the initial `create()` call (opening
     // the HTTP stream). Per-chunk inactivity is enforced below so a hung
@@ -1865,14 +2095,14 @@ export class LMStudioProvider {
         // multi-minute cost on the slow local model (audit 5d51862f).
         tool_choice: openAITools.length > 0 ? (options?.toolChoice ?? "auto") : undefined,
         temperature: streamEffectiveTemp,
-        max_tokens: this.resolveMaxTokens(messages, tools),
+        max_tokens: this.resolveMaxTokens(messages, tools, options?.maxTokens),
         ...(streamEffectiveTopP !== undefined && { top_p: streamEffectiveTopP }),
         ...(this.modelConfig.topK !== undefined && { top_k: this.modelConfig.topK }),
         ...(this.modelConfig.minP !== undefined && { min_p: this.modelConfig.minP }),
         ...(this.modelConfig.repeatPenalty !== undefined && { repeat_penalty: this.modelConfig.repeatPenalty }),
         ...(this.modelConfig.seed !== undefined && { seed: this.modelConfig.seed }),
         // Top-level, not extra_body — see buildProviderExtensions.
-        ...(this.buildProviderExtensions(modelId) ?? {}),
+        ...(extensions ?? {}),
         stream: true,
         stream_options: { include_usage: true },
       } as Parameters<typeof createStream>[0],
@@ -2179,7 +2409,9 @@ export class LMStudioProvider {
         usage: collectedUsage,
         finishReason: "aborted",
         toolCount: openAITools.length,
-        messageCount: openAIMessages.length,
+        messageCount: messages.length,
+        extensions,
+        reasoningChars: progress.reasoningChars,
       });
       throw reason instanceof Error
         ? reason
@@ -2195,7 +2427,10 @@ export class LMStudioProvider {
       usage: collectedUsage,
       finishReason: collectedFinishReason,
       toolCount: openAITools.length,
-      messageCount: openAIMessages.length,
+      messageCount: messages.length,
+      extensions,
+      // The same counter the burn guard reads: dedicated deltas AND inline <think> spans.
+      reasoningChars: progress.reasoningChars,
     });
     yield { type: "done", finishReason: collectedFinishReason ?? "stop", usage: collectedUsage };
   }

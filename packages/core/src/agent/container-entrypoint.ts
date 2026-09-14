@@ -9,6 +9,7 @@
  */
 
 import type { LLMMessage } from "../providers/lmstudio.js";
+import { trimSubAgentHistory } from "./sub-agent-history.js";
 import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type ToolContext } from "../tools/registry.js";
 import { isToolAllowed } from "../guardrails/tool-tiers.js";
 import { scanOutput } from "../guardrails/output.js";
@@ -98,6 +99,22 @@ async function main(): Promise<void> {
 
   try {
     while (iterations < maxIterations) {
+      // INPUT bound — the same one the in-process runner applies (agent/sub-agent.ts calls
+      // this before composing its request). It is not optional here: `agents.defaultContainerized`
+      // defaults true and 22 workspace agents declare no container flag, so this loop is where
+      // most delegated runs actually execute. Without the call, a 25,929-char read_file result
+      // slides under MAX_TOOL_RESULT_CHARS untouched and is re-sent verbatim for every remaining
+      // iteration (run 3959f3ac, 13 completions, 238,357 cumulative prompt tokens), and nothing
+      // bounds the prompt against contextWindow — from which the completion budget is derived
+      // (providers/lmstudio.ts computeOutputTokenBudget), so the output truncates before the
+      // window even overflows. Mutates `history` in place; the messages below are rebuilt from
+      // it every iteration, so the loop's own semantics are unchanged.
+      trimSubAgentHistory(history, {
+        systemPromptChars: systemPrompt.length,
+        tools,
+        contextWindow: resolvedModelConfig.contextWindow,
+      });
+
       const messages: LLMMessage[] = [
         { role: "system", content: systemPrompt },
         ...history,

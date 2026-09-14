@@ -147,14 +147,18 @@ export class FailoverChatProvider implements ChatProvider {
     return false;
   }
 
-  async complete(messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal): Promise<LLMResponse> {
+  async complete(messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal, options?: CompletionCallOptions): Promise<LLMResponse> {
     const attempts: string[] = [];
     const candidates = this.availableBindings();
 
     for (let index = 0; index < candidates.length; index += 1) {
       const binding = candidates[index]!;
       try {
-        const response = await binding.provider.complete(messages, tools, signal);
+        // `options` forwarded for the same reason completeViaStream forwards it: the
+        // per-call thinking-off, max_tokens ceiling and tool_choice would otherwise be
+        // silently dropped on every multi-binding deployment — and the Claude preset
+        // makes every deployment multi-binding.
+        const response = await binding.provider.complete(messages, tools, signal, options);
         this.markSuccess(binding, "complete");
         return response;
       } catch (error) {
@@ -196,8 +200,8 @@ export class FailoverChatProvider implements ChatProvider {
    * `options` is forwarded to the binding. It carries the per-chunk observation hook
    * and the operator's unbounded grant, so dropping it here would disarm the
    * mid-stream burn guard on exactly the multi-binding deployments this method exists
-   * to un-break. The complete() fallback takes no options — a non-streaming call has
-   * no mid-stream to observe.
+   * to un-break. The complete() fallback gets the same bag: it has no mid-stream to
+   * observe, but the per-call controls and max_tokens ceiling apply there too.
    */
   async completeViaStream(messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal, options?: CompletionCallOptions): Promise<LLMResponse> {
     const attempts: string[] = [];
@@ -208,7 +212,7 @@ export class FailoverChatProvider implements ChatProvider {
       try {
         const response = binding.provider.completeViaStream
           ? await binding.provider.completeViaStream(messages, tools, signal, options)
-          : await binding.provider.complete(messages, tools, signal);
+          : await binding.provider.complete(messages, tools, signal, options);
         this.markSuccess(binding, "complete");
         return response;
       } catch (error) {

@@ -107,13 +107,11 @@
         // continueLengthLimitedResponse (2 retries) still stitches a legitimately long
         // answer across three calls.
         "maxTokens": 8000,
-        // temperature/topP are deliberately UNSET so the provider applies Qwen's
-        // published per-mode sampling (recommendedQwenSampling): 1.0/0.95 for
-        // thinking, 0.7/0.80 for reasoning_effort "none". Pinning topP here defeats
-        // that entirely — the fallback is gated on `topP === undefined`, so a value
-        // in defaults propagates to every agent and the non-thinking ones run
-        // thinking-mode sampling. Agents that genuinely need a fixed temperature
-        // still set it themselves.
+        // temperature/topP are deliberately UNSET. On Qwen the provider decides per call
+        // (resolveSamplingForCall): thinking ON always gets the model card's sampling and
+        // an agent's temperature pin is IGNORED (one warning — low temperature with
+        // thinking on loops); thinking OFF honours the agent's pin; an explicit topP
+        // switches all of this off. Non-Qwen: the pin, else 0.3.
         "repeatPenalty": 1.05,
         // llama.cpp/LM Studio KV-cache reuse for the stable system-prompt prefix —
         // skips re-prefilling ~12k tokens per turn (audit 0792acf0: 7.6s for "hi").

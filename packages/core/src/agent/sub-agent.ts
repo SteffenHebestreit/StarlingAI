@@ -16,7 +16,7 @@ import fs from "node:fs";
 // unqualified `path` default import would shadow-warn against them.
 import { resolve as resolvePath } from "node:path";
 import { createHash } from "node:crypto";
-import type { LLMMessage, ChatProvider } from "../providers/lmstudio.js";
+import type { LLMMessage, LLMResponse, LLMToolDef, ChatProvider, CompletionCallOptions } from "../providers/lmstudio.js";
 import { DeadlineAbort } from "../providers/lmstudio.js";
 import { composeSubAgentMessages, trimSubAgentHistory } from "./sub-agent-history.js";
 import { getConfig } from "../config/loader.js";
@@ -34,7 +34,7 @@ import { looksLikeContainerLevelFailure, looksLikeModelTemplateArtifact, looksLi
 import { appendOutcome, computeAdaptiveSubAgentTimeoutMs, extractTaskKeywords } from "./outcomes.js";
 import { formatFlowMemoryGuidance } from "./flow-memory.js";
 import { acquireSlot, releaseSlot, DEFAULT_CONCURRENCY } from "../swarm/concurrency.js";
-import { applyActiveModelPreset, createChatProvider, getChatProviderForTier, resolveProviderEndpoint } from "../providers/index.js";
+import { applyActiveModelPreset, createChatProvider, getChatProviderForTier, resolveProviderEndpoint, tierModelDefaults } from "../providers/index.js";
 import { loadTurnPlan } from "./turn-plan.js";
 import { computerSessionManager } from "./computer-session.js";
 import { browserSessionManager } from "./browser-session.js";
@@ -60,6 +60,7 @@ import { formatScopedMemoryGuidance } from "../memory/service.js";
 import { formatSkillGuidance } from "../skills/service.js";
 import { graphMarkSessionRetrievalsUseful, graphMarkSessionRetrievalsUnhelpful } from "../memory/graph-service.js";
 import { isSessionDegraded } from "./warden.js";
+import { isRunInternalWithdrawalReason } from "./run-blocked-tool-reasons.js";
 import { claimAgentMessages, readAllFacts, type AgentMessageClaim } from "../swarm/memory.js";
 import { sanitizeTranscriptContent } from "./sanitize-response.js";
 import { truncateToolResult, extractKeyFacts, extractedFindingIsLowValue, stripEditorialNotes } from "../tools/result-shaping.js";
@@ -747,10 +748,13 @@ export function buildFactsFirstSynthesisMessages(task: string, curatedFindings: 
   ];
 }
 
-// Returns the extracted finding text that was stored, or null if skipped
-// (too short, duplicate, or boilerplate). The caller counts the returned
-// length toward cumulativeUsefulEvidenceBytes so the evidence cap tracks
-// actual stored knowledge density rather than raw tool output volume.
+// Returns null when the finding is skipped (too short, duplicate, or boilerplate);
+// otherwise the heuristic `extracted` text IMMEDIATELY plus a `stored` promise that
+// settles to the text actually written to shared facts (or null: nothing relevant,
+// or the store failed). The caller counts `extracted.length` toward
+// cumulativeUsefulEvidenceBytes provisionally and corrects it when `stored`
+// settles, so the evidence cap tracks stored knowledge density rather than raw
+// tool output volume — see the split below.
 /**
  * LLM distillation pass for the auto-share path. Given the sub-agent's OBJECTIVE
  * ("what we're looking for") and the raw content a tool returned, extract ONLY the
@@ -771,6 +775,25 @@ export function buildFactsFirstSynthesisMessages(task: string, curatedFindings: 
  * on the (non-thinking) routing tier the call takes about a second.
  */
 export const DISTILL_CALL_DEADLINE_MS = 60_000;
+
+/**
+ * Controls for the sub-agent's end-of-run synthesis passes (timeout, soft-deadline, max-iterations).
+ *
+ * The prompt those passes send is a fresh 2-message facts-first prompt (buildFactsFirstSynthesisMessages)
+ * or the history under tool_choice "none" — writing prose from a curated fact list, the one place in
+ * the run where deliberation does not pay: the facts were gathered WITH thinking, and the answer is a
+ * rendering of them. No synthesis tier is configured, so `?? provider` ran them on the WORKER with its
+ * own controls. Audit log 12 Sept 2026, researcher: the facts-first pass wrote 7,677 tokens in 291.2 s
+ * for a 7,460-char answer (~1.9K tokens), and 7,045 tokens in 127.9 s for a 5,554-char one; with the
+ * three history-bearing synthesis calls of the same shape, 824 s across five calls, ~20 % of it answer.
+ *
+ * Both fields on purpose: the enable_thinking family withholds the flag when a graded pin vetoes it,
+ * and researcher / mission_coordinator carry {enableThinking:false, reasoningEffort:"medium"} — an
+ * explicit "none" is the only value that reaches the wire past that pin (resolveThinkingControls).
+ * Spread LAST over the worker's config so it has the last word. The QA verdict in runtime.ts uses the
+ * synthesis tier WITHOUT this override and keeps its deliberation; nothing here touches it.
+ */
+export const SYNTHESIS_CALL_CONTROLS = { enableThinking: false, reasoningEffort: "none" } as const;
 
 export async function distillFindingForSharedFacts(params: {
   objective: string;
@@ -822,7 +845,21 @@ export async function distillFindingForSharedFacts(params: {
   }
 }
 
-async function autoShareUsefulFinding(params: {
+/**
+ * Split in two on purpose. The synchronous half (length gate, dedup key, heuristic extract,
+ * low-value gate) needs no I/O and returns at once; the model-backed distillation and the
+ * shared-facts store run in the returned `stored` promise, OFF the tool loop's critical path.
+ *
+ * Audit log 10 Sept 2026, turn 3: the researcher's 142 s run carried 7 distillation calls
+ * interleaved with its own iterations — 6.8, 1.5, 3.8, 1.4, 4.0, 7.4, 4.8, 5.2 s, about 30 s
+ * or 21 % of the run — each awaited inline before the NEXT model call could start. Nothing on
+ * that path reads the distilled text: it feeds the shared facts (other agents, the synthesis
+ * passes) and the sufficiency byte ladder, and the raw tool result is already in this agent's
+ * history. So the loop moves on and the run joins the promises where the text is read
+ * (joinPendingShares). Never rejects — a distill failure keeps the heuristic extract, a store
+ * failure resolves null, exactly the outcomes the inline version had.
+ */
+function autoShareUsefulFinding(params: {
   sessionId: string;
   agentName: string;
   toolName: string;
@@ -832,7 +869,7 @@ async function autoShareUsefulFinding(params: {
   provider: ChatProvider;
   signal?: AbortSignal;
   distill?: { enabled: boolean; minChars: number; budget: { remaining: number }; provider?: ChatProvider };
-}): Promise<string | null> {
+}): { extracted: string; stored: Promise<string | null> } | null {
   // Normalize only for length check and dedup key — preserve structure for extraction
   const normalized = params.evidence.replace(/\s+/g, " ").trim();
   if (normalized.length < 180) return null;
@@ -858,59 +895,72 @@ async function autoShareUsefulFinding(params: {
     return null;
   }
 
-  // Distillation: for a LARGE web-research extract, hand the objective + raw content to
-  // a one-shot model pass that keeps only the objective-relevant facts/URLs. Keeps
-  // shared findings dense and shrinks the context the final synthesis must read. Bounded
-  // per run; on failure/abort, keep the heuristic extract (never drops evidence).
-  // Scoped to web-research tools — that is where scraped page chrome / search-result
-  // noise comes from. Structured outputs (ssh_exec, DB queries, delegation results, file
-  // contents) are returned as-is: distilling them risks dropping precise data.
-  let toShare = extracted;
+  // The budget is charged HERE, synchronously, so two results from the same iteration
+  // cannot both pass a `remaining > 0` check before either has decremented it.
   const distill = params.distill;
-  if (
+  const distillThis = Boolean(
     distill?.enabled
     && /^(?:web_search|web_fetch|browser_)/i.test(params.toolName)
     && distill.budget.remaining > 0
-    && extracted.length >= distill.minChars
-  ) {
-    distill.budget.remaining -= 1;
-    const distilled = await distillFindingForSharedFacts({
-      objective: params.objective,
-      toolName: params.toolName,
-      rawEvidence: params.evidence,
-      // Distillation is a lightweight extraction — run it on the routing tier
-      // (a smaller/faster model) when one is configured, so the per-finding
-      // distill cost stays low on a single GPU. Falls back to the agent's own
-      // provider when no routing tier is set (no behavior change).
-      provider: distill.provider ?? params.provider,
-      signal: params.signal,
-    });
-    if (distilled === "") {
-      // Nothing in this result was relevant to the objective — don't pollute facts.
+    && extracted.length >= distill.minChars,
+  );
+  if (distillThis) distill!.budget.remaining -= 1;
+
+  const stored = (async (): Promise<string | null> => {
+    // Distillation: for a LARGE web-research extract, hand the objective + raw content to
+    // a one-shot model pass that keeps only the objective-relevant facts/URLs. Keeps
+    // shared findings dense and shrinks the context the final synthesis must read. Bounded
+    // per run; on failure/abort, keep the heuristic extract (never drops evidence).
+    // Scoped to web-research tools — that is where scraped page chrome / search-result
+    // noise comes from. Structured outputs (ssh_exec, DB queries, delegation results, file
+    // contents) are returned as-is: distilling them risks dropping precise data.
+    let toShare = extracted;
+    if (distillThis) {
+      const distilled = await distillFindingForSharedFacts({
+        objective: params.objective,
+        toolName: params.toolName,
+        rawEvidence: params.evidence,
+        // Distillation is a lightweight extraction — run it on the routing tier
+        // (a smaller/faster model) when one is configured, so the per-finding
+        // distill cost stays low on a single GPU. Falls back to the agent's own
+        // provider when no routing tier is set (no behavior change).
+        provider: distill!.provider ?? params.provider,
+        signal: params.signal,
+      });
+      if (distilled === "") {
+        // Nothing in this result was relevant to the objective — don't pollute facts.
+        params.sharedKeys.delete(key);
+        return null;
+      }
+      if (distilled && !extractedFindingIsLowValue(distilled)) {
+        toShare = distilled;
+      }
+    }
+
+    // Deterministic last line of defense against the distiller editorializing —
+    // strip any "(Note: …)" / "Hinweis: …" the model added in its own voice (these
+    // are never source facts and on a weak model are often wrong/backwards). If the
+    // finding was nothing but a note, it collapses to low-value and is skipped.
+    const cleaned = stripEditorialNotes(toShare);
+    if (!cleaned || extractedFindingIsLowValue(cleaned)) {
       params.sharedKeys.delete(key);
       return null;
     }
-    if (distilled && !extractedFindingIsLowValue(distilled)) {
-      toShare = distilled;
+
+    try {
+      await shareFinding(
+        params.sessionId,
+        key,
+        `[${params.agentName}/${params.toolName}] ${cleaned}`,
+      );
+    } catch (err) {
+      log.debug({ err, agentName: params.agentName, tool: params.toolName }, "Failed to auto-share useful tool evidence");
+      return null;
     }
-  }
+    return cleaned;
+  })();
 
-  // Deterministic last line of defense against the distiller editorializing —
-  // strip any "(Note: …)" / "Hinweis: …" the model added in its own voice (these
-  // are never source facts and on a weak model are often wrong/backwards). If the
-  // finding was nothing but a note, it collapses to low-value and is skipped.
-  const cleaned = stripEditorialNotes(toShare);
-  if (!cleaned || extractedFindingIsLowValue(cleaned)) {
-    params.sharedKeys.delete(key);
-    return null;
-  }
-
-  await shareFinding(
-    params.sessionId,
-    key,
-    `[${params.agentName}/${params.toolName}] ${cleaned}`,
-  );
-  return cleaned;
+  return { extracted, stored };
 }
 
 // Per-tool call caps enforced inside sub-agent runs.
@@ -1002,7 +1052,10 @@ const PER_PATH_APPEND_CAP = 24;
  * write_file) + ONE edit_file per subsystem + verification-driven corrections, all
  * against the SAME path, so the passes are the deliverable rather than a loop. The
  * widest builder iteration budget in the workspace is 14 (web_coder, backend_coder),
- * which the directive turns into 11 fill passes — at 12 the cap bit after a single
+ * which buildStagedBuildFirstStepInstruction turns into 11 fill passes in the run's
+ * USER turn (the directive in the system head is a frozen cache key and states no
+ * count of its own, so this cap and that instruction are the only two things that
+ * bound the passes) — at 12 the cap bit after a single
  * correction, i.e. exactly when the artifact was nearly finished and the work was
  * most expensive to lose. 24 matches the write_file total below and still leaves the
  * ambiguity failure (edit_file rejects an absent or non-unique old_string) as the
@@ -1637,6 +1690,33 @@ function buildApprovalRetryBlockedMessage(toolName: string, priorFailure: string
     normalized ? `Earlier approval result: ${normalized}` : "Earlier approval result: approval was not granted.",
     "Do not retry this approval-gated tool in the same run. Report the blocker and ask the user to retry when they can approve the prompt.",
   ].join(" ");
+}
+
+/** The synthetic tool result for a call the run's call-site block set refuses. The reason
+ *  strings are the sub_agent_tool_blocked `reason` values; a tool the run never held gets the
+ *  allow-list wording so that row and this text keep agreeing. */
+function describeRunBlockedTool(toolName: string, reason: string): string {
+  switch (reason) {
+    case "evidence_cap_enforced":
+      return `Tool '${toolName}' has been disabled — you have gathered enough evidence. Write your final answer now.`;
+    // No "approval_gate_unresolved" case: that withdrawal is answered one check earlier by
+    // approvalBlockedTools (buildApprovalRetryBlockedMessage, which also quotes the earlier
+    // approval result), so nothing ever reaches this switch with that reason. The reason
+    // string still exists — it is what the call site's audit row carries.
+    case "search_backend_degraded":
+      return `Tool '${toolName}' is disabled for the rest of this run: the search backend is degraded. Continue without it.`;
+    case "delegation_cascade_failed":
+      return `Tool '${toolName}' is disabled for the rest of this run: delegations have cascade-failed. Continue without it.`;
+    default:
+      // The four cases above are RUN_INTERNAL_WITHDRAWAL_REASONS — the same set warden.ts
+      // exempts from its escape counter, imported from one module so the wording here and
+      // the warden's classification cannot drift apart. Anything else (today only
+      // "not_in_agent_tools") is a tool the run never held: allow-list wording, and the
+      // warden does count that row.
+      return isRunInternalWithdrawalReason(reason)
+        ? `Tool '${toolName}' is disabled for the rest of this run: ${reason}. Continue without it.`
+        : `Tool '${toolName}' is not in this agent's allowed tool set.`;
+  }
 }
 
 function resolveSubAgentToolCap(toolName: string, isCoordinatorAgent: boolean): number | undefined {
@@ -2346,6 +2426,19 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
   // so the teardown can reach it.
   let supervisorTimer: ReturnType<typeof setInterval> | undefined;
 
+  // Auto-share distillations + stores in flight (see autoShareUsefulFinding). Declared out
+  // here, next to the timers, because the run's `finally` is the one point every return AND
+  // every throw passes through: a delegated result must not reach the parent before the
+  // findings it gathered are in shared facts. joinPendingShares is also called wherever this
+  // run itself READS shared facts (oversight check, facts-first synthesis, the outcome rule).
+  // Abort semantics are the distill call's own 60 s deadline (DISTILL_CALL_DEADLINE_MS) — no
+  // new timeout here.
+  const pendingShares: Promise<void>[] = [];
+  const joinPendingShares = async (): Promise<void> => {
+    if (pendingShares.length === 0) return;
+    await Promise.allSettled(pendingShares.splice(0));
+  };
+
   // Open a checkpoint for this run. The resume side of this system was complete —
   // context rebuilding, gateway routes, dashboard — but NOTHING ever wrote one, so
   // none of it could fire. A run that dies with partial work now leaves a record the
@@ -2437,7 +2530,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // from this object, so a raised cap does NOT apply to the grace/soft-deadline
     // synthesis passes. That is intended — a grace pass must stay short — but it is
     // silent, and it only holds when a synthesis tier is actually configured (otherwise
-    // `?? provider` reuses this one).
+    // the fallback is built from THIS object with the synthesis controls swapped in).
     const modelConfig = applyStreamCapOverlay(
       applyEffortModelOverlay(baseModelConfig, effortRunProfile),
       { toolNames: effectiveToolNames, turnTimeoutMs, declaredTurnTimeoutMs: agentTurnTimeoutMs },
@@ -2543,15 +2636,23 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     const provider = createChatProvider(modelConfig, providerEndpoint);
     // E25: prefer the synthesis-tier provider for the three sub-agent
     // synthesis paths (timeout, pre-deadline soft, max-iterations) — same
-    // rationale as runtime.ts:3127. Falls back to the primary `provider`
-    // when no tier is configured. Resolved once per run so we don't pay
-    // the lookup cost in every synthesis branch.
-    const synthProvider = getChatProviderForTier("synthesis") ?? provider;
+    // rationale as runtime.forceSynthesis. Resolved once per run so we don't
+    // pay the lookup cost in every synthesis branch.
+    // Either way the pass runs thinking-off (SYNTHESIS_CALL_CONTROLS): the tier
+    // call carries the override, and with no tier the fallback is the worker's
+    // OWN model config and endpoint with only the controls swapped — not `provider`
+    // itself, which took the worker's thinking into a prose-only pass (824 s over
+    // five calls, ~20 % of it answer).
+    const synthProvider = getChatProviderForTier("synthesis", SYNTHESIS_CALL_CONTROLS)
+      ?? createChatProvider({ ...modelConfig, ...SYNTHESIS_CALL_CONTROLS }, providerEndpoint);
 
     // Iteration cap: explicit --iter override wins, then the active effort profile's
     // sub-agent budget (0 = unbounded), then the agent's configured cap, then default.
-    // Resolved HERE (before the prompt is assembled) because the staged-build directive
-    // sizes its pass budget from it — the loop below is the only other consumer.
+    // Resolved HERE (before the prompt is assembled) because buildStagedBuildFirstStepInstruction
+    // sizes the run's fill-pass budget from it, and that instruction rides in the USER turn.
+    // The staged-build DIRECTIVE in the system head does not: it is the frozen cache key and
+    // carries no run-derived number at all (sub-agent-prompt-guidance.ts). Consumers: that
+    // instruction and the loop below.
     const effortSubAgentIterations = effortRunProfile?.subAgentMaxIterations;
     const maxIterations = opts.maxIterationsOverride === 0
       ? Number.MAX_SAFE_INTEGER
@@ -2668,7 +2769,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     const stagedBuildGuidance = isStagedBuild && stagedBuildFlags.stagedArtifactBuildDirective === true
       ? (isResumeBuild
           ? buildStagedBuildResumeGuidance(stagedResume.files, stagedResume.count, stagedResume.markers, brokenPages)
-          : buildStagedArtifactBuildGuidance(maxIterations, PER_PATH_EDIT_CAP))
+          : buildStagedArtifactBuildGuidance())
       : "";
     if (isStagedBuild) {
       logAudit(
@@ -2710,14 +2811,21 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // stagedBuildGuidance deliberately does NOT move: the comment above explains that it has
     // to lead, and behind the agent's own prompt it would again outrank its finish contract.
     //
-    // The cost is real and it is LIVE: the zod default is false but
-    // config/gateway/40-orchestration.jsonc sets stagedArtifactBuildDirective TRUE, so on this
-    // deployment any task over STAGED_BUILD_TASK_CHAR_THRESHOLD given to a write+edit-capable
-    // agent puts task-derived text at position 0 and that run's head is NOT frozen. It is
-    // computed once (stagedResume/brokenPages resolve before the iteration loop), so such a
-    // run still reuses its prefix ACROSS its own iterations and only loses reuse across runs —
-    // exactly where it stood before this change. Fixing that means making the directive
-    // invariant, not moving it, and that is a prompt-text change behind its own eval.
+    // It is instead made INVARIANT. The FRESH directive used to interpolate its pass budget
+    // from maxIterations, which the effort tier changes (14 configured, 200 under tier max),
+    // so each tier owned its own cold head. What establishes the cost is the station probe:
+    // a byte-identical head restored from host RAM after 8 evictions (16 tokens processed),
+    // against a full cold prefill for a head differing by one number. (Two parallel
+    // researchers on 2026-09-12 were once cited here as the incident; they cannot isolate it
+    // — they ran CONCURRENTLY, and concurrent requests do not share the prefix cache on this
+    // backend, so both were cold regardless of the head.) The count now rides in the user
+    // turn (below); the fresh directive is a constant string, so a fresh staged build's head
+    // is again a function of the agent only.
+    // The RESUME directive is still per-run — it names the marker count, files and sites read
+    // off disk — and that is by design: the located old_strings are what stopped run 6 paging
+    // a 446-line file for seven iterations. Such a run is computed once (stagedResume/brokenPages
+    // resolve before the iteration loop), so it still reuses its prefix ACROSS its own
+    // iterations and only loses reuse across runs.
     // The task-derived half of what used to live in the system prompt: three RAG retrievals
     // keyed on the task text, plus the routing and warden notices for this run. All five are
     // constant for the run and none of them belong in the frozen head.
@@ -2896,7 +3004,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // leaves that directive the last word — the same ordering rule the staged-build comment
     // above records for the system prompt.
     const userContent = stagedBuildGuidance && !isResumeBuild
-      ? `${baseUserContent}${runContextBlock}${buildStagedBuildFirstStepInstruction()}`
+      ? `${baseUserContent}${runContextBlock}${buildStagedBuildFirstStepInstruction(maxIterations, PER_PATH_EDIT_CAP)}`
       : `${baseUserContent}${runContextBlock}`;
 
     const history: LLMMessage[] = [{ role: "user", content: userContent }];
@@ -3081,6 +3189,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     let recentEvidenceSnippets: string[] = [];
     let autoSharedFindingCount = 0;
     const autoSharedFindingKeys = new Set<string>();
+    let routingTierProviderMemo: ChatProvider | undefined;
+    const routingTierProvider = (): ChatProvider => (routingTierProviderMemo ??= (
+      getChatProviderForTier("routing")
+      ?? createChatProvider({ ...modelConfig, ...tierModelDefaults("routing") }, providerEndpoint)
+    ));
     // Distillation budget for the auto-share path: a high SAFETY ceiling, not a
     // compute-saving cap — uncurated raw findings bloat the downstream build/synthesis
     // context far more than the small distill call costs (audit 65f46046), so we curate
@@ -3089,10 +3202,25 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       enabled: config.orchestration.distillSharedFacts,
       minChars: config.orchestration.distillSharedFactsMinChars,
       budget: { remaining: config.orchestration.distillSharedFactsMaxPerRun },
+      // ONE routing-tier provider per RUN, not one per call. Both consumers are repeat
+      // callers — per-finding distillation here, and the interval-gated progress judge in
+      // the loop below — and every construction walks resolveProviderChain and returns a
+      // fresh FailoverChatProvider whose circuit state starts closed, so a primary that is
+      // down gets re-tried in full by each of them instead of once. (This is the same cost
+      // that made the tier ladder's model-preset branch untenable; see providers/index.ts.)
+      //
       // Run per-finding distillation on the lightweight routing tier when it's
-      // configured (smaller/faster model = lower per-call cost on one GPU);
-      // falls back to this agent's provider otherwise (no behavior change).
-      provider: getChatProviderForTier("routing") ?? provider,
+      // configured (smaller/faster model = lower per-call cost on one GPU).
+      // With no tier, the fallback is this agent's model config under the
+      // ROUTING tier's controls (thinking off), not `provider` itself.
+      // What was actually measured: one distillation call at 193 s (a450970,
+      // 2026-09-05, see DISTILL_CALL_DEADLINE_MS). By that date tiers.routing was
+      // already configured, so that call ran on the ROUTING tier — the same model,
+      // but with an off-switch that was believed inert at the time and therefore
+      // went out with thinking on. Thinking off the same pass takes about a second.
+      // This fallback carries the routing controls so a deployment with NO routing
+      // tier configured does not repeat the 193 s.
+      provider: routingTierProvider(),
     };
     let cascadeSynthesisForced = false;
     let sufficiencySynthesisNudged = false;
@@ -3127,10 +3255,27 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     const infraFailureStreaks = new Map<string, InfraFailureStreak>();
     const infraBlockedFamilies = new Map<string, string>();
     let requiredResearchFallbackRoute: SubAgentRequiredResearchFallbackRoute | null = null;
-    // Track tools stripped by the evidence-cap mechanism so that blocked
-    // calls to those tools are classified as "evidence_cap_enforced" rather
-    // than "not_in_agent_tools", preventing false-positive warden alerts.
-    const evidenceCapStrippedTools = new Set<string>();
+    // THE WIRE TOOL LIST IS PART OF THE CACHE KEY, so it is never shrunk mid-run.
+    //
+    // Every mid-run "strip" used to filter `tools` (evidence cap, approval gate, degraded
+    // search backend, delegation cascade) or empty it (final iteration, loop stop, the
+    // rescue passes). The tool block renders AHEAD of the history in the chat template, so
+    // each of those threw the whole prefix away. Probed on the serving station (18 tool
+    // schemas + 7K-token system prompt, cache_prompt on):
+    //   tools + tool_choice auto, warm   prompt 9,938  processed     4   0.40 s
+    //   tools + tool_choice "none"       prompt 9,938  processed     4   0.41 s
+    //   tools + tool_choice required     prompt 9,938  processed     4   0.50 s
+    //   NO tools                         prompt 7,027  processed 7,027   7.28 s
+    // In the audit log 6 of the 8 tools-stripped calls were cold (41 messages / 12,732
+    // tokens / 14.6 s TTFT; 35 messages / 17,628 tokens / 24.7 s).
+    //
+    // So a tool that is withdrawn stays on the wire and is BLOCKED HERE at the call site
+    // instead: name → reason. The reason is what the sub_agent_tool_blocked row carries,
+    // so an evidence-cap block is still classified "evidence_cap_enforced" rather than
+    // "not_in_agent_tools" (no false-positive warden alert). Checked before and
+    // independently of effectiveToolNames, which is undefined for agents without an
+    // allow-list.
+    const blockedToolReasons = new Map<string, string>();
     // G32: task-class fingerprint for outcome-weighted routing (written into every appendOutcome call)
     const taskKeywords = extractTaskKeywords(sanitizedTask);
 
@@ -3388,6 +3533,56 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         ? describeMutatedWorkspaceFiles(mutatedWorkspacePaths, opts.workspacePath)
         : []);
 
+    /** Under tool_choice "none" the server applies no tool grammar, so a tool_call that still
+     *  comes back is one the model wrote as text and the parser recognised. Nothing executes
+     *  it: the calls are dropped, the row records which, and the content stands as the answer
+     *  (an empty one falls into the empty-response rescue like any other). */
+    const discardToolCallsUnderToolChoiceNone = (response: LLMResponse): LLMResponse => {
+      if (response.tool_calls.length === 0) return response;
+      logAudit(
+        "guardrail_flagged",
+        {
+          type: "tool_call_under_tool_choice_none",
+          agentName: opts.agentName,
+          toolNames: response.tool_calls.map((tc) => tc.name),
+        },
+        { sessionId: subSessionId, severity: "warn" },
+      );
+      return { ...response, tool_calls: [] };
+    };
+
+    /** One forced-answer completion: the run's CURRENT wire tool list (never []) under
+     *  tool_choice "none", with the instruction as the TRAILING system message. Appending it
+     *  to the system prompt was the anti-pattern wave D measured on a 24,731-token context:
+     *  0.33 s unchanged vs 41.29 s appended vs 0.87 s as a trailing message — and the empty
+     *  list re-prefilled the same prompt (the probe numbers at blockedToolReasons). */
+    const forcedAnswerMessages = (instruction: string): LLMMessage[] =>
+      composeSubAgentMessages(systemPrompt, history, [instruction]);
+    const completeWithoutTools = async (
+      via: ChatProvider,
+      messages: LLMMessage[],
+      sig: AbortSignal | undefined,
+      // WHICH list goes on the wire is a property of the PROMPT, so the caller states it.
+      // Default = the run's list, which is right for every history-bearing forced-answer
+      // pass: those replay this run's own head, so the tool block in front of it is part
+      // of the prefix the server already holds (9,938-token prompt: 4 tokens processed /
+      // 0.41 s with the list under tool_choice "none" vs 7,027 processed / 7.28 s with it
+      // removed). The facts-first passes below pass `[]` instead: their 2-message prompt
+      // has a system head that is NOT this run's systemPrompt, so nothing can match the
+      // cache and the 18 schemas are ~2,911 tokens of pure cold prefill per call.
+      // Deliberately NOT inferred — not from comparing messages[0] to systemPrompt (a
+      // string-equality heuristic that breaks the moment the head is composed differently)
+      // and not from provider identity (the no-tier synthesis fallback is a fresh object on
+      // the same model+endpoint and DOES share the server-side cache).
+      wireTools: LLMToolDef[] = tools,
+    ): Promise<LLMResponse> => {
+      const callOptions: CompletionCallOptions = { toolChoice: "none" };
+      const response = via.completeViaStream
+        ? await via.completeViaStream(messages, wireTools, sig, callOptions)
+        : await via.complete(messages, wireTools, sig, callOptions);
+      return discardToolCallsUnderToolChoiceNone(response);
+    };
+
     const rescueSanitizedEmptyResult = async (rawResult: string): Promise<string> => {
       const visibleResult = stripHallucinatedToolTags(rawResult);
       if (visibleResult || toolCount === 0 || signal?.aborted) {
@@ -3399,30 +3594,31 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           { agentName: opts.agentName, iterations, toolCalls: toolCount },
           "Sub-agent final output became empty after stripping hallucinated tool markup — forcing synthesis rescue",
         );
-        const rescueMessages: LLMMessage[] = [
-          {
-            role: "system",
-            content: systemPrompt +
-              "\n\nYour previous final answer contained only invalid tool-call markup and became empty after sanitization. " +
-              "DO NOT call any more tools. Produce your COMPLETE final answer now from the evidence already gathered in the conversation. " +
-              "Include the key facts, URLs, and extracts you retrieved.",
-          },
-          ...history,
-        ];
-        const rescueResponse = await provider.complete(rescueMessages, [], signal);
+        // synthProvider, not `provider`: this is a prose-from-history forced-answer pass,
+        // the same shape as the three synthesis passes, and the worker's own thinking pin
+        // buys nothing here (824 s across five such calls, ~20 % of it answer). With a
+        // synthesis TIER configured this moves the rescue onto the tier model too — the
+        // trade runSynthesisCompletion's construction already accepts.
+        const rescueResponse = await completeWithoutTools(
+          synthProvider,
+          forcedAnswerMessages(
+            "Your previous final answer contained only invalid tool-call markup and became empty after sanitization. " +
+            "Tool calls are disabled for this reply. Produce your COMPLETE final answer now from the evidence already gathered in the conversation. " +
+            "Include the key facts, URLs, and extracts you retrieved.",
+          ),
+          signal,
+        );
         usage.promptTokens += rescueResponse.usage.promptTokens;
         usage.completionTokens += rescueResponse.usage.completionTokens;
         usage.totalTokens += rescueResponse.usage.totalTokens;
 
-        if (rescueResponse.tool_calls.length === 0) {
-          const rescued = stripHallucinatedToolTags(normalizeSubAgentOutput(rescueResponse.content));
-          if (rescued) {
-            log.info(
-              { agentName: opts.agentName, rescuedLength: rescued.length },
-              "Sanitized-empty output rescue succeeded",
-            );
-            return rescued;
-          }
+        const rescued = stripHallucinatedToolTags(normalizeSubAgentOutput(rescueResponse.content));
+        if (rescued) {
+          log.info(
+            { agentName: opts.agentName, rescuedLength: rescued.length },
+            "Sanitized-empty output rescue succeeded",
+          );
+          return rescued;
         }
       } catch (rescueErr) {
         log.warn({ rescueErr, agentName: opts.agentName }, "Sanitized-empty output rescue failed");
@@ -3517,6 +3713,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // synthesis prompt from those when substantial; fall back to history otherwise.
     const SYNTH_FACTS_MIN_CHARS = 400;
     const readCuratedFindingsForSynthesis = async (budgetChars = 12_000): Promise<string> => {
+      // Distillations still in flight are exactly the findings this prompt is built from.
+      await joinPendingShares();
       try {
         const facts = await readAllFacts(deriveRootSessionId(subSessionId));
         const entries = Object.entries(facts)
@@ -3541,10 +3739,12 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     /** Run a forced-synthesis completion, preferring the streaming accumulator so
      *  it gets token-progress + the per-chunk inactivity abort (a hung synthesis
      *  is exactly the failure we're guarding against). */
-    const runSynthesisCompletion = (msgs: LLMMessage[], sig?: AbortSignal) =>
-      synthProvider.completeViaStream
-        ? synthProvider.completeViaStream(msgs, [], sig)
-        : synthProvider.complete(msgs, [], sig);
+    const runSynthesisCompletion = (msgs: LLMMessage[], sig?: AbortSignal, wireTools: LLMToolDef[] = tools) =>
+      completeWithoutTools(synthProvider, msgs, sig, wireTools);
+    /** The wire list for a synthesis pass: the run's list when the prompt replays this run's
+     *  head (warm prefix), `[]` when it is the facts-first 2-message prompt (nothing to warm —
+     *  see completeWithoutTools). */
+    const synthesisWireTools = (factsFirst: boolean): LLMToolDef[] => (factsFirst ? [] : tools);
 
     // "Done is done" (audit 2445da2e): when a BUILD-shaped run has already
     // persisted its deliverable(s), a final-synthesis LLM call adds no
@@ -3670,6 +3870,17 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // capped at 25s so an 8-minute coordinator does not get an
       // unboundedly large deadline-grace either.
       const graceTimeoutMs = Math.max(5_000, Math.min(25_000, Math.round(turnTimeoutMs * 0.15)));
+
+      // JOIN BEFORE THE CLOCK STARTS. readCuratedFindingsForSynthesis opens with
+      // joinPendingShares(), and a distill still in flight is bounded only by its own
+      // DISTILL_CALL_DEADLINE_MS (60 s) — measured 1.4-7.4 s per finding. Arming the grace
+      // timer first charged that wait to the synthesis window: with turnTimeoutMs 60 s the
+      // window is 9 s, so a 7.4 s distill that started just before the deadline left ~1.6 s
+      // for the inference this window exists to fit. The join is the same wait either way;
+      // it just no longer eats the budget. (The join stays inside
+      // readCuratedFindingsForSynthesis for its other callers.)
+      await joinPendingShares();
+
       const graceAbort = new AbortController();
       const graceTimer = setTimeout(() => graceAbort.abort(), graceTimeoutMs);
       const graceSignal = opts.signal
@@ -3678,27 +3889,19 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
 
       try {
         const curatedFindings = await readCuratedFindingsForSynthesis();
-        const synthMessages: LLMMessage[] = curatedFindings.length >= SYNTH_FACTS_MIN_CHARS
+        const factsFirst = curatedFindings.length >= SYNTH_FACTS_MIN_CHARS;
+        const synthMessages: LLMMessage[] = factsFirst
           ? buildFactsFirstSynthMessages(curatedFindings)
-          : [
-            {
-              role: "system",
-              content: systemPrompt +
-                "\n\nYour execution time budget has expired. DO NOT call any more tools. " +
-                "Produce your COMPLETE final answer immediately from the tool results already in the conversation. " +
-                "Include the key facts, URLs, and evidence you already retrieved. " +
-                "Do NOT mention the timeout unless the prior evidence itself requires it.",
-            },
-            ...history,
-          ];
-        const synthResponse = await runSynthesisCompletion(synthMessages, graceSignal);
+          : forcedAnswerMessages(
+            "Your execution time budget has expired. Tool calls are disabled. " +
+            "Produce your COMPLETE final answer immediately from the tool results already in the conversation. " +
+            "Include the key facts, URLs, and evidence you already retrieved. " +
+            "Do NOT mention the timeout unless the prior evidence itself requires it.",
+          );
+        const synthResponse = await runSynthesisCompletion(synthMessages, graceSignal, synthesisWireTools(factsFirst));
         usage.promptTokens += synthResponse.usage.promptTokens;
         usage.completionTokens += synthResponse.usage.completionTokens;
         usage.totalTokens += synthResponse.usage.totalTokens;
-
-        if (synthResponse.tool_calls.length > 0) {
-          return null;
-        }
 
         let result = normalizeSubAgentOutput(synthResponse.content);
         if (result === "Sub-agent produced no final response.") {
@@ -3803,6 +4006,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       const passthrough = tryReturnSingleDelegationPassthrough("soft_deadline_synthesis");
       if (passthrough) return passthrough;
 
+      // Join before arming the timer, for the same reason as attemptTimeoutSynthesis: a
+      // distill still in flight is bounded only by DISTILL_CALL_DEADLINE_MS and would
+      // otherwise be charged to `budgetMs`, the window reserved for the inference itself.
+      await joinPendingShares();
+
       const synthAbort = new AbortController();
       const synthTimer = setTimeout(() => synthAbort.abort(), budgetMs);
       const synthSignal = opts.signal
@@ -3811,34 +4019,37 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
 
       try {
         const curatedFindings = await readCuratedFindingsForSynthesis();
-        const synthMessages: LLMMessage[] = curatedFindings.length >= SYNTH_FACTS_MIN_CHARS
+        const factsFirst = curatedFindings.length >= SYNTH_FACTS_MIN_CHARS;
+        const synthMessages: LLMMessage[] = factsFirst
           ? buildFactsFirstSynthMessages(curatedFindings)
-          : [
-            {
-              role: "system",
-              content: systemPrompt +
-                "\n\n[SOFT DEADLINE REACHED — SYNTHESIZE NOW]\n" +
-                "You have used most of your execution budget. Stop calling tools. " +
-                "Produce your COMPLETE final answer immediately from the tool results already in the conversation history above. " +
-                "Include EVERY headline, fact, URL, name, number, source attribution, and snippet you already retrieved — across ALL sources, not just the first one. " +
-                "If the evidence covers multiple sources (e.g. several news outlets), your answer MUST visibly cover all of them. " +
-                "If your synthesis would exceed roughly 3000 characters, also include the full content verbatim — do not abbreviate, do not collapse list items, do not write '(truncated)'. " +
-                "If you genuinely have no usable evidence, say so plainly and list what you tried. " +
-                "Do NOT mention the soft deadline. Do NOT call any tools. Write the answer the user actually asked for.",
-            },
-            ...history,
-          ];
-        const synthResponse = await runSynthesisCompletion(synthMessages, synthSignal);
+          // The instruction rides as a TRAILING system message, not appended to the head.
+          // This was the last site still composing `systemPrompt + "..."`: on a 24,731-token
+          // context that head mutation measured 41.29 s against 0.87 s for the same text as a
+          // trailing message (0.33 s unchanged) — and since the call routes through
+          // completeWithoutTools the run's tool block sits in front of the mutated head, so
+          // the whole prefix was thrown away on the one path that only fires when the run has
+          // already run out of time. The wording stays richer than the other forced-answer
+          // passes on purpose: the sufficiency strip reaches this branch mid-run, where
+          // multi-source coverage and the verbatim clause are what the answer needs.
+          : forcedAnswerMessages(
+            "[SOFT DEADLINE REACHED — SYNTHESIZE NOW]\n" +
+            "You have used most of your execution budget. Stop calling tools. " +
+            "Produce your COMPLETE final answer immediately from the tool results already in the conversation history above. " +
+            "Include EVERY headline, fact, URL, name, number, source attribution, and snippet you already retrieved — across ALL sources, not just the first one. " +
+            "If the evidence covers multiple sources (e.g. several news outlets), your answer MUST visibly cover all of them. " +
+            "If your synthesis would exceed roughly 3000 characters, also include the full content verbatim — do not abbreviate, do not collapse list items, do not write '(truncated)'. " +
+            "If you genuinely have no usable evidence, say so plainly and list what you tried. " +
+            "Do NOT mention the soft deadline. Do NOT call any tools. Write the answer the user actually asked for.",
+          );
+        const synthResponse = await runSynthesisCompletion(synthMessages, synthSignal, synthesisWireTools(factsFirst));
         usage.promptTokens += synthResponse.usage.promptTokens;
         usage.completionTokens += synthResponse.usage.completionTokens;
         usage.totalTokens += synthResponse.usage.totalTokens;
 
-        // If the model still tried to call tools despite the explicit "no
-        // tools" instruction, fall through and let the iteration loop
-        // either succeed normally or hit the hard timeout.
-        if (synthResponse.tool_calls.length > 0) {
-          return null;
-        }
+        // No tool_calls check here: completeWithoutTools sends tool_choice "none" and
+        // discards anything the model wrote as text that the parser recognised
+        // (discardToolCallsUnderToolChoiceNone), so tool_calls is always empty by the
+        // time it returns — the same reasoning as the max-iterations pass below.
 
         let result = normalizeSubAgentOutput(synthResponse.content);
         if (result === "Sub-agent produced no final response.") {
@@ -4098,8 +4309,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             lastAssistant ? `Latest output:\n${String(lastAssistant.content).slice(0, 1200)}` : "",
             toolNames.length ? `Recent tool calls: ${toolNames.slice(-8).join(", ")}` : "",
           ].filter(Boolean).join("\n\n") || "(no assistant output or tool calls yet)";
-          const judgeProvider = getChatProviderForTier("routing") ?? provider;
-          const judgeResp = await judgeProvider.complete(
+          // A drifting/on-track verdict; with no routing tier it runs on this agent's
+          // model under the routing controls (thinking off), never on `provider`. Shared
+          // with the distillation path so an interval-gated judge does not build (and reset
+          // the circuit state of) a provider chain on every check.
+          const judgeResp = await routingTierProvider().complete(
             buildProgressJudgePrompt({ objective: opts.task, recentActivity }),
             [],
             signal,
@@ -4451,35 +4665,46 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // call because the history in front of it grows, so putting run-constant text here
       // multiplies its prefill cost by the iteration count.
       const iterationNudges: string[] = [];
-      let effectiveTools = tools;
+      // The wire list is the run's list on EVERY call. "No more tools" is tool_choice "none"
+      // for this call, not an empty list: the server renders the same tool block and applies
+      // no tool grammar, so the prefix survives (9,938-token prompt: 4 tokens processed /
+      // 0.41 s under "none" vs 7,027 processed / 7.28 s with the list removed). A tool_call
+      // that still comes back is discarded below (discardToolCallsUnderToolChoiceNone).
+      const effectiveTools = tools;
+      // No run-scoped "tools are off" latch feeds this: the loop-stop below sets nothing and
+      // BREAKS in the same block, and every call after the loop (post-loop synthesis, the
+      // rescues) reaches tool_choice "none" through completeWithoutTools, not through here.
+      let callToolChoice: "auto" | "none" = "auto";
 
       if (timeBudgetCritical) {
-        effectiveTools = [];
+        callToolChoice = "none";
         iterationNudges.push(
           `⚠️ TIME BUDGET CRITICAL: Only about ${timeRemainingMs}ms remain before timeout. ` +
-          "NO MORE TOOLS AVAILABLE. Produce your COMPLETE final answer NOW from the evidence already gathered. " +
+          "TOOL CALLS ARE DISABLED. Produce your COMPLETE final answer NOW from the evidence already gathered. " +
           "Include the key facts, URLs, and extracts you already retrieved.");
         log.info(
           { agentName: opts.agentName, iterations, toolCount, timeRemainingMs, synthesisBufferMs },
-          "Time budget nearly exhausted — stripping tools to force synthesis",
+          "Time budget nearly exhausted — disabling tool calls to force synthesis",
         );
       } else if (remaining === 1 && toolCount > 0) {
-        // HARD: last iteration — strip ALL tools so the LLM *cannot* make
-        // any more tool calls and is forced to produce a text answer.
-        // The tool list is stripped as well, which does change the rendered template ahead of the
-        // history. That is deliberate and kept: it is the only hard guarantee that no further tool
-        // call can be made. It costs one prefix break on the LAST iteration, where there is no
-        // later iteration to benefit from the cache anyway.
-        effectiveTools = [];
+        // HARD: last iteration — tool_choice "none" so the LLM is forced to produce a text
+        // answer. This used to empty the tool list as "the only hard guarantee"; it was not one
+        // (the model can still write a call as text, and the parser still recognises it), and it
+        // cost a full re-prefill on the last iteration — 6 of the 8 tools-stripped calls in the
+        // audit log were cold (41 messages / 12,732 tokens / 14.6 s TTFT; 35 messages / 17,628
+        // tokens / 24.7 s). The actual guarantee is the same on both paths: the server applies no
+        // tool grammar under tool_choice "none", and any tool_call that still comes back is
+        // discarded here and never executed.
+        callToolChoice = "none";
         iterationNudges.push(
-          "⚠️ FINAL ITERATION — NO MORE TOOLS AVAILABLE. " +
+          "⚠️ FINAL ITERATION — TOOL CALLS ARE DISABLED. " +
           "You have used all your tool-call iterations. Produce your COMPLETE final answer NOW. " +
           "Synthesize everything you have gathered from previous tool calls — include ALL content, " +
           "URLs, facts, and extracts verbatim. Do NOT summarize away details. " +
           "Your response is the ONLY output the coordinator will receive from you.");
         log.info(
           { agentName: opts.agentName, iterations, maxIterations, toolCount },
-          "Last iteration reached — stripping tools to force synthesis",
+          "Last iteration reached — disabling tool calls to force synthesis",
         );
       } else if (remaining === 2 && toolCount > 0) {
         iterationNudges.push(
@@ -4557,9 +4782,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           + "running. Narrow scope, batch tool calls, and finish quickly. Do not "
           + "spawn further delegations or parallel tool fan-out unless strictly "
           + "required to complete the task.");
-        if (effectiveTools.length > 6) {
-          effectiveTools = effectiveTools.slice(0, 6);
-        }
+        // The list used to be sliced to 6 for THIS iteration only (effectiveTools is rebuilt
+        // from `tools` every loop), so it bought one iteration of a shorter list at the price
+        // of two prefix breaks — once shrinking, once growing back. The nudge is what narrows
+        // the run; the list stays on the wire unchanged.
         log.info(
           {
             agentName: opts.agentName,
@@ -4567,7 +4793,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             iteration: iterations + 1,
             remainingTools: effectiveTools.length,
           },
-          "Sub-agent entered degraded mode mid-turn — nudge injected, tool list capped",
+          "Sub-agent entered degraded mode mid-turn — nudge injected",
         );
       }
 
@@ -4582,6 +4808,31 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         tools: effectiveTools,
         contextWindow: modelConfig.contextWindow,
       });
+      // A digest is a KV-prefix break (everything behind the rewritten message re-prefills,
+      // 10-16 s cold on the audited runs), so each batch is its own row: the log must show
+      // how many breaks a run paid, not just how many messages it dropped. The row carries
+      // the TRIGGER and the mass because the two triggers are different events: "batch" is
+      // one break per DIGEST_BATCH_MIN_CHARS of stale mass (the design), while "overflow"
+      // fires below that threshold and, on a model whose contextWindow the prompt keeps
+      // exceeding, fires again every iteration on whatever just went stale — one break per
+      // iteration, the pathology the batching removed. Without trigger + digestedStaleChars
+      // + contextWindow on the row, a run paying that every iteration and a healthy 40K
+      // batch produce indistinguishable log lines.
+      if (trimmed.digested > 0) {
+        logAudit(
+          "sub_agent_history_digested",
+          {
+            agentName: opts.agentName,
+            iteration: iterations + 1,
+            digested: trimmed.digested,
+            digestedStaleChars: trimmed.digestedStaleChars,
+            digestTrigger: trimmed.digestTrigger,
+            contextWindow: modelConfig.contextWindow,
+            remainingMessages: history.length,
+          },
+          { sessionId: subSessionId, severity: "info" },
+        );
+      }
       if (trimmed.dropped > 0) {
         logAudit(
           "sub_agent_history_trimmed",
@@ -4626,48 +4877,58 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         lastStreamProgressAt = Date.now();
         lastHeartbeatChars = 0;
         const modelCallStartedAt = Date.now();
+        const callOptions: CompletionCallOptions = {
+          toolChoice: callToolChoice,
+          // "none" on this loop has exactly three producers — the final iteration, the
+          // time-critical nudge and the loop-stop — and all three are the same forced
+          // "answer from what you already gathered" shape as the synthesis passes. Nothing
+          // is left to deliberate about, so the call runs under SYNTHESIS_CALL_CONTROLS
+          // (thinking off, past a graded pin) rather than the worker's own controls, which
+          // put 824 s across five prose-only calls with ~20 % of it answer. A tool-using
+          // iteration is untouched: no `controls` key at all means "no opinion".
+          ...(callToolChoice === "none" ? { controls: SYNTHESIS_CALL_CONTROLS } : {}),
+          // Cheap observation so the loop threshold can be fitted from real runs
+          // instead of guessed. A number per chunk, never the reasoning text.
+          onProgress: (p) => {
+            iterationRepeatRatio = p.reasoningRepeatRatio;
+            liveReasoningChars = p.reasoningChars;
+            liveLoopSuspected = p.reasoningLoopDetected;
+            lastStreamProgressAt = Date.now();
+            // THE PARENT CANNOT HEAR A CHILD THAT ONLY SPEAKS BETWEEN ITERATIONS.
+            //
+            // Progress events are emitted once per ITERATION, so a delegate inside one
+            // long generation is silent for as long as that generation runs. Validation
+            // run 4 spent thirteen minutes composing a single fill, and the orchestrator
+            // — whose own deadline defers on exactly this signal — saw nothing at all and
+            // concluded, correctly on the evidence it had, that the run was dead.
+            //
+            // Every layer that defers to liveness needs the heartbeat, not just this one.
+            // Sampled rather than per-chunk: a token-rate beat would be thousands of
+            // events per generation for a question answered just as well by one every
+            // few seconds.
+            if (p.reasoningChars - lastHeartbeatChars >= STREAM_HEARTBEAT_CHARS) {
+              lastHeartbeatChars = p.reasoningChars;
+              opts.onProgress?.({
+                agentName: opts.agentName,
+                kind: "thinking",
+                iteration: iterations + 1,
+                summary: `${opts.agentName} is composing (${p.reasoningChars.toLocaleString("en-US")} chars).`,
+              });
+            }
+          },
+          // The operator's unbounded grant, readable from INSIDE the provider while
+          // the stream is still running. A callback, not a boolean: the grant
+          // routinely lands mid-generation (that is when the dock asks), and the
+          // provider consults it only at the instant its burn guard would fire.
+          // Both scopes count — the run-scoped grant this loop's own escape hatches
+          // read, and a turn-scoped grant covering the whole delegation tree.
+          isUnbounded: () =>
+            longRunningGenerationManager.isUnbounded(subSessionId)
+            || longRunningGenerationManager.isTurnUnbounded(subSessionId),
+        };
         response = provider.completeViaStream
-          ? await provider.completeViaStream(messages, effectiveTools, llmSignal, {
-              // Cheap observation so the loop threshold can be fitted from real runs
-              // instead of guessed. A number per chunk, never the reasoning text.
-              onProgress: (p) => {
-                iterationRepeatRatio = p.reasoningRepeatRatio;
-                liveReasoningChars = p.reasoningChars;
-                liveLoopSuspected = p.reasoningLoopDetected;
-                lastStreamProgressAt = Date.now();
-                // THE PARENT CANNOT HEAR A CHILD THAT ONLY SPEAKS BETWEEN ITERATIONS.
-                //
-                // Progress events are emitted once per ITERATION, so a delegate inside one
-                // long generation is silent for as long as that generation runs. Validation
-                // run 4 spent thirteen minutes composing a single fill, and the orchestrator
-                // — whose own deadline defers on exactly this signal — saw nothing at all and
-                // concluded, correctly on the evidence it had, that the run was dead.
-                //
-                // Every layer that defers to liveness needs the heartbeat, not just this one.
-                // Sampled rather than per-chunk: a token-rate beat would be thousands of
-                // events per generation for a question answered just as well by one every
-                // few seconds.
-                if (p.reasoningChars - lastHeartbeatChars >= STREAM_HEARTBEAT_CHARS) {
-                  lastHeartbeatChars = p.reasoningChars;
-                  opts.onProgress?.({
-                    agentName: opts.agentName,
-                    kind: "thinking",
-                    iteration: iterations + 1,
-                    summary: `${opts.agentName} is composing (${p.reasoningChars.toLocaleString("en-US")} chars).`,
-                  });
-                }
-              },
-              // The operator's unbounded grant, readable from INSIDE the provider while
-              // the stream is still running. A callback, not a boolean: the grant
-              // routinely lands mid-generation (that is when the dock asks), and the
-              // provider consults it only at the instant its burn guard would fire.
-              // Both scopes count — the run-scoped grant this loop's own escape hatches
-              // read, and a turn-scoped grant covering the whole delegation tree.
-              isUnbounded: () =>
-                longRunningGenerationManager.isUnbounded(subSessionId)
-                || longRunningGenerationManager.isTurnUnbounded(subSessionId),
-            })
-          : await provider.complete(messages, effectiveTools, llmSignal);
+          ? await provider.completeViaStream(messages, effectiveTools, llmSignal, callOptions)
+          : await provider.complete(messages, effectiveTools, llmSignal, callOptions);
         // WHAT ONE CALL COSTS HERE, observed rather than assumed. The synthesis reserve
         // below is a deadline promise — "leave enough time to write the answer" — and a
         // promise sized by a constant is only kept on a model as fast as the constant.
@@ -5063,6 +5324,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         return withArtifacts({ output, stats });
       }
 
+      // Under tool_choice "none" a tool_call is dropped here, never executed — after the
+      // wind-down branch above, which reads one as "the model was still trying to work" and
+      // only ever returns. Nothing between the call and this line runs a tool.
+      if (callToolChoice === "none") response = discardToolCallsUnderToolChoiceNone(response);
+
       // No tool calls — final answer
       if (response.tool_calls.length === 0) {
         // AN ANNOUNCEMENT IS NOT A DELIVERABLE WHILE THE ARTIFACT IS STILL UNFINISHED.
@@ -5140,30 +5406,28 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             "Sub-agent returned empty response after tool use — forcing synthesis pass",
           );
           try {
-            const rescueMessages: LLMMessage[] = [
-              {
-                role: "system",
-                content: systemPrompt +
-                  "\n\nYou returned an empty response but you have already gathered content from previous tool calls. " +
-                  "DO NOT call any more tools. " +
-                  "Produce your COMPLETE final answer now. Include ALL content you retrieved — URLs, facts, and extracts. " +
-                  "Your response is the ONLY output the coordinator will receive from you.",
-              },
-              ...history,
-            ];
-            const rescueResponse = await provider.complete(rescueMessages, [], signal);
+            // synthProvider (see rescueSanitizedEmptyResult): forced answer from history,
+            // thinking off — the worker's pin is what produced the empty response.
+            const rescueResponse = await completeWithoutTools(
+              synthProvider,
+              forcedAnswerMessages(
+                "You returned an empty response but you have already gathered content from previous tool calls. " +
+                "Tool calls are disabled for this reply. " +
+                "Produce your COMPLETE final answer now. Include ALL content you retrieved — URLs, facts, and extracts. " +
+                "Your response is the ONLY output the coordinator will receive from you.",
+              ),
+              signal,
+            );
             usage.promptTokens += rescueResponse.usage.promptTokens;
             usage.completionTokens += rescueResponse.usage.completionTokens;
             usage.totalTokens += rescueResponse.usage.totalTokens;
-            if (rescueResponse.tool_calls.length === 0) {
-              const rescued = normalizeSubAgentOutput(rescueResponse.content);
-              if (rescued !== "Sub-agent produced no final response.") {
-                result = rescued;
-                log.info(
-                  { agentName: opts.agentName, rescuedLength: result.length },
-                  "Empty-response synthesis rescue succeeded",
-                );
-              }
+            const rescued = normalizeSubAgentOutput(rescueResponse.content);
+            if (rescued !== "Sub-agent produced no final response.") {
+              result = rescued;
+              log.info(
+                { agentName: opts.agentName, rescuedLength: result.length },
+                "Empty-response synthesis rescue succeeded",
+              );
             }
           } catch (rescueErr) {
             log.warn({ rescueErr, agentName: opts.agentName }, "Empty-response synthesis rescue failed");
@@ -5206,6 +5470,15 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         }
 
         history.push({ role: "assistant", content: result });
+
+        // ONE ORDERING FOR EVERY TERMINAL PATH: findings first, completion row last.
+        // The max-iterations path already joins before its completion row; without this the
+        // final-answer path logged sub_agent_completed first and the shared_finding_auto rows
+        // landed after it, in the run's `finally`. Per-run analysis windows rows UP TO
+        // sub_agent_completed (the pattern the perf audits use), so those findings silently
+        // vanished from exactly the runs that succeeded. Costs no latency the `finally` would
+        // not have paid anyway: the result is already computed here.
+        await joinPendingShares();
 
         logSubAgentCompletionAudit(
           stats,
@@ -5473,15 +5746,16 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           continue;
         }
 
-        // Enforce tool allow-list
-        if (effectiveToolNames && !effectiveToolNames.includes(tc.name)) {
-          log.warn({ agentName: opts.agentName, tool: tc.name }, "Sub-agent attempted disallowed tool");
-          // Distinguish between tools stripped by the evidence-cap mechanism
+        // Enforce the run's call-site block set, then the tool allow-list. The block set is
+        // checked FIRST and on its own: it is how a withdrawn tool is withdrawn (the wire list
+        // never shrinks), and effectiveToolNames is undefined for agents without an allow-list.
+        const runBlockReason = blockedToolReasons.get(tc.name);
+        if (runBlockReason || (effectiveToolNames && !effectiveToolNames.includes(tc.name))) {
+          log.warn({ agentName: opts.agentName, tool: tc.name, reason: runBlockReason }, "Sub-agent attempted disallowed tool");
+          // Distinguish between tools withdrawn by this run's own mechanisms
           // (normal synthesis enforcement, not a security event) and tools
           // genuinely absent from the agent's configured tool set.
-          const blockReason = evidenceCapStrippedTools.has(tc.name)
-            ? "evidence_cap_enforced"
-            : "not_in_agent_tools";
+          const blockReason = runBlockReason ?? "not_in_agent_tools";
           logAudit(
             "sub_agent_tool_blocked",
             { agentName: opts.agentName, tool: tc.name, reason: blockReason },
@@ -5489,9 +5763,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           );
           toolResults.push({
             role: "tool",
-            content: evidenceCapStrippedTools.has(tc.name)
-              ? `Tool '${tc.name}' has been disabled — you have gathered enough evidence. Write your final answer now.`
-              : `Tool '${tc.name}' is not in this agent's allowed tool set.`,
+            content: describeRunBlockedTool(tc.name, blockReason),
             tool_call_id: tc.id,
           });
           continue;
@@ -5829,8 +6101,14 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
 
         if (!result.success && isApprovalGateFailure(result.error ?? resultContent)) {
           const approvalFailure = result.error?.trim() || resultContent.replace(/^Error:\s*/i, "").trim();
+          // Stays on the wire; blocked at the call site by approvalBlockedTools, which is
+          // checked BEFORE the blockedToolReasons enforcement block and `continue`s. So a
+          // second `blockedToolReasons.set(tc.name, "approval_gate_unresolved")` here could
+          // never be read: it produced no message and no row, while the entry below carries
+          // the EARLIER APPROVAL RESULT into the synthetic result — which the generic
+          // run-block wording cannot. One map owns this withdrawal; the reason string still
+          // reaches the audit row (and the warden's withdrawal exemption) from the call site.
           approvalBlockedTools.set(tc.name, approvalFailure);
-          tools = tools.filter((tool) => tool.name !== tc.name);
           resultContent += "\n\n[APPROVAL BLOCKED] Human approval was not granted for this sensitive action. Do not request the same approval-gated tool again in this run; report the blocker and ask the user to retry when they can approve it.";
           logAudit(
             "sub_agent_tool_blocked",
@@ -6083,14 +6361,21 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
               recentEvidenceSnippets = [...recentEvidenceSnippets, `${tc.name}: ${snippet}`].slice(-6);
             }
             try {
-              // autoShareUsefulFinding returns the extracted finding text that was
-              // stored, or null if skipped. Count only the extracted length so that
-              // cumulativeUsefulEvidenceBytes reflects actual stored knowledge
-              // density — not raw dump volume inflated by search headers and URLs.
+              // autoShareUsefulFinding returns the heuristic extract at once (or null if
+              // skipped) and a promise for the distilled text actually stored. Count only
+              // extracted length so that cumulativeUsefulEvidenceBytes reflects stored
+              // knowledge density — not raw dump volume inflated by search headers and
+              // URLs. The extract is counted PROVISIONALLY here, without waiting for the
+              // distillation (measured 1.4-7.4 s per finding, ~30 s of a 142 s run, all of
+              // it in front of the next model call); the settle handler below corrects the
+              // count to the stored length — negative when the distiller shortened it, the
+              // whole amount back when it found nothing relevant — and only then reports
+              // the finding as shared. The run joins these promises before it reads shared
+              // facts and before it returns (joinPendingShares).
               // The read-back of this run's own write is kept out of shared facts (above)
               // but still reaches recentEvidenceSnippets: that is the run's own working
               // memory, where re-reading what it wrote is exactly the point.
-              const extractedFinding = readsBackOwnOutput ? null : await autoShareUsefulFinding({
+              const share = readsBackOwnOutput ? null : autoShareUsefulFinding({
                 sessionId: subSessionId,
                 agentName: opts.agentName,
                 toolName: tc.name,
@@ -6098,19 +6383,41 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
                 sharedKeys: autoSharedFindingKeys,
                 objective: opts.task,
                 provider,
-                signal,
+                // The HARD deadline, not just opts.signal. The distill now outlives the
+                // iteration that started it, and its only other bound is
+                // DISTILL_CALL_DEADLINE_MS (60 s) — so on a run whose turn budget expires
+                // mid-distill it kept the GPU and the synthesis window waiting for a
+                // finding the run no longer has time to use. Aborting it is safe by
+                // construction: the catch inside keeps the heuristic extract, which is the
+                // documented never-drops-evidence outcome.
+                signal: llmSignal,
                 distill: distillSharedFacts,
               });
-              if (extractedFinding !== null) {
-                autoSharedFindingCount += 1;
-                cumulativeUsefulEvidenceBytes += extractedFinding.length;
-                logAudit("sub_agent_tool_call", {
-                  agentName: opts.agentName,
-                  tool: tc.name,
-                  phase: "shared_finding_auto",
-                  autoSharedFindingCount,
-                  extractedChars: extractedFinding.length,
-                }, { sessionId: subSessionId, severity: "info" });
+              if (share !== null) {
+                const provisionalChars = share.extracted.length;
+                cumulativeUsefulEvidenceBytes += provisionalChars;
+                const toolName = tc.name;
+                pendingShares.push(share.stored.then((storedFinding) => {
+                  if (storedFinding === null) {
+                    cumulativeUsefulEvidenceBytes -= provisionalChars;
+                    return;
+                  }
+                  cumulativeUsefulEvidenceBytes += storedFinding.length - provisionalChars;
+                  autoSharedFindingCount += 1;
+                  logAudit("sub_agent_tool_call", {
+                    agentName: opts.agentName,
+                    tool: toolName,
+                    phase: "shared_finding_auto",
+                    autoSharedFindingCount,
+                    extractedChars: storedFinding.length,
+                    provisionalChars,
+                    usefulEvidenceBytes: cumulativeUsefulEvidenceBytes,
+                  }, { sessionId: subSessionId, severity: "info" });
+                }).catch((err) => {
+                  // `stored` never rejects by construction; a rejection here keeps the
+                  // provisional count — the heuristic extract, as the inline path did.
+                  log.debug({ err, agentName: opts.agentName, tool: toolName }, "Failed to auto-share useful tool evidence");
+                }));
               }
             } catch (err) {
               log.debug({ err, agentName: opts.agentName, tool: tc.name }, "Failed to auto-share useful tool evidence");
@@ -6146,15 +6453,14 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           }
         }
 
-        // When web_search reports degraded/hard-blocked, remove it from the
-        // tools array so the LLM cannot call it on subsequent iterations.
+        // When web_search reports degraded/hard-blocked, block it at the call site for the
+        // rest of the run (the wire list stays — see blockedToolReasons).
         if (tc.name === "web_search" && result.metadata?.searchDegraded && !result.success) {
-          const beforeLen = tools.length;
-          tools = tools.filter(t => t.name !== "web_search");
-          if (tools.length < beforeLen) {
+          if (!blockedToolReasons.has("web_search") && tools.some((t) => t.name === "web_search")) {
+            blockedToolReasons.set("web_search", "search_backend_degraded");
             log.info(
               { agentName: opts.agentName, iterations },
-              "Removed web_search from tools — search backend degraded",
+              "Blocked web_search for the rest of the run — search backend degraded",
             );
           }
         }
@@ -6281,10 +6587,14 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           const lastTR = toolResults[toolResults.length - 1]!;
           lastTR.content += delegationDeadEnd
             ? "\n\n[DELEGATION DEAD-END STOP] Every delegation in the last iterations failed (e.g. every candidate is itself a coordinator, so no leaf specialist ran). Re-delegating hits the same wall. " +
-              "No tools will be available on the next step. STOP delegating and write your final answer NOW from the shared facts and evidence already gathered this turn; if nothing usable exists, say so honestly."
+              "Tool calls are disabled from the next step. STOP delegating and write your final answer NOW from the shared facts and evidence already gathered this turn; if nothing usable exists, say so honestly."
             : "\n\n[TOOL LOOP STOP] Every tool call in the last iterations was blocked, capped, or malformed. " +
-              "No tools will be available on the next step. Produce the final answer from existing evidence now; do not retry the same tool call.";
-          tools = [];
+              "Tool calls are disabled from the next step. Produce the final answer from existing evidence now; do not retry the same tool call.";
+          // The wire list is untouched here — an emptied list re-prefills the whole prompt
+          // (see blockedToolReasons). Nothing needs a run-scoped "tools off" flag either:
+          // this block BREAKS out of the loop a few lines down, so there is no later
+          // iteration to read one, and the post-loop synthesis and the rescues send
+          // tool_choice "none" themselves through completeWithoutTools.
           if (effectiveToolNames) effectiveToolNames = [];
           logAudit(
             "sub_agent_tool_loop_detected",
@@ -6322,7 +6632,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       if (remaining === 2 && toolCount > 0 && toolResults.length > 0) {
         const lastTR = toolResults[toolResults.length - 1]!;
         lastTR.content += "\n\n[⚠️ BUDGET: You have 1 iteration left after this one. " +
-          "On your next turn you will have NO tools available. " +
+          "On your next turn tool calls will be disabled. " +
           "Produce your COMPLETE final answer NOW or on the very next turn.]";
       }
 
@@ -6378,6 +6688,22 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         evidenceIterationsSinceNudge += 1;
       }
 
+      // EVERY LATCH BELOW DECIDES ON SETTLED BYTES.
+      //
+      // Each finding's provisional ≤600-char extract is added to cumulativeUsefulEvidenceBytes
+      // the moment the tool result is seen, and the tool-result loop above is sequential — so a
+      // whole iteration's extracts are counted before ANY distillation settles. Seven searches
+      // at the cap is +4,200 provisional; if the distiller answers NONE for five of them the
+      // settled total is 1,200, but `sufficiencySynthesisNudged` has already latched (it never
+      // un-fires) and NUDGE_IGNORED_STRIP_ITERATIONS then hard-strips the gather tools on a run
+      // holding 1.2 KB of evidence. Joining here — at the boundary, once, in front of the whole
+      // ladder (oversight gate, tool strip, nudge) — makes all three read the same settled
+      // number. Guarded by the same threshold the first rung uses, so below it (the common case,
+      // and the one where waiting would cost the most iterations) the join never runs.
+      if (pendingShares.length > 0 && cumulativeUsefulEvidenceBytes >= SUFFICIENT_EVIDENCE_NUDGE_BYTES) {
+        await joinPendingShares();
+      }
+
       // I13: In-loop sufficiency / cascade-failure guard. Runs after tool
       // results have been collected for this iteration but before they are
       // pushed into history and the next LLM call is made. This is the
@@ -6411,6 +6737,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         && !signal?.aborted
       ) {
         oversightChecksUsed += 1;
+        // The check judges the STORED findings — the boundary join above this whole ladder
+        // already settled them (it fires on the same byte threshold this condition uses).
         const sharedForOversight = await formatSharedFactsContext(subSessionId).catch(() => ({ content: "" }));
         const oversightEvidence = sharedForOversight.content
           || toolResults.map((tr) => tr.content).join("\n");
@@ -6432,13 +6760,16 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
 
       if (!cascadeSynthesisForced && cumulativeTimeoutSignalCount >= 2 && toolResults.length > 0) {
         cascadeSynthesisForced = true;
-        const beforeLen = tools.length;
-        tools = tools.filter((t) =>
-          t.name !== "delegate_to_agent"
-          && t.name !== "parallel_delegate"
-          && t.name !== "swarm_delegate"
-          && t.name !== "run_task_graph",
-        );
+        // Blocked at the call site, not removed from the wire (see blockedToolReasons).
+        const cascadeBlockedNames = tools
+          .map((t) => t.name)
+          .filter((name) =>
+            name === "delegate_to_agent"
+            || name === "parallel_delegate"
+            || name === "swarm_delegate"
+            || name === "run_task_graph",
+          );
+        for (const name of cascadeBlockedNames) blockedToolReasons.set(name, "delegation_cascade_failed");
         // I13.2: Direct-fallback tool injection. After delegation has
         // cascade-failed, a delegation-only coordinator agent (e.g.
         // web_task_coordinator) is left with NO working capability and
@@ -6455,6 +6786,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             (def) => !tools.some((t) => t.name === def.name),
           );
           if (fallbackDefs.length > 0) {
+            // A deliberate EXTENSION of the wire list: it costs one prefill (the tool block
+            // renders ahead of the history), paid once, for a coordinator that otherwise ends here.
             tools = [...tools, ...fallbackDefs];
             const newAllowList = [...effectiveToolNames];
             for (const def of fallbackDefs) {
@@ -6486,7 +6819,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             reason: "cascade_timeout",
             timeoutSignals: cumulativeTimeoutSignalCount,
             usefulEvidenceBytes: cumulativeUsefulEvidenceBytes,
-            delegationToolsRemoved: beforeLen - (tools.length - fallbackToolNames.length),
+            delegationToolsRemoved: cascadeBlockedNames.length,
             fallbackToolsInjected: fallbackToolNames,
             iterations,
           },
@@ -6494,7 +6827,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         );
         log.warn(
           { agentName: opts.agentName, timeoutSignals: cumulativeTimeoutSignalCount, fallbackToolsInjected: fallbackToolNames, iterations },
-          "Cascade timeout detected — stripped delegation tools and injected direct fallbacks",
+          "Cascade timeout detected — blocked delegation tools and injected direct fallbacks",
         );
       } else if (
         !sufficiencyToolsStripped
@@ -6540,8 +6873,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         const strippedToolNames = tools
           .filter((tool) => stripSet.has(tool.name))
           .map((tool) => tool.name);
-        for (const name of strippedToolNames) evidenceCapStrippedTools.add(name);
-        tools = tools.filter((tool) => !stripSet.has(tool.name));
+        // "Stripped" from what the agent may CALL, not from the wire (see blockedToolReasons).
+        for (const name of strippedToolNames) blockedToolReasons.set(name, "evidence_cap_enforced");
         if (effectiveToolNames) {
           effectiveToolNames = effectiveToolNames.filter((name) => !stripSet.has(name));
         }
@@ -6648,7 +6981,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         && toolResults.length > 0
         && toolResults.every((tr) => {
           const c = typeof tr.content === "string" ? tr.content : "";
-          return /^Tool '[^']+' (?:has been disabled|has been called|is not in this agent's allowed tool set|is blocked by security policy)/.test(c);
+          return /^Tool '[^']+' (?:has been disabled|is disabled for the rest of this run|has been called|is not in this agent's allowed tool set|is blocked by security policy)/.test(c);
         })
       ) {
         logAudit(
@@ -6815,8 +7148,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     );
 
     // Force a final synthesis pass — send the conversation history back to the
-    // LLM with NO tools so it cannot make more tool calls and must produce a
-    // plain-text answer from whatever it has gathered so far.
+    // LLM under tool_choice "none" so it must produce a plain-text answer from
+    // whatever it has gathered so far (the wire tool list stays: see completeWithoutTools).
     if (!signal?.aborted) {
       // Single-delegation passthrough — when the only substantive evidence is
       // one large delegation, the post-loop synthesis pass is wasted work.
@@ -6825,65 +7158,67 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       if (passthrough) return passthrough;
       try {
         const curatedFindings = await readCuratedFindingsForSynthesis();
-        const synthMessages: LLMMessage[] = curatedFindings.length >= SYNTH_FACTS_MIN_CHARS
+        const factsFirst = curatedFindings.length >= SYNTH_FACTS_MIN_CHARS;
+        const synthMessages: LLMMessage[] = factsFirst
           ? buildFactsFirstSynthMessages(curatedFindings)
-          : [
-            {
-              role: "system",
-              content: systemPrompt +
-                "\n\nYou have exhausted your tool-call budget. " +
-                "DO NOT call any more tools. " +
-                "Synthesize everything you have gathered so far and return your COMPLETE final answer now. " +
-                "Include ALL content you retrieved from web_fetch, read_file, or any other tool — " +
-                "do not summarize away details. Your response is the ONLY output the coordinator will receive from you. " +
-                "If you fetched useful content earlier in the conversation, reproduce the key facts, URLs, and extracts verbatim. " +
-                "If search failed but you have model knowledge on the topic, provide that and note it was not live-verified.",
-            },
-            ...history,
-          ];
-        const synthResponse = await runSynthesisCompletion(synthMessages, signal);
+          : forcedAnswerMessages(
+            "You have exhausted your tool-call budget. " +
+            "Tool calls are disabled. " +
+            "Synthesize everything you have gathered so far and return your COMPLETE final answer now. " +
+            "Include ALL content you retrieved from web_fetch, read_file, or any other tool — " +
+            "do not summarize away details. Your response is the ONLY output the coordinator will receive from you. " +
+            "If you fetched useful content earlier in the conversation, reproduce the key facts, URLs, and extracts verbatim. " +
+            "If search failed but you have model knowledge on the topic, provide that and note it was not live-verified.",
+          );
+        const synthResponse = await runSynthesisCompletion(synthMessages, signal, synthesisWireTools(factsFirst));
         usage.promptTokens += synthResponse.usage.promptTokens;
         usage.completionTokens += synthResponse.usage.completionTokens;
         usage.totalTokens += synthResponse.usage.totalTokens;
 
-        if (synthResponse.tool_calls.length === 0) {
-          let result = normalizeSubAgentOutput(synthResponse.content);
+        let result = normalizeSubAgentOutput(synthResponse.content);
 
-          // ── Empty-response rescue for synthesis path ─────────────────────
-          // Qwen models sometimes return empty content even in the synthesis
-          // pass. If the agent used tools, retry once with an emphatic prompt.
-          if (result === "Sub-agent produced no final response." && toolCount > 0 && !signal?.aborted) {
-            try {
-              log.warn({ agentName: opts.agentName, toolCount }, "Synthesis returned empty — attempting rescue");
-              const rescueMessages: LLMMessage[] = [
-                {
-                  role: "system",
-                  content:
-                    "You returned an empty response but you have already gathered content from " +
-                    toolCount + " tool calls during this session. " +
-                    "Review your conversation history — you MUST have information from web_fetch, " +
-                    "read_file, or other tools. Produce your COMPLETE final answer now. " +
-                    "Include ALL content you retrieved — URLs, facts, and extracts verbatim. " +
-                    "Do NOT call any tools. Do NOT return an empty response.",
-                },
-                ...history,
-              ];
-              const rescueResponse = await provider.complete(rescueMessages, [], signal);
-              usage.promptTokens += rescueResponse.usage.promptTokens;
-              usage.completionTokens += rescueResponse.usage.completionTokens;
-              usage.totalTokens += rescueResponse.usage.totalTokens;
-              const rescueResult = normalizeSubAgentOutput(rescueResponse.content);
-              if (rescueResult !== "Sub-agent produced no final response.") {
-                log.info({ agentName: opts.agentName, rescueLength: rescueResult.length }, "Synthesis rescue succeeded");
-                result = rescueResult;
-              } else {
-                log.warn({ agentName: opts.agentName }, "Synthesis rescue also returned empty");
-              }
-            } catch (rescueErr) {
-              log.warn({ rescueErr, agentName: opts.agentName }, "Synthesis rescue failed");
+        // ── Empty-response rescue for synthesis path ─────────────────────
+        // Qwen models sometimes return empty content even in the synthesis
+        // pass. If the agent used tools, retry once with an emphatic prompt.
+        if (result === "Sub-agent produced no final response." && toolCount > 0 && !signal?.aborted) {
+          try {
+            log.warn({ agentName: opts.agentName, toolCount }, "Synthesis returned empty — attempting rescue");
+            // Was a standalone system message in place of the system prompt — a third
+            // prompt head for the same run, cold on every call.
+            // synthProvider (see rescueSanitizedEmptyResult): same forced-answer shape as
+            // the synthesis pass it is rescuing, so it runs under the same thinking-off
+            // controls rather than the worker's pin.
+            const rescueResponse = await completeWithoutTools(
+              synthProvider,
+              forcedAnswerMessages(
+                "You returned an empty response but you have already gathered content from " +
+                toolCount + " tool calls during this session. " +
+                "Review your conversation history — you MUST have information from web_fetch, " +
+                "read_file, or other tools. Produce your COMPLETE final answer now. " +
+                "Include ALL content you retrieved — URLs, facts, and extracts verbatim. " +
+                "Tool calls are disabled for this reply. Do NOT return an empty response.",
+              ),
+              signal,
+            );
+            usage.promptTokens += rescueResponse.usage.promptTokens;
+            usage.completionTokens += rescueResponse.usage.completionTokens;
+            usage.totalTokens += rescueResponse.usage.totalTokens;
+            const rescueResult = normalizeSubAgentOutput(rescueResponse.content);
+            if (rescueResult !== "Sub-agent produced no final response.") {
+              log.info({ agentName: opts.agentName, rescueLength: rescueResult.length }, "Synthesis rescue succeeded");
+              result = rescueResult;
+            } else {
+              log.warn({ agentName: opts.agentName }, "Synthesis rescue also returned empty");
             }
+          } catch (rescueErr) {
+            log.warn({ rescueErr, agentName: opts.agentName }, "Synthesis rescue failed");
           }
+        }
 
+        // Any tool_call the synthesis came back with was discarded by completeWithoutTools
+        // (never executed). A run that STILL has no answer after the rescue takes the
+        // recovered-evidence route below, exactly as a tool_calls-only synthesis always did.
+        if (result !== "Sub-agent produced no final response.") {
           result = await rescueSanitizedEmptyResult(result);
           result = maybePreferWorkflowOutput(result, workflowPassthroughOutput, toolNames);
           const truncationRecovered = recoverHallucinatedTruncationAfterSubstantiveWork(result);
@@ -7006,6 +7341,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // count). This deliberately does NOT key on raw successfulToolCount: a
     // successful search_workflows that returned "no workflows matched" succeeded
     // as a call but gathered nothing, and stays a failure.
+    // autoSharedFindingCount is incremented when a share SETTLES — join before reading it.
+    await joinPendingShares();
     const gatheredSharedFindings = shareFindinCallCount > 0 || autoSharedFindingCount > 0;
     // The run is ending without the agent ever having checked its own page. Establish the
     // answer here, where awaiting is free, so the outcome rule below can use it.
@@ -7033,6 +7370,9 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
   } finally {
     if (timeoutHandle) clearTimeout(timeoutHandle);
     if (supervisorTimer) clearInterval(supervisorTimer);
+    // The run's result is already computed; it is handed to the parent only once every
+    // finding it gathered is in shared facts (or its distill hit the 60 s deadline).
+    await joinPendingShares();
 
     // Tear down the live browser preview for this run (also unblocks any
     // still-pending human-assist wait with a "stopped" outcome).
