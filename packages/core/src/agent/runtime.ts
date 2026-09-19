@@ -35,6 +35,7 @@ import {
   currentEffortTier,
 } from "../runtime/effort-context.js";
 import { runWithRequestContext } from "../runtime/request-context.js";
+import { TRIAGE_PROMPT_VERSION, runTriage, type TriageOutcome } from "./triage.js";
 import {
   classifyTurnProgress,
   buildTurnOversightPrompt,
@@ -1407,6 +1408,90 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
  * signal is the turn signal composed with a controller of its own, so a turn cancel still
  * reaches the call.
  */
+/**
+ * Wall-clock bound on the facet triage.
+ *
+ * Set from what a routing-tier call actually costs on this backend rather than from a round
+ * number: a 25-token call measured 2.1 s alone and 4.06 s with four in flight, and the
+ * triage's own shape (a ~600-token warm prefix and up to 220 output tokens) is larger. A cap
+ * below that floor would turn ordinary load into a permanent timeout.
+ */
+const TRIAGE_TIMEOUT_MS = 8000;
+
+/**
+ * Two lines of the previous exchange, so a follow-up that carries no subject of its own
+ * ("now do the other one") is labelled against what it refers to.
+ *
+ * Structural: present whenever a prior assistant turn exists, with no length gate. The three
+ * existing follow-up detectors key on message length and on EN/DE cue words; this needs
+ * neither, because the classifier reads the digest itself.
+ */
+function buildPriorTurnDigest(session: AgentSession): string | undefined {
+  const history = session.getHistory();
+  let priorUser: string | undefined;
+  let priorAssistant: string | undefined;
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const message = history[index]!;
+    if (typeof message.content !== "string" || !message.content.trim()) continue;
+    if (!priorAssistant && message.role === "assistant") priorAssistant = message.content.trim();
+    else if (priorAssistant && !priorUser && message.role === "user") priorUser = message.content.trim();
+    if (priorAssistant && priorUser) break;
+  }
+  if (!priorAssistant && !priorUser) return undefined;
+  return [
+    priorUser ? `User asked: ${priorUser.slice(0, 160)}` : "",
+    priorAssistant ? `Assistant answered: ${priorAssistant.slice(0, 160)}` : "",
+  ].filter(Boolean).join("\n");
+}
+
+/**
+ * A provider for routing-tier work, falling back to the turn's own model config.
+ *
+ * `getChatProviderForTier` returns null while a model preset is active, deliberately (see
+ * providers/index.ts for why a preset branch THERE is untenable). The consequence is that on
+ * a preset deployment the receptionist, the judge and every other tier call silently do not
+ * run at all — which is exactly what the live audit showed: 0 of 5 fast-lane attempts, and
+ * not one of them logged a reason. The sanctioned fix is this call-site pattern: fall back to
+ * the caller's OWN merged model config carrying the tier's controls, so the call still
+ * happens and the deployment is measurable.
+ */
+function resolveRoutingTierProvider(): ChatProvider {
+  return getChatProviderForTier("routing")
+    ?? createChatProvider({
+      ...applyActiveModelPreset(getConfig().agents.defaults.model),
+      ...tierModelDefaults("routing"),
+    });
+}
+
+/**
+ * Start the facet triage in the background (orchestration.routingTriage).
+ *
+ * Catalog-blind by construction, so it is issued here — alongside the judge and the document
+ * retrieval — rather than after the embedding shortlist it will later be fused with.
+ */
+function startFacetTriage(
+  userMessage: string,
+  priorTurnDigest: string | undefined,
+  timeoutMs: number,
+): Promise<TriageOutcome> | null {
+  const mode = effectiveOrchestration().routingTriage ?? "off";
+  if (mode === "off") return null;
+  const provider = resolveRoutingTierProvider();
+  const outcome = runTriage(
+    { userMessage, ...(priorTurnDigest ? { priorTurnDigest } : {}) },
+    {
+      timeoutMs,
+      complete: async (messages, options) => (await provider.complete(messages, [], undefined, {
+        maxTokens: options.maxTokens,
+        controls: options.controls,
+        responseFormat: options.responseFormat,
+      })).content ?? "",
+    },
+  );
+  outcome.catch(() => { /* resolved shape only; runTriage never rejects */ });
+  return outcome;
+}
+
 function startUpfrontSourceSensitiveClassifier(
   userMessage: string,
   turnSignal: AbortSignal,
@@ -1519,6 +1604,17 @@ async function _runTurn(
     ? startUpfrontSourceSensitiveClassifier(userMessage, signal)
     : null;
 
+  // ── Facet triage (orchestration.routingTriage) ──────────────────────────────
+  // Issued alongside the judge and the document retrieval, not after the embedding
+  // shortlist: the prompt names no catalog entry, so it has nothing to wait for. In
+  // "shadow" it only produces audit rows — the turn is unchanged — so the agreement with
+  // the judge it is meant to replace can be measured before anything depends on it.
+  const facetTriagePromise = startFacetTriage(
+    userMessage,
+    buildPriorTurnDigest(session),
+    TRIAGE_TIMEOUT_MS,
+  );
+
   // ── Document RAG augmentation ───────────────────────────────────────────────
   // Runs AFTER the fast lane, so trivial turns never pay the engram search cost.
   // Auto-ingests files attached this turn into the session corpus (engram, via
@@ -1580,6 +1676,53 @@ async function _runTurn(
   } else {
     // A follow-up reusing prior evidence, or a document-grounded turn: the verdict is not wanted.
     upfrontClassifier?.abort();
+  }
+  // ── Facet triage: shadow accounting ─────────────────────────────────────────
+  // Awaited here because this is where the judge's verdict exists, and the agreement
+  // between the two is the gate for ever letting the triage replace it. In "shadow"
+  // nothing below reads the verdict — the row is the entire product of the call.
+  //
+  // The judge is SKIPPED on document-grounded and evidence-reuse turns (its verdict is
+  // unwanted there, not merely unavailable), so those turns are recorded with the
+  // structural flags and excluded from the agreement statistic rather than counted as
+  // disagreements — comparing against a verdict that was never produced would make the
+  // gate unreachable.
+  const facetTriage = facetTriagePromise ? await facetTriagePromise : null;
+  if (facetTriage) {
+    const judgeComparable = !reusePriorDelegateEvidenceForFollowUp && !documentRagFoundDocs && !!upfrontClassifier;
+    logAudit("routing_triage_decided", {
+      mode: effectiveOrchestration().routingTriage ?? "off",
+      promptVersion: TRIAGE_PROMPT_VERSION,
+      ok: facetTriage.verdict !== null,
+      failureReason: facetTriage.failureReason ?? null,
+      attempts: facetTriage.attempts,
+      elapsedMs: facetTriage.elapsedMs,
+      verdict: facetTriage.verdict
+        ? {
+            mode: facetTriage.verdict.mode,
+            domain: facetTriage.verdict.domain,
+            deliverable: facetTriage.verdict.deliverable,
+            decision: facetTriage.verdict.decision,
+            multi: facetTriage.verdict.multi,
+            alone: facetTriage.verdict.alone,
+            sourceSensitive: facetTriage.verdict.sourceSensitive,
+            confidence: facetTriage.verdict.confidence,
+            language: facetTriage.verdict.language,
+            missingCount: facetTriage.verdict.missing.length,
+          }
+        : null,
+      // The gate: does `source_sensitive` reproduce the judge it would replace?
+      judgeComparable,
+      judgeVerdict: judgeComparable ? upfrontSourceSensitive : null,
+      sourceSensitiveAgrees: judgeComparable && facetTriage.verdict
+        ? facetTriage.verdict.sourceSensitive === upfrontSourceSensitive
+        : null,
+      structural: {
+        documentGrounded: documentRagFoundDocs,
+        reusePriorEvidence: reusePriorDelegateEvidenceForFollowUp,
+        autonomous: opts.autoApprove === true,
+      },
+    }, { sessionId: session.id, severity: "info" });
   }
   const effectiveToolMode: MainAssistantToolMode | undefined = detectedDynamicGuidance?.computerAccessSensitive && !detectedDynamicGuidance?.pentestSensitive
     ? "delegate_only"

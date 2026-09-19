@@ -92,6 +92,7 @@ export type CoreAuditEventType =
   | "prompt_budget_exceeded"
   | "prompt_section_sizes"
   | "tool_restriction_refused"
+  | "routing_triage_decided"
   | "discovery_prefetch"
   | "history_compacted"
   | "session_memory_consolidated"

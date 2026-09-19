@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import JSON5 from "json5";
+import { loadWorkspaceAgents, loadWorkspaceScenes } from "./support/workspace-shards.js";
 
 // Sub-agents are sharded into role-based files under workspace/agents/ — merge them all rather
 // than reading a single monolith, so the catalog assertions are robust to the file layout.
@@ -17,24 +18,14 @@ function readJsonFile<T>(path: string): T {
 }
 
 function loadAgentCatalog(): AgentCatalog {
-  const merged: AgentCatalog = { subAgents: {} };
-  for (const file of readdirSync(agentsDir)) {
-    if (!file.endsWith(".jsonc")) continue;
-    const raw = readJsonFile<{ subAgents?: AgentCatalog["subAgents"] }>(join(agentsDir, file));
-    Object.assign(merged.subAgents, raw.subAgents ?? {});
-  }
-  return merged;
+  // Per-ENTRY merge: shards are overlays, and one that carries a single key per agent
+  // (the generated routing taxonomy does) would otherwise replace the whole entry.
+  return { subAgents: loadWorkspaceAgents<AgentCatalog["subAgents"][string]>() };
 }
 
 // Scenes are sharded into category files under workspace/scenes/ — merge them all.
 function loadSceneCatalog(): SceneCatalog {
-  const merged: SceneCatalog = { scenes: {} };
-  for (const file of readdirSync(scenesDir)) {
-    if (!file.endsWith(".jsonc")) continue;
-    const raw = readJsonFile<{ scenes?: SceneCatalog["scenes"] }>(join(scenesDir, file));
-    Object.assign(merged.scenes, raw.scenes ?? {});
-  }
-  return merged;
+  return { scenes: loadWorkspaceScenes<SceneCatalog["scenes"][string]>() };
 }
 
 // Scene catalog is optional — the workspace can run agent-only when an

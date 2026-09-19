@@ -16,7 +16,7 @@ Every public schema field, where it is declared, and how many production files r
 | `activeModelPreset` | packages/core/src/config/schema.ts:1706 | 2 |
 | `addHosts` | packages/core/src/config/schema.ts:678 | 1 |
 | `admin` | packages/core/src/config/schema.ts:363 | 21 |
-| `agents` | packages/core/src/config/schema.ts:1696 | 137 |
+| `agents` | packages/core/src/config/schema.ts:1696 | 138 |
 | `alertmanager` | packages/core/src/config/schema.ts:1137 | 1 |
 | `all` | packages/core/src/config/schema.ts:1275 | 222 |
 | `allowedAgents` | packages/core/src/config/schema.ts:1305 | 28 |
@@ -90,10 +90,10 @@ Every public schema field, where it is declared, and how many production files r
 | `config` | packages/core/src/config/schema.ts:1208 | 233 |
 | `configRemovals` | packages/core/src/config/schema.ts:1692 | 2 |
 | `consolidationIntervalMs` | packages/core/src/config/schema.ts:1519 | 1 |
-| `container` | packages/core/src/config/schema.ts:684 | 66 |
+| `container` | packages/core/src/config/schema.ts:684 | 67 |
 | `contextWindow` | packages/core/src/config/schema.ts:119 | 11 |
 | `control` | packages/core/src/config/schema.ts:1667 | 46 |
-| `coordinatorToolCaps` | packages/core/src/config/schemas/orchestration.ts:724 | 4 |
+| `coordinatorToolCaps` | packages/core/src/config/schemas/orchestration.ts:743 | 4 |
 | `corsAllowedOrigins` | packages/core/src/config/schema.ts:311 | 2 |
 | `cpus` | packages/core/src/config/schema.ts:804 | 11 |
 | `createdAt` | packages/core/src/config/schema.ts:352 | 51 |
@@ -130,8 +130,8 @@ Every public schema field, where it is declared, and how many production files r
 | `deliverableConsistencyQaMaxRounds` | packages/core/src/config/schemas/orchestration.ts:378 | 1 |
 | `description` | packages/core/src/config/schema.ts:557 | 167 |
 | `detectWriteChurnOverwrite` | packages/core/src/config/schemas/orchestration.ts:399 | 2 |
-| `digest` | packages/core/src/config/schema.ts:1920 | 35 |
-| `dir` | packages/core/src/config/schema.ts:1909 | 42 |
+| `digest` | packages/core/src/config/schema.ts:1920 | 36 |
+| `dir` | packages/core/src/config/schema.ts:1909 | 43 |
 | `disabled` | packages/core/src/config/schema.ts:801 | 99 |
 | `disabledGroups` | packages/core/src/config/schema.ts:1938 | 3 |
 | `disabledTools` | packages/core/src/config/schema.ts:1940 | 3 |
@@ -143,8 +143,8 @@ Every public schema field, where it is declared, and how many production files r
 | `distillSharedFactsMinChars` | packages/core/src/config/schemas/orchestration.ts:639 | 1 |
 | `distributedCancel` | packages/core/src/config/schema.ts:1668 | 2 |
 | `dmPolicy` | packages/core/src/config/schemas/channels.ts:18 | 5 |
-| `domain` | packages/core/src/config/schema.ts:877 | 34 |
-| `durableApprovals` | packages/core/src/config/schemas/orchestration.ts:716 | 2 |
+| `domain` | packages/core/src/config/schema.ts:877 | 35 |
+| `durableApprovals` | packages/core/src/config/schemas/orchestration.ts:735 | 2 |
 | `durableTaskGraph` | packages/core/src/config/schema.ts:1623 | 4 |
 | `effectContracts` | packages/core/src/config/schema.ts:1231 | 1 |
 | `embeddingApiKey` | packages/core/src/config/schema.ts:174 | 3 |
@@ -268,7 +268,7 @@ Every public schema field, where it is declared, and how many production files r
 | `mcpServer` | packages/core/src/config/schemas/multimodal.ts:16 | 3 |
 | `memoryMb` | packages/core/src/config/schema.ts:803 | 5 |
 | `method` | packages/core/src/config/schema.ts:1025 | 78 |
-| `midTurnSteering` | packages/core/src/config/schemas/orchestration.ts:696 | 1 |
+| `midTurnSteering` | packages/core/src/config/schemas/orchestration.ts:715 | 1 |
 | `minConsolidatedFactChars` | packages/core/src/config/schema.ts:1510 | 1 |
 | `minFailuresBeforeProposal` | packages/core/src/config/schema.ts:1415 | 2 |
 | `minP` | packages/core/src/config/schema.ts:167 | 4 |
@@ -285,9 +285,9 @@ Every public schema field, where it is declared, and how many production files r
 | `moderateToolOutputs` | packages/core/src/config/schema.ts:1239 | 1 |
 | `monthlyUsd` | packages/core/src/config/schema.ts:513 | 2 |
 | `mounts` | packages/core/src/config/schema.ts:675 | 6 |
-| `name` | packages/core/src/config/schema.ts:1919 | 287 |
+| `name` | packages/core/src/config/schema.ts:1919 | 288 |
 | `network` | packages/core/src/config/schema.ts:676 | 44 |
-| `node` | packages/core/src/config/schema.ts:1044 | 196 |
+| `node` | packages/core/src/config/schema.ts:1044 | 197 |
 | `normalizeDelegationToEnglish` | packages/core/src/config/schemas/orchestration.ts:515 | 2 |
 | `notes` | packages/core/src/config/schema.ts:782 | 39 |
 | `notFor` | packages/core/src/config/schema.ts:909 | 0 |
@@ -316,9 +316,9 @@ Every public schema field, where it is declared, and how many production files r
 | `permitTtlMs` | packages/core/src/config/schema.ts:1677 | 2 |
 | `perSenderRateLimitCount` | packages/core/src/config/schemas/channels.ts:24 | 5 |
 | `perSenderRateLimitWindowMs` | packages/core/src/config/schemas/channels.ts:26 | 5 |
-| `perTurnCaps` | packages/core/src/config/schemas/orchestration.ts:727 | 5 |
+| `perTurnCaps` | packages/core/src/config/schemas/orchestration.ts:746 | 5 |
 | `phoneNumberId` | packages/core/src/config/schemas/channels.ts:53 | 6 |
-| `planApproval` | packages/core/src/config/schemas/orchestration.ts:700 | 1 |
+| `planApproval` | packages/core/src/config/schemas/orchestration.ts:719 | 1 |
 | `planDrivenContinuation` | packages/core/src/config/schemas/orchestration.ts:50 | 2 |
 | `planFirst` | packages/core/src/config/schemas/orchestration.ts:21 | 1 |
 | `plugins` | packages/core/src/config/schema.ts:1907 | 16 |
@@ -358,7 +358,7 @@ Every public schema field, where it is declared, and how many production files r
 | `refreshIntervalMs` | packages/core/src/config/schema.ts:646 | 1 |
 | `region` | packages/core/src/config/schema.ts:449 | 9 |
 | `rejectOverMaxBytes` | packages/core/src/config/schema.ts:474 | 3 |
-| `relaySingleDeliverable` | packages/core/src/config/schemas/orchestration.ts:690 | 1 |
+| `relaySingleDeliverable` | packages/core/src/config/schemas/orchestration.ts:709 | 1 |
 | `repeatPenalty` | packages/core/src/config/schema.ts:168 | 4 |
 | `replyText` | packages/core/src/config/schema.ts:1356 | 3 |
 | `requestDelayMs` | packages/core/src/config/schemas/retrieval.ts:141 | 1 |
@@ -376,7 +376,8 @@ Every public schema field, where it is declared, and how many production files r
 | `riskGatedQA` | packages/core/src/config/schemas/effort.ts:47 | 7 |
 | `role` | packages/core/src/config/schema.ts:920 | 92 |
 | `rolesClaim` | packages/core/src/config/schema.ts:386 | 1 |
-| `routing` | packages/core/src/config/schema.ts:233 | 75 |
+| `routing` | packages/core/src/config/schema.ts:233 | 76 |
+| `routingTriage` | packages/core/src/config/schemas/orchestration.ts:701 | 1 |
 | `sampleRate` | packages/core/src/config/schema.ts:543 | 2 |
 | `sandboxShellExec` | packages/core/src/config/schema.ts:1223 | 2 |
 | `scene` | packages/core/src/config/schema.ts:1328 | 69 |
@@ -425,7 +426,7 @@ Every public schema field, where it is declared, and how many production files r
 | `subAgentMaxTokens` | packages/core/src/config/schemas/effort.ts:33 | 2 |
 | `subAgentPreEvidenceResearchForce` | packages/core/src/config/schemas/orchestration.ts:202 | 1 |
 | `subAgentSynthesisReserveMs` | packages/core/src/config/schemas/orchestration.ts:603 | 2 |
-| `subAgentToolCaps` | packages/core/src/config/schemas/orchestration.ts:720 | 4 |
+| `subAgentToolCaps` | packages/core/src/config/schemas/orchestration.ts:739 | 4 |
 | `subAgentTurnSloMs` | packages/core/src/config/schema.ts:1757 | 4 |
 | `submitSelector` | packages/core/src/config/schema.ts:781 | 5 |
 | `supersedeStaleFacts` | packages/core/src/config/schema.ts:1527 | 1 |
@@ -462,7 +463,7 @@ Every public schema field, where it is declared, and how many production files r
 | `type` | packages/core/src/config/schema.ts:966 | 373 |
 | `ungroundedFactualAnswerGuard` | packages/core/src/config/schemas/orchestration.ts:135 | 2 |
 | `upfrontSourceSensitiveClassifier` | packages/core/src/config/schemas/orchestration.ts:168 | 2 |
-| `url` | packages/core/src/config/schema.ts:555 | 116 |
+| `url` | packages/core/src/config/schema.ts:555 | 117 |
 | `urlFetchEnforcement` | packages/core/src/config/schemas/orchestration.ts:115 | 1 |
 | `urlNotFetchedShortAnswerGuard` | packages/core/src/config/schemas/orchestration.ts:268 | 1 |
 | `urls` | packages/core/src/config/schema.ts:778 | 10 |

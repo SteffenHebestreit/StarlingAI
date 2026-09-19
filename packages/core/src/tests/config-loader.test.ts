@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import JSON5 from "json5";
+import { loadWorkspaceAgents } from "./support/workspace-shards.js";
 
 function wait(ms: number): Promise<void> {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
@@ -13,16 +14,8 @@ function wait(ms: number): Promise<void> {
 // research-analysis, authoring-content, engineering, …). These tests assert prompt/tool
 // CONTENT, not file layout, so merge every *.jsonc subAgents map rather than hardcoding a file.
 function loadWorkspaceSubAgents(): Record<string, { systemPrompt?: string; tools?: string[] }> {
-  const dir = resolve(process.cwd(), "../../workspace/agents");
-  const merged: Record<string, { systemPrompt?: string; tools?: string[] }> = {};
-  for (const file of readdirSync(dir)) {
-    if (!file.endsWith(".jsonc")) continue;
-    const raw = JSON5.parse(readFileSync(join(dir, file), "utf8")) as {
-      subAgents?: Record<string, { systemPrompt?: string; tools?: string[] }>;
-    };
-    Object.assign(merged, raw.subAgents ?? {});
-  }
-  return merged;
+  // Per-ENTRY merge — see support/workspace-shards.ts.
+  return loadWorkspaceAgents<{ systemPrompt?: string; tools?: string[] }>();
 }
 
 describe("config loader mutable overlay", () => {

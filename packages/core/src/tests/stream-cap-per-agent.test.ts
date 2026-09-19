@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import JSON5 from "json5";
+import { loadWorkspaceAgents } from "./support/workspace-shards.js";
 import {
   BUILDER_MAX_STREAM_TOTAL_MS,
   LMStudioProvider,
@@ -130,14 +131,9 @@ describe("resolveAgentStreamCapMs — tiering by capability", () => {
  * edit-test-loop.test.ts and workspace-catalog.test.ts.
  */
 describe("the raised tier against the real workspace roster", () => {
-  const agentsDir = fileURLToPath(new URL("../../../../workspace/agents/", import.meta.url));
   type Agent = { tools?: string[] };
-  const subAgents: Record<string, Agent> = {};
-  for (const file of readdirSync(agentsDir)) {
-    if (!file.endsWith(".jsonc")) continue;
-    const shard = JSON5.parse<{ subAgents?: Record<string, Agent> }>(readFileSync(join(agentsDir, file), "utf-8"));
-    Object.assign(subAgents, shard.subAgents ?? {});
-  }
+  // Per-ENTRY merge — see support/workspace-shards.ts.
+  const subAgents: Record<string, Agent> = loadWorkspaceAgents<Agent>();
   const promoted = Object.entries(subAgents)
     .filter(([, a]) => emitsWholeFileArtifacts(a.tools))
     .map(([name]) => name);

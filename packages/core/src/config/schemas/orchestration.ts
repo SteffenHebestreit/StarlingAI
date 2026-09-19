@@ -680,6 +680,25 @@ export const OrchestrationSchema = z.object({
    * Default "off" — behaviour change, pass^k-gated.
    */
   stableToolBlock: z.enum(["off", "freeze"]).default("off"),
+  /**
+   * Facet triage — ONE short routing-tier classification call per escalated turn.
+   *
+   * The per-turn classifier has returned hardwired `false` for every routing flag since the
+   * de-lexicalization, so the swarm's real router is 7,331 characters of hand-written
+   * intent-to-agent prose in the always-on prompt. This replaces it with a labelled verdict:
+   * where the request sits in the routing taxonomy (mode, domain, deliverable, multi, alone,
+   * source-sensitivity), from a catalog-blind prompt that runs in parallel with the
+   * embedding shortlist.
+   *
+   * "shadow" issues the call and logs `routing_triage_decided` — including whether its
+   * `source_sensitive` reproduces the upfront judge it is meant to replace — while changing
+   * NOTHING about the turn. That agreement is the gate; the judge's own skip conditions
+   * (document-grounded and evidence-reuse turns) are excluded from it rather than counted as
+   * disagreements.
+   *
+   * Costs one small call per escalated turn in shadow, which is why it is default "off".
+   */
+  routingTriage: z.enum(["off", "shadow"]).default("off"),
   /** When true, a turn whose ONLY orchestration was a single successful delegation that
    *  returned a complete, presentable deliverable surfaces that deliverable directly instead
    *  of running a SECOND full synthesis pass over it on the main assistant — which on the slow

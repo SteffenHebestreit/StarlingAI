@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import JSON5 from "json5";
+import { loadWorkspaceAgents } from "./support/workspace-shards.js";
 
 import {
   STAGED_BUILD_TASK_CHAR_THRESHOLD,
@@ -686,14 +687,9 @@ describe("staged artifact build — on-disk salvage", () => {
  * more iterations) ate two of those five. It stopped at iteration 9 of 10.
  */
 describe("staged artifact build — the shipped iteration budget", () => {
-  const agentsDir = fileURLToPath(new URL("../../../../workspace/agents/", import.meta.url));
   type Agent = { systemPrompt?: string; maxIterations?: number; turnTimeoutMs?: number };
-  const subAgents: Record<string, Agent> = {};
-  for (const file of readdirSync(agentsDir)) {
-    if (!file.endsWith(".jsonc")) continue;
-    const shard = JSON5.parse<{ subAgents?: Record<string, Agent> }>(readFileSync(join(agentsDir, file), "utf-8"));
-    Object.assign(subAgents, shard.subAgents ?? {});
-  }
+  // Per-ENTRY merge — see support/workspace-shards.ts.
+  const subAgents: Record<string, Agent> = loadWorkspaceAgents<Agent>();
 
   // The whole-artifact builders: told to build in staged passes AND carrying the
   // 25-minute deadline that only a whole-file emitter needs. `coder` matches the first
