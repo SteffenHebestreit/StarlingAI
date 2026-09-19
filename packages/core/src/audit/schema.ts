@@ -91,6 +91,7 @@ export type CoreAuditEventType =
   | "architect_fallback_rejected"
   | "prompt_budget_exceeded"
   | "prompt_section_sizes"
+  | "tool_restriction_refused"
   | "discovery_prefetch"
   | "history_compacted"
   | "session_memory_consolidated"

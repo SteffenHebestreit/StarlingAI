@@ -308,6 +308,18 @@ export interface FastLaneOutcome {
 }
 
 /**
+ * Why the fast lane did not answer. Every one of these collapsed to `null` before, so a
+ * production run showing 0 of 5 fast-lane hits could not say whether the gate rejected the
+ * message, the small model escalated, or — the actual live cause — no routing tier exists
+ * under a model preset, which makes the lane silently unreachable.
+ */
+export type FastLaneEscalateReason =
+  | "disabled"
+  | "no-routing-tier"
+  | "error"
+  | string;
+
+/**
  * Production entry used by the runtime. Returns the response when the front desk
  * handled the turn, or `null` to fall through to the full runtime. Never throws.
  */
@@ -315,8 +327,20 @@ export async function tryReceptionistFastLane(
   userMessage: string,
   signal?: AbortSignal,
 ): Promise<FastLaneOutcome | null> {
+  const outcome = await tryReceptionistFastLaneDetailed(userMessage, signal);
+  return outcome.handled ? { response: outcome.response } : null;
+}
+
+/**
+ * Same lane, but it reports WHY it declined. The runtime logs the reason; a caller that
+ * only needs the answer can use {@link tryReceptionistFastLane}.
+ */
+export async function tryReceptionistFastLaneDetailed(
+  userMessage: string,
+  signal?: AbortSignal,
+): Promise<{ handled: true; response: string } | { handled: false; escalateReason: FastLaneEscalateReason }> {
   const config = getConfig();
-  if (!config.receptionist?.enabled) return null;
+  if (!config.receptionist?.enabled) return { handled: false, escalateReason: "disabled" };
 
   // No routing tier → there is no cheap model to answer with; use the full path.
   // reasoningEffort "none" is the point of this lane: it answers trivial turns ("hi")
@@ -324,7 +348,9 @@ export async function tryReceptionistFastLane(
   // ~1.3k reasoning characters deciding how to say hello. Families that do not honor
   // the field ignore it, so this is safe across model swaps.
   const provider = getChatProviderForTier("routing", { reasoningEffort: "none" });
-  if (!provider) return null;
+  // Under a model preset this returns null for every turn, so the lane never runs at all
+  // — the reason the live deployment recorded 0 of 5 hits. Reported rather than swallowed.
+  if (!provider) return { handled: false, escalateReason: "no-routing-tier" };
 
   let capsule = "";
   try {
@@ -349,7 +375,9 @@ export async function tryReceptionistFastLane(
     confidenceMaxChars: config.receptionist.confidenceAttemptMaxChars,
   });
 
-  return result.handled && result.response ? { response: result.response } : null;
+  return result.handled && result.response
+    ? { handled: true, response: result.response }
+    : { handled: false, escalateReason: result.escalateReason ?? "unhandled" };
 }
 
 function singleLine(value: string): string {

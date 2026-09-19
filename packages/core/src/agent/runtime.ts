@@ -1104,8 +1104,12 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
     // The per-tool wrap in tools/registry.ts re-sets the same userId for each tool.
     // Establish a fresh per-turn phase-timing store, then run the turn inside it so
     // timedPhase() calls anywhere in the turn record into THIS turn's map.
+    // sessionId/agentName/callSite are ATTRIBUTION, not scoping: they let the two
+    // provider emitters stamp every `provider_model_call` row with the turn that
+    // issued it. Without them the rows carry no session at all and model calls can
+    // only be attributed to a turn by timestamp window.
     return await runWithRequestContext(
-      { userId: opts.session.userId },
+      { userId: opts.session.userId, sessionId: opts.session.id, agentName: "main", callSite: "main_turn" },
       () => runWithPhaseTimings(() => runTurnImpl(opts)),
     );
   } finally {
@@ -1647,7 +1651,7 @@ async function _runTurn(
   // for the full actual prompt cost (system + tool schemas + history), and the
   // context window of the model actually running this turn so the trimmer
   // budgets against the real window rather than the global default.
-  session.setToolSchemasChars(JSON.stringify(tools).length);
+  session.setToolSchemasChars(JSON.stringify(tools).length, tools.length);
   // Resolve through the active preset: the dashboard Local⇄Claude switch can carry
   // its own contextWindow, and passing the raw default made the trimmer budget
   // against a window the turn is not actually running on.
@@ -1738,6 +1742,10 @@ async function _runTurn(
   // synthesize from the cached output instead of burning more LLM iterations.
   let _turnReusedDelegationCount = 0;
   const REUSED_DELEGATION_LOOP_THRESHOLD = 2;
+  // Per-iteration call-site allowlist under orchestration.stableToolBlock="freeze": the
+  // narrowing the wire array used to express, applied where the call is dispatched so the
+  // schemas on the wire never move. Undefined = no narrowing for this iteration.
+  let iterationToolRestriction: { allowed: Set<string>; reason: "must_orchestrate" | "discovery_withheld" } | undefined;
   // F29: Turn-level scorecard accumulators
   let _turnDelegationCount = 0;
   let _turnShareFindingCount = 0;
@@ -2279,7 +2287,14 @@ async function _runTurn(
       // tools so the model cannot loop on broader keyword retries. Under soft
       // routing enforcement we keep them available and rely on the (softened)
       // fallback hint instead — trust-the-LLM over a hard tool removal.
-      const activeTools = (searchAgentsNoMatchFallbackPrompt && !softRoutingEnforcement)
+      // orchestration.stableToolBlock: when "freeze", the wire array is the turn's array on
+      // EVERY iteration and the two restrictions below (discovery withheld after a
+      // search_agents no-match; the forced-orchestration subset) are enforced at the call
+      // site instead. Same capability, same refusals — the bytes just stop moving, which is
+      // what the KV prefix is keyed on.
+      const freezeToolBlock = (getConfig().orchestration?.stableToolBlock ?? "off") === "freeze";
+      const withholdDiscoveryTools = Boolean(searchAgentsNoMatchFallbackPrompt) && !softRoutingEnforcement;
+      const activeTools = (withholdDiscoveryTools && !freezeToolBlock)
         ? tools.filter((tool) => tool.name !== "search_agents" && tool.name !== "list_agents")
         : tools;
       // Cost-center 1 (audit 5d51862f): while the turn still MUST orchestrate and has NOT
@@ -2317,7 +2332,17 @@ async function _runTurn(
       const forcedPlanState = wantForceToolChoice ? { planRecorded: (await loadTurnPlan(session.id)) !== null } : undefined;
       const forcedTools = wantForceToolChoice ? filterForcedOrchestrationTools(activeTools, forcedPlanState) : activeTools;
       const forceToolChoice = wantForceToolChoice && forcedTools.length > 0;
-      const streamTools = forceToolChoice ? forcedTools : activeTools;
+      // Under "freeze" the wire array stays the turn's array; the narrowing that would have
+      // been expressed by sending fewer schemas becomes this per-iteration allowlist, applied
+      // where the call is dispatched. Without it, tool_choice:"required" over the full block
+      // can be satisfied by memory_store — the loop audit be828e39 recorded.
+      iterationToolRestriction = freezeToolBlock && (forceToolChoice || withholdDiscoveryTools)
+        ? {
+            allowed: new Set((forceToolChoice ? forcedTools : activeTools).map((tool) => tool.name)),
+            reason: forceToolChoice ? "must_orchestrate" : "discovery_withheld",
+          }
+        : undefined;
+      const streamTools = freezeToolBlock ? tools : (forceToolChoice ? forcedTools : activeTools);
       llmResponse = await collectStream(
         provider.stream(
           messages,
@@ -3664,6 +3689,33 @@ async function _runTurn(
         }
       }
 
+      // Per-iteration state restriction (orchestration.stableToolBlock="freeze"). The tool
+      // IS in the turn's set and IS permitted by policy; it just cannot advance the state
+      // this iteration is in. Refusing here — instead of withholding the schema — is what
+      // keeps the wire array byte-identical. The message names the tools that would satisfy
+      // the requirement, so the model has strictly more to go on than when the schema was
+      // simply absent.
+      if (iterationToolRestriction && !iterationToolRestriction.allowed.has(tc.name)) {
+        const satisfying = [...iterationToolRestriction.allowed].slice(0, 12).join(", ");
+        logAudit("tool_restriction_refused", {
+          tool: tc.name,
+          reason: iterationToolRestriction.reason,
+          iteration: iterationCount,
+          allowedCount: iterationToolRestriction.allowed.size,
+        }, { sessionId: session.id, severity: "warn" });
+        guardrailEvents.push({ type: "tool_blocked", details: `${tc.name}:${iterationToolRestriction.reason}` });
+        const restrictionMessage = iterationToolRestriction.reason === "must_orchestrate"
+          ? `Error: '${tc.name}' cannot advance this turn yet — this request must be routed to a specialist, workflow or plan before you answer or record anything else. Call one of these instead: ${satisfying}.`
+          : `Error: '${tc.name}' is not usable right now — agent discovery already returned no match for this request, so searching again will not produce a different answer. Call one of these instead: ${satisfying}.`;
+        if (opts.onToolResult) opts.onToolResult(tc.id, tc.name, restrictionMessage);
+        toolResultMessages.push({
+          role: "tool",
+          content: restrictionMessage,
+          tool_call_id: tc.id,
+        });
+        continue;
+      }
+
       // Block disallowed tools
       if (!isToolAllowed(tc.name)) {
         logAudit("tool_call_blocked", { tool: tc.name, reason: "not_allowed" }, {
@@ -3969,7 +4021,7 @@ async function _runTurn(
           // to the very turn that loaded it.
           toolContext.allowedTools = allowedToolNames;
           tools = getToolsAsLLMDefs(allowedToolNames);
-          session.setToolSchemasChars(JSON.stringify(tools).length);
+          session.setToolSchemasChars(JSON.stringify(tools).length, tools.length);
           logAudit("tool_loaded_into_turn", {
             tool: loaded,
             catalogSize: allowedToolNames.length,

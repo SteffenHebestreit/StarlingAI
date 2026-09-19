@@ -189,6 +189,7 @@ export class AgentSession {
    *  Updated by the runtime each turn before the LLM loop starts so
    *  maybeTrimHistory accounts for the full actual prompt size. */
   private toolSchemasChars = 0;
+  private toolCount = 0;
   /** Context window (in tokens) of the model actually running this session's
    *  turns. Set by the runtime each turn from the resolved provider model so the
    *  trimmer budgets against the real window rather than the global default. */
@@ -494,13 +495,20 @@ export class AgentSession {
 
   /** Call once per turn, after tool definitions are resolved, so the history
    *  trimmer accounts for the full prompt size (system + tools + history). */
-  setToolSchemasChars(chars: number): void {
+  setToolSchemasChars(chars: number, toolCount?: number): void {
     this.toolSchemasChars = Math.max(0, chars);
+    if (toolCount !== undefined) this.toolCount = Math.max(0, Math.floor(toolCount));
   }
 
   /** Tool-schema payload size for this turn, for telemetry (not part of promptChars). */
   getToolSchemasChars(): number {
     return this.toolSchemasChars;
+  }
+
+  /** How many tool schemas this turn put on the wire — the count that goes with
+   *  {@link getToolSchemasChars}, so telemetry can report both without re-deriving. */
+  getToolCount(): number {
+    return this.toolCount;
   }
 
   /** Tell the session the context window (tokens) of the model running its

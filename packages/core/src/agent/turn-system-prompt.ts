@@ -226,7 +226,10 @@ export async function assembleTurnSystemMessages(
             try {
               return await Promise.race([
                 // Scoped to the grant: unscoped, the capsule named agents the turn could not call.
-                prefetchCapabilityCandidates(userMessage, allowedAgents ? { allowedAgents: [...allowedAgents] } : undefined),
+                prefetchCapabilityCandidates(userMessage, {
+                  ...(allowedAgents ? { allowedAgents: [...allowedAgents] } : {}),
+                  sessionId: session.id,
+                }),
                 new Promise<string>((resolve) => { timer = setTimeout(() => resolve(""), DISCOVERY_PREFETCH_BUDGET_MS); }),
               ]);
             } finally {
@@ -461,6 +464,10 @@ export async function assembleTurnSystemMessages(
     // template is typically the bulk; memory/skill/user/flow/trajectory are the
     // reducible part that recall_context now covers on demand.
     if (iterationCount === 0) {
+      const head = buildStableHead();
+      const guidance = buildTurnGuidance();
+      const sumChars = (messages: LLMMessage[]): number =>
+        messages.reduce((total, message) => total + (typeof message.content === "string" ? message.content.length : 0), 0);
       logAudit("prompt_section_sizes", {
         total: lastPromptMetrics.systemPromptChars,
         base: systemPrompt.length,
@@ -475,6 +482,39 @@ export async function assembleTurnSystemMessages(
         trajectory: activeTrajectoryInjectionContext?.length ?? 0,
         contextDigest: contextRecallDigest.length,
         leanContextInjection,
+        // The eleven keys above account for 89-95% of the system prompt; the rest was an
+        // unattributed residual because the tail has far more sections than the row had
+        // keys, and the tool block — about 64% of the bytes actually sent — had no key at
+        // all. These close both gaps, so a prompt-diet change can be measured rather than
+        // estimated.
+        toolSchemas: session.getToolSchemasChars(),
+        toolCount: session.getToolCount(),
+        orchestrationModule: orchestrationModuleMsg.length,
+        leanToolCatalogNotice: leanToolCatalogNotice.length,
+        discoveryCapsule: discoveryCapsule.length,
+        effortAddendum: effortPromptAddendum.length,
+        freshnessHonesty: freshnessHonestyPrompt.length,
+        userProfileEvidence: userProfileEvidence.length,
+        priorEvidenceFollowUp: priorEvidenceFollowUpPrompt.length,
+        sessionEvidenceReuse: sessionEvidenceReuseNudge.length,
+        workflowGuidance: workflowCatalogGuidance.length + approvedRunCandidateGuidance.length,
+        enforcement:
+          delegatedResearchEnforcementPrompt.length
+          + searchAgentsNoMatchFallbackPrompt.length
+          + maintenanceDelegationEnforcementPrompt.length
+          + unresolvedDelegationEnforcementPrompt.length
+          + workflowCatalogEnforcementPrompt.length
+          + approvedRunCandidateEnforcementPrompt.length
+          + workflowExecutionEnforcementPrompt.length,
+        sharedFindings: sharedFindingsSystemMessage.length,
+        // Head vs tail is the cache-relevant split: head bytes are the KV prefix key,
+        // tail bytes are re-prefilled per iteration.
+        headChars: sumChars(head),
+        headMessages: head.length,
+        tailChars: sumChars(guidance),
+        tailMessages: guidance.length,
+        historyChars: lastPromptMetrics.collapsedHistoryChars,
+        historyMessages: collapsedHistory.length,
       }, { sessionId: session.id, severity: "info" });
     }
 

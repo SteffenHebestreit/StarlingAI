@@ -53,6 +53,7 @@ import {
 import { REASONING_LOOP_WINDOW_CHARS, REASONING_SAMPLE_INTERVAL_CHARS, REASONING_DRIFT_SUSTAINED_SAMPLES, detectReasoningLoop, detectReasoningDrift, deriveTaskAnchors } from "../agent/progress-verifier.js";
 import { beginProviderCall, recordProviderToken, endProviderCall } from "../observability/provider-activity-monitor.js";
 import { logAudit } from "../audit/logger.js";
+import { currentCallAttribution } from "../runtime/request-context.js";
 
 const log = childLogger("provider:anthropic");
 
@@ -961,7 +962,10 @@ export class AnthropicProvider implements ChatProvider {
     reasoningChars: number | null;
   }): void {
     const now = Date.now();
+    // See the lmstudio emitter: ambient attribution so the row joins to its turn/agent.
+    const attribution = currentCallAttribution();
     logAudit("provider_model_call", {
+      ...attribution.data,
       model: input.modelId,
       mode: input.mode,
       durationMs: now - input.startedAt,
@@ -979,7 +983,7 @@ export class AnthropicProvider implements ChatProvider {
         enableThinking: null,
         cachePrompt: this.promptCaching,
       },
-    }, { severity: "info" });
+    }, { ...attribution.opts, severity: "info" });
   }
 
   async complete(messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal, options?: CompletionCallOptions): Promise<LLMResponse> {

@@ -40,6 +40,7 @@ import {
   countRoutingQueryContentTokens,
   shortenOverspecifiedRoutingQuery,
   uniqueNames,
+  logRoutingEvaluated,
   type AgentRoutingCandidate,
   type AgentRoutingResolution,
   type RoutingSelectionReason,
@@ -864,6 +865,7 @@ async function routeAgentCandidates(query: string, ctx: ToolContext, exclude: st
       if (agentCfgIsMetaFactory(cfg)) excluded.add(name);
     }
   }
+  const routingStartedAt = Date.now();
   const medium = await resolveAgentRouting(query, {
     minConfidence: "medium",
     allowedAgents: ctx.allowedAgents,
@@ -871,11 +873,32 @@ async function routeAgentCandidates(query: string, ctx: ToolContext, exclude: st
   });
 
   let candidates: AgentRoutingCandidate[] = medium.results;
+  // This is THE router in production: every live delegation was model-named, so
+  // search_agents (the only surface that logged a row) was never called while this
+  // path decided the target on every un-named delegation. Log the medium pass here
+  // and the low-confidence retry below, so the fallback is visible as its own row.
+  logRoutingEvaluated({
+    surface: "delegation",
+    query,
+    resolution: medium,
+    elapsedMs: Date.now() - routingStartedAt,
+    ...(ctx.sessionId ? { sessionId: ctx.sessionId } : {}),
+    extra: { excludedCount: excluded.size, pass: "medium" },
+  });
   if (candidates.length === 0) {
+    const lowStartedAt = Date.now();
     const low = await resolveAgentRouting(query, {
       minConfidence: "low",
       allowedAgents: ctx.allowedAgents,
       excludeAgents: [...excluded],
+    });
+    logRoutingEvaluated({
+      surface: "delegation",
+      query,
+      resolution: low,
+      elapsedMs: Date.now() - lowStartedAt,
+      ...(ctx.sessionId ? { sessionId: ctx.sessionId } : {}),
+      extra: { excludedCount: excluded.size, pass: "low", afterEmptyMedium: true },
     });
     candidates = [...low.results, ...low.weakCandidates];
 

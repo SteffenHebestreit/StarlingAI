@@ -46,6 +46,12 @@ import {
 } from "./long-running-generation.js";
 import { currentEffortTier } from "../runtime/effort-context.js";
 import {
+  attachRequestSessionId,
+  currentUserId,
+  currentWorkspaceScope,
+  runWithRequestContext,
+} from "../runtime/request-context.js";
+import {
   classifyRunProgress,
   classifyWriteLoop,
   buildProgressJudgePrompt,
@@ -2166,7 +2172,18 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
       "starlingai.task.preview": opts.task.slice(0, 240),
     },
     async (span) => {
-      const result = await runSubAgentWithStatsInner(opts);
+      // Establish this run's own attribution context, inheriting the caller's identity
+      // and scope. The sub-session id is attached from inside the run (it is minted
+      // there); agentName/callSite are known here.
+      const result = await runWithRequestContext(
+        {
+          userId: currentUserId(),
+          workspaceScope: currentWorkspaceScope(),
+          agentName: opts.agentName,
+          callSite: "sub_agent",
+        },
+        () => runSubAgentWithStatsInner(opts),
+      );
       span.setAttribute("starlingai.agent.iterations", result.stats.iterations);
       span.setAttribute("starlingai.agent.toolCount", result.stats.toolCount);
       if (result.stats.terminalState) {
@@ -2308,6 +2325,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     }
   }
   const subSessionId = `sub:${opts.parentSessionId}:${opts.agentName}:${Date.now()}`;
+  // The run's context was established by runSubAgentWithStats (which cannot know this id
+  // yet — it embeds a timestamp minted here). Attach it now so every model call this run
+  // makes stamps its provider row with THIS sub-session rather than the parent turn's.
+  attachRequestSessionId(subSessionId);
 
   let turnTimeoutReached = false;
   // The deadline now ABORTS the in-flight completion instead of only latching a

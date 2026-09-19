@@ -17,7 +17,7 @@
  */
 
 import { resolveAgentRouting } from "../tools/sub-agent.js";
-import { agentIsMetaFactory } from "../tools/agent-routing.js";
+import { agentIsMetaFactory, logRoutingEvaluated } from "../tools/agent-routing.js";
 import { searchWorkflowCandidates } from "../tools/workflow-catalog.js";
 
 function oneLine(text: string | undefined, max: number): string {
@@ -65,12 +65,13 @@ export function formatDiscoveryCapsule(
  */
 export async function prefetchCapabilityCandidates(
   query: string,
-  opts?: { allowedAgents?: string[]; maxAgents?: number; maxWorkflows?: number },
+  opts?: { allowedAgents?: string[]; maxAgents?: number; maxWorkflows?: number; sessionId?: string },
 ): Promise<string> {
   const q = query.trim();
   if (!q) return "";
   const maxAgents = Math.max(1, opts?.maxAgents ?? 4);
   const maxWorkflows = Math.max(1, opts?.maxWorkflows ?? 3);
+  const startedAt = Date.now();
 
   const [agentRes, workflowRes] = await Promise.all([
     resolveAgentRouting(q, {
@@ -83,6 +84,25 @@ export async function prefetchCapabilityCandidates(
     // workflow the request did not clearly call for (audit 7839e153). Pure semantic.
     searchWorkflowCandidates(q, { limit: maxWorkflows, semanticOutlier: true }).catch(() => []),
   ]);
+
+  // Log the routing decision on EVERY prefetch, including the empty ones. The capsule is
+  // only rendered when something matched, and `discovery_prefetch` only fires when the
+  // capsule is non-empty, so the misses — which are also the slow ones (~2.5 s vs ~0.5 s
+  // when something matched) — left no trace at all.
+  if (agentRes) {
+    logRoutingEvaluated({
+      surface: "discovery_prefetch",
+      query: q,
+      resolution: agentRes,
+      elapsedMs: Date.now() - startedAt,
+      ...(opts?.sessionId ? { sessionId: opts.sessionId } : {}),
+      extra: {
+        workflowCount: (workflowRes ?? []).length,
+        workflowTop: workflowRes?.[0]?.name ?? null,
+        workflowTopScore: workflowRes?.[0]?.semanticScore ?? null,
+      },
+    });
+  }
 
   const agents = (agentRes?.results ?? [])
     // Drop meta/factory agents (agent_factory): UNDIRECTED routing/bidding never picks them, so

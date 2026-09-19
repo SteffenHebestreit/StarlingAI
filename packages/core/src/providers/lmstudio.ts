@@ -1,5 +1,6 @@
 import OpenAI from "openai";
 import { logAudit } from "../audit/logger.js";
+import { currentCallAttribution } from "../runtime/request-context.js";
 import { Agent as UndiciAgent } from "undici";
 import type { ChatCompletion, ChatCompletionChunk, ChatCompletionMessageParam, ChatCompletionTool } from "openai/resources/chat/completions";
 import type { Stream } from "openai/streaming";
@@ -1346,7 +1347,12 @@ export class LMStudioProvider {
     const now = Date.now();
     const ext = input.extensions ?? {};
     const kwargs = ext["chat_template_kwargs"] as Record<string, unknown> | undefined;
+    // Attribution from the ambient request context. Without it every row carries a NULL
+    // session and model calls can only be tied to a turn by timestamp window — which is
+    // exactly how the last audit had to attribute all 435 of them.
+    const attribution = currentCallAttribution();
     logAudit("provider_model_call", {
+      ...attribution.data,
       model: input.modelId,
       mode: input.mode,
       durationMs: now - input.startedAt,
@@ -1363,7 +1369,7 @@ export class LMStudioProvider {
         enableThinking: kwargs?.["enable_thinking"] ?? kwargs?.["thinking"] ?? null,
         cachePrompt: ext["cache_prompt"] === true,
       },
-    }, { severity: "info" });
+    }, { ...attribution.opts, severity: "info" });
   }
 
   private recordRequestSuccess(startedAt: number): void {

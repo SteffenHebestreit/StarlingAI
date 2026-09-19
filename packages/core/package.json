@@ -28,6 +28,7 @@
     "lint": "eslint src --max-warnings 0",
     "memory:vault": "tsx src/cli/memory-vault.ts",
     "agents:evaluate": "tsx src/agent/evaluation-cli.ts",
+    "routing:canary": "tsx src/agent/routing-canary-cli.ts",
     "packs:evaluate": "tsx src/agent/eval-pack-cli.ts",
     "docs:reference": "tsx src/scripts/generate-reference-docs.ts",
     "scenes:evaluate": "tsx src/agent/scene-evaluation-cli.ts",

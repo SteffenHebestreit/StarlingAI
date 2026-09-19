@@ -15,6 +15,7 @@ import { getEmbeddingProvider } from "../providers/index.js";
 import { readPromotedAgents } from "../agent/promoted-agents.js";
 import { readRecentOutcomes, computeAgentCostProfile, computeOutcomeRoutingMultiplier, extractTaskKeywords, type AgentCostProfile } from "../agent/outcomes.js";
 import { rerankCandidates } from "../retrieval/reranker.js";
+import { logAudit } from "../audit/logger.js";
 
 /**
  * Minimum score for a candidate to qualify when semantic embeddings are
@@ -83,6 +84,69 @@ export interface RoutingSelectionReason {
   confidence: "high" | "medium" | "low";
   matchedTerms: string[];
   score: number;
+}
+
+/**
+ * Which code path asked for this routing decision. `search_agents`/`list_agents` are the
+ * model-facing discovery tools; `discovery_prefetch` is the up-front capsule; `delegation`
+ * is an un-named delegate_to_agent/swarm_delegate resolving its own target; `bidding` is
+ * the swarm bid path.
+ */
+export type RoutingSurface =
+  | "search_agents"
+  | "list_agents"
+  | "discovery_prefetch"
+  | "delegation"
+  | "bidding"
+  | "shadow";
+
+/**
+ * Emit one `agent_routing_evaluated` row for a routing decision.
+ *
+ * Every routing path funnels through resolveAgentRouting, but only the two model-facing
+ * search tools ever logged a row — and in fourteen days of production those tools were
+ * called zero times, so the routing scores, the share of decisions that hit the floor and
+ * the chosen agents were all unobservable while routing ran on every escalated turn. The
+ * shape is the search_agents row plus `surface`, the scored top-5 and the elapsed time, so
+ * one query answers "what did routing see, and what did it do" for every surface.
+ */
+export function logRoutingEvaluated(input: {
+  surface: RoutingSurface;
+  query: string;
+  resolution: AgentRoutingResolution;
+  elapsedMs?: number;
+  sessionId?: string;
+  extra?: Record<string, unknown>;
+}): void {
+  const { resolution } = input;
+  const scored = [...resolution.results, ...resolution.weakCandidates]
+    .slice(0, 5)
+    .map((candidate) => ({
+      name: candidate.name,
+      score: Number(candidate.score.toFixed(4)),
+      confidence: candidate.confidence,
+      admitted: resolution.results.some((r) => r.name === candidate.name),
+    }));
+  logAudit("agent_routing_evaluated", {
+    surface: input.surface,
+    // The query is the routing input; it is the user's text or a derived task, so it
+    // rides through the same audit sanitizer as every other free-form field.
+    query: input.query.slice(0, 500),
+    minConfidence: resolution.minConfidence,
+    mode: resolution.mode,
+    ...(resolution.semanticUnavailableReason ? { semanticUnavailableReason: resolution.semanticUnavailableReason } : {}),
+    resultCount: resolution.results.length,
+    weakCount: resolution.weakCandidates.length,
+    gated: resolution.gated,
+    allLowConfidence: resolution.allLowConfidence,
+    trippedAgents: resolution.trippedAgents,
+    excludedAgents: resolution.excludedAgents ?? [],
+    topResult: resolution.results[0]?.name ?? null,
+    topScore: resolution.results[0]?.score ?? null,
+    scored,
+    ...(input.elapsedMs !== undefined ? { elapsedMs: input.elapsedMs } : {}),
+    ...(input.extra ?? {}),
+  }, { ...(input.sessionId ? { sessionId: input.sessionId } : {}), channel: "agent-routing" });
 }
 
 export function computeHybridRoutingScore(

@@ -659,6 +659,27 @@ export const OrchestrationSchema = z.object({
    *  once a delegation/workflow has run so the model can synthesize, and only forces before
    *  the routing-nudge fallback. Default on. */
   forceToolChoiceWhenOrchestrationRequired: z.boolean().default(true),
+  /**
+   * Keep the turn's tool array BYTE-IDENTICAL across every iteration of the turn.
+   *
+   * Today the array is re-derived per iteration and mutates twice inside one forced turn:
+   * a search_agents no-match removes the two discovery tools, and a forced iteration cuts
+   * the block down to the orchestration subset (measured 10 → 8 → 34 schemas within one
+   * turn). The chat template renders tools adjacent to the system text, so every mutation
+   * re-prefills the whole prefix behind it — on this cluster a same-content REORDER of the
+   * tool block measured 47.2 s against 0.43 s for an identical one. Three cold prefills per
+   * forced turn is the single largest avoidable cost the audit found.
+   *
+   * With `"freeze"` the array never changes: the same restrictions are enforced at the CALL
+   * SITE instead (the model's non-conforming call is refused with the same message and the
+   * list of tools that would satisfy the requirement, exactly as sub-agents already do), so
+   * capability is identical and only the wire bytes stop moving. The refusal costs one extra
+   * warm iteration when it fires, which is why `tool_restriction_refused` is logged: if the
+   * refusal rate is material the trade is not paying and the flag goes back to "off".
+   *
+   * Default "off" — behaviour change, pass^k-gated.
+   */
+  stableToolBlock: z.enum(["off", "freeze"]).default("off"),
   /** When true, a turn whose ONLY orchestration was a single successful delegation that
    *  returned a complete, presentable deliverable surfaces that deliverable directly instead
    *  of running a SECOND full synthesis pass over it on the main assistant — which on the slow
