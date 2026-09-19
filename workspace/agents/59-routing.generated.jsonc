@@ -1,0 +1,1290 @@
+// GENERATED ROUTING TAXONOMY — do not hand-edit.
+//
+// Seed labels for the IDCM routing taxonomy on all 49 agents: L1 execution mode x L2
+// capability domain, plus the orthogonal facets (deliverable, completes, inputModality,
+// riskTier, executionShape, surface). See docs/intent-routing-redesign.md.
+//
+// PROVENANCE: two taxonomies were derived independently — one top-down from the research
+// consensus, one bottom-up by clustering this catalog — and merged with a written reason per
+// disagreement. They agreed on L1 for 43 of 49 agents and 65 of 88 entries before the merge.
+// An entry whose labeledBy carries "medium/low confidence" is a straddle the merge could have
+// defended either way: a seed to be settled by eval, never a verdict.
+//
+// TO OVERRIDE one entry, set its AUTHORED `routing` block in the primary shard — authored always
+// wins over `routingGenerated`, so this file can be regenerated without losing the override.
+//
+// sourceHash covers the entry's description/capabilities/tags/tools: a mismatch means the
+// catalog text moved after labelling and the label may be stale.
+{
+  "subAgents": {
+    "api_integrator": {
+      "routingGenerated": {
+        "mode": "ACT",
+        "domain": [
+          "software"
+        ],
+        "deliverable": [
+          "evidence"
+        ],
+        "completes": [
+          "evidence"
+        ],
+        "inputModality": [
+          "live_system"
+        ],
+        "riskTier": "mutating_external",
+        "executionShape": "single_agent",
+        "surface": [
+          "external_network"
+        ],
+        "oneLiner": "Calls existing HTTP/REST/GraphQL endpoints to test/consume (can POST); ACT (operates a live service), read-heavy so a pure-read request re-ranks near GATHER via risk_tier. Distinct from backend_cod...",
+        "sourceHash": "49c1ef91fd65817d",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated) — medium confidence",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "backend_coder": {
+      "routingGenerated": {
+        "mode": "PRODUCE",
+        "domain": [
+          "software"
+        ],
+        "deliverable": [
+          "running_app"
+        ],
+        "completes": [
+          "running_app"
+        ],
+        "inputModality": [
+          "text"
+        ],
+        "riskTier": "sandbox_exec",
+        "executionShape": "single_agent",
+        "surface": [
+          "local_sandbox"
+        ],
+        "oneLiner": "Builds+serves a live container locally and returns a URL for verification. PRODUCE(running_app) -- the serve is proof-of-work in the sandbox, not an external deploy (that is infrastructure_agent)....",
+        "sourceHash": "d9b40302c65dea94",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "browser_agent": {
+      "routingGenerated": {
+        "mode": "ACT",
+        "domain": [
+          "device_control"
+        ],
+        "deliverable": [
+          "evidence"
+        ],
+        "completes": [
+          "evidence"
+        ],
+        "inputModality": [
+          "url"
+        ],
+        "riskTier": "mutating_external",
+        "executionShape": "single_agent",
+        "surface": [
+          "browser"
+        ],
+        "oneLiner": "Drives a live browser (navigate/click/submit/login); also captures snapshots (secondary GATHER) that vision_browser_analyst reads.",
+        "sourceHash": "b824b26d6807c9a6",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "calendar_agent": {
+      "routingGenerated": {
+        "mode": "ACT",
+        "domain": [
+          "comms"
+        ],
+        "deliverable": [
+          "config_change"
+        ],
+        "completes": [
+          "config_change"
+        ],
+        "inputModality": [
+          "live_system"
+        ],
+        "riskTier": "mutating_external",
+        "executionShape": "single_agent",
+        "surface": [
+          "user_channel"
+        ],
+        "oneLiner": "CalDAV/CardDAV calendar+contacts mutations; domain=communication. Tags carry provider brand names nextcloud/fastmail/icloud (lint). Unreachable by any scene.",
+        "sourceHash": "a734b39a69180bac",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "chart_designer": {
+      "routingGenerated": {
+        "mode": "PRODUCE",
+        "domain": [
+          "media"
+        ],
+        "deliverable": [
+          "chart"
+        ],
+        "completes": [
+          "chart"
+        ],
+        "inputModality": [
+          "structured_data"
+        ],
+        "riskTier": "reversible_write",
+        "executionShape": "single_agent",
+        "surface": [
+          "workspace"
+        ],
+        "oneLiner": "Renders already-verified NUMBERS as HTML charts/tables; does not compute (data_analyst does); input_modality=structured_data records the numbers input. media only (no data L2 -- it renders, not ana...",
+        "sourceHash": "55f282983fc306b3",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "code_analyst": {
+      "routingGenerated": {
+        "mode": "GATHER",
+        "domain": [
+          "software"
+        ],
+        "deliverable": [
+          "evidence"
+        ],
+        "completes": [
+          "evidence"
+        ],
+        "inputModality": [
+          "codebase"
+        ],
+        "riskTier": "read_only",
+        "executionShape": "single_agent",
+        "surface": [
+          "workspace"
+        ],
+        "oneLiner": "Reads code at rest, never runs it; distinct from diff_reviewer(diff) and qa_guard(runs).",
+        "sourceHash": "c34853fab52f5909",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "coder": {
+      "routingGenerated": {
+        "mode": "PRODUCE",
+        "domain": [
+          "software"
+        ],
+        "deliverable": [
+          "code"
+        ],
+        "completes": [
+          "code"
+        ],
+        "inputModality": [
+          "text"
+        ],
+        "riskTier": "sandbox_exec",
+        "executionShape": "single_agent",
+        "surface": [
+          "local_sandbox"
+        ],
+        "oneLiner": "Runs short JS/TS in an isolated no-network sandbox to return a computed result (map: 'executes... returns result', container.disabled). PRODUCE not ACT -- no external side effect; risk_tier=sandbox...",
+        "sourceHash": "2a774a279ba48de2",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated) — medium confidence",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "computer_use_agent": {
+      "routingGenerated": {
+        "mode": "ACT",
+        "domain": [
+          "device_control"
+        ],
+        "deliverable": [
+          "evidence"
+        ],
+        "completes": [
+          "evidence"
+        ],
+        "inputModality": [
+          "live_system"
+        ],
+        "riskTier": "mutating_external",
+        "executionShape": "single_agent",
+        "surface": [
+          "desktop_host"
+        ],
+        "oneLiner": "Controls a local/remote desktop via VNC/RDP (keyboard/mouse/screen); domain=desktop in config. Brand/mechanism tags lm-studio/vscode/vnc/rdp/ip-address (lint). Unreachable by any scene.",
+        "sourceHash": "738eab70833edc69",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "content_writer": {
+      "routingGenerated": {
+        "mode": "PRODUCE",
+        "domain": [
+          "authoring"
+        ],
+        "deliverable": [
+          "prose_doc"
+        ],
+        "completes": [
+          "prose_doc"
+        ],
+        "inputModality": [
+          "text"
+        ],
+        "riskTier": "reversible_write",
+        "executionShape": "single_agent",
+        "surface": [
+          "workspace"
+        ],
+        "oneLiner": "Also builds content websites (deliverable=website) and reveal.js decks (deliverable=deck); overlaps web_coder on sites, paper_author on docs -- split by the deliverable facet.",
+        "sourceHash": "43cc80415869680b",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "data_analyst": {
+      "routingGenerated": {
+        "mode": "GATHER",
+        "domain": [
+          "data"
+        ],
+        "deliverable": [
+          "data_table"
+        ],
+        "completes": [
+          "data_table"
+        ],
+        "inputModality": [
+          "structured_data"
+        ],
+        "riskTier": "reversible_write",
+        "executionShape": "single_agent",
+        "surface": [
+          "workspace"
+        ],
+        "oneLiner": "Computes aggregations/KPIs/anomalies over already-collected files, no live DB (map: 'produces computed figures' = output shape). GATHER per rule 4 (computing figures); prose interpretation is autho...",
+        "sourceHash": "745fcd339fe3120f",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated) — medium confidence",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "devops_coordinator": {
+      "routingGenerated": {
+        "mode": "ORCHESTRATE",
+        "domain": [
+          "infra_ops"
+        ],
+        "deliverable": [
+          "none"
+        ],
+        "completes": [],
+        "inputModality": [
+          "live_system"
+        ],
+        "riskTier": "mutating_external",
+        "executionShape": "needs_coordination",
+        "surface": [
+          "remote_infra"
+        ],
+        "oneLiner": "CI/CD release coordinator; owns promote+rollback. role=coordinator. Unreachable by any scene.",
+        "sourceHash": "71ebc87b41de5058",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "diagram_designer": {
+      "routingGenerated": {
+        "mode": "PRODUCE",
+        "domain": [
+          "media"
+        ],
+        "deliverable": [
+          "diagram"
+        ],
+        "completes": [
+          "diagram"
+        ],
+        "inputModality": [
+          "text"
+        ],
+        "riskTier": "reversible_write",
+        "executionShape": "single_agent",
+        "surface": [
+          "workspace"
+        ],
+        "oneLiner": "Mermaid structural diagrams (flowchart/sequence/timeline/graph/mindmap); distinct from chart_designer(numbers) and image_creator(artwork). Unreachable by any scene.",
+        "sourceHash": "ff7352aaa1ff75dc",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "diff_reviewer": {
+      "routingGenerated": {
+        "mode": "VERIFY",
+        "domain": [
+          "software"
+        ],
+        "deliverable": [
+          "verdict"
+        ],
+        "completes": [
+          "verdict"
+        ],
+        "inputModality": [
+          "codebase"
+        ],
+        "riskTier": "read_only",
+        "executionShape": "single_agent",
+        "surface": [
+          "workspace"
+        ],
+        "oneLiner": "Read-only diff/PR merge verdict. Reviewer-shaped but NOT tagged role=reviewer in config (lint). Distinct from code_analyst(whole tree) and git_developer(mutate).",
+        "sourceHash": "4488a21b3bb1d2a0",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "document_intake": {
+      "routingGenerated": {
+        "mode": "GATHER",
+        "domain": [
+          "data"
+        ],
+        "deliverable": [
+          "data_table"
+        ],
+        "completes": [
+          "data_table"
+        ],
+        "inputModality": [
+          "file_upload"
+        ],
+        "riskTier": "reversible_write",
+        "executionShape": "single_agent",
+        "surface": [
+          "workspace"
+        ],
+        "oneLiner": "Extracts exact text/tables/metadata from binary attachments (PDF/DOCX/XLSX/audio/video/eml/ics); first step for uploads.",
+        "sourceHash": "e9ccd2c8f9574979",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "evidence_analyst": {
+      "routingGenerated": {
+        "mode": "GATHER",
+        "domain": [
+          "research",
+          "data"
+        ],
+        "deliverable": [
+          "evidence"
+        ],
+        "completes": [
+          "evidence"
+        ],
+        "inputModality": [
+          "text"
+        ],
+        "riskTier": "reversible_write",
+        "executionShape": "single_agent",
+        "surface": [
+          "workspace"
+        ],
+        "oneLiner": "Reconciles already-collected evidence into a confirmed/tentative ledger for downstream writers. Hardest GATHER/PRODUCE call: phase-1 map + proposal B read it produce; classified GATHER because the...",
+        "sourceHash": "5d01ef61a55304de",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated) — medium confidence",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "exploit_agent": {
+      "routingGenerated": {
+        "mode": "ACT",
+        "domain": [
+          "security"
+        ],
+        "deliverable": [
+          "evidence"
+        ],
+        "completes": [
+          "evidence"
+        ],
+        "inputModality": [
+          "live_system"
+        ],
+        "riskTier": "mutating_external",
+        "executionShape": "single_agent",
+        "surface": [
+          "remote_infra"
+        ],
+        "oneLiner": "Validates vulns by RUNNING exploits against the target (mandatory per-module approval). Intent is validation but the mechanism mutates target state, so ACT -- the only pentest agent that changes ta...",
+        "sourceHash": "f8e2bd28b26cb085",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "git_developer": {
+      "routingGenerated": {
+        "mode": "ACT",
+        "domain": [
+          "software"
+        ],
+        "deliverable": [
+          "config_change"
+        ],
+        "completes": [
+          "config_change"
+        ],
+        "inputModality": [
+          "codebase"
+        ],
+        "riskTier": "mutating_external",
+        "executionShape": "single_agent",
+        "surface": [
+          "external_network"
+        ],
+        "oneLiner": "Mutating git/GitHub ops (commit/push/PR/release), approval-gated. Distinct from diff_reviewer(read) and devops_coordinator(deployment).",
+        "sourceHash": "842c430f2911fffa",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "image_creator": {
+      "routingGenerated": {
+        "mode": "PRODUCE",
+        "domain": [
+          "media"
+        ],
+        "deliverable": [
+          "image"
+        ],
+        "completes": [
+          "image"
+        ],
+        "inputModality": [
+          "text"
+        ],
+        "riskTier": "reversible_write",
+        "executionShape": "single_agent",
+        "surface": [
+          "workspace"
+        ],
+        "oneLiner": "Generates visuals from a prompt (diffusion raster/SVG/QR); creation from scratch, distinct from image_sourcer(find). Unreachable by any scene.",
+        "sourceHash": "8636e8665b06415c",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "image_sourcer": {
+      "routingGenerated": {
+        "mode": "GATHER",
+        "domain": [
+          "media"
+        ],
+        "deliverable": [
+          "image"
+        ],
+        "completes": [
+          "image"
+        ],
+        "inputModality": [
+          "text"
+        ],
+        "riskTier": "reversible_write",
+        "executionShape": "single_agent",
+        "surface": [
+          "external_network"
+        ],
+        "oneLiner": "Finds+verifies free-license image URLs (images only). media NOT research so 'research the best image model' does not route here (ADR-009); the web-search is a mechanism (surface=external_network)....",
+        "sourceHash": "a5b4717125c90ec2",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "infrastructure_agent": {
+      "routingGenerated": {
+        "mode": "ACT",
+        "domain": [
+          "infra_ops"
+        ],
+        "deliverable": [
+          "config_change"
+        ],
+        "completes": [
+          "config_change"
+        ],
+        "inputModality": [
+          "live_system"
+        ],
+        "riskTier": "mutating_external",
+        "executionShape": "single_agent",
+        "surface": [
+          "remote_infra"
+        ],
+        "oneLiner": "Mutates external clusters/servers (Terraform/Ansible/k8s/helm). Distinct from ops_triage(read) and devops_coordinator(orchestrates). Brand tags (lint). Unreachable by any scene.",
+        "sourceHash": "26aa4d10dca49bf4",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "log_analyst": {
+      "routingGenerated": {
+        "mode": "GATHER",
+        "domain": [
+          "infra_ops"
+        ],
+        "deliverable": [
+          "evidence"
+        ],
+        "completes": [
+          "evidence"
+        ],
+        "inputModality": [
+          "text"
+        ],
+        "riskTier": "read_only",
+        "executionShape": "single_agent",
+        "surface": [
+          "remote_infra"
+        ],
+        "oneLiner": "Parses log TEXT (journald/nginx/stack traces/container logs) for error clusters/timelines; narrower than ops_triage(whole failing service). Reachable via incident_response only.",
+        "sourceHash": "e98aa73d4848e9a2",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "mail_agent": {
+      "routingGenerated": {
+        "mode": "ACT",
+        "domain": [
+          "comms"
+        ],
+        "deliverable": [
+          "message"
+        ],
+        "completes": [
+          "message"
+        ],
+        "inputModality": [
+          "live_system"
+        ],
+        "riskTier": "external_send",
+        "executionShape": "single_agent",
+        "surface": [
+          "user_channel"
+        ],
+        "oneLiner": "Mailbox triage/search/organize/draft/reply+send (send approval-gated); domain=communication. Distinct from notification_agent(one-way). Unreachable by any scene.",
+        "sourceHash": "753739eb3c2203f7",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "meeting_briefing_agent": {
+      "routingGenerated": {
+        "mode": "PRODUCE",
+        "domain": [
+          "authoring"
+        ],
+        "deliverable": [
+          "prose_doc"
+        ],
+        "completes": [
+          "prose_doc"
+        ],
+        "inputModality": [
+          "text"
+        ],
+        "riskTier": "reversible_write",
+        "executionShape": "single_agent",
+        "surface": [
+          "workspace"
+        ],
+        "oneLiner": "Action-oriented briefing/handoff packet (status/facts/risks/decisions/owners/next actions); distinct from summarizer(flat TL;DR).",
+        "sourceHash": "e7d60ff64ee0f259",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "mission_coordinator": {
+      "routingGenerated": {
+        "mode": "ORCHESTRATE",
+        "domain": [
+          "cross_domain"
+        ],
+        "deliverable": [
+          "none"
+        ],
+        "completes": [],
+        "inputModality": [
+          "text"
+        ],
+        "riskTier": "read_only",
+        "executionShape": "needs_coordination",
+        "surface": [
+          "swarm_internal"
+        ],
+        "oneLiner": "General cross-domain execution coordinator; the default needs_coordination target. Longest prompt (10,178). Overlaps project_planner + the domain coordinators -- descriptions must state the scope b...",
+        "sourceHash": "d1718a2b0ab49930",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "network_auditor_agent": {
+      "routingGenerated": {
+        "mode": "GATHER",
+        "domain": [
+          "security"
+        ],
+        "deliverable": [
+          "evidence"
+        ],
+        "completes": [
+          "evidence"
+        ],
+        "inputModality": [
+          "live_system"
+        ],
+        "riskTier": "mutating_external",
+        "executionShape": "single_agent",
+        "surface": [
+          "remote_infra"
+        ],
+        "oneLiner": "Authorized non-web protocol auditing (SMB/FTP/SSH/RDP/DNS/TLS), approval-gated checks. Brand tag hydra (lint).",
+        "sourceHash": "140a1aeaf0bd60b3",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "notification_agent": {
+      "routingGenerated": {
+        "mode": "ACT",
+        "domain": [
+          "comms"
+        ],
+        "deliverable": [
+          "message"
+        ],
+        "completes": [
+          "message"
+        ],
+        "inputModality": [
+          "text"
+        ],
+        "riskTier": "external_send",
+        "executionShape": "single_agent",
+        "surface": [
+          "user_channel"
+        ],
+        "oneLiner": "One-way outbound dispatcher (Telegram/Slack/Discord/alert-email); sole agent in multi_channel_broadcast, the tail of 9 jobs.",
+        "sourceHash": "0d1e1972b8c07704",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "ops_triage": {
+      "routingGenerated": {
+        "mode": "GATHER",
+        "domain": [
+          "infra_ops"
+        ],
+        "deliverable": [
+          "evidence"
+        ],
+        "completes": [
+          "evidence"
+        ],
+        "inputModality": [
+          "live_system"
+        ],
+        "riskTier": "read_only",
+        "executionShape": "single_agent",
+        "surface": [
+          "remote_infra"
+        ],
+        "oneLiner": "Read-only incident diagnosis; hands the fix to infrastructure_agent/devops_coordinator. Broader than log_analyst. Reachable via incident_response scene.",
+        "sourceHash": "5dce66c244bb9321",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "paper_author": {
+      "routingGenerated": {
+        "mode": "PRODUCE",
+        "domain": [
+          "authoring"
+        ],
+        "deliverable": [
+          "prose_doc"
+        ],
+        "completes": [
+          "prose_doc"
+        ],
+        "inputModality": [
+          "text"
+        ],
+        "riskTier": "reversible_write",
+        "executionShape": "single_agent",
+        "surface": [
+          "workspace"
+        ],
+        "oneLiner": "Formal source-grounded cited docs from an evidence ledger; never fabricates refs. Distinct from content_writer(marketing) and researcher(gathers).",
+        "sourceHash": "008c97dbc1a4e84d",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "pentest_coordinator": {
+      "routingGenerated": {
+        "mode": "ORCHESTRATE",
+        "domain": [
+          "security"
+        ],
+        "deliverable": [
+          "none"
+        ],
+        "completes": [],
+        "inputModality": [
+          "text"
+        ],
+        "riskTier": "mutating_external",
+        "executionShape": "needs_coordination",
+        "surface": [
+          "remote_infra"
+        ],
+        "oneLiner": "Scope-gated engagement orchestrator; requires written authorization. role=coordinator. Unreachable by any scene.",
+        "sourceHash": "2ba6da91cd2618bb",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "pentest_qa_validator": {
+      "routingGenerated": {
+        "mode": "VERIFY",
+        "domain": [
+          "security"
+        ],
+        "deliverable": [
+          "verdict"
+        ],
+        "completes": [
+          "verdict"
+        ],
+        "inputModality": [
+          "text"
+        ],
+        "riskTier": "read_only",
+        "executionShape": "single_agent",
+        "surface": [
+          "workspace"
+        ],
+        "oneLiner": "Pentest finding-validation gate before reporting (false positives/CVSS/evidence/coverage). role=reviewer.",
+        "sourceHash": "5b03ebfc40e46057",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "policy_compliance_reviewer": {
+      "routingGenerated": {
+        "mode": "VERIFY",
+        "domain": [
+          "cross_domain"
+        ],
+        "deliverable": [
+          "verdict"
+        ],
+        "completes": [
+          "verdict"
+        ],
+        "inputModality": [
+          "text"
+        ],
+        "riskTier": "read_only",
+        "executionShape": "single_agent",
+        "surface": [
+          "workspace"
+        ],
+        "oneLiner": "Screens a planned action/output for policy+approval risk (destructive ops/credentials/egress/privacy); domain-agnostic -> cross_domain. Distinct from quality_supervisor(complete vs allowed). Reacha...",
+        "sourceHash": "d1da3eb5db9a382b",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "process_memory_keeper": {
+      "routingGenerated": {
+        "mode": "ACT",
+        "domain": [
+          "data"
+        ],
+        "deliverable": [
+          "config_change"
+        ],
+        "completes": [
+          "config_change"
+        ],
+        "inputModality": [
+          "text"
+        ],
+        "riskTier": "mutating_external",
+        "executionShape": "single_agent",
+        "surface": [
+          "external_network"
+        ],
+        "oneLiner": "Persists+queries long-running matters in the ProcessMem MCP store (cases/disputes/correspondence). ACT (durable external record). L2=data is a fold -- a dedicated 'memory' domain would hold only th...",
+        "sourceHash": "7ae4e1ccabd9c7c3",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated) — low confidence",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "project_planner": {
+      "routingGenerated": {
+        "mode": "PRODUCE",
+        "domain": [
+          "cross_domain"
+        ],
+        "deliverable": [
+          "plan"
+        ],
+        "completes": [
+          "plan"
+        ],
+        "inputModality": [
+          "text"
+        ],
+        "riskTier": "reversible_write",
+        "executionShape": "single_agent",
+        "surface": [
+          "workspace"
+        ],
+        "oneLiner": "role=planner; phase-1 map: 'produces a plan document; does not execute specialists'. PRODUCE(plan) so 'just give me a plan' dispatches to one agent, not forced coordination; the handoff to mission_...",
+        "sourceHash": "3601ddade3154fde",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated) — medium confidence",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "prompt_optimizer": {
+      "routingGenerated": {
+        "mode": "VERIFY",
+        "domain": [
+          "swarm_meta"
+        ],
+        "deliverable": [
+          "verdict"
+        ],
+        "completes": [
+          "verdict"
+        ],
+        "inputModality": [
+          "text"
+        ],
+        "riskTier": "read_only",
+        "executionShape": "single_agent",
+        "surface": [
+          "swarm_internal"
+        ],
+        "oneLiner": "Advisory prompt-quality reviewer; proposes the smallest wording change, does not implement (swarm_maintainer does). Shortest prompt in the swarm (235). Unreachable by any scene.",
+        "sourceHash": "0f1a3eaaae8e470e",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "qa_guard": {
+      "routingGenerated": {
+        "mode": "VERIFY",
+        "domain": [
+          "software"
+        ],
+        "deliverable": [
+          "verdict"
+        ],
+        "completes": [
+          "verdict"
+        ],
+        "inputModality": [
+          "codebase"
+        ],
+        "riskTier": "sandbox_exec",
+        "executionShape": "single_agent",
+        "surface": [
+          "local_sandbox"
+        ],
+        "oneLiner": "Verifies by RUNNING the test suite; deliverable=verdict so VERIFY not ACT; risk_tier=sandbox_exec records the run. role=reviewer.",
+        "sourceHash": "a109703456c885fa",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "quality_supervisor": {
+      "routingGenerated": {
+        "mode": "VERIFY",
+        "domain": [
+          "cross_domain"
+        ],
+        "deliverable": [
+          "verdict"
+        ],
+        "completes": [
+          "verdict"
+        ],
+        "inputModality": [
+          "text"
+        ],
+        "riskTier": "read_only",
+        "executionShape": "single_agent",
+        "surface": [
+          "workspace"
+        ],
+        "oneLiner": "Domain-agnostic acceptance gate (completeness/consistency/grounding, rerun-vs-ship); role=reviewer. Explicitly NOT tests/citations/policy.",
+        "sourceHash": "95a0fdc0b3e68df5",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "recon_agent": {
+      "routingGenerated": {
+        "mode": "GATHER",
+        "domain": [
+          "security"
+        ],
+        "deliverable": [
+          "evidence"
+        ],
+        "completes": [
+          "evidence"
+        ],
+        "inputModality": [
+          "live_system"
+        ],
+        "riskTier": "mutating_external",
+        "executionShape": "single_agent",
+        "surface": [
+          "remote_infra"
+        ],
+        "oneLiner": "Active surface mapping under authorized scope: GATHER intent, but active probing so risk_tier=mutating_external. Distinct from researcher's read-only desk lookup.",
+        "sourceHash": "80266fc5b28a23eb",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "report_writer_agent": {
+      "routingGenerated": {
+        "mode": "PRODUCE",
+        "domain": [
+          "security",
+          "authoring"
+        ],
+        "deliverable": [
+          "prose_doc"
+        ],
+        "completes": [
+          "prose_doc"
+        ],
+        "inputModality": [
+          "text"
+        ],
+        "riskTier": "reversible_write",
+        "executionShape": "single_agent",
+        "surface": [
+          "workspace"
+        ],
+        "oneLiner": "Aggregates pentest findings into a CVSS-ordered report; distinct from general content_writer/paper_author.",
+        "sourceHash": "aadedaeb7211c813",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "researcher": {
+      "routingGenerated": {
+        "mode": "GATHER",
+        "domain": [
+          "research"
+        ],
+        "deliverable": [
+          "evidence"
+        ],
+        "completes": [
+          "evidence"
+        ],
+        "inputModality": [
+          "url"
+        ],
+        "riskTier": "read_only",
+        "executionShape": "single_agent",
+        "surface": [
+          "external_network"
+        ],
+        "oneLiner": "The only fresh-discovery web researcher; shares web tools with source_verifier(audits) and image_sourcer(images) -- separated by L1 + deliverable.",
+        "sourceHash": "b60173b91fc3863f",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "shell_agent": {
+      "routingGenerated": {
+        "mode": "ACT",
+        "domain": [
+          "infra_ops"
+        ],
+        "deliverable": [
+          "evidence"
+        ],
+        "completes": [
+          "evidence"
+        ],
+        "inputModality": [
+          "live_system"
+        ],
+        "riskTier": "mutating_external",
+        "executionShape": "single_agent",
+        "surface": [
+          "remote_infra"
+        ],
+        "oneLiner": "One-off shell/SSH commands, reports raw output; can mutate so ACT. L2 could be software for local build runs. Unreachable by any scene.",
+        "sourceHash": "17cadf77103f2d9c",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated) — medium confidence",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "source_verifier": {
+      "routingGenerated": {
+        "mode": "VERIFY",
+        "domain": [
+          "research"
+        ],
+        "deliverable": [
+          "verdict"
+        ],
+        "completes": [
+          "verdict"
+        ],
+        "inputModality": [
+          "text"
+        ],
+        "riskTier": "read_only",
+        "executionShape": "single_agent",
+        "surface": [
+          "external_network"
+        ],
+        "oneLiner": "Audits an existing draft's claims/citations (fetches URLs to CHECK, not to gather) -> VERIFY. Shares web tools with researcher but audits vs gathers. Reviewer-shaped but not tagged role=reviewer.",
+        "sourceHash": "fe675484d04428dd",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "sql_specialist": {
+      "routingGenerated": {
+        "mode": "ACT",
+        "domain": [
+          "data"
+        ],
+        "deliverable": [
+          "data_table"
+        ],
+        "completes": [
+          "data_table"
+        ],
+        "inputModality": [
+          "live_system"
+        ],
+        "riskTier": "mutating_external",
+        "executionShape": "single_agent",
+        "surface": [
+          "external_network"
+        ],
+        "oneLiner": "Connects to a LIVE Postgres/MySQL/MariaDB (queries/schema/migrations/EXPLAIN); ACT (can mutate), read-heavy so pure-query re-ranks near GATHER via risk_tier. Distinct from data_analyst(files). Reac...",
+        "sourceHash": "a86ea518cecb7e85",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated) — medium confidence",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "summarizer": {
+      "routingGenerated": {
+        "mode": "PRODUCE",
+        "domain": [
+          "authoring"
+        ],
+        "deliverable": [
+          "prose_doc"
+        ],
+        "completes": [
+          "prose_doc"
+        ],
+        "inputModality": [
+          "text"
+        ],
+        "riskTier": "reversible_write",
+        "executionShape": "single_agent",
+        "surface": [
+          "workspace"
+        ],
+        "oneLiner": "Faithful condensation/TL;DR that authors a readable restatement (vs evidence_analyst which organizes evidence); the final merge/report agent in many scenes.",
+        "sourceHash": "24e09f58c610d1c1",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "swarm_maintainer": {
+      "routingGenerated": {
+        "mode": "ACT",
+        "domain": [
+          "swarm_meta"
+        ],
+        "deliverable": [
+          "config_change"
+        ],
+        "completes": [
+          "config_change"
+        ],
+        "inputModality": [
+          "codebase"
+        ],
+        "riskTier": "reversible_write",
+        "executionShape": "single_agent",
+        "surface": [
+          "swarm_internal"
+        ],
+        "oneLiner": "WRITES durable swarm config (agents/scenes/jobs/prompts), workspaceAccess=full (map: 'executes -- writes durable swarm config'). ACT because it mutates the live system (git-reversible). Distinct fr...",
+        "sourceHash": "8572d3dd80573bd3",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "tool_developer": {
+      "routingGenerated": {
+        "mode": "PRODUCE",
+        "domain": [
+          "swarm_meta",
+          "software"
+        ],
+        "deliverable": [
+          "code"
+        ],
+        "completes": [
+          "code"
+        ],
+        "inputModality": [
+          "text"
+        ],
+        "riskTier": "sandbox_exec",
+        "executionShape": "single_agent",
+        "surface": [
+          "local_sandbox"
+        ],
+        "oneLiner": "Builds+tests pure-compute no-network TS tools and SUBMITS for approval (map) -- hands off an artifact, does not apply, so PRODUCE(code) not ACT (consistent with coder). Network connectors go to bac...",
+        "sourceHash": "f66c78e1bca8ef33",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "vision_browser_analyst": {
+      "routingGenerated": {
+        "mode": "GATHER",
+        "domain": [
+          "media"
+        ],
+        "deliverable": [
+          "evidence"
+        ],
+        "completes": [
+          "evidence"
+        ],
+        "inputModality": [
+          "image"
+        ],
+        "riskTier": "read_only",
+        "executionShape": "single_agent",
+        "surface": [
+          "browser"
+        ],
+        "oneLiner": "Reads captured browser snapshots and publishes exact page evidence; capability is visual interpretation -> media (surface=browser records the coupling); does not DRIVE the browser (browser_agent do...",
+        "sourceHash": "07710239d0601905",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated) — medium confidence",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "web_auditor_agent": {
+      "routingGenerated": {
+        "mode": "GATHER",
+        "domain": [
+          "security"
+        ],
+        "deliverable": [
+          "evidence"
+        ],
+        "completes": [
+          "evidence"
+        ],
+        "inputModality": [
+          "live_system"
+        ],
+        "riskTier": "mutating_external",
+        "executionShape": "single_agent",
+        "surface": [
+          "remote_infra"
+        ],
+        "oneLiner": "Authorized web-app auditing (findings=GATHER; active testing so risk=mutating_external). Brand tags nikto/sqlmap/gobuster (lint).",
+        "sourceHash": "396de5cd155e18e8",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "web_coder": {
+      "routingGenerated": {
+        "mode": "PRODUCE",
+        "domain": [
+          "software"
+        ],
+        "deliverable": [
+          "website"
+        ],
+        "completes": [
+          "website"
+        ],
+        "inputModality": [
+          "text"
+        ],
+        "riskTier": "reversible_write",
+        "executionShape": "single_agent",
+        "surface": [
+          "workspace"
+        ],
+        "oneLiner": "Hand-writes multi-file client-side front-ends (SPAs/dashboards); client-only. Overlaps content_writer (files vs Markdown blocks) and backend_coder (client vs server).",
+        "sourceHash": "c4f9431f9bf97446",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "web_task_coordinator": {
+      "routingGenerated": {
+        "mode": "ORCHESTRATE",
+        "domain": [
+          "research"
+        ],
+        "deliverable": [
+          "message"
+        ],
+        "completes": [],
+        "inputModality": [
+          "text"
+        ],
+        "riskTier": "read_only",
+        "executionShape": "needs_coordination",
+        "surface": [
+          "external_network"
+        ],
+        "oneLiner": "Thin freshness-only relay (delegates 1-2 live retrievals, no synthesis); borderline single_agent GATHER; tags are topic keywords (news/weather/stocks), not capabilities (lint). Unreachable by any s...",
+        "sourceHash": "d10c54ca04a221f6",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated) — low confidence",
+        "labeledAt": "2026-09-19"
+      }
+    }
+  }
+}

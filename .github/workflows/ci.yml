@@ -67,6 +67,16 @@ jobs:
       - name: Lint
         run: pnpm lint
 
+      # Config-validity gate: the compiled starlingai.json must build cleanly
+      # from config/ + workspace/ (catches schema drift and bad model ids before
+      # they reach a container). DEVPLAN P1 will extend this into a drift diff.
+      #
+      # Runs BEFORE the tests because the compiled catalog is an INPUT to them: the
+      # routing-taxonomy gate asserts that every shipped agent/scene/job carries a
+      # valid, non-stale label, which it can only do against the built config.
+      - name: Config builds cleanly
+        run: pnpm config:build
+
       # pnpm -r test runs each package's vitest from ITS OWN directory. This
       # matters: the core tests resolve config relative to packages/core, so
       # running them from the repo root produces false path-resolution failures.
@@ -117,11 +127,6 @@ jobs:
       - name: Package artifact security check
         run: pnpm security:pack
 
-      # Config-validity gate: the compiled starlingai.json must build cleanly
-      # from config/ + workspace/ (catches schema drift and bad model ids before
-      # they reach a container). DEVPLAN P1 will extend this into a drift diff.
-      - name: Config builds cleanly
-        run: pnpm config:build
 
       # The compiled config must be available and every public schema field must
       # have a production read site; this catches inert flags before docs or operators advertise them.

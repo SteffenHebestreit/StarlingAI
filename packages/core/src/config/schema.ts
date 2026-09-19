@@ -818,11 +818,104 @@ export const AgentComputeProfileSchema = z.object({
   gpuTier: z.enum(["none", "low", "medium", "high", "any"]).default("none"),
 }).optional();
 
+// ─── Routing taxonomy (IDCM) ──────────────────────────────────────────────────
+// One structured block shared by agents, scenes and jobs so all three compete in a
+// single retrieval pass and can be compared on the same axes.
+//
+// L1 is the EXECUTION MODE — what the request asks the swarm to DO — and L2 is the
+// CAPABILITY DOMAIN of the work required, never the topic of the request. Keeping those
+// axes apart is the fix for the failure ADR-009 records: "research the best image model"
+// embeds near its SUBJECT and ranked the image GENERATOR above the researcher, because a
+// single description vector carries no intent axis at all. Here it is GATHER/research, and
+// "image" is only the topic.
+//
+// The facets are orthogonal and are used as retrieval boosts and capability/approval
+// filters — never as tree branches. `completes` is the fit-check bit similarity cannot
+// carry: which deliverables this entry finishes ALONE, which is what "one agent can do
+// this whole task" means.
+
+/** What the request asks the swarm to DO. `converse` is classifier-only: no catalog entry
+ *  carries it — it is the never-empty abstain target for a direct answer. */
+export const RoutingModeSchema = z.enum(["GATHER", "PRODUCE", "ACT", "VERIFY", "ORCHESTRATE"]);
+
+/** The domain of the WORK required. `cross_domain` is a catalog-only sentinel for
+ *  domain-agnostic coordinators/reviewers; a request classifier never emits it. */
+export const RoutingDomainSchema = z.enum([
+  "research", "software", "authoring", "data", "media", "device_control",
+  "comms", "infra_ops", "security", "swarm_meta", "cross_domain",
+]);
+
+export const RoutingDeliverableSchema = z.enum([
+  "evidence", "prose_doc", "deck", "website", "code", "running_app", "chart", "diagram",
+  "image", "data_table", "plan", "verdict", "message", "config_change", "none",
+]);
+
+export const RoutingInputModalitySchema = z.enum([
+  "text", "url", "file_upload", "structured_data", "image", "codebase", "live_system", "none",
+]);
+
+/** MAXIMUM external impact the entry can reach — an approval signal and a routing filter,
+ *  never a routing branch. `sandbox_exec` is load-bearing: it records that an entry runs
+ *  code without that making it an ACT (nothing external changes). */
+export const RoutingRiskTierSchema = z.enum([
+  "read_only", "sandbox_exec", "reversible_write", "external_send", "mutating_external",
+]);
+
+/** The fit-vs-coordinate decision made explicit. */
+export const RoutingExecutionShapeSchema = z.enum([
+  "single_tool", "single_agent", "workflow", "needs_coordination",
+]);
+
+export const RoutingSurfaceSchema = z.enum([
+  "local_sandbox", "workspace", "external_network", "browser",
+  "desktop_host", "remote_infra", "user_channel", "swarm_internal",
+]);
+
+export const RoutingTaxonomySchema = z.object({
+  mode: RoutingModeSchema,
+  /** One primary domain; a second only when a distinct secondary domain is materially used. */
+  domain: z.array(RoutingDomainSchema).min(1).max(2),
+  deliverable: z.array(RoutingDeliverableSchema).default([]),
+  /** Deliverables this entry finishes ALONE — the single-agent fit check. */
+  completes: z.array(RoutingDeliverableSchema).default([]),
+  inputModality: z.array(RoutingInputModalitySchema).default([]),
+  riskTier: RoutingRiskTierSchema,
+  executionShape: RoutingExecutionShapeSchema,
+  surface: z.array(RoutingSurfaceSchema).default([]),
+});
+export type RoutingTaxonomy = z.infer<typeof RoutingTaxonomySchema>;
+
+/** Generated labels carry provenance so a stale label is detectable rather than silent. */
+export const RoutingTaxonomyGeneratedSchema = RoutingTaxonomySchema.extend({
+  /** One line: what this entry does, when to use it, and when NOT to. */
+  oneLiner: z.string().max(200).optional(),
+  /** Hash of the catalog text the labels were derived from; a mismatch means stale. */
+  sourceHash: z.string().optional(),
+  labeledBy: z.string().optional(),
+  labeledAt: z.string().optional(),
+});
+
 export const SubAgentConfigSchema = z.object({
   description: z.string(),                          // shown to orchestrator LLM
   capabilities: z.array(z.string()).default([]),   // explicit routing keywords, e.g. ["browser", "forms"]
   tags: z.array(z.string()).default([]),           // lightweight product/category tags for discovery
-  /** Product domain grouping — research | coding | browser | data | communication | workflow | reliability */
+  /** AUTHORED routing taxonomy. Always wins over `routingGenerated`. */
+  routing: RoutingTaxonomySchema.optional(),
+  /** GENERATED routing taxonomy — the seeded labels, overridable by `routing`. */
+  routingGenerated: RoutingTaxonomyGeneratedSchema.optional(),
+  /** One sentence naming the sibling this agent is NOT for. Sibling boundaries are what
+   *  make coarse-to-fine selection stable; several agents smuggle this into `description`
+   *  as a "Distinct from X" clause today. */
+  notFor: z.string().max(400).optional(),
+  /** 3-5 English sample requests. Embedding-only (never sent on the wire): user vocabulary
+   *  is the largest measured retrieval lever, and 48 of 49 descriptions currently smuggle
+   *  an "Example queries" bag inline for the same reason. Optional rather than defaulted:
+   *  a default would make the field REQUIRED in the inferred type and break every literal
+   *  that constructs an agent/scene/job config. */
+  examples: z.array(z.string()).optional(),
+  /** Product domain grouping — legacy free string, superseded by `routing.domain`.
+   *  NOTE: this is z.string(), NOT an enum — the previous comment claimed an enum the code
+   *  never enforced, and one live value ("desktop") was outside the claimed set. */
   domain: z.string().optional(),
   role: z.enum(["coordinator", "specialist", "reviewer", "generator", "supervisor", "planner"]).optional(),
   model: ModelConfigSchema.partial().optional(),    // overrides agents.defaults.model
@@ -1191,6 +1284,22 @@ export type WorkflowCatalogTriggers = z.infer<typeof WorkflowCatalogTriggersSche
 export const SceneConfigSchema = z.object({
   description: z.string(),                     // shown when listing scenes
   task: z.string().min(1),                     // the prompt injected into the session
+  /** AUTHORED routing taxonomy (executionShape is always "workflow" for a scene). Scenes
+   *  carry no tags field and 0 of 23 declare triggers, so today they have NO mechanical
+   *  routing signal at all — this is it. Always wins over `routingGenerated`. */
+  routing: RoutingTaxonomySchema.optional(),
+  /** GENERATED routing taxonomy — the seeded labels, overridable by `routing`. */
+  routingGenerated: RoutingTaxonomyGeneratedSchema.optional(),
+  /** One sentence naming what this scene is NOT for. */
+  notFor: z.string().max(400).optional(),
+  /** 3-5 English sample requests; embedding-only. */
+  examples: z.array(z.string()).optional(),
+  /** The agent this scene starts with. Declared, rather than regex-parsed out of a
+   *  "use X first" lead sentence in the task prose. */
+  entryAgent: z.string().optional(),
+  /** True when the scene must be handed verified evidence before it runs — declared
+   *  instead of inferred from a substring of the task text. */
+  requiresEvidence: z.boolean().optional(),
   webhookKey: z.string().min(16).optional(),   // shared secret for unauthenticated webhook calls
   params: z.record(SceneParamSchema).optional(),    // named {{param|default}} template vars
   allowedAgents: z.array(z.string()).optional(),    // restrict which sub-agents this scene may use
@@ -1258,6 +1367,16 @@ export const JobTriggerSchema = z.discriminatedUnion("type", [
 
 export const JobConfigSchema = z.object({
   description: z.string(),
+  /** AUTHORED routing taxonomy (executionShape "workflow"). A job's L1 is its TERMINAL
+   *  content step's L1: a broadcast tail is a delivery mechanism, captured by
+   *  riskTier=external_send, not a reason to classify a research pipeline as ACT. */
+  routing: RoutingTaxonomySchema.optional(),
+  /** GENERATED routing taxonomy — the seeded labels, overridable by `routing`. */
+  routingGenerated: RoutingTaxonomyGeneratedSchema.optional(),
+  /** One sentence naming what this job is NOT for. */
+  notFor: z.string().max(400).optional(),
+  /** 3-5 English sample requests; embedding-only. */
+  examples: z.array(z.string()).optional(),
   params: z.record(SceneParamSchema).optional(),
   steps: z.array(JobStepSchema).min(1),
   triggers: z.array(JobTriggerSchema).optional(),
