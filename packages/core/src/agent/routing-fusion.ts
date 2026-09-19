@@ -69,6 +69,15 @@ export interface StructuralFlags {
   afterClarify?: boolean;
   /** An explicit agent grant (a one-element allowedAgents from the `--agent` flag). */
   directiveAgent?: string;
+  /**
+   * What the turn physically CARRIES, as a taxonomy input modality.
+   *
+   * Structural and language-independent: an attachment is `file_upload`, a link is `url`,
+   * pasted source is `codebase`. It matters because an agent that cannot read what the turn
+   * carries is the wrong target however well it matches the topic — a document question
+   * should reach the agent that opens documents, not the one that searches the web.
+   */
+  inputClass?: RoutingTaxonomy["inputModality"][number];
 }
 
 export interface FusionTuning {
@@ -76,6 +85,8 @@ export interface FusionTuning {
   modeBonus: number;
   domainBonus: number;
   deliverableBonus: number;
+  /** Bonus when the entry declares it can read what the turn actually carries. */
+  inputModalityBonus: number;
   /** Hard ceiling on the total facet bonus, in fit units. */
   maxBonus: number;
   /** Margins over which K collapses to one or two candidates. */
@@ -100,6 +111,7 @@ export const DEFAULT_FUSION_TUNING: FusionTuning = {
   modeBonus: 0.10,
   domainBonus: 0.15,
   deliverableBonus: 0.05,
+  inputModalityBonus: 0.05,
   maxBonus: 0.30,
   decisiveMargin: 0.20,
   closeMargin: 0.10,
@@ -176,6 +188,7 @@ function facetBonus(
   taxonomy: RoutingTaxonomy | undefined,
   verdict: TriageVerdict,
   tuning: FusionTuning,
+  inputClass?: RoutingTaxonomy["inputModality"][number],
 ): { bonus: number; agreement: number | null } {
   if (!taxonomy) return { bonus: 0, agreement: null };
   const facets = verdictAsFacets(verdict);
@@ -186,6 +199,12 @@ function facetBonus(
     bonus += tuning.domainBonus;
   }
   if (facets.deliverable && taxonomy.deliverable.includes(facets.deliverable)) bonus += tuning.deliverableBonus;
+  // What the turn CARRIES, matched against what the entry declares it can read. Structural,
+  // so it applies with or without a classifier opinion, and still only a bonus: an entry that
+  // cannot read the attachment is demoted relative to one that can, never excluded.
+  if (inputClass && inputClass !== "text" && inputClass !== "none" && taxonomy.inputModality.includes(inputClass)) {
+    bonus += tuning.inputModalityBonus;
+  }
   return { bonus: Math.min(tuning.maxBonus, bonus) * verdict.confidence, agreement };
 }
 
@@ -271,7 +290,7 @@ export function fuseRouting(input: FusionInput): RoutedDecision {
   const scored: ScoredCandidate[] = admitted.map((candidate) => {
     const fit = toFit(candidate);
     const { bonus, agreement } = verdict
-      ? facetBonus(candidate.taxonomy, verdict, tuning)
+      ? facetBonus(candidate.taxonomy, verdict, tuning, flags.inputClass)
       : { bonus: 0, agreement: null };
     return { ...candidate, fit, fusedFit: Math.min(1, fit + bonus), agreement };
   }).sort((a, b) => (b.fusedFit - a.fusedFit) || a.name.localeCompare(b.name));

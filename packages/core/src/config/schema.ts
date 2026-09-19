@@ -903,10 +903,6 @@ export const SubAgentConfigSchema = z.object({
   routing: RoutingTaxonomySchema.optional(),
   /** GENERATED routing taxonomy — the seeded labels, overridable by `routing`. */
   routingGenerated: RoutingTaxonomyGeneratedSchema.optional(),
-  /** One sentence naming the sibling this agent is NOT for. Sibling boundaries are what
-   *  make coarse-to-fine selection stable; several agents smuggle this into `description`
-   *  as a "Distinct from X" clause today. */
-  notFor: z.string().max(400).optional(),
   /** 3-5 English sample requests. Embedding-only (never sent on the wire): user vocabulary
    *  is the largest measured retrieval lever, and 48 of 49 descriptions currently smuggle
    *  an "Example queries" bag inline for the same reason. Optional rather than defaulted:
@@ -1290,16 +1286,8 @@ export const SceneConfigSchema = z.object({
   routing: RoutingTaxonomySchema.optional(),
   /** GENERATED routing taxonomy — the seeded labels, overridable by `routing`. */
   routingGenerated: RoutingTaxonomyGeneratedSchema.optional(),
-  /** One sentence naming what this scene is NOT for. */
-  notFor: z.string().max(400).optional(),
   /** 3-5 English sample requests; embedding-only. */
   examples: z.array(z.string()).optional(),
-  /** The agent this scene starts with. Declared, rather than regex-parsed out of a
-   *  "use X first" lead sentence in the task prose. */
-  entryAgent: z.string().optional(),
-  /** True when the scene must be handed verified evidence before it runs — declared
-   *  instead of inferred from a substring of the task text. */
-  requiresEvidence: z.boolean().optional(),
   webhookKey: z.string().min(16).optional(),   // shared secret for unauthenticated webhook calls
   params: z.record(SceneParamSchema).optional(),    // named {{param|default}} template vars
   allowedAgents: z.array(z.string()).optional(),    // restrict which sub-agents this scene may use
@@ -1373,8 +1361,6 @@ export const JobConfigSchema = z.object({
   routing: RoutingTaxonomySchema.optional(),
   /** GENERATED routing taxonomy — the seeded labels, overridable by `routing`. */
   routingGenerated: RoutingTaxonomyGeneratedSchema.optional(),
-  /** One sentence naming what this job is NOT for. */
-  notFor: z.string().max(400).optional(),
   /** 3-5 English sample requests; embedding-only. */
   examples: z.array(z.string()).optional(),
   params: z.record(SceneParamSchema).optional(),

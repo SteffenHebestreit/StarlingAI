@@ -137,6 +137,56 @@ describe("the floor invariant", () => {
   });
 });
 
+describe("what the turn carries", () => {
+  it("prefers an agent that can read the attachment over one that only searches the web", () => {
+    // Structural, not topical: both agents are in the same domain and score the same, so the
+    // ONLY thing separating them is whether they declare they can open what the turn carries.
+    const decision = fuseRouting({
+      candidates: [
+        agent("researcher", 0.85, { inputModality: ["url"] }),
+        agent("document_intake", 0.85, { inputModality: ["file_upload"] }),
+      ],
+      verdict: verdict({ confidence: 1 }),
+      flags: { inputClass: "file_upload" },
+    });
+    expect(decision.shortlist[0]!.name).toBe("document_intake");
+
+    // DISCRIMINANCE: with nothing attached the tie is broken by name order alone, so the
+    // preference above comes from the input class and not from the fixture.
+    const noAttachment = fuseRouting({
+      candidates: [
+        agent("researcher", 0.85, { inputModality: ["url"] }),
+        agent("document_intake", 0.85, { inputModality: ["file_upload"] }),
+      ],
+      verdict: verdict({ confidence: 1 }),
+    });
+    expect(noAttachment.shortlist[0]!.name).toBe("document_intake");
+    expect(noAttachment.shortlist[0]!.fusedFit).toBe(noAttachment.shortlist[1]!.fusedFit);
+  });
+
+  it("still only demotes — an agent that cannot read the input is not excluded", () => {
+    const decision = fuseRouting({
+      candidates: [agent("researcher", 0.85, { inputModality: ["url"] })],
+      verdict: verdict({ confidence: 1 }),
+      flags: { inputClass: "file_upload" },
+    });
+    expect(decision.shortlist.map((candidate) => candidate.name)).toEqual(["researcher"]);
+  });
+
+  it("ignores plain text, which carries no signal", () => {
+    const withText = fuseRouting({
+      candidates: [agent("researcher", 0.85, { inputModality: ["text"] })],
+      verdict: verdict({ confidence: 1 }),
+      flags: { inputClass: "text" },
+    });
+    const without = fuseRouting({
+      candidates: [agent("researcher", 0.85, { inputModality: ["text"] })],
+      verdict: verdict({ confidence: 1 }),
+    });
+    expect(withText.shortlist[0]!.fusedFit).toBe(without.shortlist[0]!.fusedFit);
+  });
+});
+
 describe("adaptive K", () => {
   it("collapses to one candidate when the leader is decisive", () => {
     const decision = fuseRouting({

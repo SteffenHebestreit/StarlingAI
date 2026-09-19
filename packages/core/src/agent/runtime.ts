@@ -77,6 +77,7 @@ import { postProcessToolResult, type ToolResultPostProcessContext } from "./turn
 import { beginFactTurn } from "../swarm/memory.js";
 import {
   buildDynamicTurnGuidance,
+  hasSubstantialInlineTechnicalContent,
 } from "./intent-classifier.js";
 import { buildEffectiveResearchSubject } from "./source-sensitive-delegation.js";
 import { looksLikeDegenerateRepetition, collapseRepeatedMarkdownSections, looksLikeDegenerateLineRepetition, collapseRepeatedLines } from "./text-dedup.js";
@@ -1418,6 +1419,9 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
  */
 const TRIAGE_TIMEOUT_MS = 8000;
 
+/** A link in the request. Structural; the same test the dynamic-guidance URL signal uses. */
+const TURN_URL_RE = /https?:\/\/[^\s<>"'`)\]]+/i;
+
 /**
  * Two lines of the previous exchange, so a follow-up that carries no subject of its own
  * ("now do the other one") is labelled against what it refers to.
@@ -1550,6 +1554,17 @@ async function _runTurn(
 
   const detectedDynamicGuidance = buildDynamicTurnGuidance(userMessage);
   const hasTurnAttachments = Boolean(opts.userAttachments?.length);
+  // Structural input class for routing: attachments outrank a link, a link outranks pasted
+  // source, and plain text carries no signal at all. Language-independent by construction —
+  // a URL is a URL and an attachment is an attachment in every language.
+  const turnInputClass: "file_upload" | "url" | "codebase" | "text" =
+    hasTurnAttachments
+      ? "file_upload"
+      : TURN_URL_RE.test(userMessage)
+        ? "url"
+        : hasSubstantialInlineTechnicalContent(userMessage)
+          ? "codebase"
+          : "text";
 
   // ── Receptionist fast lane ────────────────────────────────────────────────
   // Opt-in first-contact gatekeeper (config.receptionist.enabled). When no task
@@ -1721,6 +1736,11 @@ async function _runTurn(
         documentGrounded: documentRagFoundDocs,
         reusePriorEvidence: reusePriorDelegateEvidenceForFollowUp,
         autonomous: opts.autoApprove === true,
+        // What the turn physically carries, as a taxonomy input modality. Purely
+        // structural — an attachment, a link, or pasted source — and the signal the fusion
+        // uses to prefer an agent that can actually READ the input over one that merely
+        // matches the topic.
+        inputClass: turnInputClass,
       },
     }, { sessionId: session.id, severity: "info" });
   }
