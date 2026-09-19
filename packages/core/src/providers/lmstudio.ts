@@ -228,6 +228,17 @@ export interface CompletionCallOptions {
    *  read it on the non-streaming path too, and the forced-tool-call callers reach the
    *  model through completeViaStream, which is typed on this interface. */
   toolChoice?: "auto" | "required" | "none";
+  /**
+   * Constrain the response to a JSON Schema for THIS call (OpenAI-compatible
+   * `response_format`; llama.cpp implements it natively as a grammar).
+   *
+   * A classifier whose contract is "reply with JSON only" is otherwise enforced by prose
+   * in the prompt, and on this backend a forced call that returns prose is a FAILED call,
+   * not something to continue. Grammar-constraining the shape removes the failure mode
+   * rather than detecting it. Ignored by providers that do not support it, so a caller
+   * must still parse defensively.
+   */
+  responseFormat?: { name: string; schema: Record<string, unknown>; strict?: boolean };
 }
 
 export interface StreamCallOptions extends CompletionCallOptions {
@@ -1696,6 +1707,18 @@ export class LMStudioProvider {
             // Same default and the same per-call override as the streaming path: the
             // forced-tool-call callers (options.toolChoice "required") land on BOTH.
             tool_choice: openAITools.length > 0 ? (options?.toolChoice ?? "auto") : undefined,
+            ...(options?.responseFormat
+              ? {
+                  response_format: {
+                    type: "json_schema",
+                    json_schema: {
+                      name: options.responseFormat.name,
+                      schema: options.responseFormat.schema,
+                      strict: options.responseFormat.strict ?? true,
+                    },
+                  },
+                }
+              : {}),
             temperature: effectiveTemp,
             max_tokens: this.resolveMaxTokens(messages, tools, options?.maxTokens),
             ...(effectiveTopP !== undefined && { top_p: effectiveTopP }),
@@ -2100,6 +2123,18 @@ export class LMStudioProvider {
         // (source-sensitive / required-research) — that wasted full draft is a
         // multi-minute cost on the slow local model (audit 5d51862f).
         tool_choice: openAITools.length > 0 ? (options?.toolChoice ?? "auto") : undefined,
+        ...(options?.responseFormat
+          ? {
+              response_format: {
+                type: "json_schema",
+                json_schema: {
+                  name: options.responseFormat.name,
+                  schema: options.responseFormat.schema,
+                  strict: options.responseFormat.strict ?? true,
+                },
+              },
+            }
+          : {}),
         temperature: streamEffectiveTemp,
         max_tokens: this.resolveMaxTokens(messages, tools, options?.maxTokens),
         ...(streamEffectiveTopP !== undefined && { top_p: streamEffectiveTopP }),
