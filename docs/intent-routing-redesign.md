@@ -941,3 +941,103 @@ passes on its own insertion order.
 - The canary's capability probes are short abstract noun phrases ("tl;dr creation",
   "tool routing", "handoff packets") and carry 32 of the 36 probe failures, while description
   probes carry 2. Whether that is a catalog finding or a probe-design artefact is open.
+
+## 14. The mode matrix on 138 queries (2026-09-20)
+
+138 user queries over all 49 agents, 88 German and 50 English, run inside the deployment
+network so the reranker participates. Same corpus, same catalog, one variable per column.
+
+| | baseline | legacy blend | + classifier | + restatement |
+|---|---|---|---|---|
+| recall@K | 87/138 (63%) | 76/138 (55%) | 87/138 (63%) | **107/138 (78%)** |
+| top-1 | 67/138 (49%) | 67/138 (49%) | 67/138 (49%) | **81/138 (59%)** |
+| found nothing | 29 (21%) | 29 (21%) | 29 (21%) | **9 (7%)** |
+| candidates admitted | 486 | 177 | 485 | 678 |
+| median ms/case | 108 | 87 | 3,306 | 3,417 |
+
+Zero cases were flagged as lexically leaked, so the corpus is measuring routing rather than
+string overlap.
+
+### The English restatement is the single biggest win available
+
+Twenty cases that retrieved NOTHING from the user's own words retrieve correctly from the
+classifier's English restatement. No case regressed. German recall goes 58% to 81% and German
+turns that find nothing drop from 26 of 88 to 6.
+
+| | German | English |
+|---|---|---|
+| passed, baseline | 51/88 (58%) | 36/50 (72%) |
+| passed, with restatement | 71/88 (81%) | 36/50 (72%) |
+| found nothing, baseline | 26/88 (30%) | 3/50 (6%) |
+| found nothing, with restatement | 6/88 (7%) | 3/50 (6%) |
+
+English is untouched, which is the design: the second pass only fires for a non-English
+request. It was attempted on 74 cases, rescued 20, widened 49 that already worked, and left 2
+still empty.
+
+### The classifier's LABELS are inert on retrieval, and they are not cheap
+
+This is the result worth arguing with, so here is the check rather than the conclusion.
+Turning the facet triage on changed the admitted SET in 1 of 138 cases, the shortlist ORDER
+in 1, and the top-1 choice in **none**. Recall, top-1 and the gated count are identical to the
+baseline to the case. It cost 108 ms/case to 3,306 ms/case, a thirty-fold increase.
+
+That is not a measurement artefact of recall@K. The invariant says facets never admit and
+never evict, so they cannot move recall by construction — but they are free to re-order, and
+the ranked lists were compared directly. They do not.
+
+The reason is structural: every admitted candidate was retrieved for the SAME query, so they
+share a domain and a mode, and a bonus that is equal across the shortlist is not a bonus. The
+facet weights were set before any of this was measured.
+
+So on this corpus the classifier's entire measurable value is the restatement it produces.
+That does not condemn the labels — they are aimed at the BRANCH decision, which this eval
+does not score because no live case carries a branch expectation — but it does mean the
+labels have not yet earned their 3.3 seconds, and the fusion weights should be fitted to
+shadow data before anyone assumes they will.
+
+### One number to look at before turning anything on
+
+The branch the fusion chose, over all 138:
+
+| branch | share |
+|---|---|
+| coordinate | 61 (44%) |
+| general | 50 (36%) |
+| clarify | 10 (7%) |
+| single_agent | 9 (7%) |
+| answer_direct | 8 (6%) |
+
+Forty-four percent coordinating is a lot. Coordination buys an orchestrator call and a plan,
+and the literature this design cites is blunt that it loses most of its value on sequential
+work. Whether that rate is right is exactly what the shadow gate is for; it should not be
+switched on as a product default first.
+
+### What fails in every mode
+
+Nine cases retrieve nothing whatever the mode, and they cluster by SHAPE rather than by
+language or length. Query length does not predict failure at all: German cases that found
+nothing average 17.3 words against 17.7 for those that did.
+
+| shape | cases | found nothing |
+|---|---|---|
+| bare question | 14 | 50% |
+| coordination request | 11 | 45% |
+| infrastructure request | 9 | 44% |
+| imperative | 33 | 18% |
+| code request | 13 | 8% |
+| security request | 12 | 0% |
+
+A bare question names no action, and the catalog is written in action terms. That is a
+catalog-shape finding, not a retrieval bug, and it is the one the restatement helps with most:
+the classifier turns "koennen wir die kundenliste einfach an den externen anbieter geben" into
+a sentence that names what is being asked for.
+
+### What this run did NOT establish
+
+- No case in the live corpus carries a branch or source-sensitivity expectation, so branch
+  accuracy is unmeasured. The branch distribution above is a distribution, not a score.
+- The corpus expectations were written by reading the catalog, then cut and rewritten by a
+  second reader. They are better than a guess and they are not ground truth.
+- The second pass is measured as an eval experiment. It is not wired into a turn.
+

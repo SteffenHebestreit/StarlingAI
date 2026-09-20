@@ -150,6 +150,23 @@ docker rm -f sai-probe
 Set `SAI_CONFIG_PATH` INSIDE the container. Setting it on `docker run` from Git Bash rewrites
 `/app/...` into a Windows path and the run silently loads a zero-agent config.
 
+### The mode matrix (2026-09-20, 138 cases, inside the network)
+
+| | baseline | legacy blend | + classifier | + restatement |
+|---|---|---|---|---|
+| recall@K | 87/138 | 76/138 | 87/138 | 107/138 |
+| top-1 | 67/138 | 67/138 | 67/138 | 81/138 |
+| found nothing | 29 | 29 | 29 | 9 |
+| median ms/case | 108 | 87 | 3,306 | 3,417 |
+
+The restatement pass rescues 20 cases and regresses none; German recall goes 58% to 81%. The
+classifier's LABELS change the admitted set in 1 case of 138 and the top-1 choice in none, at
+thirty times the latency — see section 13 of the plan doc before drawing a conclusion from
+that. The legacy blend loses 11 cases and gains none.
+
+To reproduce, run each mode in the container recipe below, varying only
+`retrieval.reranker.blendMode` and the `--triage` / `--second-pass` flags.
+
 ### The measured baseline (2026-09-20)
 
 Run inside the network, with the reranker answering 245 of 245 queries:
