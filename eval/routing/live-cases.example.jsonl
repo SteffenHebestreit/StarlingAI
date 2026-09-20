@@ -1,0 +1,36 @@
+// EXAMPLE live routing cases — copy to live-cases.jsonl and edit for YOUR catalog.
+//
+// Run: pnpm routing:eval -- --mode live            (add --triage for branch checks)
+//
+// Every expectation here is a HYPOTHESIS until you run it. They were written from the agent
+// NAMES in a 49-agent catalog, not from a run, so treat the first run as the labelling pass:
+// where the router disagrees, decide which of you is wrong before changing either.
+//
+// Two rules kept the queries honest, and should keep yours honest too:
+//   1. Write what a USER types, not what the agent's description says. A query assembled
+//      from the description passes under a broken router; the eval flags those as
+//      LEXICALLY LEAKED, and a flagged case is a case to rewrite.
+//   2. Prefer `acceptable` over `target`. Several specialists are often defensible, and
+//      demanding one exact name measures the labeller's taste, not the routing.
+{"id":"live-find-call-site","query":"wo entscheiden wir eigentlich ob eine delegation zweimal laufen darf?","language":"de","expect":{"acceptable":["code_analyst","coder"],"admitted":true}}
+{"id":"live-write-failing-test","query":"bau mir einen test der den fehler von gestern nachstellt","language":"de","expect":{"acceptable":["coder","backend_coder","code_analyst"],"admitted":true}}
+{"id":"live-commit-and-branch","query":"leg einen branch an und commit das was ich gerade geaendert habe","language":"de","expect":{"acceptable":["git_developer","coder"],"admitted":true}}
+{"id":"live-what-changed-review","query":"schau dir die letzten aenderungen an und sag mir was daran schiefgehen kann","language":"de","expect":{"acceptable":["diff_reviewer","code_analyst","quality_supervisor"],"admitted":true}}
+{"id":"live-price-lookup","query":"was kostet das kleinste modell von denen aktuell pro million token?","language":"de","expect":{"acceptable":["researcher","source_verifier"],"admitted":true},"flags":{}}
+{"id":"live-paper-sources","query":"ich brauche belastbare quellen zu dem thema, mit zitaten die ich nachschlagen kann","language":"de","expect":{"acceptable":["researcher","source_verifier","evidence_analyst"],"admitted":true}}
+{"id":"live-long-doc-summary","query":"fass mir das lange ding hier auf eine seite zusammen","language":"de","expect":{"acceptable":["summarizer","document_intake","content_writer"],"admitted":true}}
+{"id":"live-landing-page","query":"mach mir eine seite wo man das produkt sieht und sich eintragen kann","language":"de","expect":{"acceptable":["web_coder","content_writer"],"admitted":true}}
+{"id":"live-chart-from-numbers","query":"zeig mir die zahlen als kurve ueber die letzten monate","language":"de","expect":{"acceptable":["chart_designer","data_analyst"],"admitted":true}}
+{"id":"live-architecture-picture","query":"zeichne mal auf wie die teile miteinander reden","language":"de","expect":{"acceptable":["diagram_designer"],"admitted":true}}
+{"id":"live-sql-question","query":"wie komme ich an alle eintraege die in den letzten sieben tagen dazugekommen sind?","language":"de","expect":{"acceptable":["sql_specialist","data_analyst"],"admitted":true}}
+{"id":"live-log-hunt","query":"irgendwas haengt seit heute frueh, finde raus was","language":"de","expect":{"acceptable":["log_analyst","ops_triage","infrastructure_agent"],"admitted":true}}
+{"id":"live-server-restart","query":"der dienst auf der maschine muss neu gestartet werden","language":"de","expect":{"acceptable":["infrastructure_agent","ops_triage","devops_coordinator","shell_agent"],"admitted":true}}
+{"id":"live-check-a-site","query":"guck dir die seite an und sag mir ob da was offen steht was nicht offen stehen sollte","language":"de","expect":{"acceptable":["web_auditor_agent","recon_agent","pentest_coordinator"],"admitted":true}}
+{"id":"live-fill-a-form","query":"trag das im portal ein, login hab ich dir hinterlegt","language":"de","expect":{"acceptable":["browser_agent","computer_use_agent"],"admitted":true}}
+{"id":"live-write-the-mail","query":"schreib denen zurueck dass wir den termin nicht halten koennen","language":"de","expect":{"acceptable":["mail_agent","content_writer","notification_agent"],"admitted":true}}
+{"id":"live-find-a-slot","query":"wann haetten wir naechste woche gemeinsam zwei stunden?","language":"de","expect":{"acceptable":["calendar_agent","meeting_briefing_agent"],"admitted":true}}
+{"id":"live-new-agent","query":"ich braeuchte jemanden im schwarm der sich nur um die uebersetzungen kuemmert","language":"de","expect":{"acceptable":["swarm_maintainer","tool_developer"],"admitted":true}}
+{"id":"live-picture-for-the-post","query":"mach ein bild dazu, quadratisch, fuer den post","language":"de","expect":{"acceptable":["image_creator","image_sourcer"],"admitted":true}}
+{"id":"live-english-find-symbol","query":"which module decides how long a delegated run is allowed to take?","language":"en","expect":{"acceptable":["code_analyst","coder"],"admitted":true}}
+{"id":"live-english-research","query":"who is actually shipping this in production today, and what did it cost them?","language":"en","expect":{"acceptable":["researcher","evidence_analyst","source_verifier"],"admitted":true}}
+{"id":"live-english-plan","query":"we want to move all three services onto the new queue without downtime","language":"en","expect":{"acceptable":["project_planner","mission_coordinator","devops_coordinator"],"admitted":true}}

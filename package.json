@@ -40,7 +40,9 @@
     "routing:canary": "pnpm --filter @starlingai/core routing:canary",
     "packs:evaluate": "pnpm --filter @starlingai/core packs:evaluate",
     "docs:reference": "pnpm --filter @starlingai/core docs:reference",
-    "runtime-guidance:evaluate": "pnpm --filter @starlingai/core runtime-guidance:evaluate"
+    "runtime-guidance:evaluate": "pnpm --filter @starlingai/core runtime-guidance:evaluate",
+    "routing:eval": "pnpm --filter @starlingai/core routing:eval",
+    "routing:eval:discriminance": "pnpm --filter @starlingai/core routing:eval:discriminance"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

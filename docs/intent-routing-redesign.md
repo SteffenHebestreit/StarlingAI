@@ -597,10 +597,11 @@ Two judge-level corrections applied to every design: `ToolContext.allowedAgents`
 - Prior design docs this supersedes in part: `docs/staged-orchestration.md` (S2 lean planning prompt, S4 capsule), ADR-009.
 - Session artefacts (scratchpad, may be gone): `phase1/*.json` (11 codebase maps, 6 research syntheses), `phase2/*.json` (4 designs, 3 judge reports, 2 taxonomies + merge, synthesis, 4 critiques), `CONSTRAINTS.md`.
 
-## 12. Implementation status (updated 2026-09-19)
+## 12. Implementation status (updated 2026-09-20)
 
-Five commits on `develop`: `99bbbdc`, `dfb9b15`, `cbd3116`, `53e3e99`, `76aa67a`. Core suite
-3662 passing; the one failure is `gateway.integration > resolves agent routing`, which fails
+Ten commits on `develop`: `99bbbdc`, `dfb9b15`, `cbd3116`, `53e3e99`, `76aa67a`, `7ab2f68`,
+`3bac1ae`, `a1f3047`, plus the eval slice below. Core suite
+3691 passing; the one failure is `gateway.integration > resolves agent routing`, which fails
 identically at the parent commit (known local-only). Lint clean, typecheck clean, and the
 config feature-registry gate reports zero unreferenced fields.
 
@@ -613,22 +614,25 @@ config feature-registry gate reports zero unreferenced fields.
 | S2 | `orchestration.stableToolBlock="freeze"` — the turn's tool array is byte-identical across every iteration; the discovery-withheld and forced-orchestration narrowings move to call-site refusal, logged as `tool_restriction_refused` | `off` |
 | S3 | The IDCM taxonomy on the schema for agents, scenes and jobs; seed labels for all 88 entries in `workspace/{agents,scenes,jobs}/59-routing.generated.jsonc`; `resolveRoutingTaxonomy`, `lintTaxonomy` (a CI gate against the real catalog) and `facetAgreement` | authored `routing` overrides generated |
 | S4 | `agent/triage.ts` (catalog-blind classification call, frozen versioned prefix, strict parser, grammar-constrained output) wired into the turn; `routing_triage_decided` carries the verdict and its agreement with the judge; a routing-tier preset fallback so the lane runs under a model preset at all | `orchestration.routingTriage: "off"` \| `"shadow"` |
+| P1/P3 | `agent/routing-eval.ts` + `pnpm routing:eval`: a DECISION mode that is offline and deterministic (24 committed cases, run in CI) and a LIVE mode against the real catalog and embedding backend. A gated case counts as a miss, a run that scores nothing is INCONCLUSIVE rather than green, and a query that echoes its target's own catalog text is flagged as lexically leaked. `pnpm routing:eval:discriminance` reverts each guarded fix in turn and fails if the case named for it survives | none (commands) |
 | S5 (partial) | `agent/routing-fusion.ts` — fit-space unification, capped confidence-scaled facet bonus, adaptive K, the full ordered branch rule set, `needsCoordination`, `workflowDispatchable`. PURE AND UNWIRED: nothing calls it in a turn yet | n/a |
 
 ### Not built
 
 - The `"on"` value of `routingTriage`: the fusion exists but no turn consumes a `RoutedDecision`. The brief, the branch-driven prompt shapes and the loadouts are S5-S7 and are untouched.
 - Everything in phases C, D and E: the session block, branch loadouts, the scoped coordinator handoff, mechanical dispatch, and every prompt-text change. The always-on head is byte-for-byte what it was.
-- The golden set, the offline `routing` plan kind and the routing-live pack (P2, P3, P5). The canary (P1) is the only new eval that runs.
+- The routing-live pack (P5) and a golden set drawn from REAL traffic (P2). `eval/routing/live-cases.example.jsonl` is a starting point written from agent names, not from a run: every expectation in it is a hypothesis until `--mode live` is run against a stack.
 - `notFor`, `entryAgent` and `requiresEvidence` were removed from the schema after the feature-registry gate flagged them: their consumers belong to later slices, and a field with no reader is an inert flag.
 
 ### What to do next, in order
 
-1. Run `pnpm routing:canary -- --update` against the live stack to record the first snapshot. Until it exists there is no baseline, and the canary reports INCONCLUSIVE rather than passing. It prints the catalog it loaded and its agent count; if that is not the 49-agent one, stop and run `pnpm config:build`.
-2. Set `orchestration.routingTierPresetFallback: true` FIRST if the deployment runs a model preset. Under a preset the tier resolver returns null, so the upfront judge and the receptionist never execute — and the shadow gate is defined on agreement with that judge. Without this, every row reports `judgeComparable: false` and the gate has no data. It is a real behaviour change: the judge starts arming forced research on turns where it has been silent.
-3. Turn on `orchestration.routingTriage: "shadow"` and collect a few hundred turns. The S4 gate is computable from `routing_triage_decided` alone: `sourceSensitiveAgrees` over rows with `judgeComparable: true` (use `judgeStatus` to see why the others were excluded — `not_started`, `no_answer`, `verdict_unwanted`), the parse-failure rate from `ok`, and latency from `elapsedMs`.
-4. A/B `stableToolBlock: "freeze"` against `"off"` on cold-prefill rows per turn, now that `provider_model_call` rows join to their turn and carry `callSite`.
-5. Only then wire the fusion (`routingTriage: "on"`), because its bonus weights and thresholds should be fitted against the shadow data rather than guessed.
+1. Run `pnpm routing:eval` — it needs nothing but this repo, and it is the cheapest way to confirm the fusion still behaves before touching a deployment.
+2. Run `pnpm routing:canary -- --update` against the live stack to record the first snapshot. Until it exists there is no baseline, and the canary reports INCONCLUSIVE rather than passing. It prints the catalog it loaded and its agent count; if that is not the 49-agent one, stop and run `pnpm config:build`.
+3. Set `orchestration.routingTierPresetFallback: true` FIRST if the deployment runs a model preset. Under a preset the tier resolver returns null, so the upfront judge and the receptionist never execute — and the shadow gate is defined on agreement with that judge. Without this, every row reports `judgeComparable: false` and the gate has no data. It is a real behaviour change: the judge starts arming forced research on turns where it has been silent.
+4. Turn on `orchestration.routingTriage: "shadow"` and collect a few hundred turns. The S4 gate is computable from `routing_triage_decided` alone: `sourceSensitiveAgrees` over rows with `judgeComparable: true` (use `judgeStatus` to see why the others were excluded — `not_started`, `no_answer`, `verdict_unwanted`), the parse-failure rate from `ok`, and latency from `elapsedMs`.
+5. A/B `stableToolBlock: "freeze"` against `"off"` on cold-prefill rows per turn, now that `provider_model_call` rows join to their turn and carry `callSite`.
+6. Copy `live-cases.example.jsonl` to `live-cases.jsonl`, correct it against what a live run actually produces, and keep it as the retrieval gate.
+7. Only then wire the fusion (`routingTriage: "on"`), because its bonus weights and thresholds should be fitted against the shadow data rather than guessed. The decision suite is where each weight change has to prove it did not break a rule.
 
 ### What the adversarial review changed after the first five commits
 
@@ -654,6 +658,22 @@ ignored `task`; and the canary loaded a zero-agent stub and blamed the operator'
 
 Fourteen verification agents died on a session limit, so fourteen findings remain unverified;
 the distinct ones among them were checked by hand and are either fixed above or refuted.
+
+### What the decision suite found
+
+Building it surfaced one behaviour worth stating rather than leaving implicit: **K is cut
+before rule 5 sees the shortlist**, so a decisively-ahead but undispatchable workflow does
+not hand the dispatch to a much weaker one behind it. That is the conservative direction and
+it is now pinned by `decisive-undispatchable-leader-does-not-hand-off`, next to the case
+that pins the opposite behaviour when the two are close.
+
+The discriminance harness also caught three cases of mine that passed for the wrong reason:
+the saturated-pair case only guarded the margin basis and not the sort basis (clamping cannot
+invert an order, only flatten it into a tie, so the stronger candidate now sorts last
+alphabetically); the deck-hijack case carried a verdict that never voted `workflow`, so the
+bypass it was meant to catch was inert; and the external-send case also declared a user
+channel, so either gate alone covered for the other. All three are fixed, and each guarded
+mechanism now has a case that fails when only that mechanism is reverted.
 
 ### Decisions from section 10 that the implementation already settled
 

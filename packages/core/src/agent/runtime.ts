@@ -1500,7 +1500,7 @@ function buildPriorTurnDigest(session: AgentSession): string | undefined {
  * the caller's OWN merged model config carrying the tier's controls, so the call still
  * happens and the deployment is measurable.
  */
-function resolveRoutingTierProvider(): ChatProvider {
+export function resolveRoutingTierProvider(): ChatProvider {
   return getChatProviderForTier("routing")
     ?? createChatProvider({
       ...applyActiveModelPreset(getConfig().agents.defaults.model),
