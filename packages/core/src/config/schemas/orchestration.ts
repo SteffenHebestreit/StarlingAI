@@ -699,6 +699,28 @@ export const OrchestrationSchema = z.object({
    * Costs one small call per escalated turn in shadow, which is why it is default "off".
    */
   routingTriage: z.enum(["off", "shadow"]).default("off"),
+  /**
+   * Let routing-tier work run under an active model preset.
+   *
+   * `getChatProviderForTier` returns null while a preset is active — deliberately, because
+   * building a tier provider inside the resolver breaks scope, config and breaker state
+   * (see providers/index.ts). The consequence is that on a preset deployment the
+   * receptionist fast lane and the upfront source-sensitivity judge never execute AT ALL:
+   * the live audit recorded 0 of 5 fast-lane attempts, and not one logged a reason.
+   *
+   * When true, those two resolve a provider at the CALL SITE from the turn's own merged
+   * model config carrying the tier's controls — the pattern the codebase already sanctions
+   * for its other tier calls. This is a real behaviour change on a preset deployment: the
+   * judge starts arming forced research on turns where it previously stayed silent, which
+   * is what it was written to do but has not been doing there.
+   *
+   * It is also what makes the routing-triage shadow gate measurable: without the judge
+   * running, every shadow row reports `judgeComparable: false` and the agreement statistic
+   * the gate is defined on has no data.
+   *
+   * Default off — behaviour change on exactly the deployments it applies to.
+   */
+  routingTierPresetFallback: z.boolean().default(false),
   /** When true, a turn whose ONLY orchestration was a single successful delegation that
    *  returned a complete, presentable deliverable surfaces that deliverable directly instead
    *  of running a SECOND full synthesis pass over it on the main assistant — which on the slow

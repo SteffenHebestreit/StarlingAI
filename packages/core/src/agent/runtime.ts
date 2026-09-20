@@ -1550,12 +1550,18 @@ function startUpfrontSourceSensitiveClassifier(
   userMessage: string,
   turnSignal: AbortSignal,
 ): { verdict: Promise<string>; abort: () => void } | null {
-  const classifierProvider = getChatProviderForTier("routing");
+  // Under a model preset the tier resolver returns null for every tier, so without the
+  // fallback this judge simply does not run on a preset deployment — and its verdict is the
+  // single switch that arms forced research.
+  const classifierProvider = effectiveOrchestration().routingTierPresetFallback === true
+    ? resolveRoutingTierProvider()
+    : getChatProviderForTier("routing");
   if (!classifierProvider) return null;
   const abortController = new AbortController();
-  const verdict = classifierProvider
-    .complete(buildSourceSensitiveQuestionJudgeMessages(userMessage), [], AbortSignal.any([turnSignal, abortController.signal]))
-    .then((resp) => resp.content ?? "");
+  const verdict = runWithCallAttribution({ callSite: "routing_tier", agentName: "source_sensitivity_judge" }, () =>
+    classifierProvider
+      .complete(buildSourceSensitiveQuestionJudgeMessages(userMessage), [], AbortSignal.any([turnSignal, abortController.signal]))
+      .then((resp) => resp.content ?? ""));
   verdict.catch(() => { /* consumed at the await site, or discarded after abort() */ });
   return { verdict, abort: () => abortController.abort() };
 }

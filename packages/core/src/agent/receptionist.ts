@@ -23,7 +23,8 @@
  */
 
 import { getConfig } from "../config/loader.js";
-import { getChatProviderForTier } from "../providers/index.js";
+import { applyActiveModelPreset, createChatProvider, getChatProviderForTier, tierModelDefaults } from "../providers/index.js";
+import { effectiveOrchestration } from "../runtime/effort-context.js";
 import { scanOutput } from "../guardrails/output.js";
 import { answerAssertsSpecifics } from "./citation-honesty.js";
 import { buildDynamicTurnGuidance } from "./intent-classifier.js";
@@ -347,9 +348,19 @@ export async function tryReceptionistFastLaneDetailed(
   // cheaply, and on a graded-thinking model the default effort would otherwise spend
   // ~1.3k reasoning characters deciding how to say hello. Families that do not honor
   // the field ignore it, so this is safe across model swaps.
-  const provider = getChatProviderForTier("routing", { reasoningEffort: "none" });
-  // Under a model preset this returns null for every turn, so the lane never runs at all
-  // — the reason the live deployment recorded 0 of 5 hits. Reported rather than swallowed.
+  // Under a model preset the tier resolver returns null for every turn, so the lane never
+  // runs at all — the reason the live deployment recorded 0 of 5 hits. The fallback builds a
+  // provider from the caller's own merged config carrying the tier's controls; it is
+  // flag-gated because making the fast lane start answering on a deployment where it never
+  // has is a behaviour change, not a repair.
+  const provider = effectiveOrchestration().routingTierPresetFallback === true
+    ? (getChatProviderForTier("routing", { reasoningEffort: "none" })
+      ?? createChatProvider({
+        ...applyActiveModelPreset(config.agents.defaults.model),
+        ...tierModelDefaults("routing"),
+        reasoningEffort: "none",
+      }))
+    : getChatProviderForTier("routing", { reasoningEffort: "none" });
   if (!provider) return { handled: false, escalateReason: "no-routing-tier" };
 
   let capsule = "";

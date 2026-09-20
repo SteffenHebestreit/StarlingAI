@@ -70,7 +70,10 @@ const VERDICT = {
   confidence: 0.88,
 };
 
-async function loadRuntime(routingTriage: "off" | "shadow", opts: { routingTier?: boolean } = {}) {
+async function loadRuntime(
+  routingTriage: "off" | "shadow",
+  opts: { routingTier?: boolean; presetFallback?: boolean } = {},
+) {
   tierState.available = opts.routingTier ?? true;
   const tempDir = mkdtempSync(join(tmpdir(), "starlingai-triage-shadow-"));
   tempConfigDirs.push(tempDir);
@@ -79,6 +82,7 @@ async function loadRuntime(routingTriage: "off" | "shadow", opts: { routingTier?
     agents: { mainAssistant: { toolMode: "orchestration_only" } },
     orchestration: {
       routingTriage,
+      routingTierPresetFallback: opts.presetFallback ?? false,
       // The judge is what shadow compares against, so it must be on.
       upfrontSourceSensitiveClassifier: true,
       planFirst: false,
@@ -250,6 +254,62 @@ describe("routingTriage: shadow", () => {
     expect(data.judgeStatus).toBe("no_answer");
     expect(data.judgeVerdict).toBeNull();
     expect(data.sourceSensitiveAgrees).toBeNull();
+  });
+
+  it("routingTierPresetFallback makes the JUDGE reachable too, so the gate has data", async () => {
+    // The asymmetry this closes: the triage resolved its provider through the call-site
+    // fallback while the judge still went through the tier resolver, which returns null
+    // under any model preset. On a preset deployment every shadow row then read
+    // judgeComparable:false — the agreement statistic the S4 gate is defined on had no
+    // data at all, on exactly the deployment carrying the traffic.
+    const { AgentSession, resetSessionsForTests, runTurn } = await loadRuntime("shadow", {
+      routingTier: false, presetFallback: true,
+    });
+    resetSessionsForTests();
+    completeMock.mockImplementation(async (_messages: unknown, _tools: unknown, _signal: unknown, options?: { responseFormat?: { name?: string } }) => ({
+      content: options?.responseFormat?.name === "routing_triage" ? JSON.stringify(VERDICT) : "VERDICT: yes",
+      tool_calls: [],
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      finishReason: "stop",
+    }));
+    streamMock.mockImplementation(() => textStream("Here is the answer."));
+
+    await runTurn({
+      session: new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." }),
+      userMessage: QUESTION,
+    });
+
+    const data = triageRow() as unknown as {
+      judgeComparable: boolean; judgeStatus: string; sourceSensitiveAgrees: boolean | null;
+    };
+    expect(data.judgeComparable).toBe(true);
+    expect(data.judgeStatus).toBe("answered");
+    expect(data.sourceSensitiveAgrees).toBe(true);
+  });
+
+  it("DISCRIMINANCE: with the fallback OFF and no tier, the judge stays unreachable", async () => {
+    // Same configuration minus the flag. If this also reported a comparable judge, the
+    // test above would be measuring the mock rather than the fallback.
+    const { AgentSession, resetSessionsForTests, runTurn } = await loadRuntime("shadow", {
+      routingTier: false, presetFallback: false,
+    });
+    resetSessionsForTests();
+    completeMock.mockImplementation(async (_messages: unknown, _tools: unknown, _signal: unknown, options?: { responseFormat?: { name?: string } }) => ({
+      content: options?.responseFormat?.name === "routing_triage" ? JSON.stringify(VERDICT) : "VERDICT: yes",
+      tool_calls: [],
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      finishReason: "stop",
+    }));
+    streamMock.mockImplementation(() => textStream("Here is the answer."));
+
+    await runTurn({
+      session: new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." }),
+      userMessage: QUESTION,
+    });
+
+    const data = triageRow() as unknown as { judgeComparable: boolean; judgeStatus: string };
+    expect(data.judgeComparable).toBe(false);
+    expect(data.judgeStatus).toBe("not_started");
   });
 
   it("skips the classification entirely on a workflow step, which is already routed", async () => {

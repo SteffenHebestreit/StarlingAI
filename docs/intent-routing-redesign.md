@@ -624,10 +624,36 @@ config feature-registry gate reports zero unreferenced fields.
 
 ### What to do next, in order
 
-1. Run `pnpm routing:canary -- --update` against the live stack to record the first snapshot. Until it exists there is no baseline, and the canary reports that rather than passing.
-2. Turn on `orchestration.routingTriage: "shadow"` and collect a few hundred turns. The S4 gate is computable from `routing_triage_decided` alone: `sourceSensitiveAgrees` over rows with `judgeComparable: true`, the parse-failure rate from `ok`, and latency from `elapsedMs`.
-3. A/B `stableToolBlock: "freeze"` against `"off"` on cold-prefill rows per turn, now that `provider_model_call` rows join to their turn.
-4. Only then wire the fusion (`routingTriage: "on"`), because its bonus weights and thresholds should be fitted against the shadow data rather than guessed.
+1. Run `pnpm routing:canary -- --update` against the live stack to record the first snapshot. Until it exists there is no baseline, and the canary reports INCONCLUSIVE rather than passing. It prints the catalog it loaded and its agent count; if that is not the 49-agent one, stop and run `pnpm config:build`.
+2. Set `orchestration.routingTierPresetFallback: true` FIRST if the deployment runs a model preset. Under a preset the tier resolver returns null, so the upfront judge and the receptionist never execute — and the shadow gate is defined on agreement with that judge. Without this, every row reports `judgeComparable: false` and the gate has no data. It is a real behaviour change: the judge starts arming forced research on turns where it has been silent.
+3. Turn on `orchestration.routingTriage: "shadow"` and collect a few hundred turns. The S4 gate is computable from `routing_triage_decided` alone: `sourceSensitiveAgrees` over rows with `judgeComparable: true` (use `judgeStatus` to see why the others were excluded — `not_started`, `no_answer`, `verdict_unwanted`), the parse-failure rate from `ok`, and latency from `elapsedMs`.
+4. A/B `stableToolBlock: "freeze"` against `"off"` on cold-prefill rows per turn, now that `provider_model_call` rows join to their turn and carry `callSite`.
+5. Only then wire the fusion (`routingTriage: "on"`), because its bonus weights and thresholds should be fitted against the shadow data rather than guessed.
+
+### What the adversarial review changed after the first five commits
+
+A six-lens review over the implementation produced 84 findings; 70 were adversarially
+verified and 25 survived. Three would have quietly defeated the mechanism they belonged to,
+and all three are fixed in `7ab2f68`:
+
+- The input-modality bonus could never fire: mode + domain + deliverable summed to exactly
+  the cap. Its test passed on alphabetical tie-break order.
+- Labels alone could buy a mechanical dispatch: the gate read the FUSED score while the
+  bonus could exceed it, so an agent sitting on the admission floor qualified. The gate now
+  reads raw embedding headroom.
+- The freeze rung DELETED the discovery narrowing rather than moving it, because the
+  call-site allowlist was derived from the un-narrowed array.
+
+Also fixed: a failed judge was recorded as a real `false` verdict (the gate would have been
+measuring backend outages); the tool wrapper dropped the request context, so model calls
+inside tool handlers still produced NULL-session rows; the triage ran unlabelled, unbound to
+the turn's abort signal, and on already-routed workflow steps; margin was computed on a
+clamped value, so enabling the classifier suppressed dispatches; a scene's staleness hash
+ignored `task`; and the canary loaded a zero-agent stub and blamed the operator's backend
+(`3bac1ae`).
+
+Fourteen verification agents died on a session limit, so fourteen findings remain unverified;
+the distinct ones among them were checked by hand and are either fixed above or refuted.
 
 ### Decisions from section 10 that the implementation already settled
 
