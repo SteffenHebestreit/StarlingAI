@@ -13,8 +13,9 @@
 // TO OVERRIDE one entry, set its AUTHORED `routing` block in the primary shard — authored always
 // wins over `routingGenerated`, so this file can be regenerated without losing the override.
 //
-// sourceHash covers the entry's description/capabilities/tags/tools: a mismatch means the
-// catalog text moved after labelling and the label may be stale.
+// sourceHash covers the text that DEFINES the entry: description/capabilities/tags/tools for an
+// agent, and additionally task/allowedAgents, which is where a scene's behaviour actually lives.
+// A mismatch means the catalog moved after labelling and the label may be stale.
 {
   "scenes": {
     "apply_jobs": {
@@ -36,7 +37,7 @@
           "browser"
         ],
         "oneLiner": "Browser-assisted freelance application submission (browser_agent); the only scene with webhookKey+approvalChannel+humanInLoopSteps (credential fill). Not used by any job.",
-        "sourceHash": "6334a515557ebb95",
+        "sourceHash": "f99d190e51eff812",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -60,7 +61,7 @@
           "swarm_internal"
         ],
         "oneLiner": "Captures a built+verified capability as durable machinery via swarm_maintainer. Only scene using swarm_maintainer; step 3 of co_develop_capability.",
-        "sourceHash": "406ed1ba8f9371bc",
+        "sourceHash": "c1cd1937f5542e26",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -84,7 +85,7 @@
           "workspace"
         ],
         "oneLiner": "Merge-readiness report over recent changes (diff_reviewer/code_analyst/qa_guard).",
-        "sourceHash": "a423fbe9a5915c7f",
+        "sourceHash": "1029ccafc2041bc2",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -108,7 +109,7 @@
           "external_network"
         ],
         "oneLiner": "Decision-oriented comparison brief across competitors; dominant work = research+comparison -> GATHER.",
-        "sourceHash": "07d59354e58c9d35",
+        "sourceHash": "d28b4dea337f85db",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated) — medium confidence",
         "labeledAt": "2026-09-19"
       }
@@ -132,7 +133,7 @@
           "workspace"
         ],
         "oneLiner": "Research+draft audience-ready content (blog/newsletter/copy/docs).",
-        "sourceHash": "a603e67a8af6ffde",
+        "sourceHash": "6dd542eada2bce3b",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -156,7 +157,7 @@
           "workspace"
         ],
         "oneLiner": "Inspects files OR live DB for quality/completeness/anomalies -> data-quality report; GATHER (analysis/findings); could read as VERIFY. Only scene using sql_specialist. Used by 2 jobs.",
-        "sourceHash": "5a5b2069871b8172",
+        "sourceHash": "9c998bcb77fd5afc",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated) — medium confidence",
         "labeledAt": "2026-09-19"
       }
@@ -180,7 +181,7 @@
           "external_network"
         ],
         "oneLiner": "Step 2 (image_sourcer only): source+verify+locally save real free-license images.",
-        "sourceHash": "69e3707765d9f70d",
+        "sourceHash": "e5cbf4e50b9ab041",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -205,7 +206,7 @@
           "workspace"
         ],
         "oneLiner": "Step 3; builds the cited paper from ONLY already-verified facts+images (expectArtifact).",
-        "sourceHash": "d5fc8981bda4ba55",
+        "sourceHash": "f98081ac0ed1aeff",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -229,7 +230,7 @@
           "external_network"
         ],
         "oneLiner": "Step 1 of the deck pipeline (researcher only); scope-fenced in prose (facts only, no images/build).",
-        "sourceHash": "ddfe3ddef53a1114",
+        "sourceHash": "c1d0b1ccf1ee1aa5",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -254,7 +255,7 @@
           "workspace"
         ],
         "oneLiner": "Step 4; builds the reveal.js deck + speaker notes from verified facts+images (expectArtifact).",
-        "sourceHash": "73f5f62d00ce9fe2",
+        "sourceHash": "8dd6893aaae9aac2",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -278,7 +279,7 @@
           "external_network"
         ],
         "oneLiner": "Source-backed dossier; internally drives mission_coordinator (the one scene that is an orchestrator) but exposed as one research workflow; user intent = GATHER. Used by 3 jobs.",
-        "sourceHash": "0eedb1f1e2407948",
+        "sourceHash": "972471e0394def5a",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated) — medium confidence",
         "labeledAt": "2026-09-19"
       }
@@ -302,7 +303,7 @@
           "remote_infra"
         ],
         "oneLiner": "Read-only triage + root-cause -> internal incident summary; the work is diagnosis (findings), the summary is a thin wrapper -> GATHER. Only scene using ops_triage+log_analyst.",
-        "sourceHash": "975e89b26aefa242",
+        "sourceHash": "f84b1cd1168e90b8",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -326,7 +327,7 @@
           "workspace"
         ],
         "oneLiner": "Meeting brief/handoff from attached material + prior findings; includes policy_compliance_reviewer. Not used by any job.",
-        "sourceHash": "13ad7abf4a78dac7",
+        "sourceHash": "20477264df763b86",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -350,7 +351,7 @@
           "user_channel"
         ],
         "oneLiner": "The universal send-it-out tail scene (9 jobs); its whole purpose IS the send, so ACT/comms (unlike the jobs that only END in it).",
-        "sourceHash": "8e3cc767a973e832",
+        "sourceHash": "7c75c8dbd5b8c2fe",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -374,7 +375,7 @@
           "workspace"
         ],
         "oneLiner": "Structured onboarding packet for a topic/project/new hire.",
-        "sourceHash": "5ebc4e8fabf559ba",
+        "sourceHash": "629c08cc5313dfcb",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -398,7 +399,7 @@
           "workspace"
         ],
         "oneLiner": "Assesses the USER's own CV vs a role -> structured fit deliverable; grounds on injected [USER PROFILE], do NOT re-fetch. PRODUCE(deliverable) vs VERIFY(assess-fit) straddle. Not used by any job.",
-        "sourceHash": "c490554aef9b5029",
+        "sourceHash": "ad26b8ac9cf01581",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated) — medium confidence",
         "labeledAt": "2026-09-19"
       }
@@ -423,7 +424,7 @@
           "workspace"
         ],
         "oneLiner": "Drafts release notes from repo history (git_developer reads history, content_writer drafts) -- the deliverable is the authored notes.",
-        "sourceHash": "47e3c97886992b7a",
+        "sourceHash": "5df4850cdc250da8",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -445,7 +446,7 @@
           "workspace"
         ],
         "oneLiner": "Builds ANY deliverable (content OR code) then runs a reviewer panel with one bounded revision; domain-agnostic -> cross_domain; deliverable variable (prose_doc or code). Largest allowedAgents list...",
-        "sourceHash": "256bce4971c44627",
+        "sourceHash": "ed7e9903066b7188",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated) — medium confidence",
         "labeledAt": "2026-09-19"
       }
@@ -469,7 +470,7 @@
           "external_network"
         ],
         "oneLiner": "DESK research on advisories/CVEs -> risk digest (researcher/evidence_analyst); NOT the offensive pentest swarm. L2=research only -- security is the TOPIC, kept off L2 to prevent mis-routing 'do a s...",
-        "sourceHash": "11dfebcd55ffa242",
+        "sourceHash": "c45c57071f4e90cc",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -494,7 +495,7 @@
           "workspace"
         ],
         "oneLiner": "Evidence-grounded paper/report with verified citations -- a composed authored artifact. Used by 3 jobs.",
-        "sourceHash": "da9f82379d240cd0",
+        "sourceHash": "1082ea6c42f8d0dc",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -518,7 +519,7 @@
           "external_network"
         ],
         "oneLiner": "Per-URL VERIFIED/REJECTED/UNVERIFIED verdicts; strict 'never web_search or invent' protocol. Not used by any job.",
-        "sourceHash": "1c0d09876e76bd6a",
+        "sourceHash": "e1bf696daf54f4ad",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -542,7 +543,7 @@
           "local_sandbox"
         ],
         "oneLiner": "Builds a runnable app and PROVES it works by executing it (expectArtifact). PRODUCE(running_app) -- the deliverable is the app, execution is QA (consistent with backend_coder); risk_tier=sandbox_ex...",
-        "sourceHash": "16f9bfd7764da046",
+        "sourceHash": "da1bea5afdba202a",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -566,7 +567,7 @@
           "external_network"
         ],
         "oneLiner": "Concise fact-checked findings brief with named sources+uncertainties; dominant work = acquire+verify (thin authoring wrapper) -> GATHER per rule 11. Not used by any job.",
-        "sourceHash": "e21faa8369eaa35b",
+        "sourceHash": "a8c96d71bd457eea",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated) — medium confidence",
         "labeledAt": "2026-09-19"
       }

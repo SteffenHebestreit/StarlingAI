@@ -903,12 +903,6 @@ export const SubAgentConfigSchema = z.object({
   routing: RoutingTaxonomySchema.optional(),
   /** GENERATED routing taxonomy — the seeded labels, overridable by `routing`. */
   routingGenerated: RoutingTaxonomyGeneratedSchema.optional(),
-  /** 3-5 English sample requests. Embedding-only (never sent on the wire): user vocabulary
-   *  is the largest measured retrieval lever, and 48 of 49 descriptions currently smuggle
-   *  an "Example queries" bag inline for the same reason. Optional rather than defaulted:
-   *  a default would make the field REQUIRED in the inferred type and break every literal
-   *  that constructs an agent/scene/job config. */
-  examples: z.array(z.string()).optional(),
   /** Product domain grouping — legacy free string, superseded by `routing.domain`.
    *  NOTE: this is z.string(), NOT an enum — the previous comment claimed an enum the code
    *  never enforced, and one live value ("desktop") was outside the claimed set. */
@@ -1286,8 +1280,6 @@ export const SceneConfigSchema = z.object({
   routing: RoutingTaxonomySchema.optional(),
   /** GENERATED routing taxonomy — the seeded labels, overridable by `routing`. */
   routingGenerated: RoutingTaxonomyGeneratedSchema.optional(),
-  /** 3-5 English sample requests; embedding-only. */
-  examples: z.array(z.string()).optional(),
   webhookKey: z.string().min(16).optional(),   // shared secret for unauthenticated webhook calls
   params: z.record(SceneParamSchema).optional(),    // named {{param|default}} template vars
   allowedAgents: z.array(z.string()).optional(),    // restrict which sub-agents this scene may use
@@ -1361,8 +1353,6 @@ export const JobConfigSchema = z.object({
   routing: RoutingTaxonomySchema.optional(),
   /** GENERATED routing taxonomy — the seeded labels, overridable by `routing`. */
   routingGenerated: RoutingTaxonomyGeneratedSchema.optional(),
-  /** 3-5 English sample requests; embedding-only. */
-  examples: z.array(z.string()).optional(),
   params: z.record(SceneParamSchema).optional(),
   steps: z.array(JobStepSchema).min(1),
   triggers: z.array(JobTriggerSchema).optional(),

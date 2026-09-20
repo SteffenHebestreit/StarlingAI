@@ -124,6 +124,49 @@ afterEach(() => {
   for (const dir of tempConfigDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
+describe("buildIterationToolRestriction", () => {
+  // The restriction is what CARRIES the narrowing under freeze, so it is asserted directly.
+  // An earlier version derived it from the un-narrowed active array, which made the
+  // discovery branch contain every tool — the narrowing was deleted, not relocated, and no
+  // whole-turn test could see it because the refusal simply never fired.
+  const tools = [
+    { name: "delegate_to_agent" }, { name: "search_agents" }, { name: "list_agents" },
+    { name: "memory_store" }, { name: "record_plan" },
+  ];
+  const forcedTools = [{ name: "delegate_to_agent" }, { name: "record_plan" }];
+
+  it("withholds exactly the discovery tools and keeps everything else callable", async () => {
+    const { buildIterationToolRestriction } = await import("../agent/runtime.js");
+    const restriction = buildIterationToolRestriction({
+      tools, forcedTools, forceToolChoice: false, withholdDiscoveryTools: true,
+    });
+    expect(restriction?.reason).toBe("discovery_withheld");
+    expect(restriction!.allowed.has("search_agents")).toBe(false);
+    expect(restriction!.allowed.has("list_agents")).toBe(false);
+    // Everything that is not a repeat search stays available — this is a narrowing, not a
+    // forced-orchestration gate.
+    expect(restriction!.allowed.has("delegate_to_agent")).toBe(true);
+    expect(restriction!.allowed.has("memory_store")).toBe(true);
+    expect(restriction!.allowed.size).toBe(3);
+  });
+
+  it("forcing subsumes the discovery narrowing", async () => {
+    const { buildIterationToolRestriction } = await import("../agent/runtime.js");
+    const restriction = buildIterationToolRestriction({
+      tools, forcedTools, forceToolChoice: true, withholdDiscoveryTools: true,
+    });
+    expect(restriction?.reason).toBe("must_orchestrate");
+    expect([...restriction!.allowed].sort()).toEqual(["delegate_to_agent", "record_plan"]);
+  });
+
+  it("returns undefined when neither narrowing applies, so an ordinary iteration is unrestricted", async () => {
+    const { buildIterationToolRestriction } = await import("../agent/runtime.js");
+    expect(buildIterationToolRestriction({
+      tools, forcedTools, forceToolChoice: false, withholdDiscoveryTools: false,
+    })).toBeUndefined();
+  });
+});
+
 describe("orchestration.stableToolBlock", () => {
   it('freeze: every iteration of a turn receives a byte-identical tool array, including the forced one', async () => {
     const { AgentSession, resetSessionsForTests, runTurn } = await loadRuntime("freeze");

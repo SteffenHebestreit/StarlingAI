@@ -13,8 +13,9 @@
 // TO OVERRIDE one entry, set its AUTHORED `routing` block in the primary shard — authored always
 // wins over `routingGenerated`, so this file can be regenerated without losing the override.
 //
-// sourceHash covers the entry's description/capabilities/tags/tools: a mismatch means the
-// catalog text moved after labelling and the label may be stale.
+// sourceHash covers the text that DEFINES the entry: description/capabilities/tags/tools for an
+// agent, and additionally task/allowedAgents, which is where a scene's behaviour actually lives.
+// A mismatch means the catalog moved after labelling and the label may be stale.
 {
   "jobs": {
     "co_develop_capability": {
@@ -37,7 +38,7 @@
           "swarm_internal"
         ],
         "oneLiner": "3 steps (reviewed_deliverable x2 -> capture_capability), resumable. Terminal step capture_capability PERSISTS the capability as durable swarm machinery (both classify it ACT) -> ACT/swarm_meta, sof...",
-        "sourceHash": "8d97f6adc7ba820f",
+        "sourceHash": "d3de620be17ffa02",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated) — medium confidence",
         "labeledAt": "2026-09-19"
       }
@@ -61,7 +62,7 @@
           "external_network"
         ],
         "oneLiner": "1 step (competitive_analysis). Triggers: api + slack /competitive.",
-        "sourceHash": "caeae8f0f276b1db",
+        "sourceHash": "6b915ad6ac21e158",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -85,7 +86,7 @@
           "user_channel"
         ],
         "oneLiner": "2 steps (content_creation -> broadcast). Triggers: api + slack /content (default blog-post).",
-        "sourceHash": "5e3b6cadc538aa86",
+        "sourceHash": "b4a44bb970c4df72",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -110,7 +111,7 @@
           "user_channel"
         ],
         "oneLiner": "2 steps (source_backed_paper -> broadcast). L1 follows its terminal content scene source_backed_paper=PRODUCE (fixes A's scene/job inconsistency). NAMING SMELL: 'ops' name but a research-paper pipe...",
-        "sourceHash": "ac3ba4a49ad19c5a",
+        "sourceHash": "5ef1acbe02dd9e7f",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated) — medium confidence",
         "labeledAt": "2026-09-19"
       }
@@ -134,7 +135,7 @@
           "user_channel"
         ],
         "oneLiner": "2 steps (data_pipeline_review -> broadcast). Follows data_pipeline_review=GATHER. Triggers: api only.",
-        "sourceHash": "3d2f257bb7f0565d",
+        "sourceHash": "bed5baeede7a2036",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -158,7 +159,7 @@
           "user_channel"
         ],
         "oneLiner": "2 steps (data_pipeline_review -> broadcast); shares the scene with data_quality_report. Triggers: api + slack /db-analysis.",
-        "sourceHash": "f8167d348828e98b",
+        "sourceHash": "138a6cc47d846d9c",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -182,7 +183,7 @@
           "external_network"
         ],
         "oneLiner": "1 step (deep_research). Triggers: api + slack /deep-research.",
-        "sourceHash": "05687aa71638a3ea",
+        "sourceHash": "f292953da14993cb",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -207,7 +208,7 @@
           "user_channel"
         ],
         "oneLiner": "3 steps (incident_response -> source_backed_paper -> broadcast). Terminal content scene source_backed_paper AUTHORS the postmortem -> PRODUCE; subject infra_ops. Triggers: api + slack /incident.",
-        "sourceHash": "03c1dfa012a4f468",
+        "sourceHash": "e0d55effb12999fd",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated) — medium confidence",
         "labeledAt": "2026-09-19"
       }
@@ -231,7 +232,7 @@
           "user_channel"
         ],
         "oneLiner": "2 steps (deep_research -> broadcast). Follows deep_research=GATHER; the broadcast tail is captured by risk_tier=external_send + surface=user_channel, NOT a comms L2. Telegram /morning.",
-        "sourceHash": "07d107d1d0bd7d39",
+        "sourceHash": "d55b5c684efc5c63",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated) — medium confidence",
         "labeledAt": "2026-09-19"
       }
@@ -255,7 +256,7 @@
           "user_channel"
         ],
         "oneLiner": "2 steps (onboarding_packet -> broadcast). Triggers: api + slack /onboard.",
-        "sourceHash": "0376e07cba821f70",
+        "sourceHash": "582425b60644e954",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -280,7 +281,7 @@
           "user_channel"
         ],
         "oneLiner": "2 steps (release_notes_draft -> broadcast). Triggers: api + slack /release (default HEAD~20..HEAD).",
-        "sourceHash": "4239481577e1cb8e",
+        "sourceHash": "a7769e4e7d865d45",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -305,7 +306,7 @@
           "external_network"
         ],
         "oneLiner": "1 step (deep_research with includeVisuals); brief + one high-signal Mermaid. Follows deep_research=GATHER, media secondary. Triggers: api only.",
-        "sourceHash": "6b44fd843413121b",
+        "sourceHash": "171343ded4e93b30",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -329,7 +330,7 @@
           "user_channel"
         ],
         "oneLiner": "2 steps (code_review -> broadcast). The VERIFY deliverable survives the broadcast tail. Triggers: api + slack /code-review.",
-        "sourceHash": "bd5cc20ddabf33ea",
+        "sourceHash": "2b183d60db32338e",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -354,7 +355,7 @@
           "workspace"
         ],
         "oneLiner": "1 step (source_backed_paper). NO triggers; search_workflows/LLM only.",
-        "sourceHash": "756bff491e3aeefa",
+        "sourceHash": "b4ab97d3920249bf",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -379,7 +380,7 @@
           "workspace"
         ],
         "oneLiner": "4 steps (deck_research->deck_images->deck_paper->deck_slides); terminal deck_slides=PRODUCE. The ONLY job with catalogTriggers (requiresActionVerb + 3-way AND regex presentation+image+source, bilin...",
-        "sourceHash": "9f8b48abd02daa13",
+        "sourceHash": "c89729132aabf270",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -403,7 +404,7 @@
           "user_channel"
         ],
         "oneLiner": "2 steps (security_audit desk-research -> broadcast); NOT offensive security (no security L2). Triggers: api + slack /security-digest.",
-        "sourceHash": "3339ae13ad839648",
+        "sourceHash": "e62f8aeaa733c0c6",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }

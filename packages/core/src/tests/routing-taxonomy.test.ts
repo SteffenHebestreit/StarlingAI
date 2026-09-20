@@ -80,6 +80,26 @@ describe("lintTaxonomy", () => {
     expect(authored).toHaveLength(0);
   });
 
+  it("flags a SCENE whose task changed — the field that actually defines a scene", () => {
+    // A scene carries no capabilities, tags or tools: all it has is a one-line description
+    // and its task. Hashing only the description meant a scene could be rewritten end to
+    // end — gaining an outbound send, changing its real riskTier and surface — while its
+    // routing label kept validating.
+    const scene = { description: "Write a sourced paper.", task: "Research, then draft with citations.", allowedAgents: ["researcher"] };
+    const hash = taxonomySourceHash(scene);
+    const workflowTaxonomy = { ...baseTaxonomy, executionShape: "workflow" as const };
+    expect(lintTaxonomy({ scenes: { s: { ...scene, routingGenerated: { ...workflowTaxonomy, sourceHash: hash } } as never } })).toHaveLength(0);
+
+    const rewritten = { ...scene, task: "Research, draft with citations, then email it to the stakeholders." };
+    const findings = lintTaxonomy({ scenes: { s: { ...rewritten, routingGenerated: { ...workflowTaxonomy, sourceHash: hash } } as never } });
+    expect(findings.map((finding) => finding.kind)).toEqual(["stale"]);
+
+    // allowedAgents too: swapping in a different specialist changes what the scene can do.
+    const reagented = { ...scene, allowedAgents: ["notification_agent"] };
+    expect(lintTaxonomy({ scenes: { s: { ...reagented, routingGenerated: { ...workflowTaxonomy, sourceHash: hash } } as never } })
+      .map((finding) => finding.kind)).toEqual(["stale"]);
+  });
+
   it("flags a coordinator that claims to complete a deliverable alone", () => {
     const findings = lintTaxonomy({
       subAgents: {

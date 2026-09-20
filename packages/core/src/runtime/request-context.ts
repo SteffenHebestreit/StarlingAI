@@ -77,6 +77,15 @@ export function currentUserScopeSegment(): string | undefined {
   return storage.getStore()?.userScopeSegment;
 }
 
+/**
+ * The whole ambient context, for callers that need to EXTEND it rather than read one
+ * field. Returns the live store object: treat it as read-only and spread it, never mutate
+ * it (the one sanctioned mutation is {@link attachRequestSessionId}).
+ */
+export function currentRequestContext(): Readonly<RequestContext> | undefined {
+  return storage.getStore();
+}
+
 /** The session that owns the active work (main turn or sub-agent run), if any. */
 export function currentSessionId(): string | undefined {
   return storage.getStore()?.sessionId;

@@ -27,8 +27,8 @@
  */
 
 import type { RoutingTaxonomy } from "../config/schema.js";
-import { facetAgreement, modesCompatible, type RequestFacets, type ResolvedTaxonomy } from "./routing-taxonomy.js";
-import type { TriageVerdict } from "./triage.js";
+import { facetAgreement, modesCompatible, type ResolvedTaxonomy } from "./routing-taxonomy.js";
+import { verdictFacets, type TriageVerdict } from "./triage.js";
 
 export type CandidateFamily = "agent" | "workflow" | "skill";
 
@@ -87,7 +87,13 @@ export interface FusionTuning {
   deliverableBonus: number;
   /** Bonus when the entry declares it can read what the turn actually carries. */
   inputModalityBonus: number;
-  /** Hard ceiling on the total facet bonus, in fit units. */
+  /**
+   * Hard ceiling on the total facet bonus, in fit units.
+   *
+   * Must exceed the sum of the individual weights, or the last term added is absorbed and
+   * becomes inert: mode+domain+deliverable summed to exactly the old cap, so the input
+   * signal contributed nothing on precisely the turns where all three already agreed.
+   */
   maxBonus: number;
   /** Margins over which K collapses to one or two candidates. */
   decisiveMargin: number;
@@ -96,11 +102,23 @@ export interface FusionTuning {
   clusterWidth: number;
   maxK: number;
   maxKMulti: number;
-  /** Fit a single agent must reach before the branch is single_agent. */
+  /**
+   * EMBEDDING headroom a single agent must reach before the branch is single_agent.
+   *
+   * Tested against the raw `fit`, never the fused value. The bonus can be as large as
+   * `maxBonus`, so gating on the fused score let an agent sitting exactly ON the admission
+   * floor — the weakest match the router accepts at all — clear the dispatch gate on labels
+   * alone. The facets may order candidates and may veto one; they may not buy a mechanical
+   * dispatch for a candidate the embedding does not independently support.
+   */
   dispatchFit: number;
-  /** Top-1 raw score above which a request is treated as well-covered, so a clarify is
-   *  not worth a round trip. */
-  clarifyBlockingScore: number;
+  /**
+   * Top-1 FIT above which a request is treated as well-covered, so a clarifying question is
+   * not worth a round trip. In fit units, not raw score: a raw threshold compared a
+   * family-native number against one constant, so the same "well covered" bar meant
+   * different things for an agent (floor 0.72) and a workflow (floor 0.775).
+   */
+  clarifyBlockingFit: number;
   minClarifyConfidence: number;
   /** Agreement at or above this reads as "the two signals agree". */
   strongAgreement: number;
@@ -112,14 +130,16 @@ export const DEFAULT_FUSION_TUNING: FusionTuning = {
   domainBonus: 0.15,
   deliverableBonus: 0.05,
   inputModalityBonus: 0.05,
-  maxBonus: 0.30,
+  // 0.35 = the sum of the four weights. A cap equal to a SUBSET's sum makes the remaining
+  // terms unreachable, which is how the input signal was silently inert.
+  maxBonus: 0.35,
   decisiveMargin: 0.20,
   closeMargin: 0.10,
   clusterWidth: 0.15,
   maxK: 5,
   maxKMulti: 7,
   dispatchFit: 0.25,
-  clarifyBlockingScore: 0.80,
+  clarifyBlockingFit: 0.29,
   minClarifyConfidence: 0.6,
   strongAgreement: 0.7,
   weakAgreement: 0.4,
@@ -140,8 +160,17 @@ export type AgreementClass = "strong" | "weak" | "none" | "unknown";
 export interface ScoredCandidate extends RoutingCandidate {
   /** Distance above the candidate's own floor, normalised to [0,1]. */
   fit: number;
-  /** fit + the facet bonus, capped at 1. The ordering key. */
+  /** fit + the facet bonus, capped at 1. Reported; not the ordering key. */
   fusedFit: number;
+  /**
+   * fit + the facet bonus, UNCLAMPED — the ordering key and the basis of the margin.
+   *
+   * Two strong, well-labelled candidates both saturate at 1.0 and tie at margin 0, which
+   * makes a decisive field look ambiguous. Ranking on the clamped value therefore meant
+   * that enabling the classifier SUPPRESSED the very dispatches the embedding margin alone
+   * would have made.
+   */
+  rankScore: number;
   /** Facet agreement in [0,1], or null when there is no verdict to agree with. */
   agreement: number | null;
 }
@@ -175,14 +204,6 @@ function toFit(candidate: RoutingCandidate): number {
   return Math.max(0, Math.min(1, (candidate.score - candidate.floor) / span));
 }
 
-function verdictAsFacets(verdict: TriageVerdict): RequestFacets {
-  return {
-    mode: verdict.mode,
-    domain: verdict.domain,
-    ...(verdict.deliverable !== "none" ? { deliverable: verdict.deliverable } : {}),
-  };
-}
-
 /** The bonus for one candidate, in fit units, scaled by the classifier's own confidence. */
 function facetBonus(
   taxonomy: RoutingTaxonomy | undefined,
@@ -191,7 +212,7 @@ function facetBonus(
   inputClass?: RoutingTaxonomy["inputModality"][number],
 ): { bonus: number; agreement: number | null } {
   if (!taxonomy) return { bonus: 0, agreement: null };
-  const facets = verdictAsFacets(verdict);
+  const facets = verdictFacets(verdict);
   const agreement = facetAgreement(facets, taxonomy);
   let bonus = 0;
   if (modesCompatible(facets.mode, taxonomy.mode)) bonus += tuning.modeBonus;
@@ -292,17 +313,17 @@ export function fuseRouting(input: FusionInput): RoutedDecision {
     const { bonus, agreement } = verdict
       ? facetBonus(candidate.taxonomy, verdict, tuning, flags.inputClass)
       : { bonus: 0, agreement: null };
-    return { ...candidate, fit, fusedFit: Math.min(1, fit + bonus), agreement };
-  }).sort((a, b) => (b.fusedFit - a.fusedFit) || a.name.localeCompare(b.name));
+    return { ...candidate, fit, fusedFit: Math.min(1, fit + bonus), rankScore: fit + bonus, agreement };
+  }).sort((a, b) => (b.rankScore - a.rankScore) || a.name.localeCompare(b.name));
 
   // STEP 5: adaptive K. A decisive margin means one candidate; a flat field means the cluster.
-  const margin = scored.length >= 2 ? Number((scored[0]!.fusedFit - scored[1]!.fusedFit).toFixed(4)) : scored.length === 1 ? 1 : 0;
+  const margin = scored.length >= 2 ? Number((scored[0]!.rankScore - scored[1]!.rankScore).toFixed(4)) : scored.length === 1 ? 1 : 0;
   const maxK = verdict?.multi ? tuning.maxKMulti : tuning.maxK;
   let k: number;
   if (scored.length === 0) k = 0;
   else if (margin >= tuning.decisiveMargin) k = 1;
   else if (margin >= tuning.closeMargin) k = Math.min(2, scored.length);
-  else k = Math.min(maxK, scored.filter((candidate) => candidate.fusedFit >= scored[0]!.fusedFit - tuning.clusterWidth).length);
+  else k = Math.min(maxK, scored.filter((candidate) => candidate.rankScore >= scored[0]!.rankScore - tuning.clusterWidth).length);
   const shortlist = scored.slice(0, k);
 
   const topAgreement = shortlist[0]?.agreement ?? null;
@@ -374,10 +395,14 @@ export function fuseRouting(input: FusionInput): RoutedDecision {
   }
 
   // RULE 5 — a prebuilt workflow that is literally what was asked for.
-  const workflowCandidate = shortlist.find((candidate) => candidate.family === "workflow");
-  if (workflowCandidate) {
-    const check = workflowDispatchable(workflowCandidate, verdict);
-    if (check.ok) return decide("workflow", `workflow ${workflowCandidate.name} matches the requested deliverable`, workflowCandidate);
+  // Every shortlisted workflow, in rank order — not just the first. The highest-ranked one
+  // is often refused for a good reason (a broadcast tail's external side effects), and
+  // stopping there discarded a perfectly dispatchable workflow behind it.
+  for (const candidate of shortlist) {
+    if (candidate.family !== "workflow") continue;
+    if (workflowDispatchable(candidate, verdict).ok) {
+      return decide("workflow", `workflow ${candidate.name} matches the requested deliverable`, candidate);
+    }
   }
 
   // RULE 6 — coordination, on structural grounds.
@@ -393,7 +418,7 @@ export function fuseRouting(input: FusionInput): RoutedDecision {
     top
     && top.family === "agent"
     && verdict.alone
-    && top.fusedFit >= tuning.dispatchFit
+    && top.fit >= tuning.dispatchFit
     && (k === 1 || margin >= tuning.closeMargin)
     && top.admittedByRawQuery !== false
     && top.taxonomy
@@ -401,7 +426,7 @@ export function fuseRouting(input: FusionInput): RoutedDecision {
     && (top.taxonomy.domain.includes("cross_domain") || verdict.domain.some((domain) => top.taxonomy!.domain.includes(domain)))
     && top.taxonomy.executionShape !== "needs_coordination"
   ) {
-    return decide("single_agent", `${top.name} covers this alone (fit ${top.fusedFit.toFixed(2)}, margin ${margin.toFixed(2)})`, top);
+    return decide("single_agent", `${top.name} covers this alone (fit ${top.fit.toFixed(2)}, margin ${margin.toFixed(2)})`, top);
   }
 
   // RULE 8 — ask, but only when asking is the only way forward and someone is there to answer.
@@ -411,7 +436,7 @@ export function fuseRouting(input: FusionInput): RoutedDecision {
     && verdict.confidence >= tuning.minClarifyConfidence
     && !flags.autonomous
     && !flags.afterClarify
-    && (!top || top.score < tuning.clarifyBlockingScore)
+    && (!top || top.fit < tuning.clarifyBlockingFit)
   ) {
     return decide("clarify", `missing: ${verdict.missing.join(", ")}`);
   }

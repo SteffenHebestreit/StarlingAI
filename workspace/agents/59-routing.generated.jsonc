@@ -13,8 +13,9 @@
 // TO OVERRIDE one entry, set its AUTHORED `routing` block in the primary shard — authored always
 // wins over `routingGenerated`, so this file can be regenerated without losing the override.
 //
-// sourceHash covers the entry's description/capabilities/tags/tools: a mismatch means the
-// catalog text moved after labelling and the label may be stale.
+// sourceHash covers the text that DEFINES the entry: description/capabilities/tags/tools for an
+// agent, and additionally task/allowedAgents, which is where a scene's behaviour actually lives.
+// A mismatch means the catalog moved after labelling and the label may be stale.
 {
   "subAgents": {
     "api_integrator": {
@@ -38,7 +39,7 @@
           "external_network"
         ],
         "oneLiner": "Calls existing HTTP/REST/GraphQL endpoints to test/consume (can POST); ACT (operates a live service), read-heavy so a pure-read request re-ranks near GATHER via risk_tier. Distinct from backend_cod...",
-        "sourceHash": "49c1ef91fd65817d",
+        "sourceHash": "33d61fa3c07e62e0",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated) — medium confidence",
         "labeledAt": "2026-09-19"
       }
@@ -64,7 +65,7 @@
           "local_sandbox"
         ],
         "oneLiner": "Builds+serves a live container locally and returns a URL for verification. PRODUCE(running_app) -- the serve is proof-of-work in the sandbox, not an external deploy (that is infrastructure_agent)....",
-        "sourceHash": "d9b40302c65dea94",
+        "sourceHash": "a8a4e53392a9564c",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -90,7 +91,7 @@
           "browser"
         ],
         "oneLiner": "Drives a live browser (navigate/click/submit/login); also captures snapshots (secondary GATHER) that vision_browser_analyst reads.",
-        "sourceHash": "b824b26d6807c9a6",
+        "sourceHash": "86b778e2ee9990e1",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -116,7 +117,7 @@
           "user_channel"
         ],
         "oneLiner": "CalDAV/CardDAV calendar+contacts mutations; domain=communication. Tags carry provider brand names nextcloud/fastmail/icloud (lint). Unreachable by any scene.",
-        "sourceHash": "a734b39a69180bac",
+        "sourceHash": "9447daa4388e4d6b",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -142,7 +143,7 @@
           "workspace"
         ],
         "oneLiner": "Renders already-verified NUMBERS as HTML charts/tables; does not compute (data_analyst does); input_modality=structured_data records the numbers input. media only (no data L2 -- it renders, not ana...",
-        "sourceHash": "55f282983fc306b3",
+        "sourceHash": "6e655bb9eb39bf8a",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -168,7 +169,7 @@
           "workspace"
         ],
         "oneLiner": "Reads code at rest, never runs it; distinct from diff_reviewer(diff) and qa_guard(runs).",
-        "sourceHash": "c34853fab52f5909",
+        "sourceHash": "ca8c625e91b96338",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -194,7 +195,7 @@
           "local_sandbox"
         ],
         "oneLiner": "Runs short JS/TS in an isolated no-network sandbox to return a computed result (map: 'executes... returns result', container.disabled). PRODUCE not ACT -- no external side effect; risk_tier=sandbox...",
-        "sourceHash": "2a774a279ba48de2",
+        "sourceHash": "475d0319d10f0975",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated) — medium confidence",
         "labeledAt": "2026-09-19"
       }
@@ -220,7 +221,7 @@
           "desktop_host"
         ],
         "oneLiner": "Controls a local/remote desktop via VNC/RDP (keyboard/mouse/screen); domain=desktop in config. Brand/mechanism tags lm-studio/vscode/vnc/rdp/ip-address (lint). Unreachable by any scene.",
-        "sourceHash": "738eab70833edc69",
+        "sourceHash": "fe182838b0d73189",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -246,7 +247,7 @@
           "workspace"
         ],
         "oneLiner": "Also builds content websites (deliverable=website) and reveal.js decks (deliverable=deck); overlaps web_coder on sites, paper_author on docs -- split by the deliverable facet.",
-        "sourceHash": "43cc80415869680b",
+        "sourceHash": "08bae4b3a304477e",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -272,7 +273,7 @@
           "workspace"
         ],
         "oneLiner": "Computes aggregations/KPIs/anomalies over already-collected files, no live DB (map: 'produces computed figures' = output shape). GATHER per rule 4 (computing figures); prose interpretation is autho...",
-        "sourceHash": "745fcd339fe3120f",
+        "sourceHash": "23da0c9fae1a1ef5",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated) — medium confidence",
         "labeledAt": "2026-09-19"
       }
@@ -296,7 +297,7 @@
           "remote_infra"
         ],
         "oneLiner": "CI/CD release coordinator; owns promote+rollback. role=coordinator. Unreachable by any scene.",
-        "sourceHash": "71ebc87b41de5058",
+        "sourceHash": "387f6f57ebe1eb78",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -322,7 +323,7 @@
           "workspace"
         ],
         "oneLiner": "Mermaid structural diagrams (flowchart/sequence/timeline/graph/mindmap); distinct from chart_designer(numbers) and image_creator(artwork). Unreachable by any scene.",
-        "sourceHash": "ff7352aaa1ff75dc",
+        "sourceHash": "6dfdf315e8402c7e",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -348,7 +349,7 @@
           "workspace"
         ],
         "oneLiner": "Read-only diff/PR merge verdict. Reviewer-shaped but NOT tagged role=reviewer in config (lint). Distinct from code_analyst(whole tree) and git_developer(mutate).",
-        "sourceHash": "4488a21b3bb1d2a0",
+        "sourceHash": "de0543dab1becaeb",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -374,7 +375,7 @@
           "workspace"
         ],
         "oneLiner": "Extracts exact text/tables/metadata from binary attachments (PDF/DOCX/XLSX/audio/video/eml/ics); first step for uploads.",
-        "sourceHash": "e9ccd2c8f9574979",
+        "sourceHash": "8318f8f3e126e2ce",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -401,7 +402,7 @@
           "workspace"
         ],
         "oneLiner": "Reconciles already-collected evidence into a confirmed/tentative ledger for downstream writers. Hardest GATHER/PRODUCE call: phase-1 map + proposal B read it produce; classified GATHER because the...",
-        "sourceHash": "5d01ef61a55304de",
+        "sourceHash": "ccfd4cc24ae42235",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated) — medium confidence",
         "labeledAt": "2026-09-19"
       }
@@ -427,7 +428,7 @@
           "remote_infra"
         ],
         "oneLiner": "Validates vulns by RUNNING exploits against the target (mandatory per-module approval). Intent is validation but the mechanism mutates target state, so ACT -- the only pentest agent that changes ta...",
-        "sourceHash": "f8e2bd28b26cb085",
+        "sourceHash": "c59b5a587590db77",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -453,7 +454,7 @@
           "external_network"
         ],
         "oneLiner": "Mutating git/GitHub ops (commit/push/PR/release), approval-gated. Distinct from diff_reviewer(read) and devops_coordinator(deployment).",
-        "sourceHash": "842c430f2911fffa",
+        "sourceHash": "8a66d55e9bf5c771",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -479,7 +480,7 @@
           "workspace"
         ],
         "oneLiner": "Generates visuals from a prompt (diffusion raster/SVG/QR); creation from scratch, distinct from image_sourcer(find). Unreachable by any scene.",
-        "sourceHash": "8636e8665b06415c",
+        "sourceHash": "922104f285c090a6",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -505,7 +506,7 @@
           "external_network"
         ],
         "oneLiner": "Finds+verifies free-license image URLs (images only). media NOT research so 'research the best image model' does not route here (ADR-009); the web-search is a mechanism (surface=external_network)....",
-        "sourceHash": "a5b4717125c90ec2",
+        "sourceHash": "cf34ea5a1a39d9bf",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -531,7 +532,7 @@
           "remote_infra"
         ],
         "oneLiner": "Mutates external clusters/servers (Terraform/Ansible/k8s/helm). Distinct from ops_triage(read) and devops_coordinator(orchestrates). Brand tags (lint). Unreachable by any scene.",
-        "sourceHash": "26aa4d10dca49bf4",
+        "sourceHash": "d4afda045487e0a5",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -557,7 +558,7 @@
           "remote_infra"
         ],
         "oneLiner": "Parses log TEXT (journald/nginx/stack traces/container logs) for error clusters/timelines; narrower than ops_triage(whole failing service). Reachable via incident_response only.",
-        "sourceHash": "e98aa73d4848e9a2",
+        "sourceHash": "b00d4db96af41285",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -583,7 +584,7 @@
           "user_channel"
         ],
         "oneLiner": "Mailbox triage/search/organize/draft/reply+send (send approval-gated); domain=communication. Distinct from notification_agent(one-way). Unreachable by any scene.",
-        "sourceHash": "753739eb3c2203f7",
+        "sourceHash": "24fffed7603b8048",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -609,7 +610,7 @@
           "workspace"
         ],
         "oneLiner": "Action-oriented briefing/handoff packet (status/facts/risks/decisions/owners/next actions); distinct from summarizer(flat TL;DR).",
-        "sourceHash": "e7d60ff64ee0f259",
+        "sourceHash": "cc40fb508acfa082",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -633,7 +634,7 @@
           "swarm_internal"
         ],
         "oneLiner": "General cross-domain execution coordinator; the default needs_coordination target. Longest prompt (10,178). Overlaps project_planner + the domain coordinators -- descriptions must state the scope b...",
-        "sourceHash": "d1718a2b0ab49930",
+        "sourceHash": "c3e78de9156c9a74",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -659,7 +660,7 @@
           "remote_infra"
         ],
         "oneLiner": "Authorized non-web protocol auditing (SMB/FTP/SSH/RDP/DNS/TLS), approval-gated checks. Brand tag hydra (lint).",
-        "sourceHash": "140a1aeaf0bd60b3",
+        "sourceHash": "17fa37e2e9c11e5c",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -685,7 +686,7 @@
           "user_channel"
         ],
         "oneLiner": "One-way outbound dispatcher (Telegram/Slack/Discord/alert-email); sole agent in multi_channel_broadcast, the tail of 9 jobs.",
-        "sourceHash": "0d1e1972b8c07704",
+        "sourceHash": "187ea4d05c5e51c3",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -711,7 +712,7 @@
           "remote_infra"
         ],
         "oneLiner": "Read-only incident diagnosis; hands the fix to infrastructure_agent/devops_coordinator. Broader than log_analyst. Reachable via incident_response scene.",
-        "sourceHash": "5dce66c244bb9321",
+        "sourceHash": "34dc25c74f59f5a8",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -737,7 +738,7 @@
           "workspace"
         ],
         "oneLiner": "Formal source-grounded cited docs from an evidence ledger; never fabricates refs. Distinct from content_writer(marketing) and researcher(gathers).",
-        "sourceHash": "008c97dbc1a4e84d",
+        "sourceHash": "1637dccd89e1a86b",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -761,7 +762,7 @@
           "remote_infra"
         ],
         "oneLiner": "Scope-gated engagement orchestrator; requires written authorization. role=coordinator. Unreachable by any scene.",
-        "sourceHash": "2ba6da91cd2618bb",
+        "sourceHash": "78e4515bc97d0115",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -787,7 +788,7 @@
           "workspace"
         ],
         "oneLiner": "Pentest finding-validation gate before reporting (false positives/CVSS/evidence/coverage). role=reviewer.",
-        "sourceHash": "5b03ebfc40e46057",
+        "sourceHash": "bd45891fe7600194",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -813,7 +814,7 @@
           "workspace"
         ],
         "oneLiner": "Screens a planned action/output for policy+approval risk (destructive ops/credentials/egress/privacy); domain-agnostic -> cross_domain. Distinct from quality_supervisor(complete vs allowed). Reacha...",
-        "sourceHash": "d1da3eb5db9a382b",
+        "sourceHash": "699e4973ffb57f3a",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -839,7 +840,7 @@
           "external_network"
         ],
         "oneLiner": "Persists+queries long-running matters in the ProcessMem MCP store (cases/disputes/correspondence). ACT (durable external record). L2=data is a fold -- a dedicated 'memory' domain would hold only th...",
-        "sourceHash": "7ae4e1ccabd9c7c3",
+        "sourceHash": "ad7c05c530d87355",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated) — low confidence",
         "labeledAt": "2026-09-19"
       }
@@ -865,7 +866,7 @@
           "workspace"
         ],
         "oneLiner": "role=planner; phase-1 map: 'produces a plan document; does not execute specialists'. PRODUCE(plan) so 'just give me a plan' dispatches to one agent, not forced coordination; the handoff to mission_...",
-        "sourceHash": "3601ddade3154fde",
+        "sourceHash": "28953fa3679d775d",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated) — medium confidence",
         "labeledAt": "2026-09-19"
       }
@@ -891,7 +892,7 @@
           "swarm_internal"
         ],
         "oneLiner": "Advisory prompt-quality reviewer; proposes the smallest wording change, does not implement (swarm_maintainer does). Shortest prompt in the swarm (235). Unreachable by any scene.",
-        "sourceHash": "0f1a3eaaae8e470e",
+        "sourceHash": "095773e1a4f9c97f",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -917,7 +918,7 @@
           "local_sandbox"
         ],
         "oneLiner": "Verifies by RUNNING the test suite; deliverable=verdict so VERIFY not ACT; risk_tier=sandbox_exec records the run. role=reviewer.",
-        "sourceHash": "a109703456c885fa",
+        "sourceHash": "dce2815c50e803b2",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -943,7 +944,7 @@
           "workspace"
         ],
         "oneLiner": "Domain-agnostic acceptance gate (completeness/consistency/grounding, rerun-vs-ship); role=reviewer. Explicitly NOT tests/citations/policy.",
-        "sourceHash": "95a0fdc0b3e68df5",
+        "sourceHash": "02c0a25c167ef8a0",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -969,7 +970,7 @@
           "remote_infra"
         ],
         "oneLiner": "Active surface mapping under authorized scope: GATHER intent, but active probing so risk_tier=mutating_external. Distinct from researcher's read-only desk lookup.",
-        "sourceHash": "80266fc5b28a23eb",
+        "sourceHash": "d6f06eaf1d710b3d",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -996,7 +997,7 @@
           "workspace"
         ],
         "oneLiner": "Aggregates pentest findings into a CVSS-ordered report; distinct from general content_writer/paper_author.",
-        "sourceHash": "aadedaeb7211c813",
+        "sourceHash": "870d52e76cf43ee4",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -1022,7 +1023,7 @@
           "external_network"
         ],
         "oneLiner": "The only fresh-discovery web researcher; shares web tools with source_verifier(audits) and image_sourcer(images) -- separated by L1 + deliverable.",
-        "sourceHash": "b60173b91fc3863f",
+        "sourceHash": "7b7aef8122aa060a",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -1048,7 +1049,7 @@
           "remote_infra"
         ],
         "oneLiner": "One-off shell/SSH commands, reports raw output; can mutate so ACT. L2 could be software for local build runs. Unreachable by any scene.",
-        "sourceHash": "17cadf77103f2d9c",
+        "sourceHash": "0acb66e83b8382b7",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated) — medium confidence",
         "labeledAt": "2026-09-19"
       }
@@ -1074,7 +1075,7 @@
           "external_network"
         ],
         "oneLiner": "Audits an existing draft's claims/citations (fetches URLs to CHECK, not to gather) -> VERIFY. Shares web tools with researcher but audits vs gathers. Reviewer-shaped but not tagged role=reviewer.",
-        "sourceHash": "fe675484d04428dd",
+        "sourceHash": "ed2e654706cce5c8",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -1100,7 +1101,7 @@
           "external_network"
         ],
         "oneLiner": "Connects to a LIVE Postgres/MySQL/MariaDB (queries/schema/migrations/EXPLAIN); ACT (can mutate), read-heavy so pure-query re-ranks near GATHER via risk_tier. Distinct from data_analyst(files). Reac...",
-        "sourceHash": "a86ea518cecb7e85",
+        "sourceHash": "1c2f0e32efa8d038",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated) — medium confidence",
         "labeledAt": "2026-09-19"
       }
@@ -1126,7 +1127,7 @@
           "workspace"
         ],
         "oneLiner": "Faithful condensation/TL;DR that authors a readable restatement (vs evidence_analyst which organizes evidence); the final merge/report agent in many scenes.",
-        "sourceHash": "24e09f58c610d1c1",
+        "sourceHash": "c3a3f7ef3b9d3768",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -1152,7 +1153,7 @@
           "swarm_internal"
         ],
         "oneLiner": "WRITES durable swarm config (agents/scenes/jobs/prompts), workspaceAccess=full (map: 'executes -- writes durable swarm config'). ACT because it mutates the live system (git-reversible). Distinct fr...",
-        "sourceHash": "8572d3dd80573bd3",
+        "sourceHash": "2db8c3072523c088",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -1179,7 +1180,7 @@
           "local_sandbox"
         ],
         "oneLiner": "Builds+tests pure-compute no-network TS tools and SUBMITS for approval (map) -- hands off an artifact, does not apply, so PRODUCE(code) not ACT (consistent with coder). Network connectors go to bac...",
-        "sourceHash": "f66c78e1bca8ef33",
+        "sourceHash": "d108cbad80fbde83",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -1205,7 +1206,7 @@
           "browser"
         ],
         "oneLiner": "Reads captured browser snapshots and publishes exact page evidence; capability is visual interpretation -> media (surface=browser records the coupling); does not DRIVE the browser (browser_agent do...",
-        "sourceHash": "07710239d0601905",
+        "sourceHash": "308ffba1da162423",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated) — medium confidence",
         "labeledAt": "2026-09-19"
       }
@@ -1231,7 +1232,7 @@
           "remote_infra"
         ],
         "oneLiner": "Authorized web-app auditing (findings=GATHER; active testing so risk=mutating_external). Brand tags nikto/sqlmap/gobuster (lint).",
-        "sourceHash": "396de5cd155e18e8",
+        "sourceHash": "d139b34405597ad9",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -1257,7 +1258,7 @@
           "workspace"
         ],
         "oneLiner": "Hand-writes multi-file client-side front-ends (SPAs/dashboards); client-only. Overlaps content_writer (files vs Markdown blocks) and backend_coder (client vs server).",
-        "sourceHash": "c4f9431f9bf97446",
+        "sourceHash": "767ed595f6b095ff",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -1281,7 +1282,7 @@
           "external_network"
         ],
         "oneLiner": "Thin freshness-only relay (delegates 1-2 live retrievals, no synthesis); borderline single_agent GATHER; tags are topic keywords (news/weather/stocks), not capabilities (lint). Unreachable by any s...",
-        "sourceHash": "d10c54ca04a221f6",
+        "sourceHash": "768f0fb55bc6681a",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated) — low confidence",
         "labeledAt": "2026-09-19"
       }

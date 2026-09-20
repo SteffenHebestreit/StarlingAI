@@ -47,8 +47,7 @@ import {
 import { currentEffortTier } from "../runtime/effort-context.js";
 import {
   attachRequestSessionId,
-  currentUserId,
-  currentWorkspaceScope,
+  currentRequestContext,
   runWithRequestContext,
 } from "../runtime/request-context.js";
 import {
@@ -2177,10 +2176,14 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
       // there); agentName/callSite are known here.
       const result = await runWithRequestContext(
         {
-          userId: currentUserId(),
-          workspaceScope: currentWorkspaceScope(),
+          // Inherit the caller's identity and scope wholesale — a sweep's pre-resolved
+          // userScopeSegment is lossy to re-derive, so listing fields by hand drops it.
+          ...(currentRequestContext() ?? {}),
           agentName: opts.agentName,
           callSite: "sub_agent",
+          // This run mints its own session id (attachRequestSessionId, below); inheriting
+          // the parent's would attribute every sub-agent call to the parent turn.
+          sessionId: undefined,
         },
         () => runSubAgentWithStatsInner(opts),
       );

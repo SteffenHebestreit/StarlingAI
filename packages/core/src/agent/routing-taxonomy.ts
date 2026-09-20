@@ -19,7 +19,7 @@ import type { JobConfig, RoutingTaxonomy, SceneConfig, SubAgentConfig } from "..
 
 /** Any catalog entry that can carry the taxonomy. */
 export type TaxonomyBearing = Pick<SubAgentConfig, "routing" | "routingGenerated">
-  & { description?: string; capabilities?: string[]; tags?: string[]; tools?: string[] };
+  & { description?: string; capabilities?: string[]; tags?: string[]; tools?: string[]; task?: string; allowedAgents?: string[] };
 
 export interface ResolvedTaxonomy extends RoutingTaxonomy {
   /** "authored" when a human set it explicitly, "generated" when it came from the labeller. */
@@ -58,6 +58,8 @@ export function taxonomySourceHash(entry: {
   tags?: string[];
   tools?: string[];
   steps?: unknown;
+  task?: string;
+  allowedAgents?: string[];
 }): string {
   return createHash("sha256")
     .update(JSON.stringify({
@@ -65,6 +67,12 @@ export function taxonomySourceHash(entry: {
       c: entry.capabilities ?? [],
       t: entry.tags ?? [],
       tl: entry.tools ?? entry.steps ?? null,
+      // A SCENE carries none of the fields above beyond its description: what it does lives
+      // entirely in `task`, and which specialists it may use in `allowedAgents`. Without
+      // these a scene could be rewritten end to end — gaining an outbound send, say, which
+      // changes its real riskTier and surface — while its label kept validating.
+      k: entry.task ?? null,
+      a: entry.allowedAgents ?? null,
     }))
     .digest("hex")
     .slice(0, 16);

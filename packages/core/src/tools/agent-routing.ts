@@ -22,7 +22,7 @@ import { logAudit } from "../audit/logger.js";
  * actually used (rerank mode).  Semantic similarity scores are normalized
  * narrowly around 0.5–0.95, so the cutoff sits high.
  */
-const SEMANTIC_AGENT_ROUTING_MIN_SCORE = 0.72;
+export const SEMANTIC_AGENT_ROUTING_MIN_SCORE = 0.72;
 
 /**
  * Minimum score for a candidate to qualify when only keyword scoring is

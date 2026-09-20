@@ -220,6 +220,60 @@ describe("routingTriage: shadow", () => {
     expect((triageRow() as unknown as { sourceSensitiveAgrees: boolean | null }).sourceSensitiveAgrees).toBe(false);
   });
 
+  it("excludes a judge that did not ANSWER, instead of scoring its fail-safe false as a verdict", async () => {
+    // The judge's parse is fail-safe: a call that throws, or a reply with no yes/no token,
+    // leaves the verdict at `false` — the same value as a genuine "not source-sensitive".
+    // If eligibility alone decided comparability, a window of backend errors would show up
+    // as the triage disagreeing, and the ">=95% agreement" gate would be measuring outages.
+    const { AgentSession, resetSessionsForTests, runTurn } = await loadRuntime("shadow");
+    resetSessionsForTests();
+    completeMock.mockImplementation(async (_messages: unknown, _tools: unknown, _signal: unknown, options?: { responseFormat?: { name?: string } }) => ({
+      // Triage answers cleanly and says source-sensitive; the judge replies with no verdict
+      // token at all (an empty completion is what a reasoning burn returns on this backend).
+      content: options?.responseFormat?.name === "routing_triage" ? JSON.stringify(VERDICT) : "",
+      tool_calls: [],
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      finishReason: "stop",
+    }));
+    streamMock.mockImplementation(() => textStream("Here is the answer."));
+
+    await runTurn({
+      session: new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." }),
+      userMessage: QUESTION,
+    });
+
+    const data = triageRow() as unknown as {
+      ok: boolean; judgeComparable: boolean; judgeStatus: string; judgeVerdict: boolean | null; sourceSensitiveAgrees: boolean | null;
+    };
+    expect(data.ok).toBe(true);
+    expect(data.judgeComparable).toBe(false);
+    expect(data.judgeStatus).toBe("no_answer");
+    expect(data.judgeVerdict).toBeNull();
+    expect(data.sourceSensitiveAgrees).toBeNull();
+  });
+
+  it("skips the classification entirely on a workflow step, which is already routed", async () => {
+    // A scene step's agent set, task and deliverable were decided when the workflow was
+    // authored. A four-step job would otherwise pay four extra routing-tier calls.
+    const { AgentSession, resetSessionsForTests, runTurn } = await loadRuntime("shadow");
+    resetSessionsForTests();
+    completeMock.mockImplementation(async (_messages: unknown, _tools: unknown, _signal: unknown, options?: { responseFormat?: { name?: string } }) => ({
+      content: options?.responseFormat?.name === "routing_triage" ? JSON.stringify(VERDICT) : "VERDICT: yes",
+      tool_calls: [],
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      finishReason: "stop",
+    }));
+    streamMock.mockImplementation(() => textStream("Here is the answer."));
+
+    await runTurn({
+      session: new AgentSession({ channel: "scene", workspacePath: "/workspace", systemPrompt: "You are a test agent." }),
+      userMessage: QUESTION,
+    });
+
+    expect(triageCalls()).toHaveLength(0);
+    expect(triageRow()).toBeUndefined();
+  });
+
   it("records a failed call as a failure, never as a neutral verdict", async () => {
     const { AgentSession, resetSessionsForTests, runTurn } = await loadRuntime("shadow");
     resetSessionsForTests();

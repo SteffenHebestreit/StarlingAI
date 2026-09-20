@@ -138,39 +138,43 @@ describe("the floor invariant", () => {
 });
 
 describe("what the turn carries", () => {
-  it("prefers an agent that can read the attachment over one that only searches the web", () => {
-    // Structural, not topical: both agents are in the same domain and score the same, so the
-    // ONLY thing separating them is whether they declare they can open what the turn carries.
+  // NAMING MATTERS HERE. Ties sort by name, so an earlier version of this suite "passed"
+  // because the document agent happened to sort first — the assertion proved the tie-break,
+  // not the signal. These fixtures are named so that alphabetical order works AGAINST the
+  // expected result: if the input bonus does nothing, "a_web_researcher" wins and the test
+  // fails.
+  const webOnly = (name: string, score: number) => agent(name, score, { inputModality: ["url"] });
+  const docReader = (name: string, score: number) => agent(name, score, { inputModality: ["file_upload"] });
+
+  it("prefers the agent that can READ the attachment over the one that only searches the web", () => {
     const decision = fuseRouting({
-      candidates: [
-        agent("researcher", 0.85, { inputModality: ["url"] }),
-        agent("document_intake", 0.85, { inputModality: ["file_upload"] }),
-      ],
+      candidates: [webOnly("a_web_researcher", 0.85), docReader("z_document_intake", 0.85)],
       verdict: verdict({ confidence: 1 }),
       flags: { inputClass: "file_upload" },
     });
-    expect(decision.shortlist[0]!.name).toBe("document_intake");
+    expect(decision.shortlist[0]!.name).toBe("z_document_intake");
+    expect(decision.shortlist[0]!.rankScore).toBeGreaterThan(decision.shortlist[1]!.rankScore);
+  });
 
-    // DISCRIMINANCE: with nothing attached the tie is broken by name order alone, so the
-    // preference above comes from the input class and not from the fixture.
-    const noAttachment = fuseRouting({
-      candidates: [
-        agent("researcher", 0.85, { inputModality: ["url"] }),
-        agent("document_intake", 0.85, { inputModality: ["file_upload"] }),
-      ],
+  it("DISCRIMINANCE: with nothing attached the same pair ties and sorts by name", () => {
+    // The control that makes the test above meaningful — and the regression guard for the
+    // cap bug, where mode+domain+deliverable summed to exactly maxBonus and the input term
+    // was absorbed, leaving these two tied even WITH an attachment.
+    const decision = fuseRouting({
+      candidates: [webOnly("a_web_researcher", 0.85), docReader("z_document_intake", 0.85)],
       verdict: verdict({ confidence: 1 }),
     });
-    expect(noAttachment.shortlist[0]!.name).toBe("document_intake");
-    expect(noAttachment.shortlist[0]!.fusedFit).toBe(noAttachment.shortlist[1]!.fusedFit);
+    expect(decision.shortlist[0]!.name).toBe("a_web_researcher");
+    expect(decision.shortlist[0]!.rankScore).toBe(decision.shortlist[1]!.rankScore);
   });
 
   it("still only demotes — an agent that cannot read the input is not excluded", () => {
     const decision = fuseRouting({
-      candidates: [agent("researcher", 0.85, { inputModality: ["url"] })],
+      candidates: [webOnly("a_web_researcher", 0.85)],
       verdict: verdict({ confidence: 1 }),
       flags: { inputClass: "file_upload" },
     });
-    expect(decision.shortlist.map((candidate) => candidate.name)).toEqual(["researcher"]);
+    expect(decision.shortlist.map((candidate) => candidate.name)).toEqual(["a_web_researcher"]);
   });
 
   it("ignores plain text, which carries no signal", () => {
@@ -183,7 +187,60 @@ describe("what the turn carries", () => {
       candidates: [agent("researcher", 0.85, { inputModality: ["text"] })],
       verdict: verdict({ confidence: 1 }),
     });
-    expect(withText.shortlist[0]!.fusedFit).toBe(without.shortlist[0]!.fusedFit);
+    expect(withText.shortlist[0]!.rankScore).toBe(without.shortlist[0]!.rankScore);
+  });
+
+  it("the bonus cap leaves room for every term — none is silently absorbed", () => {
+    // Regression: maxBonus equalled mode+domain+deliverable exactly, so the fourth term
+    // could never contribute. Asserted on the arithmetic rather than on an outcome, because
+    // an outcome test cannot tell "absorbed" from "tied".
+    const sum = DEFAULT_FUSION_TUNING.modeBonus + DEFAULT_FUSION_TUNING.domainBonus
+      + DEFAULT_FUSION_TUNING.deliverableBonus + DEFAULT_FUSION_TUNING.inputModalityBonus;
+    expect(DEFAULT_FUSION_TUNING.maxBonus).toBeGreaterThanOrEqual(sum);
+  });
+});
+
+describe("labels order candidates; they do not buy a dispatch", () => {
+  it("refuses to mechanically dispatch an agent sitting ON the admission floor, however well labelled", () => {
+    // fit 0 = the weakest match the router admits at all. With the gate applied to the
+    // FUSED score, a perfect label at full confidence cleared it outright — a mechanical
+    // dispatch bought entirely with a small model's opinion. The gate now reads the
+    // embedding headroom.
+    const decision = fuseRouting({
+      candidates: [agent("barely_admitted", 0.72)],
+      verdict: verdict({ confidence: 1 }),
+    });
+    expect(decision.shortlist[0]!.fit).toBe(0);
+    expect(decision.shortlist[0]!.rankScore).toBeGreaterThan(0);
+    expect(decision.branch).not.toBe("single_agent");
+  });
+
+  it("dispatches the same agent once the EMBEDDING clears the gate", () => {
+    // Same labels, same confidence; only the embedding score moved. This is what makes the
+    // test above a statement about the gate rather than about the fixture.
+    const decision = fuseRouting({
+      candidates: [agent("well_matched", 0.93)],
+      verdict: verdict({ confidence: 1 }),
+    });
+    expect(decision.shortlist[0]!.fit).toBeGreaterThanOrEqual(DEFAULT_FUSION_TUNING.dispatchFit);
+    expect(decision.branch).toBe("single_agent");
+  });
+
+  it("keeps the margin meaningful when both candidates are strong and well labelled", () => {
+    // Regression: ranking on the CLAMPED fused value made two saturating candidates tie at
+    // margin 0, so turning the classifier on suppressed dispatches that the embedding
+    // margin alone would have made. The margin is computed on the unclamped rank score.
+    const withVerdict = fuseRouting({
+      candidates: [agent("a", 0.99), agent("b", 0.90)],
+      verdict: verdict({ confidence: 1 }),
+    });
+    const withoutVerdict = fuseRouting({
+      candidates: [agent("a", 0.99), agent("b", 0.90)],
+      verdict: null,
+    });
+    expect(withVerdict.margin).toBeGreaterThan(0);
+    expect(withVerdict.margin).toBeCloseTo(withoutVerdict.margin, 4);
+    expect(withVerdict.k).toBe(withoutVerdict.k);
   });
 });
 
@@ -283,6 +340,23 @@ describe("branch rules", () => {
     });
     expect(genuine.branch).toBe("workflow");
     expect(genuine.target).toBe("sourced_presentation");
+  });
+
+  it("rule 5: tries every shortlisted workflow, not only the highest-ranked one", () => {
+    // The top-ranked workflow is often refused for a good reason; stopping there discarded
+    // a dispatchable one behind it. The broadcast outranks the report and must be refused,
+    // and the report must then be dispatched.
+    const broadcast = workflow("a_broadcast", 0.97, {
+      mode: "ACT", domain: ["comms"], deliverable: ["prose_doc"],
+      riskTier: "external_send", surface: ["user_channel"],
+    });
+    const report = workflow("z_report", 0.93, { mode: "PRODUCE", domain: ["authoring"], deliverable: ["prose_doc"] });
+    const decision = fuseRouting({
+      candidates: [broadcast, report],
+      verdict: verdict({ mode: "PRODUCE", domain: ["authoring"], deliverable: "prose_doc", decision: "workflow" }),
+    });
+    expect(decision.branch).toBe("workflow");
+    expect(decision.target).toBe("z_report");
   });
 
   it("rule 5: a side-effecting workflow is never dispatched mechanically", () => {

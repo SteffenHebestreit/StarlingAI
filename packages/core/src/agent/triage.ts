@@ -224,7 +224,10 @@ export function parseTriageVerdict(raw: string | undefined | null): TriageVerdic
   const decision = typeof record["decision"] === "string" && DECISIONS.has(record["decision"]) ? record["decision"] : null;
   if (!mode || !decision) return null;
 
-  const domain = asStringArray(record["domain"], 2).filter((value) => DOMAINS.has(value));
+  // Filter THEN slice: slicing first let two invented labels ahead of a real one erase the
+  // domain entirely, and a verdict with no domain silently loses every domain-dependent
+  // signal downstream while still looking like a successful classification.
+  const domain = asStringArray(record["domain"], 8).filter((value) => DOMAINS.has(value)).slice(0, 2);
   const deliverableRaw = record["deliverable"];
   const deliverable = typeof deliverableRaw === "string" && DELIVERABLES.has(deliverableRaw) ? deliverableRaw : "none";
   const languageRaw = record["language"];

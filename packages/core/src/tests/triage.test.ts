@@ -115,6 +115,16 @@ describe("parseTriageVerdict", () => {
     expect(verdict!.domain).toEqual(["research"]);
   });
 
+  it("validates domain values BEFORE truncating, so a real one behind two invented ones survives", () => {
+    // Slicing first erased the domain entirely, and a verdict with no domain still parses
+    // as a success while losing every domain-dependent signal downstream.
+    const verdict = parseTriageVerdict(JSON.stringify({ ...validVerdict, domain: ["devops", "webdev", "software"] }));
+    expect(verdict!.domain).toEqual(["software"]);
+    // And the two-value ceiling still holds for valid input.
+    const capped = parseTriageVerdict(JSON.stringify({ ...validVerdict, domain: ["software", "data", "media"] }));
+    expect(capped!.domain).toEqual(["software", "data"]);
+  });
+
   it("requires parts before it believes multi — a coordinator needs something to decompose", () => {
     expect(parseTriageVerdict(JSON.stringify({ ...validVerdict, multi: true, parts: [] }))!.multi).toBe(false);
     expect(parseTriageVerdict(JSON.stringify({ ...validVerdict, multi: true, parts: ["research it", "build it"] }))!.multi).toBe(true);

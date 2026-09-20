@@ -34,7 +34,7 @@ import {
   effectiveOrchestratorMaxToolIterations,
   currentEffortTier,
 } from "../runtime/effort-context.js";
-import { runWithRequestContext } from "../runtime/request-context.js";
+import { runWithRequestContext, runWithCallAttribution } from "../runtime/request-context.js";
 import { TRIAGE_PROMPT_VERSION, runTriage, type TriageOutcome } from "./triage.js";
 import {
   classifyTurnProgress,
@@ -1419,8 +1419,49 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
  */
 const TRIAGE_TIMEOUT_MS = 8000;
 
+/**
+ * A yes/no token in the judge's reply. Its ABSENCE means the judge did not answer at all,
+ * which the fail-safe parse renders as `false` — the same value as a genuine "no". Only
+ * this distinguishes them, and the shadow agreement statistic depends on the difference.
+ */
+const JUDGE_ANSWER_TOKEN_RE = /\b(yes|no|ja|nein)\b/i;
+
 /** A link in the request. Structural; the same test the dynamic-guidance URL signal uses. */
 const TURN_URL_RE = /https?:\/\/[^\s<>"'`)\]]+/i;
+
+/** Discovery tools withheld after a search_agents no-match, so the model cannot loop on
+ *  broader retries of a search that already came back empty. */
+const DISCOVERY_TOOL_NAMES = new Set(["search_agents", "list_agents"]);
+
+/**
+ * The per-iteration call-site allowlist under `stableToolBlock: "freeze"`.
+ *
+ * Under freeze the wire array is never narrowed — that is the whole point — so the
+ * restriction cannot be derived from it. An earlier version built the allowlist from the
+ * (un-narrowed) active array, which meant it contained every tool and the discovery
+ * refusal could never fire: the narrowing was silently DELETED rather than relocated, and
+ * the model could keep re-calling search_agents after a no-match. Exported so both branches
+ * are asserted directly instead of being inferred from a whole turn.
+ */
+export function buildIterationToolRestriction(input: {
+  tools: ReadonlyArray<{ name: string }>;
+  forcedTools: ReadonlyArray<{ name: string }>;
+  forceToolChoice: boolean;
+  withholdDiscoveryTools: boolean;
+}): { allowed: Set<string>; reason: "must_orchestrate" | "discovery_withheld" } | undefined {
+  // Forcing is the stronger restriction and subsumes the discovery one: the forced subset
+  // is chosen for its ability to ADVANCE the turn, and a repeat search does not.
+  if (input.forceToolChoice) {
+    return { allowed: new Set(input.forcedTools.map((tool) => tool.name)), reason: "must_orchestrate" };
+  }
+  if (input.withholdDiscoveryTools) {
+    return {
+      allowed: new Set(input.tools.map((tool) => tool.name).filter((name) => !DISCOVERY_TOOL_NAMES.has(name))),
+      reason: "discovery_withheld",
+    };
+  }
+  return undefined;
+}
 
 /**
  * Two lines of the previous exchange, so a follow-up that carries no subject of its own
@@ -1477,21 +1518,30 @@ function startFacetTriage(
   userMessage: string,
   priorTurnDigest: string | undefined,
   timeoutMs: number,
+  turnSignal: AbortSignal,
+  inWorkflowStep: boolean,
 ): Promise<TriageOutcome> | null {
   const mode = effectiveOrchestration().routingTriage ?? "off";
   if (mode === "off") return null;
+  // A scene or job step is already routed: its agent set, its task and its deliverable
+  // were decided when the workflow was authored. Classifying it again buys nothing and
+  // costs one routing-tier call per step — four of them on a four-step job.
+  if (inWorkflowStep) return null;
   const provider = resolveRoutingTierProvider();
-  const outcome = runTriage(
+  // Label the provider rows this call produces. Without it every routing-tier call is
+  // indistinguishable from the orchestrator's own — and under a model preset it runs on
+  // the SAME model id, so nothing else could tell them apart.
+  const outcome = runWithCallAttribution({ callSite: "routing_tier", agentName: "triage" }, () => runTriage(
     { userMessage, ...(priorTurnDigest ? { priorTurnDigest } : {}) },
     {
       timeoutMs,
-      complete: async (messages, options) => (await provider.complete(messages, [], undefined, {
+      complete: async (messages, options) => (await provider.complete(messages, [], turnSignal, {
         maxTokens: options.maxTokens,
         controls: options.controls,
         responseFormat: options.responseFormat,
       })).content ?? "",
     },
-  );
+  ));
   outcome.catch(() => { /* resolved shape only; runTriage never rejects */ });
   return outcome;
 }
@@ -1628,6 +1678,8 @@ async function _runTurn(
     userMessage,
     buildPriorTurnDigest(session),
     TRIAGE_TIMEOUT_MS,
+    signal,
+    session.channel === "scene",
   );
 
   // ── Document RAG augmentation ───────────────────────────────────────────────
@@ -1663,6 +1715,11 @@ async function _runTurn(
   // lane declined the turn, overlapping the document-RAG search; this is where its verdict is
   // consumed.
   let upfrontSourceSensitive = false;
+  // Did the judge actually PRODUCE a verdict? `upfrontSourceSensitive` is fail-safe: it
+  // stays false when the call throws or replies with no yes/no token, so its value alone
+  // cannot distinguish "judged not source-sensitive" from "never answered". The shadow
+  // agreement statistic must not charge a provider failure to the triage as a disagreement.
+  let upfrontJudgeAnswered = false;
   if (
     effectiveOrchestration().upfrontSourceSensitiveClassifier === true
     && getConfig().agents.mainAssistant.toolMode === "orchestration_only"
@@ -1674,6 +1731,9 @@ async function _runTurn(
       try {
         const verdictRaw = await upfrontClassifier.verdict;
         upfrontSourceSensitive = parseUngroundedClaimVerdict(verdictRaw);
+        // A reply with no yes/no token resolves to the fail-safe false; that is a
+        // non-answer, not a verdict, and is excluded from the agreement statistic.
+        upfrontJudgeAnswered = JUDGE_ANSWER_TOKEN_RE.test(verdictRaw ?? "");
         // Always log the verdict (not just the positive case) so the audit shows the classifier RAN
         // and what it decided — otherwise a silent "no" is indistinguishable from the classifier being
         // absent/disabled, which made the "did it fire?" question undiagnosable from the audit.
@@ -1704,7 +1764,13 @@ async function _runTurn(
   // gate unreachable.
   const facetTriage = facetTriagePromise ? await facetTriagePromise : null;
   if (facetTriage) {
-    const judgeComparable = !reusePriorDelegateEvidenceForFollowUp && !documentRagFoundDocs && !!upfrontClassifier;
+    // Comparable only when the judge was eligible AND actually answered. Testing
+    // eligibility alone recorded every provider failure as a judged `false`, so a bad
+    // window of backend errors would have looked like the triage disagreeing.
+    const judgeComparable = !reusePriorDelegateEvidenceForFollowUp
+      && !documentRagFoundDocs
+      && !!upfrontClassifier
+      && upfrontJudgeAnswered;
     logAudit("routing_triage_decided", {
       mode: effectiveOrchestration().routingTriage ?? "off",
       promptVersion: TRIAGE_PROMPT_VERSION,
@@ -1728,6 +1794,14 @@ async function _runTurn(
         : null,
       // The gate: does `source_sensitive` reproduce the judge it would replace?
       judgeComparable,
+      // Why it is not comparable, so a run of nulls is diagnosable rather than mysterious.
+      judgeStatus: !upfrontClassifier
+        ? "not_started"
+        : !upfrontJudgeAnswered
+          ? "no_answer"
+          : (reusePriorDelegateEvidenceForFollowUp || documentRagFoundDocs)
+            ? "verdict_unwanted"
+            : "answered",
       judgeVerdict: judgeComparable ? upfrontSourceSensitive : null,
       sourceSensitiveAgrees: judgeComparable && facetTriage.verdict
         ? facetTriage.verdict.sourceSensitive === upfrontSourceSensitive
@@ -2455,10 +2529,13 @@ async function _runTurn(
       // search_agents no-match; the forced-orchestration subset) are enforced at the call
       // site instead. Same capability, same refusals — the bytes just stop moving, which is
       // what the KV prefix is keyed on.
-      const freezeToolBlock = (getConfig().orchestration?.stableToolBlock ?? "off") === "freeze";
+      // effectiveOrchestration(), not getConfig(): the eval harness flips orchestration flags
+      // through an AsyncLocalStorage overlay, and a flag read straight from the config is
+      // invisible to it — so the A/B this flag's own documentation calls for could not be run.
+      const freezeToolBlock = (effectiveOrchestration().stableToolBlock ?? "off") === "freeze";
       const withholdDiscoveryTools = Boolean(searchAgentsNoMatchFallbackPrompt) && !softRoutingEnforcement;
       const activeTools = (withholdDiscoveryTools && !freezeToolBlock)
-        ? tools.filter((tool) => tool.name !== "search_agents" && tool.name !== "list_agents")
+        ? tools.filter((tool) => !DISCOVERY_TOOL_NAMES.has(tool.name))
         : tools;
       // Cost-center 1 (audit 5d51862f): while the turn still MUST orchestrate and has NOT
       // yet delegated, force a tool call so the slow local model can't burn ~2 min drafting
@@ -2499,11 +2576,8 @@ async function _runTurn(
       // been expressed by sending fewer schemas becomes this per-iteration allowlist, applied
       // where the call is dispatched. Without it, tool_choice:"required" over the full block
       // can be satisfied by memory_store — the loop audit be828e39 recorded.
-      iterationToolRestriction = freezeToolBlock && (forceToolChoice || withholdDiscoveryTools)
-        ? {
-            allowed: new Set((forceToolChoice ? forcedTools : activeTools).map((tool) => tool.name)),
-            reason: forceToolChoice ? "must_orchestrate" : "discovery_withheld",
-          }
+      iterationToolRestriction = freezeToolBlock
+        ? buildIterationToolRestriction({ tools, forcedTools, forceToolChoice, withholdDiscoveryTools })
         : undefined;
       const streamTools = freezeToolBlock ? tools : (forceToolChoice ? forcedTools : activeTools);
       llmResponse = await collectStream(

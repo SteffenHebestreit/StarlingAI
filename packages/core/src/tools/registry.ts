@@ -3,7 +3,7 @@ import { ToolTier, getToolTier, isToolAllowed } from "../guardrails/tool-tiers.j
 import type { LLMToolDef } from "../providers/lmstudio.js";
 import { computeQueryEmbedding, cosineSimilarity, isEmbeddingAvailable } from "../providers/embeddings.js";
 import { withSpan, genAi } from "../observability/tracing.js";
-import { runWithRequestContext, currentUserId } from "../runtime/request-context.js";
+import { runWithRequestContext, currentUserId, currentRequestContext } from "../runtime/request-context.js";
 import { childLogger } from "../logger.js";
 import { isToolDisabled, resolveToolGroup } from "./groups.js";
 import { getConfig } from "../config/loader.js";
@@ -795,10 +795,19 @@ export async function executeTool(
           // identity forwarding, workspace-path zone enforcement) without threading
           // them through every call signature.
           return await runWithRequestContext(
-            // Fall back to the ambient turn userId so a delegated sub-agent whose
-            // ToolContext didn't thread userId still resolves per-user stores to
-            // the owning user (never clobber the turn's userId to undefined).
-            { userId: context.userId ?? currentUserId(), workspaceScope: context.workspaceScope },
+            {
+              // Spread the ambient store FIRST so attribution (sessionId / agentName /
+              // callSite) and a sweep's pre-resolved userScopeSegment survive the tool
+              // boundary. Rebuilding the context from two fields dropped them, so any
+              // model call issued inside a tool handler produced a NULL-session
+              // provider row — the exact gap the attribution was added to close.
+              ...(currentRequestContext() ?? {}),
+              // Fall back to the ambient turn userId so a delegated sub-agent whose
+              // ToolContext didn't thread userId still resolves per-user stores to
+              // the owning user (never clobber the turn's userId to undefined).
+              userId: context.userId ?? currentUserId(),
+              workspaceScope: context.workspaceScope,
+            },
             () => handler.execute(args, context),
           );
         } catch (err) {

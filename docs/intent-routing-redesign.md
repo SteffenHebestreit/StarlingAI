@@ -1,6 +1,6 @@
 # Intent detection, routing and prompt diet — research and plan
 
-Status: PLAN (nothing shipped). Written 2026-09-19 from a 17-agent codebase/literature survey, four independent designs, three judge reviews, a two-way taxonomy merge, a synthesis and four adversarial critiques. Every number below is either measured on the live deployment (2026-09-16/17), measured against the built registry, or marked as an estimate.
+Status: PHASES A-B PARTIALLY IMPLEMENTED on `develop` (see section 12 for exactly what is built and what is not). Everything behavioural ships default-off. Written 2026-09-19 from a 17-agent codebase/literature survey, four independent designs, three judge reviews, a two-way taxonomy merge, a synthesis and four adversarial critiques. Every number below is either measured on the live deployment (2026-09-16/17), measured against the built registry, or marked as an estimate.
 
 ## 0. Summary
 
@@ -596,3 +596,43 @@ Two judge-level corrections applied to every design: `ToolContext.allowedAgents`
 - Code: `packages/core/src/agent/{turn-system-prompt,session,turn-prepare,turn-setup,intent-classifier,receptionist,discovery-prefetch,deliverable-intent,sub-agent,sub-agent-prompt-guidance,default-tools,turn-plan}.ts`; `packages/core/src/tools/{agent-routing,sub-agent,workflow-catalog,registry,ephemeral-agent-factory,plan-executor}.ts`; `packages/core/src/providers/{embeddings,lmstudio,anthropic,index}.ts`; `packages/core/src/config/schema.ts`; `workspace/{agents,scenes,jobs}/*.jsonc`; `config/gateway/{10-gateway,40-orchestration}.jsonc`.
 - Prior design docs this supersedes in part: `docs/staged-orchestration.md` (S2 lean planning prompt, S4 capsule), ADR-009.
 - Session artefacts (scratchpad, may be gone): `phase1/*.json` (11 codebase maps, 6 research syntheses), `phase2/*.json` (4 designs, 3 judge reports, 2 taxonomies + merge, synthesis, 4 critiques), `CONSTRAINTS.md`.
+
+## 12. Implementation status (updated 2026-09-19)
+
+Five commits on `develop`: `99bbbdc`, `dfb9b15`, `cbd3116`, `53e3e99`, `76aa67a`. Core suite
+3662 passing; the one failure is `gateway.integration > resolves agent routing`, which fails
+identically at the parent commit (known local-only). Lint clean, typecheck clean, and the
+config feature-registry gate reports zero unreferenced fields.
+
+### Built
+
+| Slice | What landed | Flag / default |
+|---|---|---|
+| S0 | `sessionId`/`agentName`/`callSite` on `provider_model_call` via the request context; `agent_routing_evaluated` at the discovery prefetch and the un-named delegation path (with `surface`, the scored top-5 and elapsed time, including empty prefetches); `prompt_section_sizes` extended with the tool block, module, capsule, effort, enforcement, shared findings and a head/tail/history split; the receptionist's escalate reason recorded | none (always on) |
+| S1 | Routing canary with a committed-snapshot diff (`pnpm routing:canary`, `--update`, `--json`); exits 2 as INCONCLUSIVE when the embedding backend is unreachable | none (a command) |
+| S2 | `orchestration.stableToolBlock="freeze"` — the turn's tool array is byte-identical across every iteration; the discovery-withheld and forced-orchestration narrowings move to call-site refusal, logged as `tool_restriction_refused` | `off` |
+| S3 | The IDCM taxonomy on the schema for agents, scenes and jobs; seed labels for all 88 entries in `workspace/{agents,scenes,jobs}/59-routing.generated.jsonc`; `resolveRoutingTaxonomy`, `lintTaxonomy` (a CI gate against the real catalog) and `facetAgreement` | authored `routing` overrides generated |
+| S4 | `agent/triage.ts` (catalog-blind classification call, frozen versioned prefix, strict parser, grammar-constrained output) wired into the turn; `routing_triage_decided` carries the verdict and its agreement with the judge; a routing-tier preset fallback so the lane runs under a model preset at all | `orchestration.routingTriage: "off"` \| `"shadow"` |
+| S5 (partial) | `agent/routing-fusion.ts` — fit-space unification, capped confidence-scaled facet bonus, adaptive K, the full ordered branch rule set, `needsCoordination`, `workflowDispatchable`. PURE AND UNWIRED: nothing calls it in a turn yet | n/a |
+
+### Not built
+
+- The `"on"` value of `routingTriage`: the fusion exists but no turn consumes a `RoutedDecision`. The brief, the branch-driven prompt shapes and the loadouts are S5-S7 and are untouched.
+- Everything in phases C, D and E: the session block, branch loadouts, the scoped coordinator handoff, mechanical dispatch, and every prompt-text change. The always-on head is byte-for-byte what it was.
+- The golden set, the offline `routing` plan kind and the routing-live pack (P2, P3, P5). The canary (P1) is the only new eval that runs.
+- `notFor`, `entryAgent` and `requiresEvidence` were removed from the schema after the feature-registry gate flagged them: their consumers belong to later slices, and a field with no reader is an inert flag.
+
+### What to do next, in order
+
+1. Run `pnpm routing:canary -- --update` against the live stack to record the first snapshot. Until it exists there is no baseline, and the canary reports that rather than passing.
+2. Turn on `orchestration.routingTriage: "shadow"` and collect a few hundred turns. The S4 gate is computable from `routing_triage_decided` alone: `sourceSensitiveAgrees` over rows with `judgeComparable: true`, the parse-failure rate from `ok`, and latency from `elapsedMs`.
+3. A/B `stableToolBlock: "freeze"` against `"off"` on cold-prefill rows per turn, now that `provider_model_call` rows join to their turn.
+4. Only then wire the fusion (`routingTriage: "on"`), because its bonus weights and thresholds should be fitted against the shadow data rather than guessed.
+
+### Decisions from section 10 that the implementation already settled
+
+- **#4 (routing lane under a preset)** — implemented as the call-site fallback, because without it the S4 shadow gate is unmeasurable on the deployment that carries the traffic.
+- **#10 (freeze vs loadouts locally)** — `freeze` shipped first, as the reviews recommended; loadouts are not built, so the A/B in step 3 decides the local default with no code to unwind.
+- **#12 (Core Principles trim)** — untouched. No prompt text changed in any of these commits.
+
+The other decisions in section 10 remain open and none of them is blocked by what is built.

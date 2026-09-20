@@ -10,16 +10,16 @@
  * benchmark in this repo ran against a hand-written fixture at `minConfidence: "low"` — it
  * could not have observed a floor regression even if it had not been skipped.
  *
- * Exit codes: 0 pass · 1 canary or snapshot failure · 2 the backend is unavailable (the run
- * is INCONCLUSIVE, never "green": a canary that silently passes without a backend is worse
- * than no canary).
+ * Exit codes: 0 pass · 1 a probe or snapshot check failed · 2 INCONCLUSIVE — the backend is
+ * unavailable, or no baseline snapshot exists yet. Both cases mean the run could not perform
+ * its strongest checks, and a canary that reports green without them is worse than none.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { getConfig } from "../config/loader.js";
 import { isEmbeddingAvailable, getEmbeddingSearchStatus } from "../providers/embeddings.js";
-import { resolveAgentRouting } from "../tools/agent-routing.js";
+import { SEMANTIC_AGENT_ROUTING_MIN_SCORE, resolveAgentRouting } from "../tools/agent-routing.js";
 import {
   DEFAULT_CANARY_FLOORS,
   buildAgentProbes,
@@ -111,7 +111,12 @@ export async function runRoutingCanaryCli(argv: readonly string[]): Promise<numb
     return 2;
   }
 
-  const report = await runCanary(probes, createLiveScorer(), DEFAULT_CANARY_FLOORS);
+  // The floor comes from the ROUTER, not from a copy: the canary exists to guard that
+  // constant, so keeping a duplicate of it invites the two drifting apart.
+  const report = await runCanary(probes, createLiveScorer(), {
+    ...DEFAULT_CANARY_FLOORS,
+    agent: SEMANTIC_AGENT_ROUTING_MIN_SCORE,
+  });
   const snapshot = readSnapshot(snapshotPath);
   const diff = snapshot ? diffSnapshot(snapshot, report, embeddingModel) : undefined;
 
@@ -137,9 +142,16 @@ export async function runRoutingCanaryCli(argv: readonly string[]): Promise<numb
   }
 
   if (!snapshot) {
-    process.stdout.write(
-      `\nNo snapshot at ${snapshotPath}. Record one with --update once the probe results look right.\n`,
+    // Exiting 0 here would report a run with its two strongest checks disabled as a pass:
+    // the floor-crossing and mean-shift guards are exactly the pair that catches the
+    // e1151d8 shape, and both need a baseline. Same contract as an unreachable backend —
+    // INCONCLUSIVE, never green.
+    process.stderr.write(
+      `\nINCONCLUSIVE: no snapshot at ${snapshotPath}, so the floor-crossing and mean-shift `
+      + "checks did not run. The per-probe results above are still valid.\n"
+      + "Record a baseline with: pnpm routing:canary -- --update\n",
     );
+    return report.passed ? 2 : 1;
   }
   return report.passed && (diff?.passed ?? true) ? 0 : 1;
 }
