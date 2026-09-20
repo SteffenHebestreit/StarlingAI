@@ -218,7 +218,7 @@ Every public schema field, where it is declared, and how many production files r
 | `label` | packages/core/src/config/schema.ts:246 | 106 |
 | `labeledAt` | packages/core/src/config/schema.ts:895 | 1 |
 | `labeledBy` | packages/core/src/config/schema.ts:894 | 1 |
-| `language` | packages/core/src/config/schemas/multimodal.ts:73 | 56 |
+| `language` | packages/core/src/config/schemas/multimodal.ts:73 | 57 |
 | `leanContextInjection` | packages/core/src/config/schema.ts:1763 | 1 |
 | `leanSynthesisPrompt` | packages/core/src/config/schemas/orchestration.ts:289 | 1 |
 | `leanToolCatalog` | packages/core/src/config/schema.ts:1753 | 3 |

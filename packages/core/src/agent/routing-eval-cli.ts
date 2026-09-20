@@ -64,6 +64,7 @@ function catalogTextFor(entry: { description?: string; capabilities?: string[]; 
 async function buildLiveResolver(
   configPath: string,
   useTriage: boolean,
+  secondPass: boolean,
 ): Promise<{ resolver: RoutingEvalResolver; catalogText: Record<string, string> } | { error: string }> {
   process.env["SAI_CONFIG_PATH"] = configPath;
   // Dynamic, so SAI_CONFIG_PATH is set before the loader is evaluated. ESM hoists static
@@ -119,21 +120,45 @@ async function buildLiveResolver(
     catalogText[name] = catalogTextFor(entry);
   }
 
+  const toCandidates = (
+    results: Array<{ name: string; score: number }>,
+    fromRawQuery: boolean,
+  ) => results.map((candidate) => {
+    const taxonomy = resolveRoutingTaxonomy(config.subAgents[candidate.name]);
+    return {
+      name: candidate.name,
+      family: "agent" as const,
+      score: candidate.score,
+      floor: SEMANTIC_AGENT_ROUTING_MIN_SCORE,
+      admittedByRawQuery: fromRawQuery,
+      ...(taxonomy ? { taxonomy } : {}),
+    };
+  });
+
   const resolver: RoutingEvalResolver = async (evalCase) => {
     const started = Date.now();
     const resolution = await resolveAgentRouting(evalCase.query, { minConfidence: "high" });
-    const candidates = resolution.results.map((candidate) => {
-      const taxonomy = resolveRoutingTaxonomy(config.subAgents[candidate.name]);
-      return {
-        name: candidate.name,
-        family: "agent" as const,
-        score: candidate.score,
-        floor: SEMANTIC_AGENT_ROUTING_MIN_SCORE,
-        admittedByRawQuery: true,
-        ...(taxonomy ? { taxonomy } : {}),
-      };
-    });
+    const candidates = toCandidates(resolution.results, true);
+    const rawAdmitted = candidates.length;
     const verdict = runTriageCase ? await runTriageCase(evalCase.query) : null;
+
+    // SECOND RETRIEVAL PASS on the classifier's English restatement.
+    //
+    // Measured: 7 of 25 German requests admit NOTHING while their English twins all clear the
+    // 0.72 floor, so the gap the paraphrase costs is the whole difference. This runs that
+    // rescue as an EXPERIMENT rather than a product change: candidates found only by the
+    // restatement carry admittedByRawQuery=false, which the fusion already refuses to let
+    // license a mechanical dispatch — the restatement is written by the same small model that
+    // produced the labels, so trusting both would be one signal counted twice.
+    let secondPassAdded: string[] = [];
+    if (secondPass && verdict?.queryEn && verdict.queryEn.trim() && verdict.language !== "en") {
+      const known = new Set(candidates.map((candidate) => candidate.name));
+      const restated = await resolveAgentRouting(verdict.queryEn, { minConfidence: "high" });
+      const extra = toCandidates(restated.results.filter((r) => !known.has(r.name)), false);
+      secondPassAdded = extra.map((candidate) => candidate.name);
+      candidates.push(...extra);
+    }
+
     const decision = fuseRouting({
       candidates,
       verdict,
@@ -144,9 +169,15 @@ async function buildLiveResolver(
       // Every admitted candidate, not the cut shortlist: recall@K asks whether retrieval
       // found the entry at all, which is a different question from whether K kept it.
       ranked: candidates.map((candidate) => candidate.name),
-      gated: resolution.gated || candidates.length === 0,
+      gated: candidates.length === 0,
       hasVerdict: Boolean(verdict),
       elapsedMs: Date.now() - started,
+      secondPass: {
+        attempted: secondPass && Boolean(verdict?.queryEn?.trim()) && verdict?.language !== "en",
+        restatement: verdict?.queryEn ?? "",
+        rawAdmitted,
+        added: secondPassAdded,
+      },
     };
   };
   return { resolver, catalogText };
@@ -172,6 +203,8 @@ export async function runRoutingEvalCli(argv: readonly string[]): Promise<number
   const modeIndex = argv.indexOf("--mode");
   const mode = (modeIndex >= 0 ? argv[modeIndex + 1] : "decision") === "live" ? "live" : "decision";
   const useTriage = argv.includes("--triage");
+  // Needs a verdict to have a restatement to route on, so it implies --triage.
+  const secondPass = argv.includes("--second-pass");
   const casesIndex = argv.indexOf("--cases");
   const jsonIndex = argv.indexOf("--json");
   const jsonPath = jsonIndex >= 0 ? argv[jsonIndex + 1] : undefined;
@@ -235,7 +268,11 @@ export async function runRoutingEvalCli(argv: readonly string[]): Promise<number
     // deployment's catalog is making a deliberate choice, and outside a checkout it is the
     // only thing that can name one.
     const configPath = explicitConfig ?? repo!.configPath;
-    const built = await buildLiveResolver(configPath, useTriage);
+    if (secondPass && !useTriage) {
+      process.stderr.write("--second-pass needs --triage: the restatement comes from the classifier.\n");
+      return 1;
+    }
+    const built = await buildLiveResolver(configPath, useTriage, secondPass);
     if ("error" in built) {
       process.stderr.write(`INCONCLUSIVE: ${built.error}\n`);
       return 2;

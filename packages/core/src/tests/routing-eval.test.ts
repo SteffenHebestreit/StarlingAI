@@ -159,6 +159,78 @@ describe("shortlist expectations", () => {
   });
 });
 
+describe("English-restatement second pass", () => {
+  /** A resolver that reports a second pass with a stated outcome, so the accounting is what is under test. */
+  const resolverFor = (
+    plan: Record<string, { rawAdmitted: number; finalRanked: string[]; added: string[] }>,
+  ): RoutingEvalResolver => async (evalCase) => {
+    const step = plan[evalCase.id]!;
+    return {
+      decision: {
+        branch: "general", shortlist: [], k: 0, margin: 0,
+        agreementClass: "unknown", sourceSensitive: false, reasons: ["stub"],
+      },
+      ranked: step.finalRanked,
+      gated: step.finalRanked.length === 0,
+      hasVerdict: true,
+      secondPass: { attempted: true, restatement: "restated in english", rawAdmitted: step.rawAdmitted, added: step.added },
+    };
+  };
+
+  const cases: RoutingEvalCase[] = [
+    { id: "rescued", query: "eine deutsche anfrage", language: "de", expect: { admitted: true } },
+    { id: "widened", query: "noch eine", language: "de", expect: { admitted: true } },
+    { id: "still-empty", query: "und noch eine", language: "de", expect: { admitted: true } },
+  ];
+
+  it("separates a rescue from a widening from a case the restatement did not help", async () => {
+    const report = await runRoutingEval(cases, resolverFor({
+      // The raw query admitted nothing; the restatement found the agent. This is the number
+      // the German measurement predicts and the only one that justifies building the pass.
+      rescued: { rawAdmitted: 0, finalRanked: ["swarm_maintainer"], added: ["swarm_maintainer"] },
+      // Already working; the restatement only made the shortlist wider. Counting this as a
+      // rescue would inflate the benefit with cases that never needed it.
+      widened: { rawAdmitted: 2, finalRanked: ["a", "b", "c"], added: ["c"] },
+      // Neither pass found anything. A restatement is not a floor.
+      "still-empty": { rawAdmitted: 0, finalRanked: [], added: [] },
+    }), { mode: "live" });
+
+    expect(report.secondPass).toBeDefined();
+    expect(report.secondPass!.attempted).toBe(3);
+    expect(report.secondPass!.rescued).toEqual(["rescued"]);
+    expect(report.secondPass!.widened).toBe(1);
+    expect(report.secondPass!.stillEmpty).toEqual(["still-empty"]);
+  });
+
+  it("says nothing at all when no second pass ran", async () => {
+    // Discriminance control: the same cases through a resolver that never attempts one. An
+    // always-present block would read as "the feature ran and found nothing".
+    const report = await runRoutingEval(cases, async () => ({
+      decision: {
+        branch: "general", shortlist: [], k: 0, margin: 0,
+        agreementClass: "unknown", sourceSensitive: false, reasons: ["stub"],
+      },
+      ranked: ["a"],
+      gated: false,
+      hasVerdict: true,
+    }), { mode: "live" });
+
+    expect(report.secondPass).toBeUndefined();
+    expect(formatRoutingEvalReport(report)).not.toContain("second pass");
+  });
+
+  it("reports the rescue in the formatted output, with the ids", async () => {
+    const report = await runRoutingEval([cases[0]!], resolverFor({
+      rescued: { rawAdmitted: 0, finalRanked: ["swarm_maintainer"], added: ["swarm_maintainer"] },
+    }), { mode: "live" });
+
+    const text = formatRoutingEvalReport(report);
+    expect(text).toContain("English-restatement second pass");
+    expect(text).toContain("rescued (raw admitted nothing, restatement did): 1");
+    expect(text).toContain("rescued");
+  });
+});
+
 describe("lexical leakage flag", () => {
   const description = "Reviews, explains and retrieves code across the workspace, locating symbols and references";
 

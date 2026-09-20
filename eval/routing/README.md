@@ -66,6 +66,38 @@ Without `--triage` there is no verdict, so the fusion returns `legacy` by contra
 branch and source-sensitivity checks are skipped rather than scored against the absence of
 a classifier. The run says how many it skipped.
 
+### The English-restatement second pass (an experiment, not a product feature)
+
+```
+pnpm routing:eval -- --mode live --triage --second-pass
+```
+
+Measured on 25 matched German/English pairs: seven German requests admitted NOTHING while
+every one of their English twins cleared the 0.72 floor. The classifier already produces an
+English restatement of a non-English request, so the obvious question is whether routing on
+it rescues those turns.
+
+This flag answers that question without shipping the mechanism. For a non-English case it
+resolves a second time on the restatement and adds anything new, marked
+`admittedByRawQuery: false` — which the fusion already refuses to let license a mechanical
+dispatch, because the restatement comes from the same small model that produced the labels
+and trusting both would be one signal counted twice.
+
+The report splits the outcome three ways, and the distinction is the point:
+
+| line | meaning |
+|---|---|
+| rescued | the raw query admitted nothing, the restatement found something |
+| widened | the case already worked; the restatement only made the shortlist longer |
+| still empty | neither pass found anything |
+
+Only the first number justifies building the pass. Counting the second with it would inflate
+the benefit with cases that never needed it.
+
+One ceiling to keep in view: the classifier emits a restatement on about 9 of 15 German
+requests. A rescue available on 60% of turns rescues 60% of turns, and two rewordings of the
+prompt failed to move that (see `TRIAGE_PROMPT_VERSION` in `agent/triage.ts`).
+
 ### Run it where the reranker is
 
 Routing blends `combinedScore * 0.7 + rerankScore * 0.3` and applies the 0.72 admission

@@ -90,6 +90,21 @@ export interface RoutingEvalObservation {
   /** True when a real classifier verdict was available, so branch checks are meaningful. */
   hasVerdict: boolean;
   elapsedMs?: number;
+  /**
+   * The English-restatement retrieval pass, when the run asked for it.
+   *
+   * Reported separately from the totals because it answers a question of its own: how many
+   * turns that retrieved NOTHING from the user's own words are rescued by routing on the
+   * classifier's restatement. Measured on 25 matched pairs, every German collapse had an
+   * English twin that cleared the floor, so this is the mechanism that gap implies.
+   */
+  secondPass?: {
+    attempted: boolean;
+    restatement: string;
+    /** Candidates the RAW query admitted, before the second pass added any. */
+    rawAdmitted: number;
+    added: string[];
+  };
 }
 
 export type RoutingEvalResolver = (evalCase: RoutingEvalCase) => Promise<RoutingEvalObservation>;
@@ -115,6 +130,7 @@ export interface RoutingCaseResult {
   /** Token overlap between the query and the expected target's own catalog text, in [0,1]. */
   lexicalOverlap: number | null;
   elapsedMs?: number;
+  secondPass?: RoutingEvalObservation["secondPass"];
   skippedChecks: string[];
 }
 
@@ -167,6 +183,16 @@ export interface RoutingEvalReport {
   byLanguage: Record<string, RoutingEvalSlice>;
   /** Ids whose query reuses the target's own vocabulary above the threshold. */
   leaked: string[];
+  /** Populated only on a --second-pass run. */
+  secondPass?: {
+    attempted: number;
+    /** Cases the raw query admitted NOTHING for, and the restatement admitted something. */
+    rescued: string[];
+    /** Cases that were already passing and the restatement widened anyway. */
+    widened: number;
+    /** Cases the raw query admitted nothing for, and the restatement did not help either. */
+    stillEmpty: string[];
+  };
   /** Pass rate over the cases that are NOT lexically leaked, or null when none remain. */
   cleanPassRate: number | null;
   thresholds: RoutingEvalThresholds;
@@ -416,6 +442,7 @@ export async function runRoutingEval(
       ranked: observation.ranked,
       lexicalOverlap: overlap,
       ...(observation.elapsedMs !== undefined ? { elapsedMs: observation.elapsedMs } : {}),
+      ...(observation.secondPass ? { secondPass: observation.secondPass } : {}),
       skippedChecks: skipped,
     });
   }
@@ -426,6 +453,19 @@ export async function runRoutingEval(
   const leaked = results
     .filter((result) => result.lexicalOverlap !== null && result.lexicalOverlap >= thresholds.leakOverlap)
     .map((result) => result.id);
+  const secondPassRuns = results.filter((result) => result.secondPass?.attempted);
+  const secondPass = secondPassRuns.length === 0 ? undefined : {
+    attempted: secondPassRuns.length,
+    rescued: secondPassRuns
+      .filter((result) => result.secondPass!.rawAdmitted === 0 && result.ranked.length > 0)
+      .map((result) => result.id),
+    widened: secondPassRuns.filter(
+      (result) => result.secondPass!.rawAdmitted > 0 && result.secondPass!.added.length > 0,
+    ).length,
+    stillEmpty: secondPassRuns
+      .filter((result) => result.secondPass!.rawAdmitted === 0 && result.ranked.length === 0)
+      .map((result) => result.id),
+  };
   const clean = results.filter((result) => result.scored && !leaked.includes(result.id));
   const cleanPassRate = clean.length > 0
     ? Number((clean.filter((result) => result.passed).length / clean.length).toFixed(4))
@@ -473,6 +513,7 @@ export async function runRoutingEval(
     confusion,
     byLanguage,
     leaked,
+    ...(secondPass ? { secondPass } : {}),
     cleanPassRate,
     thresholds,
     failures,
@@ -498,6 +539,16 @@ export function formatRoutingEvalReport(report: RoutingEvalReport): string {
   lines.push(`  gated            ${pct(report.gated, report.total)}  (a gated case is a MISS, not an exclusion)`);
   if (report.cleanPassRate !== null && report.leaked.length > 0) {
     lines.push(`  pass rate without the ${report.leaked.length} lexically-leaked case(s): ${Math.round(report.cleanPassRate * 100)}%`);
+  }
+
+  if (report.secondPass) {
+    const sp = report.secondPass;
+    lines.push(`  English-restatement second pass, on ${sp.attempted} non-English case(s):`);
+    lines.push(`    rescued (raw admitted nothing, restatement did): ${sp.rescued.length}`);
+    if (sp.rescued.length > 0) lines.push(`      ${sp.rescued.join(", ")}`);
+    lines.push(`    widened an already-working case: ${sp.widened}`);
+    lines.push(`    still empty after the restatement: ${sp.stillEmpty.length}`);
+    if (sp.stillEmpty.length > 0) lines.push(`      ${sp.stillEmpty.join(", ")}`);
   }
 
   const languages = Object.keys(report.byLanguage).sort();
