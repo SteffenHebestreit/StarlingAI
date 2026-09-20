@@ -18,7 +18,7 @@ Every public schema field, where it is declared, and how many production files r
 | `admin` | packages/core/src/config/schema.ts:363 | 21 |
 | `agents` | packages/core/src/config/schema.ts:1672 | 140 |
 | `alertmanager` | packages/core/src/config/schema.ts:1127 | 1 |
-| `all` | packages/core/src/config/schema.ts:1265 | 226 |
+| `all` | packages/core/src/config/schema.ts:1265 | 227 |
 | `allowedAgents` | packages/core/src/config/schema.ts:1285 | 29 |
 | `allowedUserIds` | packages/core/src/config/schemas/channels.ts:11 | 5 |
 | `allowedUsers` | packages/core/src/config/schema.ts:785 | 10 |
@@ -49,7 +49,7 @@ Every public schema field, where it is declared, and how many production files r
 | `autoReconnect` | packages/core/src/config/schema.ts:762 | 1 |
 | `autoResearchOnRefusal` | packages/core/src/config/schemas/effort.ts:50 | 3 |
 | `autoStart` | packages/core/src/config/schema.ts:667 | 3 |
-| `backend` | packages/core/src/config/schema.ts:478 | 73 |
+| `backend` | packages/core/src/config/schema.ts:478 | 74 |
 | `baseUrl` | packages/core/src/config/schema.ts:64 | 37 |
 | `bearerToken` | packages/core/src/config/schema.ts:629 | 4 |
 | `blendMode` | packages/core/src/config/schemas/retrieval.ts:40 | 4 |
@@ -274,7 +274,7 @@ Every public schema field, where it is declared, and how many production files r
 | `minRerankScore` | packages/core/src/config/schemas/retrieval.ts:112 | 2 |
 | `minStepsToAuthor` | packages/core/src/config/schema.ts:1441 | 2 |
 | `minVramMb` | packages/core/src/config/schema.ts:814 | 1 |
-| `mode` | packages/core/src/config/schema.ts:463 | 111 |
+| `mode` | packages/core/src/config/schema.ts:463 | 112 |
 | `model` | packages/core/src/config/schema.ts:1226 | 193 |
 | `modelModeration` | packages/core/src/config/schema.ts:1222 | 4 |
 | `modelPresets` | packages/core/src/config/schema.ts:1679 | 1 |
@@ -450,7 +450,7 @@ Every public schema field, where it is declared, and how many production files r
 | `toolMode` | packages/core/src/config/schema.ts:268 | 6 |
 | `toolName` | packages/core/src/config/schemas/multimodal.ts:17 | 66 |
 | `toolRerankMinTools` | packages/core/src/config/schemas/orchestration.ts:593 | 2 |
-| `tools` | packages/core/src/config/schema.ts:913 | 176 |
+| `tools` | packages/core/src/config/schema.ts:913 | 177 |
 | `topK` | packages/core/src/config/schema.ts:166 | 7 |
 | `topP` | packages/core/src/config/schema.ts:165 | 4 |
 | `transport` | packages/core/src/config/schema.ts:663 | 25 |

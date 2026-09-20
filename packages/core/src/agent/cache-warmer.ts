@@ -21,6 +21,8 @@
 import { getConfig } from "../config/loader.js";
 import { getChatProvider } from "../providers/index.js";
 import { defaultSystemPrompt, splitOrchestrationModule } from "./session.js";
+import { getToolsAsLLMDefs } from "../tools/registry.js";
+import { getMainAssistantToolNames } from "./default-tools.js";
 import { childLogger } from "../logger.js";
 
 const log = childLogger("agent:cache-warmer");
@@ -54,14 +56,42 @@ async function warmOnce(): Promise<void> {
   }
   if (!base) return;
 
+  // WARM THE SHAPE THE TURN ACTUALLY SENDS, tool block included.
+  //
+  // This used to pass an empty tool array while every real turn carries the orchestrator's
+  // whole tool block — 36 schemas and ~9,170 tokens under `orchestration_only`, 89 and
+  // ~19,550 under `hybrid`. The server renders tools into the prompt, so a tool-less
+  // warm-up prefills a prefix that diverges from the live one before the tools begin, and
+  // the next real turn pays the full cold prefill anyway.
+  //
+  // Measured on this backend, same system text, 40 stub tools, unique per trial:
+  //   warm WITHOUT tools, then a tooled turn ->  10,017 ms   (the warm-up bought nothing)
+  //   warm WITH tools,    then a tooled turn ->     425 ms
+  //   a genuinely warm repeat                ->     450 ms
+  //
+  // So the tool array is not a detail of the warm-up; it is most of what is being warmed.
+  // It is derived from the same functions the turn uses, so a change to the tool mode or
+  // the lean catalog moves both together instead of silently splitting them apart.
+  let tools: ReturnType<typeof getToolsAsLLMDefs> = [];
+  try {
+    tools = getToolsAsLLMDefs(getMainAssistantToolNames());
+  } catch {
+    // A registry not yet populated at boot: warm what we can rather than not at all.
+  }
+
   const ac = new AbortController();
   warmAbort = ac;
   const t0 = Date.now();
   try {
-    // The prefill of `base` is the entire point; the tiny generation off a "."
-    // user message is cheap and irrelevant to the cached prefix.
-    await provider.complete([{ role: "system", content: base }, { role: "user", content: "." }], [], ac.signal);
-    if (!ac.signal.aborted) log.debug({ ms: Date.now() - t0 }, "orchestrator prompt prefix warmed");
+    // The prefill of `base` plus the tool block is the entire point; the tiny generation
+    // off a "." user message is cheap and irrelevant to the cached prefix.
+    await provider.complete([{ role: "system", content: base }, { role: "user", content: "." }], tools, ac.signal);
+    if (!ac.signal.aborted) {
+      log.debug(
+        { ms: Date.now() - t0, baseChars: base.length, toolCount: tools.length, toolChars: JSON.stringify(tools).length },
+        "orchestrator prompt prefix warmed",
+      );
+    }
   } catch {
     // aborted (a real turn took over) or a transient provider error — best-effort.
   } finally {
