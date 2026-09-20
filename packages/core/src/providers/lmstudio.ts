@@ -1,4 +1,6 @@
 import OpenAI from "openai";
+import { setEmbeddingConcurrency, withEmbeddingSlot } from "./embedding-gate.js";
+import { getConfig } from "../config/loader.js";
 import { logAudit } from "../audit/logger.js";
 import { currentCallAttribution } from "../runtime/request-context.js";
 import { Agent as UndiciAgent } from "undici";
@@ -2491,14 +2493,30 @@ export class LMStudioProvider {
     // schedules its own retry) so we never retry a hung provider.
     const EMBED_HARD_TIMEOUT_MS = 45_000;
     const EMBED_RETRY_DELAY_MS = 1_000;
+    // Read per call rather than once at construction: getConfig is memoized so this is a
+    // property lookup, and it keeps the ceiling honest after a config reload instead of
+    // pinning whatever was set when the first provider happened to be built.
+    try {
+      setEmbeddingConcurrency(getConfig().retrieval.embeddingConcurrency);
+    } catch {
+      // No config yet (a unit test, an early boot path). The gate keeps its default.
+    }
     let attempt = 0;
     const maxAttempts = this.configuredMaxRetries + 1;
     for (;;) {
       try {
-        const response = await this.withHardTimeout(undefined, EMBED_HARD_TIMEOUT_MS, (s) =>
-          this.client.embeddings.create(
-            { model: modelId, input: texts, encoding_format: "float" },
-            { signal: s },
+        // The endpoint serves a small fixed number of concurrent embedding requests, and this
+        // process has a dozen independent callers that cannot see each other — the index
+        // build, every routing query, memory writes, skill lookup, self-improvement. Over the
+        // limit the endpoint refuses a connection and the caller reports it as "the embedding
+        // backend is unavailable", which sends the reader after the wrong thing entirely.
+        // The ceiling sits here because this is the one place every caller passes through.
+        const response = await withEmbeddingSlot(() =>
+          this.withHardTimeout(undefined, EMBED_HARD_TIMEOUT_MS, (s) =>
+            this.client.embeddings.create(
+              { model: modelId, input: texts, encoding_format: "float" },
+              { signal: s },
+            ),
           ),
         );
         return response.data.map(d => new Float32Array(d.embedding));

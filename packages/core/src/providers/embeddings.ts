@@ -14,6 +14,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { PRODUCT } from "../product/index.js";
+import { getEmbeddingGateStats } from "./embedding-gate.js";
 
 const log = childLogger("embeddings");
 
@@ -571,27 +572,58 @@ async function _buildAgentIndexInner(
     }
   }
 
-  // ── Embed changed agents one at a time and save incremental progress ──────
-  // Sending all texts in a single HTTP call causes LM Studio to queue hundreds
-  // of embedding computations at once. When the request eventually times out,
-  // the retry sends another full batch while LM Studio is still working on the
-  // first — queue grows unboundedly. Processing one-at-a-time ensures LM
-  // Studio's queue never exceeds 1 entry from this code path, and partial
-  // progress is saved after every agent so retries only redo what's missing.
+  // ── Embed changed agents in bounded chunks, saving progress after each ─────
+  //
+  // NOT one big request. Sending every text in a single HTTP call makes the server queue
+  // hundreds of computations at once; when that request times out the retry sends another
+  // full batch while the first is still running, and the queue grows without bound.
+  //
+  // NOT one at a time either, which is what this did before. The server serves several
+  // requests concurrently — sixteen slots on the deployment this was measured against, where
+  // throughput rises from 365 texts/s at concurrency 4 to 375 at 8 — and a strictly
+  // sequential build used exactly one of them. Rebuilding a 49-agent catalog took 49 round
+  // trips in series for no reason.
+  //
+  // So: separate requests, run in chunks the size of the global embedding ceiling. The
+  // ceiling is enforced inside provider.embed regardless, and chunking here on the same
+  // number gives two things the gate alone would not: a natural point to persist incremental
+  // progress without racing concurrent writers, and a bound on how much work is discarded
+  // when the server goes away mid-build.
+  const chunkSize = Math.max(1, getEmbeddingGateStats().limit);
   let failed = false;
-  for (const { name, doc } of toEmbed) {
-    try {
-      const [vec] = await provider.embed([doc], embeddingModel);
-      if (vec) {
-        updatedCache[name] = { hash: currentDocs.get(name)!.hash, vector: float32ToBase64(vec) };
-        // Persist incremental progress so a retry starts from where we left off
-        saveEmbeddingCache(embeddingModel, updatedCache);
+  for (let offset = 0; offset < toEmbed.length && !failed; offset += chunkSize) {
+    const chunk = toEmbed.slice(offset, offset + chunkSize);
+    const outcomes = await Promise.all(chunk.map(async ({ name, doc }) => {
+      try {
+        const [vec] = await provider.embed([doc], embeddingModel);
+        return { name, vec, err: null as unknown };
+      } catch (err) {
+        return { name, vec: undefined, err };
       }
-    } catch (err) {
-      recordEmbeddingFailure(err, name);
-      log.warn({ err, agent: name, model: embeddingModel }, "Failed to embed agent — will retry remaining agents");
+    }));
+
+    // Record every success in the chunk BEFORE reporting the failure: the other requests in
+    // the chunk already completed and paying for them twice on the retry is pure waste.
+    for (const outcome of outcomes) {
+      if (outcome.vec) {
+        updatedCache[outcome.name] = {
+          hash: currentDocs.get(outcome.name)!.hash,
+          vector: float32ToBase64(outcome.vec),
+        };
+      }
+    }
+    // One write per chunk, after the chunk has settled — concurrent writers would interleave
+    // whole-object writes and lose entries.
+    saveEmbeddingCache(embeddingModel, updatedCache);
+
+    const firstFailure = outcomes.find((outcome) => outcome.err);
+    if (firstFailure) {
+      recordEmbeddingFailure(firstFailure.err, firstFailure.name);
+      log.warn(
+        { err: firstFailure.err, agent: firstFailure.name, model: embeddingModel, chunkSize },
+        "Failed to embed agent — will retry remaining agents",
+      );
       failed = true;
-      break;
     }
   }
 

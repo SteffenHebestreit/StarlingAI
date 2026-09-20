@@ -40,6 +40,38 @@ export const RetrievalRerankerSchema = z.object({
   blendMode: z.enum(["ordering", "admission"]).default("ordering"),
 });
 
+/**
+ * How many embedding requests this process may have in flight at once.
+ *
+ * WHY A CEILING AT ALL. Not because of any observed overload: the failure that prompted this
+ * turned out to be a missing environment variable in a throwaway container, not capacity.
+ * The reason is structural. Requests come from a dozen callers that cannot see each other —
+ * the agent index build, every routing query, memory writes, skill lookup, self-improvement,
+ * the failover binding — so no single call site can bound the total. Over the ceiling,
+ * requests WAIT rather than fail: an embedding call sits on a turn's critical path, and a
+ * queued request that completes beats a refused one that some caller has to retry.
+ *
+ * WHY 8. Measured on the cluster this runs against, after its embedding model was given 16
+ * slots:
+ *
+ *     concurrency   4 -> 365 texts/s
+ *     concurrency   8 -> 375
+ *     concurrency  32 -> 381
+ *
+ * Throughput is flat past 8: the last 24 slots buy 1.6%. Eight takes essentially all of the
+ * available throughput and leaves half the server's capacity for everything else pointed at
+ * it, which on this deployment includes engram. Raising it further trades nothing for
+ * contention.
+ *
+ * The cost is at concurrency 1, where more slots make a lone request about 6% slower — which
+ * does not matter, because embedding traffic here is bursty by nature: an index build, a
+ * turn's routing lookup and a memory write all arrive together or not at all.
+ *
+ * Lower this only for an endpoint with fewer slots. A ceiling well below the server's
+ * capacity does not protect anything; it just makes bursts queue.
+ */
+export const EmbeddingConcurrencySchema = z.number().int().min(1).max(64).default(8);
+
 export const RetrievalSearchSchema = z.object({
   backend: z.enum(["auto", "searxng", "playwright", "duckduckgo"]).default("auto"),
   searxngBaseUrl: z.string().url().optional(),
@@ -175,6 +207,8 @@ export type KnowledgeBasesConfig = z.infer<typeof KnowledgeBasesSchema>;
 
 export const RetrievalSchema = z.object({
   reranker: RetrievalRerankerSchema.default({}),
+  /** Ceiling on concurrent embedding requests — see EmbeddingConcurrencySchema. */
+  embeddingConcurrency: EmbeddingConcurrencySchema,
   search: RetrievalSearchSchema.default({}),
   documentRag: DocumentRagSchema.default({}),
   knowledgeBases: KnowledgeBasesSchema.default({}),
