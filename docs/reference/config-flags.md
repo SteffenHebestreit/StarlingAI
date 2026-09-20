@@ -49,7 +49,7 @@ Every public schema field, where it is declared, and how many production files r
 | `autoReconnect` | packages/core/src/config/schema.ts:762 | 1 |
 | `autoResearchOnRefusal` | packages/core/src/config/schemas/effort.ts:50 | 3 |
 | `autoStart` | packages/core/src/config/schema.ts:667 | 3 |
-| `backend` | packages/core/src/config/schema.ts:478 | 74 |
+| `backend` | packages/core/src/config/schema.ts:478 | 73 |
 | `baseUrl` | packages/core/src/config/schema.ts:64 | 37 |
 | `bearerToken` | packages/core/src/config/schema.ts:629 | 4 |
 | `blendMode` | packages/core/src/config/schemas/retrieval.ts:40 | 4 |

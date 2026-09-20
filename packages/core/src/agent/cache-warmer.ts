@@ -64,10 +64,14 @@ async function warmOnce(): Promise<void> {
   // warm-up prefills a prefix that diverges from the live one before the tools begin, and
   // the next real turn pays the full cold prefill anyway.
   //
-  // Measured on this backend, same system text, 40 stub tools, unique per trial:
-  //   warm WITHOUT tools, then a tooled turn ->  10,017 ms   (the warm-up bought nothing)
-  //   warm WITH tools,    then a tooled turn ->     425 ms
-  //   a genuinely warm repeat                ->     450 ms
+  // Measured against the serving model with this deployment's REAL base prompt and real
+  // 36-tool block (15,508 prompt tokens), a unique marker per trial:
+  //   old warmer, tool-less warm then a real turn -> 17,394 ms
+  //   FIXED warmer, tooled warm then the same turn->     456 ms
+  //   no warm-up at all, cold                     -> 16,887 ms
+  //
+  // The old warmer was WORSE THAN NOTHING: it burned 7.3s of GPU and left the real turn
+  // slower than an unwarmed one, because it filled the cache with a prefix no turn shares.
   //
   // So the tool array is not a detail of the warm-up; it is most of what is being warmed.
   // It is derived from the same functions the turn uses, so a change to the tool mode or

@@ -7,12 +7,15 @@
  * tool-less warm-up prefills a prefix that diverges from the live one before the tools
  * begin, and the next real turn pays the full cold prefill anyway.
  *
- * Measured against this backend, same system text, 40 stub tools, a unique text per trial so
- * nothing else could have warmed it:
+ * Measured against the serving model with this deployment's REAL base prompt and real
+ * 36-tool block (15,508 prompt tokens), a unique marker per trial:
  *
- *   warm WITHOUT tools, then a tooled turn ->  10,017 ms
- *   warm WITH tools,    then a tooled turn ->     425 ms
- *   a genuinely warm repeat                ->     450 ms
+ *   old warmer, tool-less warm then a real turn -> 17,394 ms
+ *   FIXED warmer, tooled warm then the same turn->     456 ms
+ *   no warm-up at all, cold                     -> 16,887 ms
+ *
+ * The old warmer was WORSE THAN NOTHING: 7.3s of GPU burned, and the real turn afterwards
+ * slower than an unwarmed one.
  *
  * So the tool array is not a detail of the warm-up. It is most of what is being warmed, and
  * a warm-up that omits it is indistinguishable from no warm-up at all.

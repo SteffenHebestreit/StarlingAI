@@ -34,11 +34,16 @@
       // tool block too, which is what would actually have to change."
       //
       // agent/cache-warmer.ts now sends the orchestrator's real tool array, derived from the
-      // same getMainAssistantToolNames() the turn uses, so the two move together. Re-measured
-      // on the current backend with a unique system text per trial and 40 stub tools:
-      //   warm WITHOUT tools, then a tooled turn ->  10,017 ms
-      //   warm WITH tools,    then a tooled turn ->     425 ms
-      //   a genuinely warm repeat                ->     450 ms
+      // same getMainAssistantToolNames() the turn uses, so the two move together. Measured
+      // against the serving model with THIS deployment's real base prompt and real 36-tool
+      // block (15,508 prompt tokens), a unique marker per trial so no trial warms another:
+      //   old warmer, tool-less warm then a real turn -> 17,394 ms
+      //   FIXED warmer, tooled warm then the same turn ->     456 ms
+      //   no warm-up at all, cold                      -> 16,887 ms
+      //
+      // Note the first line: the old warmer was WORSE THAN NOTHING. It burned 7.3s of GPU
+      // and left the real turn slower than an unwarmed one, because it filled the cache with
+      // a prefix no turn shares.
       //
       // What to watch now that it is on: the warmer costs one background completion per idle
       // window, which the 2026-09-08 audit measured at ~4.4s of GPU. It aborts the instant a
