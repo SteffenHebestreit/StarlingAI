@@ -16,10 +16,13 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
-import { getConfig } from "../config/loader.js";
-import { isEmbeddingAvailable, getEmbeddingSearchStatus } from "../providers/embeddings.js";
-import { SEMANTIC_AGENT_ROUTING_MIN_SCORE, resolveAgentRouting } from "../tools/agent-routing.js";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+// NOTE: the config loader, the router and the embedding provider are imported DYNAMICALLY
+// inside runRoutingCanaryCli, after the catalog path is resolved. ESM hoists static imports,
+// so importing them here would evaluate the config loader — and cache whichever catalog the
+// current working directory happens to sit next to — before a single statement of this file
+// had run. That is how the canary ended up guarding a zero-agent stub.
 import {
   DEFAULT_CANARY_FLOORS,
   buildAgentProbes,
@@ -39,7 +42,7 @@ const DEFAULT_SNAPSHOT_PATH = "eval/routing/canary-snapshot.json";
  * resolver, the same floor, the same rerank blend. Anything else measures a path the
  * product does not take.
  */
-function createLiveScorer(): CanaryScorer {
+function createLiveScorer(resolveAgentRouting: typeof import("../tools/agent-routing.js")["resolveAgentRouting"]): CanaryScorer {
   return async (query: string) => {
     const resolution = await resolveAgentRouting(query, { minConfidence: "high" });
     return {
@@ -50,13 +53,44 @@ function createLiveScorer(): CanaryScorer {
   };
 }
 
-function buildProbes(): CanaryProbe[] {
-  const config = getConfig();
+function buildProbes(config: { subAgents: Record<string, Parameters<typeof buildAgentProbes>[1]> }): CanaryProbe[] {
   const probes: CanaryProbe[] = [];
   for (const [name, cfg] of Object.entries(config.subAgents)) {
     probes.push(...buildAgentProbes(name, cfg));
   }
   return probes;
+}
+
+/**
+ * Point the config loader at the REPO-ROOT generated catalog, wherever this was launched from.
+ *
+ * `pnpm routing:canary` delegates into the core package, so the command runs with cwd
+ * packages/core — where a `starlingai.json` also exists, declaring ZERO agents. Without this
+ * the canary loaded that stub, derived no probes, and reported "no embedding model is
+ * configured", blaming the operator's backend for a path problem.
+ *
+ * The marker is `pnpm-workspace.yaml`, which exists at the monorepo root and nowhere else.
+ * A `workspace/` directory is NOT a usable marker: packages/core has one too, so the walk
+ * stopped at the very stub it was written to skip.
+ *
+ * An explicit SAI_CONFIG_PATH always wins — an operator pointing at a specific deployment's
+ * config is making a deliberate choice.
+ */
+function resolveRepoRootConfig(): string | undefined {
+  if (process.env["SAI_CONFIG_PATH"]) return process.env["SAI_CONFIG_PATH"];
+  let dir = dirname(fileURLToPath(import.meta.url));
+  for (let depth = 0; depth < 8; depth += 1) {
+    if (existsSync(join(dir, "pnpm-workspace.yaml"))) {
+      const candidate = join(dir, "starlingai.json");
+      if (!existsSync(candidate)) return undefined;
+      process.env["SAI_CONFIG_PATH"] = candidate;
+      return candidate;
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return undefined;
 }
 
 function readSnapshot(path: string): CanarySnapshot | null {
@@ -76,7 +110,31 @@ export async function runRoutingCanaryCli(argv: readonly string[]): Promise<numb
   const snapshotIndex = argv.indexOf("--snapshot");
   const snapshotPath = resolve(snapshotIndex >= 0 ? argv[snapshotIndex + 1]! : DEFAULT_SNAPSHOT_PATH);
 
+  const configPath = resolveRepoRootConfig();
+  if (!configPath) {
+    process.stderr.write(
+      "INCONCLUSIVE: could not locate the generated catalog (starlingai.json next to workspace/).\n"
+      + "Run `pnpm config:build` first, or set SAI_CONFIG_PATH explicitly.\n",
+    );
+    return 2;
+  }
+  // Imported only now — see the note at the top of this file.
+  const { getConfig } = await import("../config/loader.js");
+  const { SEMANTIC_AGENT_ROUTING_MIN_SCORE, resolveAgentRouting } = await import("../tools/agent-routing.js");
+  const { isEmbeddingAvailable, getEmbeddingSearchStatus } = await import("../providers/embeddings.js");
   const config = getConfig();
+  // Say which catalog is being guarded. The whole point of this canary is the score
+  // distribution of a SPECIFIC catalog, so reading the wrong one is a silent no-op.
+  process.stdout.write(
+    `Catalog: ${configPath} (${Object.keys(config.subAgents).length} agents)\n`,
+  );
+  if (Object.keys(config.subAgents).length === 0) {
+    process.stderr.write(
+      "INCONCLUSIVE: that config declares no sub-agents, so there is nothing to probe.\n"
+      + "Run `pnpm config:build` at the repo root, or point SAI_CONFIG_PATH at a built catalog.\n",
+    );
+    return 2;
+  }
   const embeddingModel = config.agents.defaults.model.embeddingModel ?? "";
   if (!embeddingModel) {
     process.stderr.write(
@@ -105,7 +163,7 @@ export async function runRoutingCanaryCli(argv: readonly string[]): Promise<numb
     return 2;
   }
 
-  const probes = buildProbes();
+  const probes = buildProbes(config);
   if (probes.length === 0) {
     process.stderr.write("INCONCLUSIVE: no probes could be derived — the catalog has no usable descriptions.\n");
     return 2;
@@ -113,7 +171,7 @@ export async function runRoutingCanaryCli(argv: readonly string[]): Promise<numb
 
   // The floor comes from the ROUTER, not from a copy: the canary exists to guard that
   // constant, so keeping a duplicate of it invites the two drifting apart.
-  const report = await runCanary(probes, createLiveScorer(), {
+  const report = await runCanary(probes, createLiveScorer(resolveAgentRouting), {
     ...DEFAULT_CANARY_FLOORS,
     agent: SEMANTIC_AGENT_ROUTING_MIN_SCORE,
   });
