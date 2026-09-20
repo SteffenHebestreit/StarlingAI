@@ -40,6 +40,11 @@ export interface CanaryFloors {
 
 export const DEFAULT_CANARY_FLOORS: CanaryFloors = { agent: 0.72, margin: 0.05 };
 
+/** Probe text for a report line. A description probe runs to 300 chars; the head identifies it. */
+function truncateProbe(query: string): string {
+  return query.length <= 64 ? query : `${query.slice(0, 61)}...`;
+}
+
 /** One probe: a query derived from an entry, and the entry it must retrieve. */
 export interface CanaryProbe {
   /** Catalog entry this probe belongs to. */
@@ -202,7 +207,12 @@ export async function runCanary(
       passed: entryOutcomes.filter((o) => o.failures.length === 0).length,
       bestSelfScore: selfScores.length ? Math.max(...selfScores) : null,
       worstSelfScore: selfScores.length ? Math.min(...selfScores) : null,
-      failures: entryOutcomes.flatMap((o) => o.failures.map((f) => `[${o.probe.kind}] ${f}`)),
+      // The probe TEXT is part of the failure, not decoration. Without it the report says an
+      // entry failed a "capability" probe and leaves the reader unable to tell a real routing
+      // defect from a capability phrase so generic that three agents legitimately advertise it.
+      failures: entryOutcomes.flatMap((o) => o.failures.map(
+        (f) => `[${o.probe.kind}] "${truncateProbe(o.probe.query)}" — ${f}`,
+      )),
     };
   }).sort((a, b) => a.entry.localeCompare(b.entry));
 

@@ -56,12 +56,35 @@ cp eval/routing/live-cases.example.jsonl eval/routing/live-cases.jsonl
 pnpm routing:eval -- --mode live
 ```
 
+`live-cases.jsonl` is gitignored: it carries a deployment's own agent names and the kind of
+thing its users actually type.
+
 Live mode scores the **agent family only**. Scenes and jobs carry taxonomy labels but have
 no scorer in production yet, so a live run says nothing about workflow retrieval.
 
 Without `--triage` there is no verdict, so the fusion returns `legacy` by contract and
 branch and source-sensitivity checks are skipped rather than scored against the absence of
 a classifier. The run says how many it skipped.
+
+### Run it where the reranker is
+
+Routing blends `combinedScore * 0.7 + rerankScore * 0.3` and applies the 0.72 admission
+floor to the RESULT. The reranker is a docker sidecar on an internal network: the gateway
+reaches it, a developer machine does not.
+
+So a run from a workstation scores a different pipeline from production, against the same
+fixed gate. Both commands now print whether the reranker took part, and
+`routing:canary --update` refuses to record a baseline from a run it sat out:
+
+```
+Reranker: enabled (tei), applied to 0/245 queries — last error: fetch failed
+WARNING: the reranker is configured but never answered, so these scores are PRE-BLEND.
+REFUSING to record a baseline from a run the reranker did not take part in.
+```
+
+`--allow-degraded` overrides it, and records the rerank state into the snapshot so the
+mismatch is at least visible later. A pre-blend baseline is not comparable to a production
+run; the floor-crossing check would compare two different systems and call it a regression.
 
 ### Two things the report will tell you that are easy to misread
 

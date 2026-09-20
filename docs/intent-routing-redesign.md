@@ -682,3 +682,86 @@ mechanism now has a case that fails when only that mechanism is reverted.
 - **#12 (Core Principles trim)** — untouched. No prompt text changed in any of these commits.
 
 The other decisions in section 10 remain open and none of them is blocked by what is built.
+
+## 13. First live measurement (2026-09-20)
+
+Everything above was designed against logs and code. This is the first time the routing path
+was measured against the live catalog and a reachable embedding backend, and two things came
+out of it that the design did not anticipate in this form.
+
+### The reranker decides admission, and a developer-machine run does not have one
+
+`resolveAgentRouting` blends `combinedScore * 0.7 + rerankScore * 0.3` and applies the
+0.72 floor to the RESULT. The reranker is a docker sidecar on an internal network. It is
+reachable from the gateway — its log shows `POST /rerank 200` from the gateway's own
+address — and unreachable from a developer machine.
+
+So every canary and eval run from a workstation scores a DIFFERENT pipeline from production,
+against the same fixed gate, and neither report said so. The canary would have recorded one
+as the committed baseline for the other, and its floor-crossing check would then have been
+comparing two different systems and calling the difference a regression.
+
+Fixed: `getRerankerRunStatus()` reports attempts, applications, circuit-open skips and the
+last error. The canary and the eval print it, and `routing:canary --update` now REFUSES to
+record a baseline from a run the reranker did not take part in unless `--allow-degraded`
+is passed. The snapshot records the rerank state alongside the scores.
+
+### German paraphrases land just under a gate their English twins clear
+
+25 matched German/English query pairs, same catalog, language the only variable. Scores are
+on the routing scale, `(cos + 1) / 2`, against the 0.72 floor. These are PRE-BLEND numbers.
+
+| Request | German | English |
+|---|---|---|
+| where do we decide whether a delegation may run twice | 0.6918 | 0.7859 |
+| what does the smallest model cost per million tokens | 0.6726 | 0.7788 |
+| when do we both have two free hours next week | 0.6561 | 0.7337 |
+| i need someone in the swarm for translations | 0.7116 | 0.8146 |
+| how do i get all entries from the last seven days | 0.6996 | 0.7833 |
+| which module decides how long a delegated run may take | 0.7055 | 0.7937 |
+| who runs this in production today and what did it cost | 0.6779 | 0.7340 |
+
+Seven of 25 German queries admitted NOTHING. All seven English twins admitted. Where both
+admitted, the means were close (0.7892 against 0.8216), so this is not "German scores lower
+everywhere" — it is bimodal. A German request either works about as well as its English twin
+or it falls off a cliff, and which one it does is decided by a few hundredths.
+
+The clearest single case: "ich braeuchte jemanden im schwarm fuer uebersetzungen" put
+`swarm_maintainer` — the correct agent — at 0.7115. The gate is 0.72. The turn got nothing.
+
+This is the `queryEn` second retrieval pass in §5.2 earning its place, and the measurement
+says what it is worth: all seven collapses are recovered by the English restatement.
+
+### The log could not have told anyone this was happening
+
+`computeHybridRoutingScore` zeroes any sub-floor semantic score and the ranking then filters
+`> 0`. So a query where 49 agents scored 0.71 produced the same audit row as a query nothing
+matched: `resultCount 0, weakCount 0, gated false`. That is exactly the e1151d8 shape, and it
+is why that incident was invisible until production broke.
+
+Two further consequences, both structural rather than incidental:
+
+- `weakCandidates` can never hold an EMBEDDING near miss. Without the reranker it is always
+  empty in semantic mode; with it, only a rerank-induced drop can populate it.
+- The branch in `sub-agent.ts` that fires on "only weak candidates" — the one that records a
+  capability gap and tells the model which agents were close — is therefore unreachable for an
+  embedding near miss. Every semantic miss takes the "nothing matched at all" path instead.
+
+Fixed, as telemetry only: `AgentRoutingResolution.nearMisses` carries the top three sub-floor
+embedding matches, and `agent_routing_evaluated` logs them. It is populated ONLY when the
+ranking came back empty, because on a healthy turn there are always agents under the gate and
+listing them would put three names on every row that nobody would act on. Nothing branches on
+it: results, `weakCandidates` and every downstream decision are unchanged. Whether the
+"only weak candidates" branch should be made reachable is a behaviour change, and it should be
+decided on shadow data rather than on this reading.
+
+### What this run could not establish
+
+- Production routing telemetry does not exist yet. `agent_routing_evaluated` ships in
+  `99bbbdc`, which is not in the running image, so the audit log has no routing rows to
+  analyse. Measuring the real distribution needs that commit deployed.
+- Every number above is pre-blend. The reranker can move a candidate in either direction
+  across the gate, so the German collapses may be worse or better in production.
+- The canary's capability probes are short abstract noun phrases ("tl;dr creation",
+  "tool routing", "handoff packets") and carry 32 of the 36 probe failures, while description
+  probes carry 2. Whether that is a catalog finding or a probe-design artefact is open.

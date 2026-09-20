@@ -104,3 +104,7 @@ packages/*/package-lock.json
 # only this machine runs). Same convention as config/**/*.local.jsonc: loaded after
 # the numbered sibling, never committed.
 workspace/**/*.local.jsonc
+
+# Per-deployment routing eval cases — they name YOUR catalog and carry your own queries.
+# The committed starting point is live-cases.example.jsonl.
+eval/routing/live-cases.jsonl

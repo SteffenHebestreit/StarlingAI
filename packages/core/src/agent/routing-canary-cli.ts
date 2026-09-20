@@ -187,9 +187,42 @@ export async function runRoutingCanaryCli(argv: readonly string[]): Promise<numb
     process.stdout.write(`Wrote ${target}\n`);
   }
 
+  // Say whether the RERANKER took part. The admission floor is applied after the rerank
+  // blend, so a run without it scores a different pipeline from production — same catalog,
+  // different absolute numbers against a fixed gate.
+  const { getRerankerRunStatus } = await import("../retrieval/reranker.js");
+  const rerank = getRerankerRunStatus();
+  const rerankDegraded = rerank.enabled && rerank.applied === 0;
+  process.stdout.write(
+    `Reranker: ${rerank.enabled ? `enabled (${rerank.mode})` : "disabled"}`
+    + `, applied to ${rerank.applied}/${rerank.attempted + rerank.skippedCircuitOpen} queries`
+    + `${rerank.lastError ? ` — last error: ${rerank.lastError}` : ""}\n`,
+  );
+  if (rerankDegraded) {
+    process.stdout.write(
+      "WARNING: the reranker is configured but never answered, so these scores are PRE-BLEND.\n"
+      + "Production blends 0.7*embedding + 0.3*rerank and applies the 0.72 floor to the RESULT.\n"
+      + "The sidecar sits on the docker network; run this from inside it for a comparable run.\n",
+    );
+  }
+
   if (update) {
+    // A baseline recorded from a degraded pipeline is worse than none: the floor-crossing
+    // check would then compare production runs against a system that never existed, and
+    // report the difference as a regression. Same contract as an embedder change.
+    if (rerankDegraded && !argv.includes("--allow-degraded")) {
+      process.stderr.write(
+        "\nREFUSING to record a baseline from a run the reranker did not take part in.\n"
+        + "Re-run where the reranker is reachable, or pass --allow-degraded if you deliberately\n"
+        + "want a pre-blend baseline (it will not be comparable to production runs).\n",
+      );
+      return 2;
+    }
     mkdirSync(dirname(snapshotPath), { recursive: true });
-    writeFileSync(snapshotPath, `${JSON.stringify(buildSnapshot(report, embeddingModel), null, 2)}\n`, "utf8");
+    writeFileSync(snapshotPath, `${JSON.stringify(
+      { ...buildSnapshot(report, embeddingModel), reranker: { applied: rerank.applied, enabled: rerank.enabled, mode: rerank.mode } },
+      null, 2,
+    )}\n`, "utf8");
     process.stdout.write(`Recorded snapshot at ${snapshotPath}\n`);
     // A recorded baseline is a statement about what is NORMAL, so a failing run must not be
     // frozen into one silently.

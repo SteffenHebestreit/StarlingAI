@@ -132,7 +132,7 @@ Every public schema field, where it is declared, and how many production files r
 | `detectWriteChurnOverwrite` | packages/core/src/config/schemas/orchestration.ts:399 | 2 |
 | `digest` | packages/core/src/config/schema.ts:1896 | 36 |
 | `dir` | packages/core/src/config/schema.ts:1885 | 45 |
-| `disabled` | packages/core/src/config/schema.ts:801 | 100 |
+| `disabled` | packages/core/src/config/schema.ts:801 | 101 |
 | `disabledGroups` | packages/core/src/config/schema.ts:1914 | 3 |
 | `disabledTools` | packages/core/src/config/schema.ts:1916 | 3 |
 | `discovery` | packages/core/src/config/schema.ts:592 | 31 |
@@ -150,7 +150,7 @@ Every public schema field, where it is declared, and how many production files r
 | `embeddingApiKey` | packages/core/src/config/schema.ts:174 | 3 |
 | `embeddingBaseUrl` | packages/core/src/config/schema.ts:172 | 3 |
 | `embeddingModel` | packages/core/src/config/schema.ts:170 | 23 |
-| `enabled` | packages/core/src/config/schema.ts:281 | 115 |
+| `enabled` | packages/core/src/config/schema.ts:281 | 117 |
 | `enableThinking` | packages/core/src/config/schema.ts:192 | 16 |
 | `endpoint` | packages/core/src/config/schema.ts:448 | 64 |
 | `endpointUnits` | packages/core/src/config/schema.ts:1649 | 1 |
@@ -284,7 +284,7 @@ Every public schema field, where it is declared, and how many production files r
 | `monthlyUsd` | packages/core/src/config/schema.ts:513 | 2 |
 | `mounts` | packages/core/src/config/schema.ts:675 | 6 |
 | `name` | packages/core/src/config/schema.ts:1895 | 291 |
-| `network` | packages/core/src/config/schema.ts:676 | 45 |
+| `network` | packages/core/src/config/schema.ts:676 | 46 |
 | `node` | packages/core/src/config/schema.ts:1034 | 199 |
 | `normalizeDelegationToEnglish` | packages/core/src/config/schemas/orchestration.ts:515 | 2 |
 | `notes` | packages/core/src/config/schema.ts:782 | 39 |

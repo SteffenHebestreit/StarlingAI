@@ -76,6 +76,14 @@ export interface AgentRoutingResolution {
   allLowConfidence: boolean;
   /** Agents explicitly excluded from this routing pass, such as the invoking coordinator. */
   excludedAgents?: string[];
+  /**
+   * Best EMBEDDING matches that fell under the 0.72 admission floor, highest first.
+   *
+   * Telemetry only — nothing branches on it. Sub-floor semantic scores are zeroed before
+   * ranking, so without this a query where every agent scored 0.71 logs identically to one
+   * where nothing matched at all: resultCount 0, weakCount 0, gated false.
+   */
+  nearMisses: Array<{ name: string; score: number }>;
   /** Why semantic search could not run even though an embedding model is configured. */
   semanticUnavailableReason?: string;
 }
@@ -137,6 +145,9 @@ export function logRoutingEvaluated(input: {
     ...(resolution.semanticUnavailableReason ? { semanticUnavailableReason: resolution.semanticUnavailableReason } : {}),
     resultCount: resolution.results.length,
     weakCount: resolution.weakCandidates.length,
+    // Empty when something was admitted. Non-empty with resultCount 0 is the shape worth
+    // alerting on: agents matched, the absolute gate rejected them.
+    nearMisses: resolution.nearMisses,
     gated: resolution.gated,
     allLowConfidence: resolution.allLowConfidence,
     trippedAgents: resolution.trippedAgents,
@@ -454,6 +465,7 @@ export async function resolveAgentRouting(
       mode: "semantic_unavailable",
       results: [],
       weakCandidates: [],
+      nearMisses: [],
       gated: true,
       trippedAgents,
       allLowConfidence: false,
@@ -537,6 +549,27 @@ export async function resolveAgentRouting(
 
   ranked = ranked.sort(compareRoutingResults).slice(0, 5);
 
+  // The best EMBEDDING scores that never reached `ranked`, kept purely as telemetry.
+  //
+  // computeHybridRoutingScore turns any sub-floor semantic score into a hard 0 and the
+  // ranking then filters `> 0`, so a query where every agent scored 0.71 against a 0.72 gate
+  // is indistinguishable in the logs from a query where nothing scored at all. Both report
+  // resultCount 0, weakCount 0, gated false. That is precisely the shape of the e1151d8
+  // incident — 49 agents at 0.7059 against a 0.72 floor — and of a German paraphrase landing
+  // a few hundredths under a gate its English twin clears.
+  //
+  // Nothing downstream reads this: results, weakCandidates and the branch logic are all
+  // unchanged. It exists so the near miss is visible before anyone has to guess.
+  // Only when the ranking came back EMPTY. The field exists to explain a turn that got
+  // nothing, not to annotate healthy ones: almost every successful query also has agents
+  // sitting under the gate, and listing them would put three names on every audit row while
+  // saying nothing anyone would act on.
+  const nearMisses = ranked.length > 0 ? [] : [...semanticScores.entries()]
+    .filter(([, score]) => score > 0 && score < SEMANTIC_AGENT_ROUTING_MIN_SCORE)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([name, score]) => ({ name, score: Number(score.toFixed(4)) }));
+
   const gated = ranked.filter((result) => result.combinedScore >= minScore);
   const weakCandidates = ranked
     .filter((result) => result.combinedScore < minScore)
@@ -554,6 +587,7 @@ export async function resolveAgentRouting(
     mode: usedSemanticSearch ? "hybrid" : "keyword",
     results: resolvedResults,
     weakCandidates,
+    nearMisses,
     gated: ranked.length > 0 && gated.length === 0,
     trippedAgents,
     allLowConfidence,

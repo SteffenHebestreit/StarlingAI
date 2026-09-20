@@ -41,10 +41,64 @@ function recordRerankerFailure(now: number): void {
   }
 }
 
-/** Test-only: reset the circuit-breaker state. */
+/**
+ * What actually happened to reranking during this process's lifetime.
+ *
+ * It exists because the admission floor is applied AFTER the rerank blend
+ * (`combinedScore * 0.7 + rerankScore * 0.3` in agent-routing.ts). A run where the
+ * reranker never answered therefore scores a DIFFERENT pipeline from one where it did —
+ * same catalog, same query, different absolute numbers against a fixed gate. An eval or
+ * canary that cannot tell the two apart will happily record one as the baseline for the
+ * other, and its floor-crossing check then compares two different systems.
+ *
+ * Counters, not a boolean: "configured but answered zero times" and "not configured" are
+ * different situations, and only the first is a problem worth stopping for.
+ */
+export interface RerankerRunStatus {
+  /** `retrieval.reranker.enabled` as configured. */
+  enabled: boolean;
+  mode: string;
+  /** Calls that reached the point of contacting the backend. */
+  attempted: number;
+  /** Calls that returned scores and therefore changed the routing numbers. */
+  applied: number;
+  /** Calls skipped because the circuit was open. */
+  skippedCircuitOpen: number;
+  /** Calls that reached the backend and came back empty or failed. */
+  failed: number;
+  lastError?: string;
+  circuitOpen: boolean;
+}
+
+let _attempted = 0;
+let _applied = 0;
+let _skippedCircuitOpen = 0;
+let _failed = 0;
+let _lastError: string | undefined;
+
+export function getRerankerRunStatus(): RerankerRunStatus {
+  const reranker = getConfig().retrieval.reranker;
+  return {
+    enabled: reranker.enabled,
+    mode: reranker.mode,
+    attempted: _attempted,
+    applied: _applied,
+    skippedCircuitOpen: _skippedCircuitOpen,
+    failed: _failed,
+    ...(_lastError ? { lastError: _lastError } : {}),
+    circuitOpen: Date.now() < _circuitOpenUntil,
+  };
+}
+
+/** Test-only: reset the circuit-breaker state and the run counters. */
 export function _resetRerankerCircuitForTests(): void {
   _consecutiveFailures = 0;
   _circuitOpenUntil = 0;
+  _attempted = 0;
+  _applied = 0;
+  _skippedCircuitOpen = 0;
+  _failed = 0;
+  _lastError = undefined;
 }
 
 export interface RerankerCandidate {
@@ -76,7 +130,11 @@ export async function rerankCandidates(
 
   // Circuit open → skip the (stalling) call and keep base order until cooldown.
   const now = Date.now();
-  if (now < _circuitOpenUntil) return null;
+  if (now < _circuitOpenUntil) {
+    _skippedCircuitOpen += 1;
+    return null;
+  }
+  _attempted += 1;
 
   const limited = candidates.slice(0, reranker.topK);
   const controller = new AbortController();
@@ -87,17 +145,29 @@ export async function rerankCandidates(
       ? await rerankViaLlm(query, limited, reranker, controller.signal)
       : await rerankViaTei(query, limited, reranker, controller.signal);
     recordRerankerSuccess();
+    // A null result is a successful call that produced no usable scores — the base order
+    // survives, so it did NOT change the routing numbers and must not be counted as applied.
+    if (result === null) {
+      _failed += 1;
+      _lastError = "backend returned no usable scores";
+    } else {
+      _applied += 1;
+    }
     return result;
   } catch (error) {
     if (error instanceof RerankerRequestRejected) {
       // Payload too large, unknown model name: this query keeps base order, but the sidecar is
       // healthy — counting it would open the circuit for every other query.
       log.warn({ status: error.status, mode: reranker.mode }, "Reranker rejected the request — keeping base routing order");
+      _failed += 1;
+      _lastError = `request rejected (status ${error.status})`;
       return null;
     }
     // Thrown = timeout (abort), network refusal or a 5xx — the stall/unreachable signal.
     recordRerankerFailure(Date.now());
     log.warn({ error, mode: reranker.mode }, "Reranker unavailable — keeping base routing order");
+    _failed += 1;
+    _lastError = error instanceof Error ? error.message : String(error);
     return null;
   } finally {
     clearTimeout(timer);

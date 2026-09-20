@@ -246,6 +246,25 @@ export async function runRoutingEvalCli(argv: readonly string[]): Promise<number
   });
   process.stdout.write(`${formatRoutingEvalReport(report)}\n`);
 
+  if (mode === "live") {
+    // The floor is applied AFTER the rerank blend, so a run the reranker sat out measures a
+    // different pipeline from production. Reporting the numbers without saying so invites
+    // the reader to act on a comparison that was never valid.
+    const { getRerankerRunStatus } = await import("../retrieval/reranker.js");
+    const rerank = getRerankerRunStatus();
+    process.stdout.write(
+      `  reranker: ${rerank.enabled ? `enabled (${rerank.mode})` : "disabled"}`
+      + `, applied to ${rerank.applied}/${rerank.attempted + rerank.skippedCircuitOpen} queries\n`,
+    );
+    if (rerank.enabled && rerank.applied === 0) {
+      process.stdout.write(
+        "  WARNING: the reranker never answered, so these are PRE-BLEND scores. Production\n"
+        + "  applies the 0.72 floor to 0.7*embedding + 0.3*rerank, which can admit or reject\n"
+        + "  differently. Treat gated/admitted counts above as indicative, not as production.\n",
+      );
+    }
+  }
+
   if (jsonPath) {
     const target = resolve(jsonPath);
     mkdirSync(dirname(target), { recursive: true });
