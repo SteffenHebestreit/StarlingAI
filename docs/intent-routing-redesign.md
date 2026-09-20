@@ -612,7 +612,7 @@ config feature-registry gate reports zero unreferenced fields.
 | S0 | `sessionId`/`agentName`/`callSite` on `provider_model_call` via the request context; `agent_routing_evaluated` at the discovery prefetch and the un-named delegation path (with `surface`, the scored top-5 and elapsed time, including empty prefetches); `prompt_section_sizes` extended with the tool block, module, capsule, effort, enforcement, shared findings and a head/tail/history split; the receptionist's escalate reason recorded | none (always on) |
 | S1 | Routing canary with a committed-snapshot diff (`pnpm routing:canary`, `--update`, `--json`); exits 2 as INCONCLUSIVE when the embedding backend is unreachable | none (a command) |
 | S2 | `orchestration.stableToolBlock="freeze"` — the turn's tool array is byte-identical across every iteration; the discovery-withheld and forced-orchestration narrowings move to call-site refusal, logged as `tool_restriction_refused` | `off` |
-| S3 | The IDCM taxonomy on the schema for agents, scenes and jobs; seed labels for all 88 entries in `workspace/{agents,scenes,jobs}/59-routing.generated.jsonc`; `resolveRoutingTaxonomy`, `lintTaxonomy` (a CI gate against the real catalog) and `facetAgreement` | authored `routing` overrides generated |
+| S3 | The IDCM taxonomy on the schema for agents, scenes and jobs; seed labels for all 88 entries in `workspace/{agents,scenes,jobs}/59-routing.generated.jsonc`; `resolveRoutingTaxonomy`, `lintTaxonomy` and `facetAgreement` | authored `routing` overrides generated |
 | S4 | `agent/triage.ts` (catalog-blind classification call, frozen versioned prefix, strict parser, grammar-constrained output) wired into the turn; `routing_triage_decided` carries the verdict and its agreement with the judge; a routing-tier preset fallback so the lane runs under a model preset at all | `orchestration.routingTriage: "off"` \| `"shadow"` |
 | P1/P3 | `agent/routing-eval.ts` + `pnpm routing:eval`: a DECISION mode that is offline and deterministic (24 committed cases, run in CI) and a LIVE mode against the real catalog and embedding backend. A gated case counts as a miss, a run that scores nothing is INCONCLUSIVE rather than green, and a query that echoes its target's own catalog text is flagged as lexically leaked. `pnpm routing:eval:discriminance` reverts each guarded fix in turn and fails if the case named for it survives | none (commands) |
 | S5 (partial) | `agent/routing-fusion.ts` — fit-space unification, capped confidence-scaled facet bonus, adaptive K, the full ordered branch rule set, `needsCoordination`, `workflowDispatchable`. PURE AND UNWIRED: nothing calls it in a turn yet | n/a |
@@ -1040,4 +1040,31 @@ a sentence that names what is being asked for.
 - The corpus expectations were written by reading the catalog, then cut and rewritten by a
   second reader. They are better than a guess and they are not ground truth.
 - The second pass is measured as an eval experiment. It is not wired into a turn.
+
+## 15. Two corrections to this document (2026-09-20)
+
+An adversarial review of a proposed hierarchy-filter design read section 12 as specification
+and checked it against the code. Two statements in it were wrong, and both flattered the
+work rather than describing it.
+
+**`lintTaxonomy` was never a CI gate.** Section 12 called it "a CI gate against the real
+catalog". Its only caller outside its own definition was `routing-taxonomy.test.ts`, which
+runs it on synthetic fixtures. Nothing checked the 88 real labels. That matters more than a
+wording slip, because every design under consideration promotes those labels from a capped
+bonus over an already-retrieved set into a FILTER that decides what the turn sees. A stale
+label that nudges a ranking is a nuisance; a stale label that selects the candidate set is a
+silent wrong answer. `src/tests/routing-taxonomy-catalog.test.ts` is now the gate, with a
+control that edits a description and checks the lint notices. All 88 labels are fresh today.
+
+**"Nothing retrieves a workflow" is false.** `searchWorkflowCandidates` exists in
+`tools/workflow-catalog.ts` and `prefetchCapabilityCandidates` already calls it with
+`semanticOutlier: true`, so the discovery capsule does surface workflows. What is true, and
+what the sentence should have said: no workflow enters `fuseRouting`, the live eval scores
+the agent family only, and the workflow bar is far stricter than the agent bar — a raw cosine
+around 0.55 with a gap-break, against an agent floor of 0.72 on the rescaled scale, which is
+raw cosine 0.44.
+
+A third claim of mine survived contact but deserves a caveat that was not in section 14. The
+44% `coordinate` rate is a property of the EVAL: `fuseRouting` has no production caller yet,
+so that number describes what the fusion would do, not what the deployment does.
 
