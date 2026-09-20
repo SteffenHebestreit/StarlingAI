@@ -168,17 +168,66 @@ describe("near-miss telemetry", () => {
     vi.doUnmock("../audit/logger.js");
   });
 
+  it("never names an agent the caller excluded", async () => {
+    // nearMisses is built from semanticScores, which honours allowedAgents but knows nothing
+    // about excludeAgents or the circuit breaker. Without an eligibility filter the field can
+    // name a coordinator excluding itself — and with surfaceRoutingNearMisses on, that invites
+    // the model to delegate to exactly the agent the router refused to offer.
+    vi.resetModules();
+    tempDir = mkdtempSync(join(tmpdir(), "starlingai-near-miss-excl-"));
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      agents: { defaults: { model: { primary: "lmstudio/qwen", embeddingModel: "lmstudio/embed" } } },
+      subAgents: AGENTS,
+      retrieval: { reranker: { enabled: false } },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    process.env["SAI_EMBEDDING_CACHE"] = join(tempDir, "embedding-cache.json");
+
+    const placement = { near_miss_agent: 0.7115, other_near_agent: 0.7050, strong_agent: 0.6900 };
+    const provider = providerPlacing(placement);
+    vi.doMock("../providers/index.js", async () => ({
+      ...(await vi.importActual<Record<string, unknown>>("../providers/index.js")),
+      getEmbeddingProvider: () => provider,
+    }));
+    const { buildAgentIndex, resetEmbeddingSearchStateForTests } = await import("../providers/embeddings.js");
+    resetEmbeddingSearchStateForTests();
+    await buildAgentIndex(AGENTS as never, provider as never, "lmstudio/embed");
+    const { resolveAgentRouting } = await import("../tools/agent-routing.js");
+
+    const excluded = await resolveAgentRouting("do the work", {
+      minConfidence: "high",
+      excludeAgents: ["near_miss_agent"],
+    });
+    expect(excluded.results).toHaveLength(0);
+    expect(excluded.nearMisses.map((entry) => entry.name)).not.toContain("near_miss_agent");
+    // It still reports the ones that WERE eligible, so the filter narrows rather than empties.
+    expect(excluded.nearMisses.map((entry) => entry.name)).toContain("other_near_agent");
+
+    // DISCRIMINANCE: without the exclusion the same query names it first.
+    const open = await resolveAgentRouting("do the work", { minConfidence: "high" });
+    expect(open.nearMisses[0]!.name).toBe("near_miss_agent");
+  });
+
   it("caps the list so a wide catalog cannot flood the audit row", async () => {
     const many = Object.fromEntries(Array.from({ length: 8 }, (_, index) => [
       `agent_${index}`,
       { description: `Worker ${index}.`, capabilities: ["work"], tags: ["work"], tools: ["web_search"], maxIterations: 4 },
     ]));
-    const scores = Object.fromEntries(Object.keys(many).map((name, index) => [name, 0.715 - index * 0.002]));
+    // Scores ASCEND with insertion order on purpose. The previous fixture had agent_0 both
+    // first in the map and highest scoring, so "highest first" held whether or not the sort
+    // ran at all — deleting the sort kept every assertion green.
+    const names = Object.keys(many);
+    const scores = Object.fromEntries(names.map((name, index) => [name, 0.700 + index * 0.002]));
 
     const resolution = await resolveWith(scores, many);
     expect(resolution.results).toHaveLength(0);
     expect(resolution.nearMisses).toHaveLength(3);
-    // Highest first: the closest miss is the one worth acting on.
+    // Highest first: the closest miss is the one worth acting on. With ascending placement
+    // these are the LAST three agents, in reverse insertion order.
+    expect(resolution.nearMisses.map((entry) => entry.name)).toEqual([
+      names[7], names[6], names[5],
+    ]);
     expect(resolution.nearMisses[0]!.score).toBeGreaterThan(resolution.nearMisses[2]!.score);
   });
 });

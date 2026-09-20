@@ -552,6 +552,15 @@ export async function resolveAgentRouting(
   //     while the rerank term is stretched across the full [0, 1], the nominal 70/30 blend
   //     behaved closer to 30/70 in the reranker's favour.
   //
+  // ONE LIVE CONSEQUENCE, deliberate. `agents.ephemeralGeneration.skillMatchThreshold`
+  // compares the REPORTED score, and min-max guaranteed the reranker's top pick at least
+  // 0.72 * 0.7 + 0.3 = 0.804 — so any threshold set between 0.72 and 0.804 was bypassed
+  // unconditionally, whatever the match was actually worth. That is the same score-inflation
+  // failure `shouldPreferCatalogAgent` was written to stop; read its comment. Reporting the
+  // pre-blend score restores the threshold's ability to discriminate, so a deployment pinning
+  // 0.75 will now spawn an ephemeral agent for matches in 0.72-0.75 that used to be handed to
+  // the catalog. That is the configured behaviour finally taking effect, not a new rule.
+  //
   // So admission is decided by the embedding score, which is what the 0.72 floor was
   // calibrated for and which computeHybridRoutingScore has already gated once. The blend is
   // kept as the SORT KEY, so the reranker still does the job it is good at — ordering
@@ -600,8 +609,16 @@ export async function resolveAgentRouting(
   // nothing, not to annotate healthy ones: almost every successful query also has agents
   // sitting under the gate, and listing them would put three names on every audit row while
   // saying nothing anyone would act on.
+  //
+  // Restricted to agents this pass was actually ALLOWED to route to. `semanticScores` comes
+  // from searchByEmbedding, which honours `allowedAgents` but knows nothing about the
+  // `excludeAgents` set or the circuit breaker — both of which `entries` was filtered by
+  // above. Without this the field can name a coordinator excluding itself, or an agent whose
+  // breaker is open after repeated failures, and `surfaceRoutingNearMisses` would then invite
+  // the model to delegate to exactly the agent the router refused to offer.
+  const eligible = new Set(entries.map(([name]) => name));
   const nearMisses = ranked.length > 0 ? [] : [...semanticScores.entries()]
-    .filter(([, score]) => score > 0 && score < SEMANTIC_AGENT_ROUTING_MIN_SCORE)
+    .filter(([name, score]) => eligible.has(name) && score > 0 && score < SEMANTIC_AGENT_ROUTING_MIN_SCORE)
     .sort((a, b) => b[1] - a[1])
     .slice(0, 3)
     .map(([name, score]) => ({ name, score: Number(score.toFixed(4)) }));

@@ -1,6 +1,6 @@
 {
   "embeddingModel": "lmstudio/text-embedding-qwen3-embedding-0.6b",
-  "pipeline": "embedding_rerank",
+  "pipeline": "embedding_gated",
   "floors": {
     "agent": 0.72,
     "margin": 0.05

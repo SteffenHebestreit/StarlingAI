@@ -886,6 +886,51 @@ exists" with "nothing cleared the bar, and here is what came closest". The near 
 written to the tool's metadata whether or not the flag is on, so the flag's effect is
 measurable from the log rather than only from the model's behaviour.
 
+### What an adversarial review found in this work
+
+Five reviewers over the change set, each finding adversarially verified before it counted.
+Four survived at medium severity, all of them mine, and two were reproduced by the verifier
+rather than argued.
+
+**The canary's pipeline stamp measured the wrong thing, in both directions.** It recorded
+whether the reranker ANSWERED. Under the default `blendMode: "ordering"` that is irrelevant:
+the candidate set is cut to five before the rerank call and the reported score is pre-blend,
+so the recorded numbers are rerank-invariant. Refusing to compare a workstation run against a
+container baseline blocked a valid comparison, and it suppressed the floor check while doing
+so. Meanwhile a `blendMode` flip — 71 admitted candidates against 25 — carried the SAME stamp
+and compared as the same system; in one direction that comparison exited 0, because the
+survivor-only mean stayed inside the shift limit and newly admitted agents produce no reason.
+The stamp now names the GATE (`embedding_gated` / `rerank_gated`). Verified after the fix: a
+host run against the container baseline gives mean shift -0.0001 and exits 0.
+
+**Near misses could name an agent the router refused to offer.** `semanticScores` honours
+`allowedAgents` but knows nothing about `excludeAgents` or the circuit breaker, both of which
+`entries` was already filtered by. With `surfaceRoutingNearMisses` on, that invites the model
+to delegate to a coordinator excluding itself, or to an agent whose breaker is open.
+Reproduced at 0.7115. Now filtered to the eligible set.
+
+**Autonomous bidding threw the reranker's ordering away.** `swarm/bidding.ts` re-sorted the
+resolution by `score`. That was invisible before, because the reported score WAS the blended
+one and the re-sort reproduced the order it had just received. With the pre-blend score it
+undoes the rerank ordering. The re-sort is gone; the resolution already arrives ranked.
+
+**Nothing pinned which branch production takes.** Every test passed `blendMode` explicitly, so
+changing the schema default back to `"admission"` would have left the suite green while
+restoring the defect. Pinned.
+
+One further consequence is deliberate and worth stating, because it changes live behaviour on
+this deployment. `agents.ephemeralGeneration.skillMatchThreshold` is set to 0.75 here, and it
+compares the REPORTED score. Min-max guaranteed the reranker's top pick at least
+0.72 x 0.7 + 0.3 = 0.804, so **any threshold between 0.72 and 0.804 was bypassed
+unconditionally** — the same score-inflation failure `shouldPreferCatalogAgent` was written to
+stop. Reporting the pre-blend score restores the threshold. Expect more ephemeral-agent spawns
+for matches in the 0.72-0.75 band that used to be handed to the catalog. That is the
+configured behaviour finally taking effect, not a new rule.
+
+Also fixed from the same review: a baseline entry that stops being probed now produces a
+reason instead of a silent subset comparison, and the near-miss ordering fixture no longer
+passes on its own insertion order.
+
 ### What this run could not establish
 
 - Production routing telemetry does not exist yet. `agent_routing_evaluated` ships in

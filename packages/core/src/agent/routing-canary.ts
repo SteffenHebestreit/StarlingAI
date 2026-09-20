@@ -261,14 +261,32 @@ export async function runCanary(
 // ── Snapshot comparison ───────────────────────────────────────────────────────
 
 /**
- * Which scoring pipeline produced a set of scores.
+ * What produced the SCORES in a snapshot — named for what they depend on, not for which
+ * services happened to be up.
  *
- * The admission floor is applied after the rerank blend, so a run WITH the reranker and a run
- * WITHOUT it are different systems measured against the same fixed gate. Measured on this
- * catalog and 22 realistic queries, the difference is not a perturbation: the legacy
- * admission blend admitted 25 candidates where the embedding admitted 71.
+ * The first version of this stamp recorded whether the reranker ANSWERED, which turned out to
+ * measure the wrong thing in both directions. Under the shipped default
+ * `retrieval.reranker.blendMode: "ordering"` the reranker cannot change a single number this
+ * file records: the candidate set is cut to five BEFORE the rerank call, the blend only sets
+ * a sort key, and the reported score is the pre-blend one. So a developer-machine run with no
+ * reranker and a container run with one produce identical `scores` and identical
+ * `meanBestSelfScore`, and refusing to compare them blocked a valid comparison. Meanwhile a
+ * blendMode flip — which changes admission AND the reported score, by 71 admitted candidates
+ * against 25 on 22 real queries — carried the SAME stamp and was compared as the same system.
+ * Worse, in one direction that comparison passed: a survivor-only mean stayed inside the
+ * shift limit and the newly admitted agents produced no reason at all.
+ *
+ * So the stamp names the GATE:
+ *  - "embedding_gated": admission and the reported score come from the embedding alone. This
+ *    is the default, with or without a reranker running.
+ *  - "rerank_gated": `blendMode: "admission"` — the blend decides who is admitted and what
+ *    score is reported, so the numbers depend on the reranker being there.
+ *
+ * Per-probe RANK still differs between a reranker-present and a reranker-absent run under
+ * either setting. That is why the reranker's participation is reported separately, and why
+ * the exit code comes from the diff rather than from absolute per-probe results.
  */
-export type CanaryPipeline = "embedding_only" | "embedding_rerank";
+export type CanaryPipeline = "embedding_gated" | "rerank_gated";
 
 export interface CanarySnapshot {
   /** The embedding model the scores were produced with. Scores are not comparable across
@@ -311,7 +329,7 @@ export interface SnapshotDiff {
 export function buildSnapshot(
   report: CanaryReport,
   embeddingModel: string,
-  pipeline: CanaryPipeline = "embedding_only",
+  pipeline: CanaryPipeline = "embedding_gated",
 ): CanarySnapshot {
   const scores: Record<string, number> = {};
   for (const entry of report.entries) {
@@ -341,7 +359,7 @@ export function diffSnapshot(
   opts?: { maxMeanShift?: number; pipeline?: CanaryPipeline },
 ): SnapshotDiff {
   const maxMeanShift = opts?.maxMeanShift ?? 0.02;
-  const pipeline = opts?.pipeline ?? "embedding_only";
+  const pipeline = opts?.pipeline ?? "embedding_gated";
   const current = buildSnapshot(report, embeddingModel, pipeline);
   const reasons: string[] = [];
   const embeddingModelChanged = snapshot.embeddingModel !== embeddingModel;
@@ -391,9 +409,10 @@ export function diffSnapshot(
     );
   } else if (pipelineChanged) {
     reasons.push(
-      `scoring pipeline changed (${snapshot.pipeline ?? "unrecorded"} → ${pipeline}); the admission floor is applied `
-      + "after the rerank blend, so these are different systems measured against the same gate — "
-      + "re-record the baseline from the pipeline you want to guard",
+      `scoring gate changed (${snapshot.pipeline ?? "unrecorded"} → ${pipeline}); one of these decides `
+      + "admission on the embedding score and the other on the rerank blend, so they are different "
+      + "systems measured against the same 0.72 floor — re-record the baseline from the one you "
+      + "want to guard",
     );
   } else {
     for (const crossing of floorCrossings.filter((c) => c.direction === "fell_below")) {
@@ -406,6 +425,12 @@ export function diffSnapshot(
     }
     for (const entry of unscoredNewEntries) {
       reasons.push(`${entry} is new to the catalog and retrieves nothing — it cannot be routed to`);
+    }
+    // `removed` was computed and returned but never produced a reason, so a run that simply
+    // stopped probing part of the catalog compared a subset against the whole baseline and
+    // reported success. Deleting an agent is a legitimate change; doing it silently is not.
+    for (const entry of removed) {
+      reasons.push(`${entry} was in the baseline but was not probed at all — re-record if it was removed on purpose`);
     }
   }
 

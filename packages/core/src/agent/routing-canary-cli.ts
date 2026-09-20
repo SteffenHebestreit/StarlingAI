@@ -204,10 +204,18 @@ export async function runRoutingCanaryCli(argv: readonly string[]): Promise<numb
   // the diff needs the pipeline stamp to know whether the baseline is comparable at all.
   const { getRerankerRunStatus } = await import("../retrieval/reranker.js");
   const rerank = getRerankerRunStatus();
-  const rerankDegraded = rerank.enabled && rerank.applied === 0;
-  // The stamp is what the run DID, not what it was configured to do: a reranker that was
-  // enabled and never answered produced embedding-only scores.
-  const pipeline: CanaryPipeline = rerank.applied > 0 ? "embedding_rerank" : "embedding_only";
+  // The stamp names the GATE, not which services were up. Under the default
+  // blendMode "ordering" the reranker cannot change any number recorded here — the candidate
+  // set is cut to five before the rerank call and the reported score is pre-blend — so a run
+  // without it is still `embedding_gated` and remains comparable to one with it.
+  const blendMode = config.retrieval.reranker.blendMode;
+  const pipeline: CanaryPipeline = blendMode === "admission" && rerank.applied > 0
+    ? "rerank_gated"
+    : "embedding_gated";
+  // Only a rerank-GATED run is invalidated by a missing reranker. Under "ordering" a
+  // reranker-less run scores the same distribution, and grading it inconclusive made the
+  // command unusable from a developer machine for no gain.
+  const rerankDegraded = rerank.enabled && rerank.applied === 0 && blendMode === "admission";
   const diff = snapshot ? diffSnapshot(snapshot, report, embeddingModel, { pipeline }) : undefined;
 
   process.stdout.write(`${formatCanaryReport(report, diff)}\n`);
@@ -226,9 +234,16 @@ export async function runRoutingCanaryCli(argv: readonly string[]): Promise<numb
   );
   if (rerankDegraded) {
     process.stdout.write(
-      "WARNING: the reranker is configured but never answered, so these scores are PRE-BLEND.\n"
-      + "Production blends 0.7*embedding + 0.3*rerank and applies the 0.72 floor to the RESULT.\n"
-      + "The sidecar sits on the docker network; run this from inside it for a comparable run.\n",
+      "WARNING: blendMode is \"admission\", so the reranker decides who is admitted — and it\n"
+      + "never answered. These scores are PRE-BLEND and describe a system this deployment does\n"
+      + "not run. The sidecar sits on the docker network; run from inside it for a verdict.\n",
+    );
+  } else if (rerank.enabled && rerank.applied === 0) {
+    process.stdout.write(
+      "NOTE: the reranker never answered. Under blendMode \"ordering\" that does not change the\n"
+      + "scores recorded here — the candidate set is cut before the rerank call and the reported\n"
+      + "score is pre-blend — so the snapshot stays comparable. Per-probe RANK results above do\n"
+      + "differ from a run that has it.\n",
     );
   }
 

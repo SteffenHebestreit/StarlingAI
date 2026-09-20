@@ -122,6 +122,15 @@ describe("rerank blend and the admission floor", () => {
     expect(names.indexOf("weak_match")).toBeLessThan(names.indexOf("best_match"));
   });
 
+  it("defaults to ordering, so the fix cannot be reverted by deleting one token", async () => {
+    // Every test above passes a blendMode explicitly, so none of them pins which branch
+    // PRODUCTION takes. Changing the schema default back to "admission" would leave the whole
+    // suite green while restoring the defect: the reranker's last pick unadmittable however
+    // well it matched.
+    const { RetrievalRerankerSchema } = await import("../config/schemas/retrieval.js");
+    expect(RetrievalRerankerSchema.parse({}).blendMode).toBe("ordering");
+  });
+
   it("legacy admission mode drops that same candidate, which is why the default changed", async () => {
     const resolution = await routeWith("admission");
 

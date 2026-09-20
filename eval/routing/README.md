@@ -72,19 +72,29 @@ Routing blends `combinedScore * 0.7 + rerankScore * 0.3` and applies the 0.72 ad
 floor to the RESULT. The reranker is a docker sidecar on an internal network: the gateway
 reaches it, a developer machine does not.
 
-So a run from a workstation scores a different pipeline from production, against the same
-fixed gate. Both commands now print whether the reranker took part, and
-`routing:canary --update` refuses to record a baseline from a run it sat out:
+Both commands print whether the reranker took part. Whether that matters depends on
+`retrieval.reranker.blendMode`, and the distinction is worth getting right:
 
-```
-Reranker: enabled (tei), applied to 0/245 queries — last error: fetch failed
-WARNING: the reranker is configured but never answered, so these scores are PRE-BLEND.
-REFUSING to record a baseline from a run the reranker did not take part in.
-```
+- **`"ordering"`, the default.** The reranker cannot change a number the canary records. The
+  candidate set is cut to five BEFORE the rerank call, the blend only sets a sort key, and the
+  reported score is the pre-blend one. A workstation run and a container run produce identical
+  `scores` and identical `meanBestSelfScore` — verified by running both against the same
+  baseline, mean shift -0.0001. Per-probe RANK does differ, which is why the exit code comes
+  from the diff rather than from absolute probe results.
+- **`"admission"`, the legacy pin.** The blend decides who is admitted and what score is
+  reported, so a run without the reranker describes a system the deployment does not run.
+  `routing:canary --update` refuses to record a baseline from it unless `--allow-degraded`
+  is passed, and grading is INCONCLUSIVE rather than red.
 
-`--allow-degraded` overrides it, and records the rerank state into the snapshot so the
-mismatch is at least visible later. A pre-blend baseline is not comparable to a production
-run; the floor-crossing check would compare two different systems and call it a regression.
+The snapshot carries a `pipeline` stamp naming the GATE — `embedding_gated` or
+`rerank_gated` — and `diffSnapshot` refuses to compare across a mismatch, the same contract
+it already had for an embedding-model change. A baseline with no stamp counts as a mismatch.
+
+The first version of that stamp recorded whether the reranker ANSWERED, which measured the
+wrong thing in both directions: it blocked a valid workstation-to-container comparison, and
+it let a `blendMode` flip — 71 admitted candidates against 25 on the same 22 queries — pass
+as the same system. In one direction that comparison even exited 0, because the
+survivor-only mean stayed inside the shift limit.
 
 ### Running it against the real pipeline, from inside the network
 

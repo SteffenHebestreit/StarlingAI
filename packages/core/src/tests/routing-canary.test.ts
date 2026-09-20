@@ -180,27 +180,28 @@ describe("diffSnapshot", () => {
     expect(diffSnapshot(baseline, slid, model, { maxMeanShift: 0.5 }).passed).toBe(true);
   });
 
-  it("does not compare across SCORING PIPELINES either", async () => {
-    // The admission floor is applied AFTER the rerank blend, so a run with the reranker and
-    // a run without it are different systems measured against the same fixed gate. Measured
-    // on the live catalog: the same 22 queries admitted 71 candidates through the embedding
-    // and 25 through the legacy blend. Diffing one against the other reports that difference
-    // as a regression in the catalog, which it is not.
+  it("does not compare across SCORING GATES either", async () => {
+    // Under blendMode "admission" the rerank blend decides admission and the reported score;
+    // under "ordering" the embedding does. Measured on the live catalog: the same 22 queries
+    // admitted 71 candidates through the embedding and 25 through the blend. Diffing one
+    // against the other reports that difference as a regression in the catalog, which it is
+    // not. Reranker PARTICIPATION is deliberately not part of this: under "ordering" it
+    // cannot change a number the snapshot records.
     const baseline = buildSnapshot(
-      await reportFor({ web_task_coordinator: 0.90, researcher: 0.90 }), model, "embedding_rerank",
+      await reportFor({ web_task_coordinator: 0.90, researcher: 0.90 }), model, "rerank_gated",
     );
     // Kept within the mean-shift limit on purpose: the control below must fail for the
     // PIPELINE and nothing else, or it proves the wrong thing.
     const hostRun = await reportFor({ web_task_coordinator: 0.895, researcher: 0.895 });
 
-    const diff = diffSnapshot(baseline, hostRun, model, { pipeline: "embedding_only" });
+    const diff = diffSnapshot(baseline, hostRun, model, { pipeline: "embedding_gated" });
     expect(diff.pipelineChanged).toBe(true);
     expect(diff.passed).toBe(false);
-    expect(diff.reasons.join(" ")).toContain("scoring pipeline changed");
+    expect(diff.reasons.join(" ")).toContain("scoring gate changed");
 
-    // DISCRIMINANCE: the same two runs compare cleanly when the pipelines match, so the
-    // refusal is about the pipeline and not about the score difference.
-    expect(diffSnapshot(baseline, hostRun, model, { pipeline: "embedding_rerank" }).passed).toBe(true);
+    // DISCRIMINANCE: the same two runs compare cleanly when the gates match, so the refusal
+    // is about the gate and not about the score difference.
+    expect(diffSnapshot(baseline, hostRun, model, { pipeline: "rerank_gated" }).passed).toBe(true);
   });
 
   it("treats a baseline with NO pipeline stamp as a mismatch, not as a match", async () => {
@@ -211,7 +212,7 @@ describe("diffSnapshot", () => {
     delete (legacyBaseline as { pipeline?: unknown }).pipeline;
     const run = await reportFor({ web_task_coordinator: 0.90, researcher: 0.90 });
 
-    const diff = diffSnapshot(legacyBaseline, run, model, { pipeline: "embedding_rerank" });
+    const diff = diffSnapshot(legacyBaseline, run, model, { pipeline: "rerank_gated" });
     expect(diff.pipelineChanged).toBe(true);
     expect(diff.reasons.join(" ")).toContain("unrecorded");
   });
