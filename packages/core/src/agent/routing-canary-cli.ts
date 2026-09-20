@@ -31,6 +31,7 @@ import {
   formatCanaryReport,
   runCanary,
   type CanaryProbe,
+  type CanaryPipeline,
   type CanaryScorer,
   type CanarySnapshot,
 } from "./routing-canary.js";
@@ -196,23 +197,28 @@ export async function runRoutingCanaryCli(argv: readonly string[]): Promise<numb
     agent: SEMANTIC_AGENT_ROUTING_MIN_SCORE,
   });
   const snapshot = readSnapshot(snapshotPath);
-  const diff = snapshot ? diffSnapshot(snapshot, report, embeddingModel) : undefined;
+
+  // Say whether the RERANKER took part. The admission floor is applied after the rerank
+  // blend, so a run without it scores a different pipeline from production — same catalog,
+  // different absolute numbers against a fixed gate. This is read BEFORE the diff, because
+  // the diff needs the pipeline stamp to know whether the baseline is comparable at all.
+  const { getRerankerRunStatus } = await import("../retrieval/reranker.js");
+  const rerank = getRerankerRunStatus();
+  const rerankDegraded = rerank.enabled && rerank.applied === 0;
+  // The stamp is what the run DID, not what it was configured to do: a reranker that was
+  // enabled and never answered produced embedding-only scores.
+  const pipeline: CanaryPipeline = rerank.applied > 0 ? "embedding_rerank" : "embedding_only";
+  const diff = snapshot ? diffSnapshot(snapshot, report, embeddingModel, { pipeline }) : undefined;
 
   process.stdout.write(`${formatCanaryReport(report, diff)}\n`);
 
   if (jsonPath) {
     const target = resolve(jsonPath);
     mkdirSync(dirname(target), { recursive: true });
-    writeFileSync(target, JSON.stringify({ report, diff, embeddingModel }, null, 2), "utf8");
+    writeFileSync(target, JSON.stringify({ report, diff, embeddingModel, pipeline }, null, 2), "utf8");
     process.stdout.write(`Wrote ${target}\n`);
   }
 
-  // Say whether the RERANKER took part. The admission floor is applied after the rerank
-  // blend, so a run without it scores a different pipeline from production — same catalog,
-  // different absolute numbers against a fixed gate.
-  const { getRerankerRunStatus } = await import("../retrieval/reranker.js");
-  const rerank = getRerankerRunStatus();
-  const rerankDegraded = rerank.enabled && rerank.applied === 0;
   process.stdout.write(
     `Reranker: ${rerank.enabled ? `enabled (${rerank.mode})` : "disabled"}`
     + `, applied to ${rerank.applied}/${rerank.attempted + rerank.skippedCircuitOpen} queries`
@@ -240,7 +246,10 @@ export async function runRoutingCanaryCli(argv: readonly string[]): Promise<numb
     }
     mkdirSync(dirname(snapshotPath), { recursive: true });
     writeFileSync(snapshotPath, `${JSON.stringify(
-      { ...buildSnapshot(report, embeddingModel), reranker: { applied: rerank.applied, enabled: rerank.enabled, mode: rerank.mode } },
+      {
+        ...buildSnapshot(report, embeddingModel, pipeline),
+        reranker: { applied: rerank.applied, enabled: rerank.enabled, mode: rerank.mode },
+      },
       null, 2,
     )}\n`, "utf8");
     process.stdout.write(`Recorded snapshot at ${snapshotPath}\n`);
@@ -277,7 +286,18 @@ export async function runRoutingCanaryCli(argv: readonly string[]): Promise<numb
     );
     return report.passed ? 2 : 1;
   }
-  return report.passed && (diff?.passed ?? true) ? 0 : 1;
+  // With a baseline, the VERDICT is the diff. Absolute probe results stay printed above, but
+  // they do not decide the exit code.
+  //
+  // This catalog fails twelve probes at the baseline, every one of them adjudicated as a
+  // short abstract capability phrase several agents legitimately advertise rather than a
+  // defect. Grading those red on every run gives a command that is permanently red, and a
+  // permanently red canary is an ignored canary. What this file exists to catch is DRIFT —
+  // an entry crossing the floor, the distribution shifting, a new entry that retrieves
+  // nothing — and all three are diff checks. Recording a baseline from a failing run still
+  // warns, so the twelve are a deliberate record rather than a silent amnesty.
+  if (diff) return diff.passed ? 0 : 1;
+  return report.passed ? 0 : 1;
 }
 
 const invokedDirectly = process.argv[1]

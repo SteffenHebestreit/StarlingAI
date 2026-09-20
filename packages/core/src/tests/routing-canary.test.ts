@@ -180,6 +180,74 @@ describe("diffSnapshot", () => {
     expect(diffSnapshot(baseline, slid, model, { maxMeanShift: 0.5 }).passed).toBe(true);
   });
 
+  it("does not compare across SCORING PIPELINES either", async () => {
+    // The admission floor is applied AFTER the rerank blend, so a run with the reranker and
+    // a run without it are different systems measured against the same fixed gate. Measured
+    // on the live catalog: the same 22 queries admitted 71 candidates through the embedding
+    // and 25 through the legacy blend. Diffing one against the other reports that difference
+    // as a regression in the catalog, which it is not.
+    const baseline = buildSnapshot(
+      await reportFor({ web_task_coordinator: 0.90, researcher: 0.90 }), model, "embedding_rerank",
+    );
+    // Kept within the mean-shift limit on purpose: the control below must fail for the
+    // PIPELINE and nothing else, or it proves the wrong thing.
+    const hostRun = await reportFor({ web_task_coordinator: 0.895, researcher: 0.895 });
+
+    const diff = diffSnapshot(baseline, hostRun, model, { pipeline: "embedding_only" });
+    expect(diff.pipelineChanged).toBe(true);
+    expect(diff.passed).toBe(false);
+    expect(diff.reasons.join(" ")).toContain("scoring pipeline changed");
+
+    // DISCRIMINANCE: the same two runs compare cleanly when the pipelines match, so the
+    // refusal is about the pipeline and not about the score difference.
+    expect(diffSnapshot(baseline, hostRun, model, { pipeline: "embedding_rerank" }).passed).toBe(true);
+  });
+
+  it("treats a baseline with NO pipeline stamp as a mismatch, not as a match", async () => {
+    const stamped = buildSnapshot(await reportFor({ web_task_coordinator: 0.90, researcher: 0.90 }), model);
+    // A snapshot written before the field existed. Assuming it matches is how two different
+    // systems get compared and the difference gets reported as a catalog regression.
+    const legacyBaseline = { ...stamped };
+    delete (legacyBaseline as { pipeline?: unknown }).pipeline;
+    const run = await reportFor({ web_task_coordinator: 0.90, researcher: 0.90 });
+
+    const diff = diffSnapshot(legacyBaseline, run, model, { pipeline: "embedding_rerank" });
+    expect(diff.pipelineChanged).toBe(true);
+    expect(diff.reasons.join(" ")).toContain("unrecorded");
+  });
+
+  it("fails a NEW entry that retrieves nothing at all", async () => {
+    // The floor-crossing check can only see entries that HAVE a baseline. Once the exit code
+    // is decided by the diff, a newly added agent that cannot retrieve itself would otherwise
+    // enter the catalog silently: it has no score to cross a floor with.
+    const baseline = buildSnapshot(await reportFor({ web_task_coordinator: 0.90, researcher: 0.90 }), model);
+    const withNewAgent = await runCanary(
+      [...probes, { entry: "brand_new_agent", kind: "description", language: "en", query: "q-new" }],
+      tableScorer({
+        "q-wtc": { web_task_coordinator: 0.90 },
+        "q-researcher": { researcher: 0.90 },
+        "q-new": { someone_else: 0.88 },
+      }),
+    );
+
+    const diff = diffSnapshot(baseline, withNewAgent, model);
+    expect(diff.passed).toBe(false);
+    expect(diff.reasons.join(" ")).toContain("brand_new_agent is new to the catalog and retrieves nothing");
+
+    // DISCRIMINANCE: a new agent that DOES retrieve itself is simply an addition.
+    const healthyAddition = await runCanary(
+      [...probes, { entry: "brand_new_agent", kind: "description", language: "en", query: "q-new" }],
+      tableScorer({
+        "q-wtc": { web_task_coordinator: 0.90 },
+        "q-researcher": { researcher: 0.90 },
+        "q-new": { brand_new_agent: 0.91 },
+      }),
+    );
+    const healthyDiff = diffSnapshot(baseline, healthyAddition, model);
+    expect(healthyDiff.added).toContain("brand_new_agent");
+    expect(healthyDiff.passed).toBe(true);
+  });
+
   it("does not compare across embedding models — it demands a fresh baseline", async () => {
     const baseline = buildSnapshot(await reportFor({ web_task_coordinator: 0.90, researcher: 0.90 }), model);
     const other = await reportFor({ web_task_coordinator: 0.60, researcher: 0.61 });

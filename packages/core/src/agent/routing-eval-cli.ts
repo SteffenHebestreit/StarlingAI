@@ -177,15 +177,24 @@ export async function runRoutingEvalCli(argv: readonly string[]): Promise<number
   const jsonPath = jsonIndex >= 0 ? argv[jsonIndex + 1] : undefined;
   const thresholds = parseThresholds(argv);
 
+  // The repo root is only needed to RESOLVE DEFAULTS. Requiring it unconditionally made this
+  // command unrunnable inside the deployment container — the one place where the reranker is
+  // reachable and the scores therefore describe production. An explicit --cases plus an
+  // explicit SAI_CONFIG_PATH is a complete instruction; refusing it for want of a
+  // pnpm-workspace.yaml was the tool insisting on a layout rather than on its inputs.
   const repo = resolveRepoRoot();
-  if (!repo) {
-    process.stderr.write("INCONCLUSIVE: could not locate the repo root (pnpm-workspace.yaml).\n");
+  const explicitConfig = process.env["SAI_CONFIG_PATH"];
+  if (!repo && (casesIndex < 0 || !explicitConfig)) {
+    process.stderr.write(
+      "INCONCLUSIVE: could not locate the repo root (pnpm-workspace.yaml), and the defaults\n"
+      + "need it. Pass --cases <path> AND set SAI_CONFIG_PATH to run outside a checkout.\n",
+    );
     return 2;
   }
   const casesPath = resolve(
     casesIndex >= 0
       ? argv[casesIndex + 1]!
-      : join(repo.root, mode === "live" ? DEFAULT_LIVE_CASES : DEFAULT_DECISION_CASES),
+      : join(repo!.root, mode === "live" ? DEFAULT_LIVE_CASES : DEFAULT_DECISION_CASES),
   );
   if (!existsSync(casesPath)) {
     process.stderr.write(
@@ -222,7 +231,11 @@ export async function runRoutingEvalCli(argv: readonly string[]): Promise<number
   let resolver: RoutingEvalResolver;
   let catalogText: Record<string, string> | undefined;
   if (mode === "live") {
-    const built = await buildLiveResolver(repo.configPath, useTriage);
+    // An explicit SAI_CONFIG_PATH always wins: an operator pointing at a specific
+    // deployment's catalog is making a deliberate choice, and outside a checkout it is the
+    // only thing that can name one.
+    const configPath = explicitConfig ?? repo!.configPath;
+    const built = await buildLiveResolver(configPath, useTriage);
     if ("error" in built) {
       process.stderr.write(`INCONCLUSIVE: ${built.error}\n`);
       return 2;

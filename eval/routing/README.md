@@ -86,6 +86,60 @@ REFUSING to record a baseline from a run the reranker did not take part in.
 mismatch is at least visible later. A pre-blend baseline is not comparable to a production
 run; the floor-crossing check would compare two different systems and call it a regression.
 
+### Running it against the real pipeline, from inside the network
+
+The reranker is a docker sidecar on an internal network and the LAN model server is outside
+it, so a run needs a container attached to BOTH. The gateway image carries linux
+`node_modules` but no source, so the source is copied in:
+
+```
+IMG=$(docker inspect starlingai-gateway-1 --format '{{.Config.Image}}')
+docker run -d --name sai-probe --network starlingai_starlingai-internal   --entrypoint sh "$IMG" -c 'sleep 3600'
+docker network connect starlingai-app sai-probe          # LAN egress for the model server
+docker cp packages/core/src  sai-probe:/app/packages/core/src
+docker cp starlingai.json    sai-probe:/app/starlingai.json
+docker cp eval               sai-probe:/app/eval
+
+docker exec sai-probe sh -c 'export SAI_CONFIG_PATH=/app/starlingai.json;   cd /app/packages/core && ./node_modules/.bin/tsx src/agent/routing-canary-cli.ts   --update --snapshot /tmp/snap.json'
+docker cp sai-probe:/tmp/snap.json eval/routing/canary-snapshot.json
+docker rm -f sai-probe
+```
+
+Set `SAI_CONFIG_PATH` INSIDE the container. Setting it on `docker run` from Git Bash rewrites
+`/app/...` into a Windows path and the run silently loads a zero-agent config.
+
+### The measured baseline (2026-09-20)
+
+Run inside the network, with the reranker answering 245 of 245 queries:
+
+| measurement | value |
+|---|---|
+| canary probes passed | 233 of 245 |
+| mean best self-score | 0.9468 |
+| live eval recall@K | 13 of 22 |
+| live eval, German | 12 of 19 passed, 4 admitted nothing |
+| live eval, English | 1 of 3 passed |
+
+The same canary from a developer machine, without the reranker, passes 209 of 245. That gap
+is the reason a pre-blend run is graded INCONCLUSIVE rather than red.
+
+Twelve canary probes fail at this baseline. All twelve were adjudicated and none is a catalog
+defect: they are short abstract capability phrases ("tl;dr creation", "tool routing") that
+several agents legitimately advertise, and every natural phrasing of the same request
+retrieves the right agent first. They stay in, because capability probes are the only kind
+sensitive enough to catch a uniform score drift.
+
+So once a baseline exists, the canary's EXIT CODE comes from the diff, not from absolute
+probe results. A permanently red canary is an ignored canary, and what this guards is drift:
+an entry crossing the floor, the distribution shifting, or a new entry that retrieves nothing.
+
+Nine live-eval cases still fail. Four are German requests that admit nothing at all; the rest
+are genuine mis-routes, including one in English. They are left failing on purpose. Three
+other cases were rewritten instead, because the QUERY was underspecified rather than the
+routing wrong: "entries from the last seven days" legitimately reads as calendar entries.
+Widening `acceptable` until the router's answer counts as correct is how an eval stops
+measuring anything.
+
 ### Two things the report will tell you that are easy to misread
 
 **A gated case is a miss, not an exclusion.** The previous benchmark in this repo ran at

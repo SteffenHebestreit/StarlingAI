@@ -260,14 +260,32 @@ export async function runCanary(
 
 // ── Snapshot comparison ───────────────────────────────────────────────────────
 
+/**
+ * Which scoring pipeline produced a set of scores.
+ *
+ * The admission floor is applied after the rerank blend, so a run WITH the reranker and a run
+ * WITHOUT it are different systems measured against the same fixed gate. Measured on this
+ * catalog and 22 realistic queries, the difference is not a perturbation: the legacy
+ * admission blend admitted 25 candidates where the embedding admitted 71.
+ */
+export type CanaryPipeline = "embedding_only" | "embedding_rerank";
+
 export interface CanarySnapshot {
   /** The embedding model the scores were produced with. Scores are not comparable across
    *  models, so a model change must reset the baseline rather than fail every entry. */
   embeddingModel: string;
+  /**
+   * The pipeline behind these scores. ABSENT in snapshots written before this field existed,
+   * and an absent value is treated as a MISMATCH rather than a match: a baseline that cannot
+   * say what produced it cannot be compared to anything.
+   */
+  pipeline?: CanaryPipeline;
   floors: CanaryFloors;
   meanBestSelfScore: number | null;
   /** entry → best self-score. */
   scores: Record<string, number>;
+  /** Reranker participation at record time, for the human reading the file. */
+  reranker?: { enabled: boolean; mode: string; applied: number };
 }
 
 export interface SnapshotDiff {
@@ -277,6 +295,8 @@ export interface SnapshotDiff {
    * the entry is then invisible to every ranked view of routing.
    */
   floorCrossings: Array<{ entry: string; before: number; after: number | null; direction: "fell_below" | "rose_above" }>;
+  /** True when the baseline and this run were produced by different scoring pipelines. */
+  pipelineChanged?: boolean;
   /** Entries present in one side only. */
   added: string[];
   removed: string[];
@@ -288,13 +308,18 @@ export interface SnapshotDiff {
   reasons: string[];
 }
 
-export function buildSnapshot(report: CanaryReport, embeddingModel: string): CanarySnapshot {
+export function buildSnapshot(
+  report: CanaryReport,
+  embeddingModel: string,
+  pipeline: CanaryPipeline = "embedding_only",
+): CanarySnapshot {
   const scores: Record<string, number> = {};
   for (const entry of report.entries) {
     if (entry.bestSelfScore !== null) scores[entry.entry] = Number(entry.bestSelfScore.toFixed(4));
   }
   return {
     embeddingModel,
+    pipeline,
     floors: report.floors,
     meanBestSelfScore: report.meanBestSelfScore === null ? null : Number(report.meanBestSelfScore.toFixed(4)),
     scores,
@@ -313,12 +338,17 @@ export function diffSnapshot(
   snapshot: CanarySnapshot,
   report: CanaryReport,
   embeddingModel: string,
-  opts?: { maxMeanShift?: number },
+  opts?: { maxMeanShift?: number; pipeline?: CanaryPipeline },
 ): SnapshotDiff {
   const maxMeanShift = opts?.maxMeanShift ?? 0.02;
-  const current = buildSnapshot(report, embeddingModel);
+  const pipeline = opts?.pipeline ?? "embedding_only";
+  const current = buildSnapshot(report, embeddingModel, pipeline);
   const reasons: string[] = [];
   const embeddingModelChanged = snapshot.embeddingModel !== embeddingModel;
+  // An undefined stamp is a mismatch, not a pass. A baseline from before this field existed
+  // cannot say whether the reranker took part, and guessing is how two different systems get
+  // compared and the difference reported as a regression.
+  const pipelineChanged = snapshot.pipeline !== pipeline;
 
   const floorCrossings: SnapshotDiff["floorCrossings"] = [];
   let largestMove: SnapshotDiff["largestMove"] = null;
@@ -341,6 +371,12 @@ export function diffSnapshot(
   }
 
   const added = Object.keys(current.scores).filter((entry) => snapshot.scores[entry] === undefined);
+  // A newly probed entry that produced NO score is not "added" — it is an entry that cannot
+  // retrieve itself at all. It has no baseline to cross, so the floor-crossing check above
+  // cannot see it, and without this a broken new agent would enter the catalog silently.
+  const unscoredNewEntries = report.probedEntries.filter(
+    (entry) => snapshot.scores[entry] === undefined && current.scores[entry] === undefined,
+  );
   // "Removed" means gone from the catalog — an entry that was probed and simply stopped
   // scoring is a crossing, handled above.
   const removed = Object.keys(snapshot.scores).filter((entry) => !probed.has(entry));
@@ -353,6 +389,12 @@ export function diffSnapshot(
     reasons.push(
       `embedding model changed (${snapshot.embeddingModel} → ${embeddingModel}); scores are not comparable — re-record the baseline`,
     );
+  } else if (pipelineChanged) {
+    reasons.push(
+      `scoring pipeline changed (${snapshot.pipeline ?? "unrecorded"} → ${pipeline}); the admission floor is applied `
+      + "after the rerank blend, so these are different systems measured against the same gate — "
+      + "re-record the baseline from the pipeline you want to guard",
+    );
   } else {
     for (const crossing of floorCrossings.filter((c) => c.direction === "fell_below")) {
       reasons.push(
@@ -361,6 +403,9 @@ export function diffSnapshot(
     }
     if (meanShift !== null && Math.abs(meanShift) > maxMeanShift) {
       reasons.push(`mean self-score shifted ${meanShift > 0 ? "+" : ""}${meanShift} (limit ±${maxMeanShift})`);
+    }
+    for (const entry of unscoredNewEntries) {
+      reasons.push(`${entry} is new to the catalog and retrieves nothing — it cannot be routed to`);
     }
   }
 
@@ -371,6 +416,7 @@ export function diffSnapshot(
     meanShift,
     largestMove,
     embeddingModelChanged,
+    pipelineChanged,
     passed: reasons.length === 0,
     reasons,
   };

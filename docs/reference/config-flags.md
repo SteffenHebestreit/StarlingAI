@@ -18,7 +18,7 @@ Every public schema field, where it is declared, and how many production files r
 | `admin` | packages/core/src/config/schema.ts:363 | 21 |
 | `agents` | packages/core/src/config/schema.ts:1672 | 140 |
 | `alertmanager` | packages/core/src/config/schema.ts:1127 | 1 |
-| `all` | packages/core/src/config/schema.ts:1265 | 224 |
+| `all` | packages/core/src/config/schema.ts:1265 | 225 |
 | `allowedAgents` | packages/core/src/config/schema.ts:1285 | 29 |
 | `allowedUserIds` | packages/core/src/config/schemas/channels.ts:11 | 5 |
 | `allowedUsers` | packages/core/src/config/schema.ts:785 | 10 |
@@ -77,7 +77,7 @@ Every public schema field, where it is declared, and how many production files r
 | `clientId` | packages/core/src/config/schema.ts:376 | 2 |
 | `clientSecret` | packages/core/src/config/schema.ts:378 | 3 |
 | `cloudFallback` | packages/core/src/config/schema.ts:110 | 3 |
-| `command` | packages/core/src/config/schema.ts:664 | 41 |
+| `command` | packages/core/src/config/schema.ts:664 | 42 |
 | `completes` | packages/core/src/config/schema.ts:880 | 12 |
 | `completionPer1m` | packages/core/src/config/schema.ts:503 | 1 |
 | `computerUse` | packages/core/src/config/schema.ts:1868 | 13 |
@@ -91,7 +91,7 @@ Every public schema field, where it is declared, and how many production files r
 | `config` | packages/core/src/config/schema.ts:1198 | 234 |
 | `configRemovals` | packages/core/src/config/schema.ts:1668 | 2 |
 | `consolidationIntervalMs` | packages/core/src/config/schema.ts:1495 | 1 |
-| `container` | packages/core/src/config/schema.ts:684 | 67 |
+| `container` | packages/core/src/config/schema.ts:684 | 68 |
 | `contextWindow` | packages/core/src/config/schema.ts:119 | 11 |
 | `control` | packages/core/src/config/schema.ts:1643 | 47 |
 | `coordinatorToolCaps` | packages/core/src/config/schemas/orchestration.ts:765 | 4 |
@@ -151,7 +151,7 @@ Every public schema field, where it is declared, and how many production files r
 | `embeddingApiKey` | packages/core/src/config/schema.ts:174 | 3 |
 | `embeddingBaseUrl` | packages/core/src/config/schema.ts:172 | 3 |
 | `embeddingModel` | packages/core/src/config/schema.ts:170 | 23 |
-| `enabled` | packages/core/src/config/schema.ts:281 | 117 |
+| `enabled` | packages/core/src/config/schema.ts:281 | 118 |
 | `enableThinking` | packages/core/src/config/schema.ts:192 | 16 |
 | `endpoint` | packages/core/src/config/schema.ts:448 | 64 |
 | `endpointUnits` | packages/core/src/config/schema.ts:1649 | 1 |
@@ -291,7 +291,7 @@ Every public schema field, where it is declared, and how many production files r
 | `notes` | packages/core/src/config/schema.ts:782 | 39 |
 | `oneLiner` | packages/core/src/config/schema.ts:891 | 2 |
 | `openaiCompatible` | packages/core/src/config/schema.ts:102 | 2 |
-| `operator` | packages/core/src/config/schema.ts:364 | 96 |
+| `operator` | packages/core/src/config/schema.ts:364 | 97 |
 | `orchestratorMaxToolIterations` | packages/core/src/config/schemas/effort.ts:23 | 1 |
 | `orchestratorTurnSloMs` | packages/core/src/config/schema.ts:1731 | 2 |
 | `orgId` | packages/core/src/config/schema.ts:1117 | 1 |

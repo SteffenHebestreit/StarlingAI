@@ -830,6 +830,37 @@ rather than of the wording, and it bounds what the queryEn second pass can be wo
 a KV-cache-keyed frozen prefix for a change that does not measurably help is the blind
 prompt-trim this project has already paid for three times.
 
+### The rerank fix, measured on the real pipeline
+
+A throwaway container from the gateway image, attached to the internal network and to the
+LAN-egress network, can reach BOTH the reranker and the model server. That is the first run
+in this project that scores what production scores. The recipe is in eval/routing/README.md.
+
+The decisive comparison is the ADMITTED SET, not the self-probe. Same 22 live queries, same
+catalog, one config value apart:
+
+| | blendMode "ordering" | blendMode "admission" (legacy) |
+|---|---|---|
+| candidates admitted, total | 71 | 25 |
+| recall hits | 11 | 9 |
+| cases passed | 11 | 9 |
+
+The legacy blend discarded 65% of the candidates the embedding had admitted, and it
+discarded the right ones:
+
+| request | agent lost to the legacy blend |
+|---|---|
+| build a sign-up page | web_coder |
+| move three services to a new queue | devops_coordinator, project_planner |
+| check a site for exposure | browser_agent |
+| show the numbers as a chart | diagram_designer |
+
+**The canary could not see this, and that is worth stating plainly.** On self-probes the
+legacy mode scores slightly BETTER (235 of 245 against 233, mean 0.9627 against 0.9468),
+because a self-probe puts the correct agent at the top of the reranker's list, which is
+exactly where the defect does no harm. A metric can be sharper and still be blind to the
+failure you are chasing.
+
 ### What this run could not establish
 
 - Production routing telemetry does not exist yet. `agent_routing_evaluated` ships in
