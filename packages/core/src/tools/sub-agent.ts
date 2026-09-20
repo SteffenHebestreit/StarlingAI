@@ -41,6 +41,7 @@ import {
   shortenOverspecifiedRoutingQuery,
   uniqueNames,
   logRoutingEvaluated,
+  SEMANTIC_AGENT_ROUTING_MIN_SCORE,
   type AgentRoutingCandidate,
   type AgentRoutingResolution,
   type RoutingSelectionReason,
@@ -119,6 +120,7 @@ export {
   requiredExecutionCapabilities,
   filterCandidatesByExecutionCapability,
   explicitAgentsCoverTaskExecution,
+  SEMANTIC_AGENT_ROUTING_MIN_SCORE,
   type AgentRoutingCandidate,
   type AgentRoutingResolution,
 } from "./agent-routing.js";
@@ -3330,9 +3332,29 @@ registerTool({
       const shortenedNote = shortened
         ? ` (also tried shortened query "${shortened}" — also 0 matches)`
         : "";
+      // "Nothing matched" and "nothing cleared the bar" are different answers, and only the
+      // second one is usually true. The sub-floor scores are discarded before anyone sees
+      // them, so this branch invites the model to invent a specialist while the right one
+      // sits a few hundredths under the gate — measured: a German request put the correct
+      // agent at 0.7115 against a 0.72 floor and produced exactly this message.
+      //
+      // Nothing is admitted here: these names are offered as information, the scores are
+      // stated as below the bar, and the delegation stays the model's own decision.
+      //
+      // The bar named here is the SEMANTIC ADMISSION FLOOR, not `minConfidence`. Sub-floor
+      // semantic scores are zeroed in computeHybridRoutingScore before minConfidence is ever
+      // consulted, so 0.72 is the bar that actually applied whatever the caller asked for.
+      // Naming the requested level instead would print "below the medium bar" next to a score
+      // of 0.71, which is above medium's own 0.45 and reads as nonsense.
+      const nearMissNote = effectiveOrchestration().surfaceRoutingNearMisses && resolution.nearMisses.length > 0
+        ? `\n\nClosest matches, all below the ${SEMANTIC_AGENT_ROUTING_MIN_SCORE} semantic admission floor: `
+          + `${resolution.nearMisses.map((entry) => `${entry.name} (${entry.score.toFixed(3)})`).join(", ")}. `
+          + "If one of these plainly covers the request, delegate to it by name; a near miss is "
+          + "common when the request is phrased in another language or unusually. Otherwise proceed as above."
+        : "";
       return {
         success: true,
-        output: `No agents matched "${raw}"${shortenedNote}.${semanticUnavailableNote} Do not call search_agents again for this turn. Delegate without an agentName so autonomous routing can bid on the original task, or use create_ephemeral_agent only if this is a brand-new capability not covered by ANY existing specialist.${circuitNote}${selfExclusionNote}`,
+        output: `No agents matched "${raw}"${shortenedNote}.${semanticUnavailableNote} Do not call search_agents again for this turn. Delegate without an agentName so autonomous routing can bid on the original task, or use create_ephemeral_agent only if this is a brand-new capability not covered by ANY existing specialist.${circuitNote}${selfExclusionNote}${nearMissNote}`,
         metadata: {
           query: raw,
           minConfidence,
@@ -3343,6 +3365,9 @@ registerTool({
           topResult: null,
           trippedAgents: resolution.trippedAgents,
           excludedAgents: resolution.excludedAgents ?? [],
+          // Recorded whether or not the note was shown, so the flag's effect is measurable
+          // from the log rather than only from the model's behaviour.
+          nearMisses: resolution.nearMisses,
           ...(shortened ? { shortenedQueryAttempted: shortened } : {}),
         },
       };

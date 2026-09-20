@@ -721,6 +721,30 @@ export const OrchestrationSchema = z.object({
    * Default off — behaviour change on exactly the deployments it applies to.
    */
   routingTierPresetFallback: z.boolean().default(false),
+
+  /**
+   * Tell the model which agents ALMOST matched, when routing admitted none.
+   *
+   * Today a query where every agent scored 0.71 against the 0.72 floor produces the same
+   * answer as a query nothing matched: "No agents matched X. Delegate without an agentName,
+   * or create an ephemeral agent." The near misses are discarded before anyone sees them, so
+   * the model is invited to invent a specialist while the right one sits a few hundredths
+   * under the bar.
+   *
+   * Measured on this catalog: 7 of 25 German requests admitted NOTHING, and the correct
+   * agent was among the sub-floor scores every time — "ich braeuchte jemanden im schwarm fuer
+   * uebersetzungen" put swarm_maintainer at 0.7115. Their English twins all cleared the gate,
+   * so the ~0.09 the paraphrase costs is the whole difference.
+   *
+   * This does NOT lower the floor and does not admit anything: the candidates stay out of
+   * `results`, the delegation still has to be the model's own decision, and the wording says
+   * the scores were below the bar. It replaces "nothing exists" with "nothing cleared the
+   * bar, and here is what came closest".
+   *
+   * Default off — it changes what the model is told, so it is pass^k-gated like every other
+   * behaviour change here.
+   */
+  surfaceRoutingNearMisses: z.boolean().default(false),
   /** When true, a turn whose ONLY orchestration was a single successful delegation that
    *  returned a complete, presentable deliverable surfaces that deliverable directly instead
    *  of running a SECOND full synthesis pass over it on the main assistant — which on the slow

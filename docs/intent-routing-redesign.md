@@ -861,6 +861,31 @@ because a self-probe puts the correct agent at the top of the reranker's list, w
 exactly where the defect does no harm. A metric can be sharper and still be blind to the
 failure you are chasing.
 
+### A routing miss now has somewhere to go
+
+The measurement left one thing unfixed and it is the one a user would feel. When routing
+admits nobody, `search_agents` answers:
+
+> No agents matched "X". Delegate without an agentName so autonomous routing can bid on the
+> original task, or use create_ephemeral_agent only if this is a brand-new capability not
+> covered by ANY existing specialist.
+
+That message is usually wrong about its own premise. Measured: 7 of 25 German requests
+admitted nothing while the correct agent sat a few hundredths under the gate, so the model is
+invited to invent a specialist that already exists.
+
+`orchestration.surfaceRoutingNearMisses` (default off) appends the closest sub-floor matches
+with their scores, and names the bar that actually applied — the 0.72 semantic admission
+floor, NOT the requested confidence level. Sub-floor scores are zeroed before `minConfidence`
+is consulted, so printing "below the medium bar" beside a 0.71 would be nonsense: medium's
+own threshold is 0.45.
+
+Nothing is admitted by this. The candidates stay out of `results`, the delegation stays the
+model's decision, and the wording says the scores were below the bar. It replaces "nothing
+exists" with "nothing cleared the bar, and here is what came closest". The near misses are
+written to the tool's metadata whether or not the flag is on, so the flag's effect is
+measurable from the log rather than only from the model's behaviour.
+
 ### What this run could not establish
 
 - Production routing telemetry does not exist yet. `agent_routing_evaluated` ships in
