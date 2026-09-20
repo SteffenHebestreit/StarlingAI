@@ -19,6 +19,25 @@ export const RetrievalRerankerSchema = z.object({
   model: z.string().min(1).default("BAAI/bge-reranker-v2-m3"),
   timeoutMs: z.number().int().min(1000).max(120000).default(15000),
   topK: z.number().int().min(2).max(12).default(6),
+  /**
+   * What the rerank score is allowed to decide in AGENT ROUTING.
+   *
+   *  - "ordering" (default): the blend `0.7*embedding + 0.3*rerank` sorts the candidates the
+   *    embedding already admitted. Admission stays with the embedding score, which is the
+   *    quantity the 0.72 floor was calibrated for.
+   *  - "admission": the legacy behaviour, where the blended value is also compared against
+   *    the floor.
+   *
+   * The default changed because "admission" is unsound with a min-max normalised reranker,
+   * and rerankViaTei min-max normalises: the worst candidate in a shortlist always receives
+   * exactly 0 and the best exactly 1, so the score carries RANK, not absolute relevance.
+   * Compared against a fixed floor that meant the reranker's last choice scored at most
+   * 0.7*1.0 = 0.70 and was rejected however well it matched, while its first choice scored at
+   * least 0.804 and was admitted however poorly. Set "admission" only to pin the old numbers
+   * deliberately, and note that document RAG is unaffected either way — it ranks, it does not
+   * gate on an absolute threshold.
+   */
+  blendMode: z.enum(["ordering", "admission"]).default("ordering"),
 });
 
 export const RetrievalSearchSchema = z.object({

@@ -64,6 +64,16 @@ export interface CanaryScoredResult {
   gated: boolean;
   /** The scoring mode actually used, so a degraded run is visible rather than silently weaker. */
   mode: string;
+  /**
+   * Every catalog entry with its embedding score, past the resolver's top-N cut.
+   *
+   * Optional, because the pure decision logic must stay runnable with a stub. Where a scorer
+   * can supply it, a failure can say WHICH of two very different things happened: the entry
+   * scored under the 0.72 floor, or it scored fine and was cut by `searchByEmbedding(query,
+   * provider, 8)` before the floor was ever consulted. Reporting both as "not admitted" sent
+   * a reader looking for a catalog problem that was really a top-N problem.
+   */
+  allScored?: Array<{ name: string; score: number }>;
 }
 
 export type CanaryScorer = (query: string) => Promise<CanaryScoredResult>;
@@ -157,7 +167,16 @@ export async function runCanaryProbe(
     failures.push(`gated: ${result.ranked.length === 0 ? "no candidate cleared the floor" : "resolution reported gated"}`);
   }
   if (selfRank === null) {
-    failures.push(`not admitted (top: ${result.ranked[0]?.name ?? "none"} @ ${result.ranked[0]?.score.toFixed(4) ?? "n/a"})`);
+    const deep = result.allScored?.find((entry) => entry.name === probe.entry);
+    const deepRank = deep && result.allScored
+      ? result.allScored.filter((entry) => entry.score > deep.score).length + 1
+      : null;
+    const why = deep === undefined
+      ? "not admitted"
+      : deep.score >= floors.agent
+        ? `scored ${deep.score.toFixed(4)} — ABOVE the floor, cut by the top-N ranking at rank ${deepRank}`
+        : `scored ${deep.score.toFixed(4)} — under the ${floors.agent} floor`;
+    failures.push(`${why} (top: ${result.ranked[0]?.name ?? "none"} @ ${result.ranked[0]?.score.toFixed(4) ?? "n/a"})`);
   } else {
     if (selfRank !== 1) {
       failures.push(`self-match at rank ${selfRank}, behind ${result.ranked[0]!.name} (${result.ranked[0]!.score.toFixed(4)})`);

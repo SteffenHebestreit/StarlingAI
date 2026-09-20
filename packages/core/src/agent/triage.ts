@@ -34,8 +34,25 @@
 import type { LLMMessage } from "../providers/lmstudio.js";
 import type { RequestFacets } from "./routing-taxonomy.js";
 
-/** Version of the frozen prefix. Bump when the prompt text changes: the prefix is a KV-cache
- *  key and a shadow comparison is only meaningful within one version. */
+/**
+ * Version of the frozen prefix. Bump when the prompt text changes: the prefix is a KV-cache
+ * key and a shadow comparison is only meaningful within one version.
+ *
+ * MEASURED, and deliberately NOT changed. On the first live run this wording produced an
+ * English restatement on 9 of 15 German requests. That matters, because the restatement is
+ * what a second retrieval pass would use to rescue a German query landing a few hundredths
+ * under the 0.72 admission floor — a rescue available on 60% of turns rescues 60% of turns.
+ *
+ * Two rewordings were tried against the same 15 requests. Making it explicitly REQUIRED for
+ * non-English input made it WORSE (3 of 15): ending the line on the empty-string case is
+ * what the small model carries away. Putting the restatement last recovered 8 of 15 —
+ * indistinguishable from the original at this sample size. So the prompt stands: bumping a
+ * KV-cache-keyed frozen prefix for a change that does not measurably help is the blind
+ * prompt-trim this project has already paid for three times.
+ *
+ * The ~60% ceiling is a property of the model, not of the wording, and it bounds what the
+ * queryEn second pass can be worth. Fix it with a mechanism, not with more adjectives.
+ */
 export const TRIAGE_PROMPT_VERSION = "idcm-1";
 
 export interface TriageVerdict {

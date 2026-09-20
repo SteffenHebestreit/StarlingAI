@@ -755,6 +755,81 @@ it: results, `weakCandidates` and every downstream decision are unchanged. Wheth
 "only weak candidates" branch should be made reachable is a behaviour change, and it should be
 decided on shadow data rather than on this reading.
 
+### The reranker was deciding admission, and it was deciding it by RANK
+
+The worst finding of the run, and the one an independent review caught rather than me.
+
+`rerankViaTei` MIN-MAX normalises the model's logits. That discards their absolute meaning
+and substitutes the candidate's RANK inside the shortlist: the worst always receives exactly
+0, the best exactly 1. The old code fed that number into `combinedScore * 0.7 + rerankScore
+* 0.3` and compared the result against the fixed 0.72 floor. Two things follow by arithmetic:
+
+| candidate | best possible blended score | outcome |
+|---|---|---|
+| the reranker's LAST pick | 0.7 x 1.0 + 0 = 0.70 | below the floor, always |
+| the reranker's FIRST pick | 0.7 x 0.72 + 0.3 = 0.804 | above the floor, always |
+
+So an agent the embedding scored 1.0 was rejected for being the reranker's last pick, and an
+agent scraping the floor was admitted for being its first. And because the embedding term
+only varies across [0.72, 1.0] after its own floor while the rerank term is stretched across
+the full [0, 1], the nominal 70/30 blend behaved closer to 30/70 in the reranker's favour.
+
+Fixed as §5 N2 already specified: admission is decided by the embedding score, the blend is
+kept as the sort key, and the reported score is the pre-blend one so it agrees with the floor
+and with `confidenceLabel`. `retrieval.reranker.blendMode: "admission"` restores the old
+behaviour for a deployment that has tuned around the old numbers. The change is monotone —
+it can only add back candidates the embedding already admitted.
+
+Note this does NOT affect document RAG, which ranks with the reranker but does not gate on an
+absolute threshold.
+
+### The canary was calling a ranking problem a floor problem
+
+`searchByEmbedding(raw, provider, 8)` cuts to the top 8 BEFORE the floor is ever consulted,
+so an entry can be missing from a result for two opposite reasons. The canary reported both
+as "not admitted".
+
+Re-running with the distinction restored changed the reading of every one of the eight
+failures. All eight scored ABOVE the floor, between 0.7300 and 0.7851, and were cut by the
+ranking:
+
+| entry | probe | score | why it was missing |
+|---|---|---|---|
+| summarizer | tl;dr creation | 0.7851 | rank 10 |
+| report_writer_agent | finding aggregation and dedup | 0.7709 | rank 10 |
+| swarm_maintainer | tool routing | 0.7605 | rank 11 |
+| data_analyst | json data inspection | 0.7592 | rank 6 |
+| meeting_briefing_agent | handoff packets | 0.7551 | rank 6 |
+| recon_agent | service enumeration | 0.7539 | rank 6 |
+| devops_coordinator | rollback decision-making | 0.7515 | rank 24 |
+| devops_coordinator | environment promotion | 0.7300 | rank 25 |
+
+An independent adjudication of all ten canary findings confirmed ZERO of them as catalog
+defects. They are short abstract noun phrases ("tl;dr creation", "tool routing") that several
+agents legitimately advertise, and every natural phrasing of the same request retrieves the
+right agent at rank 1. One adjudicator checked six phrasings of a summarizer request, in both
+languages, and got summarizer first every time between 0.7779 and 0.8965.
+
+The capability probes stay as they are. They are the only probe kind sensitive enough to
+catch a uniform score drift: at a -0.01 shift ten capability probes fire and zero description
+probes do. A canary tuned until it is green measures nothing.
+
+### The classifier's English restatement fires on about 60% of German turns
+
+The facet triage ran live for the first time: 0 parse failures in 27 calls, median latency
+3.0s, p90 3.3s, comfortably inside the 8s timeout. Language labelling was perfect, 15 of 15.
+
+But `queryEn` — the restatement a second retrieval pass would use to rescue the German
+collapses above — appeared on only 9 of 15 German requests. Two rewordings were measured
+against the same 15. Making it explicitly REQUIRED for non-English input made it WORSE (3 of
+15): ending the line on the empty-string case is what the small model carries away. Putting
+the restatement last gave 8 of 15, indistinguishable from the original.
+
+So the prompt was left at `idcm-1`. The ~60% ceiling looks like a property of the model
+rather than of the wording, and it bounds what the queryEn second pass can be worth. Bumping
+a KV-cache-keyed frozen prefix for a change that does not measurably help is the blind
+prompt-trim this project has already paid for three times.
+
 ### What this run could not establish
 
 - Production routing telemetry does not exist yet. `agent_routing_evaluated` ships in

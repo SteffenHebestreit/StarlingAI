@@ -534,7 +534,41 @@ export async function resolveAgentRouting(
     })),
   );
 
-  if (rerankScores) {
+  // The rerank blend RE-ORDERS the admitted set. It does not decide admission.
+  //
+  // It used to do both, and that was a scale error with a provable consequence. The TEI path
+  // min-max normalises the model's logits (retrieval/reranker.ts), which throws away their
+  // absolute meaning and substitutes the candidate's RANK within the shortlist: the worst
+  // candidate always receives exactly 0 and the best always exactly 1. Feeding a rank
+  // position into `combinedScore * 0.7 + rerankScore * 0.3` and then comparing the result
+  // against the fixed 0.72 floor meant:
+  //
+  //   - the reranker's LAST choice scored at most 0.7 * 1.0 = 0.70 and was therefore
+  //     rejected unconditionally, however well it matched — a perfect 1.0 embedding match
+  //     still fell under the gate;
+  //   - the reranker's FIRST choice scored at least 0.72 * 0.7 + 0.3 = 0.804 and was
+  //     admitted unconditionally, however poorly;
+  //   - and because the embedding term only varies across [0.72, 1.0] after its own floor
+  //     while the rerank term is stretched across the full [0, 1], the nominal 70/30 blend
+  //     behaved closer to 30/70 in the reranker's favour.
+  //
+  // So admission is decided by the embedding score, which is what the 0.72 floor was
+  // calibrated for and which computeHybridRoutingScore has already gated once. The blend is
+  // kept as the SORT KEY, so the reranker still does the job it is good at — ordering
+  // near-equals — without deciding who is in the room. The reported score stays the
+  // pre-blend one, so `results` carry the quantity the floor and `confidenceLabel` agree on.
+  if (rerankScores && getConfig().retrieval.reranker.blendMode !== "admission") {
+    ranked = ranked
+      .map((result) => {
+        const rerankScore = rerankScores.get(result.name);
+        return rerankScore === undefined
+          ? { ...result, rankKey: result.combinedScore }
+          : { ...result, rankKey: Math.max(0, Math.min(1, result.combinedScore * 0.7 + rerankScore * 0.3)) };
+      })
+      .sort((a, b) => (b.rankKey - a.rankKey) || compareRoutingResults(a, b));
+  } else if (rerankScores) {
+    // Legacy: the blend decides admission too. Kept behind `blendMode: "admission"` so a
+    // deployment that has tuned around the old numbers can pin them deliberately.
     ranked = ranked
       .map((result) => {
         const rerankScore = rerankScores.get(result.name);
@@ -545,9 +579,11 @@ export async function resolveAgentRouting(
         };
       })
       .sort(compareRoutingResults);
+  } else {
+    ranked = ranked.sort(compareRoutingResults);
   }
 
-  ranked = ranked.sort(compareRoutingResults).slice(0, 5);
+  ranked = ranked.slice(0, 5);
 
   // The best EMBEDDING scores that never reached `ranked`, kept purely as telemetry.
   //

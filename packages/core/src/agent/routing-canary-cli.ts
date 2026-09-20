@@ -42,13 +42,23 @@ const DEFAULT_SNAPSHOT_PATH = "eval/routing/canary-snapshot.json";
  * resolver, the same floor, the same rerank blend. Anything else measures a path the
  * product does not take.
  */
-function createLiveScorer(resolveAgentRouting: typeof import("../tools/agent-routing.js")["resolveAgentRouting"]): CanaryScorer {
+function createLiveScorer(
+  resolveAgentRouting: typeof import("../tools/agent-routing.js")["resolveAgentRouting"],
+  scoreEverything?: (query: string) => Promise<Array<{ name: string; score: number }>>,
+): CanaryScorer {
   return async (query: string) => {
     const resolution = await resolveAgentRouting(query, { minConfidence: "high" });
+    // The resolver cuts to the top 8 BEFORE the floor is consulted, so an entry can be
+    // missing from the result either for scoring under 0.72 or for placing ninth. Those call
+    // for opposite responses — rewrite the entry, or accept that the field is crowded — and
+    // the report could not tell them apart. The extra lookup reuses the cached query
+    // embedding, so it costs a cosine pass over an in-memory index.
+    const allScored = scoreEverything ? await scoreEverything(query) : undefined;
     return {
       ranked: resolution.results.map((candidate) => ({ name: candidate.name, score: candidate.score })),
       gated: resolution.gated,
       mode: resolution.mode,
+      ...(allScored ? { allScored } : {}),
     };
   };
 }
@@ -171,7 +181,17 @@ export async function runRoutingCanaryCli(argv: readonly string[]): Promise<numb
 
   // The floor comes from the ROUTER, not from a copy: the canary exists to guard that
   // constant, so keeping a duplicate of it invites the two drifting apart.
-  const report = await runCanary(probes, createLiveScorer(resolveAgentRouting), {
+  const { searchByEmbedding } = await import("../providers/embeddings.js");
+  const embeddingProvider = getEmbeddingProvider();
+  const catalogSize = Object.keys(config.subAgents).length;
+  const scoreEverything = async (query: string): Promise<Array<{ name: string; score: number }>> => {
+    const hits = await searchByEmbedding(query, embeddingProvider, catalogSize);
+    // Same rescale the router applies at agent-routing.ts:442. Reporting raw cosine here
+    // would print a number that looks nothing like the floor it is being compared to.
+    return hits.map((hit) => ({ name: hit.agentName, score: Math.max(0, (hit.score + 1) / 2) }));
+  };
+
+  const report = await runCanary(probes, createLiveScorer(resolveAgentRouting, scoreEverything), {
     ...DEFAULT_CANARY_FLOORS,
     agent: SEMANTIC_AGENT_ROUTING_MIN_SCORE,
   });
@@ -230,6 +250,19 @@ export async function runRoutingCanaryCli(argv: readonly string[]): Promise<numb
       process.stdout.write("WARNING: the snapshot was recorded from a run with failing probes.\n");
     }
     return 0;
+  }
+
+  // Checked BEFORE the snapshot check, because it is the stronger statement: without the
+  // reranker these probes scored a pipeline production does not run, so neither a pass nor a
+  // failure over them is a verdict about production. Grading it RED would train people to
+  // ignore the command, which is the same harm as reporting green without a baseline.
+  if (rerankDegraded) {
+    process.stderr.write(
+      "\nINCONCLUSIVE: the probes above ran WITHOUT the reranker, and production applies the\n"
+      + "admission floor to the blended score. Re-run where the reranker is reachable — from\n"
+      + "inside the docker network — to get a verdict on production.\n",
+    );
+    return 2;
   }
 
   if (!snapshot) {
