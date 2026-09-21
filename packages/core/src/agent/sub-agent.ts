@@ -1168,6 +1168,49 @@ const GATEWAY_BOUND_SERVICE_TOOL_PREFIXES = [
   "mcp__",
 ];
 
+/**
+ * Exact tool names that bind an agent to the gateway the same way the prefixes above do,
+ * but share no common prefix.
+ *
+ * These reach a configured EXTERNAL service — the image endpoint, TTS, STT, the vision
+ * model — and they resolve it from `multimodal.*` config that the gateway fills at load
+ * time (`imageGeneration.baseUrl` comes from SAI_PRIMARY_MODEL_URL via the loader). The
+ * agent-worker container receives neither that config nor, under `--network none`, any way
+ * to reach the host it names. So the tool fails twice over, and it fails the opaque way:
+ * the container exits 1 with empty stdout and the model never gets to say what went wrong.
+ *
+ * Observed exactly that: `image_creator` was delegated a sunrise image twice, ran 15.6s
+ * each time, and returned "exited with code 1. Output:" with nothing after it. Routing had
+ * done its job — image_creator at 0.92 — and the turn still ended by telling the user to
+ * go use DALL-E.
+ *
+ * Forcing these in-process is the same remedy MCP tools already got for the same pair of
+ * reasons, and it costs no sandboxing that was real: an agent that cannot reach the
+ * network was not being sandboxed, it was being prevented from running.
+ */
+const GATEWAY_BOUND_SERVICE_TOOL_NAMES = new Set<string>([
+  "generate_image",
+  "analyze_image",
+  "synthesize_speech",
+  "transcribe_audio",
+  "list_tts_voices",
+]);
+
+/**
+ * True when an agent carrying these tools must run IN-PROCESS rather than in a container.
+ *
+ * Exported so the rule can be gated against the real catalog instead of only being
+ * exercised by whichever agent someone happens to delegate to. The failure it prevents is
+ * silent from the outside — the container exits 1 with no stdout, so routing looks healthy
+ * and the delegation simply dies.
+ */
+export function requiresInProcessExecution(tools: readonly string[] | undefined): boolean {
+  const list = tools ?? [];
+  return list.some((t) => ORCHESTRATION_DISCOVERY_TOOL_NAMES.has(t))
+    || list.some((t) => GATEWAY_BOUND_SERVICE_TOOL_NAMES.has(t)
+      || GATEWAY_BOUND_SERVICE_TOOL_PREFIXES.some((prefix) => t.startsWith(prefix)));
+}
+
 // Tools whose output is deterministic enough within a single sub-agent run that
 // re-issuing the call with identical arguments is wasted work. The existing
 // `lastToolCallSig` map only catches *consecutive* duplicates (A→A); this set
@@ -2584,14 +2627,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // `--network none` isolation breaks mcp__* tools (they reach their MCP
     // servers via the gateway's host-side registry), so MCP-using agents are
     // forced in-process too — see GATEWAY_BOUND_SERVICE_TOOL_PREFIXES.
-    const requiresHostRegistry = (agentCfg.tools ?? []).some((t: string) =>
-      ORCHESTRATION_DISCOVERY_TOOL_NAMES.has(t),
-    );
-    const requiresGatewayServices = (agentCfg.tools ?? []).some((toolName: string) =>
-      GATEWAY_BOUND_SERVICE_TOOL_PREFIXES.some((prefix) => toolName.startsWith(prefix)),
-    );
     const isContainerized =
-      !requiresHostRegistry && !requiresGatewayServices && (
+      !requiresInProcessExecution(agentCfg.tools) && (
         agentCfg.container?.enabled === true ||
         (config.agents.defaultContainerized === true && agentCfg.container?.disabled !== true)
       );

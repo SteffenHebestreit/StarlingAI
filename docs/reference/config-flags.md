@@ -192,7 +192,7 @@ Every public schema field, where it is declared, and how many production files r
 | `humanInLoopSteps` | packages/core/src/config/schema.ts:1286 | 20 |
 | `id` | packages/core/src/config/schema.ts:553 | 226 |
 | `ignoreCase` | packages/core/src/config/schema.ts:1333 | 2 |
-| `image` | packages/core/src/config/schema.ts:672 | 57 |
+| `image` | packages/core/src/config/schema.ts:672 | 58 |
 | `imapHost` | packages/core/src/config/schemas/channels.ts:57 | 5 |
 | `imapPassword` | packages/core/src/config/schemas/channels.ts:60 | 6 |
 | `imapPort` | packages/core/src/config/schemas/channels.ts:58 | 4 |
