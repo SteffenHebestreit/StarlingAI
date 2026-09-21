@@ -116,6 +116,20 @@ export interface RoutingEvalObservation {
     rawAdmitted: number;
     added: string[];
   };
+  /**
+   * The SHIPPED restatement rescue, which is a different thing from `secondPass` above.
+   *
+   * `secondPass` is the experiment: restate every non-English query. What ships fires only
+   * where retrieval came back EMPTY and detects no language at all, so it attempts far fewer
+   * turns and costs nothing on the ones that already worked. Reporting them under one field
+   * would let the experiment's number stand in for the product's, which is the mistake this
+   * separation exists to prevent.
+   */
+  rescue?: {
+    attempted: boolean;
+    restatement: string;
+    added: string[];
+  };
 }
 
 export type RoutingEvalResolver = (evalCase: RoutingEvalCase) => Promise<RoutingEvalObservation>;
@@ -144,6 +158,7 @@ export interface RoutingCaseResult {
   lexicalOverlap: number | null;
   elapsedMs?: number;
   secondPass?: RoutingEvalObservation["secondPass"];
+  rescue?: RoutingEvalObservation["rescue"];
   skippedChecks: string[];
 }
 
@@ -220,6 +235,20 @@ export interface RoutingEvalReport {
     /** Cases that were already passing and the restatement widened anyway. */
     widened: number;
     /** Cases the raw query admitted nothing for, and the restatement did not help either. */
+    stillEmpty: string[];
+  };
+  /**
+   * Populated only on a --rescue run: the SHIPPED restatement rescue.
+   *
+   * `attempted` is already only the turns retrieval left empty, which is the whole point —
+   * the experiment above restates everything non-English and so cannot tell you what the
+   * product costs or buys.
+   */
+  rescue?: {
+    attempted: number;
+    /** Empty-retrieval cases the rescue pulled at least one candidate out of. */
+    admitted: string[];
+    /** Empty-retrieval cases the rescue could not help either. */
     stillEmpty: string[];
   };
   /** Pass rate over the cases that are NOT lexically leaked, or null when none remain. */
@@ -499,6 +528,7 @@ export async function runRoutingEval(
       lexicalOverlap: overlap,
       ...(observation.elapsedMs !== undefined ? { elapsedMs: observation.elapsedMs } : {}),
       ...(observation.secondPass ? { secondPass: observation.secondPass } : {}),
+      ...(observation.rescue ? { rescue: observation.rescue } : {}),
       skippedChecks: skipped,
     });
   }
@@ -521,6 +551,14 @@ export async function runRoutingEval(
     stillEmpty: secondPassRuns
       .filter((result) => result.secondPass!.rawAdmitted === 0 && result.ranked.length === 0)
       .map((result) => result.id),
+  };
+  // The shipped rescue's own numbers. `attempted` is already the empty-retrieval subset, so
+  // the interesting ratio is how many of those it actually pulled a candidate out of.
+  const rescueRuns = results.filter((result) => result.rescue?.attempted);
+  const rescue = rescueRuns.length === 0 ? undefined : {
+    attempted: rescueRuns.length,
+    admitted: rescueRuns.filter((result) => result.rescue!.added.length > 0).map((result) => result.id),
+    stillEmpty: rescueRuns.filter((result) => result.rescue!.added.length === 0).map((result) => result.id),
   };
   const clean = results.filter((result) => result.scored && !leaked.includes(result.id));
   const cleanPassRate = clean.length > 0
@@ -579,6 +617,7 @@ export async function runRoutingEval(
     byLanguage,
     leaked,
     ...(secondPass ? { secondPass } : {}),
+    ...(rescue ? { rescue } : {}),
     cleanPassRate,
     thresholds,
     failures,
@@ -623,6 +662,15 @@ export function formatRoutingEvalReport(report: RoutingEvalReport): string {
     lines.push(`    widened an already-working case: ${sp.widened}`);
     lines.push(`    still empty after the restatement: ${sp.stillEmpty.length}`);
     if (sp.stillEmpty.length > 0) lines.push(`      ${sp.stillEmpty.join(", ")}`);
+  }
+
+  if (report.rescue) {
+    const rs = report.rescue;
+    lines.push(`  English-restatement rescue (the shipped one), on ${rs.attempted} case(s) that retrieved nothing:`);
+    lines.push(`    admitted a candidate: ${rs.admitted.length}`);
+    if (rs.admitted.length > 0) lines.push(`      ${rs.admitted.join(", ")}`);
+    lines.push(`    still empty afterwards: ${rs.stillEmpty.length}`);
+    if (rs.stillEmpty.length > 0) lines.push(`      ${rs.stillEmpty.join(", ")}`);
   }
 
   const languages = Object.keys(report.byLanguage).sort();

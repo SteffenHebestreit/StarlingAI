@@ -19,6 +19,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { attemptRestatementRescue } from "./routing-restatement.js";
+
 import {
   DEFAULT_EVAL_THRESHOLDS,
   decisionResolver,
@@ -73,6 +75,7 @@ async function buildLiveResolver(
   configPath: string,
   useTriage: boolean,
   secondPass: boolean,
+  rescue: boolean,
 ): Promise<{ resolver: RoutingEvalResolver; catalogText: Record<string, string> } | { error: string }> {
   process.env["SAI_CONFIG_PATH"] = configPath;
   // Dynamic, so SAI_CONFIG_PATH is set before the loader is evaluated. ESM hoists static
@@ -158,6 +161,32 @@ async function buildLiveResolver(
     // restatement carry admittedByRawQuery=false, which the fusion already refuses to let
     // license a mechanical dispatch — the restatement is written by the same small model that
     // produced the labels, so trusting both would be one signal counted twice.
+    // THE SHIPPED RESCUE, run exactly as production runs it.
+    //
+    // `--second-pass` below is the EXPERIMENT: it restates every non-English query, which
+    // measured 74 calls for 20 rescues plus 49 widenings that added no recall at all. What
+    // actually ships fires only where retrieval came back EMPTY, detects no language, and
+    // lives on the delegation miss path in tools/sub-agent.ts. The eval calls
+    // `resolveAgentRouting` bare, so without this the harness cannot see the shipped
+    // behaviour and would keep reporting the experiment's number in its place.
+    //
+    // It calls `attemptRestatementRescue` itself rather than re-deriving the rule, so a
+    // change to the shipped trigger shows up here instead of quietly diverging from it.
+    let rescueAdded: string[] = [];
+    let rescueRestatement = "";
+    if (rescue && candidates.length === 0) {
+      const rescued = await attemptRestatementRescue(evalCase.query, {
+        resolve: (query) => resolveAgentRouting(query, { minConfidence: "high" }),
+        admitted: (resolution) => resolution.results.length > 0,
+      });
+      if (rescued) {
+        rescueRestatement = rescued.restatement;
+        const extra = toCandidates(rescued.resolution.results, false);
+        rescueAdded = extra.map((candidate) => candidate.name);
+        candidates.push(...extra);
+      }
+    }
+
     let secondPassAdded: string[] = [];
     if (secondPass && verdict?.queryEn && verdict.queryEn.trim() && verdict.language !== "en") {
       const known = new Set(candidates.map((candidate) => candidate.name));
@@ -193,6 +222,11 @@ async function buildLiveResolver(
       gated: candidates.length === 0,
       hasVerdict: Boolean(verdict),
       elapsedMs: Date.now() - started,
+      rescue: {
+        attempted: rescue && rawAdmitted === 0,
+        restatement: rescueRestatement,
+        added: rescueAdded,
+      },
       secondPass: {
         attempted: secondPass && Boolean(verdict?.queryEn?.trim()) && verdict?.language !== "en",
         restatement: verdict?.queryEn ?? "",
@@ -227,6 +261,8 @@ export async function runRoutingEvalCli(argv: readonly string[]): Promise<number
   const useTriage = argv.includes("--triage");
   // Needs a verdict to have a restatement to route on, so it implies --triage.
   const secondPass = argv.includes("--second-pass");
+  // The shipped rescue brings its own classifier call, so it does NOT imply --triage.
+  const rescue = argv.includes("--rescue");
   const casesIndex = argv.indexOf("--cases");
   const jsonIndex = argv.indexOf("--json");
   const jsonPath = jsonIndex >= 0 ? argv[jsonIndex + 1] : undefined;
@@ -294,7 +330,7 @@ export async function runRoutingEvalCli(argv: readonly string[]): Promise<number
       process.stderr.write("--second-pass needs --triage: the restatement comes from the classifier.\n");
       return 1;
     }
-    const built = await buildLiveResolver(configPath, useTriage, secondPass);
+    const built = await buildLiveResolver(configPath, useTriage, secondPass, rescue);
     if ("error" in built) {
       process.stderr.write(`INCONCLUSIVE: ${built.error}\n`);
       return 2;

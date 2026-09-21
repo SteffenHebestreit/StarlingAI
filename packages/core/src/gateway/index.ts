@@ -2651,15 +2651,21 @@ export function createGateway() {
 
     const imgConfig = multimodalConfig.imageGeneration;
     try {
+      // Only what the CALLER asked for. requestImageGeneration fills the rest per tier —
+      // this route used to fill it itself and got it wrong: naming `image-quality` without a
+      // tier sent the FAST tier's guidance (which roughly doubles that model's ~170s render)
+      // against the FAST tier's 120s timeout, so every default-sized request aborted at 120s
+      // while the device kept rendering an image nobody would receive.
       const result = await requestImageGeneration(imgConfig, {
         prompt,
-        model: typeof body["model"] === "string" && body["model"].trim() ? body["model"].trim() : imgConfig.model,
-        negativePrompt: typeof body["negativePrompt"] === "string" ? body["negativePrompt"] : imgConfig.defaultNegativePrompt,
-        width: typeof body["width"] === "number" ? body["width"] : imgConfig.defaultWidth,
-        height: typeof body["height"] === "number" ? body["height"] : imgConfig.defaultHeight,
-        steps: typeof body["steps"] === "number" ? body["steps"] : imgConfig.defaultSteps,
-        guidanceScale: typeof body["guidanceScale"] === "number" ? body["guidanceScale"] : imgConfig.defaultGuidanceScale,
-        seed: typeof body["seed"] === "number" ? body["seed"] : undefined,
+        ...(typeof body["tier"] === "string" && body["tier"] === "quality" ? { tier: "quality" as const } : {}),
+        ...(typeof body["model"] === "string" && body["model"].trim() ? { model: body["model"].trim() } : {}),
+        ...(typeof body["negativePrompt"] === "string" ? { negativePrompt: body["negativePrompt"] } : {}),
+        ...(typeof body["width"] === "number" ? { width: body["width"] } : {}),
+        ...(typeof body["height"] === "number" ? { height: body["height"] } : {}),
+        ...(typeof body["steps"] === "number" ? { steps: body["steps"] } : {}),
+        ...(typeof body["guidanceScale"] === "number" ? { guidanceScale: body["guidanceScale"] } : {}),
+        ...(typeof body["seed"] === "number" ? { seed: body["seed"] } : {}),
       });
 
       return c.json({

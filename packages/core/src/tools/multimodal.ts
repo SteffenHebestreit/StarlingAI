@@ -418,21 +418,19 @@ registerTool({
       // at guidance 1.0 than at 7.5, and the quality tier costs 22s at guidance 4 against
       // 11s at 1.0 because its model carries embedded guidance and true CFG doubles the
       // forward passes. One shared default is wrong for one of them whichever value it takes.
-      const tierDefaults = tier === "quality" ? config.qualityDefaults : undefined;
       const result = await requestImageGeneration(config, {
         prompt,
         tier,
         // No `?? config.model` here: the backend resolves the tier's model itself, and
         // defaulting to the fast model would silently turn a quality request into a fast one.
         ...(stringArg(args["model"]) ? { model: stringArg(args["model"])! } : {}),
-        negativePrompt: stringArg(args["negativePrompt"]) ?? tierDefaults?.negativePrompt ?? config.defaultNegativePrompt,
-        width: typeof args["width"] === "number" ? args["width"] : config.defaultWidth,
-        height: typeof args["height"] === "number" ? args["height"] : config.defaultHeight,
-        steps: typeof args["steps"] === "number" ? args["steps"] : (tierDefaults?.steps ?? config.defaultSteps),
-        guidanceScale: typeof args["guidanceScale"] === "number"
-          ? args["guidanceScale"]
-          : (tierDefaults?.guidanceScale ?? config.defaultGuidanceScale),
-        seed: typeof args["seed"] === "number" ? args["seed"] : undefined,
+        // Only what the caller asked for; requestImageGeneration applies the tier's defaults.
+        ...(stringArg(args["negativePrompt"]) ? { negativePrompt: stringArg(args["negativePrompt"])! } : {}),
+        ...(typeof args["width"] === "number" ? { width: args["width"] } : {}),
+        ...(typeof args["height"] === "number" ? { height: args["height"] } : {}),
+        ...(typeof args["steps"] === "number" ? { steps: args["steps"] } : {}),
+        ...(typeof args["guidanceScale"] === "number" ? { guidanceScale: args["guidanceScale"] } : {}),
+        ...(typeof args["seed"] === "number" ? { seed: args["seed"] } : {}),
       });
 
       const imageBytes = Buffer.from(result.imageBase64, "base64");

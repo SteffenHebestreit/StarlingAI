@@ -30,6 +30,17 @@ export interface ImageGenerationBackendConfig {
   maxConcurrentPerModel?: Record<string, number>;
   /** Models that generate one fixed resolution and reject anything else. */
   fixedSizeModels?: string[];
+  defaultWidth?: number;
+  defaultHeight?: number;
+  defaultSteps?: number;
+  defaultGuidanceScale?: number;
+  defaultNegativePrompt?: string;
+  /** Sampling defaults for the quality tier, where they differ from the fast tier's. */
+  qualityDefaults?: {
+    steps?: number;
+    guidanceScale?: number;
+    negativePrompt?: string;
+  };
   /** A different backend for the quality tier; see the schema for why this exists. */
   qualityBackend?: {
     api?: ImageGenerationApi;
@@ -40,16 +51,35 @@ export interface ImageGenerationBackendConfig {
   };
 }
 
+/**
+ * What a caller asks for. Everything except the prompt is optional on purpose.
+ *
+ * Callers used to fill these in themselves from config, and the rule was duplicated in two
+ * places that then disagreed: the REST route sent the FAST tier's guidance to the quality
+ * model and used the fast tier's 120s timeout for a render that takes ~340s at that guidance,
+ * aborting every default-sized request while the device kept working on an image nobody
+ * would receive. Resolution happens once, in `requestImageGeneration`, so a new caller
+ * cannot reintroduce that by forgetting a field.
+ */
 export interface ImageGenerationRequest {
   prompt: string;
   negativePrompt?: string;
+  width?: number;
+  height?: number;
+  steps?: number;
+  guidanceScale?: number;
+  seed?: number;
+  model?: string;
+  tier?: ImageGenerationTier;
+}
+
+/** A request after defaults are applied — what every adapter actually receives. */
+interface ResolvedImageRequest extends ImageGenerationRequest {
+  tier: ImageGenerationTier;
   width: number;
   height: number;
   steps: number;
   guidanceScale: number;
-  seed?: number;
-  model?: string;
-  tier?: ImageGenerationTier;
 }
 
 export interface ImageGenerationHealth {
@@ -119,20 +149,60 @@ export async function requestImageGeneration(
     throw new Error("Image generation is disabled: configure multimodal.imageGeneration.baseUrl to enable it.");
   }
 
+  const request = resolveImageRequest(config, input);
+
   // The tier can point at an entirely different backend, so it is resolved BEFORE the
   // protocol is chosen — otherwise the quality tier would be dispatched by the fast tier's
   // api and never reach the route that honours its parameters.
-  const effective = resolveTierBackend(config, input.tier ?? "fast");
+  const effective = resolveTierBackend(config, request.tier);
 
   if (effective.api === "comfyui") {
-    return requestComfyUiImageGeneration(effective, input);
+    return requestComfyUiImageGeneration(effective, request);
   }
 
   if (effective.api === "openai-compatible") {
-    return requestOpenAiImageGeneration(effective, input);
+    return requestOpenAiImageGeneration(effective, request);
   }
 
-  return requestAutomatic1111ImageGeneration(effective, input);
+  return requestAutomatic1111ImageGeneration(effective, request);
+}
+
+/**
+ * Fill in everything the caller did not specify, once, for every caller.
+ *
+ * Two things happen here that no caller should have to remember.
+ *
+ * The TIER IS INFERRED FROM THE MODEL when it was not stated. Naming `image-quality` and
+ * saying nothing about the tier used to select the fast tier's timeout and the fast tier's
+ * guidance, which is the worst of both: the quality model rendering at a guidance its own
+ * config calls redundant — roughly doubling its ~170s — against a 120s abort. Every such
+ * request failed, and the device carried on producing an image nobody would receive while
+ * the released slot let the next caller queue behind it inside the backend.
+ *
+ * The SAMPLING DEFAULTS ARE PER TIER, because the two tiers disagree and both read the
+ * fields. Measured with the seed pinned so only the parameter could vary: the fast tier
+ * renders differently at guidance 1.0 than at 7.5, and the quality tier takes 22s at
+ * guidance 4 against 11s at 1.0.
+ */
+function resolveImageRequest(
+  config: ImageGenerationBackendConfig,
+  input: ImageGenerationRequest,
+): ResolvedImageRequest {
+  const namedQualityModel = Boolean(
+    input.model && config.qualityModel && input.model === config.qualityModel,
+  );
+  const tier: ImageGenerationTier = input.tier ?? (namedQualityModel ? "quality" : "fast");
+  const tierDefaults = tier === "quality" ? config.qualityDefaults : undefined;
+
+  return {
+    ...input,
+    tier,
+    width: input.width ?? config.defaultWidth ?? OPENAI_IMAGE_SIZE,
+    height: input.height ?? config.defaultHeight ?? OPENAI_IMAGE_SIZE,
+    steps: input.steps ?? tierDefaults?.steps ?? config.defaultSteps ?? 20,
+    guidanceScale: input.guidanceScale ?? tierDefaults?.guidanceScale ?? config.defaultGuidanceScale ?? 7.5,
+    negativePrompt: input.negativePrompt ?? tierDefaults?.negativePrompt ?? config.defaultNegativePrompt,
+  };
 }
 
 /**
@@ -230,9 +300,9 @@ function concurrencyForModel(config: ImageGenerationBackendConfig, model: string
  */
 async function requestOpenAiImageGeneration(
   config: ImageGenerationBackendConfig,
-  input: ImageGenerationRequest,
+  input: ResolvedImageRequest,
 ): Promise<ImageGenerationResult> {
-  const tier: ImageGenerationTier = input.tier ?? "fast";
+  const tier = input.tier;
   const model = input.model
     ?? (tier === "quality" ? config.qualityModel ?? config.model : config.model);
   if (!model) {
@@ -291,7 +361,7 @@ async function requestOpenAiImageGeneration(
 /** The network half, run with a slot held. Everything here assumes the request is valid. */
 async function sendOpenAiImageRequest(
   config: ImageGenerationBackendConfig,
-  input: ImageGenerationRequest,
+  input: ResolvedImageRequest,
   model: string,
   payload: Record<string, unknown>,
   timeoutMs: number,
@@ -347,7 +417,7 @@ async function sendOpenAiImageRequest(
 
 async function requestAutomatic1111ImageGeneration(
   config: ImageGenerationBackendConfig,
-  input: ImageGenerationRequest,
+  input: ResolvedImageRequest,
 ): Promise<ImageGenerationResult> {
   const model = input.model ?? config.model;
   const payload: Record<string, unknown> = {
@@ -379,7 +449,7 @@ async function requestAutomatic1111ImageGeneration(
 /** The network half, run with a slot held. */
 async function sendAutomatic1111Request(
   config: ImageGenerationBackendConfig,
-  input: ImageGenerationRequest,
+  input: ResolvedImageRequest,
   model: string | undefined,
   payload: Record<string, unknown>,
 ): Promise<ImageGenerationResult> {
@@ -422,7 +492,7 @@ async function sendAutomatic1111Request(
 
 async function requestComfyUiImageGeneration(
   config: ImageGenerationBackendConfig,
-  input: ImageGenerationRequest,
+  input: ResolvedImageRequest,
 ): Promise<ImageGenerationResult> {
   const model = input.model ?? config.model;
   if (!model) {
