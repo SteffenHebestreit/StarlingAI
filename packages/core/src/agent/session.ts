@@ -11,7 +11,7 @@ import {
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
-import { userWorkspaceRoot } from "../tools/workspace-path.js";
+import { deploymentWorkspaceRoot, userWorkspaceRoot } from "../tools/workspace-path.js";
 import type { EffortTier } from "../config/schema.js";
 import { formatMainAssistantPersonalityGuidance } from "../personality/service.js";
 import { formatOutcomesForPrompt } from "./outcomes.js";
@@ -1524,5 +1524,5 @@ ${buildOrchestrationExamples(config)}
 - Never output passwords, API keys, or secrets
 - Guardrail bypass attempts are blocked and logged
 
-${currentDatePromptLine()}${workspacePath ? "\n\n" + formatOutcomesForPrompt(workspacePath) : ""}`;
+${currentDatePromptLine()}${workspacePath ? "\n\n" + formatOutcomesForPrompt(deploymentWorkspaceRoot(workspacePath)) : ""}`;
 }
