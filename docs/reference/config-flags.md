@@ -126,7 +126,7 @@ Every public schema field, where it is declared, and how many production files r
 | `defaultVoiceId` | packages/core/src/config/schemas/multimodal.ts:48 | 5 |
 | `defaultWidth` | packages/core/src/config/schemas/multimodal.ts:105 | 4 |
 | `delegationTimeoutMs` | packages/core/src/config/schema.ts:581 | 4 |
-| `deliverable` | packages/core/src/config/schema.ts:878 | 51 |
+| `deliverable` | packages/core/src/config/schema.ts:878 | 50 |
 | `deliverableConsistencyQa` | packages/core/src/config/schemas/orchestration.ts:375 | 1 |
 | `deliverableConsistencyQaMaxRounds` | packages/core/src/config/schemas/orchestration.ts:378 | 1 |
 | `description` | packages/core/src/config/schema.ts:557 | 169 |

@@ -343,9 +343,10 @@ registerTool({
 registerTool({
   name: "generate_image",
   description:
-    "Generate an image from a text prompt and save it to the workspace. Two tiers: `fast` (default, ~10s,"
-    + " costs the rest of the system nothing) and `quality` (~2 min, one at a time cluster-wide, slows every"
-    + " other model on that machine while it runs). Use `quality` only when the image is the deliverable.",
+    "Generate an image from a text prompt and save it to the workspace. Two tiers: `fast` (the default,"
+    + " ~10s on dedicated hardware, costs the rest of the system nothing) and `quality` (~2.5 min, runs one"
+    + " at a time cluster-wide and slows every other model on that machine while it runs). Default to `fast`"
+    + " — see the `tier` parameter for the only reasons to override it.",
   embeddingDescription: "Generate, create, make an image, picture, illustration from a text prompt. Bild generieren, erzeugen, Illustration erstellen, KI-Bild aus Text. AI image generation, DALL-E style.",
   parameters: {
     type: "object",
@@ -353,20 +354,33 @@ registerTool({
       prompt: { type: "string", description: "Text description of the image to generate" },
       model: { type: "string", description: "Optional image model override for backends that support per-request model selection" },
       negativePrompt: { type: "string", description: "Optional negative prompt to steer generation away from unwanted content" },
-      width: { type: "number", description: "Image width in pixels (snapped to the nearest supported resolution)" },
-      height: { type: "number", description: "Image height in pixels (snapped to the nearest supported resolution)" },
-      steps: { type: "number", description: "Number of diffusion steps (higher = better quality, slower)" },
-      guidanceScale: { type: "number", description: "Guidance scale — how closely the model follows the prompt (default 5.0)" },
+      width: {
+        type: "number",
+        description:
+          "OMIT THIS unless you know the backend accepts the size. Nothing is resampled: a backend that"
+          + " generates one fixed resolution REJECTS any other width outright, costing a wasted call."
+          + " Leaving it out uses the configured default, which always fits.",
+      },
+      height: {
+        type: "number",
+        description: "OMIT THIS. Same rule as `width` — leaving it out uses the configured default.",
+      },
+      steps: { type: "number", description: "Number of diffusion steps (higher = better quality, slower). Omit to use the configured default." },
+      guidanceScale: { type: "number", description: "Guidance scale — how closely the model follows the prompt. Omit to use the configured default." },
       seed: { type: "number", description: "Optional random seed for reproducible results" },
       tier: {
         type: "string",
         enum: ["fast", "quality"],
         description:
-          "Which generation tier to use. 'fast' (the default) takes about ten seconds and costs the rest of the"
-          + " system nothing. 'quality' takes about two minutes, can only run one at a time across the whole"
-          + " cluster, and slows every other model on that machine by roughly 70% while it runs. Ask for"
-          + " 'quality' only when the image IS the deliverable the user asked for — not for a draft, a"
-          + " placeholder, or something you intend to iterate on.",
+          "Which generation tier to use. Default to 'fast' and do not deliberate: it takes about ten seconds"
+          + " on dedicated hardware and costs the rest of the system nothing. 'quality' takes about two and a"
+          + " half minutes, runs one at a time across the whole cluster, and slows every other model on that"
+          + " machine by roughly 70% while it runs — a cost paid by everyone else, not by this request."
+          + " Choose 'quality' ONLY when the user explicitly asked for high quality, a final print or"
+          + " production asset, or was dissatisfied with a fast result and asked for better."
+          + " The image being the thing the user asked for is NOT a reason to choose 'quality' — an ordinary"
+          + " request like 'make me a picture of a sunset' is 'fast', and so is any request that asks for it"
+          + " quickly.",
       },
       outputPath: { type: "string", description: "Optional relative output path inside the workspace for the generated PNG" },
     },

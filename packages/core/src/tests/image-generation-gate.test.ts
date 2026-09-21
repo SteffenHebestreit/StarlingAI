@@ -203,6 +203,34 @@ describe("image generation concurrency", () => {
     await all;
   });
 
+  it("sends the FAST model when no tier is given — the default that protects the cluster", async () => {
+    // The tier is a cost choice paid by everyone else on the machine, so the absence of a
+    // choice has to resolve to the cheap one. Live, an agent asked for `quality` four times
+    // on a request that said "schnell": ~2.5 min each, serialising the iGPU. The wording
+    // that invited that is fixed separately; this pins the code-level default underneath it.
+    const net = blockingFetch();
+    const run = requestImageGeneration(CLUSTER, { ...SQUARE });
+    await settle();
+
+    const body = JSON.parse(String(net.fetchMock.mock.calls[0]![1]?.body)) as { model: string };
+    expect(body.model).toBe("image");
+
+    await net.drain();
+    await run;
+  });
+
+  it("sends the QUALITY model only when that tier is asked for — the control", async () => {
+    const net = blockingFetch();
+    const run = requestImageGeneration(CLUSTER, { ...SQUARE, tier: "quality" });
+    await settle();
+
+    const body = JSON.parse(String(net.fetchMock.mock.calls[0]![1]?.body)) as { model: string };
+    expect(body.model).toBe("image-quality");
+
+    await net.drain();
+    await run;
+  });
+
   it("releases the slot when a generation FAILS, so one error does not wedge the tier", async () => {
     // The release is in a `finally`. Without it a single 502 would leave the slot held and
     // every later request for that model would queue forever — a failure that looks like a
