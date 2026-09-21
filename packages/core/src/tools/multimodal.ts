@@ -7,6 +7,8 @@ import { sendChunkedTtsRequests } from "../multimodal/tts-chunking.js";
 import { getMcpConnections } from "../mcp/registry.js";
 import { checkImageGenerationHealth, imageGenerationServiceConfigured, requestImageGeneration } from "../multimodal/image-generation.js";
 import { encodeImageAs, transformImage, type ImageTransformOp } from "../multimodal/image-transform.js";
+import { writeSharedFact } from "../swarm/memory.js";
+import { deriveSharedSessionId } from "./memory.js";
 import { resolveProviderEndpointForModel } from "../providers/index.js";
 import { registerTool, type ToolResult } from "./registry.js";
 import { resolvePathWithinWorkspace } from "./workspace-path.js";
@@ -347,6 +349,41 @@ function stripFileExtension(value: string): string {
   return ext ? value.slice(0, -ext.length) : value;
 }
 
+/**
+ * Publish a produced image where the NEXT agent can find it, without anyone remembering to.
+ *
+ * Session 2c6bdb30: turn one generated a sunset, turn two was asked to make it realistic. The
+ * orchestrator's task said "basierend auf dem Originalbild" and named no path, and turn one's
+ * agent had not called share_finding, so the shared facts were empty. image_creator then
+ * probed `/workspace/workspace/users/<seg>`, `workspace/users/<seg>` and the same path again
+ * — all directories, all ENOENT — and fell back to a fresh generation. The user got another
+ * unrelated beach and no indication that "based on the original" had been dropped.
+ *
+ * Relying on the producing agent to publish is what failed: it is one instruction among
+ * many, and turn one skipped it. Writing the fact here makes the path available whether or
+ * not any agent remembers, under the SHARED session id so a sibling or a later turn sees it
+ * rather than only the sub-session that made it.
+ *
+ * Best-effort by construction: a memory backend that is down must never fail a generation
+ * that already succeeded and is already on disk.
+ */
+async function publishImageArtifact(sessionId: string | undefined, relativePath: string): Promise<void> {
+  if (!sessionId) return;
+  try {
+    const shared = deriveSharedSessionId(sessionId);
+    // A stable pointer for "the image we just made", plus a durable per-file entry, because
+    // "the previous one" and "the one called sunset_beach" are both things users say.
+    await writeSharedFact(shared, "latest_image", relativePath);
+    await writeSharedFact(shared, `image:${basename(relativePath)}`, relativePath);
+  } catch {
+    // Nothing here is worth failing a finished image for.
+  }
+}
+
+
+/** Test seam: the handoff is the behaviour under test, not an implementation detail. */
+export const publishImageArtifactForTests = publishImageArtifact;
+
 registerTool({
   name: "transform_image",
   description:
@@ -410,6 +447,7 @@ registerTool({
       const resolved = resolveWorkspacePath(outputPath, ctx.workspacePath);
       await mkdir(resolve(resolved.resolved, ".."), { recursive: true });
       await writeFile(resolved.resolved, encoded.bytes);
+      await publishImageArtifact(ctx.sessionId, resolved.relativePath);
 
       const resized = result.before.width !== result.after.width || result.before.height !== result.after.height;
       return {
@@ -579,6 +617,7 @@ registerTool({
       const resolvedOutput = resolveWorkspacePath(outputPath, ctx.workspacePath);
       await mkdir(resolve(resolvedOutput.resolved, ".."), { recursive: true });
       await writeFile(resolvedOutput.resolved, encoded.bytes);
+      await publishImageArtifact(ctx.sessionId, resolvedOutput.relativePath);
 
       // Same as synthesize_speech above: the resolved path is the one the bytes are at.
       return {

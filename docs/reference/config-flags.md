@@ -192,7 +192,7 @@ Every public schema field, where it is declared, and how many production files r
 | `host` | packages/core/src/config/schema.ts:699 | 97 |
 | `http` | packages/core/src/config/schema.ts:744 | 73 |
 | `humanInLoopSteps` | packages/core/src/config/schema.ts:1286 | 20 |
-| `id` | packages/core/src/config/schema.ts:553 | 226 |
+| `id` | packages/core/src/config/schema.ts:553 | 227 |
 | `ignoreCase` | packages/core/src/config/schema.ts:1333 | 2 |
 | `image` | packages/core/src/config/schema.ts:672 | 59 |
 | `imapHost` | packages/core/src/config/schemas/channels.ts:57 | 5 |
@@ -444,7 +444,7 @@ Every public schema field, where it is declared, and how many production files r
 | `synthesis` | packages/core/src/config/schema.ts:234 | 52 |
 | `systemPrompt` | packages/core/src/config/schema.ts:912 | 18 |
 | `tags` | packages/core/src/config/schema.ts:559 | 64 |
-| `task` | packages/core/src/config/schema.ts:1276 | 121 |
+| `task` | packages/core/src/config/schema.ts:1276 | 122 |
 | `taskConditionalPrompt` | packages/core/src/config/schema.ts:1777 | 1 |
 | `taskGraphFailureDisposition` | packages/core/src/config/schemas/orchestration.ts:460 | 1 |
 | `taskTimeoutMs` | packages/core/src/config/schema.ts:644 | 1 |
@@ -481,7 +481,7 @@ Every public schema field, where it is declared, and how many production files r
 | `usernameClaim` | packages/core/src/config/schema.ts:384 | 1 |
 | `usernameSelector` | packages/core/src/config/schema.ts:779 | 5 |
 | `userProfilePrefetch` | packages/core/src/config/schemas/orchestration.ts:566 | 3 |
-| `users` | packages/core/src/config/schema.ts:425 | 29 |
+| `users` | packages/core/src/config/schema.ts:425 | 30 |
 | `verifyArtifacts` | packages/core/src/config/schemas/orchestration.ts:344 | 2 |
 | `verifyArtifactsMaxRepairAttempts` | packages/core/src/config/schemas/orchestration.ts:352 | 1 |
 | `verifyArtifactsRepair` | packages/core/src/config/schemas/orchestration.ts:349 | 1 |
