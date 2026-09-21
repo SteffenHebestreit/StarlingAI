@@ -479,8 +479,8 @@
         "surface": [
           "workspace"
         ],
-        "oneLiner": "Generates visuals from a prompt (diffusion raster/SVG/QR); creation from scratch, distinct from image_sourcer(find). Unreachable by any scene.",
-        "sourceHash": "922104f285c090a6",
+        "oneLiner": "Generates and EDITS visuals (diffusion raster/SVG/QR, img2img, local sharpen/crop/resize); creates or revises, distinct from image_sourcer(find). Unreachable by any scene.",
+        "sourceHash": "04d84c4c3b7cc478",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }

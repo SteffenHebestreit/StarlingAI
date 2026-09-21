@@ -121,6 +121,27 @@ export const ARTIFACT_PRODUCING_TOOLS = new Set([
   // never actually runs (audit cdd731d6: image_sourcer "reusedFromSessionMemory", 0 images).
   "fetch_image",
   "shell_exec",
+  // EVERY generator that writes a file into the workspace has to be here, not just the
+  // document-shaped ones.
+  //
+  // `generate_image` was missing, and the consequence was not subtle. image_creator
+  // generated a sunset, saved a 1.5 MB PNG and recorded the artifact — and because
+  // `generate_image` was not in this set, looksLikeArtifactDeliverableMiss saw an agent that
+  // held artifact tools, was asked for a deliverable, and (as far as this set could tell)
+  // called none of them. classifyDelegationResult therefore returned "failure" for a
+  // delegation that had entirely succeeded. Only the best-partial fallback rescued it, so
+  // every image turn came back flagged `partialFallback`, tripped the evidence backstop, and
+  // told the orchestrator its specialist had failed at something it had just done.
+  //
+  // The gap was general: ten workspace-writing tools were absent. Audio, charts, diagrams,
+  // spreadsheets, pentest reports and PDF form-filling were all misclassified the same way.
+  // The list is now derived from the question this set actually asks — "does calling this
+  // tool put a deliverable on disk?" — rather than from which generators happened to exist
+  // when it was written.
+  "generate_image", "transform_image", "generate_svg", "generate_qr_code",
+  "synthesize_speech",
+  "generate_chart_html", "generate_mermaid_diagram",
+  "spreadsheet_write", "pdf_fill", "pentest_report", "export_evidence_ledger",
 ]);
 
 // Coordinators can also "produce" by delegating the work. If they called
