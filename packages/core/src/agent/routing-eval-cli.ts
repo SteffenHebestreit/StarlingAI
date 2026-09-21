@@ -31,6 +31,14 @@ import {
   type RoutingEvalThresholds,
 } from "./routing-eval.js";
 
+/**
+ * `prefetchCapabilityCandidates`'s `maxAgents` default, which the only production caller
+ * does not override. Duplicated rather than imported because the default lives in a
+ * parameter, not a constant — if that changes, this must move with it, which is why the
+ * number is named here instead of inlined.
+ */
+const CAPSULE_MAX_AGENTS = 4;
+
 const DEFAULT_DECISION_CASES = "eval/routing/decision-cases.jsonl";
 const DEFAULT_LIVE_CASES = "eval/routing/live-cases.jsonl";
 
@@ -70,7 +78,7 @@ async function buildLiveResolver(
   // Dynamic, so SAI_CONFIG_PATH is set before the loader is evaluated. ESM hoists static
   // imports, which would make the assignment above arrive too late.
   const { getConfig } = await import("../config/loader.js");
-  const { SEMANTIC_AGENT_ROUTING_MIN_SCORE, resolveAgentRouting } = await import("../tools/agent-routing.js");
+  const { SEMANTIC_AGENT_ROUTING_MIN_SCORE, agentIsMetaFactory, resolveAgentRouting } = await import("../tools/agent-routing.js");
   const { resolveRoutingTaxonomy } = await import("./routing-taxonomy.js");
   const { fuseRouting } = await import("./routing-fusion.js");
   const { buildAgentIndex, isEmbeddingAvailable, getEmbeddingSearchStatus } = await import("../providers/embeddings.js");
@@ -164,8 +172,21 @@ async function buildLiveResolver(
       verdict,
       ...(evalCase.flags ? { flags: evalCase.flags } : {}),
     });
+    // THE CAPSULE, built the way production builds it.
+    //
+    // `prefetchCapabilityCandidates` drops meta-factory agents — undirected routing never
+    // picks them, so naming one steers the coordinator at a delegation it cannot make — and
+    // then takes the first `maxAgents`, which defaults to 4 and which the only production
+    // caller (turn-system-prompt.ts) does not override. This is what the orchestrator reads,
+    // so it is the population any gate about production has to be written against.
+    const capsule = candidates
+      .map((candidate) => candidate.name)
+      .filter((name) => !agentIsMetaFactory(name))
+      .slice(0, CAPSULE_MAX_AGENTS);
+
     return {
       decision,
+      capsule,
       // Every admitted candidate, not the cut shortlist: recall@K asks whether retrieval
       // found the entry at all, which is a different question from whether K kept it.
       ranked: candidates.map((candidate) => candidate.name),
@@ -195,6 +216,7 @@ function parseThresholds(argv: readonly string[]): RoutingEvalThresholds {
     minRecallRate: read("--min-recall", DEFAULT_EVAL_THRESHOLDS.minRecallRate),
     minBranchRate: read("--min-branch", DEFAULT_EVAL_THRESHOLDS.minBranchRate),
     maxGatedRate: read("--max-gated", DEFAULT_EVAL_THRESHOLDS.maxGatedRate),
+    minCapsuleRecallRate: read("--min-capsule-recall", DEFAULT_EVAL_THRESHOLDS.minCapsuleRecallRate),
     leakOverlap: read("--leak-overlap", DEFAULT_EVAL_THRESHOLDS.leakOverlap),
   };
 }

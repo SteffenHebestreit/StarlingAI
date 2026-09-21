@@ -199,6 +199,20 @@ routing wrong: "entries from the last seven days" legitimately reads as calendar
 Widening `acceptable` until the router's answer counts as correct is how an eval stops
 measuring anything.
 
+### Recall@K and recall AT CAPSULE are different numbers
+
+`recall@K` counts every admitted candidate: did retrieval find the entry at all.
+`recall AT CAPSULE` counts what the orchestrator is actually handed — the discovery capsule,
+at most four agents with meta-factory entries removed, built the way
+`prefetchCapabilityCandidates` builds it.
+
+The second is the one a gate belongs on. Measured on the 138-query corpus: 87/138 against
+84/138 at the baseline, and 104/138 against 97/138 with the restatement pass. The gap widens
+as retrieval improves, because more candidates compete for the same four slots. Reporting the
+wider figure as the outcome is how an eval stops describing production.
+
+`--min-capsule-recall` sets the threshold; the default is 0.75.
+
 ### Two things the report will tell you that are easy to misread
 
 **A gated case is a miss, not an exclusion.** The previous benchmark in this repo ran at

@@ -85,6 +85,17 @@ export interface RoutingEvalObservation {
   ranked: string[];
   /** The resolver returned nothing above the floor. */
   gated: boolean;
+  /**
+   * What the DISCOVERY CAPSULE would actually render — the entries the orchestrator reads.
+   *
+   * `ranked` is every admitted candidate, which answers "did retrieval find it". That is not
+   * the number that ships. Production hands the orchestrator a capsule of at most four
+   * agents, meta-factory agents removed, so a case whose target is admitted at rank six is a
+   * miss in the only place it matters. Reporting the wider figure as the outcome is this
+   * project's characteristic defect, and an adversarial review called the gap fatal for any
+   * gate written against it.
+   */
+  capsule?: string[];
   /** LIVE mode: the catalog text the expected target advertises, for the leakage check. */
   targetText?: string;
   /** True when a real classifier verdict was available, so branch checks are meaningful. */
@@ -127,6 +138,8 @@ export interface RoutingCaseResult {
   target?: string;
   top?: string;
   ranked: string[];
+  /** What the capsule would render, when the resolver reports it. */
+  capsule?: string[];
   /** Token overlap between the query and the expected target's own catalog text, in [0,1]. */
   lexicalOverlap: number | null;
   elapsedMs?: number;
@@ -143,6 +156,13 @@ export interface RoutingEvalThresholds {
   minBranchRate: number;
   /** Maximum share of cases the resolver gated away entirely. */
   maxGatedRate: number;
+  /**
+   * Minimum share of cases whose expected entry survives into the capsule.
+   *
+   * The gate that describes production. Set below `minRecallRate` on purpose: recall over
+   * the whole admitted set is an upper bound the capsule cut can only lower.
+   */
+  minCapsuleRecallRate: number;
   /** Above this query-to-catalog token overlap a case is flagged as lexically leaked. */
   leakOverlap: number;
 }
@@ -152,6 +172,7 @@ export const DEFAULT_EVAL_THRESHOLDS: RoutingEvalThresholds = {
   minRecallRate: 0.90,
   minBranchRate: 0.80,
   maxGatedRate: 0.10,
+  minCapsuleRecallRate: 0.75,
   leakOverlap: 0.5,
 };
 
@@ -174,6 +195,14 @@ export interface RoutingEvalReport {
   targetCorrect: number;
   recallScored: number;
   recallHit: number;
+  /**
+   * Recall measured on the capsule the orchestrator actually reads, not on the full admitted
+   * set. Zero-scored when the resolver does not report a capsule (decision mode).
+   */
+  capsuleRecallScored: number;
+  capsuleRecallHit: number;
+  /** How many entries the capsule rendered, summed — the prompt cost of the shortlist. */
+  capsuleEntries: number;
   branchScored: number;
   branchCorrect: number;
   sourceScored: number;
@@ -371,6 +400,9 @@ export async function runRoutingEval(
   let branchCorrect = 0;
   let sourceScored = 0;
   let sourceCorrect = 0;
+  let capsuleRecallScored = 0;
+  let capsuleRecallHit = 0;
+  let capsuleEntries = 0;
   let gated = 0;
 
   for (const evalCase of cases) {
@@ -411,11 +443,34 @@ export async function runRoutingEval(
     // Except when the target is the user's OWN named agent. A directive bypasses retrieval
     // entirely, so scoring it as a retrieval miss would charge the recall figure for a
     // candidate the router was never asked to find.
-    const directiveTarget = evalCase.flags?.directiveAgent !== undefined
-      && evalCase.flags.directiveAgent === expectedEntry;
+    // A directive bypasses retrieval entirely, so scoring it as a retrieval miss would charge
+    // the recall figures for a candidate the router was never asked to find. It counts when
+    // the expectation is ONLY that agent — either as the named target, or as a single-element
+    // acceptable set. A wider acceptable set still asks a retrieval question about the others.
+    const directive = evalCase.flags?.directiveAgent;
+    const acceptable = evalCase.expect.acceptable;
+    const directiveTarget = directive !== undefined && (
+      directive === expectedEntry
+      || (acceptable !== undefined && acceptable.length === 1 && acceptable[0] === directive)
+    );
     if (evalCase.expect.acceptable === undefined && expectedEntry !== undefined && !directiveTarget) {
       recallScored += 1;
       if (observation.ranked.includes(expectedEntry)) recallHit += 1;
+    }
+
+    // RECALL AT THE CAPSULE — the number that describes production.
+    //
+    // Counted over the same population as recall@K so the two are comparable: a case that
+    // names an entry, or a set of acceptable ones, and is not a user directive. The capsule
+    // is whatever the resolver says the orchestrator would actually be handed; a resolver
+    // that reports none (decision mode) contributes nothing rather than a zero.
+    if (observation.capsule && !directiveTarget) {
+      const wanted = evalCase.expect.acceptable ?? (expectedEntry ? [expectedEntry] : []);
+      if (wanted.length > 0) {
+        capsuleRecallScored += 1;
+        if (wanted.some((name) => observation.capsule!.includes(name))) capsuleRecallHit += 1;
+      }
+      capsuleEntries += observation.capsule.length;
     }
 
     if (evalCase.expect.branch !== undefined && observation.hasVerdict) {
@@ -440,6 +495,7 @@ export async function runRoutingEval(
       ...(observation.decision.target ? { target: observation.decision.target } : {}),
       ...(observation.ranked[0] ? { top: observation.ranked[0] } : {}),
       ranked: observation.ranked,
+      ...(observation.capsule ? { capsule: observation.capsule } : {}),
       lexicalOverlap: overlap,
       ...(observation.elapsedMs !== undefined ? { elapsedMs: observation.elapsedMs } : {}),
       ...(observation.secondPass ? { secondPass: observation.secondPass } : {}),
@@ -486,6 +542,12 @@ export async function runRoutingEval(
   if (total > 0 && gatedRate > thresholds.maxGatedRate) {
     failures.push(`gated ${gated}/${total} (${gatedRate}) above ${thresholds.maxGatedRate}`);
   }
+  if (capsuleRecallScored > 0 && rate(capsuleRecallHit, capsuleRecallScored) < thresholds.minCapsuleRecallRate) {
+    failures.push(
+      `capsule recall ${capsuleRecallHit}/${capsuleRecallScored} below ${thresholds.minCapsuleRecallRate}`
+      + " — this is the figure the orchestrator actually sees",
+    );
+  }
   for (const result of results) {
     if (result.scored && !result.passed) {
       const broken = result.checks.filter((check) => !check.ok).map((check) => `${check.name}: ${check.detail}`);
@@ -510,6 +572,9 @@ export async function runRoutingEval(
     branchCorrect,
     sourceScored,
     sourceCorrect,
+    capsuleRecallScored,
+    capsuleRecallHit,
+    capsuleEntries,
     confusion,
     byLanguage,
     leaked,
@@ -533,7 +598,16 @@ export function formatRoutingEvalReport(report: RoutingEvalReport): string {
   lines.push(`Routing eval — ${report.mode} mode`);
   lines.push(`  cases            ${report.total} (${report.scored} scored, ${report.passed} passed)`);
   lines.push(`  target accuracy  ${pct(report.targetCorrect, report.targetScored)}`);
-  lines.push(`  recall@K         ${pct(report.recallHit, report.recallScored)}`);
+  lines.push(`  recall@K         ${pct(report.recallHit, report.recallScored)}   (every admitted candidate)`);
+  if (report.capsuleRecallScored > 0) {
+    const mean = (report.capsuleEntries / report.capsuleRecallScored).toFixed(1);
+    lines.push(`  recall AT CAPSULE${pct(report.capsuleRecallHit, report.capsuleRecallScored)}   `
+      + `(what the orchestrator reads; ${mean} entries on average)`);
+    const lost = report.recallHit - report.capsuleRecallHit;
+    if (lost > 0) {
+      lines.push(`    ${lost} case(s) were retrieved but cut before the orchestrator saw them.`);
+    }
+  }
   lines.push(`  branch accuracy  ${pct(report.branchCorrect, report.branchScored)}`);
   lines.push(`  source-sensitive ${pct(report.sourceCorrect, report.sourceScored)}`);
   lines.push(`  gated            ${pct(report.gated, report.total)}  (a gated case is a MISS, not an exclusion)`);

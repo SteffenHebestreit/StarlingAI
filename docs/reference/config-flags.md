@@ -16,7 +16,7 @@ Every public schema field, where it is declared, and how many production files r
 | `activeModelPreset` | packages/core/src/config/schema.ts:1682 | 2 |
 | `addHosts` | packages/core/src/config/schema.ts:678 | 1 |
 | `admin` | packages/core/src/config/schema.ts:363 | 21 |
-| `agents` | packages/core/src/config/schema.ts:1672 | 140 |
+| `agents` | packages/core/src/config/schema.ts:1672 | 141 |
 | `alertmanager` | packages/core/src/config/schema.ts:1127 | 1 |
 | `all` | packages/core/src/config/schema.ts:1265 | 227 |
 | `allowedAgents` | packages/core/src/config/schema.ts:1285 | 29 |
@@ -102,7 +102,7 @@ Every public schema field, where it is declared, and how many production files r
 | `currency` | packages/core/src/config/schema.ts:509 | 11 |
 | `customInstructions` | packages/core/src/config/schema.ts:269 | 2 |
 | `dailyUsd` | packages/core/src/config/schema.ts:512 | 2 |
-| `default` | packages/core/src/config/schema.ts:1241 | 228 |
+| `default` | packages/core/src/config/schema.ts:1241 | 229 |
 | `defaultAlertmanager` | packages/core/src/config/schema.ts:1124 | 1 |
 | `defaultContainerized` | packages/core/src/config/schema.ts:1708 | 6 |
 | `defaultGithub` | packages/core/src/config/schema.ts:1146 | 1 |

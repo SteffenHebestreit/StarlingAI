@@ -1068,3 +1068,59 @@ A third claim of mine survived contact but deserves a caveat that was not in sec
 44% `coordinate` rate is a property of the EVAL: `fuseRouting` has no production caller yet,
 so that number describes what the fusion would do, not what the deployment does.
 
+## 16. Recall at the capsule, and what the cut costs (2026-09-21)
+
+An adversarial review called it fatal that the eval could not compute the number any gate
+would have to be written against. `runRoutingEval` measured recall over every admitted
+candidate; production hands the orchestrator a discovery capsule of at most four agents,
+meta-factory entries removed. A case whose target is admitted at rank six is a miss in the
+only place it matters, and reporting the wider figure as the outcome is this project's
+characteristic defect.
+
+The eval now reports both, and the CLI builds the capsule the way `prefetchCapabilityCandidates`
+does. Measured on the 138-query corpus, inside the network:
+
+| | recall@K | recall AT CAPSULE | found nothing |
+|---|---|---|---|
+| baseline | 87/138 (63%) | 84/138 (61%) | 28 (20%) |
+| + English restatement | 104/138 (75%) | 97/138 (70%) | 11 (8%) |
+
+So the gap is real but small at the baseline — three cases — and it WIDENS as retrieval
+improves, to seven. That is the effect the review predicted: a second pass finds more
+candidates, and they then compete for the same four slots.
+
+### The capsule is two entries too small
+
+Recomputed from the same run at every cut:
+
+| capsule size | baseline | + restatement | mean entries (restatement) |
+|---|---|---|---|
+| 2 | 78/138 | 90/138 | 1.8 |
+| 3 | 82/138 | 94/138 | 2.7 |
+| **4 (today)** | **84/138** | **97/138** | **3.6** |
+| 5 | 87/138 | 100/138 | 4.4 |
+| 6 | 87/138 | 104/138 | 4.7 |
+| no cut | 87/138 | 104/138 | 4.9 |
+
+Without the restatement the curve is flat past 5, because `resolveAgentRouting` itself
+slices to five. With it, 6 captures everything retrieval found.
+
+The price is small and it is paid in the right place. A capsule line is
+`- name [confidence] — description` capped at 120 characters, so about 145 characters; going
+from 2.9 to 4.7 entries is roughly +260 characters, +65 tokens. The capsule is assembled in
+`buildTurnGuidance`, which lands behind the history, so it is charged at the measured tail
+rate of 0.208 ms/token rather than the head rate of 1.068 — about 14 ms.
+
+**What this does NOT establish.** Recall is not correctness. A longer capsule gives the
+orchestrator more chances to pick a wrong specialist, and the corpus carries no dispatch
+ground truth, so that risk is unmeasured here. `maxAgents` should move with a pass^k eval on
+the turn outcome, not on this table alone.
+
+### The honest denominator
+
+Two runs of the same corpus an hour apart differed by one case at the baseline
+(28 found-nothing against 29) and by three with the restatement (104 against 107). The
+reranker sits in both paths and ties resolve nondeterministically. Any gate written on this
+corpus needs a margin wider than that, which is a reason to prefer a threshold like
+"capsule recall ≥ 75%" over "≥ 104 cases".
+

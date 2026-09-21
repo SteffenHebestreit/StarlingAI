@@ -159,6 +159,83 @@ describe("shortlist expectations", () => {
   });
 });
 
+describe("recall at the capsule", () => {
+  /** A resolver that admits `ranked` and says the capsule renders `capsule`. */
+  const resolverFor = (ranked: string[], capsule?: string[]): RoutingEvalResolver => async () => ({
+    decision: {
+      branch: "general", shortlist: [], k: 0, margin: 0,
+      agreementClass: "unknown", sourceSensitive: false, reasons: ["stub"],
+    },
+    ranked,
+    gated: ranked.length === 0,
+    hasVerdict: false,
+    ...(capsule ? { capsule } : {}),
+  });
+
+  const wantCoder: RoutingEvalCase[] = [
+    { id: "c", query: "q", language: "en", expect: { acceptable: ["coder"] } },
+  ];
+
+  it("counts a retrieved-but-cut case as a capsule MISS", async () => {
+    // Retrieval found it at rank 6. The orchestrator is handed four. Reporting the wider
+    // figure as the outcome is exactly the defect an adversarial review called fatal for any
+    // gate written against it.
+    const ranked = ["a", "b", "c", "d", "e", "coder"];
+    const report = await runRoutingEval(wantCoder, resolverFor(ranked, ranked.slice(0, 4)), { mode: "live" });
+
+    expect(report.recallHit).toBe(1);
+    expect(report.recallScored).toBe(1);
+    expect(report.capsuleRecallHit).toBe(0);
+    expect(report.capsuleRecallScored).toBe(1);
+    expect(report.failures.join(" ")).toContain("capsule recall");
+    expect(formatRoutingEvalReport(report)).toContain("retrieved but cut before the orchestrator saw them");
+  });
+
+  it("counts it as a hit when it survives the cut", async () => {
+    // Discriminance control: the same target, the same denominator, one position earlier.
+    const ranked = ["a", "coder", "b", "c", "d", "e"];
+    const report = await runRoutingEval(wantCoder, resolverFor(ranked, ranked.slice(0, 4)), { mode: "live" });
+
+    expect(report.capsuleRecallHit).toBe(1);
+    expect(report.failures.join(" ")).not.toContain("capsule recall");
+  });
+
+  it("stays silent when the resolver reports no capsule", async () => {
+    // Decision mode has no capsule. A zero here would read as "the orchestrator saw nothing"
+    // rather than "this run does not measure that".
+    const report = await runRoutingEval(wantCoder, resolverFor(["coder"]), { mode: "decision" });
+
+    expect(report.capsuleRecallScored).toBe(0);
+    expect(report.capsuleRecallHit).toBe(0);
+    expect(formatRoutingEvalReport(report)).not.toContain("AT CAPSULE");
+    expect(report.failures.join(" ")).not.toContain("capsule recall");
+  });
+
+  it("reports how many entries the capsule carries, which is its prompt cost", async () => {
+    const report = await runRoutingEval(
+      [
+        { id: "a", query: "q", expect: { acceptable: ["coder"] } },
+        { id: "b", query: "q", expect: { acceptable: ["coder"] } },
+      ],
+      resolverFor(["coder", "x", "y"], ["coder", "x"]),
+      { mode: "live" },
+    );
+    expect(report.capsuleEntries).toBe(4);
+    expect(formatRoutingEvalReport(report)).toContain("2.0 entries on average");
+  });
+
+  it("does not charge a user-named agent to the capsule figure either", async () => {
+    // Same exclusion recall already makes: a directive bypasses retrieval, so the capsule was
+    // never asked to carry that name.
+    const report = await runRoutingEval(
+      [{ id: "d", query: "q", flags: { directiveAgent: "researcher" }, expect: { acceptable: ["researcher"] } }],
+      resolverFor(["coder"], ["coder"]),
+      { mode: "live" },
+    );
+    expect(report.capsuleRecallScored).toBe(0);
+  });
+});
+
 describe("English-restatement second pass", () => {
   /** A resolver that reports a second pass with a stated outcome, so the accounting is what is under test. */
   const resolverFor = (
