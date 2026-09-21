@@ -61,6 +61,16 @@ services:
       # overlay /data/starlingai.runtime.json, so re-select Local<->Claude — but no re-auth.)
       - SAI_AUDIT_LOG=/workspace/.starlingai/audit.jsonl
       - SAI_CRED_STORE=/workspace/.starlingai/credentials.enc
+      # Same reasoning, and it was the one file left behind: the agent embedding cache
+      # defaults to `process.cwd()/.starlingai/` and WORKDIR is /app, which no mount
+      # covers — so every `--build` discarded all 49 agent vectors and re-embedded them
+      # at boot. Harmless when the embedding endpoint is up (~1-2s at concurrency 8),
+      # but on a boot that races the model server the FIRST failing chunk stops the
+      # whole build (`failed` breaks the loop), leaving the index empty and routing in
+      # keyword mode until the 15s retry. The cache is keyed per agent by that agent's
+      # own document hash and records the model it was built with, so a stale or
+      # partial file self-heals rather than poisoning anything.
+      - SAI_EMBEDDING_CACHE=/workspace/.starlingai/embedding-cache.json
       - SAI_USER_MEMORY_PATH=/data
       - SAI_CONFIG_PATH=/config/starlingai.json
       - SAI_MUTABLE_CONFIG_PATH=/data/starlingai.runtime.json
