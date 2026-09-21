@@ -745,6 +745,25 @@ export const OrchestrationSchema = z.object({
    * behaviour change here.
    */
   surfaceRoutingNearMisses: z.boolean().default(false),
+  /**
+   * After routing finds NOTHING, retry once on an English restatement of the request.
+   *
+   * The catalog is written in English and scored against it, so a German request lands a few
+   * hundredths below its English twin — enough to miss the 0.72 admission floor while meaning
+   * the same thing. Measured on 138 live queries (88 DE / 50 EN) against the real pipeline:
+   * raw recall 87 -> 107 and recall at the discovery capsule 84 -> 97, with ZERO cases
+   * regressing.
+   *
+   * Default ON, unlike the flags around it, because it is not a behaviour change on a working
+   * turn. It fires only where routing already returned nothing, and it can only add
+   * candidates the model was going to be denied entirely; when the restatement also finds
+   * nothing, the original message is reported unchanged. The measurement says it costs one
+   * routing-tier call on about 18% of routing attempts.
+   *
+   * Set false to make a routing miss fail fast — worth it if the routing tier is slow or
+   * unavailable, since the rescue is a few seconds spent before saying "no agent matched".
+   */
+  routingRestatementRescue: z.boolean().default(true),
   /** When true, a turn whose ONLY orchestration was a single successful delegation that
    *  returned a complete, presentable deliverable surfaces that deliverable directly instead
    *  of running a SECOND full synthesis pass over it on the main assistant — which on the slow

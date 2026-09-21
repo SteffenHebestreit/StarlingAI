@@ -36,6 +36,7 @@ import {
 } from "../runtime/effort-context.js";
 import { runWithRequestContext, runWithCallAttribution } from "../runtime/request-context.js";
 import { TRIAGE_PROMPT_VERSION, runTriage, type TriageOutcome } from "./triage.js";
+import { resolveRoutingTierProvider } from "./routing-tier-provider.js";
 import {
   classifyTurnProgress,
   buildTurnOversightPrompt,
@@ -1489,24 +1490,10 @@ function buildPriorTurnDigest(session: AgentSession): string | undefined {
   ].filter(Boolean).join("\n");
 }
 
-/**
- * A provider for routing-tier work, falling back to the turn's own model config.
- *
- * `getChatProviderForTier` returns null while a model preset is active, deliberately (see
- * providers/index.ts for why a preset branch THERE is untenable). The consequence is that on
- * a preset deployment the receptionist, the judge and every other tier call silently do not
- * run at all — which is exactly what the live audit showed: 0 of 5 fast-lane attempts, and
- * not one of them logged a reason. The sanctioned fix is this call-site pattern: fall back to
- * the caller's OWN merged model config carrying the tier's controls, so the call still
- * happens and the deployment is measurable.
- */
-export function resolveRoutingTierProvider(): ChatProvider {
-  return getChatProviderForTier("routing")
-    ?? createChatProvider({
-      ...applyActiveModelPreset(getConfig().agents.defaults.model),
-      ...tierModelDefaults("routing"),
-    });
-}
+// resolveRoutingTierProvider now lives in ./routing-tier-provider.js, so the delegation
+// tool path can use it without importing the turn. Re-exported here because callers —
+// including the routing eval — have always imported it from this module.
+export { resolveRoutingTierProvider } from "./routing-tier-provider.js";
 
 /**
  * Start the facet triage in the background (orchestration.routingTriage).

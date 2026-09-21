@@ -34,7 +34,7 @@ const CLUSTER: ImageGenerationBackendConfig = {
   qualityTimeoutMs: 210_000,
 };
 
-const SQUARE = { prompt: "a lighthouse", width: 1024, height: 1024 };
+const SQUARE = { prompt: "a lighthouse", width: 1024, height: 1024, steps: 20, guidanceScale: 7 };
 
 /** The exact body the cluster's llama-swap returned on the 502. */
 const LLAMA_SWAP_502 = {

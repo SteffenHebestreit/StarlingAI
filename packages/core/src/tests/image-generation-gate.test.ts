@@ -31,7 +31,9 @@ const CLUSTER: ImageGenerationBackendConfig = {
   qualityTimeoutMs: 210_000,
 };
 
-const SQUARE = { prompt: "a lighthouse", width: 1024, height: 1024 };
+// steps/guidanceScale are required by ImageGenerationRequest; the values are irrelevant
+// here because the stubbed backend never renders anything.
+const SQUARE = { prompt: "a lighthouse", width: 1024, height: 1024, steps: 20, guidanceScale: 7 };
 
 /** Let queued microtasks settle so a slot handoff has actually happened. */
 async function settle(): Promise<void> {

@@ -79,6 +79,7 @@ import { applyActiveModelPreset, createChatProvider, getEmbeddingProvider, getCh
 import type { ChatProvider } from "../providers/lmstudio.js";
 import { effectiveOrchestration } from "../runtime/effort-context.js";
 import { normalizeDelegationTaskLanguage } from "../agent/delegation-language.js";
+import { attemptRestatementRescue } from "../agent/routing-restatement.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { appendOutcome, extractTaskKeywords, type AgentCostProfile } from "../agent/outcomes.js";
@@ -3318,6 +3319,73 @@ registerTool({
               topResultConfidence: topAgent.confidence,
               topResultScore: topAgent.score,
               suggestedFallbackAgents: retryResolution.results.slice(1, 4).map((candidate) => candidate.name),
+            },
+          };
+        }
+      }
+
+      // Last resort before declaring failure: route an English restatement of the request.
+      //
+      // The catalog is English and the embedding is scored against it, so a German request
+      // lands a few hundredths under the 0.72 admission floor while meaning the same thing.
+      // On 138 live queries this rescued 20 that the raw pass left empty (recall 87 -> 107,
+      // 84 -> 97 at the capsule) with zero regressions — and every one of those gains came
+      // from a query that had found NOTHING, which is why it sits here and not on the
+      // healthy path. The whole thing costs p50 3.5s, which is also why it is not in the
+      // turn's 2.5s prompt-assembly race: there it would time out into an empty capsule on
+      // exactly the turns it exists to save.
+      //
+      // Nothing about the failure message below changes when this does not fire.
+      if (effectiveOrchestration().routingRestatementRescue !== false) {
+        const rescue = await attemptRestatementRescue(raw, {
+          resolve: (query) => resolveAgentRouting(query, {
+            minConfidence,
+            allowedAgents: ctx.allowedAgents,
+            allowKeywordFallback: false,
+          }),
+          // Self-exclusion applies to the restatement too: a coordinator that routed to
+          // itself would be handed back the agent the router just refused to offer.
+          admitted: (candidate) => candidate.results.some((entry) => entry.name !== currentAgentName),
+        });
+
+        if (rescue) {
+          const rescued = currentAgentName
+            ? { ...rescue.resolution, results: rescue.resolution.results.filter((c) => c.name !== currentAgentName) }
+            : rescue.resolution;
+          const rescueMetadata = buildSemanticRoutingMetadata(rescued);
+          logAudit("agent_routing_evaluated", {
+            query: rescue.restatement,
+            originalQuery: raw,
+            restatementRescue: true,
+            minConfidence,
+            mode: rescued.mode,
+            ...rescueMetadata,
+            resultCount: rescued.results.length,
+            weakCount: rescued.weakCandidates.length,
+            gated: rescued.gated,
+            topResult: rescued.results[0]?.name ?? null,
+          }, { sessionId: ctx.sessionId, channel: "agent-routing" });
+
+          const topAgent = rescued.results[0]!;
+          const nextActionLine = isStrongRoutingMatch(topAgent)
+            ? `➡ NEXT ACTION: Call delegate_to_agent(agentName="${topAgent.name}", task="<your task>") NOW. Do NOT call search_agents again.`
+            : `ℹ Best available match is ${topAgent.name} (${topAgent.confidence} confidence, score ${topAgent.score.toFixed(2)}) — review the candidate list below.`;
+          return {
+            success: true,
+            output: `${nextActionLine}\n\n⚠ Original query "${raw}" matched no agents. Retried as "${rescue.restatement}" and found ${rescued.results.length} match(es):\n\n${rescued.results.map(formatRoutingCandidate).join("\n\n")}${circuitNote}${selfExclusionNote}`,
+            metadata: {
+              query: raw,
+              restatementQuery: rescue.restatement,
+              restatementRescue: true,
+              minConfidence,
+              routingMode: rescued.mode,
+              ...rescueMetadata,
+              resultCount: rescued.results.length,
+              weakCount: rescued.weakCandidates.length,
+              topResult: topAgent.name,
+              topResultConfidence: topAgent.confidence,
+              topResultScore: topAgent.score,
+              suggestedFallbackAgents: rescued.results.slice(1, 4).map((candidate) => candidate.name),
             },
           };
         }

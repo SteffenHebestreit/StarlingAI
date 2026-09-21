@@ -94,7 +94,7 @@ Every public schema field, where it is declared, and how many production files r
 | `container` | packages/core/src/config/schema.ts:684 | 71 |
 | `contextWindow` | packages/core/src/config/schema.ts:119 | 11 |
 | `control` | packages/core/src/config/schema.ts:1643 | 47 |
-| `coordinatorToolCaps` | packages/core/src/config/schemas/orchestration.ts:789 | 4 |
+| `coordinatorToolCaps` | packages/core/src/config/schemas/orchestration.ts:808 | 4 |
 | `corsAllowedOrigins` | packages/core/src/config/schema.ts:311 | 2 |
 | `cpus` | packages/core/src/config/schema.ts:804 | 11 |
 | `createdAt` | packages/core/src/config/schema.ts:352 | 51 |
@@ -145,7 +145,7 @@ Every public schema field, where it is declared, and how many production files r
 | `distributedCancel` | packages/core/src/config/schema.ts:1644 | 2 |
 | `dmPolicy` | packages/core/src/config/schemas/channels.ts:18 | 5 |
 | `domain` | packages/core/src/config/schema.ts:877 | 35 |
-| `durableApprovals` | packages/core/src/config/schemas/orchestration.ts:781 | 2 |
+| `durableApprovals` | packages/core/src/config/schemas/orchestration.ts:800 | 2 |
 | `durableTaskGraph` | packages/core/src/config/schema.ts:1599 | 4 |
 | `effectContracts` | packages/core/src/config/schema.ts:1221 | 1 |
 | `embeddingApiKey` | packages/core/src/config/schema.ts:174 | 3 |
@@ -268,7 +268,7 @@ Every public schema field, where it is declared, and how many production files r
 | `mcpServer` | packages/core/src/config/schemas/multimodal.ts:16 | 3 |
 | `memoryMb` | packages/core/src/config/schema.ts:803 | 5 |
 | `method` | packages/core/src/config/schema.ts:1015 | 78 |
-| `midTurnSteering` | packages/core/src/config/schemas/orchestration.ts:761 | 1 |
+| `midTurnSteering` | packages/core/src/config/schemas/orchestration.ts:780 | 1 |
 | `minConsolidatedFactChars` | packages/core/src/config/schema.ts:1486 | 1 |
 | `minFailuresBeforeProposal` | packages/core/src/config/schema.ts:1391 | 2 |
 | `minP` | packages/core/src/config/schema.ts:167 | 4 |
@@ -315,9 +315,9 @@ Every public schema field, where it is declared, and how many production files r
 | `permitTtlMs` | packages/core/src/config/schema.ts:1653 | 2 |
 | `perSenderRateLimitCount` | packages/core/src/config/schemas/channels.ts:24 | 5 |
 | `perSenderRateLimitWindowMs` | packages/core/src/config/schemas/channels.ts:26 | 5 |
-| `perTurnCaps` | packages/core/src/config/schemas/orchestration.ts:792 | 5 |
+| `perTurnCaps` | packages/core/src/config/schemas/orchestration.ts:811 | 5 |
 | `phoneNumberId` | packages/core/src/config/schemas/channels.ts:53 | 6 |
-| `planApproval` | packages/core/src/config/schemas/orchestration.ts:765 | 1 |
+| `planApproval` | packages/core/src/config/schemas/orchestration.ts:784 | 1 |
 | `planDrivenContinuation` | packages/core/src/config/schemas/orchestration.ts:50 | 2 |
 | `planFirst` | packages/core/src/config/schemas/orchestration.ts:21 | 1 |
 | `plugins` | packages/core/src/config/schema.ts:1883 | 16 |
@@ -359,7 +359,7 @@ Every public schema field, where it is declared, and how many production files r
 | `refreshIntervalMs` | packages/core/src/config/schema.ts:646 | 1 |
 | `region` | packages/core/src/config/schema.ts:449 | 9 |
 | `rejectOverMaxBytes` | packages/core/src/config/schema.ts:474 | 3 |
-| `relaySingleDeliverable` | packages/core/src/config/schemas/orchestration.ts:755 | 1 |
+| `relaySingleDeliverable` | packages/core/src/config/schemas/orchestration.ts:774 | 1 |
 | `repeatPenalty` | packages/core/src/config/schema.ts:168 | 4 |
 | `replyText` | packages/core/src/config/schema.ts:1336 | 3 |
 | `requestDelayMs` | packages/core/src/config/schemas/retrieval.ts:192 | 1 |
@@ -377,6 +377,7 @@ Every public schema field, where it is declared, and how many production files r
 | `role` | packages/core/src/config/schema.ts:910 | 92 |
 | `rolesClaim` | packages/core/src/config/schema.ts:386 | 1 |
 | `routing` | packages/core/src/config/schema.ts:233 | 82 |
+| `routingRestatementRescue` | packages/core/src/config/schemas/orchestration.ts:766 | 1 |
 | `routingTierPresetFallback` | packages/core/src/config/schemas/orchestration.ts:723 | 2 |
 | `routingTriage` | packages/core/src/config/schemas/orchestration.ts:701 | 1 |
 | `sampleRate` | packages/core/src/config/schema.ts:543 | 2 |
@@ -427,7 +428,7 @@ Every public schema field, where it is declared, and how many production files r
 | `subAgentMaxTokens` | packages/core/src/config/schemas/effort.ts:33 | 2 |
 | `subAgentPreEvidenceResearchForce` | packages/core/src/config/schemas/orchestration.ts:202 | 1 |
 | `subAgentSynthesisReserveMs` | packages/core/src/config/schemas/orchestration.ts:603 | 2 |
-| `subAgentToolCaps` | packages/core/src/config/schemas/orchestration.ts:785 | 4 |
+| `subAgentToolCaps` | packages/core/src/config/schemas/orchestration.ts:804 | 4 |
 | `subAgentTurnSloMs` | packages/core/src/config/schema.ts:1733 | 4 |
 | `submitSelector` | packages/core/src/config/schema.ts:781 | 5 |
 | `supersedeStaleFacts` | packages/core/src/config/schema.ts:1503 | 1 |
