@@ -65,12 +65,22 @@
       "api": "openai-compatible",
       "model": "image",
       "qualityModel": "image-quality",
-      // Generous for a ~10 s tier: the cluster serialises image requests, so a second caller
-      // waits in a queue rather than failing, and that wait is part of this budget.
+      // Generous for a ~12 s tier. The client holds a slot per model, so a caller that has to
+      // wait for a device is NOT spending this budget — it starts counting once the request
+      // is actually on the wire.
       "timeoutMs": 120000,
-      // 150 s worst case + ~25 s weight reload + margin. Below ~180 s this abandons requests
-      // that were going to succeed.
+      // Measured 141.6 s on the iGPU, plus ~25 s of weight reload after ten minutes idle.
+      // Below ~180 s this abandons requests that were going to succeed.
       "qualityTimeoutMs": 210000,
+      // One in-flight generation per device, measured rather than assumed.
+      //
+      // The fast tier load-balances across TWO NPU stations: six concurrent requests finished
+      // in 38.5 s in a 9.9 / 10.0 / 19.5 / 19.5 / 29.1 / 38.5 stagger — two at a time, then
+      // queueing. The quality tier is a single iGPU and stays at the default of 1, because a
+      // second concurrent request there would sit in the backend burning its own timeout.
+      //
+      // Raise "image" if the cluster gains stations; this is a count of devices, not a taste.
+      "maxConcurrentPerModel": { "image": 2 },
       "defaultWidth": 1024,
       "defaultHeight": 1024,
       "defaultSteps": 20,

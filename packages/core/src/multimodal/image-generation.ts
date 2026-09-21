@@ -25,6 +25,9 @@ export interface ImageGenerationBackendConfig {
   qualityModel?: string;
   /** Wall-clock bound for the quality tier, which is far longer than the fast one. */
   qualityTimeoutMs?: number;
+  /** How many generations may run at once for a model. Hardware-dependent; see the schema. */
+  maxConcurrent?: number;
+  maxConcurrentPerModel?: Record<string, number>;
 }
 
 export interface ImageGenerationRequest {
@@ -141,6 +144,19 @@ const OPENAI_IMAGE_SIZE = 1024;
 const openAiImageGates = createConcurrencyGateFamily(1);
 
 /**
+ * The ceiling for one model, read fresh on every call.
+ *
+ * Fresh rather than cached because the hardware behind a model id changes without this
+ * process restarting — the fast tier gained a second station mid-development and went from
+ * serial to two-at-a-time. A ceiling captured at import time would have kept half of it idle
+ * until the next deploy.
+ */
+function concurrencyForModel(config: ImageGenerationBackendConfig, model: string): number {
+  const perModel = config.maxConcurrentPerModel?.[model];
+  return Math.max(1, Math.floor(perModel ?? config.maxConcurrent ?? 1));
+}
+
+/**
  * OpenAI-compatible `POST /v1/images/generations`.
  *
  * Three things about this contract are not the OpenAI default and each one has bitten a
@@ -203,7 +219,9 @@ async function requestOpenAiImageGeneration(
   // that can be rejected locally — an unset quality model, a size this endpoint refuses —
   // has already thrown, so a config mistake still fails in milliseconds rather than after
   // waiting out someone else's generation.
-  return openAiImageGates.for(model).withSlot(
+  const gate = openAiImageGates.for(model);
+  gate.setLimit(concurrencyForModel(config, model));
+  return gate.withSlot(
     () => sendOpenAiImageRequest(config, input, model, payload, timeoutMs),
   );
 }

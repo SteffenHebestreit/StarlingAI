@@ -150,6 +150,57 @@ describe("image generation concurrency", () => {
     await running;
   });
 
+  it("follows the CONFIGURED ceiling, because the device count is deployment-specific", async () => {
+    // The cluster's fast tier gained a second NPU station and now load-balances across both:
+    // six concurrent requests finished in 38.5 s in a 9.9 / 10.0 / 19.5 / 19.5 / 29.1 / 38.5
+    // stagger, which is two at a time. A hardcoded ceiling of one would leave half of it
+    // idle, so the number comes from config.
+    const twoStations: ImageGenerationBackendConfig = {
+      ...CLUSTER,
+      maxConcurrentPerModel: { image: 2 },
+    };
+    const net = blockingFetch();
+
+    const all = Promise.all([
+      requestImageGeneration(twoStations, { ...SQUARE, tier: "fast" }),
+      requestImageGeneration(twoStations, { ...SQUARE, tier: "fast" }),
+      requestImageGeneration(twoStations, { ...SQUARE, tier: "fast" }),
+    ]);
+    await settle();
+
+    // Two on the wire, the third holding — the stagger, reproduced.
+    expect(net.started()).toBe(2);
+    expect(net.peakFor("image")).toBe(2);
+
+    await net.drain();
+    await all;
+    expect(net.started()).toBe(3);
+    // And it never exceeded the ceiling on the way.
+    expect(net.peakFor("image")).toBe(2);
+  });
+
+  it("keeps the OTHER model at its own ceiling when one model is raised", async () => {
+    // The control: raising the fast tier must not raise the single-iGPU quality tier, where
+    // a second concurrent request would sit in the backend burning its own timeout.
+    const twoStations: ImageGenerationBackendConfig = {
+      ...CLUSTER,
+      maxConcurrentPerModel: { image: 2 },
+    };
+    const net = blockingFetch();
+
+    const all = Promise.all([
+      requestImageGeneration(twoStations, { ...SQUARE, tier: "quality" }),
+      requestImageGeneration(twoStations, { ...SQUARE, tier: "quality" }),
+    ]);
+    await settle();
+
+    expect(net.peakFor("image-quality")).toBe(1);
+    expect(net.started()).toBe(1);
+
+    await net.drain();
+    await all;
+  });
+
   it("releases the slot when a generation FAILS, so one error does not wedge the tier", async () => {
     // The release is in a `finally`. Without it a single 502 would leave the slot held and
     // every later request for that model would queue forever — a failure that looks like a

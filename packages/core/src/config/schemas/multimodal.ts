@@ -84,6 +84,24 @@ export const MultimodalImageGenerationSchema = MultimodalServiceSchema.extend({
    * ten minutes idle, so anything under ~180 s abandons requests that were going to succeed.
    */
   qualityTimeoutMs: z.number().int().min(10_000).max(600_000).default(210_000),
+  /**
+   * How many generations may run at once for a model, when the backend serialises per device.
+   *
+   * One by default, because a single image device generates serially: a second request does
+   * not run in parallel, it waits inside the backend with the client's clock already running.
+   * Queueing client-side instead keeps the timeout a measure of generation rather than of
+   * queue position.
+   *
+   * This is a HARDWARE fact, so it is configuration and not a constant. The cluster this was
+   * written for changed under exactly this feature: the fast tier moved from one NPU to two
+   * and now load-balances across them — six concurrent requests finished in 38.5 s in a
+   * 9.9 / 10.0 / 19.5 / 19.5 / 29.1 / 38.5 stagger, which is two at a time. A ceiling of one
+   * there would leave half the tier idle; a ceiling of two on the single-iGPU quality tier
+   * would go back to lying about the timeout.
+   */
+  maxConcurrent: z.number().int().min(1).max(16).default(1),
+  /** Per-model override of `maxConcurrent`, keyed by the model id sent upstream. */
+  maxConcurrentPerModel: z.record(z.string(), z.number().int().min(1).max(16)).default({}),
   defaultWidth: z.number().int().min(256).max(2048).default(1024),
   defaultHeight: z.number().int().min(256).max(2048).default(1024),
   defaultSteps: z.number().int().min(1).max(100).default(28),
