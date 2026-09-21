@@ -7,9 +7,9 @@
  * process knows its own total load on the endpoint. That means the ceiling cannot live in any
  * caller; it belongs at the one place they all pass through.
  *
- * Requests over the limit WAIT rather than fail. An embedding call sits on a turn's critical
- * path, and a queued request that completes is better than a refused one that whichever
- * caller happened to lose then has to retry.
+ * The queue mechanics — FIFO, wait rather than fail, release in a `finally` — live in
+ * runtime/concurrency-gate.ts, which image generation now also uses. The rationale for each of
+ * those choices is documented there.
  *
  * A NOTE ON WHAT THIS DOES NOT FIX, because the record should be accurate. This was written
  * after a run failed with "the embedding backend is unavailable", and concurrency looked like
@@ -22,42 +22,17 @@
  * The ceiling is still worth having, for a reason of its own rather than that one: nothing in
  * this process can see its own total load on the endpoint, and the endpoint has a finite slot
  * count. It is a bound on a real unknown.
- *
- * Deliberately NOT a rate limit and not a batcher. It bounds concurrency only, because a slot
- * count is what the endpoint is actually constrained on.
  */
+import { createConcurrencyGate, type ConcurrencyGateStats } from "../runtime/concurrency-gate.js";
 
-/** Waiters, oldest first — FIFO, so a burst cannot starve the request that arrived first. */
-let _limit = 8;
-let _inFlight = 0;
-const _queue: Array<() => void> = [];
+const DEFAULT_EMBEDDING_CONCURRENCY = 8;
 
-/** Peak concurrency and total wait, so the ceiling's cost is observable rather than assumed. */
-let _peakInFlight = 0;
-let _queuedCount = 0;
-let _totalWaitMs = 0;
+const gate = createConcurrencyGate(DEFAULT_EMBEDDING_CONCURRENCY);
 
-export interface EmbeddingGateStats {
-  limit: number;
-  inFlight: number;
-  waiting: number;
-  /** Highest simultaneous in-flight count seen since the last reset. */
-  peakInFlight: number;
-  /** How many calls had to wait at all. Zero means the ceiling never bound. */
-  queued: number;
-  /** Total time spent waiting, across every call that waited. */
-  totalWaitMs: number;
-}
+export type EmbeddingGateStats = ConcurrencyGateStats;
 
 export function getEmbeddingGateStats(): EmbeddingGateStats {
-  return {
-    limit: _limit,
-    inFlight: _inFlight,
-    waiting: _queue.length,
-    peakInFlight: _peakInFlight,
-    queued: _queuedCount,
-    totalWaitMs: Math.round(_totalWaitMs),
-  };
+  return gate.stats();
 }
 
 /**
@@ -65,50 +40,15 @@ export function getEmbeddingGateStats(): EmbeddingGateStats {
  * request already in flight, it only stops new ones starting until the count drains.
  */
 export function setEmbeddingConcurrency(limit: number): void {
-  _limit = Math.max(1, Math.floor(limit));
-  drain();
+  gate.setLimit(limit);
 }
 
-function drain(): void {
-  while (_inFlight < _limit && _queue.length > 0) {
-    const next = _queue.shift()!;
-    _inFlight += 1;
-    if (_inFlight > _peakInFlight) _peakInFlight = _inFlight;
-    next();
-  }
-}
-
-/**
- * Run `work` with a slot held, releasing it however `work` ends.
- *
- * The release is in a `finally`: a throwing call that kept its slot would shrink the ceiling
- * permanently, and the symptom — embeddings getting slower and then stopping — would look
- * nothing like its cause.
- */
+/** Run `work` with a slot held, releasing it however `work` ends. */
 export async function withEmbeddingSlot<T>(work: () => Promise<T>): Promise<T> {
-  if (_inFlight < _limit) {
-    _inFlight += 1;
-    if (_inFlight > _peakInFlight) _peakInFlight = _inFlight;
-  } else {
-    _queuedCount += 1;
-    const waitStarted = Date.now();
-    await new Promise<void>((resolve) => { _queue.push(resolve); });
-    _totalWaitMs += Date.now() - waitStarted;
-  }
-  try {
-    return await work();
-  } finally {
-    _inFlight -= 1;
-    drain();
-  }
+  return gate.withSlot(work);
 }
 
 /** Test-only: drop the counters and the queue. */
-export function _resetEmbeddingGateForTests(limit = 8): void {
-  _limit = limit;
-  _inFlight = 0;
-  _queue.length = 0;
-  _peakInFlight = 0;
-  _queuedCount = 0;
-  _totalWaitMs = 0;
+export function _resetEmbeddingGateForTests(limit = DEFAULT_EMBEDDING_CONCURRENCY): void {
+  gate.reset(limit);
 }

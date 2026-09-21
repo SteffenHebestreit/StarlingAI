@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { extname } from "node:path";
+import { createConcurrencyGateFamily } from "../runtime/concurrency-gate.js";
 
 export type ImageGenerationApi = "automatic1111-compatible" | "comfyui" | "openai-compatible";
 
@@ -120,6 +121,26 @@ export async function requestImageGeneration(
 const OPENAI_IMAGE_SIZE = 1024;
 
 /**
+ * One in-flight generation per MODEL, because the model is what maps to a device.
+ *
+ * sd-server generates serially, so a second request for the same model does not run in
+ * parallel — it waits in the backend with the clock already running. That turns the client
+ * timeout into a lie: a 210 s cap against a 140 s generation looks generous until two
+ * requests arrive together and the second is abandoned at 210 s having generated for 70.
+ * Queuing here instead means the timeout measures generation rather than queue position.
+ *
+ * Per model rather than globally, because the tiers run on different devices and a
+ * measurement showed they do not contend: an NPU job issued during an iGPU generation still
+ * returned, about 50% slower. A single global slot would park a 10-second fast request
+ * behind a 140-second quality one for no hardware reason.
+ *
+ * Only the OpenAI-compatible adapter is gated. AUTOMATIC1111 and ComfyUI have their own
+ * queueing and no measurement here says they serialize, and serializing a backend that
+ * handles parallelism fine would be a self-inflicted slowdown.
+ */
+const openAiImageGates = createConcurrencyGateFamily(1);
+
+/**
  * OpenAI-compatible `POST /v1/images/generations`.
  *
  * Three things about this contract are not the OpenAI default and each one has bitten a
@@ -178,6 +199,25 @@ async function requestOpenAiImageGeneration(
     ? config.qualityTimeoutMs ?? Math.max(config.timeoutMs, 200_000)
     : config.timeoutMs;
 
+  // Below this line the request is valid and the only thing left is the backend. Everything
+  // that can be rejected locally — an unset quality model, a size this endpoint refuses —
+  // has already thrown, so a config mistake still fails in milliseconds rather than after
+  // waiting out someone else's generation.
+  return openAiImageGates.for(model).withSlot(
+    () => sendOpenAiImageRequest(config, input, model, payload, timeoutMs),
+  );
+}
+
+/** The network half, run with a slot held. Everything here assumes the request is valid. */
+async function sendOpenAiImageRequest(
+  config: ImageGenerationBackendConfig,
+  input: ImageGenerationRequest,
+  model: string,
+  payload: Record<string, unknown>,
+  timeoutMs: number,
+): Promise<ImageGenerationResult> {
+  // Started after the slot is held, so `elapsedMs` reports how long the image took rather
+  // than how long this call queued — the same thing the field means in the other adapters.
   const startedAt = Date.now();
   const response = await fetchWithTimeout(
     upstreamUrl(config.baseUrl, "/images/generations"),
