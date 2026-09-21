@@ -192,7 +192,7 @@ Every public schema field, where it is declared, and how many production files r
 | `humanInLoopSteps` | packages/core/src/config/schema.ts:1286 | 20 |
 | `id` | packages/core/src/config/schema.ts:553 | 226 |
 | `ignoreCase` | packages/core/src/config/schema.ts:1333 | 2 |
-| `image` | packages/core/src/config/schema.ts:672 | 56 |
+| `image` | packages/core/src/config/schema.ts:672 | 57 |
 | `imapHost` | packages/core/src/config/schemas/channels.ts:57 | 5 |
 | `imapPassword` | packages/core/src/config/schemas/channels.ts:60 | 6 |
 | `imapPort` | packages/core/src/config/schemas/channels.ts:58 | 4 |
@@ -459,7 +459,7 @@ Every public schema field, where it is declared, and how many production files r
 | `topP` | packages/core/src/config/schema.ts:165 | 4 |
 | `transport` | packages/core/src/config/schema.ts:663 | 25 |
 | `triggers` | packages/core/src/config/schema.ts:1358 | 31 |
-| `trust` | packages/core/src/config/schema.ts:1894 | 19 |
+| `trust` | packages/core/src/config/schema.ts:1894 | 20 |
 | `trustModelRouting` | packages/core/src/config/schema.ts:277 | 2 |
 | `trustProxyHeader` | packages/core/src/config/schema.ts:433 | 1 |
 | `turnTimeoutMs` | packages/core/src/config/schema.ts:305 | 22 |

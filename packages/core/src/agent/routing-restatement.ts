@@ -30,14 +30,30 @@ import { resolveRoutingTierProvider } from "./routing-tier-provider.js";
 import { runWithCallAttribution } from "../runtime/request-context.js";
 
 /**
- * How long the rescue may take before it gives up and the caller reports the original miss.
+ * How long the TRIAGE CALL may take before the rescue gives up and the caller reports the
+ * original miss.
  *
  * Generous compared with the 2.5s prompt-assembly budget, because the situation is different:
  * this runs only after routing has already found nothing, so the turn's realistic
  * alternatives are a few seconds here or a delegation to the wrong agent. It is still bounded
  * — a hung routing tier must not turn "no agent matched" into a hung tool call.
+ *
+ * It was 6000, and measuring the shipped path against the live cluster showed that was too
+ * tight to trust. On 28 corpus queries that retrieve nothing, the rescue succeeded 13 times
+ * with END-TO-END times of 2.9, 2.9, 3.0, 3.0, 3.1, 3.3, 3.5, 3.5, 3.7, 3.7, 5.6, 6.2 and
+ * 6.3 seconds — the last two already past this number, and that was an IDLE cluster. Triage
+ * alone measured 2.6-3.9s there, and the same box runs a 140s image tier that measurably
+ * slows concurrent work (an NPU job went 9.9s -> 14.9s under load). A budget sitting inside
+ * the observed spread would silently stop rescuing under exactly the contention that makes
+ * routing hard, and the failure would look like the feature not working rather than like a
+ * timeout.
+ *
+ * 15s is about 4x the idle median and 2.5x the worst observed. It does NOT cover a cold
+ * model load on the routing tier (measured at ~27s on this cluster for a model that was not
+ * preloaded); that case loses one rescue and the next call finds the model resident, which
+ * is the right trade against making every miss wait half a minute.
  */
-const RESTATEMENT_RESCUE_BUDGET_MS = 6000;
+const RESTATEMENT_RESCUE_BUDGET_MS = 15_000;
 
 /** Lowercase, strip punctuation, collapse whitespace — enough to tell "same request" apart. */
 function normalizeForComparison(value: string): string {
