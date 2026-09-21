@@ -102,7 +102,7 @@ Every public schema field, where it is declared, and how many production files r
 | `currency` | packages/core/src/config/schema.ts:509 | 11 |
 | `customInstructions` | packages/core/src/config/schema.ts:269 | 2 |
 | `dailyUsd` | packages/core/src/config/schema.ts:512 | 2 |
-| `default` | packages/core/src/config/schema.ts:1241 | 230 |
+| `default` | packages/core/src/config/schema.ts:1241 | 231 |
 | `defaultAlertmanager` | packages/core/src/config/schema.ts:1124 | 1 |
 | `defaultContainerized` | packages/core/src/config/schema.ts:1708 | 6 |
 | `defaultGithub` | packages/core/src/config/schema.ts:1146 | 1 |
@@ -194,7 +194,7 @@ Every public schema field, where it is declared, and how many production files r
 | `humanInLoopSteps` | packages/core/src/config/schema.ts:1286 | 20 |
 | `id` | packages/core/src/config/schema.ts:553 | 226 |
 | `ignoreCase` | packages/core/src/config/schema.ts:1333 | 2 |
-| `image` | packages/core/src/config/schema.ts:672 | 58 |
+| `image` | packages/core/src/config/schema.ts:672 | 59 |
 | `imapHost` | packages/core/src/config/schemas/channels.ts:57 | 5 |
 | `imapPassword` | packages/core/src/config/schemas/channels.ts:60 | 6 |
 | `imapPort` | packages/core/src/config/schemas/channels.ts:58 | 4 |
@@ -279,7 +279,7 @@ Every public schema field, where it is declared, and how many production files r
 | `minStepsToAuthor` | packages/core/src/config/schema.ts:1441 | 2 |
 | `minVramMb` | packages/core/src/config/schema.ts:814 | 1 |
 | `mode` | packages/core/src/config/schema.ts:463 | 113 |
-| `model` | packages/core/src/config/schema.ts:1226 | 195 |
+| `model` | packages/core/src/config/schema.ts:1226 | 196 |
 | `modelModeration` | packages/core/src/config/schema.ts:1222 | 4 |
 | `modelPresets` | packages/core/src/config/schema.ts:1679 | 1 |
 | `modelPresetScope` | packages/core/src/config/schema.ts:1694 | 3 |
@@ -382,7 +382,7 @@ Every public schema field, where it is declared, and how many production files r
 | `riskGatedQA` | packages/core/src/config/schemas/effort.ts:47 | 7 |
 | `role` | packages/core/src/config/schema.ts:910 | 92 |
 | `rolesClaim` | packages/core/src/config/schema.ts:386 | 1 |
-| `routing` | packages/core/src/config/schema.ts:233 | 82 |
+| `routing` | packages/core/src/config/schema.ts:233 | 83 |
 | `routingRestatementRescue` | packages/core/src/config/schemas/orchestration.ts:766 | 1 |
 | `routingTierPresetFallback` | packages/core/src/config/schemas/orchestration.ts:723 | 2 |
 | `routingTriage` | packages/core/src/config/schemas/orchestration.ts:701 | 1 |
@@ -469,7 +469,7 @@ Every public schema field, where it is declared, and how many production files r
 | `trustModelRouting` | packages/core/src/config/schema.ts:277 | 2 |
 | `trustProxyHeader` | packages/core/src/config/schema.ts:433 | 1 |
 | `turnTimeoutMs` | packages/core/src/config/schema.ts:305 | 22 |
-| `type` | packages/core/src/config/schema.ts:956 | 377 |
+| `type` | packages/core/src/config/schema.ts:956 | 378 |
 | `ungroundedFactualAnswerGuard` | packages/core/src/config/schemas/orchestration.ts:135 | 2 |
 | `upfrontSourceSensitiveClassifier` | packages/core/src/config/schemas/orchestration.ts:168 | 2 |
 | `url` | packages/core/src/config/schema.ts:555 | 122 |

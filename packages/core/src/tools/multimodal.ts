@@ -6,6 +6,7 @@ import { childLogger } from "../logger.js";
 import { sendChunkedTtsRequests } from "../multimodal/tts-chunking.js";
 import { getMcpConnections } from "../mcp/registry.js";
 import { checkImageGenerationHealth, imageGenerationServiceConfigured, requestImageGeneration } from "../multimodal/image-generation.js";
+import { transformImage, type ImageTransformOp } from "../multimodal/image-transform.js";
 import { resolveProviderEndpointForModel } from "../providers/index.js";
 import { registerTool, type ToolResult } from "./registry.js";
 import { resolvePathWithinWorkspace } from "./workspace-path.js";
@@ -335,6 +336,95 @@ registerTool({
       };
     } catch (error) {
       log.error({ error, path }, "analyze_image failed");
+      return fail(error instanceof Error ? error.message : String(error));
+    }
+  },
+});
+
+/** Drop a trailing extension without touching directory separators in the path. */
+function stripFileExtension(value: string): string {
+  const ext = extname(value);
+  return ext ? value.slice(0, -ext.length) : value;
+}
+
+registerTool({
+  name: "transform_image",
+  description:
+    "Apply exact, deterministic edits to an existing image in the workspace: sharpen, soften,"
+    + " resize, crop, rotate, flip, brightness, contrast, grayscale, normalize. Runs locally in"
+    + " milliseconds and costs the cluster nothing — it does NOT re-generate the picture, so"
+    + " everything you are not changing stays exactly as it was. Use this, never the image model,"
+    + " when the request is about the image as a picture rather than about its content.",
+  embeddingDescription:
+    "Sharpen, soften, blur, resize, scale, crop, trim, rotate, flip, brighten, darken, contrast,"
+    + " grayscale, black and white, normalize an existing image. Bild schärfen, weichzeichnen,"
+    + " skalieren, zuschneiden, drehen, spiegeln, heller, dunkler, Kontrast, Graustufen."
+    + " Post-processing, retouch, adjust a picture without regenerating it.",
+  parameters: {
+    type: "object",
+    properties: {
+      path: { type: "string", description: "Relative workspace path to the image to transform" },
+      operations: {
+        type: "array",
+        description:
+          "Operations applied IN ORDER, so one call can crop and then sharpen. Each item is"
+          + " {op, ...}: sharpen{amount 0-3, default 1}, soften{radius, default 2},"
+          + " resize{width?, height?} (omit one to keep the aspect ratio), crop{x,y,width,height},"
+          + " rotate{degrees}, flip{horizontal?, vertical?}, brightness{amount -1..1},"
+          + " contrast{amount -1..1}, grayscale{}, normalize{}.",
+        items: { type: "object" },
+      },
+      outputPath: {
+        type: "string",
+        description:
+          "Optional relative output path. Omitted, the result is written NEXT TO the source with a"
+          + " suffix — the original is never overwritten, so an unwanted edit costs nothing.",
+      },
+    },
+    required: ["path", "operations"],
+  },
+  async execute(args, ctx) {
+    const path = String(args["path"] ?? "").trim();
+    if (!path) return fail("path is required");
+    const operations = Array.isArray(args["operations"]) ? args["operations"] as ImageTransformOp[] : [];
+    if (operations.length === 0) {
+      return fail("operations is required — e.g. [{\"op\":\"sharpen\",\"amount\":0.5}]");
+    }
+
+    try {
+      const source = await readWorkspaceBinaryFile(path, ctx.workspacePath);
+      const result = await transformImage(Buffer.from(source.bytes), operations);
+
+      const requested = stringArg(args["outputPath"]);
+      // A sibling by default. Overwriting the source would destroy the only copy of an image
+      // that may have cost minutes of GPU, and an edit the user dislikes would be unrecoverable.
+      const outputPath = requested
+        ? (extname(requested) ? requested : `${requested}.png`)
+        : `${stripFileExtension(path)}-edited-${Date.now()}.png`;
+      const resolved = resolveWorkspacePath(outputPath, ctx.workspacePath);
+      await mkdir(resolve(resolved.resolved, ".."), { recursive: true });
+      await writeFile(resolved.resolved, result.bytes);
+
+      const resized = result.before.width !== result.after.width || result.before.height !== result.after.height;
+      return {
+        success: true,
+        output: `Applied ${result.applied.join(", ")} to ${path}. Saved to ${resolved.relativePath}`
+          + (resized ? ` (${result.before.width}x${result.before.height} -> ${result.after.width}x${result.after.height})` : ""),
+        metadata: {
+          sourcePath: path,
+          outputPath: resolved.relativePath,
+          filename: basename(resolved.relativePath),
+          bytes: result.bytes.byteLength,
+          contentType: "image/png",
+          applied: result.applied,
+          width: result.after.width,
+          height: result.after.height,
+          originalWidth: result.before.width,
+          originalHeight: result.before.height,
+        },
+      };
+    } catch (error) {
+      log.error({ error, path }, "transform_image failed");
       return fail(error instanceof Error ? error.message : String(error));
     }
   },

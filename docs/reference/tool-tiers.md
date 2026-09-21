@@ -199,6 +199,7 @@ Write operations inside the workspace; session-level consent once.
 | `skill_manage` | — | — | Create, patch, pin, archive, and maintain Skill Library procedures and support files |
 | `spreadsheet_write` | — | — | Write JSON row data to an XLSX file in the workspace |
 | `synthesize_speech` | — | — | Generate speech audio and save it inside the workspace |
+| `transform_image` | — | — | Apply local raster edits (sharpen, soften, resize, crop, rotate) to a workspace image |
 | `use_knowledge_base` | — | — | Run a knowledge base's single-use worker agent on a task, grounded in that KB (may inspect live targets and write outputs) |
 | `user_model_update` | — | — | Revise the agent's evolving model of the current user |
 | `vscode_focus_panel` | — | — | Focus a VS Code panel (terminal, problems, explorer, source-control) |

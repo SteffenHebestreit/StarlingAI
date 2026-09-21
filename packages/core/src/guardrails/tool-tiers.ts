@@ -581,6 +581,12 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  transform_image: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Apply local raster edits (sharpen, soften, resize, crop, rotate) to a workspace image",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
   generate_chart_html: {
     tier: ToolTier.ONE_WRITE,
     description: "Generate an HTML chart report and save it inside the workspace",
