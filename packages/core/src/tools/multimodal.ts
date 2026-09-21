@@ -6,7 +6,7 @@ import { childLogger } from "../logger.js";
 import { sendChunkedTtsRequests } from "../multimodal/tts-chunking.js";
 import { getMcpConnections } from "../mcp/registry.js";
 import { checkImageGenerationHealth, imageGenerationServiceConfigured, requestImageGeneration } from "../multimodal/image-generation.js";
-import { transformImage, type ImageTransformOp } from "../multimodal/image-transform.js";
+import { encodeImageAs, transformImage, type ImageTransformOp } from "../multimodal/image-transform.js";
 import { resolveProviderEndpointForModel } from "../providers/index.js";
 import { registerTool, type ToolResult } from "./registry.js";
 import { resolvePathWithinWorkspace } from "./workspace-path.js";
@@ -396,14 +396,20 @@ registerTool({
       const result = await transformImage(Buffer.from(source.bytes), operations);
 
       const requested = stringArg(args["outputPath"]);
+      // Same rule as generate_image: the bytes decide the extension. transformImage returns
+      // PNG, so a caller naming ".jpg" is encoded to JPEG rather than mislabelled.
+      const requestedExt = requested ? extname(requested).toLowerCase() : "";
+      const encoded = await encodeImageAs(result.bytes, requestedExt, ".png");
       // A sibling by default. Overwriting the source would destroy the only copy of an image
       // that may have cost minutes of GPU, and an edit the user dislikes would be unrecoverable.
       const outputPath = requested
-        ? (extname(requested) ? requested : `${requested}.png`)
-        : `${stripFileExtension(path)}-edited-${Date.now()}.png`;
+        ? (requestedExt
+            ? `${stripFileExtension(requested)}${encoded.extension}`
+            : `${requested}${encoded.extension}`)
+        : `${stripFileExtension(path)}-edited-${Date.now()}${encoded.extension}`;
       const resolved = resolveWorkspacePath(outputPath, ctx.workspacePath);
       await mkdir(resolve(resolved.resolved, ".."), { recursive: true });
-      await writeFile(resolved.resolved, result.bytes);
+      await writeFile(resolved.resolved, encoded.bytes);
 
       const resized = result.before.width !== result.after.width || result.before.height !== result.after.height;
       return {
@@ -414,8 +420,8 @@ registerTool({
           sourcePath: path,
           outputPath: resolved.relativePath,
           filename: basename(resolved.relativePath),
-          bytes: result.bytes.byteLength,
-          contentType: "image/png",
+          bytes: encoded.bytes.byteLength,
+          contentType: encoded.mimeType,
           applied: result.applied,
           width: result.after.width,
           height: result.after.height,
@@ -559,24 +565,37 @@ registerTool({
 
       const imageBytes = Buffer.from(result.imageBase64, "base64");
       const requestedOutputPath = stringArg(args["outputPath"]);
+      // The backend produces PNG only, so a caller naming ".jpg" used to get PNG bytes under
+      // that name. The artifact verifier then refused the file and the swarm burned eight
+      // minutes trying to repair it. Encode into the format actually asked for, or correct
+      // the name — never write a mismatch.
+      const requestedExtension = requestedOutputPath ? extname(requestedOutputPath).toLowerCase() : "";
+      const encoded = await encodeImageAs(imageBytes, requestedExtension, result.extension);
       const outputPath = requestedOutputPath
-        ? (extname(requestedOutputPath) ? requestedOutputPath : `${requestedOutputPath}${result.extension}`)
-        : `${PRODUCT.stateDirName}/generated/image-${Date.now()}${result.extension}`;
+        ? (requestedExtension
+            ? `${stripFileExtension(requestedOutputPath)}${encoded.extension}`
+            : `${requestedOutputPath}${encoded.extension}`)
+        : `${PRODUCT.stateDirName}/generated/image-${Date.now()}${encoded.extension}`;
       const resolvedOutput = resolveWorkspacePath(outputPath, ctx.workspacePath);
       await mkdir(resolve(resolvedOutput.resolved, ".."), { recursive: true });
-      await writeFile(resolvedOutput.resolved, imageBytes);
+      await writeFile(resolvedOutput.resolved, encoded.bytes);
 
       // Same as synthesize_speech above: the resolved path is the one the bytes are at.
       return {
         success: true,
-        output: `Image generated successfully. Saved to ${resolvedOutput.relativePath}`,
+        output: `Image generated successfully. Saved to ${resolvedOutput.relativePath}`
+          + (encoded.correctedFrom
+            ? ` — NOTE: ${encoded.correctedFrom} cannot be produced here, so the file is ${encoded.extension}.`
+              + " Use this path; the one you asked for does not exist."
+            : ""),
         metadata: {
           outputPath: resolvedOutput.relativePath,
           requestedPath: outputPath,
           filename: basename(resolvedOutput.relativePath),
-          bytes: imageBytes.byteLength,
-          contentType: result.mimeType,
-          dataUrl: `data:${result.mimeType};base64,${result.imageBase64}`,
+          bytes: encoded.bytes.byteLength,
+          contentType: encoded.mimeType,
+          dataUrl: `data:${encoded.mimeType};base64,${encoded.bytes.toString("base64")}`,
+          ...(encoded.correctedFrom ? { requestedFormat: encoded.correctedFrom, writtenFormat: encoded.extension } : {}),
           width: result.width,
           height: result.height,
           seed: result.seed,

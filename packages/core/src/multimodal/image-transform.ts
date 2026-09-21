@@ -135,3 +135,55 @@ export async function transformImage(
   const bytes = Buffer.from(await image.getBufferAsync(Jimp.MIME_PNG));
   return { bytes, before, after: { width: image.bitmap.width, height: image.bitmap.height }, applied };
 }
+
+/**
+ * Make the BYTES match the name, or make the name match the bytes. Never ship a mismatch.
+ *
+ * This is not pedantry about file extensions. An agent asked for `sunset_beach.jpg`, the
+ * image backend only produces PNG, and the client wrote PNG bytes under that name. The
+ * artifact verifier correctly refused it — "named .jpg but its bytes are PNG" — and the
+ * swarm then spent EIGHT MINUTES trying to repair it: an artifact-repair coordinator, a
+ * rejected ephemeral agent, a 221-second coder run transcoding the file, and two
+ * progress-verifier interventions. All of it downstream of one line that trusted the
+ * caller's extension.
+ *
+ * So a requested format we can actually encode is produced, and one we cannot is corrected
+ * in the name rather than lied about. The caller is told which happened; silently renaming
+ * would leave an agent reporting a path that is not the one on disk.
+ */
+export interface EncodedImage {
+  bytes: Buffer;
+  extension: string;
+  mimeType: string;
+  /** Set when the requested extension could not be honoured and the name was corrected. */
+  correctedFrom?: string;
+}
+
+const ENCODABLE: Record<string, string> = {
+  ".png": Jimp.MIME_PNG,
+  ".jpg": Jimp.MIME_JPEG,
+  ".jpeg": Jimp.MIME_JPEG,
+  ".bmp": Jimp.MIME_BMP,
+};
+
+export async function encodeImageAs(
+  pngBytes: Buffer,
+  requestedExtension: string,
+  sourceExtension = ".png",
+): Promise<EncodedImage> {
+  const wanted = requestedExtension.toLowerCase();
+  if (!wanted || wanted === sourceExtension) {
+    return { bytes: pngBytes, extension: sourceExtension, mimeType: Jimp.MIME_PNG };
+  }
+
+  const mime = ENCODABLE[wanted];
+  if (!mime) {
+    // Nothing we can encode. The bytes are what they are, so the NAME is what changes.
+    return {
+      bytes: pngBytes, extension: sourceExtension, mimeType: Jimp.MIME_PNG, correctedFrom: wanted,
+    };
+  }
+
+  const image = await Jimp.read(pngBytes);
+  return { bytes: Buffer.from(await image.getBufferAsync(mime)), extension: wanted, mimeType: mime };
+}

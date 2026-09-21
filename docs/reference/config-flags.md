@@ -49,7 +49,7 @@ Every public schema field, where it is declared, and how many production files r
 | `autoReconnect` | packages/core/src/config/schema.ts:762 | 1 |
 | `autoResearchOnRefusal` | packages/core/src/config/schemas/effort.ts:50 | 3 |
 | `autoStart` | packages/core/src/config/schema.ts:667 | 3 |
-| `backend` | packages/core/src/config/schema.ts:478 | 75 |
+| `backend` | packages/core/src/config/schema.ts:478 | 76 |
 | `baseUrl` | packages/core/src/config/schema.ts:64 | 37 |
 | `bearerToken` | packages/core/src/config/schema.ts:629 | 4 |
 | `blendMode` | packages/core/src/config/schemas/retrieval.ts:40 | 4 |
@@ -168,7 +168,7 @@ Every public schema field, where it is declared, and how many production files r
 | `exposeScenes` | packages/core/src/config/schema.ts:740 | 1 |
 | `exposeTools` | packages/core/src/config/schema.ts:736 | 1 |
 | `expression` | packages/core/src/config/schema.ts:1321 | 18 |
-| `extensions` | packages/core/src/config/schema.ts:1924 | 20 |
+| `extensions` | packages/core/src/config/schema.ts:1924 | 21 |
 | `failedResearchHonestyBackstop` | packages/core/src/config/schemas/orchestration.ts:123 | 1 |
 | `fallback` | packages/core/src/config/schema.ts:109 | 86 |
 | `finalResponseQaGate` | packages/core/src/config/schemas/effort.ts:49 | 3 |
@@ -288,7 +288,7 @@ Every public schema field, where it is declared, and how many production files r
 | `moderateToolOutputs` | packages/core/src/config/schema.ts:1229 | 1 |
 | `monthlyUsd` | packages/core/src/config/schema.ts:513 | 2 |
 | `mounts` | packages/core/src/config/schema.ts:675 | 6 |
-| `name` | packages/core/src/config/schema.ts:1895 | 292 |
+| `name` | packages/core/src/config/schema.ts:1895 | 293 |
 | `negativePrompt` | packages/core/src/config/schemas/multimodal.ts:152 | 3 |
 | `network` | packages/core/src/config/schema.ts:676 | 47 |
 | `node` | packages/core/src/config/schema.ts:1034 | 199 |
