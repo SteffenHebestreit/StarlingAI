@@ -86,10 +86,46 @@
       // served 64x64 in 1.2s and 1024x768 in 91s. Listing both would refuse requests the
       // quality tier is happy to serve — which it already did once, for 1024x768.
       "fixedSizeModels": ["image"],
+      // NOT ACTIVE YET — the route below returned 404 on re-test while the provider was
+      // being reconfigured, so it stays commented until it is verified again. The CLIENT
+      // support for it is shipped and tested; only this wiring is pending.
+      //
+      // Why it is wanted: the OpenAI route parses `prompt` and `size` and discards the rest
+      // (eight probes varying steps, seed, cfg and negative prompt all returned steps=8
+      // seed=42), and its `--seed -1` randomises once per SERVER PROCESS, so one prompt
+      // returns one image until a restart. The AUTOMATIC1111 route on the same sd-server
+      // honours all of it — verified: seed -1 gave 1152108546 then 1467603400 with different
+      // images, an explicit seed reproduced byte-for-byte, steps/cfg came back in `info`.
+      // The quality tier does NOT go through the OpenAI route, and that is deliberate.
+      //
+      // That route parses `prompt` and `size` and discards the rest — proven with eight
+      // probes varying steps, seed, cfg and negative prompt, all returning steps=8 seed=42.
+      // Its `--seed -1` also randomises once per SERVER PROCESS, not per request, so the
+      // same prompt returned the same image until a restart and "make me another one" was
+      // impossible. The same sd-server speaks AUTOMATIC1111 on this path, where seed -1 gives
+      // a fresh seed every call, an explicit seed reproduces exactly, and steps/cfg_scale
+      // come back echoed in `info`.
+      //
+      // Worker station DIRECTLY: the head node 404s /upstream/ paths, so this must not be
+      // pointed at the 192.168.12.11 endpoint the rest of the config uses.
+      // "qualityBackend": {
+      // "api": "automatic1111-compatible",
+      // "baseUrl": "http://192.168.12.13:8080/upstream/qwen-image",
+        // The checkpoint this backend reports, not the `image-quality` router alias.
+      // "model": "qwen_image_2.1-Q8_0",
+        // Measured 169 s at 1024x1024, 20 steps, cfg 1.0 — plus a weight reload after idle.
+        // 210 s left almost no margin once the render alone is 169.
+      // "timeoutMs": 300000
+      // },
       "defaultWidth": 1024,
       "defaultHeight": 1024,
       "defaultSteps": 20,
-      "defaultGuidanceScale": 7
+      // 1.0, not the usual 7. Qwen-Image carries embedded guidance (the generation record
+      // shows Guidance: 3.5), so true CFG is redundant AND doubles the forward passes per
+      // step: measured 8 steps/cfg 6 = 120 s against 20 steps/cfg 1 = 169 s. Dropping CFG
+      // paid for the steps that actually fix the output. The OpenAI fast route discards
+      // this value entirely, so it costs that tier nothing.
+      "defaultGuidanceScale": 1
     },
     "wakeWord": {
       "enabled": false,

@@ -117,6 +117,33 @@ export const MultimodalImageGenerationSchema = MultimodalServiceSchema.extend({
    * served.
    */
   fixedSizeModels: z.array(z.string()).default([]),
+  /**
+   * A DIFFERENT backend for the quality tier, when the fast tier's protocol cannot express
+   * what the quality tier needs.
+   *
+   * This deployment is exactly that case. Both tiers answer on one OpenAI-compatible
+   * endpoint, but that route parses `prompt` and `size` and discards everything else —
+   * measured with eight probes varying steps, seed, cfg and negative prompt, all returning
+   * an identical record. Worse, its `--seed -1` randomises ONCE per server process, so the
+   * same prompt returns the same image until the server restarts and "make me another one"
+   * cannot work at all.
+   *
+   * The same sd-server also speaks the AUTOMATIC1111 protocol, and that route honours the
+   * lot. Verified against it: `seed: -1` gives a different seed and a different image on
+   * every request, an explicit seed reproduces byte-for-byte, and `steps` / `cfg_scale` come
+   * back echoed in `info`.
+   *
+   * So the quality tier points at that route instead. Anything left unset here falls through
+   * to the settings above.
+   */
+  qualityBackend: z.object({
+    api: z.enum(["automatic1111-compatible", "comfyui", "openai-compatible"]).optional(),
+    baseUrl: OptionalEndpointUrlSchema.optional(),
+    /** The checkpoint name this backend reports, not the tier alias the router uses. */
+    model: z.string().min(1).optional(),
+    apiKey: z.string().optional(),
+    timeoutMs: z.number().int().min(10_000).max(900_000).optional(),
+  }).optional(),
   defaultWidth: z.number().int().min(256).max(2048).default(1024),
   defaultHeight: z.number().int().min(256).max(2048).default(1024),
   defaultSteps: z.number().int().min(1).max(100).default(28),

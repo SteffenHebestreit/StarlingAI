@@ -30,6 +30,14 @@ export interface ImageGenerationBackendConfig {
   maxConcurrentPerModel?: Record<string, number>;
   /** Models that generate one fixed resolution and reject anything else. */
   fixedSizeModels?: string[];
+  /** A different backend for the quality tier; see the schema for why this exists. */
+  qualityBackend?: {
+    api?: ImageGenerationApi;
+    baseUrl?: string;
+    model?: string;
+    apiKey?: string;
+    timeoutMs?: number;
+  };
 }
 
 export interface ImageGenerationRequest {
@@ -111,15 +119,46 @@ export async function requestImageGeneration(
     throw new Error("Image generation is disabled: configure multimodal.imageGeneration.baseUrl to enable it.");
   }
 
-  if (config.api === "comfyui") {
-    return requestComfyUiImageGeneration(config, input);
+  // The tier can point at an entirely different backend, so it is resolved BEFORE the
+  // protocol is chosen — otherwise the quality tier would be dispatched by the fast tier's
+  // api and never reach the route that honours its parameters.
+  const effective = resolveTierBackend(config, input.tier ?? "fast");
+
+  if (effective.api === "comfyui") {
+    return requestComfyUiImageGeneration(effective, input);
   }
 
-  if (config.api === "openai-compatible") {
-    return requestOpenAiImageGeneration(config, input);
+  if (effective.api === "openai-compatible") {
+    return requestOpenAiImageGeneration(effective, input);
   }
 
-  return requestAutomatic1111ImageGeneration(config, input);
+  return requestAutomatic1111ImageGeneration(effective, input);
+}
+
+/**
+ * Flatten a tier's overrides onto the base config.
+ *
+ * Only the quality tier can be redirected, because only it has a reason to be: the fast tier
+ * is the one whose protocol the deployment is built around. `model` becomes the plain
+ * `model` here so the chosen adapter needs no tier awareness at all — it is handed one
+ * backend and one model, exactly as if that were the only one configured.
+ */
+function resolveTierBackend(
+  config: ImageGenerationBackendConfig,
+  tier: ImageGenerationTier,
+): ImageGenerationBackendConfig {
+  const override = config.qualityBackend;
+  if (tier !== "quality" || !override) return config;
+  return {
+    ...config,
+    api: override.api ?? config.api,
+    baseUrl: override.baseUrl ?? config.baseUrl,
+    model: override.model ?? config.qualityModel ?? config.model,
+    // Cleared so the adapter cannot fall back to a tier alias this backend never heard of.
+    qualityModel: override.model ?? config.qualityModel,
+    ...(override.apiKey ? { apiKey: override.apiKey } : {}),
+    timeoutMs: override.timeoutMs ?? config.qualityTimeoutMs ?? config.timeoutMs,
+  };
 }
 
 /** Both tiers of the cluster endpoint run fixed-resolution pipelines. */
@@ -139,11 +178,11 @@ const OPENAI_IMAGE_SIZE = 1024;
  * returned, about 50% slower. A single global slot would park a 10-second fast request
  * behind a 140-second quality one for no hardware reason.
  *
- * Only the OpenAI-compatible adapter is gated. AUTOMATIC1111 and ComfyUI have their own
- * queueing and no measurement here says they serialize, and serializing a backend that
- * handles parallelism fine would be a self-inflicted slowdown.
+ * The AUTOMATIC1111 adapter is gated too, because the quality tier now runs through it and
+ * that is the device where serialising actually matters. ComfyUI is left alone: it has its
+ * own queue and nothing measured here says it serialises.
  */
-const openAiImageGates = createConcurrencyGateFamily(1);
+const imageGates = createConcurrencyGateFamily(1);
 
 /**
  * The ceiling for one model, read fresh on every call.
@@ -225,7 +264,7 @@ async function requestOpenAiImageGeneration(
   // that can be rejected locally — an unset quality model, a size this endpoint refuses —
   // has already thrown, so a config mistake still fails in milliseconds rather than after
   // waiting out someone else's generation.
-  const gate = openAiImageGates.for(model);
+  const gate = imageGates.for(model);
   gate.setLimit(concurrencyForModel(config, model));
   return gate.withSlot(
     () => sendOpenAiImageRequest(config, input, model, payload, timeoutMs),
@@ -305,6 +344,21 @@ async function requestAutomatic1111ImageGeneration(
     };
   }
 
+  // One in flight per model here as well: the quality tier reaches its device through this
+  // adapter, and that device generates serially.
+  const gateKey = model ?? config.baseUrl;
+  const gate = imageGates.for(gateKey);
+  gate.setLimit(concurrencyForModel(config, gateKey));
+  return gate.withSlot(() => sendAutomatic1111Request(config, input, model, payload));
+}
+
+/** The network half, run with a slot held. */
+async function sendAutomatic1111Request(
+  config: ImageGenerationBackendConfig,
+  input: ImageGenerationRequest,
+  model: string | undefined,
+  payload: Record<string, unknown>,
+): Promise<ImageGenerationResult> {
   const response = await fetchWithTimeout(
     upstreamUrl(config.baseUrl, "/sdapi/v1/txt2img"),
     {
