@@ -87,6 +87,15 @@
       // served 64x64 in 1.2s and 1024x768 in 91s. Listing both would refuse requests the
       // quality tier is happy to serve — which it already did once, for 1024x768.
       "fixedSizeModels": ["image"],
+      // Editing is LIVE on the quality tier. Verified against the endpoint: POST
+      // /v1/images/edits with `image` + `strength` returns usage.mode "img2img" and the
+      // applied strength, and a low strength really does stay close to the source (mean
+      // pixel distance 1.6 at 0.25 against 44.5 at 0.85). The fast tier is not listed
+      // because it has no edit route.
+      //
+      // The generations route now answers 400 "does not accept 'image'" rather than quietly
+      // rendering something new, so a mistake here is loud at both ends.
+      "initImageModels": ["image-quality"],
       // The tiers disagree about guidance and BOTH read the field, so one shared value is
       // wrong for one of them. Measured with the seed pinned so only guidance could vary:
       // the fast tier rendered differently at 1.0 than at 7.5, and the quality tier took 22 s

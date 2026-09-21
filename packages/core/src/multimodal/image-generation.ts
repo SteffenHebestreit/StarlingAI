@@ -389,16 +389,13 @@ async function requestOpenAiImageGeneration(
   // Extras the fast tier accepts. Sent only when the caller asked for them, so a backend
   // that ignores or rejects unknown fields is not handed any by default.
   if (input.initImage) {
-    // Sent under several names on purpose. This is an OpenAI-shaped endpoint with no
-    // standard field for a base image, and the shims that implement one do not agree: some
-    // take `image`, some `init_image`, some A1111's `init_images` array. Sending all three
-    // costs a few KB on a request that already carries a megabyte of PNG, and the
-    // alternative is a capability that works only against whichever name we guessed.
+    // ONE spelling. An earlier version sent `image`, `init_image` and `init_images` together
+    // because no shim agreed on the name; this endpoint settled on `image` and rejects
+    // unknown parameters by name rather than ignoring them, so guessing is now worse than
+    // useless. `strength` is likewise the single accepted spelling — not
+    // `denoising_strength`.
     payload["image"] = input.initImage;
-    payload["init_image"] = input.initImage;
-    payload["init_images"] = [input.initImage];
     payload["strength"] = input.strength ?? DEFAULT_EDIT_STRENGTH;
-    payload["denoising_strength"] = input.strength ?? DEFAULT_EDIT_STRENGTH;
   }
   if (input.negativePrompt) payload["negative_prompt"] = input.negativePrompt;
   if (typeof input.seed === "number") payload["seed"] = input.seed;
@@ -434,7 +431,10 @@ async function sendOpenAiImageRequest(
   let response: Response | undefined;
   for (let attempt = 0; ; attempt += 1) {
     response = await fetchWithTimeout(
-      upstreamUrl(config.baseUrl, "/images/generations"),
+      // Editing has its own route. Sending a reference to /images/generations returns
+      // 400 "does not accept 'image'. Use /v1/images/edits" — a good error, and one we
+      // should never provoke.
+      upstreamUrl(config.baseUrl, input.initImage ? "/images/edits" : "/images/generations"),
       {
         method: "POST",
         headers: upstreamHeaders(config.apiKey, { "Content-Type": "application/json" }),
@@ -455,7 +455,7 @@ async function sendOpenAiImageRequest(
   const body = await parseUpstreamJsonResponse(response, "Image generation returned a non-JSON response");
   const first = Array.isArray(body["data"]) && isRecord(body["data"][0]) ? body["data"][0] : undefined;
   const image = stripBase64Prefix(stringField(first?.["b64_json"]) ?? "");
-  assertEditWasApplied(input, image);
+  assertEditWasApplied(input, body);
   if (!image) {
     // Said explicitly rather than returning an empty success: a URL here would mean the
     // endpoint changed contract, and silently writing a zero-byte PNG is the worse failure.
@@ -825,49 +825,39 @@ function summarizeUpstreamText(value: string): string {
 }
 
 /**
- * Every PNG this backend produces carries a `tEXt` record of what actually generated it, so
- * an edit can be checked rather than assumed. If our `strength` did not land, the reference
- * did not either, and the picture is a fresh generation wearing an edit's name.
+ * Prove the base image was actually used, from what the ENGINE reports rather than what we
+ * asked for.
  *
- * Silent when the record is absent — some tiers emit none — because a missing record is not
- * evidence of anything. The allowlist above is what stops an unverifiable backend being
- * asked in the first place.
+ * The response carries `usage.mode` ("img2img" or "txt2img"), `usage.strength` — the value
+ * the sampler actually applied — and `usage.strength_requested`. A `txt2img` mode, or a
+ * missing strength, means the reference did not land and the picture is a fresh generation
+ * wearing an edit's name. That distinction is the whole safety property here: a user told
+ * three times that their image had been revised, when each round was an unrelated render,
+ * is the failure this exists to make impossible.
+ *
+ * Compared with a TOLERANCE, never for equality. The applied value is a float32 round-trip
+ * of what was sent: 0.35 comes back as 0.3499999940395355 and 0.85 likewise. An exact
+ * comparison would fail every edit whose strength is not representable, which is most of
+ * them.
  */
-function assertEditWasApplied(input: ResolvedImageRequest, imageBase64: string): void {
-  if (!input.initImage || !imageBase64) return;
-  const record = readGenerationRecord(imageBase64);
-  const applied = record && typeof record["strength"] === "number" ? record["strength"] : undefined;
-  if (applied === undefined) return;
-  const asked = input.strength ?? DEFAULT_EDIT_STRENGTH;
-  if (Math.abs(applied - asked) > 0.01) {
-    throw new Error(
-      `The backend ignored the base image: it reports strength ${applied} where ${asked} was sent,`
-      + " so the result is a fresh generation rather than an edit. Treat the edit as unavailable"
-      + " and do not present this as a continuation of the earlier image.",
-    );
-  }
-}
+function assertEditWasApplied(input: ResolvedImageRequest, body: Record<string, unknown>): void {
+  if (!input.initImage) return;
+  const usage = isRecord(body["usage"]) ? body["usage"] : undefined;
+  if (!usage) return; // A backend that reports nothing cannot be checked; the allowlist gates those.
 
-/** The SDCPP JSON out of a PNG's `tEXt` chunk, or undefined when there is none. */
-function readGenerationRecord(imageBase64: string): Record<string, unknown> | undefined {
-  try {
-    const buf = Buffer.from(imageBase64, "base64");
-    if (buf.length < 8) return undefined;
-    let offset = 8;
-    let text = "";
-    while (offset + 8 <= buf.length) {
-      const length = buf.readUInt32BE(offset);
-      const type = buf.toString("ascii", offset + 4, offset + 8);
-      if (type === "tEXt") text += buf.subarray(offset + 8, offset + 8 + length).toString("latin1");
-      if (type === "IEND") break;
-      offset += 12 + length;
-    }
-    const marker = text.indexOf("SDCPP:");
-    if (marker < 0) return undefined;
-    return JSON.parse(text.slice(marker + 6).trim()) as Record<string, unknown>;
-  } catch {
-    return undefined;
-  }
+  const mode = stringField(usage["mode"]);
+  const applied = numericField(usage["strength"]);
+  const asked = input.strength ?? DEFAULT_EDIT_STRENGTH;
+
+  if (mode === "img2img" && applied !== undefined && Math.abs(applied - asked) <= 0.01) return;
+
+  throw new Error(
+    "The backend did not apply the base image"
+    + `${mode ? ` (mode "${mode}"` : " (no mode reported"}`
+    + `${applied === undefined ? ", no strength reported" : `, strength ${applied} against ${asked} requested`})`
+    + ". The result is a fresh generation, not an edit — do not present it as a revision of the"
+    + " earlier image.",
+  );
 }
 
 function stripBase64Prefix(value: string): string {
