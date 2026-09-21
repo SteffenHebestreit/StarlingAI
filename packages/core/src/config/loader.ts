@@ -482,6 +482,20 @@ function mergeEnvOverrides(raw: Record<string, unknown>): Record<string, unknown
     const lms = (p["lmstudio"] as Record<string, unknown> | undefined) ?? {};
     raw["providers"] = { ...(p as object), lmstudio: { ...lms, baseUrl: primaryModelUrl } };
   }
+  // Image generation on the SAME OpenAI-compatible endpoint as chat.
+  //
+  // Only when the api is `openai-compatible`: a cluster that serves chat and images behind one
+  // base URL would otherwise carry that URL twice, and the copy that nobody moved is the one
+  // that breaks. An A1111 or ComfyUI deployment keeps its own endpoint untouched, and an
+  // explicitly configured baseUrl always wins over this.
+  if (primaryModelUrl) {
+    const mm = (raw["multimodal"] as Record<string, unknown> | undefined) ?? {};
+    const img = (mm["imageGeneration"] as Record<string, unknown> | undefined);
+    if (img && img["api"] === "openai-compatible" && !String(img["baseUrl"] ?? "").trim()) {
+      raw["multimodal"] = { ...(mm as object), imageGeneration: { ...img, baseUrl: primaryModelUrl } };
+    }
+  }
+
   // Primary provider API key — needed in general, not just for one engine (LM Studio uses a
   // placeholder, OpenRouter a real key, Ollama often none). SAI_PRIMARY_MODEL_KEY is canonical;
   // SAI_LMSTUDIO_API_KEY is the back-compat alias.

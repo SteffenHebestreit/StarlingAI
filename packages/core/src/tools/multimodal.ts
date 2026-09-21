@@ -342,7 +342,10 @@ registerTool({
 
 registerTool({
   name: "generate_image",
-  description: "Generate an image from a text prompt using the configured image-generation backend and save it to the workspace.",
+  description:
+    "Generate an image from a text prompt and save it to the workspace. Two tiers: `fast` (default, ~10s,"
+    + " costs the rest of the system nothing) and `quality` (~2 min, one at a time cluster-wide, slows every"
+    + " other model on that machine while it runs). Use `quality` only when the image is the deliverable.",
   embeddingDescription: "Generate, create, make an image, picture, illustration from a text prompt. Bild generieren, erzeugen, Illustration erstellen, KI-Bild aus Text. AI image generation, DALL-E style.",
   parameters: {
     type: "object",
@@ -355,6 +358,16 @@ registerTool({
       steps: { type: "number", description: "Number of diffusion steps (higher = better quality, slower)" },
       guidanceScale: { type: "number", description: "Guidance scale — how closely the model follows the prompt (default 5.0)" },
       seed: { type: "number", description: "Optional random seed for reproducible results" },
+      tier: {
+        type: "string",
+        enum: ["fast", "quality"],
+        description:
+          "Which generation tier to use. 'fast' (the default) takes about ten seconds and costs the rest of the"
+          + " system nothing. 'quality' takes about two minutes, can only run one at a time across the whole"
+          + " cluster, and slows every other model on that machine by roughly 70% while it runs. Ask for"
+          + " 'quality' only when the image IS the deliverable the user asked for — not for a draft, a"
+          + " placeholder, or something you intend to iterate on.",
+      },
       outputPath: { type: "string", description: "Optional relative output path inside the workspace for the generated PNG" },
     },
     required: ["prompt"],
@@ -383,9 +396,15 @@ registerTool({
         return fail(`Image generation service is offline (${config.baseUrl}). The endpoint is unavailable. Do not retry - inform the user.`);
       }
 
+      // The tier is a COST choice, so an unknown value falls back to the cheap one rather
+      // than to the one that serialises the cluster.
+      const tier = stringArg(args["tier"]) === "quality" ? "quality" as const : "fast" as const;
       const result = await requestImageGeneration(config, {
         prompt,
-        model: stringArg(args["model"]) ?? config.model,
+        tier,
+        // No `?? config.model` here: the backend resolves the tier's model itself, and
+        // defaulting to the fast model would silently turn a quality request into a fast one.
+        ...(stringArg(args["model"]) ? { model: stringArg(args["model"])! } : {}),
         negativePrompt: stringArg(args["negativePrompt"]) ?? config.defaultNegativePrompt,
         width: typeof args["width"] === "number" ? args["width"] : config.defaultWidth,
         height: typeof args["height"] === "number" ? args["height"] : config.defaultHeight,
@@ -418,6 +437,7 @@ registerTool({
           height: result.height,
           seed: result.seed,
           model: result.model,
+          tier,
           elapsedMs: result.elapsedMs,
         },
       };

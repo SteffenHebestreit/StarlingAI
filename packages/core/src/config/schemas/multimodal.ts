@@ -58,8 +58,32 @@ export const MultimodalTextToSpeechSchema = MultimodalServiceSchema.extend({
 
 export const MultimodalImageGenerationSchema = MultimodalServiceSchema.extend({
   baseUrl: OptionalEndpointUrlSchema.default(""),
-  api: z.enum(["automatic1111-compatible", "comfyui"]).default("automatic1111-compatible"),
+  /**
+   * `openai-compatible` targets `POST {baseUrl}/images/generations` and expects base64 in
+   * `b64_json` — there is no file host behind such an endpoint, so a response carrying a URL
+   * is treated as a contract change rather than a success.
+   */
+  api: z.enum(["automatic1111-compatible", "comfyui", "openai-compatible"]).default("automatic1111-compatible"),
+  /** The default model: the FAST tier where a backend offers more than one. */
   model: z.string().min(1).optional(),
+  /**
+   * The slow, higher-fidelity tier, when the backend has one.
+   *
+   * Left unset unless a deployment really has a second tier, because the choice is a cost
+   * decision and not a quality dial. On the cluster this was written for, the quality tier
+   * takes about 120 s against the fast tier's 10 s, runs on the worker station's graphics
+   * chip, drops that station's chat throughput by roughly 70% while it runs, and serialises
+   * cluster-wide. A turn that picks it is spending everyone else's latency.
+   */
+  qualityModel: z.string().min(1).optional(),
+  /**
+   * Wall clock for the quality tier. Separate from `timeoutMs` so the fast tier is not made
+   * to hang for minutes on a stalled request.
+   *
+   * The documented worst case is 150 s of generation plus about 25 s of weight reload after
+   * ten minutes idle, so anything under ~180 s abandons requests that were going to succeed.
+   */
+  qualityTimeoutMs: z.number().int().min(10_000).max(600_000).default(210_000),
   defaultWidth: z.number().int().min(256).max(2048).default(1024),
   defaultHeight: z.number().int().min(256).max(2048).default(1024),
   defaultSteps: z.number().int().min(1).max(100).default(28),

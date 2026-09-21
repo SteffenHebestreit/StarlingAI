@@ -1,7 +1,18 @@
 import { randomUUID } from "node:crypto";
 import { extname } from "node:path";
 
-export type ImageGenerationApi = "automatic1111-compatible" | "comfyui";
+export type ImageGenerationApi = "automatic1111-compatible" | "comfyui" | "openai-compatible";
+
+/**
+ * Which tier a request asks for, on a backend that offers more than one.
+ *
+ * Not a quality knob — a COST knob. On the cluster this was written against the two tiers
+ * differ by more than ten times in wall clock, and the slow one runs on the worker station's
+ * graphics chip and drops that station's chat throughput by about 70% while it runs, one
+ * generation at a time cluster-wide. So a caller asking for "quality" is spending someone
+ * else's latency, and the choice belongs in the request rather than in a default.
+ */
+export type ImageGenerationTier = "fast" | "quality";
 
 export interface ImageGenerationBackendConfig {
   api: ImageGenerationApi;
@@ -9,6 +20,10 @@ export interface ImageGenerationBackendConfig {
   apiKey?: string;
   timeoutMs: number;
   model?: string;
+  /** Model id for the slow, higher-fidelity tier. Absent means the backend has only one. */
+  qualityModel?: string;
+  /** Wall-clock bound for the quality tier, which is far longer than the fast one. */
+  qualityTimeoutMs?: number;
 }
 
 export interface ImageGenerationRequest {
@@ -20,6 +35,7 @@ export interface ImageGenerationRequest {
   guidanceScale: number;
   seed?: number;
   model?: string;
+  tier?: ImageGenerationTier;
 }
 
 export interface ImageGenerationHealth {
@@ -55,7 +71,11 @@ export async function checkImageGenerationHealth(config: ImageGenerationBackendC
     return { ok: false, disabled: true, error: "Disabled: no image generation endpoint configured." };
   }
 
-  const path = config.api === "comfyui" ? "/system_stats" : "/sdapi/v1/sd-models";
+  const path = config.api === "comfyui"
+    ? "/system_stats"
+    // An OpenAI-compatible endpoint has no /sdapi; `/models` is its own liveness check and
+    // the doc calls it authoritative, so a tier that has been unloaded still answers here.
+    : config.api === "openai-compatible" ? "/models" : "/sdapi/v1/sd-models";
   try {
     const response = await fetchWithTimeout(
       upstreamUrl(config.baseUrl, path),
@@ -70,7 +90,7 @@ export async function checkImageGenerationHealth(config: ImageGenerationBackendC
     return {
       ok: false,
       status: response.status,
-      error: await extractUpstreamError(response, `Upstream returned HTTP ${response.status}`),
+      error: await extractUpstreamError(response, "Upstream rejected the health probe"),
     };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
@@ -89,7 +109,113 @@ export async function requestImageGeneration(
     return requestComfyUiImageGeneration(config, input);
   }
 
+  if (config.api === "openai-compatible") {
+    return requestOpenAiImageGeneration(config, input);
+  }
+
   return requestAutomatic1111ImageGeneration(config, input);
+}
+
+/** Both tiers of the cluster endpoint run fixed-resolution pipelines. */
+const OPENAI_IMAGE_SIZE = 1024;
+
+/**
+ * OpenAI-compatible `POST /v1/images/generations`.
+ *
+ * Three things about this contract are not the OpenAI default and each one has bitten a
+ * client that assumed otherwise:
+ *
+ *  - The response carries base64 in `b64_json`, never a URL. There is no file host behind
+ *    the endpoint, so a client that reads `data[0].url` gets undefined and reports success.
+ *  - The resolution is FIXED. Any other `size` is rejected rather than quietly resampled, so
+ *    a width the caller asked for is refused here with the reason rather than sent to fail.
+ *  - The quality tier needs up to 150 s, and after ten minutes idle it reloads its weights
+ *    first, adding about 25 s. A 30 s client default — which many are — abandons a request
+ *    that was going to succeed.
+ */
+async function requestOpenAiImageGeneration(
+  config: ImageGenerationBackendConfig,
+  input: ImageGenerationRequest,
+): Promise<ImageGenerationResult> {
+  const tier: ImageGenerationTier = input.tier ?? "fast";
+  const model = input.model
+    ?? (tier === "quality" ? config.qualityModel ?? config.model : config.model);
+  if (!model) {
+    throw new Error(
+      "No image model configured. Set multimodal.imageGeneration.model (and qualityModel for the slow tier).",
+    );
+  }
+  if (tier === "quality" && !config.qualityModel && !input.model) {
+    throw new Error(
+      "The quality tier was requested but multimodal.imageGeneration.qualityModel is not set."
+      + " Configure it, or generate on the fast tier.",
+    );
+  }
+
+  if (input.width !== OPENAI_IMAGE_SIZE || input.height !== OPENAI_IMAGE_SIZE) {
+    throw new Error(
+      `This backend generates ${OPENAI_IMAGE_SIZE}x${OPENAI_IMAGE_SIZE} only and rejects any other size`
+      + ` (asked for ${input.width}x${input.height}). Generate at ${OPENAI_IMAGE_SIZE}x${OPENAI_IMAGE_SIZE}`
+      + " and resize afterwards if a different shape is needed.",
+    );
+  }
+
+  const payload: Record<string, unknown> = {
+    model,
+    prompt: input.prompt,
+    n: 1,
+    size: `${OPENAI_IMAGE_SIZE}x${OPENAI_IMAGE_SIZE}`,
+    response_format: "b64_json",
+  };
+  // Extras the fast tier accepts. Sent only when the caller asked for them, so a backend
+  // that ignores or rejects unknown fields is not handed any by default.
+  if (input.negativePrompt) payload["negative_prompt"] = input.negativePrompt;
+  if (typeof input.seed === "number") payload["seed"] = input.seed;
+  if (typeof input.steps === "number") payload["steps"] = input.steps;
+  if (typeof input.guidanceScale === "number") payload["guidance_scale"] = input.guidanceScale;
+
+  const timeoutMs = tier === "quality"
+    ? config.qualityTimeoutMs ?? Math.max(config.timeoutMs, 200_000)
+    : config.timeoutMs;
+
+  const startedAt = Date.now();
+  const response = await fetchWithTimeout(
+    upstreamUrl(config.baseUrl, "/images/generations"),
+    {
+      method: "POST",
+      headers: upstreamHeaders(config.apiKey, { "Content-Type": "application/json" }),
+      body: JSON.stringify(payload),
+    },
+    timeoutMs,
+  );
+
+  if (!response.ok) {
+    throw new Error(await extractUpstreamError(response, `Image generation failed (${model})`));
+  }
+
+  const body = await parseUpstreamJsonResponse(response, "Image generation returned a non-JSON response");
+  const first = Array.isArray(body["data"]) && isRecord(body["data"][0]) ? body["data"][0] : undefined;
+  const image = stripBase64Prefix(stringField(first?.["b64_json"]) ?? "");
+  if (!image) {
+    // Said explicitly rather than returning an empty success: a URL here would mean the
+    // endpoint changed contract, and silently writing a zero-byte PNG is the worse failure.
+    throw new Error(
+      first?.["url"]
+        ? "Image generation returned a URL instead of base64; this endpoint has no file host behind it."
+        : "Image generation service returned no image data",
+    );
+  }
+
+  return {
+    imageBase64: image,
+    mimeType: "image/png",
+    extension: ".png",
+    width: OPENAI_IMAGE_SIZE,
+    height: OPENAI_IMAGE_SIZE,
+    ...(typeof input.seed === "number" ? { seed: input.seed } : {}),
+    model,
+    elapsedMs: Date.now() - startedAt,
+  };
 }
 
 async function requestAutomatic1111ImageGeneration(
@@ -336,28 +462,66 @@ async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: numbe
   }
 }
 
+/** Keys an upstream might hang its message on, in the order we prefer them. */
+const UPSTREAM_DETAIL_KEYS = ["detail", "error", "message", "exception_message"] as const;
+
+/**
+ * Dig a human-readable message out of an error body, following nested `error` objects.
+ *
+ * The flat lookup this replaces stopped at the first hit and required it to be a string, so
+ * an OpenAI-shaped `{"error": {"message": ...}}` — which is what both llama-swap and the
+ * OpenAI API itself send — yielded an object, failed the string test, and lost the message.
+ */
+function findUpstreamDetail(value: unknown, depth = 0): string | undefined {
+  if (typeof value === "string") return value.trim() || undefined;
+  if (depth >= 4 || !isRecord(value)) return undefined;
+  for (const key of UPSTREAM_DETAIL_KEYS) {
+    if (!(key in value)) continue;
+    const found = findUpstreamDetail(value[key], depth + 1);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/**
+ * The upstream's own words about a failure, plus the status that carried them.
+ *
+ * This used to return the bare `fallback` whenever a JSON body's detail was not a string,
+ * which is exactly the shape a llama-swap gateway sends:
+ *
+ *   {"src":"llama-swap","error":{"message":"peer proxy error: net/http: timeout awaiting
+ *    response headers","type":"server_error","code":"bad_gateway"}}
+ *
+ * So a 502 carrying a precise diagnostic reached the agent as "Image generation failed
+ * (image)" and the log learned nothing at all. That distinction is not cosmetic: a proxy
+ * that never got response headers is a different failure from a model that refused the
+ * prompt, and only one of them is ours to fix.
+ *
+ * The body is read as text first and parsed afterwards, so a JSON error served with the
+ * wrong content-type — common from proxies and error pages — is still mined rather than
+ * truncated to a generic sentence. When nothing parses, the raw text is the evidence.
+ */
 async function extractUpstreamError(response: Response, fallback: string): Promise<string> {
-  const contentType = response.headers.get("content-type") ?? "";
+  const status = `HTTP ${response.status}`;
 
+  let text: string;
   try {
-    if (contentType.includes("application/json")) {
-      const body = await response.json() as Record<string, unknown>;
-      const detail = body["detail"] ?? body["error"] ?? body["message"] ?? body["exception_message"];
-      if (typeof detail === "string" && detail.trim()) {
-        return detail.trim();
-      }
-      return fallback;
-    }
-
-    const text = await response.text();
-    if (text.trim()) {
-      return `${fallback}: ${summarizeUpstreamText(text)}`;
-    }
-  } catch {
-    // Ignore parse failures and fall back to the generic message.
+    text = await response.text();
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return `${fallback} (${status}, body unreadable: ${detail})`;
   }
 
-  return fallback;
+  if (!text.trim()) return `${fallback} (${status}, empty body)`;
+
+  let detail: string | undefined;
+  try {
+    detail = findUpstreamDetail(JSON.parse(text) as unknown);
+  } catch {
+    // Not JSON. The raw text is still the best evidence we have, so fall through to it.
+  }
+
+  return `${fallback} (${status}): ${summarizeUpstreamText(detail ?? text)}`;
 }
 
 async function parseUpstreamJsonResponse(response: Response, fallback: string): Promise<Record<string, unknown>> {

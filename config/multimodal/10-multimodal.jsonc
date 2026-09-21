@@ -45,13 +45,35 @@
       "defaultQuality": "medium",
       "timeoutMs": 60000
     },
+    // Two tiers behind one OpenAI-compatible endpoint, POST {baseUrl}/images/generations.
+    // The response carries base64 in `b64_json` — there is no file host behind it — and both
+    // tiers run FIXED at 1024x1024, rejecting any other size rather than resampling.
+    //
+    // The tiers are a cost choice, not a quality dial:
+    //   image          ~10 s, neural accelerator, costs the chat models nothing measurable
+    //   image-quality  ~120 s (up to 150 s, plus ~25 s to reload weights after 10 min idle),
+    //                  worker station's graphics chip, drops that station's chat throughput
+    //                  by ~70% while it runs, one at a time cluster-wide
+    //
+    // `generate_image` defaults to the fast tier; an agent must ask for `tier: "quality"`,
+    // and the tool description says what that spends.
     "imageGeneration": {
+      // Left EMPTY on purpose: with api "openai-compatible" the loader fills it from
+      // SAI_PRIMARY_MODEL_URL, the same variable the chat provider follows, so the two
+      // cannot drift. Set it here to point images somewhere else.
       "baseUrl": "",
-      "api": "automatic1111-compatible",
+      "api": "openai-compatible",
+      "model": "image",
+      "qualityModel": "image-quality",
+      // Generous for a ~10 s tier: the cluster serialises image requests, so a second caller
+      // waits in a queue rather than failing, and that wait is part of this budget.
       "timeoutMs": 120000,
+      // 150 s worst case + ~25 s weight reload + margin. Below ~180 s this abandons requests
+      // that were going to succeed.
+      "qualityTimeoutMs": 210000,
       "defaultWidth": 1024,
       "defaultHeight": 1024,
-      "defaultSteps": 28,
+      "defaultSteps": 20,
       "defaultGuidanceScale": 7
     },
     "wakeWord": {
