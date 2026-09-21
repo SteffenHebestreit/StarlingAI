@@ -29,6 +29,8 @@ const CLUSTER: ImageGenerationBackendConfig = {
   qualityModel: "image-quality",
   timeoutMs: 120_000,
   qualityTimeoutMs: 210_000,
+  // Only the NPU tier is fixed-resolution; measured, the quality tier serves any size.
+  fixedSizeModels: ["image"],
 };
 
 // steps/guidanceScale are required by ImageGenerationRequest; the values are irrelevant
@@ -132,17 +134,18 @@ describe("image generation concurrency", () => {
   });
 
   it("rejects an invalid request IMMEDIATELY instead of queueing it behind a generation", async () => {
-    // Validation sits before the slot for this reason. A size this endpoint refuses is
-    // knowable without the network, and making it wait out someone else's 140-second image
-    // before saying so would be a worse answer delivered later.
+    // Validation sits before the slot for this reason. A size the fast tier refuses is
+    // knowable without the network, and making it wait out an in-flight image before saying
+    // so would be a worse answer delivered later. Same MODEL on both calls, so the second
+    // would genuinely queue if the guard ran after the slot.
     const net = blockingFetch();
 
-    const running = requestImageGeneration(CLUSTER, { ...SQUARE, tier: "quality" });
+    const running = requestImageGeneration(CLUSTER, { ...SQUARE, tier: "fast" });
     await settle();
     expect(net.started()).toBe(1);
 
     await expect(
-      requestImageGeneration(CLUSTER, { ...SQUARE, width: 512, height: 512, tier: "quality" }),
+      requestImageGeneration(CLUSTER, { ...SQUARE, width: 512, height: 512, tier: "fast" }),
     ).rejects.toThrow(/1024x1024 only/);
 
     // And it never touched the network: the rejection is local.
@@ -150,6 +153,27 @@ describe("image generation concurrency", () => {
 
     await net.drain();
     await running;
+  });
+
+  it("does NOT impose the fixed size on a model that accepts other shapes", async () => {
+    // The control that keeps the guard honest. Measured against the live endpoint, the
+    // quality tier served 64x64 in 1.2s and 1024x768 in 91s, while the NPU tier answers
+    // HTTP 502 in ~13ms for anything but 1024x1024. One rule for both refused a 1024x768
+    // the backend would have served — which is exactly what happened in production.
+    const net = blockingFetch();
+
+    const run = requestImageGeneration(CLUSTER, { ...SQUARE, width: 1024, height: 768, tier: "quality" });
+    await settle();
+
+    expect(net.started(), "the quality tier should have been called, not refused").toBe(1);
+    const body = JSON.parse(String(net.fetchMock.mock.calls[0]![1]?.body)) as { size: string };
+    // And the size asked for is the size sent — not silently rewritten to the square.
+    expect(body.size).toBe("1024x768");
+
+    await net.drain();
+    const result = await run;
+    expect(result.width).toBe(1024);
+    expect(result.height).toBe(768);
   });
 
   it("follows the CONFIGURED ceiling, because the device count is deployment-specific", async () => {

@@ -28,6 +28,8 @@ export interface ImageGenerationBackendConfig {
   /** How many generations may run at once for a model. Hardware-dependent; see the schema. */
   maxConcurrent?: number;
   maxConcurrentPerModel?: Record<string, number>;
+  /** Models that generate one fixed resolution and reject anything else. */
+  fixedSizeModels?: string[];
 }
 
 export interface ImageGenerationRequest {
@@ -189,11 +191,15 @@ async function requestOpenAiImageGeneration(
     );
   }
 
-  if (input.width !== OPENAI_IMAGE_SIZE || input.height !== OPENAI_IMAGE_SIZE) {
+  // Only the models that actually refuse other sizes. Measured: the NPU tier answers HTTP
+  // 502 in ~13ms for anything but 1024x1024, while the iGPU tier served 64x64 in 1.2s and
+  // 1024x768 in 91s. Guarding both alike refused a request the backend would have served.
+  if (config.fixedSizeModels?.includes(model)
+    && (input.width !== OPENAI_IMAGE_SIZE || input.height !== OPENAI_IMAGE_SIZE)) {
     throw new Error(
-      `This backend generates ${OPENAI_IMAGE_SIZE}x${OPENAI_IMAGE_SIZE} only and rejects any other size`
-      + ` (asked for ${input.width}x${input.height}). Generate at ${OPENAI_IMAGE_SIZE}x${OPENAI_IMAGE_SIZE}`
-      + " and resize afterwards if a different shape is needed.",
+      `The ${model} model generates ${OPENAI_IMAGE_SIZE}x${OPENAI_IMAGE_SIZE} only and rejects any other`
+      + ` size (asked for ${input.width}x${input.height}). Generate at`
+      + ` ${OPENAI_IMAGE_SIZE}x${OPENAI_IMAGE_SIZE}, or use a tier that accepts other shapes.`,
     );
   }
 
@@ -201,7 +207,7 @@ async function requestOpenAiImageGeneration(
     model,
     prompt: input.prompt,
     n: 1,
-    size: `${OPENAI_IMAGE_SIZE}x${OPENAI_IMAGE_SIZE}`,
+    size: `${input.width}x${input.height}`,
     response_format: "b64_json",
   };
   // Extras the fast tier accepts. Sent only when the caller asked for them, so a backend
@@ -268,8 +274,8 @@ async function sendOpenAiImageRequest(
     imageBase64: image,
     mimeType: "image/png",
     extension: ".png",
-    width: OPENAI_IMAGE_SIZE,
-    height: OPENAI_IMAGE_SIZE,
+    width: input.width,
+    height: input.height,
     ...(typeof input.seed === "number" ? { seed: input.seed } : {}),
     model,
     elapsedMs: Date.now() - startedAt,

@@ -102,6 +102,21 @@ export const MultimodalImageGenerationSchema = MultimodalServiceSchema.extend({
   maxConcurrent: z.number().int().min(1).max(16).default(1),
   /** Per-model override of `maxConcurrent`, keyed by the model id sent upstream. */
   maxConcurrentPerModel: z.record(z.string(), z.number().int().min(1).max(16)).default({}),
+  /**
+   * Models that generate ONE fixed resolution and reject anything else.
+   *
+   * Measured rather than assumed, because the two tiers on this cluster disagree. The NPU
+   * tier (`image`) answers HTTP 502 in about 13 ms for any size but 1024x1024 — an ugly
+   * rejection, but a rejection, and worth catching locally so the caller gets a reason
+   * instead of a bad gateway. The iGPU tier (`image-quality`, Qwen-Image via
+   * stable-diffusion.cpp) accepts whatever it is given: 64x64 came back in 1.2 s and
+   * 1024x768 in 91 s.
+   *
+   * Applying one rule to both was wrong in the expensive direction: an agent asked for
+   * 1024x768 on the quality tier and this client refused a request the backend would have
+   * served.
+   */
+  fixedSizeModels: z.array(z.string()).default([]),
   defaultWidth: z.number().int().min(256).max(2048).default(1024),
   defaultHeight: z.number().int().min(256).max(2048).default(1024),
   defaultSteps: z.number().int().min(1).max(100).default(28),

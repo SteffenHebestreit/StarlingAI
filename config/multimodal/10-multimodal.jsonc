@@ -81,6 +81,11 @@
       //
       // Raise "image" if the cluster gains stations; this is a count of devices, not a taste.
       "maxConcurrentPerModel": { "image": 2 },
+      // Only the NPU tier is fixed-resolution. Measured against the live endpoint:
+      // `image` answers HTTP 502 in ~13ms for any size but 1024x1024, while `image-quality`
+      // served 64x64 in 1.2s and 1024x768 in 91s. Listing both would refuse requests the
+      // quality tier is happy to serve — which it already did once, for 1024x768.
+      "fixedSizeModels": ["image"],
       "defaultWidth": 1024,
       "defaultHeight": 1024,
       "defaultSteps": 20,
