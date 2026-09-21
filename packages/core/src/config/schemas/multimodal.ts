@@ -118,6 +118,21 @@ export const MultimodalImageGenerationSchema = MultimodalServiceSchema.extend({
    */
   fixedSizeModels: z.array(z.string()).default([]),
   /**
+   * Models whose backend genuinely honours a base image, for "change this picture" rather
+   * than "make a new one". EMPTY by default, which disables editing.
+   *
+   * An allowlist, because the endpoint measured here accepts a reference image under six
+   * different field names with HTTP 200 and ignores all of them — so an attempt returns a
+   * brand-new unrelated picture that looks like a successful edit. A user asked three times
+   * to continue from an earlier render and got three unrelated beaches, losing the palms
+   * they had asked to keep. Refusing is the honest answer until a route exists.
+   *
+   * To enable: expose a reference image on the generation route (or A1111's
+   * POST /sdapi/v1/img2img with `init_images` + `denoising_strength`), then list the model
+   * here. The client already sends both shapes.
+   */
+  initImageModels: z.array(z.string()).default([]),
+  /**
    * Generation defaults for the QUALITY tier, where they differ from the fast tier's.
    *
    * They do differ, and one value for both is actively harmful. Measured against the live

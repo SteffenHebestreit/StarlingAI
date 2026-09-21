@@ -382,6 +382,23 @@ registerTool({
           + " request like 'make me a picture of a sunset' is 'fast', and so is any request that asks for it"
           + " quickly.",
       },
+      baseImage: {
+        type: "string",
+        description:
+          "Relative workspace path to an existing image to EDIT rather than replace. Use this"
+          + " whenever the user asks to change, continue, fix or build on a picture that already"
+          + " exists — without it every request is a brand-new image that keeps nothing from the"
+          + " last one, so elements the user asked to preserve will simply disappear. If the"
+          + " backend cannot edit, this fails with a clear message: report that honestly instead"
+          + " of passing a fresh generation off as a revision.",
+      },
+      strength: {
+        type: "number",
+        description:
+          "With `baseImage`, how far the result may move from it, 0 to 1. Low (0.2-0.35) keeps the"
+          + " composition and changes style or detail; high (0.6-0.8) keeps only the rough layout."
+          + " Defaults to a middling value.",
+      },
       outputPath: { type: "string", description: "Optional relative output path inside the workspace for the generated PNG" },
     },
     required: ["prompt"],
@@ -418,6 +435,21 @@ registerTool({
       // at guidance 1.0 than at 7.5, and the quality tier costs 22s at guidance 4 against
       // 11s at 1.0 because its model carries embedded guidance and true CFG doubles the
       // forward passes. One shared default is wrong for one of them whichever value it takes.
+      // Read the base image before anything else touches the backend, so a bad path fails
+      // immediately rather than after a two-minute render.
+      let baseImageBase64: string | undefined;
+      const baseImagePath = stringArg(args["baseImage"]);
+      if (baseImagePath) {
+        try {
+          const baseFile = await readWorkspaceBinaryFile(baseImagePath, ctx.workspacePath);
+          baseImageBase64 = Buffer.from(baseFile.bytes).toString("base64");
+        } catch (error) {
+          return fail(
+            `Could not read baseImage "${baseImagePath}": ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+
       const result = await requestImageGeneration(config, {
         prompt,
         tier,
@@ -431,6 +463,8 @@ registerTool({
         ...(typeof args["steps"] === "number" ? { steps: args["steps"] } : {}),
         ...(typeof args["guidanceScale"] === "number" ? { guidanceScale: args["guidanceScale"] } : {}),
         ...(typeof args["seed"] === "number" ? { seed: args["seed"] } : {}),
+        ...(baseImageBase64 ? { initImage: baseImageBase64 } : {}),
+        ...(typeof args["strength"] === "number" ? { strength: args["strength"] } : {}),
       });
 
       const imageBytes = Buffer.from(result.imageBase64, "base64");

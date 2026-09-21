@@ -30,6 +30,17 @@ export interface ImageGenerationBackendConfig {
   maxConcurrentPerModel?: Record<string, number>;
   /** Models that generate one fixed resolution and reject anything else. */
   fixedSizeModels?: string[];
+  /**
+   * Models whose backend actually honours a base image. EMPTY means no model does.
+   *
+   * An allowlist rather than an attempt, because the failure mode of guessing is the worst
+   * one available here: the endpoint measured today accepts `image`, `init_image`,
+   * `init_images`, `reference_image`, `ref_images` and `image_b64` with HTTP 200 and ignores
+   * every one of them. So "edit this image" would return a brand-new unrelated picture and
+   * look like it worked — which is exactly what happened to a user asking three times to
+   * continue from a previous render, and getting three unrelated beaches.
+   */
+  initImageModels?: string[];
   defaultWidth?: number;
   defaultHeight?: number;
   defaultSteps?: number;
@@ -71,6 +82,22 @@ export interface ImageGenerationRequest {
   seed?: number;
   model?: string;
   tier?: ImageGenerationTier;
+  /**
+   * A base image to work FROM, as bare base64 (no data: prefix).
+   *
+   * Without this there is no iteration: "make it photorealistic" and "now add the palms"
+   * each produce a brand-new picture that shares nothing with the last one but the words.
+   * That is what happened live — three rounds of "continue from the previous image" returned
+   * three unrelated beaches, and the palms the user asked to keep were gone by round two.
+   */
+  initImage?: string;
+  /**
+   * How far the result may move from `initImage`, in [0,1]. 0 keeps it, 1 ignores it.
+   *
+   * Same sense as stable-diffusion.cpp's own `strength` and A1111's `denoising_strength`,
+   * so the number means one thing across the adapters.
+   */
+  strength?: number;
 }
 
 /** A request after defaults are applied — what every adapter actually receives. */
@@ -81,6 +108,9 @@ interface ResolvedImageRequest extends ImageGenerationRequest {
   steps: number;
   guidanceScale: number;
 }
+
+/** Default for how far an edit may move from its base: a visible change that still recognisably follows it. */
+const DEFAULT_EDIT_STRENGTH = 0.45;
 
 export interface ImageGenerationHealth {
   ok: boolean;
@@ -150,6 +180,26 @@ export async function requestImageGeneration(
   }
 
   const request = resolveImageRequest(config, input);
+
+  // Refuse an edit the backend cannot perform, instead of returning something unrelated.
+  //
+  // Silence is the danger here: the endpoint returns 200 for a reference field it discards,
+  // so without this the caller receives a fresh image and reports it as an iteration. An
+  // agent told honestly that editing is unavailable can say so, or start over deliberately;
+  // one handed a plausible wrong answer cannot.
+  if (request.initImage) {
+    const target = request.model
+      ?? (request.tier === "quality" ? config.qualityModel ?? config.model : config.model)
+      ?? "";
+    if (!config.initImageModels?.includes(target)) {
+      throw new Error(
+        `This backend cannot edit an existing image: ${target || "the configured model"} is not in`
+        + " multimodal.imageGeneration.initImageModels. Generate a new image from a full prompt"
+        + " instead, and say plainly that the previous one could not be used as a base —"
+        + " do NOT present a fresh generation as an edit of an earlier one.",
+      );
+    }
+  }
 
   // The tier can point at an entirely different backend, so it is resolved BEFORE the
   // protocol is chosen — otherwise the quality tier would be dispatched by the fast tier's
@@ -338,6 +388,18 @@ async function requestOpenAiImageGeneration(
   };
   // Extras the fast tier accepts. Sent only when the caller asked for them, so a backend
   // that ignores or rejects unknown fields is not handed any by default.
+  if (input.initImage) {
+    // Sent under several names on purpose. This is an OpenAI-shaped endpoint with no
+    // standard field for a base image, and the shims that implement one do not agree: some
+    // take `image`, some `init_image`, some A1111's `init_images` array. Sending all three
+    // costs a few KB on a request that already carries a megabyte of PNG, and the
+    // alternative is a capability that works only against whichever name we guessed.
+    payload["image"] = input.initImage;
+    payload["init_image"] = input.initImage;
+    payload["init_images"] = [input.initImage];
+    payload["strength"] = input.strength ?? DEFAULT_EDIT_STRENGTH;
+    payload["denoising_strength"] = input.strength ?? DEFAULT_EDIT_STRENGTH;
+  }
   if (input.negativePrompt) payload["negative_prompt"] = input.negativePrompt;
   if (typeof input.seed === "number") payload["seed"] = input.seed;
   if (typeof input.steps === "number") payload["steps"] = input.steps;
@@ -393,6 +455,7 @@ async function sendOpenAiImageRequest(
   const body = await parseUpstreamJsonResponse(response, "Image generation returned a non-JSON response");
   const first = Array.isArray(body["data"]) && isRecord(body["data"][0]) ? body["data"][0] : undefined;
   const image = stripBase64Prefix(stringField(first?.["b64_json"]) ?? "");
+  assertEditWasApplied(input, image);
   if (!image) {
     // Said explicitly rather than returning an empty success: a URL here would mean the
     // endpoint changed contract, and silently writing a zero-byte PNG is the worse failure.
@@ -431,6 +494,11 @@ async function requestAutomatic1111ImageGeneration(
     send_images: true,
     save_images: false,
   };
+  // An edit is a different ENDPOINT in this protocol, not a flag on the same one.
+  if (input.initImage) {
+    payload["init_images"] = [input.initImage];
+    payload["denoising_strength"] = input.strength ?? DEFAULT_EDIT_STRENGTH;
+  }
 
   if (model) {
     payload["override_settings"] = {
@@ -454,7 +522,7 @@ async function sendAutomatic1111Request(
   payload: Record<string, unknown>,
 ): Promise<ImageGenerationResult> {
   const response = await fetchWithTimeout(
-    upstreamUrl(config.baseUrl, "/sdapi/v1/txt2img"),
+    upstreamUrl(config.baseUrl, input.initImage ? "/sdapi/v1/img2img" : "/sdapi/v1/txt2img"),
     {
       method: "POST",
       headers: upstreamHeaders(config.apiKey, { "Content-Type": "application/json" }),
@@ -754,6 +822,52 @@ function summarizeUpstreamText(value: string): string {
   const collapsed = value.replace(/\s+/g, " ").trim();
   if (!collapsed) return "empty response";
   return collapsed.length > 240 ? `${collapsed.slice(0, 237)}...` : collapsed;
+}
+
+/**
+ * Every PNG this backend produces carries a `tEXt` record of what actually generated it, so
+ * an edit can be checked rather than assumed. If our `strength` did not land, the reference
+ * did not either, and the picture is a fresh generation wearing an edit's name.
+ *
+ * Silent when the record is absent — some tiers emit none — because a missing record is not
+ * evidence of anything. The allowlist above is what stops an unverifiable backend being
+ * asked in the first place.
+ */
+function assertEditWasApplied(input: ResolvedImageRequest, imageBase64: string): void {
+  if (!input.initImage || !imageBase64) return;
+  const record = readGenerationRecord(imageBase64);
+  const applied = record && typeof record["strength"] === "number" ? record["strength"] : undefined;
+  if (applied === undefined) return;
+  const asked = input.strength ?? DEFAULT_EDIT_STRENGTH;
+  if (Math.abs(applied - asked) > 0.01) {
+    throw new Error(
+      `The backend ignored the base image: it reports strength ${applied} where ${asked} was sent,`
+      + " so the result is a fresh generation rather than an edit. Treat the edit as unavailable"
+      + " and do not present this as a continuation of the earlier image.",
+    );
+  }
+}
+
+/** The SDCPP JSON out of a PNG's `tEXt` chunk, or undefined when there is none. */
+function readGenerationRecord(imageBase64: string): Record<string, unknown> | undefined {
+  try {
+    const buf = Buffer.from(imageBase64, "base64");
+    if (buf.length < 8) return undefined;
+    let offset = 8;
+    let text = "";
+    while (offset + 8 <= buf.length) {
+      const length = buf.readUInt32BE(offset);
+      const type = buf.toString("ascii", offset + 4, offset + 8);
+      if (type === "tEXt") text += buf.subarray(offset + 8, offset + 8 + length).toString("latin1");
+      if (type === "IEND") break;
+      offset += 12 + length;
+    }
+    const marker = text.indexOf("SDCPP:");
+    if (marker < 0) return undefined;
+    return JSON.parse(text.slice(marker + 6).trim()) as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
 }
 
 function stripBase64Prefix(value: string): string {
