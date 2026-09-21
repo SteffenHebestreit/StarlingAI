@@ -413,17 +413,25 @@ registerTool({
       // The tier is a COST choice, so an unknown value falls back to the cheap one rather
       // than to the one that serialises the cluster.
       const tier = stringArg(args["tier"]) === "quality" ? "quality" as const : "fast" as const;
+      // The tiers want DIFFERENT sampling defaults and both read the fields. Measured with
+      // the seed pinned so only the parameter could vary: the fast tier renders differently
+      // at guidance 1.0 than at 7.5, and the quality tier costs 22s at guidance 4 against
+      // 11s at 1.0 because its model carries embedded guidance and true CFG doubles the
+      // forward passes. One shared default is wrong for one of them whichever value it takes.
+      const tierDefaults = tier === "quality" ? config.qualityDefaults : undefined;
       const result = await requestImageGeneration(config, {
         prompt,
         tier,
         // No `?? config.model` here: the backend resolves the tier's model itself, and
         // defaulting to the fast model would silently turn a quality request into a fast one.
         ...(stringArg(args["model"]) ? { model: stringArg(args["model"])! } : {}),
-        negativePrompt: stringArg(args["negativePrompt"]) ?? config.defaultNegativePrompt,
+        negativePrompt: stringArg(args["negativePrompt"]) ?? tierDefaults?.negativePrompt ?? config.defaultNegativePrompt,
         width: typeof args["width"] === "number" ? args["width"] : config.defaultWidth,
         height: typeof args["height"] === "number" ? args["height"] : config.defaultHeight,
-        steps: typeof args["steps"] === "number" ? args["steps"] : config.defaultSteps,
-        guidanceScale: typeof args["guidanceScale"] === "number" ? args["guidanceScale"] : config.defaultGuidanceScale,
+        steps: typeof args["steps"] === "number" ? args["steps"] : (tierDefaults?.steps ?? config.defaultSteps),
+        guidanceScale: typeof args["guidanceScale"] === "number"
+          ? args["guidanceScale"]
+          : (tierDefaults?.guidanceScale ?? config.defaultGuidanceScale),
         seed: typeof args["seed"] === "number" ? args["seed"] : undefined,
       });
 

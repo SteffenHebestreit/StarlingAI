@@ -165,6 +165,23 @@ function resolveTierBackend(
 const OPENAI_IMAGE_SIZE = 1024;
 
 /**
+ * Statuses the endpoint uses to mean "ask again", not "your request is wrong".
+ *
+ * Both are documented behaviours of this cluster rather than guesses. 429 is a busy signal:
+ * each tier generates one image at a time, a second request waits, and a third is refused
+ * outright rather than queued behind a two-minute job. 503 is the fast tier reporting that
+ * its neural accelerator wedged, rebuilt itself, and wants the request again.
+ *
+ * Treating either as a failure hands the user "image generation failed" for a condition the
+ * server explicitly said was temporary. Retrying is bounded and keeps the concurrency slot,
+ * so a retry never lets a later caller overtake the one that was already waiting.
+ */
+const RETRYABLE_IMAGE_STATUS = new Set([429, 503]);
+const IMAGE_RETRY_BACKOFF_MS = [1_500, 4_000];
+
+const delay = (ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms); });
+
+/**
  * One in-flight generation per MODEL, because the model is what maps to a device.
  *
  * sd-server generates serially, so a second request for the same model does not run in
@@ -282,18 +299,25 @@ async function sendOpenAiImageRequest(
   // Started after the slot is held, so `elapsedMs` reports how long the image took rather
   // than how long this call queued — the same thing the field means in the other adapters.
   const startedAt = Date.now();
-  const response = await fetchWithTimeout(
-    upstreamUrl(config.baseUrl, "/images/generations"),
-    {
-      method: "POST",
-      headers: upstreamHeaders(config.apiKey, { "Content-Type": "application/json" }),
-      body: JSON.stringify(payload),
-    },
-    timeoutMs,
-  );
-
-  if (!response.ok) {
-    throw new Error(await extractUpstreamError(response, `Image generation failed (${model})`));
+  let response: Response | undefined;
+  for (let attempt = 0; ; attempt += 1) {
+    response = await fetchWithTimeout(
+      upstreamUrl(config.baseUrl, "/images/generations"),
+      {
+        method: "POST",
+        headers: upstreamHeaders(config.apiKey, { "Content-Type": "application/json" }),
+        body: JSON.stringify(payload),
+      },
+      timeoutMs,
+    );
+    if (response.ok) break;
+    const backoff = IMAGE_RETRY_BACKOFF_MS[attempt];
+    if (!RETRYABLE_IMAGE_STATUS.has(response.status) || backoff === undefined) {
+      throw new Error(await extractUpstreamError(response, `Image generation failed (${model})`));
+    }
+    // Drain the body so the connection is not left half-read between attempts.
+    await response.text().catch(() => "");
+    await delay(backoff);
   }
 
   const body = await parseUpstreamJsonResponse(response, "Image generation returned a non-JSON response");

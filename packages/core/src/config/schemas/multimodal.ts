@@ -118,6 +118,25 @@ export const MultimodalImageGenerationSchema = MultimodalServiceSchema.extend({
    */
   fixedSizeModels: z.array(z.string()).default([]),
   /**
+   * Generation defaults for the QUALITY tier, where they differ from the fast tier's.
+   *
+   * They do differ, and one value for both is actively harmful. Measured against the live
+   * endpoint with the seed pinned so only the parameter could vary: the fast tier at
+   * guidance 1.0 and at 7.5 produced different images, so it genuinely reads the field and
+   * wants 7.5. The quality tier wants 1.0 — Qwen-Image carries embedded guidance (3.5 in its
+   * own record), so true CFG is redundant there AND doubles the forward passes per step:
+   * guidance 4 measured 22 s against 11 s at guidance 1, same size and step count.
+   *
+   * So sending the fast tier's 7.5 to the quality tier would double its cost for a worse
+   * picture, and sending the quality tier's 1.0 to the fast tier would flatten that one.
+   * Anything left unset here falls back to the `default*` fields above.
+   */
+  qualityDefaults: z.object({
+    steps: z.number().int().min(1).max(100).optional(),
+    guidanceScale: z.number().min(0).max(20).optional(),
+    negativePrompt: z.string().optional(),
+  }).optional(),
+  /**
    * A DIFFERENT backend for the quality tier, when the fast tier's protocol cannot express
    * what the quality tier needs.
    *

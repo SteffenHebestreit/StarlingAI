@@ -69,23 +69,31 @@
       // wait for a device is NOT spending this budget — it starts counting once the request
       // is actually on the wire.
       "timeoutMs": 120000,
-      // Measured 141.6 s on the iGPU, plus ~25 s of weight reload after ten minutes idle.
-      // Below ~180 s this abandons requests that were going to succeed.
-      "qualityTimeoutMs": 210000,
-      // One in-flight generation per device, measured rather than assumed.
+      // ~170 s per image plus ~25 s of weight reload after ten minutes idle. 210000 left
+      // almost no margin once the render alone is 170, so a queued or contended request
+      // would have been abandoned while it was still going to succeed.
+      "qualityTimeoutMs": 300000,
+      // Both tiers run ONE generation at a time, so the default ceiling of 1 applies to both
+      // and there is no per-model override.
       //
-      // The fast tier load-balances across TWO NPU stations: six concurrent requests finished
-      // in 38.5 s in a 9.9 / 10.0 / 19.5 / 19.5 / 29.1 / 38.5 stagger — two at a time, then
-      // queueing. The quality tier is a single iGPU and stays at the default of 1, because a
-      // second concurrent request there would sit in the backend burning its own timeout.
-      //
-      // Raise "image" if the cluster gains stations; this is a count of devices, not a taste.
-      "maxConcurrentPerModel": { "image": 2 },
+      // "image" was 2 for a while, from a measurement that no longer holds: six concurrent
+      // requests once finished in a 9.9 / 10.0 / 19.5 / 19.5 / 29.1 / 38.5 stagger, which is
+      // two at a time. Re-measured after the endpoint was reworked, three concurrent requests
+      // ran 9.7 / 19.2 / 28.7 s — strictly serial. Leaving it at 2 would put a second request
+      // inside the backend with our timeout already running, which is the precise failure the
+      // gate exists to prevent. Raise it again only against a fresh measurement.
       // Only the NPU tier is fixed-resolution. Measured against the live endpoint:
       // `image` answers HTTP 502 in ~13ms for any size but 1024x1024, while `image-quality`
       // served 64x64 in 1.2s and 1024x768 in 91s. Listing both would refuse requests the
       // quality tier is happy to serve — which it already did once, for 1024x768.
       "fixedSizeModels": ["image"],
+      // The tiers disagree about guidance and BOTH read the field, so one shared value is
+      // wrong for one of them. Measured with the seed pinned so only guidance could vary:
+      // the fast tier rendered differently at 1.0 than at 7.5, and the quality tier took 22 s
+      // at guidance 4 against 11 s at 1.0 — Qwen-Image carries its own embedded guidance
+      // (3.5 in its generation record), so true CFG there is redundant AND doubles the
+      // forward passes per step.
+      "qualityDefaults": { "steps": 20, "guidanceScale": 1 },
       // NOT ACTIVE YET — the route below returned 404 on re-test while the provider was
       // being reconfigured, so it stays commented until it is verified again. The CLIENT
       // support for it is shipped and tested; only this wiring is pending.
@@ -120,12 +128,10 @@
       "defaultWidth": 1024,
       "defaultHeight": 1024,
       "defaultSteps": 20,
-      // 1.0, not the usual 7. Qwen-Image carries embedded guidance (the generation record
-      // shows Guidance: 3.5), so true CFG is redundant AND doubles the forward passes per
-      // step: measured 8 steps/cfg 6 = 120 s against 20 steps/cfg 1 = 169 s. Dropping CFG
-      // paid for the steps that actually fix the output. The OpenAI fast route discards
-      // this value entirely, so it costs that tier nothing.
-      "defaultGuidanceScale": 1
+      // The FAST tier's value. It is not shared: `qualityDefaults` above overrides it for the
+      // quality tier, which wants 1.0. Confirmed live — the fast tier's own default output
+      // reproduces exactly at 20 steps / guidance 7.5.
+      "defaultGuidanceScale": 7.5
     },
     "wakeWord": {
       "enabled": false,
