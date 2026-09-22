@@ -290,6 +290,7 @@ import DOMPurify from "dompurify";
 import { useProductStore } from "@/stores/product";
 import TurnStepStream from "@/components/TurnStepStream.vue";
 import { stepsFor } from "@/composables/turnSteps";
+import { renderInlineImage } from "@/composables/inlineImages";
 
 // Product name comes from GET /api/product so a fork rebrands without editing this
 // file (docs/fork-boilerplate-plan.md WS1).
@@ -426,6 +427,12 @@ marked.use({
   ${svgPreview ? `<div class="code-block__svg-preview" data-svg-panel="preview" aria-label="SVG preview">${svgPreview}</div>` : ""}
   <pre${svgPreview ? ' data-svg-panel="code"' : ""}><code class="language-${escapeAttr(language || "plaintext")} hljs">${highlighted}</code></pre>
 </div>`;
+    },
+    // An inline image of a workspace file becomes a short reference: as a relative URL it only
+    // ever reached the SPA's index.html, and the attachment card shows the picture itself.
+    // Remote and data: images fall through to marked's own renderer (composables/inlineImages.ts).
+    image({ href, text }: Tokens.Image): string | false {
+      return renderInlineImage({ href, text });
     },
   },
 });
@@ -1764,6 +1771,9 @@ onBeforeUnmount(() => {
 .prose-content :deep(code)        { background: rgba(168,85,247,0.12); color: #d8b4fe; padding: 0.1em 0.35em; border-radius: 4px; font-size: 0.82em; border: 1px solid rgba(168,85,247,0.2); }
 .prose-content :deep(pre)         { background: rgba(10, 7, 20, 0.8); border: 1px solid rgba(168,85,247,0.15); padding: 0.75rem; border-radius: 0.75rem; overflow-x: auto; margin: 0.5rem 0; }
 .prose-content :deep(pre code)    { background: none; border: none; padding: 0; color: #e2d9f3; }
+/* A generated image is 1024 px wide or more; keep an inline one inside the bubble. */
+.prose-content :deep(img)         { max-width: 100%; height: auto; border-radius: 0.5rem; }
+.prose-content :deep(.md-image-ref) { opacity: 0.7; font-style: italic; }
 
 /* Code-block wrapper produced by the marked code renderer override.
    Header strip with language label + Copy button; pre/code styles inherit
