@@ -170,7 +170,7 @@
               :streaming-sub-agent-reasoning="msg.id === 'streaming' ? gateway.streamingSubAgentReasoning : undefined"
               :auto-collapse="msg.role === 'assistant' && idx !== lastAssistantVisibleIdx && msg.id !== 'streaming'"
               @rewind="handleRewind"
-              @show-steps="showStepsFor"
+              @show-step="showStep"
             />
           </div>
         </section>
@@ -182,33 +182,12 @@
       v-model="sidePanelOpen"
       :has-live-content="hasSidePanels"
       :artifact-count="sessionArtifacts.length"
-      :step-count="stepDetailItems.length"
+      :step-count="stepDetailToolCount"
       :requested-tab="requestedPanelTab"
     >
-      <!-- Steps slot: the execution detail for the ONE message whose link was clicked. -->
+      <!-- Steps slot: every step of the ONE answer whose row was clicked, that row opened. -->
       <template #steps>
-        <div v-if="stepDetailItems.length" class="panel-steps">
-          <div class="panel-steps__header">{{ stepDetailHeader }}</div>
-          <div
-            v-for="(item, i) in stepDetailItems"
-            :key="`${item.kind}-${item.key}`"
-            class="panel-steps__item-wrap"
-          >
-            <div class="panel-steps__item">
-              <span class="panel-steps__step">{{ i + 1 }}</span>
-              <div class="panel-steps__details">
-                <span class="panel-steps__name">{{ item.name }}</span>
-                <span v-if="item.meta" class="panel-steps__meta">{{ item.meta }}</span>
-              </div>
-              <span :class="['panel-steps__status', `panel-steps__status--${item.status}`]">
-                {{ item.statusSymbol }}
-              </span>
-            </div>
-            <!-- Full result here, not the bubble's old 600-char slice: the panel scrolls and
-                 is the place someone goes when they actually want to read it. -->
-            <pre v-if="item.result" class="panel-steps__result">{{ item.result }}</pre>
-          </div>
-        </div>
+        <StepDetailPanel :steps="stepDetailSteps" :focus-step-id="focusedStepId" :focus-request="focusRequest" />
       </template>
       <!-- Live context slot: swarm, shell, computer sessions -->
       <template #live>
@@ -1059,7 +1038,8 @@ import type { GatewaySessionTranscriptMessage, InterventionAction, EffortTier } 
 import { readSpeakReplySummaryStorage, writeSpeakReplySummaryStorage } from "@/stores/multimodal";
 import { marked } from "marked";
 import MessageBubble from "@/components/MessageBubble.vue";
-import { buildExecutionItems } from "@/composables/executionItems";
+import StepDetailPanel from "@/components/StepDetailPanel.vue";
+import { stepsFor } from "@/composables/turnSteps";
 import SwarmStatusPanel from "@/components/SwarmStatusPanel.vue";
 import ComputerSessionPanel from "@/components/ComputerSessionPanel.vue";
 import ShellSessionPanel from "@/components/ShellSessionPanel.vue";
@@ -1660,22 +1640,47 @@ const sidePanelOpen = ref(false);
  * the reader last clicked.
  */
 const stepDetailMessageId = ref<string | null>(null);
+const focusedStepId = ref<string | null>(null);
+/** Bumped on every click, so clicking the SAME row again still opens and scrolls to it. */
+const focusRequest = ref(0);
 const requestedPanelTab = ref<"live" | "steps" | "artifacts" | null>(null);
 
-const stepDetail = computed(() => {
+// Resolved by id on every render rather than holding the message object: a rewind can
+// truncate it away, and a stale selection should render empty rather than frozen.
+const stepDetailSteps = computed(() => {
   const id = stepDetailMessageId.value;
-  if (!id) return null;
-  const message = gateway.messages.find(m => m.id === id);
-  // The selected message can vanish: a rewind truncates history, and the "streaming"
-  // placeholder is replaced by a real id when the turn lands. Resolve by lookup every time
-  // rather than holding the object, so a stale selection renders empty instead of frozen.
-  return message ? buildExecutionItems(message) : null;
+  const message = id ? gateway.messages.find(m => m.id === id) : undefined;
+  return message ? stepsFor(message) : [];
 });
-const stepDetailItems = computed(() => stepDetail.value?.items ?? []);
-const stepDetailHeader = computed(() => stepDetail.value?.header ?? "");
+// The tab badge counts steps, not the narration lines between them — the bubble's own header
+// already does, and the two disagreeing reads like a bug.
+const stepDetailToolCount = computed(() => stepDetailSteps.value.filter(step => step.kind === "tool").length);
 
-function showStepsFor(messageId: string): void {
+// A step clicked WHILE the turn runs belongs to the "streaming" placeholder, which is replaced
+// under a new id when the turn lands. Follow the STEP, not a guess at the message: settleSteps
+// keeps step ids, so the only message that can contain this one is the one that inherited this
+// turn's record. Guessing "the last assistant message" picked the previous turn's answer when
+// a turn was superseded, and another session's answer after a switch.
+watch(() => gateway.messages.some(m => m.id === "streaming"), (streamingNow, streamingBefore) => {
+  if (!streamingBefore || streamingNow || stepDetailMessageId.value !== "streaming") return;
+  const stepId = focusedStepId.value;
+  const landed = stepId
+    ? [...gateway.messages].reverse().find(m => m.id !== "streaming" && m.steps?.some(step => step.id === stepId))
+    : undefined;
+  stepDetailMessageId.value = landed?.id ?? null;
+  if (!landed) focusedStepId.value = null;
+});
+
+// Another session is another conversation; never leave its steps open against this one.
+watch(() => gateway.currentSessionId, () => {
+  stepDetailMessageId.value = null;
+  focusedStepId.value = null;
+});
+
+function showStep(messageId: string, stepId: string): void {
   stepDetailMessageId.value = messageId;
+  focusedStepId.value = stepId;
+  focusRequest.value += 1;
   requestedPanelTab.value = "steps";
   sidePanelOpen.value = true;
   // Clear the request so a later manual tab change inside the panel is not undone by the
@@ -4933,55 +4938,6 @@ onUnmounted(() => {
 .chat-scene-pill:disabled {
   opacity: 0.4;
   cursor: not-allowed;
-}
-
-/* ── Panel step-detail styles ──────────────────────────────────────── */
-/* The execution trail that used to render inside the message bubble. Same information, moved
-   somewhere with room to scroll — so results are shown in full rather than cut at 600 chars. */
-.panel-steps { display: flex; flex-direction: column; gap: 0.1rem; }
-.panel-steps__header {
-  font-size: 0.7rem;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  opacity: 0.6;
-  padding: 0.3rem 0 0.45rem;
-  position: sticky;
-  top: 0;
-  background: inherit;
-}
-.panel-steps__item-wrap {
-  border-bottom: 1px solid rgba(168, 85, 247, 0.12);
-  padding-bottom: 0.3rem;
-  margin-bottom: 0.3rem;
-}
-.panel-steps__item-wrap:last-child { border-bottom: none; }
-.panel-steps__item {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.5rem;
-  font-size: 0.78rem;
-  padding: 0.25rem 0;
-}
-.panel-steps__step { color: #a78bfa; font-weight: 700; min-width: 1.2rem; }
-.panel-steps__details { display: flex; flex-direction: column; gap: 0.1rem; flex: 1; min-width: 0; }
-.panel-steps__name { font-family: monospace; color: #e2d9f3; word-break: break-word; }
-.panel-steps__meta { font-size: 0.7rem; opacity: 0.65; word-break: break-word; }
-.panel-steps__status { font-size: 0.75rem; }
-.panel-steps__status--done    { color: #4ade80; }
-.panel-steps__status--partial { color: #fbbf24; }
-.panel-steps__status--running { color: #e879f9; animation: pulse 1s infinite; }
-.panel-steps__status--failed  { color: #f87171; }
-.panel-steps__result {
-  margin: 0.2rem 0 0 1.7rem;
-  padding: 0.4rem 0.5rem;
-  border-radius: 0.4rem;
-  background: rgba(0, 0, 0, 0.28);
-  font-size: 0.7rem;
-  line-height: 1.45;
-  white-space: pre-wrap;
-  word-break: break-word;
-  max-height: 22rem;
-  overflow-y: auto;
 }
 
 /* ── Panel artifact viewer styles ──────────────────────────────────── */

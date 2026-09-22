@@ -5,6 +5,7 @@ import { useAuditStore } from "./audit";
 import { useComputerStore } from "./computer";
 import { useNotificationStore } from "./notifications";
 import { useShellStore } from "./shell";
+import { isDelegation, isFailedResult, type TurnStep } from "../composables/turnSteps";
 
 export interface TurnUsage {
   promptTokens: number;
@@ -64,6 +65,13 @@ export interface ChatMessage {
   reasoning?: string;
   /** Per-sub-agent chain-of-thought, surfaced behind a debug toggle. */
   subAgentReasoning?: Array<{ agent: string; text: string }>;
+  /**
+   * The turn as it happened, in order: each tool call (the orchestrator's own and those made
+   * inside a delegated specialist) plus the runtime's narration between them. Recorded live
+   * from the turn's events; absent on a message reloaded from the transcript, where it is
+   * reconstructed from `toolCalls` instead.
+   */
+  steps?: TurnStep[];
 }
 
 export interface SwarmTaskAttempt {
@@ -1414,6 +1422,138 @@ export const useGatewayStore = defineStore("gateway", () => {
     }];
   }
 
+  // ── The step stream ───────────────────────────────────────────────────────
+  // Recorded alongside `toolCalls` rather than derived from it, because `toolCalls` loses two
+  // things the stream needs: WHEN each call ran, and WHICH specialist it ran inside (a
+  // delegated `generate_image` lands in the same flat list as the orchestrator's own calls).
+
+  // Phases worth keeping on the finished answer: each is a course-correction the reader would
+  // otherwise never learn happened. "synthesizing" is only the FORCED path now (a loop or the
+  // iteration cap cut the turn short); the routine after-every-round line is "reviewing" and
+  // stays live-status only.
+  /** Tools that run several specialists under one call — progress hosts, never a single target. */
+  const FAN_OUT_TOOLS = new Set(["parallel_delegate", "execute_plan", "run_task_graph", "run_workflow"]);
+
+  const NARRATION_PHASES = new Set(["steering", "oversight", "recovered", "guardrail", "synthesizing"]);
+
+  function recordStepStart(data: Record<string, unknown>): void {
+    const streamingMessage = getStreamingMessage();
+    if (!streamingMessage) return;
+    const name = String(data["name"]);
+    const delegated = data["delegated"] === true;
+    const toolCallId = typeof data["toolCallId"] === "string" ? data["toolCallId"] : undefined;
+    const steps = streamingMessage.steps ?? [];
+
+    let id = toolCallId ?? `${name}-${Date.now()}-${steps.length}`;
+    const existing = steps.find(step => step.id === id);
+    if (existing) {
+      // A repeated start for a call still running is the same call announced twice.
+      if (existing.status === "running") return;
+      // A finished id seen again is a NEW call reusing it — the sub-agent fallback id is
+      // agent:tool:iteration, which two calls in one iteration share.
+      id = `${id}#${steps.length}`;
+    }
+
+    streamingMessage.steps = [...steps, {
+      id,
+      kind: "tool",
+      name,
+      ...(delegated && typeof data["sourceAgent"] === "string" ? { agent: data["sourceAgent"] } : {}),
+      depth: delegated ? 1 : 0,
+      status: "running",
+      startedAt: Date.now(),
+      args: (data["args"] as Record<string, unknown>) ?? {},
+    }];
+  }
+
+  function recordStepDone(data: Record<string, unknown>): void {
+    const steps = getStreamingMessage()?.steps;
+    if (!steps?.length) return;
+    const name = String(data["name"]);
+    const toolCallId = typeof data["toolCallId"] === "string" ? data["toolCallId"] : undefined;
+    const agent = data["delegated"] === true && typeof data["sourceAgent"] === "string" ? data["sourceAgent"] : undefined;
+
+    // Newest first: when an id was reused, the running call is the later one.
+    const step = [...steps].reverse().find(candidate => candidate.status === "running" && (toolCallId
+      ? candidate.id === toolCallId || candidate.id.startsWith(`${toolCallId}#`)
+      : candidate.name === name && candidate.agent === agent));
+    if (!step) return;
+
+    const result = String(data["result"] ?? "");
+    const metadata = data["metadata"] && typeof data["metadata"] === "object"
+      ? data["metadata"] as Record<string, unknown>
+      : undefined;
+    step.status = isFailedResult(result, metadata) ? "failed" : "done";
+    step.endedAt = Date.now();
+    step.result = result;
+    if (metadata) step.metadata = metadata;
+    step.progress = undefined;
+  }
+
+  /**
+   * A line from inside a running delegation. It belongs to the delegation's row rather than
+   * becoming a row of its own — "image_creator finished" is the delegation's progress, and as
+   * a separate line it would duplicate the row it describes.
+   */
+  function recordDelegationProgress(agent: string | undefined, message: string): void {
+    const steps = getStreamingMessage()?.steps;
+    if (!steps?.length) return;
+    const running = [...steps].reverse().filter(step => step.depth === 0 && step.status === "running");
+    const single = running.filter(isDelegation);
+    const direct = single.find(candidate => agent && (candidate.args?.["agentName"] === agent || candidate.target === agent))
+      // The orchestrator may not have named the specialist, in which case the runtime picked
+      // one and this event is the first place its name appears.
+      ?? single.find(candidate => !candidate.args?.["agentName"] && !candidate.target);
+    if (direct) {
+      // Only the FIRST name heard becomes the target. Nested runs share this progress sink,
+      // so once a coordinator starts delegating, its grandchildren's lines arrive here too —
+      // and letting each overwrite the target flipped the row to "Delegated to researcher"
+      // for a delegation that went to mission_coordinator.
+      if (agent && !direct.args?.["agentName"] && !direct.target) direct.target = agent;
+      direct.progress = message;
+      return;
+    }
+    // Anything that fans work out — or a line from deeper in a single delegation — goes to the
+    // newest running host as progress only. Before, a fan-out row had no way to receive these
+    // at all and they were dropped, leaving the row silent while several specialists worked.
+    const host = running.find(candidate => FAN_OUT_TOOLS.has(candidate.name)) ?? single[0];
+    if (!host) return;
+    host.progress = agent && !message.toLowerCase().includes(agent.toLowerCase())
+      ? `${agent}: ${message}`
+      : message;
+  }
+
+  function recordNarration(phase: string, message: string): void {
+    const streamingMessage = getStreamingMessage();
+    if (!streamingMessage) return;
+    const steps = streamingMessage.steps ?? [];
+    // The runtime re-announces a phase on each iteration; one line per distinct sentence.
+    if (steps.some(step => step.kind === "note" && step.text === message)) return;
+    const now = Date.now();
+    streamingMessage.steps = [...steps, {
+      id: `note-${now}-${steps.length}`,
+      kind: "note",
+      name: phase,
+      depth: 0,
+      status: "done",
+      startedAt: now,
+      endedAt: now,
+      text: message,
+    }];
+  }
+
+  /**
+   * Freeze the stream when the turn ends. A step still marked running never reported back —
+   * say exactly that, rather than leaving a spinner on a finished answer or guessing "failed".
+   */
+  function settleSteps(steps: TurnStep[] | undefined): TurnStep[] | undefined {
+    if (!steps?.length) return undefined;
+    const now = Date.now();
+    return steps.map(step => step.status === "running"
+      ? { ...step, status: "stopped" as const, endedAt: now, progress: undefined }
+      : { ...step });
+  }
+
   function resolveStreamingToolCall(name: string, result: string, toolCallId?: string): void {
     const streamingMessage = getStreamingMessage();
     if (!streamingMessage?.toolCalls) return;
@@ -1628,6 +1768,9 @@ export const useGatewayStore = defineStore("gateway", () => {
       swarmState: preservedSwarmState ?? undefined,
       toolCalls: streamingMessage?.toolCalls,
       attachments: streamingMessage?.attachments,
+      // Keep what DID happen before the failure — that is exactly what someone reading an
+      // error wants to see, and dropping it left only the error line.
+      steps: settleSteps(streamingMessage?.steps),
     };
 
     if (!preservePendingState) {
@@ -2095,6 +2238,7 @@ export const useGatewayStore = defineStore("gateway", () => {
             (data["args"] as Record<string, unknown>) ?? {},
             typeof data["toolCallId"] === "string" ? data["toolCallId"] : undefined,
           );
+          recordStepStart(data);
         }
         updateStreamingStatus(`Running ${String(data["name"])}...`, { appendHistory: true });
       }
@@ -2198,6 +2342,7 @@ export const useGatewayStore = defineStore("gateway", () => {
             tc.metadata = data["metadata"] as Record<string, unknown>;
           }
         }
+        recordStepDone(data);
         if (streamingMessage) {
           const attachments = extractToolAttachments(String(data["name"]), data["metadata"]);
           if (attachments.length) {
@@ -2238,11 +2383,16 @@ export const useGatewayStore = defineStore("gateway", () => {
       // and `recovered` were all being dropped on the floor. Those are the three a reader most
       // wants — that an interjection was folded in, that the turn corrected itself, and that it
       // recovered from a failure — and dropping them is why a long turn looks silent.
-      if (["routing", "synthesizing", "guardrail", "delegating",
+      if (["routing", "reviewing", "synthesizing", "guardrail", "delegating",
         "steering", "oversight", "recovered"].includes(status)) {
         const message = String(data["message"] ?? "").trim();
         if (message) {
           updateStreamingStatus(message, { appendHistory: true });
+          if (data["delegated"] === true) {
+            recordDelegationProgress(typeof data["sourceAgent"] === "string" ? data["sourceAgent"] : undefined, message);
+          } else if (NARRATION_PHASES.has(status)) {
+            recordNarration(status, message);
+          }
         }
         return;
       }
@@ -2267,6 +2417,7 @@ export const useGatewayStore = defineStore("gateway", () => {
           blocked: isBlocked,
           statusText: streamingMessage?.statusText,
           statusHistory: cloneStatusHistory(streamingMessage?.statusHistory),
+          steps: settleSteps(streamingMessage?.steps),
           swarmState: swarmState ?? undefined,
           usage: data["usage"] as TurnUsage | undefined,
           perf: rawPerf ? {
@@ -2377,7 +2528,25 @@ export const useGatewayStore = defineStore("gateway", () => {
 
     const idx = messages.value.findIndex((message) => message.id === "streaming");
     if (idx >= 0) {
-      messages.value.splice(idx, 1);
+      // Keep what the cancelled turn already DID. Deleting the placeholder outright threw away
+      // its steps and any file it had produced, so an image generated a minute into a turn
+      // vanished from the conversation the moment the user sent something else. A turn that
+      // did nothing yet still disappears, as before.
+      const placeholder = messages.value[idx]!;
+      const steps = settleSteps(placeholder.steps);
+      if (steps?.length || placeholder.toolCalls?.length || placeholder.attachments?.length) {
+        messages.value.splice(idx, 1, {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: "_Stopped — replaced by your next message._",
+          timestamp: new Date(),
+          steps,
+          toolCalls: placeholder.toolCalls,
+          attachments: placeholder.attachments,
+        });
+      } else {
+        messages.value.splice(idx, 1);
+      }
     }
 
     streamingText.value = "";
@@ -2562,6 +2731,7 @@ export const useGatewayStore = defineStore("gateway", () => {
       timestamp: new Date(),
       statusText: "Working on it...",
       statusHistory: ["Working on it..."],
+      steps: [],
     });
     armPendingTurnWatchdog();
 

@@ -2506,7 +2506,11 @@ async function _runTurn(
       const chunkSink = iterationCount === 0 && !suppressInitialInlineStreaming ? opts.onChunk : undefined;
       if (!chunkSink) {
         opts.onStatus?.({
-          phase: suppressInitialInlineStreaming ? "routing" : "synthesizing",
+          // "reviewing", not "synthesizing": this fires after EVERY tool round, so it is live
+          // status and nothing more. "synthesizing" is kept for the forced paths — a loop or the
+          // iteration cap cutting the turn short — which the chat keeps on the finished answer
+          // as a narration line, and which would be buried if this routine line shared a phase.
+          phase: suppressInitialInlineStreaming ? "routing" : "reviewing",
           message: suppressInitialInlineStreaming
             ? "Selecting the required specialist path before drafting the answer."
             : "Reviewing completed tool results and preparing the final response.",

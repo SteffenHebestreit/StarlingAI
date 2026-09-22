@@ -5628,6 +5628,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       });
 
       const toolResults: LLMMessage[] = [];
+      // Which calls announced a start on the progress channel, and which announced an end.
+      // See the sweep after the call loop: the two must match.
+      const progressStarted = new Set<string>();
+      const progressFinished = new Set<string>();
       let decisiveDirectRemoteToolResult: import("../tools/registry.js").ToolResult | null = null;
       let decisiveDirectRemoteToolName: string | null = null;
       let executedToolThisIteration = false;
@@ -5856,6 +5860,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           args: tc.arguments,
           summary: `Running ${tc.name} in ${opts.agentName}.`,
         });
+        if (tc.id) progressStarted.add(tc.id);
 
         toolNames.push(tc.name);
         iterationToolNames.push(tc.name);
@@ -6584,11 +6589,42 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             ? `Finished ${tc.name} in ${opts.agentName}.`
             : `Encountered an issue while running ${tc.name} in ${opts.agentName}.`,
         });
+        if (tc.id) progressFinished.add(tc.id);
 
         toolResults.push({
           role: "tool",
           content: resultContent,
           tool_call_id: tc.id,
+        });
+      }
+
+      // EVERY CALL THAT ANNOUNCED A START ANNOUNCES AN END.
+      //
+      // Seven branches in the loop above answer a call without running it — the ABA and
+      // consecutive-duplicate caches, the per-tool, per-path, failure and artifact-persist
+      // caps, and the write-content loop guard — and each `continue`s past the only
+      // tool_done emit. Their tool_start was already on the wire, so the chat showed those
+      // calls running for the rest of the turn and then called them "no result reported",
+      // although each had been answered instantly. The caches fire routinely on local models
+      // (web_search, web_fetch and read_file are idempotent-cached).
+      //
+      // Swept here rather than patched at each branch, so a skip branch added later cannot
+      // reopen the gap. The answer each branch pushed is exactly what the call returned.
+      for (const id of progressStarted) {
+        if (progressFinished.has(id)) continue;
+        const call = response.tool_calls.find(entry => entry.id === id);
+        if (!call) continue;
+        const answered = toolResults.find(entry => entry.tool_call_id === id);
+        const content = typeof answered?.content === "string" ? answered.content : "";
+        opts.onProgress?.({
+          agentName: opts.agentName,
+          kind: "tool_done",
+          iteration: iterations + 1,
+          toolName: call.name,
+          toolCallId: id,
+          result: content,
+          metadata: { notExecuted: true, cached: /\[Note: This is a cached/.test(content) },
+          summary: `Answered ${call.name} in ${opts.agentName} without running it.`,
         });
       }
 

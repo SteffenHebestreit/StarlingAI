@@ -28,22 +28,6 @@
         </div>
       </div>
 
-      <!-- Live status pill only while streaming; finalized messages keep just the
-           progress-history trail (the carried-over statusText is the last transient
-           status — e.g. "Working on it..." — and must not stay pinned). -->
-      <div v-if="isStreamingMessage ? message.statusText : progressHistory.length > 1" class="message-progress">
-        <div v-if="isStreamingMessage" class="message-progress__current">{{ message.statusText }}</div>
-        <div v-if="progressHistory.length > 1" class="message-progress__history">
-          <div
-            v-for="(entry, index) in progressHistory"
-            :key="`${message.id}-progress-${index}`"
-            class="message-progress__history-item"
-          >
-            {{ entry }}
-          </div>
-        </div>
-      </div>
-
       <!-- Thinking FIRST. While a turn runs, what the model is reasoning about is the thing worth
            watching; the tool roll-call below is the audit trail. This used to sit under a
            fully-expanded step list, which pushed live reasoning off-screen exactly when it was
@@ -85,25 +69,17 @@
         </div>
       </div>
 
-      <!-- Execution summary — ONE line saying what this step did.
-           The full list used to live here, and a long turn rendered every step plus a 600-char
-           result each, so a single answer ran to pages and the answer itself got pushed out of
-           sight. The detail now opens in the side panel, where there is room for it and where
-           it does not compete with the thing the reader came for. -->
-      <div v-if="executionItems.length" class="tool-status-wrap">
-        <div class="tool-status tool-status--summary">
-          <span class="tool-status__icon">⚙</span>
-          <span class="tool-status__label">{{ executionSummaryLine || activeExecutionLabel }}</span>
-          <button
-            type="button"
-            class="tool-status__details-btn"
-            :aria-label="`Show the ${executionItems.length} steps behind this answer`"
-            @click="emit('show-steps', message.id)"
-          >
-            {{ executionItems.length }} step{{ executionItems.length === 1 ? '' : 's' }} ›
-          </button>
-        </div>
-      </div>
+      <!-- The turn as it happened: one line per step, in order, filling in with each step's
+           outcome as it finishes. This replaces three things that each showed part of it — a
+           live status pill, a four-line status trail, and a one-line summary that hid the flow
+           behind a link. The full detail of any step opens in the side panel on click. -->
+      <TurnStepStream
+        :steps="turnSteps"
+        :is-streaming="isStreamingMessage"
+        :live-text="isStreamingMessage ? message.statusText : undefined"
+        :start-collapsed="autoCollapse"
+        @select="(stepId) => emit('show-step', message.id, stepId)"
+      />
 
       <!-- Image attachments -->
       <div v-if="imageAttachments.length" class="message-attachments">
@@ -312,12 +288,8 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { marked, type Tokens } from "marked";
 import DOMPurify from "dompurify";
 import { useProductStore } from "@/stores/product";
-import {
-  buildExecutionItems,
-  summariseExecution,
-  type ExecutionItem,
-  type ExecutionStatus,
-} from "@/composables/executionItems";
+import TurnStepStream from "@/components/TurnStepStream.vue";
+import { stepsFor } from "@/composables/turnSteps";
 
 // Product name comes from GET /api/product so a fork rebrands without editing this
 // file (docs/fork-boilerplate-plan.md WS1).
@@ -497,8 +469,8 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   rewind: [messageId: string];
-  /** Ask the page to show THIS message's execution steps in the side panel. */
-  "show-steps": [messageId: string];
+  /** Ask the page to show ONE step of this message in the side panel. */
+  "show-step": [messageId: string, stepId: string];
 }>();
 
 const gateway = useGatewayStore();
@@ -511,7 +483,7 @@ const artifactPreview = ref<ArtifactPreviewState | null>(null);
 const artifactPreviewLoading = ref<string | null>(null);
 const renderedMessageRef = ref<HTMLElement | null>(null);
 const contentCollapsed = ref(props.autoCollapse ?? false);
-const progressHistory = computed(() => props.message.statusHistory?.slice(-4) ?? []);
+const turnSteps = computed(() => stepsFor(props.message));
 const isStreamingMessage = computed(() => props.message.id === "streaming");
 const mermaidPreviewSvg = ref<Record<string, string>>({});
 const mermaidPreviewErrors = ref<Record<string, string>>({});
@@ -624,85 +596,14 @@ const visibleGuardrailEvents = computed(() =>
     .map((ev) => GUARDRAIL_LABELS[ev.type]!),
 );
 
-const swarmTasks = computed(() => Object.values(props.message.swarmState?.tasks ?? {}));
-
-// ── Execution history ────────────────────────────────────────────────────────
-// Derived in @/composables/executionItems because the side panel renders the same list.
-// The bubble keeps only the one-line summary; `executionItems` survives here so the
-// existing label logic below is untouched.
-const execution = computed(() => buildExecutionItems(props.message));
-const executionItems = computed<ExecutionItem[]>(() => execution.value.items);
-const executionHistoryHeader = computed(() => execution.value.header);
-const swarmExecutionItems = computed<ExecutionItem[]>(() => execution.value.delegated ? execution.value.items : []);
-const executionSummaryLine = computed(() => summariseExecution(props.message));
-
-const activeExecutionLabel = computed(() => {
-  if (swarmExecutionItems.value.length > 0) {
-    const runningTaskCount = swarmTasks.value.filter((task) => task.status === "running" || task.status === "pending").length;
-    const runningAttempt = swarmTasks.value
-      .flatMap((task) => task.attempts.map((attempt) => ({ task, attempt })))
-      .find(({ attempt }) => attempt.status === "running");
-
-    if (runningAttempt) {
-      return runningTaskCount > 1
-        ? `${runningTaskCount} swarm task${runningTaskCount === 1 ? "" : "s"} running`
-        : `${runningAttempt.attempt.agentName} working…`;
-    }
-
-    const completedCount = swarmTasks.value.filter((task) => task.status === "completed").length;
-    const partialCount = swarmTasks.value.filter((task) => task.status === "partial").length;
-    const failedCount = swarmTasks.value.filter((task) => task.status === "failed" || task.status === "blocked").length;
-    const parts: string[] = [];
-
-    if (completedCount > 0) parts.push(`${completedCount} task${completedCount === 1 ? "" : "s"} done`);
-    if (partialCount > 0) parts.push(`${partialCount} partial`);
-    if (failedCount > 0) parts.push(`${failedCount} failed`);
-
-    if (parts.length > 0) {
-      return parts.join(" · ");
-    }
-
-    return `${swarmTasks.value.length} swarm task${swarmTasks.value.length === 1 ? "" : "s"}`;
-  }
-
-  const items = executionItems.value;
-  if (!items.length) return "";
-
-  const running = items.find((item) => item.status === "running");
-  if (running) {
-    return running.kind === "subagent"
-      ? `${running.name} working…`
-      : `Calling ${running.name}…`;
-  }
-
-  const failedCount = items.filter((item) => item.status === "failed").length;
-  if (failedCount > 0) {
-    return swarmExecutionItems.value.length > 0
-      ? `${failedCount} sub-agent action${failedCount !== 1 ? "s" : ""} failed`
-      : `${failedCount} tool call${failedCount !== 1 ? "s" : ""} failed`;
-  }
-
-  const partialCount = items.filter((item) => item.status === "partial").length;
-  if (partialCount > 0) {
-    return swarmExecutionItems.value.length > 0
-      ? `${partialCount} sub-agent action${partialCount !== 1 ? "s" : ""} partial`
-      : `${partialCount} tool call${partialCount !== 1 ? "s" : ""} partial`;
-  }
-
-  return `${items.length} tool call${items.length !== 1 ? "s" : ""} completed`;
-});
-
 /**
- * Keep the answer expanded while work is actually running.
- *
- * This watcher used to also open and close the inline step list. That list now lives in the
- * side panel, so only the un-collapse survives — a message that is still being written should
- * not be sitting behind a "show more" the reader has to click to watch it arrive.
+ * Keep the answer expanded while work is actually running — a message still being written
+ * should not sit behind a "show more" the reader has to click to watch it arrive.
  */
 watch(
-  () => [props.isStreaming, executionItems.value.some((item) => item.status === "running")],
-  ([isStreamingNow, hasRunningItems]) => {
-    if (isStreamingNow && hasRunningItems) contentCollapsed.value = false;
+  () => [props.isStreaming, turnSteps.value.some((step) => step.status === "running")],
+  ([isStreamingNow, hasRunningSteps]) => {
+    if (isStreamingNow && hasRunningSteps) contentCollapsed.value = false;
   },
   { immediate: true },
 );
@@ -1121,7 +1022,6 @@ async function previewAttachment(attachment: ChatAttachment): Promise<void> {
   }
 }
 
-
 function openExternalAttachment(attachment: ChatAttachment): void {
   if (!attachment.externalUrl) return;
   window.open(attachment.externalUrl, "_blank", "noopener,noreferrer");
@@ -1459,7 +1359,6 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
-
 .artifact-diagrams {
   display: grid;
   gap: 0.5rem;
@@ -1536,7 +1435,6 @@ onBeforeUnmount(() => {
   color: #8b7fa8;
 }
 
-
 .mermaid-inline-diagram :deep(svg) {
   width: 100%;
   height: auto;
@@ -1571,33 +1469,6 @@ onBeforeUnmount(() => {
   border-radius: 1.2rem;
   overflow: hidden;
   box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
-}
-
-.message-progress {
-  display: grid;
-  gap: 0.45rem;
-  margin-bottom: 0.65rem;
-  padding: 0.75rem 0.85rem;
-  border-radius: 0.95rem;
-  background: rgba(56, 189, 248, 0.08);
-  border: 1px solid rgba(56, 189, 248, 0.18);
-}
-
-.message-progress__current {
-  color: #dff7ff;
-  font-size: 0.8rem;
-  line-height: 1.45;
-}
-
-.message-progress__history {
-  display: grid;
-  gap: 0.18rem;
-  color: #9fc6d9;
-  font-size: 0.72rem;
-}
-
-.message-progress__history-item {
-  line-height: 1.35;
 }
 
 .message-streaming-text {
@@ -1785,124 +1656,9 @@ onBeforeUnmount(() => {
 .guardrail-events { margin-bottom: 0.5rem; display: flex; flex-direction: column; gap: 0.25rem; }
 
 /* ── Tool status ─────────────────────────────────────────────────────────────── */
-.tool-status-wrap { margin-bottom: 0.625rem; position: relative; }
-
-.tool-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.375rem;
-  padding: 0.2rem 0.7rem;
-  border-radius: 9999px;
-  font-size: 0.78rem;
-  font-style: italic;
-  font-weight: 500;
-  cursor: pointer;
-  color: #c084fc;
-  background: rgba(168, 85, 247, 0.1);
-  border: 1px solid rgba(168, 85, 247, 0.25);
-  user-select: none;
-  transition: background 0.15s;
-}
-.tool-status:hover { background: rgba(168, 85, 247, 0.18); }
-.tool-status__icon  { font-style: normal; }
-.tool-status__chevron { font-size: 0.6rem; opacity: 0.6; font-style: normal; }
 
 /* The summary row is no longer itself a button — only the trailing count opens the panel,
    so clicking the sentence does not fire a navigation the reader did not ask for. */
-.tool-status--summary { cursor: default; }
-.tool-status--summary:hover { background: rgba(168, 85, 247, 0.1); }
-.tool-status__details-btn {
-  font: inherit;
-  font-style: normal;
-  margin-left: 0.15rem;
-  padding: 0 0.3rem;
-  border: none;
-  border-radius: 9999px;
-  background: transparent;
-  color: inherit;
-  opacity: 0.75;
-  cursor: pointer;
-  transition: opacity 0.15s, background 0.15s;
-}
-.tool-status__details-btn:hover { opacity: 1; background: rgba(168, 85, 247, 0.22); }
-.tool-status__details-btn:focus-visible { outline: 2px solid #c084fc; outline-offset: 1px; }
-
-.tool-history {
-  margin-top: 4px;
-  min-width: 280px;
-  max-width: 100%;
-  background: rgba(15, 12, 28, 0.95);
-  border: 1px solid rgba(168, 85, 247, 0.25);
-  border-radius: 0.75rem;
-  /* Bounded: a turn with a dozen tool calls used to render all of them plus 600 characters of each
-     result, so one message could run for pages. It scrolls inside itself instead. */
-  max-height: 320px;
-  overflow-y: auto;
-  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
-  backdrop-filter: blur(16px);
-}
-.tool-history__header {
-  padding: 0.5rem 0.75rem;
-  font-size: 0.72rem;
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: #a78bfa;
-  background: rgba(168, 85, 247, 0.1);
-  border-bottom: 1px solid rgba(168, 85, 247, 0.15);
-}
-.tool-history__item-wrap {
-  border-bottom: 1px solid rgba(255,255,255,0.04);
-}
-.tool-history__item-wrap:last-child { border-bottom: none; }
-.tool-history__item {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.4rem 0.75rem;
-  font-size: 0.78rem;
-  color: #c4b5fd;
-}
-.tool-history__item:last-child { border-bottom: none; }
-.tool-history__step  { color: #a78bfa; font-weight: 700; min-width: 1rem; }
-.tool-history__details {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0.1rem;
-}
-.tool-history__name  { font-family: monospace; color: #e2d9f3; }
-.tool-history__meta {
-  color: #b8a7d9;
-  font-size: 0.68rem;
-  line-height: 1.3;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.tool-history__status { font-size: 0.75rem; }
-.tool-history__status--done    { color: #4ade80; }
-.tool-history__status--partial { color: #fbbf24; }
-.tool-history__status--running { color: #e879f9; animation: pulse 1s infinite; }
-.tool-history__status--failed  { color: #f87171; }
-
-.tool-history__result {
-  padding: 0 0.75rem 0.4rem 2.25rem;
-}
-.tool-history__result pre {
-  margin: 0;
-  padding: 0.35rem 0.5rem;
-  font-size: 0.68rem;
-  line-height: 1.4;
-  color: #9ca3af;
-  background: rgba(0, 0, 0, 0.3);
-  border-radius: 0.375rem;
-  white-space: pre-wrap;
-  word-break: break-word;
-  max-height: 120px;
-  overflow-y: auto;
-}
 
 /* ── Thinking section ────────────────────────────────────────────────────────── */
 .thinking-section {
