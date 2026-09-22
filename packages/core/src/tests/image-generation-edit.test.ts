@@ -156,6 +156,44 @@ describe("editing an existing image", () => {
     })).rejects.toThrow(/strength 0.75 against 0.35 requested/);
   });
 
+  it("routes an edit to the tier that CAN edit when no tier was stated", async () => {
+    // The defect session 3a438b35 hit. `generate_image` resolved an absent tier to "fast",
+    // whose model is `image`, and only `image-quality` is in initImageModels — so the agent
+    // passed baseImage, was refused, and silently generated a fresh picture. The capability
+    // was configured, tested and unreachable by the request that wants it.
+    const net = stub();
+
+    await requestImageGeneration(EDITS, { prompt: "make it photorealistic", initImage: REF, strength: 0.3 });
+
+    expect(net.calls[0]!.url).toBe("http://cluster:8080/v1/images/edits");
+    expect(net.calls[0]!.body["model"]).toBe("image-quality");
+    // And it gets the quality tier's guidance, not the fast tier's.
+    expect(net.calls[0]!.body["guidance_scale"]).toBe(1);
+  });
+
+  it("does NOT upgrade the tier for an ordinary generation — the control", async () => {
+    // Without this, the rule could be "always use quality", which would spend the worker's
+    // GPU on every picture and serialise the cluster for requests that never needed it.
+    const net = stub();
+
+    await requestImageGeneration(EDITS, { prompt: "a lighthouse" });
+
+    expect(net.calls[0]!.body["model"]).toBe("image");
+    expect(net.calls[0]!.body["guidance_scale"]).toBe(7.5);
+  });
+
+  it("respects an EXPLICIT fast tier, refusing rather than quietly upgrading", async () => {
+    // Quality costs everyone else latency. A caller who said "fast" and asked for an edit
+    // has stated a contradiction, and should hear about it rather than be billed for the
+    // resolution.
+    const net = stub();
+
+    await expect(requestImageGeneration(EDITS, {
+      prompt: "make it photorealistic", initImage: REF, tier: "fast",
+    })).rejects.toThrow(/cannot edit an existing image/);
+    expect(net.fetchMock).not.toHaveBeenCalled();
+  });
+
   it("sends NO reference fields when there is no base image — the control", async () => {
     // Without this, always attaching the fields would pass the case above while changing
     // every ordinary generation into something the backend has to ignore.

@@ -121,6 +121,8 @@ export interface ImageGenerationHealth {
 
 export interface ImageGenerationResult {
   imageBase64: string;
+  /** The tier actually used, which is not always the one asked for — see resolveImageRequest. */
+  tier?: ImageGenerationTier;
   mimeType: string;
   extension: string;
   width?: number;
@@ -241,7 +243,29 @@ function resolveImageRequest(
   const namedQualityModel = Boolean(
     input.model && config.qualityModel && input.model === config.qualityModel,
   );
-  const tier: ImageGenerationTier = input.tier ?? (namedQualityModel ? "quality" : "fast");
+  let tier: ImageGenerationTier = input.tier ?? (namedQualityModel ? "quality" : "fast");
+
+  // AN EDIT GOES TO A TIER THAT CAN EDIT.
+  //
+  // Only one tier here has an edit route, and it is not the default one. A caller that asked
+  // to change an existing image without naming a tier was therefore refused outright — the
+  // capability existed, was configured, was tested, and could not be reached by the request
+  // that actually wants it. Live, an agent passed baseImage and got "image is not in
+  // initImageModels", then silently generated a fresh picture instead.
+  //
+  // Only when the caller did NOT state a tier. An explicit `tier: "fast"` plus a base image
+  // is a contradiction the caller should hear about rather than have quietly resolved, and
+  // quality costs everyone else latency — not something to opt into on their behalf when
+  // they said otherwise.
+  if (input.initImage && input.tier === undefined) {
+    const modelForTier = (candidate: ImageGenerationTier): string =>
+      input.model
+      ?? (candidate === "quality" ? config.qualityModel ?? config.model : config.model)
+      ?? "";
+    const canEdit = (candidate: ImageGenerationTier): boolean =>
+      config.initImageModels?.includes(modelForTier(candidate)) ?? false;
+    if (!canEdit(tier) && canEdit("quality")) tier = "quality";
+  }
   const tierDefaults = tier === "quality" ? config.qualityDefaults : undefined;
 
   return {
@@ -470,6 +494,7 @@ async function sendOpenAiImageRequest(
     imageBase64: image,
     mimeType: "image/png",
     extension: ".png",
+    tier: input.tier,
     width: input.width,
     height: input.height,
     ...(typeof input.seed === "number" ? { seed: input.seed } : {}),

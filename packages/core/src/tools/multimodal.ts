@@ -563,7 +563,12 @@ registerTool({
 
       // The tier is a COST choice, so an unknown value falls back to the cheap one rather
       // than to the one that serialises the cluster.
-      const tier = stringArg(args["tier"]) === "quality" ? "quality" as const : "fast" as const;
+      // Pass the tier ONLY when the caller stated one. Forcing "fast" on every call that
+      // omitted it is what made editing unreachable: requestImageGeneration then had no way
+      // to tell "the caller wants fast" from "the caller did not say", so a baseImage request
+      // was pinned to a tier that cannot edit and refused.
+      const requestedTier = stringArg(args["tier"]) === "quality" ? "quality" as const
+        : stringArg(args["tier"]) === "fast" ? "fast" as const : undefined;
       // The tiers want DIFFERENT sampling defaults and both read the fields. Measured with
       // the seed pinned so only the parameter could vary: the fast tier renders differently
       // at guidance 1.0 than at 7.5, and the quality tier costs 22s at guidance 4 against
@@ -586,7 +591,7 @@ registerTool({
 
       const result = await requestImageGeneration(config, {
         prompt,
-        tier,
+        ...(requestedTier ? { tier: requestedTier } : {}),
         // No `?? config.model` here: the backend resolves the tier's model itself, and
         // defaulting to the fast model would silently turn a quality request into a fast one.
         ...(stringArg(args["model"]) ? { model: stringArg(args["model"])! } : {}),
@@ -639,7 +644,7 @@ registerTool({
           height: result.height,
           seed: result.seed,
           model: result.model,
-          tier,
+          tier: result.tier,
           elapsedMs: result.elapsedMs,
         },
       };

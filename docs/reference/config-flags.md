@@ -194,7 +194,7 @@ Every public schema field, where it is declared, and how many production files r
 | `humanInLoopSteps` | packages/core/src/config/schema.ts:1286 | 20 |
 | `id` | packages/core/src/config/schema.ts:553 | 227 |
 | `ignoreCase` | packages/core/src/config/schema.ts:1333 | 2 |
-| `image` | packages/core/src/config/schema.ts:672 | 59 |
+| `image` | packages/core/src/config/schema.ts:672 | 60 |
 | `imapHost` | packages/core/src/config/schemas/channels.ts:57 | 5 |
 | `imapPassword` | packages/core/src/config/schemas/channels.ts:60 | 6 |
 | `imapPort` | packages/core/src/config/schemas/channels.ts:58 | 4 |
@@ -288,7 +288,7 @@ Every public schema field, where it is declared, and how many production files r
 | `moderateToolOutputs` | packages/core/src/config/schema.ts:1229 | 1 |
 | `monthlyUsd` | packages/core/src/config/schema.ts:513 | 2 |
 | `mounts` | packages/core/src/config/schema.ts:675 | 6 |
-| `name` | packages/core/src/config/schema.ts:1895 | 293 |
+| `name` | packages/core/src/config/schema.ts:1895 | 294 |
 | `negativePrompt` | packages/core/src/config/schemas/multimodal.ts:152 | 3 |
 | `network` | packages/core/src/config/schema.ts:676 | 47 |
 | `node` | packages/core/src/config/schema.ts:1034 | 199 |
@@ -296,7 +296,7 @@ Every public schema field, where it is declared, and how many production files r
 | `notes` | packages/core/src/config/schema.ts:782 | 39 |
 | `oneLiner` | packages/core/src/config/schema.ts:891 | 2 |
 | `openaiCompatible` | packages/core/src/config/schema.ts:102 | 2 |
-| `operator` | packages/core/src/config/schema.ts:364 | 97 |
+| `operator` | packages/core/src/config/schema.ts:364 | 98 |
 | `orchestratorMaxToolIterations` | packages/core/src/config/schemas/effort.ts:23 | 1 |
 | `orchestratorTurnSloMs` | packages/core/src/config/schema.ts:1731 | 2 |
 | `orgId` | packages/core/src/config/schema.ts:1117 | 1 |
