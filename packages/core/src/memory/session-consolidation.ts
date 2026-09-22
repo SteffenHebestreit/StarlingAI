@@ -16,7 +16,7 @@
 import { childLogger } from "../logger.js";
 import { logAudit } from "../audit/logger.js";
 import { getConfig } from "../config/loader.js";
-import { readAllFacts } from "../swarm/memory.js";
+import { isAtomicFactValue, readAllFacts } from "../swarm/memory.js";
 import { storeWorkspaceMemoryRecord, listWorkspaceMemoryRecords } from "./service.js";
 
 const log = childLogger("memory:session-consolidation");
@@ -92,7 +92,9 @@ export async function consolidateSessionMemory(opts: {
     if (entries.length === 0) return result;
 
     // Snapshot existing durable content once for dedup (tokenized once, not
-    // re-tokenized per candidate — the O(facts×records) hot loop).
+    // re-tokenized per candidate — the O(facts×records) hot loop). An identifier
+    // (a path, URL, id) is only ever compared exactly, so it gets no token set:
+    // sibling paths share almost every token and would read as near-duplicates.
     const existingNorms = new Set<string>();
     const existingTokens: Array<Set<string>> = [];
     try {
@@ -100,7 +102,7 @@ export async function consolidateSessionMemory(opts: {
         const n = normalize(r.content);
         if (existingNorms.has(n)) continue;
         existingNorms.add(n);
-        existingTokens.push(tokenize(n));
+        if (!isAtomicFactValue(n)) existingTokens.push(tokenize(n));
       }
     } catch { /* best-effort */ }
 
@@ -114,10 +116,11 @@ export async function consolidateSessionMemory(opts: {
       if (CREDENTIAL_RE.test(content)) { result.skipped++; continue; }
 
       const norm = normalize(content);
+      const atomic = isAtomicFactValue(norm);
       const normTokens = tokenize(norm);
       // Exact or near-duplicate dedup against existing durable memory.
       let duplicate = existingNorms.has(norm);
-      if (!duplicate) {
+      if (!duplicate && !atomic) {
         for (const priorTokens of existingTokens) {
           if (isNearDuplicateTokens(normTokens, priorTokens)) { duplicate = true; break; }
         }
@@ -138,7 +141,7 @@ export async function consolidateSessionMemory(opts: {
           tags: ["consolidated", "session-derived", `source-session:${opts.sessionId.slice(0, 8)}`],
         }, { sessionId: opts.sessionId });
         existingNorms.add(norm);
-        existingTokens.push(normTokens);
+        if (!atomic) existingTokens.push(normTokens);
         result.promoted++;
       } catch (err) {
         log.debug({ err, key }, "Session fact promotion failed");

@@ -14,7 +14,19 @@
 import { getConfig } from "../config/loader.js";
 import { logAudit } from "../audit/logger.js";
 import { readAllFacts } from "./memory.js";
-import { appendEvidenceClaim, canonicalizeSubject, listEvidenceClaims, normalizeValue } from "./evidence-ledger.js";
+import { appendEvidenceClaim, canonicalizeSubject, listEvidenceClaims, liveClaims, normalizeValue, type EvidenceClaim } from "./evidence-ledger.js";
+
+/** Agents under which this sweep mirrors legacy values into the ledger. A subject
+ *  whose every claim carries one of these is known to the ledger ONLY through
+ *  earlier snapshots of the legacy store itself. */
+const LEGACY_ORIGIN = new Set(["evidence_migration_backfill", "evidence_migration_divergence"]);
+
+/** A provenance line as tools/memory.ts serializes sourced findings and evidence records. */
+const PROVENANCE_LINE = /^(?:record_type|claim|source_url|source_title|evidence_type): /m;
+
+function carriesProvenance(value: string | undefined): boolean {
+  return typeof value === "string" && PROVENANCE_LINE.test(value);
+}
 
 export interface EvidenceMigrationParity {
   /** Facts in the legacy shared-facts store. */
@@ -26,11 +38,18 @@ export interface EvidenceMigrationParity {
   /** Ledger subjects with no legacy counterpart (expected: rich share_evidence
    *  records use claim sentences as subjects, not fact keys). */
   ledgerOnly: number;
-  /** Subjects present in BOTH stores whose VALUES disagree. The legacy value is
-   *  appended as a claim, which trips write-time conflict detection — the
-   *  divergence becomes a first-class DISPUTED subject for EVD-302 to route,
-   *  never a silent store split. */
+  /** Subjects present in BOTH stores whose VALUES disagree, where the subject
+   *  is SOURCED: the ledger holds a claim written directly (share_evidence,
+   *  share_finding with provenance, a FACT line), or the value carries the
+   *  provenance lines a sourced writer stores. The legacy value is appended as a claim, which
+   *  trips write-time conflict detection — the divergence becomes a first-class
+   *  DISPUTED subject for EVD-302 to route, never a silent store split. */
   valueDivergences: number;
+  /** Bare, mirror-only subjects whose legacy value was overwritten since the last
+   *  sweep (a last-writer-wins pointer such as `latest_image`). The new value
+   *  SUPERSEDES the old one: an overwrite of one store is not two sources
+   *  disagreeing, so it is never disputed. */
+  superseded: number;
 }
 
 /**
@@ -43,25 +62,62 @@ export async function sweepEvidenceMigrationParity(rootSessionId: string): Promi
 
   const legacy = await readAllFacts(rootSessionId);
   const claims = await listEvidenceClaims(rootSessionId);
-  const ledgerSubjects = new Set(claims.map((claim) => claim.canonicalSubject));
-  const valueNormsBySubject = new Map<string, Set<string>>();
+  // Claims per subject in append order, so the last one is the current value.
+  const claimsBySubject = new Map<string, EvidenceClaim[]>();
   for (const claim of claims) {
-    const set = valueNormsBySubject.get(claim.canonicalSubject) ?? new Set<string>();
-    set.add(claim.valueNorm);
-    valueNormsBySubject.set(claim.canonicalSubject, set);
+    const list = claimsBySubject.get(claim.canonicalSubject) ?? [];
+    list.push(claim);
+    claimsBySubject.set(claim.canonicalSubject, list);
+  }
+  // Two legacy keys that canonicalize alike ("GPU price", "gpu price") hold two
+  // values at the SAME time. That is a real disagreement, not an overwrite, and
+  // superseding would flip between them on every sweep.
+  const legacyNormsBySubject = new Map<string, Set<string>>();
+  for (const [key, value] of Object.entries(legacy)) {
+    const subject = canonicalizeSubject(key);
+    legacyNormsBySubject.set(subject, (legacyNormsBySubject.get(subject) ?? new Set<string>()).add(normalizeValue(value)));
   }
 
   let backfilled = 0;
   let valueDivergences = 0;
+  let superseded = 0;
   for (const [key, value] of Object.entries(legacy)) {
     const subject = canonicalizeSubject(key);
-    if (ledgerSubjects.has(subject)) {
+    const subjectClaims = claimsBySubject.get(subject);
+    if (subjectClaims) {
+      const valueNorm = normalizeValue(value);
+      // A sourced writer (share_evidence, share_finding with provenance) serializes its
+      // provenance into the stored value; a pointer such as latest_image is written bare.
+      // Only a bare, sweep-only subject is a pointer being overwritten — a sourced one
+      // changing value is a second source disagreeing, and keeps conflict detection.
+      const sourced = carriesProvenance(value) || subjectClaims.some((claim) => carriesProvenance(claim.value));
+      if (!sourced && legacyNormsBySubject.get(subject)!.size === 1 && subjectClaims.every((claim) => LEGACY_ORIGIN.has(claim.agent ?? ""))) {
+        // The ledger only knows this subject from earlier sweeps of the same
+        // last-writer-wins store, so a different value can only be an overwrite.
+        // Compare with the CURRENT value, not the whole history, so a revert
+        // (A→B→A) is re-learned too.
+        if (subjectClaims[subjectClaims.length - 1]!.valueNorm !== valueNorm) {
+          try {
+            await appendEvidenceClaim(rootSessionId, {
+              subject: key,
+              value,
+              agent: "evidence_migration_backfill",
+              evidenceType: "observed",
+              validationState: "unverified",
+              supersedesPrior: true,
+            });
+            superseded++;
+          } catch { /* re-detected next sweep */ }
+        }
+        continue;
+      }
       // Value-level parity: the subject exists in both stores — do the VALUES
       // agree? A divergent legacy value is appended as a claim so write-time
       // conflict detection marks the subject disputed and EVD-302 routes it,
-      // instead of the two stores silently disagreeing.
-      const norms = valueNormsBySubject.get(subject);
-      if (norms && !norms.has(normalizeValue(value))) {
+      // instead of the two stores silently disagreeing. Agreement is with a LIVE
+      // value: matching one a supersession already replaced would leave the value
+      // agents actually read out of the dispute.
+      if (!liveClaims(subjectClaims).some((claim) => claim.valueNorm === valueNorm)) {
         try {
           await appendEvidenceClaim(rootSessionId, {
             subject: key,
@@ -89,8 +145,7 @@ export async function sweepEvidenceMigrationParity(rootSessionId: string): Promi
     }
   }
 
-  const legacyCanonical = new Set(Object.keys(legacy).map((key) => canonicalizeSubject(key)));
-  const ledgerOnly = [...ledgerSubjects].filter((subject) => !legacyCanonical.has(subject)).length;
+  const ledgerOnly = [...claimsBySubject.keys()].filter((subject) => !legacyNormsBySubject.has(subject)).length;
 
   const parity: EvidenceMigrationParity = {
     legacyFacts: Object.keys(legacy).length,
@@ -98,9 +153,11 @@ export async function sweepEvidenceMigrationParity(rootSessionId: string): Promi
     backfilled,
     ledgerOnly,
     valueDivergences,
+    superseded,
   };
   // Backfills mean the dual-write missed records; value divergences mean the
-  // stores DISAGREE — both warn while shadow parity is being judged.
+  // stores DISAGREE — both warn while shadow parity is being judged. A
+  // superseded pointer is the legacy store working as designed, so it does not.
   logAudit("evidence_migration_parity", { ...parity }, {
     sessionId: rootSessionId,
     severity: backfilled > 0 || valueDivergences > 0 ? "warn" : "info",

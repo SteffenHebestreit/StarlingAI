@@ -13,7 +13,7 @@ import { dirname, extname } from "node:path";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
 import { appendOutcome, readRecentOutcomes } from "../agent/outcomes.js";
-import { appendAgentMessage, writeSharedFact, readAllFacts, searchSharedFacts } from "../swarm/memory.js";
+import { appendAgentMessage, writeSharedFact, readAllFacts, searchSharedFacts, isAtomicFactValue } from "../swarm/memory.js";
 import { appendEvidenceClaim } from "../swarm/evidence-ledger.js";
 import { emitSwarmEvent } from "../swarm/bus.js";
 import { logAudit } from "../audit/logger.js";
@@ -131,11 +131,14 @@ function deriveAgentName(sessionId: string): string {
 
 /**
  * C13: Tokenize text for near-duplicate detection in share_finding.
- * Returns a Set of lowercase word-level tokens (length ≥ 3).
+ * Returns a Set of lowercase word-level tokens: length ≥ 3, or any length when
+ * the token holds a digit. "Q2" vs "Q3" or "0.6%" vs "0.4%" can be the whole
+ * difference between two facts, and dropping short tokens scored such a pair
+ * as identical.
  */
 function tokenizeForDedup(text: string): Set<string> {
-  const tokens = text.toLowerCase().match(/[a-z0-9äöüß]{3,}/g) ?? [];
-  return new Set(tokens);
+  const tokens = text.toLowerCase().match(/[a-z0-9äöüß]+/g) ?? [];
+  return new Set(tokens.filter((t) => t.length >= 3 || /\d/.test(t)));
 }
 
 /**
@@ -146,6 +149,11 @@ function tokenOverlapScore(newTokens: Set<string>, existingValue: string): numbe
   if (newTokens.size === 0) return 0;
   const existingTokens = tokenizeForDedup(existingValue);
   if (existingTokens.size === 0) return 0;
+  // A different number is a different fact, however long the sentence around it. Jaccard
+  // alone let a 90-character finding that changed one figure score above the threshold and be
+  // dropped as a duplicate, so the older figure stayed the only one recorded.
+  const numbers = (tokens: Set<string>): string => [...tokens].filter((t) => /\d/.test(t)).sort().join(" ");
+  if (numbers(newTokens) !== numbers(existingTokens)) return 0;
   let intersection = 0;
   for (const token of newTokens) {
     if (existingTokens.has(token)) intersection++;
@@ -1089,9 +1097,25 @@ registerTool({
     // with redundant information across multiple browser/search iterations.
     if (rawValue.length >= 50) {
       const existingFacts = await readAllFacts(parentSessionId);
-      const newTokens = tokenizeForDedup(rawValue);
-      for (const [existingKey, existingValue] of Object.entries(existingFacts)) {
-        if (existingKey === key) continue; // same key overwrite is fine
+      // A write to a key that already exists is an update: the hash replaces that
+      // one field, so it cannot add a fact, and skipping it would only keep the
+      // old value alive. Such a write is never compared with the other keys.
+      const others = Object.hasOwn(existingFacts, key) ? [] : Object.entries(existingFacts);
+      const newIsAtomic = isAtomicFactValue(rawValue);
+      const newTokens = newIsAtomic ? new Set<string>() : tokenizeForDedup(rawValue);
+      for (const [existingKey, existingValue] of others) {
+        // An identifier on either side is a duplicate only when the stored values
+        // are equal, so a finding that adds a claim or a source to a known path is
+        // new content.
+        if (newIsAtomic || isAtomicFactValue(existingValue)) {
+          if (existingValue !== value) continue;
+          log.info({ key, existingKey, parentSessionId }, "share_finding rejected as exact duplicate");
+          return {
+            success: true,
+            output: `Finding '${key}' has the same value as existing fact '${existingKey}'. Skipped to avoid duplicate.`,
+            metadata: { key, parentSessionId, deduplicated: true, nearDuplicateKey: existingKey },
+          };
+        }
         const overlapScore = tokenOverlapScore(newTokens, existingValue);
         if (overlapScore >= 0.85) {
           log.info({ key, existingKey, overlapScore, parentSessionId }, "share_finding rejected as near-duplicate");

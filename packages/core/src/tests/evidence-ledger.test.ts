@@ -109,6 +109,40 @@ describe("evidence conflict & freshness engine (EVD-302)", () => {
     expect(result.outcome).toBe("material");
   });
 
+  it("a supersedesPrior write replaces the current value instead of disputing it; both claims stay in the log", async () => {
+    const a = await appendEvidenceClaim("cf-8", { subject: "s", value: "x", evidenceType: "observed" });
+    const b = await appendEvidenceClaim("cf-8", { subject: "s", value: "y", evidenceType: "observed", supersedesPrior: true });
+    expect(b.conflictWith).toBeUndefined();
+    expect(b.claim.validationState).toBe("unverified");
+    expect(b.claim.relations?.supersedes).toEqual([a.claim.claimId]);
+    expect(await listDisputedSubjects("cf-8")).toEqual([]);
+    expect(await listEvidenceClaims("cf-8", { subject: "s" })).toHaveLength(2);
+  });
+
+  it("a genuine dispute after a supersession weighs only the live values, not the superseded one", async () => {
+    await appendEvidenceClaim("cf-9", { subject: "s", value: "old", evidenceType: "observed" });
+    await appendEvidenceClaim("cf-9", { subject: "s", value: "current", evidenceType: "observed", supersedesPrior: true });
+    await appendEvidenceClaim("cf-9", { subject: "s", value: "rival", evidenceType: "observed", agent: "researcher" });
+    expect(await listDisputedSubjects("cf-9")).toEqual(["s"]);
+    const result = await resolveSubjectConflict("cf-9", "s");
+    expect(result.outcome).toBe("material");
+    if (result.outcome !== "material") return;
+    expect(result.claims.map((c) => c.value).sort()).toEqual(["current", "rival"]);
+  });
+
+  it("a dispute with more than ten values still weighs its oldest, most authoritative claim", async () => {
+    // The subject index keeps only the last ten values for write-time detection. Judging
+    // "live" by that cap would drop the official value here — only supersession retires one.
+    await appendEvidenceClaim("cf-10", { subject: "s", value: "official", evidenceType: "official" });
+    for (let i = 1; i <= 10; i++) {
+      await appendEvidenceClaim("cf-10", { subject: "s", value: `guess-${i}`, evidenceType: "observed" });
+    }
+    const result = await resolveSubjectConflict("cf-10", "s");
+    expect(result.outcome).toBe("resolved");
+    if (result.outcome !== "resolved") return;
+    expect(result.winner.value).toBe("official");
+  });
+
   it("sweep resolves every disputed subject and reports the queue", async () => {
     await appendEvidenceClaim("cf-4", { subject: "a", value: "1", evidenceType: "secondary" });
     await appendEvidenceClaim("cf-4", { subject: "a", value: "2", evidenceType: "official" });

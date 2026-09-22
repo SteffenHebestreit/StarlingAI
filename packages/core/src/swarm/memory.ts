@@ -257,6 +257,17 @@ export async function readAllFacts(sessionId: string): Promise<Record<string, st
   return Object.fromEntries(_facts.get(sessionId) ?? new Map());
 }
 
+/**
+ * True when a fact value is one whitespace-free token: a path, URL, id, hash or
+ * e-mail address. Such a value names one thing, so it duplicates another value
+ * only when the two are equal. Token overlap cannot compare them: sibling files in
+ * one directory share almost every token, so they score as near-identical.
+ */
+export function isAtomicFactValue(value: string): boolean {
+  const trimmed = value.trim();
+  return trimmed !== "" && !/\s/.test(trimmed);
+}
+
 // ── Turn plan slot ───────────────────────────────────────────────────────────
 // A reserved per-session slot holding the orchestrator's structured plan for the
 // current turn (JSON). Kept OUT of the facts hash so the raw JSON never leaks

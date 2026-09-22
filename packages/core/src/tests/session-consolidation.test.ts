@@ -5,7 +5,8 @@ import { join } from "node:path";
 
 // Control the session's shared-facts without needing Redis.
 const { factsRef } = vi.hoisted(() => ({ factsRef: { value: {} as Record<string, string> } }));
-vi.mock("../swarm/memory.js", () => ({
+vi.mock("../swarm/memory.js", async () => ({
+  ...(await vi.importActual<Record<string, unknown>>("../swarm/memory.js")),
   readAllFacts: async () => factsRef.value,
 }));
 
@@ -124,6 +125,24 @@ describe("end-of-session memory consolidation", () => {
 
     const result = await consolidateSessionMemory({ sessionId: "sess-neardup", workspacePath: ws, turnCount: 2 });
     expect(result.promoted).toBe(0);
+  });
+
+  it("promotes a different file even when a sibling path is already stored", async () => {
+    // The two paths differ only in `_v2`, so their tokens overlap 6/7 (0.857) and the
+    // near-duplicate check dropped the second file. A path names one file: it is a
+    // duplicate only when it is the same path.
+    const ws = workspace();
+    storeWorkspaceMemoryRecord(ws, {
+      key: "image_v1",
+      subject: "image v1",
+      content: "generated/.starlingai/generated/image-1790107355849_realistic.png",
+      kind: "fact",
+    }, { sessionId: "seed" });
+
+    factsRef.value = { image_v2: "generated/.starlingai/generated/image-1790107355849_realistic_v2.png" };
+
+    const result = await consolidateSessionMemory({ sessionId: "sess-paths", workspacePath: ws, turnCount: 2 });
+    expect(result.promoted).toBe(1);
   });
 
   it("skips sessions with no completed turns", async () => {

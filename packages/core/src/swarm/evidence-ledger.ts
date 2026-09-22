@@ -37,9 +37,14 @@ export interface EvidenceClaimInput {
   confidence?: { accuracy?: number; trustworthiness?: number; corroboration?: number };
   validationState?: EvidenceValidationState;
   relations?: Partial<Record<EvidenceRelationKind, string[]>>;
+  /** The claim REPLACES the subject's current value instead of contradicting it:
+   *  a later write of the same single last-writer-wins source (the migration
+   *  sweep's mirror of a legacy pointer such as `latest_image`). Never set it for
+   *  agent or source claims — it clears the subject's dispute flag. */
+  supersedesPrior?: boolean;
 }
 
-export interface EvidenceClaim extends EvidenceClaimInput {
+export interface EvidenceClaim extends Omit<EvidenceClaimInput, "supersedesPrior"> {
   claimId: string;
   canonicalSubject: string;
   valueNorm: string;
@@ -230,13 +235,18 @@ export interface AppendEvidenceResult {
 
 /** Append one immutable claim; conflicts are marked, never merged or overwritten. */
 export async function appendEvidenceClaim(sessionId: string, input: EvidenceClaimInput): Promise<AppendEvidenceResult> {
+  const { supersedesPrior, ...fields } = input;
   const canonicalSubject = canonicalizeSubject(input.subject);
   const valueNorm = normalizeValue(input.value);
   const existing = await readSubjectEntry(sessionId, canonicalSubject);
-  const conflict = Boolean(existing && existing.valueNorms.length > 0 && !existing.valueNorms.includes(valueNorm));
+  // A supersession is one source moving its own value, not two sources
+  // disagreeing, so it never counts as a conflict.
+  const supersede = supersedesPrior === true && existing != null;
+  const conflict = !supersede && Boolean(existing && existing.valueNorms.length > 0 && !existing.valueNorms.includes(valueNorm));
 
   const claim: EvidenceClaim = {
-    ...input,
+    ...fields,
+    ...(supersede ? { relations: { ...fields.relations, supersedes: existing.claimIds } } : {}),
     claimId: randomUUID(),
     canonicalSubject,
     valueNorm,
@@ -269,11 +279,20 @@ export async function appendEvidenceClaim(sessionId: string, input: EvidenceClai
     _localClaims.set(sessionId, list);
   }
 
-  const nextEntry: SubjectIndexEntry = {
-    claimIds: [...(existing?.claimIds ?? []), claim.claimId].slice(-20),
-    valueNorms: existing?.valueNorms.includes(valueNorm) ? existing.valueNorms : [...(existing?.valueNorms ?? []), valueNorm].slice(-10),
-    disputed: conflict || (existing?.disputed ?? false),
-  };
+  // A superseded value leaves the live set: the next write is compared against
+  // the current value only, and the old claims remain in the log as history.
+  const nextEntry: SubjectIndexEntry = supersede
+    ? {
+      claimIds: [...existing.claimIds, claim.claimId].slice(-20),
+      valueNorms: [valueNorm],
+      disputed: false,
+      resolution: { winnerClaimId: claim.claimId, reason: "superseded by a later write of the same last-writer-wins source", at: claim.observedAt },
+    }
+    : {
+      claimIds: [...(existing?.claimIds ?? []), claim.claimId].slice(-20),
+      valueNorms: existing?.valueNorms.includes(valueNorm) ? existing.valueNorms : [...(existing?.valueNorms ?? []), valueNorm].slice(-10),
+      disputed: conflict || (existing?.disputed ?? false),
+    };
   await writeSubjectEntry(sessionId, canonicalSubject, nextEntry);
 
   if (conflict) {
@@ -389,9 +408,22 @@ export type ConflictResolution =
  * conflict is MATERIAL and becomes verification work (`evidence_verification_needed`
  * audit) — it is never silently collapsed. Losing claims remain in the log.
  */
+/**
+ * The claims a supersession has not replaced. Read from the claims' own `supersedes`
+ * relations rather than the subject index, whose value list is capped at ten: filtering on
+ * that cap would drop the oldest value — possibly the authoritative one — from a dispute
+ * that merely has many values, which is not what superseding means.
+ */
+export function liveClaims(claims: readonly EvidenceClaim[]): EvidenceClaim[] {
+  const replaced = new Set(claims.flatMap((claim) => claim.relations?.supersedes ?? []));
+  return claims.filter((claim) => !replaced.has(claim.claimId));
+}
+
 export async function resolveSubjectConflict(sessionId: string, subject: string): Promise<ConflictResolution> {
   const canonical = canonicalizeSubject(subject);
-  const claims = await listEvidenceClaims(sessionId, { subject: canonical });
+  // Only live values compete: a value an earlier write superseded is history, and must not
+  // come back as a candidate winner when the subject is disputed again later.
+  const claims = liveClaims(await listEvidenceClaims(sessionId, { subject: canonical }));
   const distinctValues = new Set(claims.map((claim) => claim.valueNorm));
   if (distinctValues.size <= 1) return { subject: canonical, outcome: "no_conflict" };
 
