@@ -529,9 +529,17 @@ registerTool({
       strength: {
         type: "number",
         description:
-          "With `baseImage`, how far the result may move from it, 0 to 1. Low (0.2-0.35) keeps the"
-          + " composition and changes style or detail; high (0.6-0.8) keeps only the rough layout."
-          + " Defaults to a middling value.",
+          "With `baseImage`, how much of the original is re-rendered, 0 to 1. This is the choice"
+          + " that decides whether an edit reads as an edit, so match the band to what the user"
+          + " asked to CHANGE. 0.2-0.35 is a TOUCH-UP: composition AND style both survive, only"
+          + " detail and colour move — right for 'warmer', 'remove that object', 'fix the sky'."
+          + " 0.65-0.8 is a RESTYLE: the layout (subject, horizon, framing) survives while the"
+          + " look is genuinely replaced — this is what 'make it photorealistic', 'more"
+          + " dramatic', 'less cartoonish', 'viel realer' need. Above ~0.85 keeps nothing and is"
+          + " a fresh image with extra steps. Asking for a different LOOK and sending 0.3-0.5"
+          + " returns the same picture very slightly altered, which the user reads as the edit"
+          + " having been ignored. Defaults to a conservative touch-up, so state the value"
+          + " explicitly whenever the request is about the look rather than a local detail.",
       },
       outputPath: { type: "string", description: "Optional relative output path inside the workspace for the generated PNG" },
     },

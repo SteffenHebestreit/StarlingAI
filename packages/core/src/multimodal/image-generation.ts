@@ -877,6 +877,19 @@ function summarizeUpstreamText(value: string): string {
  * comparison would fail every edit whose strength is not representable, which is most of
  * them.
  */
+/**
+ * Do NOT try to confirm an edit from the PNG's own generation record.
+ *
+ * Every image this backend returns carries a tEXt "parameters" chunk, and for a genuine
+ * img2img it still reads `"mode":"img_gen"` with no `ref_images` entry — that string names
+ * stable-diffusion.cpp's entry point, not whether a reference was used. Reading it as proof
+ * of a text-to-image render sends you hunting a backend bug that is not there.
+ *
+ * What actually discriminates is `strength`, measured on decoded pixels against the base:
+ * 0.15 -> 10.1, 0.5 -> 16.3, 0.65 -> 21.8, 0.78 -> 23.8, and 0.9 -> 55.3 against 58.2 for a
+ * text-to-image control of the same prompt. Strength near 1 converging on the control is the
+ * signature of a reference that IS being applied.
+ */
 function assertEditWasApplied(input: ResolvedImageRequest, body: Record<string, unknown>): void {
   if (!input.initImage) return;
   const usage = isRecord(body["usage"]) ? body["usage"] : undefined;

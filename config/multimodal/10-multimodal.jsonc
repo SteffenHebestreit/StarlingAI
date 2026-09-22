@@ -93,6 +93,17 @@
       // pixel distance 1.6 at 0.25 against 44.5 at 0.85). The fast tier is not listed
       // because it has no edit route.
       //
+      // `strength` is the whole game, and the bands are NOT symmetric. Measured on decoded
+      // pixels at the production settings below (20 steps, guidance 1), distance from base:
+      // 0.15 -> 10.1, 0.5 -> 16.3, 0.65 -> 21.8, 0.78 -> 23.8; a text-to-image control of the
+      // same prompt sits at 58.2. So everything up to ~0.5 keeps the ORIGINAL LOOK as well as
+      // the composition — a "make it photorealistic" sent at 0.5 comes back as the same
+      // picture, which is the failure session 8144f262 reported. Restyling needs 0.65-0.8.
+      // The tool schema carries this mapping; it is the thing the model reads.
+      //
+      // The request form does not matter: bare base64, a data: URL and multipart/form-data
+      // all behave identically here, so there is no reason to build a multipart path.
+      //
       // The generations route now answers 400 "does not accept 'image'" rather than quietly
       // rendering something new, so a mistake here is loud at both ends.
       "initImageModels": ["image-quality"],
