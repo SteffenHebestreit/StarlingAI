@@ -170,6 +170,7 @@
               :streaming-sub-agent-reasoning="msg.id === 'streaming' ? gateway.streamingSubAgentReasoning : undefined"
               :auto-collapse="msg.role === 'assistant' && idx !== lastAssistantVisibleIdx && msg.id !== 'streaming'"
               @rewind="handleRewind"
+              @show-steps="showStepsFor"
             />
           </div>
         </section>
@@ -181,7 +182,34 @@
       v-model="sidePanelOpen"
       :has-live-content="hasSidePanels"
       :artifact-count="sessionArtifacts.length"
+      :step-count="stepDetailItems.length"
+      :requested-tab="requestedPanelTab"
     >
+      <!-- Steps slot: the execution detail for the ONE message whose link was clicked. -->
+      <template #steps>
+        <div v-if="stepDetailItems.length" class="panel-steps">
+          <div class="panel-steps__header">{{ stepDetailHeader }}</div>
+          <div
+            v-for="(item, i) in stepDetailItems"
+            :key="`${item.kind}-${item.key}`"
+            class="panel-steps__item-wrap"
+          >
+            <div class="panel-steps__item">
+              <span class="panel-steps__step">{{ i + 1 }}</span>
+              <div class="panel-steps__details">
+                <span class="panel-steps__name">{{ item.name }}</span>
+                <span v-if="item.meta" class="panel-steps__meta">{{ item.meta }}</span>
+              </div>
+              <span :class="['panel-steps__status', `panel-steps__status--${item.status}`]">
+                {{ item.statusSymbol }}
+              </span>
+            </div>
+            <!-- Full result here, not the bubble's old 600-char slice: the panel scrolls and
+                 is the place someone goes when they actually want to read it. -->
+            <pre v-if="item.result" class="panel-steps__result">{{ item.result }}</pre>
+          </div>
+        </div>
+      </template>
       <!-- Live context slot: swarm, shell, computer sessions -->
       <template #live>
         <SwarmStatusPanel
@@ -1031,6 +1059,7 @@ import type { GatewaySessionTranscriptMessage, InterventionAction, EffortTier } 
 import { readSpeakReplySummaryStorage, writeSpeakReplySummaryStorage } from "@/stores/multimodal";
 import { marked } from "marked";
 import MessageBubble from "@/components/MessageBubble.vue";
+import { buildExecutionItems } from "@/composables/executionItems";
 import SwarmStatusPanel from "@/components/SwarmStatusPanel.vue";
 import ComputerSessionPanel from "@/components/ComputerSessionPanel.vue";
 import ShellSessionPanel from "@/components/ShellSessionPanel.vue";
@@ -1622,6 +1651,37 @@ const hasSidePanels = computed(() => Boolean(gateway.visibleSwarmState) || shell
 
 // ── Off-canvas side panel ───────────────────────────────────────────────
 const sidePanelOpen = ref(false);
+
+/**
+ * Per-message execution detail, shown in the panel's Steps tab.
+ *
+ * The panel is otherwise session-scoped — the Live tab tracks whatever the swarm is doing now
+ * — so this is the one place it becomes about a SPECIFIC message: whichever answer's step link
+ * the reader last clicked.
+ */
+const stepDetailMessageId = ref<string | null>(null);
+const requestedPanelTab = ref<"live" | "steps" | "artifacts" | null>(null);
+
+const stepDetail = computed(() => {
+  const id = stepDetailMessageId.value;
+  if (!id) return null;
+  const message = gateway.messages.find(m => m.id === id);
+  // The selected message can vanish: a rewind truncates history, and the "streaming"
+  // placeholder is replaced by a real id when the turn lands. Resolve by lookup every time
+  // rather than holding the object, so a stale selection renders empty instead of frozen.
+  return message ? buildExecutionItems(message) : null;
+});
+const stepDetailItems = computed(() => stepDetail.value?.items ?? []);
+const stepDetailHeader = computed(() => stepDetail.value?.header ?? "");
+
+function showStepsFor(messageId: string): void {
+  stepDetailMessageId.value = messageId;
+  requestedPanelTab.value = "steps";
+  sidePanelOpen.value = true;
+  // Clear the request so a later manual tab change inside the panel is not undone by the
+  // watcher firing again on an unrelated re-render.
+  void nextTick(() => { requestedPanelTab.value = null; });
+}
 
 // Aggregate previewable, non-image attachments from all messages in the session
 // Aggregate previewable and downloadable attachments from all messages in the session.
@@ -4873,6 +4933,55 @@ onUnmounted(() => {
 .chat-scene-pill:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+/* ── Panel step-detail styles ──────────────────────────────────────── */
+/* The execution trail that used to render inside the message bubble. Same information, moved
+   somewhere with room to scroll — so results are shown in full rather than cut at 600 chars. */
+.panel-steps { display: flex; flex-direction: column; gap: 0.1rem; }
+.panel-steps__header {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.6;
+  padding: 0.3rem 0 0.45rem;
+  position: sticky;
+  top: 0;
+  background: inherit;
+}
+.panel-steps__item-wrap {
+  border-bottom: 1px solid rgba(168, 85, 247, 0.12);
+  padding-bottom: 0.3rem;
+  margin-bottom: 0.3rem;
+}
+.panel-steps__item-wrap:last-child { border-bottom: none; }
+.panel-steps__item {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  font-size: 0.78rem;
+  padding: 0.25rem 0;
+}
+.panel-steps__step { color: #a78bfa; font-weight: 700; min-width: 1.2rem; }
+.panel-steps__details { display: flex; flex-direction: column; gap: 0.1rem; flex: 1; min-width: 0; }
+.panel-steps__name { font-family: monospace; color: #e2d9f3; word-break: break-word; }
+.panel-steps__meta { font-size: 0.7rem; opacity: 0.65; word-break: break-word; }
+.panel-steps__status { font-size: 0.75rem; }
+.panel-steps__status--done    { color: #4ade80; }
+.panel-steps__status--partial { color: #fbbf24; }
+.panel-steps__status--running { color: #e879f9; animation: pulse 1s infinite; }
+.panel-steps__status--failed  { color: #f87171; }
+.panel-steps__result {
+  margin: 0.2rem 0 0 1.7rem;
+  padding: 0.4rem 0.5rem;
+  border-radius: 0.4rem;
+  background: rgba(0, 0, 0, 0.28);
+  font-size: 0.7rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 22rem;
+  overflow-y: auto;
 }
 
 /* ── Panel artifact viewer styles ──────────────────────────────────── */

@@ -85,36 +85,23 @@
         </div>
       </div>
 
-      <!-- Execution steps — the audit trail, below the reasoning and collapsed unless asked for.
-           The list is bounded and scrolls: a long turn used to render every step and every 600-char
-           result inline, so a single message could be pages long. -->
+      <!-- Execution summary — ONE line saying what this step did.
+           The full list used to live here, and a long turn rendered every step plus a 600-char
+           result each, so a single answer ran to pages and the answer itself got pushed out of
+           sight. The detail now opens in the side panel, where there is room for it and where
+           it does not compete with the thing the reader came for. -->
       <div v-if="executionItems.length" class="tool-status-wrap">
-        <div class="tool-status" @click="toggleToolHistory()">
+        <div class="tool-status tool-status--summary">
           <span class="tool-status__icon">⚙</span>
-          <span class="tool-status__label">{{ activeExecutionLabel }}</span>
-          <span class="tool-status__chevron">{{ toolHistoryOpen ? '▲' : '▼' }}</span>
-        </div>
-        <div v-if="toolHistoryOpen" class="tool-history">
-          <div class="tool-history__header">{{ executionHistoryHeader }}</div>
-          <div
-            v-for="(item, i) in executionItems"
-            :key="`${item.kind}-${item.key}`"
-            class="tool-history__item-wrap"
+          <span class="tool-status__label">{{ executionSummaryLine || activeExecutionLabel }}</span>
+          <button
+            type="button"
+            class="tool-status__details-btn"
+            :aria-label="`Show the ${executionItems.length} steps behind this answer`"
+            @click="emit('show-steps', message.id)"
           >
-            <div class="tool-history__item">
-              <span class="tool-history__step">{{ i + 1 }}</span>
-              <div class="tool-history__details">
-                <span class="tool-history__name">{{ item.name }}</span>
-                <span v-if="item.meta" class="tool-history__meta">{{ item.meta }}</span>
-              </div>
-              <span :class="['tool-history__status', `tool-history__status--${item.status}`]">
-                {{ item.statusSymbol }}
-              </span>
-            </div>
-            <div v-if="item.result" class="tool-history__result">
-              <pre>{{ item.result.length > 600 ? item.result.substring(0, 600) + '…' : item.result }}</pre>
-            </div>
-          </div>
+            {{ executionItems.length }} step{{ executionItems.length === 1 ? '' : 's' }} ›
+          </button>
         </div>
       </div>
 
@@ -325,6 +312,12 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { marked, type Tokens } from "marked";
 import DOMPurify from "dompurify";
 import { useProductStore } from "@/stores/product";
+import {
+  buildExecutionItems,
+  summariseExecution,
+  type ExecutionItem,
+  type ExecutionStatus,
+} from "@/composables/executionItems";
 
 // Product name comes from GET /api/product so a fork rebrands without editing this
 // file (docs/fork-boilerplate-plan.md WS1).
@@ -465,19 +458,6 @@ marked.use({
   },
 });
 
-type ExecutionStatus = "running" | "done" | "partial" | "failed";
-
-interface ExecutionItem {
-  key: string;
-  kind: "subagent" | "subagent-tool" | "tool";
-  name: string;
-  meta?: string;
-  status: ExecutionStatus;
-  statusSymbol: string;
-  startedAt?: string;
-  result?: string;
-}
-
 interface ArtifactPreviewState {
   title: string;
   filename: string;
@@ -504,19 +484,6 @@ let mermaidInlineRenderToken = 0;
 
 const MERMAID_START_RE = /^(?:%%\{.*\}%%|%%\s|flowchart|graph|sequenceDiagram|classDiagram|stateDiagram(?:-v2)?|erDiagram|journey|gantt|pie|mindmap|timeline|gitGraph|quadrantChart|requirementDiagram|xychart-beta|block-beta|architecture-beta|packet-beta|kanban|sankey-beta|radar-beta|treemap-beta|info)\b/i;
 
-function mapExecutionStatus(status: "running" | "completed" | "partial" | "failed"): ExecutionStatus {
-  if (status === "completed") return "done";
-  if (status === "partial") return "partial";
-  return status;
-}
-
-function executionStatusSymbol(status: ExecutionStatus): string {
-  if (status === "done") return "✓";
-  if (status === "partial") return "~";
-  if (status === "failed") return "!";
-  return "…";
-}
-
 const props = defineProps<{
   message: ChatMessage;
   isStreaming?: boolean;
@@ -530,16 +497,14 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   rewind: [messageId: string];
+  /** Ask the page to show THIS message's execution steps in the side panel. */
+  "show-steps": [messageId: string];
 }>();
 
 const gateway = useGatewayStore();
 
 const COLLAPSE_CHAR_THRESHOLD = 400;
 
-const toolHistoryOpen = ref(false);
-/** Set once the reader opens or closes the step list themselves, so the automatic open/close stops
- *  fighting them for the rest of the message's life. */
-const userToggledToolHistory = ref(false);
 const thinkingOpen = ref(false);
 const lightboxUrl = ref<string | null>(null);
 const artifactPreview = ref<ArtifactPreviewState | null>(null);
@@ -661,78 +626,15 @@ const visibleGuardrailEvents = computed(() =>
 
 const swarmTasks = computed(() => Object.values(props.message.swarmState?.tasks ?? {}));
 
-// ── Execution history label ──────────────────────────────────────────────────
-const swarmExecutionItems = computed<ExecutionItem[]>(() => swarmTasks.value
-  .flatMap((task) => task.attempts.flatMap((attempt, index) => {
-    const status = mapExecutionStatus(attempt.status);
-    const items: ExecutionItem[] = [{
-      key: `${task.id}-${attempt.agentName}-${attempt.startedAt}-${index}`,
-      kind: "subagent" as const,
-      name: attempt.agentName,
-      meta: [
-        task.title,
-        attempt.toolCount ? `${attempt.toolCount} tool${attempt.toolCount === 1 ? "" : "s"}` : "",
-        attempt.iterations ? `${attempt.iterations} iter${attempt.iterations === 1 ? "" : "s"}` : "",
-      ].filter(Boolean).join(" · "),
-      status,
-      statusSymbol: executionStatusSymbol(status),
-      startedAt: attempt.startedAt,
-    }];
-
-    // A tool name only appears in toolNames after that call COMPLETED, so each
-    // listed sub-agent tool call did run. Render it "done" — never inherit the
-    // parent attempt's "partial"/"failed" status (a stopped/timed-out attempt,
-    // or one the operator chose to stop/extend, must not retroactively paint the
-    // searches that already succeeded as failed). The attempt node itself keeps
-    // its real status.
-    for (const [toolIndex, toolName] of (attempt.toolNames ?? []).entries()) {
-      items.push({
-        key: `${task.id}-${attempt.agentName}-${attempt.startedAt}-${index}-tool-${toolIndex}`,
-        kind: "subagent-tool" as const,
-        name: toolName,
-        meta: `${attempt.agentName} · ${toolIndex + 1}/${attempt.toolNames?.length ?? 0}`,
-        status: "done" as const,
-        statusSymbol: executionStatusSymbol("done"),
-        startedAt: attempt.startedAt,
-      });
-    }
-
-    return items;
-  }))
-  .sort((left, right) => {
-    if (left.startedAt && right.startedAt) return left.startedAt.localeCompare(right.startedAt);
-    if (left.startedAt) return -1;
-    if (right.startedAt) return 1;
-    return left.key.localeCompare(right.key);
-  }));
-
-const toolExecutionItems = computed<ExecutionItem[]>(() => (props.message.toolCalls ?? []).map((toolCall, index) => {
-  const argsSummary = Object.entries(toolCall.args ?? {})
-    // Render object/array values as JSON, not the useless "[object Object]" String() gives.
-    .map(([k, v]) => `${k}: ${(typeof v === "string" ? v : JSON.stringify(v)).substring(0, 80)}`)
-    .join(", ");
-  const status: ExecutionStatus = toolCall.result === undefined
-    ? "running"
-    : toolCall.result.trim().startsWith("Error:")
-      ? "failed"
-      : "done";
-  return {
-    key: toolCall.id ?? `${toolCall.name}-${index}`,
-    kind: "tool" as const,
-    name: toolCall.name,
-    meta: argsSummary || undefined,
-    status,
-    statusSymbol: executionStatusSymbol(status),
-    result: toolCall.result,
-  };
-}));
-
-const executionItems = computed<ExecutionItem[]>(() => {
-  if (swarmExecutionItems.value.length > 0) return swarmExecutionItems.value;
-  return toolExecutionItems.value;
-});
-
-const executionHistoryHeader = computed(() => swarmExecutionItems.value.length > 0 ? "Swarm Task Timeline" : "Tool Execution Steps");
+// ── Execution history ────────────────────────────────────────────────────────
+// Derived in @/composables/executionItems because the side panel renders the same list.
+// The bubble keeps only the one-line summary; `executionItems` survives here so the
+// existing label logic below is untouched.
+const execution = computed(() => buildExecutionItems(props.message));
+const executionItems = computed<ExecutionItem[]>(() => execution.value.items);
+const executionHistoryHeader = computed(() => execution.value.header);
+const swarmExecutionItems = computed<ExecutionItem[]>(() => execution.value.delegated ? execution.value.items : []);
+const executionSummaryLine = computed(() => summariseExecution(props.message));
 
 const activeExecutionLabel = computed(() => {
   if (swarmExecutionItems.value.length > 0) {
@@ -791,24 +693,16 @@ const activeExecutionLabel = computed(() => {
 });
 
 /**
- * The step list opens while work is running and closes again when it stops.
+ * Keep the answer expanded while work is actually running.
  *
- * It used to only ever open. Every finished message in the transcript therefore kept its whole tool
- * history expanded — each step plus 600 characters of each result — so scrolling back through a
- * session meant scrolling past every tool call the assistant had ever made, and the reply itself
- * was pushed below the fold. Reopening it is one click, and a message the user opened by hand stays
- * open because `userToggledToolHistory` suppresses the automatic close.
+ * This watcher used to also open and close the inline step list. That list now lives in the
+ * side panel, so only the un-collapse survives — a message that is still being written should
+ * not be sitting behind a "show more" the reader has to click to watch it arrive.
  */
 watch(
   () => [props.isStreaming, executionItems.value.some((item) => item.status === "running")],
   ([isStreamingNow, hasRunningItems]) => {
-    if (userToggledToolHistory.value) return;
-    if (isStreamingNow && hasRunningItems) {
-      toolHistoryOpen.value = true;
-      contentCollapsed.value = false;
-      return;
-    }
-    toolHistoryOpen.value = false;
+    if (isStreamingNow && hasRunningItems) contentCollapsed.value = false;
   },
   { immediate: true },
 );
@@ -1227,10 +1121,6 @@ async function previewAttachment(attachment: ChatAttachment): Promise<void> {
   }
 }
 
-function toggleToolHistory(): void {
-  userToggledToolHistory.value = true;
-  toolHistoryOpen.value = !toolHistoryOpen.value;
-}
 
 function openExternalAttachment(attachment: ChatAttachment): void {
   if (!attachment.externalUrl) return;
@@ -1916,6 +1806,26 @@ onBeforeUnmount(() => {
 .tool-status:hover { background: rgba(168, 85, 247, 0.18); }
 .tool-status__icon  { font-style: normal; }
 .tool-status__chevron { font-size: 0.6rem; opacity: 0.6; font-style: normal; }
+
+/* The summary row is no longer itself a button — only the trailing count opens the panel,
+   so clicking the sentence does not fire a navigation the reader did not ask for. */
+.tool-status--summary { cursor: default; }
+.tool-status--summary:hover { background: rgba(168, 85, 247, 0.1); }
+.tool-status__details-btn {
+  font: inherit;
+  font-style: normal;
+  margin-left: 0.15rem;
+  padding: 0 0.3rem;
+  border: none;
+  border-radius: 9999px;
+  background: transparent;
+  color: inherit;
+  opacity: 0.75;
+  cursor: pointer;
+  transition: opacity 0.15s, background 0.15s;
+}
+.tool-status__details-btn:hover { opacity: 1; background: rgba(168, 85, 247, 0.22); }
+.tool-status__details-btn:focus-visible { outline: 2px solid #c084fc; outline-offset: 1px; }
 
 .tool-history {
   margin-top: 4px;
