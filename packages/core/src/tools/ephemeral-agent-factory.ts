@@ -526,6 +526,10 @@ export async function runArchitectFallback(task: string, ctx: ToolContext): Prom
 
   let result: string;
   let terminalState: string | undefined;
+  // What the run recorded, beside what it said: the files it produced and the calls that failed
+  // on the way. A configured specialist's delegation carries both; this stand-in for one must too,
+  // or its frame shows only the agent's own account of what happened.
+  let runRecord: Record<string, unknown>;
   try {
     // Inject shared facts into the ephemeral agent's context so it can use
     // URLs, partial results, and evidence discovered by earlier agents.
@@ -534,6 +538,8 @@ export async function runArchitectFallback(task: string, ctx: ToolContext): Prom
       agentName: ephemeralName,
       task,
       context: ephemeralSharedCtx ?? undefined,
+      // Stands in for a delegation that found no specialist, so it gets what a specialist would.
+      turnUserWords: ctx.turnUserWords,
       parentSessionId: ctx.sessionId,
       workspacePath: ctx.workspacePath,
       userId: ctx.userId,
@@ -551,6 +557,7 @@ export async function runArchitectFallback(task: string, ctx: ToolContext): Prom
     });
     result = runResult.output;
     terminalState = runResult.stats.terminalState;
+    runRecord = runRecordMetadata(runResult);
   } catch (err) {
     logAudit(
       "architect_fallback_failed",
@@ -593,7 +600,16 @@ export async function runArchitectFallback(task: string, ctx: ToolContext): Prom
       architect: true,
       tools,
       promoted: success && config.subAgents[agentName] === undefined,
+      ...runRecord,
     },
+  };
+}
+
+/** The produced files and failed calls of an ephemeral run, as delegation metadata. */
+function runRecordMetadata(run: { artifacts?: unknown[]; toolFailures?: unknown[] }): Record<string, unknown> {
+  return {
+    ...(run.artifacts?.length ? { artifacts: run.artifacts } : {}),
+    ...(run.toolFailures?.length ? { specialistToolFailures: run.toolFailures } : {}),
   };
 }
 
@@ -823,6 +839,8 @@ registerTool({
       agentName: ephemeralName,
       task,
       context,
+      // Same as any delegated specialist: the orchestrator wrote this task, the user did not.
+      turnUserWords: ctx.turnUserWords,
       parentSessionId: ctx.sessionId,
       workspacePath: ctx.workspacePath,
       userId: ctx.userId,
@@ -863,6 +881,7 @@ registerTool({
           rejectedTools: rejected,
           narrativeOnly: true,
           toolNames: ephemeralStats?.toolNames ?? [],
+          ...runRecordMetadata(runResult),
         },
       };
     }
@@ -871,7 +890,7 @@ registerTool({
     return {
       success: true,
       output: `[ephemeral:${agentName}]: ${result}${note}`,
-      metadata: { agentName: ephemeralName, grantedTools: tools, rejectedTools: rejected },
+      metadata: { agentName: ephemeralName, grantedTools: tools, rejectedTools: rejected, ...runRecordMetadata(runResult) },
     };
   },
 });

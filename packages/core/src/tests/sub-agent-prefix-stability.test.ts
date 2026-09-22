@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { appendFlowMemoryEntry } from "../agent/flow-memory.js";
+import type { SubAgentRunOptions } from "../agent/sub-agent.js";
+import type { TurnUserWords } from "../agent/delegation-user-words.js";
 
 /**
  * THE SUB-AGENT PREFIX IS A CACHE KEY.
@@ -115,7 +117,7 @@ describe("sub-agent prompt prefix is stable across tasks", () => {
     return dir;
   };
 
-  const run = async (task: string, dir: string): Promise<Captured> => {
+  const run = async (task: string, dir: string, extra: Partial<SubAgentRunOptions> = {}): Promise<Captured> => {
     process.env["SAI_CONFIG_PATH"] = join(dir, "starlingai.json");
     vi.resetModules();
     (await import("../config/loader.js")).resetConfigForTests();
@@ -139,6 +141,7 @@ describe("sub-agent prompt prefix is stable across tasks", () => {
       task,
       parentSessionId: `parent-${Math.random().toString(36).slice(2)}`,
       workspacePath: dir,
+      ...extra,
     });
 
     return {
@@ -245,5 +248,100 @@ describe("sub-agent prompt prefix is stable across tasks", () => {
     // is byte-identical across every run of this agent instead of being re-sorted per task.
     expect(a.rerankKey).toBe(DESCRIPTION);
     expect(b.rerankKey).toBe(DESCRIPTION);
+  });
+
+  // THE USER'S OWN WORDS. The specialist used to start from the orchestrator's paraphrase alone,
+  // which is how "nicht den fast-tier" was lost on the way to image_creator (session f4ebf47b).
+  const USER_WORDS_LABEL = "[USER'S OWN WORDS — this turn, verbatim, untranslated]";
+  const GERMAN = "nicht den fast-tier … das result ist schlimmer als das original";
+  const germanWords = (): TurnUserWords => ({ opening: GERMAN, midTurn: [] });
+
+  it("delivers the user's own words right after the task, and leaves the head byte-identical", async () => {
+    const dir = makeWorkspace();
+    const withWords = await run(TASK_NGINX, dir, { turnUserWords: germanWords() });
+    const without = await run(TASK_NGINX, dir);
+
+    expect(withWords.userTurn).toContain(GERMAN);
+    expect(withWords.userTurn.indexOf(USER_WORDS_LABEL)).toBeGreaterThan(withWords.userTurn.indexOf(TASK_NGINX));
+    // The words are per turn, so in the head they would cost the cold prefill the head exists
+    // to avoid. They belong with the task.
+    expect(withWords.head).toBe(without.head);
+    expect(without.userTurn).not.toContain(USER_WORDS_LABEL);
+  });
+
+  it("keeps the user's words off an A2A bridge agent", async () => {
+    // A bridge agent's task goes to another instance; nothing the user typed should leave with it
+    // unless someone sends it on purpose.
+    const dir = makeWorkspace();
+    const inlineConfig = {
+      description: DESCRIPTION,
+      systemPrompt: "You are a probe.",
+      tools: ["read_file"],
+      maxIterations: 2,
+      turnTimeoutMs: 60_000,
+      domain: "a2a",
+    } as unknown as SubAgentRunOptions["inlineConfig"];
+    const bridged = await run(TASK_NGINX, dir, { turnUserWords: germanWords(), inlineConfig });
+    const ordinary = await run(TASK_NGINX, dir, { turnUserWords: germanWords(), inlineConfig: { ...inlineConfig!, domain: undefined } });
+
+    expect(bridged.userTurn).not.toContain(GERMAN);
+    // The control: the same inline agent without the bridge domain does get them.
+    expect(ordinary.userTurn).toContain(GERMAN);
+  });
+
+  it("hands the user's words to the tools the specialist calls, so its own delegations carry them", async () => {
+    // A coordinator's specialists must get the user's words, not the coordinator's paraphrase.
+    // Its delegate tools read them from the ToolContext they are called with, so that is what
+    // is observed here: a probe standing in for any tool the specialist calls.
+    const dir = makeWorkspace(undefined, false);
+    process.env["SAI_CONFIG_PATH"] = join(dir, "starlingai.json");
+    vi.resetModules();
+    (await import("../config/loader.js")).resetConfigForTests();
+
+    const responses = [
+      {
+        content: "",
+        tool_calls: [{ id: "probe-1", name: "web_search", arguments: { query: "harbour at dusk" } }],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        finishReason: "tool_calls",
+      },
+    ];
+    completeMock.mockImplementation(async () => responses.shift() ?? {
+      content: "Done.",
+      tool_calls: [],
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+      finishReason: "stop",
+    });
+
+    const seen: Array<TurnUserWords | undefined> = [];
+    const { registerTool, unregisterTool } = await import("../tools/registry.js");
+    registerTool({
+      name: "web_search",
+      description: "Search the web.",
+      parameters: { type: "object", properties: {} },
+      async execute(_args, ctx) {
+        seen.push(ctx.turnUserWords);
+        return { success: true, output: "Three sources about the harbour at dusk." };
+      },
+    });
+
+    const words = germanWords();
+    try {
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      await runSubAgentWithStats({
+        agentName: AGENT,
+        task: TASK_NGINX,
+        parentSessionId: "parent-nesting",
+        workspacePath: dir,
+        turnUserWords: words,
+      });
+    } finally {
+      unregisterTool("web_search");
+    }
+
+    // The probe ran — the precondition, or this proves nothing.
+    expect(seen).toHaveLength(1);
+    // The same object, not a copy: a mid-turn addition pushed later is visible to it too.
+    expect(seen[0]).toBe(words);
   });
 });

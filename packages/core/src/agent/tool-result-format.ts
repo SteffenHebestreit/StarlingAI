@@ -8,7 +8,7 @@
  *
  * INVARIANT: this module imports ONLY leaf modules (runtime-utils,
  * runtime-evidence-dump, interrupted-delegation-evidence, container-failure,
- * effort-context). It must NEVER import from runtime.js — keep it a true leaf.
+ * effort-context, artifact-metadata). It must NEVER import from runtime.js — keep it a true leaf.
  *
  * `looksLikeDelegatedFailureEvidence` is also used by
  * classifyPostOrchestrationDisposition (which stays in runtime.ts), so runtime.ts
@@ -22,9 +22,13 @@ import {
   formatRawWorkspaceToolDumpFailure,
 } from "./runtime-evidence-dump.js";
 import {
+  EVIDENCE_SECTION_RE,
   extractUsefulInterruptedDelegationEvidence,
   looksLikeInterruptedDelegationWithoutUsableEvidence,
 } from "./interrupted-delegation-evidence.js";
+import { collectArtifactRecords, type ArtifactRecord } from "./artifact-metadata.js";
+import { PRODUCED_FILES_HEADER, TOOL_FAILURES_HEADER } from "./delegated-run-record.js";
+import { defangFramingMarkers } from "../guardrails/framing-markers.js";
 
 export function truncateForContext(value: string, maxChars: number): string {
   const normalized = collapseWhitespace(value);
@@ -95,7 +99,121 @@ export function isExplicitDelegationSuccess(metadata?: Record<string, unknown>):
   return metadata?.["delegationVerdict"] === "explicit" && metadata["delegationOutcome"] === "success";
 }
 
+/** Lines listed per block; the rest are counted, not listed. */
+const PRODUCED_FILES_MAX_LINES = 6;
+const TOOL_FAILURES_MAX_LINES = 4;
+
+// The headers, and how the checks that read a whole frame step past the block, are in
+// delegated-run-record.ts.
+
+/** A recorded tool, agent, engine, tier or model is printed only when it reads as a name: a few tokens, no prose or markup. */
+const RECORDED_NAME_RE = /^[\w.:/@+-]+(?: [\w.:/@+-]+){0,5}$/;
+
+function recordedName(value: unknown): string | undefined {
+  return typeof value === "string" && value.length <= 80 && RECORDED_NAME_RE.test(value) ? value : undefined;
+}
+
+/**
+ * One line of free text for the block. Defanged, because the block is added AFTER the tool-output
+ * guards ran on the result text: a file name or an error line carrying a role or framing marker
+ * would otherwise reach the orchestrator intact.
+ */
+function singleLine(value: string, maxChars: number): string {
+  const flat = defangFramingMarkers(value.replace(/[\s\p{Cc}]+/gu, " ")).trim();
+  return flat.length <= maxChars ? flat : `${flat.slice(0, maxChars - 3).trimEnd()}...`;
+}
+
+function producedFileLine(record: ArtifactRecord, frameAgent: string | undefined): string {
+  const tool = recordedName(record.sourceTool);
+  const agent = recordedName(record.sourceAgent);
+  const engine = recordedName(record.engine);
+  const tier = recordedName(record.tier);
+  const model = recordedName(record.model);
+  const origin = [tool, agent && agent !== frameAgent ? `by ${agent}` : ""].filter(Boolean).join(" ");
+  const details = [
+    engine ? `engine ${engine}` : "",
+    tier ? `tier ${tier}` : "",
+    model ? `model ${model}` : "",
+    record.elapsedMs !== undefined ? `${(record.elapsedMs / 1000).toFixed(1)} s` : "",
+  ].filter(Boolean).join(", ");
+  const qualifiers = [origin, details].filter(Boolean).join("; ");
+  return `- ${singleLine(record.ref, 200)}${qualifiers ? ` (${qualifiers})` : ""}`;
+}
+
+function toolFailureLines(failures: unknown, frameAgent: string | undefined): string[] {
+  if (!Array.isArray(failures)) return [];
+  // A specialist retrying the same call gets one line with a count, not one line per retry.
+  const counts = new Map<string, number>();
+  for (const entry of failures) {
+    if (!entry || typeof entry !== "object") continue;
+    const value = entry as Record<string, unknown>;
+    const tool = recordedName(value["tool"]);
+    if (!tool) continue;
+    const agent = recordedName(value["agent"]);
+    const error = typeof value["error"] === "string" ? singleLine(value["error"], 160) : "";
+    const line = `- ${tool}${agent && agent !== frameAgent ? ` by ${agent}` : ""}: ${error || "no error text"}`;
+    counts.set(line, (counts.get(line) ?? 0) + 1);
+  }
+  return [...counts].map(([line, count]) => (count > 1 ? `${line} (x${count})` : line));
+}
+
+function cappedBlock(header: string, lines: string[], maxLines: number): string {
+  if (lines.length === 0) return "";
+  const shown = lines.slice(0, maxLines);
+  if (lines.length > maxLines) shown.push(`- (+${lines.length - maxLines} more)`);
+  return [header, ...shown].join("\n");
+}
+
+/**
+ * What a delegated run RECORDED, as opposed to what its specialist said: the files it produced,
+ * with the tool, engine, tier and model the producing tool wrote down, and the tool calls that
+ * failed on the way. Without this the frames carry only the specialist's own account. In f4ebf47b
+ * that account named the engine the user had asked for; that call had returned a 404, the file came
+ * from the fast tier instead, and the final answer repeated the claim. "" when nothing was recorded.
+ */
+export function formatDelegatedRunRecord(metadata?: Record<string, unknown>): string {
+  if (!metadata) return "";
+  const frameAgent = typeof metadata["agentName"] === "string" ? metadata["agentName"] : undefined;
+  return [
+    cappedBlock(
+      PRODUCED_FILES_HEADER,
+      collectArtifactRecords(metadata).map((record) => producedFileLine(record, frameAgent)),
+      PRODUCED_FILES_MAX_LINES,
+    ),
+    cappedBlock(TOOL_FAILURES_HEADER, toolFailureLines(metadata["specialistToolFailures"], frameAgent), TOOL_FAILURES_MAX_LINES),
+  ].filter(Boolean).join("\n");
+}
+
 export function buildModelVisibleToolResult(
+  toolName: string,
+  resultText: string,
+  metadata?: Record<string, unknown>,
+): string {
+  const frame = frameToolResult(toolName, resultText, metadata);
+  // run_workflow names its files in its own instruction; a second list would repeat them.
+  if (toolName === "run_workflow") return frame;
+  const record = formatDelegatedRunRecord(metadata);
+  if (!record) return frame;
+  // At the HEAD of the frame, never in the evidence. Every evidence parser (the single-deliverable
+  // relay, the failure sniffers, the backstops) reads from the evidence marker on, so it sees the
+  // same bytes as before. And the head survives every cap: the 1,600-char evidence cap, the plan
+  // report's cap and the head-first cap on collapsed history.
+  if (toolName === "execute_plan") {
+    // The plan report has no evidence marker; its first paragraph is the "Plan: N/M" roll-call.
+    const end = frame.indexOf("\n\n");
+    return end < 0 ? `${frame}\n\n${record}` : `${frame.slice(0, end)}\n\n${record}${frame.slice(end)}`;
+  }
+  const marker = EVIDENCE_SECTION_RE.exec(frame);
+  if (!marker) return frame;
+  // Above the frame's IMPORTANT instruction when it has one: that line tells the orchestrator to
+  // relay or reproduce "the content below", and the block is not content for the user.
+  const head = frame.slice(0, marker.index);
+  const important = head.search(/^IMPORTANT:/m);
+  const at = important >= 0 ? important : marker.index;
+  return `${frame.slice(0, at)}${record}\n${frame.slice(at)}`;
+}
+
+function frameToolResult(
   toolName: string,
   resultText: string,
   metadata?: Record<string, unknown>,

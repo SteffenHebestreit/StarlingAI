@@ -16,6 +16,7 @@
 import { sanitizeAssistantContent, NARRATED_TOOL_TEXT_RE } from "./sanitize-response.js";
 import { looksLikeDegenerateRepetition, collapseRepeatedMarkdownSections } from "./text-dedup.js";
 import { DELEGATE_TOOL_RESULT_RE, looksLikeDelegateMetadata } from "./runtime-utils.js";
+import { stripDelegatedRunRecord } from "./delegated-run-record.js";
 
 export function sanitizeUserFacingAssistantResponse(value: string, toolIterations: number): string {
   const cleaned = sanitizeAssistantContent(value, toolIterations > 0);
@@ -76,7 +77,7 @@ export function hasRecentUnresolvedDelegatedAction(history: readonly { role: str
     const terminalState = typeof metadata["terminalState"] === "string"
       ? String(metadata["terminalState"]).toLowerCase()
       : undefined;
-    const content = String(message.content ?? "");
+    const content = stripDelegatedRunRecord(String(message.content ?? ""));
 
     if (
       delegationOutcome === "partial"
@@ -127,16 +128,19 @@ export function findRecentJunkDelegationResult(
   const recent = [...history].reverse().slice(0, 12);
   for (const message of recent) {
     if (message.role !== "tool") continue;
-    const content = String(message.content ?? "");
+    const content = stripDelegatedRunRecord(String(message.content ?? ""));
     const meta = message.metadata ?? {};
     const isDelegate = DELEGATE_TOOL_RESULT_RE.test(content) || looksLikeDelegateMetadata(meta);
     if (!isDelegate) continue;
 
     const terminalState = typeof meta["terminalState"] === "string" ? String(meta["terminalState"]) : null;
     const delegationOutcome = typeof meta["delegationOutcome"] === "string" ? String(meta["delegationOutcome"]) : null;
+    // The frame's verdict is its heading line. Anywhere else, "timeout" is just a word: in a file
+    // path, in a failed tool call's error listed above the evidence, in a `timeoutMs` the
+    // specialist quoted. Matched anywhere, it marked a completed delegation as a timed-out one.
     const isPartialOrTimeout = terminalState === "timeout"
       || delegationOutcome === "partial"
-      || /—\s*PARTIAL PROGRESS|TIMEOUT|TASK FAILED/i.test(content);
+      || /^Delegated result from [^\n]*—\s*(?:PARTIAL PROGRESS|TASK FAILED)/im.test(content);
     if (!isPartialOrTimeout) {
       // Most recent delegation succeeded with full evidence — there is no
       // recovery scenario to authorize. Stop walking.
@@ -181,7 +185,7 @@ export function findRecentFailedDelegation(
   const recent = [...history].reverse().slice(0, 8);
   for (const message of recent) {
     if (message.role !== "tool") continue;
-    const content = String(message.content ?? "");
+    const content = stripDelegatedRunRecord(String(message.content ?? ""));
     const meta = message.metadata ?? {};
     const isDelegate = DELEGATE_TOOL_RESULT_RE.test(content) || looksLikeDelegateMetadata(meta);
     if (!isDelegate) continue;

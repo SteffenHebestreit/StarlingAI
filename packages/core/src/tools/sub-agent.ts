@@ -6,7 +6,7 @@
  */
 
 import { registerTool, getAllTools, searchToolsByEmbedding, executeTool, type SwarmState, type SwarmTaskAttempt, type SwarmTaskState, type ToolContext, type ToolResult } from "./registry.js";
-import { runSubAgent, runSubAgentWithStats } from "../agent/sub-agent.js";
+import { runSubAgent, runSubAgentWithStats, type SubAgentToolFailure } from "../agent/sub-agent.js";
 // Leaf module shared with agent/sub-agent.ts so the soft deadline and the hard deadline
 // are derived from ONE precedence rule; deriving them separately is how they drifted.
 import {
@@ -1131,6 +1131,12 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
     | undefined;
   /** Routing metadata for agents that were auto-selected by resolveAgentRouting. */
   const routingCandidateMap = new Map<string, RoutingSelectionReason>();
+  // The failed tool calls of every candidate that ran, the one whose result is returned included.
+  // Each return below carries them as specialistToolFailures, which the orchestrator's frame lists
+  // beside the specialist's own account of what it did.
+  const specialistToolFailures: SubAgentToolFailure[] = [];
+  const withToolFailures = (): Record<string, unknown> =>
+    (specialistToolFailures.length > 0 ? { specialistToolFailures: [...specialistToolFailures] } : {});
 
   if (!ctx._turnAgentCounts) ctx._turnAgentCounts = new Map();
 
@@ -1982,6 +1988,10 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         task: request.task,
         taskTitle: request.taskTitle,
         context: handoffContext,
+        // Beside the task, never merged into it: `task` drives routing, the reuse signature and
+        // translation, and the user's words must reach the specialist untouched by any of them.
+        // Every tool-level delegation passes through here, execute_plan's steps included.
+        turnUserWords: ctx.turnUserWords,
         parentSessionId: ctx.sessionId,
         workspacePath: ctx.workspacePath,
         userId: ctx.userId,
@@ -2049,6 +2059,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           artifacts = Array.isArray(maybeResult.artifacts)
             ? maybeResult.artifacts.map((artifact) => ({ ...artifact }))
             : [];
+          if (Array.isArray(maybeResult.toolFailures)) specialistToolFailures.push(...maybeResult.toolFailures);
         } else {
           output = await runSubAgent(subAgentArgs);
         }
@@ -2310,6 +2321,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           // INPUT (evidence), never a verbatim-relayable final deliverable.
           ...(isCanonicalResearchSliceTask(request.task) ? { researchSlice: true } : {}),
           ...(artifacts.length > 0 ? { artifacts } : {}),
+          ...withToolFailures(),
           ...(stats?.terminalState ? { terminalState: stats.terminalState } : {}),
           ...(routingInfo && { routingReason: { confidence: routingInfo.confidence, matchedTerms: routingInfo.matchedTerms, score: routingInfo.score } }),
         },
@@ -2386,9 +2398,11 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         taskState.error = architectResult.success ? undefined : architectResult.error;
         ensureSwarmState(ctx, request.task).updatedAt = new Date().toISOString();
         publishSwarmState(ctx);
+        const architectFailures = architectResult.metadata?.["specialistToolFailures"];
+        if (Array.isArray(architectFailures)) specialistToolFailures.push(...architectFailures);
         return {
           ...architectResult,
-          metadata: { ...architectResult.metadata, taskId, attemptedAgents, skillMatchThreshold, bestAutoMatchScore, delegationSucceeded: architectResult.success },
+          metadata: { ...architectResult.metadata, taskId, attemptedAgents, skillMatchThreshold, bestAutoMatchScore, delegationSucceeded: architectResult.success, ...withToolFailures() },
         };
       }
     }
@@ -2418,6 +2432,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         partialFallback: true,
         ...(isCanonicalResearchSliceTask(request.task) ? { researchSlice: true } : {}),
         ...(bestPartialResult.artifacts?.length ? { artifacts: bestPartialResult.artifacts } : {}),
+        ...withToolFailures(),
         ...(bestPartialResult.terminalState ? { terminalState: bestPartialResult.terminalState } : {}),
         ...(bestPartialResult.routingInfo
           ? {
@@ -2501,6 +2516,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           blockedCoordinators: [...skippedCoordinatorCandidates],
         }
         : {}),
+      ...withToolFailures(),
     },
   };
 }
@@ -2758,6 +2774,8 @@ registerTool({
     // parallel_delegate — see that handler). Without this a graph whose final
     // node BUILT a file ships no download and the honesty guards see 0 produced.
     const graphArtifacts: Record<string, unknown>[] = [];
+    // And every node's failed tool calls, from failed nodes as well as completed ones.
+    const graphToolFailures: unknown[] = [];
     const graphId = `graph_${Date.now()}_${Object.keys(swarmState.tasks).length}`;
 
     for (const node of rawNodes) {
@@ -2943,6 +2961,8 @@ registerTool({
 
       const { node, result } = await Promise.race(active.values());
       active.delete(node.id);
+      const nodeToolFailures = result.metadata?.["specialistToolFailures"];
+      if (Array.isArray(nodeToolFailures)) graphToolFailures.push(...nodeToolFailures);
 
       if (result.success) {
         completed.add(node.id);
@@ -3018,6 +3038,7 @@ registerTool({
         ...(reused.size > 0 ? { reused: [...reused] } : {}),
         swarmState,
         ...(graphArtifacts.length > 0 ? { artifacts: graphArtifacts } : {}),
+        ...(graphToolFailures.length > 0 ? { specialistToolFailures: graphToolFailures } : {}),
       },
     };
   },
@@ -4096,6 +4117,8 @@ registerTool({
     // sign of the built app (audit 411ed14f: iSAQB learn-platform built by
     // backend_coder, never surfaced). Aggregate them here.
     const aggregatedArtifacts: Record<string, unknown>[] = [];
+    // Each slice's failed tool calls, failed slices included; every entry names its agent.
+    const aggregatedToolFailures: unknown[] = [];
     for (const result of results) {
       const arts = result.metadata?.["artifacts"];
       if (Array.isArray(arts)) {
@@ -4105,6 +4128,8 @@ registerTool({
           }
         }
       }
+      const sliceToolFailures = result.metadata?.["specialistToolFailures"];
+      if (Array.isArray(sliceToolFailures)) aggregatedToolFailures.push(...sliceToolFailures);
     }
 
     // DISAGREEMENT-AS-SIGNAL (orchestration.subAgentDisagreementVerify, default-off): when
@@ -4135,6 +4160,7 @@ registerTool({
         nestedCalls: results.map((result) => ({ tool: "delegate_to_agent", success: result.success === true })),
         ...(disagreementMarker ? { subAgentDisagreement: true } : {}),
         ...(aggregatedArtifacts.length > 0 ? { artifacts: aggregatedArtifacts } : {}),
+        ...(aggregatedToolFailures.length > 0 ? { specialistToolFailures: aggregatedToolFailures } : {}),
         ...(duplicatesRemoved > 0 ? { requestedTaskCount: runnableTasks.length, duplicatesRemoved } : {}),
       },
     };

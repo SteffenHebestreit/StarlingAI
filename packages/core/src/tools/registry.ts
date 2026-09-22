@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { ToolTier, getToolTier, isToolAllowed } from "../guardrails/tool-tiers.js";
 import type { LLMToolDef } from "../providers/lmstudio.js";
+import type { TurnUserWords } from "../agent/delegation-user-words.js";
 import { computeQueryEmbedding, cosineSimilarity, isEmbeddingAvailable } from "../providers/embeddings.js";
 import { withSpan, genAi } from "../observability/tracing.js";
 import { runWithRequestContext, currentUserId, currentRequestContext } from "../runtime/request-context.js";
@@ -219,6 +220,12 @@ export interface ToolContext {
   swarmState?: SwarmState;
   /** Optional live callback whenever swarm state changes during a turn. */
   onSwarmState?: (state: SwarmState) => void;
+  /**
+   * What the user typed this turn, handed to every specialist the turn delegates to (and to theirs)
+   * beside the orchestrator's task. One object for the whole turn: mid-turn messages are pushed
+   * into it, so a delegation dispatched after one arrived carries it too. Unset outside a turn.
+   */
+  turnUserWords?: TurnUserWords;
   /**
    * Abort signal from the parent turn — propagated to sub-agent delegations.
    * When aborted, delegation loops exit early and return a cancellation error.

@@ -131,6 +131,7 @@ export async function startTelegramBot(): Promise<(() => Promise<void>) | null> 
     const result = await runTurn({
       session,
       userMessage: ctx.message.text,
+      userWords: ctx.message.text,
     });
 
     await deliverWithRetry(

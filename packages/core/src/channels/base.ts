@@ -136,6 +136,8 @@ export async function getOrCreateChannelSession(channelType: string, senderId: s
 export async function runChannelTurn(sessionId: string, text: string): Promise<string> {
   const session = getSession(sessionId);
   if (!session) return "Session expired — please send /reset to start over.";
-  const result = await runTurn({ session, userMessage: text });
+  // Every channel hands this what the sender wrote, so it is also what specialists are shown as
+  // the user's own words.
+  const result = await runTurn({ session, userMessage: text, userWords: text });
   return result.response;
 }

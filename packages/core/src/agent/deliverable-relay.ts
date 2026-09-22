@@ -12,6 +12,7 @@
  * importers (tests, tools) keep working unchanged.
  */
 import { DELEGATE_TOOL_RESULT_RE, looksLikeOrchestrationOnlyEvidence } from "./runtime-utils.js";
+import { stripDelegatedRunRecord } from "./delegated-run-record.js";
 import { EVIDENCE_SECTION_RE } from "./interrupted-delegation-evidence.js";
 import { looksLikeDegenerateRepetition } from "./text-dedup.js";
 import { looksLikeProviderErrorEcho } from "./container-failure.js";
@@ -78,7 +79,7 @@ export function extractSingleRelayableDeliverable(
     (m) => m.role === "tool" && typeof m.content === "string" && DELEGATE_TOOL_RESULT_RE.test(String(m.content)),
   );
   if (delegateResults.length !== 1) return null;
-  const content = String(delegateResults[0]!.content ?? "");
+  const content = stripDelegatedRunRecord(String(delegateResults[0]!.content ?? ""));
   if (!/TASK COMPLETED\b/i.test(content)) return null;
   if (/TASK FAILED|PARTIAL PROGRESS|TASK COMPLETED \(PARTIAL/i.test(content)) return null;
   // Only the long-deliverable formatting carries this marker; short relays still synthesize.

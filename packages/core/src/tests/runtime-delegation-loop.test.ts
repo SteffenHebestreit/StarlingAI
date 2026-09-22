@@ -65,6 +65,7 @@ import { logAudit } from "../audit/logger.js";
 import { buildModelVisibleToolResult, deriveDelegationTaskFromArgs, runTurn } from "../agent/runtime.js";
 import { getConfig, resetConfigForTests } from "../config/loader.js";
 import { registerTool, unregisterTool } from "../tools/registry.js";
+import { turnSteeringManager } from "../agent/turn-steering.js";
 
 interface DelegationLoopFixtures {
   identicalLoop: {
@@ -4758,6 +4759,62 @@ describe("runtime delegated-loop regressions", () => {
     expect(result.usage.completionTokens).toBe(4097);
     expect(streamedChunks.join("")).toBe("Part one of a long answer. Part two finishes the answer.");
     expect(streamMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("the user's own words on the turn's tool context", () => {
+  it("hands a delegation the opening words and a message the user sent while the turn ran", async () => {
+    // A specialist has no conversation history, so what the user typed reaches it only through
+    // the tool context. The mid-turn message is the one that matters most and arrives last: in
+    // session f4ebf47b the correction came after the first attempt.
+    const opening = "mach es realer, nicht den fast-tier";
+    const steering = "nimm das qwen model";
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) return createToolCallStream("find_1", "search_agents", { query: "image generation" });
+      if (llmCallCount === 2) {
+        return createDelegateToolCallStream("delegate_1", { agentName: "image_creator", task: "Render the harbour at dusk." });
+      }
+      return createTextStream("Rendered the harbour at dusk.");
+    });
+
+    registerTool({
+      name: "search_agents",
+      description: "Find agents.",
+      parameters: { type: "object", properties: {} },
+      // The user types while the turn is working, i.e. between two model calls.
+      execute: async () => {
+        expect(turnSteeringManager.enqueueIfActive(session.id, steering)).toBe(true);
+        return { success: true, output: "image_creator — generates images." };
+      },
+    });
+    const seen: Array<{ opening: string; midTurn: string[] } | undefined> = [];
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: async (_args, ctx) => {
+        // A snapshot: the context's object keeps changing after this call returns.
+        seen.push(ctx.turnUserWords ? { opening: ctx.turnUserWords.opening, midTurn: [...ctx.turnUserWords.midTurn] } : undefined);
+        return {
+          success: true,
+          output: "Saved generated/images/harbour.png",
+          metadata: { agentName: "image_creator", attemptedAgents: ["image_creator"], delegationSucceeded: true },
+        };
+      },
+    });
+
+    await runTurn({ session, userMessage: opening, userWords: opening });
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toEqual({ opening, midTurn: [steering] });
   });
 });
 

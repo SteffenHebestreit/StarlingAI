@@ -26,6 +26,13 @@ export interface RunTurnOptions {
   session: AgentSession;
   userMessage: string;
   userDisplayContent?: string;
+  /**
+   * What a person actually typed to open this turn, carried verbatim to the specialists it
+   * delegates to. Set only by the chat entry points: a scene or job template in `userMessage` must
+   * never be presented to a specialist as the user's words, so a caller that leaves this unset
+   * gets no such block at all.
+   */
+  userWords?: string;
   userAttachments?: SessionTranscriptAttachment[];
   onChunk?: (text: string) => void;
   /** Live chain-of-thought tokens for the main assistant turn. Streams ahead

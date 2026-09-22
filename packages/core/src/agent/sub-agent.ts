@@ -30,6 +30,7 @@ import { childLogger } from "../logger.js";
 import { createCheckpoint, pauseCheckpoint, completeCheckpoint } from "../swarm/checkpoints.js";
 import { withSpan, genAi } from "../observability/tracing.js";
 import { runSubAgentInContainer } from "./container-runner.js";
+import { userWordsBlockForRun, type TurnUserWords } from "./delegation-user-words.js";
 import { looksLikeContainerLevelFailure, looksLikeModelTemplateArtifact, looksLikeProviderErrorEcho, looksLikeHallucinatedTruncationClaim } from "./container-failure.js";
 import { appendOutcome, computeAdaptiveSubAgentTimeoutMs, extractTaskKeywords } from "./outcomes.js";
 import { formatFlowMemoryGuidance } from "./flow-memory.js";
@@ -2066,6 +2067,35 @@ function buildSubAgentToolAuditPayload(params: {
   return payload;
 }
 
+/** Failed tool calls a run hands back: the most recent, which are the ones any recovery followed. */
+const MAX_RECORDED_TOOL_FAILURES = 6;
+
+/**
+ * The first line of a failed call's error, as the orchestrator is shown it. That frame is built
+ * from metadata, after the redaction and framing scans have run on the result text, so the line
+ * gets both here.
+ */
+function firstToolErrorLine(result: ToolResult): string {
+  const text = result.error?.trim() || result.output.trim();
+  // Redact BEFORE cutting: a secret that straddles the cut would keep a prefix too short for any
+  // pattern to recognise, and this line travels to the browser and into stored metadata.
+  const scan = scanOutput(text);
+  const redacted = !scan.safe && scan.redacted ? scan.redacted : text;
+  const line = (redacted.split(/\r?\n/).find((entry) => entry.trim()) ?? "").trim().slice(0, 240);
+  return neutralizeToolResultFraming(line);
+}
+
+/** The well-formed entries of a `specialistToolFailures` value another delegation handed back. */
+export function readToolFailures(value: unknown): SubAgentToolFailure[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry): SubAgentToolFailure[] => {
+    if (!entry || typeof entry !== "object") return [];
+    const { agent, tool, error } = entry as Record<string, unknown>;
+    if (typeof tool !== "string" || typeof error !== "string") return [];
+    return [{ ...(typeof agent === "string" ? { agent } : {}), tool, error }];
+  });
+}
+
 
 /** Floor for the parent-remaining-budget clamp (orchestration.clampSubAgentTimeoutToParent): even
  * when the parent turn is nearly out of time, give a delegated sub-agent at least this long so it can
@@ -2100,6 +2130,9 @@ export interface SubAgentRunOptions {
    * search_agents/search_workflows call the parent already failed on. */
   taskTitle?: string;
   context?: string;
+  /** What the user typed this turn. Rendered once into the first message, right after the task,
+   * and passed on to this run's own delegations. */
+  turnUserWords?: TurnUserWords;
   parentSessionId: string;
   workspacePath: string;
   /** Authenticated user that owns the parent turn — propagated so sub-agents
@@ -2192,10 +2225,24 @@ export interface SubAgentExecutionStats {
   containerRuntimeMs?: number;
 }
 
+/**
+ * A tool call that ran inside a delegated run and failed. The delegating tools carry these up as
+ * `specialistToolFailures`, and the orchestrator's frame lists them beside the specialist's own
+ * account (agent/tool-result-format.ts).
+ */
+export interface SubAgentToolFailure {
+  agent?: string;
+  tool: string;
+  /** First line of the error, redacted. */
+  error: string;
+}
+
 export interface SubAgentRunResult {
   output: string;
   stats: SubAgentExecutionStats;
   artifacts?: Record<string, unknown>[];
+  /** The run's failed tool calls, recovered from or not; the last MAX_RECORDED_TOOL_FAILURES. */
+  toolFailures?: SubAgentToolFailure[];
   /** QPR-004: the turn's quality scorecard when the transport surfaces one
    *  (gateway-routed eval runs capture the turn_scorecard audit event). */
   qualityScorecard?: import("./turn-scorecard.js").TurnQualityScorecard;
@@ -2338,6 +2385,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     : resolvedTurnTimeoutMs;
   const turnTimeoutMs = effectiveTurnTimeoutMs && effectiveTurnTimeoutMs > 0 ? effectiveTurnTimeoutMs : undefined;
   const sanitizedTask = sanitizeSubAgentTask(agentCfg.tools, opts.task);
+  const userWordsBlock = userWordsBlockForRun(agentCfg.domain, opts.turnUserWords, sanitizedTask, opts.context);
   const sourceSensitiveTask = buildDynamicTurnGuidance(sanitizedTask)?.sourceSensitive === true;
   // Fix 4: detect when this task was routed via the no-specialist-match
   // discovery fallback. The taskTitle marker is set by both the runtime-side
@@ -2546,6 +2594,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       {
         agentName: opts.agentName,
         task: sanitizedTask.slice(0, 120),
+        // Only the length: the audit log keeps no copy of what the user wrote.
+        ...(userWordsBlock ? { userWordsChars: userWordsBlock.length } : {}),
         capabilities: agentCfg.capabilities,
         configuredTools: agentCfg.tools ?? [],
         effectiveTools: effectiveToolNames ?? [],
@@ -2992,6 +3042,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       onComputerSessionState: opts.onComputerSessionState,
       swarmState: opts.swarmState,
       onSwarmState: opts.onSwarmState,
+      // A coordinator's specialists get the user's words, not the coordinator's paraphrase of
+      // its own paraphrase: every hop loses a little, and the constraint usually matters at the
+      // leaf that makes the call (generate_image's tier). Same object, so it is never copied.
+      turnUserWords: opts.turnUserWords,
       _turnAgentCounts: opts._turnAgentCounts,
       _turnAgentRepeatLimitOverrides: opts._turnAgentRepeatLimitOverrides,
       _turnTotalDelegationLimitOverride: opts._turnTotalDelegationLimitOverride,
@@ -3050,10 +3104,12 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       ? `\n\n${initialSharedFacts.content}`
       : "";
 
-    // Build initial message
+    // Build initial message. The user's words sit directly behind the task so the pairing is
+    // explicit, and only here: history[0] is never trimmed and is prefilled once per run, whereas
+    // the system head is the cache key and a trailing message would be re-read every iteration.
     const baseUserContent = opts.context
-      ? `Context:\n${opts.context}${a2aContext}${sharedFactsContext}\n\nTask: ${sanitizedTask}`
-      : `${sanitizedTask}${a2aContext}${sharedFactsContext}`;
+      ? `Context:\n${opts.context}${a2aContext}${sharedFactsContext}\n\nTask: ${sanitizedTask}${userWordsBlock}`
+      : `${sanitizedTask}${userWordsBlock}${a2aContext}${sharedFactsContext}`;
     // Gated on the SAME condition that injects the system directive, so the two halves
     // cannot disagree: if the directive is off, the user turn is untouched and the run
     // behaves exactly as it did before this existed.
@@ -3177,6 +3233,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     const assistantOutputSigs = new Set<string>();
     const artifacts: Record<string, unknown>[] = [];
     const artifactKeys = new Set<string>();
+    // Every tool call that ran and failed, in call order, including ones the run later recovered
+    // from: the final text rarely mentions those, and a recovery onto a different path is exactly
+    // what the orchestrator must not describe as the path the user asked for.
+    const toolFailures: SubAgentToolFailure[] = [];
     // Workspace-relative paths this run successfully wrote or edited, in call order.
     // Feeds describeMutatedWorkspaceFiles on the interrupted paths so a cut-off staged
     // build hands back what is on disk instead of discarding it.
@@ -3431,11 +3491,14 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       terminalState,
     }))(honestOutcome(rawOutcome));
 
-    const withArtifacts = (result: { output: string; stats: SubAgentExecutionStats }): SubAgentRunResult => (
-      artifacts.length > 0
-        ? { ...result, artifacts: artifacts.map((artifact) => refreshWorkspaceArtifactSnapshot(artifact, opts.workspacePath)) }
-        : result
-    );
+    // Every return below passes through here, so it also hands back the failed tool calls.
+    const withArtifacts = (result: { output: string; stats: SubAgentExecutionStats }): SubAgentRunResult => ({
+      ...result,
+      ...(artifacts.length > 0
+        ? { artifacts: artifacts.map((artifact) => refreshWorkspaceArtifactSnapshot(artifact, opts.workspacePath)) }
+        : {}),
+      ...(toolFailures.length > 0 ? { toolFailures: toolFailures.slice(-MAX_RECORDED_TOOL_FAILURES) } : {}),
+    });
 
     const logSubAgentCompletionAudit = (
       stats: SubAgentExecutionStats,
@@ -6152,6 +6215,14 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           toolCallId: tc.id,
           result,
         });
+        // Recorded only here, where the call RAN. The branches above answer a call without running
+        // it, and an approval that was not granted is a refusal, not a failure of the work.
+        if (!result.success && !isApprovalGateFailure(result.error ?? result.output)) {
+          toolFailures.push({ agent: opts.agentName, tool: tc.name, error: firstToolErrorLine(result) });
+        }
+        // A delegation brings its own specialists' failures along, so one two levels down reaches
+        // the orchestrator too.
+        toolFailures.push(...readToolFailures(result.metadata?.["specialistToolFailures"]));
         let resultContent = result.success
           ? result.output
           : (result.error?.trim()

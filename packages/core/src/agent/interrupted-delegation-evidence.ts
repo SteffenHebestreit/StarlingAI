@@ -14,6 +14,7 @@
  * keep it cycle-free.
  */
 import { currentTurnStartIndex } from "./turn-boundary.js";
+import { stripDelegatedRunRecord } from "./delegated-run-record.js";
 import { looksLikeProviderErrorEcho } from "./container-failure.js";
 import {
   DELEGATE_TOOL_RESULT_RE,
@@ -200,7 +201,7 @@ function findRecentDelegateEvidence(
 
   for (const message of recent) {
     if (message.role !== "tool") continue;
-    const content = String(message.content ?? "");
+    const content = stripDelegatedRunRecord(String(message.content ?? ""));
     const meta = message.metadata ?? {};
 
     // Workflow execution results (run_workflow) carry the same

@@ -17,6 +17,8 @@ import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type SwarmState, typ
 import { isToolAllowed } from "../guardrails/tool-tiers.js";
 import { loadTurnPlan, clearTurnPlanForSession, decidePlanContinuation, renderPlanContinuationDirective } from "./turn-plan.js";
 import { runQaDeliveryLoop, parseQaVerdict, resolveQaVerdictStatus, qaRequiresEvidence, type QaVerdict, type QaVerdictStatus } from "./qa-delivery-loop.js";
+import { formatQaTurnRecord } from "./qa-turn-record.js";
+import type { TurnUserWords } from "./delegation-user-words.js";
 import {
   buildDeliverableConsistencyCheckMessages,
   buildDeliverableConsistencyRepairInstruction,
@@ -63,6 +65,7 @@ import { consumePendingSessionCancel } from "../swarm/control.js";
 import { artifactFileLooksTruncated, runSubAgent } from "./sub-agent.js";
 import { collectJudgeableArtifactRefs, runQaToolJudgeCheck, type QaJudgeArtifactRef } from "./qa-tool-judge.js";
 import { probeArtifacts } from "./artifact-probes.js";
+import { collectSessionArtifactPaths, repairArtifactPathReferences, workspaceFileExists, type ArtifactPathRepair } from "./artifact-path-repair.js";
 import { listEvidenceClaims, sweepEvidenceConflicts } from "../swarm/evidence-ledger.js";
 import { deriveSharedSessionId } from "../tools/memory.js";
 import { join } from "node:path";
@@ -134,6 +137,7 @@ import {
 // Re-export the originally-exported buildModelVisibleToolResult so existing imports
 // from runtime.js (runtime-delegation-loop.test.ts, runtime-guidance.test.ts) keep working.
 export { buildModelVisibleToolResult } from "./tool-result-format.js";
+import { stripDelegatedRunRecord } from "./delegated-run-record.js";
 
 // Turn-preparation phases + the blocked() early-exit builder (god-file seam): the
 // pre-loop setup phases of _runTurn and the shared blocked() TurnOutput builder live
@@ -937,7 +941,7 @@ export function classifyPostOrchestrationDisposition(
   // honesty backstop never armed. When the flag is on, recognize the incomplete-graph result too.
   const taskGraphFailureDisposition = getConfig().orchestration?.taskGraphFailureDisposition === true;
   const orchestrationResults = toolResultMessages.filter((message) => {
-    const text = typeof message.content === "string" ? message.content : "";
+    const text = typeof message.content === "string" ? stripDelegatedRunRecord(message.content) : "";
     // execute_plan dispatches the delegations and workflows the markers below name, one level down,
     // so its OWN result carries none of them and matched nothing here. An iteration whose only call
     // was execute_plan therefore classified as "none" — which skips the entire post-orchestration
@@ -964,7 +968,7 @@ export function classifyPostOrchestrationDisposition(
   let sawContinuationCue = false;
 
   for (const message of orchestrationResults) {
-    const text = typeof message.content === "string" ? message.content : "";
+    const text = typeof message.content === "string" ? stripDelegatedRunRecord(message.content) : "";
     const metadata = message.metadata ?? {};
     const agentName = typeof metadata["agentName"] === "string"
       ? String(metadata["agentName"])
@@ -1337,7 +1341,21 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
         deadlineMs: turnDeadlineMs,
         extendForDelegationWait: extendTurnDeadlineForDelegationWait,
       }));
-    const finalized = finalizeTurnOutput(out, sessionId);
+    // The repair persistAssistantTurnState already applied to the saved answer, reused rather than
+    // re-derived: saving can trim history, and a second pass over fewer known paths could repair
+    // the returned copy differently. It is audited here only, where every turn passes exactly once.
+    const pathRepair = takeFinalAnswerRepair(opts.session, out.response);
+    for (const repair of pathRepair.repairs) {
+      logAudit("artifact_path_repaired", { surface: "final_answer", from: repair.from, to: repair.to }, {
+        sessionId,
+        channel: opts.session.channel,
+        severity: "info",
+      });
+    }
+    const finalized = finalizeTurnOutput(
+      pathRepair.repairs.length > 0 ? { ...out, response: pathRepair.text } : out,
+      sessionId,
+    );
     const qualityScorecard = finalized.qualityScorecard ?? buildTurnQualityScorecard({
       delegationCount: 0,
       shareFindingCount: 0,
@@ -1921,6 +1939,9 @@ async function _runTurn(
     signal,
     _turnDeadlineMs: turnBudget?.deadlineMs,
     _workflowExecutionStack: opts._workflowExecutionStack,
+    // Always an object, even when no entry point supplied the opening words (a scene template):
+    // mid-turn steering is typed by a person on every surface, and is pushed in below.
+    turnUserWords: { opening: opts.userWords ?? "", midTurn: [] },
     swarmState: {
       objective: userMessage,
       startedAt: new Date().toISOString(),
@@ -1930,6 +1951,13 @@ async function _runTurn(
       tasks: carriedSwarmTasks,
     },
   };
+  // The QA verdict checks the answer against what the user typed this turn. The terminal guards
+  // are handed the gate as a plain function, so it is bound to this turn's words here, once.
+  const runQaDeliveryGateForTurn: TerminalGuardContext["runQaDeliveryGate"] = (
+    gateSession, gateProvider, gateSignal, answer, criteria, maxRounds, escalate, requireEvidence,
+  ) => runQaDeliveryGate(
+    gateSession, gateProvider, gateSignal, answer, criteria, maxRounds, escalate, requireEvidence, toolContext.turnUserWords,
+  );
   let turnUsedSwarmTools = false;
   const getTurnSwarmState = (): SwarmState | undefined => selectPersistableSwarmState(
     toolContext.swarmState,
@@ -2285,6 +2313,9 @@ async function _runTurn(
           // this marker (agent/turn-boundary.ts), so steering does not cut the turn in two.
           metadata: { midTurn: true },
         });
+        // The orchestrator reads this from history; a specialist it delegates to afterwards has no
+        // history, so it gets the same words through the tool context.
+        toolContext.turnUserWords?.midTurn.push(...steering);
         logAudit("turn_steering_injected", {
           count: steering.length,
           iteration: iterationCount,
@@ -3666,7 +3697,7 @@ async function _runTurn(
         finalizeUserFacingAssistantResponse,
         forceSynthesis,
         collectTurnArtifactAttachments,
-        runQaDeliveryGate,
+        runQaDeliveryGate: runQaDeliveryGateForTurn,
         runDeliverableConsistencyGate,
         runCorrectiveBuild,
         runCorrectiveReroute,
@@ -5084,7 +5115,7 @@ async function _runTurn(
     finalizeUserFacingAssistantResponse,
     forceSynthesis,
     collectTurnArtifactAttachments,
-    runQaDeliveryGate,
+    runQaDeliveryGate: runQaDeliveryGateForTurn,
     runDeliverableConsistencyGate,
     runCorrectiveBuild,
     runCorrectiveReroute,
@@ -5252,6 +5283,7 @@ async function runQaDeliveryGate(
   maxRounds: number,
   escalate?: (current: string, flaws: string, crit: string[]) => Promise<string | null>,
   requireEvidence = false,
+  turnUserWords?: TurnUserWords,
 ): Promise<{ answer: string; changed: boolean; rounds: number; passed: boolean; status: QaVerdictStatus; evidence?: string; artifactProbeStatus: ArtifactProbeStatus; artifactProbeCount: number; escalated: boolean; unverified: boolean }> {
   const verdictProvider = getChatProviderForTier("synthesis") ?? provider;
 
@@ -5346,10 +5378,15 @@ async function runQaDeliveryGate(
     const toolJudgeRefs = qaToolJudgeOn
       ? collectJudgeableArtifactRefs(collectTurnArtifactAttachments(session))
       : [];
+    // The files this turn produced, as their tools recorded them, and the user's own words. The
+    // criteria and the answer are both the orchestrator's account; this is what they are checked
+    // against. Read each round, so a file an escalation round produced is on it — and handed to
+    // whichever verdict runs, the tool-equipped judge included.
+    const turnRecordBlock = formatQaTurnRecord(session.getHistory(), turnUserWords);
     if (toolJudgeRefs.length > 0) {
       artifactProbeCount = toolJudgeRefs.length;
       try {
-        const verdict = await toolJudgeCheck(current, crit, toolJudgeRefs);
+        const verdict = await toolJudgeCheck(current, turnRecordBlock ? [...crit, turnRecordBlock.trim()] : crit, toolJudgeRefs);
         artifactProbeStatus = resolveQaVerdictStatus(verdict);
         return verdict;
       } catch (err) {
@@ -5385,6 +5422,7 @@ async function runQaDeliveryGate(
       "Acceptance criteria:",
       ...crit.map((c, i) => `${i + 1}. ${c}`),
       ...(disputedEvidenceBlock ? [disputedEvidenceBlock] : []),
+      ...(turnRecordBlock ? [turnRecordBlock] : []),
       "",
       "ANSWER:",
       current,
@@ -5631,12 +5669,37 @@ function persistAssistantTurnState(session: AgentSession, content: string, swarm
   const metadata: Record<string, unknown> = {};
   if (swarmState) metadata["swarmState"] = structuredClone(swarmState);
   if (attachments.length > 0) metadata["attachments"] = attachments;
+  // Save the answer with any mis-copied artifact path already repaired, BEFORE adding it: adding
+  // can trim history. runTurnImpl returns and audits this same repair.
+  const repair = repairFinalAnswerArtifactPaths(session, content);
+  lastFinalAnswerRepair.set(session, { input: content, repair });
+  const saved = repair.text;
 
   if (Object.keys(metadata).length > 0) {
-    session.addMessage({ role: "assistant", content, metadata });
+    session.addMessage({ role: "assistant", content: saved, metadata });
     return;
   }
-  session.addMessage({ role: "assistant", content });
+  session.addMessage({ role: "assistant", content: saved });
+}
+
+/**
+ * Puts file paths the model mis-copied into a final answer back to the paths this session's tools
+ * recorded (artifact-path-repair.ts has the rules). The saved answer is repaired here and the
+ * returned one reuses that result (takeFinalAnswerRepair), so the two come out identical.
+ */
+const lastFinalAnswerRepair = new WeakMap<AgentSession, { input: string; repair: { text: string; repairs: ArtifactPathRepair[] } }>();
+
+/** The repair made when the answer was saved, when it was this text; otherwise a fresh one. */
+function takeFinalAnswerRepair(session: AgentSession, text: string): { text: string; repairs: ArtifactPathRepair[] } {
+  const saved = lastFinalAnswerRepair.get(session);
+  lastFinalAnswerRepair.delete(session);
+  return saved && saved.input === text ? saved.repair : repairFinalAnswerArtifactPaths(session, text);
+}
+
+function repairFinalAnswerArtifactPaths(session: AgentSession, text: string): { text: string; repairs: ArtifactPathRepair[] } {
+  if (typeof text !== "string" || !text) return { text, repairs: [] };
+  const knownPaths = collectSessionArtifactPaths(session.getHistory());
+  return repairArtifactPathReferences(text, knownPaths, workspaceFileExists(session.getWorkspacePath()));
 }
 
 /**

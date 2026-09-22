@@ -60,6 +60,7 @@ import { checkImageGenerationHealth, imageGenerationServiceConfigured, requestIm
 import { sendChunkedTtsRequests } from "../multimodal/tts-chunking.js";
 import { resolveProviderEndpointForModel, syncChatProviderRuntimeStatus } from "../providers/index.js";
 import { logAudit } from "../audit/logger.js";
+import { checkInput } from "../guardrails/input.js";
 import { getConcurrencySnapshot, getGlobalConcurrencySnapshot } from "../swarm/concurrency.js";
 import { isSwarmBusConnected } from "../swarm/bus.js";
 import { getAgentCapabilitySnapshot } from "../swarm/capabilities.js";
@@ -2798,6 +2799,27 @@ export function createGateway() {
     }
     if (!message.trim()) return c.json({ error: "message is required" }, 400);
 
+    // Steering text becomes part of someone's running turn — and now reaches every specialist
+    // delegated after it as that user's own words — so it gets what any message gets: the
+    // ownership check /stop enforces (opaque 404, archived sessions resolved, admins exempt)
+    // and the input guardrail.
+    const caller = await authenticatedUser(c.req.header("Authorization"));
+    if (getConfig().auth?.enabled === true && !userHasRole(caller, "admin")) {
+      const session = getSessionRecord(sessionId);
+      if (!session) return c.json({ error: "Session not found" }, 404);
+      if (session.userId !== undefined && session.userId !== caller?.username) {
+        return c.json({ error: "Session not found" }, 404);
+      }
+    }
+    const inputCheck = checkInput(message);
+    if (!inputCheck.allowed) {
+      logAudit("guardrail_blocked", { type: "input", surface: "steer", reason: inputCheck.reason, patterns: inputCheck.detectedPatterns }, {
+        sessionId,
+        severity: "warn",
+      });
+      return c.json({ error: `I can't process that message: ${inputCheck.reason ?? "Prompt injection detected"}` }, 400);
+    }
+
     const steered = turnSteeringManager.enqueueIfActive(sessionId, message);
     // active mirrors steered here, but expose it explicitly so the client knows
     // whether to fall back to a normal new-message send.
@@ -2844,7 +2866,10 @@ export function createGateway() {
       // turn cluster-wide. getSessionRecord sees archived sessions too, and an id this
       // instance cannot resolve at all is refused rather than assumed free.
       const session = getSessionRecord(sessionId);
-      const isAdmin = userHasRole(caller, "operator");
+      // ADMIN, not operator: operator is the ordinary role every account gets by default, and
+      // the /api write gate already requires it — so exempting operators exempted everyone who
+      // could reach this route, and any user could stop any other user's run.
+      const isAdmin = userHasRole(caller, "admin");
       if (!isAdmin) {
         if (!session) return c.json({ error: "Session not found" }, 404);
         if (session.userId !== undefined && session.userId !== caller?.username) {

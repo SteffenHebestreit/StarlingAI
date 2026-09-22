@@ -304,6 +304,25 @@ describe("execute_plan dispatches each step to the tool that runs that kind", ()
     expect(result.metadata?.["artifacts"]).toEqual([{ path: "deck.html" }]);
   });
 
+  it("propagates the failed calls inside each step's specialist, a failed step's included", async () => {
+    // A step's result is its specialist's own account, which leaves out a call it recovered from.
+    // In f4ebf47b the requested engine returned a 404, the fast tier drew the picture, and the
+    // answer credited the engine.
+    const drawFailure = { agent: "image_creator", tool: "generate_image", error: "HTTP 404: no router for requested model" };
+    const fetchFailure = { agent: "researcher", tool: "web_fetch", error: "HTTP 403 Forbidden" };
+    respond = (_name, args) => (String(args["task"]).includes("draw the harbour")
+      ? { success: true, output: "drawn", metadata: { specialistToolFailures: [drawFailure] } }
+      : { success: true, output: "no source reachable", metadata: { delegationSucceeded: false, specialistToolFailures: [fetchFailure] } });
+    await persistTurnPlan(SESSION, basePlan([
+      { id: "s1", description: "draw the harbour", kind: "delegate" },
+      { id: "s2", description: "check the tide table", kind: "delegate" },
+    ]));
+
+    const result = await run();
+    expect(result.metadata?.["failed"]).toBe(1);
+    expect(result.metadata?.["specialistToolFailures"]).toEqual([drawFailure, fetchFailure]);
+  });
+
   it("stops at the per-turn delegate cap instead of fanning out past it", async () => {
     // The executor delegates from inside ONE tool call, so the turn loop's cap never sees those
     // dispatches. Unbounded, a 12-step plan fans out 12 times in a turn that allows 5.

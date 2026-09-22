@@ -237,6 +237,10 @@ export type CoreAuditEventType =
   // that never ran.
   | "artifact_verification_failed"
   | "artifact_verification_unrepaired"
+  // A file path the model mis-copied into its final answer (a dropped or doubled
+  // character) was put back to the path the tool recorded. One event per distinct
+  // repair, so the rate of rewritten answers can be measured.
+  | "artifact_path_repaired"
   | "flow_high_stakes_unverified"
   | "plan_approval_requested"
   | "plan_approval_resolved"

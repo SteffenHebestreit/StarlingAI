@@ -30,26 +30,15 @@ import { planFrontier, planCycle } from "../agent/plan-frontier.js";
 import { BLOCKED_STEP_TOOLS } from "./tool-pipeline.js";
 import { getPerTurnToolCallLimit } from "../agent/delegation-response-collapse.js";
 import { withDelegationFanoutAllowance } from "./sub-agent.js";
+// This tool's output is mostly untrusted delegated content, re-emitted as the orchestrator's own.
+// A step whose result merely quoted an HTML-ish role tag replaced the ENTIRE report with "Tool
+// output blocked by guardrails", while the metadata still said N done and 0 failed, so the turn
+// synthesized over it. And it could not be retried: the results are already persisted, so the next
+// call re-emits the same text and is blocked again. Hence every carried or reported result is
+// defanged rather than left for checkToolOutput to block.
+import { defangFramingMarkers } from "../guardrails/framing-markers.js";
 
 const log = childLogger("tool:execute_plan");
-
-/**
- * Defang the framing markers that the orchestrator's OWN tool-output guardrail blocks on.
- *
- * checkToolOutput BLOCKS rather than neutralizes, which is right for the orchestrator's controlled
- * tools — but this tool's output is mostly untrusted delegated content, re-emitted as the
- * orchestrator's own. A step whose result merely quoted an HTML-ish role tag therefore replaced the
- * ENTIRE report with "Tool output blocked by guardrails", while the metadata still said N done and
- * 0 failed, so the turn synthesized over it. And it could not be retried: the results are already
- * persisted, so the next call re-emits the same text and is blocked again. input.ts's own note says
- * untrusted content must be neutralized instead — the content is preserved, only the exact tokens
- * are rewritten.
- */
-function defangFramingMarkers(text: string): string {
-  return text
-    .replace(/<(\s*\/?\s*)(system|assistant|human|user|tool_result)\b/gi, "&lt;$1$2")
-    .replace(/\[(function_results?)\]/gi, "[$1 ]");
-}
 
 /** Hard stop on scheduler rounds, so a plan that never settles cannot spin. */
 const MAX_ROUNDS = 16;
@@ -118,6 +107,8 @@ interface StepRun {
   result?: string;
   /** Artifacts the step produced, propagated so the parent turn can surface them as downloads. */
   artifacts?: unknown[];
+  /** Tool calls that failed inside the step's specialist, propagated so the report can list them. */
+  toolFailures?: unknown[];
 }
 
 /**
@@ -214,8 +205,12 @@ async function runStep(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<
 
   try {
     const result = await executeTool(dispatch.tool, dispatch.args, ctx);
+    // Forwarded like the artifacts below, and from a failed step as well: which calls failed on the
+    // way is what tells a recovery onto another path apart from the path the step asked for.
+    const stepToolFailures = result.metadata?.["specialistToolFailures"];
+    const failures = Array.isArray(stepToolFailures) && stepToolFailures.length > 0 ? { toolFailures: stepToolFailures } : {};
     if (!result.success) {
-      return { status: "failed", detail: (result.error ?? "step failed").slice(0, 300), call: made(false) };
+      return { status: "failed", detail: (result.error ?? "step failed").slice(0, 300), call: made(false), ...failures };
     }
     // A DELEGATION CAN FAIL ON A SUCCESSFUL ToolResult. delegate_to_agent returns success:true and
     // carries the verdict in metadata: the sub-agent's own <final_answer status="failure">, a
@@ -234,6 +229,7 @@ async function runStep(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<
           status: "failed",
           detail: `the specialist reported failure (${outcome ?? terminalState ?? "no usable result"})`,
           call: made(false),
+          ...failures,
         };
       }
     }
@@ -246,6 +242,7 @@ async function runStep(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<
         status: "failed",
         detail: `no workflow named "${step.workflow}" exists — re-record the step with a real workflow name, or make it a delegate step`,
         call: made(true, true),
+        ...failures,
       };
     }
     // Artifacts have to be forwarded explicitly: collectTurnArtifactAttachments walks the metadata
@@ -259,6 +256,7 @@ async function runStep(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<
       result: result.output,
       call: made(true),
       ...(Array.isArray(stepArtifacts) && stepArtifacts.length > 0 ? { artifacts: stepArtifacts } : {}),
+      ...failures,
     };
   } catch (err) {
     return {
@@ -328,6 +326,7 @@ registerTool({
     // dependent — and still report it. Results the first call held only in memory were lost.
     const results = new Map<string, string>((plan.outcomes ?? []).flatMap((o) => (o.result ? [[o.id, o.result]] : [])));
     const artifacts: unknown[] = [];
+    const specialistToolFailures: unknown[] = [];
 
     // THE RESUME PATH. Without these a `manual` step is terminal: it is not `pending`, so it is
     // never re-offered, and it never settles, so its dependents stay blocked for good. The tool
@@ -437,6 +436,7 @@ registerTool({
         if (run.detail) details.set(step.id, run.detail);
         if (run.result) results.set(step.id, run.result);
         if (run.artifacts) artifacts.push(...run.artifacts);
+        if (run.toolFailures) specialistToolFailures.push(...run.toolFailures);
         if (run.status === "done" || run.status === "failed") ran.push(step.id);
       }
     }
@@ -590,6 +590,7 @@ registerTool({
         // Reported for the audit line and the report, not consumed by the turn.
         delegated: dispatchedOk.filter((id) => byId.get(id)?.kind !== "direct").length,
         ...(artifacts.length > 0 ? { artifacts } : {}),
+        ...(specialistToolFailures.length > 0 ? { specialistToolFailures } : {}),
       },
     };
   },

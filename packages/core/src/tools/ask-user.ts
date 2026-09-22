@@ -73,6 +73,15 @@ registerTool({
         : 120_000;
 
     const answer = (await context.inputCallback(question, choices?.length ? choices : undefined, timeoutMs)).trim();
+    // An answer is the user's own words too, and often the one that settles what the opening
+    // message left open, so specialists delegated to after it see it. The question rides along
+    // because "yes" means nothing on its own — and it is the END of a question that says what "yes"
+    // or "2" answers: context comes first, the actual question and its options last. An unattended
+    // run's stand-in answer is not the user's.
+    if (answer && answer !== UNATTENDED_ANSWER) {
+      const asked = question.length > 160 ? `…${question.slice(-159)}` : question;
+      context.turnUserWords?.midTurn.push(`(asked "${asked}") ${answer}`);
+    }
 
     return {
       success: true,

@@ -34,6 +34,7 @@ import { subscribeToNotifications } from "../runtime/notifications.js";
 import { captureComputerSessionSnapshot } from "../agent/computer-adapters/runtime.js";
 import { resolveSessionWorkspaceOverride } from "./session-workspace.js";
 import { longRunningGenerationManager } from "../agent/long-running-generation.js";
+import { typedUserWords } from "../agent/delegation-user-words.js";
 
 /**
  * How often the gateway turn watchdog re-checks a turn it has suspended for an operator
@@ -910,6 +911,12 @@ export class RpcConnection {
           session,
           userMessage: message,
           userDisplayContent: displayContent,
+          // What the person typed. `message` can carry inlined image analysis (the web chat's typed
+          // text is displayContent then), and after /run it is the scene's template, which is not
+          // the user's words at all.
+          userWords: runMatch
+            ? undefined
+            : typedUserWords(message, displayContent ? parseOverrideFlags(displayContent).clean : undefined),
           userAttachments,
           signal: ac.signal,
           allowedAgents: effectiveAllowedAgents,

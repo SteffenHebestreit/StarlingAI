@@ -283,6 +283,7 @@ export async function handleAguiStream(
     const turnResult = await runTurn({
       session,
       userMessage: message,
+      userWords: message,
       signal: abortController.signal,
       // Keep the gateway's hard timeout in lockstep with the runtime's delegation-wait
       // exclusion. Without this the two clocks disagree and the shorter one wins.

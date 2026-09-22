@@ -28,6 +28,7 @@ import { emitSwarmEvent } from "../swarm/bus.js";
 import { resolveDockerWorkspaceBind } from "../tools/workspace-mount.js";
 import { logAudit } from "../audit/logger.js";
 import { currentUserId } from "../runtime/request-context.js";
+import { userWordsBlockForRun } from "./delegation-user-words.js";
 
 const log = childLogger("agent:container-runner");
 
@@ -190,7 +191,10 @@ export function buildContainerTaskPayload(
 ): ContainerTaskPayload {
   return {
     agentName: opts.agentName,
-    task: opts.task,
+    // The user's words ride at the end of the task, which is where the in-process runner puts
+    // them too. The worker builds its first message from task and context alone, so this reaches
+    // it without rebuilding the worker image.
+    task: `${opts.task}${userWordsBlockForRun(agentCfg.domain, opts.turnUserWords, opts.task, opts.context)}`,
     context: opts.context,
     parentSessionId: opts.parentSessionId,
     // `?? currentUserId()`: the in-process runner uses the same fallback (tools/registry.ts),

@@ -148,6 +148,40 @@ describe("the container payload carries the owning user", () => {
 });
 
 /**
+ * A containerized specialist gets the user's own words too. The worker builds its first message
+ * from `task` and `context` only, so the block has to arrive inside `task` — at its end, where the
+ * in-process runner puts it — or a containerized agent would still see only the paraphrase.
+ */
+describe("the container payload carries the user's own words", () => {
+  const GERMAN = "nicht den fast-tier … das result ist schlimmer als das original";
+  const opts = (over: Partial<SubAgentRunOptions> = {}): SubAgentRunOptions => ({
+    agentName: "image_creator",
+    task: "Render the harbour at dusk.",
+    parentSessionId: "sess-1",
+    workspacePath: "/w",
+    ...over,
+  } as SubAgentRunOptions);
+  const model = { primary: "lmstudio/qwen" } as unknown as ModelConfig;
+  const build = (o: SubAgentRunOptions, domain?: string) =>
+    buildContainerTaskPayload(o, { tools: [], ...(domain ? { domain } : {}) } as unknown as SubAgentConfig, model, "http://x", "k");
+
+  it("appends them to the task, after the orchestrator's text, and adds nothing when there are none", () => {
+    const payload = build(opts({ turnUserWords: { opening: GERMAN, midTurn: [] } }));
+    expect(payload.task.startsWith("Render the harbour at dusk.")).toBe(true);
+    expect(payload.task).toContain("[USER'S OWN WORDS");
+    expect(payload.task.endsWith(GERMAN)).toBe(true);
+    expect(build(opts()).task).toBe("Render the harbour at dusk.");
+  });
+
+  it("keeps them off an A2A bridge agent", () => {
+    const withWords = opts({ turnUserWords: { opening: GERMAN, midTurn: [] } });
+    expect(build(withWords, "a2a").task).toBe("Render the harbour at dusk.");
+    // The control: the same payload for an ordinary agent does carry them.
+    expect(build(withWords).task).toContain(GERMAN);
+  });
+});
+
+/**
  * THE MOUNT SOURCE IS NOT THE WORKSPACE.
  *
  * The shipped compose deployment binds the REPO root at /workspace on purpose — the
