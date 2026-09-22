@@ -2232,7 +2232,14 @@ export const useGatewayStore = defineStore("gateway", () => {
         return;
       }
 
-      if (["routing", "synthesizing", "guardrail", "delegating"].includes(status)) {
+      // An allowlist rather than a passthrough, because the runtime also emits internal
+      // bookkeeping phases (`shared_finding_auto`, `shared_finding_skipped`) that mean nothing
+      // to a reader. But it had fallen behind what the runtime emits: `steering`, `oversight`
+      // and `recovered` were all being dropped on the floor. Those are the three a reader most
+      // wants — that an interjection was folded in, that the turn corrected itself, and that it
+      // recovered from a failure — and dropping them is why a long turn looks silent.
+      if (["routing", "synthesizing", "guardrail", "delegating",
+        "steering", "oversight", "recovered"].includes(status)) {
         const message = String(data["message"] ?? "").trim();
         if (message) {
           updateStreamingStatus(message, { appendHistory: true });
@@ -2463,13 +2470,27 @@ export const useGatewayStore = defineStore("gateway", () => {
     if (!currentSessionId.value) await createSession();
 
     const id = crypto.randomUUID();
-    messages.value.push({
+    const entry: ChatMessage = {
       id,
       role: "user",
       content,
       timestamp: new Date(),
       attachments: cloneAttachments(attachments),
-    });
+    };
+
+    // A message sent INTO a running turn belongs ABOVE that turn's bubble.
+    //
+    // An entire assistant turn occupies ONE slot here — the `id: "streaming"` placeholder
+    // pushed when the turn starts — and the final answer is spliced back over it in place.
+    // So a plain push put the interjection after an answer that was still being written when
+    // the user sent it, reading as though they had replied to something they had not yet
+    // seen. The server disagreed too: the runtime drains the steering queue between tool-loop
+    // iterations and records the message in arrival position, so a reload silently reordered
+    // the conversation. Render order here is raw array order — there is no timestamp sort —
+    // so the position at insert time IS the displayed position.
+    const streamingIndex = messages.value.findIndex(m => m.id === "streaming");
+    if (streamingIndex >= 0) messages.value.splice(streamingIndex, 0, entry);
+    else messages.value.push(entry);
     return id;
   }
 

@@ -244,10 +244,18 @@ function resolveImageRequest(
   config: ImageGenerationBackendConfig,
   input: ImageGenerationRequest,
 ): ResolvedImageRequest {
-  const namedQualityModel = Boolean(
-    input.model && config.qualityModel && input.model === config.qualityModel,
-  );
-  let tier: ImageGenerationTier = input.tier ?? (namedQualityModel ? "quality" : "fast");
+  // A NAMED MODEL DECIDES ITS OWN TIER. The two are not independent knobs: the tier exists to
+  // pick a model and its sampling defaults, so honouring both separately produced incoherent
+  // requests. `{model: "image", tier: "quality"}` rendered on the FAST model while taking the
+  // quality tier's steps, guidance and 300 s budget, and reported `tier: "quality"` back to
+  // the caller — a render on one engine labelled as the other.
+  const tierOfModel = (named: string | undefined): ImageGenerationTier | undefined =>
+    !named ? undefined
+      : config.qualityModel && named === config.qualityModel ? "quality"
+        : config.model && named === config.model ? "fast"
+          : undefined; // A model outside the configured pair: the stated tier picks defaults.
+  let tier: ImageGenerationTier = tierOfModel(input.model) ?? input.tier ?? "fast";
+  let model = input.model;
 
   // AN EDIT GOES TO A TIER THAT CAN EDIT, whatever tier was asked for.
   //
@@ -262,16 +270,21 @@ function resolveImageRequest(
   // "silently do something else". Upgrading is the only one that answers the request, and
   // `tierUpgradedForEdit` carries the cost up to the caller so it can be said out loud
   // instead of being discovered in the latency.
+  //
+  // The upgrade must move the MODEL, not just the tier label. An earlier version derived both
+  // candidates from `input.model`, so naming a model made the two comparisons identical, the
+  // upgrade could never fire, and the request fell through to a flat refusal further down —
+  // defeating the capability for exactly the caller who was most specific about what it wanted.
   let tierUpgradedForEdit = false;
   if (input.initImage) {
-    const modelForTier = (candidate: ImageGenerationTier): string =>
-      input.model
-      ?? (candidate === "quality" ? config.qualityModel ?? config.model : config.model)
-      ?? "";
-    const canEdit = (candidate: ImageGenerationTier): boolean =>
-      config.initImageModels?.includes(modelForTier(candidate)) ?? false;
-    if (!canEdit(tier) && canEdit("quality")) {
+    const canEdit = (named: string | undefined): boolean =>
+      Boolean(named) && (config.initImageModels?.includes(named!) ?? false);
+    const editModel = config.qualityModel ?? config.model;
+    const current = model
+      ?? (tier === "quality" ? config.qualityModel ?? config.model : config.model);
+    if (!canEdit(current) && canEdit(editModel)) {
       tier = "quality";
+      model = editModel;
       tierUpgradedForEdit = true;
     }
   }
@@ -281,6 +294,7 @@ function resolveImageRequest(
   return {
     ...input,
     tier,
+    ...(model ? { model } : {}),
     ...(tierUpgradedForEdit ? { tierUpgradedForEdit: true } : {}),
     width: input.width ?? config.defaultWidth ?? OPENAI_IMAGE_SIZE,
     height: input.height ?? config.defaultHeight ?? OPENAI_IMAGE_SIZE,
@@ -425,10 +439,16 @@ async function requestOpenAiImageGeneration(
   // that ignores or rejects unknown fields is not handed any by default.
   if (input.initImage) {
     // ONE spelling. An earlier version sent `image`, `init_image` and `init_images` together
-    // because no shim agreed on the name; this endpoint settled on `image` and rejects
-    // unknown parameters by name rather than ignoring them, so guessing is now worse than
-    // useless. `strength` is likewise the single accepted spelling — not
-    // `denoising_strength`.
+    // because no shim agreed on the name; this endpoint settled on `image`, and `strength` is
+    // likewise the single accepted spelling — not `denoising_strength`.
+    //
+    // CORRECTION, measured 2026-09-22: this comment used to claim the endpoint "rejects
+    // unknown parameters by name rather than ignoring them". It does NOT. A request carrying
+    // `__definitely_not_real__: 1` returned HTTP 200 and a real image. Only a few names are
+    // special-cased (`mask` answers 400 "masked inpainting is not available"); everything else
+    // is silently dropped. So a misspelled parameter costs a full render and changes nothing,
+    // and you cannot use a rejection to discover which names the backend honours — that reads
+    // as a working feature and is how a silent no-op gets shipped.
     payload["image"] = input.initImage;
     payload["strength"] = input.strength ?? DEFAULT_EDIT_STRENGTH;
   }

@@ -86,14 +86,52 @@ describe("image request resolution", () => {
     expect(net.calls[0]!.body["size"]).toBe("1024x1024");
   });
 
-  it("lets an explicit tier win over the model-derived one", async () => {
-    // A caller who names the fast model but asks for quality gets quality; the tier is the
-    // statement of intent, the model id is only a hint when intent is absent.
+  it("lets the NAMED MODEL decide the tier, overriding a contradictory tier", async () => {
+    // This case used to assert the opposite — that a stated tier beat the model — and that
+    // assertion re-created the exact defect described at the top of this file. `image-quality`
+    // at the fast tier's guidance of 7.5 roughly doubles a ~170s render and then judges it
+    // against the fast tier's 120s timeout, so it aborts every time while the device keeps
+    // going. The old rule simply required the caller to say `tier: "fast"` out loud to earn it.
+    //
+    // The two are not independent knobs: a tier's whole job is to pick a model and the
+    // sampling defaults that suit it, so a named model has already chosen its tier.
     const net = stub();
 
     await requestImageGeneration(CLUSTER, { prompt: "a lighthouse", model: "image-quality", tier: "fast" });
 
+    expect(net.calls[0]!.body["model"]).toBe("image-quality");
+    expect(net.calls[0]!.body["guidance_scale"]).toBe(1);
+  });
+
+  it("does the same in the other direction — the fast model never gets quality's defaults", async () => {
+    // `{model: "image", tier: "quality"}` rendered on the FAST model while taking the quality
+    // tier's steps, guidance and 300s budget, and reported `tier: "quality"` back to the
+    // caller: a render on one engine labelled as the other. This is the direction a settings
+    // UI hits, because a UI offers model and quality as separate controls.
+    const net = stub();
+
+    const result = await requestImageGeneration(CLUSTER, {
+      prompt: "a lighthouse", model: "image", tier: "quality",
+    });
+
+    expect(net.calls[0]!.body["model"]).toBe("image");
     expect(net.calls[0]!.body["guidance_scale"]).toBe(7.5);
+    // And the report back matches what actually ran, rather than what was asked for.
+    expect(result.tier).toBe("fast");
+  });
+
+  it("keeps honouring a stated tier for a model outside the configured pair", async () => {
+    // The control that keeps the rule from becoming "ignore the tier". A station-local id is
+    // neither `image` nor `image-quality`, so nothing can be derived from it and the caller's
+    // stated tier is the only signal for which sampling defaults to use.
+    const net = stub();
+
+    await requestImageGeneration(CLUSTER, {
+      prompt: "a lighthouse", model: "corsair/qwen-image", tier: "quality",
+    });
+
+    expect(net.calls[0]!.body["model"]).toBe("corsair/qwen-image");
+    expect(net.calls[0]!.body["guidance_scale"]).toBe(1);
   });
 
   it("lets an explicit parameter win over every default", async () => {

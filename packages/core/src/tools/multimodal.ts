@@ -485,7 +485,21 @@ registerTool({
   parameters: {
     type: "object",
     properties: {
-      prompt: { type: "string", description: "Text description of the image to generate" },
+      prompt: {
+        type: "string",
+        description:
+          "Text description of the image to generate. The prompt sets the VISUAL REGISTER and is"
+          + " the strongest control you have — stronger than the tier, the model or any"
+          + " parameter. Write it in the register the user actually asked for. Decorative"
+          + " wording ('beautiful', 'dramatic', 'vibrant', 'stunning', named saturated colours)"
+          + " reliably produces a stylised, poster-like image; if the user wants a photograph,"
+          + " describe one the way a photographer would — camera and lens, aperture, natural"
+          + " unedited colour, specific material texture, real optical behaviour such as haze,"
+          + " grain or clipped highlights. Measured on this cluster: the SAME fast model that"
+          + " returned candy-coloured clip art for a decorative prompt returned a convincing"
+          + " photograph for a photographic one, in the same ~10 seconds. Reach for"
+          + " `negativePrompt` in the same breath to exclude the register you do not want.",
+      },
       model: { type: "string", description: "Optional image model override for backends that support per-request model selection" },
       negativePrompt: { type: "string", description: "Optional negative prompt to steer generation away from unwanted content" },
       width: {
@@ -529,17 +543,22 @@ registerTool({
       strength: {
         type: "number",
         description:
-          "With `baseImage`, how much of the original is re-rendered, 0 to 1. This is the choice"
-          + " that decides whether an edit reads as an edit, so match the band to what the user"
-          + " asked to CHANGE. 0.2-0.35 is a TOUCH-UP: composition AND style both survive, only"
-          + " detail and colour move — right for 'warmer', 'remove that object', 'fix the sky'."
-          + " 0.65-0.8 is a RESTYLE: the layout (subject, horizon, framing) survives while the"
-          + " look is genuinely replaced — this is what 'make it photorealistic', 'more"
-          + " dramatic', 'less cartoonish', 'viel realer' need. Above ~0.85 keeps nothing and is"
-          + " a fresh image with extra steps. Asking for a different LOOK and sending 0.3-0.5"
-          + " returns the same picture very slightly altered, which the user reads as the edit"
-          + " having been ignored. Defaults to a conservative touch-up, so state the value"
-          + " explicitly whenever the request is about the look rather than a local detail.",
+          "With `baseImage`, how much of the original is re-rendered, 0 to 1. Low (0.2-0.35)"
+          + " moves detail and colour only; 0.65-0.8 rebuilds most of the content while the"
+          + " broad layout survives; above ~0.85 keeps nothing and is a fresh image with extra"
+          + " steps. Defaults to 0.45."
+          + " WHAT STRENGTH CANNOT DO: it does not change the VISUAL REGISTER of the base."
+          + " An edit inherits whether its base looks like a photograph, an illustration or a"
+          + " painting, at every strength that still preserves the composition. Measured: a"
+          + " stylised base edited at 0.75 with an explicitly photographic prompt AND an"
+          + " anti-illustration negative prompt stayed an illustration (mean pixel distance"
+          + " from the base 31.2, against 32.7 for a plain prompt — the prompt work bought"
+          + " nothing), while the SAME call from a photographic base stayed photographic. So if"
+          + " the user asks for a different register ('make it real', 'less cartoonish'),"
+          + " raising strength will NOT deliver it. Generate a new image instead, describing"
+          + " the composition you want to keep in words, and say plainly that the composition"
+          + " is re-interpreted rather than preserved. Use an edit for what an edit does: keep"
+          + " this picture, change something in it.",
       },
       outputPath: { type: "string", description: "Optional relative output path inside the workspace for the generated PNG" },
     },

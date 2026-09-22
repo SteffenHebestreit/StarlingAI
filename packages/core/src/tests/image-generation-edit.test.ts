@@ -9,9 +9,15 @@
  *
  * At the time the backend made that invisible: it returned HTTP 200 for a reference image
  * sent under six different field names and ignored every one. It has since been rebuilt —
- * editing is POST /v1/images/edits, `image` is the only accepted spelling, unknown parameters
- * are rejected by name rather than ignored, and sending a reference to /images/generations
- * now answers 400 "does not accept 'image'". So both ends are loud today.
+ * editing is POST /v1/images/edits, `image` is the only accepted spelling, and sending a
+ * reference to /images/generations now answers 400 "does not accept 'image'".
+ *
+ * But it is NOT loud about everything, and this file used to say it was. Measured 2026-09-22:
+ * a request carrying `__definitely_not_real__: 1` returned HTTP 200 and a real image. Unknown
+ * parameters are SILENTLY DROPPED apart from a couple of special cases, so a misspelled field
+ * still costs a full render and simply does nothing. That is the original 2c6bdb30 failure
+ * mode, still live for any name we get wrong — which is exactly why the single-spelling
+ * assertions below are worth keeping.
  *
  * The guards stay anyway, and these tests are mostly about them. An allowlist keeps us off a
  * backend that cannot edit, and `usage.mode` is checked on the way out, because the failure
@@ -109,8 +115,8 @@ describe("editing an existing image", () => {
     });
 
     const body = net.calls[0]!.body;
-    // ONE spelling. The endpoint rejects unknown parameters by name rather than ignoring
-    // them, so the old belt-and-braces aliases would now be a 400.
+    // ONE spelling. The old belt-and-braces aliases would not error — they would be silently
+    // dropped after a full render, which is the failure this whole file exists to prevent.
     expect(body["image"]).toBe(REF);
     expect(body["strength"]).toBe(0.3);
     expect(body["init_image"]).toBeUndefined();

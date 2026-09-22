@@ -56,7 +56,7 @@ Every public schema field, where it is declared, and how many production files r
 | `blockOn` | packages/core/src/config/schema.ts:1231 | 1 |
 | `botToken` | packages/core/src/config/schemas/channels.ts:10 | 9 |
 | `bucket` | packages/core/src/config/schema.ts:450 | 15 |
-| `budget` | packages/core/src/config/schema.ts:1608 | 78 |
+| `budget` | packages/core/src/config/schema.ts:1608 | 79 |
 | `budgets` | packages/core/src/config/schema.ts:511 | 13 |
 | `candidateTopK` | packages/core/src/config/schemas/retrieval.ts:105 | 2 |
 | `capabilities` | packages/core/src/config/schema.ts:900 | 46 |
@@ -93,7 +93,7 @@ Every public schema field, where it is declared, and how many production files r
 | `consolidationIntervalMs` | packages/core/src/config/schema.ts:1495 | 1 |
 | `container` | packages/core/src/config/schema.ts:684 | 71 |
 | `contextWindow` | packages/core/src/config/schema.ts:119 | 11 |
-| `control` | packages/core/src/config/schema.ts:1643 | 48 |
+| `control` | packages/core/src/config/schema.ts:1643 | 49 |
 | `coordinatorToolCaps` | packages/core/src/config/schemas/orchestration.ts:808 | 4 |
 | `corsAllowedOrigins` | packages/core/src/config/schema.ts:311 | 2 |
 | `cpus` | packages/core/src/config/schema.ts:804 | 11 |
@@ -218,7 +218,7 @@ Every public schema field, where it is declared, and how many production files r
 | `keywords` | packages/core/src/config/schemas/multimodal.ts:192 | 27 |
 | `kubeconfigPath` | packages/core/src/config/schema.ts:1061 | 1 |
 | `kubectlBinary` | packages/core/src/config/schema.ts:1059 | 1 |
-| `label` | packages/core/src/config/schema.ts:246 | 106 |
+| `label` | packages/core/src/config/schema.ts:246 | 107 |
 | `labeledAt` | packages/core/src/config/schema.ts:895 | 1 |
 | `labeledBy` | packages/core/src/config/schema.ts:894 | 1 |
 | `language` | packages/core/src/config/schemas/multimodal.ts:191 | 58 |
@@ -303,7 +303,7 @@ Every public schema field, where it is declared, and how many production files r
 | `otlpEndpoint` | packages/core/src/config/schema.ts:539 | 2 |
 | `otlpHeaders` | packages/core/src/config/schema.ts:541 | 1 |
 | `outputSecretScan` | packages/core/src/config/schema.ts:1211 | 5 |
-| `oversight` | packages/core/src/config/schemas/effort.ts:52 | 11 |
+| `oversight` | packages/core/src/config/schemas/effort.ts:52 | 12 |
 | `pageSpeedInsightsApiKey` | packages/core/src/config/schema.ts:1150 | 1 |
 | `pageTimeoutMs` | packages/core/src/config/schemas/retrieval.ts:194 | 1 |
 | `params` | packages/core/src/config/schema.ts:1284 | 52 |
@@ -410,7 +410,7 @@ Every public schema field, where it is declared, and how many production files r
 | `signalCliPath` | packages/core/src/config/schemas/channels.ts:73 | 4 |
 | `signingSecret` | packages/core/src/config/schemas/channels.ts:35 | 6 |
 | `silenceTimeoutMs` | packages/core/src/config/schemas/multimodal.ts:194 | 2 |
-| `silent` | packages/core/src/config/schema.ts:1335 | 29 |
+| `silent` | packages/core/src/config/schema.ts:1335 | 31 |
 | `skillMatchThreshold` | packages/core/src/config/schema.ts:282 | 2 |
 | `sleepTimeConsolidation` | packages/core/src/config/schema.ts:1493 | 2 |
 | `smtpFrom` | packages/core/src/config/schemas/channels.ts:65 | 6 |
