@@ -5,7 +5,15 @@ import { getConfig } from "../config/loader.js";
 import { childLogger } from "../logger.js";
 import { sendChunkedTtsRequests } from "../multimodal/tts-chunking.js";
 import { getMcpConnections } from "../mcp/registry.js";
-import { checkImageGenerationHealth, imageGenerationServiceConfigured, requestImageGeneration } from "../multimodal/image-generation.js";
+import {
+  checkImageGenerationHealth,
+  describeImageTierChoices,
+  imageEngineLabel,
+  imageGenerationServiceConfigured,
+  imageTierChoices,
+  requestImageGeneration,
+  resolveNamedImageEngine,
+} from "../multimodal/image-generation.js";
 import { encodeImageAs, transformImage, type ImageTransformOp } from "../multimodal/image-transform.js";
 import { writeSharedFact } from "../swarm/memory.js";
 import { deriveSharedSessionId } from "./memory.js";
@@ -474,13 +482,34 @@ registerTool({
   },
 });
 
+const GENERATE_IMAGE_DESCRIPTION =
+  "Generate an image from a text prompt and save it to the workspace. Two tiers: `fast` (the default,"
+  + " ~10s on dedicated hardware, costs the rest of the system nothing) and `quality` (~2-3 min, runs one"
+  + " at a time cluster-wide and slows every other model on that machine while it runs). See the `tier`"
+  + " parameter for when each is right.";
+
+/**
+ * The engines behind the tiers, named, so "the qwen model" can be matched to a tier.
+ *
+ * Read from config each time the description is read rather than baked in at registration:
+ * the names belong to the deployment, not to this file. Deterministic for a given config, so
+ * the tool block stays byte-identical between calls and only moves when the config does.
+ */
+function describeImageEngines(): string {
+  try {
+    const config = getConfig().multimodal?.imageGeneration;
+    const engines = config ? describeImageTierChoices(config) : "";
+    return engines ? ` Engines: ${engines}. A user who names one of these is asking for that tier.` : "";
+  } catch {
+    return "";
+  }
+}
+
 registerTool({
   name: "generate_image",
-  description:
-    "Generate an image from a text prompt and save it to the workspace. Two tiers: `fast` (the default,"
-    + " ~10s on dedicated hardware, costs the rest of the system nothing) and `quality` (~2.5 min, runs one"
-    + " at a time cluster-wide and slows every other model on that machine while it runs). Default to `fast`"
-    + " — see the `tier` parameter for the only reasons to override it.",
+  get description() {
+    return GENERATE_IMAGE_DESCRIPTION + describeImageEngines();
+  },
   embeddingDescription: "Generate, create, make an image, picture, illustration from a text prompt. Bild generieren, erzeugen, Illustration erstellen, KI-Bild aus Text. AI image generation, DALL-E style.",
   parameters: {
     type: "object",
@@ -488,19 +517,22 @@ registerTool({
       prompt: {
         type: "string",
         description:
-          "Text description of the image to generate. The prompt sets the VISUAL REGISTER and is"
-          + " the strongest control you have — stronger than the tier, the model or any"
-          + " parameter. Write it in the register the user actually asked for. Decorative"
-          + " wording ('beautiful', 'dramatic', 'vibrant', 'stunning', named saturated colours)"
-          + " reliably produces a stylised, poster-like image; if the user wants a photograph,"
-          + " describe one the way a photographer would — camera and lens, aperture, natural"
-          + " unedited colour, specific material texture, real optical behaviour such as haze,"
-          + " grain or clipped highlights. Measured on this cluster: the SAME fast model that"
-          + " returned candy-coloured clip art for a decorative prompt returned a convincing"
-          + " photograph for a photographic one, in the same ~10 seconds. Reach for"
-          + " `negativePrompt` in the same breath to exclude the register you do not want.",
+          "Text description of the image to generate. It sets the VISUAL REGISTER — photograph,"
+          + " illustration, painting — so write it in the register the user asked for, and put"
+          + " the register FIRST: measured here with the seed pinned, the fast engine rendered"
+          + " one 250-word description as a painting when its camera terms came last and as a"
+          + " photograph when they led, on two seeds out of two. Decorative wording"
+          + " ('beautiful', 'vibrant', 'stunning', named saturated colours) produces a stylised,"
+          + " poster-like image; for a photograph describe one the way a photographer would —"
+          + " camera and lens, natural unedited colour, real material texture, haze or grain."
+          + " Wording cannot make the fast engine follow a detailed layout; see `tier`.",
       },
-      model: { type: "string", description: "Optional image model override for backends that support per-request model selection" },
+      model: {
+        type: "string",
+        description:
+          "Rarely needed — choose the engine with `tier`. Accepts only the model ids or engine names"
+          + " listed in this tool's description; any other name is refused before anything renders.",
+      },
       negativePrompt: { type: "string", description: "Optional negative prompt to steer generation away from unwanted content" },
       width: {
         type: "number",
@@ -520,15 +552,17 @@ registerTool({
         type: "string",
         enum: ["fast", "quality"],
         description:
-          "Which generation tier to use. Default to 'fast' and do not deliberate: it takes about ten seconds"
-          + " on dedicated hardware and costs the rest of the system nothing. 'quality' takes about two and a"
-          + " half minutes, runs one at a time across the whole cluster, and slows every other model on that"
-          + " machine by roughly 70% while it runs — a cost paid by everyone else, not by this request."
-          + " Choose 'quality' ONLY when the user explicitly asked for high quality, a final print or"
-          + " production asset, or was dissatisfied with a fast result and asked for better."
-          + " The image being the thing the user asked for is NOT a reason to choose 'quality' — an ordinary"
-          + " request like 'make me a picture of a sunset' is 'fast', and so is any request that asks for it"
-          + " quickly.",
+          "Which engine renders it. 'fast' is the default: about ten seconds on dedicated hardware,"
+          + " costing the rest of the system nothing — right for an ordinary picture, a realistic"
+          + " one included (with the register first it comes back photographic). 'quality' takes"
+          + " two to three minutes, runs one at a time across the whole cluster and slows every"
+          + " other model on that machine by roughly 70% while it runs. Choose 'quality' when the"
+          + " user was unhappy with a fast result or asks for a better one, names the quality"
+          + " engine, or when the new picture must keep an EXISTING picture's layout: measured here"
+          + " with the seed pinned, the fast engine ignored a described layout in 6 renders out of"
+          + " 6, while the quality engine followed it. A user who names an engine or tier gets"
+          + " exactly that one; if it fails, say so — never render on the other tier and present"
+          + " it as what they asked for.",
       },
       baseImage: {
         type: "string",
@@ -539,8 +573,9 @@ registerTool({
           + " Do NOT use it to change the picture's LOOK ('make it realistic', 'as a painting'):"
           + " an edit inherits its base's look at every strength that keeps the layout, so the"
           + " result comes back in the old style. For that, describe the existing layout in the"
-          + " prompt and generate without baseImage — measured here, that returned a photograph"
-          + " in ~10 s where a 0.75 edit of the same picture stayed an illustration. If the"
+          + " prompt and generate without baseImage on tier 'quality' — measured here, that engine"
+          + " reproduced a described layout as a photograph, where a 0.75 edit of the same picture"
+          + " stayed an illustration and the fast engine ignored the layout. If the"
           + " backend cannot edit, this fails with a clear message: report that honestly instead"
           + " of passing a fresh generation off as a revision.",
       },
@@ -561,8 +596,8 @@ registerTool({
           + " from the base 31.2, against 32.7 for a plain prompt — the prompt work bought"
           + " nothing), while the SAME call from a photographic base stayed photographic. So if"
           + " the user asks for a different register ('make it real', 'less cartoonish'),"
-          + " raising strength will NOT deliver it. Generate a new image instead, describing"
-          + " the composition you want to keep in words, and say plainly that the composition"
+          + " raising strength will NOT deliver it. Generate a new image instead on tier 'quality',"
+          + " describing the composition you want to keep in words, and say plainly that the composition"
           + " is re-interpreted rather than preserved. Use an edit for what an edit does: keep"
           + " this picture, change something in it.",
       },
@@ -606,6 +641,33 @@ registerTool({
         return fail("Image generation is disabled: configure multimodal.imageGeneration.baseUrl to enable it.");
       }
 
+      // Names are checked HERE, before anything touches the backend. Session f4ebf47b sent
+      // `model: "Qwen"`, the router answered 404, and the agent's only recovery was to drop the
+      // name — which lands on the fast tier, the opposite of what the user asked for. A refusal
+      // that lists what exists costs one cheap iteration and points at the right engine.
+      const choices = imageTierChoices(config);
+      const statedTier = stringArg(args["tier"])?.toLowerCase();
+      if (statedTier && statedTier !== "fast" && statedTier !== "quality") {
+        return fail(
+          `Unknown tier "${stringArg(args["tier"])}". This deployment has: ${describeImageTierChoices(config) || "`fast`"}.`
+          + " Nothing was rendered.",
+        );
+      }
+      let requestedTier = statedTier as "fast" | "quality" | undefined;
+      const namedModel = stringArg(args["model"]);
+      if (namedModel && choices.length > 0) {
+        const tierOfName = resolveNamedImageEngine(config, namedModel);
+        if (!tierOfName) {
+          return fail(
+            `Unknown image engine "${namedModel}". This deployment has: ${describeImageTierChoices(config)}.`
+            + " Choose one with `tier` and omit `model`. Nothing was rendered.",
+          );
+        }
+        // The engine the user named wins over a tier stated beside it — the same rule the
+        // library applies — and only the tier travels on, so the backend resolves its own model.
+        requestedTier = tierOfName;
+      }
+
       const health = await checkImageGenerationHealth(config);
       if (!health.ok) {
         if (health.disabled) {
@@ -617,14 +679,12 @@ registerTool({
         return fail(`Image generation service is offline (${config.baseUrl}). The endpoint is unavailable. Do not retry - inform the user.`);
       }
 
-      // The tier is a COST choice, so an unknown value falls back to the cheap one rather
-      // than to the one that serialises the cluster.
-      // Pass the tier ONLY when the caller stated one. Forcing "fast" on every call that
-      // omitted it is what made editing unreachable: requestImageGeneration then had no way
-      // to tell "the caller wants fast" from "the caller did not say", so a baseImage request
-      // was pinned to a tier that cannot edit and refused.
-      const requestedTier = stringArg(args["tier"]) === "quality" ? "quality" as const
-        : stringArg(args["tier"]) === "fast" ? "fast" as const : undefined;
+      // Pass the tier ONLY when the caller stated one (or named an engine, above). Forcing
+      // "fast" on every call that omitted it is what made editing unreachable:
+      // requestImageGeneration then had no way to tell "the caller wants fast" from "the caller
+      // did not say", so a baseImage request was pinned to a tier that cannot edit and refused.
+      // An unknown tier used to fall back to fast silently; it is refused above instead,
+      // because a quiet fallback is the same wrong-engine outcome with no one told.
       // The tiers want DIFFERENT sampling defaults and both read the fields. Measured with
       // the seed pinned so only the parameter could vary: the fast tier renders differently
       // at guidance 1.0 than at 7.5, and the quality tier costs 22s at guidance 4 against
@@ -663,7 +723,8 @@ registerTool({
         ...(requestedTier ? { tier: requestedTier } : {}),
         // No `?? config.model` here: the backend resolves the tier's model itself, and
         // defaulting to the fast model would silently turn a quality request into a fast one.
-        ...(stringArg(args["model"]) ? { model: stringArg(args["model"])! } : {}),
+        // A name is forwarded only where no engines are configured to check it against.
+        ...(namedModel && choices.length === 0 ? { model: namedModel } : {}),
         // Only what the caller asked for; requestImageGeneration applies the tier's defaults.
         ...(stringArg(args["negativePrompt"]) ? { negativePrompt: stringArg(args["negativePrompt"])! } : {}),
         ...(typeof args["width"] === "number" ? { width: args["width"] } : {}),
@@ -695,10 +756,20 @@ registerTool({
       await writeFile(resolvedOutput.resolved, encoded.bytes);
       await publishImageArtifact(ctx.sessionId, resolvedOutput.relativePath);
 
+      // Which engine rendered it is said in the OUTPUT, not only in metadata. The specialist
+      // reads the output and nothing else; in f4ebf47b it retried on the fast tier after a
+      // failed named-model call, never learned the difference, and the picture was reported
+      // as the engine the user asked for.
+      const engine = imageEngineLabel(config, result.tier);
+      const seconds = typeof result.elapsedMs === "number" ? ` in ${(result.elapsedMs / 1000).toFixed(1)} s` : "";
+      const renderedBy = result.tier
+        ? `on the ${result.tier} tier${engine ? ` (${engine})` : result.model ? ` (model ${result.model})` : ""}${seconds}`
+        : "";
+
       // Same as synthesize_speech above: the resolved path is the one the bytes are at.
       return {
         success: true,
-        output: `Image generated successfully. Saved to ${resolvedOutput.relativePath}`
+        output: `Image generated${renderedBy ? ` ${renderedBy}` : " successfully"}. Saved to ${resolvedOutput.relativePath}`
           + (result.tierUpgradedForEdit
             ? ` — NOTE: editing is only available on the slower quality tier, so this used it`
               + " rather than the fast one. Say so if the user asked for speed."
@@ -720,6 +791,7 @@ registerTool({
           seed: result.seed,
           model: result.model,
           tier: result.tier,
+          ...(engine ? { engine } : {}),
           elapsedMs: result.elapsedMs,
         },
       };

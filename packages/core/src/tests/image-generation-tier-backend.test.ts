@@ -81,6 +81,9 @@ describe("per-tier image backend", () => {
 
     // The seed actually used comes back, so a caller can reproduce or vary deliberately.
     expect(result.seed).toBe(1152108546);
+    // And so does the tier. Only the OpenAI adapter used to report it, so a render routed here
+    // came back unlabelled and nobody downstream could say which engine had made it.
+    expect(result.tier).toBe("quality");
   });
 
   it("leaves the FAST tier on the original backend — the control", async () => {

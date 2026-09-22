@@ -23,6 +23,8 @@ export interface ImageGenerationBackendConfig {
   model?: string;
   /** Model id for the slow, higher-fidelity tier. Absent means the backend has only one. */
   qualityModel?: string;
+  /** What each tier's engine is called, so a user naming one can be understood. */
+  tierLabels?: Partial<Record<ImageGenerationTier, string>>;
   /** Wall-clock bound for the quality tier, which is far longer than the fast one. */
   qualityTimeoutMs?: number;
   /** How many generations may run at once for a model. Hardware-dependent; see the schema. */
@@ -168,6 +170,64 @@ interface ComfyUiImageRef {
   type?: string;
 }
 
+/** One configured engine, as an agent should hear about it. */
+export interface ImageTierChoice {
+  tier: ImageGenerationTier;
+  model: string;
+  label?: string;
+}
+
+/**
+ * The engines this deployment actually has, by tier.
+ *
+ * Session f4ebf47b: the user said "nimm das qwen model", the agent sent `model: "Qwen"`, the
+ * router answered 404, and the agent retried on the fast tier and reported the picture as
+ * Qwen's. Nothing it could read said that the quality tier IS the Qwen engine — that lived
+ * only in config comments. These choices are what the tool shows and checks names against.
+ */
+export function imageTierChoices(config: ImageGenerationBackendConfig): ImageTierChoice[] {
+  const choices: ImageTierChoice[] = [];
+  const add = (tier: ImageGenerationTier, model: string | undefined): void => {
+    if (!model) return;
+    const label = config.tierLabels?.[tier]?.trim();
+    choices.push({ tier, model, ...(label ? { label } : {}) });
+  };
+  add("fast", config.model);
+  if (config.qualityModel !== config.model) add("quality", config.qualityModel);
+  return choices;
+}
+
+/**
+ * The tier a named engine belongs to — by exact model id or exact label, ignoring case.
+ * Deliberately no partial matching: "Qwen" is not "Qwen-Image 2.1", and guessing which
+ * engine a fragment meant is how a request ends up on the wrong one without anyone saying so.
+ */
+export function resolveNamedImageEngine(
+  config: ImageGenerationBackendConfig,
+  name: string,
+): ImageGenerationTier | undefined {
+  const wanted = name.trim().toLowerCase();
+  if (!wanted) return undefined;
+  return imageTierChoices(config)
+    .find((choice) => choice.model.toLowerCase() === wanted || choice.label?.toLowerCase() === wanted)
+    ?.tier;
+}
+
+/** `fast` = Segmind Vega (model "image"); `quality` = … — for tool text and refusals. */
+export function describeImageTierChoices(config: ImageGenerationBackendConfig): string {
+  return imageTierChoices(config)
+    .map((choice) => `\`${choice.tier}\` = ${choice.label ? `${choice.label} (model "${choice.model}")` : `model "${choice.model}"`}`)
+    .join("; ");
+}
+
+/** The human name of the engine behind a tier, when one is configured. */
+export function imageEngineLabel(
+  config: ImageGenerationBackendConfig,
+  tier: ImageGenerationTier | undefined,
+): string | undefined {
+  return tier ? config.tierLabels?.[tier]?.trim() || undefined : undefined;
+}
+
 export function imageGenerationServiceConfigured(baseUrl: string | undefined): boolean {
   return typeof baseUrl === "string" && baseUrl.trim().length > 0;
 }
@@ -238,15 +298,20 @@ export async function requestImageGeneration(
   // api and never reach the route that honours its parameters.
   const effective = resolveTierBackend(config, request.tier);
 
-  if (effective.api === "comfyui") {
-    return requestComfyUiImageGeneration(effective, request);
-  }
+  const result = effective.api === "comfyui"
+    ? await requestComfyUiImageGeneration(effective, request)
+    : effective.api === "openai-compatible"
+      ? await requestOpenAiImageGeneration(effective, request)
+      : await requestAutomatic1111ImageGeneration(effective, request);
 
-  if (effective.api === "openai-compatible") {
-    return requestOpenAiImageGeneration(effective, request);
-  }
-
-  return requestAutomatic1111ImageGeneration(effective, request);
+  // Every adapter reports which tier rendered, not only the OpenAI one. Without this a render
+  // routed to the quality tier's own backend came back with no tier at all, so the caller
+  // could not say which engine made the picture — and the edit-upgrade notice was lost.
+  return {
+    ...result,
+    tier: result.tier ?? request.tier,
+    ...(request.tierUpgradedForEdit ? { tierUpgradedForEdit: true } : {}),
+  };
 }
 
 /**

@@ -184,6 +184,13 @@ export const MultimodalImageGenerationSchema = MultimodalServiceSchema.extend({
   defaultGuidanceScale: z.number().min(0).max(20).default(7),
   /** Default negative prompt appended to every generate_image call unless the agent supplies one. */
   defaultNegativePrompt: z.string().optional(),
+  /**
+   * What each tier's engine is called ("Qwen-Image 2.1"), shown to agents in generate_image's
+   * description and accepted as a name for the tier. Without it a user asking for "the qwen
+   * model" had nothing to be matched against: the agent guessed `model: "Qwen"`, the router
+   * answered 404, and the retry quietly landed on the other engine.
+   */
+  tierLabels: z.record(z.enum(["fast", "quality"]), z.string().min(1)).default({}),
 });
 
 export const MultimodalWakeWordSchema = z.object({
