@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import type { AuditEvent } from "../audit/schema.js";
+import { sanitizeAuditData } from "../audit/logger.js";
 import { flushAuditLog, resolveAuditLogPath } from "../audit/logger.js";
 import { isSessionTurnActive } from "./warden.js";
 import {
@@ -64,7 +65,7 @@ export async function buildSessionDebugMarkdownDetached(sessionId: string): Prom
 }
 
 function describeTranscriptContent(message: SessionTranscriptMessage): string {
-  const content = message.content.trim();
+  const content = safeText(message.content.trim());
   if (content) {
     return content;
   }
@@ -131,7 +132,7 @@ function appendRawHistoryMessage(lines: string[], message: SessionHistoryMessage
   lines.push("");
 
   const content = typeof message.content === "string"
-    ? message.content
+    ? safeText(message.content)
     : safeJson(message.content);
   lines.push("```text");
   lines.push(content || "(no text content)");
@@ -203,7 +204,8 @@ async function buildSessionAuditMarkdownFromSnapshot(snapshot: SessionExportSnap
   return lines.join("\n");
 }
 
-async function buildSessionDebugMarkdownFromSnapshot(snapshot: SessionExportSnapshot): Promise<string> {
+/** Exported for tests: the renderer is where payload redaction has to hold, not the store fetch. */
+export async function buildSessionDebugMarkdownFromSnapshot(snapshot: SessionExportSnapshot): Promise<string> {
   const auditEvents = await readSessionAuditEventsAsync(snapshot.id, snapshot.workspacePath);
   const relatedSubSessions = getRelatedSubSessions(snapshot.id, auditEvents);
 
@@ -404,10 +406,29 @@ function safeParseAuditEvent(line: string): AuditEvent | null {
   }
 }
 
+/**
+ * Serialize for the debug export, without the images.
+ *
+ * The audit log stopped carrying inline base64 and dropped from 8.4 MB to 43 KB, but this
+ * export renders the session's own message history and metadata, which carry the same
+ * `dataUrl` — so a two-turn image session still produced a multi-megabyte debug file that
+ * no one can open, and the useful 20 KB sat inside 5 MB of one PNG written twice.
+ *
+ * `sanitizeAuditData` is reused rather than reimplemented: it replaces a payload with a
+ * pointer to the file it was written to, and it also redacts credential-shaped fields, which
+ * this export was not doing at all. A debug bundle is exactly the artifact someone pastes
+ * into a chat or a ticket.
+ */
 function safeJson(value: unknown): string {
   try {
-    return JSON.stringify(value, null, 2);
+    return JSON.stringify(sanitizeAuditData(value), null, 2);
   } catch {
     return String(value);
   }
+}
+
+/** Same guard for a bare string: a tool result can hold a data URL with no object around it. */
+function safeText(value: string): string {
+  const sanitized = sanitizeAuditData(value);
+  return typeof sanitized === "string" ? sanitized : value;
 }

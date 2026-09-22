@@ -18,7 +18,7 @@ Every public schema field, where it is declared, and how many production files r
 | `admin` | packages/core/src/config/schema.ts:363 | 21 |
 | `agents` | packages/core/src/config/schema.ts:1672 | 142 |
 | `alertmanager` | packages/core/src/config/schema.ts:1127 | 1 |
-| `all` | packages/core/src/config/schema.ts:1265 | 231 |
+| `all` | packages/core/src/config/schema.ts:1265 | 232 |
 | `allowedAgents` | packages/core/src/config/schema.ts:1285 | 29 |
 | `allowedUserIds` | packages/core/src/config/schemas/channels.ts:11 | 5 |
 | `allowedUsers` | packages/core/src/config/schema.ts:785 | 10 |
@@ -194,7 +194,7 @@ Every public schema field, where it is declared, and how many production files r
 | `humanInLoopSteps` | packages/core/src/config/schema.ts:1286 | 20 |
 | `id` | packages/core/src/config/schema.ts:553 | 227 |
 | `ignoreCase` | packages/core/src/config/schema.ts:1333 | 2 |
-| `image` | packages/core/src/config/schema.ts:672 | 60 |
+| `image` | packages/core/src/config/schema.ts:672 | 61 |
 | `imapHost` | packages/core/src/config/schemas/channels.ts:57 | 5 |
 | `imapPassword` | packages/core/src/config/schemas/channels.ts:60 | 6 |
 | `imapPort` | packages/core/src/config/schemas/channels.ts:58 | 4 |
@@ -428,7 +428,7 @@ Every public schema field, where it is declared, and how many production files r
 | `stagedArtifactBuilds` | packages/core/src/config/schemas/orchestration.ts:414 | 1 |
 | `steps` | packages/core/src/config/schema.ts:1357 | 45 |
 | `stopPhrases` | packages/core/src/config/schemas/multimodal.ts:193 | 2 |
-| `store` | packages/core/src/config/schema.ts:1590 | 138 |
+| `store` | packages/core/src/config/schema.ts:1590 | 139 |
 | `subAgentDisagreementVerify` | packages/core/src/config/schemas/orchestration.ts:586 | 2 |
 | `subAgentMaxIterations` | packages/core/src/config/schemas/effort.ts:25 | 2 |
 | `subAgentMaxTokens` | packages/core/src/config/schemas/effort.ts:33 | 2 |

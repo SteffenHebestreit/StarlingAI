@@ -82,4 +82,33 @@ describe("audit inline payloads", () => {
     expect(out.artifacts[0]!["dataUrl"]).toContain("omitted");
     expect(out.artifacts[0]!["outputPath"]).toBe("generated/a.png");
   });
+
+  it("also covers the DEBUG export, which renders the session's own history", async () => {
+    // The audit log went from 8.4 MB to 43 KB, and the debug export still produced a
+    // multi-megabyte file: it renders rawHistory and message metadata, which carry the same
+    // dataUrl. Same guard, one implementation — a second copy would drift.
+    const { buildSessionDebugMarkdownFromSnapshot } = await import("../agent/debug-session-export.js");
+    const rendered = await buildSessionDebugMarkdownFromSnapshot({
+      sessionId: "s1",
+      channel: "webchat",
+      createdAt: "2026-09-22T07:16:34.505Z",
+      updatedAt: "2026-09-22T07:19:34.620Z",
+      status: "Active",
+      turnCount: 2,
+      workspacePath: "/workspace",
+      systemPrompt: "",
+      transcript: [],
+      rawHistory: [{
+        role: "tool",
+        content: "Image generated successfully.",
+        metadata: { outputPath: "generated/sunset.png", dataUrl: bigDataUrl },
+      }],
+      auditEvents: [],
+      subSessionIds: [],
+    } as never);
+
+    expect(rendered).not.toContain("AAAAAAAAAA");
+    expect(rendered).toContain("omitted");
+    expect(rendered).toContain("generated/sunset.png");
+  });
 });

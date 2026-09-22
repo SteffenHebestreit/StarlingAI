@@ -182,16 +182,31 @@ describe("editing an existing image", () => {
     expect(net.calls[0]!.body["guidance_scale"]).toBe(7.5);
   });
 
-  it("respects an EXPLICIT fast tier, refusing rather than quietly upgrading", async () => {
-    // Quality costs everyone else latency. A caller who said "fast" and asked for an edit
-    // has stated a contradiction, and should hear about it rather than be billed for the
-    // resolution.
+  it("upgrades even when fast was stated EXPLICITLY, and reports that it did", async () => {
+    // This refused at first, on the reasoning that an explicit "fast" was a cost choice to
+    // respect. Live, the agent states "fast" because the tool documents it as the default —
+    // and the refusal sent it straight to a fresh unrelated picture, twice. There is no fast
+    // edit to fall back to, so the real choice is "edit on the slower tier" or "silently do
+    // something else"; only the first answers the request.
     const net = stub();
 
-    await expect(requestImageGeneration(EDITS, {
-      prompt: "make it photorealistic", initImage: REF, tier: "fast",
-    })).rejects.toThrow(/cannot edit an existing image/);
-    expect(net.fetchMock).not.toHaveBeenCalled();
+    const result = await requestImageGeneration(EDITS, {
+      prompt: "make it photorealistic", initImage: REF, tier: "fast", strength: 0.35,
+    });
+
+    expect(net.calls[0]!.url).toBe("http://cluster:8080/v1/images/edits");
+    expect(net.calls[0]!.body["model"]).toBe("image-quality");
+    // The cost is carried up rather than discovered in the latency.
+    expect(result.tierUpgradedForEdit).toBe(true);
+    expect(result.tier).toBe("quality");
+  });
+
+  it("does NOT flag an upgrade when the tier already could edit — the control", async () => {
+    stub();
+    const result = await requestImageGeneration(EDITS, {
+      prompt: "make it photorealistic", initImage: REF, tier: "quality", strength: 0.35,
+    });
+    expect(result.tierUpgradedForEdit).toBeUndefined();
   });
 
   it("sends NO reference fields when there is no base image — the control", async () => {

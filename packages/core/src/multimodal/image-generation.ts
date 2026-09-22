@@ -103,6 +103,8 @@ export interface ImageGenerationRequest {
 /** A request after defaults are applied — what every adapter actually receives. */
 interface ResolvedImageRequest extends ImageGenerationRequest {
   tier: ImageGenerationTier;
+  /** True when the tier was raised because the one asked for cannot edit. */
+  tierUpgradedForEdit?: boolean;
   width: number;
   height: number;
   steps: number;
@@ -123,6 +125,8 @@ export interface ImageGenerationResult {
   imageBase64: string;
   /** The tier actually used, which is not always the one asked for — see resolveImageRequest. */
   tier?: ImageGenerationTier;
+  /** Set when the tier was raised because editing needs a tier the caller did not ask for. */
+  tierUpgradedForEdit?: boolean;
   mimeType: string;
   extension: string;
   width?: number;
@@ -245,32 +249,39 @@ function resolveImageRequest(
   );
   let tier: ImageGenerationTier = input.tier ?? (namedQualityModel ? "quality" : "fast");
 
-  // AN EDIT GOES TO A TIER THAT CAN EDIT.
+  // AN EDIT GOES TO A TIER THAT CAN EDIT, whatever tier was asked for.
   //
-  // Only one tier here has an edit route, and it is not the default one. A caller that asked
-  // to change an existing image without naming a tier was therefore refused outright — the
-  // capability existed, was configured, was tested, and could not be reached by the request
-  // that actually wants it. Live, an agent passed baseImage and got "image is not in
-  // initImageModels", then silently generated a fresh picture instead.
+  // Only one tier here has an edit route, and it is not the default one. This first upgraded
+  // only when no tier was stated, on the reasoning that an explicit "fast" was a cost choice
+  // to respect. That was wrong in practice: the agent states "fast" because the tool
+  // documents it as the default, not because it weighed anything — and the refusal it earned
+  // sent it straight to a fresh unrelated picture, which is the failure the whole capability
+  // exists to prevent. Observed twice in a row on "nimm das Bild als Basis".
   //
-  // Only when the caller did NOT state a tier. An explicit `tier: "fast"` plus a base image
-  // is a contradiction the caller should hear about rather than have quietly resolved, and
-  // quality costs everyone else latency — not something to opt into on their behalf when
-  // they said otherwise.
-  if (input.initImage && input.tier === undefined) {
+  // There is no fast edit to fall back to, so the real choice is "edit on the slower tier" or
+  // "silently do something else". Upgrading is the only one that answers the request, and
+  // `tierUpgradedForEdit` carries the cost up to the caller so it can be said out loud
+  // instead of being discovered in the latency.
+  let tierUpgradedForEdit = false;
+  if (input.initImage) {
     const modelForTier = (candidate: ImageGenerationTier): string =>
       input.model
       ?? (candidate === "quality" ? config.qualityModel ?? config.model : config.model)
       ?? "";
     const canEdit = (candidate: ImageGenerationTier): boolean =>
       config.initImageModels?.includes(modelForTier(candidate)) ?? false;
-    if (!canEdit(tier) && canEdit("quality")) tier = "quality";
+    if (!canEdit(tier) && canEdit("quality")) {
+      tier = "quality";
+      tierUpgradedForEdit = true;
+    }
   }
+
   const tierDefaults = tier === "quality" ? config.qualityDefaults : undefined;
 
   return {
     ...input,
     tier,
+    ...(tierUpgradedForEdit ? { tierUpgradedForEdit: true } : {}),
     width: input.width ?? config.defaultWidth ?? OPENAI_IMAGE_SIZE,
     height: input.height ?? config.defaultHeight ?? OPENAI_IMAGE_SIZE,
     steps: input.steps ?? tierDefaults?.steps ?? config.defaultSteps ?? 20,
@@ -495,6 +506,7 @@ async function sendOpenAiImageRequest(
     mimeType: "image/png",
     extension: ".png",
     tier: input.tier,
+    ...(input.tierUpgradedForEdit ? { tierUpgradedForEdit: true } : {}),
     width: input.width,
     height: input.height,
     ...(typeof input.seed === "number" ? { seed: input.seed } : {}),

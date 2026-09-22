@@ -628,6 +628,10 @@ registerTool({
       return {
         success: true,
         output: `Image generated successfully. Saved to ${resolvedOutput.relativePath}`
+          + (result.tierUpgradedForEdit
+            ? ` — NOTE: editing is only available on the slower quality tier, so this used it`
+              + " rather than the fast one. Say so if the user asked for speed."
+            : "")
           + (encoded.correctedFrom
             ? ` — NOTE: ${encoded.correctedFrom} cannot be produced here, so the file is ${encoded.extension}.`
               + " Use this path; the one you asked for does not exist."
