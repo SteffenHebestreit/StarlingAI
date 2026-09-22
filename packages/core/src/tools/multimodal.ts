@@ -533,10 +533,14 @@ registerTool({
       baseImage: {
         type: "string",
         description:
-          "Relative workspace path to an existing image to EDIT rather than replace. Use this"
-          + " whenever the user asks to change, continue, fix or build on a picture that already"
-          + " exists — without it every request is a brand-new image that keeps nothing from the"
-          + " last one, so elements the user asked to preserve will simply disappear. If the"
+          "Relative workspace path to an existing image to EDIT rather than replace. Use this when"
+          + " the user wants something changed INSIDE a picture while its look stays — add, remove,"
+          + " fix, recolour — because without it the elements they asked to keep will disappear."
+          + " Do NOT use it to change the picture's LOOK ('make it realistic', 'as a painting'):"
+          + " an edit inherits its base's look at every strength that keeps the layout, so the"
+          + " result comes back in the old style. For that, describe the existing layout in the"
+          + " prompt and generate without baseImage — measured here, that returned a photograph"
+          + " in ~10 s where a 0.75 edit of the same picture stayed an illustration. If the"
           + " backend cannot edit, this fails with a clear message: report that honestly instead"
           + " of passing a fresh generation off as a revision.",
       },
@@ -544,9 +548,11 @@ registerTool({
         type: "number",
         description:
           "With `baseImage`, how much of the original is re-rendered, 0 to 1. Low (0.2-0.35)"
-          + " moves detail and colour only; 0.65-0.8 rebuilds most of the content while the"
-          + " broad layout survives; above ~0.85 keeps nothing and is a fresh image with extra"
-          + " steps. Defaults to 0.45."
+          + " moves tone and colour only and cannot add or remove anything; 0.65-0.8 rebuilds"
+          + " most of the content while the broad layout survives; above ~0.85 keeps nothing"
+          + " and is a fresh image with extra steps. Defaults to 0.45. To ADD, REMOVE or"
+          + " REPLACE something while keeping the rest, pair `mask` with 0.6-0.85: only the"
+          + " masked region is rebuilt."
           + " WHAT STRENGTH CANNOT DO: it does not change the VISUAL REGISTER of the base."
           + " An edit inherits whether its base looks like a photograph, an illustration or a"
           + " painting, at every strength that still preserves the composition. Measured: a"
@@ -568,8 +574,10 @@ registerTool({
           + " TRANSPARENT pixel may be edited, an OPAQUE pixel is protected. Getting that"
           + " backwards edits exactly the part the user wanted kept and still returns a"
           + " perfectly plausible picture, so never guess the polarity. The mask must select"
-          + " something and not everything; both are rejected. Use this for 'change only the"
-          + " sky', 'replace the car', 'leave her face alone'. LIMIT: the model never sees the"
+          + " something and not everything; both are rejected. Pass one only when a mask file"
+          + " already exists — none of the image tools can draw one, and inventing a path fails."
+          + " Useful for 'change only the sky', 'replace the car', 'leave her face alone'."
+          + " LIMIT: the model never sees the"
           + " mask — the region is composited in — so this REPLACES a region cleanly but cannot"
           + " continue existing content across it. 'Extend this wall into the gap' will not"
           + " work; 'put boulders on this beach' will.",

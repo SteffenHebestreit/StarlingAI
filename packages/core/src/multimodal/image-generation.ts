@@ -85,7 +85,7 @@ export interface ImageGenerationRequest {
   /**
    * A base image to work FROM, as bare base64 (no data: prefix).
    *
-   * Without this there is no iteration: "make it photorealistic" and "now add the palms"
+   * Without this there is no iteration: "now add the palms" and "make the sky warmer"
    * each produce a brand-new picture that shares nothing with the last one but the words.
    * That is what happened live — three rounds of "continue from the previous image" returned
    * three unrelated beaches, and the palms the user asked to keep were gone by round two.
