@@ -98,6 +98,32 @@ export interface ImageGenerationRequest {
    * so the number means one thing across the adapters.
    */
   strength?: number;
+  /**
+   * Which REGION of `initImage` may change, as a bare-base64 RGBA PNG.
+   *
+   * ALPHA semantics, the OpenAI convention: a TRANSPARENT pixel may be edited, an OPAQUE one
+   * is protected. This is the opposite of stable-diffusion.cpp's luminance convention
+   * underneath, and the endpoint converts — but the distinction matters here because getting
+   * it backwards edits precisely the region the caller meant to keep, returns HTTP 200, and
+   * produces a picture that looks entirely plausible. Only a per-region pixel measurement
+   * tells the two apart, so this is not a mistake any amount of eyeballing would catch.
+   *
+   * Requires `initImage`; the generations route rejects a mask outright. A mask selecting
+   * nothing, selecting everything, or that is not an image is rejected with param "mask",
+   * and the endpoint answers 502 if the engine ignored the mask at runtime rather than
+   * returning a silently unmasked result.
+   *
+   * THE LIMIT: Qwen-Image 2.1 has no inpainting mask channels, so the model never sees the
+   * mask — the endpoint composites the result. Feathering makes the join invisible, but it
+   * cannot make CONTENT continuous. Good for replacing a region; not for "extend this wall
+   * across the gap", which needs an inpainting-trained model.
+   */
+  mask?: string;
+  /**
+   * Feather width in pixels for the mask edge. The engine binarizes masks, so the blend is
+   * done by the endpoint rather than the model; without it a mask leaves a hard seam.
+   */
+  maskBlur?: number;
 }
 
 /** A request after defaults are applied — what every adapter actually receives. */
@@ -444,13 +470,25 @@ async function requestOpenAiImageGeneration(
     //
     // CORRECTION, measured 2026-09-22: this comment used to claim the endpoint "rejects
     // unknown parameters by name rather than ignoring them". It does NOT. A request carrying
-    // `__definitely_not_real__: 1` returned HTTP 200 and a real image. Only a few names are
-    // special-cased (`mask` answers 400 "masked inpainting is not available"); everything else
-    // is silently dropped. So a misspelled parameter costs a full render and changes nothing,
+    // `__definitely_not_real__: 1` returned HTTP 200 and a real image; so did `mask_image`,
+    // which is the near-miss spelling of a field that DOES exist. Most unknown names are
+    // silently dropped, so a misspelled parameter costs a full render and changes nothing,
     // and you cannot use a rejection to discover which names the backend honours — that reads
-    // as a working feature and is how a silent no-op gets shipped.
+    // as a working feature and is how a silent no-op gets shipped. A few names ARE
+    // special-cased loudly: `mask` is validated and rejected with param "mask" when it selects
+    // nothing, selects everything, or is not an image.
     payload["image"] = input.initImage;
     payload["strength"] = input.strength ?? DEFAULT_EDIT_STRENGTH;
+    if (input.mask) {
+      payload["mask"] = input.mask;
+      if (typeof input.maskBlur === "number") payload["mask_blur"] = input.maskBlur;
+    }
+  } else if (input.mask) {
+    // Loud rather than silently dropped: the generations route rejects a mask anyway, and a
+    // caller who built one has a region in mind that would simply have been ignored.
+    throw new Error(
+      "A mask needs a base image to mask. Pass the image being edited as well, or drop the mask.",
+    );
   }
   if (input.negativePrompt) payload["negative_prompt"] = input.negativePrompt;
   if (typeof input.seed === "number") payload["seed"] = input.seed;
@@ -472,6 +510,28 @@ async function requestOpenAiImageGeneration(
   );
 }
 
+/**
+ * The same payload as multipart, with `image` and `mask` promoted to file parts.
+ *
+ * Both are held as bare base64 in the payload because that is what the JSON path sends; here
+ * they are decoded back to bytes. Every other field goes across as its string form, which is
+ * all multipart can carry — the endpoint parses the numbers back out.
+ */
+function buildEditForm(payload: Record<string, unknown>): FormData {
+  const form = new FormData();
+  for (const [key, value] of Object.entries(payload)) {
+    if (key === "image" || key === "mask" || value === undefined || value === null) continue;
+    form.set(key, String(value));
+  }
+  for (const key of ["image", "mask"] as const) {
+    const encoded = payload[key];
+    if (typeof encoded !== "string" || !encoded) continue;
+    const bytes = Buffer.from(encoded, "base64");
+    form.set(key, new Blob([bytes], { type: "image/png" }), `${key}.png`);
+  }
+  return form;
+}
+
 /** The network half, run with a slot held. Everything here assumes the request is valid. */
 async function sendOpenAiImageRequest(
   config: ImageGenerationBackendConfig,
@@ -490,11 +550,20 @@ async function sendOpenAiImageRequest(
       // 400 "does not accept 'image'. Use /v1/images/edits" — a good error, and one we
       // should never provoke.
       upstreamUrl(config.baseUrl, input.initImage ? "/images/edits" : "/images/generations"),
-      {
-        method: "POST",
-        headers: upstreamHeaders(config.apiKey, { "Content-Type": "application/json" }),
-        body: JSON.stringify(payload),
-      },
+      // A MASK IS A FILE PART, so a masked edit cannot go as JSON. Everything else stays on
+      // the JSON path, which is measured-equivalent to multipart for the `image` field and is
+      // the shape already in production — no reason to churn the working case.
+      //
+      // `Content-Type` is deliberately omitted for multipart: fetch generates it WITH the
+      // boundary, and setting it by hand produces a header with no boundary that the server
+      // cannot parse.
+      input.mask
+        ? { method: "POST", headers: upstreamHeaders(config.apiKey), body: buildEditForm(payload) }
+        : {
+          method: "POST",
+          headers: upstreamHeaders(config.apiKey, { "Content-Type": "application/json" }),
+          body: JSON.stringify(payload),
+        },
       timeoutMs,
     );
     if (response.ok) break;
@@ -919,15 +988,59 @@ function assertEditWasApplied(input: ResolvedImageRequest, body: Record<string, 
   const applied = numericField(usage["strength"]);
   const asked = input.strength ?? DEFAULT_EDIT_STRENGTH;
 
-  if (mode === "img2img" && applied !== undefined && Math.abs(applied - asked) <= 0.01) return;
+  if (mode !== "img2img" || applied === undefined || Math.abs(applied - asked) > 0.01) {
+    throw new Error(
+      "The backend did not apply the base image"
+      + `${mode ? ` (mode "${mode}"` : " (no mode reported"}`
+      + `${applied === undefined ? ", no strength reported" : `, strength ${applied} against ${asked} requested`})`
+      + ". The result is a fresh generation, not an edit — do not present it as a revision of the"
+      + " earlier image.",
+    );
+  }
 
-  throw new Error(
-    "The backend did not apply the base image"
-    + `${mode ? ` (mode "${mode}"` : " (no mode reported"}`
-    + `${applied === undefined ? ", no strength reported" : `, strength ${applied} against ${asked} requested`})`
-    + ". The result is a fresh generation, not an edit — do not present it as a revision of the"
-    + " earlier image.",
-  );
+  assertMaskWasRespected(input, usage);
+}
+
+/**
+ * A mask that was ignored, or applied backwards, returns HTTP 200 and a plausible picture.
+ *
+ * Unlike `usage.mode` — which only echoes which route we posted to, and so confirms nothing
+ * about the work — `usage.mask` carries the endpoint's own MEASUREMENTS of what moved. That
+ * makes two distinct failures catchable here:
+ *
+ *  - Ignored. `respected: false`, or no mask report at all when we sent one. The endpoint
+ *    answers 502 when the engine drops the mask at runtime, so reaching this branch means
+ *    something upstream of that check let it through.
+ *  - INVERTED. The OpenAI alpha convention and stable-diffusion.cpp's luminance convention are
+ *    opposites, so an unconverted mask edits exactly the region the caller meant to protect.
+ *    `protected_delta` exceeding `edited_delta` is that signature, and it is invisible to the
+ *    eye — the picture looks fine, it is just the wrong half of it that changed.
+ */
+function assertMaskWasRespected(input: ResolvedImageRequest, usage: Record<string, unknown>): void {
+  if (!input.mask) return;
+  const report = isRecord(usage["mask"]) ? usage["mask"] : undefined;
+  if (!report) {
+    throw new Error(
+      "A mask was sent but the backend reported nothing about it, so there is no evidence the"
+      + " edit was confined to the requested region. Treat the result as an unmasked edit.",
+    );
+  }
+  if (report["respected"] === false) {
+    throw new Error(
+      "The backend did not apply the mask, so the whole image was edited rather than the"
+      + " selected region. Do not present the result as a local change.",
+    );
+  }
+
+  const edited = numericField(report["edited_delta"]);
+  const protectedDelta = numericField(report["protected_delta"]);
+  if (edited !== undefined && protectedDelta !== undefined && protectedDelta > edited) {
+    throw new Error(
+      `The mask appears INVERTED: the protected region changed more than the edited one`
+      + ` (protected ${protectedDelta}, edited ${edited}). A mask is alpha-based here —`
+      + " transparent marks what may change, opaque what must be kept.",
+    );
+  }
 }
 
 function stripBase64Prefix(value: string): string {

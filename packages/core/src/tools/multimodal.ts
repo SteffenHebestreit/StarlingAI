@@ -560,6 +560,27 @@ registerTool({
           + " is re-interpreted rather than preserved. Use an edit for what an edit does: keep"
           + " this picture, change something in it.",
       },
+      mask: {
+        type: "string",
+        description:
+          "With `baseImage`, a relative workspace path to an RGBA PNG selecting WHICH REGION may"
+          + " change — everything outside it is returned untouched. ALPHA semantics: a"
+          + " TRANSPARENT pixel may be edited, an OPAQUE pixel is protected. Getting that"
+          + " backwards edits exactly the part the user wanted kept and still returns a"
+          + " perfectly plausible picture, so never guess the polarity. The mask must select"
+          + " something and not everything; both are rejected. Use this for 'change only the"
+          + " sky', 'replace the car', 'leave her face alone'. LIMIT: the model never sees the"
+          + " mask — the region is composited in — so this REPLACES a region cleanly but cannot"
+          + " continue existing content across it. 'Extend this wall into the gap' will not"
+          + " work; 'put boulders on this beach' will.",
+      },
+      maskBlur: {
+        type: "number",
+        description:
+          "Feather width in pixels for the mask edge, with `mask`. Around 24 is a good default;"
+          + " 0 gives a hard cut. Without feathering the composited region meets the original"
+          + " at a visible seam.",
+      },
       outputPath: { type: "string", description: "Optional relative output path inside the workspace for the generated PNG" },
     },
     required: ["prompt"],
@@ -616,6 +637,19 @@ registerTool({
         }
       }
 
+      let maskBase64: string | undefined;
+      const maskPath = stringArg(args["mask"]);
+      if (maskPath) {
+        try {
+          const maskFile = await readWorkspaceBinaryFile(maskPath, ctx.workspacePath);
+          maskBase64 = Buffer.from(maskFile.bytes).toString("base64");
+        } catch (error) {
+          return fail(
+            `Could not read mask "${maskPath}": ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+
       const result = await requestImageGeneration(config, {
         prompt,
         ...(requestedTier ? { tier: requestedTier } : {}),
@@ -631,6 +665,8 @@ registerTool({
         ...(typeof args["seed"] === "number" ? { seed: args["seed"] } : {}),
         ...(baseImageBase64 ? { initImage: baseImageBase64 } : {}),
         ...(typeof args["strength"] === "number" ? { strength: args["strength"] } : {}),
+        ...(maskBase64 ? { mask: maskBase64 } : {}),
+        ...(typeof args["maskBlur"] === "number" ? { maskBlur: args["maskBlur"] } : {}),
       });
 
       const imageBytes = Buffer.from(result.imageBase64, "base64");

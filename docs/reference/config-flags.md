@@ -65,7 +65,7 @@ Every public schema field, where it is declared, and how many production files r
 | `captureMessageAs` | packages/core/src/config/schema.ts:1337 | 2 |
 | `captureRemainderAs` | packages/core/src/config/schema.ts:1338 | 3 |
 | `cdpUrl` | packages/core/src/config/schemas/render.ts:21 | 1 |
-| `channels` | packages/core/src/config/schema.ts:1328 | 33 |
+| `channels` | packages/core/src/config/schema.ts:1328 | 34 |
 | `childReserveActiveTimeMs` | packages/core/src/config/schema.ts:1619 | 1 |
 | `childReserveTokens` | packages/core/src/config/schema.ts:1617 | 1 |
 | `childReserveToolCalls` | packages/core/src/config/schema.ts:1618 | 1 |
@@ -363,7 +363,7 @@ Every public schema field, where it is declared, and how many production files r
 | `readOnly` | packages/core/src/config/schema.ts:1022 | 1 |
 | `reasoningEffort` | packages/core/src/config/schema.ts:205 | 11 |
 | `refreshIntervalMs` | packages/core/src/config/schema.ts:646 | 1 |
-| `region` | packages/core/src/config/schema.ts:449 | 9 |
+| `region` | packages/core/src/config/schema.ts:449 | 11 |
 | `rejectOverMaxBytes` | packages/core/src/config/schema.ts:474 | 3 |
 | `relaySingleDeliverable` | packages/core/src/config/schemas/orchestration.ts:774 | 1 |
 | `repeatPenalty` | packages/core/src/config/schema.ts:168 | 4 |
