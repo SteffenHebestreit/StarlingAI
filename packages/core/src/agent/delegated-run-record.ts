@@ -17,12 +17,14 @@ export const PRODUCED_FILES_HEADER =
   "Files produced, as recorded by the tool that wrote each (for you, not for the reply; name an engine, tier or model only as given here):";
 export const TOOL_FAILURES_HEADER =
   "Tool calls that failed along the way (for you, not for the reply; the run went on after them, so they are not its outcome):";
+export const TOOL_DECLINES_HEADER =
+  "Tool calls the user declined (their choice, not a failure; nothing was done in them, so do not retry them):";
 
-const HEADERS = new Set([PRODUCED_FILES_HEADER, TOOL_FAILURES_HEADER]);
+const HEADERS = new Set([PRODUCED_FILES_HEADER, TOOL_FAILURES_HEADER, TOOL_DECLINES_HEADER]);
 
 /** The frame as it read before the block was added: each header and the "- " lines under it go. */
 export function stripDelegatedRunRecord(text: string): string {
-  if (!text.includes(PRODUCED_FILES_HEADER) && !text.includes(TOOL_FAILURES_HEADER)) return text;
+  if (![...HEADERS].some((header) => text.includes(header))) return text;
   const kept: string[] = [];
   let inBlock = false;
   for (const line of text.split("\n")) {

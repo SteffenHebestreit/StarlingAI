@@ -9,6 +9,7 @@
  */
 import type { Hono } from "hono";
 import { verifyToken, extractBearerToken } from "./auth.js";
+import { channelSecretDestinations, refuseMovedSecrets } from "./config-secrets.js";
 import { getConfig } from "../config/loader.js";
 import { getChannelStatuses } from "../channels/registry.js";
 import { CHANNEL_TYPES, getStoredChannelConfig, saveChannelConfig, deleteChannelConfig, getEffectiveChannelConfig, getChannelConfigSource, redactChannelSecrets, type StoredChannelConfig } from "../credentials/channels.js";
@@ -181,13 +182,18 @@ export function registerChannelRoutes(app: Hono): void {
 
     // If a field is "••••••••" (redacted placeholder), preserve existing value
     const currentConfig = getConfig();
-    const existing = getEffectiveChannelConfig(type as Parameters<typeof saveChannelConfig>[0], currentConfig.channels[type as keyof typeof currentConfig.channels]);
+    const baseChannel = currentConfig.channels[type as keyof typeof currentConfig.channels];
+    const existing = getEffectiveChannelConfig(type as Parameters<typeof saveChannelConfig>[0], baseChannel);
+    const received = { ...body };
     const secretFields = ["botToken", "appToken", "signingSecret", "token", "appSecret", "accessToken", "imapPassword", "smtpPassword"] as const;
     for (const f of secretFields) {
       if ((body as Record<string, unknown>)[f] === "••••••••") {
         (body as Record<string, unknown>)[f] = existing[f];
       }
     }
+    // ...but not to a mail server the same save moved (see config-secrets.ts).
+    const moved = refuseMovedSecrets(channelSecretDestinations, received, existing, { ...baseChannel, ...body });
+    if (!moved.ok) return c.json({ error: moved.error, details: { field: moved.field } }, 400);
 
     saveChannelConfig(type as Parameters<typeof saveChannelConfig>[0], body);
     await reloadChannel(type as Parameters<typeof saveChannelConfig>[0]);

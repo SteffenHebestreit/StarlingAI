@@ -17,11 +17,13 @@ import type { ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import { archiveSession, createSession, getSessionRecord, resolveSession } from "../agent/session.js";
 import { longRunningGenerationManager } from "../agent/long-running-generation.js";
+import { HUMAN_WAIT_RECHECK_MS, trackHumanWaits } from "../agent/user-input-broker.js";
 
 /** How often the watchdog re-checks a turn it suspended for an operator grant. Same cadence
  *  as the RPC surface, so the two clocks behave identically under a grant. */
 const GRANTED_TURN_RECHECK_MS = 60_000;
 import { runTurn } from "../agent/runtime.js";
+import { currentRequestContext, runWithRequestContext } from "../runtime/request-context.js";
 import { extendDeadlineForDelegationWait, resolveDelegationWaitCeilingMs } from "../agent/delegation-budget.js";
 import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
@@ -94,7 +96,8 @@ export async function handleAguiStream(
   const existingRecord = sessionId ? getSessionRecord(sessionId) : undefined;
   if (existingRecord && getConfig().auth?.enabled === true) {
     const owner = existingRecord.userId;
-    const isAdmin = !!caller?.role && roleRank(caller.role) >= roleRank("operator");
+    // ADMIN, not operator: operator is the role every account gets by default.
+    const isAdmin = !!caller?.role && roleRank(caller.role) >= roleRank("admin");
     if (owner !== undefined && owner !== userId && !isAdmin) {
       log.warn({ sessionId, owner, caller: userId ?? "(none)" }, "AG-UI stream denied: session owned by another user");
       res.writeHead(404, { "Content-Type": "application/json" });
@@ -106,12 +109,12 @@ export async function handleAguiStream(
 
   // Ownership gate (decided BEFORE we commit to the SSE 200 response): don't let a
   // caller drive a turn on another user's existing session — the same invariant the
-  // RPC chat path enforces via canAccessSession. Operators may access any session;
+  // RPC chat path enforces via canAccessSession. Admins may access any session;
   // unowned sessions and auth-off deployments fall through. Opaque 404 to match the
   // RPC not-found shape and avoid confirming the session id exists.
   if (session && getConfig().auth?.enabled === true) {
     const owner = session.userId;
-    const isAdmin = !!caller?.role && roleRank(caller.role) >= roleRank("operator");
+    const isAdmin = !!caller?.role && roleRank(caller.role) >= roleRank("admin");
     if (owner !== undefined && owner !== userId && !isAdmin) {
       log.warn({ sessionId: session.id, owner, caller: userId ?? "(none)" }, "AG-UI stream denied: session owned by another user");
       res.writeHead(404, { "Content-Type": "application/json" });
@@ -157,6 +160,14 @@ export async function handleAguiStream(
   /** Absolute ceiling, so a chatty-but-stuck turn cannot defer forever. */
   const MAX_GATEWAY_TURN_MS = 86_400_000;
   const noteTurnActivity = (): void => { lastTurnActivityAt = Date.now(); };
+  // When the watchdog fires next, so a credit never pulls it EARLIER than a re-check it already
+  // scheduled (the same guard rpc.ts keeps).
+  let watchdogFiresAt = 0;
+  const armWatchdog = (delayMs: number): void => {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+    watchdogFiresAt = Date.now() + delayMs;
+    timeoutHandle = setTimeout(handleTurnTimeout, delayMs);
+  };
 
   // ONE cleanup for both timers rather than two functions called side by side. There are
   // four teardown paths here, and the comment on the turn-timeout timer below records what
@@ -182,7 +193,14 @@ export async function handleAguiStream(
     // long as it needs. Re-arm rather than cancel, so the watchdog resumes if the grant clears.
     if (longRunningGenerationManager.isTurnUnbounded(session.id)) {
       log.info({ runId, sessionId: session.id }, "AG-UI turn watchdog suspended — operator unbounded grant");
-      timeoutHandle = setTimeout(handleTurnTimeout, GRANTED_TURN_RECHECK_MS);
+      armWatchdog(GRANTED_TURN_RECHECK_MS);
+      return;
+    }
+    // A person is being waited on (a CAPTCHA handoff at any depth), or work they approved is
+    // running: held as rpc.ts holds, under the same absolute ceiling.
+    if (humanWaits.isWaiting() && Date.now() - turnStartedAt < MAX_GATEWAY_TURN_MS) {
+      log.info({ runId, sessionId: session.id }, "AG-UI turn watchdog held — the turn is waiting on the person or on work they approved");
+      armWatchdog(HUMAN_WAIT_RECHECK_MS);
       return;
     }
     // THE EIGHTH CLOCK, AND THE LAST ONE STILL DECIDING ON ELAPSED TIME ALONE.
@@ -204,7 +222,7 @@ export async function handleAguiStream(
         { runId, sinceProgressMs, recheckMs: GATEWAY_LIVENESS_RECHECK_MS },
         "Gateway turn deadline deferred — the turn is still producing",
       );
-      timeoutHandle = setTimeout(handleTurnTimeout, GATEWAY_LIVENESS_RECHECK_MS);
+      armWatchdog(GATEWAY_LIVENESS_RECHECK_MS);
       return;
     }
     timedOut = true;
@@ -259,11 +277,23 @@ export async function handleAguiStream(
   const extendGatewayDeadline = (ms: number): void => {
     if (gatewayDeadlineMs <= 0 || timedOut || res.writableEnded || ms <= 0) return;
     gatewayDeadlineMs = extendDeadlineForDelegationWait(gatewayDeadlineMs, ms, gatewayDeadlineCeilingMs);
-    if (timeoutHandle) clearTimeout(timeoutHandle);
-    timeoutHandle = setTimeout(handleTurnTimeout, Math.max(0, gatewayDeadlineMs - Date.now()));
+    armWatchdog(Math.max(0, gatewayDeadlineMs - Date.now()));
   };
+  // THE PERSON'S TIME, ON THIS SURFACE TOO. The runtime leaves a human wait out of the delegation
+  // wait it reports above and credits it to its own deadline; rpc.ts adds it back through a
+  // tracker of its own. This surface had none, so a CAPTCHA handoff inside a delegation moved this
+  // clock by that much LESS than before, and nothing held it while the person worked (review #18).
+  // The same hold and credit as rpc.ts, so the minutes are counted exactly once here too. Scoped to
+  // this run: the turn runs under runId (RequestContext.turnId), so a wait an earlier run on this
+  // thread left open names that run and holds nothing here (review of round 1, B #7).
+  const humanWaits = trackHumanWaits(session.id, (waitedMs) => {
+    if (lastTurnActivityAt > 0) lastTurnActivityAt = Math.min(Date.now(), lastTurnActivityAt + waitedMs);
+    if (gatewayDeadlineMs <= 0 || timedOut || res.writableEnded) return;
+    gatewayDeadlineMs = Math.min(gatewayDeadlineMs + waitedMs, turnStartedAt + MAX_GATEWAY_TURN_MS);
+    if (gatewayDeadlineMs > watchdogFiresAt) armWatchdog(gatewayDeadlineMs - Date.now());
+  }, { turnId: runId });
 
-  timeoutHandle = setTimeout(handleTurnTimeout, turnTimeoutMs + TURN_TIMEOUT_SYNTHESIS_GRACE_MS);
+  armWatchdog(turnTimeoutMs + TURN_TIMEOUT_SYNTHESIS_GRACE_MS);
 
   // Armed next to the turn timer, and torn down by the same cleanup. `unref` so a live
   // heartbeat can never be the reason the process stays up.
@@ -280,7 +310,7 @@ export async function handleAguiStream(
     let textStarted = false;
     let streamedMeaningfulText = false;
 
-    const turnResult = await runTurn({
+    const turnResult = await runWithRequestContext({ ...(currentRequestContext() ?? {}), turnId: runId }, () => runTurn({
       session,
       userMessage: message,
       userWords: message,
@@ -377,7 +407,7 @@ export async function handleAguiStream(
           });
         }
       },
-    });
+    }));
 
     cleanupTimers();
     if (timedOut) return;
@@ -419,6 +449,7 @@ export async function handleAguiStream(
     }
   } finally {
     cleanupTimers();
+    humanWaits.dispose();
     res.end();
   }
 }

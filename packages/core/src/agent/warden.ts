@@ -194,9 +194,13 @@ export function registerSessionAbortController(sessionId: string, controller: Ab
 
 /**
  * Remove the abort controller registration when a turn completes.
- * Called in the runTurn() finally block.
+ * Called in the runTurn() finally block. With `controller`, only if it is still the registered one:
+ * a superseded turn unwinds after its replacement registered, and deleting by session id removed
+ * the NEW turn's controller, so a Stop, a distributed cancel or a Warden abort missed it (review of
+ * round 1, B #4).
  */
-export function deregisterSessionAbortController(sessionId: string): void {
+export function deregisterSessionAbortController(sessionId: string, controller?: AbortController): void {
+  if (controller && _sessionAbortControllers.get(sessionId) !== controller) return;
   _sessionAbortControllers.delete(sessionId);
 }
 

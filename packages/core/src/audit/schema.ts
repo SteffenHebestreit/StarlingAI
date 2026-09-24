@@ -137,6 +137,9 @@ export type CoreAuditEventType =
   // Mid-turn user steering — fold user guidance into a running turn
   | "turn_steering_enqueued"
   | "turn_steering_injected"
+  // Structured user input — a tool's question and how it ended (agent/user-input-broker.ts)
+  | "user_input_requested"
+  | "user_input_resolved"
   | "assistant_text_with_tool_calls_suppressed"
   | "tool_loop_detected"
   // Config proposals & self-improvement
@@ -285,6 +288,7 @@ export type CoreAuditEventType =
   // Multi-user auth (Wave A) + RBAC (Wave B)
   | "auth_user_created"
   | "auth_user_deleted"
+  | "auth_user_password_reset"
   | "rbac_denied"
   // Plugin SDK
   | "plugin_loaded"

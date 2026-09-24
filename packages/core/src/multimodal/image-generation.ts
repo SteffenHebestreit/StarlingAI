@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { extname } from "node:path";
+import { inflateSync } from "node:zlib";
 import { createConcurrencyGateFamily } from "../runtime/concurrency-gate.js";
 
 export type ImageGenerationApi = "automatic1111-compatible" | "comfyui" | "openai-compatible";
@@ -140,7 +141,7 @@ interface ResolvedImageRequest extends ImageGenerationRequest {
 }
 
 /** Default for how far an edit may move from its base: a visible change that still recognisably follows it. */
-const DEFAULT_EDIT_STRENGTH = 0.45;
+export const DEFAULT_EDIT_STRENGTH = 0.45;
 
 export interface ImageGenerationHealth {
   ok: boolean;
@@ -162,6 +163,12 @@ export interface ImageGenerationResult {
   seed?: number;
   model?: string;
   elapsedMs?: number;
+  /**
+   * How long the render waited, before its own clock started, for the device to finish a render
+   * abandoned earlier (see deviceBusyUntil). Not in `elapsedMs`, and minutes long on the quality
+   * engine — said, so a slow answer after a timeout is not a mystery.
+   */
+  deviceWaitMs?: number;
 }
 
 interface ComfyUiImageRef {
@@ -270,8 +277,15 @@ export async function requestImageGeneration(
   if (!imageGenerationServiceConfigured(config.baseUrl)) {
     throw new Error("Image generation is disabled: configure multimodal.imageGeneration.baseUrl to enable it.");
   }
+  const outOfBounds = imageRequestBoundsError(input);
+  if (outOfBounds) throw new Error(`${outOfBounds}. Nothing was rendered.`);
 
-  const request = resolveImageRequest(config, input);
+  // Measured only when it can matter: an edit with no size stated renders at its base's size.
+  const baseSize = input.initImage && input.width === undefined && input.height === undefined
+    ? await measureImage(input.initImage)
+    : undefined;
+  const request = resolveImageRequest(config, input, baseSize);
+  const budget = renderBudget(config, request);
 
   // Refuse an edit the backend cannot perform, instead of returning something unrelated.
   //
@@ -280,9 +294,7 @@ export async function requestImageGeneration(
   // agent told honestly that editing is unavailable can say so, or start over deliberately;
   // one handed a plausible wrong answer cannot.
   if (request.initImage) {
-    const target = request.model
-      ?? (request.tier === "quality" ? config.qualityModel ?? config.model : config.model)
-      ?? "";
+    const target = request.model ?? engineModelForTier(config, request.tier) ?? "";
     if (!config.initImageModels?.includes(target)) {
       throw new Error(
         `This backend cannot edit an existing image: ${target || "the configured model"} is not in`
@@ -299,10 +311,10 @@ export async function requestImageGeneration(
   const effective = resolveTierBackend(config, request.tier);
 
   const result = effective.api === "comfyui"
-    ? await requestComfyUiImageGeneration(effective, request)
+    ? await requestComfyUiImageGeneration(effective, request, budget)
     : effective.api === "openai-compatible"
-      ? await requestOpenAiImageGeneration(effective, request)
-      : await requestAutomatic1111ImageGeneration(effective, request);
+      ? await requestOpenAiImageGeneration(effective, request, budget)
+      : await requestAutomatic1111ImageGeneration(effective, request, budget);
 
   // Every adapter reports which tier rendered, not only the OpenAI one. Without this a render
   // routed to the quality tier's own backend came back with no tier at all, so the caller
@@ -334,6 +346,8 @@ export async function requestImageGeneration(
 function resolveImageRequest(
   config: ImageGenerationBackendConfig,
   input: ImageGenerationRequest,
+  /** The natural size of `input.initImage`, when the caller measured it. */
+  baseSize?: ImageSize,
 ): ResolvedImageRequest {
   // A NAMED MODEL DECIDES ITS OWN TIER. The two are not independent knobs: the tier exists to
   // pick a model and its sampling defaults, so honouring both separately produced incoherent
@@ -380,19 +394,668 @@ function resolveImageRequest(
     }
   }
 
-  const tierDefaults = tier === "quality" ? config.qualityDefaults : undefined;
+  const tierDefaults = imageTierDefaults(config, tier);
+
+  // AN EDIT KEEPS ITS BASE'S SHAPE when no size was asked for. The configured default is a
+  // square, so a 1024x768 picture edited without a size came back 1024x1024 — the picture
+  // stretched, and a mask painted on the base no longer lined up with the result. A fixed-size
+  // engine still gets its one size, and a base outside the size bounds keeps the default.
+  const targetModel = model ?? engineModelForTier(config, tier);
+  const editSize = input.initImage && input.width === undefined && input.height === undefined
+    && baseSize && fitsImageSizeBounds(baseSize)
+    && !(targetModel && config.fixedSizeModels?.includes(targetModel))
+    ? baseSize
+    : undefined;
 
   return {
     ...input,
     tier,
     ...(model ? { model } : {}),
     ...(tierUpgradedForEdit ? { tierUpgradedForEdit: true } : {}),
-    width: input.width ?? config.defaultWidth ?? OPENAI_IMAGE_SIZE,
-    height: input.height ?? config.defaultHeight ?? OPENAI_IMAGE_SIZE,
-    steps: input.steps ?? tierDefaults?.steps ?? config.defaultSteps ?? 20,
-    guidanceScale: input.guidanceScale ?? tierDefaults?.guidanceScale ?? config.defaultGuidanceScale ?? 7.5,
-    negativePrompt: input.negativePrompt ?? tierDefaults?.negativePrompt ?? config.defaultNegativePrompt,
+    width: input.width ?? editSize?.width ?? tierDefaults.width,
+    height: input.height ?? editSize?.height ?? tierDefaults.height,
+    steps: input.steps ?? tierDefaults.steps,
+    guidanceScale: input.guidanceScale ?? tierDefaults.guidanceScale,
+    negativePrompt: input.negativePrompt ?? tierDefaults.negativePrompt,
   };
+}
+
+/** What a tier renders with when the request names nothing: the size, steps and guidance its time was measured at. */
+export interface ImageTierDefaults {
+  width: number;
+  height: number;
+  steps: number;
+  guidanceScale: number;
+  negativePrompt?: string;
+}
+
+export function imageTierDefaults(config: ImageGenerationBackendConfig, tier: ImageGenerationTier): ImageTierDefaults {
+  const tierDefaults = tier === "quality" ? config.qualityDefaults : undefined;
+  const negativePrompt = tierDefaults?.negativePrompt ?? config.defaultNegativePrompt;
+  return {
+    width: config.defaultWidth ?? OPENAI_IMAGE_SIZE,
+    height: config.defaultHeight ?? OPENAI_IMAGE_SIZE,
+    steps: tierDefaults?.steps ?? config.defaultSteps ?? 20,
+    guidanceScale: tierDefaults?.guidanceScale ?? config.defaultGuidanceScale ?? 7.5,
+    ...(negativePrompt !== undefined ? { negativePrompt } : {}),
+  };
+}
+
+/**
+ * How long each tier takes AT ITS DEFAULTS, in seconds: about ten for the fast engine, ~170 for a
+ * quality render at 1024x1024 and 20 steps (measured 169 s). Every other request's time is this
+ * scaled by imageRenderWork.
+ */
+export const IMAGE_TIER_EXPECTED_SECONDS: Record<ImageGenerationTier, number> = { fast: 10, quality: 170 };
+
+/** The parts of a resolved request that decide how long it renders. */
+export type ImageRenderShape = Pick<ImageRequestPreview, "tier" | "width" | "height" | "steps" | "guidanceScale">;
+
+/**
+ * The work a resolved request is, relative to its tier's defaults: 1 renders in the tier's usual
+ * time, 2.8 takes 2.8 times as long.
+ *
+ * A diffusion render costs one forward pass per step per latent pixel, so the time scales with
+ * steps and with area; and true CFG runs a second pass per step, which on an engine whose default
+ * guidance is ≤ 1 (embedded guidance, no CFG) doubles it — measured 22 s against 11 s on the
+ * quality tier. Session 807684e9: the user set a quality render to 57 steps at 1344x768, about
+ * eight minutes, against a fixed 300 s budget; it was abandoned at exactly 300 s while the device
+ * kept rendering, and the retry queued behind the abandoned render inside the backend.
+ */
+export function imageRenderWork(config: ImageGenerationBackendConfig, request: ImageRenderShape): number {
+  const defaults = imageTierDefaults(config, request.tier);
+  const steps = request.steps / defaults.steps;
+  const area = (request.width * request.height) / (defaults.width * defaults.height);
+  const cfg = defaults.guidanceScale <= 1 && request.guidanceScale > 1 ? 2 : 1;
+  const work = steps * area * cfg;
+  return Number.isFinite(work) && work > 0 ? work : 1;
+}
+
+/** The budget a tier is configured with, before the request's own work scales it. */
+function tierTimeoutMs(config: ImageGenerationBackendConfig, tier: ImageGenerationTier): number {
+  if (tier !== "quality") return config.timeoutMs;
+  return config.qualityBackend?.timeoutMs ?? config.qualityTimeoutMs ?? Math.max(config.timeoutMs, 200_000);
+}
+
+/**
+ * How long this request may take before it is abandoned: the tier's configured timeout, scaled up
+ * by the request's work and never below it. The configured figure is sized for a default render
+ * plus a weight reload after idle, so a smaller request keeps that margin rather than losing it.
+ */
+export function imageRequestTimeoutMs(config: ImageGenerationBackendConfig, request: ImageRenderShape): number {
+  return Math.round(tierTimeoutMs(config, request.tier) * Math.max(1, imageRenderWork(config, request)));
+}
+
+/** How long this request should take: the tier's time at its defaults, scaled by the request's work. */
+export function expectedImageRenderSeconds(config: ImageGenerationBackendConfig, request: ImageRenderShape): number {
+  return IMAGE_TIER_EXPECTED_SECONDS[request.tier] * imageRenderWork(config, request);
+}
+
+/** The steps a render may ask for — the settings form's bound as well. */
+export const IMAGE_STEPS_BOUNDS = { min: 1, max: 100 } as const;
+
+/**
+ * Why a request's steps or size are outside what may be rendered, or undefined.
+ *
+ * The budget scales with the work, so nothing else bounds it: 1000 steps at 2048x2048 with true
+ * CFG is 400 times a default render — a timeout of about 33 hours, with the run's clocks held
+ * for all of it once the user took the settings. Refused rather than clamped, because a quietly
+ * different render is reported as the one asked for. The minimum size is left to the backend: a
+ * 64x64 render is a real request on the quality engine.
+ */
+export function imageRequestBoundsError(input: Pick<ImageGenerationRequest, "steps" | "width" | "height">): string | undefined {
+  const problems: string[] = [];
+  const { min, max } = IMAGE_STEPS_BOUNDS;
+  if (input.steps !== undefined && !(Number.isInteger(input.steps) && input.steps >= min && input.steps <= max)) {
+    problems.push(`steps must be a whole number from ${min} to ${max} (asked for ${input.steps})`);
+  }
+  for (const [name, side] of [["width", input.width], ["height", input.height]] as const) {
+    if (side !== undefined && !(Number.isInteger(side) && side > 0 && side <= IMAGE_SIZE_BOUNDS.max)) {
+      problems.push(`${name} must be a whole number of pixels up to ${IMAGE_SIZE_BOUNDS.max} (asked for ${side})`);
+    }
+  }
+  return problems.length > 0 ? problems.join("; ") : undefined;
+}
+
+/** "8 min" / "40 s" — a duration as a person reads it. */
+function formatRenderDuration(seconds: number): string {
+  return seconds < 90 ? `${Math.max(1, Math.round(seconds))} s` : `${Math.round(seconds / 60)} min`;
+}
+
+/**
+ * A render that ran out of time. A class, so the tool can tell it from every other failure and say
+ * so in its metadata as well as in words.
+ *
+ * The words carry what the agent needs to not repeat session 807684e9, where the only message was
+ * "This operation was aborted": the agent retried with identical settings, the retry queued inside
+ * the backend behind the render it had just abandoned, and timed out as well.
+ */
+export class ImageGenerationTimeoutError extends Error {
+  readonly timedOut = true;
+
+  constructor(readonly details: {
+    engine: string;
+    tier: ImageGenerationTier;
+    model?: string;
+    timeoutMs: number;
+    expectedSeconds: number;
+    steps: number;
+    width: number;
+    height: number;
+  }) {
+    super(
+      `${details.engine} did not finish within ${formatRenderDuration(details.timeoutMs / 1000)}, the limit for this`
+      + ` request: ${details.steps} steps at ${details.width}x${details.height} were expected to take about`
+      + ` ${formatRenderDuration(details.expectedSeconds)}. The engine renders one picture at a time and keeps working on an`
+      + " abandoned one, so it stays busy for a while yet. This is not transient: do NOT call generate_image again with"
+      + " the same settings. Tell the user it timed out, and offer fewer steps or a smaller size.",
+    );
+    this.name = "ImageGenerationTimeoutError";
+  }
+}
+
+/** What one render may spend, and the error to throw when it spends it all. */
+interface RenderBudget {
+  timeoutMs: number;
+  expectedSeconds: number;
+  timedOut(): ImageGenerationTimeoutError;
+}
+
+function renderBudget(config: ImageGenerationBackendConfig, request: ResolvedImageRequest): RenderBudget {
+  const timeoutMs = imageRequestTimeoutMs(config, request);
+  const expectedSeconds = expectedImageRenderSeconds(config, request);
+  const model = request.model ?? engineModelForTier(config, request.tier);
+  const label = imageEngineLabel(config, request.tier);
+  const engine = label
+    ? `${label} (the ${request.tier} tier)`
+    : `The ${request.tier} tier${model ? ` (model ${model})` : ""}`;
+  return {
+    timeoutMs,
+    expectedSeconds,
+    timedOut: () => new ImageGenerationTimeoutError({
+      engine,
+      tier: request.tier,
+      ...(model ? { model } : {}),
+      timeoutMs,
+      expectedSeconds,
+      steps: request.steps,
+      width: request.width,
+      height: request.height,
+    }),
+  };
+}
+
+/** What a request will run as, without running it. */
+export interface ImageRequestPreview {
+  tier: ImageGenerationTier;
+  /** The model the tier resolves to; empty when nothing is configured. */
+  model: string;
+  tierUpgradedForEdit: boolean;
+  width: number;
+  height: number;
+  steps: number;
+  guidanceScale: number;
+  negativePrompt?: string;
+}
+
+/**
+ * The resolution requestImageGeneration applies, for a caller that must show it before the render
+ * — the settings step offers the person exactly what would run. Re-deriving the tier, the edit
+ * upgrade and the per-tier defaults anywhere else is the drift the note on ImageGenerationRequest
+ * describes. `baseSize` is the natural size of `input.initImage`; the render measures it itself.
+ */
+export function previewImageRequest(
+  config: ImageGenerationBackendConfig,
+  input: ImageGenerationRequest,
+  baseSize?: ImageSize,
+): ImageRequestPreview {
+  const request = resolveImageRequest(config, input, baseSize);
+  return {
+    tier: request.tier,
+    model: request.model ?? engineModelForTier(config, request.tier) ?? "",
+    tierUpgradedForEdit: request.tierUpgradedForEdit === true,
+    width: request.width,
+    height: request.height,
+    steps: request.steps,
+    guidanceScale: request.guidanceScale,
+    ...(request.negativePrompt ? { negativePrompt: request.negativePrompt } : {}),
+  };
+}
+
+/** The model a tier renders on when no model was named. */
+export function engineModelForTier(
+  config: ImageGenerationBackendConfig,
+  tier: ImageGenerationTier,
+): string | undefined {
+  return tier === "quality" ? config.qualityModel ?? config.model : config.model;
+}
+
+export interface ImageSize {
+  width: number;
+  height: number;
+}
+
+/** Inside the sizes a render may ask for (the schema's own width/height bounds). */
+export function fitsImageSizeBounds(size: ImageSize): boolean {
+  const fits = (side: number) => Number.isInteger(side)
+    && side >= IMAGE_SIZE_BOUNDS.min && side <= IMAGE_SIZE_BOUNDS.max;
+  return fits(size.width) && fits(size.height);
+}
+
+/**
+ * The natural size of an encoded picture, read from its header, or undefined when the header is
+ * not one readImageHeaderSize knows. It used to decode the whole picture just to learn two numbers.
+ */
+export async function measureImage(base64: string): Promise<ImageSize | undefined> {
+  return readImageHeaderSize(Buffer.from(base64, "base64"));
+}
+
+/**
+ * The size an encoded picture DECLARES — PNG, JPEG, GIF, BMP, WebP or TIFF — read from its header
+ * without decoding it; undefined for anything else, for a structure cut short, for a picture that
+ * declares a size twice, and for a JPEG with more EXIF than a camera writes (MAX_EXIF_ENTRIES).
+ *
+ * Read BEFORE any decode, because the decoders allocate whatever the header declares and do it
+ * synchronously: a 1.5 MB PNG declaring 20000x20000 held the event loop for 3 s and took RSS to
+ * about 5 GB before it was rejected as the wrong size, and a chat of phone photos cost ~1.6 s of
+ * blocked gateway per photo, each thrown away afterwards as larger than 2048.
+ *
+ * TWICE is "not known" because a decoder need not read the declaration read here. pngjs keeps the
+ * LAST IHDR it parses: a 243 KB PNG declaring 320x256 and then 8000x8000 passed as a 320x256 mask
+ * and was decoded at 8000x8000, the loop held for half a second and RSS up by 700 MB. jpeg-js
+ * allocates for every frame header before it refuses a second one, and omggif sizes its buffer by
+ * the first frame, not by the screen the GIF declares. So the whole structure is walked — chunk
+ * and segment headers only, never the pixels.
+ *
+ * A JPEG's size is the one it is SHOWN at: an EXIF orientation of 5–8 swaps the sides, as the
+ * decoder, the browser and so the painted mask all do. Reading the stored sides had Auto render a
+ * portrait photo at 2048x1536 while the card and the form said 1536x2048.
+ */
+export function readImageHeaderSize(bytes: Uint8Array): ImageSize | undefined {
+  const data = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  try {
+    if (data.length >= 8 && data.readUInt32BE(0) === 0x89504e47) return readPngSize(data);
+    if (data.length >= 4 && data[0] === 0xff && data[1] === 0xd8) return readJpegSize(data);
+    if (data.length >= 13 && data.toString("latin1", 0, 3) === "GIF") return readGifSize(data);
+    // BMP: the DIB header; the 12-byte OS/2 form has 16-bit sides, the rest signed 32-bit ones
+    // (a negative height is a top-down bitmap, not a small one).
+    if (data.length >= 26 && data.toString("latin1", 0, 2) === "BM") {
+      return data.readUInt32LE(14) === 12
+        ? sized(data.readUInt16LE(18), data.readUInt16LE(20))
+        : sized(Math.abs(data.readInt32LE(18)), Math.abs(data.readInt32LE(22)));
+    }
+    // WebP: RIFF…WEBP, then a lossy (VP8), lossless (VP8L) or extended (VP8X) first chunk.
+    if (data.length >= 30 && data.toString("latin1", 0, 4) === "RIFF" && data.toString("latin1", 8, 12) === "WEBP") {
+      const chunk = data.toString("latin1", 12, 16);
+      if (chunk === "VP8 ") return sized(data.readUInt16LE(26) & 0x3fff, data.readUInt16LE(28) & 0x3fff);
+      if (chunk === "VP8L") {
+        const bits = data.readUInt32LE(21);
+        return sized((bits & 0x3fff) + 1, ((bits >>> 14) & 0x3fff) + 1);
+      }
+      if (chunk === "VP8X") return sized(data.readUIntLE(24, 3) + 1, data.readUIntLE(27, 3) + 1);
+      return undefined;
+    }
+    // TIFF: the first page's ImageWidth and ImageLength — the page a backend reads.
+    const tiff = readTiff(data);
+    if (tiff) {
+      const width = tiff.tag(tiff.firstIfd, 256);
+      const height = tiff.tag(tiff.firstIfd, 257);
+      return width !== undefined && height !== undefined ? sized(width, height) : undefined;
+    }
+  } catch {
+    // A structure cut short reads past the end; that is "not known", not a crash.
+  }
+  return undefined;
+}
+
+function sized(width: number, height: number): ImageSize | undefined {
+  return width > 0 && height > 0 ? { width, height } : undefined;
+}
+
+/** PNG: IHDR is the first chunk, width and height at 16..23; then every chunk header up to IEND. */
+function readPngSize(data: Buffer): ImageSize | undefined {
+  if (data.length < 33 || data.readUInt32BE(8) !== 13 || data.toString("latin1", 12, 16) !== "IHDR") return undefined;
+  for (let offset = 33; ;) {
+    if (offset + 8 > data.length) return undefined;
+    const type = data.toString("latin1", offset + 4, offset + 8);
+    if (type === "IEND") break;
+    if (type === "IHDR") return undefined;
+    offset += 12 + data.readUInt32BE(offset);
+  }
+  return sized(data.readUInt32BE(16), data.readUInt32BE(20));
+}
+
+/** C0–CF, except the DHT, JPG and DAC markers that share the range. */
+const isJpegFrameMarker = (marker: number): boolean =>
+  marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc;
+
+/**
+ * More scans than any encoder writes. jpeg-js walks every block of the picture once per scan, so a
+ * progressive 2048x2048 JPEG of 16-byte scans held the gateway 5 s for 340 KB, and the 20 MB upload
+ * cap allowed minutes. libjpeg's progressive scripts write 10 scans for colour, 24 at most for CMYK.
+ */
+const MAX_JPEG_SCANS = 64;
+
+interface JpegStructure {
+  frame: ImageSize;
+  components: number;
+  /** Adobe's APP14, without which jpeg-js outputs no 4-component picture. */
+  adobe: boolean;
+  scans: number;
+}
+
+/**
+ * JPEG: every marker segment up to EOI — whatever follows EOI (a phone's depth map, say) is another
+ * picture the decoder never reads — and one frame header.
+ */
+function readJpegStructure(data: Buffer): JpegStructure | undefined {
+  let frame: ImageSize | undefined;
+  let components = 0;
+  let adobe = false;
+  let scans = 0;
+  let offset = 2;
+  while (offset + 1 < data.length) {
+    if (data[offset] !== 0xff) return undefined;
+    const marker = data[offset + 1]!;
+    if (marker === 0xff) { offset += 1; continue; }
+    if (marker === 0xd9) break;
+    if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) { offset += 2; continue; }
+    const length = data.readUInt16BE(offset + 2);
+    if (isJpegFrameMarker(marker)) {
+      if (frame) return undefined;
+      frame = sized(data.readUInt16BE(offset + 7), data.readUInt16BE(offset + 5));
+      if (!frame) return undefined;
+      components = data[offset + 9]!;
+    } else if (marker === 0xee && data.toString("latin1", offset + 4, offset + 10) === "Adobe\0") {
+      adobe = true;
+    }
+    offset += 2 + length;
+    if (marker === 0xda) {
+      scans += 1;
+      // A scan's entropy-coded data carries no length: it runs to the next marker that is neither a
+      // stuffed 0xFF00, a restart marker nor fill.
+      offset = nextJpegMarker(data, offset);
+    }
+  }
+  return frame ? { frame, components, adobe, scans } : undefined;
+}
+
+/** A JPEG's size as it is shown — turned as Jimp turns it (readExifOrientation). */
+function readJpegSize(data: Buffer): ImageSize | undefined {
+  const frame = readJpegStructure(data)?.frame;
+  const orientation = frame ? readExifOrientation(data) : undefined;
+  if (!frame || orientation === undefined) return undefined;
+  return [5, 6, 7, 8].includes(orientation) ? { width: frame.height, height: frame.width } : frame;
+}
+
+function nextJpegMarker(data: Buffer, from: number): number {
+  for (let index = data.indexOf(0xff, from); index >= 0 && index + 1 < data.length; index = data.indexOf(0xff, index + 1)) {
+    const next = data[index + 1]!;
+    if (next !== 0x00 && next !== 0xff && (next < 0xd0 || next > 0xd7)) return index;
+  }
+  return data.length;
+}
+
+/**
+ * More IFD entries than a camera writes — its EXIF holds about a hundred. exif-parser reads every
+ * entry of every IFD in every APP1, so a 1 MB file of small APP1s that all point at one 65535-entry
+ * IFD is hundreds of millions of entries to read, here and again in Jimp. Like one with too many
+ * scans, that JPEG is not decoded.
+ */
+const MAX_EXIF_ENTRIES = 2048;
+
+interface ExifTag { type: number; count: number; at: number; little: boolean }
+
+const EXIF_TOO_LARGE = new Error("more EXIF than a camera writes");
+
+/**
+ * The EXIF orientation Jimp turns a JPEG by — 1, "as stored", when it turns it by none — or
+ * undefined for more EXIF than a camera writes (MAX_EXIF_ENTRIES).
+ *
+ * Jimp turns a picture by what exif-parser returns, and makes any error of exif-parser's into no
+ * turn at all while the picture still decodes. So this reads what exif-parser reads, the way it
+ * reads it, and fails where it fails: the segments up to the first scan and every EXIF APP1 among
+ * them; in each, IFD0, then IFD1 whenever the pointer to it is not zero, then the GPS, Exif and
+ * Interop IFDs, at offsets into the whole file rather than the segment. The first Orientation tag
+ * wins, and turns the picture only as one number from 2 to 8. Reading IFD1 only when IFD0 had no
+ * orientation, and letting a bad pointer throw out of the size read, lost the size of a picture
+ * Jimp decoded at 2048x1536 — Auto rendered it square — and turned one that Jimp did not.
+ */
+function readExifOrientation(data: Buffer): number | undefined {
+  const tags = new Map<number, ExifTag>();
+  const budget = { entries: MAX_EXIF_ENTRIES };
+  try {
+    let marker = 0;
+    for (let at = 0; at < data.length && marker !== 0xda;) {
+      if (data.readUInt8(at) !== 0xff) return 1;
+      marker = data.readUInt8(at + 1);
+      if ((marker >= 0xd0 && marker <= 0xd9) || marker === 0xda) { at += 2; continue; }
+      const length = data.readUInt16BE(at + 2) - 2;
+      if (marker === 0xe1) readExifApp1(data, at + 4, tags, budget);
+      at += 4 + length;
+    }
+    // exif-parser then turns three date tags into timestamps, and throws on one it cannot split.
+    if ([0x0132, 0x9003, 0x9004].some((tag) => exifDateThrows(data, tags.get(tag)))) return 1;
+  } catch (error) {
+    if (error === EXIF_TOO_LARGE) return undefined;
+    // exif-parser threw, so Jimp does not turn it: the picture decodes as stored.
+    return 1;
+  }
+  const orientation = tags.get(0x0112);
+  return orientation && orientation.count === 1 && orientation.type !== 0 && orientation.type !== 2
+    ? exifNumber(data, orientation.at, orientation.type, orientation.little)
+    : 1;
+}
+
+/** Bytes per value of each EXIF type exif-parser knows; a type it does not know, it cannot read. */
+const EXIF_VALUE_BYTES: Record<number, number> = { 1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 10: 8, 11: 4, 12: 8 };
+
+/**
+ * One APP1 as exif-parser's parseTags reads it, keeping the first of each tag it reports. A header
+ * it cannot read makes it pass the segment by; anything after that throws, as it does there.
+ */
+function readExifApp1(data: Buffer, start: number, tags: Map<number, ExifTag>, budget: { entries: number }): void {
+  const tiff = start + 6;
+  if (data.toString("latin1", start, tiff) !== "Exif\0\0" || tiff + 4 > data.length) return;
+  const order = data.readUInt16BE(tiff);
+  if (order !== 0x4949 && order !== 0x4d4d) return;
+  const little = order === 0x4949;
+  const u16 = (at: number) => (little ? data.readUInt16LE(at) : data.readUInt16BE(at));
+  const u32 = (at: number) => (little ? data.readUInt32LE(at) : data.readUInt32BE(at));
+  if (u16(tiff + 2) !== 42) return;
+
+  /** An IFD's entries, each handed on once its values would have read; returns where they end. */
+  const readIfd = (ifd: number, onTag: (tag: number, value: ExifTag) => void): number => {
+    let entry = tiff + ifd + 2;
+    for (let left = u16(tiff + ifd); left > 0; left -= 1, entry += 12) {
+      if (--budget.entries < 0) throw EXIF_TOO_LARGE;
+      const [tag, type, count] = [u16(entry), u16(entry + 2), u32(entry + 4)];
+      const size = EXIF_VALUE_BYTES[type] ?? 0;
+      const at = size * count > 4 ? tiff + u32(entry + 8) : entry + 8;
+      // Numbers are read one by one, so a list past the end throws; so does a type with no reader.
+      if (count > 0 && type !== 0 && type !== 2 && type !== 7 && (size === 0 || at + size * count > data.length)) {
+        throw new RangeError("EXIF value");
+      }
+      onTag(tag, { type, count, at, little });
+    }
+    return entry;
+  };
+  const report = (tag: number, value: ExifTag): void => {
+    // Binary tags are left out. The thumbnail's tags are read for their first value, which a tag
+    // of type 0 does not have.
+    if (value.type === 7) return;
+    if (value.type === 0 && (tag === 0x0103 || tag === 0x0201 || tag === 0x0202)) throw new TypeError("EXIF value");
+    if (!tags.has(tag)) tags.set(tag, value);
+  };
+  /** A pointer tag's first value as exif-parser follows it: an offset, 0 for none, null where following it throws. */
+  const pointer = ({ type, count, at }: ExifTag): number | null => {
+    if (type === 0) throw new TypeError("EXIF pointer");
+    if (count === 0) return 0;
+    if (type === 2) return data.toString("utf8", at, at + count).split("\0")[0] ? null : 0;
+    if (type === 7) return data[at] ?? 0;
+    if (type === 5 || type === 10) return null;
+    return exifNumber(data, at, type, little) || 0;
+  };
+  const follow = (offset: number | null, onTag: (tag: number, value: ExifTag) => void): void => {
+    if (offset === null) throw new TypeError("EXIF pointer");
+    if (offset !== 0) readIfd(offset, onTag);
+  };
+
+  let gps: number | null = 0;
+  let exif: number | null = 0;
+  let interop: number | null = 0;
+  const ifd0End = readIfd(u32(tiff + 4), (tag, value) => {
+    if (tag === 0x8825) gps = pointer(value);
+    else if (tag === 0x8769) exif = pointer(value);
+    else report(tag, value);
+  });
+  const ifd1 = u32(ifd0End);
+  if (ifd1 !== 0) readIfd(ifd1, report);
+  follow(gps, report);
+  follow(exif, (tag, value) => {
+    if (tag === 0xa005) interop = pointer(value);
+    else report(tag, value);
+  });
+  follow(interop, report);
+}
+
+/** Whether exif-parser throws casting this date tag: a list of 19 or 25 values, or 19 characters with no space. */
+function exifDateThrows(data: Buffer, date: ExifTag | undefined): boolean {
+  if (!date || date.type === 0) return false;
+  if (date.type !== 2) return date.count === 19 || date.count === 25;
+  const text = data.toString("utf8", date.at, date.at + date.count).split("\0")[0]!;
+  return text.length === 19 && text[4] === ":" && !text.includes(" ");
+}
+
+/** One EXIF value as exif-parser simplifies it: a rational becomes its quotient. */
+function exifNumber(data: Buffer, at: number, type: number, little: boolean): number {
+  const u32 = (offset: number) => (little ? data.readUInt32LE(offset) : data.readUInt32BE(offset));
+  const i32 = (offset: number) => (little ? data.readInt32LE(offset) : data.readInt32BE(offset));
+  switch (type) {
+    case 1: return data[at]!;
+    case 3: case 8: return little ? data.readUInt16LE(at) : data.readUInt16BE(at);
+    case 5: return u32(at) / u32(at + 4);
+    case 6: return data.readInt8(at);
+    case 10: return i32(at) / i32(at + 4);
+    case 11: return little ? data.readFloatLE(at) : data.readFloatBE(at);
+    case 12: return little ? data.readDoubleLE(at) : data.readDoubleBE(at);
+    default: return u32(at);
+  }
+}
+
+interface TiffReader {
+  firstIfd: number;
+  /** A SHORT or LONG tag of the IFD at that offset. */
+  tag(ifd: number, tag: number): number | undefined;
+}
+
+/** A .tif file's structure: its byte order, its first IFD and the tags in it. */
+function readTiff(data: Buffer): TiffReader | undefined {
+  const order = data.toString("latin1", 0, 2);
+  if (data.length < 8 || (order !== "II" && order !== "MM")) return undefined;
+  const little = order === "II";
+  const u16 = (at: number) => (little ? data.readUInt16LE(at) : data.readUInt16BE(at));
+  const u32 = (at: number) => (little ? data.readUInt32LE(at) : data.readUInt32BE(at));
+  if (u16(2) !== 42) return undefined;
+  return {
+    firstIfd: u32(4),
+    tag(ifd, tag) {
+      const end = ifd + 2 + u16(ifd) * 12;
+      for (let entry = ifd + 2; entry < end; entry += 12) {
+        if (u16(entry) !== tag) continue;
+        const type = u16(entry + 2);
+        return type === 3 ? u16(entry + 8) : type === 4 ? u32(entry + 8) : undefined;
+      }
+      return undefined;
+    },
+  };
+}
+
+/** GIF: the logical screen — with the first frame, which omggif sizes its buffer by, inside it. */
+function readGifSize(data: Buffer): ImageSize | undefined {
+  const screen = sized(data.readUInt16LE(6), data.readUInt16LE(8));
+  if (!screen) return undefined;
+  const flags = data[10]!;
+  let offset = 13 + (flags & 0x80 ? 3 * 2 ** ((flags & 0x07) + 1) : 0);
+  while (offset < data.length) {
+    const block = data[offset];
+    if (block === 0x2c) {
+      const [x, y, width, height] = [1, 3, 5, 7].map((at) => data.readUInt16LE(offset + at)) as [number, number, number, number];
+      return x + width <= screen.width && y + height <= screen.height ? screen : undefined;
+    }
+    // An extension: its label, then sub-blocks up to a zero length. Anything else before a frame
+    // (the trailer, garbage) means there is no picture to decode.
+    if (block !== 0x21) return undefined;
+    offset += 2;
+    while (offset < data.length && data[offset] !== 0) offset += data[offset]! + 1;
+    offset += 1;
+  }
+  return undefined;
+}
+
+/**
+ * Whether Jimp decodes these bytes within the size they declare — asked once that size has been
+ * judged (readImageHeaderSize), before the decode that would allocate it.
+ *
+ * One declaration is not enough for every decoder. pngjs inflates an INTERLACED PNG with no output
+ * limit: a 597 KB PNG honestly declaring 320x256 inflated to 600 MB before it failed, so its pixel
+ * stream is inflated here first, capped at exactly what that size needs. bmp-js reads 32-bit sides
+ * from an OS/2 header, whose sides are 16-bit, and allocates what that misreading says. utif2
+ * inflates a TIFF strip with no limit either, and Jimp decodes every page: a TIFF is not decoded.
+ *
+ * jpeg-js allocates for every component a frame names before it looks at how many there are, and
+ * turns only 1 (grey), 3 (colour) or 4 (CMYK, behind Adobe's APP14) into pixels: a 187-byte JPEG
+ * honestly declaring 2048x2048 with 20 components held the gateway 836 ms and took RSS to 1 GB
+ * before it threw "Unsupported color mode". Never decoded, it never counted against the candidate
+ * cap, so every generate_image call in that chat paid it again. And it walks the whole picture once
+ * per scan (MAX_JPEG_SCANS). The first refusal loses no JPEG it decodes, the second none an encoder
+ * writes.
+ */
+export function decodesWithinDeclaredSize(bytes: Uint8Array): boolean {
+  const data = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const declared = readImageHeaderSize(data);
+  if (!declared) return false;
+  if (data.readUInt32BE(0) === 0x89504e47) return data[28] !== 1 || interlacedPngFits(data, declared);
+  if (data[0] === 0xff && data[1] === 0xd8) {
+    const jpeg = readJpegStructure(data);
+    return jpeg !== undefined && jpeg.scans <= MAX_JPEG_SCANS
+      && (jpeg.components === 1 || jpeg.components === 3 || (jpeg.components === 4 && jpeg.adobe));
+  }
+  if (data.toString("latin1", 0, 3) === "GIF") return true;
+  if (data.toString("latin1", 0, 2) === "BM") return data.readUInt32LE(14) !== 12;
+  return false;
+}
+
+/** Adam7's seven passes: where each starts, and how far it steps across and down. */
+const ADAM7_PASSES = [[0, 0, 8, 8], [4, 0, 8, 8], [0, 4, 4, 8], [2, 0, 4, 4], [0, 2, 2, 4], [1, 0, 2, 2], [0, 1, 1, 2]] as const;
+const PNG_CHANNELS: Record<number, number> = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 };
+
+function interlacedPngFits(data: Buffer, size: ImageSize): boolean {
+  const channels = PNG_CHANNELS[data[25]!];
+  if (!channels) return false;
+  const bitsPerPixel = channels * data[24]!;
+  let raw = 0;
+  for (const [x, y, stepX, stepY] of ADAM7_PASSES) {
+    const width = Math.ceil((size.width - x) / stepX);
+    const height = Math.ceil((size.height - y) / stepY);
+    // Each row of a pass is its filter byte, then its pixels.
+    if (width > 0 && height > 0) raw += height * (1 + Math.ceil((width * bitsPerPixel) / 8));
+  }
+  const idat: Buffer[] = [];
+  for (let offset = 8; offset + 8 <= data.length;) {
+    const length = data.readUInt32BE(offset);
+    const type = data.toString("latin1", offset + 4, offset + 8);
+    if (type === "IEND") break;
+    if (type === "IDAT") idat.push(data.subarray(offset + 8, offset + 8 + length));
+    offset += 12 + length;
+  }
+  try {
+    inflateSync(Buffer.concat(idat), { maxOutputLength: Math.max(1, raw) });
+    return true;
+  } catch {
+    // Longer than the declared size needs — or no zlib stream at all, which does not decode either.
+    return false;
+  }
 }
 
 /**
@@ -423,6 +1086,10 @@ function resolveTierBackend(
 
 /** Both tiers of the cluster endpoint run fixed-resolution pipelines. */
 const OPENAI_IMAGE_SIZE = 1024;
+
+/** The sizes a render may ask for: the schema's bounds, a 64-pixel grid, and the one size a
+ *  fixed-size engine accepts. */
+export const IMAGE_SIZE_BOUNDS = { min: 256, max: 2048, step: 64, fixed: OPENAI_IMAGE_SIZE } as const;
 
 /**
  * Statuses the endpoint uses to mean "ask again", not "your request is wrong".
@@ -475,6 +1142,63 @@ function concurrencyForModel(config: ImageGenerationBackendConfig, model: string
 }
 
 /**
+ * Until when a model's device is still working on a render WE abandoned, by gate key.
+ *
+ * The slot is released when our request times out, but the engine does not stop: it finishes the
+ * abandoned picture first. In session 807684e9 the retry took the free slot, went straight into
+ * the backend's own queue with its clock already running, and timed out behind the render nobody
+ * was waiting for. So a timeout marks the device busy for the abandoned render's expected time
+ * (capped by its timeout), and the next request waits that out inside its slot, before its own
+ * clock starts. A finished render is the proof the device is free again and clears the mark.
+ */
+const deviceBusyUntil = new Map<string, number>();
+
+/** Test-only: forget the renders abandoned so far, so one test's timeout does not delay the next. */
+export function resetImageDeviceBusyForTests(): void {
+  deviceBusyUntil.clear();
+}
+
+/**
+ * How much longer a tier's device is busy with a render we abandoned, in ms; 0 when it is free.
+ * The settings step adds it to the time it shows, because the next render waits it out first.
+ */
+export function imageDeviceBusyMs(config: ImageGenerationBackendConfig, tier: ImageGenerationTier, model?: string): number {
+  const gateKey = renderGateKey(resolveTierBackend(config, tier), tier, model);
+  return gateKey ? Math.max(0, (deviceBusyUntil.get(gateKey) ?? 0) - Date.now()) : 0;
+}
+
+/** The key each adapter holds its slot and busy mark under; ComfyUI queues on its own and has none. */
+function renderGateKey(effective: ImageGenerationBackendConfig, tier: ImageGenerationTier, model?: string): string | undefined {
+  if (effective.api === "comfyui") return undefined;
+  if (effective.api === "openai-compatible") return model ?? engineModelForTier(effective, tier);
+  return model ?? effective.model ?? effective.baseUrl;
+}
+
+/** One render with its model's slot held: waits out an abandoned render first, then runs. */
+function renderInSlot(
+  config: ImageGenerationBackendConfig,
+  gateKey: string,
+  budget: RenderBudget,
+  work: () => Promise<ImageGenerationResult>,
+): Promise<ImageGenerationResult> {
+  const gate = imageGates.for(gateKey);
+  gate.setLimit(concurrencyForModel(config, gateKey));
+  return gate.withSlot(async () => {
+    const busyFor = (deviceBusyUntil.get(gateKey) ?? 0) - Date.now();
+    if (busyFor > 0) await delay(busyFor);
+    try {
+      const result = await work();
+      deviceBusyUntil.delete(gateKey);
+      return busyFor > 0 ? { ...result, deviceWaitMs: busyFor } : result;
+    } catch (error) {
+      if (!(error instanceof UpstreamTimeoutError)) throw error;
+      deviceBusyUntil.set(gateKey, Date.now() + Math.min(budget.expectedSeconds * 1000, budget.timeoutMs));
+      throw budget.timedOut();
+    }
+  });
+}
+
+/**
  * OpenAI-compatible `POST /v1/images/generations`.
  *
  * Three things about this contract are not the OpenAI default and each one has bitten a
@@ -491,6 +1215,7 @@ function concurrencyForModel(config: ImageGenerationBackendConfig, model: string
 async function requestOpenAiImageGeneration(
   config: ImageGenerationBackendConfig,
   input: ResolvedImageRequest,
+  budget: RenderBudget,
 ): Promise<ImageGenerationResult> {
   const tier = input.tier;
   const model = input.model
@@ -560,18 +1285,12 @@ async function requestOpenAiImageGeneration(
   if (typeof input.steps === "number") payload["steps"] = input.steps;
   if (typeof input.guidanceScale === "number") payload["guidance_scale"] = input.guidanceScale;
 
-  const timeoutMs = tier === "quality"
-    ? config.qualityTimeoutMs ?? Math.max(config.timeoutMs, 200_000)
-    : config.timeoutMs;
-
   // Below this line the request is valid and the only thing left is the backend. Everything
   // that can be rejected locally — an unset quality model, a size this endpoint refuses —
   // has already thrown, so a config mistake still fails in milliseconds rather than after
   // waiting out someone else's generation.
-  const gate = imageGates.for(model);
-  gate.setLimit(concurrencyForModel(config, model));
-  return gate.withSlot(
-    () => sendOpenAiImageRequest(config, input, model, payload, timeoutMs),
+  return renderInSlot(config, model, budget,
+    () => sendOpenAiImageRequest(config, input, model, payload, budget.timeoutMs),
   );
 }
 
@@ -672,6 +1391,7 @@ async function sendOpenAiImageRequest(
 async function requestAutomatic1111ImageGeneration(
   config: ImageGenerationBackendConfig,
   input: ResolvedImageRequest,
+  budget: RenderBudget,
 ): Promise<ImageGenerationResult> {
   const model = input.model ?? config.model;
   const payload: Record<string, unknown> = {
@@ -700,9 +1420,7 @@ async function requestAutomatic1111ImageGeneration(
   // One in flight per model here as well: the quality tier reaches its device through this
   // adapter, and that device generates serially.
   const gateKey = model ?? config.baseUrl;
-  const gate = imageGates.for(gateKey);
-  gate.setLimit(concurrencyForModel(config, gateKey));
-  return gate.withSlot(() => sendAutomatic1111Request(config, input, model, payload));
+  return renderInSlot(config, gateKey, budget, () => sendAutomatic1111Request(config, input, model, payload, budget.timeoutMs));
 }
 
 /** The network half, run with a slot held. */
@@ -711,6 +1429,7 @@ async function sendAutomatic1111Request(
   input: ResolvedImageRequest,
   model: string | undefined,
   payload: Record<string, unknown>,
+  timeoutMs: number,
 ): Promise<ImageGenerationResult> {
   const response = await fetchWithTimeout(
     upstreamUrl(config.baseUrl, input.initImage ? "/sdapi/v1/img2img" : "/sdapi/v1/txt2img"),
@@ -719,7 +1438,7 @@ async function sendAutomatic1111Request(
       headers: upstreamHeaders(config.apiKey, { "Content-Type": "application/json" }),
       body: JSON.stringify(payload),
     },
-    config.timeoutMs,
+    timeoutMs,
   );
 
   if (!response.ok) {
@@ -752,6 +1471,7 @@ async function sendAutomatic1111Request(
 async function requestComfyUiImageGeneration(
   config: ImageGenerationBackendConfig,
   input: ResolvedImageRequest,
+  budget: RenderBudget,
 ): Promise<ImageGenerationResult> {
   const model = input.model ?? config.model;
   if (!model) {
@@ -781,7 +1501,8 @@ async function requestComfyUiImageGeneration(
     throw new Error("ComfyUI did not return a prompt_id");
   }
 
-  const deadline = Date.now() + config.timeoutMs;
+  // The request's own budget, not the tier's flat one: the render is what the deadline bounds.
+  const deadline = Date.now() + budget.timeoutMs;
   while (Date.now() < deadline) {
     const historyResponse = await fetchWithTimeout(
       upstreamUrl(config.baseUrl, `/history/${encodeURIComponent(promptId)}`),
@@ -833,7 +1554,7 @@ async function requestComfyUiImageGeneration(
     await sleep(750);
   }
 
-  throw new Error(`ComfyUI image generation timed out after ${config.timeoutMs}ms`);
+  throw budget.timedOut();
 }
 
 function buildComfyUiWorkflow(input: ImageGenerationRequest, model: string): Record<string, unknown> {
@@ -920,12 +1641,29 @@ function upstreamHeaders(apiKey?: string, init: Record<string, string> | Headers
   return headers;
 }
 
+/**
+ * OUR timer ran out, as opposed to the connection failing. Told apart because the two mean
+ * different things to the caller: "This operation was aborted" was all session 807684e9 heard of
+ * a render that simply needed longer than its budget, and it retried the same settings.
+ */
+class UpstreamTimeoutError extends Error {
+  constructor(readonly url: string, readonly timeoutMs: number) {
+    super(`Request to ${url} timed out after ${Math.round(timeoutMs / 1000)} s`);
+    this.name = "UpstreamTimeoutError";
+  }
+}
+
 async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
   try {
     return await fetch(url, { ...init, signal: controller.signal });
   } catch (error) {
+    if (timedOut) throw new UpstreamTimeoutError(url, timeoutMs);
     const detail = error instanceof Error ? error.message : String(error);
     throw new Error(`Request to ${url} failed: ${detail}`);
   } finally {

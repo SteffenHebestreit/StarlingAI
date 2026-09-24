@@ -64,6 +64,9 @@ export const STATE_DEPENDENT_TOOL_NAMES: ReadonlySet<string> = new Set([
   "request_human_assist",
   // Each call delegates again; two identical delegations are two pieces of work.
   "delegate_to_agent",
+  // Each call is a new render: "make another one" repeats the call verbatim, and in a chat the
+  // person may choose different settings for it. A replay handed back the previous picture as new.
+  "generate_image",
   // Takes no required arguments, so its signature never varies — and its result depends entirely on
   // the plan and the outcomes recorded against it, both of which change between calls. Its resume
   // path is a second call with the same shape.

@@ -218,6 +218,41 @@ describe("failed tool calls inside a delegated run", () => {
     expect(result.metadata?.["specialistToolFailures"]).toEqual([DRAW_FAILURE]);
   }, 30_000);
 
+  it("records a call the user declined as their choice, and a coordinator passes that on", async () => {
+    // A Skip in generate_image's settings step: success:false, so the specialist neither retries nor
+    // claims a picture, but not a failure of the render. It was listed as one, by its flag alone.
+    const SKIP = "The user skipped this render in the settings step, so nothing was rendered.";
+    await registerLeafTools();
+    const { registerTool } = await import("../tools/registry.js");
+    registerTool({
+      name: "generate_image",
+      description: "Generate an image.",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return { success: false, output: "", error: SKIP, metadata: { settings: { source: "user_skipped" }, declinedByUser: true } };
+      },
+    });
+    completeMock.mockImplementation(async (messages: Message[]) => {
+      if (systemIncludes(messages, "LEAF-7F2")) {
+        return toolResultsIn(messages) === 0 ? call("g1", "generate_image", { prompt: "harbour at dusk" }) : answer("The user skipped the render.");
+      }
+      if (toolResultsIn(messages) === 0) {
+        return call("dl1", "delegate_to_agent", { agentName: "image_creator", task: "Draw the harbour at dusk." });
+      }
+      return answer("Nothing was drawn: the user skipped the render.");
+    });
+
+    const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+    const result = await runSubAgentWithStats({
+      agentName: "art_director",
+      task: "Get a picture of the harbour at dusk drawn.",
+      parentSessionId: "parent-failures-declined",
+      workspacePath: tempDir,
+    });
+
+    expect(result.toolFailures).toEqual([{ agent: "image_creator", tool: "generate_image", error: SKIP, declinedByUser: true }]);
+  }, 30_000);
+
   it("a coordinator passes on the failures of the specialist it delegated to", async () => {
     await registerLeafTools();
     completeMock.mockImplementation(async (messages: Message[]) => {

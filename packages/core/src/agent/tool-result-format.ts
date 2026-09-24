@@ -27,7 +27,7 @@ import {
   looksLikeInterruptedDelegationWithoutUsableEvidence,
 } from "./interrupted-delegation-evidence.js";
 import { collectArtifactRecords, type ArtifactRecord } from "./artifact-metadata.js";
-import { PRODUCED_FILES_HEADER, TOOL_FAILURES_HEADER } from "./delegated-run-record.js";
+import { PRODUCED_FILES_HEADER, TOOL_DECLINES_HEADER, TOOL_FAILURES_HEADER } from "./delegated-run-record.js";
 import { defangFramingMarkers } from "../guardrails/framing-markers.js";
 
 export function truncateForContext(value: string, maxChars: number): string {
@@ -140,13 +140,16 @@ function producedFileLine(record: ArtifactRecord, frameAgent: string | undefined
   return `- ${singleLine(record.ref, 200)}${qualifiers ? ` (${qualifiers})` : ""}`;
 }
 
-function toolFailureLines(failures: unknown, frameAgent: string | undefined): string[] {
+/** The recorded calls that failed, or with `declined` those the user declined (a Skip), which are
+ *  their choice and read as a broken tool when listed among the failures. */
+function toolFailureLines(failures: unknown, frameAgent: string | undefined, declined = false): string[] {
   if (!Array.isArray(failures)) return [];
   // A specialist retrying the same call gets one line with a count, not one line per retry.
   const counts = new Map<string, number>();
   for (const entry of failures) {
     if (!entry || typeof entry !== "object") continue;
     const value = entry as Record<string, unknown>;
+    if ((value["declinedByUser"] === true) !== declined) continue;
     const tool = recordedName(value["tool"]);
     if (!tool) continue;
     const agent = recordedName(value["agent"]);
@@ -181,6 +184,7 @@ export function formatDelegatedRunRecord(metadata?: Record<string, unknown>): st
       PRODUCED_FILES_MAX_LINES,
     ),
     cappedBlock(TOOL_FAILURES_HEADER, toolFailureLines(metadata["specialistToolFailures"], frameAgent), TOOL_FAILURES_MAX_LINES),
+    cappedBlock(TOOL_DECLINES_HEADER, toolFailureLines(metadata["specialistToolFailures"], frameAgent, true), TOOL_FAILURES_MAX_LINES),
   ].filter(Boolean).join("\n");
 }
 

@@ -40,8 +40,9 @@ function userRec(username: string, role: string, displayName?: string): Record<s
 
 async function buildAuthApp(): Promise<Hono> {
   const auth = await import("../gateway/auth.js");
-  const { getConfig, updateConfig } = await import("../config/loader.js");
+  const { getConfig } = await import("../config/loader.js");
   const { logAudit } = await import("../audit/logger.js");
+  const { registerUserRoutes } = await import("../gateway/user-routes.js");
 
   const app = new Hono();
 
@@ -85,33 +86,9 @@ async function buildAuthApp(): Promise<Hono> {
     return c.json(me);
   });
 
-  app.post("/api/auth/users", async (c) => {
-    const actor = await auth.authenticatedUser(c.req.header("Authorization"));
-    if (!actor) return c.json({ error: "Unauthorized" }, 401);
-    if (!auth.userHasRole(actor, "operator")) {
-      return c.json({ error: "Operator role required" }, 403);
-    }
-    let body: { username?: unknown; password?: unknown; displayName?: unknown; role?: unknown };
-    try { body = await c.req.json(); } catch { return c.json({ error: "Invalid JSON body" }, 400); }
-    const username = typeof body.username === "string" ? body.username.trim().toLowerCase() : "";
-    const password = typeof body.password === "string" ? body.password : "";
-    const displayName = typeof body.displayName === "string" ? body.displayName : undefined;
-    const role = body.role === "viewer" ? "viewer" : "operator";
-    if (!username || !/^[a-z0-9_.-]+$/.test(username)) return c.json({ error: "username invalid" }, 400);
-    if (password.length < 8) return c.json({ error: "password too short" }, 400);
-    if (getConfig().auth.users.find((u) => u.username.toLowerCase() === username)) {
-      return c.json({ error: "exists" }, 409);
-    }
-    const passwordHash = await auth.hashPassword(password);
-    const createdAt = new Date().toISOString();
-    updateConfig((raw) => {
-      const a = (raw["auth"] = (raw["auth"] as Record<string, unknown>) ?? {});
-      const users = (a["users"] = (a["users"] as unknown[] | undefined) ?? []);
-      (users as unknown[]).push({ username, passwordHash, displayName, role, createdAt });
-      if (a["enabled"] !== true) a["enabled"] = true;
-    });
-    return c.json({ username, displayName, role, createdAt });
-  });
+  // The REAL account routes. A copy of the old operator-gated POST lived here and kept asserting
+  // the contract the admin gate replaced (see user-routes.ts).
+  registerUserRoutes(app);
 
   return app;
 }
@@ -290,10 +267,10 @@ describe("multi-user auth — user creation", () => {
   });
 
   it("creates a user and persists the bcrypt hash to config", async () => {
-    tempDir = writeAuthConfig({ auth: { enabled: true, users: [userRec("admin", "operator")] } });
+    tempDir = writeAuthConfig({ auth: { enabled: true, users: [userRec("admin", "admin")] } });
     vi.resetModules();
     const auth = await import("../gateway/auth.js");
-    const actorToken = await auth.createToken("admin", { role: "operator" });
+    const actorToken = await auth.createToken("admin", { role: "admin" });
     const app = await buildAuthApp();
 
     const res = await app.request("/api/auth/users", {
@@ -321,10 +298,10 @@ describe("multi-user auth — user creation", () => {
   });
 
   it("rejects passwords shorter than 8 chars", async () => {
-    tempDir = writeAuthConfig({ auth: { enabled: true, users: [userRec("admin", "operator")] } });
+    tempDir = writeAuthConfig({ auth: { enabled: true, users: [userRec("admin", "admin")] } });
     vi.resetModules();
     const auth = await import("../gateway/auth.js");
-    const actorToken = await auth.createToken("admin", { role: "operator" });
+    const actorToken = await auth.createToken("admin", { role: "admin" });
     const app = await buildAuthApp();
 
     const res = await app.request("/api/auth/users", {
@@ -339,11 +316,11 @@ describe("multi-user auth — user creation", () => {
     const auth = await import("../gateway/auth.js");
     const hash = await auth.hashPassword("12345678");
     tempDir = writeAuthConfig({
-      auth: { enabled: true, users: [{ username: "alice", passwordHash: hash, createdAt: "2026-04-28T00:00:00Z" }] },
+      auth: { enabled: true, users: [{ username: "alice", passwordHash: hash, role: "admin", createdAt: "2026-04-28T00:00:00Z" }] },
     });
     vi.resetModules();
     const auth2 = await import("../gateway/auth.js");
-    const actorToken = await auth2.createToken("alice", { role: "operator" });
+    const actorToken = await auth2.createToken("alice", { role: "admin" });
     const app = await buildAuthApp();
 
     const res = await app.request("/api/auth/users", {
@@ -422,10 +399,10 @@ describe("multi-user auth Wave B — role gating", () => {
     });
     expect(res.status).toBe(403);
     const body = await res.json() as { error: string };
-    expect(body.error).toMatch(/operator role/i);
+    expect(body.error).toMatch(/admin role/i);
   });
 
-  it("operators can create viewer accounts via role parameter", async () => {
+  it("operators cannot create accounts either (403): operator is every account's default role", async () => {
     tempDir = writeAuthConfig({ auth: { enabled: true, users: [userRec("alice", "operator")] } });
     vi.resetModules();
     const auth = await import("../gateway/auth.js");
@@ -435,6 +412,21 @@ describe("multi-user auth Wave B — role gating", () => {
     const res = await app.request("/api/auth/users", {
       method: "POST",
       headers: { Authorization: `Bearer ${operatorToken}`, "content-type": "application/json" },
+      body: JSON.stringify({ username: "newviewer", password: "pass1234", role: "viewer" }),
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it("admins can create viewer accounts via role parameter", async () => {
+    tempDir = writeAuthConfig({ auth: { enabled: true, users: [userRec("root", "admin")] } });
+    vi.resetModules();
+    const auth = await import("../gateway/auth.js");
+    const adminToken = await auth.createToken("root", { role: "admin" });
+    const app = await buildAuthApp();
+
+    const res = await app.request("/api/auth/users", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${adminToken}`, "content-type": "application/json" },
       body: JSON.stringify({ username: "newviewer", password: "pass1234", role: "viewer" }),
     });
     expect(res.status).toBe(200);

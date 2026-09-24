@@ -509,12 +509,23 @@ function buildTaskSignature(title: string, task: string, dependsOn: string[] = [
   return `${normalizedTitle}::${normalizedTask}::${normalizedDeps}`;
 }
 
+/**
+ * The turn deadline a delegation clamps to, as it stands now. The static _turnDeadlineMs was
+ * refreshed only after a tool call returned, so the next step of an execute_plan, a dependent
+ * task-graph node, or a delegation a specialist made after a wait in its subtree, ran to the
+ * deadline from before the person answered (review #14).
+ */
+function currentTurnDeadlineMs(ctx: ToolContext): number | undefined {
+  return ctx._liveTurnDeadlineMs?.() ?? ctx._turnDeadlineMs;
+}
+
 function resolveTaskLeaseTtlMs(ctx: ToolContext, agentTimeoutMs?: number | "unbound"): number {
   const configured = typeof ctx.turnTimeoutOverrideMs === "number" && ctx.turnTimeoutOverrideMs > 0
     ? ctx.turnTimeoutOverrideMs
     : typeof agentTimeoutMs === "number" ? agentTimeoutMs : 30_000;
-  const remaining = typeof ctx._turnDeadlineMs === "number"
-    ? Math.max(0, ctx._turnDeadlineMs - Date.now())
+  const turnDeadlineMs = currentTurnDeadlineMs(ctx);
+  const remaining = typeof turnDeadlineMs === "number"
+    ? Math.max(0, turnDeadlineMs - Date.now())
     : undefined;
   const bounded = remaining === undefined ? configured : Math.min(configured, remaining);
   return Math.max(5_000, Math.min(bounded, 60_000));
@@ -1601,7 +1612,8 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       // DST-103 result following: the winner publishes a fence-guarded durable
       // result on the lease key — wait for it (bounded by the remaining turn
       // budget, capped) instead of duplicating the work.
-      const remainingBudgetMs = typeof ctx._turnDeadlineMs === "number" ? ctx._turnDeadlineMs - Date.now() : 0;
+      const turnDeadlineMs = currentTurnDeadlineMs(ctx);
+      const remainingBudgetMs = typeof turnDeadlineMs === "number" ? turnDeadlineMs - Date.now() : 0;
       const followWaitMs = Math.max(0, Math.min(remainingBudgetMs - 5_000, 30_000));
       const winner = await waitForTaskLeaseResult(leaseScope, { timeoutMs: followWaitMs });
       if (winner) {
@@ -1965,10 +1977,11 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       // and the SAME reserve, so the hard ceiling, the deadline handed down and the E18 soft
       // deadline cannot drift apart the way the hard/soft pair once did.
       const delegationNowMs = Date.now();
+      const parentDeadlineMs = currentTurnDeadlineMs(ctx);
       const synthesisReserveMs = getConfig().orchestration?.subAgentSynthesisReserveMs ?? 0;
       const delegationCeilingMs = resolveDelegationCeilingMs({
         callerBudgetMs: ctx.turnTimeoutOverrideMs,
-        parentDeadlineMs: ctx._turnDeadlineMs,
+        parentDeadlineMs,
         nowMs: delegationNowMs,
         synthesisReserveMs,
       });
@@ -1978,7 +1991,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       // instead of every level racing the same absolute instant with nothing left over for the
       // level above it. No depth counter needed; the sequence is monotonically non-increasing.
       const delegationDeadlineMs = resolveDelegationDeadlineMs({
-        parentDeadlineMs: ctx._turnDeadlineMs,
+        parentDeadlineMs,
         nowMs: delegationNowMs,
         synthesisReserveMs,
       });

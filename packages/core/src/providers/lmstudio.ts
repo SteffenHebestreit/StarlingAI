@@ -382,9 +382,11 @@ export const FALLBACK_CONTEXT_WINDOW_TOKENS = 32_768;
 export const MIN_USABLE_OUTPUT_TOKENS = 8_192;
 
 /** The context window to budget against: the configured number when it is usable, the
- *  schema default otherwise. `PATCH /api/agents/:name/model` copies `contextWindow`
- *  through a bare allow-list cast, so a null/string/NaN can reach here; before the
- *  budget was derived it was inert, now it would serialise as `max_tokens: null`. */
+ *  schema default otherwise. `PATCH /api/agents/:name/model` used to copy `contextWindow`
+ *  into the loaded config unvalidated, so a null/string/NaN could reach here; it now saves
+ *  through the config schema like every other settings route. Kept as a backstop: a bad
+ *  window was inert before the budget was derived from it, now it would serialise as
+ *  `max_tokens: null`. */
 function usableContextWindow(contextWindow: number): number {
   return Number.isFinite(contextWindow) && contextWindow > 0
     ? Math.floor(contextWindow)

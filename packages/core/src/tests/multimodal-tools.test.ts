@@ -584,8 +584,10 @@ describe("multimodal and browser direct tools", () => {
     });
 
     expect(result.success).toBe(true);
-    expect(result.output).toContain(`${PRODUCT.stateDirName}/generated/tts-`);
-    expect(result.output).toContain(".wav");
+    // Once under generated/ — the old `.starlingai/generated/` default was re-rooted into a hidden,
+    // doubled generated/.starlingai/generated/ (session 807684e9).
+    expect(result.output).toMatch(/Audio saved to generated\/tts-\d+\.wav$/);
+    expect(result.output).not.toContain(PRODUCT.stateDirName);
   });
 
   it("sends voice and language overrides in the TTS request body", async () => {

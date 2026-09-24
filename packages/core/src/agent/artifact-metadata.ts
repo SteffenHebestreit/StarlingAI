@@ -58,3 +58,59 @@ export function collectArtifactRecords(metadata: unknown): ArtifactRecord[] {
   if (metadata && typeof metadata === "object") visit((metadata as Record<string, unknown>)["artifacts"], 0);
   return [...byRef.values()];
 }
+
+/**
+ * Appends the attachment entries a tool result's metadata describes — its own file, then every
+ * nested `artifacts` record — to `out`, skipping any whose key is in `seen`. The runtime pins
+ * these on a turn's final answer; the transcript reads the same shape back, so both sides derive
+ * an entry, and its key, here.
+ */
+export function extractArtifactsFromMetadata(
+  metadata: Record<string, unknown>,
+  out: Array<Record<string, unknown>>,
+  seen: Set<string>,
+): void {
+  const filename = typeof metadata["filename"] === "string" ? metadata["filename"].trim() : "";
+  const outputPath = typeof metadata["outputPath"] === "string" ? metadata["outputPath"].trim() : "";
+  const externalUrl = typeof metadata["externalUrl"] === "string" ? metadata["externalUrl"].trim() : "";
+
+  if (filename || outputPath || externalUrl) {
+    const key = [outputPath, externalUrl, filename, typeof metadata["sourceTool"] === "string" ? metadata["sourceTool"] : ""].join("::");
+    if (!seen.has(key)) {
+      seen.add(key);
+      // A `filename` is required by the transcript builder. Derive one when
+      // only a path is available. `pop()` can yield an empty string for a
+      // trailing-slash path (e.g. "subdir/") — fall back to the raw path
+      // so the transcript builder never sees an empty filename.
+      const derivedFilename = filename
+        || (outputPath ? (outputPath.split("/").pop() || outputPath) : "")
+        || externalUrl;
+      const entry: Record<string, unknown> = { filename: derivedFilename };
+      if (outputPath) entry["relativePath"] = outputPath;
+      if (externalUrl) entry["externalUrl"] = externalUrl;
+      if (typeof metadata["contentType"] === "string") entry["contentType"] = metadata["contentType"];
+      if (typeof metadata["previewMode"] === "string") entry["previewMode"] = metadata["previewMode"];
+      if (typeof metadata["size"] === "number") entry["size"] = metadata["size"];
+      else if (typeof metadata["bytes"] === "number") entry["size"] = metadata["bytes"];
+      if (metadata["isDirectory"] === true) entry["isDirectory"] = true;
+      if (typeof metadata["title"] === "string" && metadata["title"]) entry["title"] = metadata["title"];
+      if (typeof metadata["sourceTool"] === "string" && metadata["sourceTool"]) entry["sourceTool"] = metadata["sourceTool"];
+      out.push(entry);
+    }
+  }
+
+  const nested = metadata["artifacts"];
+  if (Array.isArray(nested)) {
+    for (const item of nested) {
+      if (item && typeof item === "object") {
+        extractArtifactsFromMetadata(item as Record<string, unknown>, out, seen);
+      }
+    }
+  }
+}
+
+/** Identity of an attachment entry as extractArtifactsFromMetadata builds it. */
+export function attachmentEntryKey(entry: { relativePath?: unknown; externalUrl?: unknown; filename?: unknown; sourceTool?: unknown }): string {
+  const field = (value: unknown): string => (typeof value === "string" ? value.trim() : "");
+  return [field(entry.relativePath), field(entry.externalUrl), field(entry.filename), field(entry.sourceTool)].join("::");
+}

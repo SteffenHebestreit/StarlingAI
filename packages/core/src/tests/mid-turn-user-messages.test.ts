@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../agent/session.js";
 import { findRecentDelegateEvidence } from "../agent/interrupted-delegation-evidence.js";
 import { collectTurnArtifactAttachments } from "../agent/runtime.js";
@@ -84,5 +84,161 @@ describe("mid-turn user messages do not end the turn", () => {
     };
     expect(build(STEERING)).toHaveLength(1);
     expect(build(UNMARKED_STEERING)).toHaveLength(0);
+  });
+});
+
+/**
+ * On reload a steered turn is split the way it looked live: the part before the message, the
+ * message, the part after it. The history keeps the model-facing wrapper and the whole turn's
+ * swarm state and files on the final answer; the transcript shows the person's words only, and
+ * each part only what happened inside it.
+ */
+describe("a steered turn in the transcript", () => {
+  afterEach(() => { vi.useRealTimers(); });
+
+  const WRAPPER = "[USER STEERING — sent mid-turn] The user added the following while you were working. "
+    + "Take it into account in the REMAINING steps of this turn: adjust course, drop now-irrelevant work, and prioritise it. "
+    + "Do not restart from scratch or re-do already-completed steps.\n";
+  const steered = (messages: Array<{ id: string; text: string }>) => ({
+    role: "user" as const,
+    content: WRAPPER + messages.map((message) => `- ${message.text}`).join("\n"),
+    metadata: { midTurn: true, midTurnSource: "user", steering: messages },
+  });
+  const delegation = (id: string) => ({
+    role: "assistant",
+    content: "",
+    tool_calls: [{ id, type: "function", function: { name: "delegate_to_agent", arguments: JSON.stringify({ agentName: "image_creator" }) } }],
+  }) as never;
+  const imageResult = (callId: string, file: string) => ({
+    role: "tool",
+    content: `Saved generated/images/${file}`,
+    tool_call_id: callId,
+    metadata: { agentName: "image_creator", artifacts: [{ outputPath: `generated/images/${file}`, filename: file, sourceTool: "generate_image" }] },
+  }) as never;
+  /** Pins the clock so the history timestamps are known. */
+  const clockAt = (time: string) => vi.setSystemTime(new Date(`2026-09-23T${time}.000Z`));
+
+  it("shows each message the person sent as their own words, never the wrapper, and marks where the turn went on", () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const session = makeSession();
+    clockAt("10:00:00"); session.addMessage({ role: "user", content: "render the harbour" });
+    clockAt("10:00:01"); session.addMessage(delegation("call-1"));
+    clockAt("10:00:30"); session.addMessage(imageResult("call-1", "a.png"));
+    clockAt("10:00:40"); session.addMessage(steered([
+      { id: "steer-aaa-001", text: "nimm das qwen model" },
+      { id: "steer-aaa-002", text: "und mach es realer" },
+    ]));
+    clockAt("10:01:20"); session.addMessage({ role: "assistant", content: "Done." });
+
+    const transcript = session.toTranscript();
+    expect(transcript.map((entry) => [entry.role, entry.content, entry.midTurn, entry.steeringId])).toEqual([
+      ["user", "render the harbour", undefined, undefined],
+      ["assistant", "", undefined, undefined],
+      ["user", "nimm das qwen model", true, "steer-aaa-001"],
+      ["user", "und mach es realer", true, "steer-aaa-002"],
+      ["assistant", "Done.", undefined, undefined],
+    ]);
+    expect(transcript[2]!.id).toBe(`${session.id}:3`);
+    expect(transcript[3]!.id).toBe(`${session.id}:3+1`);
+    expect(JSON.stringify(transcript)).not.toContain("USER STEERING");
+    expect(transcript.map((entry) => entry.continued)).toEqual([undefined, true, undefined, undefined, undefined]);
+    expect(transcript.map((entry) => entry.segmentStartedAt)).toEqual([undefined, undefined, undefined, undefined, "2026-09-23T10:00:40.000Z"]);
+  });
+
+  it("previews a turn that is still running with the person's words", () => {
+    const session = makeSession();
+    session.addMessage({ role: "user", content: "render the harbour" });
+    session.addMessage(steered([{ id: "steer-bbb-001", text: "nimm das qwen model" }]));
+    expect(session.toSummary().preview).toBe("nimm das qwen model");
+  });
+
+  it("reads a message saved before the steering metadata existed from its wrapper", () => {
+    const session = makeSession();
+    session.addMessage({ role: "user", content: "compare the regions" });
+    session.addMessage({ role: "user", content: WRAPPER + "- also cover Slovenia\n- skip Croatia", metadata: { midTurn: true } });
+    session.addMessage({ role: "user", content: WRAPPER + "- one message\nwith a second line", metadata: { midTurn: true } });
+    const shown = session.toTranscript().filter((entry) => entry.midTurn).map((entry) => entry.content);
+    expect(shown).toEqual(["also cover Slovenia", "skip Croatia", "one message\nwith a second line"]);
+  });
+
+  it("leaves the oversight redirect out, so the parts around it read as one", () => {
+    for (const metadata of [{ midTurn: true, midTurnSource: "oversight" }, { midTurn: true }]) {
+      const session = makeSession();
+      session.addMessage({ role: "user", content: "build the site" });
+      session.addMessage(delegation("call-1"));
+      session.addMessage(imageResult("call-1", "a.png"));
+      session.addMessage({ role: "user", content: "[OVERSIGHT — max-effort progress check] A progress monitor judged this turn is not converging.", metadata });
+      expect(session.toSummary().preview).not.toContain("OVERSIGHT");
+      session.addMessage(delegation("call-2"));
+      session.addMessage(imageResult("call-2", "b.png"));
+      session.addMessage({ role: "assistant", content: "Built it." });
+
+      const transcript = session.toTranscript();
+      expect(transcript.map((entry) => entry.role)).toEqual(["user", "assistant"]);
+      expect(transcript[1]!.toolCalls).toHaveLength(2);
+      expect(transcript[1]!.continued).toBeUndefined();
+      expect(JSON.stringify(transcript)).not.toContain("OVERSIGHT");
+    }
+  });
+
+  it("gives each part only the specialist attempts that started inside it", () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const attempt = (startedAt: string, status: "completed" | "failed") => ({
+      agentName: "image_creator", status, startedAt: `2026-09-23T${startedAt}.000Z`,
+    });
+    const swarmState = {
+      objective: "render the harbour",
+      startedAt: "2026-09-23T10:00:00.000Z",
+      updatedAt: "2026-09-23T10:01:20.000Z",
+      tasks: {
+        before: { id: "before", title: "fast render", status: "completed", dependsOn: [], attempts: [attempt("10:00:02", "completed")] },
+        after: { id: "after", title: "qwen render", status: "completed", dependsOn: [], attempts: [attempt("10:00:42", "completed")] },
+        retried: {
+          id: "retried", title: "upscale", status: "completed", dependsOn: [],
+          attempts: [attempt("10:00:05", "failed"), attempt("10:00:45", "completed")],
+          totals: { attempts: 2, toolCount: 2, iterations: 2, promptTokens: 0, completionTokens: 0, totalTokens: 0, durationMs: 0 },
+        },
+      },
+    };
+    const session = makeSession();
+    clockAt("10:00:00"); session.addMessage({ role: "user", content: "render the harbour" });
+    clockAt("10:00:01"); session.addMessage(delegation("call-1"));
+    clockAt("10:00:30"); session.addMessage(imageResult("call-1", "a.png"));
+    clockAt("10:00:40"); session.addMessage(steered([{ id: "steer-ccc-001", text: "nimm das qwen model" }]));
+    clockAt("10:00:41"); session.addMessage(delegation("call-2"));
+    clockAt("10:01:10"); session.addMessage(imageResult("call-2", "b.png"));
+    clockAt("10:01:20"); session.addMessage({ role: "assistant", content: "Rendered with Qwen.", metadata: { swarmState } });
+
+    const [, before, , after] = session.toTranscript();
+    const startsOf = (entry: typeof before) => Object.fromEntries(Object.entries(entry!.swarmState?.tasks ?? {})
+      .map(([key, task]) => [key, task.attempts.map((a) => a.startedAt.slice(11, 19))]));
+    expect(startsOf(before)).toEqual({ before: ["10:00:02"], retried: ["10:00:05"] });
+    expect(startsOf(after)).toEqual({ after: ["10:00:42"], retried: ["10:00:45"] });
+    // A task split across parts reads as each part's own attempt, without the whole task's totals.
+    expect(before!.swarmState!.tasks["retried"]!.status).toBe("failed");
+    expect(before!.swarmState!.tasks["retried"]!.totals).toBeUndefined();
+    // The saved record stays whole.
+    const saved = session.getHistory().at(-1)!.metadata!["swarmState"] as typeof swarmState;
+    expect(saved.tasks.retried.attempts).toHaveLength(2);
+  });
+
+  it("does not list an earlier part's files again on the answer after the message", () => {
+    const session = makeSession();
+    session.addMessage({ role: "user", content: "render the harbour" });
+    session.addMessage(delegation("call-1"));
+    session.addMessage(imageResult("call-1", "a.png"));
+    session.addMessage(steered([{ id: "steer-ddd-001", text: "now write the caption" }]));
+    // The answer pins the WHOLE turn's files, as persistAssistantTurnState does, plus one no tool
+    // call of this transcript recorded.
+    const attachments = [...collectTurnArtifactAttachments(session), { filename: "caption.md", relativePath: "out/caption.md" }];
+    session.addMessage({ role: "assistant", content: "Here is the caption.", metadata: { attachments } });
+
+    const transcript = session.toTranscript();
+    const answer = transcript.at(-1)!;
+    expect(answer.content).toBe("Here is the caption.");
+    expect(answer.attachments?.map((attachment) => attachment.filename)).toEqual(["caption.md"]);
+    // The earlier part still shows its image, through its own tool call.
+    expect(transcript[1]!.toolCalls?.[0]?.metadata?.["artifacts"]).toBeDefined();
+    expect((session.getHistory().at(-1)!.metadata!["attachments"] as unknown[])).toHaveLength(2);
   });
 });

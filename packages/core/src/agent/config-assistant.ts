@@ -8,7 +8,8 @@ import {
   type ConversationConfigChange,
   type ConversationPromptChange,
   MAIN_ASSISTANT_PROMPT_TARGET,
-  isProtectedConfigPath,
+  isCredentialFieldName,
+  isProtectedConfigChange,
 } from "./config-assistant-proposals.js";
 import { formatFlowMemoryGuidance } from "./flow-memory.js";
 
@@ -122,8 +123,9 @@ function parseDraftResponse(raw: string, targetAgent?: string): ConfigAssistantD
   const validations = [...source.validations];
   const configChanges = dedupeConfigChanges(source.configChanges)
     .filter((change) => {
-      if (!isProtectedConfigPath(change.path)) return true;
-      validations.push(`Manual step required: protected path '${change.path}' was excluded from the applyable proposal.`);
+      // The apply route's own predicate (path AND value), so what is offered here is what applies.
+      if (!isProtectedConfigChange(change)) return true;
+      validations.push(`Manual step required: '${change.path}' is a protected path or sets a credential, so it was excluded from the applyable proposal.`);
       return false;
     });
 
@@ -355,7 +357,11 @@ function redactSensitive(value: unknown): unknown {
 
   const output: Record<string, unknown> = {};
   for (const [key, entry] of Object.entries(value)) {
-    if (/(secret|password|token|apikey|api_key|privatekey|private_key|credential|credentials|headers)/i.test(key)) {
+    // A credential field by the predicate drafting and Apply share, anchored to the end of the
+    // name, and a header map, whose credentials go by names of their own (Authorization). Matched
+    // anywhere in the name, "token" hid maxTokens, a knob the assistant may propose, from the
+    // very snapshot it drafts from (r3 A-security #5).
+    if (isCredentialFieldName(key) || /headers/i.test(key)) {
       continue;
     }
     output[key] = redactSensitive(entry);

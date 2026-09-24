@@ -19,6 +19,8 @@ import { createHash } from "node:crypto";
 import type { LLMMessage, LLMResponse, LLMToolDef, ChatProvider, CompletionCallOptions } from "../providers/lmstudio.js";
 import { DeadlineAbort } from "../providers/lmstudio.js";
 import { composeSubAgentMessages, trimSubAgentHistory } from "./sub-agent-history.js";
+import { bindRequestUserInput, HUMAN_WAIT_RECHECK_MS, trackHumanWaits } from "./user-input-broker.js";
+import { isDeclinedByUser } from "./user-input.js";
 import { getConfig } from "../config/loader.js";
 import { currentEffortProfile, effectiveOrchestration, effectiveSubAgentTurnSloMs } from "../runtime/effort-context.js";
 import { getToolsAsLLMDefs, rerankToolsForTask, executeTool, normalizeToolCall, type ToolContext, type SwarmState, type ToolResult } from "../tools/registry.js";
@@ -1236,6 +1238,11 @@ const IDEMPOTENT_TOOLS = new Set<string>([
   "workspace_search",
 ]);
 
+// Tools whose every call is new work, so even the consecutive-duplicate cache below never answers
+// one: a repeated generate_image is "make another one", and in a chat the person may choose
+// different settings for it. The turn loop exempts the same tool (STATE_DEPENDENT_TOOL_NAMES).
+const NEVER_REPLAYED_TOOLS = new Set<string>(["generate_image"]);
+
 /**
  * Structural completeness check for a written text artifact, used by the
  * deterministic artifact completion ("done is done"). A run that gets cut by
@@ -2090,9 +2097,9 @@ export function readToolFailures(value: unknown): SubAgentToolFailure[] {
   if (!Array.isArray(value)) return [];
   return value.flatMap((entry): SubAgentToolFailure[] => {
     if (!entry || typeof entry !== "object") return [];
-    const { agent, tool, error } = entry as Record<string, unknown>;
+    const { agent, tool, error, declinedByUser } = entry as Record<string, unknown>;
     if (typeof tool !== "string" || typeof error !== "string") return [];
-    return [{ ...(typeof agent === "string" ? { agent } : {}), tool, error }];
+    return [{ ...(typeof agent === "string" ? { agent } : {}), tool, error, ...(declinedByUser === true ? { declinedByUser } : {}) }];
   });
 }
 
@@ -2235,6 +2242,9 @@ export interface SubAgentToolFailure {
   tool: string;
   /** First line of the error, redacted. */
   error: string;
+  /** The call did nothing because the person said no (a Skip): listed as their choice, not as a
+   *  failure. Set from the result's own flag (isDeclinedByUser), never from its text. */
+  declinedByUser?: true;
 }
 
 export interface SubAgentRunResult {
@@ -2481,6 +2491,13 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         { agentName: opts.agentName, runSessionId: subSessionId, turnTimeoutMs },
         "Turn deadline suppressed — this run was granted unbounded budget",
       );
+      deadlineArmed = false;
+      return;
+    }
+    // A person is answering a question this run (or one it started) asked; the wait's end moves
+    // the deadline by the wait's length and re-arms it (humanWaits, below).
+    if (humanWaits.isWaiting()) {
+      timeoutHandle = setTimeout(onDeadline, HUMAN_WAIT_RECHECK_MS);
       return;
     }
     // THE DEADLINE IS A LIVENESS PROBE, NOT A BUDGET.
@@ -2523,11 +2540,29 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       return;
     }
     turnTimeoutReached = true;
+    deadlineArmed = false;
     // Only reachable when a deadline was armed, which requires a positive budget; the
     // fallback keeps the abort well-typed without inventing a second source of truth.
     deadlineAc.abort(new DeadlineAbort(turnTimeoutMs ?? 0));
   };
   if (turnTimeoutMs) timeoutHandle = setTimeout(onDeadline, turnTimeoutMs);
+  // A PERSON ANSWERING IS NOT A STALLED RUN. A tool waiting on the person's answer produces
+  // nothing, and every clock here reads "nothing" as dead: the deadline latched while the card
+  // was open, and the run came back from the answer straight into timeout synthesis instead of
+  // doing what the person had just configured. While a wait under this run is open the deadline
+  // and the supervisor hold; when it ends, its length moves every wall this run measures — the
+  // hard deadline, the pre-deadline synthesis window, the caller's soft deadline — by exactly
+  // that much.
+  let deadlineArmed = Boolean(turnTimeoutMs);
+  let humanWaitCreditMs = 0;
+  const humanWaits = trackHumanWaits(subSessionId, (waitedMs) => {
+    humanWaitCreditMs += waitedMs;
+    if (effectiveDeadlineAt === undefined) return;
+    effectiveDeadlineAt += waitedMs;
+    if (!deadlineArmed) return;
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+    timeoutHandle = setTimeout(onDeadline, Math.max(0, effectiveDeadlineAt - Date.now()));
+  });
   // Escape hatch 2 (grant AFTER the deadline already fired): swap in a fresh, un-aborted
   // controller so the run can actually call the model again. Nothing re-arms the timer —
   // an unbounded grant suspends the deadline for good, exactly as its comment promises;
@@ -3033,6 +3068,9 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       allowedAgents: opts.allowedAgents,
       allowedTools: effectiveToolNames,
       approvalCallback: opts.approvalCallback,
+      // Bound from the request context this run inherited, so it reaches every in-process depth
+      // whichever delegation path started the run; container runs never get here and have none.
+      requestUserInput: bindRequestUserInput({ requesterSessionId: subSessionId, sourceAgent: opts.agentName, signal }),
       humanInLoopSteps: opts.humanInLoopSteps,
       // The child's own delegations report to the same progress sink as the parent's, so a nested
       // specialist's start, finish and tool calls reach the dashboard instead of stopping one level down.
@@ -3053,6 +3091,9 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // Propagate the parent turn's deadline so this sub-agent's OWN delegations clamp to the same
       // remaining budget (D3). Inherited unchanged — nothing can run past the turn's hard abort.
       _turnDeadlineMs: opts._turnDeadlineMs,
+      // Credited as this run's waits end, so a delegation it makes after one clamps to the moved
+      // deadline, not the one it was handed (review #14).
+      _liveTurnDeadlineMs: () => opts._turnDeadlineMs === undefined ? undefined : opts._turnDeadlineMs + humanWaitCreditMs,
       signal,
     };
 
@@ -3182,6 +3223,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // handoff no longer pauses for an operator "continue" grant.
     const lrgWallThresholdMs = DEFAULT_SOFT_THRESHOLD_MS;
     const lrgTokenThreshold = DEFAULT_SOFT_THRESHOLD_TOKENS;
+    // The run's OWN time: wall time less what it spent waiting on the person or on work they
+    // approved (holdTurnClocks). Session 807684e9: a render the person had configured ran five
+    // minutes, and the first iteration after it asked them "keep going?" about those minutes.
+    const workingMs = (): number => Date.now() - runStartedAt - humanWaitCreditMs;
     // When the operator answers "stop" (polled via isStopRequested), we set
     // this so the next loop iteration goes straight to attemptTimeoutSynthesis
     // instead of making another LLM call.
@@ -4366,6 +4411,12 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
      */
     const superviseProgress = (trigger: "iteration" | "timer"): void => {
       if (lrgOperatorStop) return;
+      // No sample while a person is answering: a run parked on them makes no progress by design,
+      // and the next sample comes a full interval after the answer.
+      if (humanWaits.isWaiting()) {
+        lrgLastProgressCheckAt = Date.now();
+        return;
+      }
       if (Date.now() - lrgLastProgressCheckAt < PROGRESS_CHECK_INTERVAL_MS) return;
       lrgLastProgressCheckAt = Date.now();
       const cur = sampleProgress();
@@ -4382,7 +4433,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           runSessionId: subSessionId,
           ...(opts.parentSessionId ? { parentSessionId: opts.parentSessionId } : {}),
           reason: `${opts.agentName}: ${decision.reason}`,
-          elapsedMs: Date.now() - runStartedAt,
+          elapsedMs: workingMs(),
           completionTokens: usage.completionTokens,
           iterations,
         });
@@ -4509,7 +4560,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           lrgOperatorStop = true;
           turnTimeoutReached = true;
         } else if (
-          (Date.now() - runStartedAt) > lrgWallThresholdMs
+          workingMs() > lrgWallThresholdMs
           || usage.completionTokens > lrgTokenThreshold
         ) {
           // Effort-tier policy answers "this run is taking a while — keep going?"
@@ -4576,8 +4627,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
               agentName: opts.agentName,
               runSessionId: subSessionId,
               ...(opts.parentSessionId ? { parentSessionId: opts.parentSessionId } : {}),
-              reason: `${opts.agentName} has been generating for ${Math.round((Date.now() - runStartedAt) / 1000)}s and burned ${usage.completionTokens} completion tokens across ${iterations} iterations; ${toolCount} tool calls so far`,
-              elapsedMs: Date.now() - runStartedAt,
+              reason: `${opts.agentName} has been generating for ${Math.round(workingMs() / 1000)}s and burned ${usage.completionTokens} completion tokens across ${iterations} iterations; ${toolCount} tool calls so far`,
+              elapsedMs: workingMs(),
               completionTokens: usage.completionTokens,
               iterations,
             });
@@ -4857,7 +4908,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       if (
         opts.softDeadlineMs !== undefined
         && !softDeadlineInjected
-        && Date.now() >= opts.softDeadlineMs
+        && Date.now() >= opts.softDeadlineMs + humanWaitCreditMs
         && toolCount > 0
         && !softDeadlineDeferred
       ) {
@@ -6149,7 +6200,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         // immediately prior call, return the cached result with a warning
         // instead of wasting an iteration on a redundant network round-trip.
         const prev = lastToolCallSig.get(tc.name);
-        if (prev && prev.args === argsSig && !isLiveStateTool(tc.name)) {
+        if (prev && prev.args === argsSig && !isLiveStateTool(tc.name) && !NEVER_REPLAYED_TOOLS.has(tc.name)) {
           log.warn(
             { agentName: opts.agentName, tool: tc.name },
             "Sub-agent repeated identical tool call — returning cached result",
@@ -6179,7 +6230,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           continue;
         }
 
-        const result = await executeTool(tc.name, tc.arguments, toolContext);
+        const result = await executeTool(tc.name, tc.arguments, toolContext, { toolCallId: tc.id });
         executedToolThisIteration = true;
         if (isDelegationToolName(tc.name)) {
           delegationCallsThisIteration += 1;
@@ -6216,9 +6267,16 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           result,
         });
         // Recorded only here, where the call RAN. The branches above answer a call without running
-        // it, and an approval that was not granted is a refusal, not a failure of the work.
+        // it, and an approval that was not granted is a refusal, not a failure of the work. A call
+        // the person declined (a Skip in the settings step) is recorded as that: listed as a failure,
+        // it told the orchestrator the render had broken.
         if (!result.success && !isApprovalGateFailure(result.error ?? result.output)) {
-          toolFailures.push({ agent: opts.agentName, tool: tc.name, error: firstToolErrorLine(result) });
+          toolFailures.push({
+            agent: opts.agentName,
+            tool: tc.name,
+            error: firstToolErrorLine(result),
+            ...(isDeclinedByUser(result.metadata) ? { declinedByUser: true as const } : {}),
+          });
         }
         // A delegation brings its own specialists' failures along, so one two levels down reaches
         // the orchestrator too.
@@ -7537,6 +7595,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     });
   } finally {
     if (timeoutHandle) clearTimeout(timeoutHandle);
+    humanWaits.dispose();
     if (supervisorTimer) clearInterval(supervisorTimer);
     // The run's result is already computed; it is handed to the parent only once every
     // finding it gathered is in shared facts (or its distill hit the 60 s deadline).

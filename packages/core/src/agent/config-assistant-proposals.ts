@@ -172,21 +172,47 @@ export function hasPromptTarget(root: { subAgents?: Record<string, unknown> }, t
  * Everything else — providers, gateway, guardrails, channels, infrastructure,
  * multimodal, integrations, webhooks, sites, mcp, computerUse, etc. — is protected.
  * Additionally, credential-like segments are always blocked as a safety net.
+ *
+ * A segment is credential-like when its name ENDS in a credential word (apiKey, botToken,
+ * jwtSecret, secretAccessKey). Matched anywhere in the name, "token" caught maxTokens, a knob the
+ * assistant's own snapshot lists: such a proposal was shown as applyable and then refused.
  */
 const MUTABLE_TOP_LEVEL_KEYS = new Set(["agents", "subagents", "scenes"]);
+const CREDENTIAL_SEGMENT = /(?:secret|password|token|api_?key|private_?key|access_?key|credentials?)$/i;
+
+/** A field named as a credential: apiKey, botToken, jwtSecret, secretAccessKey — not maxTokens. */
+export function isCredentialFieldName(name: string): boolean {
+  return CREDENTIAL_SEGMENT.test(name);
+}
 
 export function isProtectedConfigPath(path: string): boolean {
   const normalized = path.trim().toLowerCase();
   if (!normalized) return true;
 
   // Credential-like segments are always blocked
-  if (/(secret|password|token|apikey|api_key|privatekey|private_key|credential|credentials)/i.test(normalized)) {
+  if (normalized.split(".").some(isCredentialFieldName)) {
     return true;
   }
 
   // Only allow changes under the mutable workspace keys
   const topKey = normalized.split(".")[0]!;
   return !MUTABLE_TOP_LEVEL_KEYS.has(topKey);
+}
+
+function carriesCredentialField(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(carriesCredentialField);
+  if (typeof value !== "object" || value === null) return false;
+  return Object.entries(value).some(([key, entry]) => isCredentialFieldName(key) || carriesCredentialField(entry));
+}
+
+/**
+ * A change drafting leaves out and the apply route refuses — one predicate for both, so a draft
+ * never offers what Apply will refuse. It is checked again at apply because the proposals file
+ * sits in the workspace, where more than the drafter can write. And the value counts too —
+ * `subAgents.x.model` set to `{ apiKey: … }` names no credential in its path.
+ */
+export function isProtectedConfigChange(change: { path: string; value: unknown }): boolean {
+  return isProtectedConfigPath(change.path) || carriesCredentialField(change.value);
 }
 
 function readAllConversationConfigProposals(workspacePath: string): ConversationConfigProposal[] {

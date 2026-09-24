@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, existsSync, watchFile, unwatchFile, mkdirS
 import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import JSON5 from "json5";
-import { ConfigSchema, type Config } from "./schema.js";
+import { ConfigSchema, type Config, type SubAgentConfig } from "./schema.js";
 import { validateComputerUseConfig } from "./computer-use-schema.js";
 import { NON_CONFIG_WORKSPACE_ZONES } from "../tools/workspace-path.js";
 import { logger } from "../logger.js";
@@ -42,11 +42,40 @@ let _config: Config | null = null;
 const activeWatchedFiles = new Set<string>();
 const activeDirectoryWatchers: FSWatcher[] = [];
 
+/**
+ * Sub-agents a runtime client adds to the loaded config: the A2A client bridges each peer skill in
+ * as one. They are not config — never saved, never in a preview (a save is judged on the config as
+ * it loads from disk), never in the compiled artifact the bidder and sub-agent containers read. But
+ * every fresh load rebuilt the loaded config without them, and every save reloads: a sub-agent
+ * PATCH, now saved, dropped the peer's skills from delegation until the next card refresh, up to
+ * 15 minutes later (r4 A-security #3). So each load lays them back over.
+ */
+const _runtimeSubAgents = new Map<string, SubAgentConfig>();
+
+export function setRuntimeSubAgent(name: string, agent: SubAgentConfig): void {
+  _runtimeSubAgents.set(name, agent);
+  (getConfig().subAgents as Record<string, SubAgentConfig>)[name] = agent;
+}
+
+export function deleteRuntimeSubAgent(name: string): void {
+  _runtimeSubAgents.delete(name);
+  if (_config) delete (_config.subAgents as Record<string, SubAgentConfig>)[name];
+}
+
 export function loadConfig(opts: { skipCompiledWrite?: boolean } = {}): Config {
   if (_config) return _config;
 
-  const raw = getEffectiveRawConfig();
+  _config = parseRawConfig(getEffectiveRawConfig());
+  for (const [name, agent] of _runtimeSubAgents) (_config.subAgents as Record<string, SubAgentConfig>)[name] = agent;
+  // The watch path skips this and writes only when a section actually changed (B21),
+  // avoiding a redundant 277KB serialize + read on no-op reloads. Cold boot and
+  // updateConfig keep writing so the compiled artifact + sub-agent containers stay current.
+  if (!opts.skipCompiledWrite) writeCompiledConfig(_config);
+  return _config;
+}
 
+/** The effective raw config as the runtime reads it: env overrides laid over, then validated. */
+function parseRawConfig(raw: Record<string, unknown>): Config {
   // Merge env overrides
   const merged = mergeEnvOverrides(raw);
 
@@ -72,12 +101,7 @@ export function loadConfig(opts: { skipCompiledWrite?: boolean } = {}): Config {
     result.data.workspacePath = CONFIG_SOURCE.workspacePath;
   }
 
-  _config = result.data;
-  // The watch path skips this and writes only when a section actually changed (B21),
-  // avoiding a redundant 277KB serialize + read on no-op reloads. Cold boot and
-  // updateConfig keep writing so the compiled artifact + sub-agent containers stay current.
-  if (!opts.skipCompiledWrite) writeCompiledConfig(_config);
-  return _config;
+  return result.data;
 }
 
 export function getConfig(): Config {
@@ -140,14 +164,35 @@ export function updateConfig(mutator: (raw: Record<string, unknown>) => void): C
   const raw = getEffectiveRawConfig();
 
   mutator(raw);
-  const rawToPersist = CONFIG_SOURCE.mutablePath === CONFIG_SOURCE.basePath
-    ? raw
-    : buildOverlayConfig(baseRaw, raw);
+  const rawToPersist = persistedRawConfig(baseRaw, raw);
 
   mkdirSync(dirname(CONFIG_SOURCE.mutablePath), { recursive: true });
   writeFileSync(CONFIG_SOURCE.mutablePath, `${JSON.stringify(rawToPersist, null, 2)}\n`, "utf-8");
   _config = null;
   return loadConfig();
+}
+
+/**
+ * The config `updateConfig(mutator)` would load, without writing anything. It is not the mutated
+ * raw config: the write goes through JSON, which drops an `undefined`, so a value a base shard sets
+ * comes back; and the env overrides outrank what was written (SAI_PRIMARY_MODEL pins the model).
+ * A route that must judge what a save leaves in effect — which key goes where — judges this.
+ */
+export function previewConfigUpdate(mutator: (raw: Record<string, unknown>) => void): Config {
+  const baseRaw = getBaseRawConfig();
+  const raw = getEffectiveRawConfig();
+  mutator(raw);
+  const written = JSON.parse(JSON.stringify(persistedRawConfig(baseRaw, raw))) as Record<string, unknown>;
+  return parseRawConfig(CONFIG_SOURCE.mutablePath === CONFIG_SOURCE.basePath
+    ? applyConfigRemovals(written)
+    : applyMutableOverlay(baseRaw, written));
+}
+
+/** What updateConfig writes for the mutated effective config: the whole file, or the overlay on the base. */
+function persistedRawConfig(baseRaw: Record<string, unknown>, raw: Record<string, unknown>): Record<string, unknown> {
+  return CONFIG_SOURCE.mutablePath === CONFIG_SOURCE.basePath
+    ? raw
+    : buildOverlayConfig(baseRaw, raw);
 }
 
 function getEffectiveRawConfig(): Record<string, unknown> {
@@ -339,7 +384,7 @@ function writeCompiledConfig(config: Config): void {
 
   try {
     mkdirSync(dirname(CONFIG_SOURCE.compiledPath), { recursive: true });
-    const serialized = `${JSON.stringify(config, null, 2)}\n`;
+    const serialized = `${JSON.stringify(withoutRuntimeSubAgents(config), null, 2)}\n`;
     if (existsSync(CONFIG_SOURCE.compiledPath)) {
       const existing = readFileSync(CONFIG_SOURCE.compiledPath, "utf-8");
       if (existing === serialized) return;
@@ -348,6 +393,13 @@ function writeCompiledConfig(config: Config): void {
   } catch (err) {
     logger.warn({ err, path: CONFIG_SOURCE.compiledPath }, "Failed to write compiled config artifact");
   }
+}
+
+/** The loaded config without the sub-agents a runtime client laid over it (see setRuntimeSubAgent). */
+function withoutRuntimeSubAgents(config: Config): Config {
+  if (_runtimeSubAgents.size === 0) return config;
+  const subAgents = Object.fromEntries(Object.entries(config.subAgents).filter(([name, agent]) => _runtimeSubAgents.get(name) !== agent));
+  return { ...config, subAgents };
 }
 
 function buildOverlayConfig(base: Record<string, unknown>, updated: Record<string, unknown>): Record<string, unknown> {

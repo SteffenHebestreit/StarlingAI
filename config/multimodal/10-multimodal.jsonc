@@ -77,7 +77,9 @@
       "timeoutMs": 120000,
       // ~170 s per image plus ~25 s of weight reload after ten minutes idle. 210000 left
       // almost no margin once the render alone is 170, so a queued or contended request
-      // would have been abandoned while it was still going to succeed.
+      // would have been abandoned while it was still going to succeed. Both timeouts are for a
+      // render at the tier's defaults (1024x1024, 20 steps); a request with more steps, a larger
+      // size or true CFG gets proportionally more, never less.
       "qualityTimeoutMs": 300000,
       // Both tiers run ONE generation at a time, so the default ceiling of 1 applies to both
       // and there is no per-model override.
@@ -128,25 +130,22 @@
       // (3.5 in its generation record), so true CFG there is redundant AND doubles the
       // forward passes per step.
       "qualityDefaults": { "steps": 20, "guidanceScale": 1 },
-      // NOT ACTIVE YET — the route below returned 404 on re-test while the provider was
-      // being reconfigured, so it stays commented until it is verified again. The CLIENT
-      // support for it is shipped and tested; only this wiring is pending.
+      // NOT ACTIVE — the route below returned 404 on re-test while the provider was being
+      // reconfigured, so it stays commented until it is verified again. The CLIENT support for
+      // it is shipped and tested; only this wiring is pending.
       //
-      // Why it is wanted: the OpenAI route parses `prompt` and `size` and discards the rest
-      // (eight probes varying steps, seed, cfg and negative prompt all returned steps=8
-      // seed=42), and its `--seed -1` randomises once per SERVER PROCESS, so one prompt
-      // returns one image until a restart. The AUTOMATIC1111 route on the same sd-server
-      // honours all of it — verified: seed -1 gave 1152108546 then 1467603400 with different
-      // images, an explicit seed reproduced byte-for-byte, steps/cfg came back in `info`.
-      // The quality tier does NOT go through the OpenAI route, and that is deliberate.
+      // It was wanted because an earlier build of the OpenAI route parsed `prompt` and `size`
+      // and discarded the rest (eight probes varying steps, seed, cfg and negative prompt all
+      // returned steps=8 seed=42). That is NO LONGER TRUE. Re-measured 2026-09-23 with the seed
+      // pinned: BOTH engines on the OpenAI route honour seed, steps, guidance and negative
+      // prompt. Fast engine, mean pixel distance from the control render: another seed 55,
+      // 8 steps 27 (in half the time), guidance 2 29, a negative prompt 21. So both tiers take
+      // all four from generate_image and from the settings step below. Whether an OMITTED seed
+      // still repeats once per server process was not re-measured.
       //
-      // That route parses `prompt` and `size` and discards the rest — proven with eight
-      // probes varying steps, seed, cfg and negative prompt, all returning steps=8 seed=42.
-      // Its `--seed -1` also randomises once per SERVER PROCESS, not per request, so the
-      // same prompt returned the same image until a restart and "make me another one" was
-      // impossible. The same sd-server speaks AUTOMATIC1111 on this path, where seed -1 gives
-      // a fresh seed every call, an explicit seed reproduces exactly, and steps/cfg_scale
-      // come back echoed in `info`.
+      // The AUTOMATIC1111 route on the same sd-server honours all of it as well — seed -1 gave
+      // 1152108546 then 1467603400 with different images, an explicit seed reproduced
+      // byte-for-byte, steps/cfg came back in `info`.
       //
       // Worker station DIRECTLY: the head node 404s /upstream/ paths, so this must not be
       // pointed at the 192.168.12.11 endpoint the rest of the config uses.
@@ -165,7 +164,19 @@
       // The FAST tier's value. It is not shared: `qualityDefaults` above overrides it for the
       // quality tier, which wants 1.0. Confirmed live — the fast tier's own default output
       // reproduces exactly at 20 steps / guidance 7.5.
-      "defaultGuidanceScale": 7.5
+      "defaultGuidanceScale": 7.5,
+      // The settings step. Before EVERY render in an interactive chat turn generate_image shows
+      // the person what it is about to run — engine, prompt, size, steps, guidance, seed, base
+      // picture — and they take it (Auto), change it and paint a mask (Configure), or skip it.
+      // No answer within timeoutMs runs the agent's settings; opening the form extends the wait
+      // to configureTimeoutMs. Channels, scenes, jobs and --auto are never asked, and a chat
+      // set to "Images: auto" is not either.
+      "settingsPrompt": {
+        "enabled": true,
+        "timeoutMs": 120000,
+        "configureTimeoutMs": 600000,
+        "maxBaseCandidates": 6
+      }
     },
     "wakeWord": {
       "enabled": false,

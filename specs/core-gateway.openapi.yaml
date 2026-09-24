@@ -494,10 +494,10 @@ paths:
   /api/agents/{name}/model:
     patch:
       tags: [Agents]
-      summary: Hot-patch an agent's model config
+      summary: Set an agent's model config, saved to the config overlay
       parameters: [ { name: name, in: path, required: true, schema: { type: string } } ]
       requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
-      responses: { '200': { description: Patched }, '404': { description: Unknown agent } }
+      responses: { '200': { description: Saved }, '400': { description: 'Invalid value, or a saved key would go to a new endpoint' }, '404': { description: Unknown agent }, '409': { description: 'Agent is not in the saved config (bridged from an A2A peer)' } }
   /api/agents/outcomes:
     get:
       tags: [Agents]

@@ -485,6 +485,14 @@ export interface TurnAttachment {
   isDirectory?: boolean;
 }
 
+const IMAGE_EXTENSION = /\.(?:png|jpe?g|gif|webp|bmp|tiff?|heic|avif)$/i;
+
+/** A picture, by its declared type or, when none was sent, by its name. */
+export function isImageAttachment(att: Pick<TurnAttachment, "filename" | "relativePath" | "contentType">): boolean {
+  if (att.contentType) return att.contentType.toLowerCase().startsWith("image/");
+  return IMAGE_EXTENSION.test(att.relativePath ?? att.filename);
+}
+
 /**
  * Per-turn document-RAG augmentation, called by the runtime at the start of a
  * turn: (1) auto-ingest any files attached THIS turn into the session corpus
@@ -521,6 +529,11 @@ export async function augmentTurnWithDocuments(input: {
     ]);
     for (const att of input.attachments) {
       if (att.isDirectory || !att.relativePath) continue;
+      // An uploaded picture is stored so it can be an edit base, not so it can be read as a
+      // document: its analysis is already inlined into the message, and extracting text from
+      // the pixels here would at best duplicate it and at worst add an "attachment not
+      // readable" note that contradicts it.
+      if (isImageAttachment(att)) continue;
       try {
         // Chat attachments are persisted through the object store (scanAndStoreUpload →
         // putUpload), and under `storage.backend: "s3"` — the bundled compose DEFAULT —

@@ -354,6 +354,10 @@ export async function main() {
         if (changedSections.includes("channels") || changedSections.includes("_initial")) {
           await syncAllChannels();
         }
+        {
+          const { syncA2AClientWithConfig } = await import("./a2a/client.js");
+          await syncA2AClientWithConfig(changedSections);
+        }
         markRuntimeComponentSuccess("config_reload", { model: newConfig.agents.defaults.model.primary, changedSections });
       } catch (err) {
         markRuntimeComponentFailure("config_reload", err, { model: newConfig.agents.defaults.model.primary });

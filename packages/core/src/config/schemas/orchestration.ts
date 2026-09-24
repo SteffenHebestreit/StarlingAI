@@ -776,7 +776,7 @@ export const OrchestrationSchema = z.object({
    *  that turn as steering at the next tool-loop iteration (instead of only being
    *  able to Stop). The runtime drains a per-turn queue before each model call and
    *  appends it as an authoritative user message. Default on; opt-out disables the
-   *  drain so such messages are ignored mid-turn. */
+   *  drain, so such messages come back unconsumed when the turn ends. */
   midTurnSteering: z.boolean().default(true),
   /** When true, a high-stakes or wide plan pauses for human approval in the
    *  operator dock before the orchestrator executes it. Off by default until the

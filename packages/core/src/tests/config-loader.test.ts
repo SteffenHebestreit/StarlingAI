@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PRODUCT } from "../product/index.js";
+import type { SubAgentConfig } from "../config/schema.js";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -633,6 +634,42 @@ describe("config loader mutable overlay", () => {
       expect(readded.providers.lmstudio?.baseUrl).toBe("http://lm2:1234/v1");
       configLoader.resetConfigForTests();
       expect(configLoader.loadConfig().providers.lmstudio?.baseUrl).toBe("http://lm2:1234/v1");
+    } finally {
+      configLoader.resetConfigForTests();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  // The A2A client lays each peer skill over the loaded config as a sub-agent. Every save reloads,
+  // and the reload dropped them until the next card refresh (r4 A-security #3). They are not config,
+  // so a preview (what a save is judged on) and the compiled artifact the bidder reads stay without.
+  it("lays a runtime sub-agent back over each reload, and keeps it out of the preview and the compiled artifact", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-config-runtime-agent-"));
+    const configDir = join(tempDir, "starling_config");
+    mkdirSync(join(configDir, "agents"), { recursive: true });
+    writeFileSync(join(configDir, "agents", "10-coder.json"), JSON.stringify({ subAgents: { coder: { description: "Writes code." } } }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configDir;
+    vi.resetModules();
+    const configLoader = await import("../config/loader.js");
+
+    try {
+      const peer = { description: "[A2A:peer] A peer's skill.", tools: ["a2a__peer__skill"] } as unknown as SubAgentConfig;
+      configLoader.setRuntimeSubAgent("a2a__peer__skill", peer);
+      const updated = configLoader.updateConfig((raw) => {
+        (raw["subAgents"] as Record<string, Record<string, unknown>>)["coder"]!["description"] = "Writes tests.";
+      });
+      expect(updated.subAgents["coder"]?.description).toBe("Writes tests.");
+      expect(updated.subAgents["a2a__peer__skill"]).toBe(peer);
+      expect(configLoader.previewConfigUpdate(() => {}).subAgents["a2a__peer__skill"]).toBeUndefined();
+      const compiled = readFileSync(join(tempDir, PRODUCT.configFileName), "utf8");
+      expect(compiled).toContain("Writes tests.");
+      expect(compiled).not.toContain("a2a__peer__skill");
+
+      configLoader.deleteRuntimeSubAgent("a2a__peer__skill");
+      expect(configLoader.getConfig().subAgents["a2a__peer__skill"]).toBeUndefined();
+      configLoader.resetConfigForTests();
+      expect(configLoader.getConfig().subAgents["a2a__peer__skill"]).toBeUndefined();
     } finally {
       configLoader.resetConfigForTests();
       rmSync(tempDir, { recursive: true, force: true });

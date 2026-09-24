@@ -25,7 +25,8 @@ import {
 } from "./session-redis.js";
 
 import { PRODUCT } from "../product/index.js";
-import { startsTurn } from "./turn-boundary.js";
+import { midTurnUserMessages, startsTurn } from "./turn-boundary.js";
+import { attachmentEntryKey, extractArtifactsFromMetadata } from "./artifact-metadata.js";
 
 const log = childLogger("agent:session");
 const TRANSIENT_TURN_SYSTEM_PREFIXES = [
@@ -53,12 +54,16 @@ function isTransientTurnSystemMessage(message: Pick<SessionHistoryMessage, "role
  * Per-session tuning the user controls from the chat composer. `effort` selects an
  * effort profile (see runtime/effort-context.ts); `turnTimeoutSecOverride` is an
  * optional independent time-limit override (seconds; 0 = unlimited) that wins over
- * the profile's own timeout. Both persist with the session.
+ * the profile's own timeout. `imageSettingsPrompt` "auto" stops generate_image from
+ * asking for render settings in this chat (unset = "ask"). All persist with the session.
  */
 export interface SessionSettings {
   effort?: EffortTier;
   turnTimeoutSecOverride?: number;
+  imageSettingsPrompt?: ImageSettingsPromptPreference;
 }
+
+export type ImageSettingsPromptPreference = "ask" | "auto";
 
 /** Why a session was archived — drives which retention the pruner applies and whether
  *  a follow-up message resumes it. */
@@ -122,6 +127,14 @@ export interface SessionTranscriptMessage {
   attachments?: SessionTranscriptAttachment[];
   toolCalls?: Array<{ name: string; args: Record<string, unknown>; result?: string; metadata?: Record<string, unknown> }>;
   swarmState?: SwarmState;
+  /** A message the user sent into a running turn. Its content is only what they wrote. */
+  midTurn?: true;
+  /** The id the message was queued under (the client's own id when it sent one). */
+  steeringId?: string;
+  /** The turn went on after this assistant entry: a mid-turn message of the same turn follows. */
+  continued?: true;
+  /** When the part of the turn this assistant entry shows began: the mid-turn message before it. */
+  segmentStartedAt?: string;
 }
 
 export interface SessionTranscriptAttachment {
@@ -636,14 +649,20 @@ export class AgentSession {
 
   toSummary(): SessionSummary {
     const previewSource = [...this.history].reverse().find((message) =>
-      (message.role === "user" || message.role === "assistant") && typeof message.content === "string" && message.content.trim().length > 0,
+      (message.role === "user" || message.role === "assistant") && typeof message.content === "string" && message.content.trim().length > 0
+      // The oversight redirect is not the person's words, so it never previews.
+      && midTurnUserMessages(message)?.length !== 0,
     );
+    // A mid-turn message previews as what the person wrote, never as the wrapper the model reads.
+    const steering = previewSource ? midTurnUserMessages(previewSource) : undefined;
     const preview = previewSource
-      ? sanitizeTranscriptContent(
-          previewSource.role,
-          previewSource.content,
-          Array.isArray((previewSource as { tool_calls?: unknown[] }).tool_calls) && (((previewSource as { tool_calls?: unknown[] }).tool_calls?.length ?? 0) > 0),
-        )
+      ? steering
+        ? sanitizeTranscriptContent("user", steering.map((entry) => entry.text).join("\n"), false)
+        : sanitizeTranscriptContent(
+            previewSource.role,
+            previewSource.content,
+            Array.isArray((previewSource as { tool_calls?: unknown[] }).tool_calls) && (((previewSource as { tool_calls?: unknown[] }).tool_calls?.length ?? 0) > 0),
+          )
       : undefined;
 
     return {
@@ -714,6 +733,25 @@ export class AgentSession {
         continue;
       }
 
+      // A message sent into a running turn: one entry per message the person wrote, holding only
+      // their words. The oversight redirect is not theirs and is left out, so the assistant
+      // entries around it merge below as if it were not there.
+      const midTurn = midTurnUserMessages(message);
+      if (midTurn) {
+        midTurn.forEach((entry, k) => {
+          raw.push({
+            id: k === 0 ? `${this.id}:${index}` : `${this.id}:${index}+${k}`,
+            role: "user",
+            content: sanitizeTranscriptContent("user", entry.text, false),
+            timestamp: message.timestamp,
+            midTurn: true,
+            ...(entry.id ? { steeringId: entry.id } : {}),
+          });
+        });
+        index += 1;
+        continue;
+      }
+
       const transcriptContent = getTranscriptDisplayContent(message);
       const attachments = getTranscriptAttachments(message.metadata);
       raw.push({
@@ -751,6 +789,7 @@ export class AgentSession {
       }
     }
 
+    splitSteeredTurns(transcript);
     return transcript;
   }
 
@@ -877,6 +916,9 @@ function estimatePromptTokens(systemPrompt: string, history: readonly LLMMessage
 }
 
 function getTranscriptDisplayContent(message: SessionHistoryMessage): string {
+  // What the person sent mid-turn, never the wrapper around it; nothing for the oversight redirect.
+  const midTurn = midTurnUserMessages(message);
+  if (midTurn) return sanitizeTranscriptContent("user", midTurn.map((entry) => entry.text).join("\n\n"), false);
   if (message.role === "user") {
     const displayContent = message.metadata?.["displayContent"];
     if (typeof displayContent === "string" && displayContent.trim()) {
@@ -917,6 +959,114 @@ function getTranscriptSwarmState(metadata?: Record<string, unknown>): SwarmState
   const raw = metadata?.["swarmState"];
   if (!raw || typeof raw !== "object") return undefined;
   return structuredClone(raw as SwarmState);
+}
+
+/**
+ * A turn the user steered reads as assistant parts with their mid-turn messages between them,
+ * the way it looked live. The saved answer holds the WHOLE turn's swarm state and artifacts
+ * (that record is what survives trimming and what the verification gate reads, so it stays
+ * whole), and shown as-is the last part claimed everything the earlier parts did: the earlier
+ * specialist runs listed under the later delegations, the earlier files shown again at the end.
+ * Each part now gets the attempts that started inside it, and a later part drops the files an
+ * earlier part's own tool calls made.
+ */
+function splitSteeredTurns(transcript: SessionTranscriptMessage[]): void {
+  let turnStart = 0;
+  for (let index = 1; index <= transcript.length; index += 1) {
+    const entry = transcript[index];
+    if (entry && !(entry.role === "user" && !entry.midTurn)) continue;
+    splitSteeredTurn(transcript.slice(turnStart, index));
+    turnStart = index;
+  }
+}
+
+function splitSteeredTurn(turn: SessionTranscriptMessage[]): void {
+  if (!turn.some((entry) => entry.midTurn)) return;
+  // A part starts at the first mid-turn message after the previous part's assistant entries.
+  // Every depth-0 tool call has finished before the loop drains a message, so the attempts and
+  // files of one part all fall before the next part's start.
+  const parts: Array<{ start?: string; entries: SessionTranscriptMessage[] }> = [{ entries: [] }];
+  for (const entry of turn) {
+    const current = parts[parts.length - 1]!;
+    if (entry.midTurn) {
+      if (current.entries.length > 0) parts.push({ start: entry.timestamp, entries: [] });
+      else current.start ??= entry.timestamp;
+    } else if (entry.role === "assistant") {
+      current.entries.push(entry);
+    }
+  }
+  parts.forEach((part, k) => {
+    if (part.entries.length === 0) return;
+    if (k < parts.length - 1) part.entries[part.entries.length - 1]!.continued = true;
+    if (part.start !== undefined) part.entries[0]!.segmentStartedAt = part.start;
+  });
+
+  const shown = parts.filter((part) => part.entries.length > 0);
+  if (shown.length < 2) return;
+
+  const source = [...turn].reverse().find((entry) => entry.role === "assistant" && entry.swarmState)?.swarmState;
+  if (source) {
+    for (const part of shown) for (const entry of part.entries) delete entry.swarmState;
+    shown.forEach((part, k) => {
+      const from = k === 0 ? -Infinity : Date.parse(part.start ?? "");
+      const to = k + 1 < shown.length ? Date.parse(shown[k + 1]!.start ?? "") : Infinity;
+      const within = swarmStateWithin(source, from, to);
+      // The final part keeps a swarm state even when empty, as a turn's answer always had one.
+      if (k === shown.length - 1 || Object.keys(within.tasks).length > 0) {
+        part.entries[part.entries.length - 1]!.swarmState = within;
+      }
+    });
+  }
+
+  // An answer's attachments survive the merge above only when its part made no tool calls (it
+  // then has an entry of its own), so a file it lists that an earlier part's calls recorded was
+  // made there, not here.
+  const earlierKeys = new Set<string>();
+  for (const part of shown) {
+    for (const entry of part.entries) {
+      if (!entry.attachments || earlierKeys.size === 0) continue;
+      const kept = entry.attachments.filter((attachment) => !earlierKeys.has(attachmentEntryKey(attachment)));
+      if (kept.length > 0) entry.attachments = kept;
+      else delete entry.attachments;
+    }
+    for (const key of toolCallArtifactKeys(part.entries)) earlierKeys.add(key);
+  }
+}
+
+/** A copy of the swarm state holding only the attempts that started in [from, to). */
+function swarmStateWithin(state: SwarmState, from: number, to: number): SwarmState {
+  const copy = structuredClone(state);
+  for (const [key, task] of Object.entries(copy.tasks)) {
+    const attempts = task.attempts ?? [];
+    const kept = attempts.filter((attempt) => {
+      const startedAt = Date.parse(attempt.startedAt);
+      // An attempt without a readable start goes to the first part rather than vanishing.
+      return Number.isFinite(startedAt) ? startedAt >= from && startedAt < to : from === -Infinity;
+    });
+    if (kept.length === 0) {
+      delete copy.tasks[key];
+    } else if (kept.length < attempts.length) {
+      task.attempts = kept;
+      task.status = kept[kept.length - 1]!.status;
+      // The totals add up every attempt of the task, not the ones this part shows.
+      delete task.totals;
+    }
+  }
+  return copy;
+}
+
+/** Keys of the files the given entries' tool calls recorded, in attachment-entry form. */
+function toolCallArtifactKeys(entries: readonly SessionTranscriptMessage[]): Set<string> {
+  const keys = new Set<string>();
+  for (const entry of entries) {
+    for (const call of entry.toolCalls ?? []) {
+      if (!call.metadata) continue;
+      const found: Array<Record<string, unknown>> = [];
+      extractArtifactsFromMetadata(call.metadata, found, new Set<string>());
+      for (const artifact of found) keys.add(attachmentEntryKey(artifact));
+    }
+  }
+  return keys;
 }
 
 const _sessions = new Map<string, AgentSession>();

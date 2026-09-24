@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -10,6 +10,7 @@ import {
   createConversationConfigProposal,
   getConversationConfigProposal,
   hasPromptTarget,
+  isProtectedConfigChange,
   isProtectedConfigPath,
   listConversationConfigProposals,
   updateConversationConfigProposal,
@@ -102,5 +103,107 @@ describe("config assistant proposals", () => {
     expect(isProtectedConfigPath("subAgents.browser_agent.systemPrompt")).toBe(false);
     expect(isProtectedConfigPath("agents.mainAssistant.customInstructions")).toBe(false);
     expect(hasPromptTarget({}, MAIN_ASSISTANT_PROMPT_TARGET)).toBe(true);
+  });
+
+  it("counts a field as a credential only when its name ends in one", () => {
+    // Matched anywhere in the name, "token" caught maxTokens — a knob the assistant's snapshot
+    // lists — and a proposal that set it was refused as a protected path.
+    expect(isProtectedConfigPath("subAgents.coder.model.maxTokens")).toBe(false);
+    expect(isProtectedConfigChange({ path: "subAgents.coder.model", value: { primary: "lmstudio/x", temperature: 0.2, maxTokens: 4096 } })).toBe(false);
+    expect(isProtectedConfigChange({ path: "subAgents.new_agent", value: { description: "d", model: { maxTokens: 8000 } } })).toBe(false);
+    expect(isProtectedConfigPath("agents.defaults.model.embeddingApiKey")).toBe(true);
+    expect(isProtectedConfigPath("subAgents.coder.model.apiKey")).toBe(true);
+    expect(isProtectedConfigChange({ path: "subAgents.coder.model", value: { primary: "lmstudio/x", apiKey: "k" } })).toBe(true);
+    expect(isProtectedConfigChange({ path: "subAgents.coder", value: { model: { authToken: "t" } } })).toBe(true);
+  });
+});
+
+/**
+ * Drafting filtered by path only, while Apply also refuses a value that carries a credential
+ * field: the page offered `subAgents.x.model = { apiKey }` as applyable and Apply then refused it.
+ * Now both ask isProtectedConfigChange.
+ */
+describe("config assistant drafting", () => {
+  const dirs: string[] = [];
+
+  afterEach(async () => {
+    vi.doUnmock("../providers/index.js");
+    (await import("../config/loader.js")).resetConfigForTests();
+    delete process.env["SAI_CONFIG_PATH"];
+    delete process.env["SAI_MUTABLE_CONFIG_PATH"];
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+    vi.resetModules();
+  });
+
+  it("offers exactly what Apply accepts", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "starlingai-config-draft-"));
+    dirs.push(tempDir);
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      gateway: { jwtSecret: "s".repeat(40) },
+      workspacePath: tempDir,
+      subAgents: { coder: { description: "Writes code.", model: { primary: "lmstudio/coder" } } },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    process.env["SAI_MUTABLE_CONFIG_PATH"] = configPath;
+    const configChanges = [
+      { path: "subAgents.coder.model", value: { primary: "lmstudio/coder", apiKey: "sk-in-a-value" }, reason: "Give the coder its own key." },
+      { path: "subAgents.coder.model.maxTokens", value: 4096, reason: "Longer answers." },
+    ];
+    vi.resetModules();
+    vi.doMock("../providers/index.js", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("../providers/index.js")>()),
+      createChatProvider: () => ({
+        complete: async () => ({ content: JSON.stringify({ summary: "Tune the coder.", configChanges }) }),
+      }),
+    }));
+    const { proposeConversationConfigChange } = await import("../agent/config-assistant.js");
+    const { draft } = await proposeConversationConfigChange({ request: "tune the coder", mode: "enhancement", workspacePath: tempDir });
+    expect(draft.configChanges.map((change) => change.path)).toEqual(["subAgents.coder.model.maxTokens"]);
+    expect(draft.configChanges.every((change) => !isProtectedConfigChange(change))).toBe(true);
+    expect(draft.validations.join(" ")).toContain("'subAgents.coder.model'");
+  });
+
+  it("shows the assistant maxTokens in its snapshot, and none of the keys", async () => {
+    // Redacted by "token" anywhere in the name, maxTokens never reached the snapshot the assistant
+    // drafts from, though it is a knob drafting and Apply accept (r3 A-security #5).
+    const tempDir = mkdtempSync(join(tmpdir(), "starlingai-config-snapshot-"));
+    dirs.push(tempDir);
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      gateway: { jwtSecret: "s".repeat(40) },
+      workspacePath: tempDir,
+      agents: { defaults: { model: { primary: "lmstudio/orch", maxTokens: 2048, apiKey: "sk-default-key" } } },
+      subAgents: { coder: { description: "Writes code.", model: { primary: "lmstudio/coder", maxTokens: 4096, apiKey: "sk-coder-key" } } },
+      retrieval: { reranker: { enabled: false, baseUrl: "http://rerank.local/v1", apiKey: "sk-rerank-key" } },
+      infrastructure: { virtualization: { profiles: {
+        pve: { type: "proxmox", apiUrl: "https://pve.local:8006", node: "pve", password: "pve-password", tokenSecret: "pve-token-secret" },
+        hook: { type: "webhook", url: "https://hook.local/vm", headers: { Authorization: "Bearer hook-header-secret" } },
+      } } },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    process.env["SAI_MUTABLE_CONFIG_PATH"] = configPath;
+    const prompts: string[] = [];
+    vi.resetModules();
+    vi.doMock("../providers/index.js", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("../providers/index.js")>()),
+      createChatProvider: () => ({
+        complete: async (messages: Array<{ content: string }>) => {
+          prompts.push(messages.map((message) => message.content).join("\n"));
+          return { content: JSON.stringify({ summary: "Nothing to change.", configChanges: [] }) };
+        },
+      }),
+    }));
+    const { proposeConversationConfigChange } = await import("../agent/config-assistant.js");
+    await proposeConversationConfigChange({ request: "tune the coder", mode: "enhancement", workspacePath: tempDir });
+    expect(prompts).toHaveLength(1);
+    const snapshot = JSON.parse(prompts[0]!.split("Safe configuration snapshot:\n")[1]!) as {
+      agents: { defaults: { model: Record<string, unknown> }; subAgents: Record<string, { model: Record<string, unknown> }> };
+    };
+    expect(snapshot.agents.defaults.model.maxTokens).toBe(2048);
+    expect(snapshot.agents.subAgents["coder"]?.model.maxTokens).toBe(4096);
+    for (const secret of ["sk-default-key", "sk-coder-key", "sk-rerank-key", "pve-password", "pve-token-secret", "hook-header-secret", "s".repeat(40)]) {
+      expect(prompts[0]).not.toContain(secret);
+    }
   });
 });

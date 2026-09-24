@@ -18,6 +18,7 @@ import type { SwarmState } from "../tools/registry.js";
 import type { EffortTier } from "../config/schema.js";
 import type { AgentSession, SessionTranscriptAttachment } from "./session.js";
 import type { InterventionNotice } from "./interventions.js";
+import type { UserInputChannel } from "./user-input.js";
 import type { SubAgentProgressEvent } from "./sub-agent.js";
 import type { TurnPerformanceMetrics } from "./turn-metrics.js";
 import type { TurnQualityScorecard } from "./turn-scorecard.js";
@@ -40,6 +41,10 @@ export interface RunTurnOptions {
    * once the first answer token arrives. */
   onReasoning?: (text: string) => void;
   onStatus?: (status: { phase: string; message: string; iteration?: number }) => void;
+  /** Mid-turn messages the loop just folded into the turn, with the time of the history message
+   *  that carries them. Called before the "steering" status, so a client can split the running
+   *  answer there first. */
+  onSteeringConsumed?: (event: { messages: Array<{ id: string; text: string }>; iteration: number; at: string }) => void;
   onToolCall?: (toolCallId: string, name: string, args: Record<string, unknown>) => void;
   onToolResult?: (toolCallId: string, name: string, result: string, metadata?: Record<string, unknown>) => void;
   onSubAgentProgress?: (event: SubAgentProgressEvent) => void;
@@ -55,6 +60,12 @@ export interface RunTurnOptions {
   approvalCallback?: (toolName: string, args: Record<string, unknown>) => Promise<boolean>;
   inputCallback?: (question: string, choices?: string[], timeoutMs?: number) => Promise<string>;
   signal?: AbortSignal;
+  /** Steering token of a turn the gateway armed before calling runTurn (turn-steering.ts), so
+   *  messages sent while the turn starts up are kept. Unset: the turn opens its own. */
+  steeringToken?: string;
+  /** The chat a structured user-input request from this turn reaches (agent/user-input-broker.ts).
+   *  Unset: a nested turn inherits its caller's; a top-level one has nobody to ask. */
+  userInput?: UserInputChannel;
   /** Sub-agents this turn is allowed to delegate to (undefined = no restriction) */
   allowedAgents?: string[];
   /** Tool names that must pause for human approval this turn (enforced unconditionally) */
@@ -86,4 +97,7 @@ export interface TurnOutput {
   performance?: TurnPerformanceMetrics;
   /** Canonical v2 quality payload emitted once as the terminal turn_scorecard audit event. */
   qualityScorecard?: TurnQualityScorecard;
+  /** Mid-turn messages queued after the loop's last drain. Never folded in late; the client sends
+   *  them on as the next turn. */
+  unconsumedSteering?: Array<{ id: string; text: string }>;
 }

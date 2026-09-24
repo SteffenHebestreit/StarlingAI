@@ -8,8 +8,8 @@ import { resolve, basename, extname } from "node:path";
 import { z } from "zod";
 import { WebSocketServer, WebSocket } from "ws";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { getConfig, updateConfig } from "../config/loader.js";
-import { verifyToken, extractBearerToken, checkAuthRateLimit, recordAuthFailure, clearAuthFailures, authenticatedUser, userHasRole, hashPassword, verifyPassword, createToken, type AuthRole } from "./auth.js";
+import { getConfig, previewConfigUpdate, updateConfig } from "../config/loader.js";
+import { verifyToken, extractBearerToken, checkAuthRateLimit, recordAuthFailure, clearAuthFailures, authenticatedUser, userHasRole, verifyPassword, createToken } from "./auth.js";
 import { buildLoginUrl, handleCallback, stashLoginState, takeLoginState, oidcPublicBase, OIDC_CALLBACK_PATH } from "./oidc.js";
 import { runWithRequestContext } from "../runtime/request-context.js";
 import { registerSubAgentRoutes } from "./sub-agent-routes.js";
@@ -23,13 +23,14 @@ import { registerWorkspaceRoutes } from "./workspace-routes.js";
 import { buildContentDisposition } from "./content-disposition.js";
 import { registerChannelRoutes } from "./channels-routes.js";
 import { registerModelPresetRoutes } from "./model-preset-routes.js";
+import { registerUserRoutes } from "./user-routes.js";
 import { registerSecurityConfigRoutes } from "./security-config-routes.js";
 import { registerCheckpointRoutes } from "./checkpoint-routes.js";
 import { mountFederationRoutes } from "./federation-router.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { handleFederationDelegateStream } from "./federation-stream.js";
 import { RpcConnection } from "./rpc.js";
-import { getAllSessions, getSessionRecord } from "../agent/session.js";
+import { getAllSessions } from "../agent/session.js";
 import { probeDockerReachability } from "../agent/container-runner.js";
 import {
   buildSessionAuditMarkdownDetached,
@@ -56,7 +57,7 @@ import { buildSpeechSummarySystemPrompt, buildSpeechSummaryUserPrompt } from "./
 import { getRuntimeStatusSnapshot } from "../runtime/status.js";
 import { getModelEndpointHealthSnapshot, syncModelEndpointRuntimeStatus } from "../runtime/model-endpoints.js";
 import { getDeadLetterCount, readDeadLetters } from "../channels/dead-letter.js";
-import { checkImageGenerationHealth, imageGenerationServiceConfigured, requestImageGeneration } from "../multimodal/image-generation.js";
+import { checkImageGenerationHealth, imageGenerationServiceConfigured, imageRequestBoundsError, requestImageGeneration } from "../multimodal/image-generation.js";
 import { sendChunkedTtsRequests } from "../multimodal/tts-chunking.js";
 import { resolveProviderEndpointForModel, syncChatProviderRuntimeStatus } from "../providers/index.js";
 import { logAudit } from "../audit/logger.js";
@@ -69,11 +70,22 @@ import { getSceneJobWorkerStatus } from "../agent/scene-worker.js";
 import { getAgentMessageBacklog, readAllFacts } from "../swarm/memory.js";
 import { deriveSharedSessionId } from "../tools/memory.js";
 import { turnSteeringManager } from "../agent/turn-steering.js";
+import { userInputBroker } from "../agent/user-input-broker.js";
 import { getLoadedDynamicTools, listPromotionCandidates, approvePromotion, rejectPromotion, getDynamicToolStats } from "../tools/dynamic-tools.js";
 import { listCapabilityGaps } from "../agent/self-improve.js";
 import { getWardenAlerts } from "../agent/warden.js";
-import { ModelConfigSchema, MultimodalSchema, RetrievalRerankerSchema, SkillLibrarySchema, ToolPipelineSchema, DocumentRagSchema, EffortSchema, EFFORT_TIERS } from "../config/schema.js";
+import { ModelConfigSchema, RetrievalRerankerSchema, SkillLibrarySchema, ToolPipelineSchema, DocumentRagSchema, EffortSchema, EFFORT_TIERS, type Config } from "../config/schema.js";
 import { mergeOrchestrationConfigUpdate } from "./orchestration-config-merge.js";
+import { callerMayUseSession } from "./session-route-access.js";
+import { checkMultimodalConfigSave, mergeMultimodalConfigUpdate } from "./multimodal-config-merge.js";
+import {
+  agentModelSecretDestinations,
+  maskConfigSecrets,
+  modelEndpointSecretDestinations,
+  refuseMovedSecrets,
+  resolveSecretPlaceholders,
+} from "./config-secrets.js";
+import { secretEndpointContext } from "./secret-endpoint-context.js";
 import { getMcpConnections } from "../mcp/registry.js";
 import {
   upstreamUrl,
@@ -100,6 +112,7 @@ import {
   createConversationConfigProposal,
   getConversationConfigProposal,
   hasPromptTarget,
+  isProtectedConfigChange,
   MAIN_ASSISTANT_PROMPT_TARGET,
   updateConversationConfigProposal,
 } from "../agent/config-assistant-proposals.js";
@@ -1108,97 +1121,8 @@ export function createGateway() {
     return c.json(user);
   });
 
-  app.get("/api/auth/users", async (c) => {
-    const user = await authenticatedUser(c.req.header("Authorization"));
-    if (!user) return c.json({ error: "Unauthorized" }, 401);
-    // User management is operator-only (matches POST/DELETE); a read-only viewer
-    // must not enumerate the full account roster.
-    if (!userHasRole(user, "operator")) {
-      return c.json({ error: "Operator role required" }, 403);
-    }
-    const users = getConfig().auth.users.map((u) => ({
-      username: u.username,
-      displayName: u.displayName,
-      role: u.role,
-      createdAt: u.createdAt,
-    }));
-    return c.json({ enabled: getConfig().auth.enabled, users });
-  });
-
-  app.post("/api/auth/users", async (c) => {
-    const actor = await authenticatedUser(c.req.header("Authorization"));
-    if (!actor) return c.json({ error: "Unauthorized" }, 401);
-    if (!userHasRole(actor, "operator")) {
-      return c.json({ error: "Operator role required" }, 403);
-    }
-
-    let body: { username?: unknown; password?: unknown; displayName?: unknown; role?: unknown };
-    try { body = await c.req.json(); } catch { return c.json({ error: "Invalid JSON body" }, 400); }
-    const username = typeof body.username === "string" ? body.username.trim().toLowerCase() : "";
-    const password = typeof body.password === "string" ? body.password : "";
-    const displayName = typeof body.displayName === "string" ? body.displayName : undefined;
-    const role: AuthRole = body.role === "viewer" ? "viewer" : "operator";
-    if (!username || !/^[a-z0-9_.-]+$/.test(username)) {
-      return c.json({ error: "username must be alphanumeric/_/-/." }, 400);
-    }
-    if (password.length < 8) {
-      return c.json({ error: "password must be at least 8 characters" }, 400);
-    }
-
-    if (getConfig().auth.users.find((u) => u.username.toLowerCase() === username)) {
-      return c.json({ error: `User '${username}' already exists` }, 409);
-    }
-
-    const passwordHash = await hashPassword(password);
-    const createdAt = new Date().toISOString();
-
-    updateConfig((raw) => {
-      const auth = (raw["auth"] = (raw["auth"] as Record<string, unknown>) ?? {});
-      const users = (auth["users"] = (auth["users"] as unknown[] | undefined) ?? []);
-      (users as unknown[]).push({ username, passwordHash, displayName, role, createdAt });
-      // Auto-enable so the first added user makes the feature usable.
-      if (auth["enabled"] !== true) auth["enabled"] = true;
-    });
-
-    logAudit("auth_user_created", { actor: actor.username, username, displayName: displayName ?? null, role }, { userId: actor.username, severity: "info" });
-    return c.json({ username, displayName, role, createdAt });
-  });
-
-  app.delete("/api/auth/users/:username", async (c) => {
-    const actor = await authenticatedUser(c.req.header("Authorization"));
-    if (!actor) return c.json({ error: "Unauthorized" }, 401);
-    if (!userHasRole(actor, "operator")) {
-      return c.json({ error: "Operator role required" }, 403);
-    }
-
-    const target = c.req.param("username").toLowerCase();
-    const targetUser = getConfig().auth.users.find((u) => u.username.toLowerCase() === target);
-    if (!targetUser) {
-      return c.json({ error: `User '${target}' not found` }, 404);
-    }
-    const remaining = getConfig().auth.users.filter((u) => u.username.toLowerCase() !== target);
-    // Prevent locking the deployment out of administration: at least one
-    // operator must remain.  Viewers don't count toward this floor.
-    const remainingOperators = remaining.filter((u) => u.role === "operator");
-    if (remainingOperators.length === 0) {
-      return c.json({ error: "Refusing to delete the last operator — promote another account first" }, 400);
-    }
-
-    updateConfig((raw) => {
-      const auth = (raw["auth"] as Record<string, unknown>) ?? {};
-      auth["users"] = remaining.map((u) => ({
-        username: u.username,
-        passwordHash: u.passwordHash,
-        role: u.role,
-        ...(u.displayName ? { displayName: u.displayName } : {}),
-        ...(u.createdAt ? { createdAt: u.createdAt } : {}),
-      }));
-      raw["auth"] = auth;
-    });
-
-    logAudit("auth_user_deleted", { actor: actor.username, username: target, role: targetUser.role }, { userId: actor.username, severity: "warn" });
-    return c.json({ ok: true });
-  });
+  // ── User management (roster, create, delete) — extracted to ./user-routes.ts ──
+  registerUserRoutes(app);
 
   // Federation routes — gated at request time on federation.enabled, so
   // toggling the config flag takes effect without a gateway restart.
@@ -1645,10 +1569,11 @@ export function createGateway() {
   // ── Model presets + Claude OAuth routes — extracted to ./model-preset-routes.ts ──
   registerModelPresetRoutes(app);
 
+  // Keys masked on the way out and a masked key kept on the way in, as for the multimodal config.
   app.get("/api/model-endpoints/config", async (c) => {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
-    return c.json(currentModelEndpointConfig());
+    return c.json(maskConfigSecrets(currentModelEndpointConfig()));
   });
 
   app.put("/api/model-endpoints/config", async (c) => {
@@ -1662,62 +1587,101 @@ export function createGateway() {
       return c.json({ error: "Invalid JSON body" }, 400);
     }
 
-    const parsed = ModelEndpointConfigSchema.safeParse(body);
+    const cfg = getConfig();
+    const current = currentModelEndpointConfig(cfg);
+    const parsed = ModelEndpointConfigSchema.safeParse(resolveSecretPlaceholders(body, current));
     if (!parsed.success) {
       return c.json({ error: "Invalid model endpoint configuration", details: parsed.error.flatten() }, 400);
     }
+    const applyModelEndpoints = (raw: Record<string, unknown>) => {
+      const agents = (raw["agents"] as Record<string, unknown> | undefined) ?? {};
+      const defaults = (agents["defaults"] as Record<string, unknown> | undefined) ?? {};
+      const defaultModel = (defaults["model"] as Record<string, unknown> | undefined) ?? {};
+      const retrieval = (raw["retrieval"] as Record<string, unknown> | undefined) ?? {};
+      const reranker = (retrieval["reranker"] as Record<string, unknown> | undefined) ?? {};
+      const guardrails = (raw["guardrails"] as Record<string, unknown> | undefined) ?? {};
+      const modelModeration = (guardrails["modelModeration"] as Record<string, unknown> | undefined) ?? {};
+
+      raw["agents"] = {
+        ...agents,
+        defaults: {
+          ...defaults,
+          model: {
+            ...defaultModel,
+            primary: parsed.data.orchestrator.primary,
+            baseUrl: parsed.data.orchestrator.baseUrl,
+            apiKey: parsed.data.orchestrator.apiKey,
+            embeddingModel: parsed.data.embeddings.embeddingModel,
+            embeddingBaseUrl: parsed.data.embeddings.embeddingBaseUrl,
+            embeddingApiKey: parsed.data.embeddings.embeddingApiKey,
+          },
+        },
+      };
+
+      raw["retrieval"] = {
+        ...retrieval,
+        reranker: {
+          ...reranker,
+          enabled: parsed.data.reranker.enabled,
+          model: parsed.data.reranker.model,
+          baseUrl: parsed.data.reranker.baseUrl,
+          apiKey: parsed.data.reranker.apiKey,
+        },
+      };
+
+      raw["guardrails"] = {
+        ...guardrails,
+        modelModeration: {
+          ...modelModeration,
+          enabled: parsed.data.guard.enabled,
+          model: parsed.data.guard.model,
+          baseUrl: parsed.data.guard.baseUrl,
+          apiKey: parsed.data.guard.apiKey,
+        },
+      };
+    };
+    // Judged on the config the save leaves in effect, not on the body. A key the body leaves out is
+    // written as unset, which the overlay cannot store, so a key a config shard sets stayed — and
+    // went to the body's endpoint while the rule saw no key at all. And an env-pinned model
+    // (SAI_PRIMARY_MODEL) outranks the body's, and with it whose key stands in for an unset one.
+    // `before` is the config as it loads from disk too, not the loaded one: a save reloads from
+    // disk, so what it changes is disk against disk. Against the loaded config, a sub-agent model
+    // patched only in memory read as its key moving back to the endpoint on disk, and every save was
+    // refused until a reload (r3 A-security #1). That patch is saved now (sub-agent-routes.ts).
+    let before: Config;
+    let after: Config;
+    try {
+      before = previewConfigUpdate(() => {});
+      after = previewConfigUpdate(applyModelEndpoints);
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+    }
+    const ctx = secretEndpointContext(before);
+    const moved = refuseMovedSecrets(modelEndpointSecretDestinations(ctx), body, currentModelEndpointConfig(before), currentModelEndpointConfig(after));
+    if (!moved.ok) {
+      return c.json({ error: moved.error, details: { field: moved.field } }, 400);
+    }
+    // The default model is every sub-agent's base: one with a key of its own and no endpoint of
+    // its own is sent that key at the DEFAULT endpoint, so moving the default moves its key too.
+    // Judged over the whole config, the keys this body typed mapped to where they are stored.
+    const sent = body as { orchestrator?: { apiKey?: unknown }; embeddings?: { embeddingApiKey?: unknown } } | null;
+    const inherited = refuseMovedSecrets(
+      agentModelSecretDestinations(ctx),
+      { agents: { defaults: { model: { apiKey: sent?.orchestrator?.apiKey, embeddingApiKey: sent?.embeddings?.embeddingApiKey } } } },
+      before,
+      after,
+    );
+    if (!inherited.ok) {
+      return c.json({
+        error: `A sub-agent follows the default model where it sets no endpoint or key of its own, so this save would send a key to an endpoint it does not go to today (${inherited.field}). Set that sub-agent's own endpoint and key first.`,
+        details: { field: inherited.field },
+      }, 400);
+    }
 
     try {
-      const updatedConfig = updateConfig((raw) => {
-        const agents = (raw["agents"] as Record<string, unknown> | undefined) ?? {};
-        const defaults = (agents["defaults"] as Record<string, unknown> | undefined) ?? {};
-        const defaultModel = (defaults["model"] as Record<string, unknown> | undefined) ?? {};
-        const retrieval = (raw["retrieval"] as Record<string, unknown> | undefined) ?? {};
-        const reranker = (retrieval["reranker"] as Record<string, unknown> | undefined) ?? {};
-        const guardrails = (raw["guardrails"] as Record<string, unknown> | undefined) ?? {};
-        const modelModeration = (guardrails["modelModeration"] as Record<string, unknown> | undefined) ?? {};
-
-        raw["agents"] = {
-          ...agents,
-          defaults: {
-            ...defaults,
-            model: {
-              ...defaultModel,
-              primary: parsed.data.orchestrator.primary,
-              baseUrl: parsed.data.orchestrator.baseUrl,
-              apiKey: parsed.data.orchestrator.apiKey,
-              embeddingModel: parsed.data.embeddings.embeddingModel,
-              embeddingBaseUrl: parsed.data.embeddings.embeddingBaseUrl,
-              embeddingApiKey: parsed.data.embeddings.embeddingApiKey,
-            },
-          },
-        };
-
-        raw["retrieval"] = {
-          ...retrieval,
-          reranker: {
-            ...reranker,
-            enabled: parsed.data.reranker.enabled,
-            model: parsed.data.reranker.model,
-            baseUrl: parsed.data.reranker.baseUrl,
-            apiKey: parsed.data.reranker.apiKey,
-          },
-        };
-
-        raw["guardrails"] = {
-          ...guardrails,
-          modelModeration: {
-            ...modelModeration,
-            enabled: parsed.data.guard.enabled,
-            model: parsed.data.guard.model,
-            baseUrl: parsed.data.guard.baseUrl,
-            apiKey: parsed.data.guard.apiKey,
-          },
-        };
-      });
-
+      const updatedConfig = updateConfig(applyModelEndpoints);
       await syncModelEndpointRuntimeStatus();
-      return c.json(currentModelEndpointConfig(updatedConfig));
+      return c.json(maskConfigSecrets(currentModelEndpointConfig(updatedConfig)));
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
     }
@@ -1806,12 +1770,15 @@ export function createGateway() {
   });
 
 
+  // Every signed-in account can read this, so the keys go out masked (see config-secrets.ts).
   app.get("/api/multimodal/config", async (c) => {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
-    return c.json(currentMultimodalConfig());
+    return c.json(maskConfigSecrets(currentMultimodalConfig()));
   });
 
+  // A partial update: keys the body leaves out are kept, `null` removes one, and a masked key
+  // stands for the stored one (see multimodal-config-merge.ts and config-secrets.ts).
   app.put("/api/multimodal/config", async (c) => {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
@@ -1823,16 +1790,21 @@ export function createGateway() {
       return c.json({ error: "Invalid JSON body" }, 400);
     }
 
-    const parsed = MultimodalSchema.safeParse(body);
-    if (!parsed.success) {
-      return c.json({ error: "Invalid multimodal configuration", details: parsed.error.flatten() }, 400);
+    // A bad body, or one that would send a saved key to a new endpoint, is a 400 before anything
+    // is touched; the merge that persists runs inside the mutator, over the RAW stored section,
+    // as the orchestration PUT does.
+    const checked = checkMultimodalConfigSave(currentMultimodalConfig(), body, secretEndpointContext());
+    if (!checked.ok) {
+      return c.json({ error: checked.error, details: checked.details }, 400);
     }
 
     try {
       const updatedConfig = updateConfig((raw) => {
-        raw["multimodal"] = parsed.data;
+        const merged = mergeMultimodalConfigUpdate(raw["multimodal"], checked.patch);
+        if (!merged.ok) throw new Error(merged.error);
+        raw["multimodal"] = merged.stored;
       });
-      return c.json(updatedConfig.multimodal);
+      return c.json(maskConfigSecrets(updatedConfig.multimodal));
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
     }
@@ -2150,9 +2122,17 @@ export function createGateway() {
       try {
         const base64 = Buffer.from(imageBytes).toString("base64");
         const dataUrl = `data:${uploadedFile.type};base64,${base64}`;
-        const providerConfig = getConfig().providers?.lmstudio;
-        const visionBaseUrl = (multimodalConfig.files.visionBaseUrl ?? providerConfig?.baseUrl ?? "http://host.docker.internal:1234/v1").replace(/\/$/, "");
-        const visionApiKey = multimodalConfig.files.visionApiKey ?? providerConfig?.apiKey ?? "lm-studio";
+        // The resolver the status and analyze-image routes use, and the one the moved-key rule
+        // judges by (secret-endpoint-context.ts). Reading providers.lmstudio here sent the primary
+        // key to a vision endpoint the rule had judged by the vision model's provider: with an
+        // anthropic/* model and no Anthropic credentials it saw no key to protect.
+        const visionEndpoint = resolveProviderEndpointForModel(
+          multimodalConfig.files.visionModel,
+          { baseUrl: multimodalConfig.files.visionBaseUrl, apiKey: multimodalConfig.files.visionApiKey },
+          getConfig(),
+        );
+        const visionBaseUrl = visionEndpoint.baseUrl.replace(/\/$/, "");
+        const visionApiKey = visionEndpoint.apiKey;
         // Strip provider prefix (e.g. "lmstudio/qwen2-vl-7b-instruct" → "qwen2-vl-7b-instruct")
         const modelId = multimodalConfig.files.visionModel.replace(/^[^/]+\//, "");
 
@@ -2650,6 +2630,15 @@ export function createGateway() {
     const prompt = typeof body["prompt"] === "string" ? body["prompt"].trim() : "";
     if (!prompt) return c.json({ error: "prompt is required" }, 400);
 
+    // Steps or a size outside what may be rendered are the caller's to fix, not the backend failing:
+    // a 400, where requestImageGeneration's own refusal came back through the catch below as a 502.
+    const outOfBounds = imageRequestBoundsError({
+      ...(typeof body["width"] === "number" ? { width: body["width"] } : {}),
+      ...(typeof body["height"] === "number" ? { height: body["height"] } : {}),
+      ...(typeof body["steps"] === "number" ? { steps: body["steps"] } : {}),
+    });
+    if (outOfBounds) return c.json({ error: `${outOfBounds}. Nothing was rendered.` }, 400);
+
     const imgConfig = multimodalConfig.imageGeneration;
     try {
       // Only what the CALLER asked for. requestImageGeneration fills the rest per tier —
@@ -2710,6 +2699,10 @@ export function createGateway() {
     if (!sessionId) {
       return c.json({ error: "sessionId is required" }, 400);
     }
+    // The export is the whole transcript: someone else's is not the caller's to download.
+    if (!callerMayUseSession(await authenticatedUser(c.req.header("Authorization")), sessionId)) {
+      return c.json({ error: "Session not found" }, 404);
+    }
 
     try {
       const markdown = await buildSessionDebugMarkdownDetached(sessionId);
@@ -2736,6 +2729,9 @@ export function createGateway() {
     const sessionId = c.req.param("sessionId")?.trim();
     if (!sessionId) {
       return c.json({ error: "sessionId is required" }, 400);
+    }
+    if (!callerMayUseSession(await authenticatedUser(c.req.header("Authorization")), sessionId)) {
+      return c.json({ error: "Session not found" }, 404);
     }
 
     try {
@@ -2767,8 +2763,14 @@ export function createGateway() {
     const sessionId = c.req.param("sessionId")?.trim();
     if (!sessionId) return c.json({ error: "sessionId is required" }, 400);
 
+    // The facts carry what the run found, image paths included. Ownership is checked on the id
+    // whose facts are read: a sub-agent id resolves to its root session.
+    const sharedSessionId = deriveSharedSessionId(sessionId);
+    if (!callerMayUseSession(await authenticatedUser(c.req.header("Authorization")), sharedSessionId)) {
+      return c.json({ error: "Session not found" }, 404);
+    }
+
     try {
-      const sharedSessionId = deriveSharedSessionId(sessionId);
       const facts = await readAllFacts(sharedSessionId);
       // Curated (share_finding) facts first, then auto-extracted `auto_*` findings; each group alphabetical.
       const items = Object.entries(facts)
@@ -2783,6 +2785,9 @@ export function createGateway() {
   // POST /api/sessions/:sessionId/steer — fold a user message into a RUNNING turn
   // (mid-turn steering). Only queues when a turn is actually in flight; returns
   // steered:false otherwise so the client can fall back to sending a normal message.
+  // The reply carries the message's id — the client's clientMessageId when it sent a
+  // valid one — which the agent.steering_consumed event later names, and a retry
+  // with the same id is queued once.
   app.post("/api/sessions/:sessionId/steer", async (c) => {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
@@ -2791,9 +2796,11 @@ export function createGateway() {
     if (!sessionId) return c.json({ error: "sessionId is required" }, 400);
 
     let message: string;
+    let clientMessageId: string | undefined;
     try {
-      const body = await c.req.json() as { message?: unknown };
+      const body = await c.req.json() as { message?: unknown; clientMessageId?: unknown };
       message = typeof body?.message === "string" ? body.message : "";
+      clientMessageId = typeof body?.clientMessageId === "string" ? body.clientMessageId : undefined;
     } catch {
       return c.json({ error: "Invalid JSON body" }, 400);
     }
@@ -2801,15 +2808,9 @@ export function createGateway() {
 
     // Steering text becomes part of someone's running turn — and now reaches every specialist
     // delegated after it as that user's own words — so it gets what any message gets: the
-    // ownership check /stop enforces (opaque 404, archived sessions resolved, admins exempt)
-    // and the input guardrail.
-    const caller = await authenticatedUser(c.req.header("Authorization"));
-    if (getConfig().auth?.enabled === true && !userHasRole(caller, "admin")) {
-      const session = getSessionRecord(sessionId);
-      if (!session) return c.json({ error: "Session not found" }, 404);
-      if (session.userId !== undefined && session.userId !== caller?.username) {
-        return c.json({ error: "Session not found" }, 404);
-      }
+    // session ownership check and the input guardrail.
+    if (!callerMayUseSession(await authenticatedUser(c.req.header("Authorization")), sessionId)) {
+      return c.json({ error: "Session not found" }, 404);
     }
     const inputCheck = checkInput(message);
     if (!inputCheck.allowed) {
@@ -2820,10 +2821,10 @@ export function createGateway() {
       return c.json({ error: `I can't process that message: ${inputCheck.reason ?? "Prompt injection detected"}` }, 400);
     }
 
-    const steered = turnSteeringManager.enqueueIfActive(sessionId, message);
+    const queued = turnSteeringManager.enqueue(sessionId, message, clientMessageId);
     // active mirrors steered here, but expose it explicitly so the client knows
     // whether to fall back to a normal new-message send.
-    return c.json({ steered, active: turnSteeringManager.isTurnActive(sessionId) });
+    return c.json({ steered: queued.queued, active: queued.active, ...(queued.id ? { id: queued.id } : {}) });
   });
 
   // Cancel an in-flight turn — gracefully by default, hard only when asked.
@@ -2854,35 +2855,20 @@ export function createGateway() {
       // No body is the common case for a plain cancel — treat it as graceful, not a 400.
     }
 
-    // Same ownership invariant the AG-UI stream enforces before it will drive a turn: a
-    // caller may not stop another user's run. Opaque 404 so the response does not confirm
-    // that the session id exists.
+    // A caller may not stop another user's run. An unresolvable id matters most here: the
+    // `force` path cancels the turn cluster-wide, so an owner this process cannot see must not
+    // read as "unowned" (see callerMayUseSession).
     const caller = await authenticatedUser(c.req.header("Authorization"));
-    if (getConfig().auth?.enabled === true) {
-      // AN OWNER THIS PROCESS CANNOT SEE IS NOT AN ABSENT OWNER. `getSession` reads the hot
-      // in-memory set only: it returns undefined for an ARCHIVED session and for one held by
-      // another gateway instance, and the check below then read that as "unowned" and allowed
-      // any authenticated caller through — including on the `force` path, which cancels the
-      // turn cluster-wide. getSessionRecord sees archived sessions too, and an id this
-      // instance cannot resolve at all is refused rather than assumed free.
-      const session = getSessionRecord(sessionId);
-      // ADMIN, not operator: operator is the ordinary role every account gets by default, and
-      // the /api write gate already requires it — so exempting operators exempted everyone who
-      // could reach this route, and any user could stop any other user's run.
-      const isAdmin = userHasRole(caller, "admin");
-      if (!isAdmin) {
-        if (!session) return c.json({ error: "Session not found" }, 404);
-        if (session.userId !== undefined && session.userId !== caller?.username) {
-          return c.json({ error: "Session not found" }, 404);
-        }
-      }
-    }
+    if (!callerMayUseSession(caller, sessionId)) return c.json({ error: "Session not found" }, 404);
 
     // Report whether a turn was actually running. A stop against an idle session is not an
     // error — the client may be racing the turn's own completion — but the caller needs to
     // know, so it can stop showing a "cancelling…" state that will never resolve.
     const active = turnSteeringManager.isTurnActive(sessionId);
     const actor = caller?.username ?? "user";
+    // A question the turn is waiting on closes with the stop, on both paths: graceful would
+    // otherwise leave the tool parked on it until its own deadline, and the card open.
+    userInputBroker.stopRoot(sessionId);
 
     if (force) {
       const { requestDistributedSessionCancel } = await import("../swarm/control.js");
@@ -3027,28 +3013,51 @@ export function createGateway() {
       return c.json({ error: `Proposal is already ${proposal.status}` }, 409);
     }
 
-    const protectedChange = proposal.configChanges.find((change) => /secret|password|token|apikey|api_key|privatekey|private_key|credential|credentials/i.test(change.path));
+    const protectedChange = proposal.configChanges.find(isProtectedConfigChange);
     if (protectedChange) {
       return c.json({ error: `Protected config path cannot be applied automatically: ${protectedChange.path}` }, 400);
     }
-
     const missingAgent = proposal.promptChanges.find((change) => !hasPromptTarget(cfg, change.agentName));
     if (missingAgent) {
       return c.json({ error: `Prompt target agent '${missingAgent.agentName}' not found` }, 404);
     }
 
-    try {
-      updateConfig((raw) => {
-        for (const change of proposal.configChanges) {
-          applyObjectPath(raw, change.path, change.value);
-        }
+    const applyProposal = (raw: Record<string, unknown>) => {
+      for (const change of proposal.configChanges) {
+        applyObjectPath(raw, change.path, change.value);
+      }
 
-        if (proposal.promptChanges.length > 0) {
-          for (const change of proposal.promptChanges) {
-            applyPromptChange(raw, change);
-          }
+      if (proposal.promptChanges.length > 0) {
+        for (const change of proposal.promptChanges) {
+          applyPromptChange(raw, change);
         }
-      });
+      }
+    };
+    // An endpoint path is not protected, but moving one moves the key that goes with it: a default
+    // or sub-agent baseUrl, an embeddingBaseUrl, even a sub-agent's model (another provider's key
+    // at its endpoint). So the proposal is judged on the config it would leave IN EFFECT
+    // (previewConfigUpdate: a shard's value survives an unset, an env-pinned model outranks the
+    // proposal's), by the same rule as the settings pages — with nothing typed in, since a
+    // proposal carries no key. Against the config as it loads from disk, not the loaded one, as
+    // the model-endpoints save is (r3 A-security #1).
+    let before: Config;
+    let proposed: Config;
+    try {
+      before = previewConfigUpdate(() => {});
+      proposed = previewConfigUpdate(applyProposal);
+    } catch (error) {
+      return c.json({ error: `The proposal does not leave a valid config: ${error instanceof Error ? error.message : String(error)}` }, 400);
+    }
+    const moved = refuseMovedSecrets(agentModelSecretDestinations(secretEndpointContext(before)), {}, before, proposed);
+    if (!moved.ok) {
+      return c.json({
+        error: `The proposal would send the key at ${moved.field} to an endpoint it does not go to today. Change endpoints and keys in Settings (Model Routing, or the agent's model) instead.`,
+        details: { field: moved.field },
+      }, 400);
+    }
+
+    try {
+      updateConfig(applyProposal);
 
       const updated = updateConversationConfigProposal(cfg.workspacePath, id, (current) => ({
         ...current,

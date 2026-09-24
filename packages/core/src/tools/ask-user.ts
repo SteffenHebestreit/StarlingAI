@@ -1,4 +1,6 @@
 import { registerTool } from "./registry.js";
+import { userInputBroker } from "../agent/user-input-broker.js";
+import { clampUserInputTimeoutMs } from "../agent/user-input.js";
 
 /**
  * What the model reads when the wait ended without an answer. The gateway resolves a timed-out
@@ -44,7 +46,7 @@ registerTool({
       timeoutMs: {
         type: "number",
         description:
-          "How long to wait for the user's answer in milliseconds. Defaults to 120000 (2 minutes).",
+          "How long to wait for the user's answer in milliseconds. Defaults to 120000 (2 minutes); held between 10000 and 900000.",
       },
     },
     required: ["question"],
@@ -67,12 +69,22 @@ registerTool({
       ? (args["choices"] as unknown[]).map(String).filter(Boolean)
       : undefined;
 
-    const timeoutMs =
-      typeof args["timeoutMs"] === "number" && args["timeoutMs"] > 0
-        ? args["timeoutMs"]
-        : 120_000;
+    // The model picks this number. Unbounded, a slip ("wait 2 hours") parked the whole turn and a
+    // tiny one expired before anyone could read the question.
+    const timeoutMs = clampUserInputTimeoutMs(args["timeoutMs"]);
 
-    const answer = (await context.inputCallback(question, choices?.length ? choices : undefined, timeoutMs)).trim();
+    // The run clocks hold while the person reads and answers (agent/user-input-broker.ts). A Stop
+    // ends the hold at once: the question itself may outlive it until its own deadline, and a hold
+    // left open would freeze the next turn's clocks instead (review #17).
+    const endHumanWait = userInputBroker.beginHumanWait(context.sessionId);
+    context.signal?.addEventListener("abort", endHumanWait, { once: true });
+    let answer: string;
+    try {
+      answer = (await context.inputCallback(question, choices?.length ? choices : undefined, timeoutMs)).trim();
+    } finally {
+      context.signal?.removeEventListener("abort", endHumanWait);
+      endHumanWait();
+    }
     // An answer is the user's own words too, and often the one that settles what the opening
     // message left open, so specialists delegated to after it see it. The question rides along
     // because "yes" means nothing on its own — and it is the END of a question that says what "yes"

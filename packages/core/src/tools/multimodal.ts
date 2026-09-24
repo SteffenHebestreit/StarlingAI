@@ -6,21 +6,49 @@ import { childLogger } from "../logger.js";
 import { sendChunkedTtsRequests } from "../multimodal/tts-chunking.js";
 import { getMcpConnections } from "../mcp/registry.js";
 import {
+  ImageGenerationTimeoutError,
   checkImageGenerationHealth,
   describeImageTierChoices,
   imageEngineLabel,
   imageGenerationServiceConfigured,
+  imageRequestBoundsError,
   imageTierChoices,
   requestImageGeneration,
   resolveNamedImageEngine,
+  type ImageGenerationRequest,
 } from "../multimodal/image-generation.js";
+import {
+  IMAGE_SETTINGS_KIND,
+  IMAGE_SETTINGS_MAX_ANSWER_BYTES,
+  applyImageSettings,
+  buildImageSettingsProposal,
+  collectBaseCandidates,
+  describeAgentMask,
+  describeImageSettingsForAgent,
+  describeRenderSettings,
+  describeReusedMaskForAgent,
+  describeSettingsChange,
+  truncate,
+  validateImageSettingsAnswer,
+  type AgentMask,
+  type BaseCandidate,
+  type BaseCandidateSource,
+  type CandidateSourceEntry,
+  type ImageSettingsDecision,
+  type ImageSettingsProposal,
+  type ImageSettingsSource,
+} from "../multimodal/image-settings.js";
 import { encodeImageAs, transformImage, type ImageTransformOp } from "../multimodal/image-transform.js";
-import { writeSharedFact } from "../swarm/memory.js";
+import { readAllFacts, writeSharedFact } from "../swarm/memory.js";
+import { getSessionRecord } from "../agent/session.js";
+import { holdTurnClocks } from "../agent/user-input-broker.js";
+import { DECLINED_BY_USER_METADATA_KEY } from "../agent/user-input.js";
+import { currentRequestContext } from "../runtime/request-context.js";
+import type { MultimodalImageGenerationConfig } from "../config/schemas/multimodal.js";
 import { deriveSharedSessionId } from "./memory.js";
 import { resolveProviderEndpointForModel } from "../providers/index.js";
-import { registerTool, type ToolResult } from "./registry.js";
-import { resolvePathWithinWorkspace } from "./workspace-path.js";
-import { PRODUCT } from "../product/index.js";
+import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
+import { resolvePathWithinWorkspace, resolveWorkspaceWritePath } from "./workspace-path.js";
 
 const log = childLogger("tool:multimodal");
 
@@ -277,8 +305,11 @@ registerTool({
       }
 
       const audio = new Uint8Array(await response.arrayBuffer());
-      const outputPath = stringArg(args["outputPath"]) ?? `${PRODUCT.stateDirName}/generated/tts-${Date.now()}.wav`;
-      const resolvedOutput = resolveWorkspacePath(outputPath, ctx.workspacePath);
+      const requestedOutputPath = stringArg(args["outputPath"]);
+      const outputPath = requestedOutputPath ?? `tts-${Date.now()}.wav`;
+      const resolvedOutput = requestedOutputPath
+        ? resolveWorkspacePath(outputPath, ctx.workspacePath)
+        : resolveDefaultArtifactPath(outputPath, ctx.workspacePath);
       await mkdir(resolve(resolvedOutput.resolved, ".."), { recursive: true });
       await writeFile(resolvedOutput.resolved, audio);
 
@@ -413,7 +444,7 @@ registerTool({
         type: "array",
         description:
           "Operations applied IN ORDER, so one call can crop and then sharpen. Each item is"
-          + " {op, ...}: sharpen{amount 0-3, default 1}, soften{radius, default 2},"
+          + " {op, ...}: sharpen{amount 0-3, default 1}, soften{radius 1-144, default 2},"
           + " resize{width?, height?} (omit one to keep the aspect ratio), crop{x,y,width,height},"
           + " rotate{degrees}, flip{horizontal?, vertical?}, brightness{amount -1..1},"
           + " contrast{amount -1..1}, grayscale{}, normalize{}.",
@@ -486,7 +517,9 @@ const GENERATE_IMAGE_DESCRIPTION =
   "Generate an image from a text prompt and save it to the workspace. Two tiers: `fast` (the default,"
   + " ~10s on dedicated hardware, costs the rest of the system nothing) and `quality` (~2-3 min, runs one"
   + " at a time cluster-wide and slows every other model on that machine while it runs). See the `tier`"
-  + " parameter for when each is right.";
+  + " parameter for when each is right. In a chat the user may first see your settings and keep them,"
+  + " change engine, prompt, size, steps, seed or base picture, paint a mask, or skip the render; the"
+  + " output says which settings ran and who chose them. Report those, and never re-render to restore yours.";
 
 /**
  * The engines behind the tiers, named, so "the qwen model" can be matched to a tier.
@@ -539,13 +572,16 @@ registerTool({
         description:
           "OMIT THIS unless you know the backend accepts the size. Nothing is resampled: a backend that"
           + " generates one fixed resolution REJECTS any other width outright, costing a wasted call."
-          + " Leaving it out uses the configured default, which always fits.",
+          + " Leaving it out uses the configured default, which always fits. At most 2048.",
       },
       height: {
         type: "number",
         description: "OMIT THIS. Same rule as `width` — leaving it out uses the configured default.",
       },
-      steps: { type: "number", description: "Number of diffusion steps (higher = better quality, slower). Omit to use the configured default." },
+      steps: {
+        type: "number",
+        description: "Number of diffusion steps, 1 to 100 (higher = better quality, slower: the render time grows with them). Omit to use the configured default.",
+      },
       guidanceScale: { type: "number", description: "Guidance scale — how closely the model follows the prompt. Omit to use the configured default." },
       seed: { type: "number", description: "Optional random seed for reproducible results" },
       tier: {
@@ -610,7 +646,11 @@ registerTool({
           + " backwards edits exactly the part the user wanted kept and still returns a"
           + " perfectly plausible picture, so never guess the polarity. The mask must select"
           + " something and not everything; both are rejected. Pass one only when a mask file"
-          + " already exists — none of the image tools can draw one, and inventing a path fails."
+          + " already exists — you cannot draw one, and inventing a path fails. In a chat the user"
+          + " can paint one in the settings step, so for add/remove/replace without a mask still"
+          + " call with baseImage; a mask they painted is kept as the shared fact `latest_mask`. It selects"
+          + " one region of the pictures in `latest_mask_base`: reuse it only to change that SAME region again;"
+          + " for another region or picture call without it — it is refused on any other picture."
           + " Useful for 'change only the sky', 'replace the car', 'leave her face alone'."
           + " LIMIT: the model never sees the"
           + " mask — the region is composited in — so this REPLACES a region cleanly but cannot"
@@ -668,6 +708,18 @@ registerTool({
         requestedTier = tierOfName;
       }
 
+      // Held to what may be rendered before anything else runs: the render's budget grows with its
+      // steps and size, so 1000 steps at 2048x2048 would have been offered on the settings card as a
+      // 19-hour render.
+      const outOfBounds = imageRequestBoundsError({
+        ...(typeof args["steps"] === "number" ? { steps: args["steps"] } : {}),
+        ...(typeof args["width"] === "number" ? { width: args["width"] } : {}),
+        ...(typeof args["height"] === "number" ? { height: args["height"] } : {}),
+      });
+      if (outOfBounds) {
+        return fail(`${outOfBounds}. Nothing was rendered: call again within those bounds, or leave them out for the engine's defaults.`);
+      }
+
       const health = await checkImageGenerationHealth(config);
       if (!health.ok) {
         if (health.disabled) {
@@ -692,12 +744,11 @@ registerTool({
       // forward passes. One shared default is wrong for one of them whichever value it takes.
       // Read the base image before anything else touches the backend, so a bad path fails
       // immediately rather than after a two-minute render.
-      let baseImageBase64: string | undefined;
+      let baseFile: WorkspaceBinaryFile | undefined;
       const baseImagePath = stringArg(args["baseImage"]);
       if (baseImagePath) {
         try {
-          const baseFile = await readWorkspaceBinaryFile(baseImagePath, ctx.workspacePath);
-          baseImageBase64 = Buffer.from(baseFile.bytes).toString("base64");
+          baseFile = await readWorkspaceBinaryFile(baseImagePath, ctx.workspacePath);
         } catch (error) {
           return fail(
             `Could not read baseImage "${baseImagePath}": ${error instanceof Error ? error.message : String(error)}`,
@@ -705,12 +756,11 @@ registerTool({
         }
       }
 
-      let maskBase64: string | undefined;
+      let maskFile: WorkspaceBinaryFile | undefined;
       const maskPath = stringArg(args["mask"]);
       if (maskPath) {
         try {
-          const maskFile = await readWorkspaceBinaryFile(maskPath, ctx.workspacePath);
-          maskBase64 = Buffer.from(maskFile.bytes).toString("base64");
+          maskFile = await readWorkspaceBinaryFile(maskPath, ctx.workspacePath);
         } catch (error) {
           return fail(
             `Could not read mask "${maskPath}": ${error instanceof Error ? error.message : String(error)}`,
@@ -718,7 +768,22 @@ registerTool({
         }
       }
 
-      const result = await requestImageGeneration(config, {
+      // A painted mask selects one region of ONE picture, and the agent cannot see which. Offered
+      // for any later edit, it rebuilt the sky again when the user had asked to remove the boat.
+      let paintedMaskFor: string | undefined;
+      if (maskFile && baseFile) {
+        const fits = await paintedMaskFits(ctx, maskFile.relativePath);
+        paintedMaskFor = fits?.[0];
+        if (fits && !fits.includes(baseFile.relativePath)) {
+          return fail(
+            `The mask ${maskFile.relativePath} was painted for ${fits[0]}, not for ${baseFile.relativePath}: a mask`
+            + " selects one region of one picture. Nothing was rendered. For another picture or another region, call"
+            + " generate_image without `mask`; in a chat the user paints the region in the settings step.",
+          );
+        }
+      }
+
+      const agentRequest: ImageGenerationRequest = {
         prompt,
         ...(requestedTier ? { tier: requestedTier } : {}),
         // No `?? config.model` here: the backend resolves the tier's model itself, and
@@ -732,11 +797,47 @@ registerTool({
         ...(typeof args["steps"] === "number" ? { steps: args["steps"] } : {}),
         ...(typeof args["guidanceScale"] === "number" ? { guidanceScale: args["guidanceScale"] } : {}),
         ...(typeof args["seed"] === "number" ? { seed: args["seed"] } : {}),
-        ...(baseImageBase64 ? { initImage: baseImageBase64 } : {}),
+        ...(baseFile ? { initImage: Buffer.from(baseFile.bytes).toString("base64") } : {}),
         ...(typeof args["strength"] === "number" ? { strength: args["strength"] } : {}),
-        ...(maskBase64 ? { mask: maskBase64 } : {}),
+        ...(maskFile ? { mask: Buffer.from(maskFile.bytes).toString("base64") } : {}),
         ...(typeof args["maskBlur"] === "number" ? { maskBlur: args["maskBlur"] } : {}),
-      });
+      };
+
+      // The person may now take, change or skip what the agent chose. Asked AFTER the health
+      // probe, so an offline backend never keeps anyone waiting, and after the agent's own base
+      // and mask were read, so a bad path fails at once and the agent's picture can be offered.
+      const settingsStep = await askForImageSettings(ctx, config, agentRequest, { base: baseFile, mask: maskFile, paintedMaskFor });
+      if (settingsStep.stop) {
+        // A Skip is the person's choice, not a broken render: flagged, so the run record lists it
+        // apart from the calls that failed instead of telling the orchestrator the render broke.
+        const declined = settingsStep.metadata?.["source"] === "user_skipped";
+        return {
+          ...fail(settingsStep.stop),
+          ...(settingsStep.metadata
+            ? { metadata: { settings: settingsStep.metadata, ...(declined ? { [DECLINED_BY_USER_METADATA_KEY]: true } : {}) } }
+            : {}),
+        };
+      }
+
+      // A render the person approved in the settings step runs as long as its settings need —
+      // minutes, on the quality engine — and none of the run's clocks may read that as a stall
+      // (session 807684e9). Held for the render only, and only where somebody really answered.
+      const release = settingsStep.answered ? holdTurnClocks(ctx.sessionId, "image_render") : undefined;
+      let result: Awaited<ReturnType<typeof requestImageGeneration>>;
+      try {
+        result = await requestImageGeneration(config, settingsStep.request);
+      } catch (error) {
+        if (!(error instanceof ImageGenerationTimeoutError)) throw error;
+        return timedOutRender(error, settingsStep.metadata);
+      } finally {
+        release?.();
+      }
+
+      // Its picture is one the painted mask fits, so the tool cannot tell a second change to the
+      // same region from a different change; only a person looking can, and the output says whether one did.
+      const maskNote = paintedMaskFor && agentRequest.mask && settingsStep.request.mask === agentRequest.mask
+        ? describeReusedMaskForAgent(paintedMaskFor, settingsStep.metadata?.["source"] as ImageSettingsSource | undefined)
+        : "";
 
       const imageBytes = Buffer.from(result.imageBase64, "base64");
       const requestedOutputPath = stringArg(args["outputPath"]);
@@ -750,11 +851,14 @@ registerTool({
         ? (requestedExtension
             ? `${stripFileExtension(requestedOutputPath)}${encoded.extension}`
             : `${requestedOutputPath}${encoded.extension}`)
-        : `${PRODUCT.stateDirName}/generated/image-${Date.now()}${encoded.extension}`;
-      const resolvedOutput = resolveWorkspacePath(outputPath, ctx.workspacePath);
+        : `image-${Date.now()}${encoded.extension}`;
+      const resolvedOutput = requestedOutputPath
+        ? resolveWorkspacePath(outputPath, ctx.workspacePath)
+        : resolveDefaultArtifactPath(outputPath, ctx.workspacePath);
       await mkdir(resolve(resolvedOutput.resolved, ".."), { recursive: true });
       await writeFile(resolvedOutput.resolved, encoded.bytes);
       await publishImageArtifact(ctx.sessionId, resolvedOutput.relativePath);
+      await recordMaskedRender(ctx, settingsStep, maskFile, resolvedOutput.relativePath);
 
       // Which engine rendered it is said in the OUTPUT, not only in metadata. The specialist
       // reads the output and nothing else; in f4ebf47b it retried on the fast tier after a
@@ -762,14 +866,20 @@ registerTool({
       // as the engine the user asked for.
       const engine = imageEngineLabel(config, result.tier);
       const seconds = typeof result.elapsedMs === "number" ? ` in ${(result.elapsedMs / 1000).toFixed(1)} s` : "";
+      // Not in that time, and minutes long after a timeout: said, or the slow answer is unexplained.
+      const waited = result.deviceWaitMs
+        ? `, after waiting ${Math.round(result.deviceWaitMs / 1000)} s for the engine to finish an earlier render that timed out`
+        : "";
       const renderedBy = result.tier
-        ? `on the ${result.tier} tier${engine ? ` (${engine})` : result.model ? ` (model ${result.model})` : ""}${seconds}`
+        ? `on the ${result.tier} tier${engine ? ` (${engine})` : result.model ? ` (model ${result.model})` : ""}${seconds}${waited}`
         : "";
 
       // Same as synthesize_speech above: the resolved path is the one the bytes are at.
       return {
         success: true,
         output: `Image generated${renderedBy ? ` ${renderedBy}` : " successfully"}. Saved to ${resolvedOutput.relativePath}`
+          + settingsStep.note
+          + maskNote
           + (result.tierUpgradedForEdit
             ? ` — NOTE: editing is only available on the slower quality tier, so this used it`
               + " rather than the fast one. Say so if the user asked for speed."
@@ -793,6 +903,8 @@ registerTool({
           tier: result.tier,
           ...(engine ? { engine } : {}),
           elapsedMs: result.elapsedMs,
+          ...(result.deviceWaitMs ? { deviceWaitMs: result.deviceWaitMs } : {}),
+          ...(settingsStep.metadata ? { settings: settingsStep.metadata } : {}),
         },
       };
     } catch (error) {
@@ -807,6 +919,302 @@ registerTool({
     }
   },
 });
+
+/** What the settings step decided: the request to render, and what to tell the agent about it. */
+interface ImageSettingsStep {
+  request: ImageGenerationRequest;
+  /** Appended to the tool output; empty where nobody could be asked. */
+  note: string;
+  /** metadata.settings: who chose, what changed, how long the person took. */
+  metadata?: Record<string, unknown>;
+  /** Set when nothing may be rendered; the tool fails with it. */
+  stop?: string;
+  /** The person answered — Auto or their own settings — rather than a deadline or a standing choice. */
+  answered?: boolean;
+}
+
+/**
+ * A render that ran out of its time, as the agent must hear it: the error names the engine, the
+ * limit, the settings and what they were expected to take, and that the same settings must not be
+ * tried again. `dispatchUncertain`, because the engine is still rendering what we abandoned.
+ */
+function timedOutRender(error: ImageGenerationTimeoutError, settings: Record<string, unknown> | undefined): ToolResult {
+  const { tier, model, timeoutMs, expectedSeconds, steps, width, height } = error.details;
+  return {
+    success: false,
+    output: "",
+    error: error.message,
+    dispatchUncertain: true,
+    metadata: {
+      timedOut: true,
+      tier,
+      ...(model ? { model } : {}),
+      timeoutMs,
+      expectedSeconds: Math.round(expectedSeconds),
+      steps,
+      width,
+      height,
+      ...(settings ? { settings } : {}),
+    },
+  };
+}
+
+/**
+ * Put the render to the person before it runs (multimodal/image-settings.ts). Asked on EVERY call:
+ * a repeat call is a new render, and "make another one" deserves the same chance to change it.
+ * Where nobody can answer, or the chat is set to Auto, the broker says so at once and the agent's
+ * request runs unchanged; the proposal is only built when someone will really see it.
+ */
+async function askForImageSettings(
+  ctx: ToolContext,
+  config: MultimodalImageGenerationConfig,
+  agentRequest: ImageGenerationRequest,
+  agentFiles: { base?: WorkspaceBinaryFile; mask?: WorkspaceBinaryFile; paintedMaskFor?: string | undefined },
+): Promise<ImageSettingsStep> {
+  const prompt = config.settingsPrompt;
+  if (!ctx.requestUserInput || prompt?.enabled === false) return { request: agentRequest, note: "" };
+
+  let candidates: BaseCandidate[] = [];
+  let agentMask: AgentMask | undefined;
+  let proposal: ImageSettingsProposal | undefined;
+  const outcome = await ctx.requestUserInput<ImageSettingsDecision>({
+    kind: IMAGE_SETTINGS_KIND,
+    // Says who is asking and for what; the card and form already label themselves as settings.
+    title: `${ctx.currentAgentName ?? "The assistant"} wants to ${agentRequest.initImage ? "edit a picture" : "render a new picture"}`,
+    payload: async () => {
+      // Even at a cap of 0 the agent's own base is offered (see collectBaseCandidates).
+      const max = prompt?.maxBaseCandidates ?? 6;
+      candidates = await collectBaseCandidates(await baseCandidateEntries(ctx, agentFiles.base, max), max);
+      agentMask = agentFiles.mask ? await describeAgentMask(agentFiles.mask.bytes, agentFiles.mask.relativePath) : undefined;
+      // Said on the card, so an Auto on it is an Auto on that region.
+      if (agentMask && agentFiles.paintedMaskFor) agentMask = { ...agentMask, paintedEarlier: true };
+      proposal = buildImageSettingsProposal(config, agentRequest, candidates, agentMask);
+      return proposal as unknown as Record<string, unknown>;
+    },
+    ...(prompt?.timeoutMs ? { timeoutMs: prompt.timeoutMs } : {}),
+    ...(prompt?.configureTimeoutMs ? { holdTimeoutMs: prompt.configureTimeoutMs } : {}),
+    maxAnswerBytes: IMAGE_SETTINGS_MAX_ANSWER_BYTES,
+    validate: (answer) => proposal
+      ? validateImageSettingsAnswer(answer, { config, proposal, candidates, ...(agentMask ? { agentMask } : {}) })
+      : { ok: false, errors: [{ field: "inputId", message: "expired" }] },
+    preview: (candidateId) => {
+      const candidate = candidates.find((entry) => entry.id === candidateId);
+      return candidate
+        ? { dataUrl: `data:${candidate.mime};base64,${candidate.bytes.toString("base64")}`, width: candidate.width, height: candidate.height }
+        : null;
+    },
+    autoIf: (settings) => settings.imageSettingsPrompt === "auto",
+  });
+
+  const decision = "value" in outcome ? outcome.value : undefined;
+  if (decision?.alwaysAuto && outcome.rootSessionId) {
+    // "Always Auto in this chat": a standing choice for the chat, read by every later render.
+    getSessionRecord(outcome.rootSessionId)?.setSettings({ imageSettingsPrompt: "auto" });
+  }
+
+  if (outcome.outcome === "cancelled") {
+    if (outcome.reason === "user_skipped") {
+      ctx.turnUserWords?.midTurn.push("(image settings) skipped this render");
+      return {
+        request: agentRequest,
+        note: "",
+        stop: "The user skipped this render in the settings step, so nothing was rendered. Do not retry;"
+          + " tell the user and ask what they want instead.",
+        // The failure stays a failure for the agent, which must not retry; the tag is what lets the
+        // chat show a choice the user made as "Skipped by you" rather than as a red failed step.
+        metadata: { source: "user_skipped", changed: [], waitedMs: outcome.waitedMs },
+      };
+    }
+    return { request: agentRequest, note: "", stop: "The turn was stopped during the settings step, so nothing was rendered." };
+  }
+
+  if (outcome.outcome === "auto") {
+    const source: ImageSettingsSource = outcome.reason === "user" ? "auto" : outcome.reason;
+    return {
+      request: agentRequest,
+      note: describeImageSettingsForAgent({ source }),
+      ...(source !== "no_channel" ? { metadata: { source, changed: [], waitedMs: outcome.waitedMs } } : {}),
+      ...(source === "auto" ? { answered: true } : {}),
+    };
+  }
+
+  const settings = outcome.value.settings;
+  if (!settings || !proposal) return { request: agentRequest, note: "" };
+  let maskPath: string | undefined;
+  if (settings.edit?.mask) {
+    maskPath = await writePaintedMask(ctx, settings.edit.base.relativePath, settings.edit.mask.bytes);
+  } else if (settings.edit?.keepAgentMask) {
+    maskPath = agentFiles.mask?.relativePath;
+  }
+  const request = applyImageSettings(agentRequest, settings);
+  const change = describeSettingsChange(proposal, settings);
+  // Their choices are the person's own words for every specialist that runs after this one.
+  ctx.turnUserWords?.midTurn.push(
+    `(image settings) ${change.summary}`
+    + (change.changed.includes("prompt") ? ` — their prompt: "${truncate(settings.prompt, 300)}"` : ""),
+  );
+  const ran = describeRenderSettings(config, request, {
+    ...(settings.edit ? { baseLabel: settings.edit.base.relativePath } : {}),
+    ...(maskPath ? { maskPath } : {}),
+    ...(settings.edit?.mask ? { maskCoverage: settings.edit.mask.coverage } : {}),
+  });
+  return {
+    request,
+    note: describeImageSettingsForAgent({ source: "user", ran, change, prompt: settings.prompt }),
+    answered: true,
+    metadata: {
+      source: "user",
+      changed: change.changed,
+      waitedMs: outcome.waitedMs,
+      ...(maskPath ? { maskPath } : {}),
+      ...(settings.edit ? { baseImage: settings.edit.base.relativePath } : {}),
+    },
+  };
+}
+
+const RASTER_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"]);
+
+/**
+ * The pictures that may be offered as a base, agent's first, then newest first: the latest image,
+ * the chat's image attachments from the newest message back (uploads and earlier renders alike),
+ * then the older renders the shared facts remember. Paths go through the workspace guard here and
+ * again when read; the client only ever sees the ids handed out for them.
+ */
+async function baseCandidateEntries(
+  ctx: ToolContext,
+  agentBase: WorkspaceBinaryFile | undefined,
+  max: number,
+): Promise<CandidateSourceEntry[]> {
+  const entries: CandidateSourceEntry[] = [];
+  const seen = new Set<string>();
+  const add = (path: string | undefined, source: BaseCandidateSource, read?: () => Promise<Uint8Array>) => {
+    if (!path?.trim()) return;
+    let relativePath: string;
+    try {
+      relativePath = resolveWorkspacePath(path.trim(), ctx.workspacePath).relativePath;
+    } catch {
+      return;
+    }
+    if (seen.has(relativePath)) return;
+    seen.add(relativePath);
+    entries.push({
+      relativePath,
+      source,
+      read: read ?? (async () => (await readWorkspaceBinaryFile(relativePath, ctx.workspacePath)).bytes),
+    });
+  };
+  if (agentBase) add(agentBase.relativePath, "agent", async () => agentBase.bytes);
+
+  const shared = deriveSharedSessionId(ctx.sessionId);
+  let facts: Record<string, string> = {};
+  try {
+    facts = await readAllFacts(shared);
+  } catch {
+    // Without the memory backend the chat's own attachments are still offered.
+  }
+  add(facts["latest_image"], "latest_image");
+  const rootSessionId = currentRequestContext()?.userInput?.rootSessionId ?? shared;
+  const history = getSessionRecord(rootSessionId)?.getHistory() ?? [];
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const attachments = history[index]?.metadata?.["attachments"];
+    if (!Array.isArray(attachments)) continue;
+    for (const attachment of attachments as Array<Record<string, unknown>>) {
+      const path = typeof attachment?.["relativePath"] === "string" ? attachment["relativePath"] : undefined;
+      const contentType = typeof attachment?.["contentType"] === "string" ? attachment["contentType"] : "";
+      const isRaster = contentType
+        ? contentType.startsWith("image/") && !contentType.includes("svg")
+        : attachment?.["previewMode"] === "image" || RASTER_EXTENSIONS.has(extname(path ?? "").toLowerCase());
+      if (path && isRaster) add(path, "attachment");
+    }
+  }
+  for (const key of Object.keys(facts).filter((name) => name.startsWith("image:")).reverse()) {
+    add(facts[key], "shared_fact");
+  }
+  // Reading stops once enough decode; a bound on the scan keeps a long chat from reading them all.
+  return entries.slice(0, Math.max(1, max) * 4);
+}
+
+/**
+ * Keep a painted mask where the agent can reuse it: a follow-up "change it again" passes it as
+ * `mask` instead of asking the person to paint the same region twice. Best-effort — the render
+ * carries the mask's bytes itself, so a failed write costs only the reuse.
+ */
+async function writePaintedMask(ctx: ToolContext, baseRelativePath: string, bytes: Buffer): Promise<string | undefined> {
+  try {
+    const stem = basename(stripFileExtension(baseRelativePath)).replace(/[^A-Za-z0-9._-]+/g, "_").slice(0, 60) || "image";
+    const target = resolveWorkspaceWritePath(`generated/image-masks/${stem}-mask-${Date.now()}.png`, ctx.workspacePath);
+    await mkdir(resolve(target.resolved, ".."), { recursive: true });
+    await writeFile(target.resolved, bytes);
+    try {
+      const shared = deriveSharedSessionId(ctx.sessionId);
+      await writeSharedFact(shared, "latest_mask", target.relativePath);
+      await writeSharedFact(shared, LATEST_MASK_BASE, JSON.stringify([baseRelativePath]));
+    } catch {
+      // The file is there; only the pointer to it is missing.
+    }
+    return target.relativePath;
+  } catch (error) {
+    log.warn({ error }, "Could not keep the painted mask");
+    return undefined;
+  }
+}
+
+/**
+ * The pictures `latest_mask` fits, next to it in the shared facts: the one it was painted for, then
+ * the latest render made with it — the picture a follow-up "change it again" edits.
+ */
+const LATEST_MASK_BASE = "latest_mask_base";
+
+/** The pictures a mask fits, when it is the painted `latest_mask`; undefined for any other mask. */
+async function paintedMaskFits(ctx: ToolContext, maskRelativePath: string): Promise<string[] | undefined> {
+  let facts: Record<string, string>;
+  try {
+    facts = await readAllFacts(deriveSharedSessionId(ctx.sessionId));
+  } catch {
+    return undefined;
+  }
+  const normalize = (path: string | undefined): string | undefined => {
+    if (!path?.trim()) return undefined;
+    try {
+      return resolveWorkspacePath(path.trim(), ctx.workspacePath).relativePath;
+    } catch {
+      return undefined;
+    }
+  };
+  if (normalize(facts["latest_mask"]) !== maskRelativePath) return undefined;
+  const recorded = facts[LATEST_MASK_BASE];
+  if (!recorded) return undefined;
+  let paths: unknown;
+  try {
+    paths = JSON.parse(recorded);
+  } catch {
+    paths = [recorded];
+  }
+  const fits = (Array.isArray(paths) ? paths : [paths])
+    .map((path) => normalize(typeof path === "string" ? path : undefined))
+    .filter((path): path is string => Boolean(path));
+  return fits.length > 0 ? fits : undefined;
+}
+
+/** After a render made with the painted mask: the result is a picture that mask fits too. */
+async function recordMaskedRender(
+  ctx: ToolContext,
+  step: ImageSettingsStep,
+  agentMask: WorkspaceBinaryFile | undefined,
+  outputRelativePath: string,
+): Promise<void> {
+  if (!step.request.mask || !step.request.initImage) return;
+  // The person's settings name their own mask; anything else ran the agent's.
+  const mask = step.metadata?.["source"] === "user" ? step.metadata["maskPath"] : agentMask?.relativePath;
+  if (typeof mask !== "string") return;
+  const fits = await paintedMaskFits(ctx, mask);
+  if (!fits) return;
+  try {
+    await writeSharedFact(deriveSharedSessionId(ctx.sessionId), LATEST_MASK_BASE, JSON.stringify([...new Set([fits[0]!, outputRelativePath])]));
+  } catch {
+    // Only the follow-up loses: it is refused the mask and the user paints the region again.
+  }
+}
 
 registerBrowserTool({
   name: "browser_navigate",
@@ -911,6 +1319,8 @@ registerBrowserTool({
 
 interface WorkspaceBinaryFile {
   resolvedPath: string;
+  /** The guard-approved workspace-relative form of the path. */
+  relativePath: string;
   filename: string;
   contentType: string;
   bytes: Uint8Array;
@@ -954,6 +1364,7 @@ async function readWorkspaceBinaryFile(path: string, workspacePath: string): Pro
   const resolved = resolveWorkspacePath(path, workspacePath);
   const describe = (bytes: Buffer): WorkspaceBinaryFile => ({
     resolvedPath: resolved.resolved,
+    relativePath: resolved.relativePath,
     filename: basename(resolved.resolved),
     contentType: inferMimeType(resolved.resolved),
     bytes,
@@ -983,6 +1394,20 @@ async function readWorkspaceBinaryFile(path: string, workspacePath: string): Pro
     if (!stored) throw err;
     return describe(Buffer.from(stored));
   }
+}
+
+/**
+ * Where a file lands that the caller did not name: wherever the write resolver roots a plain name —
+ * the artifact zone in the scoped workspaces, and the workspace root itself in scope "full", which
+ * no agent holding these tools runs in today. The defaults used to be
+ * `.starlingai/generated/<name>`, which the zone then re-rooted into
+ * `generated/.starlingai/generated/<name>` — a hidden, doubled directory, every time (session
+ * 807684e9). A plain name, rooted by the write resolver, lands once under `generated/`. Files
+ * already written at the old place are still read by the paths the facts and transcripts carry.
+ */
+function resolveDefaultArtifactPath(name: string, workspacePath: string): { resolved: string; relativePath: string } {
+  const { resolved, relativePath } = resolveWorkspaceWritePath(name, workspacePath);
+  return { resolved, relativePath };
 }
 
 function resolveWorkspacePath(path: string, workspacePath: string): { resolved: string; relativePath: string } {
@@ -1077,7 +1502,7 @@ export async function extractDocumentBytesToMarkdown(
   const config = getConfig().multimodal.files;
   if (!config.mcpServer && !multimodalServiceConfigured(config.baseUrl)) return "";
   try {
-    const body = await convertFileToMarkdown({ resolvedPath: filename, filename, contentType, bytes });
+    const body = await convertFileToMarkdown({ resolvedPath: filename, relativePath: filename, filename, contentType, bytes });
     return String(body["markdown"] ?? "").trim();
   } catch (error) {
     log.warn({ error, filename }, "extractDocumentBytesToMarkdown failed");

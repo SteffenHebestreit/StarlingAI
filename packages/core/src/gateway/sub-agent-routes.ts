@@ -8,7 +8,8 @@
  */
 import type { Hono } from "hono";
 import { z } from "zod";
-import { getConfig } from "../config/loader.js";
+import { getConfig, previewConfigUpdate, updateConfig } from "../config/loader.js";
+import type { Config } from "../config/schema.js";
 import { verifyToken, extractBearerToken, authenticatedUser, userHasRole } from "./auth.js";
 import type { Context } from "hono";
 import { childLogger } from "../logger.js";
@@ -16,6 +17,8 @@ import { PRODUCT } from "../product/index.js";
 import { resolveAgentRouting } from "../tools/sub-agent.js";
 import { appendFlowMemoryEntry, readFlowMemoryEntries } from "../agent/flow-memory.js";
 import { listConversationConfigProposals } from "../agent/config-assistant-proposals.js";
+import { agentModelSecretDestinations, maskConfigSecrets, refuseMovedSecrets, resolveSecretPlaceholders } from "./config-secrets.js";
+import { secretEndpointContext } from "./secret-endpoint-context.js";
 import {
   MainAssistantPersonalityEditableSchema,
   loadMainAssistantPersonality,
@@ -27,7 +30,7 @@ import {
 const log = childLogger("gateway:sub-agent-routes");
 
 export function registerSubAgentRoutes(app: Hono): void {
-    // State-changing routes (model hot-patch, personality, flow-memory) require the
+    // State-changing routes (sub-agent model, personality, flow-memory) require the
     // operator role — a read-only viewer must not mutate persisted swarm state or
     // redirect LLM traffic. Returns a 401/403 Response to short-circuit, or null when
     // authorized. (Pre-Wave-B tokens with no role claim normalize to "operator", so
@@ -65,8 +68,9 @@ export function registerSubAgentRoutes(app: Hono): void {
 
   // ── Sub-agents API ────────────────────────────────────────────────────────
   // GET   /api/agents            — list all configured sub-agents with their model config
-  // PATCH /api/agents/:name/model — hot-patch a sub-agent's model config in memory
+  // PATCH /api/agents/:name/model — change a sub-agent's model config, saved to the config overlay
 
+  // Every signed-in account can read this, so a sub-agent's key goes out masked (see config-secrets.ts).
   app.get("/api/agents", async (c) => {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
@@ -76,7 +80,7 @@ export function registerSubAgentRoutes(app: Hono): void {
       description: agent.description,
       capabilities: agent.capabilities,
       tags: agent.tags,
-      model: agent.model ?? {},
+      model: maskConfigSecrets(agent.model ?? {}),
       maxIterations: agent.maxIterations,
     }));
     return c.json(agents);
@@ -101,31 +105,76 @@ export function registerSubAgentRoutes(app: Hono): void {
     const denied = await requireOperator(c);
     if (denied) return denied;
     const name = c.req.param("name");
-    const cfg = getConfig();
-    const agent = cfg.subAgents?.[name];
-    if (!agent) return c.json({ error: `Agent '${name}' not found` }, 404);
+    if (!getConfig().subAgents?.[name]) return c.json({ error: `Agent '${name}' not found` }, 404);
     let body: Record<string, unknown>;
     try {
       body = await c.req.json() as Record<string, unknown>;
     } catch {
       return c.json({ error: "Invalid JSON body" }, 400);
     }
+    // SAVED, like every other settings change. It was patched into the loaded config only, so the
+    // next save of any other setting, or a config file change, reloaded it from disk: the field
+    // showed the patch until then and went back without a word, and the other saves' moved-key
+    // rule, judged on the loaded config, read that going back as a key moving and refused them
+    // (r3 A-security #1). So it is judged, like them, on the config as it loads from disk.
+    let before: Config;
+    try {
+      before = previewConfigUpdate(() => {});
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
+    }
+    const agent = before.subAgents?.[name];
+    // Loaded but not saved: an A2A peer's skill, which the A2A client adds at runtime and which runs
+    // remotely, on no model of ours.
+    if (!agent) return c.json({ error: `Agent '${name}' is not in the saved config (an agent bridged from an A2A peer runs on the peer's model)` }, 409);
     const allowed = ["primary", "baseUrl", "apiKey", "temperature", "maxTokens", "topP", "topK", "minP", "repeatPenalty", "seed", "contextWindow", "enableThinking", "reasoningEffort"];
     // NULL MEANS CLEAR. A UI field emptied to "derive it per request" has no value to send,
     // and `undefined` does not survive JSON.stringify — the body arrived as `{}` and this loop
     // left the old pin in place, so the affordance could be used exactly once, to set it.
+    // An empty model is no model, so it clears too: kept as "", it overrode the default's model with
+    // nothing, and now that the patch is saved, for good (r4 A-security #1).
+    // A masked key stands for the stored one, and a key goes only where it already went unless
+    // this body typed it in: the same rule as the settings pages, over the whole config, because a
+    // sub-agent with an endpoint of its own and no key of its own is sent the DEFAULT key there.
+    const restored = resolveSecretPlaceholders(body, agent.model ?? {}) as Record<string, unknown>;
     const patch: Record<string, unknown> = {};
     const cleared: string[] = [];
     for (const key of allowed) {
-      if (!(key in body)) continue;
-      if (body[key] === null) cleared.push(key);
-      else patch[key] = body[key];
+      if (!(key in restored)) continue;
+      const value = restored[key];
+      if (value === null || (key === "primary" && typeof value === "string" && !value.trim())) cleared.push(key);
+      else patch[key] = value;
     }
-    const nextModel = { ...(agent.model ?? {}), ...patch } as Record<string, unknown>;
-    for (const key of cleared) delete nextModel[key];
-    agent.model = nextModel as typeof agent.model;
-    log.info({ agent: name, patch }, "Sub-agent model config patched");
-    return c.json({ name, model: agent.model });
+    const applyPatch = (raw: Record<string, unknown>) => {
+      const subAgents = (raw["subAgents"] as Record<string, unknown> | undefined) ?? {};
+      const saved = (subAgents[name] as Record<string, unknown> | undefined) ?? {};
+      const model = { ...((saved["model"] as Record<string, unknown> | undefined) ?? {}), ...patch };
+      for (const key of cleared) delete model[key];
+      raw["subAgents"] = { ...subAgents, [name]: { ...saved, model } };
+    };
+    // A value the schema refuses (maxTokens under its floor, a baseUrl that is no URL) is refused
+    // here; patched in memory it was taken as it came.
+    let after: Config;
+    try {
+      after = previewConfigUpdate(applyPatch);
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+    }
+    const moved = refuseMovedSecrets(
+      agentModelSecretDestinations(secretEndpointContext(before)),
+      { subAgents: { [name]: { model: body } } },
+      before,
+      after,
+    );
+    if (!moved.ok) return c.json({ error: moved.error, details: { field: moved.field } }, 400);
+    let updated: Config;
+    try {
+      updated = updateConfig(applyPatch);
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
+    }
+    log.info({ agent: name, patch: maskConfigSecrets(patch), cleared }, "Sub-agent model config saved");
+    return c.json({ name, model: maskConfigSecrets(updated.subAgents[name]?.model ?? {}) });
   });
 
   // GET /api/agents/outcomes — per-agent execution stats from agent_outcomes.ndjson

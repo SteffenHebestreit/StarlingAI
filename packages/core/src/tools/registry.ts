@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { ToolTier, getToolTier, isToolAllowed } from "../guardrails/tool-tiers.js";
 import type { LLMToolDef } from "../providers/lmstudio.js";
 import type { TurnUserWords } from "../agent/delegation-user-words.js";
+import type { UserInputOutcome, UserInputRequest } from "../agent/user-input.js";
 import { computeQueryEmbedding, cosineSimilarity, isEmbeddingAvailable } from "../providers/embeddings.js";
 import { withSpan, genAi } from "../observability/tracing.js";
 import { runWithRequestContext, currentUserId, currentRequestContext } from "../runtime/request-context.js";
@@ -158,6 +159,14 @@ export interface ToolContext {
   workspaceScope?: "full" | "generated";
   approvalCallback?: (toolName: string, args: Record<string, unknown>) => Promise<boolean>;
   inputCallback?: (question: string, choices?: string[], timeoutMs?: number) => Promise<string>;
+  /**
+   * Put a structured question to the person behind this turn (agent/user-input.ts) and wait for
+   * the answer. ALWAYS resolves, never throws: where nobody can be asked (a channel, a scene,
+   * federation, --auto) it answers "auto" / "no_channel" at once, so a tool keeps its old behaviour
+   * there. Bound at the orchestrator and at every in-process sub-agent; a tool whose registration
+   * sets its own timeoutMs must not ask, since that race does not pause for a person.
+   */
+  requestUserInput?: <T>(request: UserInputRequest<T>) => Promise<UserInputOutcome<T>>;
   onSubAgentProgress?: (event: {
     agentName: string;
     kind: "started" | "thinking" | "tool_start" | "tool_done" | "completed" | "reasoning";
@@ -270,6 +279,9 @@ export interface ToolContext {
    * Internal. Undefined when the turn has no timeout (unlimited / max effort).
    */
   _turnDeadlineMs?: number;
+  /** The same deadline as it stands NOW, after every credit (a human wait moves it the moment the
+   *  wait ends). A delegation reads this; a function, so a spread copy of the context stays live. */
+  _liveTurnDeadlineMs?: () => number | undefined;
   /**
    * Per-turn per-path overwrite tracker for the write_file regeneration nudge
    * (orchestration.detectWriteChurnOverwrite). Keyed by workspace-relative path;
@@ -656,7 +668,9 @@ export function _resetUnknownEffectsForTests(): void {
 export async function executeTool(
   name: string,
   args: Record<string, unknown>,
-  context: ToolContext
+  context: ToolContext,
+  /** The model's id for this call, made ambient for the handler (currentRequestContext). */
+  meta?: { toolCallId?: string },
 ): Promise<ToolResult> {
   const def = getToolTier(name);
 
@@ -814,6 +828,9 @@ export async function executeTool(
               // the owning user (never clobber the turn's userId to undefined).
               userId: context.userId ?? currentUserId(),
               workspaceScope: context.workspaceScope,
+              // Always this call's own id (or none): an inherited one would pin a question raised
+              // by a nested run's call to the call that started that run.
+              toolCallId: meta?.toolCallId,
             },
             () => handler.execute(args, context),
           );

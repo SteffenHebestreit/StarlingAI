@@ -226,6 +226,100 @@ describe("AG-UI streaming", () => {
     }
   }, 30_000);
 
+  it("holds the gateway clock while a person works, and does not count the wait as silence", async () => {
+    // Review #18: the runtime leaves a human wait out of the delegation wait it reports, and this
+    // surface had no tracker to add it back — so a CAPTCHA handoff was neither held nor credited.
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agui-human-"));
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      gateway: { jwtSecret: "a".repeat(32), turnTimeoutMs: 30_000 },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    // The loader fixes its source when it loads, and the cleanup before this test loaded it with
+    // no file set: fresh modules read this one.
+    vi.resetModules();
+
+    vi.doMock("../agent/runtime.js", () => ({
+      runTurn: vi.fn(async (opts: Record<string, unknown>) => {
+        const { userInputBroker } = await import("../agent/user-input-broker.js");
+        const sessionId = (opts["session"] as { id: string }).id;
+        await new Promise((r) => setTimeout(r, 9_000));
+        (opts["onChunk"] as (t: string) => void)("checking the login page");
+        await new Promise((r) => setTimeout(r, 1_000));
+        // browser_agent hands the browser to the person for 390 s.
+        const endWait = userInputBroker.beginHumanWait(`sub:${sessionId}:browser_agent:1790000000000`);
+        await new Promise((r) => setTimeout(r, 390_000));
+        endWait();
+        await new Promise(() => { /* then works on silently */ });
+        return undefined;
+      }),
+    }));
+
+    vi.useFakeTimers();
+    try {
+      const { handleAguiStream } = await import("../gateway/agui.js");
+      const res = new FakeResponse();
+      void handleAguiStream(res as never, { message: "log in and fetch the invoices" });
+      const errored = () => parseSseEvents(res.chunks).some((e) => e["type"] === "RUN_ERROR");
+
+      // Far past the 95 s deadline, and past the liveness window, while the person works.
+      await vi.advanceTimersByTimeAsync(399_000);
+      expect(errored()).toBe(false);
+      // The wait ends at 400 s: the deadline moves to 485 s, and the turn last spoke 1 s before it.
+      await vi.advanceTimersByTimeAsync(90_000);
+      expect(errored()).toBe(false);
+      // A turn that stays quiet afterwards is still ended.
+      await vi.advanceTimersByTimeAsync(320_000);
+      expect(errored()).toBe(true);
+    } finally {
+      vi.useRealTimers();
+      (await import("../agent/user-input-broker.js")).userInputBroker.resetForTests();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not hold a run for a wait an earlier run on the thread left open", async () => {
+    // Review of round 1, B #7: an AG-UI turn has no question channel, so its waits named no turn, and
+    // one it left open held every later run on the thread until the 24 h ceiling.
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agui-leftover-"));
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      gateway: { jwtSecret: "a".repeat(32), turnTimeoutMs: 30_000 },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    let runs = 0;
+    vi.doMock("../agent/runtime.js", () => ({
+      runTurn: vi.fn(async (opts: Record<string, unknown>) => {
+        runs += 1;
+        if (runs === 1) {
+          // A handoff whose tool never hears that the run is over.
+          const { userInputBroker } = await import("../agent/user-input-broker.js");
+          userInputBroker.beginHumanWait(`sub:${(opts["session"] as { id: string }).id}:browser_agent:1790000000000`);
+          return { response: "Handed the browser over.", blocked: false };
+        }
+        await new Promise(() => { /* silent */ });
+        return undefined;
+      }),
+    }));
+
+    vi.useFakeTimers();
+    try {
+      const { handleAguiStream } = await import("../gateway/agui.js");
+      await handleAguiStream(new FakeResponse() as never, { message: "log in", sessionId: "agui-thread-leftover" });
+      const res = new FakeResponse();
+      void handleAguiStream(res as never, { message: "fetch the invoices", sessionId: "agui-thread-leftover" });
+      // A 30 s budget and the synthesis grace: a silent run is ended on time.
+      await vi.advanceTimersByTimeAsync(96_000);
+      expect(parseSseEvents(res.chunks).some((e) => e["type"] === "RUN_ERROR")).toBe(true);
+    } finally {
+      vi.useRealTimers();
+      (await import("../agent/user-input-broker.js")).userInputBroker.resetForTests();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("forwards a delegated sub-agent's thinking and tool calls to the stream", async () => {
     // Regression: this path subscribed to none of the sub-agent progress events, so a turn
     // that delegated a long build emitted heartbeats and nothing else for as long as the
@@ -338,7 +432,7 @@ describe("AG-UI streaming", () => {
     // Regression: handleAguiStream resolved an existing session purely by id with no
     // ownership check, so any authenticated caller who knew a victim's sessionId could
     // run a turn AS the victim (their history + user-scoped memory/documents). Mirrors
-    // the RPC canAccessSession invariant. Operators may still access any session.
+    // the RPC canAccessSession invariant. Admins may still access any session.
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agui-owner-"));
     const configPath = join(tempDir, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
@@ -371,10 +465,15 @@ describe("AG-UI streaming", () => {
       expect(ran).toHaveBeenCalledTimes(1);
 
       // A non-privileged "viewer" bob tries to drive it → opaque 404, turn never runs.
-      // (Instance operators/admins are trusted to access any session, mirroring RPC.)
       const resBob = new FakeResponse();
       await handleAguiStream(resBob as never, { sessionId: "victim-sess", message: "leak it" }, { userId: "bob", role: "viewer" });
       expect(resBob.statusCode).toBe(404);
+      expect(ran).toHaveBeenCalledTimes(1);
+
+      // Nor as an operator: that is the role every account gets by default, so it exempts no one.
+      const resOperator = new FakeResponse();
+      await handleAguiStream(resOperator as never, { sessionId: "victim-sess", message: "leak it" }, { userId: "bob", role: "operator" });
+      expect(resOperator.statusCode).toBe(404);
       expect(ran).toHaveBeenCalledTimes(1);
 
       // An admin (instance-wide) role may access any session.

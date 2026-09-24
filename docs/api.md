@@ -131,7 +131,7 @@ the required Claude Code system identity as the first system block on each call.
 | --- | --- | --- |
 | `GET` | `/api/agents` | list configured sub-agents |
 | `GET` | `/api/agents/resolve` | route a natural-language query |
-| `PATCH` | `/api/agents/:name/model` | hot-patch allowed model fields |
+| `PATCH` | `/api/agents/:name/model` | set allowed model fields, saved to the config overlay; `null` clears one, and so does an empty `primary` |
 | `GET` | `/api/agents/outcomes` | aggregate agent outcome statistics |
 
 `GET /api/agents/resolve` query parameters:
@@ -521,7 +521,7 @@ Supported RPC methods:
 
 | Method | Params |
 | --- | --- |
-| `gateway.status` | none |
+| `gateway.status` | `{ requestId? }` |
 | `session.create` | `{ channel, userId?, workspacePath? }` |
 | `session.end` | `{ sessionId? }` |
 | `session.get` | `{ sessionId?, limit?, beforeMessageId? }` |
@@ -529,15 +529,44 @@ Supported RPC methods:
 | `session.archive` | `{ sessionId? }` |
 | `session.delete` | `{ sessionId? }` |
 | `session.reset` | `{ sessionId? }` |
-| `session.updateSettings` | `{ sessionId?, effort?, turnTimeoutSec? }` |
+| `session.rewind` | `{ sessionId?, historyIndex }` |
+| `session.updateSettings` | `{ sessionId?, effort?, turnTimeoutSec?, imageSettingsPrompt? }` |
 | `scenes.list` | none |
 | `approval.respond` | `{ approvalId, approved }` |
+| `input.respond` | `{ inputId, answer }` |
+| `userInput.respond` | `{ inputId, answer }` |
+| `userInput.hold` | `{ inputId }` |
+| `userInput.preview` | `{ inputId, candidateId }` |
 | `chat.send` | `{ sessionId, message, requestId?, enableThinking?, effort? }` |
+| `chat.cancel` | `{ requestId }` |
 | `audit.subscribe` | none |
+
+`gateway.status` with a `requestId` adds `{ requestId, activeTurn }`: whether that turn is running in this process, for any session the connection may use, not only a turn this connection started.
 
 `chat.send` also supports chat-triggered scenes via `/run <sceneName> key=value ...`, and inline override flags in the `message`: `--auto`, `--iter N`, `--agent NAME`, `--timeout N`, and `--effort low|medium|high|max` (a one-off effort tier for that message).
 
-`session.updateSettings` persists per-session controls: `effort` (`low|medium|high|max`, or `null`/`"default"` to clear → inherit the global default) and `turnTimeoutSec` (independent time-limit override; `0` = unlimited, `null`/`""` to clear). It returns `{ settings }`. The active effort tier bundles the orchestration/latency/reasoning knobs into a profile (see the Effort tiers section of the README); the global default lives at `effort.default` and is editable via `GET`/`PUT /api/effort/config`.
+`chat.send` answers once the turn has started; the turn itself reports through the events below. The reply:
+
+```json
+{
+  "accepted": true,
+  "requestId": "req-7f4",
+  "unreadSteering": [
+    { "id": "steer-blue-01", "text": "make it blue", "requestId": "req-7f3" }
+  ]
+}
+```
+
+- `accepted` is `false` when nothing was started: a message that is empty once the flags are stripped, an unknown `/run` scene, or a `/job` that is unknown or could not be queued. A `status` event says why. `/job <name>` answers `{ accepted: true, queued: true, requestId, jobId }`. `/jobs` and `/job help` answer in a `status` event and start no turn.
+- `unreadSteering` is present only when this start retired steering messages that earlier turns of the session never read (see [Mid-turn steering](#mid-turn-steering)), and only for the session owner or an admin. It has the same shape as in `session.get`. The web stops a turn with `chat.cancel` and only then sends the next message; a stopped turn that finished unwinding in between would otherwise have its leftovers dropped by this start without anyone seeing them.
+- A turn already running on the session is superseded, whichever connection started it: it is aborted and reports its own leftovers on its own final `status`. The new turn runs alone on the history.
+- A `requestId` that a running turn still uses is refused with the RPC error `requestId <id> is already in use by a running turn`, before anything is sent under it.
+
+`chat.cancel` stops a turn by its request id and answers `{ cancelled, requestId, known }`. It reaches any turn in a session the caller may stop (its owner or an admin, as for `POST /api/sessions/:sessionId/stop`), not only a turn this connection started: a reloaded page still follows its turn by request id. `cancelled` says whether this call stopped the turn. `known` says whether this process runs the turn or ended it within the last ten minutes (at most 1,000 ended turns are remembered), for a caller who may stop it. `cancelled: false, known: true` means the turn was already stopped or is over; only `known: false` calls for stopping the session some other way. A Stop also settles the turn's open questions at once.
+
+`session.rewind` truncates the raw session history before `historyIndex`: entries `0 … historyIndex-1` stay. It answers `{ rewound: true, historyIndex }`. An index at or past the end removes nothing. A negative or non-integer index is an RPC error. It drops the session's `unreadSteering` only when it actually removed something.
+
+`session.updateSettings` persists per-session controls: `effort` (`low|medium|high|max`, or `null`/`"default"` to clear → inherit the global default), `turnTimeoutSec` (independent time-limit override; `0` = unlimited, `null`/`""` to clear) and `imageSettingsPrompt` (`"auto"`: `generate_image` stops asking for render settings in this chat; `"ask"`, `null`, `""` or `"default"`: it asks, the default; anything else is an RPC error). It returns `{ settings }` in the shape `session.get` shows, with the defaults filled in. The active effort tier bundles the orchestration/latency/reasoning knobs into a profile (see the Effort tiers section of the README); the global default lives at `effort.default` and is editable via `GET`/`PUT /api/effort/config`.
 
 `session.list` returns session summaries for both active and archived sessions. `session.get` supports optional transcript paging with `limit` and `beforeMessageId`. When `limit` is omitted, the full transcript is returned. With `limit`, the response returns the newest page before the optional cursor.
 
@@ -566,11 +595,29 @@ Supported RPC methods:
   ],
   "totalMessages": 8,
   "nextBeforeMessageId": "session:0",
-  "settings": { "effort": "medium" }
+  "settings": { "effort": "medium", "imageSettingsPrompt": "ask" },
+  "activeTurn": true,
+  "activeTurnRequestId": "req-7f4",
+  "activeTurnStartedAt": 1790153205322,
+  "openUserInputs": [],
+  "unreadSteering": [
+    { "id": "steer-blue-01", "text": "make it blue", "requestId": "req-7f3" }
+  ],
+  "serverNow": 1790153290114
 }
 ```
 
-`settings` carries the per-session effort tier (and any `turnTimeoutSecOverride`); `effort` falls back to the global `effort.default` when the session has none set.
+`settings` carries the per-session effort tier (and any `turnTimeoutSecOverride`) and `imageSettingsPrompt`; `effort` falls back to the global `effort.default` when the session has none set, and `imageSettingsPrompt` to `"ask"`.
+
+The rest lets a page reloaded mid-turn, or a second tab, pick the turn up:
+
+- `activeTurn` is `true` while any turn holds the session, including one started over AG-UI and one that was stopped and is still unwinding.
+- `activeTurnRequestId` and `activeTurnStartedAt` (epoch ms) name the running turn when it is a WebSocket turn of this process that has not been stopped. The page can steer it or stop it with `chat.cancel`; a `chat.send` it makes anyway supersedes it.
+- `openUserInputs` lists the session's open structured questions (see [Structured user input](#structured-user-input)) that the caller may answer, each in the `agent.user_input_needed` shape. It is `[]` for anyone else.
+- `unreadSteering` is present only when it is not empty, and only for the session owner or an admin, since these are the person's own words. It lists steering messages that finished turns never read and whose final `status` found the connection that started them gone, each naming that turn as `requestId`. They are kept for at most an hour. The next `chat.send` of the session hands them back and retires them, and a reset, a delete or a rewind that removes something drops them. A turn that was already running then adds none of its own when it ends.
+- `serverNow` is the gateway clock (epoch ms) at the answer. The `expiresAt` deadlines of `openUserInputs` are server times, and the page needs the skew to count them down.
+
+For the owner or an admin, `session.get` also subscribes the connection to the session's `agent.user_input_needed`, `agent.user_input_resolved` and `agent.unread_steering` events. A turn's other events go only to the connection that started it.
 
 `session.end` remains accepted for backward compatibility and now archives the session instead of deleting it. Use `session.delete` to permanently remove stored session state.
 
@@ -586,6 +633,11 @@ During `chat.send`, the gateway emits streamed events:
 | `agent.tool_done` | tool name and truncated result |
 | `agent.swarm` | live swarm state snapshot |
 | `agent.approval_needed` | approval id, tool name, and args |
+| `agent.input_needed` | an `ask_user` question: `{ requestId, inputId, question, choices, timeoutMs, expiresAt }`, answered with `input.respond` |
+| `agent.steering_consumed` | the turn read queued steering messages (see [Mid-turn steering](#mid-turn-steering)) |
+| `agent.user_input_needed` | a structured question from a tool (see [Structured user input](#structured-user-input)) |
+| `agent.user_input_resolved` | that question was answered, expired or settled |
+| `agent.unread_steering` | a finished turn's unread steering messages, pushed to the session's open pages |
 | `audit.event` | only after `audit.subscribe` |
 
 Final `status` payloads can include:
@@ -597,8 +649,65 @@ Final `status` payloads can include:
 - `swarmState`
 - `performance`
 - `error`
+- `unconsumedSteering`: `[{ id, text }]`, the steering messages the turn never read
+- `finishReason`: `"timeout"` on the answer delivered for a turn that ran out of time
 
-When a turn times out, the gateway now emits an error message that explicitly says the session was archived.
+When a turn exceeds its time limit, the gateway parks the session (the next message continues it) and delivers the best answer it can recover as `status: "ok"` with `finishReason: "timeout"`. When it cannot recover one, it sends an `error` status saying the session is parked.
+
+`input.respond` answers `{ ok: true }`, or `{ ok: false, errors: [{ "field": "inputId", "message": "expired" }] }` when this connection has no such open question, for example because it timed out. `ask_user` questions belong to the connection that started the turn. They are settled with an empty answer when the turn is stopped or times out, or when that connection closes.
+
+### Mid-turn steering
+
+A message sent while a turn runs is folded into that turn at its next safe point instead of starting a new one. It is sent with `POST /api/sessions/:sessionId/steer` and a body of `{ message, clientMessageId? }`. The reply `{ steered, active, id? }` says whether the message was queued. `id` is the `clientMessageId` when that has the accepted shape (8 to 64 of `A-Za-z0-9_-`), and a server id otherwise. A retry with the same id is queued once.
+
+When the turn reads queued messages, the connection that started it gets:
+
+```json
+{
+  "type": "agent.steering_consumed",
+  "data": {
+    "requestId": "req-7f3",
+    "iteration": 2,
+    "at": "2026-09-24T10:15:02.114Z",
+    "discardedDraft": false,
+    "messages": [{ "id": "steer-blue-01", "text": "make it blue" }],
+    "segmentText": "Found three candidates, checking prices next."
+  }
+}
+```
+
+`segmentText` is the text the transcript keeps for the part of the answer before this cut, or `""` when that part wrote none. A live view splits the answer there, so it matches what a reload shows.
+
+Messages the turn never read ride its final `status` as `unconsumedSteering`, and the client sends them on as the next turn. When that status cannot be delivered because the connection that started the turn is gone, the session keeps them. `session.get` lists them as `unreadSteering`, the next `chat.send` reply hands them back, and they are pushed at once to the session's open connections:
+
+```json
+{
+  "type": "agent.unread_steering",
+  "data": {
+    "sessionId": "...",
+    "messages": [{ "id": "steer-blue-01", "text": "make it blue", "requestId": "req-7f3" }]
+  }
+}
+```
+
+The push covers a stopped turn that is slow to notice its Stop and finishes unwinding after the next `chat.send` has started. Neither `session.get` nor that send's reply saw its leftovers then. It reaches the connections that loaded the session with `session.get` or started an interactive (not `--auto`) turn on it, and only those of the session owner or an admin (anyone's, for a session with no owner). Each message names, as `requestId`, the turn that ended without reading it. One message can arrive by more than one of these routes, so clients drop repeats by `id`.
+
+A turn that started before a reset, a delete or a rewind that removes something keeps and pushes nothing when its final `status` cannot be delivered, as the history its leftovers belong to is gone. That includes messages steered into it afterwards, a known limit: nothing then tells the page that sent them that the turn left them unread.
+
+### Structured user input
+
+A tool at any depth, including a specialist several delegations down, can ask the person behind an interactive turn (not `--auto`) a question with a typed answer. The question belongs to the turn, not to the socket. It stays open across a reload until its own deadline, and any connection of the session owner or an admin can answer it. The turn's end, a Stop, a supersede or the watchdog settle it. While it is open, the turn's clocks hold, the gateway watchdog included, and the waited time is credited back.
+
+- `agent.user_input_needed`: `{ requestId, sessionId, inputId, kind, title, toolCallId?, sourceAgent?, payload, timeoutMs, expiresAt }`. `kind` picks the card the client renders, for example `image_settings`, and `payload` is that card's JSON. `session.get` lists the open ones as `openUserInputs`.
+- `agent.user_input_resolved`: `{ requestId, sessionId, inputId, outcome, reason?, summary? }`.
+  - `outcome` is `configured`, `auto` or `cancelled`.
+  - `reason` is one of `user`, `timeout`, `session_preference`, `no_channel`, `turn_aborted`, `user_skipped` or `disconnected_expired`.
+- `userInput.respond` `{ inputId, answer }` answers `{ ok: true }` or `{ ok: false, errors: [{ field, message }] }`.
+  - A rejected answer leaves the question open to be corrected.
+  - `answer` is JSON. It is size-capped (64 KiB by default; the asking tool sets its own cap) and passes the input guardrail before the tool's own validator.
+  - An unknown or expired `inputId`, and one the caller may not answer, both get `[{ "field": "inputId", "message": "expired" }]`.
+- `userInput.hold` `{ inputId }` answers `{ expiresAt }` when the person opens the full form. The deadline moves to the question's configure window from now, never past the first window plus one configure window. Otherwise it fails with the RPC error `User input request not found or expired`.
+- `userInput.preview` `{ inputId, candidateId }` answers `{ dataUrl, width, height }`, a full-size view of something the payload offered, resolved by the asking tool itself. Otherwise it fails with the RPC error `Preview not available`.
 
 ## AG-UI Streaming
 

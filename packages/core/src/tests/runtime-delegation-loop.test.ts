@@ -284,6 +284,53 @@ describe("runtime delegated-loop regressions", () => {
     expect(transcript.at(-1)?.content).toContain("workspace/esp32-recorder-project/README.md");
   });
 
+  it("treats a Stop that cuts the model call short as a cancel, not as an error to back-stop", async () => {
+    // Session 807684e9: Stop landed 1.2 s after the delegation returned, aborted the orchestrator's
+    // next call, and the catch relayed the specialist's evidence as the turn's answer. Same shape as
+    // the backstop case above, except that the call fails BECAUSE the caller aborted.
+    const stop = new AbortController();
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createDelegateToolCallStream("delegate_before_stop", {
+          agentName: "mission_coordinator",
+          task: "Draft the portable ESP32 recorder deliverable.",
+        });
+      }
+      return (async function* () {
+        stop.abort();
+        throw new DOMException("This operation was aborted", "AbortError");
+      })();
+    });
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: vi.fn(async () => ({
+        success: true,
+        output: [
+          "Delegated result from mission_coordinator — PARTIAL PROGRESS (TIMEOUT).",
+          "Observed evidence:",
+          "Recovered evidence snippets from completed tools:",
+          "- Saved artifact workspace/esp32-recorder-project/README.md (486 chars) via write_file."
+            + " Preview: # ESP32 5-microphone array recorder — a flat, battery-powered capture device for OTA transcription.",
+        ].join("\n"),
+        metadata: { agentName: "mission_coordinator", delegationSucceeded: true, delegationOutcome: "partial", terminalState: "timeout" },
+      })),
+    });
+    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+
+    const result = await runTurn({ session, userMessage: "Draft the portable ESP32 recorder deliverable.", signal: stop.signal });
+
+    expect(result.blocked).toBe(true);
+    expect(result.performance?.finishReason).toBe("aborted");
+    expect(result.response).not.toContain("README.md");
+    // Nothing was saved as the turn's answer.
+    expect(session.toTranscript().some((entry) => entry.role === "assistant" && entry.content.includes("README.md"))).toBe(false);
+    expect(vi.mocked(logAudit).mock.calls.some(([, data]) => (data as { type?: string }).type === "llm_error_evidence_backstop")).toBe(false);
+  });
+
   it("forces a real fetch when the user gives a URL and the model answers tool-free (urlFetchEnforcement)", async () => {
     // Restores (structurally) the honesty enforcement the de-lex stripped: a URL in the user's
     // message + a tool-free draft about its content → reject + force a fetch (live session 29796f86
@@ -4815,6 +4862,139 @@ describe("the user's own words on the turn's tool context", () => {
 
     expect(seen).toHaveLength(1);
     expect(seen[0]).toEqual({ opening, midTurn: [steering] });
+  });
+});
+
+describe("mid-turn steering the loop takes, and steering it never reaches", () => {
+  const makeSession = () => new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+
+  it("names the messages it folds in, with the history message's time, before the steering status", async () => {
+    // The client splits the running answer where the message was taken. It can only do that if it
+    // learns WHICH messages were taken, and before the status line moves on.
+    const steering = "nimm das qwen model";
+    const session = makeSession();
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) return createToolCallStream("find_1", "search_agents", { query: "image generation" });
+      if (llmCallCount === 2) {
+        return createDelegateToolCallStream("delegate_1", { agentName: "image_creator", task: "Render the harbour at dusk." });
+      }
+      return createTextStream("Rendered the harbour at dusk.");
+    });
+    registerTool({
+      name: "search_agents",
+      description: "Find agents.",
+      parameters: { type: "object", properties: {} },
+      execute: async () => {
+        expect(turnSteeringManager.enqueue(session.id, steering, "client-steer-01").queued).toBe(true);
+        return { success: true, output: "image_creator — generates images." };
+      },
+    });
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: async () => ({
+        success: true,
+        output: "Saved generated/images/harbour.png",
+        metadata: { agentName: "image_creator", attemptedAgents: ["image_creator"], delegationSucceeded: true },
+      }),
+    });
+
+    const events: Array<{ kind: string; phase?: string; messages?: unknown; iteration?: number; at?: string }> = [];
+    const result = await runTurn({
+      session,
+      userMessage: "Render the harbour at dusk.",
+      onStatus: (status) => events.push({ kind: "status", phase: status.phase }),
+      onSteeringConsumed: (event) => events.push({ kind: "consumed", ...event }),
+    });
+
+    const consumedAt = events.findIndex((event) => event.kind === "consumed");
+    const statusAt = events.findIndex((event) => event.kind === "status" && event.phase === "steering");
+    expect(consumedAt).toBeGreaterThanOrEqual(0);
+    expect(consumedAt).toBeLessThan(statusAt);
+    const consumed = events[consumedAt]!;
+    expect(consumed.messages).toEqual([{ id: "client-steer-01", text: steering }]);
+    expect(consumed.iteration).toBe(1);
+
+    // The model reads the same wrapper as before; the person's words and ids ride in the metadata.
+    const folded = session.getHistory().find((message) => message.metadata?.["midTurn"] === true)!;
+    expect(folded.content).toBe(
+      "[USER STEERING — sent mid-turn] The user added the following while you were working. "
+      + "Take it into account in the REMAINING steps of this turn: adjust course, drop now-irrelevant work, and prioritise it. "
+      + "Do not restart from scratch or re-do already-completed steps.\n- nimm das qwen model",
+    );
+    expect(folded.metadata).toEqual({ midTurn: true, midTurnSource: "user", steering: [{ id: "client-steer-01", text: steering }] });
+    expect(consumed.at).toBe(folded.timestamp);
+    expect(result.unconsumedSteering).toBeUndefined();
+  });
+
+  it("hands back a message sent while the final answer was being written, instead of dropping it", async () => {
+    // The turn is past its last drain. The message used to be deleted with the queue at turn end:
+    // shown as sent, never answered, gone on reload.
+    const session = makeSession();
+    streamMock.mockImplementation(() => {
+      turnSteeringManager.enqueue(session.id, "use the qwen model", "late-steer-01");
+      return createTextStream("Hello there.");
+    });
+
+    const result = await runTurn({ session, userMessage: "Say hello." });
+
+    expect(streamMock).toHaveBeenCalledTimes(1);
+    expect(result.response).toBe("Hello there.");
+    expect(result.unconsumedSteering).toEqual([{ id: "late-steer-01", text: "use the qwen model" }]);
+    expect(session.getHistory().some((message) => message.metadata?.["midTurn"] === true)).toBe(false);
+    // Closed with the hand-back: a message sent now is told there is no turn to join.
+    expect(turnSteeringManager.isTurnActive(session.id)).toBe(false);
+    expect(turnSteeringManager.enqueueIfActive(session.id, "too late")).toBe(false);
+  });
+
+  it("hands back a message the loop never reached when the turn ends in forced synthesis", async () => {
+    const freshRuntime = await loadFreshRuntimeForToolMode("hybrid");
+    // The fresh module graph has its own steering manager; the runtime under test uses that one.
+    const { turnSteeringManager: freshSteering } = await import("../agent/turn-steering.js");
+    const session = new freshRuntime.AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      return createDelegateToolCallStream(`steer_synthesis_delegate_${llmCallCount}`, {
+        agentName: "mission_coordinator",
+        task: `Continue researching after repeated failures (${llmCallCount}).`,
+      });
+    });
+    let delegations = 0;
+    freshRuntime.registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: async () => {
+        delegations += 1;
+        // Sent during the delegation after which the warden stops the loop.
+        if (delegations === 2) freshSteering.enqueue(session.id, "try the other region", "synth-steer-01");
+        return {
+          success: true,
+          output: "Delegated result from mission_coordinator — TASK FAILED.\nObserved evidence:\nAll candidate agents failed.",
+          metadata: {
+            agentName: "mission_coordinator",
+            attemptedAgents: ["mission_coordinator"],
+            delegationSucceeded: false,
+            delegationOutcome: "failure",
+            terminalState: "completed",
+          },
+        };
+      },
+    });
+
+    const result = await freshRuntime.runTurn({ session, userMessage: "Summarize what happened." });
+
+    expect(result.performance?.finishReason).toBe("delegation_failures_terminal");
+    expect(result.response).toBe("synthesized");
+    expect(result.unconsumedSteering).toEqual([{ id: "synth-steer-01", text: "try the other region" }]);
+    expect(freshSteering.isTurnActive(session.id)).toBe(false);
+
+    freshRuntime.unregisterTool("delegate_to_agent");
   });
 });
 

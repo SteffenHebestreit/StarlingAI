@@ -6,7 +6,7 @@ import { extractSingleRelayableDeliverable } from "../agent/deliverable-relay.js
 import { findRecentJunkDelegationResult } from "../agent/response-finalization.js";
 import { classifyPostOrchestrationDisposition } from "../agent/runtime.js";
 import { AgentSession } from "../agent/session.js";
-import { TOOL_FAILURES_HEADER, stripDelegatedRunRecord } from "../agent/delegated-run-record.js";
+import { TOOL_DECLINES_HEADER, TOOL_FAILURES_HEADER, stripDelegatedRunRecord } from "../agent/delegated-run-record.js";
 import { hasRecentUnresolvedDelegatedAction } from "../agent/response-finalization.js";
 
 // Session f4ebf47b: the specialist's prose and the filename both said Qwen; the tool recorded the
@@ -205,6 +205,21 @@ describe("tool calls that failed inside the specialist", () => {
     expect(lines.slice(1, 5)).toHaveLength(4);
     expect(lines[5]).toBe("- (+1 more)");
     expect(record).not.toContain("not a name");
+  });
+
+  it("list a call the user declined as their choice, apart from the failures, and step past it like them", () => {
+    // A Skip in the settings step is success:false for the specialist, which must not retry it; listed
+    // under the failures it told the orchestrator the render had broken.
+    const skipped = { agent: "image_creator", tool: "generate_image", error: "The user skipped this render in the settings step.", declinedByUser: true };
+    const plain = buildModelVisibleToolResult("delegate_to_agent", NARRATION, { ...DELEGATION, specialistToolFailures: [FAILURE_404] });
+    const frame = buildModelVisibleToolResult("delegate_to_agent", NARRATION, { ...DELEGATION, specialistToolFailures: [FAILURE_404, skipped] });
+    expect(frame).toContain(`${TOOL_FAILURES_HEADER}\n- generate_image: HTTP 404: no router for requested model "Qwen"\n${TOOL_DECLINES_HEADER}\n- generate_image: The user skipped this render in the settings step.\n`);
+    expect(stripDelegatedRunRecord(frame)).toBe(stripDelegatedRunRecord(plain));
+    // A run whose only such call was the Skip lists no failure at all, and the frame steps past it.
+    expect(formatDelegatedRunRecord({ agentName: "image_creator", specialistToolFailures: [skipped] }))
+      .toBe(`${TOOL_DECLINES_HEADER}\n- generate_image: The user skipped this render in the settings step.`);
+    expect(stripDelegatedRunRecord(buildModelVisibleToolResult("delegate_to_agent", NARRATION, { ...DELEGATION, specialistToolFailures: [skipped] })))
+      .toBe(buildModelVisibleToolResult("delegate_to_agent", NARRATION, DELEGATION));
   });
 
   it("a timeout in a failed call's error does not make a completed delegation read as timed out", () => {

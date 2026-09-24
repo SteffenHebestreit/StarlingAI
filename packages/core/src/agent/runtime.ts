@@ -2,7 +2,16 @@
  * Agent Runtime — the main agent loop.
  * LLM call → parse tool calls → execute (with guardrails) → loop → final response
  */
-import { startsTurn, currentTurnStartIndex } from "./turn-boundary.js";
+import { randomUUID } from "node:crypto";
+import {
+  startsTurn,
+  currentTurnStartIndex,
+  MID_TURN_SOURCE_METADATA,
+  MID_TURN_USER_MESSAGE_METADATA,
+  STEERING_METADATA,
+  STEERING_PREFIX,
+} from "./turn-boundary.js";
+import { extractArtifactsFromMetadata } from "./artifact-metadata.js";
 // The system's one definition of "substantive output" — shared with the mid-stream burn
 // shape so a salvaged partial and a burn verdict cannot disagree about what counts as prose.
 import { MIN_SUBSTANTIVE_OUTPUT_CHARS } from "./progress-verifier.js";
@@ -36,7 +45,8 @@ import {
   effectiveOrchestratorMaxToolIterations,
   currentEffortTier,
 } from "../runtime/effort-context.js";
-import { runWithRequestContext, runWithCallAttribution } from "../runtime/request-context.js";
+import { runWithRequestContext, runWithCallAttribution, currentRequestContext } from "../runtime/request-context.js";
+import { bindRequestUserInput, HUMAN_WAIT_RECHECK_MS, trackHumanWaits } from "./user-input-broker.js";
 import { TRIAGE_PROMPT_VERSION, runTriage, type TriageOutcome } from "./triage.js";
 import { resolveRoutingTierProvider } from "./routing-tier-provider.js";
 import {
@@ -59,7 +69,7 @@ import {
   STATE_DEPENDENT_TOOL_NAMES,
 } from "./turn-tool-contribution.js";
 import { longRunningGenerationManager } from "./long-running-generation.js";
-import { turnSteeringManager } from "./turn-steering.js";
+import { recordUnconsumedSteering, turnSteeringManager, type SteeringMessage } from "./turn-steering.js";
 import { registerSessionAbortController, deregisterSessionAbortController } from "./warden.js";
 import { consumePendingSessionCancel } from "../swarm/control.js";
 import { artifactFileLooksTruncated, runSubAgent } from "./sub-agent.js";
@@ -1115,8 +1125,21 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
     // provider emitters stamp every `provider_model_call` row with the turn that
     // issued it. Without them the rows carry no session at all and model calls can
     // only be attributed to a turn by timestamp window.
+    // The user-input channel is the one thing inherited: a workflow turn nested inside a chat
+    // turn still reaches that chat's person, and a top-level turn from any other surface has none.
+    const userInput = opts.userInput ?? currentRequestContext()?.userInput;
+    // So is the turn id, which every turn has: the chat's request id, the one a gateway set around
+    // this call, or the enclosing turn's for a nested one; a fresh one for a turn nobody named.
+    const turnId = userInput?.turnId ?? currentRequestContext()?.turnId ?? randomUUID();
     return await runWithRequestContext(
-      { userId: opts.session.userId, sessionId: opts.session.id, agentName: "main", callSite: "main_turn" },
+      {
+        userId: opts.session.userId,
+        sessionId: opts.session.id,
+        agentName: "main",
+        callSite: "main_turn",
+        ...(userInput ? { userInput } : {}),
+        turnId,
+      },
       () => runWithPhaseTimings(() => runTurnImpl(opts)),
     );
   } finally {
@@ -1211,6 +1234,13 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
     if (!turnAbort) return;
     if (timeoutHandle) clearTimeout(timeoutHandle);
     timeoutHandle = setTimeout(() => {
+      // A person is answering a question this turn asked (at any depth). Nothing is being
+      // produced, and nothing should be: the wait's end credits its whole length back below.
+      // Never past the absolute ceiling: a wait's length can come from the model (review #29).
+      if (humanWaits.isWaiting() && Date.now() - turnStartMs < MAX_TURN_CEILING_MS) {
+        armTurnDeadline(budgetMs, HUMAN_WAIT_RECHECK_MS);
+        return;
+      }
       if (longRunningGenerationManager.isTurnUnbounded(sessionId)) {
         // Same event the sub-agent side already logs when a grant re-arms ITS deadline
         // (sub-agent.ts, "unbounded_grant_rearmed_deadline") — this is that decision one
@@ -1262,6 +1292,21 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
       turnAbort.abort(new DeadlineAbort(budgetMs));
     }, Math.max(0, fireInMs));
   };
+  // Time spent waiting on the person is not the turn's own time: the deadline moves by exactly
+  // that much when a wait ends. Not through the delegation-wait ceiling — a wait is bounded by
+  // its own request deadline — and counted, so the delegation-wait credit for the call that
+  // contained it does not grant the same minutes twice.
+  // The liveness beat is credited too. Moving only the deadline left the beat where it was before
+  // the wait, so the first check after a long answer measured the whole wait as silence and
+  // aborted a turn that had been producing right up to its question (review #13).
+  let humanWaitCreditedMs = 0;
+  const humanWaits = trackHumanWaits(sessionId, (waitedMs) => {
+    humanWaitCreditedMs += waitedMs;
+    if (lastSubAgentProgressAt > 0) lastSubAgentProgressAt = Math.min(Date.now(), lastSubAgentProgressAt + waitedMs);
+    if (!turnAbort || turnDeadlineMs === undefined || turnAbort.signal.aborted) return;
+    turnDeadlineMs = Math.min(turnDeadlineMs + waitedMs, turnStartMs + MAX_TURN_CEILING_MS);
+    armTurnDeadline(Math.max(0, turnDeadlineMs - turnStartMs), Math.max(0, turnDeadlineMs - Date.now()));
+  }, { turnId: currentRequestContext()?.turnId });
   if (turnAbort && turnTimeoutMs) armTurnDeadline(turnTimeoutMs);
   // D5 (orchestration.excludeDelegationWaitFromTurnBudget): push the turn deadline out by `ms` (the
   // wall-clock the orchestrator sat BLOCKED awaiting a delegated child) and re-arm the abort, so the
@@ -1314,8 +1359,10 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
   // long-lived session unbounded too — the same leak clearStopRequested exists to prevent.
   longRunningGenerationManager.clearUnbounded(sessionId);
   // Mark this turn live so the user can steer it mid-flight (drained in the loop);
-  // cleared in the finally below so the active flag never leaks across turns.
-  turnSteeringManager.markTurnActive(sessionId);
+  // cleared in the finally below so the active flag never leaks across turns. The token
+  // makes that clearing this turn's own: a superseded turn unwinding late cannot switch
+  // off the turn that replaced it.
+  const steeringToken = turnSteeringManager.markTurnActive(sessionId, opts.steeringToken);
 
   // Merge caller signal + timeout signal + warden signal: any source can cancel the turn.
   const allSignals: AbortSignal[] = [];
@@ -1326,6 +1373,7 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
     ? allSignals[0]!
     : AbortSignal.any(allSignals);
 
+  let unconsumedSteering: SteeringMessage[] = [];
   try {
     // Activate the effort profile for the whole turn so the scattered
     // getConfig().orchestration reads (via effectiveOrchestration()) and the
@@ -1334,13 +1382,21 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
     const out = await runWithEffortContext(opts.effortTier, () =>
       _runTurn({
         ...opts,
+        steeringToken,
         onSubAgentProgress: noteSubAgentProgress,
         onChunk: noteChunk,
         onReasoning: noteReasoning,
       }, signal, turnAbort?.signal ?? inertAbort.signal, {
         deadlineMs: turnDeadlineMs,
         extendForDelegationWait: extendTurnDeadlineForDelegationWait,
+        humanWaitCreditedMs: () => humanWaitCreditedMs,
+        currentDeadlineMs: () => turnDeadlineMs,
       }));
+    // Steering that arrived after the last drain is handed back rather than folded in here: the
+    // answer is written, and discarding it to make room would cost the user the whole synthesis.
+    // Closing in the same step as reading keeps a message from slipping in between; the client
+    // sends what comes back as the next turn.
+    unconsumedSteering = turnSteeringManager.closeTurn(sessionId, steeringToken).map(({ id, text }) => ({ id, text }));
     // The repair persistAssistantTurnState already applied to the saved answer, reused rather than
     // re-derived: saving can trim history, and a second pass over fewer known paths could repair
     // the returned copy differently. It is audited here only, where every turn passes exactly once.
@@ -1372,7 +1428,7 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
       channel: opts.session.channel,
       severity: "info",
     });
-    return { ...finalized, qualityScorecard };
+    return { ...finalized, qualityScorecard, ...(unconsumedSteering.length > 0 ? { unconsumedSteering } : {}) };
   } catch (err) {
     // A thrown/aborted turn (provider hard-timeout, the per-turn timeout abort, a
     // Warden cancel, or any unexpected throw) bypasses finalizeTurnOutput's
@@ -1402,12 +1458,14 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
         artifactCount: 0,
       }),
     }, { sessionId, channel: opts.session.channel, severity: "error" });
+    recordUnconsumedSteering(err, [...unconsumedSteering, ...turnSteeringManager.closeTurn(sessionId, steeringToken)]);
     throw err;
   } finally {
     if (timeoutHandle) clearTimeout(timeoutHandle);
+    humanWaits.dispose();
     longRunningGenerationManager.off("lrg:unbounded", onUnboundedGrant);
-    deregisterSessionAbortController(sessionId);
-    turnSteeringManager.markTurnDone(sessionId);
+    deregisterSessionAbortController(sessionId, wardenAbort);
+    turnSteeringManager.markTurnDone(sessionId, steeringToken);
   }
 }
 
@@ -1575,7 +1633,14 @@ async function _runTurn(
   opts: RunTurnOptions,
   signal: AbortSignal,
   timeoutSignal: AbortSignal,
-  turnBudget?: { deadlineMs?: number; extendForDelegationWait: (ms: number) => number | undefined },
+  turnBudget?: {
+    deadlineMs?: number;
+    extendForDelegationWait: (ms: number) => number | undefined;
+    /** Human-wait time already credited to the deadline, so far this turn. */
+    humanWaitCreditedMs?: () => number;
+    /** The deadline as it stands now, after every credit. */
+    currentDeadlineMs?: () => number | undefined;
+  },
 ): Promise<TurnOutput> {
   const { session, userMessage } = opts;
   const guardrailEvents: TurnOutput["guardrailEvents"] = [];
@@ -1919,6 +1984,7 @@ async function _runTurn(
     // An unattended run (auto mode, no input channel) answers ask_user itself — "no user is here,
     // continue on your stated assumption". Before, the tool refused and the model looped on it.
     inputCallback: opts.inputCallback ?? (opts.autoApprove ? unattendedInputCallback : undefined),
+    requestUserInput: bindRequestUserInput({ requesterSessionId: session.id, signal }),
     onSubAgentProgress: opts.onSubAgentProgress,
     onComputerAction: opts.onComputerAction,
     onComputerScreenshot: opts.onComputerScreenshot,
@@ -1938,6 +2004,9 @@ async function _runTurn(
     onSwarmState: opts.onSwarmState,
     signal,
     _turnDeadlineMs: turnBudget?.deadlineMs,
+    // Read when a delegation starts, not when the last tool call returned: a wait inside
+    // execute_plan's first step moved the deadline, and its next step was clamped to the old one.
+    _liveTurnDeadlineMs: () => turnBudget?.currentDeadlineMs?.() ?? toolContext._turnDeadlineMs,
     _workflowExecutionStack: opts._workflowExecutionStack,
     // Always an object, even when no entry point supplied the opening words (a scene template):
     // mid-turn steering is typed by a person on every surface, and is pushed in below.
@@ -2298,28 +2367,41 @@ async function _runTurn(
     // Mid-turn user steering: fold any messages the user sent WHILE this turn
     // has been running into the conversation as authoritative guidance before the
     // next model call, so they redirect the remaining work without aborting (Stop
-    // is the abort path). Drains the per-turn queue; a no-op on iteration 0 (the
-    // queue was cleared at turn start). Opt-out via orchestration.midTurnSteering.
+    // is the abort path). Drains the per-turn queue. Iteration 0 drains too: the
+    // prep phases before the first model call take long enough for a message to
+    // arrive, and the gateway opens the queue before the turn starts. Opt-out via
+    // orchestration.midTurnSteering.
     if (getConfig().orchestration?.midTurnSteering ?? true) {
-      const steering = turnSteeringManager.drain(session.id);
+      const steering = turnSteeringManager.drain(session.id, opts.steeringToken).map(({ id, text }) => ({ id, text }));
       if (steering.length > 0) {
-        const joined = steering.map((s) => `- ${s}`).join("\n");
+        const texts = steering.map((entry) => entry.text);
+        const joined = texts.map((s) => `- ${s}`).join("\n");
         session.addMessage({
           role: "user",
-          content: "[USER STEERING — sent mid-turn] The user added the following while you were working. "
+          content: STEERING_PREFIX + " The user added the following while you were working. "
             + "Take it into account in the REMAINING steps of this turn: adjust course, drop now-irrelevant work, and prioritise it. "
             + "Do not restart from scratch or re-do already-completed steps.\n" + joined,
           // Injected INSIDE the turn: every "current turn" reader keys on user messages WITHOUT
-          // this marker (agent/turn-boundary.ts), so steering does not cut the turn in two.
-          metadata: { midTurn: true },
+          // this marker (agent/turn-boundary.ts), so steering does not cut the turn in two. The
+          // person's own messages ride along, so the transcript shows what they wrote, not the
+          // instructions around it.
+          metadata: {
+            [MID_TURN_USER_MESSAGE_METADATA]: true,
+            [MID_TURN_SOURCE_METADATA]: "user",
+            [STEERING_METADATA]: steering,
+          },
         });
+        const at = session.getHistory().at(-1)?.timestamp ?? new Date().toISOString();
         // The orchestrator reads this from history; a specialist it delegates to afterwards has no
         // history, so it gets the same words through the tool context.
-        toolContext.turnUserWords?.midTurn.push(...steering);
+        toolContext.turnUserWords?.midTurn.push(...texts);
         logAudit("turn_steering_injected", {
           count: steering.length,
           iteration: iterationCount,
         }, { sessionId: session.id, channel: session.channel, severity: "info" });
+        // Which messages were taken, and when, BEFORE the status: the client splits the running
+        // answer at this point, and the status line then lands on the part that follows.
+        opts.onSteeringConsumed?.({ messages: steering, iteration: iterationCount, at });
         opts.onStatus?.({ phase: "steering", message: "Folding in your mid-turn message…", iteration: iterationCount });
       }
     }
@@ -2407,7 +2489,8 @@ async function _runTurn(
             role: "user",
             content: "[OVERSIGHT — max-effort progress check] A progress monitor judged this turn is not converging on the deliverable. "
               + "Apply this correction in your NEXT step — do NOT restart from scratch or re-do finished work:\n" + oversight.directive,
-            metadata: { midTurn: true },
+            // User-role for the model, but not the person's words: the transcript leaves it out.
+            metadata: { [MID_TURN_USER_MESSAGE_METADATA]: true, [MID_TURN_SOURCE_METADATA]: "oversight" },
           });
           logAudit("turn_oversight_redirected", {
             iteration: iterationCount,
@@ -2721,6 +2804,33 @@ async function _runTurn(
         }, { sessionId: session.id, channel: session.channel, severity: "warn" });
       }
     } catch (err) {
+      // A STOP IS NOT A PROVIDER ERROR. Session 807684e9: the person pressed Stop 1.2 s after the
+      // image delegation returned, the cancel aborted this call 90 ms later, and the abort landed
+      // here as "LLM call failed" — so the backstop below relayed the specialist's summary as the
+      // turn's answer, persisted and delivered, to someone who had asked for nothing more. The loop
+      // top already reads an abort that is not the internal deadline as a cancel; a call it cut
+      // short takes the same exit. The salvage and the backstop stay for provider errors and for
+      // the deadline, where the run wanted to finish.
+      if (opts.signal?.aborted === true || (signal.aborted && !timeoutSignal.aborted)) {
+        log.info({ sessionId: session.id, iteration: iterationCount }, "LLM call aborted by a stop — turn cancelled");
+        return blocked(
+          "Request cancelled or timed out",
+          getTurnSwarmState(),
+          buildTurnPerformanceMetrics({
+            turnStartedAt,
+            firstModelResponseMs,
+            llmCalls,
+            llmTimeMs,
+            toolCallsRequested,
+            toolExecutionTimeMs,
+            lastPromptMetrics,
+            completionChars: 0,
+            finishReason: "aborted",
+            blocked: true,
+            toolIterations: iterationCount,
+          }),
+        );
+      }
       log.error({ err, sessionId: session.id }, "LLM call failed");
       // THE MODEL'S OWN PARTIAL OUTRANKS THE EVIDENCE BACKSTOP.
       //
@@ -4143,8 +4253,12 @@ async function _runTurn(
       }
 
       const toolStartedAt = Date.now();
-      const result = await executeTool(tc.name, tc.arguments, toolContext);
+      const humanWaitCreditedBefore = turnBudget?.humanWaitCreditedMs?.() ?? 0;
+      const result = await executeTool(tc.name, tc.arguments, toolContext, { toolCallId: tc.id });
       const toolDurationMs = Date.now() - toolStartedAt;
+      // The part of this call spent waiting on the person was credited to the deadline as it ended.
+      const humanWaitMs = (turnBudget?.humanWaitCreditedMs?.() ?? 0) - humanWaitCreditedBefore;
+      const delegationWaitMs = toolDurationMs - humanWaitMs;
       if (PERSISTED_SWARM_STATE_TOOL_NAMES.has(tc.name)) {
         turnUsedSwarmTools = true;
       }
@@ -4155,12 +4269,15 @@ async function _runTurn(
       // parent's own work, not its children's (run e3cf6c22). Bounded by the absolute ceiling.
       if (
         DELEGATION_WAIT_TOOL_NAMES.has(tc.name)
-        && toolDurationMs > 0
+        && delegationWaitMs > 0
         && getConfig().orchestration?.excludeDelegationWaitFromTurnBudget !== false
       ) {
-        const extendedDeadline = turnBudget?.extendForDelegationWait(toolDurationMs);
+        const extendedDeadline = turnBudget?.extendForDelegationWait(delegationWaitMs);
         if (extendedDeadline !== undefined) toolContext._turnDeadlineMs = extendedDeadline;
-        opts.onDelegationWaitMs?.(toolDurationMs);
+        opts.onDelegationWaitMs?.(delegationWaitMs);
+      } else if (humanWaitMs > 0) {
+        // The wait's own credit moved the deadline; later delegations clamp to the moved one.
+        toolContext._turnDeadlineMs = turnBudget?.currentDeadlineMs?.() ?? toolContext._turnDeadlineMs;
       }
       const intervention = classifyToolIntervention({
         toolName: tc.name,
@@ -5812,50 +5929,6 @@ export function collectTurnArtifactAttachments(session: AgentSession): Array<Rec
     extractArtifactsFromMetadata(msg.metadata, attachments, seen);
   }
   return attachments;
-}
-
-function extractArtifactsFromMetadata(
-  metadata: Record<string, unknown>,
-  out: Array<Record<string, unknown>>,
-  seen: Set<string>,
-): void {
-  const filename = typeof metadata["filename"] === "string" ? metadata["filename"].trim() : "";
-  const outputPath = typeof metadata["outputPath"] === "string" ? metadata["outputPath"].trim() : "";
-  const externalUrl = typeof metadata["externalUrl"] === "string" ? metadata["externalUrl"].trim() : "";
-
-  if (filename || outputPath || externalUrl) {
-    const key = [outputPath, externalUrl, filename, typeof metadata["sourceTool"] === "string" ? metadata["sourceTool"] : ""].join("::");
-    if (!seen.has(key)) {
-      seen.add(key);
-      // A `filename` is required by the transcript builder. Derive one when
-      // only a path is available. `pop()` can yield an empty string for a
-      // trailing-slash path (e.g. "subdir/") — fall back to the raw path
-      // so the transcript builder never sees an empty filename.
-      const derivedFilename = filename
-        || (outputPath ? (outputPath.split("/").pop() || outputPath) : "")
-        || externalUrl;
-      const entry: Record<string, unknown> = { filename: derivedFilename };
-      if (outputPath) entry["relativePath"] = outputPath;
-      if (externalUrl) entry["externalUrl"] = externalUrl;
-      if (typeof metadata["contentType"] === "string") entry["contentType"] = metadata["contentType"];
-      if (typeof metadata["previewMode"] === "string") entry["previewMode"] = metadata["previewMode"];
-      if (typeof metadata["size"] === "number") entry["size"] = metadata["size"];
-      else if (typeof metadata["bytes"] === "number") entry["size"] = metadata["bytes"];
-      if (metadata["isDirectory"] === true) entry["isDirectory"] = true;
-      if (typeof metadata["title"] === "string" && metadata["title"]) entry["title"] = metadata["title"];
-      if (typeof metadata["sourceTool"] === "string" && metadata["sourceTool"]) entry["sourceTool"] = metadata["sourceTool"];
-      out.push(entry);
-    }
-  }
-
-  const nested = metadata["artifacts"];
-  if (Array.isArray(nested)) {
-    for (const item of nested) {
-      if (item && typeof item === "object") {
-        extractArtifactsFromMetadata(item as Record<string, unknown>, out, seen);
-      }
-    }
-  }
 }
 
 function appendNonDuplicatedContinuation(existing: string, continuation: string): string {

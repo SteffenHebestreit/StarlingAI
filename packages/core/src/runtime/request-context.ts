@@ -10,6 +10,7 @@
  * Undefined store / userId = single-user / auth-disabled mode (no scoping).
  */
 import { AsyncLocalStorage } from "node:async_hooks";
+import type { UserInputChannel } from "../agent/user-input.js";
 
 export interface RequestContext {
   /** Authenticated user (JWT subject / username) that owns this tool execution. */
@@ -40,6 +41,24 @@ export interface RequestContext {
   agentName?: string;
   /** Coarse origin of the work, for attributing provider rows: see {@link RequestCallSite}. */
   callSite?: RequestCallSite;
+  /**
+   * The interactive chat this work answers to, set by runTurn for a dashboard turn. It rides the
+   * context rather than the ToolContext so every in-process delegation path (there are many, and
+   * each builds its own options) hands it down without being touched; a surface with nobody to
+   * ask simply never sets it. See agent/user-input-broker.ts.
+   */
+  userInput?: UserInputChannel;
+  /**
+   * The top-level turn this work belongs to, set by runTurn for every turn and inherited by
+   * everything it runs; a gateway sets it around runTurn so its own clock and the runtime's name the
+   * same turn. Human waits carry it, so a wait a stopped turn left open holds no clock of the next
+   * turn on the session. Only interactive chat turns had an id to carry (userInput.turnId): an
+   * AG-UI or --auto turn's waits named none and held every later turn (review of round 1, B #7).
+   */
+  turnId?: string;
+  /** The model's id for the tool call executing right now, set by executeTool, so a question the
+   *  tool raises can be shown next to that call. */
+  toolCallId?: string;
 }
 
 /**

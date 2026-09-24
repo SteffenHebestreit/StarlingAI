@@ -14,7 +14,7 @@
  */
 import { randomUUID } from "node:crypto";
 
-import { getConfig } from "../config/loader.js";
+import { deleteRuntimeSubAgent, getConfig, setRuntimeSubAgent } from "../config/loader.js";
 import type { SubAgentConfig } from "../config/schema.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
@@ -99,9 +99,11 @@ export function listA2APeers(): RegisteredPeer[] {
 export async function startA2AClient(): Promise<void> {
   stopA2AClient(); // clear any prior refresh timer so repeated calls don't leak intervals
   const config = getConfig();
-  if (!config.a2a.enabled) return;
-
+  // Before the enabled check: turned off, it wants no peers and unregisters those a previous start
+  // registered. Each config reload lays their agents back over, so returning first kept them in
+  // delegation for good (r5 A-security).
   await refreshAllPeers();
+  if (!config.a2a.enabled) return;
 
   if (config.a2a.refreshIntervalMs > 0) {
     _refreshTimer = setInterval(() => {
@@ -109,6 +111,19 @@ export async function startA2AClient(): Promise<void> {
     }, config.a2a.refreshIntervalMs);
     _refreshTimer.unref();
   }
+}
+
+/**
+ * The config watcher's half: a reload that changed the `a2a` section restarts the client. A peer
+ * taken out of config by a save or a file edit (not the peers route, which restarts the client
+ * itself) otherwise stayed delegatable until the next refresh tick, and for good with
+ * refreshIntervalMs 0, because every reload lays the registered agents back over the config
+ * (review of round 6, A-security).
+ */
+export async function syncA2AClientWithConfig(changedSections: readonly string[]): Promise<boolean> {
+  if (!changedSections.includes("a2a")) return false;
+  await startA2AClient();
+  return true;
 }
 
 export function stopA2AClient(): void {
@@ -120,7 +135,9 @@ export function stopA2AClient(): void {
 
 async function refreshAllPeers(): Promise<void> {
   const config = getConfig();
-  const desiredPeers = config.a2a.peers.filter((p) => p.enabled);
+  // No peers while A2A is off: a refresh timer still running after a config change turned it off
+  // drops them, rather than polling them back in.
+  const desiredPeers = config.a2a.enabled ? config.a2a.peers.filter((p) => p.enabled) : [];
   const desiredIds = new Set(desiredPeers.map((p) => p.id));
 
   // Drop peers that disappeared from config
@@ -286,18 +303,16 @@ function registerVirtualAgent(
   }
 
   // 2. Inject the virtual sub-agent into config.subAgents so the orchestrator
-  // can also reach it via `delegate_to_agent`.  The config object loaded by
-  // `getConfig()` is mutable in process; runtime additions don't persist to
-  // disk (and shouldn't, since they're discovered live).
-  const inlineConfig = buildVirtualAgentConfig(name, peerId, skill);
-  const config = getConfig();
-  (config.subAgents as Record<string, SubAgentConfig>)[name] = inlineConfig;
+  // can also reach it via `delegate_to_agent`.  Runtime additions don't persist to
+  // disk (and shouldn't, since they're discovered live), so the loader keeps them
+  // and lays them back over each reload: patched into the loaded config object, the
+  // next save or config file change rebuilt it without them (r4 A-security #3).
+  setRuntimeSubAgent(name, buildVirtualAgentConfig(name, peerId, skill));
 }
 
 function unregisterVirtualAgent(name: string): void {
   try { unregisterTool(name); } catch { /* ignore */ }
-  const config = getConfig();
-  delete (config.subAgents as Record<string, SubAgentConfig>)[name];
+  deleteRuntimeSubAgent(name);
 }
 
 function buildVirtualAgentConfig(

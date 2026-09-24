@@ -82,6 +82,11 @@ export const MultimodalImageGenerationSchema = MultimodalServiceSchema.extend({
    *
    * The documented worst case is 150 s of generation plus about 25 s of weight reload after
    * ten minutes idle, so anything under ~180 s abandons requests that were going to succeed.
+   *
+   * Both this and `timeoutMs` bound a render at the tier's DEFAULTS. A request with more steps, a
+   * larger size or true CFG on an embedded-guidance engine gets proportionally more, never less
+   * (imageRequestTimeoutMs): 57 steps at 1344x768 is ~8 minutes on the quality engine, and a flat
+   * 300 s abandoned it while the device kept rendering (session 807684e9).
    */
   qualityTimeoutMs: z.number().int().min(10_000).max(600_000).default(210_000),
   /**
@@ -155,20 +160,19 @@ export const MultimodalImageGenerationSchema = MultimodalServiceSchema.extend({
    * A DIFFERENT backend for the quality tier, when the fast tier's protocol cannot express
    * what the quality tier needs.
    *
-   * This deployment is exactly that case. Both tiers answer on one OpenAI-compatible
-   * endpoint, but that route parses `prompt` and `size` and discards everything else —
-   * measured with eight probes varying steps, seed, cfg and negative prompt, all returning
-   * an identical record. Worse, its `--seed -1` randomises ONCE per server process, so the
-   * same prompt returns the same image until the server restarts and "make me another one"
-   * cannot work at all.
+   * It was written for an earlier build of the cluster's OpenAI-compatible route, which parsed
+   * `prompt` and `size` and discarded the rest (eight probes varying steps, seed, cfg and
+   * negative prompt returned one identical record) and randomised `--seed -1` once per server
+   * process. That no longer holds: re-measured 2026-09-23 with the seed pinned, BOTH engines
+   * on that route honour seed, steps, guidance and negative prompt (fast engine, mean pixel
+   * distance from the control: another seed 55, 8 steps 27 in half the time, guidance 2 29,
+   * a negative prompt 21). Whether an omitted seed still repeats until a restart was not
+   * re-measured.
    *
-   * The same sd-server also speaks the AUTOMATIC1111 protocol, and that route honours the
-   * lot. Verified against it: `seed: -1` gives a different seed and a different image on
-   * every request, an explicit seed reproduces byte-for-byte, and `steps` / `cfg_scale` come
-   * back echoed in `info`.
-   *
-   * So the quality tier points at that route instead. Anything left unset here falls through
-   * to the settings above.
+   * The same sd-server also speaks the AUTOMATIC1111 protocol, where `seed: -1` gives a
+   * different seed and a different image on every request, an explicit seed reproduces
+   * byte-for-byte, and `steps` / `cfg_scale` come back echoed in `info`. Anything left unset
+   * here falls through to the settings above.
    */
   qualityBackend: z.object({
     api: z.enum(["automatic1111-compatible", "comfyui", "openai-compatible"]).optional(),
@@ -191,6 +195,22 @@ export const MultimodalImageGenerationSchema = MultimodalServiceSchema.extend({
    * answered 404, and the retry quietly landed on the other engine.
    */
   tierLabels: z.record(z.enum(["fast", "quality"]), z.string().min(1)).default({}),
+  /**
+   * The settings step: before every render in an interactive chat turn, generate_image shows the
+   * person what it is about to run (engine, prompt, size, steps, seed, base picture) and lets them
+   * take it, change it, paint a mask, or skip the render. Nobody is asked where nobody can answer
+   * (channels, scenes, jobs, --auto), or in a chat whose `imageSettingsPrompt` setting is "auto".
+   *
+   * `timeoutMs` is how long the card waits before the agent's settings run on their own;
+   * `configureTimeoutMs` is the longer window a person gets once they open the full form.
+   */
+  settingsPrompt: z.object({
+    enabled: z.boolean().default(true),
+    timeoutMs: z.number().int().min(10_000).max(900_000).default(120_000),
+    configureTimeoutMs: z.number().int().min(10_000).max(900_000).default(600_000),
+    /** How many earlier pictures the form offers as the base of an edit. */
+    maxBaseCandidates: z.number().int().min(0).max(12).default(6),
+  }).default({}),
 });
 
 export const MultimodalWakeWordSchema = z.object({
@@ -213,3 +233,4 @@ export const MultimodalSchema = z.object({
 export type MultimodalFileConfig = z.infer<typeof MultimodalFileServiceSchema>;
 export type MultimodalSpeechToTextConfig = z.infer<typeof MultimodalSpeechToTextSchema>;
 export type MultimodalTextToSpeechConfig = z.infer<typeof MultimodalTextToSpeechSchema>;
+export type MultimodalImageGenerationConfig = z.infer<typeof MultimodalImageGenerationSchema>;
