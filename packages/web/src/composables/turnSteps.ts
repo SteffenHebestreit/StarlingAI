@@ -10,6 +10,8 @@
  * Deliberately free of Vue and of the store, so the derivation can be exercised on its own.
  */
 
+import type { StepUserInput } from "./userInputs";
+
 export type StepStatus = "running" | "done" | "failed" | "stopped";
 
 export interface TurnStep {
@@ -41,6 +43,8 @@ export interface TurnStep {
   target?: string;
   /** The sentence itself, for a note. */
   text?: string;
+  /** How a question this call put to the user came out (the image settings card), once it is answered. */
+  userInput?: StepUserInput;
 }
 
 /** One specialist run as the swarm recorded it — kept structural so there is no store import. */
@@ -79,6 +83,22 @@ function basename(path: string): string {
 function clip(text: string, max: number): string {
   const flat = text.replace(/\s+/g, " ").trim();
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+/**
+ * A step the USER chose not to run — Skip on the image settings card. The tool still fails it, so
+ * the agent does not retry; but it is the user's choice, not a failure, and it read as one: a red ✕
+ * and the instruction meant for the agent ("… Do not retry; tell the user …") as its outcome.
+ */
+export function isSkippedByUser(step: Pick<TurnStep, "metadata" | "userInput">): boolean {
+  return record(step.metadata?.["settings"])?.["source"] === "user_skipped" || step.userInput?.reason === "user_skipped";
+}
+
+/** How a row shows its step: a skip the user chose is neither done nor failed. */
+export type StepDisplayStatus = StepStatus | "skipped";
+
+export function displayStatus(step: TurnStep): StepDisplayStatus {
+  return step.status !== "running" && isSkippedByUser(step) ? "skipped" : step.status;
 }
 
 /** A failure the tool reported in-band, which still arrives as a normal result. */
@@ -161,6 +181,7 @@ export function stepOutcome(step: TurnStep): string | undefined {
   // Not "did not finish": a step can also land here because its completion event never
   // arrived while the turn itself succeeded. Claiming failure would be a guess.
   if (step.status === "stopped") return "no result reported";
+  if (isSkippedByUser(step)) return "Skipped by you";
 
   const meta = step.metadata ?? {};
   const result = step.result ?? "";
@@ -183,7 +204,10 @@ export function stepOutcome(step: TurnStep): string | undefined {
       const path = str(meta["outputPath"]) ?? str(meta["filename"]);
       const tier = str(meta["tier"])
         ?? (/slower quality tier/i.test(result) ? "quality" : undefined);
-      return [path ? basename(path) : undefined, tier ? `${tier} tier` : undefined]
+      // Said when the user set the render up themselves: otherwise the row reads as the agent's
+      // choice, and the reader cannot tell the settings card was answered.
+      const yours = record(meta["settings"])?.["source"] === "user" || step.userInput?.outcome === "configured";
+      return [path ? basename(path) : undefined, tier ? `${tier} tier` : undefined, yours ? "your settings" : undefined]
         .filter(Boolean).join(" · ") || "done";
     }
     case "search_agents": {
@@ -236,21 +260,38 @@ export function stepOutcome(step: TurnStep): string | undefined {
  * A two-minute wait with nothing but a spinner reads as a hang. These are the cases where the
  * duration is known in advance, so the reader is told once instead of left to guess. An edit
  * always runs on the slow tier here because only that tier has an edit route.
+ *
+ * Once the user has picked the engine on the settings card, THEIR engine decides — the agent's
+ * arguments still name the one it proposed.
  */
-export function stepHint(step: TurnStep): string | undefined {
+export function stepHint(step: TurnStep, now = Date.now()): string | undefined {
   if (step.status !== "running") return undefined;
   if (step.name === "generate_image") {
-    const slow = str(step.args?.["baseImage"]) || step.args?.["tier"] === "quality";
-    return slow ? "quality tier — usually 2–3 min" : "usually ~10 s";
+    const expected = step.userInput?.expectedSeconds;
+    // The engine first finishing a render abandoned at its timeout — minutes that are not the
+    // render's — counted down to when it should be free, as the card and the form count it.
+    const wait = Math.max(0, ((step.userInput?.engineFreeAt ?? now) - now) / 1000);
+    const waiting = wait >= 1 ? `, once the engine finishes an earlier render (~${roughDuration(wait)})` : "";
+    if (expected && expected > 0) return `usually ~${roughDuration(expected)}${waiting}`;
+    const slow = step.userInput?.tier
+      ? step.userInput.tier === "quality"
+      : str(step.args?.["baseImage"]) || step.args?.["tier"] === "quality";
+    return `${slow ? "quality tier — usually 2–3 min" : "usually ~10 s"}${waiting}`;
   }
   return undefined;
 }
 
+/** "40 s" / "8 min" — a known duration, as the hint says it. */
+function roughDuration(seconds: number): string {
+  return seconds < 60 ? `${Math.round(seconds)} s` : `${Math.max(1, Math.round(seconds / 60))} min`;
+}
+
+/** How long the step worked — the time it stood waiting on the user's answer is not work. */
 export function stepDurationMs(step: TurnStep, now: number): number | undefined {
   if (step.durationMs !== undefined) return step.durationMs;
   if (!step.startedAt) return undefined;
   const end = step.endedAt ?? (step.status === "running" ? now : undefined);
-  return end !== undefined ? Math.max(0, end - step.startedAt) : undefined;
+  return end !== undefined ? Math.max(0, end - step.startedAt - (step.userInput?.waitedMs ?? 0)) : undefined;
 }
 
 export function formatDuration(ms: number | undefined): string {

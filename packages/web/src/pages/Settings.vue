@@ -318,6 +318,7 @@
                 <div class="md:col-span-2">
                   <label class="field-label">API Key <span class="text-gray-600 font-normal">optional</span></label>
                   <input v-model="multimodalForm.filesApiKey" type="password" class="input-box" autocomplete="off" placeholder="Bearer token if required" />
+                  <div v-if="keysToReenter.has('filesApiKey')" class="text-xs text-amber-400 mt-1">The endpoint changed: enter the key again, or clear it.</div>
                 </div>
                 <div class="md:col-span-2 border-t border-purple-500/10 pt-3 mt-1">
                   <div class="text-xs uppercase tracking-[0.18em] text-gray-500 mb-3">Vision Fallback</div>
@@ -333,6 +334,8 @@
                     <div class="md:col-span-2">
                       <label class="field-label">Vision API Key <span class="text-gray-600 font-normal">optional</span></label>
                       <input v-model="multimodalForm.visionApiKey" type="password" class="input-box" autocomplete="off" placeholder="uses provider or dedicated vision key" />
+                      <div v-if="keysToReenter.has('visionApiKey') && !multimodalForm.visionApiKey" class="text-xs text-amber-400 mt-1">With no key here, this endpoint would be sent the provider's key: enter a key, or save again to send none.</div>
+                      <div v-else-if="keysToReenter.has('visionApiKey')" class="text-xs text-amber-400 mt-1">The endpoint changed: enter the key again, or clear it.</div>
                     </div>
                   </div>
                 </div>
@@ -366,6 +369,7 @@
                 <div class="md:col-span-2">
                   <label class="field-label">API Key <span class="text-gray-600 font-normal">optional</span></label>
                   <input v-model="multimodalForm.sttApiKey" type="password" class="input-box" autocomplete="off" placeholder="Bearer token if required" />
+                  <div v-if="keysToReenter.has('sttApiKey')" class="text-xs text-amber-400 mt-1">The endpoint changed: enter the key again, or clear it.</div>
                 </div>
               </div>
             </div>
@@ -408,6 +412,7 @@
                 <div>
                   <label class="field-label">API Key <span class="text-gray-600 font-normal">optional</span></label>
                   <input v-model="multimodalForm.ttsApiKey" type="password" class="input-box" autocomplete="off" placeholder="Bearer token if required" />
+                  <div v-if="keysToReenter.has('ttsApiKey')" class="text-xs text-amber-400 mt-1">The endpoint changed: enter the key again, or clear it.</div>
                 </div>
                 <div v-if="multimodalForm.ttsApi === 'qwen-compatible'" class="md:col-span-2">
                   <label class="field-label">Audio Example Path <span class="text-gray-600 font-normal">optional</span></label>
@@ -497,13 +502,14 @@
               <div class="multimodal-grid">
                 <div class="md:col-span-2">
                   <label class="field-label">Image Gen Endpoint <span class="text-gray-600 font-normal">optional</span></label>
-                  <input v-model="multimodalForm.imageGenBaseUrl" type="text" class="input-box font-mono" :placeholder="multimodalForm.imageGenApi === 'comfyui' ? 'http://localhost:8188' : 'http://localhost:7860'" />
+                  <input v-model="multimodalForm.imageGenBaseUrl" type="text" class="input-box font-mono" :placeholder="multimodalForm.imageGenApi === 'comfyui' ? 'http://localhost:8188' : multimodalForm.imageGenApi === 'openai-compatible' ? 'http://localhost:8000/v1' : 'http://localhost:7860'" />
                 </div>
                 <div>
                   <label class="field-label">API Mode</label>
                   <select v-model="multimodalForm.imageGenApi" class="input-box font-mono">
                     <option value="automatic1111-compatible">automatic1111-compatible</option>
                     <option value="comfyui">comfyui</option>
+                    <option value="openai-compatible">openai-compatible</option>
                   </select>
                 </div>
                 <div>
@@ -533,6 +539,8 @@
                 <div class="md:col-span-2">
                   <label class="field-label">API Key <span class="text-gray-600 font-normal">optional</span></label>
                   <input v-model="multimodalForm.imageGenApiKey" type="password" class="input-box" autocomplete="off" placeholder="Bearer token if required" />
+                  <div v-if="keysToReenter.has('imageGenApiKey') && multimodalForm.imageGenApiKey" class="text-xs text-amber-400 mt-1">The endpoint changed: enter the key again, or clear it.</div>
+                  <div v-if="tierKeyMoves" class="text-xs text-amber-400 mt-1">The quality tier's own saved key would follow this endpoint too. Saving drops it (enter or clear the key above first if it is masked); the tier then uses the image key.</div>
                 </div>
                 <div v-if="multimodalForm.imageGenApi === 'comfyui'" class="md:col-span-2 text-xs text-gray-500">
                   ComfyUI requires a checkpoint name. Set the model here or in the saved config before using generate_image.
@@ -1357,7 +1365,7 @@
                 </div>
                 <div class="md:col-span-2">
                   <label class="field-label">Embedding API Key <span class="text-gray-600 font-normal">optional</span></label>
-                  <input v-model="modelEndpointForm.embeddingApiKey" type="password" class="input-box" autocomplete="off" placeholder="uses orchestrator/provider key when empty" />
+                  <input v-model="modelEndpointForm.embeddingApiKey" type="password" class="input-box" autocomplete="off" :placeholder="embeddingKeyPlaceholder(modelEndpointForm, modelEndpointForm.lastLoaded, modelEndpointForm.refusedField)" />
                 </div>
               </div>
               <div v-if="getModelEndpointStatus('embeddings')?.error" class="text-[11px] text-red-300">{{ getModelEndpointStatus('embeddings')?.error }}</div>
@@ -1547,7 +1555,7 @@
                     <label class="field-label text-xs">temperature</label>
                     <input type="number" step="0.05" min="0" max="2"
                       :value="agent.model.temperature ?? 0.3"
-                      @change="agentsStore.patchModel(agent.name, { temperature: +($event.target as HTMLInputElement).value })"
+                      @change="agentsStore.patchModel(agent.name, { temperature: ($event.target as HTMLInputElement).value === '' ? null : +($event.target as HTMLInputElement).value })"
                       class="input-box text-sm" />
                   </div>
                   <div>
@@ -1603,25 +1611,28 @@
                     <label class="field-label text-xs">model</label>
                     <input type="text"
                       :value="agent.model.primary ?? ''"
-                      @change="agentsStore.patchModel(agent.name, { primary: ($event.target as HTMLInputElement).value })"
+                      @change="agentsStore.patchModel(agent.name, { primary: ($event.target as HTMLInputElement).value.trim() || null })"
                       class="input-box text-sm font-mono" />
                   </div>
                   <div class="md:col-span-2">
                     <label class="field-label text-xs">endpoint override <span class="text-gray-600 font-normal">optional</span></label>
                     <input type="text"
-                      :value="agent.model.baseUrl ?? ''"
+                      :value="agentEndpointDrafts[agent.name]?.baseUrl ?? agent.model.baseUrl ?? ''"
                       placeholder="uses provider default"
-                      @change="agentsStore.patchModel(agent.name, { baseUrl: ($event.target as HTMLInputElement).value || undefined })"
+                      @input="agentEndpointDraft(agent.name).baseUrl = ($event.target as HTMLInputElement).value"
+                      @change="saveAgentEndpoint(agent)"
                       class="input-box text-sm font-mono" />
                   </div>
                   <div class="md:col-span-2">
                     <label class="field-label text-xs">endpoint api key <span class="text-gray-600 font-normal">optional</span></label>
                     <input type="password"
-                      :value="agent.model.apiKey ?? ''"
-                      placeholder="uses provider default"
+                      :value="agentEndpointDrafts[agent.name]?.apiKey ?? agent.model.apiKey ?? ''"
+                      placeholder="uses the default key, or none at an endpoint of its own"
                       autocomplete="off"
-                      @change="agentsStore.patchModel(agent.name, { apiKey: ($event.target as HTMLInputElement).value || undefined })"
+                      @input="agentEndpointDraft(agent.name).apiKey = ($event.target as HTMLInputElement).value"
+                      @change="saveAgentEndpoint(agent)"
                       class="input-box text-sm" />
+                    <div v-if="agentEndpointDrafts[agent.name]?.error" class="text-xs text-amber-400 mt-1">{{ agentEndpointDrafts[agent.name]?.error }}</div>
                   </div>
                   <div class="md:col-span-2 flex items-center justify-between gap-4 pt-1">
                     <div>
@@ -1630,7 +1641,7 @@
                     </div>
                     <select
                       :value="agent.model.enableThinking === undefined ? '' : agent.model.enableThinking ? 'on' : 'off'"
-                      @change="agentsStore.patchModel(agent.name, { enableThinking: ($event.target as HTMLSelectElement).value === '' ? undefined : ($event.target as HTMLSelectElement).value === 'on' })"
+                      @change="agentsStore.patchModel(agent.name, { enableThinking: ($event.target as HTMLSelectElement).value === '' ? null : ($event.target as HTMLSelectElement).value === 'on' })"
                       class="input-box text-sm w-24 shrink-0">
                       <option value="">auto</option>
                       <option value="on">on</option>
@@ -2122,8 +2133,9 @@ import { useScenesStore, type SceneDetail } from "@/stores/scenes";
 import { useJobsStore, type JobDetail, type JobTriggerInput, type JobStepInput } from "@/stores/jobs";
 import { useChannelsStore, type ChannelConfig, type ChannelDetail, type ChannelStatus } from "@/stores/channels";
 import { useRuntimeStore } from "@/stores/runtime";
-import { useAgentsStore } from "@/stores/agents";
+import { useAgentsStore, type AgentInfo } from "@/stores/agents";
 import { useMultimodalStore, type MultimodalConfig } from "@/stores/multimodal";
+import { buildMultimodalPatch, embeddingKeyPlaceholder, keyAsSaved, keysNeedingReentry, modelEndpointKeysAsSaved, tierKeyFollowsMove } from "@/composables/multimodalSettings";
 import { useConfigAssistantStore, type ConfigAssistantFeedbackOutcome, type ConfigAssistantMode, type FlowMemoryOutcome, type FlowMemoryScope } from "@/stores/configAssistant";
 import ToggleSwitch from "@/components/ToggleSwitch.vue";
 import ChannelIcon from "@/components/ChannelIcon.vue";
@@ -2231,7 +2243,7 @@ const multimodalForm = reactive({
   ttsVoiceSampleText: "",
   ttsDefaultQuality: "medium",
   imageGenBaseUrl: "",
-  imageGenApi: "automatic1111-compatible" as "automatic1111-compatible" | "comfyui",
+  imageGenApi: "automatic1111-compatible" as "automatic1111-compatible" | "comfyui" | "openai-compatible",
   imageGenApiKey: "",
   imageGenTimeoutMs: 120_000,
   imageGenModel: "",
@@ -2319,6 +2331,8 @@ const modelEndpointForm = reactive({
   loading: false,
   saving: false,
   error: "",
+  /** The key the gateway named when it refused the last save (details.field). */
+  refusedField: "",
   lastLoaded: null as ModelEndpointEditorConfig | null,
   orchestratorModel: "",
   orchestratorBaseUrl: "",
@@ -2427,16 +2441,22 @@ async function submitModelEndpointConfig() {
 
   modelEndpointForm.saving = true;
   try {
+    // Left empty, the orchestrator key falls back to the provider's and the embeddings key to the
+    // orchestrator's; the gateway sends neither to an endpoint it was not already going to, so an
+    // empty key beside a moved endpoint is saved as "" — no key (see modelEndpointKeysAsSaved).
+    const keys = modelEndpointKeysAsSaved(modelEndpointForm, modelEndpointForm.lastLoaded, modelEndpointForm.refusedField);
+    const orchestratorBaseUrl = modelEndpointForm.orchestratorBaseUrl.trim();
+    const embeddingBaseUrl = modelEndpointForm.embeddingBaseUrl.trim();
     const payload: ModelEndpointEditorConfig = {
       orchestrator: {
         primary: modelEndpointForm.orchestratorModel.trim(),
-        baseUrl: modelEndpointForm.orchestratorBaseUrl.trim() || undefined,
-        apiKey: modelEndpointForm.orchestratorApiKey.trim() || undefined,
+        baseUrl: orchestratorBaseUrl || undefined,
+        apiKey: keys.apiKey,
       },
       embeddings: {
         embeddingModel: modelEndpointForm.embeddingModel.trim() || undefined,
-        embeddingBaseUrl: modelEndpointForm.embeddingBaseUrl.trim() || undefined,
-        embeddingApiKey: modelEndpointForm.embeddingApiKey.trim() || undefined,
+        embeddingBaseUrl: embeddingBaseUrl || undefined,
+        embeddingApiKey: keys.embeddingApiKey,
       },
       reranker: {
         enabled: modelEndpointForm.rerankerEnabled,
@@ -2461,9 +2481,12 @@ async function submitModelEndpointConfig() {
       body: JSON.stringify(payload),
     });
     if (!response.ok) {
+      const refusal = await response.clone().json().catch(() => null) as { details?: { field?: unknown } } | null;
+      modelEndpointForm.refusedField = typeof refusal?.details?.field === "string" ? refusal.details.field : "";
       throw new Error(await parseSettingsError(response));
     }
 
+    modelEndpointForm.refusedField = "";
     syncModelEndpointForm(await response.json() as ModelEndpointEditorConfig);
     await runtime.fetch();
   } catch (error) {
@@ -2471,6 +2494,26 @@ async function submitModelEndpointConfig() {
   } finally {
     modelEndpointForm.saving = false;
   }
+}
+
+// A sub-agent's endpoint and key are saved TOGETHER. The gateway sends a saved key only where it
+// already went, so an endpoint patched alone was refused, and a key patched first was saved and
+// then refused again at the endpoint patched after it. Each field keeps its draft until a save
+// of both succeeds; a refusal is shown beside them.
+const agentEndpointDrafts = reactive<Record<string, { baseUrl?: string; apiKey?: string; error?: string }>>({});
+
+function agentEndpointDraft(name: string) {
+  return (agentEndpointDrafts[name] ??= {});
+}
+
+async function saveAgentEndpoint(agent: AgentInfo) {
+  const draft = agentEndpointDraft(agent.name);
+  const baseUrl = (draft.baseUrl ?? agent.model.baseUrl ?? "").trim();
+  // Left empty, the key falls back to the default one (see keyAsSaved); the mask stands for the saved key.
+  const apiKey = keyAsSaved(draft.apiKey ?? agent.model.apiKey ?? "", baseUrl, { key: agent.model.apiKey, endpoint: agent.model.baseUrl });
+  const refusal = await agentsStore.patchModel(agent.name, { baseUrl: baseUrl || null, apiKey: apiKey ?? null });
+  if (refusal) draft.error = refusal;
+  else delete agentEndpointDrafts[agent.name];
 }
 
 function applyNegativePreset(value: string) {
@@ -2606,6 +2649,19 @@ function resetMultimodalForm() {
   syncMultimodalForm(multimodalStore.config);
 }
 
+// Key fields whose endpoint changed while they still show the saved key's mask: the gateway
+// will not send a saved key to a new endpoint, so each says so beside itself. The field the
+// gateway named in its last refusal counts too, for moves only it can see.
+const refusedMultimodalKey = computed(() => (multimodalStore.error ? multimodalStore.errorField : ""));
+const keysToReenter = computed(() => new Set(keysNeedingReentry(
+  multimodalStore.config,
+  multimodalForm,
+  refusedMultimodalKey.value,
+)));
+// The quality tier has a saved key of its own and no endpoint of its own, and the image endpoint
+// moved: its key would follow, and it has no field, so the save drops it (buildMultimodalConfig).
+const tierKeyMoves = computed(() => tierKeyFollowsMove(multimodalStore.config, multimodalForm, refusedMultimodalKey.value));
+
 function onSavedVoiceFileSelected(event: Event) {
   const input = event.target as HTMLInputElement;
   const file = input.files?.[0] ?? null;
@@ -2733,58 +2789,18 @@ async function submitMultimodalForm() {
     return;
   }
 
-  const imageGenBaseUrl = multimodalForm.imageGenBaseUrl.trim();
-  await multimodalStore.save({
-    maxUploadBytes: multimodalForm.maxUploadBytes,
-    files: {
-      baseUrl: multimodalForm.filesBaseUrl.trim(),
-      apiKey: multimodalForm.filesApiKey.trim() || undefined,
-      timeoutMs: multimodalForm.filesTimeoutMs,
-      toolName: multimodalForm.fileToolName.trim(),
-      visionModel: multimodalForm.visionModel.trim() || undefined,
-      visionBaseUrl: multimodalForm.visionBaseUrl.trim() || undefined,
-      visionApiKey: multimodalForm.visionApiKey.trim() || undefined,
-    },
-    stt: {
-      baseUrl: multimodalForm.sttBaseUrl.trim(),
-      api: multimodalForm.sttApi,
-      apiKey: multimodalForm.sttApiKey.trim() || undefined,
-      timeoutMs: multimodalForm.sttTimeoutMs,
-      model: multimodalForm.sttModel.trim(),
-    },
-    tts: {
-      baseUrl: multimodalForm.ttsBaseUrl.trim(),
-      api: multimodalForm.ttsApi,
-      apiKey: multimodalForm.ttsApiKey.trim() || undefined,
-      timeoutMs: multimodalForm.ttsTimeoutMs,
-      model: multimodalForm.ttsModel.trim() || undefined,
-      defaultLanguage: multimodalForm.ttsDefaultLanguage.trim(),
-      defaultSpeaker: multimodalForm.ttsDefaultSpeaker.trim(),
-      defaultVoiceId: multimodalForm.ttsDefaultVoiceId.trim() || undefined,
-      voiceSamplePath: multimodalForm.ttsVoiceSamplePath.trim() || undefined,
-      voiceSampleText: multimodalForm.ttsVoiceSampleText.trim() || undefined,
-      defaultQuality: multimodalForm.ttsDefaultQuality.trim(),
-    },
-    wakeWord: {
-      enabled: multimodalForm.wakeEnabled,
-      language: multimodalForm.wakeLanguage,
-      keywords: wakeKeywords,
-      stopPhrases: wakeStopPhrases,
-      silenceTimeoutMs: multimodalForm.wakeSilenceTimeoutMs,
-    },
-    imageGeneration: imageGenBaseUrl ? {
-      baseUrl: imageGenBaseUrl,
-      api: multimodalForm.imageGenApi,
-      apiKey: multimodalForm.imageGenApiKey.trim() || undefined,
-      timeoutMs: multimodalForm.imageGenTimeoutMs,
-      model: multimodalForm.imageGenModel.trim() || undefined,
-      defaultWidth: multimodalForm.imageGenDefaultWidth,
-      defaultHeight: multimodalForm.imageGenDefaultHeight,
-      defaultSteps: multimodalForm.imageGenDefaultSteps,
-      defaultGuidanceScale: multimodalForm.imageGenGuidanceScale,
-      defaultNegativePrompt: multimodalForm.imageGenDefaultNegativePrompt.trim() || undefined,
-    } : undefined,
-  });
+  // Caught here rather than by a refused save: the hint beside each key says what to do.
+  if (keysNeedingReentry(multimodalStore.config, multimodalForm).length > 0) {
+    multimodalForm.error = "An endpoint changed: enter its API key again, or clear the key field.";
+    return;
+  }
+
+  // Only what the user changed goes back; the server merges it over what it stored (see
+  // buildMultimodalPatch).
+  await multimodalStore.save(buildMultimodalPatch(multimodalStore.config, multimodalForm, {
+    keywords: wakeKeywords,
+    stopPhrases: wakeStopPhrases,
+  }, refusedMultimodalKey.value));
 
   if (!multimodalStore.error) {
     syncMultimodalForm(multimodalStore.config);

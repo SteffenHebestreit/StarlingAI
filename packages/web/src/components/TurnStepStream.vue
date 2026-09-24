@@ -13,13 +13,15 @@
       <span>{{ headerText }}</span>
     </button>
 
-    <ol v-if="expanded || isStreaming" class="tss-list">
+    <!-- A step waiting on the user keeps its list open: its card is under the row, and a folded
+         segment would hide the question the turn is stuck on. -->
+    <ol v-if="expanded || isStreaming || hasAwaiting" class="tss-list">
       <li
         v-for="row in rows"
         :key="row.step.id"
         :class="[
           'tss-row',
-          `tss-row--${row.step.status}`,
+          `tss-row--${row.status}`,
           { 'tss-row--nested': row.step.depth === 1, 'tss-row--note': row.step.kind === 'note' },
         ]"
       >
@@ -35,11 +37,11 @@
         >
           <span class="tss-mark" aria-hidden="true">
             <span v-if="row.step.status === 'running'" class="tss-spinner" />
-            <template v-else>{{ markFor(row.step.status) }}</template>
+            <template v-else>{{ markFor(row.status) }}</template>
           </span>
           <!-- The glyph is decorative, so the status is spoken separately: without this a
                failed step read exactly like a successful one to a screen reader. -->
-          <span class="tss-sr">{{ statusWord(row.step.status) }}:</span>
+          <span class="tss-sr">{{ statusWord(row.status) }}:</span>
           <span v-if="row.agentTag" class="tss-agent">{{ row.agentTag }}</span>
           <span class="tss-title">{{ row.title }}</span>
           <span v-if="row.subject" class="tss-subject">{{ row.subject }}</span>
@@ -48,6 +50,11 @@
           </span>
           <span v-if="row.duration" class="tss-time">{{ row.duration }}</span>
         </button>
+
+        <!-- The question this step is waiting on, right under it (see userInputs). -->
+        <div v-if="awaiting?.[row.step.id]" class="tss-input">
+          <slot name="input" :step-id="row.step.id" />
+        </div>
       </li>
 
       <!-- What is happening right now, when no step row says it — routing, synthesis. -->
@@ -63,6 +70,7 @@
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import {
   delegationTarget,
+  displayStatus,
   formatDuration,
   isQuietStep,
   stepDurationMs,
@@ -71,9 +79,10 @@ import {
   stepSubject,
   stepTitle,
   turnSpanMs,
-  type StepStatus,
+  type StepDisplayStatus,
   type TurnStep,
 } from "@/composables/turnSteps";
+import { awaitingStepHint, awaitingStepTitle } from "@/composables/userInputs";
 
 const props = defineProps<{
   steps: TurnStep[];
@@ -82,6 +91,8 @@ const props = defineProps<{
   liveText?: string;
   /** Start folded — for answers that are no longer the latest. */
   startCollapsed?: boolean;
+  /** Steps waiting on the user's answer: their row says so, and the `input` slot renders under them. */
+  awaiting?: Record<string, { kind: string; expiresAt: string }>;
 }>();
 
 const emit = defineEmits<{
@@ -123,15 +134,22 @@ const rows = computed(() => {
   });
 });
 
+const hasAwaiting = computed(() => Boolean(props.awaiting && props.steps.some(step => props.awaiting![step.id])));
+
 function describe(step: TurnStep) {
-  const title = stepTitle(step);
+  const waiting = step.status === "running" ? props.awaiting?.[step.id] : undefined;
+  const title = waiting ? awaitingStepTitle(waiting.kind) : stepTitle(step);
   const outcome = stepOutcome(step);
   // While running: the specialist's own progress line if it sent one, otherwise what to
-  // expect. Finished: how it came out.
-  const detail = step.status === "running" ? (step.progress ?? stepHint(step)) : outcome;
+  // expect. Finished: how it came out. While it waits on the user, neither — the countdown.
+  const detail = waiting
+    ? awaitingStepHint(waiting.expiresAt, now.value)
+    : step.status === "running" ? (step.progress ?? stepHint(step, now.value)) : outcome;
   const duration = formatDuration(stepDurationMs(step, now.value));
+  const waited = step.userInput?.waitedMs;
   return {
     step,
+    status: displayStatus(step),
     title,
     subject: stepSubject(step),
     detail,
@@ -139,6 +157,8 @@ function describe(step: TurnStep) {
     tooltip: [
       step.agent ? `inside ${step.agent}` : undefined,
       step.kind === "tool" ? step.name : undefined,
+      // The row's time leaves the wait out; this is where it is still told.
+      waited ? `waited ${formatDuration(waited)} for your answer` : undefined,
       "click for details",
     ].filter(Boolean).join(" · "),
   };
@@ -151,7 +171,8 @@ const headerText = computed(() => {
     .filter(step => step.depth === 0 && step.kind === "tool")
     .map(delegationTarget)
     .filter((name): name is string => Boolean(name)))];
-  const failed = props.steps.filter(step => step.status === "failed").length;
+  // A render the user skipped is their choice, not a failure of the turn.
+  const failed = props.steps.filter(step => displayStatus(step) === "failed").length;
   const span = formatDuration(turnSpanMs(props.steps, now.value));
   // A turn can consist of narration only (a steering or correction line and no tool call);
   // it still needs a header, or folding it made the whole record disappear.
@@ -166,14 +187,15 @@ const headerText = computed(() => {
   ].filter(Boolean).join(" · ");
 });
 
-function statusWord(status: StepStatus): string {
+function statusWord(status: StepDisplayStatus): string {
   if (status === "running") return "running";
   if (status === "failed") return "failed";
   if (status === "stopped") return "no result";
+  if (status === "skipped") return "skipped by you";
   return "done";
 }
 
-function markFor(status: StepStatus): string {
+function markFor(status: StepDisplayStatus): string {
   if (status === "done") return "✓";
   if (status === "failed") return "✕";
   return "–";
@@ -318,6 +340,10 @@ function markFor(status: StepStatus): string {
   clip: rect(0, 0, 0, 0);
   white-space: nowrap;
   border: 0;
+}
+
+.tss-input {
+  margin: 0.25rem 0 0.45rem 1.3rem;
 }
 
 .tss-note {

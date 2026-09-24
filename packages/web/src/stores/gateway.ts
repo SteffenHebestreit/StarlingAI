@@ -5,7 +5,24 @@ import { useAuditStore } from "./audit";
 import { useComputerStore } from "./computer";
 import { useNotificationStore } from "./notifications";
 import { useShellStore } from "./shell";
-import { isDelegation, isFailedResult, type TurnStep } from "../composables/turnSteps";
+import { isDelegation, isFailedResult, stepsFromToolCalls, type TurnStep } from "../composables/turnSteps";
+import { mergeFinalAssistantContent, mergeSegmentAssistantContent, transcriptAssistantContent } from "../composables/assistantContent";
+import {
+  appendUnread, landTurn, liveCallId, markUnread, newSteerMessage, progressSteps, readSteeringEntries, resteer, resumeTurnSegments,
+  routeToolDone, settleSteps, splitAtSteering, takeFollowUp, turnBubbles, unreadAbove, withoutOutdatedSegments, withResumedStep, type SteerMark,
+  type SteerState, type SteeringEntry,
+} from "../composables/turnSegments";
+import { dropRunningTail, markRunningTail, mergeHydrated, sameList, sameMessage } from "../composables/hydration";
+import { nextOpenerIndex, recoveryVerdict, savedEnding, type RecoveryVerdict } from "../composables/turnRecovery";
+import { needsOlderTranscript, rewindHistoryIndex, transcriptHistoryIndex } from "../composables/rewind";
+import {
+  addUserInput, anchorStepFor, askUserExpiresAt, closesAskUser, dropTurnInputs, expiredInputIds, holdsStallRecovery,
+  isExpiredAnswer, nextExpiryAt, openInputsFor, outcomeOfChoice, placeUserInputs, readFieldErrors, readUserInputList,
+  readUserInputRequest, readUserInputResolution, rehydrateUserInputs, removeUserInput, serverClockSkew, stepUserInputRecord,
+  type UserInputFieldError, type UserInputMap, type UserInputResolution,
+} from "../composables/userInputs";
+
+export { sanitizeAssistantMessageContent } from "../composables/assistantContent";
 
 export interface TurnUsage {
   promptTokens: number;
@@ -72,6 +89,18 @@ export interface ChatMessage {
    * reconstructed from `toolCalls` instead.
    */
   steps?: TurnStep[];
+  /** The turn this bubble belongs to — shared by every segment of a turn the user spoke into. */
+  requestId?: string;
+  /** A user message read inside a running turn rather than opening one. */
+  midTurn?: boolean;
+  /** An assistant segment the turn continued past after reading a mid-turn message; not its answer. */
+  continued?: boolean;
+  /** Only on a message sent into a running turn: where it stands (see turnSegments). */
+  steer?: SteerMark;
+  /** Made by this page and never saved on the server — an error note, a stopped stub (see hydration). */
+  pageOnly?: boolean;
+  /** A page-only note on a turn the user stopped: the server records no stop, only what the turn did. */
+  stopped?: boolean;
 }
 
 export interface SwarmTaskAttempt {
@@ -139,6 +168,12 @@ export interface GatewaySessionTranscriptMessage {
   attachments?: ChatAttachment[];
   toolCalls?: Array<{ id?: string; name: string; args: Record<string, unknown>; result?: string; metadata?: Record<string, unknown> }>;
   swarmState?: SwarmState;
+  /** A user message sent into a running turn; `content` is only what the user wrote. */
+  midTurn?: true;
+  steeringId?: string;
+  /** An assistant segment followed by a mid-turn message of the same turn. */
+  continued?: true;
+  segmentStartedAt?: string;
 }
 
 interface SendMessageOptions {
@@ -155,9 +190,16 @@ interface GatewayAuditEvent {
 
 export type EffortTier = "low" | "medium" | "high" | "max";
 
+/** Whether a render asks for the user's settings first ("ask") or goes ahead with the agent's ("auto"). */
+export type ImageSettingsPrompt = "ask" | "auto";
+
+/** How a message sent into a running turn fared — or "sent": it already went out as the next turn. */
+export type SteerOutcome = SteerState | "sent";
+
 export interface SessionEffortSettings {
   effort?: EffortTier;
   turnTimeoutSecOverride?: number;
+  imageSettingsPrompt?: ImageSettingsPrompt;
 }
 
 export interface GatewaySessionTranscript {
@@ -166,6 +208,21 @@ export interface GatewaySessionTranscript {
   totalMessages: number;
   nextBeforeMessageId?: string;
   settings?: SessionEffortSettings;
+  /** A turn is running on this session right now. */
+  activeTurn?: boolean;
+  /** That turn's requestId, while it runs — a page that did not start it can follow it by that. */
+  activeTurnRequestId?: string;
+  /** When that turn started (epoch ms). */
+  activeTurnStartedAt?: number;
+  /** Questions a running turn put to the user that are still waiting for an answer. */
+  openUserInputs?: unknown[];
+  /** The server's clock when it answered (epoch ms). */
+  serverNow?: number;
+  /**
+   * Messages finished turns never read, kept by the server when the final status that lists them
+   * found the connection that started the turn gone — until the session's next turn starts.
+   */
+  unreadSteering?: Array<{ id: string; text: string; requestId: string }>;
 }
 
 const SESSION_TRANSCRIPT_PAGE_SIZE = 100;
@@ -175,7 +232,12 @@ const HEARTBEAT_RPC_TIMEOUT_MS = 8_000;
 const PENDING_TURN_LIVENESS_PROBE_TIMEOUT_MS = 8_000;
 const RECONNECT_DELAY_MS = 3_000;
 const TURN_RECOVERY_POLL_MS = 2_000;
+// While the server confirms the lost turn is still running, its answer can be many minutes off;
+// reading the transcript every two seconds for all of that would be wasted work.
+const TURN_RECOVERY_RUNNING_POLL_MS = 5_000;
 const TURN_RECOVERY_TIMEOUT_MS = 60_000;
+/** How many older transcript pages a Restart reads back to find the message it restarts from. */
+const REWIND_MAX_TRANSCRIPT_PAGES = 5;
 const TURN_STALL_WARNING_MS = 20_000;
 const TURN_STALL_RECOVERY_MS = 45_000;
 const TURN_DELEGATED_STALL_WARNING_MS = 60_000;
@@ -307,80 +369,6 @@ function normalizeHydratedMessages(input: ChatMessage[]): ChatMessage[] {
     toolCalls: cloneToolCalls(entry.toolCalls),
     guardrailEvents: cloneGuardrailEvents(entry.guardrailEvents),
   }));
-}
-
-const THINKING_BLOCK_RE = /<(thinking|think)>[\s\S]*?<\/(thinking|think)>/gi;
-const NARRATED_TOOL_TEXT_RE = /<tool_call>|<function=|<parameter=|\[Tool:/i;
-const EXECUTION_CHATTER_START_RE = /^\s*(let me|now let me|first let me|i(?:'m| am) going to|i(?:'ll| will)|i found some useful information|let me fetch|let me search|now let me create|now i can)\b/i;
-
-function stripNarratedToolTags(text: string): string {
-  return text
-    .replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, "")
-    .replace(/<function=[^>]*>[\s\S]*?<\/function>/gi, "")
-    .replace(/<parameter=[^>]*>[\s\S]*?<\/parameter>/gi, "")
-    .replace(/<\/?tool_call>/gi, "")
-    .trim();
-}
-
-export function sanitizeAssistantMessageContent(
-  content: string | null | undefined,
-  toolCalls?: Array<unknown>,
-): string {
-  const raw = typeof content === "string" ? content.trim() : "";
-  if (!raw) return "";
-
-  let cleaned = stripNarratedToolTags(raw)
-    .split(/\r?\n/)
-    .filter((line) => !line.trim().startsWith("[Tool:"))
-    .join("\n")
-    .trim();
-
-  if (!cleaned) return "";
-
-  if (NARRATED_TOOL_TEXT_RE.test(raw) || (toolCalls?.length ?? 0) > 0) {
-    cleaned = cleaned
-      .split(/\n\s*\n/)
-      .map((paragraph) => paragraph.trim())
-      .filter(Boolean)
-      .filter((paragraph) => !EXECUTION_CHATTER_START_RE.test(paragraph))
-      .join("\n\n")
-      .trim();
-  }
-
-  return cleaned;
-}
-
-function summarizeToolOnlyAssistantTurn(toolCalls?: ChatMessage["toolCalls"]): string {
-  if (!toolCalls?.length) return "";
-
-  const toolNames = [...new Set(toolCalls.map((toolCall) => toolCall.name).filter(Boolean))];
-  if (toolNames.length === 0) return "";
-
-  if (toolNames.length === 1) {
-    const toolName = toolNames[0];
-    if (toolName === "delegate_to_agent") {
-      const rawTask = toolCalls.find((toolCall) => toolCall.name === toolName)?.args?.task;
-      const task = typeof rawTask === "string" ? rawTask.replace(/\s+/g, " ").trim() : "";
-      if (task) {
-        const summary = task.length > 160 ? `${task.slice(0, 157)}...` : task;
-        return `Delegated work completed without a text summary: ${summary}`;
-      }
-      return "Delegated work completed without a text summary. See execution details below.";
-    }
-
-    if (toolName === "parallel_delegate") {
-      const rawTasks = toolCalls.find((toolCall) => toolCall.name === toolName)?.args?.tasks;
-      const taskCount = Array.isArray(rawTasks) ? rawTasks.length : 0;
-      const suffix = taskCount > 0 ? ` (${taskCount} task${taskCount === 1 ? "" : "s"})` : "";
-      return `Parallel delegation completed without a text summary${suffix}. See execution details below.`;
-    }
-
-    if (toolName === "run_task_graph") {
-      return "Task graph execution completed without a text summary. See execution details below.";
-    }
-  }
-
-  return `This turn completed via ${toolNames.join(", ")} without a text summary. See execution details below.`;
 }
 
 function inferContentTypeFromPath(path: string): string {
@@ -531,40 +519,6 @@ function extractToolAttachments(name: string, metadata: unknown): ChatAttachment
 
   visit(metadata, name);
   return attachments;
-}
-
-function extractVisibleAssistantContent(
-  content: string | null | undefined,
-  toolCalls?: ChatMessage["toolCalls"],
-): string {
-  const raw = typeof content === "string" ? content.trim() : "";
-  if (!raw) return "";
-  const withoutThinking = raw.replace(THINKING_BLOCK_RE, "").trim();
-  if (!withoutThinking) return "";
-  return sanitizeAssistantMessageContent(withoutThinking, toolCalls) || withoutThinking;
-}
-
-function mergeCompletedThinkingBlocks(...values: Array<string | null | undefined>): string {
-  const blocks = values
-    .flatMap((value) => (typeof value === "string" ? (value.match(THINKING_BLOCK_RE) ?? []) : []))
-    .map((block) => block.trim())
-    .filter(Boolean);
-  return [...new Set(blocks)].join("\n\n").trim();
-}
-
-function mergeFinalAssistantContent(response: unknown, streamedText: string, toolCalls?: ChatMessage["toolCalls"]): string {
-  const finalResponse = String(response ?? "").trim();
-  const completedThinking = mergeCompletedThinkingBlocks(streamedText, finalResponse);
-  const visibleFinal = extractVisibleAssistantContent(finalResponse, toolCalls);
-  const visibleStreamed = extractVisibleAssistantContent(streamedText, toolCalls);
-  const visibleContent = visibleFinal || visibleStreamed || summarizeToolOnlyAssistantTurn(toolCalls);
-  const merged = [completedThinking, visibleContent].filter(Boolean).join("\n\n").trim();
-
-  return merged
-    || visibleContent
-    || finalResponse
-    || streamedText.trim()
-    || summarizeToolOnlyAssistantTurn(toolCalls);
 }
 
 function buildAcceptedStatusMessage(data: Record<string, unknown>): string | null {
@@ -725,7 +679,35 @@ export const useGatewayStore = defineStore("gateway", () => {
   // persisted on the session). Hydrated on load; defaults to "medium" until known.
   const currentSessionEffort = ref<EffortTier>("medium");
   const currentSessionTimeLimitSec = ref<number | null>(null);
+  const currentSessionImageSettingsPrompt = ref<ImageSettingsPrompt>("ask");
   const pendingRequestId = ref<string | null>(null);
+  // The session the pending turn runs in. The page shows one session at a time, and a turn goes
+  // on running on the server when the user switches away: its events must never land in the
+  // session on screen, and nothing typed there may steer or stop it.
+  let pendingTurnSessionId: string | null = null;
+  // Turns the page stopped following when the user switched sessions mid-turn, by session. Going
+  // back while one still runs picks it up again. `connection` is the connection its events come
+  // to — null when they never came here — so a turn left before a reconnect is followed by
+  // reading the transcript, not by waiting for events that go to the connection that is gone.
+  const detachedTurns = new Map<string, { requestId: string; connection: number | null }>();
+  // The turn followServerTurn picked up from the transcript. What it did before is in its resumed
+  // segments, not in the live bubble — which holds nothing at all when `transcriptOnly`: no event
+  // of it ever comes here, and it is followed by reading the transcript alone.
+  let pickedUpTurn: { requestId: string; transcriptOnly: boolean } | null = null;
+  // Counts the connections this page has had; a turn's events come to the one it started on.
+  let connectionEpoch = 0;
+  // The session each turn this page sent or followed runs in. The list can still hold another
+  // session's messages while the one switched to loads, and what was typed there must not run
+  // as a turn here.
+  const turnSessions = new Map<string, string>();
+  // What turns in other sessions never read, kept until that session is on screen again — the
+  // server hands it back only once, in the turn's final status, and nothing saves it.
+  const unreadSteering = new Map<string, Array<{ requestId: string; entries: SteeringEntry[]; error: string }>>();
+  // Messages already sent on as the next turn (takeFollowUp), which no longer carry their mark.
+  const sentAsFollowUp = new Set<string>();
+  // The turn whose own tool events have been seen. From then on they are the record of its calls,
+  // and the audit log's copies of the same calls are not applied on top of them.
+  let liveToolEventsTurn: string | null = null;
   const streamingText = ref("");
   // Live chain-of-thought for the in-flight turn. streamingReasoning is the
   // main assistant's CoT; streamingSubAgentReasoning accumulates one entry per
@@ -781,12 +763,19 @@ export const useGatewayStore = defineStore("gateway", () => {
   let _pendingReasoning = "";
   const _pendingSubAgentReasoning = new Map<string, string>();
   let _reasoningRaf: number | null = null;
-  // `force` mirrors flushStreamTextNow: the residual must still land when the turn has
-  // already flipped isStreaming false, or the last reasoning before completion is lost from
-  // the message we are about to build. A stale rAF callback (force=false) still discards.
-  function flushPendingReasoning(force = false): void {
+  // The turn the buffered reasoning belongs to. A buffer is thrown away only when that turn is no
+  // longer the live one (it ended, was stopped or was replaced). It used to be thrown away
+  // whenever no answer TEXT had streamed yet — isStreaming is set by text chunks only — which is
+  // every turn that thinks and calls tools before it writes: both lanes stayed empty for the
+  // whole of a delegation, and only the last frame reached the finished message.
+  let _reasoningTurn: string | null = null;
+  function flushPendingReasoning(): void {
     _reasoningRaf = null;
-    if (!isStreaming.value && !force) { _pendingReasoning = ""; _pendingSubAgentReasoning.clear(); return; }
+    if (_reasoningTurn === null || _reasoningTurn !== pendingRequestId.value) {
+      _pendingReasoning = "";
+      _pendingSubAgentReasoning.clear();
+      return;
+    }
     if (_pendingReasoning) {
       streamingReasoning.value = boundedTail(streamingReasoning.value, _pendingReasoning);
       _pendingReasoning = "";
@@ -811,6 +800,12 @@ export const useGatewayStore = defineStore("gateway", () => {
   }
   function appendReasoning(text: string, agent?: string): void {
     if (!text) return;
+    if (_reasoningTurn !== pendingRequestId.value) {
+      // Another turn's leftovers never join this one's lanes.
+      _pendingReasoning = "";
+      _pendingSubAgentReasoning.clear();
+      _reasoningTurn = pendingRequestId.value;
+    }
     if (agent) _pendingSubAgentReasoning.set(agent, (_pendingSubAgentReasoning.get(agent) ?? "") + text);
     else _pendingReasoning += text;
     scheduleReasoningFlush();
@@ -818,10 +813,26 @@ export const useGatewayStore = defineStore("gateway", () => {
   function flushReasoningNow(): void {
     if (_reasoningRaf !== null && typeof cancelAnimationFrame === "function") cancelAnimationFrame(_reasoningRaf);
     _reasoningRaf = null;
-    flushPendingReasoning(true);
+    flushPendingReasoning();
   }
 
   const isError = ref(false);       // true when last turn ended in an error
+  // One timer for the error flash: with one per failure, a blocked turn's 3 s timer cleared the
+  // flash of an error that came a second later, two seconds into its five.
+  let errorFlashTimer: ReturnType<typeof setTimeout> | null = null;
+  function flashError(ms: number): void {
+    if (errorFlashTimer) clearTimeout(errorFlashTimer);
+    isError.value = true;
+    errorFlashTimer = setTimeout(() => {
+      errorFlashTimer = null;
+      isError.value = false;
+    }, ms);
+  }
+  function clearErrorFlash(): void {
+    if (errorFlashTimer) clearTimeout(errorFlashTimer);
+    errorFlashTimer = null;
+    isError.value = false;
+  }
   const turnLikelyStalled = ref(false);
   const authFailed = ref(false);    // true when connection was rejected due to bad token
   const pendingIntervention = ref<InterventionNotice | null>(null);
@@ -846,17 +857,65 @@ export const useGatewayStore = defineStore("gateway", () => {
     requestId: string;
     question: string;
     choices?: string[];
+    /** When the server stops waiting and answers for the user; drives the banner's countdown. */
+    expiresAt?: string;
+    /** The ask_user call that asked — its completion closes the banner. */
+    toolCallId?: string;
   }
 
   interface PendingTurnRecovery {
+    /**
+     * The turn being recovered. Recovery answers for that turn only: a Stop or a new message
+     * while it waits ends it, and a result that arrives later must not land on the next turn.
+     */
+    requestId: string;
     sessionId: string;
     baselineTotalMessages: number;
     startedAt: number;
+    /** The user's message that opened the turn, to find the turn in the transcript. */
+    openerText?: string;
+    /** The user pressed Stop and the server said the turn runs no longer (cancelTurn). */
+    stopped?: boolean;
+    /**
+     * The server accepted the turn (chat.send) before the connection dropped, so it has the
+     * turn's opening message: a later one in the transcript came after it, not instead of it.
+     */
+    openerSaved?: boolean;
+    /**
+     * Its final status came to this page (endUnlessReplaced), with what it never read: no
+     * connection dropped. `data`, the status itself, when a lost connection cut the read short:
+     * a turn the read does not show landed says how it ended by that.
+     */
+    finalStatus?: { leftovers: SteeringEntry[]; data?: Record<string, unknown> };
   }
 
   const pendingApproval = ref<PendingApproval | null>(null);
   const pendingInputRequest = ref<PendingInputRequest | null>(null);
+  let inputRequestExpiryTimer: ReturnType<typeof setTimeout> | null = null;
+  // Structured questions (the image settings card), keyed by inputId. Separate from the ask_user
+  // banner on purpose: that banner takes over the composer, and a settings card must not — the
+  // user can keep steering while it waits.
+  const userInputs = ref<UserInputMap>({});
+  // The engine the user picked on a card, from the moment the answer goes out until the card is
+  // settled here — which the server's "resolved" event does before its reply arrives.
+  const chosenSettings = new Map<string, { tier?: string; expectedSeconds?: number }>();
+  let userInputExpiryTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The card whose full form is open. The page draws it, so it survives its card being re-mounted. */
+  const configuringUserInputId = ref<string | null>(null);
   const pendingTurnRecovery = ref<PendingTurnRecovery | null>(null);
+  // The turn the user asked to stop. Its own final status can still arrive as "blocked", and
+  // what it never read must not then go out as though it had ended on its own.
+  let stoppedRequestId: string | null = null;
+  // The newest turn this page sent that the server accepted (chat.send's reply).
+  let acceptedRequestId: string | null = null;
+  // The turn whose final status endUnlessReplaced lands, once a read said nothing replaced it.
+  let finalStatusRead: string | null = null;
+  // Final statuses endUnlessReplaced holds while it reads the session, by turn. The turn has
+  // ended: a Stop or a message typed meanwhile lands its status as it came.
+  const heldFinalStatuses = new Map<string, Record<string, unknown>>();
+  // The last turn's thinking setting, for the turn made of messages the previous one never read.
+  let lastEnableThinking: boolean | undefined;
+  let heldSendTimer: ReturnType<typeof setTimeout> | null = null;
   const notificationsSubscribed = ref(false);
 
   let ws: WebSocket | null = null;
@@ -970,9 +1029,23 @@ export const useGatewayStore = defineStore("gateway", () => {
     }
   }
 
+  /**
+   * A turn waiting on the user's answer sends no progress, by design. Silence then is not a
+   * stall, and recovering from it would be worse than useless: the recovery drops the socket, and
+   * the server reads a vanished connection as the user walking away from the question.
+   */
+  function turnWaitsOnUser(): boolean {
+    return holdsStallRecovery(userInputs.value, currentSessionId.value, Date.now(), Boolean(pendingInputRequest.value));
+  }
+
   async function warnAboutPossiblyStalledTurn(delegated: boolean): Promise<void> {
     const requestId = pendingRequestId.value;
     if (!requestId) return;
+    if (turnWaitsOnUser()) {
+      turnLikelyStalled.value = false;
+      armPendingTurnWatchdog();
+      return;
+    }
 
     const liveness = await probePendingTurnLiveness(requestId);
     if (pendingRequestId.value !== requestId) return;
@@ -996,6 +1069,11 @@ export const useGatewayStore = defineStore("gateway", () => {
     const requestId = pendingRequestId.value;
     if (!requestId) {
       clearTurnStallState();
+      return;
+    }
+    if (turnWaitsOnUser()) {
+      turnLikelyStalled.value = false;
+      armPendingTurnWatchdog();
       return;
     }
 
@@ -1033,8 +1111,8 @@ export const useGatewayStore = defineStore("gateway", () => {
   const DELEGATION_TOOL_NAMES = new Set(["delegate_to_agent", "parallel_delegate", "run_task_graph"]);
 
   function hasActiveWorkInFlight(): boolean {
-    const streamingMessage = getStreamingMessage();
-    const pendingToolCalls = streamingMessage?.toolCalls?.filter((tc) => tc.result === undefined) ?? [];
+    const pendingToolCalls = turnBubbles(messages.value, pendingRequestId.value)
+      .flatMap((bubble) => bubble.toolCalls?.filter((tc) => tc.result === undefined) ?? []);
     const hasActiveDelegation = pendingToolCalls.some((tc) => DELEGATION_TOOL_NAMES.has(tc.name));
     const hasPendingToolCall = pendingToolCalls.length > 0;
     const activeSwarmTask = Object.values((liveSwarmState.value ?? syntheticSwarmState.value)?.tasks ?? {}).some((task) => task.status === "running" || task.status === "pending");
@@ -1152,71 +1230,122 @@ export const useGatewayStore = defineStore("gateway", () => {
     }, delayMs);
   }
 
-  function beginPendingTurnRecovery(): void {
-    if (!pendingRequestId.value) return;
+  /** The user's message that opened the pending turn — not one sent into it while it ran. */
+  function pendingTurnOpenerText(): string | undefined {
+    const liveIndex = messages.value.findIndex((message) => message.id === "streaming");
+    for (let index = (liveIndex >= 0 ? liveIndex : messages.value.length) - 1; index >= 0; index -= 1) {
+      const message = messages.value[index]!;
+      if (message.role === "user" && !message.midTurn && !message.steer) return message.content;
+    }
+    return undefined;
+  }
 
-    const sessionId = currentSessionId.value;
+  function beginPendingTurnRecovery(): void {
+    const requestId = pendingRequestId.value;
+    if (!requestId) return;
+
+    const sessionId = pendingTurnSessionId ?? currentSessionId.value;
     if (!sessionId) {
       failPendingTurn("Connection lost while waiting for a response. Please try again.");
       return;
     }
 
-    if (!pendingTurnRecovery.value) {
+    if (pendingTurnRecovery.value?.requestId !== requestId) {
+      clearPendingTurnRecovery();
       pendingTurnRecovery.value = {
+        requestId,
         sessionId,
         baselineTotalMessages: currentSessionTranscriptTotalMessages.value,
         startedAt: Date.now(),
+        openerText: pendingTurnOpenerText(),
+        openerSaved: acceptedRequestId === requestId,
       };
       insertSystemFeedbackMessage("Connection lost. Reconnecting and recovering the active turn.");
     }
 
     pendingApproval.value = null;
-      pendingInputRequest.value = null;
+    pendingInputRequest.value = null;
     liveSwarmState.value = null;
     syntheticSwarmState.value = null;
     isStreaming.value = false;
     clearTurnStallTimers();
   }
 
+  /** Whether a recovery still speaks for the turn on screen — a Stop or a new message ends it. */
+  function recoveryIsCurrent(recovery: PendingTurnRecovery): boolean {
+    return pendingTurnRecovery.value?.requestId === recovery.requestId && pendingRequestId.value === recovery.requestId;
+  }
+
   async function recoverPendingTurn(): Promise<void> {
     const recovery = pendingTurnRecovery.value;
     if (!recovery || !connected.value || turnRecoveryInFlight) return;
+    if (!recoveryIsCurrent(recovery)) {
+      clearPendingTurnRecovery();
+      return;
+    }
 
     turnRecoveryInFlight = true;
     try {
+      const listedAt = Date.now();
       const result = await getSessionTranscript(recovery.sessionId, { limit: SESSION_TRANSCRIPT_PAGE_SIZE });
-      const lastMessage = result.transcript[result.transcript.length - 1];
-      const hasRecoveredAssistantReply = result.totalMessages > recovery.baselineTotalMessages
-        && lastMessage?.role === "assistant";
+      // The user stopped the turn, sent another or switched away while this was out: whatever it
+      // says is about a turn no longer on screen.
+      if (!recoveryIsCurrent(recovery)) return;
+      // A question the turn put while the connection was down is still waiting on the server.
+      rehydrateOpenUserInputs(recovery.sessionId, result.openUserInputs, listedAt, result.serverNow);
 
-      if (hasRecoveredAssistantReply || result.session.archivedAt) {
-        currentSessionId.value = result.session.archivedAt ? null : recovery.sessionId;
-        currentSessionTranscriptTotalMessages.value = result.totalMessages;
-        currentSessionTranscriptNextBeforeMessageId.value = result.nextBeforeMessageId ?? null;
-        hydrateTranscript(result.transcript);
-        applyCurrentSessionRunSelection(currentSessionId.value ?? recovery.sessionId);
-        pendingRequestId.value = null;
-        pendingApproval.value = null;
-        pendingInputRequest.value = null;
-        pendingIntervention.value = null;
-        isStreaming.value = false;
-        isError.value = false;
-        clearTurnStallState();
-        clearPendingTurnRecovery();
+      // Archived, it runs no more: it ends as the read says it did, else as the transcript shows it.
+      // Ended as the transcript shows it whatever the read said, a turn another tab's message had
+      // replaced read as "completed without a text summary" (review of round 4, D #6).
+      if (result.session.archivedAt) {
+        if (!endRecoveredTurn(recovery, result, readRecoveryVerdict(recovery, result))) finishRecoveredTurn(recovery, result);
         return;
       }
 
+      const verdict = readRecoveryVerdict(recovery, result);
+      if (endRecoveredTurn(recovery, result, verdict)) return;
+
+      if (verdict === "lost") {
+        clearPendingTurnRecovery();
+        if (recovery.stopped) failPendingTurn("Turn cancelled by user.", false, [], true);
+        else failRecoveredTurn(recovery, "The connection dropped and the turn ended without an answer. Please try again.");
+        return;
+      }
+
+      if (verdict === "running") {
+        // Alive on the server, but its events went to the connection that was lost. Its answer
+        // is read from the transcript once it lands; until then this is not a timeout.
+        recovery.startedAt = Date.now();
+        // A turn picked up by reading the transcript lost no connection here (a reload, a second
+        // tab): its status line stays as followServerTurn set it, and its steps move with each read.
+        if (readsTranscriptOnly(recovery.requestId)) refreshPickedUpTurn(recovery.requestId, result);
+        else updateStreamingStatus("Reconnected — this turn is still running on the server. Its answer appears here when it finishes.", { appendHistory: false });
+        scheduleTurnRecovery(TURN_RECOVERY_RUNNING_POLL_MS);
+        return;
+      }
+
+      // A turn waiting on the user's answer is not a lost turn: it cannot reply before they do,
+      // and giving up here would take their open card away with it.
+      if (openInputsFor(userInputs.value, recovery.sessionId, Date.now()).length > 0) recovery.startedAt = Date.now();
+
       if (Date.now() - recovery.startedAt >= TURN_RECOVERY_TIMEOUT_MS) {
         clearPendingTurnRecovery();
-        failPendingTurn("Connection was lost and the active turn could not be recovered. Please try again.");
+        failRecoveredTurn(recovery, "Connection was lost and the active turn could not be recovered. Please try again.");
         return;
       }
 
       scheduleTurnRecovery();
     } catch {
+      if (!recoveryIsCurrent(recovery)) return;
+      // A Stop is not kept waiting on a read that failed: the turn has ended either way.
+      if (recovery.stopped) {
+        clearPendingTurnRecovery();
+        failPendingTurn("Turn cancelled by user.", false, [], true);
+        return;
+      }
       if (Date.now() - recovery.startedAt >= TURN_RECOVERY_TIMEOUT_MS) {
         clearPendingTurnRecovery();
-        failPendingTurn("Connection was lost and the active turn could not be recovered. Please try again.");
+        failRecoveredTurn(recovery, "Connection was lost and the active turn could not be recovered. Please try again.");
         return;
       }
 
@@ -1224,6 +1353,213 @@ export const useGatewayStore = defineStore("gateway", () => {
     } finally {
       turnRecoveryInFlight = false;
     }
+  }
+
+  /**
+   * End a recovered turn the transcript does not show landed: by its own final status when that
+   * came here before the connection dropped (endUnlessReplaced). The page had "Provider
+   * unreachable", and said the connection had dropped (review of round 5, D R2).
+   */
+  function failRecoveredTurn(recovery: PendingTurnRecovery, errorText: string): void {
+    if (recovery.finalStatus?.data) landHeldStatus(recovery.finalStatus.data);
+    else failPendingTurn(errorText);
+  }
+
+  /** What a read of the session says of the turn the page recovers. */
+  function readRecoveryVerdict(recovery: PendingTurnRecovery, result: GatewaySessionTranscript): RecoveryVerdict {
+    return recoveryVerdict({
+      activeTurn: result.activeTurn,
+      transcript: result.transcript,
+      totalMessages: result.totalMessages,
+      baselineTotalMessages: recovery.baselineTotalMessages,
+      openerText: recovery.openerText,
+      // A turn the server runs under another name is the message from another tab that
+      // replaced this one — and so, after a Stop the server says found nothing running, is
+      // any turn running there. Waited on as this one, it kept the page spinning this turn's
+      // steps until that turn ended too, then said the connection had dropped (review of
+      // round 3, D #1).
+      requestId: recovery.requestId,
+      activeTurnRequestId: result.activeTurnRequestId,
+      stopped: recovery.stopped,
+      // Read from the transcript, or accepted by the server before the connection dropped. The
+      // page's own turn, replaced by another tab's message that ended before the reconnect, said
+      // the connection had dropped and hid that message and its answer (review of round 4, D #4).
+      openerSaved: recovery.openerSaved === true || readsTranscriptOnly(recovery.requestId),
+    });
+  }
+
+  /** End the recovered turn when the read says it has ended: true when it did. */
+  function endRecoveredTurn(recovery: PendingTurnRecovery, result: GatewaySessionTranscript, verdict: RecoveryVerdict): boolean {
+    if (verdict !== "landed" && verdict !== "moved-on") return false;
+    const saved = savedEnding(result.transcript, recovery.openerText);
+    finishRecoveredTurn(recovery, result, {
+      // A Stop on a turn that had ended keeps its note unless what the server saved ends in an
+      // answer: taken for one, its partial step read as a success (review of round 3, D #2). A
+      // turn another tab's message replaced is noted as replaced unless it ends in an answer —
+      // between two calls as well as in one: noted only when cut in a call, a turn replaced
+      // between two steps read as "completed without a text summary" (review of round 4, D #3).
+      ending: recovery.stopped ? (saved === "answer" ? undefined : "stopped") : verdict === "moved-on" && saved !== "answer" ? "replaced" : undefined,
+      movedOn: verdict === "moved-on",
+    });
+    return true;
+  }
+
+  /**
+   * The lost turn is over and the transcript has its answer: show the transcript. The live
+   * bubble goes with the turn, and a message the turn never read is marked undelivered — it is
+   * not known how the turn ended, so nothing is sent on unasked.
+   *
+   * `ending`, when what the server saved of the turn is not how it ended: the user's Stop, or a
+   * message from another tab that replaced it. Its note goes where the live bubble was, holding
+   * the step it ended in, before the transcript is merged — which then places it (hydration).
+   *
+   * `movedOn`, when the session went on to a turn opened after this one. One still running there
+   * is followed, as a reload would: the page no longer looks idle while it runs, and a message
+   * typed here steers it — sent as a new turn, it stopped that turn on the server (review of
+   * round 3, D #1).
+   */
+  function finishRecoveredTurn(
+    recovery: PendingTurnRecovery,
+    result: GatewaySessionTranscript,
+    options: { ending?: "stopped" | "replaced"; movedOn?: boolean } = {},
+  ): void {
+    if (options.ending === "stopped") failPendingTurn("Turn cancelled by user.", false, [], true);
+    else if (options.ending === "replaced") landReplacedTurn(recovery.requestId, true);
+    currentSessionId.value = result.session.archivedAt ? null : recovery.sessionId;
+    currentSessionTranscriptTotalMessages.value = result.totalMessages;
+    currentSessionTranscriptNextBeforeMessageId.value = result.nextBeforeMessageId ?? null;
+    const runsOn = options.movedOn === true && result.activeTurn === true;
+    const fetched = mapTranscriptMessages(runsOn ? markRunningTail(result.transcript) : result.transcript);
+    // The turn's segments the server has moved past, or saved as how it ended, are the page's
+    // stale copies: the server's stand.
+    const local = withoutOutdatedSegments(messages.value.filter((message) => message.id !== "streaming"), recovery.requestId, fetched);
+    const merged = mergeHydrated(fetched, local, {
+      knownBefore: new Set(local.map((message) => message.id)),
+      sameSession: true,
+    });
+    messages.value = markUnread(merged, recovery.requestId, recovery.finalStatus?.leftovers ?? [], "undelivered", {
+      at: new Date(),
+      newId: () => crypto.randomUUID(),
+      // Picked up after a reload or in a second tab, or ended with a status that came here: no
+      // connection of this page dropped.
+      error: readsTranscriptOnly(recovery.requestId) || recovery.finalStatus
+        ? "The turn ended before it read this."
+        : "The connection dropped and the turn ended before it read this.",
+    });
+    pendingRequestId.value = null;
+    // Sent from another tab or connection, it has no bubble here; the server kept it (session.get).
+    restoreServerUnread(recovery.sessionId, result.unreadSteering);
+    // What this turn never read was typed before the message that opened the turn after it, and
+    // goes above that message: a bubble this page already had for it as well as one just restored.
+    // Only this turn's: another turn's leftovers can be the newer turn's own, and above its
+    // message they read as typed before it (review of round 4, D #1 and #2). The message is the
+    // first the transcript has after this turn's, by its id: the newest, with two turns opened
+    // since, put them below the first one's message and work (review of round 5, D E1).
+    const nextOpener = options.movedOn ? nextOpenerIndex(result.transcript, recovery.openerText) : -1;
+    if (nextOpener >= 0) messages.value = unreadAbove(messages.value, recovery.requestId, result.transcript[nextOpener]!.id);
+    applyCurrentSessionRunSelection(currentSessionId.value ?? recovery.sessionId);
+    pendingApproval.value = null;
+    pendingInputRequest.value = null;
+    dropUserInputsOfTurn(recovery.requestId);
+    pendingIntervention.value = null;
+    streamingText.value = "";
+    streamingReasoning.value = "";
+    streamingSubAgentReasoning.value = [];
+    liveSwarmState.value = null;
+    syntheticSwarmState.value = null;
+    isStreaming.value = false;
+    if (options.ending !== "stopped") clearErrorFlash();
+    clearTurnStallState();
+    clearPendingTurnRecovery();
+    const next = runsOn && !result.session.archivedAt ? serverTurnToFollow(recovery.sessionId, result) : null;
+    if (next && next.requestId !== recovery.requestId) followServerTurn(next.requestId, recovery.sessionId, next);
+  }
+
+  /**
+   * The final status of a turn this page follows live and did not stop ("blocked" or "error"):
+   * landed as it came — unless the session runs another turn now. A message from another tab
+   * ends the turn so (chat.send stops the turn running on the session); landed, it left the page
+   * idle while that tab's turn ran, and a message typed next went out as a new turn and stopped
+   * that one in turn (review of round 4, D #7). Then the turn ends as one followed by reading the
+   * transcript does when another tab replaced it: that tab's message shows, this turn reads as
+   * replaced, and the turn running now is followed, so a message typed here steers it.
+   *
+   * Until the server has saved that turn's message the session is read again: before, the turn
+   * that ended is the newest the transcript has, and its work read as the new turn's. A few times,
+   * not for a minute: a message from another tab in this turn's words is the newest there for
+   * good, and the page spun the ended turn for a minute, then landed it and went idle (review of
+   * round 5, D R1). The transcript does not say which turn a message opened, so that message is
+   * not told from this turn's own, and its turn is not followed: the status lands as it came.
+   */
+  async function endUnlessReplaced(data: Record<string, unknown>): Promise<void> {
+    const requestId = String(data["requestId"]);
+    const sessionId = pendingTurnSessionId;
+    const leftovers = readSteeringEntries(data["unconsumedSteering"]);
+    // Read before the first await: a Continue while the read was out moved the live bubble below
+    // another tab's message, which was then taken for this turn's (review of round 5, D R4).
+    const openerText = pendingTurnOpenerText();
+    const startedAt = Date.now();
+    heldFinalStatuses.set(requestId, data);
+    for (let attempt = 0; sessionId; attempt += 1) {
+      if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, TURN_RECOVERY_POLL_MS));
+      let result: GatewaySessionTranscript;
+      try {
+        result = await getSessionTranscript(sessionId, { limit: SESSION_TRANSCRIPT_PAGE_SIZE });
+      } catch {
+        break;
+      }
+      if (pendingRequestId.value !== requestId || pendingTurnRecovery.value) break;
+      const another = result.activeTurn === true && Boolean(result.activeTurnRequestId) && result.activeTurnRequestId !== requestId;
+      if (!another) break;
+      const recovery: PendingTurnRecovery = {
+        requestId,
+        sessionId,
+        baselineTotalMessages: currentSessionTranscriptTotalMessages.value,
+        startedAt,
+        openerText,
+        finalStatus: { leftovers },
+      };
+      const verdict = readRecoveryVerdict(recovery, result);
+      if (verdict === "moved-on") {
+        heldFinalStatuses.delete(requestId);
+        endRecoveredTurn(recovery, result, verdict);
+        return;
+      }
+      if (verdict !== "running" || attempt >= 2) break;
+    }
+    // Landed while the read was out, by a Stop or a message typed here (takeHeldStatus).
+    if (!heldFinalStatuses.delete(requestId)) return;
+    // Stopped or replaced from here while the read was out, or picked up by a recovery after a
+    // lost connection: what the turn never read still shows, as undelivered. The recovery keeps
+    // the status: a turn it does not see land ends by that.
+    if (pendingRequestId.value !== requestId || pendingTurnRecovery.value) {
+      const recovering = pendingTurnRecovery.value;
+      if (recovering?.requestId === requestId && pendingRequestId.value === requestId) recovering.finalStatus = { leftovers, data };
+      else if (leftovers.length > 0 && sessionId) keepUnread(sessionId, requestId, leftovers, "The turn ended before it read this.");
+      return;
+    }
+    landHeldStatus(data);
+  }
+
+  /** Land a final status held for a read of the session as it came: read for again, it never lands. */
+  function landHeldStatus(data: Record<string, unknown>): void {
+    finalStatusRead = String(data["requestId"]);
+    try {
+      handleServerMessage({ type: "status", data });
+    } finally {
+      finalStatusRead = null;
+    }
+  }
+
+  /**
+   * The final status held for the turn, taken to land: while endUnlessReplaced reads the session,
+   * or kept by the recovery that took over when the connection dropped meanwhile.
+   */
+  function takeHeldStatus(requestId: string): Record<string, unknown> | undefined {
+    const held = heldFinalStatuses.get(requestId)
+      ?? (pendingTurnRecovery.value?.requestId === requestId ? pendingTurnRecovery.value.finalStatus?.data : undefined);
+    heldFinalStatuses.delete(requestId);
+    return held;
   }
 
   async function parseErrorResponse(response: Response): Promise<string> {
@@ -1330,7 +1666,8 @@ export const useGatewayStore = defineStore("gateway", () => {
   function currentTurnObjectiveFallback(): string {
     for (let index = messages.value.length - 1; index >= 0; index -= 1) {
       const message = messages.value[index];
-      if (message?.role === "user" && message.content.trim()) {
+      // A message sent into the running turn redirects it; the turn's objective is what opened it.
+      if (message?.role === "user" && !message.midTurn && !message.steer && message.content.trim()) {
         return summarizeTaskTitle(message.content, 140);
       }
     }
@@ -1412,7 +1749,12 @@ export const useGatewayStore = defineStore("gateway", () => {
       || (toolCall.result === undefined && toolCall.name === name && toolArgsSignature(toolCall.args) === signature)
     );
     if (existing) {
-      if (toolCallId && !existing.id) existing.id = toolCallId;
+      // The audit log reports a call BEFORE the call's own start event arrives, so the entry is
+      // often made from the audit copy first. The real id replaces the stand-in: kept, it left
+      // the call's own completion (looked up by the real id) nowhere to land.
+      if (toolCallId && !toolCallId.startsWith("audit:") && (!existing.id || existing.id.startsWith("audit:"))) {
+        existing.id = toolCallId;
+      }
       return;
     }
     streamingMessage.toolCalls = [...(streamingMessage.toolCalls ?? []), {
@@ -1434,14 +1776,23 @@ export const useGatewayStore = defineStore("gateway", () => {
   /** Tools that run several specialists under one call — progress hosts, never a single target. */
   const FAN_OUT_TOOLS = new Set(["parallel_delegate", "execute_plan", "run_task_graph", "run_workflow"]);
 
-  const NARRATION_PHASES = new Set(["steering", "oversight", "recovered", "guardrail", "synthesizing"]);
+  // Not "steering": a message read mid-turn now shows as the user's own bubble between the
+  // segments before and after it, and a note saying so as well would tell it twice.
+  const NARRATION_PHASES = new Set(["oversight", "recovered", "guardrail", "synthesizing"]);
+
+  /** A live event's call id, keyed by the specialist it ran in when it ran in one (see liveCallId). */
+  function eventCallId(data: Record<string, unknown>): string | undefined {
+    const toolCallId = typeof data["toolCallId"] === "string" ? data["toolCallId"] : undefined;
+    if (!toolCallId) return undefined;
+    return liveCallId(toolCallId, data["delegated"] === true && typeof data["sourceAgent"] === "string" ? data["sourceAgent"] : undefined);
+  }
 
   function recordStepStart(data: Record<string, unknown>): void {
     const streamingMessage = getStreamingMessage();
     if (!streamingMessage) return;
     const name = String(data["name"]);
     const delegated = data["delegated"] === true;
-    const toolCallId = typeof data["toolCallId"] === "string" ? data["toolCallId"] : undefined;
+    const toolCallId = eventCallId(data);
     const steps = streamingMessage.steps ?? [];
 
     let id = toolCallId ?? `${name}-${Date.now()}-${steps.length}`;
@@ -1466,19 +1817,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     }];
   }
 
-  function recordStepDone(data: Record<string, unknown>): void {
-    const steps = getStreamingMessage()?.steps;
-    if (!steps?.length) return;
-    const name = String(data["name"]);
-    const toolCallId = typeof data["toolCallId"] === "string" ? data["toolCallId"] : undefined;
-    const agent = data["delegated"] === true && typeof data["sourceAgent"] === "string" ? data["sourceAgent"] : undefined;
-
-    // Newest first: when an id was reused, the running call is the later one.
-    const step = [...steps].reverse().find(candidate => candidate.status === "running" && (toolCallId
-      ? candidate.id === toolCallId || candidate.id.startsWith(`${toolCallId}#`)
-      : candidate.name === name && candidate.agent === agent));
-    if (!step) return;
-
+  function finishStep(step: TurnStep, data: Record<string, unknown>): void {
     const result = String(data["result"] ?? "");
     const metadata = data["metadata"] && typeof data["metadata"] === "object"
       ? data["metadata"] as Record<string, unknown>
@@ -1496,7 +1835,7 @@ export const useGatewayStore = defineStore("gateway", () => {
    * a separate line it would duplicate the row it describes.
    */
   function recordDelegationProgress(agent: string | undefined, message: string): void {
-    const steps = getStreamingMessage()?.steps;
+    const steps = progressSteps(messages.value, pendingRequestId.value);
     if (!steps?.length) return;
     const running = [...steps].reverse().filter(step => step.depth === 0 && step.status === "running");
     const single = running.filter(isDelegation);
@@ -1542,31 +1881,209 @@ export const useGatewayStore = defineStore("gateway", () => {
     }];
   }
 
-  /**
-   * Freeze the stream when the turn ends. A step still marked running never reported back —
-   * say exactly that, rather than leaving a spinner on a finished answer or guessing "failed".
-   */
-  function settleSteps(steps: TurnStep[] | undefined): TurnStep[] | undefined {
-    if (!steps?.length) return undefined;
-    const now = Date.now();
-    return steps.map(step => step.status === "running"
-      ? { ...step, status: "stopped" as const, endedAt: now, progress: undefined }
-      : { ...step });
-  }
-
   function resolveStreamingToolCall(name: string, result: string, toolCallId?: string): void {
-    const streamingMessage = getStreamingMessage();
-    if (!streamingMessage?.toolCalls) return;
-    const toolCall = toolCallId
-      ? streamingMessage.toolCalls.find((entry) => entry.id === toolCallId)
-      : streamingMessage.toolCalls.find((entry) => entry.name === name && entry.result === undefined);
+    const { toolCall } = routeToolDone(messages.value, pendingRequestId.value, { name, toolCallId });
     if (toolCall) {
       toolCall.result = result;
     }
   }
 
+  // ── Questions put to the user ────────────────────────────────────────────
+  // The image settings card and any later kind (see userInputs). A request lives here from its
+  // "needed" event until its "resolved" event, an accepted answer, the end of its turn, or its
+  // deadline — whichever comes first. A lost connection is not one of them: the server keeps the
+  // question open, and a reload lists it again.
+
+  /** Past the deadline, the server has gone ahead; this is only how long its word may take to arrive. */
+  const USER_INPUT_EXPIRY_GRACE_MS = 3_000;
+
+  function scheduleUserInputExpiry(): void {
+    if (userInputExpiryTimer) {
+      clearTimeout(userInputExpiryTimer);
+      userInputExpiryTimer = null;
+    }
+    const at = nextExpiryAt(userInputs.value, USER_INPUT_EXPIRY_GRACE_MS);
+    if (at === null) return;
+    userInputExpiryTimer = setTimeout(() => {
+      userInputExpiryTimer = null;
+      for (const inputId of expiredInputIds(userInputs.value, Date.now(), USER_INPUT_EXPIRY_GRACE_MS)) {
+        settleUserInput({ inputId, outcome: "auto", reason: "timeout" });
+      }
+      scheduleUserInputExpiry();
+    }, Math.max(0, at - Date.now()));
+  }
+
+  function receiveUserInput(raw: unknown): void {
+    const request = readUserInputRequest(raw, Date.now());
+    if (!request) return;
+    const before = userInputs.value;
+    // Only the bubbles of the turn that asked — after a reload the live bubble can be another turn's.
+    const bubbles = turnBubbles(messages.value, request.requestId).filter((bubble) => !bubble.requestId || bubble.requestId === request.requestId);
+    const anchorStepId = anchorStepFor(bubbles, request);
+    userInputs.value = addUserInput(before, anchorStepId ? { ...request, anchorStepId } : request, currentSessionId.value);
+    // Another session's question: this page shows one conversation.
+    if (userInputs.value === before) return;
+    if (request.requestId === pendingRequestId.value) notePendingTurnActivity();
+    scheduleUserInputExpiry();
+    notifications.pushLocalNotification({
+      id: `user-input:${request.inputId}`,
+      title: request.title,
+      message: "The agent is waiting for your answer before it goes on.",
+      level: "info",
+      category: "input",
+      sessionId: request.sessionId,
+    });
+  }
+
+  /**
+   * Close a card and keep on its step how it came out. `chosen` is what this page sent, when the
+   * answer came from here (or as noted when it went out, see respondUserInput) — the step's hint
+   * then follows the user's engine, not the agent's. On Auto it follows the agent's settings
+   * (stepUserInputRecord).
+   */
+  function settleUserInput(resolution: UserInputResolution, chosen?: { tier?: string; expectedSeconds?: number }): void {
+    const picked = chosen ?? (resolution.outcome === "configured" ? chosenSettings.get(resolution.inputId) : undefined);
+    chosenSettings.delete(resolution.inputId);
+    const request = userInputs.value[resolution.inputId];
+    if (!request) return;
+    userInputs.value = removeUserInput(userInputs.value, resolution.inputId);
+    notifications.dismiss(`user-input:${resolution.inputId}`);
+    if (configuringUserInputId.value === resolution.inputId) configuringUserInputId.value = null;
+    const stepId = request.anchorStepId ?? anchorStepFor(turnBubbles(messages.value, request.requestId), request);
+    // Searched across the whole list, newest first: a turn that has already landed moved its
+    // steps into its answer.
+    const step = stepId
+      ? [...messages.value].reverse().flatMap((message) => message.steps ?? []).find((candidate) => candidate.id === stepId)
+      : undefined;
+    if (step) step.userInput = stepUserInputRecord(request, resolution, Date.now(), picked);
+    scheduleUserInputExpiry();
+    // The wait is over; the stall watchdog counts silence from here, not from when it was asked.
+    if (request.requestId === pendingRequestId.value) notePendingTurnActivity();
+  }
+
+  function setUserInputErrors(inputId: string, errors: UserInputFieldError[]): void {
+    const request = userInputs.value[inputId];
+    if (!request) return;
+    userInputs.value = { ...userInputs.value, [inputId]: { ...request, errors } };
+  }
+
+  /**
+   * Replace the session's cards with the server's list of its open questions. `serverNow`, the
+   * server's clock sent with the list, gives a question first seen here its deadline on this
+   * page's clock (serverClockSkew) — without it a reloaded card on a browser ahead of the gateway
+   * was pruned at once and settled as timed out while the server still waited.
+   */
+  function rehydrateOpenUserInputs(sessionId: string, raw: unknown, listedAt: number, serverNow: unknown): void {
+    const now = Date.now();
+    userInputs.value = rehydrateUserInputs(userInputs.value, sessionId, readUserInputList(raw, now, serverClockSkew(serverNow, listedAt, now)), now, listedAt);
+    scheduleUserInputExpiry();
+  }
+
+  function clearUserInputs(): void {
+    for (const inputId of Object.keys(userInputs.value)) notifications.dismiss(`user-input:${inputId}`);
+    userInputs.value = {};
+    configuringUserInputId.value = null;
+    scheduleUserInputExpiry();
+  }
+
+  /** A turn ended: what it asked is settled server-side, and its cards go with it. */
+  function dropUserInputsOfTurn(requestId: string | null | undefined): void {
+    const next = dropTurnInputs(userInputs.value, requestId);
+    if (next === userInputs.value) return;
+    for (const inputId of Object.keys(userInputs.value)) if (!next[inputId]) notifications.dismiss(`user-input:${inputId}`);
+    userInputs.value = next;
+    scheduleUserInputExpiry();
+  }
+
+  /**
+   * Answer a card. An accepted answer closes it at once, in case no "resolved" event comes to this
+   * connection. Objections stay on the card, which stays open.
+   *
+   * The engine the user picked is noted BEFORE the answer goes out: the server announces the card
+   * resolved before it replies, so that event closes the card here first — and the choice, applied
+   * only on the reply, found nothing left to go on, and the running step kept the agent's ETA.
+   */
+  async function respondUserInput(
+    inputId: string,
+    answer: { choice: "auto" | "configure" | "skip"; alwaysAuto?: boolean; settings?: unknown },
+    chosen?: { tier?: string; expectedSeconds?: number },
+  ): Promise<{ ok: boolean; errors?: UserInputFieldError[] }> {
+    if (!userInputs.value[inputId]) return { ok: false, errors: [{ field: "inputId", message: "expired" }] };
+    if (answer.choice === "configure" && chosen) chosenSettings.set(inputId, chosen);
+    else chosenSettings.delete(inputId);
+    let result: { ok?: unknown; errors?: unknown } | undefined;
+    try {
+      result = await rpc("userInput.respond", { inputId, answer }) as { ok?: unknown; errors?: unknown } | undefined;
+    } catch (error) {
+      chosenSettings.delete(inputId);
+      const errors = [{ field: "_form", message: error instanceof Error ? error.message : String(error) }];
+      setUserInputErrors(inputId, errors);
+      return { ok: false, errors };
+    }
+    if (result?.ok === true) {
+      settleUserInput({ inputId, ...outcomeOfChoice(answer.choice) }, answer.choice === "configure" ? chosen : undefined);
+      return { ok: true };
+    }
+    chosenSettings.delete(inputId);
+    const errors = readFieldErrors(result?.errors);
+    if (isExpiredAnswer(errors)) {
+      settleUserInput({ inputId, outcome: "auto", reason: "timeout" });
+      notifications.pushLocalNotification({
+        title: "That answer came too late",
+        message: "The agent had already gone ahead with its own settings.",
+        level: "warn",
+        category: "input",
+      });
+      return { ok: false, errors };
+    }
+    const shown = errors.length ? errors : [{ field: "_form", message: "The answer was not accepted." }];
+    setUserInputErrors(inputId, shown);
+    return { ok: false, errors: shown };
+  }
+
+  /**
+   * Open a card's full form. The short deadline is for choosing Auto or Configure; a form takes
+   * longer to fill in, so the server is asked for the longer one. If it refuses, the form still
+   * opens and its countdown stays honest about the shorter deadline.
+   */
+  function openUserInputForm(inputId: string): void {
+    if (!userInputs.value[inputId]) return;
+    configuringUserInputId.value = inputId;
+    void holdUserInput(inputId);
+  }
+
+  function closeUserInputForm(): void {
+    configuringUserInputId.value = null;
+  }
+
+  /** Ask the server for the longer configure deadline. */
+  async function holdUserInput(inputId: string): Promise<boolean> {
+    try {
+      const result = await rpc("userInput.hold", { inputId }) as { expiresAt?: unknown } | undefined;
+      const request = userInputs.value[inputId];
+      if (request) {
+        const expiresAt = typeof result?.expiresAt === "string" && !Number.isNaN(Date.parse(result.expiresAt))
+          ? result.expiresAt
+          : request.expiresAt;
+        userInputs.value = { ...userInputs.value, [inputId]: { ...request, phase: "configure", expiresAt } };
+        scheduleUserInputExpiry();
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** A base picture at full size, for painting a mask over it. */
+  async function previewUserInputCandidate(inputId: string, candidateId: string): Promise<{ dataUrl: string; width: number; height: number }> {
+    const result = await rpc("userInput.preview", { inputId, candidateId }, 60_000) as Record<string, unknown> | undefined;
+    const dataUrl = result?.["dataUrl"];
+    if (typeof dataUrl !== "string" || !dataUrl.startsWith("data:image/")) throw new Error("The picture could not be loaded.");
+    return { dataUrl, width: Number(result?.["width"]) || 0, height: Number(result?.["height"]) || 0 };
+  }
+
   function applyAuditEventFallback(event: GatewayAuditEvent): void {
-    if (!pendingRequestId.value || !currentSessionId.value) return;
+    if (!pendingRequestId.value || !currentSessionId.value || pendingTurnSessionId !== currentSessionId.value) return;
 
     const sessionId = event.sessionId ?? "";
     const parentSessionId = currentSessionId.value;
@@ -1575,6 +2092,10 @@ export const useGatewayStore = defineStore("gateway", () => {
     if (!isMainSessionEvent && !isSubSessionEvent) return;
 
     if (isMainSessionEvent) {
+      // A fallback for when the turn's own tool events do not arrive. Once they do, they are the
+      // record: applied on top, the audit copies matched calls by name alone and wrote
+      // "Completed." over whichever same-named call was still open.
+      if (liveToolEventsTurn === pendingRequestId.value) return;
       if (event.type === "tool_call_requested") {
         const toolName = typeof event.data["tool"] === "string" ? String(event.data["tool"]) : "";
         const args = event.data["args"] && typeof event.data["args"] === "object"
@@ -1752,9 +2273,33 @@ export const useGatewayStore = defineStore("gateway", () => {
     return swarmRunsBySession.value[sessionId] ?? [];
   }
 
-  function failPendingTurn(errorText: string, preservePendingState = false) {
-    const idx = messages.value.findIndex(m => m.id === "streaming");
-    const streamingMessage = idx >= 0 ? messages.value[idx] : undefined;
+  /**
+   * What becomes of the messages a turn never read, once it has ended. After a turn that ended
+   * on its own they go out together as the next turn. After a stop or an error nothing sends
+   * them unasked — they are marked undelivered, with a Resend.
+   */
+  function settleUnreadSteering(requestId: string, leftovers: SteeringEntry[], endedOnItsOwn: boolean): void {
+    const stopped = !endedOnItsOwn || stoppedRequestId === requestId;
+    if (stoppedRequestId === requestId) stoppedRequestId = null;
+    messages.value = markUnread(messages.value, requestId, leftovers, stopped ? "undelivered" : "held", {
+      at: new Date(),
+      newId: () => crypto.randomUUID(),
+      error: "The turn ended before it read this.",
+    });
+    if (!stopped) scheduleHeldSend();
+  }
+
+  /** `stopped` when the user ended the turn: its note then stays beside what the server saved of it (hydration). */
+  function failPendingTurn(errorText: string, preservePendingState = false, leftovers: SteeringEntry[] = [], stopped = false) {
+    const requestId = pendingRequestId.value;
+    // A turn picked up part-way has the step it is in above its live bubble as well: the note
+    // takes all of it, so it stands in for what the server saved of that step (withResumedStep).
+    const list = requestId && !preservePendingState ? withResumedStep(messages.value, requestId) : messages.value;
+    const idx = list.findIndex(m => m.id === "streaming");
+    // No turn and no live bubble: whatever failed has already ended — its own final status got
+    // here first. Reporting it now would add a second error under the first.
+    if (!requestId && idx < 0) return;
+    const streamingMessage = idx >= 0 ? list[idx] : undefined;
     const preservedSwarmState = liveSwarmState.value
       ?? syntheticSwarmState.value
       ?? streamingMessage?.swarmState
@@ -1765,36 +2310,262 @@ export const useGatewayStore = defineStore("gateway", () => {
       content: `⚠️ ${errorText}`,
       timestamp: new Date(),
       blocked: true,
+      pageOnly: true,
+      ...(stopped ? { stopped: true } : {}),
       swarmState: preservedSwarmState ?? undefined,
       toolCalls: streamingMessage?.toolCalls,
       attachments: streamingMessage?.attachments,
       // Keep what DID happen before the failure — that is exactly what someone reading an
       // error wants to see, and dropping it left only the error line.
-      steps: settleSteps(streamingMessage?.steps),
+      steps: settleSteps(streamingMessage?.steps, Date.now()),
+      ...(requestId ? { requestId } : {}),
     };
 
     if (!preservePendingState) {
-      if (idx >= 0) messages.value.splice(idx, 1, errorMsg);
-      else messages.value.push(errorMsg);
+      messages.value = landTurn(list, requestId, errorMsg, Date.now());
+      if (requestId) settleUnreadSteering(requestId, leftovers, false);
       streamingText.value = "";
       streamingReasoning.value = "";
       streamingSubAgentReasoning.value = [];
       pendingRequestId.value = null;
       pendingApproval.value = null;
       pendingInputRequest.value = null;
+      dropUserInputsOfTurn(requestId);
       pendingIntervention.value = null;
       isStreaming.value = false;
       clearTurnStallState();
       appendSwarmRun("error", preservedSwarmState);
       liveSwarmState.value = null;
       syntheticSwarmState.value = null;
+      clearPendingTurnRecovery();
     }
 
-    isError.value = true;
-    setTimeout(() => { isError.value = false; }, 5000);
+    flashError(5000);
+  }
+
+  /**
+   * Stop following the pending turn without stopping it: the user moved to another session.
+   * The turn goes on on the server; none of its state may stay on the page that now shows
+   * something else — its events are dropped from here on, and its banners and buffers go.
+   * It is remembered by session, so going back while it still runs can pick it up again.
+   *
+   * Its live bubble goes at once. Left in the list until the other session's transcript replaced
+   * it, it was the bubble a message sent meanwhile found as "the" live one: that turn's steps
+   * went into it, and both vanished when the transcript landed. Returned, so a switch that fails
+   * can put it back.
+   */
+  function detachPendingTurn(): { index: number; message: ChatMessage } | undefined {
+    const requestId = pendingRequestId.value;
+    if (!requestId) return undefined;
+    if (pendingTurnSessionId) {
+      const eventsComeHere = pendingTurnRecovery.value?.requestId !== requestId;
+      detachedTurns.set(pendingTurnSessionId, { requestId, connection: eventsComeHere ? connectionEpoch : null });
+    }
+    const liveIndex = messages.value.findIndex((message) => message.id === "streaming");
+    const live = liveIndex >= 0 ? { index: liveIndex, message: messages.value[liveIndex]! } : undefined;
+    if (live) messages.value = messages.value.filter((message) => message !== live.message);
+    flushStreamTextNow();
+    streamingText.value = "";
+    streamingReasoning.value = "";
+    streamingSubAgentReasoning.value = [];
+    _pendingReasoning = "";
+    _pendingSubAgentReasoning.clear();
+    pendingRequestId.value = null;
+    pendingTurnSessionId = null;
+    pendingApproval.value = null;
+    pendingInputRequest.value = null;
+    pendingIntervention.value = null;
+    liveSwarmState.value = null;
+    syntheticSwarmState.value = null;
+    isStreaming.value = false;
+    clearTurnStallState();
+    clearPendingTurnRecovery();
+    return live;
+  }
+
+  /**
+   * Follow a turn running on the server that this page is not following: one left when the user
+   * switched away, or — after a reload, or in a second tab — one it never saw start. What it did
+   * so far is in the transcript, as the segments before a fresh live bubble; from here the
+   * composer steers it and Stop stops it.
+   *
+   * `live` when its events still come to this connection. Otherwise they go to the one it
+   * started on, and its answer is read from the transcript once it lands, as after a lost
+   * connection — the page no longer looks idle while it runs, and a message typed meanwhile
+   * steers it instead of starting a second turn beside it.
+   */
+  function followServerTurn(requestId: string, sessionId: string, options: { live: boolean; startedAt?: number }): void {
+    pendingRequestId.value = requestId;
+    pendingTurnSessionId = sessionId;
+    pickedUpTurn = { requestId, transcriptOnly: !options.live };
+    turnSessions.set(requestId, sessionId);
+    messages.value = resumeTurnSegments(messages.value, requestId, stepsFromToolCalls);
+    const status = options.live ? "Still working on it…" : "Still running on the server — its answer appears here when it finishes.";
+    messages.value.push({
+      id: "streaming",
+      role: "assistant",
+      content: "",
+      timestamp: options.startedAt ? new Date(options.startedAt) : new Date(),
+      statusText: status,
+      statusHistory: [status],
+      steps: [],
+      requestId,
+    });
+    if (!options.live) readTranscriptUntilLanded(requestId, sessionId);
+    armPendingTurnWatchdog();
+  }
+
+  /** Follow the pending turn by reading the transcript until its answer is there (recoverPendingTurn). */
+  function readTranscriptUntilLanded(requestId: string, sessionId: string): void {
+    clearPendingTurnRecovery();
+    pendingTurnRecovery.value = {
+      requestId,
+      sessionId,
+      baselineTotalMessages: currentSessionTranscriptTotalMessages.value,
+      startedAt: Date.now(),
+      openerText: pendingTurnOpenerText(),
+    };
+    scheduleTurnRecovery(TURN_RECOVERY_RUNNING_POLL_MS);
+  }
+
+  /** Whether the page follows this turn by reading the transcript alone (pickedUpTurn). */
+  function readsTranscriptOnly(requestId: string): boolean {
+    return pickedUpTurn?.requestId === requestId && pickedUpTurn.transcriptOnly;
+  }
+
+  /**
+   * Bring a turn followed by reading the transcript up to date with a read of it: no event of it
+   * comes here, so its steps only moved when it landed. Only from the message that opened it on
+   * — what is above stays as it is, older pages the user loaded included — and only while that
+   * message is the server's newest opener.
+   */
+  function refreshPickedUpTurn(requestId: string, result: GatewaySessionTranscript): void {
+    const fetched = mapTranscriptMessages(markRunningTail(result.transcript));
+    const from = turnOpenerIndex(fetched);
+    const at = turnOpenerIndex(messages.value);
+    if (from < 0 || at < 0 || !sameMessage(fetched[from]!, messages.value[at]!)) return;
+    const shown = messages.value.slice(at);
+    const serverTail = fetched.slice(from);
+    const merged = mergeHydrated(serverTail, withoutOutdatedSegments(shown, requestId, serverTail), {
+      knownBefore: new Set(shown.map((message) => message.id)),
+      sameSession: true,
+    });
+    const tail = resumeTurnSegments(merged, requestId, stepsFromToolCalls);
+    if (!sameList(tail, shown)) messages.value = [...messages.value.slice(0, at), ...tail];
+  }
+
+  /** Where the newest turn starts: the last message that opened one — not one sent into it. */
+  function turnOpenerIndex(list: ChatMessage[]): number {
+    let index = list.length - 1;
+    while (index >= 0 && !(list[index]!.role === "user" && !list[index]!.midTurn && !list[index]!.steer)) index -= 1;
+    return index;
+  }
+
+  /**
+   * The turn a freshly read session has running that this page should follow, if any. Its id is
+   * the server's word when it gives one; an older server says only that a turn runs, and then
+   * only a turn this page left there can be picked up.
+   */
+  function serverTurnToFollow(sessionId: string, result: GatewaySessionTranscript): { requestId: string; live: boolean; startedAt?: number } | null {
+    const detached = detachedTurns.get(sessionId);
+    const running = result.activeTurn !== true
+      ? undefined
+      : typeof result.activeTurnRequestId === "string" && result.activeTurnRequestId ? result.activeTurnRequestId : detached?.requestId;
+    // A turn left here stays remembered while its final status can still come to this
+    // connection: that status is the only place it says what it never read (noteDetachedTurnEnd).
+    if (detached && (detached.requestId === running || detached.connection !== connectionEpoch)) detachedTurns.delete(sessionId);
+    if (!running || pendingRequestId.value) return null;
+    return {
+      requestId: running,
+      live: detached?.requestId === running && detached.connection === connectionEpoch,
+      ...(typeof result.activeTurnStartedAt === "number" ? { startedAt: result.activeTurnStartedAt } : {}),
+    };
+  }
+
+  /**
+   * A turn the page left in another session ended. What it never read comes back only in this
+   * final status, and the bubbles it was typed into left the page with the switch — so it is
+   * kept for its session and shown there as undelivered, with a Resend, instead of vanishing.
+   */
+  function noteDetachedTurnEnd(data: Record<string, unknown>): void {
+    const status = data["status"];
+    if (status !== "ok" && status !== "blocked" && status !== "error") return;
+    const requestId = String(data["requestId"] ?? "");
+    const sessionId = [...detachedTurns].find(([, turn]) => turn.requestId === requestId)?.[0];
+    if (!sessionId) return;
+    detachedTurns.delete(sessionId);
+    const leftovers = readSteeringEntries(data["unconsumedSteering"]);
+    if (leftovers.length > 0) keepUnread(sessionId, requestId, leftovers, "The turn ended before it read this.");
+  }
+
+  /** Messages a turn never read, as undelivered: on screen when their session is, else kept until it is. */
+  function keepUnread(sessionId: string, requestId: string | undefined, entries: SteeringEntry[], error: string): void {
+    const turnId = requestId ?? "";
+    if (currentSessionId.value === sessionId) {
+      messages.value = appendUnread(messages.value, turnId, entries, "undelivered", { at: new Date(), newId: () => crypto.randomUUID(), error });
+      return;
+    }
+    unreadSteering.set(sessionId, [...(unreadSteering.get(sessionId) ?? []), { requestId: turnId, entries, error }]);
+  }
+
+  function restoreUnreadSteering(sessionId: string): void {
+    const kept = unreadSteering.get(sessionId);
+    if (!kept) return;
+    unreadSteering.delete(sessionId);
+    let next = messages.value;
+    for (const record of kept) {
+      next = appendUnread(next, record.requestId, record.entries, "undelivered", { at: new Date(), newId: () => crypto.randomUUID(), error: record.error });
+    }
+    if (next !== messages.value) messages.value = next;
+  }
+
+  /**
+   * What finished turns of the session never read, as the server kept it (session.get
+   * `unreadSteering`): their final status found the connection that started them gone — the page
+   * was reloaded, or reconnected while the user was elsewhere — so no page ever heard of it, and
+   * the message vanished without a trace (review of #10/#32). Shown once each as undelivered,
+   * with a Resend; nothing sends it on its own. An older server sends no list.
+   *
+   * For a session not on screen — the user moved on while the request was out — the list is kept
+   * until it is (keepUnread): the server retired it with that answer, and dropped here it was
+   * shown to nobody (review of round 3, D M6). `before` places the bubbles above that message —
+   * the opening message of a turn after theirs; those of the turn running now go at the end.
+   */
+  function restoreServerUnread(sessionId: string, raw: unknown, before?: string): void {
+    if (!Array.isArray(raw)) return;
+    const byTurn = new Map<string, SteeringEntry[]>();
+    for (const item of raw) {
+      const [entry] = readSteeringEntries([item]);
+      // Already sent on as a turn of its own, which no longer carries its mark.
+      if (!entry || sentAsFollowUp.has(entry.id)) continue;
+      const requestId = typeof (item as Record<string, unknown>)["requestId"] === "string" ? String((item as Record<string, unknown>)["requestId"]) : "";
+      // Its Resend goes out in this session (belongsOnScreen).
+      if (requestId) turnSessions.set(requestId, sessionId);
+      byTurn.set(requestId, [...(byTurn.get(requestId) ?? []), entry]);
+    }
+    if (currentSessionId.value !== sessionId) {
+      for (const [requestId, entries] of byTurn) keepUnread(sessionId, requestId, entries, "The turn ended before it read this.");
+      return;
+    }
+    let next = messages.value;
+    for (const [requestId, entries] of byTurn) {
+      next = appendUnread(next, requestId, entries, "undelivered", {
+        at: new Date(),
+        newId: () => crypto.randomUUID(),
+        error: "The turn ended before it read this.",
+        ...(requestId !== pendingRequestId.value ? { before } : {}),
+      });
+    }
+    if (next !== messages.value) messages.value = next;
+  }
+
+  /** Whether a message may go out from the session on screen — not one typed into another session's turn. */
+  function belongsOnScreen(message: ChatMessage): boolean {
+    return !message.requestId || turnSessions.get(message.requestId) === currentSessionId.value;
   }
 
   function resetLocalSessionState() {
+    detachPendingTurn();
     clearPendingTurnRecovery();
     clearTurnStallState();
     messages.value = [];
@@ -1807,6 +2578,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     pendingRequestId.value = null;
     pendingApproval.value = null;
     pendingInputRequest.value = null;
+    clearUserInputs();
     pendingIntervention.value = null;
     liveSwarmState.value = null;
     syntheticSwarmState.value = null;
@@ -1842,21 +2614,22 @@ export const useGatewayStore = defineStore("gateway", () => {
       return {
         id: message.id,
         role: message.role,
-        content: message.role === "assistant"
-          ? mergeFinalAssistantContent(message.content, "", message.toolCalls)
-          : message.content,
+        // A segment the turn continued past is not its answer, so it gets no stand-in text.
+        content: message.role === "assistant" ? transcriptAssistantContent(message) : message.content,
         timestamp: new Date(message.timestamp),
         toolCalls: message.toolCalls,
         swarmState: normalizeSwarmState(message.swarmState) ?? undefined,
         attachments,
+        ...(message.midTurn ? { midTurn: true } : {}),
+        // Read by its turn, under the id this page sent it with — so a copy still marked queued
+        // here is recognised as the same message when the transcript comes back.
+        ...(message.midTurn && message.steeringId ? { steer: { clientId: message.steeringId, state: "consumed" as const } } : {}),
+        ...(message.continued ? { continued: true } : {}),
       };
     });
     return normalizeHydratedMessages(mappedReversed.reverse());
   }
 
-  function hydrateTranscript(transcript: GatewaySessionTranscriptMessage[]) {
-    messages.value = mapTranscriptMessages(transcript);
-  }
 
   function getStreamingMessage(): ChatMessage | undefined {
     return messages.value.find((entry) => entry.id === "streaming");
@@ -1866,11 +2639,11 @@ export const useGatewayStore = defineStore("gateway", () => {
     const trimmed = content.trim();
     if (!trimmed) return;
 
+    // No live bubble, no line: a routine "Running …" / "Completed …" is part of the turn's
+    // bubble, and made into a bubble of its own it read as a message — in whichever
+    // conversation was on screen. Connection notices use insertSystemFeedbackMessage directly.
     const streamingMessage = getStreamingMessage();
-    if (!streamingMessage) {
-      insertSystemFeedbackMessage(trimmed);
-      return;
-    }
+    if (!streamingMessage) return;
 
     streamingMessage.statusText = trimmed;
 
@@ -1947,8 +2720,17 @@ export const useGatewayStore = defineStore("gateway", () => {
     // another — leaving the chat showing the prior transcript and chat.send
     // routing to the wrong session id.
     const previousSessionId = currentSessionId.value;
+    // A turn running in another session goes on running there, but is no longer followed here:
+    // its events would land in this session, and a message typed here would steer — or, when
+    // that failed, cancel — a turn the user can no longer see.
+    const leftBehind = pendingRequestId.value && pendingTurnSessionId !== sessionId ? pendingRequestId.value : null;
+    const leftBubble = leftBehind ? detachPendingTurn() : undefined;
+    // What the page holds as it asks. Anything added while the answer is on its way — a message
+    // sent meanwhile and its live bubble — is not in that answer and must survive it.
+    const knownBefore = new Set(messages.value.map((message) => message.id));
     currentSessionId.value = sessionId;
     try {
+      const listedAt = Date.now();
       const result = await getSessionTranscript(sessionId, { limit: SESSION_TRANSCRIPT_PAGE_SIZE });
       if (currentSessionId.value !== sessionId) return; // concurrent switch won
       if (!allowArchived && result.session.archivedAt) {
@@ -1960,11 +2742,76 @@ export const useGatewayStore = defineStore("gateway", () => {
       currentSessionTranscriptNextBeforeMessageId.value = result.nextBeforeMessageId ?? null;
       currentSessionEffort.value = result.settings?.effort ?? "medium";
       currentSessionTimeLimitSec.value = result.settings?.turnTimeoutSecOverride ?? null;
-      hydrateTranscript(result.transcript);
+      currentSessionImageSettingsPrompt.value = result.settings?.imageSettingsPrompt === "auto" ? "auto" : "ask";
+      // The session's open questions replace whatever the page had — a reload's cards come back,
+      // another session's go.
+      rehydrateOpenUserInputs(sessionId, result.openUserInputs, listedAt, result.serverNow);
+      // A read that shows the turn this page recovers has ended — another tab's message replaced
+      // it, or it landed between two of the recovery's reads — ends it here, as that read would
+      // have. Merged as a turn still running, the next turn's work became this one's, and the note
+      // on how it ended went below that work (review of round 3, D #1). An archived session's
+      // too: left to the recovery's next read, it did just that until then, and the turn read as
+      // "completed without a text summary" after (review of round 4, D #6). A recovery still there
+      // once the answer came is for this session's turn on screen: every Stop, send and switch
+      // clears it, and a switch that won meanwhile has returned above.
+      const recovering = pendingTurnRecovery.value;
+      if (recovering && endRecoveredTurn(recovering, result, readRecoveryVerdict(recovering, result))) {
+        restoreUnreadSteering(sessionId);
+        return;
+      }
+      // A turn running here that this page does not follow — left when the user switched away,
+      // or started before a reload or in another tab: follow it.
+      const follow = serverTurnToFollow(sessionId, result);
+      // This session's turn, already followed by this page. Where its work so far is shown decides
+      // what to do with what the transcript saved of it — not whether its events come here: the
+      // page's own turn, seen from its start, has it in its live bubble (dropped here, or shown
+      // twice), even while it is read from the transcript after a lost connection; a turn picked
+      // up from the transcript has it in its resumed segments (dropped, it vanished).
+      const followed = !follow && pendingRequestId.value !== null && pendingTurnSessionId === sessionId ? pendingRequestId.value : null;
+      const pickedUp = followed !== null && pickedUpTurn?.requestId === followed;
+      const inLiveBubble = followed !== null && !pickedUp && Boolean(getStreamingMessage());
+      const transcript = inLiveBubble
+        ? dropRunningTail(result.transcript, pendingTurnOpenerText())
+        : follow || followed ? markRunningTail(result.transcript) : result.transcript;
+      const fetched = mapTranscriptMessages(transcript);
+      // A turn picked up on return and followed live: its events keep the page's copy of it — the
+      // segments resumed at the pick-up, then the live bubble — up to date, and the server's copy
+      // of that work lags behind. Taken in its place, a call the live bubble showed came back in
+      // the server's copy of a segment too, twice, and stayed "never reported back" there once the
+      // turn landed (review of round 2, D #3). So the server's list is read up to the message that
+      // opened the turn, and the page's own copy follows it — the reverse of refreshPickedUpTurn.
+      const ownFrom = pickedUp && followed && !readsTranscriptOnly(followed) && previousSessionId === sessionId ? turnOpenerIndex(messages.value) : -1;
+      const serverFrom = ownFrom >= 0 ? turnOpenerIndex(fetched) : -1;
+      const ownTurn = serverFrom >= 0 && sameMessage(fetched[serverFrom]!, messages.value[ownFrom]!) ? messages.value.slice(ownFrom + 1) : null;
+      const local = ownTurn ? messages.value.slice(0, ownFrom + 1)
+        : followed && readsTranscriptOnly(followed) ? withoutOutdatedSegments(messages.value, followed, fetched) : messages.value;
+      const merged = mergeHydrated(ownTurn ? fetched.slice(0, serverFrom + 1) : fetched, local, { knownBefore, sameSession: previousSessionId === sessionId });
+      // The server's copies that replaced them, and any segment saved since, are the turn's too.
+      const shown = ownTurn ? [...merged, ...ownTurn] : pickedUp && followed ? resumeTurnSegments(merged, followed, stepsFromToolCalls) : merged;
+      if (!sameList(shown, messages.value)) messages.value = shown;
+      restoreUnreadSteering(sessionId);
+      restoreServerUnread(sessionId, result.unreadSteering);
+      if (follow) followServerTurn(follow.requestId, sessionId, follow);
       applyCurrentSessionRunSelection(currentSessionId.value ?? sessionId);
     } catch (err) {
       if (currentSessionId.value === sessionId) {
         currentSessionId.value = previousSessionId;
+      }
+      // The switch did not happen, so the turn left behind for it is on screen again, live
+      // bubble and all: follow it again as if nothing had changed.
+      if (leftBehind && previousSessionId && currentSessionId.value === previousSessionId && !pendingRequestId.value) {
+        const left = detachedTurns.get(previousSessionId);
+        detachedTurns.delete(previousSessionId);
+        if (leftBubble && !getStreamingMessage()) {
+          const restored = [...messages.value];
+          restored.splice(Math.min(leftBubble.index, restored.length), 0, leftBubble.message);
+          messages.value = restored;
+        }
+        pendingRequestId.value = leftBehind;
+        pendingTurnSessionId = previousSessionId;
+        // Its events do not come here: go on reading the transcript for its answer.
+        if (left?.requestId === leftBehind && left.connection !== connectionEpoch) readTranscriptUntilLanded(leftBehind, previousSessionId);
+        armPendingTurnWatchdog();
       }
       throw err;
     } finally {
@@ -1984,19 +2831,24 @@ export const useGatewayStore = defineStore("gateway", () => {
   async function updateSessionSettings(patch: {
     effort?: EffortTier | null;
     turnTimeoutSec?: number | null;
+    imageSettingsPrompt?: ImageSettingsPrompt;
   }): Promise<void> {
     const sessionId = currentSessionId.value;
     if (!sessionId) return;
     if (patch.effort !== undefined) currentSessionEffort.value = patch.effort ?? "medium";
     if (patch.turnTimeoutSec !== undefined) currentSessionTimeLimitSec.value = patch.turnTimeoutSec;
+    if (patch.imageSettingsPrompt !== undefined) currentSessionImageSettingsPrompt.value = patch.imageSettingsPrompt;
     try {
       const result = await rpc("session.updateSettings", {
         sessionId,
         ...(patch.effort !== undefined ? { effort: patch.effort ?? "default" } : {}),
         ...(patch.turnTimeoutSec !== undefined ? { turnTimeoutSec: patch.turnTimeoutSec ?? "" } : {}),
+        ...(patch.imageSettingsPrompt !== undefined ? { imageSettingsPrompt: patch.imageSettingsPrompt } : {}),
       }) as { settings?: SessionEffortSettings };
       currentSessionEffort.value = result.settings?.effort ?? "medium";
       currentSessionTimeLimitSec.value = result.settings?.turnTimeoutSecOverride ?? null;
+      const prompt = result.settings?.imageSettingsPrompt;
+      if (prompt === "ask" || prompt === "auto") currentSessionImageSettingsPrompt.value = prompt;
     } catch {
       /* keep the optimistic value; a reload reconciles from the server */
     }
@@ -2045,8 +2897,13 @@ export const useGatewayStore = defineStore("gateway", () => {
     const socket = new WebSocket(url);
     ws = socket;
     connectTimeoutTimer = setTimeout(() => {
+      connectTimeoutTimer = null;
       if (ws !== socket || connected.value) return;
+      // Closing detaches the socket first, so its own onclose bails as stale — this has to do
+      // everything that onclose would. It used to only close, which left `connecting` set
+      // forever: every automatic retry refuses to start while a connect is in progress.
       closeActiveSocket("Connect timeout");
+      handleConnectionLost("Connect timeout");
     }, CONNECT_TIMEOUT_MS);
 
     socket.onopen = () => {
@@ -2057,25 +2914,22 @@ export const useGatewayStore = defineStore("gateway", () => {
     socket.onclose = (ev: CloseEvent) => {
       if (ws !== socket) return;          // stale socket — already replaced
       ws = null;
-      connected.value = false;
-      connecting.value = false;
-      notificationsSubscribed.value = false;
-      clearConnectTimeout();
-      stopHeartbeat();
-      rejectPendingRpcs("Connection closed");
 
       // Auth failure (4401) or rate-limited (4429) — stop reconnecting
       if (ev.code === 4401 || ev.code === 4429) {
+        connected.value = false;
+        connecting.value = false;
+        notificationsSubscribed.value = false;
+        clearConnectTimeout();
+        stopHeartbeat();
+        rejectPendingRpcs("Connection closed");
         clearReconnectTimer();
         authFailed.value = true;
         token.value = "";
         return;
       }
 
-      if (pendingRequestId.value) {
-        beginPendingTurnRecovery();
-      }
-      scheduleReconnect();
+      handleConnectionLost("Connection closed");
     };
 
     socket.onerror = () => {
@@ -2090,6 +2944,20 @@ export const useGatewayStore = defineStore("gateway", () => {
         handleServerMessage(msg);
       } catch { /* ignore malformed */ }
     };
+  }
+
+  /** A socket that closed, or never opened in time: settle the connection state, keep the turn, retry. */
+  function handleConnectionLost(reason: string): void {
+    connected.value = false;
+    connecting.value = false;
+    notificationsSubscribed.value = false;
+    clearConnectTimeout();
+    stopHeartbeat();
+    rejectPendingRpcs(reason);
+    if (pendingRequestId.value) {
+      beginPendingTurnRecovery();
+    }
+    scheduleReconnect();
   }
 
   async function ensureNotificationSubscription(): Promise<void> {
@@ -2112,14 +2980,25 @@ export const useGatewayStore = defineStore("gateway", () => {
     old?.close();
     connected.value = false;
     connecting.value = false;
-    // Clear stale UI state so reconnect starts clean
+    // Clear stale UI state so reconnect starts clean (open questions come back with the session)
     pendingApproval.value = null;
     pendingInputRequest.value = null;
+    clearUserInputs();
     pendingIntervention.value = null;
     notificationsSubscribed.value = false;
     liveSwarmState.value = null;
     syntheticSwarmState.value = null;
     isStreaming.value = false;
+  }
+
+  /**
+   * Whether an event belongs to the turn this page follows, in the session it shows. Both: a
+   * turn keeps sending events after the user switched sessions, and a requestId alone once let
+   * them into whichever session was on screen.
+   */
+  function isLiveTurnEvent(data: Record<string, unknown> | undefined): boolean {
+    return Boolean(data) && pendingRequestId.value !== null && data!["requestId"] === pendingRequestId.value
+      && pendingTurnSessionId === currentSessionId.value;
   }
 
   function handleServerMessage(msg: Record<string, unknown>) {
@@ -2130,6 +3009,7 @@ export const useGatewayStore = defineStore("gateway", () => {
       connected.value = true;
       connecting.value = false;
       consecutiveReconnects = 0;
+      connectionEpoch += 1;
       notePendingTurnActivity();
       startHeartbeat();
       const data = msg["data"] as Record<string, unknown>;
@@ -2144,6 +3024,9 @@ export const useGatewayStore = defineStore("gateway", () => {
           failPendingTurn("Connection was restored, but the active session no longer exists.");
         }
       } else if (currentSessionId.value && sessions.value.some((session) => session.id === currentSessionId.value && !session.archivedAt)) {
+        // Read again even when nothing changed: the read is also what subscribes this new
+        // connection to the session's open questions. Nothing on screen is rebuilt for it —
+        // the merge keeps the page's own copy of every message the server still agrees on.
         void loadSession(currentSessionId.value).catch(() => {
           currentSessionId.value = null;
           resetLocalSessionState();
@@ -2199,7 +3082,7 @@ export const useGatewayStore = defineStore("gateway", () => {
 
     if (type === "agent.chunk") {
       const data = msg["data"] as Record<string, unknown>;
-      if (data["requestId"] === pendingRequestId.value) {
+      if (isLiveTurnEvent(data)) {
         notePendingTurnActivity();
         isStreaming.value = true;
         appendStreamText(String(data["text"] ?? ""));
@@ -2209,7 +3092,7 @@ export const useGatewayStore = defineStore("gateway", () => {
 
     if (type === "agent.reasoning") {
       const data = msg["data"] as Record<string, unknown>;
-      if (data["requestId"] === pendingRequestId.value) {
+      if (isLiveTurnEvent(data)) {
         notePendingTurnActivity();
         // The reasoning lanes were built end-to-end — reset, persisted onto the finished
         // message, rendered by MessageBubble behind its toggle — but this handler dropped
@@ -2228,15 +3111,16 @@ export const useGatewayStore = defineStore("gateway", () => {
 
     if (type === "agent.tool_start") {
       const data = msg["data"] as Record<string, unknown>;
-      if (data["requestId"] === pendingRequestId.value) {
+      if (isLiveTurnEvent(data)) {
         notePendingTurnActivity();
+        liveToolEventsTurn = pendingRequestId.value;
         useShellStore().handleToolStart(data);
         const streamingMessage = getStreamingMessage();
         if (streamingMessage) {
           ensureStreamingToolCall(
             String(data["name"]),
             (data["args"] as Record<string, unknown>) ?? {},
-            typeof data["toolCallId"] === "string" ? data["toolCallId"] : undefined,
+            eventCallId(data),
           );
           recordStepStart(data);
         }
@@ -2247,7 +3131,7 @@ export const useGatewayStore = defineStore("gateway", () => {
 
     if (type === "agent.swarm") {
       const data = msg["data"] as Record<string, unknown>;
-      if (data["requestId"] === pendingRequestId.value) {
+      if (isLiveTurnEvent(data)) {
         notePendingTurnActivity();
         const swarmState = normalizeSwarmState(data["swarmState"]);
         if (swarmState) {
@@ -2262,7 +3146,7 @@ export const useGatewayStore = defineStore("gateway", () => {
 
     if (type === "agent.approval_needed") {
       const data = msg["data"] as Record<string, unknown>;
-      if (data["requestId"] === pendingRequestId.value) {
+      if (isLiveTurnEvent(data)) {
         notePendingTurnActivity();
         const approvalId = String(data["approvalId"]);
         pendingApproval.value = {
@@ -2287,23 +3171,46 @@ export const useGatewayStore = defineStore("gateway", () => {
 
     if (type === "agent.input_needed") {
       const data = msg["data"] as Record<string, unknown>;
-      if (data["requestId"] === pendingRequestId.value) {
+      if (isLiveTurnEvent(data)) {
         notePendingTurnActivity();
         const inputId = String(data["inputId"]);
         const rawChoices = data["choices"];
+        const expiresAt = askUserExpiresAt(data, Date.now());
         pendingInputRequest.value = {
           inputId,
           requestId: String(data["requestId"]),
           question: String(data["question"] ?? ""),
           choices: Array.isArray(rawChoices) ? rawChoices.map(String) : undefined,
+          ...(expiresAt ? { expiresAt } : {}),
+          ...(typeof data["toolCallId"] === "string" ? { toolCallId: data["toolCallId"] } : {}),
         };
+        // Past its deadline the server has answered for the user; a banner still asking would
+        // take an answer nothing is waiting for.
+        if (inputRequestExpiryTimer) clearTimeout(inputRequestExpiryTimer);
+        inputRequestExpiryTimer = expiresAt
+          ? setTimeout(() => {
+              inputRequestExpiryTimer = null;
+              if (pendingInputRequest.value?.inputId === inputId) pendingInputRequest.value = null;
+            }, Math.max(0, Date.parse(expiresAt) - Date.now()))
+          : null;
       }
+      return;
+    }
+
+    if (type === "agent.user_input_needed") {
+      receiveUserInput(msg["data"]);
+      return;
+    }
+
+    if (type === "agent.user_input_resolved") {
+      const resolution = readUserInputResolution(msg["data"]);
+      if (resolution) settleUserInput(resolution);
       return;
     }
 
     if (type === "agent.intervention") {
       const data = msg["data"] as Record<string, unknown>;
-      if (data["requestId"] === pendingRequestId.value) {
+      if (isLiveTurnEvent(data)) {
         notePendingTurnActivity();
         pendingIntervention.value = data["notice"] as InterventionNotice;
         const notice = data["notice"] as InterventionNotice;
@@ -2328,27 +3235,33 @@ export const useGatewayStore = defineStore("gateway", () => {
 
     if (type === "agent.tool_done") {
       const data = msg["data"] as Record<string, unknown>;
-      if (data["requestId"] === pendingRequestId.value) {
+      if (isLiveTurnEvent(data)) {
         notePendingTurnActivity();
         useShellStore().handleToolDone(data);
-        const streamingMessage = getStreamingMessage();
-        if (streamingMessage?.toolCalls) {
-          const toolCallId = typeof data["toolCallId"] === "string" ? data["toolCallId"] : undefined;
-          const tc = toolCallId
-            ? streamingMessage.toolCalls.find((toolCall) => toolCall.id === toolCallId)
-            : streamingMessage.toolCalls.find((toolCall) => toolCall.name === String(data["name"]) && toolCall.result === undefined);
-          if (tc) tc.result = String(data["result"] ?? "");
-          if (tc && data["metadata"] && typeof data["metadata"] === "object") {
-            tc.metadata = data["metadata"] as Record<string, unknown>;
+        // The ask_user call returned, so its question is answered — from here, another tab, or
+        // by its timeout — and the banner is stale.
+        if (closesAskUser(pendingInputRequest.value, data)) pendingInputRequest.value = null;
+        // A call that started before a mid-turn message was read finishes in the segment it
+        // started in — its result, its step and anything it made — not in whichever bubble is
+        // live when the result arrives.
+        const route = routeToolDone(messages.value, pendingRequestId.value, {
+          name: String(data["name"]),
+          toolCallId: typeof data["toolCallId"] === "string" ? data["toolCallId"] : undefined,
+          agent: data["delegated"] === true && typeof data["sourceAgent"] === "string" ? data["sourceAgent"] : undefined,
+        });
+        if (route.toolCall) {
+          route.toolCall.result = String(data["result"] ?? "");
+          if (data["metadata"] && typeof data["metadata"] === "object") {
+            route.toolCall.metadata = data["metadata"] as Record<string, unknown>;
           }
         }
-        recordStepDone(data);
+        if (route.step) finishStep(route.step, data);
+        const attachments = extractToolAttachments(String(data["name"]), data["metadata"]);
+        if (route.owner && attachments.length) {
+          route.owner.attachments = [...(route.owner.attachments ?? []), ...attachments];
+        }
+        const streamingMessage = getStreamingMessage();
         if (streamingMessage) {
-          const attachments = extractToolAttachments(String(data["name"]), data["metadata"]);
-          if (attachments.length) {
-            streamingMessage.attachments = [...(streamingMessage.attachments ?? []), ...attachments];
-          }
-
           const completedTools = streamingMessage.toolCalls?.filter((toolCall) => toolCall.result !== undefined).length ?? 0;
           const shouldCheckpoint = completedTools <= 2 || completedTools % 3 === 0;
           updateStreamingStatus(
@@ -2362,9 +3275,45 @@ export const useGatewayStore = defineStore("gateway", () => {
       return;
     }
 
+    // Sent the moment the runtime reads the queued mid-turn messages, BEFORE its "steering"
+    // status, so the status line already lands on the bubble that follows the cut.
+    if (type === "agent.steering_consumed") {
+      const data = msg["data"] as Record<string, unknown>;
+      if (isLiveTurnEvent(data)) {
+        notePendingTurnActivity();
+        splitStreamingAtSteering(data);
+      }
+      return;
+    }
+
+    // What a turn never read, kept by the server because the connection that started the turn was
+    // gone when it ended — told to every page attached to the session. It came only with the reply
+    // to the session's next message, below that turn's answer, or with a reload (review of round
+    // 3, B #1). Shown as undelivered, once per message, with a Resend: nothing sends it unasked.
+    if (type === "agent.unread_steering") {
+      const data = msg["data"] as Record<string, unknown> | undefined;
+      if (!data || typeof data["sessionId"] !== "string") return;
+      // It comes once the stopped turn has unwound, often after the session's next turn started:
+      // typed before that turn's message, it goes above it. Only for a turn whose events come
+      // here: a turn followed by reading the transcript can itself have been replaced by the
+      // turn the message was typed into, and above its message the message read as typed before
+      // it (review of round 4, D #2). There it goes at the end. So it does once the followed
+      // turn's final status is here, held for a read of the session: the turn has ended, and
+      // another tab's turn can have replaced it (review of round 5, D R3).
+      const sessionId = data["sessionId"];
+      const followedLive = pendingRequestId.value !== null && pendingTurnRecovery.value?.requestId !== pendingRequestId.value
+        && !heldFinalStatuses.has(pendingRequestId.value);
+      const opener = followedLive && pendingTurnSessionId === sessionId ? messages.value[turnOpenerIndex(messages.value)] : undefined;
+      restoreServerUnread(sessionId, data["messages"], opener?.id);
+      return;
+    }
+
     if (type === "status") {
       const data = msg["data"] as Record<string, unknown>;
-      if (data["requestId"] !== pendingRequestId.value) return;
+      if (!isLiveTurnEvent(data)) {
+        if (data) noteDetachedTurnEnd(data);
+        return;
+      }
       notePendingTurnActivity();
 
       const status = data["status"] as string;
@@ -2397,6 +3346,13 @@ export const useGatewayStore = defineStore("gateway", () => {
         return;
       }
 
+      // A turn that ends with a status this page did not cause — no Stop here — may have been
+      // replaced by a message from another tab: the session is read first (endUnlessReplaced).
+      if ((status === "blocked" || status === "error") && stoppedRequestId !== data["requestId"] && finalStatusRead !== data["requestId"]) {
+        void endUnlessReplaced(data);
+        return;
+      }
+
       if (status === "ok" || status === "blocked") {
         flushStreamTextNow(); // apply any buffered streamed text before snapshotting it
         flushReasoningNow();  // …and the buffered reasoning, which is snapshotted with it
@@ -2417,7 +3373,9 @@ export const useGatewayStore = defineStore("gateway", () => {
           blocked: isBlocked,
           statusText: streamingMessage?.statusText,
           statusHistory: cloneStatusHistory(streamingMessage?.statusHistory),
-          steps: settleSteps(streamingMessage?.steps),
+          steps: settleSteps(streamingMessage?.steps, Date.now()),
+          // The whole turn's figures, on its answer: the segments before a mid-turn message
+          // keep only their own work.
           swarmState: swarmState ?? undefined,
           usage: data["usage"] as TurnUsage | undefined,
           perf: rawPerf ? {
@@ -2431,28 +3389,31 @@ export const useGatewayStore = defineStore("gateway", () => {
           subAgentReasoning: streamingSubAgentReasoning.value.length > 0
             ? streamingSubAgentReasoning.value.map((entry) => ({ ...entry }))
             : undefined,
+          requestId: String(data["requestId"]),
         };
-        if (idx >= 0) messages.value.splice(idx, 1, finalMsg);
-        else messages.value.push(finalMsg);
+        messages.value = landTurn(messages.value, String(data["requestId"]), finalMsg, Date.now());
         streamingText.value = "";
         streamingReasoning.value = "";
         streamingSubAgentReasoning.value = [];
         pendingRequestId.value = null;
         isStreaming.value = false;
         clearTurnStallState();
-        isError.value = isBlocked;
+        clearPendingTurnRecovery();
+        if (isBlocked) flashError(3000);
+        else clearErrorFlash();
         pendingApproval.value = null;
         pendingInputRequest.value = null;
+        dropUserInputsOfTurn(String(data["requestId"]));
         appendSwarmRun(isBlocked ? "blocked" : "ok", swarmState);
         liveSwarmState.value = null;
         syntheticSwarmState.value = null;
-        if (isBlocked) setTimeout(() => { isError.value = false; }, 3000);
+        settleUnreadSteering(String(data["requestId"]), readSteeringEntries(data["unconsumedSteering"]), true);
         return;
       }
 
       if (status === "error") {
         const errorText = String(data["error"] ?? "An unexpected error occurred.");
-        failPendingTurn(errorText);
+        failPendingTurn(errorText, false, readSteeringEntries(data["unconsumedSteering"]));
       }
     }
   }
@@ -2479,6 +3440,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     const sid = result["sessionId"] as string;
     currentSessionId.value = sid;
     resetLocalSessionState();
+    currentSessionImageSettingsPrompt.value = "ask";
     applyCurrentSessionRunSelection(sid);
     await refreshSessions();
     return sid;
@@ -2497,9 +3459,23 @@ export const useGatewayStore = defineStore("gateway", () => {
     pendingApproval.value = null;
   }
 
-  async function respondInput(inputId: string, answer: string): Promise<void> {
-    await rpc("input.respond", { inputId, answer });
-    pendingInputRequest.value = null;
+  /**
+   * Answer the agent's question. False when the answer came too late: the server had already
+   * given the agent an empty one, and says so rather than let the person believe they were heard.
+   */
+  async function respondInput(inputId: string, answer: string): Promise<boolean> {
+    const result = await rpc("input.respond", { inputId, answer }) as { ok?: unknown; errors?: unknown } | undefined;
+    if (pendingInputRequest.value?.inputId === inputId) pendingInputRequest.value = null;
+    if (result?.ok === false && isExpiredAnswer(readFieldErrors(result.errors))) {
+      notifications.pushLocalNotification({
+        title: "That answer came too late",
+        message: "The agent had already gone on without it.",
+        level: "warn",
+        category: "input",
+      });
+      return false;
+    }
+    return true;
   }
 
   function dismissIntervention(): void {
@@ -2509,11 +3485,89 @@ export const useGatewayStore = defineStore("gateway", () => {
   async function cancelTurn(): Promise<void> {
     const rid = pendingRequestId.value;
     if (!rid) return;
+    // A turn this page follows by reading the transcript was started on another connection —
+    // before a reload, in another tab — and that connection is the one holding it.
+    const elsewhere = pendingTurnRecovery.value?.requestId === rid;
+    const sessionId = pendingTurnSessionId ?? currentSessionId.value;
+    // Noted before the cancel goes out: the stopped turn's own final status can arrive first,
+    // and what it never read must not then be sent on as though it had ended by itself.
+    stoppedRequestId = rid;
+    // Its final status is here, held for a read of the session: the turn has ended, and that
+    // status says how. The Stop's note in its place read an error the page already had as the
+    // user's Stop (review of round 5, D R2).
+    const held = takeHeldStatus(rid);
+    if (held) {
+      landHeldStatus(held);
+      return;
+    }
+    let reply: { cancelled?: unknown; known?: unknown } | undefined;
     try {
-      await rpc("chat.cancel", { requestId: rid });
+      reply = await rpc("chat.cancel", { requestId: rid }) as typeof reply;
     } catch { /* ignore — WS may have closed */ }
+    let stopped = reply ? reply.cancelled === true : undefined;
+    // Stopped by its session only when the server does not know the turn — another instance
+    // holds it — or could not be asked. One it knows has ended, or was stopped already by a
+    // message from another tab: a session-wide Stop sent for it stopped the turn running there
+    // now (review of round 2, B #2).
+    if (elsewhere && stopped !== true && (!reply || reply.known === false) && sessionId) stopped = await stopSessionTurn(sessionId);
+    // The stopped turn's own final status can arrive while the cancel is out, and land the turn
+    // itself; a new message may even have started the next one. Either way this turn is no
+    // longer pending, and failing "it" now would add a second error — or fail the new turn.
+    if (pendingRequestId.value !== rid) return;
+    // Nothing was running to stop: it ended on its own, or was stopped already. Its answer, if it
+    // has one, is in the transcript — read once, not waited on: a turn running there now is another.
+    if (elsewhere && stopped === false) {
+      stoppedRequestId = null;
+      if (pendingTurnRecovery.value?.requestId === rid) pendingTurnRecovery.value.stopped = true;
+      void recoverPendingTurn();
+      return;
+    }
     // Surface cancellation locally even if RPC failed
-    failPendingTurn("Turn cancelled by user.");
+    failPendingTurn("Turn cancelled by user.", false, [], true);
+  }
+
+  /** Stop whatever turn runs on a session. True when one was running, undefined when the request failed. */
+  async function stopSessionTurn(sessionId: string): Promise<boolean | undefined> {
+    try {
+      const res = await authorizedFetch(`/api/sessions/${encodeURIComponent(sessionId)}/stop`, { method: "POST" });
+      const data = await res.json() as { stopping?: unknown; active?: unknown };
+      return data?.stopping === true || data?.active === true;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * End a turn a newer message replaced — this page's, or another tab's (finishRecoveredTurn) —
+   * with a stub where its live bubble was.
+   *
+   * Keep what the cancelled turn already DID. Deleting the placeholder outright threw away
+   * its steps and any file it had produced, so an image generated a minute into a turn
+   * vanished from the conversation the moment the user sent something else. A turn that
+   * did nothing yet still disappears, as before. A turn picked up part-way has the step it was
+   * in above its live bubble too (withResumedStep). `didWork` when the server's copy says the turn
+   * did something the live bubble does not show: a step with words stays above it, and without
+   * the stub that step read as the turn's answer.
+   */
+  function landReplacedTurn(rid: string, didWork = false): void {
+    const list = withResumedStep(messages.value, rid);
+    const placeholder = list.find((message) => message.id === "streaming");
+    const steps = settleSteps(placeholder?.steps, Date.now());
+    const stub: ChatMessage | null = placeholder && (didWork || steps?.length || placeholder.toolCalls?.length || placeholder.attachments?.length)
+      ? {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: "_Stopped — replaced by your next message._",
+          timestamp: new Date(),
+          pageOnly: true,
+          stopped: true,
+          steps,
+          toolCalls: placeholder.toolCalls,
+          attachments: placeholder.attachments,
+          requestId: rid,
+        }
+      : null;
+    messages.value = landTurn(list, rid, stub, Date.now());
   }
 
   async function supersedePendingTurn(): Promise<void> {
@@ -2525,29 +3579,12 @@ export const useGatewayStore = defineStore("gateway", () => {
     } catch {
       // Ignore transport failures here so a replacement turn can still start.
     }
+    // It landed on its own while the cancel was out; its answer stands, and there is no live
+    // bubble left to turn into a stub.
+    if (pendingRequestId.value !== rid) return;
 
-    const idx = messages.value.findIndex((message) => message.id === "streaming");
-    if (idx >= 0) {
-      // Keep what the cancelled turn already DID. Deleting the placeholder outright threw away
-      // its steps and any file it had produced, so an image generated a minute into a turn
-      // vanished from the conversation the moment the user sent something else. A turn that
-      // did nothing yet still disappears, as before.
-      const placeholder = messages.value[idx]!;
-      const steps = settleSteps(placeholder.steps);
-      if (steps?.length || placeholder.toolCalls?.length || placeholder.attachments?.length) {
-        messages.value.splice(idx, 1, {
-          id: crypto.randomUUID(),
-          role: "assistant",
-          content: "_Stopped — replaced by your next message._",
-          timestamp: new Date(),
-          steps,
-          toolCalls: placeholder.toolCalls,
-          attachments: placeholder.attachments,
-        });
-      } else {
-        messages.value.splice(idx, 1);
-      }
-    }
+    landReplacedTurn(rid);
+    settleUnreadSteering(rid, [], false);
 
     streamingText.value = "";
     streamingReasoning.value = "";
@@ -2555,11 +3592,13 @@ export const useGatewayStore = defineStore("gateway", () => {
     pendingRequestId.value = null;
     pendingApproval.value = null;
     pendingInputRequest.value = null;
+    dropUserInputsOfTurn(rid);
     pendingIntervention.value = null;
     liveSwarmState.value = null;
     syntheticSwarmState.value = null;
     isStreaming.value = false;
     clearTurnStallState();
+    clearPendingTurnRecovery();
   }
 
   async function deleteSession(sessionId: string): Promise<void> {
@@ -2593,10 +3632,15 @@ export const useGatewayStore = defineStore("gateway", () => {
    * Rewind the current session to just before the message with the given client ID.
    * The message's text is returned so the caller can pre-fill the composer.
    * The local messages array is truncated to exclude that message and everything after it.
+   *
+   * Both sides are cut, or neither: when the server's copy of the message cannot be found, this
+   * throws and nothing changes — cutting only here left the page and the server telling two
+   * different conversations. Never while a turn runs, which would cut its history under it.
    */
   async function rewindToMessage(msgId: string): Promise<string> {
     const sid = currentSessionId.value;
     if (!sid) throw new Error("No active session");
+    if (pendingRequestId.value) throw new Error("a turn is still running — stop it first");
 
     const msgIndex = messages.value.findIndex((m) => m.id === msgId);
     if (msgIndex < 0) throw new Error("Message not found");
@@ -2604,31 +3648,24 @@ export const useGatewayStore = defineStore("gateway", () => {
     const msg = messages.value[msgIndex]!;
     const text = msg.content;
 
-    // Parse the server-side history index from transcript IDs formatted as "${sessionId}:${index}"
-    let historyIndex: number | null = null;
-    const colonIdx = msgId.lastIndexOf(":");
-    if (colonIdx > 0) {
-      const parsed = Number(msgId.slice(colonIdx + 1));
-      if (Number.isInteger(parsed) && parsed >= 0) historyIndex = parsed;
-    }
-
+    let historyIndex = transcriptHistoryIndex(msgId);
     if (historyIndex === null) {
-      // Live message (UUID) — fetch transcript to resolve the server-side index
-      try {
-        const transcript = await getSessionTranscript(sid, { limit: 200 });
-        const found = transcript.transcript.find((t) => t.role === "user" && t.content === text);
-        if (found) {
-          const ci = found.id.lastIndexOf(":");
-          if (ci > 0) historyIndex = Number(found.id.slice(ci + 1));
-        }
-      } catch {
-        // If we can't resolve the index, we still truncate locally
+      // Sent from this page, so known here by a local id: find its place in the transcript, reading
+      // older pages until the transcript reaches back to it.
+      let transcript: GatewaySessionTranscriptMessage[] = [];
+      let beforeMessageId: string | undefined;
+      for (let page = 0; page < REWIND_MAX_TRANSCRIPT_PAGES; page += 1) {
+        const result = await getSessionTranscript(sid, { limit: 200, ...(beforeMessageId ? { beforeMessageId } : {}) });
+        transcript = [...result.transcript, ...transcript];
+        beforeMessageId = result.nextBeforeMessageId;
+        if (!needsOlderTranscript(messages.value, msgIndex, transcript) || !beforeMessageId) break;
       }
+      historyIndex = rewindHistoryIndex(messages.value, msgIndex, transcript);
     }
+    if (historyIndex === null) throw new Error("that message is not in the saved conversation");
+    if (currentSessionId.value !== sid || pendingRequestId.value) throw new Error("the conversation changed while restarting");
 
-    if (historyIndex !== null) {
-      await rpc("session.rewind", { sessionId: sid, historyIndex });
-    }
+    await rpc("session.rewind", { sessionId: sid, historyIndex });
 
     // Truncate local messages to exclude the target message and everything after
     messages.value = messages.value.slice(0, msgIndex);
@@ -2639,48 +3676,190 @@ export const useGatewayStore = defineStore("gateway", () => {
     if (!currentSessionId.value) await createSession();
 
     const id = crypto.randomUUID();
-    const entry: ChatMessage = {
+    // The message that opens the next turn (one whose attachments had to be read first). A
+    // message sent INTO a running turn does not come through here: it goes to the end marked
+    // queued, and moves to where the turn read it (steerRunningTurn).
+    messages.value.push({
       id,
       role: "user",
       content,
       timestamp: new Date(),
       attachments: cloneAttachments(attachments),
-    };
-
-    // A message sent INTO a running turn belongs ABOVE that turn's bubble.
-    //
-    // An entire assistant turn occupies ONE slot here — the `id: "streaming"` placeholder
-    // pushed when the turn starts — and the final answer is spliced back over it in place.
-    // So a plain push put the interjection after an answer that was still being written when
-    // the user sent it, reading as though they had replied to something they had not yet
-    // seen. The server disagreed too: the runtime drains the steering queue between tool-loop
-    // iterations and records the message in arrival position, so a reload silently reordered
-    // the conversation. Render order here is raw array order — there is no timestamp sort —
-    // so the position at insert time IS the displayed position.
-    const streamingIndex = messages.value.findIndex(m => m.id === "streaming");
-    if (streamingIndex >= 0) messages.value.splice(streamingIndex, 0, entry);
-    else messages.value.push(entry);
+    });
     return id;
   }
 
   /**
-   * Mid-turn steering: hand a message to a RUNNING turn instead of starting a
-   * new one. Returns true when the gateway queued it (a turn is in flight); false
-   * when no turn is active, so the caller can fall back to sendMessage. Never
-   * throws — a transport/HTTP error resolves to false (caller falls back).
+   * Hand a message to the RUNNING turn on this session: the server queues it for the model's
+   * next step and says whether a turn took it. Never throws. A transport or HTTP failure —
+   * including the input guardrail refusing the text — comes back as `error`, never as "no turn
+   * is running", because the caller must not treat a refused message as one to send anew.
    */
-  async function steerTurn(sessionId: string, message: string): Promise<boolean> {
+  async function steerTurn(
+    sessionId: string,
+    message: string,
+    clientMessageId?: string,
+  ): Promise<{ steered: boolean; active: boolean; id?: string; error?: string }> {
     try {
       const res = await authorizedFetch(`/api/sessions/${encodeURIComponent(sessionId)}/steer`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message }),
+        body: JSON.stringify({ message, ...(clientMessageId ? { clientMessageId } : {}) }),
       });
-      const data = await res.json() as { steered?: boolean };
-      return Boolean(data?.steered);
-    } catch {
-      return false;
+      const data = await res.json() as { steered?: boolean; active?: boolean; id?: string };
+      return {
+        steered: data?.steered === true,
+        active: data?.active === true,
+        ...(typeof data?.id === "string" ? { id: data.id } : {}),
+      };
+    } catch (error) {
+      return { steered: false, active: false, error: error instanceof Error ? error.message : String(error) };
     }
+  }
+
+  function findSteer(clientId: string): ChatMessage | undefined {
+    return messages.value.find((message) => message.role === "user" && message.steer?.clientId === clientId);
+  }
+
+  /**
+   * Send a message into the running turn. Its bubble goes at the END first, marked queued, and
+   * only then is it sent: the server can read it before the reply to this request arrives, and
+   * that read needs a bubble to move. The running turn is never cancelled for it — a message
+   * that cannot be delivered says so and offers a resend.
+   */
+  async function steerRunningTurn(text: string): Promise<SteerOutcome | null> {
+    const requestId = pendingRequestId.value;
+    const sessionId = currentSessionId.value;
+    if (!requestId || !sessionId) return null;
+    const clientId = crypto.randomUUID();
+    // Steered even while this turn's final status is held for a read of the session: the turn that
+    // replaced it may be the one running now, and /steer reaches it. Landing the held status first
+    // and sending the message by chat.send stopped that other tab's turn (review of round 6, G1).
+    // A message no running turn took lands the held status in deliverSteer, then goes out as the
+    // next turn.
+    messages.value.push(newSteerMessage({ id: crypto.randomUUID(), clientId, text, requestId, at: new Date() }) as ChatMessage);
+    return deliverSteer(sessionId, clientId);
+  }
+
+  /**
+   * Null only when nothing went out. Every other answer means the text is on its way or in the
+   * chat, and the caller must not hand it back to the composer, where Enter sent it twice.
+   * "sent": it has already gone out as the next turn.
+   */
+  async function deliverSteer(sessionId: string, clientId: string): Promise<SteerOutcome | null> {
+    const pending = findSteer(clientId);
+    if (!pending) return null;
+    const { content: text, requestId } = pending;
+    const reply = await steerTurn(sessionId, text, clientId);
+    // Look again: while the request was out, the turn may have read it, ended, or failed — or
+    // the user moved to another session.
+    const message = findSteer(clientId);
+    if (!message?.steer || currentSessionId.value !== sessionId) {
+      // The turn's final status listed it before this reply came back, and it has already gone
+      // out as the next turn, without its mark.
+      if (sentAsFollowUp.has(clientId)) return "sent";
+      // The turn has it: it reads it, or lists it when it ends (noteDetachedTurnEnd).
+      if (reply.steered) return "queued";
+      // Nothing took it, and nothing here may send it on — the session on screen may be another.
+      const error = reply.error ?? "The turn ended before it read this.";
+      if (message?.steer?.state === "queued") message.steer = { clientId, state: "undelivered", error };
+      keepUnread(sessionId, requestId, [{ id: clientId, text }], error);
+      return "undelivered";
+    }
+    if (message.steer.state !== "queued") return message.steer.state;
+    if (reply.error) {
+      message.steer = { clientId, state: "undelivered", error: reply.error };
+      return "undelivered";
+    }
+    if (reply.steered && pendingRequestId.value === message.requestId) return "queued";
+    // No running turn holds it: the server had already finished the turn it was typed into
+    // (that turn's final status is still on its way), or that turn ended without listing it.
+    // Either way it goes out as the next turn.
+    // The turn's final status may be here, held for a read of the session (endUnlessReplaced): it
+    // lands first, so the message goes out as the next turn once it has. scheduleHeldSend, not an
+    // awaited send, so the page still sees the landed turn's loading edge (review of round 6, G2).
+    const held = message.requestId ? heldFinalStatuses.get(message.requestId) : undefined;
+    if (held) {
+      heldFinalStatuses.delete(message.requestId!);
+      landHeldStatus(held);
+    }
+    const again = findSteer(clientId);
+    if (again?.steer) again.steer = { clientId, state: "held" };
+    scheduleHeldSend();
+    return "held";
+  }
+
+  /**
+   * Send what is held as the next turn, once nothing runs. Deferred a tick so the turn that just
+   * ended is SEEN to end: the finished-turn watchers (read the answer aloud, re-arm the voice
+   * loop) fire on that edge, and starting the next turn in the same tick would swallow it.
+   */
+  function scheduleHeldSend(): void {
+    if (heldSendTimer !== null) return;
+    heldSendTimer = setTimeout(() => {
+      heldSendTimer = null;
+      void sendHeldSteers();
+    }, 0);
+  }
+
+  async function sendHeldSteers(): Promise<void> {
+    // A running turn sends them itself when it lands.
+    if (pendingRequestId.value) return;
+    const followUp = takeFollowUp(messages.value, new Date(), belongsOnScreen, () => crypto.randomUUID());
+    if (!followUp) return;
+    for (const clientId of followUp.clientIds) sentAsFollowUp.add(clientId);
+    for (const oldest of sentAsFollowUp) {
+      if (sentAsFollowUp.size <= 200) break;
+      sentAsFollowUp.delete(oldest);
+    }
+    messages.value = followUp.messages;
+    try {
+      await sendMessage(followUp.text, lastEnableThinking, undefined, undefined, { userMessageId: followUp.messageId });
+    } catch {
+      // sendMessage has already turned the failure into an error bubble.
+    }
+  }
+
+  /** Try an undelivered message again: into the running turn when there is one, else as a turn of its own. */
+  async function resendSteer(messageId: string): Promise<void> {
+    const message = messages.value.find((entry) => entry.id === messageId && entry.steer?.state === "undelivered");
+    const sessionId = currentSessionId.value;
+    if (!message?.steer || !sessionId || !belongsOnScreen(message)) return;
+    const clientId = message.steer.clientId;
+    if (pendingRequestId.value) {
+      messages.value = resteer(messages.value, messageId, "queued", pendingRequestId.value, new Date());
+      await deliverSteer(sessionId, clientId);
+      return;
+    }
+    messages.value = resteer(messages.value, messageId, "held", null, new Date());
+    await sendHeldSteers();
+  }
+
+  /** The runtime read the queued mid-turn messages: cut the live bubble at that point (see turnSegments). */
+  function splitStreamingAtSteering(data: Record<string, unknown>): void {
+    const read = readSteeringEntries(data["messages"]);
+    if (read.length === 0) return;
+    flushStreamTextNow();
+    flushReasoningNow();
+    const live = getStreamingMessage();
+    const at = typeof data["at"] === "string" && !Number.isNaN(Date.parse(data["at"])) ? new Date(data["at"]) : new Date();
+    const segmentText = data["discardedDraft"] === true || typeof data["segmentText"] !== "string" ? "" : data["segmentText"];
+    messages.value = splitAtSteering(messages.value, { requestId: String(data["requestId"]), at, messages: read }, {
+      // The server's word for what the transcript keeps of the part before the cut, so a reload
+      // reads the same. Never the streamed text: a step that calls tools does not stream its
+      // words, so all that can be in the stream at a cut is a draft the runtime rejected and
+      // never kept — frozen above the user's message as if it were part of the answer.
+      content: mergeSegmentAssistantContent(segmentText, live?.toolCalls),
+      reasoning: streamingReasoning.value,
+      subAgentReasoning: streamingSubAgentReasoning.value,
+      swarmState: liveSwarmState.value ?? syntheticSwarmState.value ?? undefined,
+    }, () => crypto.randomUUID());
+    // The segment took the live text and thinking with it; the bubble after the cut starts empty.
+    // isStreaming stays as it is: the turn is still running, and the reasoning lane only keeps
+    // what arrives while it is set.
+    streamingText.value = "";
+    streamingReasoning.value = "";
+    streamingSubAgentReasoning.value = [];
   }
 
   async function sendMessage(
@@ -2696,16 +3875,18 @@ export const useGatewayStore = defineStore("gateway", () => {
 
     if (!currentSessionId.value) await createSession();
 
+    lastEnableThinking = enableThinking;
     const displayText = displayContent ?? text;
     const existingUserMessage = options.userMessageId
       ? messages.value.find((message) => message.id === options.userMessageId && message.role === "user")
       : undefined;
+    const openerId = existingUserMessage?.id ?? crypto.randomUUID();
     if (existingUserMessage) {
       existingUserMessage.content = displayText;
       existingUserMessage.attachments = cloneAttachments(attachments);
     } else {
       messages.value.push({
-        id: crypto.randomUUID(),
+        id: openerId,
         role: "user",
         content: displayText,
         timestamp: new Date(),
@@ -2715,6 +3896,9 @@ export const useGatewayStore = defineStore("gateway", () => {
 
     const requestId = Math.random().toString(36).slice(2);
     pendingRequestId.value = requestId;
+    pendingTurnSessionId = currentSessionId.value;
+    if (pendingTurnSessionId) turnSessions.set(requestId, pendingTurnSessionId);
+    liveToolEventsTurn = null;
     streamingText.value = "";
     streamingReasoning.value = "";
     streamingSubAgentReasoning.value = [];
@@ -2732,18 +3916,26 @@ export const useGatewayStore = defineStore("gateway", () => {
       statusText: "Working on it...",
       statusHistory: ["Working on it..."],
       steps: [],
+      requestId,
     });
     armPendingTurnWatchdog();
 
+    const sentTo = currentSessionId.value;
     try {
-      await rpc("chat.send", {
+      const reply = await rpc("chat.send", {
         sessionId: currentSessionId.value,
         message: text,
         requestId,
         displayContent: displayText,
         attachments: attachmentsForRpc(attachments),
         ...(enableThinking !== undefined && { enableThinking }),
-      });
+      }) as { accepted?: unknown; unreadSteering?: unknown } | undefined;
+      if (reply?.accepted === true) acceptedRequestId = requestId;
+      // What the turn this one replaced never read, retired as this one started: this page's own
+      // messages are marked already (supersedePendingTurn), but one sent into it from another tab
+      // was kept for the session and dropped by this very start, shown to nobody (review of
+      // round 2, B #5). Typed before this turn's message, they go above it.
+      if (sentTo) restoreServerUnread(sentTo, reply?.unreadSteering, openerId);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       if (errorMessage === "RPC timeout" && connected.value && pendingRequestId.value === requestId) {
@@ -3138,6 +4330,11 @@ export const useGatewayStore = defineStore("gateway", () => {
   }
 
   const isLoading = computed(() => pendingRequestId.value !== null);
+  /** This session's open cards, the first asked first. */
+  const sessionUserInputs = computed(() => openInputsFor(userInputs.value, currentSessionId.value));
+  const hasOpenUserInput = computed(() => sessionUserInputs.value.length > 0);
+  /** Which step each card sits under; the rest have no step on screen and are shown after the conversation. */
+  const userInputPlacement = computed(() => placeUserInputs(sessionUserInputs.value, messages.value, "streaming"));
   const currentSessionSwarmRuns = computed<SwarmRunRecord[]>(() => {
     if (!currentSessionId.value) return [];
     return swarmRunsBySession.value[currentSessionId.value] ?? [];
@@ -3191,6 +4388,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     currentSessionHasOlderMessages,
     currentSessionEffort,
     currentSessionTimeLimitSec,
+    currentSessionImageSettingsPrompt,
     scenes,
     messages,
     streamingText,
@@ -3207,6 +4405,11 @@ export const useGatewayStore = defineStore("gateway", () => {
     pendingApproval,
     pendingInputRequest,
     pendingIntervention,
+    userInputs,
+    sessionUserInputs,
+    hasOpenUserInput,
+    userInputPlacement,
+    configuringUserInputId,
     connect,
     disconnect,
     rpc,
@@ -3221,6 +4424,8 @@ export const useGatewayStore = defineStore("gateway", () => {
     appendPendingUserMessage,
     sendMessage,
     steerTurn,
+    steerRunningTurn,
+    resendSteer,
     rewindToMessage,
     convertFileToMarkdown,
     persistAttachment,
@@ -3259,6 +4464,10 @@ export const useGatewayStore = defineStore("gateway", () => {
     downloadSessionAuditMarkdown,
     respondApproval,
     respondInput,
+    respondUserInput,
+    openUserInputForm,
+    closeUserInputForm,
+    previewUserInputCandidate,
     dismissIntervention,
     cancelTurn,
     archiveSession,

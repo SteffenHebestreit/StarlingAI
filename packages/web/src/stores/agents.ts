@@ -84,8 +84,11 @@ export const useAgentsStore = defineStore("agents", () => {
    * `null` for a field means CLEAR IT — the server deletes the key and the agent falls back to
    * the derived/default value. It cannot be `undefined`: JSON.stringify drops undefined
    * properties, so an emptied field used to send `{}` and the old value simply stayed.
+   *
+   * Resolves to the gateway's reason when it refuses the patch (a saved key at a moved endpoint,
+   * say), else null: the re-fetch below clears `error`, so the page shows the reason itself.
    */
-  async function patchModel(name: string, patch: Partial<Record<keyof AgentModelConfig, unknown>>) {
+  async function patchModel(name: string, patch: Partial<Record<keyof AgentModelConfig, unknown>>): Promise<string | null> {
     error.value = null;
     // Optimistic update — a cleared key is removed locally too, so the input shows its
     // placeholder immediately instead of snapping back to the value it just cleared.
@@ -104,13 +107,18 @@ export const useAgentsStore = defineStore("agents", () => {
         headers: authHeaders(),
         body: JSON.stringify(patch),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        const refusal = await res.json().catch(() => null) as { error?: string } | null;
+        throw new Error(refusal?.error ?? `HTTP ${res.status}`);
+      }
       const updated = await res.json() as { name: string; model: AgentModelConfig };
       if (agent) agent.model = updated.model;
+      return null;
     } catch (e) {
       error.value = String(e);
       // Revert by re-fetching
       await fetch();
+      return e instanceof Error ? e.message : String(e);
     }
   }
 

@@ -161,17 +161,30 @@
             </div>
 
             <MessageBubble
-              v-for="(msg, idx) in visibleMessages"
+              v-for="msg in visibleMessages"
               :key="msg.id"
               :message="msg"
               :is-streaming="msg.id === 'streaming'"
               :streaming-text="msg.id === 'streaming' ? gateway.streamingText : undefined"
               :streaming-reasoning="msg.id === 'streaming' ? gateway.streamingReasoning : undefined"
               :streaming-sub-agent-reasoning="msg.id === 'streaming' ? gateway.streamingSubAgentReasoning : undefined"
-              :auto-collapse="msg.role === 'assistant' && idx !== lastAssistantVisibleIdx && msg.id !== 'streaming'"
+              :auto-collapse="msg.role === 'assistant' && msg.id !== 'streaming' && !latestTurnView.assistantIds.has(msg.id)"
+              :allow-rewind="!gateway.isLoading"
               @rewind="handleRewind"
+              @resend="handleResendSteer"
               @show-step="showStep"
             />
+
+            <!-- Questions with no step on screen to sit under — after a reload the steps are
+                 rebuilt from the transcript and the waiting call is not among them. They still
+                 belong to the conversation, so they close it rather than float over it. -->
+            <div v-if="gateway.userInputPlacement.floating.length" class="chat-floating-inputs">
+              <UserInputCard
+                v-for="inputId in gateway.userInputPlacement.floating"
+                :key="inputId"
+                :input-id="inputId"
+              />
+            </div>
           </div>
         </section>
       </div>
@@ -338,6 +351,7 @@
                   style="background: linear-gradient(90deg,#38bdf8,#818cf8); -webkit-background-clip:text; -webkit-text-fill-color:transparent;">
               Question
             </span>
+            <span v-if="inputRequestCountdownLabel" class="ml-auto text-xs tabular-nums text-gray-400">{{ inputRequestCountdownLabel }}</span>
           </div>
           <p class="text-sm text-gray-200 mb-3">{{ gateway.pendingInputRequest.question }}</p>
           <div v-if="gateway.pendingInputRequest.choices?.length" class="flex flex-wrap gap-2 mb-3">
@@ -643,7 +657,9 @@
             class="chat-composer__textarea"
             :class="compactComposer ? 'chat-composer__textarea--compact' : ''"
             :style="composerTextareaStyle"
-            :placeholder="gateway.isLoading ? 'Steer the running turn — your message is folded in at the next step…' : `Message ${product.name}… (Enter to send, Shift+Enter for newline, / for commands)`"
+            :placeholder="gateway.hasOpenUserInput
+              ? 'Waiting on the card above — use its Configure to change the engine or prompt…'
+              : gateway.isLoading ? 'Steer the running turn — your message is queued and read at its next step…' : `Message ${product.name}… (Enter to send, Shift+Enter for newline, / for commands)`"
             rows="3"
           />
           <div v-if="steeringNote" class="chat-composer__steering-note">{{ steeringNote }}</div>
@@ -919,6 +935,26 @@
               <span class="capitalize">{{ currentEffort }}</span>
             </button>
 
+            <!-- Whether a render in this chat stops for the user's settings first. The same
+                 session setting as the card's "Always Auto in this chat". -->
+            <button
+              @click="toggleImageSettingsPrompt"
+              class="btn-brand-ghost px-3 py-3 rounded-2xl shrink-0 transition-colors text-xs font-semibold inline-flex items-center gap-1.5"
+              :class="gateway.currentSessionImageSettingsPrompt === 'auto' ? 'opacity-60 hover:opacity-100' : 'opacity-80 hover:opacity-100'"
+              :title="gateway.currentSessionImageSettingsPrompt === 'auto'
+                ? 'Images: auto — renders use the agent\'s settings without asking. Click to be asked first.'
+                : 'Images: ask — before each render you can pick the engine, size, seed and mask. Click to always use the agent\'s settings.'"
+              :aria-label="`Image settings: ${gateway.currentSessionImageSettingsPrompt}`"
+              :aria-pressed="gateway.currentSessionImageSettingsPrompt === 'ask'"
+            >
+              <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="3" y="4" width="18" height="16" rx="2" />
+                <circle cx="8.5" cy="9.5" r="1.5" />
+                <path d="m21 16-5-5L5 20" />
+              </svg>
+              <span>Images: {{ gateway.currentSessionImageSettingsPrompt }}</span>
+            </button>
+
             <!-- Thinking toggle lives beside the dropdowns; its state is
                  carried by color/glow alone (active = cyan glow, off =
                  dashed + dim, auto = dim). -->
@@ -946,6 +982,17 @@
           </div>
 
           <div class="chat-composer__primary-actions">
+            <!-- While a turn runs, Steer sends the composer into it — the same as Enter, for
+                 anyone not on a keyboard. Stop stays beside it. -->
+            <button
+              v-if="gateway.isLoading"
+              @click="sendMessage"
+              :disabled="!composerHasContent || !gateway.connected"
+              class="btn-brand-ghost px-4 py-3 rounded-2xl text-sm shrink-0 font-semibold"
+              title="Send this into the running turn — it is read at the turn's next step"
+            >
+              Steer
+            </button>
             <button
               v-if="gateway.isLoading"
               @click="gateway.cancelTurn()"
@@ -957,7 +1004,7 @@
             <button
               v-else
               @click="sendMessage"
-              :disabled="(!inputText.trim() && pendingImageContexts.length === 0 && pendingDocumentContexts.length === 0) || !gateway.connected"
+              :disabled="!composerHasContent || !gateway.connected"
               class="btn-grad px-5 py-3 rounded-2xl text-sm shrink-0"
             >
               Send
@@ -1003,8 +1050,10 @@
     <div
       v-if="previewModalUrl"
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Image preview"
       @click.self="previewModalUrl = null"
-      @keydown.esc.window="previewModalUrl = null"
     >
       <div class="relative max-w-4xl max-h-[90vh] p-2">
         <img
@@ -1021,6 +1070,17 @@
     </div>
     </Transition>
   </Teleport>
+
+  <!-- A settings card's full form. Drawn by the page, not by the card: a message sent mid-turn
+       re-mounts the card in a new segment, and the form must not lose what was typed or painted. -->
+  <ImageSettingsModal
+    v-if="configuringImageRequest"
+    :key="configuringImageRequest.request.inputId"
+    :request="configuringImageRequest.request"
+    :payload="configuringImageRequest.payload"
+    :always-auto="gateway.currentSessionImageSettingsPrompt === 'auto'"
+    @close="gateway.closeUserInputForm()"
+  />
 </template>
 
 <script setup lang="ts">
@@ -1039,7 +1099,14 @@ import { readSpeakReplySummaryStorage, writeSpeakReplySummaryStorage } from "@/s
 import { marked } from "marked";
 import MessageBubble from "@/components/MessageBubble.vue";
 import StepDetailPanel from "@/components/StepDetailPanel.vue";
+import UserInputCard from "@/components/input/UserInputCard.vue";
+import ImageSettingsModal from "@/components/input/ImageSettingsModal.vue";
+import { readImageSettingsPayload } from "@/composables/imageSettings";
+import { formatCountdown, remainingMs } from "@/composables/userInputs";
 import { stepsFor } from "@/composables/turnSteps";
+import { followFocusedStep, latestTurn } from "@/composables/turnSegments";
+import { useEscapeToClose } from "@/composables/useEscapeToClose";
+import { followGrowth, LANDING_FOLLOW_MS } from "@/composables/scrollFollow";
 import SwarmStatusPanel from "@/components/SwarmStatusPanel.vue";
 import ComputerSessionPanel from "@/components/ComputerSessionPanel.vue";
 import ShellSessionPanel from "@/components/ShellSessionPanel.vue";
@@ -1063,6 +1130,16 @@ const shellStore = useShellStore();
 const router = useRouter();
 const inputText = ref("");
 const steeringNote = ref("");   // transient note shown after a mid-turn steering message is sent
+let steeringNoteTimer: number | null = null;
+function showSteeringNote(text: string): void {
+  // One timer for the note, so an earlier note's timeout cannot clear a later one early.
+  if (steeringNoteTimer !== null) window.clearTimeout(steeringNoteTimer);
+  steeringNote.value = text;
+  steeringNoteTimer = window.setTimeout(() => {
+    steeringNote.value = "";
+    steeringNoteTimer = null;
+  }, 6000);
+}
 const sessionIdCopied = ref(false); // transient "Copied!" feedback for the session-id click-to-copy
 
 /** Copy the full current session id to the clipboard (clicking the shortened id). */
@@ -1126,9 +1203,12 @@ const pendingImageContexts = ref<Array<{ filename: string; file: File; previewUr
 /** Documents queued for the current composer message — persisted + ingested into
  *  the engram document library on submit (not inlined into the prompt). */
 const pendingDocumentContexts = ref<Array<{ filename: string; file: File }>>([]);
+const composerHasContent = computed(() =>
+  Boolean(inputText.value.trim()) || pendingImageContexts.value.length > 0 || pendingDocumentContexts.value.length > 0);
 /** The Options <details> element, so attaching a file can close it. */
 const optionsDetailsEl = ref<HTMLDetailsElement | null>(null);
 const previewModalUrl = ref<string | null>(null);
+useEscapeToClose(() => previewModalUrl.value !== null, () => { previewModalUrl.value = null; });
 const expandedMessageHistory = ref(false);
 const approvalNowMs = ref(Date.now());
 let approvalClockId: number | null = null;
@@ -1147,6 +1227,27 @@ const approvalCountdownLabel = computed(() => {
   if (remaining <= 0) return "Expiring now";
   return `Expires in ${formatApprovalCountdown(remaining)}`;
 });
+
+// The ask_user banner counts down to the server's deadline too; past it, the server stops waiting
+// for an answer and the store takes the banner away.
+const inputRequestCountdownLabel = computed(() => {
+  const left = remainingMs(gateway.pendingInputRequest?.expiresAt, approvalNowMs.value);
+  return left === null ? "" : `Expires in ${formatCountdown(left)}`;
+});
+
+/** The settings card whose full form is open, with its payload read — or null. */
+const configuringImageRequest = computed(() => {
+  const id = gateway.configuringUserInputId;
+  const request = id ? gateway.userInputs[id] : undefined;
+  const payload = request?.kind === "image_settings" ? readImageSettingsPayload(request.payload) : null;
+  return request && payload ? { request, payload } : null;
+});
+
+function toggleImageSettingsPrompt(): void {
+  void gateway.updateSessionSettings({
+    imageSettingsPrompt: gateway.currentSessionImageSettingsPrompt === "auto" ? "ask" : "auto",
+  });
+}
 
 function formatApprovalCountdown(value: number): string {
   const totalSeconds = Math.max(0, Math.ceil(value / 1_000));
@@ -1596,7 +1697,7 @@ const orbAiState = computed(() => {
   if (gateway.isError || gateway.turnLikelyStalled) return "error";
   // Approval/input/intervention means the AI is idle waiting on the human —
   // show "waiting" (attention), not "activity" (working).
-  if (gateway.pendingApproval || gateway.pendingInputRequest || gateway.pendingIntervention) {
+  if (gateway.pendingApproval || gateway.pendingInputRequest || gateway.pendingIntervention || gateway.hasOpenUserInput) {
     return "waiting";
   }
   // Tokens visibly arriving outranks still-unresolved tool calls.
@@ -1656,19 +1757,16 @@ const stepDetailSteps = computed(() => {
 // already does, and the two disagreeing reads like a bug.
 const stepDetailToolCount = computed(() => stepDetailSteps.value.filter(step => step.kind === "tool").length);
 
-// A step clicked WHILE the turn runs belongs to the "streaming" placeholder, which is replaced
-// under a new id when the turn lands. Follow the STEP, not a guess at the message: settleSteps
-// keeps step ids, so the only message that can contain this one is the one that inherited this
-// turn's record. Guessing "the last assistant message" picked the previous turn's answer when
-// a turn was superseded, and another session's answer after a switch.
-watch(() => gateway.messages.some(m => m.id === "streaming"), (streamingNow, streamingBefore) => {
-  if (!streamingBefore || streamingNow || stepDetailMessageId.value !== "streaming") return;
-  const stepId = focusedStepId.value;
-  const landed = stepId
-    ? [...gateway.messages].reverse().find(m => m.id !== "streaming" && m.steps?.some(step => step.id === stepId))
-    : undefined;
-  stepDetailMessageId.value = landed?.id ?? null;
-  if (!landed) focusedStepId.value = null;
+// A step clicked WHILE the turn runs belongs to the "streaming" placeholder, and it leaves that
+// bubble when the turn lands or when a message the user sent mid-turn is read (see
+// followFocusedStep). Follow the STEP, not a guess at the message: step ids survive both moves,
+// so the only message that can contain this one is the one that took it. Guessing "the last
+// assistant message" picked the previous turn's answer when a turn was superseded, and another
+// session's answer after a switch.
+watch(() => followFocusedStep(gateway.messages, stepDetailMessageId.value, focusedStepId.value), (target) => {
+  if (target === undefined) return;
+  stepDetailMessageId.value = target;
+  if (target === null) focusedStepId.value = null;
 });
 
 // Another session is another conversation; never leave its steps open against this one.
@@ -1816,18 +1914,17 @@ watch(() => gateway.currentSessionId, () => {
 });
 const runningSceneJobs = computed(() => scenesStore.runningJobs.slice(0, 3));
 const VISIBLE_TAIL = 6;
+/**
+ * The newest turn, which stays open and in view as a whole: a turn the user spoke into runs
+ * as several bubbles with their messages between them, and it is still one answer being told —
+ * folding its first part away, or hiding it behind "show older", would cut it in half.
+ */
+const latestTurnView = computed(() => latestTurn(displayMessages.value));
 const visibleMessages = computed(() => {
   if (expandedMessageHistory.value || displayMessages.value.length <= VISIBLE_TAIL) {
     return displayMessages.value;
   }
-  return displayMessages.value.slice(-VISIBLE_TAIL);
-});
-/** Index of the last assistant message inside visibleMessages (never auto-collapsed). */
-const lastAssistantVisibleIdx = computed(() => {
-  for (let i = visibleMessages.value.length - 1; i >= 0; i--) {
-    if (visibleMessages.value[i].role === 'assistant') return i;
-  }
-  return -1;
+  return displayMessages.value.slice(Math.min(displayMessages.value.length - VISIBLE_TAIL, latestTurnView.value.start));
 });
 const collapsedMessageCount = computed(() => Math.max(0, displayMessages.value.length - visibleMessages.value.length));
 const latestAssistantMessage = computed(() => {
@@ -3129,19 +3226,40 @@ async function sendMessage() {
   const hasImages = pendingImageContexts.value.length > 0;
   const hasDocs = pendingDocumentContexts.value.length > 0;
   if (!trimmedText && !hasImages && !hasDocs) return;
-  // Mid-turn steering: a turn is already running → fold this text into it instead
-  // of dropping the message. Text-only — attachments can't be folded into a turn.
+  // Mid-turn steering: a turn is already running → fold this text into it. Never a new turn,
+  // which would cancel the running one: a message that cannot be delivered stays in the chat
+  // marked as such, with a resend.
   if (gateway.isLoading) {
-    if (!trimmedText || hasImages || hasDocs) return;
-    const sid = gateway.currentSessionId;
-    inputText.value = "";
-    if (sid && await gateway.steerTurn(sid, trimmedText)) {
-      await gateway.appendPendingUserMessage(trimmedText);
-      steeringNote.value = "Steering sent — folding it into the running turn at the next step.";
-      window.setTimeout(() => { steeringNote.value = ""; }, 6000);
+    if (hasImages || hasDocs) {
+      // Text-only — attachments cannot join a running turn. Say so rather than ignore Enter.
+      showSteeringNote("Attachments can't join a running turn — send them once it finishes.");
       return;
     }
-    inputText.value = trimmedText;
+    inputText.value = "";
+    const state = await gateway.steerRunningTurn(trimmedText);
+    if (state === null) {
+      // Nothing went out. Whatever was typed while it was tried stays.
+      if (!inputText.value.trim()) inputText.value = trimmedText;
+      return;
+    }
+    showSteeringNote(state === "undelivered"
+      ? "Not delivered — use Resend on your message to try again."
+      : state === "sent"
+        ? "The turn had just finished — your message went out as the next one."
+        : state === "held"
+          ? "The turn is finishing — your message goes out as soon as it does."
+          // Mid-turn messages are read between the turn's steps, and a step waiting on a card
+          // does not finish until the card is answered.
+          : gateway.hasOpenUserInput
+            ? "Queued — read once the card is answered and its step finishes. To change the engine or prompt, use Configure on the card."
+            : "Queued — folded into the running turn at its next step.");
+    return;
+  }
+  // The previous message's attachments are still being read, and its turn has not started. Sent
+  // now, this one would start first — and the analysed one would then replace it. It waits.
+  if (analysing.value) {
+    showSteeringNote("Still reading your attachments — send this once they're done.");
+    return;
   }
   const spokenAckLanguage = pendingSpokenAckLanguage.value;
   pendingSpokenAckLanguage.value = null;
@@ -3174,12 +3292,17 @@ async function sendMessage() {
   }
 
   if (pendingImages.length === 0 && pendingDocs.length === 0) {
-    await gateway.sendMessage(trimmedText, thinkingMode.value);
+    try {
+      await gateway.sendMessage(trimmedText, thinkingMode.value);
+    } catch (error) {
+      giveBackUnsentText(trimmedText, error);
+    }
     return;
   }
 
   analysing.value = true;
   let pendingUserMessageId: string | undefined;
+  let attachmentsGivenBack = false;
   try {
     const attachments: ChatAttachment[] = [];
 
@@ -3205,21 +3328,30 @@ async function sendMessage() {
       }
     }
 
-    // Images: analyzed client-side; the analysis text is inlined (unchanged).
+    // Images: analyzed client-side; the analysis text is inlined. Each is also kept in the
+    // session's workspace, like a document: with a workspace path an uploaded picture can be
+    // offered as the base of a later edit, and it still opens after a reload. A failed upload
+    // costs only that — the picture and its analysis still go out.
     let imageContext = "";
     if (pendingImages.length > 0) {
       wakeStatus.value = `Analysing image${pendingImages.length > 1 ? "s" : ""}…`;
-      const dataUrls = await Promise.all(pendingImages.map(p => fileToDataUrl(p.file)));
+      const sid = gateway.currentSessionId ?? "shared";
+      const [dataUrls, stored, analyses] = await Promise.all([
+        Promise.all(pendingImages.map(p => fileToDataUrl(p.file))),
+        Promise.all(pendingImages.map(p => gateway.persistAttachment(p.file, sid).catch(() => null))),
+        Promise.all(pendingImages.map(p => gateway.analyzeImageFile(p.file))),
+      ]);
       for (let i = 0; i < pendingImages.length; i++) {
+        const kept = stored[i];
         attachments.push({
           filename: pendingImages[i]!.filename,
           dataUrl: dataUrls[i],
-          contentType: pendingImages[i]!.file.type || "image/*",
+          contentType: kept?.contentType || pendingImages[i]!.file.type || "image/*",
           previewMode: "image",
           size: pendingImages[i]!.file.size,
+          ...(kept ? { relativePath: kept.relativePath } : {}),
         });
       }
-      const analyses = await Promise.all(pendingImages.map(p => gateway.analyzeImageFile(p.file)));
       imageContext = pendingImages.map((p, i) => `Image analysis (${p.filename}):\n\n${analyses[i]}`).join("\n\n");
     }
 
@@ -3234,10 +3366,28 @@ async function sendMessage() {
     await gateway.sendMessage(fullText, thinkingMode.value, displayContent, attachments, { userMessageId: pendingUserMessageId });
   } catch (error) {
     wakeStatus.value = error instanceof Error ? error.message : String(error);
+    if (!pendingUserMessageId) {
+      // Nothing reached the chat — no session could be made, or reading an attachment failed —
+      // so the whole message goes back to the composer, attachments and all.
+      pendingImageContexts.value = [...pendingImages, ...pendingImageContexts.value];
+      pendingDocumentContexts.value = [...pendingDocs, ...pendingDocumentContexts.value];
+      attachmentsGivenBack = true;
+    }
+    giveBackUnsentText(trimmedText, error);
   } finally {
     analysing.value = false;
-    for (const p of pendingImages) URL.revokeObjectURL(p.previewUrl);
+    if (!attachmentsGivenBack) for (const p of pendingImages) URL.revokeObjectURL(p.previewUrl);
   }
+}
+
+/**
+ * A send that failed must not take the words with it: the composer was cleared as the send
+ * began. They go back unless something new was typed meanwhile. A failure after the message
+ * reached the chat is also shown there, as an error under it.
+ */
+function giveBackUnsentText(text: string, error: unknown): void {
+  if (text && !inputText.value.trim()) inputText.value = text;
+  showSteeringNote(`Not sent — ${error instanceof Error ? error.message : String(error)}`);
 }
 
 async function triggerScene(name: string) {
@@ -3268,7 +3418,9 @@ async function submitInputFreeText() {
   const answer = inputRequestText.value.trim();
   if (!answer) return;
   inputRequestText.value = "";
-  await gateway.respondInput(gateway.pendingInputRequest.inputId, answer);
+  const heard = await gateway.respondInput(gateway.pendingInputRequest.inputId, answer);
+  // Too late to be read: keep what they wrote, so it can still go to the agent as a message.
+  if (!heard && !inputText.value.trim()) inputText.value = answer;
 }
 
 // Same IME / Shift+Enter rules as the composer: bare Enter submits, modified
@@ -3322,8 +3474,13 @@ async function handleRewind(messageId: string) {
     await nextTick();
     composerTextareaEl.value?.focus();
   } catch (err) {
-    console.error("Rewind failed:", err);
+    // Nothing was cut, here or on the server; say why rather than leave the click unanswered.
+    showSteeringNote(`Couldn't restart there — ${err instanceof Error ? err.message : String(err)}`);
   }
+}
+
+async function handleResendSteer(messageId: string) {
+  await gateway.resendSteer(messageId);
 }
 
 async function archiveCurrentSession() {
@@ -3655,12 +3812,56 @@ function jumpToBottom() {
   hasNewBelow.value = false;
 }
 
+// The content's own size, measured. A turn that only runs tools grows inside its one live bubble
+// and its answer replaces that bubble in place, so neither watcher further down ever fires for it
+// (see scrollFollow). Each message row is observed, and rows come and go with the list.
+let contentResizeObserver: ResizeObserver | null = null;
+let contentChildObserver: MutationObserver | null = null;
+let lastContentHeight = 0;
+let turnFollowUntil = 0;
+
+function onContentResize(): void {
+  const el = messagesEl.value;
+  if (!el) return;
+  const height = el.scrollHeight;
+  const action = followGrowth({
+    grewBy: height - lastContentHeight,
+    atBottom: isAtBottom.value,
+    turnLive: gateway.isLoading || Date.now() < turnFollowUntil,
+  });
+  lastContentHeight = height;
+  if (action === "stick") el.scrollTop = el.scrollHeight;
+  else if (action === "mark") hasNewBelow.value = true;
+}
+
+function observeContent(el: HTMLElement | null): void {
+  contentResizeObserver?.disconnect();
+  contentChildObserver?.disconnect();
+  contentResizeObserver = null;
+  contentChildObserver = null;
+  if (!el || typeof ResizeObserver === "undefined" || typeof MutationObserver === "undefined") return;
+  lastContentHeight = el.scrollHeight;
+  const resizeObserver = new ResizeObserver(onContentResize);
+  for (const child of Array.from(el.children)) resizeObserver.observe(child);
+  const childObserver = new MutationObserver((records) => {
+    for (const record of records) {
+      record.addedNodes.forEach((node) => { if (node instanceof Element) resizeObserver.observe(node); });
+      record.removedNodes.forEach((node) => { if (node instanceof Element) resizeObserver.unobserve(node); });
+    }
+    onContentResize();
+  });
+  childObserver.observe(el, { childList: true });
+  contentResizeObserver = resizeObserver;
+  contentChildObserver = childObserver;
+}
+
 let scrollListenerEl: HTMLElement | null = null;
 function attachScrollListener() {
   const el = messagesEl.value;
   if (scrollListenerEl === el) return;
   if (scrollListenerEl) scrollListenerEl.removeEventListener("scroll", recomputeScrollPosition);
   scrollListenerEl = el;
+  observeContent(el);
   if (el) {
     el.addEventListener("scroll", recomputeScrollPosition, { passive: true });
     recomputeScrollPosition();
@@ -3672,11 +3873,15 @@ watch(messagesEl, attachScrollListener);
 onBeforeUnmount(() => {
   if (scrollListenerEl) scrollListenerEl.removeEventListener("scroll", recomputeScrollPosition);
   scrollListenerEl = null;
+  observeContent(null);
   revokePanelObjectUrl();
+  if (steeringNoteTimer !== null) window.clearTimeout(steeringNoteTimer);
 });
 
 watch(() => gateway.messages.length, scrollToBottom);
 watch(() => gateway.streamingText, scrollToBottom);
+// A new question card grows the stream without adding a message; keep it in view.
+watch(() => gateway.sessionUserInputs.length, (count, before) => { if (count > (before ?? 0)) scrollToBottom(); });
 watch(currentProgressStatus, (status) => {
   if (!status || !gateway.isLoading) return;
   void speakProgressUpdate(status);
@@ -3687,15 +3892,22 @@ watch(compactComposer, () => {
 watch(inputText, () => {
   nextTick(() => { adjustComposerHeight(); });
 }, { flush: "post" });
-watch(() => gateway.pendingApproval?.approvalId, () => {
+watch(() => [gateway.pendingApproval?.approvalId, gateway.pendingInputRequest?.inputId], () => {
   approvalNowMs.value = Date.now();
 });
 
 // Auto-speak: fires when a turn finishes (isLoading flips false → true → false)
 // and the speak-reply toggle is on and the user is in voice-input mode.
 let _wasLoading = false;
+// The session the running turn belongs to. Switching sessions mid-turn also clears the flag —
+// the turn goes on there, unwatched — and that is no answer to read aloud.
+let _loadingSessionId: string | null = null;
 watch(() => gateway.isLoading, (loading) => {
-  if (_wasLoading && !loading && speakReplyEnabled.value && showSpeechPlayback.value) {
+  const landedHere = _wasLoading && !loading && gateway.currentSessionId === _loadingSessionId;
+  if (loading) _loadingSessionId = gateway.currentSessionId;
+  // The answer is laid out just after the flag flips; its growth still belongs to the turn.
+  if (landedHere) turnFollowUntil = Date.now() + LANDING_FOLLOW_MS;
+  if (landedHere && speakReplyEnabled.value && showSpeechPlayback.value) {
     void speakLatestAssistant({ reason: "auto" });
   }
   if (!loading) {
@@ -3719,7 +3931,7 @@ watch(() => gateway.connected, async (connected) => {
 onMounted(() => {
   adjustComposerHeight();
   approvalClockId = window.setInterval(() => {
-    if (gateway.pendingApproval) approvalNowMs.value = Date.now();
+    if (gateway.pendingApproval || gateway.pendingInputRequest) approvalNowMs.value = Date.now();
   }, 1_000);
 });
 
@@ -4481,6 +4693,12 @@ onUnmounted(() => {
 .chat-mobile-panels__summary::-webkit-details-marker,
 .chat-dropdown__summary::-webkit-details-marker {
   display: none;
+}
+
+.chat-floating-inputs {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
 }
 
 .chat-history-collapsed {

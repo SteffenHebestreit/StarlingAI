@@ -4,20 +4,28 @@
       <div>
         <h2 class="users-page__title">Users</h2>
         <p class="users-page__subtitle">
-          Manage operator and viewer accounts.  Passwords are stored as bcrypt hashes — plaintext is never persisted.
+          Manage operator and viewer accounts.  Only an admin can add, reset or delete one.  Passwords are stored as bcrypt hashes — plaintext is never persisted.
         </p>
       </div>
       <div class="users-page__actions">
         <button class="users-page__button" :disabled="loading" @click="loadUsers">Refresh</button>
         <button
+          v-if="!accountsFromIdp"
           class="users-page__button users-page__button--primary"
-          :disabled="!isOperator"
-          :title="isOperator ? '' : 'Only operators can add users'"
+          :disabled="!isAdmin"
+          :title="isAdmin ? '' : 'Only admins can add users'"
           @click="openCreateForm"
         >
           + Add user
         </button>
       </div>
+    </div>
+
+    <div v-if="accountsFromIdp" class="users-disabled">
+      <p>
+        Accounts come from the identity provider (SSO), which owns the usernames: no local account
+        can be added here.  Local accounts made before SSO are listed below.
+      </p>
     </div>
 
     <div v-if="bootstrapHandoff" class="users-disabled">
@@ -44,7 +52,8 @@
     <div v-if="loading && users.length === 0" class="users-page__empty">Loading…</div>
 
     <div v-else-if="users.length === 0" class="users-page__empty">
-      No users configured yet.  Click <strong>Add user</strong> to create the first account.
+      <template v-if="accountsFromIdp">No local accounts.</template>
+      <template v-else>No users configured yet.  Click <strong>Add user</strong> to create the first account.</template>
     </div>
 
     <ul v-else class="user-grid">
@@ -60,14 +69,19 @@
             </div>
             <code class="user-card__username">{{ user.username }}</code>
           </div>
-          <button
-            v-if="isOperator && user.username !== currentUsername"
-            class="user-card__button user-card__button--danger"
-            :disabled="deleting === user.username"
-            @click="deleteUser(user)"
-          >
-            {{ deleting === user.username ? "…" : "Delete" }}
-          </button>
+          <div v-if="isAdmin" class="user-card__actions">
+            <button class="user-card__button user-card__button--neutral" @click="openResetForm(user)">
+              Reset password
+            </button>
+            <button
+              v-if="user.username !== currentUsername"
+              class="user-card__button user-card__button--danger"
+              :disabled="deleting === user.username"
+              @click="deleteUser(user)"
+            >
+              {{ deleting === user.username ? "…" : "Delete" }}
+            </button>
+          </div>
         </div>
         <p v-if="user.createdAt" class="user-card__meta">Created {{ formatTimestamp(user.createdAt) }}</p>
       </li>
@@ -127,6 +141,37 @@
         </div>
       </form>
     </div>
+
+    <div
+      v-if="resetting"
+      class="users-create-modal"
+      role="dialog"
+      aria-modal="true"
+      @click.self="closeResetForm"
+    >
+      <form class="users-create-card" @submit.prevent="submitReset">
+        <h3 class="users-create-card__title">New password for {{ resetting }}</h3>
+        <label class="users-create-card__label">
+          Password
+          <input
+            v-model="resetPassword"
+            type="password"
+            class="input-line"
+            autocomplete="new-password"
+            minlength="8"
+            required
+          />
+          <span class="users-create-card__hint">≥ 8 characters.  Sessions already signed in stay signed in until their token expires.</span>
+        </label>
+        <p v-if="formError" class="users-page__error">{{ formError }}</p>
+        <div class="users-create-card__actions">
+          <button type="button" class="users-page__button" @click="closeResetForm">Cancel</button>
+          <button type="submit" class="users-page__button users-page__button--primary" :disabled="submitting">
+            {{ submitting ? "Saving…" : "Set password" }}
+          </button>
+        </div>
+      </form>
+    </div>
   </div>
 </template>
 
@@ -138,17 +183,21 @@ import { useAuthStore } from "@/stores/auth";
 interface User {
   username: string;
   displayName?: string;
-  role: "operator" | "viewer";
+  role: "admin" | "operator" | "viewer";
   createdAt?: string;
 }
 
 const gateway = useGatewayStore();
 const auth = useAuthStore();
-const isOperator = computed(() => auth.isOperator);
+// Adding, resetting and deleting accounts is admin-only at the gateway (user-routes.ts): operator
+// is every account's default role, so an operator could otherwise become anyone.
+const isAdmin = computed(() => auth.currentUser?.role === "admin");
 const currentUsername = computed(() => auth.currentUser?.username);
 
 const users = ref<User[]>([]);
 const authEnabled = ref(true);
+// Under OIDC the identity provider owns the usernames and the gateway creates no local account.
+const accountsFromIdp = ref(false);
 const loading = ref(false);
 const errorMessage = ref<string | null>(null);
 const deleting = ref<string | null>(null);
@@ -166,6 +215,10 @@ const form = ref({
   displayName: "",
   role: "operator" as "operator" | "viewer",
 });
+// The account whose password is being reset. Re-creating an account whose name owns sessions is
+// refused, so this is how a forgotten password is fixed.
+const resetting = ref<string | null>(null);
+const resetPassword = ref("");
 
 function apiBase(): string {
   return gateway.wsUrl.replace(/^ws/, "http").replace(/\/ws$/, "");
@@ -185,8 +238,9 @@ async function loadUsers(): Promise<void> {
         : `Failed to load users (${res.status})`;
       return;
     }
-    const body = await res.json() as { enabled: boolean; users: User[] };
+    const body = await res.json() as { enabled: boolean; provider?: string; users: User[] };
     authEnabled.value = body.enabled;
+    accountsFromIdp.value = body.provider === "oidc";
     users.value = body.users;
   } catch (err) {
     errorMessage.value = (err as Error).message;
@@ -242,6 +296,44 @@ async function submitCreate(): Promise<void> {
       return;
     }
     await loadUsers();
+  } finally {
+    submitting.value = false;
+  }
+}
+
+function openResetForm(user: User): void {
+  resetting.value = user.username;
+  resetPassword.value = "";
+  formError.value = null;
+}
+
+function closeResetForm(): void {
+  resetting.value = null;
+}
+
+async function submitReset(): Promise<void> {
+  if (!resetting.value) return;
+  formError.value = null;
+  submitting.value = true;
+  try {
+    const res = await fetch(`${apiBase()}/api/auth/users/${encodeURIComponent(resetting.value)}`, {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${gateway.token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ password: resetPassword.value }),
+    });
+    if (!res.ok) {
+      let message = `Failed (${res.status})`;
+      try {
+        const body = await res.json() as { error?: string };
+        if (body.error) message = body.error;
+      } catch { /* ignore */ }
+      formError.value = message;
+      return;
+    }
+    closeResetForm();
   } finally {
     submitting.value = false;
   }
@@ -483,6 +575,22 @@ onMounted(() => {
 .user-card__button:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+.user-card__actions {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.user-card__button--neutral {
+  border-color: rgba(168, 85, 247, 0.4);
+  color: rgb(216 180 254);
+}
+
+.user-card__button--neutral:hover:not(:disabled) {
+  background: rgba(124, 58, 237, 0.25);
 }
 
 .users-create-modal {

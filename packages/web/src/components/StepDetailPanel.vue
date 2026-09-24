@@ -5,7 +5,7 @@
         v-for="(step, index) in steps"
         :key="step.id"
         :ref="(el) => registerRow(step.id, el)"
-        :class="['sdp-item', `sdp-item--${step.status}`, {
+        :class="['sdp-item', `sdp-item--${displayStatus(step)}`, {
           'sdp-item--nested': step.depth === 1,
           'sdp-item--focus': step.id === focusStepId,
           'sdp-item--note': step.kind === 'note',
@@ -65,6 +65,7 @@
 <script setup lang="ts">
 import { nextTick, ref, watch } from "vue";
 import {
+  displayStatus,
   formatDuration,
   stepDurationMs,
   stepOutcome,
@@ -116,9 +117,12 @@ function durationOf(step: TurnStep): string {
 }
 
 function statusLabel(step: TurnStep): string {
-  if (step.status === "running") return "running…";
-  if (step.status === "failed") return "failed";
-  if (step.status === "stopped") return "no result";
+  // A render the user skipped is their choice, as the stream's row and the Outcome line say.
+  const status = displayStatus(step);
+  if (status === "running") return "running…";
+  if (status === "skipped") return "skipped by you";
+  if (status === "failed") return "failed";
+  if (status === "stopped") return "no result";
   return durationOf(step) || "done";
 }
 
@@ -180,6 +184,7 @@ function printable(value: unknown): string {
 .sdp-item--done .sdp-status { color: #4ade80; opacity: 1; }
 .sdp-item--failed .sdp-status { color: #f87171; opacity: 1; }
 .sdp-item--stopped .sdp-status { color: #fbbf24; opacity: 1; }
+.sdp-item--skipped .sdp-status { color: rgb(156 163 175); opacity: 1; }
 
 .sdp-body { padding: 0.1rem 0.45rem 0.6rem 2.1rem; font-size: 0.76rem; }
 .sdp-facts { display: grid; grid-template-columns: auto 1fr; gap: 0.15rem 0.75rem; margin: 0 0 0.5rem; }

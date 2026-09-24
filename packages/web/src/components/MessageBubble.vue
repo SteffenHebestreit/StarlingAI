@@ -33,8 +33,13 @@
            fully-expanded step list, which pushed live reasoning off-screen exactly when it was
            happening. -->
       <div v-if="displayThinkingContent || isThinking" class="thinking-section">
-        <div class="thinking-header" @click="thinkingOpen = !thinkingOpen">
-          <span v-if="isThinking" class="thinking-indicators">
+        <button
+          type="button"
+          class="thinking-header"
+          :aria-expanded="thinkingOpen || isThinking"
+          @click="thinkingOpen = !thinkingOpen"
+        >
+          <span v-if="isThinking" class="thinking-indicators" aria-label="Thinking">
             <span class="thinking-dot">·</span>
             <span class="thinking-dot">·</span>
             <span class="thinking-dot">·</span>
@@ -42,8 +47,8 @@
           <span v-else class="thinking-toggle-label">
             {{ thinkingOpen ? 'Hide thinking' : 'Show thinking' }}
           </span>
-          <span v-if="!isThinking" class="thinking-chevron">{{ thinkingOpen ? '▲' : '▼' }}</span>
-        </div>
+          <span v-if="!isThinking" class="thinking-chevron" aria-hidden="true">{{ thinkingOpen ? '▲' : '▼' }}</span>
+        </button>
         <div v-if="thinkingOpen || isThinking" class="thinking-body">
           {{ displayThinkingContent }}
         </div>
@@ -51,12 +56,17 @@
 
       <!-- Sub-agent reasoning — live while the delegate works, collapsed once it is history -->
       <div v-if="subAgentReasoning.length" class="thinking-section thinking-section--subagent">
-        <div class="thinking-header" @click="toggleSubAgentReasoning()">
+        <button
+          type="button"
+          class="thinking-header"
+          :aria-expanded="showSubAgentReasoning"
+          @click="toggleSubAgentReasoning()"
+        >
           <span class="thinking-toggle-label">
             {{ showSubAgentReasoning ? 'Hide' : 'Show' }} sub-agent thinking ({{ subAgentReasoning.length }})
           </span>
-          <span class="thinking-chevron">{{ showSubAgentReasoning ? '▲' : '▼' }}</span>
-        </div>
+          <span class="thinking-chevron" aria-hidden="true">{{ showSubAgentReasoning ? '▲' : '▼' }}</span>
+        </button>
         <div v-if="showSubAgentReasoning" class="thinking-body">
           <div
             v-for="(entry, i) in subAgentReasoning"
@@ -78,8 +88,19 @@
         :is-streaming="isStreamingMessage"
         :live-text="isStreamingMessage ? message.statusText : undefined"
         :start-collapsed="autoCollapse"
+        :awaiting="awaitingSteps"
         @select="(stepId) => emit('show-step', message.id, stepId)"
-      />
+      >
+        <!-- A question a step is waiting on sits under that step, so it moves with the step
+             when a message sent mid-turn cuts this bubble. -->
+        <template #input="{ stepId }">
+          <UserInputCard
+            v-for="inputId in gateway.userInputPlacement.byStep[placementKey(message.id, stepId)] ?? []"
+            :key="inputId"
+            :input-id="inputId"
+          />
+        </template>
+      </TurnStepStream>
 
       <!-- Image attachments -->
       <div v-if="imageAttachments.length" class="message-attachments">
@@ -167,14 +188,30 @@
         </button>
       </div>
 
+      <!-- A message sent into a running turn: where it stands. It sits below everything the
+           turn did before reading it, so the reader needs to know it was not what opened the
+           turn — and, until it is read, that it is still on its way. -->
+      <div v-if="steerBadge" :class="['steer-status', `steer-status--${steerBadge.tone}`]" :title="steerBadge.title">
+        <span>{{ steerBadge.label }}</span>
+        <button
+          v-if="message.steer?.state === 'undelivered'"
+          class="export-btn"
+          title="Send this message again"
+          @click="emit('resend', message.id)"
+        >↻ Resend</button>
+      </div>
+
       <!-- Timestamp + usage row -->
       <div class="message-footer">
         <div class="message-time">{{ formatTime(message.timestamp) }}</div>
         <div v-if="!isStreaming && mainContent" class="message-export-actions">
           <button @click="exportMessageMarkdown" title="Download as Markdown" class="export-btn">⬇ MD</button>
           <button @click="exportMessagePDF" title="Export as PDF" class="export-btn">⬇ PDF</button>
+          <!-- Not on a message read mid-turn: restarting there would cut the turn it was read into
+               in half, on the server as well as here. Nor while any turn runs: the rewind would
+               cut the history under a runtime that is still appending to it. -->
           <button
-            v-if="message.role === 'user'"
+            v-if="message.role === 'user' && !message.midTurn && !message.steer && allowRewind !== false"
             @click="emit('rewind', message.id)"
             title="Restart the conversation from this message"
             class="export-btn"
@@ -218,14 +255,17 @@
     <div
       v-if="lightboxUrl"
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Image preview"
       @click.self="lightboxUrl = null"
-      @keydown.esc.window="lightboxUrl = null"
     >
       <div class="relative max-w-4xl max-h-[90vh] p-2">
         <img :src="lightboxUrl" alt="Attachment preview" class="max-w-full max-h-[85vh] rounded-xl object-contain shadow-2xl" />
         <button
           @click="lightboxUrl = null"
           class="absolute -top-2 -right-2 w-7 h-7 rounded-full bg-gray-800 border border-gray-600 text-gray-300 hover:text-white hover:bg-gray-700 flex items-center justify-center text-sm transition-colors"
+          aria-label="Close preview"
         >✕</button>
       </div>
     </div>
@@ -235,8 +275,10 @@
     <div
       v-if="artifactPreview"
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm"
+      role="dialog"
+      aria-modal="true"
+      :aria-label="`Artifact preview: ${artifactPreview.title}`"
       @click.self="closeArtifactPreview"
-      @keydown.esc.window="closeArtifactPreview"
     >
       <div class="artifact-preview-modal">
         <div class="artifact-preview-modal__header">
@@ -244,7 +286,7 @@
             <div class="artifact-preview-modal__eyebrow">Artifact Preview</div>
             <div class="artifact-preview-modal__title">{{ artifactPreview.title }}</div>
           </div>
-          <button @click="closeArtifactPreview" class="artifact-preview-modal__close">✕</button>
+          <button @click="closeArtifactPreview" class="artifact-preview-modal__close" aria-label="Close preview">✕</button>
         </div>
 
         <div class="artifact-preview-modal__body">
@@ -283,159 +325,40 @@
   </Teleport>
 </template>
 
-<script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
-import { marked, type Tokens } from "marked";
-import DOMPurify from "dompurify";
-import { useProductStore } from "@/stores/product";
-import TurnStepStream from "@/components/TurnStepStream.vue";
-import { stepsFor } from "@/composables/turnSteps";
-import { renderInlineImage } from "@/composables/inlineImages";
-
-// Product name comes from GET /api/product so a fork rebrands without editing this
-// file (docs/fork-boilerplate-plan.md WS1).
-const product = useProductStore();
+<script lang="ts">
+// Module scope — shared by every bubble rather than set up again in each one.
+//
 // mermaid (hundreds of KB) is dynamically imported so it is NOT in the landing
 // chat chunk — it loads only when a message actually contains a diagram. Rollup
-// auto-splits the dynamic import into its own chunk.
+// auto-splits the dynamic import into its own chunk. The render counter lives here
+// too: mermaid.render takes an id for a scratch element in the document, and a
+// counter per bubble handed two bubbles rendering at once the same id.
 type MermaidModule = (typeof import("mermaid"))["default"];
 let mermaidModule: MermaidModule | null = null;
+let mermaidInitialized = false;
+let mermaidRenderCounter = 0;
 async function loadMermaid(): Promise<MermaidModule> {
   if (!mermaidModule) mermaidModule = (await import("mermaid")).default;
   return mermaidModule;
 }
-import hljs from "highlight.js/lib/core";
-import bash from "highlight.js/lib/languages/bash";
-import css from "highlight.js/lib/languages/css";
-import diff from "highlight.js/lib/languages/diff";
-import dockerfile from "highlight.js/lib/languages/dockerfile";
-import go from "highlight.js/lib/languages/go";
-import ini from "highlight.js/lib/languages/ini";
-import java from "highlight.js/lib/languages/java";
-import javascript from "highlight.js/lib/languages/javascript";
-import json from "highlight.js/lib/languages/json";
-import markdown from "highlight.js/lib/languages/markdown";
-import plaintext from "highlight.js/lib/languages/plaintext";
-import python from "highlight.js/lib/languages/python";
-import rust from "highlight.js/lib/languages/rust";
-import shell from "highlight.js/lib/languages/shell";
-import sql from "highlight.js/lib/languages/sql";
-import typescript from "highlight.js/lib/languages/typescript";
-import xml from "highlight.js/lib/languages/xml";
-import yaml from "highlight.js/lib/languages/yaml";
+</script>
+
+<script setup lang="ts">
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import DOMPurify from "dompurify";
+import { useProductStore } from "@/stores/product";
+import TurnStepStream from "@/components/TurnStepStream.vue";
+import UserInputCard from "@/components/input/UserInputCard.vue";
+import { stepsFor } from "@/composables/turnSteps";
+import { localExpiresAt, placementKey } from "@/composables/userInputs";
+import { escapeHtml, memoizedRenderMarkdown, renderMarkdown, renderStreamingMarkdown } from "@/composables/markdown";
+import { useEscapeToClose } from "@/composables/useEscapeToClose";
 import "highlight.js/styles/github-dark.css";
 import { sanitizeAssistantMessageContent, useGatewayStore, type ChatAttachment, type ChatMessage } from "@/stores/gateway";
 
-// ── highlight.js: register only the languages we expect to see in chat to keep
-// the bundle small. Aliases (sh, ts, js, html, etc.) come from the language
-// modules themselves. Unknown languages fall through to plaintext.
-hljs.registerLanguage("bash", bash);
-hljs.registerLanguage("css", css);
-hljs.registerLanguage("diff", diff);
-hljs.registerLanguage("dockerfile", dockerfile);
-hljs.registerLanguage("go", go);
-hljs.registerLanguage("ini", ini);
-hljs.registerLanguage("java", java);
-hljs.registerLanguage("javascript", javascript);
-hljs.registerLanguage("json", json);
-hljs.registerLanguage("markdown", markdown);
-hljs.registerLanguage("plaintext", plaintext);
-hljs.registerLanguage("python", python);
-hljs.registerLanguage("rust", rust);
-hljs.registerLanguage("shell", shell);
-hljs.registerLanguage("sql", sql);
-hljs.registerLanguage("typescript", typescript);
-hljs.registerLanguage("xml", xml);
-hljs.registerLanguage("yaml", yaml);
-
-function escapeAttr(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-function highlightCode(code: string, lang: string): string {
-  const trimmed = (lang ?? "").trim().toLowerCase();
-  if (trimmed && hljs.getLanguage(trimmed)) {
-    try {
-      return hljs.highlight(code, { language: trimmed, ignoreIllegals: true }).value;
-    } catch {
-      // fall through to escapeHtml below
-    }
-  }
-  return code
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
-function sanitizeSvgMarkup(raw: string): string | null {
-  const normalized = raw.replace(/^\uFEFF/, "").replace(/^<\?xml[^>]*>\s*/i, "").trim();
-  const match = normalized.match(/<svg[\s\S]*?<\/svg>/i);
-  if (!match) return null;
-  const sanitized = DOMPurify.sanitize(match[0], {
-    USE_PROFILES: { html: true, svg: true, svgFilters: true },
-  }).trim();
-  return /<svg[\s\S]*?<\/svg>/i.test(sanitized) ? sanitized : null;
-}
-
-function renderSvgPreviewBlock(code: string, lang: string): string | null {
-  const normalizedLang = (lang ?? "").trim().toLowerCase();
-  if (normalizedLang && !["svg", "xml", "html"].includes(normalizedLang)) {
-    return null;
-  }
-  const svg = sanitizeSvgMarkup(code);
-  if (!svg) return null;
-  return svg;
-}
-
-// Override marked's code renderer once at module load so every <pre><code> in
-// the chat gets a header bar with an optional language label and a copy button.
-// The button has data-copy-code so a single click handler on the message
-// wrapper can find the matching <code> and copy its text.
-marked.use({
-  renderer: {
-    code({ text, lang }: Tokens.Code): string {
-      const language = (lang ?? "").trim();
-      if (language === "mermaid") {
-        // Leave mermaid blocks untouched so the existing inline mermaid
-        // renderer / artifact preview can handle them downstream.
-        return `<pre><code class="language-mermaid">${escapeAttr(text)}</code></pre>`;
-      }
-      const highlighted = highlightCode(text, language);
-      const svgPreview = renderSvgPreviewBlock(text, language);
-      const langLabel = language
-        ? `<span class="code-block__lang">${escapeAttr(language)}</span>`
-        : "<span class=\"code-block__lang code-block__lang--unknown\">code</span>";
-      const actions = svgPreview
-        ? `<div class="code-block__actions">
-    <div class="code-block__toggle-group" role="tablist" aria-label="SVG block display mode">
-      <button class="code-block__toggle code-block__toggle--active" data-svg-mode-button="preview" type="button" aria-pressed="true">Preview</button>
-      <button class="code-block__toggle" data-svg-mode-button="code" type="button" aria-pressed="false">Code</button>
-    </div>
-    <button class="code-block__copy" data-copy-code="1" type="button" aria-label="Copy code to clipboard">Copy</button>
-  </div>`
-        : `<button class="code-block__copy" data-copy-code="1" type="button" aria-label="Copy code to clipboard">Copy</button>`;
-      return `<div class="code-block${svgPreview ? " code-block--svg" : ""}"${svgPreview ? ' data-svg-mode="preview"' : ""}>
-  <div class="code-block__header">
-    ${langLabel}
-    ${actions}
-  </div>
-  ${svgPreview ? `<div class="code-block__svg-preview" data-svg-panel="preview" aria-label="SVG preview">${svgPreview}</div>` : ""}
-  <pre${svgPreview ? ' data-svg-panel="code"' : ""}><code class="language-${escapeAttr(language || "plaintext")} hljs">${highlighted}</code></pre>
-</div>`;
-    },
-    // An inline image of a workspace file becomes a short reference: as a relative URL it only
-    // ever reached the SPA's index.html, and the attachment card shows the picture itself.
-    // Remote and data: images fall through to marked's own renderer (composables/inlineImages.ts).
-    image({ href, text }: Tokens.Image): string | false {
-      return renderInlineImage({ href, text });
-    },
-  },
-});
+// Product name comes from GET /api/product so a fork rebrands without editing this
+// file (docs/fork-boilerplate-plan.md WS1).
+const product = useProductStore();
 
 interface ArtifactPreviewState {
   title: string;
@@ -457,8 +380,6 @@ interface ArtifactPreviewState {
   };
 }
 
-let mermaidInitialized = false;
-let mermaidRenderCounter = 0;
 let mermaidInlineRenderToken = 0;
 
 const MERMAID_START_RE = /^(?:%%\{.*\}%%|%%\s|flowchart|graph|sequenceDiagram|classDiagram|stateDiagram(?:-v2)?|erDiagram|journey|gantt|pie|mindmap|timeline|gitGraph|quadrantChart|requirementDiagram|xychart-beta|block-beta|architecture-beta|packet-beta|kanban|sankey-beta|radar-beta|treemap-beta|info)\b/i;
@@ -472,10 +393,14 @@ const props = defineProps<{
   /** Live per-sub-agent chain-of-thought for the in-flight turn. */
   streamingSubAgentReasoning?: Array<{ agent: string; text: string }>;
   autoCollapse?: boolean;
+  /** False while a turn runs: a Restart then would cut the history under it. */
+  allowRewind?: boolean;
 }>();
 
 const emit = defineEmits<{
   rewind: [messageId: string];
+  /** Try again to deliver a message sent into a running turn that never reached it. */
+  resend: [messageId: string];
   /** Ask the page to show ONE step of this message in the side panel. */
   "show-step": [messageId: string, stepId: string];
 }>();
@@ -492,6 +417,35 @@ const renderedMessageRef = ref<HTMLElement | null>(null);
 const contentCollapsed = ref(props.autoCollapse ?? false);
 const turnSteps = computed(() => stepsFor(props.message));
 const isStreamingMessage = computed(() => props.message.id === "streaming");
+/** This bubble's steps that have an open question under them. */
+const awaitingSteps = computed(() => {
+  const byStep = gateway.userInputPlacement.byStep;
+  const awaiting: Record<string, { kind: string; expiresAt: string }> = {};
+  for (const step of turnSteps.value) {
+    const first = byStep[placementKey(props.message.id, step.id)]?.[0];
+    const request = first ? gateway.userInputs[first] : undefined;
+    if (request) awaiting[step.id] = { kind: request.kind, expiresAt: localExpiresAt(request) };
+  }
+  return awaiting;
+});
+
+const steerBadge = computed((): { label: string; tone: "pending" | "error" | "read"; title?: string } | null => {
+  if (props.message.role !== "user") return null;
+  // A reloaded message read mid-turn has no live state, only the flag.
+  const state = props.message.steer?.state ?? (props.message.midTurn ? "consumed" : undefined);
+  switch (state) {
+    case "queued": return { label: "Queued — read at the turn's next step", tone: "pending" };
+    case "held": return { label: "Waiting — sent when this turn finishes", tone: "pending" };
+    case "undelivered": {
+      // The reason matters here — a guardrail refusal needs rewording, a dropped connection only a resend.
+      const error = props.message.steer?.error?.replace(/\s+/g, " ").trim();
+      const shown = error && error.length > 120 ? `${error.slice(0, 119)}…` : error;
+      return { label: shown ? `Not delivered — ${shown}` : "Not delivered", tone: "error", title: error };
+    }
+    case "consumed": return { label: "Sent mid-turn", tone: "read" };
+    default: return null;
+  }
+});
 const mermaidPreviewSvg = ref<Record<string, string>>({});
 const mermaidPreviewErrors = ref<Record<string, string>>({});
 const mermaidPreviewLoading = ref<Record<string, boolean>>({});
@@ -927,6 +881,9 @@ function closeArtifactPreview(): void {
   artifactPreview.value = null;
 }
 
+useEscapeToClose(() => lightboxUrl.value !== null, () => { lightboxUrl.value = null; });
+useEscapeToClose(() => artifactPreview.value !== null, closeArtifactPreview);
+
 async function previewAttachment(attachment: ChatAttachment): Promise<void> {
   if (attachment.dataUrl?.startsWith("data:image/")) {
     lightboxUrl.value = attachment.dataUrl;
@@ -1135,70 +1092,7 @@ async function downloadAttachment(attachment: ChatAttachment, archive = false): 
   anchor.click();
 }
 
-// ── Rendered markdown ─────────────────────────────────────────────────────────
-// breaks=true: single \n in source becomes <br> so multi-line user messages
-//   don't get collapsed into one wrapped paragraph by CommonMark rules.
-// gfm=true:    GitHub-flavored extras (tables, autolinks, ~~strikethrough~~)
-//   that match the conventions assistant messages already use.
-function renderMarkdown(raw: string): string {
-  const html = marked.parse(raw, { async: false, breaks: true, gfm: true }) as string;
-  return DOMPurify.sanitize(html, {
-    USE_PROFILES: { html: true, svg: true, svgFilters: true },
-  });
-}
-
-function escapeHtml(raw: string): string {
-  return raw
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/\"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-/**
- * Stabilize a stream-in-progress so marked doesn't render half-open structures
- * as ugly artifacts that then snap into place when the closer arrives.
- *  - Unclosed fenced code block: append a closing ``` so the partial code is
- *    still rendered as a code block (with the right language class) instead of
- *    cascading into the rest of the message as paragraph text.
- *  - Half-typed inline code (``foo``) is a non-issue — a single ` rolls back
- *    to a literal backtick at render time.
- */
-function stabilizePartialMarkdown(raw: string): string {
-  const fenceCount = (raw.match(/^(```+)/gm) ?? []).length;
-  if (fenceCount % 2 === 1) {
-    const trailing = raw.endsWith("\n") ? "" : "\n";
-    return `${raw}${trailing}\`\`\``;
-  }
-  return raw;
-}
-
-function renderStreamingMarkdown(raw: string): string {
-  return renderMarkdown(stabilizePartialMarkdown(raw));
-}
-
-// Bounded FIFO cache of finalized (non-streaming) rendered markdown. Expanding a
-// long transcript remounts every MessageBubble, which would otherwise re-run
-// marked.parse + DOMPurify over each message again. Keyed by message id + content
-// length (a finalized message's content is immutable). The streaming bubble is
-// never cached (id === "streaming", content changes every token).
-const _renderedMarkdownCache = new Map<string, string>();
-const RENDERED_MARKDOWN_CACHE_MAX = 500;
-function memoizedRenderMarkdown(id: string, raw: string): string {
-  if (id === "streaming") return renderMarkdown(raw);
-  const key = `${id}:${raw.length}`;
-  const cached = _renderedMarkdownCache.get(key);
-  if (cached !== undefined) return cached;
-  const html = renderMarkdown(raw);
-  _renderedMarkdownCache.set(key, html);
-  if (_renderedMarkdownCache.size > RENDERED_MARKDOWN_CACHE_MAX) {
-    const oldest = _renderedMarkdownCache.keys().next().value;
-    if (oldest !== undefined) _renderedMarkdownCache.delete(oldest);
-  }
-  return html;
-}
-
+// ── Rendered markdown (composables/markdown) ─────────────────────────────────
 const renderedContent = computed(() => {
   const raw = mainContent.value;
   if (!raw) return "";
@@ -1218,6 +1112,10 @@ const renderedStreamingContent = computed(() => {
 watch(
   [renderedContent, renderedStreamingContent, () => props.isStreaming],
   () => {
+    // Not while the text is still arriving: v-html rebuilds the DOM every frame, so each frame
+    // re-ran mermaid on a half-written diagram — burning CPU and flashing "Diagram preview
+    // failed" until the source was complete. The finished message renders it once.
+    if (props.isStreaming) return;
     void renderInlineMermaidBlocks();
   },
   { immediate: true, flush: "post" },
@@ -1679,7 +1577,12 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 0.375rem;
+  width: 100%;
   padding: 0.35rem 0.625rem;
+  border: 0;
+  background: none;
+  font: inherit;
+  text-align: left;
   cursor: pointer;
   font-size: 0.75rem;
   color: #a78bfa;
@@ -1949,6 +1852,20 @@ onBeforeUnmount(() => {
   border-radius: 1px;
   animation: pulse 0.9s infinite;
 }
+
+/* ── Mid-turn message status ─────────────────────────────────────────────────── */
+.steer-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.4rem;
+  font-size: 0.68rem;
+  letter-spacing: 0.01em;
+}
+.steer-status--pending { color: rgba(216, 180, 254, 0.8); }
+.steer-status--read    { color: rgba(216, 180, 254, 0.5); }
+.steer-status--error   { color: #fbbf24; }
 
 /* ── Footer (timestamp + usage) ──────────────────────────────────────────────── */
 .message-footer {

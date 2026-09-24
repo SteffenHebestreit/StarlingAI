@@ -38,12 +38,15 @@
       <span v-if="hasLiveContent && !modelValue" class="sp-handle__dot" aria-hidden="true" />
     </button>
 
-    <!-- The drawer panel -->
+    <!-- The drawer panel. Closed, it is only moved off-screen (so it can slide), which left its
+         tabs, step rows and previews in the tab order and in front of screen readers: inert
+         takes all of it out until the panel is open again. -->
     <div
       class="sp-panel"
       :class="{ 'sp-panel--open': modelValue }"
       role="complementary"
       aria-label="Live context and artifacts"
+      :inert="!modelValue"
     >
       <!-- Header with tabs + close -->
       <div class="sp-header">
@@ -134,6 +137,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from "vue";
+import { useEscapeToClose } from "@/composables/useEscapeToClose";
 
 type PanelTab = "live" | "steps" | "artifacts";
 
@@ -155,11 +159,13 @@ const props = defineProps<{
   requestedTab?: PanelTab | null;
 }>();
 
-defineEmits<{
+const emit = defineEmits<{
   "update:modelValue": [value: boolean];
 }>();
 
 const activeTab = ref<PanelTab>("live");
+
+useEscapeToClose(() => props.modelValue, () => emit("update:modelValue", false));
 
 watch(() => props.requestedTab, (tab) => { if (tab) activeTab.value = tab; });
 
