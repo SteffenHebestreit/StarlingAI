@@ -9,7 +9,12 @@
  * instructions and its options under neutral letters, in the order the point defines them — the model is trained on
  * what it will be asked. The same case seen more than once is kept once, with its latest answer.
  *
+ * Beside it, browser-export.jsonl: every browser step the agent's model took on a page laya-browser read (from
+ * browser-ledger.jsonl) — the page, the goal, the history and the model's step, which laya-browser is fine-tuned to
+ * take. Both land in .starlingai/laya/data, which the laya sidecar sees as /models/local/data:
+ *
  *   pnpm --filter @starlingai/core decisions:export [--ledger <path>] [--out <path>] [--points a,b]
+ *   docker compose --profile laya run --rm laya python -m app.train decision     (or: browser)
  */
 import { mkdir, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -63,21 +68,44 @@ export function buildTrainingItems(rows: LedgerRow[], points?: ReadonlySet<strin
   return [...latest.values()];
 }
 
+/**
+ * Browser-ledger rows laya-browser can learn from: steps the agent's model took (and final answers), with the page,
+ * goal and history as laya-browser read them. Its own steps are left out: they teach it nothing it did not know.
+ */
+export function buildBrowserTrainingRows(rows: ReadonlyArray<Record<string, unknown>>): Array<Record<string, unknown>> {
+  return rows.flatMap((row) => {
+    const model = row["model"] as { operation?: unknown } | null | undefined;
+    if (row["point"] !== "browser_step" || row["decidedBy"] !== "model" || typeof model?.operation !== "string") return [];
+    if (!row["observation"] || typeof row["goal"] !== "string") return [];
+    const { ts, sessionId, goal, observation, history, excluded, decidedBy } = row;
+    return [{ ts, sessionId, goal, observation, history: history ?? [], excluded: excluded ?? [], model, decidedBy }];
+  });
+}
+
+async function writeJsonl(path: string, rows: ReadonlyArray<unknown>): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, rows.map((row) => JSON.stringify(row)).join("\n") + (rows.length ? "\n" : ""), "utf8");
+}
+
 async function main(): Promise<void> {
   const ledger = arg("ledger") ?? join(repoRoot, ".starlingai", "decisions", "ledger.jsonl");
   const out = arg("out") ?? join(repoRoot, ".starlingai", "laya", "data", "ledger-export.jsonl");
+  const browserLedger = join(dirname(ledger), "browser-ledger.jsonl");
+  const browserOut = join(dirname(out), "browser-export.jsonl");
   const pointList = arg("points");
-  if (!existsSync(ledger)) {
+  if (!existsSync(ledger) && !existsSync(browserLedger)) {
     console.log(`No decision ledger at ${ledger} yet.`);
     return;
   }
   const items = buildTrainingItems(await readLedgerRows(ledger), pointList ? new Set(pointList.split(",")) : undefined);
-  await mkdir(dirname(out), { recursive: true });
-  await writeFile(out, items.map((item) => JSON.stringify(item)).join("\n") + (items.length ? "\n" : ""), "utf8");
+  await writeJsonl(out, items);
   const counts: Record<string, number> = {};
   for (const item of items) counts[`${item.point}/${item.language}`] = (counts[`${item.point}/${item.language}`] ?? 0) + 1;
   console.log(`Wrote ${items.length} training items to ${out}`);
   for (const [key, count] of Object.entries(counts).sort()) console.log(`  ${key}: ${count}`);
+  const steps = buildBrowserTrainingRows(await readLedgerRows(browserLedger) as unknown as Array<Record<string, unknown>>);
+  await writeJsonl(browserOut, steps);
+  console.log(`Wrote ${steps.length} browser steps to ${browserOut}`);
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {

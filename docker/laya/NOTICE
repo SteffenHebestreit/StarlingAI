@@ -35,6 +35,12 @@ Code adapted into app/:
 3. tests/fixtures/laya_browser_sample_request.json is cklxx/laya-browser code/sample_request.json (Apache-2.0),
    unchanged.
 
+4. The training loop and the temperature fit in app/train.py follow cklxx/laya-browser code/finetune/train.py and
+   code/finetune/calibrate.py (Apache-2.0): laya's RLCD recipe on one device. Changes: the items are built through
+   laya's own encoding path from the questions as this sidecar serves them, the batch accumulation adapts to small
+   data sets, the temperature is fitted within the range laya applies, and a run replaces the served checkpoint only
+   when it agrees with the incumbent more often on held-out cases.
+
 The jev-ultrafast page snapshot script used by the gateway (packages/core/src/decisions/jev-snapshot.ts, the
 browser decider's page read) is jev_ultrafast/snapshot.js @ 1231850 under the same MIT notice, with the snapshot
 changes of cklxx/laya-browser code/jev-ultrafast.patch (Apache-2.0), unchanged otherwise.

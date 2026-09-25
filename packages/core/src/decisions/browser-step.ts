@@ -35,7 +35,7 @@ import { childLogger } from "../logger.js";
 import { getMcpConnections } from "../mcp/registry.js";
 import { getChatProviderForTier } from "../providers/index.js";
 import { runWithCallAttribution } from "../runtime/request-context.js";
-import { languageBucket, layaMayDecide, qualifiedLevel, recordAgreementSample, type LanguageBucket } from "./gate.js";
+import { languageBucket, layaMayDecide, modelsWithSamples, qualifiedLevel, recordAgreementSample, type LanguageBucket } from "./gate.js";
 import { JEV_SNAPSHOT_SCRIPT } from "./jev-snapshot.js";
 import { askLayaBrowser, layaConfigured, type LayaBrowserStep } from "./laya-client.js";
 import { appendBrowserLedgerRow, readLedgerRows, resolveBrowserLedgerPath } from "./ledger.js";
@@ -48,6 +48,13 @@ export const BROWSER_POINT = "browser_step";
 let seeding: Promise<void> | undefined;
 
 /**
+ * The laya-browser version that answered last. An adaptive decider asks the gate before it reads the
+ * page — the read is what costs — and has no answer yet to take the version from, so it asks about
+ * this one: seeded from the ledger, then kept current by every answer.
+ */
+let lastBrowserModel = "";
+
+/**
  * Rebuild the browser gate from the browser ledger, once per process. Started by the first
  * decider without being waited for: until it finishes, the gate knows less and so hands
  * laya-browser less, never more.
@@ -56,12 +63,16 @@ export function seedBrowserGate(): Promise<void> {
   seeding ??= readLedgerRows(resolveBrowserLedgerPath())
     .then((rows) => {
       let seeded = 0;
-      for (const row of rows as unknown as Array<{ point?: string; language?: LanguageBucket; gate?: { answer?: unknown; top?: unknown; agree?: unknown } }>) {
+      let lastSeededModel = "";
+      for (const row of rows as unknown as Array<{ point?: string; language?: LanguageBucket; gate?: { answer?: unknown; top?: unknown; agree?: unknown; model?: unknown } }>) {
         const gate = row.gate;
         if (row.point !== BROWSER_POINT || !gate || typeof gate.answer !== "string" || typeof gate.top !== "number" || typeof gate.agree !== "boolean") continue;
-        recordAgreementSample(BROWSER_POINT, row.language ?? "other", gate.answer, gate.top, gate.agree);
+        const model = typeof gate.model === "string" ? gate.model : "";
+        recordAgreementSample(BROWSER_POINT, row.language ?? "other", gate.answer, gate.top, gate.agree, model);
+        if (model) lastSeededModel = model;
         seeded += 1;
       }
+      if (!lastBrowserModel && lastSeededModel) lastBrowserModel = lastSeededModel;
       if (seeded > 0) log.info({ seeded }, "Browser gate rebuilt from the browser ledger");
     })
     .catch((err: unknown) => {
@@ -70,9 +81,10 @@ export function seedBrowserGate(): Promise<void> {
   return seeding;
 }
 
-/** Test-only: seed again on the next decider. */
+/** Test-only: seed again on the next decider, and forget the last version seen. */
 export function resetBrowserGateSeedingForTests(): void {
   seeding = undefined;
+  lastBrowserModel = "";
 }
 
 /** The model's page actions laya-browser also chooses among, as its operation names. */
@@ -524,7 +536,10 @@ export class LayaBrowserDecider {
         history: asked.history.map(({ action, kind, text, page_changed }) => ({ action, kind, text, page_changed })),
         ...(asked.excluded.length ? { excluded: asked.excluded } : {}),
       }, signal).then((step) => {
-        if (step) this.counts.answered += 1;
+        if (step) {
+          this.counts.answered += 1;
+          lastBrowserModel = step.model;
+        }
         return step;
       });
     }
@@ -577,11 +592,16 @@ export class LayaBrowserDecider {
     }
   }
 
-  /** Has a confidence qualified for any step laya-browser may take here? */
+  /**
+   * Has a confidence qualified for any step laya-browser may take here — for the version answering
+   * now? Before any answer has named that version, any version's qualification is reason enough to
+   * read the page once: the answer to that read names it.
+   */
   private gateOpen(language: LanguageBucket): boolean {
     const adaptive = getConfig().decisions.adaptive;
-    return (this.may.click && qualifiedLevel(BROWSER_POINT, language, "CLICK", adaptive) !== null)
-      || (this.may.select && qualifiedLevel(BROWSER_POINT, language, "SELECT", adaptive) !== null);
+    const answers = [...(this.may.click ? ["CLICK"] : []), ...(this.may.select ? ["SELECT"] : [])];
+    return answers.some((answer) => (lastBrowserModel ? [lastBrowserModel] : modelsWithSamples(BROWSER_POINT, language, answer))
+      .some((model) => qualifiedLevel(BROWSER_POINT, language, answer, adaptive, model) !== null));
   }
 
   /** A scroll or a wait: laya-browser looking at the page, done in place. */
@@ -616,7 +636,7 @@ export class LayaBrowserDecider {
       if (laya.operationProbability < threshold || target.probability < threshold) return null;
     } else {
       const adaptive = getConfig().decisions.adaptive;
-      if (!layaMayDecide(BROWSER_POINT, language, laya.operation, jointProbability(laya), adaptive)) return null;
+      if (!layaMayDecide(BROWSER_POINT, language, laya.operation, jointProbability(laya), adaptive, laya.model)) return null;
       // Some of what it may take still goes to the model: without those, the agreement could not be measured once it acts.
       if (Math.random() < adaptive.auditRate) return null;
     }
@@ -753,7 +773,7 @@ export class LayaBrowserDecider {
   ): void {
     try {
       let agree: { operation: boolean; target?: boolean } | null = null;
-      let sample: { answer: string; top: number; agree: boolean } | null = null;
+      let sample: { answer: string; top: number; agree: boolean; model: string } | null = null;
       if (laya && model) {
         const operation = laya.operation === model.operation;
         let target: boolean | undefined;
@@ -775,8 +795,8 @@ export class LayaBrowserDecider {
         // agrees only on the same element, and counts only when the model's element was found.
         const judged = !operation ? false : TARGETED_OPERATIONS.has(laya.operation) ? target : true;
         if (judged !== undefined && view.asked) {
-          sample = { answer: laya.operation, top: jointProbability(laya), agree: judged };
-          recordAgreementSample(BROWSER_POINT, view.asked.language, sample.answer, sample.top, sample.agree);
+          sample = { answer: laya.operation, top: jointProbability(laya), agree: judged, model: laya.model };
+          recordAgreementSample(BROWSER_POINT, view.asked.language, sample.answer, sample.top, sample.agree, sample.model);
         }
       }
       const modelTarget = model?.mapped ? view.observation.actions.find((a) => a.node === model.mapped!.node) : undefined;
@@ -816,6 +836,7 @@ export class LayaBrowserDecider {
             target: laya.target ? { actionId: laya.target.actionId, node: laya.target.node, label: laya.target.label, probability: laya.target.probability } : null,
             control: laya.control,
             ms: laya.ms,
+            ...(laya.model ? { model: laya.model } : {}),
           }
           : null,
         model: model

@@ -33,6 +33,14 @@
   // the settings above. "drive" acts above a fixed driveMinProbability instead — but its
   // probabilities are not calibrated: on real pages its right and its wrong elements both came at
   // 0.6–0.7, so 0.9 never acts and 0.6 acts wrongly about half the time. "shadow" only compares.
+  //
+  // Fine-tuning on the swarm's own cases, once the ledgers have grown (a few hundred each):
+  //   pnpm --filter @starlingai/core decisions:export
+  //   docker compose -f docker-compose.yml -f docker-compose.gpu.yml --profile laya run --rm laya python -m app.train decision
+  //   (and: ... python -m app.train browser), then restart the laya service.
+  // A run replaces the served checkpoint only when it agrees with the incumbent more often on
+  // held-out cases (.starlingai/laya/<model>/runs/<run>/metrics.json says why). The gate's evidence
+  // is kept per checkpoint version, so a new one earns its handover from its own cases.
   "decisions": {
     "defaultMode": "adaptive",
     "adaptive": { "targetAgreement": 0.9, "minSamples": 30, "auditRate": 0.1 },

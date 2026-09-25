@@ -31,6 +31,14 @@ class BadRequest(ValueError):
     """The request cannot be answered as sent."""
 
 
+def configure_agent(agent: Any) -> None:
+    """laya-browser checkpoints record the head budget they were trained with (systemone_server.py): serve and
+    train with it."""
+    trained = agent.cfg.get("head_max_len_train")
+    if trained:
+        agent.cfg["head_max_len"] = trained
+
+
 # ── jev-ultrafast: the request ────────────────────────────────────────────────────────────────────
 
 def action_space(actions: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Dict[str, Any]]], Dict[str, Dict[str, Any]]]:

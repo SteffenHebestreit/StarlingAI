@@ -11,6 +11,10 @@
  * lower bound of their agreement (Wilson, 95%) reaches `targetAgreement`. The lowest qualifying
  * level is used, which hands Laya the most cases the evidence supports. The lower bound rather than
  * the plain rate, so that 10 of 10 does not qualify where 290 of 300 does.
+ *
+ * And per MODEL VERSION — the checkpoint that answered (the sidecar names it in every answer). A
+ * fine-tuned checkpoint is a different model: what its predecessor proved says nothing about it, so
+ * it earns its handover from its own cases.
  */
 
 /** The confidence levels considered, lowest first. */
@@ -40,14 +44,14 @@ const samples = new Map<string, Sample[]>();
 /** The qualified level per key and settings, until the next sample for that key arrives. */
 const levelCache = new Map<string, number | null>();
 
-function sampleKey(point: string, language: LanguageBucket, answer: string): string {
-  return `${point}|${language}|${answer}`;
+function sampleKey(point: string, language: LanguageBucket, answer: string, model: string): string {
+  return `${point}|${language}|${answer}|${model}`;
 }
 
-/** Record one case where both answered. */
-export function recordAgreementSample(point: string, language: LanguageBucket, layaAnswer: string, top: number, agree: boolean): void {
+/** Record one case where both answered; `model` is the version that answered. */
+export function recordAgreementSample(point: string, language: LanguageBucket, layaAnswer: string, top: number, agree: boolean, model = ""): void {
   if (!Number.isFinite(top)) return;
-  const key = sampleKey(point, language, layaAnswer);
+  const key = sampleKey(point, language, layaAnswer, model);
   const list = samples.get(key) ?? [];
   list.push({ top, agree });
   if (list.length > MAX_SAMPLES_PER_KEY) list.splice(0, list.length - MAX_SAMPLES_PER_KEY);
@@ -68,9 +72,9 @@ export function wilsonLowerBound(agree: number, n: number, z = 1.96): number {
   return Math.max(0, (centre - margin) / (1 + z2 / n));
 }
 
-/** The lowest confidence at which Laya's `answer` may be taken, or null while none qualifies. */
-export function qualifiedLevel(point: string, language: LanguageBucket, answer: string, settings: GateSettings): number | null {
-  const key = sampleKey(point, language, answer);
+/** The lowest confidence at which `model`'s `answer` may be taken, or null while none qualifies. */
+export function qualifiedLevel(point: string, language: LanguageBucket, answer: string, settings: GateSettings, model = ""): number | null {
+  const key = sampleKey(point, language, answer, model);
   const cacheKey = `${key}|${settings.targetAgreement}|${settings.minSamples}`;
   const cached = levelCache.get(cacheKey);
   if (cached !== undefined) return cached;
@@ -95,9 +99,15 @@ export function qualifiedLevel(point: string, language: LanguageBucket, answer: 
   return level;
 }
 
-/** May Laya's `answer`, given with probability `top`, be taken for this point and language? */
-export function layaMayDecide(point: string, language: LanguageBucket, answer: string, top: number, settings: GateSettings): boolean {
-  const level = qualifiedLevel(point, language, answer, settings);
+/** The model versions with samples for this point, language and answer. */
+export function modelsWithSamples(point: string, language: LanguageBucket, answer: string): string[] {
+  const prefix = `${point}|${language}|${answer}|`;
+  return [...samples.keys()].filter((key) => key.startsWith(prefix)).map((key) => key.slice(prefix.length));
+}
+
+/** May `model`'s `answer`, given with probability `top`, be taken for this point and language? */
+export function layaMayDecide(point: string, language: LanguageBucket, answer: string, top: number, settings: GateSettings, model = ""): boolean {
+  const level = qualifiedLevel(point, language, answer, settings, model);
   return level !== null && top >= level;
 }
 
@@ -106,22 +116,26 @@ export function gateSnapshot(settings: GateSettings): Array<{
   point: string;
   language: LanguageBucket;
   answer: string;
+  model: string;
   samples: number;
   agreement: number;
   qualifiedLevel: number | null;
 }> {
   return [...samples.entries()].map(([key, list]) => {
-    const [point, language, answer] = key.split("|") as [string, LanguageBucket, string];
+    // The version may itself contain "|": it is everything after the third.
+    const [point, language, answer, ...rest] = key.split("|") as [string, LanguageBucket, string, ...string[]];
+    const model = rest.join("|");
     const agree = list.filter((sample) => sample.agree).length;
     return {
       point,
       language,
       answer,
+      model,
       samples: list.length,
       agreement: list.length > 0 ? agree / list.length : 0,
-      qualifiedLevel: qualifiedLevel(point, language, answer, settings),
+      qualifiedLevel: qualifiedLevel(point, language, answer, settings, model),
     };
-  }).sort((a, b) => a.point.localeCompare(b.point) || a.language.localeCompare(b.language) || a.answer.localeCompare(b.answer));
+  }).sort((a, b) => a.point.localeCompare(b.point) || a.language.localeCompare(b.language) || a.answer.localeCompare(b.answer) || a.model.localeCompare(b.model));
 }
 
 /** Test-only: forget every sample. */

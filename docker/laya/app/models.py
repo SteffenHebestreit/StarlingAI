@@ -40,6 +40,7 @@ class Model:
         self.cpu_fallbacks = 0
         self.loading = False
         self._lock = threading.RLock()
+        self._version: Optional[str] = None
 
     def load(self) -> Any:
         with self._lock:
@@ -63,8 +64,15 @@ class Model:
             self.loaded_device = str(agent.device.type)
             self.load_seconds = round(time.perf_counter() - started, 1)
             self.error = None
-            log.info("loaded %s (%s) on %s in %.1fs", self.name, self.reference, self.loaded_device, self.load_seconds)
+            run = agent.cfg.get("starlingai_run") if isinstance(getattr(agent, "cfg", None), dict) else None
+            self._version = f"{self.reference}@{run}" if run else self.reference
+            log.info("loaded %s (%s) on %s in %.1fs", self.name, self.version, self.loaded_device, self.load_seconds)
             return agent
+
+    @property
+    def version(self) -> str:
+        """What gave an answer: the checkpoint reference, with the run id of a fine-tune (app/train.py)."""
+        return self._version or self.reference
 
     def run(self, fn: Callable[[Any], Any]) -> Any:
         """`fn(agent)` with the model held for this call alone: one inference at a time per model."""
@@ -86,6 +94,7 @@ class Model:
     def status(self) -> Dict[str, Any]:
         return {
             "reference": self.reference,
+            "version": self.version,
             "loaded": self.agent is not None,
             "loading": self.loading,
             "device": str(self.agent.device.type) if self.agent is not None else None,

@@ -9,9 +9,13 @@
 Configuration (environment):
     LAYA_DECISION_MODEL   checkpoint for /v1/decide     (default convaiinnovations/laya#multilingual)
     LAYA_BROWSER_MODEL    checkpoint for browser steps  (default cklxx/laya-browser#v14s)
+    LAYA_LOCAL_DIR        fine-tuned checkpoints (default /models/local); <dir>/<model>/current wins over the above
     LAYA_DEVICE           cuda | cpu | unset for automatic
     LAYA_PRELOAD          comma list of models to load at start (default decision,browser; empty = on first use)
     LAYA_BROWSER_CHUNK    widest choice decided in one pass (default 60, as laya-browser v14s recommends)
+
+Every answer names the model version that gave it ("model"): a fine-tune's run id, else the checkpoint reference.
+The gateway keeps its agreement statistics per version, so a new checkpoint earns its handover again.
 
 It has no authentication: like the reranker it is reachable only on the compose networks.
 """
@@ -26,7 +30,7 @@ from typing import Any, Dict
 from fastapi import Body, FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from . import browser, generic
+from . import browser, generic, references
 from .models import Model
 
 logging.basicConfig(level=os.environ.get("LAYA_LOG_LEVEL", "INFO"))
@@ -36,26 +40,9 @@ MAX_BODY_BYTES = 2 * 1024 * 1024
 DEVICE = os.environ.get("LAYA_DEVICE") or None
 BROWSER_CHUNK = int(os.environ.get("LAYA_BROWSER_CHUNK", "60"))
 
-
-def _browser_configure(agent: Any) -> None:
-    # laya-browser checkpoints record the head budget they were trained with (systemone_server.py).
-    trained = agent.cfg.get("head_max_len_train")
-    if trained:
-        agent.cfg["head_max_len"] = trained
-
-
-def _decision_reference() -> str:
-    """A fine-tuned checkpoint in LAYA_LOCAL_DIR/decision/current wins over the downloaded one: the base model is not
-    expected to make the swarm's decisions well until it has been fine-tuned on them."""
-    local = os.path.join(os.environ.get("LAYA_LOCAL_DIR", "/models/local"), "decision", "current")
-    if os.path.isfile(os.path.join(local, "rl_agent_config.json")):
-        return local
-    return os.environ.get("LAYA_DECISION_MODEL", "convaiinnovations/laya#multilingual")
-
-
 MODELS: Dict[str, Model] = {
-    "decision": Model("decision", _decision_reference(), DEVICE),
-    "browser": Model("browser", os.environ.get("LAYA_BROWSER_MODEL", "cklxx/laya-browser#v14s"), DEVICE, _browser_configure),
+    "decision": Model("decision", references.reference("decision"), DEVICE),
+    "browser": Model("browser", references.reference("browser"), DEVICE, browser.configure_agent),
 }
 
 app = FastAPI(title="laya sidecar", docs_url=None, redoc_url=None, openapi_url=None)
@@ -118,7 +105,7 @@ def decide(body: Any = Body(...)):
         questions = generic.validate(body)
         model = MODELS["decision"]
         result = generic.decide_all(lambda state, qs: model.run(lambda agent: agent.system_one(state, qs)), questions)
-        return {**result, "model": model.reference}
+        return {**result, "model": model.version}
     return _answer(run)
 
 
@@ -136,5 +123,5 @@ def browser_step(body: Any = Body(...)):
             body.get("excluded") or None,
             BROWSER_CHUNK,
         )
-        return {**step, "model": model.reference}
+        return {**step, "model": model.version}
     return _answer(run)

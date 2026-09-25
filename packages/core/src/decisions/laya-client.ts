@@ -29,6 +29,14 @@ export interface LayaAnswer {
   top: number;
   /** Round trip, as measured here. */
   ms: number;
+  /** The checkpoint version that answered, as the sidecar names it ("" when it did not). */
+  model: string;
+}
+
+/** The version a sidecar answer names: a fine-tune's run, else the checkpoint reference. */
+function modelOf(body: unknown): string {
+  const model = body && typeof body === "object" ? (body as Record<string, unknown>)["model"] : undefined;
+  return typeof model === "string" ? model.slice(0, 300) : "";
 }
 
 /** Is a sidecar configured at all? Without one, no point asks Laya whatever its mode. */
@@ -54,7 +62,7 @@ function recordFailure(now: number, reason: string): void {
 }
 
 /** The answer for one question, checked against the options it was offered. */
-function readAnswer(raw: unknown, options: Readonly<Record<string, string>>, ms: number): LayaAnswer | null {
+function readAnswer(raw: unknown, options: Readonly<Record<string, string>>, ms: number, model: string): LayaAnswer | null {
   if (!raw || typeof raw !== "object") return null;
   const record = raw as Record<string, unknown>;
   const choice = typeof record["choice"] === "string" ? record["choice"] : undefined;
@@ -69,7 +77,7 @@ function readAnswer(raw: unknown, options: Readonly<Record<string, string>>, ms:
   const top = probabilities[choice]!;
   // The choice must be the argmax of what it sent: anything else is a contract break, not an answer.
   if (Object.values(probabilities).some((p) => p > top + 1e-9)) return null;
-  return { choice, probabilities, top, ms };
+  return { choice, probabilities, top, ms, model };
 }
 
 /**
@@ -98,7 +106,7 @@ export async function askLaya(
       return null;
     }
     const body = await response.json() as { answers?: Record<string, unknown> };
-    const answer = readAnswer(body.answers?.[point.id], point.options, Date.now() - started);
+    const answer = readAnswer(body.answers?.[point.id], point.options, Date.now() - started, modelOf(body));
     if (!answer) {
       recordFailure(Date.now(), "answer does not fit the options");
       return null;
@@ -134,6 +142,8 @@ export interface LayaBrowserStep {
   control: { actionId: string; kind: string; label: string; delta?: number; key?: string } | null;
   /** Round trip, as measured here. */
   ms: number;
+  /** The laya-browser version that answered ("" when the sidecar did not say). */
+  model: string;
 }
 
 function finiteProbability(value: unknown): value is number {
@@ -175,6 +185,7 @@ function readBrowserStep(raw: unknown, ms: number): LayaBrowserStep | null {
     } : null,
     control: control ? (control as NonNullable<LayaBrowserStep["control"]>) : null,
     ms,
+    model: modelOf(body),
   };
 }
 

@@ -37,6 +37,8 @@ export interface AnswerReport {
 export interface PointReport {
   point: string;
   language: string;
+  /** The checkpoint version that answered: statistics are the gate's, per version. */
+  model: string;
   rows: number;
   decidedByLaya: number;
   bothAnswered: number;
@@ -60,8 +62,9 @@ function median(values: number[]): number | null {
 export function browserRowsForReport(rows: ReadonlyArray<Record<string, unknown>>): LedgerRow[] {
   return rows.flatMap((row): LedgerRow[] => {
     if (row["point"] !== "browser_step") return [];
-    const laya = row["laya"] as { operation?: string; operationProbability?: number; target?: { probability?: number } | null; ms?: number } | null;
-    const gate = row["gate"] as { answer?: unknown; top?: unknown; agree?: unknown } | undefined;
+    const laya = row["laya"] as { operation?: string; operationProbability?: number; target?: { probability?: number } | null; ms?: number; model?: string } | null;
+    const gate = row["gate"] as { answer?: unknown; top?: unknown; agree?: unknown; model?: unknown } | undefined;
+    const model = typeof gate?.model === "string" ? gate.model : laya?.model;
     const base = {
       ts: String(row["ts"] ?? ""),
       point: "browser_step",
@@ -73,13 +76,13 @@ export function browserRowsForReport(rows: ReadonlyArray<Record<string, unknown>
     if (gate && typeof gate.answer === "string" && typeof gate.top === "number" && typeof gate.agree === "boolean") {
       return [{
         ...base,
-        laya: { choice: gate.answer, top: gate.top, probabilities: {}, ms: laya?.ms ?? 0 },
+        laya: { choice: gate.answer, top: gate.top, probabilities: {}, ms: laya?.ms ?? 0, ...(model ? { model } : {}) },
         incumbent: { choice: gate.agree ? gate.answer : `not ${gate.answer}`, ms: -1 },
       }];
     }
     if (!laya?.operation) return [base];
     const top = Math.min(laya.operationProbability ?? 0, laya.target?.probability ?? 1);
-    return [{ ...base, laya: { choice: laya.operation, top, probabilities: {}, ms: laya.ms ?? 0 } }];
+    return [{ ...base, laya: { choice: laya.operation, top, probabilities: {}, ms: laya.ms ?? 0, ...(model ? { model } : {}) } }];
   });
 }
 
@@ -87,11 +90,12 @@ export function browserRowsForReport(rows: ReadonlyArray<Record<string, unknown>
 export function buildDecisionReport(rows: LedgerRow[], target: number, min: number): PointReport[] {
   const groups = new Map<string, LedgerRow[]>();
   for (const row of rows) {
-    const key = `${row.point}|${row.language}`;
+    const key = `${row.point}|${row.language}|${row.laya?.model ?? ""}`;
     groups.set(key, [...(groups.get(key) ?? []), row]);
   }
   return [...groups.entries()].map(([key, group]) => {
-    const [point, language] = key.split("|") as [string, string];
+    const [point, language, ...rest] = key.split("|") as [string, string, ...string[]];
+    const model = rest.join("|");
     const both = group.filter((row) => row.laya && row.incumbent);
     const agreeing = both.filter((row) => row.laya!.choice === row.incumbent!.choice).length;
     const answers = [...new Set(both.map((row) => row.laya!.choice))].sort().map((answer): AnswerReport => {
@@ -107,6 +111,7 @@ export function buildDecisionReport(rows: LedgerRow[], target: number, min: numb
     return {
       point,
       language,
+      model,
       rows: group.length,
       decidedByLaya: group.filter((row) => row.decidedBy === "laya").length,
       bothAnswered: both.length,
@@ -116,7 +121,7 @@ export function buildDecisionReport(rows: LedgerRow[], target: number, min: numb
       incumbentMedianMs: median(group.flatMap((row) => (row.incumbent && row.incumbent.ms >= 0 ? [row.incumbent.ms] : []))),
       answers,
     };
-  }).sort((a, b) => a.point.localeCompare(b.point) || a.language.localeCompare(b.language));
+  }).sort((a, b) => a.point.localeCompare(b.point) || a.language.localeCompare(b.language) || a.model.localeCompare(b.model));
 }
 
 function pct(value: number | null): string {
@@ -126,7 +131,7 @@ function pct(value: number | null): string {
 function render(report: PointReport[], target: number, min: number): string {
   const lines = [`Decision ledger — agreement with the incumbent; the gate needs ≥${min} cases with a lower bound ≥${pct(target)}.`, ""];
   for (const point of report) {
-    lines.push(`## ${point.point} (${point.language}) — ${point.rows} cases, Laya decided ${point.decidedByLaya}, both answered ${point.bothAnswered}, agreement ${pct(point.agreement)}`);
+    lines.push(`## ${point.point} (${point.language}${point.model ? `, ${point.model}` : ""}) — ${point.rows} cases, Laya decided ${point.decidedByLaya}, both answered ${point.bothAnswered}, agreement ${pct(point.agreement)}`);
     lines.push(`   median: Laya ${point.layaMedianMs ?? "–"} ms, incumbent ${point.incumbentMedianMs ?? "–"} ms`);
     for (const answer of point.answers) {
       const levels = answer.levels.filter((row) => row.cases > 0)

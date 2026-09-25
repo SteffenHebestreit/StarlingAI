@@ -57,7 +57,7 @@ Every public schema field, where it is declared, and how many production files r
 | `blendMode` | packages/core/src/config/schemas/retrieval.ts:40 | 4 |
 | `blockOn` | packages/core/src/config/schema.ts:1239 | 1 |
 | `botToken` | packages/core/src/config/schemas/channels.ts:10 | 10 |
-| `browser` | packages/core/src/config/schemas/decisions.ts:73 | 66 |
+| `browser` | packages/core/src/config/schemas/decisions.ts:73 | 67 |
 | `bucket` | packages/core/src/config/schema.ts:458 | 15 |
 | `budget` | packages/core/src/config/schema.ts:1616 | 82 |
 | `budgets` | packages/core/src/config/schema.ts:519 | 13 |
@@ -290,11 +290,11 @@ Every public schema field, where it is declared, and how many production files r
 | `minStepsToAuthor` | packages/core/src/config/schema.ts:1449 | 2 |
 | `minVramMb` | packages/core/src/config/schema.ts:822 | 1 |
 | `mode` | packages/core/src/config/schema.ts:471 | 126 |
-| `model` | packages/core/src/config/schema.ts:1234 | 228 |
+| `model` | packages/core/src/config/schema.ts:1234 | 229 |
 | `modelModeration` | packages/core/src/config/schema.ts:1230 | 4 |
 | `modelPresets` | packages/core/src/config/schema.ts:1687 | 1 |
 | `modelPresetScope` | packages/core/src/config/schema.ts:1702 | 3 |
-| `models` | packages/core/src/config/schema.ts:518 | 48 |
+| `models` | packages/core/src/config/schema.ts:518 | 49 |
 | `moderateInputs` | packages/core/src/config/schema.ts:1236 | 1 |
 | `moderateToolOutputs` | packages/core/src/config/schema.ts:1237 | 1 |
 | `monthlyUsd` | packages/core/src/config/schema.ts:521 | 2 |
@@ -441,7 +441,7 @@ Every public schema field, where it is declared, and how many production files r
 | `stableToolBlock` | packages/core/src/config/schemas/orchestration.ts:696 | 1 |
 | `stagedArtifactBuildDirective` | packages/core/src/config/schemas/orchestration.ts:454 | 1 |
 | `stagedArtifactBuilds` | packages/core/src/config/schemas/orchestration.ts:428 | 1 |
-| `steps` | packages/core/src/config/schema.ts:1365 | 66 |
+| `steps` | packages/core/src/config/schema.ts:1365 | 67 |
 | `stopPhrases` | packages/core/src/config/schemas/multimodal.ts:233 | 3 |
 | `store` | packages/core/src/config/schema.ts:1598 | 154 |
 | `subAgentDisagreementVerify` | packages/core/src/config/schemas/orchestration.ts:600 | 2 |

@@ -153,12 +153,12 @@ function click(node: number, label: string, p: number, targetP = p, actionId = `
   return {
     operation: "CLICK", operationProbability: p, operationProbabilities: { CLICK: p, DONE: 1 - p },
     target: { index: String(node), actionId, node, kind: "click", label, role: "link", probability: targetP, alternatives: [] },
-    control: null, passes: 1, tokens: 300, ms: 18,
+    control: null, passes: 1, tokens: 300, ms: 18, model: "laya-browser-test",
   };
 }
 
 function operation(name: string, p: number, extra: Partial<Step> = {}): Step {
-  return { operation: name, operationProbability: p, operationProbabilities: { [name]: p, CLICK: 1 - p }, target: null, control: null, ms: 15, ...extra };
+  return { operation: name, operationProbability: p, operationProbabilities: { [name]: p, CLICK: 1 - p }, target: null, control: null, ms: 15, model: "laya-browser-test", ...extra };
 }
 
 async function decider(browserSettings: Record<string, unknown>, browser: FakeBrowser, overrides: Record<string, unknown> = {}, decisions: Record<string, unknown> = {}) {
@@ -390,8 +390,8 @@ describe("adaptive: laya-browser acts where the comparisons show it agrees", () 
   /** 40 steps where laya-browser's click at 0.65 agreed with the model, and 10 at 0.55 where it did not. */
   async function evidence() {
     const { recordAgreementSample } = await import("../decisions/gate.js");
-    for (let i = 0; i < 40; i += 1) recordAgreementSample("browser_step", "en", "CLICK", 0.65, true);
-    for (let i = 0; i < 10; i += 1) recordAgreementSample("browser_step", "en", "CLICK", 0.55, false);
+    for (let i = 0; i < 40; i += 1) recordAgreementSample("browser_step", "en", "CLICK", 0.65, true, "laya-browser-test");
+    for (let i = 0; i < 10; i += 1) recordAgreementSample("browser_step", "en", "CLICK", 0.55, false, "laya-browser-test");
   }
 
   it("reads no page before the model's turn while nothing has qualified, and learns from every comparison", async () => {
@@ -404,7 +404,7 @@ describe("adaptive: laya-browser acts where the comparisons show it agrees", () 
     await d.beforeModelActions([{ id: "m1", name: "browser_click", arguments: { element: "Products", ref: "e7" } }]);
     const { gateSnapshot } = await import("../decisions/gate.js");
     await vi.waitFor(() => expect(gateSnapshot({ targetAgreement: 0.9, minSamples: 30 })).toEqual([
-      { point: "browser_step", language: "en", answer: "CLICK", samples: 1, agreement: 1, qualifiedLevel: null },
+      { point: "browser_step", language: "en", answer: "CLICK", model: "laya-browser-test", samples: 1, agreement: 1, qualifiedLevel: null },
     ]));
     await (await import("../decisions/ledger.js")).flushLedgerForTests();
     const row = JSON.parse(readFileSync(browserLedgerPath, "utf8").trim()) as Record<string, unknown>;
@@ -443,6 +443,21 @@ describe("adaptive: laya-browser acts where the comparisons show it agrees", () 
     expect(await below.proposeStep(), "0.58 is below the qualified 0.6").toBeNull();
   });
 
+  it("counts evidence for the version that earned it: a new checkpoint compares first, without reading ahead", async () => {
+    await evidence();
+    // The first answer of this process names a version the evidence was not earned by.
+    const browser: FakeBrowser = { current: HOME, calls: [] };
+    sidecar([{ ...click(2, "Products", 0.64), model: "laya-browser-v2" }]);
+    const d = await decider({ mode: "adaptive" }, browser, {}, noAudits);
+    d.afterToolCall(navigate, { success: true });
+    expect(await d.proposeStep(), "the old version's evidence does not hand the new one the click").toBeNull();
+    expect(observeCalls(browser), "one read, to learn which version answers").toHaveLength(1);
+    // Now that the new version is known and has no evidence, the page is not read ahead of the model any more.
+    d.afterToolCall({ id: "w1", name: "browser_wait_for", arguments: {} }, { success: true });
+    expect(await d.proposeStep()).toBeNull();
+    expect(observeCalls(browser)).toHaveLength(1);
+  });
+
   it("still hands a share of what it may take to the model, to keep measuring", async () => {
     await evidence();
     const browser: FakeBrowser = { current: HOME, calls: [] };
@@ -455,13 +470,13 @@ describe("adaptive: laya-browser acts where the comparisons show it agrees", () 
   it("rebuilds what it learnt from the browser ledger after a restart", async () => {
     const { mkdirSync } = await import("node:fs");
     mkdirSync(join(tempDir, "decisions"), { recursive: true });
-    const rows = Array.from({ length: 40 }, () => JSON.stringify({ point: "browser_step", language: "en", gate: { answer: "CLICK", top: 0.8, agree: true }, decidedBy: "model" }));
+    const rows = Array.from({ length: 40 }, () => JSON.stringify({ point: "browser_step", language: "en", gate: { answer: "CLICK", top: 0.8, agree: true, model: "laya-browser-test" }, decidedBy: "model" }));
     writeFileSync(browserLedgerPath, `${rows.join("\n")}\n`, "utf8");
     await writeConfig({ mode: "adaptive" });
     const { seedBrowserGate } = await import("../decisions/browser-step.js");
     const { qualifiedLevel } = await import("../decisions/gate.js");
     await seedBrowserGate();
-    expect(qualifiedLevel("browser_step", "en", "CLICK", { targetAgreement: 0.9, minSamples: 30 })).toBe(0.5);
+    expect(qualifiedLevel("browser_step", "en", "CLICK", { targetAgreement: 0.9, minSamples: 30 }, "laya-browser-test")).toBe(0.5);
   });
 });
 
@@ -551,6 +566,31 @@ describe("the report", () => {
     const [report] = buildDecisionReport(browserRowsForReport(rows), 0.9, 30);
     expect(report).toMatchObject({ point: "browser_step", language: "en", rows: 46, decidedByLaya: 1, bothAnswered: 45, incumbentMedianMs: null });
     expect(report!.answers).toEqual([expect.objectContaining({ answer: "CLICK", qualifiedLevel: 0.6 })]);
+  });
+
+  it("keeps each checkpoint version's statistics apart, as the gate does", async () => {
+    const { browserRowsForReport, buildDecisionReport } = await import("../scripts/decisions-report.js");
+    const row = (model: string, agree: boolean) => ({ point: "browser_step", language: "en", decidedBy: "model", laya: { operation: "CLICK", ms: 20 }, gate: { answer: "CLICK", top: 0.7, agree, model } });
+    const report = buildDecisionReport(browserRowsForReport([row("v14s", false), row("v14s", false), row("run-2", true)]), 0.9, 30);
+    expect(report.map((r) => [r.model, r.bothAnswered, r.agreement])).toEqual([["run-2", 1, 1], ["v14s", 2, 0]]);
+  });
+});
+
+describe("the training export", () => {
+  it("keeps the steps the agent's model took, with what laya-browser read, and leaves laya-browser's own out", async () => {
+    const { buildBrowserTrainingRows } = await import("../scripts/decisions-export.js");
+    const read = { goal: "Open the shop", observation: { url: "https://shop.example/", actions: [] }, history: [], sessionId: "s1", ts: "t" };
+    const rows = buildBrowserTrainingRows([
+      { point: "browser_step", decidedBy: "model", model: { tool: "browser_click", operation: "CLICK", node: 2 }, laya: { operation: "CLICK" }, gate: {}, ...read },
+      // laya-browser's own step — left out by who decided it, whatever the row says of a model step.
+      { point: "browser_step", decidedBy: "laya", model: { tool: "browser_click", operation: "CLICK", node: 2 }, laya: { operation: "CLICK" }, ...read },
+      { point: "browser_step", decidedBy: "model", model: { tool: "final_answer", operation: "DONE", node: null }, ...read },
+      { point: "fast_lane", decidedBy: "incumbent" },
+    ]);
+    expect(rows).toEqual([
+      { ts: "t", sessionId: "s1", goal: "Open the shop", observation: read.observation, history: [], excluded: [], model: { tool: "browser_click", operation: "CLICK", node: 2 }, decidedBy: "model" },
+      { ts: "t", sessionId: "s1", goal: "Open the shop", observation: read.observation, history: [], excluded: [], model: { tool: "final_answer", operation: "DONE", node: null }, decidedBy: "model" },
+    ]);
   });
 });
 

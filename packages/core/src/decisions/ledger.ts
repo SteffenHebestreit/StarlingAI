@@ -23,7 +23,8 @@ export interface LedgerRow {
   /** What Laya read about the case. */
   state: Record<string, unknown>;
   mode: string;
-  laya?: { choice: string; top: number; probabilities: Record<string, number>; ms: number };
+  /** `model`: the checkpoint version that answered; the gate's statistics are kept per version. */
+  laya?: { choice: string; top: number; probabilities: Record<string, number>; ms: number; model?: string };
   incumbent?: { choice: string; ms: number };
   decidedBy: "laya" | "incumbent";
   sessionId?: string;

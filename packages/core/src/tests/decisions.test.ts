@@ -171,7 +171,8 @@ describe("who decides", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
       point: "source_sensitive", language: "de", mode: "shadow", decidedBy: "incumbent",
-      laya: { choice: "yes", top: 0.97 }, incumbent: { choice: "no" }, sessionId: "s-test",
+      // The version that answered: the gate's evidence is rebuilt per version from these rows.
+      laya: { choice: "yes", top: 0.97, model: "laya-test" }, incumbent: { choice: "no" }, sessionId: "s-test",
     });
   });
 
@@ -203,7 +204,10 @@ describe("who decides", () => {
     // No evidence yet: the incumbent decides, and each case becomes evidence.
     const first = await sourceSensitive(GERMAN, incumbentAnswering(true).run);
     expect(first.decidedBy).toBe("incumbent");
-    for (let i = 0; i < 40; i += 1) gate.recordAgreementSample("source_sensitive", "de", "yes", 0.96, true);
+    // Evidence about another checkpoint proves nothing about this one.
+    for (let i = 0; i < 40; i += 1) gate.recordAgreementSample("source_sensitive", "de", "yes", 0.96, true, "an-older-checkpoint");
+    expect((await sourceSensitive(GERMAN, incumbentAnswering(true).run)).decidedBy).toBe("incumbent");
+    for (let i = 0; i < 40; i += 1) gate.recordAgreementSample("source_sensitive", "de", "yes", 0.96, true, "laya-test");
 
     const slow = incumbentAnswering(true, 5_000);
     const proven = await sourceSensitive(GERMAN, slow.run);
@@ -218,14 +222,14 @@ describe("who decides", () => {
 
   it("adaptive: an audited case still goes to the incumbent and keeps measuring", async () => {
     await writeConfig({ baseUrl: "http://laya:8080", defaultMode: "adaptive", adaptive: { targetAgreement: 0.9, minSamples: 30, auditRate: 1 } });
-    for (let i = 0; i < 40; i += 1) gate.recordAgreementSample("source_sensitive", "de", "yes", 0.96, true);
+    for (let i = 0; i < 40; i += 1) gate.recordAgreementSample("source_sensitive", "de", "yes", 0.96, true, "laya-test");
     layaAnswers("yes", 0.96);
     const incumbent = incumbentAnswering(false);
     const outcome = await sourceSensitive(GERMAN, incumbent.run);
     expect(outcome.decidedBy).toBe("incumbent");
     expect(outcome.value).toBe(false);
     // The disagreement is counted: 40 of 41 now.
-    expect(gate.gateSnapshot({ targetAgreement: 0.9, minSamples: 30 }).find((row) => row.language === "de")?.samples).toBe(41);
+    expect(gate.gateSnapshot({ targetAgreement: 0.9, minSamples: 30 }).find((row) => row.language === "de" && row.model === "laya-test")?.samples).toBe(41);
   });
 
   it("falls back to the incumbent when Laya fails, and stops asking a sidecar that keeps failing", async () => {
@@ -269,15 +273,23 @@ describe("the ledger", () => {
     for (let i = 0; i < 40; i += 1) {
       rows.push(JSON.stringify({
         ts: new Date().toISOString(), point: "source_sensitive", language: "de", state: { message: GERMAN }, mode: "shadow",
-        laya: { choice: "yes", top: 0.97, probabilities: { yes: 0.97, no: 0.03 }, ms: 12 }, incumbent: { choice: "yes", ms: 1500 }, decidedBy: "incumbent",
+        laya: { choice: "yes", top: 0.97, probabilities: { yes: 0.97, no: 0.03 }, ms: 12, model: "laya-test" }, incumbent: { choice: "yes", ms: 1500 }, decidedBy: "incumbent",
       }));
     }
+    // A case another checkpoint answered counts for that checkpoint only.
+    rows.push(JSON.stringify({
+      ts: new Date().toISOString(), point: "source_sensitive", language: "de", state: { message: GERMAN }, mode: "shadow",
+      laya: { choice: "yes", top: 0.97, probabilities: { yes: 0.97, no: 0.03 }, ms: 12, model: "an-older-checkpoint" }, incumbent: { choice: "no", ms: 1500 }, decidedBy: "incumbent",
+    }));
     // A torn last line is skipped.
     writeFileSync(ledgerPath, `${rows.join("\n")}\n{"torn":`, "utf8");
 
     await decideModule.seedDecisionGate();
-    expect(gate.qualifiedLevel("source_sensitive", "de", "yes", { targetAgreement: 0.9, minSamples: 30 })).toBe(0.5);
+    expect(gate.qualifiedLevel("source_sensitive", "de", "yes", { targetAgreement: 0.9, minSamples: 30 }, "laya-test")).toBe(0.5);
     const snapshot = gate.gateSnapshot({ targetAgreement: 0.9, minSamples: 30 });
-    expect(snapshot).toEqual([{ point: "source_sensitive", language: "de", answer: "yes", samples: 40, agreement: 1, qualifiedLevel: 0.5 }]);
+    expect(snapshot).toEqual([
+      { point: "source_sensitive", language: "de", answer: "yes", model: "an-older-checkpoint", samples: 1, agreement: 0, qualifiedLevel: null },
+      { point: "source_sensitive", language: "de", answer: "yes", model: "laya-test", samples: 40, agreement: 1, qualifiedLevel: 0.5 },
+    ]);
   });
 });
