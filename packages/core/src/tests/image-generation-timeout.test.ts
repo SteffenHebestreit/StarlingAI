@@ -13,9 +13,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   IMAGE_TRANSPORT_OPTIONS,
   ImageGenerationTimeoutError,
+  ImageRenderTooLongError,
   ImageUpstreamRequestError,
   expectedImageRenderSeconds,
   imageDeviceBusyMs,
+  imageRenderLimitError,
   imageRenderWork,
   imageRequestTimeoutMs,
   requestImageGeneration,
@@ -321,5 +323,131 @@ describe("the transport under a render", () => {
     failWith("ECONNREFUSED");
     const refused = await requestImageGeneration(CLUSTER, { prompt: "a sunset", tier: "fast" }).catch((error: unknown) => error);
     expect((refused as ImageUpstreamRequestError).unreachable).toBe(true);
+  });
+});
+
+describe("the image server's own limit", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  /** llama-swap in front of the cluster: its peer transport gives up after 600 s (session fa673f2c). */
+  const LIMITED: ImageGenerationBackendConfig = { ...CLUSTER, maxRenderMs: 600_000 };
+  /** The agent's own re-render in fa673f2c: about 17 minutes, cut at 600 s twice. */
+  const FA673F2C_RERENDER = { tier: "quality" as const, steps: 60, width: 1024, height: 1024, guidanceScale: 2.5 };
+  const LLAMA_SWAP_CUT = JSON.stringify({ src: "llama-swap", error: { message: "peer proxy error: net/http: timeout awaiting response headers" } });
+
+  /** Every request is answered with `status` and `body` after `afterMs`. */
+  function answersAfter(afterMs: number, status: number, body: string) {
+    const fetchMock = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((resolve, reject) => {
+      const timer = setTimeout(() => resolve(new Response(body, { status, headers: { "Content-Type": "application/json" } })), afterMs);
+      init?.signal?.addEventListener("abort", () => { clearTimeout(timer); reject(new Error("This operation was aborted")); });
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  it("refuses the fa673f2c re-render before sending it, and says guidance 1 would fit", async () => {
+    const message = imageRenderLimitError(LIMITED, FA673F2C_RERENDER);
+    expect(message).toContain("Qwen-Image 2.1 (the quality tier) would need about 17 min for 60 steps at 1024x1024 with guidance 2.5");
+    expect(message).toContain("the image server gives up on any render after 10 min, so it would fail. Nothing was rendered.");
+    expect(message).toContain("At guidance 1, the engine's default, the same steps and size take about 9 min");
+    expect(message).toContain("guidance above 1 doubles the time on this engine without improving the picture");
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const refused = await requestImageGeneration(LIMITED, { prompt: "x", ...FA673F2C_RERENDER }).catch((error: unknown) => error);
+    expect(refused).toBeInstanceOf(ImageRenderTooLongError);
+    expect((refused as Error).message).toBe(message);
+    expect(fetchMock, "a render the server would cut off went out anyway").not.toHaveBeenCalled();
+  });
+
+  it("lets through what the server can finish: the user's own 50 steps at 1344x768 (414 s measured) and 807684e9's 57", () => {
+    expect(imageRenderLimitError(LIMITED, { tier: "quality", steps: 50, width: 1344, height: 768, guidanceScale: 1 })).toBeUndefined();
+    expect(imageRenderLimitError(LIMITED, { ...SESSION_807684E9, guidanceScale: 1 })).toBeUndefined();
+    expect(imageRenderLimitError(LIMITED, { tier: "fast", steps: 40, width: 1024, height: 1024, guidanceScale: 2.5 })).toBeUndefined();
+    // No limit configured, no refusal: a backend without a proxy in front has nothing to cut it.
+    expect(imageRenderLimitError(CLUSTER, FA673F2C_RERENDER)).toBeUndefined();
+  });
+
+  it("draws the line at 90% of the limit and names the steps that fit", () => {
+    const at = (steps: number) => imageRenderLimitError(LIMITED, { tier: "quality", steps, width: 1344, height: 768, guidanceScale: 1 });
+    expect(at(64), "64 steps at 1344x768 is 536 s, inside 540").toBeUndefined();
+    expect(at(65), "65 steps is 544 s").toBeDefined();
+    expect(at(80)).toContain("At 1344x768, at most 64 steps fit.");
+    // Too long even at the default guidance: the steps that fit are counted without the doubling.
+    expect(imageRenderLimitError(LIMITED, { tier: "quality", steps: 100, width: 1024, height: 1024, guidanceScale: 3 }))
+      .toContain("At 1024x1024 with guidance 1 (guidance above 1 doubles the time on this engine without improving the picture), at most 63 steps fit.");
+  });
+
+  it("never waits much past the moment the server gives up", () => {
+    const shape = { ...SESSION_807684E9, guidanceScale: 1 };
+    expect(imageRequestTimeoutMs(CLUSTER, shape)).toBeGreaterThan(800_000);
+    expect(imageRequestTimeoutMs(LIMITED, shape)).toBe(630_000);
+    expect(imageRequestTimeoutMs(LIMITED, { tier: "quality", steps: 20, width: 1024, height: 1024, guidanceScale: 1 })).toBe(300_000);
+  });
+
+  it("reads llama-swap's 502 at the limit as the server's cut: a timeout that says so, with what fits, and the device busy", async () => {
+    vi.useFakeTimers();
+    // No limit configured, so the request goes out, as it did in fa673f2c.
+    const config = { ...CLUSTER, qualityModel: "q-server-cut" };
+    answersAfter(600_000, 502, LLAMA_SWAP_CUT);
+    const run = watch(requestImageGeneration(config, { prompt: "x", ...FA673F2C_RERENDER }));
+    await vi.advanceTimersByTimeAsync(600_001);
+
+    const error = run.error as ImageGenerationTimeoutError;
+    expect(error, "the cut surfaced as a bare HTTP 502 the agent retried").toBeInstanceOf(ImageGenerationTimeoutError);
+    expect(error.details.cutByServerAfterMs).toBe(600_000);
+    expect(error.message).toContain("Qwen-Image 2.1 (the quality tier) was still rendering when the image server gave up waiting after 10 min");
+    expect(error.message).toContain("60 steps at 1024x1024 were expected to take about 17 min");
+    expect(error.message).toContain("do NOT call generate_image again with the same settings");
+    expect(error.message).toContain("At guidance 1, the engine's default, the same steps and size take about 9 min");
+    // Where the cut came from survives: the proxy, the missing headers, the status.
+    expect(error.message).toContain("The server said: Image generation failed (q-server-cut) (HTTP 502): peer proxy error: net/http: timeout awaiting response headers");
+    // The engine renders on: 1020 s expected, 600 s gone, 1 ms of it since the cut.
+    expect(imageDeviceBusyMs(config, "quality")).toBe(419_999);
+  });
+
+  it("does not blame the settings for a cut they should have fitted inside", async () => {
+    vi.useFakeTimers();
+    const config = { ...CLUSTER, qualityModel: "q-server-cut-fits" };
+    answersAfter(600_000, 504, "upstream request timeout");
+    const run = watch(requestImageGeneration(config, { prompt: "x", tier: "quality", steps: 50, width: 1344, height: 768 }));
+    await vi.advanceTimersByTimeAsync(600_001);
+
+    const error = run.error as ImageGenerationTimeoutError;
+    expect(error).toBeInstanceOf(ImageGenerationTimeoutError);
+    expect(error.message).toContain("These settings fit within that limit, so the engine was most likely still busy with another render first.");
+    expect(error.message).not.toContain("steps fit");
+    // Past its estimate already, so the device is given the minimum rather than nothing.
+    expect(imageDeviceBusyMs(config, "quality")).toBe(59_999);
+  });
+
+  it("leaves a timeout reply that came at once an ordinary failure: no render was running to cut", async () => {
+    vi.useFakeTimers();
+    const config = { ...CLUSTER, qualityModel: "q-server-instant" };
+    answersAfter(1_000, 502, LLAMA_SWAP_CUT);
+    const run = watch(requestImageGeneration(config, { prompt: "x", ...FA673F2C_RERENDER }));
+    await vi.advanceTimersByTimeAsync(1_001);
+
+    expect(run.settled).toBe("rejected");
+    expect(run.error).not.toBeInstanceOf(ImageGenerationTimeoutError);
+    expect((run.error as Error).message).toContain("timeout awaiting response headers");
+    expect(imageDeviceBusyMs(config, "quality"), "a device marked busy for a render that never ran").toBe(0);
+  });
+
+  it("leaves a 502 that is not a timeout an ordinary failure — the control", async () => {
+    vi.useFakeTimers();
+    const config = { ...CLUSTER, qualityModel: "q-server-502" };
+    answersAfter(45_000, 502, JSON.stringify({ error: { message: "peer proxy error: dial tcp 10.0.0.2:8080: connection refused" } }));
+    const run = watch(requestImageGeneration(config, { prompt: "x", tier: "quality" }));
+    await vi.advanceTimersByTimeAsync(45_001);
+
+    expect(run.settled).toBe("rejected");
+    expect(run.error).not.toBeInstanceOf(ImageGenerationTimeoutError);
+    expect((run.error as Error).message).toContain("connection refused");
+    expect(imageDeviceBusyMs(config, "quality")).toBe(0);
   });
 });

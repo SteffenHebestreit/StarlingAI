@@ -7,13 +7,17 @@ import { sendChunkedTtsRequests } from "../multimodal/tts-chunking.js";
 import { getMcpConnections } from "../mcp/registry.js";
 import {
   ImageGenerationTimeoutError,
+  ImageRenderTooLongError,
   ImageUpstreamRequestError,
   checkImageGenerationHealth,
   describeImageTierChoices,
   imageEngineLabel,
   imageGenerationServiceConfigured,
+  imageRenderLimitError,
   imageRequestBoundsError,
   imageTierChoices,
+  previewImageRequest,
+  readImageHeaderSize,
   requestImageGeneration,
   resolveNamedImageEngine,
   type ImageGenerationRequest,
@@ -533,7 +537,13 @@ function describeImageEngines(): string {
   try {
     const config = getConfig().multimodal?.imageGeneration;
     const engines = config ? describeImageTierChoices(config) : "";
-    return engines ? ` Engines: ${engines}. A user who names one of these is asking for that tier.` : "";
+    // The server's limit, so the agent does not propose a render it would cut off.
+    const limit = config?.maxRenderMs
+      ? ` The image server gives up on any render after ${Math.round(config.maxRenderMs / 60_000)} min, and a render`
+        + " expected to take longer is refused before it runs: more steps, a larger size and guidance above an engine's"
+        + " default of 1 or less (which doubles the time) all make it longer."
+      : "";
+    return (engines ? ` Engines: ${engines}. A user who names one of these is asking for that tier.` : "") + limit;
   } catch {
     return "";
   }
@@ -804,6 +814,28 @@ registerTool({
         ...(typeof args["maskBlur"] === "number" ? { maskBlur: args["maskBlur"] } : {}),
       };
 
+      // A picture the person skipped is not put to them again in the same turn. The skip told the
+      // agent not to retry; it sent the same picture again seconds later, and again after the
+      // second skip (session fa673f2c). The refusal is flagged as theirs, like the skip itself.
+      const skipKey = skippedRenderKey(agentRequest.prompt, baseFile?.relativePath);
+      if (ctx.turnUserWords && skippedRenders.get(ctx.turnUserWords)?.has(skipKey)) {
+        return {
+          ...fail(
+            "The user already skipped this picture in the settings step this turn, so it was not put to them again"
+            + " and nothing was rendered. Do not call generate_image for it again: finish, and say the render was skipped.",
+          ),
+          metadata: { settings: { source: "user_skipped", changed: [], waitedMs: 0 }, [DECLINED_BY_USER_METADATA_KEY]: true },
+        };
+      }
+
+      // A render the image server would cut off is refused before anyone is asked to approve it,
+      // with what would fit: the agent can correct it before the person ever sees it.
+      const tooLong = imageRenderLimitError(
+        config,
+        previewImageRequest(config, agentRequest, baseFile ? readImageHeaderSize(baseFile.bytes) : undefined),
+      );
+      if (tooLong) return fail(tooLong);
+
       // The person may now take, change or skip what the agent chose. Asked AFTER the health
       // probe, so an offline backend never keeps anyone waiting, and after the agent's own base
       // and mask were read, so a bad path fails at once and the agent's picture can be offered.
@@ -812,6 +844,10 @@ registerTool({
         // A Skip is the person's choice, not a broken render: flagged, so the run record lists it
         // apart from the calls that failed instead of telling the orchestrator the render broke.
         const declined = settingsStep.metadata?.["source"] === "user_skipped";
+        if (declined && ctx.turnUserWords) {
+          const skipped = skippedRenders.get(ctx.turnUserWords) ?? new Set<string>();
+          skippedRenders.set(ctx.turnUserWords, skipped.add(skipKey));
+        }
         return {
           ...fail(settingsStep.stop),
           ...(settingsStep.metadata
@@ -828,6 +864,7 @@ registerTool({
       try {
         result = await requestImageGeneration(config, settingsStep.request);
       } catch (error) {
+        if (error instanceof ImageRenderTooLongError) return fail(error.message);
         if (!(error instanceof ImageGenerationTimeoutError)) throw error;
         return timedOutRender(error, settingsStep.metadata);
       } finally {
@@ -938,12 +975,24 @@ interface ImageSettingsStep {
 }
 
 /**
+ * The pictures the person skipped in the settings step, per turn. Keyed by the turn's own words
+ * object — one per turn, handed by reference to every specialist in it — so a skip holds for the
+ * whole turn and is forgotten with it: the next message is free to ask for the picture again.
+ */
+const skippedRenders = new WeakMap<object, Set<string>>();
+
+/** The same picture: the same prompt (spacing and case aside) on the same base, whatever the settings. */
+function skippedRenderKey(prompt: string, basePath: string | undefined): string {
+  return `${prompt.replace(/\s+/g, " ").trim().toLowerCase()}\u0000${basePath ?? ""}`;
+}
+
+/**
  * A render that ran out of its time, as the agent must hear it: the error names the engine, the
  * limit, the settings and what they were expected to take, and that the same settings must not be
  * tried again. `dispatchUncertain`, because the engine is still rendering what we abandoned.
  */
 function timedOutRender(error: ImageGenerationTimeoutError, settings: Record<string, unknown> | undefined): ToolResult {
-  const { tier, model, timeoutMs, expectedSeconds, steps, width, height } = error.details;
+  const { tier, model, timeoutMs, expectedSeconds, steps, width, height, cutByServerAfterMs } = error.details;
   return {
     success: false,
     output: "",
@@ -954,6 +1003,7 @@ function timedOutRender(error: ImageGenerationTimeoutError, settings: Record<str
       tier,
       ...(model ? { model } : {}),
       timeoutMs,
+      ...(cutByServerAfterMs !== undefined ? { cutByServerAfterMs } : {}),
       expectedSeconds: Math.round(expectedSeconds),
       steps,
       width,

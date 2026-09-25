@@ -90,6 +90,19 @@ export const MultimodalImageGenerationSchema = MultimodalServiceSchema.extend({
    */
   qualityTimeoutMs: z.number().int().min(10_000).max(600_000).default(210_000),
   /**
+   * How long the image SERVER waits for a render before it gives up — set it to the limit of the
+   * server or of a proxy in front of it (llama-swap: `peers.<peer>.timeouts.responseHeader`). Unset
+   * where there is none.
+   *
+   * No timeout on this side can extend it. An image engine sends no response headers until the
+   * picture is done, so every render longer than a proxy's response-header limit is cut at exactly
+   * that limit while the engine renders on. Session fa673f2c: 60 steps with guidance 2.5 on the
+   * quality engine, about 17 minutes, was cut at 600 s, sent again and cut again. With this set, a
+   * render expected to take longer than 90% of it is refused before it is sent, with the steps or
+   * guidance that would fit, and the settings form stops a person choosing one.
+   */
+  maxRenderMs: z.number().int().min(10_000).max(86_400_000).optional(),
+  /**
    * How many generations may run at once for a model, when the backend serialises per device.
    *
    * One by default, because a single image device generates serially: a second request does

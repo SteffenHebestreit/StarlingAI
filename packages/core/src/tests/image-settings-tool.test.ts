@@ -127,11 +127,11 @@ describe("generate_image: the settings step", () => {
   let memory: typeof import("../swarm/memory.js");
   let broker: typeof import("../agent/user-input-broker.js");
 
-  const writeConfig = async (settingsPrompt?: Record<string, unknown>) => {
+  const writeConfig = async (settingsPrompt?: Record<string, unknown>, imageConfig: Record<string, unknown> = {}) => {
     writeFileSync(configPath, JSON.stringify({
       workspacePath: tempDir,
       gateway: { jwtSecret: "t".repeat(32) },
-      multimodal: { imageGeneration: { ...IMAGE_CONFIG, ...(settingsPrompt ? { settingsPrompt } : {}) } },
+      multimodal: { imageGeneration: { ...IMAGE_CONFIG, ...imageConfig, ...(settingsPrompt ? { settingsPrompt } : {}) } },
     }), "utf8");
     (await import("../config/loader.js")).resetConfigForTests();
   };
@@ -613,5 +613,73 @@ describe("generate_image: the settings step", () => {
       vi.useRealTimers();
       (await import("../multimodal/image-generation.js")).resetImageDeviceBusyForTests();
     }
+  });
+
+  // Session fa673f2c: llama-swap cut two ~17-minute quality renders at exactly 600 s.
+  it("refuses a render the image server would cut off before anyone is asked, and says what would fit", async () => {
+    await writeConfig(undefined, { maxRenderMs: 600_000 });
+    const { chat } = await chatWithPictures();
+    const { fetchMock } = stubCluster();
+    const asked = person(() => ({ choice: "auto" }), chat.id);
+
+    const result = await run({ prompt: "the amazon, photograph", tier: "quality", steps: 60, guidanceScale: 2.5 }, { requestUserInput: asked.ask });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("Qwen-Image 2.1 (the quality tier) would need about 17 min for 60 steps at 1024x1024 with guidance 2.5");
+    expect(result.error).toContain("At guidance 1, the engine's default, the same steps and size take about 9 min");
+    expect(asked.mock, "an impossible render was put to the person").not.toHaveBeenCalled();
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST"), "the render went out").toBe(false);
+  });
+
+  it("gives the form the server's limit, and refuses settings past it against the steps with what fits", async () => {
+    await writeConfig(undefined, { maxRenderMs: 600_000 });
+    const { chat } = await chatWithPictures();
+    const { posts } = stubCluster();
+    const { ask, seen } = person(() => ({
+      choice: "configure",
+      settings: { tier: "quality", prompt: "the amazon", negativePrompt: "", width: 1344, height: 768, steps: 80, guidanceScale: 1, seed: null, edit: null },
+    }), chat.id);
+
+    const result = await run({ prompt: "the amazon", tier: "quality" }, { requestUserInput: ask });
+
+    expect(seen.payload!["renderLimit"]).toEqual({ allowedSeconds: 540, serverSeconds: 600 });
+    expect(seen.errors).toEqual([{
+      field: "settings.steps",
+      message: "about 11 min, and the image server stops any render after 10 min. At 1344x768, at most 64 steps fit.",
+    }]);
+    // The refused settings did not render; the stand-in lets the card run out, so the agent's did.
+    expect(result.success, String(result.error)).toBe(true);
+    expect(posts[0]!.fields).toMatchObject({ steps: "20", size: "1024x1024" });
+  });
+
+  it("gives the form no limit where the server has none", async () => {
+    const { chat } = await chatWithPictures();
+    stubCluster();
+    const { ask, seen } = person(() => ({ choice: "auto" }), chat.id);
+    await run({ prompt: "the amazon", tier: "quality" }, { requestUserInput: ask });
+    expect(seen.payload).not.toHaveProperty("renderLimit");
+  });
+
+  // Session fa673f2c: after "skip", the agent sent the same picture again within seconds, twice.
+  it("does not put a picture the person skipped to them again in the same turn — another picture, or the next turn, it does", async () => {
+    const { chat } = await chatWithPictures();
+    const { fetchMock } = stubCluster();
+    const words = { opening: "", midTurn: [] as string[] };
+    const { ask, mock } = person(() => ({ choice: "skip" }), chat.id);
+
+    await run({ prompt: "The Amazon rainforest, photograph", tier: "fast" }, { requestUserInput: ask, turnUserWords: words });
+    const again = await run({ prompt: "the amazon  rainforest, photograph", tier: "quality", steps: 30 }, { requestUserInput: ask, turnUserWords: words });
+
+    expect(mock, "the skipped picture was put to the person again").toHaveBeenCalledTimes(1);
+    expect(again.success).toBe(false);
+    expect(again.error).toContain("The user already skipped this picture in the settings step this turn");
+    expect(again.error).toContain("Do not call generate_image for it again");
+    expect(isDeclinedByUser(again.metadata)).toBe(true);
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+
+    await run({ prompt: "a toucan on a branch, photograph" }, { requestUserInput: ask, turnUserWords: words });
+    expect(mock, "a different picture is the person's to decide").toHaveBeenCalledTimes(2);
+    await run({ prompt: "The Amazon rainforest, photograph" }, { requestUserInput: ask, turnUserWords: { opening: "", midTurn: [] } });
+    expect(mock, "the next turn may ask for it again").toHaveBeenCalledTimes(3);
   });
 });

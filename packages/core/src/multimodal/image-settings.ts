@@ -22,9 +22,12 @@ import {
   IMAGE_STEPS_BOUNDS,
   IMAGE_TIER_EXPECTED_SECONDS,
   decodesWithinDeclaredSize,
+  describeRenderDuration,
   fitsImageSizeBounds,
   imageDeviceBusyMs,
   imageEngineLabel,
+  imageRenderLimitSeconds,
+  imageRenderOverLimit,
   imageTierChoices,
   imageTierDefaults,
   previewImageRequest,
@@ -132,6 +135,12 @@ export interface ImageSettingsProposal {
   bounds: typeof IMAGE_SETTINGS_BOUNDS;
   baseCandidates: Array<Pick<BaseCandidate, "id" | "label" | "source" | "width" | "height" | "fitsBounds" | "thumbDataUrl">>;
   agentMask?: { width: number; height: number; previewDataUrl: string; paintedEarlier?: boolean };
+  /**
+   * The image server's own limit, where one is configured: `serverSeconds` is when it gives up on a
+   * render, `allowedSeconds` the longest a render may be expected to take (imageRenderLimitSeconds).
+   * The form stops settings that would run past it; they are refused here as well.
+   */
+  renderLimit?: { allowedSeconds: number; serverSeconds: number };
 }
 
 /** The settings the person chose, checked. */
@@ -327,6 +336,14 @@ export function imageSettingsEngines(config: ImageGenerationBackendConfig): Imag
   });
 }
 
+/** The proposal's `renderLimit`, or nothing where the image server has no limit configured. */
+function renderLimitOf(config: ImageGenerationBackendConfig): Pick<ImageSettingsProposal, "renderLimit"> {
+  const allowedSeconds = imageRenderLimitSeconds(config);
+  return config.maxRenderMs && allowedSeconds !== undefined
+    ? { renderLimit: { allowedSeconds: Math.floor(allowedSeconds), serverSeconds: Math.round(config.maxRenderMs / 1000) } }
+    : {};
+}
+
 /**
  * What the form shows. `agent` is resolved through previewImageRequest — the resolution the render
  * itself applies — so Auto runs exactly what the form said it would.
@@ -361,6 +378,7 @@ export function buildImageSettingsProposal(
     },
     engines: imageSettingsEngines(config),
     bounds: IMAGE_SETTINGS_BOUNDS,
+    ...renderLimitOf(config),
     baseCandidates: candidates.map(({ id, label, source, width, height, fitsBounds, thumbDataUrl }) => ({ id, label, source, width, height, fitsBounds, thumbDataUrl })),
     ...(agentMask
       ? {
@@ -503,6 +521,15 @@ async function checkSettings(
   if (errors.length > 0 || !engine || prompt === undefined || negativePrompt === undefined
     || steps === undefined || guidanceScale === undefined || edit === undefined) {
     return undefined;
+  }
+  // Settings the image server would cut off are the person's to change, like any other bad field:
+  // said against the steps, with what would fit, and the question stays open.
+  const over = imageRenderOverLimit(context.config, {
+    tier: engine.tier, width: width as number, height: height as number, steps, guidanceScale,
+  });
+  if (over) {
+    return fail("steps", `about ${describeRenderDuration(over.expectedSeconds)}, and the image server stops any render`
+      + ` after ${describeRenderDuration(over.serverSeconds)}. ${over.advice}`);
   }
   return {
     tier: engine.tier,

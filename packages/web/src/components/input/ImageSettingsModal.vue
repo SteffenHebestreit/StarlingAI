@@ -284,6 +284,7 @@ import {
   imageFieldErrors,
   initialForm,
   longRenderWarning,
+  renderLimitProblem,
   randomSeed,
   selectBase,
   selectEngine,
@@ -328,7 +329,8 @@ const lock = computed(() => sizeLock(form.value, props.payload));
 const presets = computed(() => sizePresets(props.payload.bounds));
 // What these settings should take; also the running step's ETA once they are sent.
 const estimateSeconds = computed(() => formEstimateSeconds(form.value, props.payload));
-const longWarning = computed(() => longRenderWarning(estimateSeconds.value));
+// Past the image server's own limit the settings would fail, which outranks merely taking long.
+const longWarning = computed(() => renderLimitProblem(form.value, props.payload) || longRenderWarning(estimateSeconds.value));
 const waitNote = computed(() => engineWaitNote(engineWaitSeconds(props.payload, form.value.tier, props.request.askedAt, now.value)));
 const baseMissing = computed(() => editBaseMissing(props.payload));
 // This page's own checks first; what the server said about the last answer shows until the next.

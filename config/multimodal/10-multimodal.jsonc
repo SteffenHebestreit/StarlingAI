@@ -81,6 +81,12 @@
       // render at the tier's defaults (1024x1024, 20 steps); a request with more steps, a larger
       // size or true CFG gets proportionally more, never less.
       "qualityTimeoutMs": 300000,
+      // The cluster's OWN limit: llama-swap gives up on a request to its corsair peer after
+      // `peers.corsair.timeouts.responseHeader` (600 s), and the quality engine sends nothing
+      // until the picture is done. So any render longer than this fails whatever our timeouts
+      // say — session fa673f2c lost two 10-minute renders to it. Renders expected to need more
+      // than 90% of it are refused up front. Raise it together with llama-swap's setting.
+      "maxRenderMs": 600000,
       // Both tiers run ONE generation at a time, so the default ceiling of 1 applies to both
       // and there is no per-model override.
       //

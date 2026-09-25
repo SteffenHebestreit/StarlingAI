@@ -64,6 +64,12 @@ export interface ImageGenerationBackendConfig {
     apiKey?: string;
     timeoutMs?: number;
   };
+  /**
+   * How long the image server itself waits for a render before it gives up, in ms; absent where it
+   * has no such limit. No timeout here can extend it, so a render expected to take longer is
+   * refused before it is sent (imageRenderLimitError).
+   */
+  maxRenderMs?: number;
 }
 
 /**
@@ -286,6 +292,9 @@ export async function requestImageGeneration(
     ? await measureImage(input.initImage)
     : undefined;
   const request = resolveImageRequest(config, input, baseSize);
+  // Before the slot and the backend: a render the server would cut off fails now, not in ten minutes.
+  const tooLong = imageRenderLimitError(config, request);
+  if (tooLong) throw new ImageRenderTooLongError(tooLong);
   const budget = renderBudget(config, request);
 
   // Refuse an edit the backend cannot perform, instead of returning something unrelated.
@@ -484,12 +493,100 @@ function tierTimeoutMs(config: ImageGenerationBackendConfig, tier: ImageGenerati
  * plus a weight reload after idle, so a smaller request keeps that margin rather than losing it.
  */
 export function imageRequestTimeoutMs(config: ImageGenerationBackendConfig, request: ImageRenderShape): number {
-  return Math.round(tierTimeoutMs(config, request.tier) * Math.max(1, imageRenderWork(config, request)));
+  const scaled = Math.round(tierTimeoutMs(config, request.tier) * Math.max(1, imageRenderWork(config, request)));
+  // Never waits past the moment the image server itself gives up: no answer can come after it.
+  return config.maxRenderMs ? Math.min(scaled, config.maxRenderMs + IMAGE_SERVER_CUT_GRACE_MS) : scaled;
 }
 
 /** How long this request should take: the tier's time at its defaults, scaled by the request's work. */
 export function expectedImageRenderSeconds(config: ImageGenerationBackendConfig, request: ImageRenderShape): number {
   return IMAGE_TIER_EXPECTED_SECONDS[request.tier] * imageRenderWork(config, request);
+}
+
+/** How long past the server's own limit its answer may take to arrive before this side stops waiting. */
+const IMAGE_SERVER_CUT_GRACE_MS = 30_000;
+
+/**
+ * The share of the image server's limit a render may be expected to fill. The estimate is close —
+ * 50 steps at 1344x768 on the quality engine: 418 s expected, 414 s measured (session fa673f2c) —
+ * but a quality render reloads its weights after ten idle minutes (~25 s) and shares its machine,
+ * so the last tenth is margin.
+ */
+export const IMAGE_RENDER_LIMIT_HEADROOM = 0.9;
+
+/**
+ * The longest a render may be expected to take, in seconds: the image server's own limit
+ * (maxRenderMs) less the headroom. Undefined where no limit is configured.
+ */
+export function imageRenderLimitSeconds(config: ImageGenerationBackendConfig): number | undefined {
+  return config.maxRenderMs ? (config.maxRenderMs / 1000) * IMAGE_RENDER_LIMIT_HEADROOM : undefined;
+}
+
+/**
+ * What would bring a render within `allowedSeconds`, as one sentence: guidance back to the
+ * engine's default where true CFG doubles the time, else the steps that fit at this size.
+ */
+function renderFitAdvice(config: ImageGenerationBackendConfig, request: ImageRenderShape, allowedSeconds: number): string {
+  const defaults = imageTierDefaults(config, request.tier);
+  const cfgDoubles = defaults.guidanceScale <= 1 && request.guidanceScale > 1;
+  const withoutCfg = expectedImageRenderSeconds(config, cfgDoubles ? { ...request, guidanceScale: defaults.guidanceScale } : request);
+  const cfgNote = `guidance above ${defaults.guidanceScale} doubles the time on this engine without improving the picture`;
+  if (cfgDoubles && withoutCfg <= allowedSeconds) {
+    return `At guidance ${defaults.guidanceScale}, the engine's default, the same steps and size take about`
+      + ` ${formatRenderDuration(withoutCfg)} — ${cfgNote}.`;
+  }
+  const maxSteps = Math.floor((request.steps * allowedSeconds) / withoutCfg);
+  const at = `${request.width}x${request.height}${cfgDoubles ? ` with guidance ${defaults.guidanceScale} (${cfgNote})` : ""}`;
+  return maxSteps >= IMAGE_STEPS_BOUNDS.min
+    ? `At ${at}, at most ${maxSteps} steps fit.`
+    : `Even one step at ${at} does not fit: use a smaller size.`;
+}
+
+/**
+ * Why a resolved request cannot finish within the image server's own limit, with what would fit;
+ * undefined when it can, or where no limit is configured.
+ *
+ * Session fa673f2c: the quality engine was asked for 60 steps with guidance 2.5 — about 17 minutes —
+ * behind a proxy that gives up on any request after 10. The client's own budget allowed 30, so the
+ * render was sent, cut at exactly 600 s, sent again and cut again: twenty minutes of the cluster's
+ * slowest device for nothing, while the engine kept rendering what nobody would receive.
+ */
+export function imageRenderLimitError(config: ImageGenerationBackendConfig, request: ImageRenderShape): string | undefined {
+  const over = imageRenderOverLimit(config, request);
+  if (!over) return undefined;
+  return `${renderEngineName(config, request)} would need about ${formatRenderDuration(over.expectedSeconds)} for`
+    + ` ${request.steps} steps at ${request.width}x${request.height} with guidance ${request.guidanceScale}, and the image`
+    + ` server gives up on any render after ${formatRenderDuration(over.serverSeconds)}, so it would fail. Nothing`
+    + ` was rendered. ${over.advice}`;
+}
+
+/** A render too long for the image server: what it would take, the server's limit, and what would fit. */
+export interface ImageRenderOverLimit {
+  expectedSeconds: number;
+  serverSeconds: number;
+  advice: string;
+}
+
+/** The same judgement for a person choosing settings (the settings form words it its own way). */
+export function imageRenderOverLimit(config: ImageGenerationBackendConfig, request: ImageRenderShape): ImageRenderOverLimit | undefined {
+  const allowed = imageRenderLimitSeconds(config);
+  if (!config.maxRenderMs || allowed === undefined) return undefined;
+  const expectedSeconds = expectedImageRenderSeconds(config, request);
+  if (expectedSeconds <= allowed) return undefined;
+  return { expectedSeconds, serverSeconds: config.maxRenderMs / 1000, advice: renderFitAdvice(config, request, allowed) };
+}
+
+/** "8 min" / "40 s", as the render limit's messages word a duration. */
+export function describeRenderDuration(seconds: number): string {
+  return formatRenderDuration(seconds);
+}
+
+/** A render refused before it was sent because it could not finish within the image server's limit. */
+export class ImageRenderTooLongError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ImageRenderTooLongError";
+  }
 }
 
 /** The steps a render may ask for — the settings form's bound as well. */
@@ -543,13 +640,29 @@ export class ImageGenerationTimeoutError extends Error {
     steps: number;
     width: number;
     height: number;
+    /**
+     * Set when the image server gave up rather than this side: how long it had waited. Its limit is
+     * its own, so no budget here can extend it (session fa673f2c).
+     */
+    cutByServerAfterMs?: number;
+    /** The server's own words for the cut, kept so the reader can see where it came from. */
+    serverSaid?: string;
+    /** What would fit within the limit that ended it, as renderFitAdvice words it. */
+    advice?: string;
   }) {
+    const cutByServer = details.cutByServerAfterMs !== undefined;
     super(
-      `${details.engine} did not finish within ${formatRenderDuration(details.timeoutMs / 1000)}, the limit for this`
-      + ` request: ${details.steps} steps at ${details.width}x${details.height} were expected to take about`
+      (cutByServer
+        ? `${details.engine} was still rendering when the image server gave up waiting after`
+          + ` ${formatRenderDuration(details.cutByServerAfterMs! / 1000)} — the server's own limit, which no request can exceed:`
+        : `${details.engine} did not finish within ${formatRenderDuration(details.timeoutMs / 1000)}, the limit for this`
+          + " request:")
+      + ` ${details.steps} steps at ${details.width}x${details.height} were expected to take about`
       + ` ${formatRenderDuration(details.expectedSeconds)}. The engine renders one picture at a time and keeps working on an`
       + " abandoned one, so it stays busy for a while yet. This is not transient: do NOT call generate_image again with"
-      + " the same settings. Tell the user it timed out, and offer fewer steps or a smaller size.",
+      + " the same settings. Tell the user it timed out, and offer fewer steps or a smaller size."
+      + (details.advice ? ` ${details.advice}` : "")
+      + (details.serverSaid ? ` The server said: ${details.serverSaid}` : ""),
     );
     this.name = "ImageGenerationTimeoutError";
   }
@@ -560,29 +673,51 @@ interface RenderBudget {
   timeoutMs: number;
   expectedSeconds: number;
   timedOut(): ImageGenerationTimeoutError;
+  /** The image server gave up after `elapsedMs`, saying `serverSaid`: its limit, not ours, ended the render. */
+  cutByServer(elapsedMs: number, serverSaid: string): ImageGenerationTimeoutError;
+}
+
+/** "Qwen-Image 2.1 (the quality tier)" — the engine a request renders on, as the agent reads it. */
+function renderEngineName(config: ImageGenerationBackendConfig, request: Pick<ImageRenderShape, "tier"> & { model?: string }): string {
+  const model = request.model ?? engineModelForTier(config, request.tier);
+  const label = imageEngineLabel(config, request.tier);
+  return label
+    ? `${label} (the ${request.tier} tier)`
+    : `The ${request.tier} tier${model ? ` (model ${model})` : ""}`;
 }
 
 function renderBudget(config: ImageGenerationBackendConfig, request: ResolvedImageRequest): RenderBudget {
   const timeoutMs = imageRequestTimeoutMs(config, request);
   const expectedSeconds = expectedImageRenderSeconds(config, request);
   const model = request.model ?? engineModelForTier(config, request.tier);
-  const label = imageEngineLabel(config, request.tier);
-  const engine = label
-    ? `${label} (the ${request.tier} tier)`
-    : `The ${request.tier} tier${model ? ` (model ${model})` : ""}`;
+  const details = {
+    engine: renderEngineName(config, request),
+    tier: request.tier,
+    ...(model ? { model } : {}),
+    timeoutMs,
+    expectedSeconds,
+    steps: request.steps,
+    width: request.width,
+    height: request.height,
+  };
   return {
     timeoutMs,
     expectedSeconds,
-    timedOut: () => new ImageGenerationTimeoutError({
-      engine,
-      tier: request.tier,
-      ...(model ? { model } : {}),
-      timeoutMs,
-      expectedSeconds,
-      steps: request.steps,
-      width: request.width,
-      height: request.height,
-    }),
+    timedOut: () => new ImageGenerationTimeoutError(details),
+    cutByServer: (elapsedMs, serverSaid) => {
+      // What fits in the limit the server just showed, with the same margin a configured one gets.
+      // A render that should have fitted was not cut for its own length but for a wait inside the
+      // backend, and lowering its settings would not have saved it.
+      const allowed = (elapsedMs / 1000) * IMAGE_RENDER_LIMIT_HEADROOM;
+      return new ImageGenerationTimeoutError({
+        ...details,
+        cutByServerAfterMs: elapsedMs,
+        serverSaid,
+        advice: expectedSeconds <= allowed
+          ? "These settings fit within that limit, so the engine was most likely still busy with another render first."
+          : renderFitAdvice(config, request, allowed),
+      });
+    },
   };
 }
 
@@ -1192,6 +1327,14 @@ function renderInSlot(
       deviceBusyUntil.delete(gateKey);
       return busyFor > 0 ? { ...result, deviceWaitMs: busyFor } : result;
     } catch (error) {
+      if (error instanceof ServerRenderTimeoutError) {
+        // The server stopped waiting; the engine did not stop rendering. It is busy for what the
+        // render has left — at least a minute, since one that overran its estimate is still going.
+        const expectedMs = budget.expectedSeconds * 1000;
+        const left = Math.max(expectedMs - error.elapsedMs, Math.min(SERVER_CUT_MIN_BUSY_MS, expectedMs));
+        deviceBusyUntil.set(gateKey, Date.now() + left);
+        throw budget.cutByServer(error.elapsedMs, error.message);
+      }
       if (!(error instanceof UpstreamTimeoutError)) throw error;
       deviceBusyUntil.set(gateKey, Date.now() + Math.min(budget.expectedSeconds * 1000, budget.timeoutMs));
       throw budget.timedOut();
@@ -1354,7 +1497,10 @@ async function sendOpenAiImageRequest(
     if (response.ok) break;
     const backoff = IMAGE_RETRY_BACKOFF_MS[attempt];
     if (!RETRYABLE_IMAGE_STATUS.has(response.status) || backoff === undefined) {
-      throw new Error(await extractUpstreamError(response, `Image generation failed (${model})`));
+      const message = await extractUpstreamError(response, `Image generation failed (${model})`);
+      const elapsedMs = Date.now() - startedAt;
+      if (isServerRenderTimeout(response.status, message, elapsedMs)) throw new ServerRenderTimeoutError(message, elapsedMs);
+      throw new Error(message);
     }
     // Drain the body so the connection is not left half-read between attempts.
     await response.text().catch(() => "");
@@ -1432,6 +1578,7 @@ async function sendAutomatic1111Request(
   payload: Record<string, unknown>,
   timeoutMs: number,
 ): Promise<ImageGenerationResult> {
+  const startedAt = Date.now();
   const response = await fetchWithTimeout(
     upstreamUrl(config.baseUrl, input.initImage ? "/sdapi/v1/img2img" : "/sdapi/v1/txt2img"),
     {
@@ -1443,7 +1590,10 @@ async function sendAutomatic1111Request(
   );
 
   if (!response.ok) {
-    throw new Error(await extractUpstreamError(response, "Image generation failed"));
+    const message = await extractUpstreamError(response, "Image generation failed");
+    const elapsedMs = Date.now() - startedAt;
+    if (isServerRenderTimeout(response.status, message, elapsedMs)) throw new ServerRenderTimeoutError(message, elapsedMs);
+    throw new Error(message);
   }
 
   const body = await parseUpstreamJsonResponse(response, "Image generation returned a non-JSON response");
@@ -1647,6 +1797,36 @@ function upstreamHeaders(apiKey?: string, init: Record<string, string> | Headers
  * different things to the caller: "This operation was aborted" was all session 807684e9 heard of
  * a render that simply needed longer than its budget, and it retried the same settings.
  */
+/**
+ * The image server (or a proxy in front of it) gave up waiting for the render and answered with a
+ * gateway timeout. llama-swap words it `HTTP 502 … peer proxy error: net/http: timeout awaiting
+ * response headers`: its peer transport has a response-header limit, and the image engine sends no
+ * headers until the picture is done — so every render longer than that limit is cut at exactly it
+ * (600 s on the cluster this was written for, twice in session fa673f2c), while the engine renders on.
+ */
+class ServerRenderTimeoutError extends Error {
+  constructor(message: string, readonly elapsedMs: number) {
+    super(message);
+    this.name = "ServerRenderTimeoutError";
+  }
+}
+
+/**
+ * A 504, or a 502 that says it timed out, after the render had been running a while: the server's
+ * own limit ended the wait. One that answers at once never had a render to cut — the proxy could
+ * not reach its upstream — and stays an ordinary failure, with no device marked busy.
+ */
+function isServerRenderTimeout(status: number, message: string, elapsedMs: number): boolean {
+  if (elapsedMs < SERVER_CUT_MIN_ELAPSED_MS) return false;
+  return status === 504 || (status === 502 && /\btime(?:d)?\s?out\b/i.test(message));
+}
+
+/** Shorter than any server limit a render could meet (llama-swap's was 60 s at its lowest). */
+const SERVER_CUT_MIN_ELAPSED_MS = 30_000;
+
+/** However short the rest looks, the engine is still on the render for this long, or its whole expected time if shorter. */
+const SERVER_CUT_MIN_BUSY_MS = 60_000;
+
 class UpstreamTimeoutError extends Error {
   constructor(readonly url: string, readonly timeoutMs: number) {
     super(`Request to ${url} timed out after ${Math.round(timeoutMs / 1000)} s`);

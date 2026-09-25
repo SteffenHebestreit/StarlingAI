@@ -83,6 +83,11 @@ export interface ImageSettingsPayload {
   baseCandidates: BaseCandidate[];
   /** `paintedEarlier`: the region the user painted for an earlier render, which the agent passed again. */
   agentMask?: { width: number; height: number; previewDataUrl: string; paintedEarlier?: boolean };
+  /**
+   * The image server's own limit, where one is configured: it gives up on any render after
+   * `serverSeconds`, and settings expected to take longer than `allowedSeconds` are refused.
+   */
+  renderLimit?: { allowedSeconds: number; serverSeconds: number };
 }
 
 export type MaskChoice = "none" | "agent" | "painted";
@@ -225,6 +230,10 @@ export function readImageSettingsPayload(raw: unknown): ImageSettingsPayload | n
       thumbDataUrl: str(candidate["thumbDataUrl"]) ?? "",
     }];
   });
+  const limitRaw = record(data["renderLimit"]);
+  const allowedSeconds = num(limitRaw?.["allowedSeconds"]) ?? 0;
+  const serverSeconds = num(limitRaw?.["serverSeconds"]) ?? 0;
+  const renderLimit = allowedSeconds > 0 && serverSeconds > 0 ? { allowedSeconds, serverSeconds } : undefined;
   const maskRaw = record(data["agentMask"]);
   const agentMask = maskRaw && num(maskRaw["width"]) && num(maskRaw["height"]) && str(maskRaw["previewDataUrl"])
     ? {
@@ -254,6 +263,7 @@ export function readImageSettingsPayload(raw: unknown): ImageSettingsPayload | n
     bounds,
     baseCandidates,
     ...(agentMask ? { agentMask } : {}),
+    ...(renderLimit ? { renderLimit } : {}),
   };
 }
 
@@ -340,6 +350,36 @@ export function longRenderWarning(seconds: number): string {
   return seconds > LONG_RENDER_SECONDS
     ? `About ${Math.round(seconds / 60)} min. The engine renders one picture at a time and is busy for all of it.`
     : "";
+}
+
+/**
+ * Why the form's settings would run past the image server's own limit, with what would fit; "" when
+ * they fit or no limit is configured. Guidance back to the engine's default first where true CFG
+ * doubles the time, else the steps that fit at this size.
+ *
+ * Mirrors imageRenderOverLimit / renderFitAdvice in core's multimodal/image-generation.ts, which
+ * refuses the same settings — change both together. Session fa673f2c: "About 17 min" was shown as a
+ * warning, the render was taken, and the server cut it at 10 minutes, twice.
+ */
+export function renderLimitProblem(form: ImageSettingsForm, payload: ImageSettingsPayload): string {
+  const limit = payload.renderLimit;
+  const engine = engineFor(payload, form.tier);
+  if (!limit || !engine) return "";
+  const seconds = estimateRenderSeconds(engine, form);
+  if (!(seconds > limit.allowedSeconds)) return "";
+  const defaultGuidance = engine.defaults.guidanceScale;
+  const cfgDoubles = defaultGuidance <= 1 && form.guidanceScale > 1;
+  const withoutCfg = cfgDoubles ? estimateRenderSeconds(engine, { ...form, guidanceScale: defaultGuidance }) : seconds;
+  const head = `About ${Math.round(seconds / 60)} min, and the image server stops any render after`
+    + ` ${Math.round(limit.serverSeconds / 60)} min, so it would fail.`;
+  if (cfgDoubles && withoutCfg <= limit.allowedSeconds) {
+    return `${head} At guidance ${defaultGuidance}, this engine's default, it takes ${etaLabel(withoutCfg)}: higher guidance`
+      + " doubles the time here without improving the picture.";
+  }
+  const maxSteps = Math.floor((form.steps * limit.allowedSeconds) / withoutCfg);
+  return maxSteps >= 1
+    ? `${head} At most ${maxSteps} steps fit at this size${cfgDoubles ? ` with guidance ${defaultGuidance}` : ""}.`
+    : `${head} Choose a smaller size.`;
 }
 
 /**
@@ -562,6 +602,11 @@ export function validateForm(form: ImageSettingsForm, payload: ImageSettingsPayl
   }
   if (form.seed !== null && (!isInt(form.seed) || form.seed < bounds.seed[0] || form.seed > bounds.seed[1])) {
     add("seed", `A whole number from ${bounds.seed[0]} to ${bounds.seed[1]}, or random.`);
+  }
+  // Only settings that are otherwise valid have a time worth judging.
+  if (errors.length === 0) {
+    const tooLong = renderLimitProblem(form, payload);
+    if (tooLong) add("steps", tooLong);
   }
 
   if (base) {
