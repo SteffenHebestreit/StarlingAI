@@ -66,6 +66,7 @@ import { buildModelVisibleToolResult, deriveDelegationTaskFromArgs, runTurn } fr
 import { getConfig, resetConfigForTests } from "../config/loader.js";
 import { registerTool, unregisterTool } from "../tools/registry.js";
 import { turnSteeringManager } from "../agent/turn-steering.js";
+import { currentChatRequestId } from "../runtime/request-context.js";
 
 interface DelegationLoopFixtures {
   identicalLoop: {
@@ -4928,6 +4929,97 @@ describe("mid-turn steering the loop takes, and steering it never reaches", () =
     expect(folded.metadata).toEqual({ midTurn: true, midTurnSource: "user", steering: [{ id: "client-steer-01", text: steering }] });
     expect(consumed.at).toBe(folded.timestamp);
     expect(result.unconsumedSteering).toBeUndefined();
+  });
+
+  it("names its chat request on every history message, the steering it read included, and sends the model the same bytes", async () => {
+    // The web told turns apart by their text, and a second tab re-sending the same words left a
+    // message "Queued" under the wrong turn. The id is metadata: the prefix cache depends on the
+    // prompt bytes staying what they were.
+    const run = async (requestId?: string) => {
+      const session = makeSession();
+      let llmCallCount = 0;
+      streamMock.mockReset();
+      streamMock.mockImplementation(() => {
+        llmCallCount += 1;
+        if (llmCallCount === 1) return createToolCallStream("find_1", "search_agents", { query: "image generation" });
+        if (llmCallCount === 2) {
+          return createDelegateToolCallStream("delegate_1", { agentName: "image_creator", task: "Render the harbour at dusk." });
+        }
+        return createTextStream("Rendered the harbour at dusk.");
+      });
+      registerTool({
+        name: "search_agents",
+        description: "Find agents.",
+        parameters: { type: "object", properties: {} },
+        execute: async () => {
+          turnSteeringManager.enqueue(session.id, "nimm das qwen model", "client-steer-01");
+          return { success: true, output: "image_creator — generates images." };
+        },
+      });
+      registerTool({
+        name: "delegate_to_agent",
+        description: "Delegate to a specialist.",
+        parameters: { type: "object", properties: {} },
+        execute: async () => ({
+          success: true,
+          output: "Saved generated/images/harbour.png",
+          metadata: { agentName: "image_creator", attemptedAgents: ["image_creator"], delegationSucceeded: true },
+        }),
+      });
+      await runTurn({ session, userMessage: "Render the harbour at dusk.", ...(requestId ? { requestId } : {}) });
+      const prompts = JSON.stringify(streamMock.mock.calls.map((call) => call[0])).replaceAll(session.id, "<session>");
+      return { session, prompts };
+    };
+
+    const named = await run("req-a");
+    const unnamed = await run();
+    expect(named.prompts).toContain("[USER STEERING — sent mid-turn]");
+    expect(named.prompts).toBe(unnamed.prompts);
+    expect(named.prompts).not.toContain("req-a");
+
+    expect(named.session.getHistory().length).toBeGreaterThan(4);
+    expect(named.session.getHistory().filter((message) => message.requestId !== "req-a")).toEqual([]);
+    expect(unnamed.session.getHistory().filter((message) => message.requestId !== undefined)).toEqual([]);
+    expect(named.session.toTranscript().map((entry) => [entry.role, entry.content, entry.midTurn, entry.requestId])).toEqual([
+      ["user", "Render the harbour at dusk.", undefined, "req-a"],
+      ["assistant", "", undefined, "req-a"],
+      ["user", "nimm das qwen model", true, "req-a"],
+      ["assistant", "Rendered the harbour at dusk.", undefined, "req-a"],
+    ]);
+    expect(unnamed.session.toTranscript().map((entry) => entry.requestId)).toEqual([undefined, undefined, undefined, undefined]);
+  });
+
+  it("does not hand its chat request id to a turn nested in it", async () => {
+    // A nested turn (a workflow run from a tool) writes to its own session, which no chat.send
+    // started: its messages must not name the chat turn around it (turn-ids review, INFO 4).
+    const session = makeSession();
+    const nested = makeSession();
+    let llmCallCount = 0;
+    let seenInTool: string | undefined;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) return createToolCallStream("find_1", "search_agents", { query: "harbour" });
+      if (llmCallCount === 2) return createTextStream("The nested step is done.");
+      return createTextStream("Rendered the harbour at dusk.");
+    });
+    registerTool({
+      name: "search_agents",
+      description: "Find agents.",
+      parameters: { type: "object", properties: {} },
+      execute: async () => {
+        // The tool runs in the chat turn's context: a nested turn that inherited it would name it.
+        seenInTool = currentChatRequestId();
+        const inner = await runTurn({ session: nested, userMessage: "Run the nested step." });
+        return { success: true, output: inner.response };
+      },
+    });
+
+    await runTurn({ session, userMessage: "Render the harbour at dusk.", requestId: "req-a" });
+
+    expect(seenInTool).toBe("req-a");
+    expect(nested.getHistory().length).toBeGreaterThan(1);
+    expect(nested.getHistory().filter((message) => message.requestId !== undefined)).toEqual([]);
+    expect(session.getHistory().filter((message) => message.requestId !== "req-a")).toEqual([]);
   });
 
   it("hands back a message sent while the final answer was being written, instead of dropping it", async () => {

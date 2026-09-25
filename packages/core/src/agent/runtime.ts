@@ -1139,6 +1139,8 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
         callSite: "main_turn",
         ...(userInput ? { userInput } : {}),
         turnId,
+        // Not inherited: a nested turn writes to its own session, which no chat.send started.
+        ...(opts.requestId ? { chatRequestId: opts.requestId } : {}),
       },
       () => runWithPhaseTimings(() => runTurnImpl(opts)),
     );

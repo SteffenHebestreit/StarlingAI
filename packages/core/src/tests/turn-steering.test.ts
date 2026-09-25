@@ -203,25 +203,135 @@ describe("turnSteeringManager", () => {
     }
   });
 
-  it("keeps nothing for a turn that started before its session's last drop", () => {
+  it("leaves a turn's queue alone on a reset, and keeps for the session only what was queued after it", () => {
     // Review of round 4, B #2: a stopped turn slow to unwind kept its leftovers again after a reset
-    // had dropped them.
-    const blue = [{ id: "steer-blue-01", text: "make it blue" }];
-    const before = turnSteeringManager.dropMark();
+    // had dropped them. Round 5, B #1: refusing the whole turn's leftovers also refused a message
+    // typed into it after the reset. Turn-ids review, R1: clearing the queue instead lost a message
+    // typed before a Reset, which does not stop the turn, so its own final status no longer listed
+    // it and the page showed it "Queued" for good.
+    turnSteeringManager.armTurn("s1", "tok-a", "req-a");
+    turnSteeringManager.armTurn("s2", "tok-x", "req-x");
+    turnSteeringManager.enqueue("s1", "make it blue", "steer-blue-01");
+    turnSteeringManager.enqueue("s2", "a clear sky", "steer-sky-0001");
     turnSteeringManager.dropUnread("sub:s1:researcher:1780000000000");
-    expect(turnSteeringManager.keepUnread("s1", "req-a", blue, before)).toBe(false);
-    expect(turnSteeringManager.unreadOf("s1")).toEqual([]);
+    turnSteeringManager.enqueue("s1", "typed after the reset", "steer-after-01");
+    // A retry of the message typed before is the same message, not one typed after.
+    expect(turnSteeringManager.enqueue("s1", "make it blue", "steer-blue-01").queued).toBe(true);
+
+    // The turn still lists both, for its own page.
+    const leftovers = turnSteeringManager.closeTurn("s1", "tok-a");
+    expect(leftovers.map(({ id }) => id)).toEqual(["steer-blue-01", "steer-after-01"]);
+    // The session keeps only the one typed into the chat as it is now.
+    expect(turnSteeringManager.keepUnread("s1", "req-a", leftovers)).toEqual([{ id: "steer-after-01", text: "typed after the reset" }]);
+    expect(turnSteeringManager.unreadOf("s1")).toEqual([{ id: "steer-after-01", text: "typed after the reset", requestId: "req-a" }]);
     // Another session's drop is not this one's.
-    expect(turnSteeringManager.keepUnread("s2", "req-x", blue, before)).toBe(true);
-    expect(turnSteeringManager.unreadOf("s2")).toHaveLength(1);
-    // A turn that started after the drop keeps its own.
-    const after = turnSteeringManager.dropMark();
-    expect(turnSteeringManager.keepUnread("s1", "req-b", blue, after)).toBe(true);
-    expect(turnSteeringManager.unreadOf("s1")).toEqual([{ id: "steer-blue-01", text: "make it blue", requestId: "req-b" }]);
-    // Bounded like the unread lists: the oldest session's mark goes after a thousand others'.
-    for (let index = 0; index < 1_000; index += 1) turnSteeringManager.dropUnread(`other-${index}`);
-    expect(turnSteeringManager.keepUnread("other-999", "req-y", [{ id: "steer-hat-0001", text: "and a hat" }], before)).toBe(false);
-    expect(turnSteeringManager.keepUnread("s1", "req-c", [{ id: "steer-hat-0001", text: "and a hat" }], before)).toBe(true);
+    const sky = turnSteeringManager.closeTurn("s2", "tok-x");
+    expect(turnSteeringManager.keepUnread("s2", "req-x", sky)).toEqual([{ id: "steer-sky-0001", text: "a clear sky" }]);
+
+    // A running turn still reads what was typed before the reset.
+    turnSteeringManager.armTurn("s3", "tok-c", "req-c");
+    turnSteeringManager.enqueue("s3", "and a hat", "steer-hat-0001");
+    turnSteeringManager.dropUnread("s3");
+    expect(turnSteeringManager.drain("s3", "tok-c").map(({ id }) => id)).toEqual(["steer-hat-0001"]);
+
+    // The tag is taken when the message is queued: a drop between the turn's close and its final
+    // status still counts.
+    turnSteeringManager.armTurn("s4", "tok-d", "req-d");
+    turnSteeringManager.enqueue("s4", "and a scarf", "steer-scarf-01");
+    const closed = turnSteeringManager.closeTurn("s4", "tok-d");
+    turnSteeringManager.dropUnread("s4");
+    expect(turnSteeringManager.keepUnread("s4", "req-d", closed)).toEqual([]);
+    expect(turnSteeringManager.unreadOf("s4")).toEqual([]);
+
+    // Typed after one reset but before the next is older than the chat again.
+    turnSteeringManager.armTurn("s5", "tok-e", "req-e");
+    turnSteeringManager.dropUnread("s5");
+    turnSteeringManager.enqueue("s5", "and gloves", "steer-glove-01");
+    turnSteeringManager.dropUnread("s5");
+    expect(turnSteeringManager.keepUnread("s5", "req-e", turnSteeringManager.closeTurn("s5", "tok-e"))).toEqual([]);
+  });
+
+  it("lists what a turn another turn took the session from had queued, and keeps only what came after a reset", () => {
+    turnSteeringManager.armTurn("s1", "tok-a", "req-a");
+    turnSteeringManager.enqueue("s1", "make it blue", "steer-blue-01");
+    turnSteeringManager.armTurn("s1", "tok-b", "req-b");
+    turnSteeringManager.dropUnread("s1");
+    turnSteeringManager.enqueue("s1", "and a hat", "steer-hat-0001");
+
+    const displaced = turnSteeringManager.closeTurn("s1", "tok-a");
+    expect(displaced.map(({ id }) => id)).toEqual(["steer-blue-01"]);
+    expect(turnSteeringManager.keepUnread("s1", "req-a", displaced)).toEqual([]);
+    const current = turnSteeringManager.closeTurn("s1", "tok-b");
+    expect(turnSteeringManager.keepUnread("s1", "req-b", current)).toEqual([{ id: "steer-hat-0001", text: "and a hat" }]);
+    expect(turnSteeringManager.unreadOf("s1")).toEqual([{ id: "steer-hat-0001", text: "and a hat", requestId: "req-b" }]);
+  });
+
+  it("queues for the named chat turn only, and says when another turn holds the session", () => {
+    // The web told turns apart by their text: a page still showing a turn that another tab had
+    // replaced steered the replacement, and its message belonged to a turn the page never ran.
+    expect(turnSteeringManager.enqueue("s1", "make it blue", "steer-blue-01", "req-a"))
+      .toEqual({ queued: false, active: false, otherTurn: true });
+    turnSteeringManager.armTurn("s1", "tok-a", "req-a");
+    expect(turnSteeringManager.enqueue("sub:s1:researcher:1780000000000", "make it blue", "steer-blue-01", "req-a"))
+      .toEqual({ queued: true, active: true, id: "steer-blue-01" });
+    // The armed turn reaching the runtime keeps its id.
+    turnSteeringManager.markTurnActive("s1", "tok-a");
+    expect(turnSteeringManager.enqueue("s1", "and a hat", "steer-hat-0001", "req-a").queued).toBe(true);
+
+    turnSteeringManager.armTurn("s1", "tok-b", "req-b");
+    // It names the turn that took the session, so a page can tell "replaced" from "ended".
+    expect(turnSteeringManager.enqueue("s1", "and a scarf", "steer-scarf-01", "req-a"))
+      .toEqual({ queued: false, active: true, otherTurn: true, replaced: true, replacedBy: "req-b" });
+    // Without an id it goes to whichever turn holds the session, as before.
+    expect(turnSteeringManager.enqueue("s1", "and a scarf", "steer-scarf-01").queued).toBe(true);
+    expect(turnSteeringManager.drain("s1", "tok-b").map(({ id }) => id)).toEqual(["steer-scarf-01"]);
+    expect(turnSteeringManager.closeTurn("s1", "tok-a").map(({ id }) => id)).toEqual(["steer-blue-01", "steer-hat-0001"]);
+
+    // A turn no chat.send started has no id to match, and none to name — but it still moved the
+    // chat on from the named one (round 2, LOW 2).
+    const unnamed = turnSteeringManager.markTurnActive("s1");
+    expect(turnSteeringManager.enqueue("s1", "and a scarf", "steer-scarf-02", "req-b"))
+      .toEqual({ queued: false, active: true, otherTurn: true, replaced: true });
+    // Still named once nothing runs; a turn that simply ended names nobody.
+    turnSteeringManager.armTurn("s2", "tok-x", "req-x");
+    turnSteeringManager.closeTurn("s2", "tok-x");
+    turnSteeringManager.closeTurn("s1", unnamed);
+    expect(turnSteeringManager.enqueue("s1", "and a hat", "steer-hat-0002", "req-a"))
+      .toEqual({ queued: false, active: false, otherTurn: true, replaced: true, replacedBy: "req-b" });
+    expect(turnSteeringManager.enqueue("s2", "a clear sky", "steer-sky-0001", "req-x"))
+      .toEqual({ queued: false, active: false, otherTurn: true });
+  });
+
+  it("keys what it remembers of a turn by its session: request ids are the client's", () => {
+    // Round 2, LOW 1: one session's request id named another session's replacement, and a client
+    // reusing ids across sessions had a steer refused as replaced instead of sent on as the next turn.
+    turnSteeringManager.armTurn("A", "tok-a1", "req-1");
+    turnSteeringManager.armTurn("A", "tok-a2", "req-2");
+    turnSteeringManager.armTurn("M", "tok-m1", "req-1");
+    turnSteeringManager.closeTurn("M", "tok-m1");
+    expect(turnSteeringManager.enqueue("M", "and a hat", "steer-hat-0001", "req-1"))
+      .toEqual({ queued: false, active: false, otherTurn: true });
+    expect(turnSteeringManager.enqueue("A", "and a hat", "steer-hat-0002", "req-1"))
+      .toEqual({ queued: false, active: true, otherTurn: true, replaced: true, replacedBy: "req-2" });
+    // An id used again for a new turn names that turn now: once it simply ends, it was not replaced
+    // (final review, LOW 2).
+    turnSteeringManager.armTurn("A", "tok-a3", "req-1");
+    turnSteeringManager.closeTurn("A", "tok-a3");
+    expect(turnSteeringManager.enqueue("A", "and a hat", "steer-hat-0003", "req-1"))
+      .toEqual({ queued: false, active: false, otherTurn: true });
+
+    // Round 2, INFO 3: after a reset, a message resent under the same id into a LATER turn is another
+    // message; its tag must not let the earlier turn's leftovers keep the first one.
+    turnSteeringManager.armTurn("R", "tok-r1", "req-r1");
+    turnSteeringManager.enqueue("R", "make it blue", "steer-blue-01");
+    turnSteeringManager.dropUnread("R");
+    turnSteeringManager.armTurn("R", "tok-r2", "req-r2");
+    turnSteeringManager.enqueue("R", "make it blue", "steer-blue-01");
+    const early = turnSteeringManager.closeTurn("R", "tok-r1");
+    expect(early.map(({ id }) => id)).toEqual(["steer-blue-01"]);
+    expect(turnSteeringManager.keepUnread("R", "req-r1", early)).toEqual([]);
+    expect(turnSteeringManager.keepUnread("R", "req-r2", turnSteeringManager.closeTurn("R", "tok-r2")))
+      .toEqual([{ id: "steer-blue-01", text: "make it blue" }]);
   });
 
   it("carries a failed turn's leftovers on the error it rethrows", () => {

@@ -561,6 +561,7 @@ Supported RPC methods:
 - `unreadSteering` is present only when this start retired steering messages that earlier turns of the session never read (see [Mid-turn steering](#mid-turn-steering)), and only for the session owner or an admin. It has the same shape as in `session.get`. The web stops a turn with `chat.cancel` and only then sends the next message; a stopped turn that finished unwinding in between would otherwise have its leftovers dropped by this start without anyone seeing them.
 - A turn already running on the session is superseded, whichever connection started it: it is aborted and reports its own leftovers on its own final `status`. The new turn runs alone on the history.
 - A `requestId` that a running turn still uses is refused with the RPC error `requestId <id> is already in use by a running turn`, before anything is sent under it.
+- A `requestId` must be 1 to 64 characters of `A-Za-z0-9_-`, as every history message of the turn is saved with it. Any other is refused with the RPC error `requestId must be 1 to 64 characters of A-Za-z0-9_-`, and no turn starts. Without one, the gateway picks one.
 
 `chat.cancel` stops a turn by its request id and answers `{ cancelled, requestId, known }`. It reaches any turn in a session the caller may stop (its owner or an admin, as for `POST /api/sessions/:sessionId/stop`), not only a turn this connection started: a reloaded page still follows its turn by request id. `cancelled` says whether this call stopped the turn. `known` says whether this process runs the turn or ended it within the last ten minutes (at most 1,000 ended turns are remembered), for a caller who may stop it. `cancelled: false, known: true` means the turn was already stopped or is over; only `known: false` calls for stopping the session some other way. A Stop also settles the turn's open questions at once.
 
@@ -590,7 +591,8 @@ Supported RPC methods:
       "id": "session:0",
       "role": "user",
       "content": "hello",
-      "timestamp": "2026-03-15T11:00:01.000Z"
+      "timestamp": "2026-03-15T11:00:01.000Z",
+      "requestId": "req-7f4"
     }
   ],
   "totalMessages": 8,
@@ -609,12 +611,14 @@ Supported RPC methods:
 
 `settings` carries the per-session effort tier (and any `turnTimeoutSecOverride`) and `imageSettingsPrompt`; `effort` falls back to the global `effort.default` when the session has none set, and `imageSettingsPrompt` to `"ask"`.
 
+A transcript entry of a turn started by `chat.send` carries that turn's `requestId`: its opening message, every assistant entry, and each message sent into it while it ran (`midTurn: true`), which names the turn that read it. The id is saved with the history, so it survives a restart. Entries of other turns (AG-UI, jobs, channels) and of history saved before the field existed have none. Assistant entries of two different turns are never merged into one, so a stopped turn that writes after its replacement has started keeps its own entry.
+
 The rest lets a page reloaded mid-turn, or a second tab, pick the turn up:
 
 - `activeTurn` is `true` while any turn holds the session, including one started over AG-UI and one that was stopped and is still unwinding.
 - `activeTurnRequestId` and `activeTurnStartedAt` (epoch ms) name the running turn when it is a WebSocket turn of this process that has not been stopped. The page can steer it or stop it with `chat.cancel`; a `chat.send` it makes anyway supersedes it.
 - `openUserInputs` lists the session's open structured questions (see [Structured user input](#structured-user-input)) that the caller may answer, each in the `agent.user_input_needed` shape. It is `[]` for anyone else.
-- `unreadSteering` is present only when it is not empty, and only for the session owner or an admin, since these are the person's own words. It lists steering messages that finished turns never read and whose final `status` found the connection that started them gone, each naming that turn as `requestId`. They are kept for at most an hour. The next `chat.send` of the session hands them back and retires them, and a reset, a delete or a rewind that removes something drops them. A turn that was already running then adds none of its own when it ends.
+- `unreadSteering` is present only when it is not empty, and only for the session owner or an admin, since these are the person's own words. It lists steering messages that finished turns never read and whose final `status` found the connection that started them gone, each naming that turn as `requestId`. They are kept for at most an hour. The next `chat.send` of the session hands them back and retires them, and a reset, a delete or a rewind that removes something drops them. A turn still running then does not add the messages queued before it (see [Mid-turn steering](#mid-turn-steering)).
 - `serverNow` is the gateway clock (epoch ms) at the answer. The `expiresAt` deadlines of `openUserInputs` are server times, and the page needs the skew to count them down.
 
 For the owner or an admin, `session.get` also subscribes the connection to the session's `agent.user_input_needed`, `agent.user_input_resolved` and `agent.unread_steering` events. A turn's other events go only to the connection that started it.
@@ -658,7 +662,22 @@ When a turn exceeds its time limit, the gateway parks the session (the next mess
 
 ### Mid-turn steering
 
-A message sent while a turn runs is folded into that turn at its next safe point instead of starting a new one. It is sent with `POST /api/sessions/:sessionId/steer` and a body of `{ message, clientMessageId? }`. The reply `{ steered, active, id? }` says whether the message was queued. `id` is the `clientMessageId` when that has the accepted shape (8 to 64 of `A-Za-z0-9_-`), and a server id otherwise. A retry with the same id is queued once.
+A message sent while a turn runs is folded into that turn at its next safe point instead of starting a new one. It is sent with `POST /api/sessions/:sessionId/steer` and a body of `{ message, clientMessageId?, requestId? }`. The reply `{ steered, active, id? }` says whether the message was queued. `id` is the `clientMessageId` when that has the accepted shape (8 to 64 of `A-Za-z0-9_-`), and a server id otherwise. A retry with the same id is queued once.
+
+`requestId` names the `chat.send` turn the message was typed into, and only that turn takes it. When another turn holds the session, or none does, nothing is queued and the reply (HTTP 200) is:
+
+```json
+{
+  "steered": false,
+  "active": true,
+  "activeTurnRequestId": "req-7f4",
+  "replaced": true,
+  "replacedBy": "req-7f4",
+  "error": "The turn this was typed into has ended."
+}
+```
+
+`active` says whether any turn holds the session, and `activeTurnRequestId` names the running turn as `session.get` does. `replaced` says another turn took the session from the turn the message was typed into, and `replacedBy` names it when it was a `chat.send` turn, for example a send from another tab (a job or an AG-UI turn has no id to name, so it gives `replaced` alone). Both are absent when that turn simply ended, and both stay set after the replacing turn has ended too, so a client can tell a replaced turn from an ended one when `active` is `false`. Both are kept per session: request ids are the client's, and one session's id never names another session's turn. The server remembers the last 1,000 replacements across all sessions; past that, an older replaced turn reads as one that ended. A turn that was stopped and is still unwinding still takes a message that names it, though `session.get` no longer names that turn; what it does not read comes back on its final `status`. Without `requestId`, the message goes to whichever turn holds the session.
 
 When the turn reads queued messages, the connection that started it gets:
 
@@ -676,7 +695,7 @@ When the turn reads queued messages, the connection that started it gets:
 }
 ```
 
-`segmentText` is the text the transcript keeps for the part of the answer before this cut, or `""` when that part wrote none. A live view splits the answer there, so it matches what a reload shows.
+`segmentText` is the text the transcript keeps for the part of the answer before this cut, or `""` when that part wrote none. Like the transcript, it passes over an entry another turn wrote, such as the late write of a turn this one replaced. A live view splits the answer there, so it matches what a reload shows.
 
 Messages the turn never read ride its final `status` as `unconsumedSteering`, and the client sends them on as the next turn. When that status cannot be delivered because the connection that started the turn is gone, the session keeps them. `session.get` lists them as `unreadSteering`, the next `chat.send` reply hands them back, and they are pushed at once to the session's open connections:
 
@@ -692,7 +711,7 @@ Messages the turn never read ride its final `status` as `unconsumedSteering`, an
 
 The push covers a stopped turn that is slow to notice its Stop and finishes unwinding after the next `chat.send` has started. Neither `session.get` nor that send's reply saw its leftovers then. It reaches the connections that loaded the session with `session.get` or started an interactive (not `--auto`) turn on it, and only those of the session owner or an admin (anyone's, for a session with no owner). Each message names, as `requestId`, the turn that ended without reading it. One message can arrive by more than one of these routes, so clients drop repeats by `id`.
 
-A turn that started before a reset, a delete or a rewind that removes something keeps and pushes nothing when its final `status` cannot be delivered, as the history its leftovers belong to is gone. That includes messages steered into it afterwards, a known limit: nothing then tells the page that sent them that the turn left them unread.
+A reset, a delete or a rewind that removes something does not stop a running turn, and leaves what it has queued alone: the turn still folds those messages in, and its final `status` still lists the ones it did not read, for the connection that started it. When that status cannot be delivered, the session neither keeps nor pushes a message queued before the reset, delete or rewind, as the history it belongs to is gone. The rule is per message: one steered into the turn afterwards is kept and pushed like any other.
 
 ### Structured user input
 

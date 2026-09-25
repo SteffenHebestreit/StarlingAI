@@ -27,6 +27,7 @@ import {
 import { PRODUCT } from "../product/index.js";
 import { midTurnUserMessages, startsTurn } from "./turn-boundary.js";
 import { attachmentEntryKey, extractArtifactsFromMetadata } from "./artifact-metadata.js";
+import { currentChatRequestId } from "../runtime/request-context.js";
 
 const log = childLogger("agent:session");
 const TRANSIENT_TURN_SYSTEM_PREFIXES = [
@@ -104,7 +105,14 @@ export interface TurnResult {
 export interface SessionHistoryMessage extends LLMMessage {
   timestamp: string;
   metadata?: Record<string, unknown>;
+  /** The chat.send request id of the turn that wrote this message (RequestContext.chatRequestId).
+   *  Beside the content, like the timestamp: the model reads role and content only, so the prompt
+   *  bytes, and with them the prefix cache, are the same with or without it. */
+  requestId?: string;
 }
+
+/** What a turn hands to addMessage. `requestId` is for a writer outside the turn's own context. */
+export type SessionMessageInput = LLMMessage & { metadata?: Record<string, unknown>; requestId?: string };
 
 export interface SessionSummary {
   id: string;
@@ -135,6 +143,12 @@ export interface SessionTranscriptMessage {
   continued?: true;
   /** When the part of the turn this assistant entry shows began: the mid-turn message before it. */
   segmentStartedAt?: string;
+  /**
+   * The chat.send request id of the turn this entry belongs to; for a mid-turn message, of the
+   * turn that read it. Absent for turns no chat.send started and for history saved before it was
+   * recorded, which a client then tells apart the way it did before.
+   */
+  requestId?: string;
 }
 
 export interface SessionTranscriptAttachment {
@@ -417,14 +431,14 @@ export class AgentSession {
     return this.workspacePath;
   }
 
-  addMessage(msg: LLMMessage & { metadata?: Record<string, unknown> }): void {
+  addMessage(msg: SessionMessageInput): void {
     this.history.push(withTimestamp(msg));
     this.touch();
     this.maybeTrimHistory();
     persistSessionStore(this);
   }
 
-  addMessages(msgs: Array<LLMMessage & { metadata?: Record<string, unknown> }>): void {
+  addMessages(msgs: SessionMessageInput[]): void {
     this.history.push(...msgs.map(withTimestamp));
     this.touch();
     this.maybeTrimHistory();
@@ -713,6 +727,7 @@ export class AgentSession {
           role: "assistant",
           content: sanitizeTranscriptContent("assistant", message.content ?? "", true),
           timestamp: message.timestamp,
+          ...(message.requestId ? { requestId: message.requestId } : {}),
           swarmState: getTranscriptSwarmState(message.metadata),
           toolCalls: message.tool_calls.map((toolCall) => {
             let args: Record<string, unknown>;
@@ -746,6 +761,8 @@ export class AgentSession {
             timestamp: message.timestamp,
             midTurn: true,
             ...(entry.id ? { steeringId: entry.id } : {}),
+            // The turn that read it, which wrote this message into the history.
+            ...(message.requestId ? { requestId: message.requestId } : {}),
           });
         });
         index += 1;
@@ -759,6 +776,7 @@ export class AgentSession {
         role: message.role,
         content: transcriptContent,
         timestamp: message.timestamp,
+        ...(message.requestId ? { requestId: message.requestId } : {}),
         attachments,
         swarmState: message.role === "assistant" ? getTranscriptSwarmState(message.metadata) : undefined,
       });
@@ -768,11 +786,13 @@ export class AgentSession {
     // Merge consecutive assistant entries that belong to the same turn.
     // During a multi-iteration tool-use turn the history contains several
     // assistant messages (one per LLM call) interleaved with tool results.
-    // The live UI shows them as one message — replicate that on reload.
+    // The live UI shows them as one message — replicate that on reload. Never across two turns: a
+    // superseded turn still unwinding writes after its replacement has started, and merged into it
+    // its entry took the other turn's id.
     const transcript: SessionTranscriptMessage[] = [];
     for (const entry of raw) {
       const prev = transcript[transcript.length - 1];
-      if (prev && prev.role === "assistant" && entry.role === "assistant") {
+      if (prev && prev.role === "assistant" && entry.role === "assistant" && prev.requestId === entry.requestId) {
         // Combine tool calls
         if (entry.toolCalls?.length) {
           prev.toolCalls = [...(prev.toolCalls ?? []), ...entry.toolCalls];
@@ -975,7 +995,9 @@ function splitSteeredTurns(transcript: SessionTranscriptMessage[]): void {
   for (let index = 1; index <= transcript.length; index += 1) {
     const entry = transcript[index];
     if (entry && !(entry.role === "user" && !entry.midTurn)) continue;
-    splitSteeredTurn(transcript.slice(turnStart, index));
+    // A late write of a superseded turn that landed here is not a part of this turn.
+    const turn = transcript.slice(turnStart, index);
+    splitSteeredTurn(turn.filter((part) => part.requestId === turn[0]!.requestId));
     turnStart = index;
   }
 }
@@ -1390,10 +1412,14 @@ export function resetSessionsForTests(): void {
   persistSessionStore();
 }
 
-function withTimestamp(message: LLMMessage & { metadata?: Record<string, unknown> }): SessionHistoryMessage {
+/** Also names the turn: from the writer's own chat turn, so a superseded turn still unwinding
+ *  labels its late writes as its own, not as the turn that replaced it. */
+function withTimestamp(message: SessionMessageInput): SessionHistoryMessage {
+  const requestId = message.requestId ?? currentChatRequestId();
   return {
     ...message,
     timestamp: new Date().toISOString(),
+    ...(requestId ? { requestId } : {}),
   };
 }
 

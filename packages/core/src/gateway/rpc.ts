@@ -75,6 +75,13 @@ const liveChatTurns = new Map<string, LiveChatTurn>();
 const liveChatTurnBySession = new Map<string, string>();
 
 /**
+ * A client's chat.send request id is taken only in this shape: the web's ids, UUIDs and the like.
+ * The id is saved on every history message the turn writes, and with no limit a client could have
+ * any string stored again and again (turn-ids review, INFO 3).
+ */
+const CHAT_REQUEST_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+/**
  * Turns that ended here lately, by request id, so a Stop that arrives just after can say "that turn
  * is over" rather than "no such turn". The web stops a turn it followed after a reload by its session
  * when chat.cancel does not know it; told nothing more than `cancelled: false`, it also did that for
@@ -110,6 +117,41 @@ function liveChatTurnOf(sessionId: string): LiveChatTurn | undefined {
   return turn && !turn.signal.aborted ? turn : undefined;
 }
 
+export interface SteerReply {
+  steered: boolean;
+  active: boolean;
+  id?: string;
+  activeTurnRequestId?: string;
+  /** On a refusal: another turn took the session from the one the message was typed into. */
+  replaced?: true;
+  /** With replaced: that turn's chat.send id, when a chat turn took it. */
+  replacedBy?: string;
+  error?: string;
+}
+
+/**
+ * Queue a message sent into a running turn (POST /api/sessions/:sessionId/steer). With the request
+ * id of the turn it was typed into, only that turn takes it: a page still showing a turn another
+ * tab had replaced steered the replacement, so its message belonged to a turn the page never ran
+ * and stayed "Queued" there. The refusal names the running turn the way session.get does, so the
+ * page can follow that one instead, and the turn that replaced the typed-into one, if one did: with
+ * no turn running, a page could not tell a replaced turn from one that ended, and sent the message
+ * on by itself as a new turn (turn-ids review, LOW 2).
+ */
+export function steerChatTurn(sessionId: string, message: string, clientMessageId?: string, requestId?: string): SteerReply {
+  const queued = turnSteeringManager.enqueue(sessionId, message, clientMessageId, requestId);
+  if (!queued.otherTurn) return { steered: queued.queued, active: queued.active, ...(queued.id ? { id: queued.id } : {}) };
+  const live = liveChatTurnOf(sessionId);
+  return {
+    steered: false,
+    active: queued.active || live !== undefined,
+    ...(live ? { activeTurnRequestId: live.requestId } : {}),
+    ...(queued.replaced ? { replaced: true as const } : {}),
+    ...(queued.replacedBy ? { replacedBy: queued.replacedBy } : {}),
+    error: "The turn this was typed into has ended.",
+  };
+}
+
 /** The chat a nested session id belongs to: `sub:<parent>:<agent>:<ts>` and
  *  `workflow:<parent>:<name>:<uuid>` embed their parent, at any depth. */
 function owningChatSessionId(sessionId: string): string {
@@ -130,11 +172,16 @@ function owningChatSessionId(sessionId: string): string {
  * assistant entry just ahead of the messages that cut it, or "" when that part wrote none. The
  * client used to take it from its own stream buffer, which holds only an unvalidated iteration-0
  * draft — often empty while the saved part has text, sometimes a draft a guard threw away that no
- * reload shows (review #9).
+ * reload shows (review #9). An entry another turn wrote is passed over, as the transcript's own
+ * split does: a turn this one replaced, still unwinding, can write just ahead of the cut, and its
+ * words showed as this turn's (turn-ids review, LOW 1).
  */
-function steeringSegmentText(transcript: readonly SessionTranscriptMessage[], consumedIds: ReadonlySet<string>): string {
+function steeringSegmentText(transcript: readonly SessionTranscriptMessage[], consumedIds: ReadonlySet<string>, requestId: string): string {
+  const passOver = (entry: SessionTranscriptMessage): boolean =>
+    (entry.midTurn === true && consumedIds.has(entry.steeringId ?? ""))
+    || (entry.requestId !== undefined && entry.requestId !== requestId);
   let index = transcript.length - 1;
-  while (index >= 0 && transcript[index]!.midTurn && consumedIds.has(transcript[index]!.steeringId ?? "")) index -= 1;
+  while (index >= 0 && passOver(transcript[index]!)) index -= 1;
   const before = transcript[index];
   return before?.role === "assistant" ? before.content : "";
 }
@@ -786,6 +833,7 @@ export class RpcConnection {
         const displayContent = typeof params["displayContent"] === "string" ? String(params["displayContent"]).trim() : undefined;
         const userAttachments = normalizeChatAttachmentMetadata(params["attachments"]);
         const requestId = String(params["requestId"] ?? randomUUID());
+        if (!CHAT_REQUEST_ID_RE.test(requestId)) throw new Error("requestId must be 1 to 64 characters of A-Za-z0-9_-");
         // The client picks the id, and the turn registry, the Stop and the turn's questions are all
         // keyed by it: a second turn under a live id took the entry over, so the first could no
         // longer be stopped from a reloaded page and its own tab's Stop hit the other turn (review
@@ -982,9 +1030,7 @@ export class RpcConnection {
         // sent in that gap found no turn, and the client's fallback send cancelled the turn it
         // was meant for.
         const steeringToken = randomUUID();
-        const retiredUnread = turnSteeringManager.armTurn(session.id, steeringToken);
-        // What this turn leaves unread belongs to the history as it stands now (sendFinalStatus).
-        const steeringDropMark = turnSteeringManager.dropMark();
+        const retiredUnread = turnSteeringManager.armTurn(session.id, steeringToken, requestId);
         const closeSteering = () => turnSteeringManager.closeTurn(session.id, steeringToken).map(({ id, text }) => ({ id, text }));
         // Tools of this turn may ask the person structured questions, at any depth; --auto has
         // nobody to ask. The questions go to this socket and to any tab that loads the session.
@@ -1046,13 +1092,16 @@ export class RpcConnection {
         const sendFinalStatus = (data: Record<string, unknown>, leftovers: readonly SteeringMessage[] = []): void => {
           const delivered = this.sendEvent({ type: "status", data: leftovers.length > 0 ? { ...data, unconsumedSteering: leftovers } : data });
           if (delivered || leftovers.length === 0) return;
-          // Neither kept nor pushed once the chat was reset, rewound or deleted after this turn
-          // started: a stopped turn slow to unwind brought them back into the emptied chat right
-          // after they were dropped (review of round 4, B #2).
-          if (!turnSteeringManager.keepUnread(session.id, requestId, leftovers, steeringDropMark)) return;
+          // Only what was typed into the chat as it is now: a stopped turn slow to unwind pushed what
+          // predated a reset, rewind or delete into the emptied chat right after it was dropped
+          // (review of round 4, B #2). Decided per message, so what was steered into the turn after
+          // the drop is still kept and pushed (round 5, B #1); the delivered status above lists both,
+          // to the page that sent them (turn-ids review, R1).
+          const kept = turnSteeringManager.keepUnread(session.id, requestId, leftovers);
+          if (kept.length === 0) return;
           userInputBroker.emitToOwner(session.id, {
             type: "agent.unread_steering",
-            data: { sessionId: session.id, messages: leftovers.map(({ id, text }) => ({ id, text, requestId })) },
+            data: { sessionId: session.id, messages: kept.map(({ id, text }) => ({ id, text, requestId })) },
           });
         };
 
@@ -1132,7 +1181,8 @@ export class RpcConnection {
             log.warn({ err, sessionId: session.id }, "Timeout best-available recovery failed");
           }
           if (delivery?.response) {
-            try { session.addMessage({ role: "assistant", content: delivery.response }); } catch { /* archive anyway */ }
+            // Named here: this timer does not run inside the turn, whose writes are named for it.
+            try { session.addMessage({ role: "assistant", content: delivery.response, requestId }); } catch { /* archive anyway */ }
           }
           // "timeout", not the default "manual": this parks the session (dropped from the
           // hot set, consolidated, kept on the long retention) while leaving it resumable,
@@ -1223,6 +1273,9 @@ export class RpcConnection {
           // D5: keep the gateway hard-timeout in lockstep with the runtime's delegation-wait exclusion.
           onDelegationWaitMs: extendGatewayDeadline,
           steeringToken,
+          // Every history message the turn writes names it, so a reload can tell this turn's
+          // entries apart from another tab's with the same words.
+          requestId,
           ...(interactiveTurn ? { userInput: { rootSessionId: session.id, turnId: requestId, mode: "interactive" as const } } : {}),
           onChunk: (text) => {
             noteTurnActivity();
@@ -1243,7 +1296,7 @@ export class RpcConnection {
             noteTurnActivity();
             let segmentText = "";
             try {
-              segmentText = steeringSegmentText(session.toTranscript(), new Set(messages.map((message) => message.id)));
+              segmentText = steeringSegmentText(session.toTranscript(), new Set(messages.map((message) => message.id)), requestId);
             } catch (err) {
               log.warn({ err, sessionId: session.id }, "Steering segment text unavailable");
             }

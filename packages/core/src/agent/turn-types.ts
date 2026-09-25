@@ -63,6 +63,10 @@ export interface RunTurnOptions {
   /** Steering token of a turn the gateway armed before calling runTurn (turn-steering.ts), so
    *  messages sent while the turn starts up are kept. Unset: the turn opens its own. */
   steeringToken?: string;
+  /** The chat.send request id of this turn. Every history message the turn writes carries it, so
+   *  each transcript entry names its turn (RequestContext.chatRequestId). Unset for a turn no
+   *  chat.send started, a nested one included: its messages carry none. */
+  requestId?: string;
   /** The chat a structured user-input request from this turn reaches (agent/user-input-broker.ts).
    *  Unset: a nested turn inherits its caller's; a top-level one has nobody to ask. */
   userInput?: UserInputChannel;

@@ -267,13 +267,13 @@ describe("gateway HTTP bridge", () => {
       await waitForHealth(`${baseUrl}/healthz`);
       const sessionId = "steer-route-session";
       sessions.createSession({ sessionId, channel: "webchat", userId: "alice" });
-      const steer = async (user: string, message: string, clientMessageId?: string) => fetch(`${baseUrl}/api/sessions/${sessionId}/steer`, {
+      const steer = async (user: string, message: string, clientMessageId?: string, requestId?: string) => fetch(`${baseUrl}/api/sessions/${sessionId}/steer`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${await auth.createToken(user, { role: "operator" })}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ message, ...(clientMessageId !== undefined ? { clientMessageId } : {}) }),
+        body: JSON.stringify({ message, ...(clientMessageId !== undefined ? { clientMessageId } : {}), ...(requestId !== undefined ? { requestId } : {}) }),
       });
 
       // Another user cannot steer it, and the reply does not confirm the session exists.
@@ -307,6 +307,22 @@ describe("gateway HTTP bridge", () => {
         { id: oddBody.id, text: "und mach es realer" },
       ]);
       turnSteeringManager.markTurnDone(sessionId, turn);
+
+      // Named, a message joins that chat turn only. One typed into a turn that has ended is
+      // refused with a 200, so the page can say so instead of leaving it "Queued".
+      turnSteeringManager.armTurn(sessionId, "tok-live", "req-live");
+      const live = await steer("alice", "und mach es realer", "web-steer-0002", "req-live");
+      expect(await live.json()).toEqual({ steered: true, active: true, id: "web-steer-0002" });
+      const stale = await steer("alice", "und mach es realer", "web-steer-0003", "req-gone");
+      expect(stale.status).toBe(200);
+      expect(await stale.json()).toEqual({ steered: false, active: true, error: "The turn this was typed into has ended." });
+      expect(turnSteeringManager.closeTurn(sessionId, "tok-live").map(({ id }) => id)).toEqual(["web-steer-0002"]);
+      // One typed into a turn another took the session from names that turn: it was replaced, not over.
+      turnSteeringManager.armTurn(sessionId, "tok-first", "req-first");
+      turnSteeringManager.armTurn(sessionId, "tok-second", "req-second");
+      const replaced = await steer("alice", "und mach es realer", "web-steer-0004", "req-first");
+      expect(await replaced.json()).toEqual({ steered: false, active: true, replaced: true, replacedBy: "req-second", error: "The turn this was typed into has ended." });
+      turnSteeringManager.markTurnDone(sessionId, "tok-second");
 
       // /stop had the same gap: its "operator override" exempted the role every account has.
       const foreignStop = await fetch(`${baseUrl}/api/sessions/${sessionId}/stop`, {
@@ -1825,7 +1841,7 @@ describe("gateway HTTP bridge", () => {
       // A value that carries a credential field is protected, whatever its path says.
       const refusedKey = await apply(carriesKey);
       expect(refusedKey.status).toBe(400);
-      expect(((await refusedKey.json()) as { error: string }).error).toContain("Protected");
+      expect(((await refusedKey.json()) as { error: string }).error).toContain("is a protected path or sets a credential");
       expect(configLoader.getConfig().agents.defaults.model.baseUrl).toBe("http://orch.local/v1");
       expect(configLoader.getConfig().subAgents["coder"]?.model?.baseUrl).toBeUndefined();
 

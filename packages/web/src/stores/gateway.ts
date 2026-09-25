@@ -9,11 +9,11 @@ import { isDelegation, isFailedResult, stepsFromToolCalls, type TurnStep } from 
 import { mergeFinalAssistantContent, mergeSegmentAssistantContent, transcriptAssistantContent } from "../composables/assistantContent";
 import {
   appendUnread, landTurn, liveCallId, markUnread, newSteerMessage, progressSteps, readSteeringEntries, resteer, resumeTurnSegments,
-  routeToolDone, settleSteps, splitAtSteering, takeFollowUp, turnBubbles, unreadAbove, withoutOutdatedSegments, withResumedStep, type SteerMark,
+  routeToolDone, settleSteps, splitAtSteering, takeFollowUp, turnBubbles, unreadAbove, unreadPlace, withoutOutdatedSegments, withResumedStep, type SteerMark,
   type SteerState, type SteeringEntry,
 } from "../composables/turnSegments";
 import { dropRunningTail, markRunningTail, mergeHydrated, sameList, sameMessage } from "../composables/hydration";
-import { nextOpenerIndex, recoveryVerdict, savedEnding, type RecoveryVerdict } from "../composables/turnRecovery";
+import { namesTurns, nextOpenerIndex, recoveryVerdict, savedEnding, type RecoveryVerdict } from "../composables/turnRecovery";
 import { needsOlderTranscript, rewindHistoryIndex, transcriptHistoryIndex } from "../composables/rewind";
 import {
   addUserInput, anchorStepFor, askUserExpiresAt, closesAskUser, dropTurnInputs, expiredInputIds, holdsStallRecovery,
@@ -174,6 +174,12 @@ export interface GatewaySessionTranscriptMessage {
   /** An assistant segment followed by a mid-turn message of the same turn. */
   continued?: true;
   segmentStartedAt?: string;
+  /**
+   * The chat.send request id of the turn the entry belongs to — for a mid-turn message, the turn
+   * that read it. Absent on an older server, in history saved before, and for turns no chat.send
+   * started; the page then tells turns apart by their words.
+   */
+  requestId?: string;
 }
 
 interface SendMessageOptions {
@@ -872,7 +878,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     sessionId: string;
     baselineTotalMessages: number;
     startedAt: number;
-    /** The user's message that opened the turn, to find the turn in the transcript. */
+    /** The user's message that opened the turn, to find the turn in a transcript that names no turns. */
     openerText?: string;
     /** The user pressed Stop and the server said the turn runs no longer (cancelTurn). */
     stopped?: boolean;
@@ -1359,10 +1365,23 @@ export const useGatewayStore = defineStore("gateway", () => {
    * End a recovered turn the transcript does not show landed: by its own final status when that
    * came here before the connection dropped (endUnlessReplaced). The page had "Provider
    * unreachable", and said the connection had dropped (review of round 5, D R2).
+   *
+   * What the turn never read is marked undelivered first, and the status lands without it: after
+   * a lost connection nothing is sent on unasked (finishRecoveredTurn). A "blocked" status lands
+   * as a turn that ended on its own, and sent them out as the next turn (review of round 6, D I1).
    */
   function failRecoveredTurn(recovery: PendingTurnRecovery, errorText: string): void {
-    if (recovery.finalStatus?.data) landHeldStatus(recovery.finalStatus.data);
-    else failPendingTurn(errorText);
+    const status = recovery.finalStatus;
+    if (!status?.data) {
+      failPendingTurn(errorText);
+      return;
+    }
+    messages.value = markUnread(messages.value, recovery.requestId, status.leftovers, "undelivered", {
+      at: new Date(),
+      newId: () => crypto.randomUUID(),
+      error: "The turn ended before it read this.",
+    });
+    landHeldStatus({ ...status.data, unconsumedSteering: [] });
   }
 
   /** What a read of the session says of the turn the page recovers. */
@@ -1391,7 +1410,7 @@ export const useGatewayStore = defineStore("gateway", () => {
   /** End the recovered turn when the read says it has ended: true when it did. */
   function endRecoveredTurn(recovery: PendingTurnRecovery, result: GatewaySessionTranscript, verdict: RecoveryVerdict): boolean {
     if (verdict !== "landed" && verdict !== "moved-on") return false;
-    const saved = savedEnding(result.transcript, recovery.openerText);
+    const saved = savedEnding(result.transcript, recovery);
     finishRecoveredTurn(recovery, result, {
       // A Stop on a turn that had ended keeps its note unless what the server saved ends in an
       // answer: taken for one, its partial step read as a success (review of round 3, D #2). A
@@ -1455,7 +1474,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     // message they read as typed before it (review of round 4, D #1 and #2). The message is the
     // first the transcript has after this turn's, by its id: the newest, with two turns opened
     // since, put them below the first one's message and work (review of round 5, D E1).
-    const nextOpener = options.movedOn ? nextOpenerIndex(result.transcript, recovery.openerText) : -1;
+    const nextOpener = options.movedOn ? nextOpenerIndex(result.transcript, recovery) : -1;
     if (nextOpener >= 0) messages.value = unreadAbove(messages.value, recovery.requestId, result.transcript[nextOpener]!.id);
     applyCurrentSessionRunSelection(currentSessionId.value ?? recovery.sessionId);
     pendingApproval.value = null;
@@ -1485,11 +1504,14 @@ export const useGatewayStore = defineStore("gateway", () => {
    * replaced, and the turn running now is followed, so a message typed here steers it.
    *
    * Until the server has saved that turn's message the session is read again: before, the turn
-   * that ended is the newest the transcript has, and its work read as the new turn's. A few times,
-   * not for a minute: a message from another tab in this turn's words is the newest there for
-   * good, and the page spun the ended turn for a minute, then landed it and went idle (review of
-   * round 5, D R1). The transcript does not say which turn a message opened, so that message is
-   * not told from this turn's own, and its turn is not followed: the status lands as it came.
+   * that ended is the newest the transcript has, and its work read as the new turn's. A transcript
+   * that names the turn of each entry says exactly when that is, and is read until then, as long as
+   * a lost turn is: the turn's input checks can hold its message up for seconds, and landed after
+   * three reads the status left the page idle while that turn ran — a message typed next stopped it
+   * (review of round 6, G1). One that names none is read a few times, not for a minute: a message
+   * from another tab in this turn's words is the newest there for good, and the page spun the
+   * ended turn for a minute, then landed it and went idle (review of round 5, D R1); that message
+   * is not told from this turn's own, and the status lands as it came.
    */
   async function endUnlessReplaced(data: Record<string, unknown>): Promise<void> {
     const requestId = String(data["requestId"]);
@@ -1525,7 +1547,8 @@ export const useGatewayStore = defineStore("gateway", () => {
         endRecoveredTurn(recovery, result, verdict);
         return;
       }
-      if (verdict !== "running" || attempt >= 2) break;
+      const named = namesTurns(result.transcript);
+      if (verdict !== "running" || (named ? Date.now() - startedAt >= TURN_RECOVERY_TIMEOUT_MS : attempt >= 2)) break;
     }
     // Landed while the read was out, by a Stop or a message typed here (takeHeldStatus).
     if (!heldFinalStatuses.delete(requestId)) return;
@@ -2528,8 +2551,9 @@ export const useGatewayStore = defineStore("gateway", () => {
    *
    * For a session not on screen — the user moved on while the request was out — the list is kept
    * until it is (keepUnread): the server retired it with that answer, and dropped here it was
-   * shown to nobody (review of round 3, D M6). `before` places the bubbles above that message —
-   * the opening message of a turn after theirs; those of the turn running now go at the end.
+   * shown to nobody (review of round 3, D M6). They go after the turn they were typed into where
+   * the list names its message (unreadPlace). Otherwise `before` places the bubbles above that
+   * message — the opening message of a turn after theirs; those of the turn running now go at the end.
    */
   function restoreServerUnread(sessionId: string, raw: unknown, before?: string): void {
     if (!Array.isArray(raw)) return;
@@ -2549,11 +2573,14 @@ export const useGatewayStore = defineStore("gateway", () => {
     }
     let next = messages.value;
     for (const [requestId, entries] of byTurn) {
+      // After the turn they were typed into, where the list names its message; else above `before`.
+      const place = requestId ? unreadPlace(next, requestId) : undefined;
+      const above = place === undefined ? (requestId !== pendingRequestId.value ? before : undefined) : place ?? undefined;
       next = appendUnread(next, requestId, entries, "undelivered", {
         at: new Date(),
         newId: () => crypto.randomUUID(),
         error: "The turn ended before it read this.",
-        ...(requestId !== pendingRequestId.value ? { before } : {}),
+        ...(above ? { before: above } : {}),
       });
     }
     if (next !== messages.value) messages.value = next;
@@ -2625,6 +2652,9 @@ export const useGatewayStore = defineStore("gateway", () => {
         // here is recognised as the same message when the transcript comes back.
         ...(message.midTurn && message.steeringId ? { steer: { clientId: message.steeringId, state: "consumed" as const } } : {}),
         ...(message.continued ? { continued: true } : {}),
+        // The turn it belongs to, so a message another tab sent in the same words is never taken
+        // for this page's own (hydration, turnRecovery).
+        ...(message.requestId ? { requestId: message.requestId } : {}),
       };
     });
     return normalizeHydratedMessages(mappedReversed.reverse());
@@ -2771,7 +2801,7 @@ export const useGatewayStore = defineStore("gateway", () => {
       const pickedUp = followed !== null && pickedUpTurn?.requestId === followed;
       const inLiveBubble = followed !== null && !pickedUp && Boolean(getStreamingMessage());
       const transcript = inLiveBubble
-        ? dropRunningTail(result.transcript, pendingTurnOpenerText())
+        ? dropRunningTail(result.transcript, { requestId: followed ?? undefined, openerText: pendingTurnOpenerText() })
         : follow || followed ? markRunningTail(result.transcript) : result.transcript;
       const fetched = mapTranscriptMessages(transcript);
       // A turn picked up on return and followed live: its events keep the page's copy of it — the
@@ -3299,7 +3329,8 @@ export const useGatewayStore = defineStore("gateway", () => {
       // turn the message was typed into, and above its message the message read as typed before
       // it (review of round 4, D #2). There it goes at the end. So it does once the followed
       // turn's final status is here, held for a read of the session: the turn has ended, and
-      // another tab's turn can have replaced it (review of round 5, D R3).
+      // another tab's turn can have replaced it (review of round 5, D R3). All this is for a turn
+      // the list does not name: one it names places its messages itself (restoreServerUnread).
       const sessionId = data["sessionId"];
       const followedLive = pendingRequestId.value !== null && pendingTurnRecovery.value?.requestId !== pendingRequestId.value
         && !heldFinalStatuses.has(pendingRequestId.value);
@@ -3694,23 +3725,38 @@ export const useGatewayStore = defineStore("gateway", () => {
    * next step and says whether a turn took it. Never throws. A transport or HTTP failure —
    * including the input guardrail refusing the text — comes back as `error`, never as "no turn
    * is running", because the caller must not treat a refused message as one to send anew.
+   *
+   * `requestId` names the turn it was typed into, and only that turn takes it. Without it the
+   * server queued it into whichever turn held the session: a page still showing a turn another
+   * tab had replaced steered the replacement, and the message stayed "Queued" under a turn that
+   * would never read it, or went twice after a Resend (review of round 5, D E3). The server's
+   * refusal comes back as `ended`, its words, with the turn running now as `runningNow` when it
+   * names one, and as `replacedBy` the turn that took the session from the one it was typed into,
+   * when one did — named even after that turn has ended too.
    */
   async function steerTurn(
     sessionId: string,
     message: string,
     clientMessageId?: string,
-  ): Promise<{ steered: boolean; active: boolean; id?: string; error?: string }> {
+    requestId?: string,
+  ): Promise<{ steered: boolean; active: boolean; id?: string; error?: string; ended?: string; runningNow?: string; replaced?: true; replacedBy?: string }> {
     try {
       const res = await authorizedFetch(`/api/sessions/${encodeURIComponent(sessionId)}/steer`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message, ...(clientMessageId ? { clientMessageId } : {}) }),
+        body: JSON.stringify({ message, ...(clientMessageId ? { clientMessageId } : {}), ...(requestId ? { requestId } : {}) }),
       });
-      const data = await res.json() as { steered?: boolean; active?: boolean; id?: string };
+      const data = await res.json() as { steered?: boolean; active?: boolean; id?: string; error?: unknown; activeTurnRequestId?: unknown; replaced?: unknown; replacedBy?: unknown };
       return {
         steered: data?.steered === true,
         active: data?.active === true,
         ...(typeof data?.id === "string" ? { id: data.id } : {}),
+        ...(data?.steered !== true && typeof data?.error === "string" ? { ended: data.error } : {}),
+        ...(typeof data?.activeTurnRequestId === "string" && data.activeTurnRequestId ? { runningNow: data.activeTurnRequestId } : {}),
+        // A turn no chat.send started (a job, AG-UI) takes the session with no id to name: `replaced`
+        // alone says the chat moved on (turn-ids review round 2, LOW 2).
+        ...(data?.steered !== true && data?.replaced === true ? { replaced: true as const } : {}),
+        ...(data?.steered !== true && typeof data?.replacedBy === "string" && data.replacedBy ? { replacedBy: data.replacedBy } : {}),
       };
     } catch (error) {
       return { steered: false, active: false, error: error instanceof Error ? error.message : String(error) };
@@ -3735,8 +3781,8 @@ export const useGatewayStore = defineStore("gateway", () => {
     // Steered even while this turn's final status is held for a read of the session: the turn that
     // replaced it may be the one running now, and /steer reaches it. Landing the held status first
     // and sending the message by chat.send stopped that other tab's turn (review of round 6, G1).
-    // A message no running turn took lands the held status in deliverSteer, then goes out as the
-    // next turn.
+    // A message no running turn took, typed into a turn no other replaced, lands the held status in
+    // deliverSteer, then goes out as the next turn.
     messages.value.push(newSteerMessage({ id: crypto.randomUUID(), clientId, text, requestId, at: new Date() }) as ChatMessage);
     return deliverSteer(sessionId, clientId);
   }
@@ -3750,7 +3796,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     const pending = findSteer(clientId);
     if (!pending) return null;
     const { content: text, requestId } = pending;
-    const reply = await steerTurn(sessionId, text, clientId);
+    const reply = await steerTurn(sessionId, text, clientId, requestId);
     // Look again: while the request was out, the turn may have read it, ended, or failed — or
     // the user moved to another session.
     const message = findSteer(clientId);
@@ -3772,9 +3818,19 @@ export const useGatewayStore = defineStore("gateway", () => {
       return "undelivered";
     }
     if (reply.steered && pendingRequestId.value === message.requestId) return "queued";
-    // No running turn holds it: the server had already finished the turn it was typed into
-    // (that turn's final status is still on its way), or that turn ended without listing it.
-    // Either way it goes out as the next turn.
+    // Another turn holds the session, or took it from the one this was typed into and has ended
+    // since (`replacedBy`): a message from another tab moved the chat on. It is not the other
+    // turn's to read unasked — offered to Resend, which sends it into the turn the page follows by
+    // then — and the page moves on to that turn. With nothing running it was taken for a turn that
+    // simply ended, and went out by itself as a new turn after the other tab's (turn-ids review, LOW 2).
+    if (reply.ended !== undefined && (reply.active || reply.replaced === true || reply.replacedBy !== undefined)) {
+      message.steer = { clientId, state: "undelivered", error: reply.ended };
+      followReplacement(sessionId, message.requestId, reply.runningNow);
+      return "undelivered";
+    }
+    // No running turn holds it, and none took the session from the turn it was typed into: the
+    // server had already finished that turn (its final status is still on its way), or that turn
+    // ended without listing it. Either way it goes out as the next turn.
     // The turn's final status may be here, held for a read of the session (endUnlessReplaced): it
     // lands first, so the message goes out as the next turn once it has. scheduleHeldSend, not an
     // awaited send, so the page still sees the landed turn's loading edge (review of round 6, G2).
@@ -3787,6 +3843,28 @@ export const useGatewayStore = defineStore("gateway", () => {
     if (again?.steer) again.steer = { clientId, state: "held" };
     scheduleHeldSend();
     return "held";
+  }
+
+  /**
+   * The server refused a message typed into `requestId`: that turn has ended, and another holds
+   * the session — `runningNow`, when the server names it. The page moves on to that turn as it
+   * would once a read showed it. Followed by reading the transcript, the turn is read at once
+   * rather than at the next poll; followed live, its final status is on its way or held for a read
+   * of the session (endUnlessReplaced), and either moves on. Landed already, as it came — the read
+   * was out before the other turn started — the turn running now is picked up as a Continue does.
+   * A turn that took the session and has ended too (`replacedBy`, nothing running) leaves none to
+   * pick up.
+   */
+  function followReplacement(sessionId: string, requestId: string | undefined, runningNow: string | undefined): void {
+    if (currentSessionId.value !== sessionId) return;
+    if (requestId && pendingRequestId.value === requestId) {
+      if (pendingTurnRecovery.value?.requestId === requestId) {
+        clearTurnRecoveryTimer();
+        scheduleTurnRecovery(0);
+      }
+      return;
+    }
+    if (!pendingRequestId.value && runningNow) void loadSession(sessionId).catch(() => undefined);
   }
 
   /**
@@ -3881,9 +3959,13 @@ export const useGatewayStore = defineStore("gateway", () => {
       ? messages.value.find((message) => message.id === options.userMessageId && message.role === "user")
       : undefined;
     const openerId = existingUserMessage?.id ?? crypto.randomUUID();
+    const requestId = Math.random().toString(36).slice(2);
+    // The turn's message names the turn, as the server's copy of it does: another tab's message
+    // in the same words is then never taken for it (hydration's sameMessage).
     if (existingUserMessage) {
       existingUserMessage.content = displayText;
       existingUserMessage.attachments = cloneAttachments(attachments);
+      existingUserMessage.requestId = requestId;
     } else {
       messages.value.push({
         id: openerId,
@@ -3891,10 +3973,10 @@ export const useGatewayStore = defineStore("gateway", () => {
         content: displayText,
         timestamp: new Date(),
         attachments: cloneAttachments(attachments),
+        requestId,
       });
     }
 
-    const requestId = Math.random().toString(36).slice(2);
     pendingRequestId.value = requestId;
     pendingTurnSessionId = currentSessionId.value;
     if (pendingTurnSessionId) turnSessions.set(requestId, pendingTurnSessionId);

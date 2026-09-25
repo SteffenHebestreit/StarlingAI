@@ -37,6 +37,10 @@ const MAX_UNREAD_PER_SESSION = 50;
 const UNREAD_TTL_MS = 3_600_000;
 /** Sessions holding unread leftovers at once; the oldest goes first. */
 const MAX_UNREAD_SESSIONS = 1_000;
+/** Ids kept per session as queued since its last drop (_queuedSinceDrop); the oldest goes first. */
+const MAX_QUEUED_SINCE_DROP = 256;
+/** Chat turns remembered as replaced by another (_replacedBy); the oldest goes first. */
+const MAX_REPLACED_TURNS = 1_000;
 
 /** What the client and the transcript see of one steering message. */
 export interface SteeringMessage {
@@ -54,6 +58,15 @@ export interface SteeringEnqueueResult {
   /** Whether a turn is running for the session at all. */
   active: boolean;
   id?: string;
+  /** The caller named a turn that does not own the session's steering: it ended, or another turn
+   *  took the session over. Nothing was queued. */
+  otherTurn?: true;
+  /** With otherTurn: another turn took the session from the named one. Absent when the named turn
+   *  simply ended. */
+  replaced?: true;
+  /** With replaced: that turn's chat.send id, when a chat turn took it. A turn no chat.send started
+   *  (AG-UI, a job, a channel) has none to name. */
+  replacedBy?: string;
 }
 
 /** A message a finished turn never read, kept for the session because nobody received it. */
@@ -64,9 +77,17 @@ export interface UnreadSteeringMessage extends SteeringMessage {
 
 interface TurnSteeringState {
   token: string;
+  /** The chat.send request id of the turn, when the gateway armed it for one. */
+  requestId?: string;
   queue: SteeringEntry[];
   /** Every id this turn accepted, drained or not, so a retried POST is never folded twice. */
   seenIds: Set<string>;
+}
+
+/** One chat turn's key in a root's records: request ids are the client's, and two sessions may use
+ *  the same one. */
+function turnKey(root: string, requestId: string): string {
+  return `${root}\u0000${requestId}`;
 }
 
 /** Strip `sub:` nesting hops to the root (turn) session id. Mirrors rootOf in
@@ -105,15 +126,28 @@ class TurnSteeringManager {
    */
   private _unread = new Map<string, Array<UnreadSteeringMessage & { keptAt: number }>>();
   /**
-   * When each root's unread leftovers were last dropped, as a count of the drops in this process,
-   * oldest first. A stopped turn slow to unwind finished after the reset, rewind or delete that
-   * dropped them, kept its own again and pushed them into the emptied chat (review of round 4,
-   * B #2). A turn now carries dropMark from its start, and keepUnread refuses one that predates
-   * its root's last drop. A count rather than a clock: a drop in the same millisecond as a start
-   * must still order after it.
+   * For a root that was reset, rewound or deleted (dropUnread): the ids queued since its last drop,
+   * each tagged when it is queued. A message queued before the drop belongs to the history that is
+   * gone, and keepUnread keeps and pushes none of those (review of round 4, B #2). The queues
+   * themselves are left alone: clearing them lost a message typed before a Reset, which does not
+   * stop the turn, so the turn's own final status no longer listed it and the page showed it
+   * "Queued" for good (turn-ids review, R1). Tagged by id rather than on the entry: a leftover
+   * reaches keepUnread through the runtime's TurnOutput as a bare id and text, and the rule must
+   * hold for a drop between the turn's close and its final status too. Each tag names the turn as
+   * well as the id (tagOf): a message resent under the same id into a later turn is another
+   * message, and its tag let the earlier turn's leftovers keep the first one (turn-ids review
+   * round 2, INFO 3).
    */
-  private _droppedAt = new Map<string, number>();
-  private _drops = 0;
+  private _queuedSinceDrop = new Map<string, Set<string>>();
+  /**
+   * The chat turn that took the root from another, by the replaced turn's request id. A steer
+   * typed into a replaced turn was refused like one typed into a turn that ended, and the page then
+   * sent it on by itself as a new turn, though another tab had moved the chat on (turn-ids review,
+   * LOW 2). Keyed by root and request id (turnKey): request ids are the client's, and one session's
+   * id named another session's replacement (round 2, LOW 1). Recorded for any turn that takes the
+   * root, not only a chat turn: a job or AG-UI turn moves the chat on as well (round 2, LOW 2).
+   */
+  private _replacedBy = new Map<string, { by?: string }>();
 
   /**
    * Open steering for a turn that is about to start. The gateway calls this before runTurn: the
@@ -126,9 +160,11 @@ class TurnSteeringManager {
    * started it can hand them back to its page. The web stops its turn with chat.cancel and only
    * then sends the next message; a turn that unwound in that gap had its leftovers kept for the
    * session and then dropped here at once, shown to nobody (review of round 2, B #5).
+   *
+   * `requestId` is the chat.send id of the turn, which a steer may name to reach this turn only.
    */
-  armTurn(sessionId: string, token: string): UnreadSteeringMessage[] {
-    return this.takeRoot(rootOf(sessionId), token);
+  armTurn(sessionId: string, token: string, requestId?: string): UnreadSteeringMessage[] {
+    return this.takeRoot(rootOf(sessionId), token, requestId);
   }
 
   /**
@@ -146,18 +182,20 @@ class TurnSteeringManager {
 
   /**
    * Keep leftovers of a turn whose final status reached nobody, for the session's next reader, and
-   * say whether they were kept. `startMark` is the dropMark taken when the turn started: nothing is
-   * kept for a turn whose session was reset, rewound or deleted since, as the history they belong
-   * to is gone.
+   * return the ones kept: none that was queued before the session's last reset, rewind or delete
+   * (_queuedSinceDrop). The rule is per message: refusing a whole turn that predated the drop also
+   * refused what the person steered into it afterwards, which then stayed "Queued" on their page
+   * (round 5, B #1).
    */
-  keepUnread(sessionId: string, requestId: string, messages: readonly SteeringMessage[], startMark?: number): boolean {
-    if (messages.length === 0) return false;
+  keepUnread(sessionId: string, requestId: string, messages: readonly SteeringMessage[]): SteeringMessage[] {
     const root = rootOf(sessionId);
-    if (startMark !== undefined && (this._droppedAt.get(root) ?? 0) > startMark) return false;
+    const sinceDrop = this._queuedSinceDrop.get(root);
+    const keep = sinceDrop ? messages.filter((message) => sinceDrop.has(tagOf(requestId, message.id))) : messages;
+    if (keep.length === 0) return [];
     const now = Date.now();
     this.pruneUnread(now);
-    const kept = (this._unread.get(root) ?? []).filter((entry) => !messages.some((message) => message.id === entry.id));
-    kept.push(...messages.map(({ id, text }) => ({ id, text, requestId, keptAt: now })));
+    const kept = (this._unread.get(root) ?? []).filter((entry) => !keep.some((message) => message.id === entry.id));
+    kept.push(...keep.map(({ id, text }) => ({ id, text, requestId, keptAt: now })));
     // Re-inserted so the map's order stays oldest-written first for the cap below.
     this._unread.delete(root);
     this._unread.set(root, kept.slice(-MAX_UNREAD_PER_SESSION));
@@ -165,12 +203,7 @@ class TurnSteeringManager {
       const oldest = this._unread.keys().next().value;
       if (oldest !== undefined) this._unread.delete(oldest);
     }
-    return true;
-  }
-
-  /** Taken when a turn starts, for its keepUnread at the end: see _droppedAt. */
-  dropMark(): number {
-    return this._drops;
+    return keep.map(({ id, text }) => ({ id, text }));
   }
 
   /** What the session's finished turns left unread and delivered to nobody, oldest first. */
@@ -182,20 +215,21 @@ class TurnSteeringManager {
   /**
    * Forget what the session's finished turns left unread. For a history that was reset, rewound or
    * deleted: they belong to the part that is gone, and after a reset every session.get brought
-   * them back into the emptied chat as undelivered, with a Resend (review of round 2, B #4). A turn
-   * already running when this is called keeps nothing when it ends (_droppedAt).
+   * them back into the emptied chat as undelivered, with a Resend (review of round 2, B #4). What
+   * its turns have queued and not read yet stays queued: a running turn still reads it, and a final
+   * status still lists it to the page that sent it, but the session never keeps or pushes it
+   * (_queuedSinceDrop).
    */
   dropUnread(sessionId: string): void {
     const root = rootOf(sessionId);
     this._unread.delete(root);
-    this._drops += 1;
-    // Re-inserted to keep the oldest first. Bounded like _unread: a mark pushed out by a thousand
-    // other sessions' drops lets a turn that old keep its leftovers, as before the marks.
-    this._droppedAt.delete(root);
-    this._droppedAt.set(root, this._drops);
-    if (this._droppedAt.size > MAX_UNREAD_SESSIONS) {
-      const oldest = this._droppedAt.keys().next().value;
-      if (oldest !== undefined) this._droppedAt.delete(oldest);
+    // Re-inserted to keep the oldest drop first. A session pushed out by a thousand other sessions'
+    // drops keeps every leftover again, as before these marks.
+    this._queuedSinceDrop.delete(root);
+    this._queuedSinceDrop.set(root, new Set());
+    if (this._queuedSinceDrop.size > MAX_UNREAD_SESSIONS) {
+      const oldest = this._queuedSinceDrop.keys().next().value;
+      if (oldest !== undefined) this._queuedSinceDrop.delete(oldest);
     }
   }
 
@@ -232,7 +266,7 @@ class TurnSteeringManager {
     return state.queue;
   }
 
-  private takeRoot(root: string, token: string): UnreadSteeringMessage[] {
+  private takeRoot(root: string, token: string, requestId?: string): UnreadSteeringMessage[] {
     // A new turn has started: what an earlier one left unread is now older than the conversation.
     const retired = this.unreadOf(root);
     this._unread.delete(root);
@@ -245,7 +279,18 @@ class TurnSteeringManager {
         if (oldest !== undefined) this._displaced.delete(oldest);
       }
     }
-    this._turns.set(root, { token, queue: [], seenIds: new Set() });
+    // Named to a steer still typed into the old turn (enqueue).
+    if (previous?.requestId && previous.requestId !== requestId) {
+      this._replacedBy.set(turnKey(root, previous.requestId), requestId ? { by: requestId } : {});
+      if (this._replacedBy.size > MAX_REPLACED_TURNS) {
+        const oldest = this._replacedBy.keys().next().value;
+        if (oldest !== undefined) this._replacedBy.delete(oldest);
+      }
+    }
+    // A request id used again for a new turn names that turn now, not the one it replaced: a client
+    // reusing ids had a steer into a turn that simply ended refused as replaced (final review, LOW 2).
+    if (requestId) this._replacedBy.delete(turnKey(root, requestId));
+    this._turns.set(root, { token, ...(requestId ? { requestId } : {}), queue: [], seenIds: new Set() });
     return retired;
   }
 
@@ -259,17 +304,40 @@ class TurnSteeringManager {
    * stray message never leaks into a later turn. `clientId` becomes the message id when it has
    * the accepted shape, else the server picks one; an id this turn already accepted is not
    * queued again, which makes a retried request safe.
+   *
+   * With `requestId`, only the chat turn of that id takes it. A page still showing a turn another
+   * tab had replaced steered the replacement, and its message then belonged to a turn the page
+   * never ran.
    */
-  enqueue(sessionId: string, text: string, clientId?: string): SteeringEnqueueResult {
+  enqueue(sessionId: string, text: string, clientId?: string, requestId?: string): SteeringEnqueueResult {
     const root = rootOf(sessionId);
     const state = this._turns.get(root);
     const trimmed = (text ?? "").trim();
+    if (requestId !== undefined && state?.requestId !== requestId) {
+      const replaced = this._replacedBy.get(turnKey(root, requestId));
+      return {
+        queued: false,
+        active: Boolean(state),
+        otherTurn: true,
+        ...(replaced ? { replaced: true as const } : {}),
+        ...(replaced?.by ? { replacedBy: replaced.by } : {}),
+      };
+    }
     if (!state) return { queued: false, active: false };
     if (!trimmed) return { queued: false, active: true };
     const id = typeof clientId === "string" && STEERING_CLIENT_ID_RE.test(clientId) ? clientId : randomUUID();
     if (state.seenIds.has(id)) return { queued: true, active: true, id };
     state.seenIds.add(id);
     state.queue.push({ id, text: trimmed, enqueuedAt: new Date().toISOString() });
+    // Typed into the chat as it is now, after its last drop if it had one (_queuedSinceDrop).
+    const sinceDrop = this._queuedSinceDrop.get(root);
+    if (sinceDrop) {
+      sinceDrop.add(tagOf(state.requestId, id));
+      if (sinceDrop.size > MAX_QUEUED_SINCE_DROP) {
+        const oldest = sinceDrop.values().next().value;
+        if (oldest !== undefined) sinceDrop.delete(oldest);
+      }
+    }
     logAudit("turn_steering_enqueued", {
       length: trimmed.length,
       queued: state.queue.length,
@@ -305,9 +373,14 @@ class TurnSteeringManager {
     this._turns.clear();
     this._displaced.clear();
     this._unread.clear();
-    this._droppedAt.clear();
-    this._drops = 0;
+    this._queuedSinceDrop.clear();
+    this._replacedBy.clear();
   }
+}
+
+/** A message's tag in _queuedSinceDrop: the turn it was queued into, and its id. */
+function tagOf(requestId: string | undefined, id: string): string {
+  return `${requestId ?? ""}\u0000${id}`;
 }
 
 // Singleton

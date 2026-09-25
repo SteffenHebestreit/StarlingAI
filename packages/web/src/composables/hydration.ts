@@ -17,6 +17,7 @@
  *
  * Deliberately free of Vue and of the store, so it can be exercised on its own.
  */
+import { namesTurns, opensTurn, type TurnRef } from "./turnRecovery";
 
 /** The minimum of a chat message this module needs — kept structural so it has no store import. */
 export interface HydrationMessage {
@@ -64,11 +65,17 @@ function comparableText(content: string): string {
  * continued past is never the turn's end, even when neither has words: taken for it, a turn
  * followed by reading the transcript landed as its own running copy — no answer, no image, its
  * delegation spinning for good (review of #38).
+ *
+ * Two that name different turns are never the same, whatever their words: a message another tab
+ * sent in the words of the page's own was taken for it, and the page's copy of its turn moved
+ * below that message — the note on how its turn ended with it (review of round 4, Q7). Either
+ * side without a name (an older server, a message from before) is told by its words.
  */
 export function sameMessage(fetched: HydrationMessage, local: HydrationMessage): boolean {
   return fetched.role === local.role
     && Boolean(fetched.midTurn) === Boolean(local.midTurn)
     && Boolean(fetched.continued) === Boolean(local.continued)
+    && (fetched.requestId === undefined || local.requestId === undefined || fetched.requestId === local.requestId)
     && comparableText(fetched.content) === comparableText(local.content);
 }
 
@@ -313,14 +320,17 @@ export function markRunningTail<T extends { role: string; midTurn?: boolean; con
  * Kept, it read as a finished answer above the live bubble — the running work shown twice, and
  * left behind as a "completed without a text summary" once the turn landed.
  *
- * Only once the server has the turn's opening message (`openerText`): before that, the newest
- * entries are the previous turn's.
+ * Only once the server has the turn's opening message: before that, the newest entries are the
+ * previous turn's — by name where the transcript names turns, else by `openerText`, its words.
  */
-export function dropRunningTail<T extends { role: string; content: string; midTurn?: boolean }>(transcript: T[], openerText: string | undefined): T[] {
+export function dropRunningTail<T extends { role: string; content: string; midTurn?: boolean; requestId?: string }>(
+  transcript: T[],
+  turn: TurnRef,
+): T[] {
   let opener = transcript.length - 1;
   while (opener >= 0 && !(transcript[opener]!.role === "user" && !transcript[opener]!.midTurn)) opener -= 1;
-  const normalize = (text: string) => text.replace(/\s+/g, " ").trim();
-  if (opener < 0 || openerText === undefined || normalize(transcript[opener]!.content) !== normalize(openerText)) return transcript;
+  const named = namesTurns(transcript);
+  if (opener < 0 || (!named && turn.openerText === undefined) || !opensTurn(transcript[opener]!, turn, named)) return transcript;
   let last = transcript.length - 1;
   while (last > opener && transcript[last]!.role === "assistant") last -= 1;
   return last === transcript.length - 1 ? transcript : transcript.slice(0, last + 1);

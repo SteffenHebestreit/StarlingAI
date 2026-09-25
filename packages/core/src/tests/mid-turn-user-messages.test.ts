@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../agent/session.js";
+import { runWithRequestContext } from "../runtime/request-context.js";
 import { findRecentDelegateEvidence } from "../agent/interrupted-delegation-evidence.js";
 import { collectTurnArtifactAttachments } from "../agent/runtime.js";
 import { currentTurnStartIndex, startsTurn } from "../agent/turn-boundary.js";
@@ -240,5 +241,75 @@ describe("a steered turn in the transcript", () => {
     // The earlier part still shows its image, through its own tool call.
     expect(transcript[1]!.toolCalls?.[0]?.metadata?.["artifacts"]).toBeDefined();
     expect((session.getHistory().at(-1)!.metadata!["attachments"] as unknown[])).toHaveLength(2);
+  });
+});
+
+/**
+ * Each transcript entry names the chat.send turn it belongs to. The web told turns apart by their
+ * text, and a second tab re-sending the same words left a message "Queued" under the wrong turn.
+ */
+describe("which turn a transcript entry belongs to", () => {
+  const WRAPPER = "[USER STEERING — sent mid-turn] The user added the following while you were working.\n";
+  const steered = (id: string, text: string) => ({
+    role: "user" as const,
+    content: `${WRAPPER}- ${text}`,
+    metadata: { midTurn: true, midTurnSource: "user", steering: [{ id, text }] },
+  });
+  const delegation = (id: string) => ({
+    role: "assistant",
+    content: "",
+    tool_calls: [{ id, type: "function", function: { name: "delegate_to_agent", arguments: "{}" } }],
+  }) as never;
+  const result = (callId: string) => ({ role: "tool", content: "done", tool_call_id: callId }) as never;
+  const inTurn = (requestId: string, write: () => void) => runWithRequestContext({ chatRequestId: requestId }, write);
+
+  it("names the turn that wrote each entry: a steering message by the turn that read it, a superseded turn's late write by its own", () => {
+    const session = makeSession();
+    inTurn("req-a", () => {
+      session.addMessage({ role: "user", content: "render the harbour" });
+      session.addMessage(delegation("call-1"));
+      session.addMessage(result("call-1"));
+    });
+    // Another tab's send superseded it; the old turn unwinds after the new one has started.
+    inTurn("req-b", () => {
+      session.addMessage({ role: "user", content: "also add a caption" });
+      session.addMessage(delegation("call-2"));
+      session.addMessage(result("call-2"));
+    });
+    inTurn("req-a", () => session.addMessage({ role: "assistant", content: "Stopped before the render finished." }));
+    inTurn("req-b", () => {
+      session.addMessage(steered("steer-hat-0001", "and a hat"));
+      session.addMessage({ role: "assistant", content: "Captioned, with a hat." });
+    });
+
+    const transcript = session.toTranscript();
+    expect(transcript.map((entry) => [entry.role, entry.content, entry.requestId, entry.continued])).toEqual([
+      ["user", "render the harbour", "req-a", undefined],
+      ["assistant", "", "req-a", undefined],
+      ["user", "also add a caption", "req-b", undefined],
+      // The steered turn goes on after its own part, not after the other turn's late write.
+      ["assistant", "", "req-b", true],
+      ["assistant", "Stopped before the render finished.", "req-a", undefined],
+      ["user", "and a hat", "req-b", undefined],
+      ["assistant", "Captioned, with a hat.", "req-b", undefined],
+    ]);
+    expect(transcript[5]!.steeringId).toBe("steer-hat-0001");
+  });
+
+  it("keeps each entry's turn across a save and load, and names none for history saved before it", () => {
+    const session = makeSession();
+    inTurn("req-a", () => {
+      session.addMessage({ role: "user", content: "render the harbour" });
+      session.addMessage(steered("steer-blue-01", "make it blue"));
+      session.addMessage({ role: "assistant", content: "Rendered in blue." });
+    });
+    const loaded = AgentSession.fromRecord(JSON.parse(JSON.stringify(session.toRecord())));
+    expect(loaded.toTranscript().map((entry) => entry.requestId)).toEqual(["req-a", "req-a", "req-a"]);
+
+    const legacy = session.toRecord();
+    legacy.history = legacy.history.map(({ requestId: _dropped, ...message }) => message);
+    const before = AgentSession.fromRecord(legacy).toTranscript();
+    expect(before.map((entry) => entry.content)).toEqual(["render the harbour", "make it blue", "Rendered in blue."]);
+    expect(before.filter((entry) => "requestId" in entry)).toEqual([]);
   });
 });

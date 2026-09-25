@@ -56,6 +56,14 @@ export interface RequestContext {
    * AG-UI or --auto turn's waits named none and held every later turn (review of round 1, B #7).
    */
   turnId?: string;
+  /**
+   * The chat.send request id of the turn this work belongs to, set by runTurn from
+   * RunTurnOptions.requestId and never inherited by a nested turn. Every history message the turn
+   * writes carries it (AgentSession.addMessage), so a transcript entry names its own turn: the web
+   * told turns apart by their text, and a second tab re-sending the same words left a message
+   * "Queued" under the wrong one. Metadata only; the model never reads it.
+   */
+  chatRequestId?: string;
   /** The model's id for the tool call executing right now, set by executeTool, so a question the
    *  tool raises can be shown next to that call. */
   toolCallId?: string;
@@ -108,6 +116,11 @@ export function currentRequestContext(): Readonly<RequestContext> | undefined {
 /** The session that owns the active work (main turn or sub-agent run), if any. */
 export function currentSessionId(): string | undefined {
   return storage.getStore()?.sessionId;
+}
+
+/** The chat.send request id of the turn doing the active work, if a chat started it. */
+export function currentChatRequestId(): string | undefined {
+  return storage.getStore()?.chatRequestId;
 }
 
 /** The agent running the active work ("main" for the orchestrator), if any. */

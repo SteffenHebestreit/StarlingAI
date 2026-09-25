@@ -29,7 +29,7 @@ import { registerCheckpointRoutes } from "./checkpoint-routes.js";
 import { mountFederationRoutes } from "./federation-router.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { handleFederationDelegateStream } from "./federation-stream.js";
-import { RpcConnection } from "./rpc.js";
+import { RpcConnection, steerChatTurn } from "./rpc.js";
 import { getAllSessions } from "../agent/session.js";
 import { probeDockerReachability } from "../agent/container-runner.js";
 import {
@@ -112,8 +112,10 @@ import {
   createConversationConfigProposal,
   getConversationConfigProposal,
   hasPromptTarget,
-  isProtectedConfigChange,
+  configChangeRefusal,
   MAIN_ASSISTANT_PROMPT_TARGET,
+  peerAgentRefusal,
+  proposalAgentNames,
   updateConversationConfigProposal,
 } from "../agent/config-assistant-proposals.js";
 import { appendFlowMemoryEntry } from "../agent/flow-memory.js";
@@ -2787,7 +2789,8 @@ export function createGateway() {
   // steered:false otherwise so the client can fall back to sending a normal message.
   // The reply carries the message's id — the client's clientMessageId when it sent a
   // valid one — which the agent.steering_consumed event later names, and a retry
-  // with the same id is queued once.
+  // with the same id is queued once. With a requestId, only that chat turn takes it
+  // (steerChatTurn).
   app.post("/api/sessions/:sessionId/steer", async (c) => {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
@@ -2797,10 +2800,12 @@ export function createGateway() {
 
     let message: string;
     let clientMessageId: string | undefined;
+    let requestId: string | undefined;
     try {
-      const body = await c.req.json() as { message?: unknown; clientMessageId?: unknown };
+      const body = await c.req.json() as { message?: unknown; clientMessageId?: unknown; requestId?: unknown };
       message = typeof body?.message === "string" ? body.message : "";
       clientMessageId = typeof body?.clientMessageId === "string" ? body.clientMessageId : undefined;
+      requestId = typeof body?.requestId === "string" && body.requestId.trim() ? body.requestId : undefined;
     } catch {
       return c.json({ error: "Invalid JSON body" }, 400);
     }
@@ -2821,10 +2826,9 @@ export function createGateway() {
       return c.json({ error: `I can't process that message: ${inputCheck.reason ?? "Prompt injection detected"}` }, 400);
     }
 
-    const queued = turnSteeringManager.enqueue(sessionId, message, clientMessageId);
-    // active mirrors steered here, but expose it explicitly so the client knows
-    // whether to fall back to a normal new-message send.
-    return c.json({ steered: queued.queued, active: queued.active, ...(queued.id ? { id: queued.id } : {}) });
+    // active says whether any turn runs at all, so the client knows whether to
+    // fall back to a normal new-message send.
+    return c.json(steerChatTurn(sessionId, message, clientMessageId, requestId));
   });
 
   // Cancel an in-flight turn — gracefully by default, hard only when asked.
@@ -2948,6 +2952,8 @@ export function createGateway() {
     if (!hasPromptTarget(cfg, parsed.data.targetAgent)) {
       return c.json({ error: `Agent '${parsed.data.targetAgent}' not found` }, 404);
     }
+    const peerAgent = peerAgentRefusal([parsed.data.targetAgent]);
+    if (peerAgent) return c.json({ error: peerAgent }, 409);
 
     try {
       const result = await proposeConversationConfigChange({
@@ -3013,14 +3019,16 @@ export function createGateway() {
       return c.json({ error: `Proposal is already ${proposal.status}` }, 409);
     }
 
-    const protectedChange = proposal.configChanges.find(isProtectedConfigChange);
-    if (protectedChange) {
-      return c.json({ error: `Protected config path cannot be applied automatically: ${protectedChange.path}` }, 400);
-    }
+    // The drafting filter's own reasons (configChangeRefusal), so Apply refuses what drafting left out
+    // in the same words.
+    const refusal = proposal.configChanges.map(configChangeRefusal).find(Boolean);
+    if (refusal) return c.json({ error: `Cannot be applied automatically: ${refusal}` }, 400);
     const missingAgent = proposal.promptChanges.find((change) => !hasPromptTarget(cfg, change.agentName));
     if (missingAgent) {
       return c.json({ error: `Prompt target agent '${missingAgent.agentName}' not found` }, 404);
     }
+    const peerAgent = peerAgentRefusal(proposalAgentNames(proposal));
+    if (peerAgent) return c.json({ error: peerAgent }, 409);
 
     const applyProposal = (raw: Record<string, unknown>) => {
       for (const change of proposal.configChanges) {

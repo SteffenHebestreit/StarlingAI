@@ -85,7 +85,7 @@ describe("rpc turns across connections", () => {
   });
 
   async function setup() {
-    const [{ RpcConnection }, session, broker, requestContext, steering, audit, boundary] = await Promise.all([
+    const [{ RpcConnection, steerChatTurn }, session, broker, requestContext, steering, audit, boundary] = await Promise.all([
       import("../gateway/rpc.js"),
       import("../agent/session.js"),
       import("../agent/user-input-broker.js"),
@@ -115,7 +115,7 @@ describe("rpc turns across connections", () => {
         () => broker.bindRequestUserInput({ requesterSessionId: `sub:${opts.session.id}:image_creator:1`, sourceAgent: "image_creator" }),
       )(request);
     return {
-      chat, connect, askFromSpecialist, session, requestContext, boundary,
+      chat, connect, askFromSpecialist, session, requestContext, boundary, steerChatTurn,
       broker: broker.userInputBroker, steering: steering.turnSteeringManager, logAudit: audit.logAudit,
       recordUnconsumedSteering: steering.recordUnconsumedSteering,
     };
@@ -355,6 +355,8 @@ describe("rpc turns across connections", () => {
     // Which status it was: only a recovered answer is saved to the transcript.
     const transcript = got["transcript"] as Array<Record<string, unknown>>;
     expect(transcript.some((entry) => String(entry["content"]).includes("time budget"))).toBe(!recoveryFails);
+    // Saved by the watchdog, outside the turn, and still named for it.
+    if (!recoveryFails) expect(transcript.find((entry) => String(entry["content"]).includes("time budget"))!["requestId"]).toBe("req-slow");
     expect(got["unreadSteering"]).toEqual([{ id: "steer-blue-01", text: "make it blue", requestId: "req-slow" }]);
   });
 
@@ -514,6 +516,115 @@ describe("rpc turns across connections", () => {
     expect(steering.unreadOf(chat.id)).toEqual([]);
   });
 
+  it("lists on its own final status what the turn never read, though the chat was reset while it ran", async () => {
+    // Turn-ids review, R1: the reset cleared the running turn's queue. A Reset does not stop the
+    // turn and the page keeps the message it steered into it, so with the turn's final status no
+    // longer listing it, the page showed it "Queued" for good.
+    const { chat, connect, steering, steerChatTurn } = await setup();
+    let finish!: () => void;
+    runTurnMock.mockImplementation(async (opts) => {
+      const token = steering.markTurnActive(opts.session.id, opts.steeringToken);
+      await new Promise<void>((resolve) => { finish = resolve; });
+      return turnOutput({
+        response: "Rendered.",
+        unconsumedSteering: steering.closeTurn(opts.session.id, token).map(({ id, text }) => ({ id, text })),
+      });
+    });
+    const tab = connect("alice");
+    await tab.call("chat.send", { sessionId: chat.id, message: "render the harbour", requestId: "req-a" });
+    expect(steerChatTurn(chat.id, "make it blue", "steer-blue-01", "req-a").steered).toBe(true);
+    // The web's Reset: session.reset, then the session is loaded again, and the turn runs on.
+    expect((await tab.call("session.reset", { sessionId: chat.id })).ok).toBe(true);
+    expect((await tab.call("session.get", { sessionId: chat.id })).payload!["activeTurnRequestId"]).toBe("req-a");
+    expect(steerChatTurn(chat.id, "typed after the reset", "steer-after-01", "req-a").steered).toBe(true);
+
+    finish();
+    await runTurnMock.mock.results[0]!.value;
+    expect(tab.statusOf("req-a", "ok")!["unconsumedSteering"]).toEqual([
+      { id: "steer-blue-01", text: "make it blue" },
+      { id: "steer-after-01", text: "typed after the reset" },
+    ]);
+    // Its own page has them: the session keeps and pushes nothing.
+    expect(tab.eventsOf("agent.unread_steering")).toEqual([]);
+    expect(steering.unreadOf(chat.id)).toEqual([]);
+  });
+
+  it("keeps and pushes what was steered into a running turn after the chat was reset", async () => {
+    // Review of round 5, B #1: the refusal covered the whole turn, so a message typed into it after
+    // the reset was neither kept nor pushed, and stayed "Queued" on the page that sent it.
+    const { chat, connect, steering, steerChatTurn } = await setup();
+    const unwind = slowToUnwind(steering);
+    const tabA = connect("alice");
+    await tabA.call("chat.send", { sessionId: chat.id, message: "render the harbour", requestId: "req-a" });
+    expect(steerChatTurn(chat.id, "make it blue", "steer-blue-01", "req-a").steered).toBe(true);
+    tabA.ws.readyState = 3;
+    tabA.conn.close();
+
+    const reloaded = connect("alice");
+    await reloaded.call("session.get", { sessionId: chat.id });
+    // A reset does not stop the turn, and the page may go on steering it.
+    expect((await reloaded.call("session.reset", { sessionId: chat.id })).ok).toBe(true);
+    expect(steerChatTurn(chat.id, "typed after the reset", "steer-after-01", "req-a").steered).toBe(true);
+
+    unwind["req-a"]!();
+    await runTurnMock.mock.results[0]!.value;
+    const kept = [{ id: "steer-after-01", text: "typed after the reset", requestId: "req-a" }];
+    expect(reloaded.eventsOf("agent.unread_steering")).toEqual([{ sessionId: chat.id, messages: kept }]);
+    expect(steering.unreadOf(chat.id)).toEqual(kept);
+  });
+
+  it("steers only the turn a message was typed into, and names the running one when that turn is over", async () => {
+    // The web told turns apart by their text. A page still showing a turn another tab had replaced
+    // steered the replacement, and its message sat under a turn that page never ran.
+    const { chat, connect, steering, steerChatTurn } = await setup();
+    const unwind = slowToUnwind(steering);
+    const tabA = connect("alice");
+    await tabA.call("chat.send", { sessionId: chat.id, message: "render the harbour", requestId: "req-a" });
+    expect(runTurnMock.mock.calls[0]![0].requestId).toBe("req-a");
+    expect(steerChatTurn(chat.id, "make it blue", "steer-blue-01", "req-a")).toEqual({ steered: true, active: true, id: "steer-blue-01" });
+
+    const tabB = connect("alice");
+    await tabB.call("chat.send", { sessionId: chat.id, message: "also add a caption", requestId: "req-b" });
+    const ended = { steered: false, active: true, activeTurnRequestId: "req-b", error: "The turn this was typed into has ended." };
+    expect(steerChatTurn(chat.id, "and a hat", "steer-hat-0001", "req-a")).toEqual({ ...ended, replaced: true, replacedBy: "req-b" });
+    // A turn this process never ran is no different, but nothing replaced it.
+    expect(steerChatTurn(chat.id, "and a hat", "steer-hat-0001", "req-unknown")).toEqual(ended);
+    expect(steerChatTurn(chat.id, "and a scarf", "steer-scarf-01", "req-b")).toEqual({ steered: true, active: true, id: "steer-scarf-01" });
+    // Without an id, whichever turn holds the session takes it, as before.
+    expect(steerChatTurn(chat.id, "and gloves", "steer-glove-01")).toEqual({ steered: true, active: true, id: "steer-glove-01" });
+
+    unwind["req-a"]!();
+    unwind["req-b"]!();
+    await Promise.all(runTurnMock.mock.results.map((result) => result.value));
+    expect(tabA.statusOf("req-a", "blocked")!["unconsumedSteering"]).toEqual([{ id: "steer-blue-01", text: "make it blue" }]);
+    expect(tabB.statusOf("req-b", "blocked")!["unconsumedSteering"]).toEqual([
+      { id: "steer-scarf-01", text: "and a scarf" },
+      { id: "steer-glove-01", text: "and gloves" },
+    ]);
+    expect(steerChatTurn(chat.id, "and a hat", "steer-hat-0001", "req-b"))
+      .toEqual({ steered: false, active: false, error: "The turn this was typed into has ended." });
+    // Turn-ids review, LOW 2: with nothing running, a turn another tab replaced read like one that
+    // ended, and the page sent the message on by itself as a new turn.
+    expect(steerChatTurn(chat.id, "and a hat", "steer-hat-0001", "req-a"))
+      .toEqual({ steered: false, active: false, replaced: true, replacedBy: "req-b", error: "The turn this was typed into has ended." });
+  });
+
+  it("takes a message typed into a stopped turn that is still unwinding, and hands it back on its status", async () => {
+    // Deliberate: session.get no longer names a stopped turn, but its steering stays open until it
+    // has unwound, and what it did not read comes back on its final status as before.
+    const { chat, connect, steering, steerChatTurn } = await setup();
+    const unwind = slowToUnwind(steering);
+    const tab = connect("alice");
+    await tab.call("chat.send", { sessionId: chat.id, message: "render the harbour", requestId: "req-a" });
+    expect((await tab.call("chat.cancel", { requestId: "req-a" })).payload).toMatchObject({ cancelled: true });
+    expect((await tab.call("session.get", { sessionId: chat.id })).payload!["activeTurnRequestId"]).toBeUndefined();
+    expect(steerChatTurn(chat.id, "make it blue", "steer-blue-01", "req-a")).toEqual({ steered: true, active: true, id: "steer-blue-01" });
+
+    unwind["req-a"]!();
+    await runTurnMock.mock.results[0]!.value;
+    expect(tab.statusOf("req-a", "blocked")!["unconsumedSteering"]).toEqual([{ id: "steer-blue-01", text: "make it blue" }]);
+  });
+
   it.each([
     ["at the end of the history", 1],
     ["past it", 5],
@@ -548,6 +659,24 @@ describe("rpc turns across connections", () => {
     first.conn.close();
     expect((await connect("alice").call("chat.cancel", { requestId: "req-same" })).payload).toMatchObject({ cancelled: true });
     expect(signals[0]!.aborted).toBe(true);
+  });
+
+  it("refuses a request id that is not an id", async () => {
+    // Turn-ids review, INFO 3: the id is saved on every history message the turn writes, and any
+    // string was taken.
+    const { chat, connect } = await setup();
+    runTurnMock.mockImplementation(async () => turnOutput());
+    const tab = connect("alice");
+    for (const requestId of ["r".repeat(65), "req a", "../req-a", "", "req-a\n"]) {
+      expect(await tab.call("chat.send", { sessionId: chat.id, message: "render", requestId }))
+        .toMatchObject({ ok: false, error: "Error: requestId must be 1 to 64 characters of A-Za-z0-9_-" });
+    }
+    expect(runTurnMock).not.toHaveBeenCalled();
+    // The web's ids, the eval runner's UUIDs, the longest allowed, and a server id when none is given.
+    for (const requestId of ["k3j5h2l9x0q", "0b5e1c2a-7f3d-4e8b-9a6c-2d1f0e9b8a7c", "r".repeat(64), undefined]) {
+      expect((await tab.call("chat.send", { sessionId: chat.id, message: "render", ...(requestId ? { requestId } : {}) })).ok).toBe(true);
+    }
+    expect(runTurnMock).toHaveBeenCalledTimes(4);
   });
 
   it("says what time it is on the server when it answers session.get", async () => {
@@ -668,6 +797,45 @@ describe("rpc turns across connections", () => {
     const parts = transcript.filter((entry) => entry["role"] === "assistant" && entry["continued"] === true).map((entry) => entry["content"]);
     expect(cuts).toEqual(["Found three candidates, checking prices next.", ""]);
     expect(parts).toEqual([cuts[0], cuts[1]]);
+  });
+
+  it("passes over a replaced turn's late write when it names the text before a steering cut", async () => {
+    // Turn-ids review, LOW 1: a superseded turn still unwinding wrote just ahead of the cut, and the
+    // live segment showed its words as this turn's, where a reload passes them over.
+    const { chat, connect, steering, boundary, requestContext } = await setup();
+    runTurnMock.mockImplementation((opts) => requestContext.runWithRequestContext({ chatRequestId: opts.requestId! }, async () => {
+      const s = opts.session;
+      s.addMessage({ role: "user", content: opts.userMessage });
+      const token = steering.markTurnActive(s.id, opts.steeringToken);
+      s.addMessage({ role: "assistant", content: "Found three candidates, checking prices next.", tool_calls: [{ id: "c1", type: "function", function: { name: "web_search", arguments: "{}" } }] });
+      s.addMessage({ role: "tool", content: "three results", tool_call_id: "c1" });
+      // The turn this one replaced, unwinding, writes its last words under its own id.
+      s.addMessage({ role: "assistant", content: "Rendered the old harbour.", requestId: "req-old" });
+      steering.enqueue(s.id, "only under 50 euros", "steer-price-01");
+      const taken = steering.drain(s.id, token).map(({ id, text }) => ({ id, text }));
+      s.addMessage({
+        role: "user",
+        content: `${boundary.STEERING_PREFIX} ${taken.map((entry) => entry.text).join("\n")}`,
+        metadata: {
+          [boundary.MID_TURN_USER_MESSAGE_METADATA]: true,
+          [boundary.MID_TURN_SOURCE_METADATA]: "user",
+          [boundary.STEERING_METADATA]: taken,
+        },
+      });
+      opts.onSteeringConsumed?.({ messages: taken, iteration: 1, at: s.getHistory().at(-1)!.timestamp });
+      s.addMessage({ role: "assistant", content: "The blue one at 42 euros." });
+      steering.closeTurn(s.id, token);
+      return turnOutput({ response: "The blue one at 42 euros." });
+    }));
+    const tab = connect("alice");
+    await tab.call("chat.send", { sessionId: chat.id, message: "find me a lamp", requestId: "req-seg" });
+    await vi.waitFor(() => expect(tab.statusOf("req-seg", "ok")).toBeDefined());
+
+    const cuts = tab.eventsOf("agent.steering_consumed").map((event) => event["segmentText"]);
+    expect(cuts).toEqual(["Found three candidates, checking prices next."]);
+    const transcript = (await tab.call("session.get", { sessionId: chat.id })).payload!["transcript"] as Array<Record<string, unknown>>;
+    const parts = transcript.filter((entry) => entry["role"] === "assistant" && entry["continued"] === true).map((entry) => entry["content"]);
+    expect(parts).toEqual(cuts);
   });
 
   it("does not read a long answer as silence: a turn producing right up to its question survives it", async () => {

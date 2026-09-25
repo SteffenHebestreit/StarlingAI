@@ -292,6 +292,10 @@ export function routeToolDone<T extends SegmentMessage>(
  * before it runs them. Reconstructed as for a finished turn, it read "no result" — a delegation
  * in full swing shown as one that never reported back. `reconstruct` is turnSteps'
  * stepsFromToolCalls, passed in so this module keeps to type imports.
+ *
+ * A segment the server names for another turn stays that turn's: a stopped turn still unwinding
+ * writes after the message of the turn that replaced it. One already named for this turn, and
+ * one this page cut itself, keeps its steps.
  */
 export function resumeTurnSegments<T extends SegmentMessage>(
   messages: T[],
@@ -301,8 +305,9 @@ export function resumeTurnSegments<T extends SegmentMessage>(
   let opener = -1;
   messages.forEach((message, index) => { if (message.role === "user" && !message.midTurn && !message.steer) opener = index; });
   return messages.map((message, index) => {
-    if (index <= opener || message.role !== "assistant" || !message.continued || message.requestId) return message;
+    if (index <= opener || message.role !== "assistant" || !message.continued || (message.requestId && message.requestId !== requestId)) return message;
     const waiting = !message.steps?.length && message.toolCalls?.some((call) => call.result === undefined);
+    if (message.requestId && !waiting) return message;
     return { ...message, requestId, ...(waiting ? { steps: runningSteps(message, reconstruct) } : {}) };
   });
 }
@@ -478,6 +483,21 @@ export function appendUnread<T extends SegmentMessage>(
   if (!added.length) return messages;
   const at = options.before === undefined ? -1 : messages.findIndex((message) => message.id === options.before);
   return at < 0 ? [...messages, ...added] : [...messages.slice(0, at), ...added, ...messages.slice(at)];
+}
+
+/**
+ * Where the bubbles of messages turn `requestId` never read belong, when the list names that
+ * turn's opening message: above the first message that opened a turn after it (the id returned) —
+ * they were typed before that — or at the end (null). Undefined when no message in the list is
+ * named as that turn's opener: an older server names none, and the page never saw another tab's
+ * turn open. Placed by which turn the page followed, what the turn before it never read went to
+ * the end while the followed turn's final status was held for a read (review of round 6, D I2).
+ */
+export function unreadPlace(messages: SegmentMessage[], requestId: string): string | null | undefined {
+  const opens = (message: SegmentMessage) => message.role === "user" && !message.midTurn && !message.steer;
+  const own = messages.findIndex((message) => opens(message) && message.requestId === requestId);
+  if (own < 0) return undefined;
+  return messages.find((message, index) => index > own && opens(message))?.id ?? null;
 }
 
 /**
