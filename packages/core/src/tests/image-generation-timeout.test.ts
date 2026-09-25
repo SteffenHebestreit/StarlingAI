@@ -11,7 +11,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  IMAGE_TRANSPORT_OPTIONS,
   ImageGenerationTimeoutError,
+  ImageUpstreamRequestError,
   expectedImageRenderSeconds,
   imageDeviceBusyMs,
   imageRenderWork,
@@ -281,5 +283,43 @@ describe("the device stays busy after a timeout", () => {
     expect(net.started.map((call) => call.model)).toEqual(["q-busy-control", "fast-control"]);
     await vi.advanceTimersByTimeAsync(5_000);
     expect(fast.settled).toBe("resolved");
+  });
+});
+
+describe("the transport under a render", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  // Session 9cc3f362: 47 and 50 steps at 1344x768 had a budget of about eleven minutes and both
+  // failed at exactly 300.0 s — undici's default headersTimeout, which an image endpoint trips by
+  // sending its headers only once the picture is done — and the failure read as "service offline".
+  it("runs every image request on a dispatcher whose own timeouts are off, so only the render's budget applies", async () => {
+    const seen: RequestInit[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      seen.push(init ?? {});
+      return new Response(JSON.stringify({ data: [{ b64_json: Buffer.from("png").toString("base64") }] }), { status: 200, headers: { "content-type": "application/json" } });
+    }));
+    await requestImageGeneration(CLUSTER, { prompt: "a sunset", tier: "fast" });
+    expect(seen).toHaveLength(1);
+    expect((seen[0] as { dispatcher?: unknown }).dispatcher).toBeDefined();
+    expect(IMAGE_TRANSPORT_OPTIONS).toMatchObject({ headersTimeout: 0, bodyTimeout: 0 });
+  });
+
+  it("keeps the transport's cause, and calls only a connection that never opened unreachable", async () => {
+    const failWith = (code: string) => vi.stubGlobal("fetch", vi.fn(async () => {
+      throw Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error(`${code} happened`), { code }) });
+    }));
+
+    failWith("UND_ERR_HEADERS_TIMEOUT");
+    const midRender = await requestImageGeneration(CLUSTER, { prompt: "a sunset", tier: "fast" }).catch((error: unknown) => error);
+    expect(midRender).toBeInstanceOf(ImageUpstreamRequestError);
+    expect((midRender as ImageUpstreamRequestError).unreachable).toBe(false);
+    expect((midRender as Error).message).toContain("UND_ERR_HEADERS_TIMEOUT");
+
+    failWith("ECONNREFUSED");
+    const refused = await requestImageGeneration(CLUSTER, { prompt: "a sunset", tier: "fast" }).catch((error: unknown) => error);
+    expect((refused as ImageUpstreamRequestError).unreachable).toBe(true);
   });
 });

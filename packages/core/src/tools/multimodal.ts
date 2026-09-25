@@ -7,6 +7,7 @@ import { sendChunkedTtsRequests } from "../multimodal/tts-chunking.js";
 import { getMcpConnections } from "../mcp/registry.js";
 import {
   ImageGenerationTimeoutError,
+  ImageUpstreamRequestError,
   checkImageGenerationHealth,
   describeImageTierChoices,
   imageEngineLabel,
@@ -908,10 +909,13 @@ registerTool({
         },
       };
     } catch (error) {
-      log.error({ error }, "generate_image failed");
+      // `err`, the key the logger serializes: under `error` the row read {} and hid the cause.
+      log.error({ err: error }, "generate_image failed");
       const msg = error instanceof Error ? error.message : String(error);
-      // Surface a clear service-down message so the agent doesn't over-explain.
-      if (msg.includes("fetch failed") || msg.includes("ECONNREFUSED") || msg.includes("ENOTFOUND")) {
+      // "Offline" only for an endpoint that could not be reached at all. Any "fetch failed" used to
+      // read as offline — including a render cut short on the way, which is what session 9cc3f362
+      // was told twice while the service was up and had rendered a picture a minute earlier.
+      if (error instanceof ImageUpstreamRequestError && error.unreachable) {
         const config = getConfig().multimodal?.imageGeneration;
         return fail(`Image generation service is offline (${config?.baseUrl ?? "not configured"}). The endpoint is unavailable. Do not retry - inform the user the service is unavailable.`);
       }

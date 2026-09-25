@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { extname } from "node:path";
 import { inflateSync } from "node:zlib";
+import { Agent as UndiciAgent } from "undici";
 import { createConcurrencyGateFamily } from "../runtime/concurrency-gate.js";
 
 export type ImageGenerationApi = "automatic1111-compatible" | "comfyui" | "openai-compatible";
@@ -1653,6 +1654,35 @@ class UpstreamTimeoutError extends Error {
   }
 }
 
+/**
+ * The transport under every image request, with undici's own timeouts OFF: this module's timer
+ * (imageRequestTimeoutMs, scaled to the render) is the only fuse. Node's fetch is undici, which
+ * gives up on a response whose headers have not arrived after 300 s — and an image endpoint sends
+ * its headers only when the picture is done. So every quality render longer than five minutes died
+ * at exactly 300 s whatever budget it had been given: session 9cc3f362 rendered 47 and then 50
+ * steps at 1344x768 (budget ~11 min), and both failed at 300.0 s as "fetch failed", which the tool
+ * then reported as the service being offline. The chat provider zeroed the same default for the
+ * same reason (providers/lmstudio.ts, providerDispatcher).
+ */
+export const IMAGE_TRANSPORT_OPTIONS = { headersTimeout: 0, bodyTimeout: 0, keepAliveTimeout: 60_000 } as const;
+const imageDispatcher = new UndiciAgent(IMAGE_TRANSPORT_OPTIONS);
+
+/** Connection-level failure codes: the endpoint could not be reached at all. */
+const UNREACHABLE_CODES = new Set(["ECONNREFUSED", "ENOTFOUND", "EHOSTUNREACH", "ENETUNREACH", "EAI_AGAIN", "UND_ERR_CONNECT_TIMEOUT"]);
+
+/** A request that failed below HTTP, with the transport's own code kept for the caller to judge. */
+export class ImageUpstreamRequestError extends Error {
+  constructor(message: string, readonly code: string | undefined) {
+    super(message);
+    this.name = "ImageUpstreamRequestError";
+  }
+
+  /** The endpoint could not be reached at all — not a request that started and then failed. */
+  get unreachable(): boolean {
+    return this.code !== undefined && UNREACHABLE_CODES.has(this.code);
+  }
+}
+
 async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
   const controller = new AbortController();
   let timedOut = false;
@@ -1661,11 +1691,16 @@ async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: numbe
     controller.abort();
   }, timeoutMs);
   try {
-    return await fetch(url, { ...init, signal: controller.signal });
+    return await fetch(url, { ...init, signal: controller.signal, dispatcher: imageDispatcher } as RequestInit);
   } catch (error) {
     if (timedOut) throw new UpstreamTimeoutError(url, timeoutMs);
+    // "fetch failed" alone says nothing; the cause says whether the endpoint was unreachable or the
+    // request died on the way, and only the first is "offline".
+    const cause = (error as { cause?: { code?: unknown; message?: unknown } } | null)?.cause;
+    const code = typeof cause?.code === "string" ? cause.code : undefined;
     const detail = error instanceof Error ? error.message : String(error);
-    throw new Error(`Request to ${url} failed: ${detail}`);
+    const causeText = code ? ` (${code}${typeof cause?.message === "string" && cause.message ? `: ${cause.message}` : ""})` : "";
+    throw new ImageUpstreamRequestError(`Request to ${url} failed: ${detail}${causeText}`, code);
   } finally {
     clearTimeout(timer);
   }

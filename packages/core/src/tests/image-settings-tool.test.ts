@@ -37,7 +37,7 @@ interface Post {
 }
 
 /** The cluster: /models answers, generations and edits render, an edit reports what it applied. */
-function stubCluster(opts: { offline?: boolean; hang?: boolean; hangFirst?: boolean; onRender?: () => void } = {}) {
+function stubCluster(opts: { offline?: boolean; hang?: boolean; hangFirst?: boolean; onRender?: () => void; renderFailCode?: string } = {}) {
   const posts: Post[] = [];
   let renders = 0;
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -48,6 +48,10 @@ function stubCluster(opts: { offline?: boolean; hang?: boolean; hangFirst?: bool
     }
     opts.onRender?.();
     renders += 1;
+    // A render that dies below HTTP, the way undici reports it: "fetch failed" with the cause's code.
+    if (opts.renderFailCode) {
+      throw Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error(`${opts.renderFailCode} happened`), { code: opts.renderFailCode }) });
+    }
     if (opts.hang || (opts.hangFirst && renders === 1)) {
       // A render that outlasts its budget: only our own timer ends it.
       return new Promise<Response>((_resolve, reject) => {
@@ -328,6 +332,23 @@ describe("generate_image: the settings step", () => {
     const offline = await run({ prompt: "a harbour" }, { requestUserInput: down.ask });
     expect(offline.success).toBe(false);
     expect(down.mock).not.toHaveBeenCalled();
+  });
+
+  // Session 9cc3f362: two quality renders cut at 300 s by the transport were reported as "service is
+  // offline" while the service was up — any "fetch failed" read as offline.
+  it("calls the service offline only when it could not be reached, and passes any other transport failure on", async () => {
+    await writeConfig();
+    vi.unstubAllGlobals();
+    stubCluster({ renderFailCode: "UND_ERR_HEADERS_TIMEOUT" });
+    const cutShort = await run({ prompt: "a harbour" }, {});
+    expect(cutShort.success).toBe(false);
+    expect(cutShort.error).not.toContain("offline");
+    expect(cutShort.error).toContain("UND_ERR_HEADERS_TIMEOUT");
+
+    vi.unstubAllGlobals();
+    stubCluster({ renderFailCode: "ECONNREFUSED" });
+    const refused = await run({ prompt: "a harbour" }, {});
+    expect(refused.error).toContain("Image generation service is offline");
   });
 
   it("serves a full-size preview only for the ids it offered", async () => {

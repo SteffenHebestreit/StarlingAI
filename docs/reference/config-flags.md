@@ -344,8 +344,8 @@ Every public schema field, where it is declared, and how many production files r
 | `promptInjectionBlock` | packages/core/src/config/schema.ts:1210 | 6 |
 | `promptPer1m` | packages/core/src/config/schema.ts:502 | 1 |
 | `protocol` | packages/core/src/config/schema.ts:692 | 48 |
-| `provider` | packages/core/src/config/schema.ts:423 | 109 |
-| `providers` | packages/core/src/config/schema.ts:1202 | 84 |
+| `provider` | packages/core/src/config/schema.ts:423 | 110 |
+| `providers` | packages/core/src/config/schema.ts:1202 | 85 |
 | `publicUrl` | packages/core/src/config/schema.ts:309 | 7 |
 | `qaDeliveryLoop` | packages/core/src/config/schemas/orchestration.ts:303 | 5 |
 | `qaDeliveryLoopEscalateToCoordinator` | packages/core/src/config/schemas/orchestration.ts:329 | 1 |
@@ -468,7 +468,7 @@ Every public schema field, where it is declared, and how many production files r
 | `tools` | packages/core/src/config/schema.ts:913 | 193 |
 | `topK` | packages/core/src/config/schema.ts:166 | 7 |
 | `topP` | packages/core/src/config/schema.ts:165 | 4 |
-| `transport` | packages/core/src/config/schema.ts:663 | 26 |
+| `transport` | packages/core/src/config/schema.ts:663 | 27 |
 | `triggers` | packages/core/src/config/schema.ts:1358 | 31 |
 | `trust` | packages/core/src/config/schema.ts:1894 | 20 |
 | `trustModelRouting` | packages/core/src/config/schema.ts:277 | 2 |
