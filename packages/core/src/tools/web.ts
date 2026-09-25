@@ -330,9 +330,11 @@ registerTool({
           await callPlaywrightTool("browser_navigate", { url });
           let text = "";
           try {
-            // browser_evaluate is available in Playwright MCP >= 0.0.21
+            // browser_evaluate takes a FUNCTION. This sent `expression`, which Playwright MCP 1.61
+            // rejects as a missing `function`, so this fast path never ran and every page came
+            // back as a converted accessibility snapshot instead of its text.
             text = await callPlaywrightTool("browser_evaluate", {
-              expression: `(document.body?.innerText??'').replace(/\\t/g,' ').replace(/[ \\t]{3,}/g,'  ').replace(/\\n{4,}/g,'\\n\\n\\n').trim()`,
+              function: `() => (document.body?.innerText??'').replace(/\\t/g,' ').replace(/[ \\t]{3,}/g,'  ').replace(/\\n{4,}/g,'\\n\\n\\n').trim()`,
             });
           } catch {
             // Fall back to snapshot and convert to readable text

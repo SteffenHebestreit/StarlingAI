@@ -33,7 +33,10 @@ function readPcmWavDataSize(wav: Buffer): number {
   return wav.readUInt32LE(40);
 }
 
-const mcpConnections = new Map<string, { client: { callTool: ReturnType<typeof vi.fn> } }>();
+const mcpConnections = new Map<string, {
+  client: { callTool: ReturnType<typeof vi.fn> };
+  tools?: Array<{ name: string; description: string; inputSchema: Record<string, unknown> }>;
+}>();
 
 vi.mock("../mcp/registry.js", () => ({
   getMcpConnections: () => mcpConnections,
@@ -1138,5 +1141,81 @@ describe("multimodal and browser direct tools", () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/element not found/);
+  });
+
+  // Playwright MCP 1.61 renamed the element argument to `target` and requires it: a click sent
+  // with `ref` failed "Invalid input: expected string, received undefined", so every click, type
+  // and select the browser agent made failed once the image updated.
+  const schemaFor = (name: string, properties: string[]) => ({
+    name,
+    description: name,
+    inputSchema: { type: "object", properties: Object.fromEntries(properties.map((key) => [key, { type: "string" }])) },
+  });
+
+  it("sends the element as `target` to a server whose schema asks for it", async () => {
+    const callTool = vi.fn(async () => ({ content: [{ type: "text", text: "clicked" }], isError: false }));
+    mcpConnections.set("playwright", {
+      client: { callTool },
+      tools: [schemaFor("browser_click", ["element", "target", "doubleClick"]), schemaFor("browser_type", ["element", "target", "text", "submit"])],
+    });
+    const { getTool } = await import("../tools/registry.js");
+
+    await getTool("browser_click")!.execute({ element: "Submit button", ref: "e42" }, { sessionId: "s", workspacePath: tempDir });
+    await getTool("browser_type")!.execute({ element: "Email", ref: "e10", text: "a@b.c", submit: true }, { sessionId: "s", workspacePath: tempDir });
+
+    expect(callTool).toHaveBeenNthCalledWith(1, { name: "browser_click", arguments: { element: "Submit button", target: "e42" } });
+    expect(callTool).toHaveBeenNthCalledWith(2, { name: "browser_type", arguments: { element: "Email", target: "e10", text: "a@b.c", submit: true } });
+  });
+
+  it("keeps `ref` for a server that still declares it, and turns a `target` into `ref` there", async () => {
+    const callTool = vi.fn(async () => ({ content: [{ type: "text", text: "clicked" }], isError: false }));
+    mcpConnections.set("playwright", { client: { callTool }, tools: [schemaFor("browser_click", ["element", "ref"])] });
+    const { callPlaywrightTool } = await import("../tools/multimodal.js");
+
+    await callPlaywrightTool("browser_click", { element: "OK", ref: "e3" });
+    await callPlaywrightTool("browser_click", { element: "OK", target: "e4" });
+
+    expect(callTool).toHaveBeenNthCalledWith(1, { name: "browser_click", arguments: { element: "OK", ref: "e3" } });
+    expect(callTool).toHaveBeenNthCalledWith(2, { name: "browser_click", arguments: { element: "OK", ref: "e4" } });
+  });
+
+  const ACTION_WITH_LINK = "### Ran Playwright code\n```js\nawait page.getByRole('button', { name: 'OK' }).click();\n```\n"
+    + "### Page\n- Page URL: https://example.com/\n- Page Title: Example\n### Snapshot\n- [Snapshot](.playwright-mcp/page-2026-09-25T19-55-09-899Z.yml)";
+  const SNAPSHOT = "### Page\n- Page URL: https://example.com/\n- Page Title: Example\n### Snapshot\n```yaml\n- button \"Next\" [ref=e7]\n```";
+
+  it("puts the page back into an action's answer when the server only links to a snapshot file", async () => {
+    const callTool = vi.fn(async ({ name }: { name: string }) => ({
+      content: [{ type: "text", text: name === "browser_snapshot" ? SNAPSHOT : ACTION_WITH_LINK }],
+      isError: false,
+    }));
+    mcpConnections.set("playwright", { client: { callTool } });
+    const { getTool } = await import("../tools/registry.js");
+
+    const result = await getTool("browser_click")!.execute({ element: "OK", ref: "e2" }, { sessionId: "s", workspacePath: tempDir });
+
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("### Snapshot\n```yaml\n- button \"Next\" [ref=e7]\n```");
+    expect(result.output, "a link to a file inside the MCP container the agent cannot open").not.toContain(".playwright-mcp/");
+    expect(result.output).toContain("- Page Title: Example");
+    expect(callTool.mock.calls.map(([call]) => call.name)).toEqual(["browser_click", "browser_snapshot"]);
+  });
+
+  it("says to take a snapshot when fetching the page after an action fails, and leaves a snapshot's own answer alone", async () => {
+    const callTool = vi.fn(async ({ name }: { name: string }) => name === "browser_snapshot"
+      ? { content: [{ type: "text", text: "browser closed" }], isError: true }
+      : { content: [{ type: "text", text: ACTION_WITH_LINK }], isError: false });
+    mcpConnections.set("playwright", { client: { callTool } });
+    const { getTool } = await import("../tools/registry.js");
+
+    const result = await getTool("browser_navigate")!.execute({ url: "https://example.com" }, { sessionId: "s", workspacePath: tempDir });
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("(not available here: call browser_snapshot to see the page)");
+    expect(result.output).not.toContain(".playwright-mcp/");
+
+    callTool.mockClear();
+    callTool.mockImplementation(async () => ({ content: [{ type: "text", text: SNAPSHOT }], isError: false }));
+    const snapshot = await getTool("browser_snapshot")!.execute({}, { sessionId: "s", workspacePath: tempDir });
+    expect(snapshot.output).toBe(SNAPSHOT);
+    expect(callTool).toHaveBeenCalledTimes(1);
   });
 });

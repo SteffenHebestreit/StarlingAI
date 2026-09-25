@@ -1404,14 +1404,39 @@ function registerBrowserTool(input: {
         }
       }
       try {
-        const output = await callPlaywrightTool(input.mcpToolName, args);
+        const raw = await callPlaywrightTool(input.mcpToolName, args);
+        const output = PAGE_ACTION_TOOLS.has(input.mcpToolName) ? await withInlineSnapshot(raw) : raw;
         return { success: true, output, metadata: { server: "playwright", tool: input.mcpToolName } };
       } catch (error) {
-        log.error({ error, tool: input.mcpToolName }, "browser tool failed");
+        log.error({ err: error, tool: input.mcpToolName }, "browser tool failed");
         return fail(error instanceof Error ? error.message : String(error));
       }
     },
   });
+}
+
+/** The actions after which the agent must see the page they produced before it can choose the next one. */
+const PAGE_ACTION_TOOLS = new Set(["browser_navigate", "browser_click", "browser_type", "browser_select_option", "browser_wait_for"]);
+
+/**
+ * Playwright MCP 1.61 answers an action with a LINK to a snapshot file inside its own container,
+ * which the agent cannot open, where earlier versions put the snapshot in the answer. The agent was
+ * written for one call per action, so without the page it would spend a whole extra model turn on
+ * browser_snapshot after every click — or act on refs it never saw.
+ */
+const SNAPSHOT_FILE_LINK = /^#{1,4}[ \t]*Snapshot[ \t]*\n-[ \t]*\[Snapshot\]\([^)\n]*\)[^\n]*$/m;
+
+/** The action's answer with the page's snapshot in place of the link to it. */
+async function withInlineSnapshot(output: string): Promise<string> {
+  if (!SNAPSHOT_FILE_LINK.test(output)) return output;
+  try {
+    const snapshot = await callPlaywrightTool("browser_snapshot", {});
+    const section = snapshot.match(/#{1,4}[ \t]*Snapshot[ \t]*\n```[\s\S]*?```/)?.[0];
+    if (section) return output.replace(SNAPSHOT_FILE_LINK, section);
+  } catch (error) {
+    log.warn({ err: error }, "browser snapshot after an action failed");
+  }
+  return output.replace(SNAPSHOT_FILE_LINK, "### Snapshot\n(not available here: call browser_snapshot to see the page)");
 }
 
 async function readWorkspaceBinaryFile(path: string, workspacePath: string): Promise<WorkspaceBinaryFile> {
@@ -1669,6 +1694,28 @@ export async function analyzeImageBytes(bytes: Uint8Array, contentType: string, 
   return text.trim();
 }
 
+/**
+ * The element argument under the name the connected Playwright MCP server declares. It was `ref`
+ * and became `target` in 1.61, whose schema requires `target` and rejects a call that sends only
+ * `ref` ("expected string, received undefined") — so every click, type and select the browser
+ * agent made failed once the image updated. Read from the schema the server itself listed; with no
+ * schema, or one that names both or neither, the arguments go as given.
+ */
+function adaptElementArgument(args: Record<string, unknown>, inputSchema: Record<string, unknown> | undefined): Record<string, unknown> {
+  const properties = inputSchema?.["properties"];
+  if (!properties || typeof properties !== "object") return args;
+  const declares = (key: string) => Object.prototype.hasOwnProperty.call(properties, key);
+  if ("ref" in args && !("target" in args) && declares("target") && !declares("ref")) {
+    const { ref, ...rest } = args;
+    return { ...rest, target: ref };
+  }
+  if ("target" in args && !("ref" in args) && declares("ref") && !declares("target")) {
+    const { target, ...rest } = args;
+    return { ...rest, ref: target };
+  }
+  return args;
+}
+
 export async function callPlaywrightTool(toolName: string, args: Record<string, unknown>): Promise<string> {
   const connection = getMcpConnections().get("playwright");
   if (!connection) {
@@ -1684,7 +1731,8 @@ export async function callPlaywrightTool(toolName: string, args: Record<string, 
     log.info({ requestedToolName: toolName, resolvedToolName }, "Resolved legacy Playwright tool name");
   }
 
-  const result = await connection.client.callTool({ name: resolvedToolName, arguments: args });
+  const schema = (connection.tools ?? []).find((tool) => tool.name === resolvedToolName)?.inputSchema;
+  const result = await connection.client.callTool({ name: resolvedToolName, arguments: adaptElementArgument(args, schema) });
   const output = (result.content as Array<{ type: string; text?: string }> | undefined)
     ?.map(item => (item.type === "text" ? (item.text ?? "") : JSON.stringify(item)))
     .join("\n")

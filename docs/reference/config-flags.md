@@ -92,7 +92,7 @@ Every public schema field, where it is declared, and how many production files r
 | `configRemovals` | packages/core/src/config/schema.ts:1673 | 2 |
 | `configureTimeoutMs` | packages/core/src/config/schemas/multimodal.ts:223 | 1 |
 | `consolidationIntervalMs` | packages/core/src/config/schema.ts:1500 | 1 |
-| `container` | packages/core/src/config/schema.ts:689 | 71 |
+| `container` | packages/core/src/config/schema.ts:689 | 72 |
 | `contextWindow` | packages/core/src/config/schema.ts:119 | 12 |
 | `control` | packages/core/src/config/schema.ts:1648 | 49 |
 | `coordinatorToolCaps` | packages/core/src/config/schemas/orchestration.ts:822 | 4 |
@@ -185,7 +185,7 @@ Every public schema field, where it is declared, and how many production files r
 | `grafana` | packages/core/src/config/schema.ts:1133 | 4 |
 | `guidanceScale` | packages/core/src/config/schemas/multimodal.ts:169 | 7 |
 | `guildIds` | packages/core/src/config/schemas/channels.ts:42 | 5 |
-| `headers` | packages/core/src/config/schema.ts:698 | 93 |
+| `headers` | packages/core/src/config/schema.ts:698 | 94 |
 | `helmBinary` | packages/core/src/config/schema.ts:1065 | 1 |
 | `historyLimit` | packages/core/src/config/schemas/channels.ts:22 | 5 |
 | `holdoutRate` | packages/core/src/config/schema.ts:1468 | 2 |

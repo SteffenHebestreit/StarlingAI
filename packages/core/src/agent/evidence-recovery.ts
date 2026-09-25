@@ -254,6 +254,9 @@ function compactSourceSensitiveEvidenceForDisplay(evidence: string): string {
         .replace(/^-\s+auto_[a-z0-9_]+:\s*/i, "- ")
         .replace(/\s*###\s*Page state\b[\s\S]*$/i, "")
         .replace(/\s*Page Snapshot:\s*[\s\S]*$/i, "")
+        // Playwright MCP 1.61 headers: the page tree, the code it ran, the page header.
+        .replace(/\s*###\s*(?:Snapshot|Ran Playwright code|Page)\s*$/i, "")
+        .replace(/\s*-\s*\[Snapshot\]\([^)]*\)/i, "")
         .replace(/```[\s\S]*?```/g, "")
         .replace(/\s+/g, " ")
         .trim();

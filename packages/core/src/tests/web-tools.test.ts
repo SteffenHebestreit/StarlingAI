@@ -324,3 +324,37 @@ describe("web search backend selection", () => {
     expect(result.metadata?.["consecutiveZeroResults"]).toBeUndefined();
   });
 });
+describe("web_fetch through the browser (Playwright MCP 1.61)", () => {
+  // browser_evaluate takes `function`; this sent `expression`, which 1.61 rejects, so the page's
+  // text was never read and every JS-rendered page came back as a converted accessibility tree.
+  it("reads a JS-rendered page's text with browser_evaluate's `function`", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("<html><body><div id=app></div></body></html>", {
+      status: 200,
+      headers: { "Content-Type": "text/html" },
+    })));
+    const callTool = vi.fn(async (input: { name: string; arguments: Record<string, unknown> }) => {
+      if (input.name === "browser_evaluate") {
+        const fn = input.arguments["function"];
+        return typeof fn === "string" && fn.startsWith("() =>")
+          ? { content: [{ type: "text", text: "### Result\n\"Rendered pricing table: Basic 9 EUR, Pro 29 EUR\"" }] }
+          : { content: [{ type: "text", text: "Invalid input: function expected string, received undefined" }], isError: true };
+      }
+      if (input.name === "browser_snapshot") {
+        return { content: [{ type: "text", text: "### Snapshot\n```yaml\n- heading \"Fallback tree\" [ref=e1]\n```" }] };
+      }
+      return { content: [{ type: "text", text: "" }] };
+    });
+    mcpConnections.set("playwright", { client: { callTool } });
+
+    const { getTool } = await import("../tools/registry.js");
+    const result = await getTool("web_fetch")!.execute({ url: "https://example.com/app" }, {
+      sessionId: "session-web-fetch-evaluate",
+      workspacePath: "/workspace",
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("Rendered pricing table: Basic 9 EUR, Pro 29 EUR");
+    expect(result.output, "fell back to the accessibility tree").not.toContain("Fallback tree");
+    expect(result.metadata?.["fetchMethod"]).toBe("playwright");
+  });
+});

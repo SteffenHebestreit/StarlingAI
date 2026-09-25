@@ -69,6 +69,12 @@ export function extractKeyFacts(text: string, toolName: string, maxChars = 600):
     .replace(/#{1,4}\s*Page state[\s\S]*?(?=\n#{1,4}\s|\n\n[A-Z#]|$)/m, "")
     // Also catch inline Page Snapshot yaml blocks not preceded by the header
     .replace(/-\s+Page Snapshot:\s*`yaml[\s\S]*?`/g, "")
+    // Playwright MCP 1.61 shape: "### Snapshot" with the yaml tree or a link to its file, the
+    // "### Ran Playwright code" block, and a bare "### Page" header over the URL/title lines.
+    .replace(/#{1,4}[ \t]*Snapshot[ \t]*\n```[\s\S]*?```/g, "")
+    .replace(/#{1,4}[ \t]*Snapshot[ \t]*\n-[ \t]*\[Snapshot\]\([^)\n]*\)[^\n]*/g, "")
+    .replace(/#{1,4}[ \t]*Ran Playwright code[ \t]*\n```[\s\S]*?```/g, "")
+    .replace(/^#{1,4}[ \t]*Page[ \t]*$\n?/gm, "")
     // Individual page-state metadata lines
     .replace(/^-\s+Page (?:URL|Title|Status|State|Snapshot):[^\n]*\n?/gm, "")
     // YAML accessibility tree lines (the DOM ref noise from browser_snapshot fallback)
