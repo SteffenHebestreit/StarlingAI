@@ -11,6 +11,9 @@
  *  - Audit entries tagged with the parent session ID so tracing works
  */
 
+import { decide } from "../decisions/decide.js";
+import { layaConfigured } from "../decisions/laya-client.js";
+import { GOAL_MET } from "../decisions/points.js";
 import fs from "node:fs";
 // Named import: two local `path` bindings already exist in this module, and an
 // unqualified `path` default import would shadow-warn against them.
@@ -200,10 +203,11 @@ export async function assessOversightGoalMet(
   acceptanceCriteria: string[],
   evidence: string,
   signal?: AbortSignal,
+  sessionId?: string,
 ): Promise<boolean> {
   if (acceptanceCriteria.length === 0) return false;
   const provider = getChatProviderForTier("routing");
-  if (!provider) return false;
+  if (!provider && !layaConfigured()) return false;
   const system =
     "You are a swarm oversight checker. A worker agent is gathering evidence for a task. Given the task's "
     + "acceptance criteria and the evidence it has gathered SO FAR, decide whether the goal is ALREADY met well "
@@ -216,14 +220,29 @@ export async function assessOversightGoalMet(
     + "\n\nEvidence gathered so far:\n"
     + (evidence || "(none)").slice(0, 3_000);
   try {
-    // Labelled like the other routing-tier verdicts: unlabelled, its provider row read as the
-    // worker's own call (review of the thinking-off verdicts, D4).
-    const res = await runWithCallAttribution({ callSite: "routing_tier", agentName: "goal_met_oversight" }, () => provider.complete(
-      [{ role: "system", content: system }, { role: "user", content: user }],
-      [],
-      signal,
-    ));
-    return (res.content ?? "").trim().toUpperCase().startsWith("DONE");
+    // Laya reads the criteria and the evidence clipped to its window; decisions/decide.ts says when
+    // its answer replaces the routing tier's.
+    const outcome = await decide<boolean>({
+      point: GOAL_MET,
+      state: { criteria: acceptanceCriteria.slice(0, 12), evidence: (evidence || "(none)").slice(0, 2_400) },
+      languageOf: acceptanceCriteria.join("\n"),
+      ...(sessionId ? { sessionId } : {}),
+      ...(signal ? { signal } : {}),
+      incumbent: async (decisionSignal) => {
+        if (!provider) return undefined;
+        // Labelled like the other routing-tier verdicts: unlabelled, its provider row read as the
+        // worker's own call (review of the thinking-off verdicts, D4).
+        const res = await runWithCallAttribution({ callSite: "routing_tier", agentName: "goal_met_oversight" }, () => provider.complete(
+          [{ role: "system", content: system }, { role: "user", content: user }],
+          [],
+          signal ? AbortSignal.any([signal, decisionSignal]) : decisionSignal,
+        ));
+        return (res.content ?? "").trim().toUpperCase().startsWith("DONE");
+      },
+      toKey: (done) => (done ? "done" : "continue"),
+      fromKey: (key) => key === "done",
+    });
+    return outcome.value === true;
   } catch {
     return false;
   }
@@ -6975,7 +6994,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         const sharedForOversight = await formatSharedFactsContext(subSessionId).catch(() => ({ content: "" }));
         const oversightEvidence = sharedForOversight.content
           || toolResults.map((tr) => tr.content).join("\n");
-        oversightGoalMet = await assessOversightGoalMet(oversightCriteria, oversightEvidence, signal);
+        oversightGoalMet = await assessOversightGoalMet(oversightCriteria, oversightEvidence, signal, subSessionId);
         if (oversightGoalMet) {
           logAudit(
             "sub_agent_synthesis_forced",

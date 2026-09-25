@@ -4166,7 +4166,7 @@ registerTool({
         .map((result, index) => ({ label: dispatchTasks[index]?.agentName ?? `task_${index + 1}`, text: result.output ?? "", success: result.success }))
         .filter((entry) => entry.success && entry.text.trim().length > 0)
         .map(({ label, text }) => ({ label, text }));
-      disagreementMarker = await checkSubAgentDisagreement(successfulOutputs, delegatedCtx.signal);
+      disagreementMarker = await checkSubAgentDisagreement(successfulOutputs, delegatedCtx.signal, ctx.sessionId);
     }
 
     const baseOutput = formatted.join("\n\n---\n\n");

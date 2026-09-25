@@ -100,6 +100,8 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - SAI_PENTEST_SERVICE_URL=${SAI_PENTEST_SERVICE_URL:-http://kali-pentest:5010}
       - SAI_MAIL_SERVICE_URL=${SAI_MAIL_SERVICE_URL:-http://mail-service:5020}
+      # Set by `sai start --laya` (http://laya:8080); empty keeps the Laya decision layer inert.
+      - SAI_LAYA_URL=${SAI_LAYA_URL:-}
       - SAI_MAIL_SERVICE_TOKEN=${SAI_MAIL_SERVICE_TOKEN:?run pnpm sai setup first — it generates internal service credentials}
       - SAI_COMPUTER_REMOTE_URL=${SAI_COMPUTER_REMOTE_URL:-http://computer-remote:8890}
       - SAI_COMPUTER_REMOTE_TOKEN=${SAI_COMPUTER_REMOTE_TOKEN:?run pnpm sai setup first — it generates internal service credentials}
@@ -445,6 +447,39 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+
+  laya:
+    # The Laya decision sidecar (docker/laya): millisecond answers to the swarm's yes/no and
+    # pick-one questions for the decision layer (packages/core/src/decisions), and laya-browser
+    # steps for the browser agent. OFF unless the `laya` profile is on (`sai start --laya`, or
+    # SAI_ENABLE_LAYA=1 in .env), which also hands the gateway SAI_LAYA_URL.
+    # Downloaded checkpoints go in a named volume (fetched again after a wipe). Fine-tuned ones,
+    # trained on the decision ledger, live on the host in ./.starlingai/laya, which a wipe keeps —
+    # a checkpoint in ./.starlingai/laya/decision/current replaces the downloaded decision model.
+    profiles: ["laya"]
+    build:
+      context: ./docker/laya
+    image: starlingai/laya:dev
+    restart: unless-stopped
+    environment:
+      - LAYA_DECISION_MODEL=${LAYA_DECISION_MODEL:-convaiinnovations/laya#multilingual}
+      - LAYA_BROWSER_MODEL=${LAYA_BROWSER_MODEL:-cklxx/laya-browser#v14s}
+      - LAYA_PRELOAD=${LAYA_PRELOAD:-decision,browser}
+      - LAYA_LOCAL_DIR=/models/local
+      - HUGGINGFACE_HUB_TOKEN=${HUGGINGFACE_HUB_TOKEN:-}
+    volumes:
+      - gc-laya-hf-cache:/models/hf
+      - ./.starlingai/laya:/models/local
+    networks:
+      - starlingai-internal
+      - starlingai-public
+    # GPU reservation is in docker-compose.gpu.yml (added by `sai start` when a GPU is present).
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 120s
 
   mail-service:
     build:
@@ -844,6 +879,7 @@ volumes:
   gc-workspace:
   gc-qwen-model-cache:
   gc-engram-reranker-cache:
+  gc-laya-hf-cache:
   # engram-db snapshot — persists uploaded documents (CV/profile, workspace library)
   # across container restarts/rebuilds. Wiped only by `sai stop --volumes` / `--fresh`.
   engram-data:

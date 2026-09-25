@@ -439,6 +439,9 @@ const FORCED_TOOL_CALL_MAX_TOKENS = 4000;
 // helpers can depend on them without importing runtime.js. Re-exported here so
 // every external `import { TurnOutput } from ".../runtime.js"` keeps working.
 import type { RunTurnOptions, TurnOutput } from "./turn-types.js";
+import { decide } from "../decisions/decide.js";
+import { layaConfigured } from "../decisions/laya-client.js";
+import { SOURCE_SENSITIVE, UNGROUNDED_DRAFT } from "../decisions/points.js";
 export type { RunTurnOptions, TurnOutput } from "./turn-types.js";
 
 // Shared-facts / evidence / recovery-backstop cluster moved to ./evidence-recovery.ts
@@ -1618,22 +1621,48 @@ function startFacetTriage(
   return outcome;
 }
 
+/** The up-front judge's verdict: source-sensitive or not, whether anyone answered, and who. */
+interface UpfrontSourceSensitiveVerdict {
+  sensitive: boolean;
+  /** False for a reply with no yes/no in it: a non-answer, resolved to the fail-safe "clear". */
+  answered: boolean;
+  decidedBy: "laya" | "incumbent";
+}
+
 function startUpfrontSourceSensitiveClassifier(
   userMessage: string,
   turnSignal: AbortSignal,
-): { verdict: Promise<string>; abort: () => void } | null {
+  sessionId: string,
+): { verdict: Promise<UpfrontSourceSensitiveVerdict>; abort: () => void } | null {
   // Under a model preset the tier resolver returns null for every tier, so without the
   // fallback this judge simply does not run on a preset deployment — and its verdict is the
   // single switch that arms forced research.
   const classifierProvider = effectiveOrchestration().routingTierPresetFallback === true
     ? resolveRoutingTierProvider()
     : getChatProviderForTier("routing");
-  if (!classifierProvider) return null;
+  if (!classifierProvider && !layaConfigured()) return null;
   const abortController = new AbortController();
-  const verdict = runWithCallAttribution({ callSite: "routing_tier", agentName: "source_sensitivity_judge" }, () =>
-    classifierProvider
-      .complete(buildSourceSensitiveQuestionJudgeMessages(userMessage), [], AbortSignal.any([turnSignal, abortController.signal]))
-      .then((resp) => resp.content ?? ""));
+  const signal = AbortSignal.any([turnSignal, abortController.signal]);
+  // Laya answers in milliseconds what the routing tier answers in one to two seconds on the shared
+  // GPU, before the orchestrator's first call; decisions/decide.ts says when its answer is taken.
+  const verdict = decide<boolean>({
+    point: SOURCE_SENSITIVE,
+    state: { message: userMessage.slice(0, 2_000) },
+    languageOf: userMessage,
+    sessionId,
+    signal,
+    incumbent: async (decisionSignal) => {
+      if (!classifierProvider) return undefined;
+      const raw = await runWithCallAttribution({ callSite: "routing_tier", agentName: "source_sensitivity_judge" }, () =>
+        classifierProvider
+          .complete(buildSourceSensitiveQuestionJudgeMessages(userMessage), [], AbortSignal.any([signal, decisionSignal]))
+          .then((resp) => resp.content ?? ""));
+      // A reply with no yes/no token is no answer: fail-safe "clear", and not counted as agreement.
+      return JUDGE_ANSWER_TOKEN_RE.test(raw) ? parseUngroundedClaimVerdict(raw) : undefined;
+    },
+    toKey: (sensitive) => (sensitive ? "yes" : "no"),
+    fromKey: (key) => key === "yes",
+  }).then((outcome) => ({ sensitive: outcome.value === true, answered: outcome.value !== undefined, decidedBy: outcome.decidedBy }));
   verdict.catch(() => { /* consumed at the await site, or discarded after abort() */ });
   return { verdict, abort: () => abortController.abort() };
 }
@@ -1751,7 +1780,7 @@ async function _runTurn(
     && getConfig().agents.mainAssistant.toolMode === "orchestration_only"
     && !detectedDynamicGuidance?.computerAccessSensitive
   )
-    ? startUpfrontSourceSensitiveClassifier(userMessage, signal)
+    ? startUpfrontSourceSensitiveClassifier(userMessage, signal, session.id)
     : null;
 
   // ── Facet triage (orchestration.routingTriage) ──────────────────────────────
@@ -1805,6 +1834,7 @@ async function _runTurn(
   // cannot distinguish "judged not source-sensitive" from "never answered". The shadow
   // agreement statistic must not charge a provider failure to the triage as a disagreement.
   let upfrontJudgeAnswered = false;
+  let upfrontJudgeDecidedBy: "laya" | "incumbent" | undefined;
   if (
     effectiveOrchestration().upfrontSourceSensitiveClassifier === true
     && getConfig().agents.mainAssistant.toolMode === "orchestration_only"
@@ -1814,11 +1844,12 @@ async function _runTurn(
   ) {
     if (upfrontClassifier) {
       try {
-        const verdictRaw = await upfrontClassifier.verdict;
-        upfrontSourceSensitive = parseUngroundedClaimVerdict(verdictRaw);
+        const upfrontVerdict = await upfrontClassifier.verdict;
+        upfrontSourceSensitive = upfrontVerdict.sensitive;
         // A reply with no yes/no token resolves to the fail-safe false; that is a
         // non-answer, not a verdict, and is excluded from the agreement statistic.
-        upfrontJudgeAnswered = JUDGE_ANSWER_TOKEN_RE.test(verdictRaw ?? "");
+        upfrontJudgeAnswered = upfrontVerdict.answered;
+        upfrontJudgeDecidedBy = upfrontVerdict.decidedBy;
         // Always log the verdict (not just the positive case) so the audit shows the classifier RAN
         // and what it decided — otherwise a silent "no" is indistinguishable from the classifier being
         // absent/disabled, which made the "did it fire?" question undiagnosable from the audit.
@@ -1828,6 +1859,7 @@ async function _runTurn(
         logAudit("guardrail_flagged", {
           type: upfrontSourceSensitive ? "upfront_source_sensitive_detected" : "upfront_source_sensitive_clear",
           answered: upfrontJudgeAnswered,
+          ...(upfrontJudgeDecidedBy === "laya" ? { decidedBy: "laya" } : {}),
         }, { sessionId: session.id, severity: "info" });
       } catch (err) {
         log.debug({ err, sessionId: session.id }, "Up-front source-sensitivity classifier failed — relying on post-draft guards");
@@ -3641,14 +3673,32 @@ async function _runTurn(
         && !releasedAfterRoutingNudge
         && rawResponse.trim().length >= UNGROUNDED_JUDGE_MIN_CHARS) {
         const judgeProvider = getChatProviderForTier("routing");
-        if (judgeProvider) {
+        if (judgeProvider || layaConfigured()) {
           try {
-            // Labelled like the up-front judge (review of the thinking-off verdicts, D4).
-            const verdictRaw = (await runWithCallAttribution({ callSite: "routing_tier", agentName: "ungrounded_claim_judge" }, () =>
-              judgeProvider.complete(buildUngroundedClaimJudgeMessages(userMessage, rawResponse), [], signal))).content ?? "";
-            if (parseUngroundedClaimVerdict(verdictRaw)) {
+            // Laya reads the question and the draft clipped to its window; decisions/decide.ts says
+            // when its answer replaces the routing-tier judge's.
+            const outcome = await decide<boolean>({
+              point: UNGROUNDED_DRAFT,
+              state: { question: userMessage.slice(0, 800), draft: rawResponse.slice(0, 2_400) },
+              languageOf: userMessage,
+              sessionId: session.id,
+              signal,
+              incumbent: async (decisionSignal) => {
+                if (!judgeProvider) return undefined;
+                // Labelled like the up-front judge (review of the thinking-off verdicts, D4).
+                const verdictRaw = (await runWithCallAttribution({ callSite: "routing_tier", agentName: "ungrounded_claim_judge" }, () =>
+                  judgeProvider.complete(buildUngroundedClaimJudgeMessages(userMessage, rawResponse), [], AbortSignal.any([signal, decisionSignal])))).content ?? "";
+                return JUDGE_ANSWER_TOKEN_RE.test(verdictRaw) ? parseUngroundedClaimVerdict(verdictRaw) : undefined;
+              },
+              toKey: (ungrounded) => (ungrounded ? "yes" : "no"),
+              fromKey: (key) => key === "yes",
+            });
+            if (outcome.value === true) {
               requiresUngroundedFactualResearch = true;
-              logAudit("guardrail_flagged", { type: "semantic_ungrounded_factual_detected" }, { sessionId: session.id, severity: "info" });
+              logAudit("guardrail_flagged", {
+                type: "semantic_ungrounded_factual_detected",
+                ...(outcome.decidedBy === "laya" ? { decidedBy: "laya" } : {}),
+              }, { sessionId: session.id, severity: "info" });
             }
           } catch (err) {
             log.debug({ err, sessionId: session.id }, "Semantic ungrounded-claim judge failed — relying on structural tier");

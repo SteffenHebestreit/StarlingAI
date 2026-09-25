@@ -206,7 +206,7 @@ export async function prepareReceptionistFastLane(args: {
   // for a message that carries none of its own.
   const previousReply = lastAssistantReplyText(session.getHistory());
   const fastLane = await timedPhase("receptionistFastLane", () =>
-    tryReceptionistFastLaneDetailed(userMessage, signal, previousReply ? { previousReply } : {}).catch(
+    tryReceptionistFastLaneDetailed(userMessage, signal, { ...(previousReply ? { previousReply } : {}), sessionId: session.id }).catch(
       (): { handled: false; escalateReason: string } => ({ handled: false, escalateReason: "error" }),
     ),
   );

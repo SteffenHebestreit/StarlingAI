@@ -1,0 +1,88 @@
+/**
+ * The decision ledger as Laya fine-tuning data: every case the incumbent answered, labelled with the incumbent's
+ * answer, in the typed-decisions format laya's fine-tuning notebook reads —
+ *
+ *   {"point", "language", "state": "<json>", "questions": {point: {type, instructions, criteria}},
+ *    "gold": {point: {"label": "A", "probabilities": {"A": 1, "B": 0}}}}
+ *
+ * The question is written exactly as the sidecar serves it (docker/laya/app/generic.py): the point's question as the
+ * instructions and its options under neutral letters, in the order the point defines them — the model is trained on
+ * what it will be asked. The same case seen more than once is kept once, with its latest answer.
+ *
+ *   pnpm --filter @starlingai/core decisions:export [--ledger <path>] [--out <path>] [--points a,b]
+ */
+import { mkdir, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { DECISION_POINTS, type DecisionPointDefinition, type DecisionPointId } from "../decisions/points.js";
+import { readLedgerRows, type LedgerRow } from "../decisions/ledger.js";
+
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
+const LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+function arg(name: string): string | undefined {
+  const index = process.argv.indexOf(`--${name}`);
+  return index >= 0 ? process.argv[index + 1] : undefined;
+}
+
+export interface TrainingItem {
+  point: string;
+  language: string;
+  state: string;
+  questions: Record<string, { type: "choice"; instructions: string; criteria: Record<string, string> }>;
+  gold: Record<string, { label: string; probabilities: Record<string, number> }>;
+}
+
+/** The question as the sidecar serves it: options under letters, in the point's order. */
+export function servedQuestion(point: DecisionPointDefinition): { keys: string[]; criteria: Record<string, string> } {
+  const keys = Object.keys(point.options);
+  return { keys, criteria: Object.fromEntries(keys.map((key, i) => [LETTERS[i]!, point.options[key]!])) };
+}
+
+export function buildTrainingItems(rows: LedgerRow[], points?: ReadonlySet<string>): TrainingItem[] {
+  const latest = new Map<string, TrainingItem>();
+  for (const row of rows) {
+    if (!row.incumbent) continue;
+    if (points && !points.has(row.point)) continue;
+    const point = DECISION_POINTS[row.point as DecisionPointId];
+    if (!point) continue;
+    const { keys, criteria } = servedQuestion(point);
+    const index = keys.indexOf(row.incumbent.choice);
+    if (index < 0) continue; // an answer the point no longer has
+    const label = LETTERS[index]!;
+    const state = JSON.stringify(row.state);
+    latest.set(`${row.point}\u0000${state}`, {
+      point: row.point,
+      language: row.language,
+      state,
+      questions: { [row.point]: { type: "choice", instructions: point.question, criteria } },
+      gold: { [row.point]: { label, probabilities: Object.fromEntries(Object.keys(criteria).map((letter) => [letter, letter === label ? 1 : 0])) } },
+    });
+  }
+  return [...latest.values()];
+}
+
+async function main(): Promise<void> {
+  const ledger = arg("ledger") ?? join(repoRoot, ".starlingai", "decisions", "ledger.jsonl");
+  const out = arg("out") ?? join(repoRoot, ".starlingai", "laya", "data", "ledger-export.jsonl");
+  const pointList = arg("points");
+  if (!existsSync(ledger)) {
+    console.log(`No decision ledger at ${ledger} yet.`);
+    return;
+  }
+  const items = buildTrainingItems(await readLedgerRows(ledger), pointList ? new Set(pointList.split(",")) : undefined);
+  await mkdir(dirname(out), { recursive: true });
+  await writeFile(out, items.map((item) => JSON.stringify(item)).join("\n") + (items.length ? "\n" : ""), "utf8");
+  const counts: Record<string, number> = {};
+  for (const item of items) counts[`${item.point}/${item.language}`] = (counts[`${item.point}/${item.language}`] ?? 0) + 1;
+  console.log(`Wrote ${items.length} training items to ${out}`);
+  for (const [key, count] of Object.entries(counts).sort()) console.log(`  ${key}: ${count}`);
+}
+
+if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+  main().catch((err: unknown) => {
+    console.error(err);
+    process.exit(1);
+  });
+}

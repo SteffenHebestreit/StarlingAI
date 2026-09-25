@@ -21,6 +21,7 @@ import { getTelemetryWriteHealth } from "./telemetry.js";
 import { getAuditWriteStatus } from "../audit/logger.js";
 import { browserSessionManager } from "../agent/browser-session.js";
 import { engramConfigured, engramHealth } from "../retrieval/engram.js";
+import { layaConfigured, layaHealth } from "../decisions/laya-client.js";
 
 const log = childLogger("health-checks");
 
@@ -242,6 +243,22 @@ async function checkEngram(): Promise<SubsystemCheck> {
 }
 
 /**
+ * The Laya decision sidecar, when configured. Optional like engram: every decision point falls back to its
+ * incumbent without it, so an unreachable sidecar is `degraded`, never `unavailable`. A sidecar that fell back to
+ * the CPU after a CUDA error answers ~10x slower and reports that in its own status.
+ */
+async function checkLaya(): Promise<SubsystemCheck> {
+  if (!layaConfigured()) return { name: "laya", status: "ok", detail: "not configured (decision layer off)" };
+  const health = await layaHealth();
+  if (!health) return { name: "laya", status: "degraded", detail: "configured but unreachable — incumbents decide" };
+  const models = (health["models"] ?? {}) as Record<string, { loaded?: boolean; device?: string | null; error?: string }>;
+  const detail = Object.entries(models)
+    .map(([name, model]) => `${name}: ${model.error ? "error" : model.loaded ? model.device ?? "loaded" : "loading"}`)
+    .join(", ");
+  return { name: "laya", status: health["status"] === "ok" || health["status"] === "loading" ? "ok" : "degraded", detail: detail || String(health["status"]) };
+}
+
+/**
  * Primary chat-model reachability. The #1 first-run confusion is a stack that
  * boots "healthy" while the model endpoint (a local LM Studio / Ollama the user
  * hasn't started yet) is unreachable — so every turn fails with an empty answer
@@ -299,6 +316,7 @@ export async function runSubsystemChecks(): Promise<SubsystemHealth> {
     Promise.resolve(checkAudit()),
     checkBrowserVnc(),
     checkEngram(),
+    checkLaya(),
   ]);
   const healthy = checks.every((c) => c.status !== "unavailable");
   const degraded = checks.some((c) => c.status === "degraded");

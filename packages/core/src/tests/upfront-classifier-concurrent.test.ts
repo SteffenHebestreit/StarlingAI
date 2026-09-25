@@ -98,12 +98,13 @@ vi.mock("../guardrails/moderation.js", () => ({
 vi.mock("../guardrails/output.js", () => ({ scanOutput: vi.fn((text: string) => ({ safe: true, redacted: text })) }));
 vi.mock("../audit/logger.js", () => ({ logAudit: (...args: unknown[]) => logAuditMock(...args) }));
 
-async function loadRuntime(config: { receptionistEnabled: boolean }) {
+async function loadRuntime(config: { receptionistEnabled: boolean; decisions?: Record<string, unknown> }) {
   const dir = mkdtempSync(join(tmpdir(), "sai-upfront-concurrent-"));
   writeFileSync(join(dir, "starlingai.json"), JSON.stringify({
     agents: { mainAssistant: { toolMode: "orchestration_only" } },
     orchestration: { upfrontSourceSensitiveClassifier: true },
     receptionist: { enabled: config.receptionistEnabled },
+    ...(config.decisions ? { decisions: { ledger: { path: join(dir, "ledger.jsonl") }, ...config.decisions } } : {}),
   }), "utf8");
   process.env["SAI_CONFIG_PATH"] = join(dir, "starlingai.json");
   vi.resetModules();
@@ -238,5 +239,35 @@ describe("up-front source-sensitivity classifier — issued after the fast lane,
     // the audit sees neither a verdict row nor a no-routing-tier row, exactly as before.
     expect(routingCalls.classifier[0]!.signal?.aborted).toBe(true);
     expect(upfrontAuditTypes()).toEqual([]);
+  });
+
+  // The Laya decision layer: a verdict Laya may give replaces the routing-tier judge's, and the
+  // judge's request — on the wire already — is cancelled rather than waited for.
+  it("takes Laya's verdict when its mode allows, and cancels the judge's request", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      answers: { source_sensitive: { choice: "yes", probabilities: { yes: 0.96, no: 0.04 } } },
+    }), { status: 200, headers: { "Content-Type": "application/json" } })));
+    try {
+      const { AgentSession, runTurn } = await loadRuntime({
+        receptionistEnabled: false,
+        decisions: { baseUrl: "http://laya:8080", points: { source_sensitive: { mode: "laya", threshold: 0.9 } } },
+      });
+      const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+      streamMock.mockImplementation(() => (async function* () {
+        yield { type: "text_delta", content: "done" };
+        yield { type: "done", finishReason: "stop", usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } };
+      })());
+      // The routing tier would say "no" (the harness default): only Laya's "yes" can produce "detected".
+      await runTurn({ session, userMessage: "Wie funktioniert das Pfandsystem in Dänemark und wer betreibt es?" });
+
+      const rows = logAuditMock.mock.calls
+        .map((args) => args[1] as { type?: string; decidedBy?: string } | undefined)
+        .filter((data) => data?.type?.startsWith("upfront_source_sensitive"));
+      expect(rows).toEqual([{ type: "upfront_source_sensitive_detected", answered: true, decidedBy: "laya" }]);
+      expect(routingCalls.classifier).toHaveLength(1);
+      expect(routingCalls.classifier[0]!.signal?.aborted, "the replaced judge's request kept running").toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

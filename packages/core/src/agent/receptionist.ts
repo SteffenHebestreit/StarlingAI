@@ -23,6 +23,8 @@
  */
 
 import { getConfig } from "../config/loader.js";
+import { decide } from "../decisions/decide.js";
+import { FAST_LANE } from "../decisions/points.js";
 import { applyActiveModelPreset, createChatProvider, getChatProviderForTier, tierModelDefaults } from "../providers/index.js";
 import { effectiveOrchestration } from "../runtime/effort-context.js";
 import { runWithCallAttribution } from "../runtime/request-context.js";
@@ -107,7 +109,7 @@ export interface ReceptionistResult {
   escalateReason?: string;
 }
 
-export type CompleteFn = (messages: LLMMessage[]) => Promise<string>;
+export type CompleteFn = (messages: LLMMessage[], signal?: AbortSignal) => Promise<string>;
 
 export interface RunReceptionistDeps {
   complete: CompleteFn;
@@ -120,6 +122,8 @@ export interface RunReceptionistDeps {
   confidenceAttempt?: boolean;
   /** Candidate-length ceiling for the relaxed Stage-0 gate in confidence-attempt mode. */
   confidenceMaxChars?: number;
+  /** For the decision ledger. */
+  sessionId?: string;
   /** The language the conversation has been using, for a message that carries none. */
   conversationLanguage?: string;
   /** agents.mainAssistant.defaultLanguage. */
@@ -142,18 +146,31 @@ export async function runReceptionist(
   });
   if (!gate.fastLane) return { handled: false, escalateReason: gate.reason };
 
+  const messages = buildReceptionistMessages(userMessage, {
+    memoryCapsule: deps.memoryCapsule,
+    assistantName: deps.assistantName,
+    personaLines: deps.personaLines ?? getReceptionistPersonaLines(),
+    confidenceAttempt,
+    ...(deps.conversationLanguage ? { conversationLanguage: deps.conversationLanguage } : {}),
+    ...(deps.defaultLanguage ? { defaultLanguage: deps.defaultLanguage } : {}),
+  });
   let raw: string;
   try {
-    raw = await deps.complete(
-      buildReceptionistMessages(userMessage, {
-        memoryCapsule: deps.memoryCapsule,
-        assistantName: deps.assistantName,
-        personaLines: deps.personaLines ?? getReceptionistPersonaLines(),
-        confidenceAttempt,
-        ...(deps.conversationLanguage ? { conversationLanguage: deps.conversationLanguage } : {}),
-        ...(deps.defaultLanguage ? { defaultLanguage: deps.defaultLanguage } : {}),
-      }),
-    );
+    // Laya may call a message a task on its own: then it goes straight to the full assistant and
+    // the micro-call — about two seconds on the shared GPU for a message that escalates anyway —
+    // is never waited for. "Small talk" it may not decide alone: only the model can write the reply.
+    const outcome = await decide<string>({
+      point: FAST_LANE,
+      state: { message: userMessage },
+      languageOf: userMessage,
+      layaMayTake: ["task"],
+      incumbent: (signal) => deps.complete(messages, signal),
+      toKey: (reply) => (receptionistEscalated(reply, confidenceAttempt) ? "task" : "small_talk"),
+      fromKey: () => ESCALATE_SENTINEL,
+      ...(deps.sessionId ? { sessionId: deps.sessionId } : {}),
+    });
+    if (outcome.decidedBy === "laya") return { handled: false, escalateReason: "laya-task" };
+    raw = outcome.value ?? "";
   } catch (err) {
     log.debug({ err }, "Receptionist micro-call failed — escalating");
     return { handled: false, escalateReason: "micro-call-error" };
@@ -203,6 +220,13 @@ export async function runReceptionist(
     return { handled: true, response: redacted };
   }
   return { handled: true, response: text };
+}
+
+/** Did the front desk's model hand the message on, rather than answer it? */
+function receptionistEscalated(raw: string, confidenceAttempt: boolean): boolean {
+  if (confidenceAttempt) return !parseReceptionistConfidence(raw).confident;
+  const text = raw.trim();
+  return !text || text.includes(ESCALATE_SENTINEL);
 }
 
 /**
@@ -369,6 +393,8 @@ export interface FastLaneConversationContext {
   /** The assistant's previous reply in this session, if any — the language anchor for a
    *  message that carries none of its own. */
   previousReply?: string;
+  /** For the decision ledger. */
+  sessionId?: string;
 }
 
 /**
@@ -428,8 +454,9 @@ export async function tryReceptionistFastLaneDetailed(
     // A routing-tier call like the triage and the source-sensitivity judge, labelled like them.
     // Unlabelled it inherited the turn's own context, so its provider row read agentName main,
     // callSite main_turn — indistinguishable from the orchestrator's first call on the same model.
-    complete: async (messages) => (await runWithCallAttribution({ callSite: "routing_tier", agentName: "receptionist" }, () =>
-      provider.complete(messages, [], signal))).content ?? "",
+    complete: async (messages, callSignal) => (await runWithCallAttribution({ callSite: "routing_tier", agentName: "receptionist" }, () =>
+      provider.complete(messages, [], callSignal && signal ? AbortSignal.any([signal, callSignal]) : callSignal ?? signal))).content ?? "",
+    ...(context.sessionId ? { sessionId: context.sessionId } : {}),
     memoryCapsule: capsule || undefined,
     assistantName,
     personaLines: getReceptionistPersonaLines(),

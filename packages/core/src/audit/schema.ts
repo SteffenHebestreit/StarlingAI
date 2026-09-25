@@ -38,6 +38,8 @@ export type CoreAuditEventType =
   | "tool_output_framing_neutralized"
   | "guardrail_blocked"
   | "guardrail_flagged"
+  /** The Laya decision layer answered, or was asked alongside, one decision point (decisions/decide.ts). */
+  | "decision_point"
   | "output_redacted"
   | "auth_success"
   | "auth_failure"

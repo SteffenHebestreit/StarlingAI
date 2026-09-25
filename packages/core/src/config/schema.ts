@@ -44,6 +44,8 @@ export {
 export type { DocumentRagConfig, RetrievalSearchConfig } from "./schemas/retrieval.js";
 export { OrchestrationSchema } from "./schemas/orchestration.js";
 export type { OrchestrationConfig } from "./schemas/orchestration.js";
+export { DecisionModeSchema, DecisionPointSettingsSchema, DecisionsSchema } from "./schemas/decisions.js";
+export type { DecisionMode, DecisionsConfig } from "./schemas/decisions.js";
 export {
   EFFORT_TIERS,
   EffortTierSchema,
@@ -59,6 +61,7 @@ import { RetrievalSchema } from "./schemas/retrieval.js";
 import { RenderSchema } from "./schemas/render.js";
 import { OrchestrationSchema } from "./schemas/orchestration.js";
 import { EffortSchema } from "./schemas/effort.js";
+import { DecisionsSchema } from "./schemas/decisions.js";
 
 export const LMStudioProviderSchema = z.object({
   baseUrl: z.string().url().default("http://host.docker.internal:1234/v1"),
@@ -1853,6 +1856,8 @@ export const ConfigSchema = z.object({
   guardrails: GuardrailsSchema.default({}),
   multimodal: MultimodalSchema.default({}),
   retrieval: RetrievalSchema.default({}),
+  /** The Laya decision layer: fast local answers to the swarm's yes/no and pick-one questions. */
+  decisions: DecisionsSchema.default({}),
   render: RenderSchema,
   mcp: McpConfigSchema.default({}),
   sites: SitesSchema.default({}),

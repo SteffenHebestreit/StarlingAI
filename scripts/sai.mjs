@@ -153,6 +153,7 @@ async function cmdStart() {
       pentest:           { type: "boolean", default: false },
       "computer-desktop":{ type: "boolean", default: false },
       rag:               { type: "boolean", default: false },
+      laya:              { type: "boolean", default: false },
       all:               { type: "boolean", default: false },
     },
     strict: false,
@@ -164,6 +165,7 @@ async function cmdStart() {
   const pentest     = values.pentest || values.all;
   const desktop     = values["computer-desktop"] || values.all;
   const ragFlag     = values.rag || values.all;
+  const layaFlag    = values.laya || values.all;
 
   hdr(`${PRODUCT.name} — Starting up`);
 
@@ -208,22 +210,32 @@ async function cmdStart() {
   // default so a plain start works on any machine (the reranker reserves an NVIDIA
   // GPU). Opt in with `sai start --rag` or persist SAI_ENABLE_RAG=1 in .env.
   const wantRag = ragFlag || /^(1|true|yes|on)$/i.test(process.env.SAI_ENABLE_RAG || "");
+  // The Laya decision sidecar (docker/laya) behind the `laya` profile, OFF by default: it downloads
+  // ~2 GB of checkpoints and wants the GPU. Opt in with `sai start --laya` or SAI_ENABLE_LAYA=1 in .env.
+  // Running it is what tells the gateway where it is (SAI_LAYA_URL), so the decision layer is
+  // inert exactly when the sidecar is not there.
+  const wantLaya = layaFlag || /^(1|true|yes|on)$/i.test(process.env.SAI_ENABLE_LAYA || "");
+  if (wantLaya) process.env.SAI_LAYA_URL = process.env.SAI_LAYA_URL || "http://laya:8080";
   const profileArgs = [];
   if (pentest) profileArgs.push("--profile", "pentest");
   if (desktop) profileArgs.push("--profile", "computer-desktop");
+  if (wantLaya) profileArgs.push("--profile", "laya");
+  // The reranker and the Laya sidecar only get the GPU when a host NVIDIA GPU is present
+  // (or forced via SAI_GPU=1). Otherwise they run on CPU. SAI_GPU=0 forces CPU.
+  const gpuForced = /^(1|true|yes|on)$/i.test(process.env.SAI_GPU || "");
+  const gpuOff = /^(0|false|no|off)$/i.test(process.env.SAI_GPU || "");
+  const useGpu = (wantRag || wantLaya) && (gpuForced || (!gpuOff && hasNvidiaGpu()));
+  if (useGpu) composeFiles.push("-f", "docker-compose.gpu.yml");
   if (wantRag) {
     profileArgs.push("--profile", "rag");
-    // The reranker only gets the GPU when a host NVIDIA GPU is present (or forced
-    // via SAI_GPU=1). Otherwise it runs on CPU. SAI_GPU=0 forces CPU.
-    const gpuForced = /^(1|true|yes|on)$/i.test(process.env.SAI_GPU || "");
-    const gpuOff = /^(0|false|no|off)$/i.test(process.env.SAI_GPU || "");
-    const useGpu = gpuForced || (!gpuOff && hasNvidiaGpu());
-    if (useGpu) {
-      composeFiles.push("-f", "docker-compose.gpu.yml");
-      ok("RAG enabled (engram + reranker) — GPU detected, reranker on GPU");
-    } else {
-      ok("RAG enabled (engram + reranker) — no GPU, reranker on CPU");
-    }
+    ok(useGpu
+      ? "RAG enabled (engram + reranker) — GPU detected, reranker on GPU"
+      : "RAG enabled (engram + reranker) — no GPU, reranker on CPU");
+  }
+  if (wantLaya) {
+    ok(useGpu
+      ? "Laya decision sidecar enabled — GPU detected, decisions in milliseconds"
+      : "Laya decision sidecar enabled — no GPU, it runs on CPU (tens to hundreds of ms per decision)");
   }
 
   const dc = (...args) => ["docker", "compose", ...composeFiles, ...profileArgs, ...args];
@@ -388,7 +400,7 @@ async function cmdStop() {
   });
 
   const composeFiles = ["-f", "docker-compose.yml"];
-  const allProfiles = ["--profile", "pentest", "--profile", "computer-desktop", "--profile", "rag"];
+  const allProfiles = ["--profile", "pentest", "--profile", "computer-desktop", "--profile", "rag", "--profile", "laya"];
 
   hdr(`Stopping ${PRODUCT.name}...`);
   ensureDockerDaemon();
@@ -583,6 +595,9 @@ ${BOLD}Commands:${RESET}
     --rag                              Include document-RAG stack (engram + reranker);
                                        uses the GPU when one is present, else CPU.
                                        Persist with SAI_ENABLE_RAG=1 in .env
+    --laya                             Include the Laya decision sidecar (fast local
+                                       decisions; GPU when present). Persist with
+                                       SAI_ENABLE_LAYA=1 in .env
     --pentest                          Include Kali pentest service
     --computer-desktop                 Include VNC desktop container
     --all                              Include all remaining optional services

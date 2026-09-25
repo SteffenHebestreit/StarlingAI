@@ -7,6 +7,9 @@
  * the live check does ONE routing-tier completion and fails OPEN (no marker) on any error
  * so it can never block or break a turn.
  */
+import { decide } from "../decisions/decide.js";
+import { layaConfigured } from "../decisions/laya-client.js";
+import { SLICES_DISAGREE } from "../decisions/points.js";
 import { getChatProviderForTier } from "../providers/index.js";
 import { runWithCallAttribution } from "../runtime/request-context.js";
 import type { LLMMessage } from "../providers/lmstudio.js";
@@ -65,16 +68,32 @@ export function renderDisagreementMarker(detail: string): string {
 export async function checkSubAgentDisagreement(
   outputs: ReadonlyArray<{ label: string; text: string }>,
   signal?: AbortSignal,
+  sessionId?: string,
 ): Promise<string | null> {
   try {
     if (outputs.length < 2) return null;
     const provider = getChatProviderForTier("routing");
-    if (!provider) return null;
-    // Labelled like the other routing-tier verdicts (review of the thinking-off verdicts, D4).
-    const res = await runWithCallAttribution({ callSite: "routing_tier", agentName: "disagreement_check" }, () =>
-      provider.complete(buildDisagreementCheckMessages(outputs), [], signal));
-    const verdict = parseDisagreementVerdict(res.content ?? "");
-    return verdict.disagree ? renderDisagreementMarker(verdict.detail) : null;
+    if (!provider && !layaConfigured()) return null;
+    // Laya reads every output clipped so all of them fit its window together. Its "disagree" names
+    // no conflict — the marker then asks the orchestrator to find it — while the routing tier's does.
+    const perOutput = Math.max(200, Math.floor(2_400 / outputs.length));
+    const outcome = await decide<{ disagree: boolean; detail: string }>({
+      point: SLICES_DISAGREE,
+      state: { outputs: outputs.map((output) => ({ label: output.label, text: output.text.slice(0, perOutput) })) },
+      languageOf: outputs.map((output) => output.text).join("\n").slice(0, 2_000),
+      ...(sessionId ? { sessionId } : {}),
+      ...(signal ? { signal } : {}),
+      incumbent: async (decisionSignal) => {
+        if (!provider) return undefined;
+        // Labelled like the other routing-tier verdicts (review of the thinking-off verdicts, D4).
+        const res = await runWithCallAttribution({ callSite: "routing_tier", agentName: "disagreement_check" }, () =>
+          provider.complete(buildDisagreementCheckMessages(outputs), [], signal ? AbortSignal.any([signal, decisionSignal]) : decisionSignal));
+        return parseDisagreementVerdict(res.content ?? "");
+      },
+      toKey: (verdict) => (verdict.disagree ? "disagree" : "agree"),
+      fromKey: (key) => ({ disagree: key === "disagree", detail: "" }),
+    });
+    return outcome.value?.disagree ? renderDisagreementMarker(outcome.value.detail) : null;
   } catch (err) {
     log.debug({ err }, "disagreement check failed — failing open (no marker)");
     return null;

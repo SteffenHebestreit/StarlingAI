@@ -1,0 +1,9 @@
+# torch is installed first by the Dockerfile (from PyPI or the index given at build time).
+#
+# Pinned: laya-browser v14s was trained with transformers 5.x, and laya's own fixes for 4.x (RoPE theta on
+# mmBERT) only exist in newer laya versions. 0.3.20 is the newest release; string instructions tokenize
+# byte-identically to 0.3.4, the version the browser checkpoint was built with.
+laya==0.3.20
+transformers==5.17.0
+fastapi>=0.110,<1
+uvicorn>=0.30,<1

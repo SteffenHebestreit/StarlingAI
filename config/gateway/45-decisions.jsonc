@@ -1,0 +1,28 @@
+{
+  // The Laya decision layer (packages/core/src/decisions, schema config/schemas/decisions.ts).
+  //
+  // Laya is a small local choice model in the `laya` sidecar. It answers the swarm's yes/no and
+  // pick-one questions in milliseconds, where the incumbent is an LLM call of one to two seconds
+  // on the shared GPU. The incumbent is the LLM call or rule that decides the point today. It
+  // stays the fallback, and it is the teacher Laya is measured, and fine-tuned, against.
+  //
+  // The sidecar's address comes from SAI_LAYA_URL, which `sai start --laya` sets. Without the
+  // sidecar every point is decided by its incumbent, whatever the modes below say.
+  //
+  // "adaptive": the incumbent decides until the decision ledger (.starlingai/decisions/ledger.jsonl)
+  // shows that Laya agrees with it, per point, language and answer, at a confidence where the
+  // agreement's lower bound reaches targetAgreement over at least minSamples cases. From then on
+  // Laya decides those cases, the incumbent is not waited for, and auditRate of them still goes
+  // to the incumbent so the agreement keeps being measured.
+  //
+  // The stock checkpoint is not expected to qualify for much before it is fine-tuned on the ledger,
+  // so this starts out as shadow mode: nothing changes until the evidence says it may.
+  //
+  // To only watch: set "defaultMode": "shadow". To switch one point off: "points": { "<id>": { "mode": "off" } }.
+  // Points: fast_lane, source_sensitive, ungrounded_draft, slices_disagree, goal_met.
+  // Report: `pnpm --filter @starlingai/core decisions:report`.
+  "decisions": {
+    "defaultMode": "adaptive",
+    "adaptive": { "targetAgreement": 0.9, "minSamples": 30, "auditRate": 0.1 }
+  }
+}

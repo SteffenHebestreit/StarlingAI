@@ -535,6 +535,14 @@ function mergeEnvOverrides(raw: Record<string, unknown>): Record<string, unknown
     const gw = (raw["gateway"] as Record<string, unknown> | undefined) ?? {};
     raw["gateway"] = { ...(gw as object), jwtSecret: env["SAI_JWT_SECRET"] };
   }
+  // The Laya sidecar: `sai start --laya` runs it and sets this, so the decision layer finds it
+  // exactly when it is running. A baseUrl written in config wins over it.
+  if (env["SAI_LAYA_URL"]?.trim()) {
+    const decisions = (raw["decisions"] as Record<string, unknown> | undefined) ?? {};
+    if (typeof decisions["baseUrl"] !== "string" || !decisions["baseUrl"].trim()) {
+      raw["decisions"] = { ...decisions, baseUrl: env["SAI_LAYA_URL"].trim() };
+    }
+  }
   // Primary model provider endpoint — provider-NEUTRAL. The primary provider may be LM Studio,
   // Ollama, vLLM, llama.cpp, LocalAI, OpenRouter, or ANY OpenAI-compatible server; it just
   // happens to be wired through the `lmstudio` provider slot (an OpenAI-compatible adapter).
