@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { childLogger } from "../logger.js";
+import { isProtectedConfigPath } from "./config-assistant-proposals.js";
 
 import { PRODUCT } from "../product/index.js";
 
@@ -154,7 +155,11 @@ export function formatFlowMemoryGuidance(
       : entry.outcome === "partial"
         ? "Watch"
         : "Prefer";
-    const actions = entry.actions.length > 0 ? ` Actions: ${entry.actions.join("; ")}.` : "";
+    // Not a path drafting now refuses: a proposal applied under agents.subAgents.* was recorded as
+    // applied, and "Prefer … set agents.subAgents…" steered the assistant back to a path that does
+    // nothing (final review of the leftovers, 5).
+    const usable = entry.actions.filter((action) => !(action.startsWith("set ") && isProtectedConfigPath(action.slice(4))));
+    const actions = usable.length > 0 ? ` Actions: ${usable.join("; ")}.` : "";
     const lesson = entry.lesson ? ` Lesson: ${entry.lesson}.` : "";
     const agentHint = entry.targetAgent ? ` [target=${entry.targetAgent}]` : "";
     return `- ${label}${agentHint}: ${entry.summary}.${actions}${lesson}`;

@@ -157,6 +157,10 @@ export function embeddingKeyPlaceholder(
   if (modelEndpointKeysAsSaved({ ...form, embeddingApiKey: "" }, loaded, refusedField).embeddingApiKey !== "") {
     return "uses orchestrator/provider key when empty";
   }
+  // While the gateway's refusal stands, the empty field saves "" whatever the model or endpoint, so
+  // naming a change that goes back to borrowing told the user to change the model they had just
+  // changed (r5 A-security).
+  if (refusedField === "embeddings.embeddingApiKey") return "no key: the gateway refused the last save over this key; type one";
   return form.embeddingBaseUrl.trim()
     ? "no key: type one, or clear the endpoint to use the orchestrator/provider key"
     : "no key: type one, or change the model to use the orchestrator/provider key";

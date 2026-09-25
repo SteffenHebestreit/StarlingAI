@@ -661,6 +661,10 @@ describe("config loader mutable overlay", () => {
       });
       expect(updated.subAgents["coder"]?.description).toBe("Writes tests.");
       expect(updated.subAgents["a2a__peer__skill"]).toBe(peer);
+      // Told apart from a saved agent without a read of the disk, and still after the reload (review
+      // of r6 leftovers, 2).
+      expect(configLoader.isRuntimeSubAgent("a2a__peer__skill")).toBe(true);
+      expect(configLoader.isRuntimeSubAgent("coder")).toBe(false);
       expect(configLoader.previewConfigUpdate(() => {}).subAgents["a2a__peer__skill"]).toBeUndefined();
       const compiled = readFileSync(join(tempDir, PRODUCT.configFileName), "utf8");
       expect(compiled).toContain("Writes tests.");
@@ -668,6 +672,7 @@ describe("config loader mutable overlay", () => {
 
       configLoader.deleteRuntimeSubAgent("a2a__peer__skill");
       expect(configLoader.getConfig().subAgents["a2a__peer__skill"]).toBeUndefined();
+      expect(configLoader.isRuntimeSubAgent("a2a__peer__skill")).toBe(false);
       configLoader.resetConfigForTests();
       expect(configLoader.getConfig().subAgents["a2a__peer__skill"]).toBeUndefined();
     } finally {

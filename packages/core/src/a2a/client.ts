@@ -88,6 +88,13 @@ interface RegisteredPeer {
 
 const _peers = new Map<string, RegisteredPeer>();
 let _refreshTimer: ReturnType<typeof setInterval> | null = null;
+/**
+ * The client's current run: each stop begins a new one, and a restart stops first. A card fetch
+ * can outlast a restart; finishing afterwards, it registered again the agents of a peer the restart
+ * had just taken out or switched off, and its start then set a refresh timer over the new run's
+ * (r6 A-security, remaining 2).
+ */
+let _run = 0;
 
 const A2A_AGENT_PREFIX = "a2a__";
 
@@ -98,12 +105,14 @@ export function listA2APeers(): RegisteredPeer[] {
 
 export async function startA2AClient(): Promise<void> {
   stopA2AClient(); // clear any prior refresh timer so repeated calls don't leak intervals
+  const run = _run;
   const config = getConfig();
   // Before the enabled check: turned off, it wants no peers and unregisters those a previous start
   // registered. Each config reload lays their agents back over, so returning first kept them in
   // delegation for good (r5 A-security).
   await refreshAllPeers();
-  if (!config.a2a.enabled) return;
+  // Stopped, or overtaken by a newer start, while it polled: any timer is that start's to set.
+  if (run !== _run || !config.a2a.enabled) return;
 
   if (config.a2a.refreshIntervalMs > 0) {
     _refreshTimer = setInterval(() => {
@@ -127,6 +136,7 @@ export async function syncA2AClientWithConfig(changedSections: readonly string[]
 }
 
 export function stopA2AClient(): void {
+  _run += 1;
   if (_refreshTimer) {
     clearInterval(_refreshTimer);
     _refreshTimer = null;
@@ -134,6 +144,7 @@ export function stopA2AClient(): void {
 }
 
 async function refreshAllPeers(): Promise<void> {
+  const run = _run;
   const config = getConfig();
   // No peers while A2A is off: a refresh timer still running after a config change turned it off
   // drops them, rather than polling them back in.
@@ -147,10 +158,11 @@ async function refreshAllPeers(): Promise<void> {
     }
   }
 
-  await Promise.allSettled(desiredPeers.map((peer) => refreshPeer(peer.id, peer.url, peer.bearerToken, peer.description)));
+  await Promise.allSettled(desiredPeers.map((peer) => refreshPeer(run, peer.id, peer.url, peer.bearerToken, peer.description)));
 }
 
 async function refreshPeer(
+  run: number,
   id: string,
   url: string,
   bearerToken: string | undefined,
@@ -180,6 +192,8 @@ async function refreshPeer(
   } catch (err) {
     lastError = err instanceof Error ? err.message : String(err);
   }
+  // Stopped or restarted while the card was on its way: the peers are the newer run's to register.
+  if (run !== _run) return;
 
   const previous = _peers.get(id);
   const previousAgentNames = new Set(previous?.virtualAgents ?? []);

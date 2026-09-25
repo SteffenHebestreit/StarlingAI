@@ -142,12 +142,16 @@ function unitAmount(operation: { op: "brightness" | "contrast"; amount: number }
   return Math.max(-1, Math.min(1, finiteNumber(`${operation.op} needs its amount`, operation.amount)));
 }
 
-/** Human-readable record of what was done, so the caller can state it rather than guess. */
-function describe(operation: ImageTransformOp): string {
+/**
+ * Human-readable record of what was done, so the caller can state it rather than guess. `made` is
+ * the picture's size after the operation: a resize reports that, not the sides asked for, which
+ * read resize(0.4x10) for a picture Jimp made 1x10 (r6 C-image, remaining 5).
+ */
+function describe(operation: ImageTransformOp, made: { width: number; height: number }): string {
   switch (operation.op) {
     case "sharpen": return `sharpen(${sharpenAmount(operation.amount)})`;
     case "soften": return `soften(radius ${softenRadius(operation.radius)})`;
-    case "resize": return `resize(${operation.width ?? "auto"}x${operation.height ?? "auto"})`;
+    case "resize": return `resize(${made.width}x${made.height})`;
     case "crop": return `crop(${operation.x},${operation.y} ${operation.width}x${operation.height})`;
     case "rotate": return `rotate(${operation.degrees}°)`;
     case "flip": return `flip(${operation.horizontal ? "h" : ""}${operation.vertical ? "v" : ""})`;
@@ -291,7 +295,7 @@ export async function transformImage(
         throw new Error(`Unknown operation "${unknown.op}".`);
       }
     }
-    applied.push(describe(operation));
+    applied.push(describe(operation, image.bitmap));
   }
 
   const bytes = Buffer.from(await image.getBufferAsync(Jimp.MIME_PNG));

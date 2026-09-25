@@ -1554,7 +1554,8 @@
                   <div>
                     <label class="field-label text-xs">temperature</label>
                     <input type="number" step="0.05" min="0" max="2"
-                      :value="agent.model.temperature ?? 0.3"
+                      :value="agent.model.temperature ?? ''"
+                      placeholder="default"
                       @change="agentsStore.patchModel(agent.name, { temperature: ($event.target as HTMLInputElement).value === '' ? null : +($event.target as HTMLInputElement).value })"
                       class="input-box text-sm" />
                   </div>

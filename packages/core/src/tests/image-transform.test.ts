@@ -76,6 +76,15 @@ describe("local image transforms", () => {
     const out = await transformImage(await sample(16, 12), [{ op: "resize", width: 8 }]);
 
     expect(out.after).toEqual({ width: 8, height: 6 });
+    expect(out.applied).toEqual(["resize(8x6)"]);
+  });
+
+  it("reports the size a resize made, not the sides asked for", async () => {
+    // Jimp rounds each side and makes it at least 1: asked for 0.4x10, the report read
+    // resize(0.4x10) for a 1x10 picture (r6 C-image, remaining 5).
+    const out = await transformImage(await sample(16, 12), [{ op: "resize", width: 0.4, height: 10 }]);
+    expect(out.after).toEqual({ width: 1, height: 10 });
+    expect(out.applied).toEqual(["resize(1x10)"]);
   });
 
   it("reads a null side as omitted, and refuses a resize with neither side", async () => {

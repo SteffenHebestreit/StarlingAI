@@ -62,6 +62,17 @@ export function deleteRuntimeSubAgent(name: string): void {
   if (_config) delete (_config.subAgents as Record<string, SubAgentConfig>)[name];
 }
 
+/**
+ * Whether the loaded sub-agent `name` is one a runtime client laid over the config: the one
+ * withoutRuntimeSubAgents leaves out. Told apart as "loaded but not on disk", every check parsed
+ * the config on disk again, and named an agent deleted on disk but not yet reloaded a peer's
+ * (review of r6 leftovers, 2).
+ */
+export function isRuntimeSubAgent(name: string): boolean {
+  const agent = _runtimeSubAgents.get(name);
+  return agent !== undefined && getConfig().subAgents[name] === agent;
+}
+
 export function loadConfig(opts: { skipCompiledWrite?: boolean } = {}): Config {
   if (_config) return _config;
 

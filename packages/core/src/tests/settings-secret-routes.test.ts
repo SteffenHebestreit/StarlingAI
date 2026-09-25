@@ -234,6 +234,87 @@ describe("the sub-agent model routes", () => {
     }
   });
 
+  // A card fetch can outlast a restart. Finishing afterwards, it registered again the skill of the
+  // peer the restart had removed, and its start set a refresh timer over the newer start's, which
+  // then went on polling after the client stopped (r6 A-security, remaining 2).
+  describe("a card that arrives after a restart or a stop", () => {
+    const card = { name: "peer", skills: [{ id: "skill", name: "Skill", description: "A peer's skill." }] };
+    const peers = [{ id: "peer", url: "https://peer.example" }];
+    function holdFirstCard() {
+      let deliver = (): void => {};
+      const held = new Promise<void>((resolve) => { deliver = resolve; });
+      const fetchCard = vi.fn(async () => {
+        if (fetchCard.mock.calls.length === 1) await held;
+        return new Response(JSON.stringify(card), { status: 200, headers: { "content-type": "application/json" } });
+      });
+      vi.stubGlobal("fetch", fetchCard);
+      return { fetchCard, deliver: () => deliver() };
+    }
+
+    it("registers nothing for a peer the restart removed", async () => {
+      const { loader } = await boot({ ...config, a2a: { enabled: true, refreshIntervalMs: 0, peers } });
+      const { fetchCard, deliver } = holdFirstCard();
+      const a2a = await import("../a2a/client.js");
+      try {
+        const first = a2a.startA2AClient();
+        await vi.waitFor(() => expect(fetchCard).toHaveBeenCalledTimes(1));
+        loader.updateConfig((raw) => { (raw["a2a"] as Record<string, unknown>)["peers"] = []; });
+        await a2a.startA2AClient();
+        deliver();
+        await first;
+        expect(loader.getConfig().subAgents["a2a__peer__skill"]).toBeUndefined();
+        expect(a2a.listA2APeers()).toEqual([]);
+      } finally {
+        a2a.stopA2AClient();
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it("leaves no refresh timer from the start it overtook", async () => {
+      await boot({ ...config, a2a: { enabled: true, refreshIntervalMs: 20, peers } });
+      const { fetchCard, deliver } = holdFirstCard();
+      const a2a = await import("../a2a/client.js");
+      try {
+        const first = a2a.startA2AClient();
+        await vi.waitFor(() => expect(fetchCard).toHaveBeenCalledTimes(1));
+        await a2a.startA2AClient();
+        deliver();
+        await first;
+        a2a.stopA2AClient();
+        await new Promise((resolve) => setImmediate(resolve)); // a tick's fetch already under way
+        const polled = fetchCard.mock.calls.length;
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        expect(fetchCard).toHaveBeenCalledTimes(polled);
+      } finally {
+        a2a.stopA2AClient();
+        vi.unstubAllGlobals();
+      }
+    });
+
+    // A shutdown moves the run on as a restart does. Were only a start to move it, the card of a start
+    // the shutdown cut short would register the peer after the client stopped, and that start would
+    // set its refresh timer (review of r6 leftovers, 1).
+    it("registers nothing, and polls no more, when the client stopped rather than restarted", async () => {
+      const { loader } = await boot({ ...config, a2a: { enabled: true, refreshIntervalMs: 20, peers } });
+      const { fetchCard, deliver } = holdFirstCard();
+      const a2a = await import("../a2a/client.js");
+      try {
+        const first = a2a.startA2AClient();
+        await vi.waitFor(() => expect(fetchCard).toHaveBeenCalledTimes(1));
+        a2a.stopA2AClient();
+        deliver();
+        await first;
+        expect(loader.getConfig().subAgents["a2a__peer__skill"]).toBeUndefined();
+        expect(a2a.listA2APeers()).toEqual([]);
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        expect(fetchCard).toHaveBeenCalledTimes(1);
+      } finally {
+        a2a.stopA2AClient();
+        vi.unstubAllGlobals();
+      }
+    });
+  });
+
   it("refuses a value the schema refuses, and saves nothing", async () => {
     const { send, loader } = await boot(config);
     // Under maxTokens' floor: patched in memory it was taken as it came.
@@ -515,6 +596,51 @@ describe("the moved-key rule with a primary provider key", () => {
       expect(refused.status).toBe(400);
       expect(await refusedField(refused)).toBe("agents.defaults.model.apiKey");
       expect(gw.loader.getConfig().agents.defaults.model.baseUrl).toBe("http://orch.invalid/v1");
+    } finally {
+      await gw.stop();
+    }
+  }, 45_000);
+
+  // A peer's agent is loaded but not saved. A prompt change aimed at one passed the target check,
+  // and Apply then wrote the saved config an agent of a prompt alone and refused the proposal as one
+  // that "does not leave a valid config" (r5 A-security).
+  it("refuses a proposal aimed at an A2A peer's agent up front, when drafting and when applying", async () => {
+    const gw = await bootGateway({ subAgents: { coder: { description: "Writes code." } } });
+    try {
+      // As the A2A client registers a peer's skill.
+      gw.loader.setRuntimeSubAgent("a2a__peer__skill", { description: "[A2A:peer] A peer's skill.", tools: ["a2a__peer__skill"] } as never);
+      const said = { error: "Agent 'a2a__peer__skill' is bridged in from an A2A peer and runs there, so its prompt and settings are the peer's to change, not ours." };
+      const drafted = await gw.send("POST", "/api/config-assistant/proposals", { request: "Be terser.", mode: "prompt", targetAgent: "a2a__peer__skill" });
+      expect(drafted.status).toBe(409);
+      expect(await drafted.json()).toEqual(said);
+
+      const { createConversationConfigProposal } = await import("../agent/config-assistant-proposals.js");
+      const workspacePath = gw.loader.getConfig().workspacePath;
+      const propose = (changes: { configChanges?: Array<{ path: string; value: unknown; reason: string }>; promptChanges?: Array<{ agentName: string; strategy: "replace" | "append"; prompt: string; rationale: string }> }) =>
+        createConversationConfigProposal(workspacePath, {
+          status: "pending", mode: "prompt", request: "Be terser.", summary: "Terser answers.", assistantAgent: "prompt_optimizer",
+          configChanges: changes.configChanges ?? [], promptChanges: changes.promptChanges ?? [], validations: [], tags: [],
+        }).id;
+      const toPeer = [
+        propose({ promptChanges: [{ agentName: "a2a__peer__skill", strategy: "append", prompt: "Be terser.", rationale: "test" }] }),
+        propose({ configChanges: [{ path: "subAgents.a2a__peer__skill.model.temperature", value: 0.2, reason: "test" }] }),
+        // The whole map with the peer's agent written in (review of r6 leftovers, 3).
+        propose({ configChanges: [{ path: "subAgents", value: { coder: { description: "Writes code." }, a2a__peer__skill: { description: "Mine now.", tools: [] } }, reason: "test" }] }),
+      ];
+      for (const id of toPeer) {
+        const applied = await gw.send("POST", `/api/config-assistant/proposals/${id}/apply`);
+        expect(applied.status).toBe(409);
+        expect(await applied.json()).toEqual(said);
+      }
+      // The whole map without it applies, and cannot drop the peer's agent: the next load lays it
+      // back over (round 2 of the leftovers review, LOW 1).
+      const mapWithout = propose({ configChanges: [{ path: "subAgents", value: { coder: { description: "Writes code." } }, reason: "test" }] });
+      expect((await gw.send("POST", `/api/config-assistant/proposals/${mapWithout}/apply`)).status).toBe(200);
+      expect(gw.loader.getConfig().subAgents["a2a__peer__skill"]).toBeDefined();
+      // A saved agent's prompt still applies.
+      const toCoder = propose({ promptChanges: [{ agentName: "coder", strategy: "replace", prompt: "Be terser.", rationale: "test" }] });
+      expect((await gw.send("POST", `/api/config-assistant/proposals/${toCoder}/apply`)).status).toBe(200);
+      expect(gw.loader.getConfig().subAgents["coder"]?.systemPrompt).toBe("Be terser.");
     } finally {
       await gw.stop();
     }
