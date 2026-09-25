@@ -36,6 +36,12 @@ export interface QaVerdict {
    *  unparseable fail-open pass — the signal that distinguishes an evidence-backed
    *  verdict from a rubber stamp. Consumed only when requireEvidence is on. */
   evidence?: string;
+  /** The reviewer gave NO verdict: an empty reply, or text carrying neither PASS nor FAIL.
+   *  Distinct from a bare PASS, which is a verdict without its evidence. The thinking-on 35B
+   *  sometimes spent ~600 tokens reasoning and then returned empty content (owner-measured
+   *  2026-09-25). `pass` stays true so delivery fails open; the loop must still not record
+   *  it as a pass. */
+  noVerdict?: boolean;
 }
 
 /**
@@ -56,18 +62,34 @@ export function parseQaVerdict(text: string): QaVerdict {
   // A leading PASS is never overridden by "fail" in evidence text: valid evidence often
   // says "0 failures" or "did not fail". Without strict evidence it is unverified,
   // rather than a verified pass.
-  if (/^pass\b/i.test(trimmed)) {
-    const evidence = extractVerdictEvidence(trimmed);
+  const lead = leadingVerdict(trimmed);
+  if (/^pass\b/i.test(lead)) {
+    const evidence = extractVerdictEvidence(lead);
     return evidence.evidence
       ? { status: "pass", pass: true, ...evidence }
       : { status: "unverified", pass: true };
   }
   const failMatch = /\bFAIL\b/i.exec(trimmed);
-  // No explicit FAIL means reviewer noise or malformed output. Fail open for delivery,
-  // but never let it certify the answer.
-  if (!failMatch) return { status: "unverified", pass: true };
-  const flaws = trimmed.slice(failMatch.index).replace(/^FAIL[:\s-]*/i, "").trim();
+  // No verdict word at all means reviewer noise, malformed output or nothing. Fail open for
+  // delivery, but never let it certify the answer — and mark it as no verdict, so the loop does
+  // not record it as a pass. A PASS further in is a verdict still, only not a verified one.
+  if (!failMatch) return { status: "unverified", pass: true, ...(/\bPASS\b/i.test(trimmed) ? {} : { noVerdict: true }) };
+  // Emphasis hugging the word and any dash after it go too: `**FAIL**: no chart` kept "**: no chart".
+  const flaws = trimmed.slice(failMatch.index).replace(/^FAIL[*_`]*[:\s\-–—]*/i, "").trim();
   return { status: "fail", pass: false, flaws: flaws || "One or more acceptance criteria are unmet." };
+}
+
+/**
+ * The verdict as written, without what a reviewer puts around it: leading marks and emoji, one
+ * leading "<word>:" label, and emphasis or backticks hugging the verdict word. With reasoning off
+ * the reviewer formats more, and `**PASS** — evidence: …`, `Verdict: PASS …` or `✅ PASS` read as
+ * no verdict at all, which inflated the no-verdict rate the change was meant to measure (review of
+ * the thinking-off verdicts, R1). Structural: no list of label words, in any language.
+ */
+function leadingVerdict(text: string): string {
+  let lead = text.replace(/^[^\p{L}\p{N}]+/u, "");
+  lead = lead.replace(/^\p{L}+\s*:\s*(?=[^\p{L}\p{N}]*(?:pass|fail)\b)/iu, "").replace(/^[^\p{L}\p{N}]+/u, "");
+  return lead.replace(/^(pass|fail)[*_`]+/i, "$1");
 }
 
 /** Pull a `PASS — evidence: <ground>` justification out of a passing verdict. Returns
@@ -152,7 +174,8 @@ export interface QaDeliveryResult {
   answer: string;
   /** Number of improvement passes actually run. */
   rounds: number;
-  /** Whether the final answer passed the QA check. */
+  /** Whether the final answer passed the QA check. False when the reviewer gave no verdict
+   *  (see noVerdict): an answer nobody judged did not pass, whatever ships. */
   passed: boolean;
   /** Canonical final QA state. `unverified` is delivered but must not be called verified. */
   status: QaVerdictStatus;
@@ -160,6 +183,9 @@ export interface QaDeliveryResult {
   evidence?: string;
   /** True if at least one round used the coordinator escalation path. */
   escalated: boolean;
+  /** The last check produced no verdict — an empty or unparseable reply, or a thrown check.
+   *  The answer ships (fail-open) with status `unverified` and `passed` false. */
+  noVerdict?: boolean;
   /** True when the shipped answer must NOT be presented as QA-confirmed: its verdict
    *  was not an evidence-backed PASS. Under `strict` this covers a bare PASS, malformed
    *  reviewer output, and a thrown check; under legacy mode it is set only when
@@ -195,11 +221,15 @@ export async function runQaDeliveryLoop(
     try {
       verdict = await deps.check(current, criteria);
     } catch {
-      // Check failed → fail open, ship the current answer. The status is truthfully
-      // unverified; whether that surfaces as a caveat is the strict policy's call.
-      return { answer: current, rounds: round, passed: true, status: "unverified", escalated, unverified: deps.strict === true };
+      // Check failed → fail open, ship the current answer. There is no verdict, so it did not
+      // pass: the status is truthfully unverified, and whether that surfaces as a caveat is the
+      // strict policy's call.
+      return { answer: current, rounds: round, passed: false, status: "unverified", escalated, unverified: deps.strict === true, noVerdict: true };
     }
     if (verdict.pass) {
+      // An empty or unparseable reply keeps pass:true so delivery fails open, but nobody judged
+      // the answer: it is recorded as no verdict, never as a pass.
+      const noVerdict = verdict.noVerdict === true;
       const status = resolveQaVerdictStatus(verdict);
       // The tri-state status is always the parser truth (for scorecards/telemetry).
       // The `unverified` caveat is policy: strict mode surfaces every non-evidence-
@@ -210,11 +240,12 @@ export async function runQaDeliveryLoop(
       return {
         answer: current,
         rounds: round,
-        passed: true,
-        status: unverified ? "unverified" : status,
+        passed: !noVerdict,
+        status: unverified || noVerdict ? "unverified" : status,
         ...(evidence ? { evidence } : {}),
         escalated,
         unverified,
+        ...(noVerdict ? { noVerdict: true } : {}),
       };
     }
 

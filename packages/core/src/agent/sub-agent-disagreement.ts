@@ -8,6 +8,7 @@
  * so it can never block or break a turn.
  */
 import { getChatProviderForTier } from "../providers/index.js";
+import { runWithCallAttribution } from "../runtime/request-context.js";
 import type { LLMMessage } from "../providers/lmstudio.js";
 import { childLogger } from "../logger.js";
 
@@ -69,7 +70,9 @@ export async function checkSubAgentDisagreement(
     if (outputs.length < 2) return null;
     const provider = getChatProviderForTier("routing");
     if (!provider) return null;
-    const res = await provider.complete(buildDisagreementCheckMessages(outputs), [], signal);
+    // Labelled like the other routing-tier verdicts (review of the thinking-off verdicts, D4).
+    const res = await runWithCallAttribution({ callSite: "routing_tier", agentName: "disagreement_check" }, () =>
+      provider.complete(buildDisagreementCheckMessages(outputs), [], signal));
     const verdict = parseDisagreementVerdict(res.content ?? "");
     return verdict.disagree ? renderDisagreementMarker(verdict.detail) : null;
   } catch (err) {

@@ -140,6 +140,8 @@ describe("consistency gate wiring (runQaDeliveryLoop with the consistency criter
       maxRounds: 1,
     });
     expect(result.answer).toBe("an answer");
-    expect(result.passed).toBe(true);
+    // It ships, but nobody judged it: no verdict, not a pass.
+    expect(result.passed).toBe(false);
+    expect(result.noVerdict).toBe(true);
   });
 });

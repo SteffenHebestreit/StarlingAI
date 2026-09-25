@@ -86,6 +86,8 @@ interface QaDeliveryGateResult {
   artifactProbeCount: number;
   escalated: boolean;
   unverified: boolean;
+  /** The reviewer returned no verdict (empty/unparseable reply or a thrown check). */
+  noVerdict?: boolean;
 }
 
 /** Structural result shape of runDeliverableConsistencyGate (declared locally). */
@@ -94,6 +96,8 @@ interface DeliverableConsistencyGateResult {
   changed: boolean;
   rounds: number;
   passed: boolean;
+  status: "pass" | "fail" | "unverified";
+  noVerdict?: boolean;
 }
 
 /**
@@ -406,7 +410,8 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
   // plan with acceptance criteria, check the answer against those criteria
   // and repair if it falls short. Source-sensitive turns were already
   // anchored by the evidence backstop above, so they skip the redundant
-  // verify call. Low-stakes / chat turns skip QA entirely.
+  // verify call. Low-stakes / chat turns skip this one-shot check; while qaDeliveryLoop is on,
+  // the loop replaces it on every plan with criteria, whatever the risk tier.
   if (effectiveOrchestration().riskGatedQA) {
     const qaPlan = await loadTurnPlan(session.id);
     const invokedApprovalGatedTool = [...ctx.turnToolCallCounts.keys()].some(requiresApproval);
@@ -488,7 +493,12 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
             { sessionId: session.id, severity: repaired ? "warn" : "info" });
           if (repaired) guardrailEvents.push({ type: "guardrail_flagged", details: "risk_gated_qa_repaired" });
         } else {
-          logAudit("flow_verification_passed", { reason: "verify_produced_no_better_candidate" }, { sessionId: session.id, severity: "info" });
+          // Nothing usable came back — no reply, or a stub — so nothing was checked. It logged as
+          // flow_verification_passed, a pass nobody gave (review of the thinking-off verdicts, D3b).
+          logAudit("flow_high_stakes_unverified", {
+            reason: verified ? "verify_returned_a_stub" : "verify_returned_nothing",
+            invokedApprovalGatedTool,
+          }, { sessionId: session.id, severity: "info" });
         }
       } else {
         logAudit("flow_high_stakes_unverified", { reason: qaPlan ? "no_acceptance_criteria" : "no_plan", invokedApprovalGatedTool }, { sessionId: session.id, severity: "info" });
@@ -593,6 +603,7 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
         status: gate.status,
         ...(gate.evidence ? { qaEvidence: gate.evidence } : {}),
         unverified: gate.unverified,
+        ...(gate.noVerdict ? { noVerdict: true } : {}),
         improved: gate.changed,
         escalated: gate.escalated,
         acceptanceCriteria: criteria.length,
@@ -631,10 +642,12 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
     })
   ) {
     const userStatements = collectUserStatements(session.getHistory(), 2000);
-    const gate = await ctx.runDeliverableConsistencyGate(
+    // Timed as its own stage, like the delivery loop: its verdict and repair calls ran outside
+    // every counter turn_performance keeps, so their time landed in untrackedMs unnamed.
+    const gate = await timedPhase("deliverableConsistencyQa", () => ctx.runDeliverableConsistencyGate(
       session, provider, signal, finalResponse, userStatements,
       effectiveOrchestration().deliverableConsistencyQaMaxRounds,
-    );
+    ));
     if (gate.changed) {
       finalResponse = gate.answer;
       invalidateQaSignals();
@@ -647,8 +660,16 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
       }
       guardrailEvents.push({ type: "guardrail_flagged", details: "deliverable_consistency_repaired" });
     }
-    logAudit(gate.changed ? "deliverable_consistency_repaired" : "deliverable_consistency_passed",
-      { rounds: gate.rounds, passed: gate.passed, repaired: gate.changed },
+    // An empty or unparseable verdict is no verdict: it used to log as
+    // deliverable_consistency_passed with passed:true, a pass nobody gave. A FAIL whose repair
+    // returned nothing logged as "passed" too, with passed:false in its own row (review of the
+    // thinking-off verdicts, D3c).
+    logAudit(
+      gate.changed
+        ? "deliverable_consistency_repaired"
+        : gate.noVerdict ? "deliverable_consistency_unverified"
+          : gate.passed ? "deliverable_consistency_passed" : "deliverable_consistency_failed",
+      { rounds: gate.rounds, passed: gate.passed, status: gate.status, repaired: gate.changed, ...(gate.noVerdict ? { noVerdict: true } : {}) },
       { sessionId: session.id, severity: gate.changed ? "warn" : "info" });
   }
 

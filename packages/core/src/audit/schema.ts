@@ -253,6 +253,10 @@ export type CoreAuditEventType =
   // Deliverable self-consistency gate (plan-less internal-consistency check before delivery)
   | "deliverable_consistency_passed"
   | "deliverable_consistency_repaired"
+  // The consistency verdict came back empty or unparseable: no verdict, never a pass.
+  | "deliverable_consistency_unverified"
+  // The consistency verdict FAILED and no repair came back: shipped as it was, never a pass.
+  | "deliverable_consistency_failed"
   | "warden:tool_dev_stuck"
   | "warden:tool_dev_runaway"
   // Infrastructure health

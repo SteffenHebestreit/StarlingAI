@@ -30,9 +30,10 @@ export const OrchestrationSchema = z.object({
   /** When true, high-stakes turns (sourced factual claims, approval-gated
    *  actions, or a plan the orchestrator flagged high-risk) get an automatic
    *  verification pass that checks the answer against the plan's acceptance
-   *  criteria and repairs it if it falls short. Low-stakes/chat turns skip QA
-   *  entirely. Source-sensitive turns reuse the existing evidence backstop.
-   *  Default: true. */
+   *  criteria and repairs it if it falls short. Low-stakes/chat turns skip this
+   *  one-shot check — but not QA: while qaDeliveryLoop is on, the loop replaces it
+   *  on every plan with acceptance criteria, whatever the risk tier. Source-sensitive
+   *  turns reuse the existing evidence backstop. Default: true. */
   riskGatedQA: z.boolean().default(true),
   /** Plan-driven continuation (audit 763394da). The post-orchestration disposition
    *  defaults to "synthesize" after the FIRST successful delegation and never
@@ -303,6 +304,19 @@ export const OrchestrationSchema = z.object({
   /** Max improvement rounds for the QA delivery loop (each round = one check + one
    *  improve call). Bounded low because every round is extra slow-model latency. */
   qaDeliveryLoopMaxRounds: z.number().int().min(1).max(4).default(2),
+  /** Let the QA VERDICT calls reason before they answer. Default OFF: the delivery-loop verdict
+   *  and the deliverable-consistency verdict run thinking-off for that one call
+   *  (enableThinking:false + reasoningEffort:"none" as per-call controls — the provider, its
+   *  preset and its failover chain stay the caller's own). The reply is one line, PASS or
+   *  FAIL: …, and on the thinking-on orchestrator it cost 30.1 s and 47.4 s per verdict
+   *  (1,646 and 2,682 completion tokens) in session f4ebf47b, 77 s of a 145 s turn. The owner's
+   *  serial, cache-defeating measurement (2026-09-25, same decision, same input): the 35B
+   *  classified 1.4–5× faster with reasoning off, and with it on it sometimes returned NO
+   *  answer — ~600 thinking tokens, then empty content. True brings the deliberation back
+   *  without a code change. The improve (rewrite) call is not a verdict and this switch does
+   *  not touch it: with no synthesis tier it runs thinking-off (forceSynthesis's fallback), and
+   *  with tiers.synthesis set it runs as that tier's model is configured. */
+  qaVerdictReasoning: z.boolean().default(false),
   /** When true, the QA delivery loop escalates to the COORDINATOR after a cheap
    *  re-synthesis round has already failed the re-check — handing the flaws back to
    *  mission_coordinator to make a plan and do NEW work (re-research / re-build),

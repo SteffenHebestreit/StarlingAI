@@ -51,6 +51,7 @@ import { currentEffortTier } from "../runtime/effort-context.js";
 import {
   attachRequestSessionId,
   currentRequestContext,
+  runWithCallAttribution,
   runWithRequestContext,
 } from "../runtime/request-context.js";
 import {
@@ -215,11 +216,13 @@ export async function assessOversightGoalMet(
     + "\n\nEvidence gathered so far:\n"
     + (evidence || "(none)").slice(0, 3_000);
   try {
-    const res = await provider.complete(
+    // Labelled like the other routing-tier verdicts: unlabelled, its provider row read as the
+    // worker's own call (review of the thinking-off verdicts, D4).
+    const res = await runWithCallAttribution({ callSite: "routing_tier", agentName: "goal_met_oversight" }, () => provider.complete(
       [{ role: "system", content: system }, { role: "user", content: user }],
       [],
       signal,
-    );
+    ));
     return (res.content ?? "").trim().toUpperCase().startsWith("DONE");
   } catch {
     return false;
@@ -798,8 +801,9 @@ export const DISTILL_CALL_DEADLINE_MS = 60_000;
  * Both fields on purpose: the enable_thinking family withholds the flag when a graded pin vetoes it,
  * and researcher / mission_coordinator carry {enableThinking:false, reasoningEffort:"medium"} — an
  * explicit "none" is the only value that reaches the wire past that pin (resolveThinkingControls).
- * Spread LAST over the worker's config so it has the last word. The QA verdict in runtime.ts uses the
- * synthesis tier WITHOUT this override and keeps its deliberation; nothing here touches it.
+ * Spread LAST over the worker's config so it has the last word. The QA verdicts in runtime.ts run
+ * thinking-off too, through their own per-call controls (qaVerdictCallOptions, which
+ * orchestration.qaVerdictReasoning can switch back to deliberating); nothing here touches them.
  */
 export const SYNTHESIS_CALL_CONTROLS = { enableThinking: false, reasoningEffort: "none" } as const;
 
@@ -4488,11 +4492,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           // model under the routing controls (thinking off), never on `provider`. Shared
           // with the distillation path so an interval-gated judge does not build (and reset
           // the circuit state of) a provider chain on every check.
-          const judgeResp = await routingTierProvider().complete(
+          const judgeResp = await runWithCallAttribution({ callSite: "routing_tier", agentName: "progress_judge" }, () => routingTierProvider().complete(
             buildProgressJudgePrompt({ objective: opts.task, recentActivity }),
             [],
             signal,
-          );
+          ));
           const verdict = parseProgressVerdict(judgeResp.content);
           if (verdict.verdict === "drifting") {
             windDownForSupervisor();

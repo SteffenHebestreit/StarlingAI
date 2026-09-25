@@ -195,6 +195,30 @@ describe("up-front source-sensitivity classifier — issued after the fast lane,
     expect(upfrontAuditTypes()).toEqual(["upfront_source_sensitive_clear"]);
   });
 
+  it("says in the audit whether the judge answered: an empty reply is a fail-safe clear, not a judged one", async () => {
+    // "clear 6 of 6" could not rule out six empty replies (review of the thinking-off verdicts, D3a).
+    const upfrontRows = () => logAuditMock.mock.calls
+      .map((args) => args[1] as { type?: string; answered?: boolean } | undefined)
+      .filter((row) => row?.type?.startsWith("upfront_source_sensitive"));
+    streamMock.mockImplementation(() => (async function* () {
+      yield { type: "text_delta", content: "done" };
+      yield { type: "done", finishReason: "stop", usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } };
+    })());
+    const saved = routingCalls.classifierVerdict;
+    try {
+      for (const [verdict, answered] of [["VERDICT: no", true], ["", false]] as const) {
+        logAuditMock.mockClear();
+        routingCalls.classifierVerdict = verdict;
+        const { AgentSession, runTurn } = await loadRuntime({ receptionistEnabled: false });
+        const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+        await runTurn({ session, userMessage: "what changed in the deposit rules this year?" });
+        expect(upfrontRows(), JSON.stringify(verdict)).toEqual([{ type: "upfront_source_sensitive_clear", answered }]);
+      }
+    } finally {
+      routingCalls.classifierVerdict = saved;
+    }
+  });
+
   it("aborts the speculative request and logs no verdict when the turn turns out to be document-grounded", async () => {
     ragState.contextBlock = "the attached file says so";
     const { AgentSession, runTurn } = await loadRuntime({ receptionistEnabled: false });

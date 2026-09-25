@@ -60,7 +60,8 @@ describe("runQaDeliveryLoop", () => {
 
   it("fails OPEN: a thrown check ships the current answer as unverified under strict mode (never blocks delivery)", async () => {
     const r = await runQaDeliveryLoop("answer", CRITERIA, deps({ check: async () => { throw new Error("model down"); }, strict: true }));
-    expect(r.passed).toBe(true);
+    expect(r.passed).toBe(false);        // nobody judged it — it ships, but it did not pass
+    expect(r.noVerdict).toBe(true);
     expect(r.answer).toBe("answer");
     expect(r.status).toBe("unverified");
     expect(r.unverified).toBe(true);
@@ -68,7 +69,8 @@ describe("runQaDeliveryLoop", () => {
 
   it("fails OPEN: a thrown check ships uncaveated in legacy mode, but the status stays truthful", async () => {
     const r = await runQaDeliveryLoop("answer", CRITERIA, deps({ check: async () => { throw new Error("model down"); } }));
-    expect(r.passed).toBe(true);
+    expect(r.passed).toBe(false);
+    expect(r.noVerdict).toBe(true);
     expect(r.status).toBe("unverified"); // truth for scorecards
     expect(r.unverified).toBe(false);    // legacy policy: no caveat without qaStrictVerdicts
   });
@@ -146,6 +148,19 @@ describe("runQaDeliveryLoop — coordinator escalation (staged-orchestration fid
 });
 
 describe("parseQaVerdict (runtime verdict parser)", () => {
+  it("reads a verdict the reviewer formatted, and marks no verdict only when there is none", () => {
+    // With reasoning off the reviewer formats more; these read as "no verdict" and inflated the
+    // rate the change was meant to measure (review of the thinking-off verdicts, R1).
+    expect(parseQaVerdict("**PASS** — evidence: file has 3 rows")).toEqual({ status: "pass", pass: true, evidence: "file has 3 rows" });
+    expect(parseQaVerdict("Verdict: PASS — evidence: the chart has 4 bars")).toEqual({ status: "pass", pass: true, evidence: "the chart has 4 bars" });
+    for (const bare of ["`PASS`", "✅ PASS", "Result: PASS", "Some prose, then PASS"]) {
+      expect(parseQaVerdict(bare), bare).toEqual({ status: "unverified", pass: true });
+    }
+    expect(parseQaVerdict("**FAIL**: no chart")).toEqual({ status: "fail", pass: false, flaws: "no chart" });
+    expect(parseQaVerdict("Ergebnis: FAIL – fehlt")).toEqual({ status: "fail", pass: false, flaws: "fehlt" });
+    expect(parseQaVerdict("I think it is fine")).toEqual({ status: "unverified", pass: true, noVerdict: true });
+  });
+
   it("marks bare or non-contract PASS output as unverified", () => {
     expect(parseQaVerdict("PASS")).toEqual({ status: "unverified", pass: true });
     expect(parseQaVerdict("  pass — all criteria met  ")).toEqual({ status: "unverified", pass: true });
@@ -169,9 +184,13 @@ describe("parseQaVerdict (runtime verdict parser)", () => {
     expect(parseQaVerdict("FAIL")).toEqual({ status: "fail", pass: false, flaws: "One or more acceptance criteria are unmet." });
   });
 
-  it("fails OPEN for delivery but marks empty or malformed reviewer noise unverified", () => {
-    expect(parseQaVerdict("")).toEqual({ status: "unverified", pass: true });
-    expect(parseQaVerdict("hmm, hard to say")).toEqual({ status: "unverified", pass: true });
+  it("fails OPEN for delivery but marks empty or malformed reviewer noise unverified — and as no verdict", () => {
+    expect(parseQaVerdict("")).toEqual({ status: "unverified", pass: true, noVerdict: true });
+    expect(parseQaVerdict("   \n ")).toEqual({ status: "unverified", pass: true, noVerdict: true });
+    expect(parseQaVerdict("hmm, hard to say")).toEqual({ status: "unverified", pass: true, noVerdict: true });
+    // A bare PASS is a verdict without its evidence, not an absent one.
+    expect(parseQaVerdict("PASS").noVerdict).toBeUndefined();
+    expect(parseQaVerdict("FAIL: x").noVerdict).toBeUndefined();
   });
 
   it("captures a PASS — evidence: <ground> justification, but a bare PASS carries none", () => {
@@ -265,6 +284,42 @@ describe("runQaDeliveryLoop — no-PASS-without-evidence invariant (qaEvidenceRe
     expect(r.answer).toBe("v1");
     expect(r.passed).toBe(true);
     expect(r.unverified).toBe(false);
+  });
+});
+
+/**
+ * An empty verdict is NO verdict. The owner measured the 35B with reasoning on (2026-09-25): on
+ * some classifications it spent ~600 thinking tokens and returned empty content. parseQaVerdict
+ * kept that fail-open (pass:true, status unverified), and the loop then returned passed:true —
+ * which the audit row flow_verification_passed carried as a pass nobody gave.
+ */
+describe("runQaDeliveryLoop — an empty verdict is no verdict, never a pass", () => {
+  for (const reply of ["", "  \n", "I need to think about the criteria first"]) {
+    it(`records ${JSON.stringify(reply)} as no verdict, ships the answer, and asks for no rewrite`, async () => {
+      const improve = vi.fn(async () => "rewritten");
+      const r = await runQaDeliveryLoop("the answer", CRITERIA, deps({ check: async () => parseQaVerdict(reply), improve }));
+      expect(r.answer).toBe("the answer");  // fail-open: delivery is not blocked
+      expect(r.passed).toBe(false);
+      expect(r.status).toBe("unverified");
+      expect(r.noVerdict).toBe(true);
+      expect(improve).not.toHaveBeenCalled(); // no flaws were named, so there is nothing to fix
+    });
+  }
+
+  it("caveats it under strict verdicts, as it did before", async () => {
+    const r = await runQaDeliveryLoop("the answer", CRITERIA, deps({ check: async () => parseQaVerdict(""), strict: true, requireEvidence: true }));
+    expect(r.unverified).toBe(true);
+    expect(r.passed).toBe(false);
+  });
+
+  it("leaves a bare PASS a pass (legacy), and an evidence-backed PASS verified", async () => {
+    const bare = await runQaDeliveryLoop("a", CRITERIA, deps({ check: async () => parseQaVerdict("PASS") }));
+    expect(bare.passed).toBe(true);
+    expect(bare.noVerdict).toBeUndefined();
+    const backed = await runQaDeliveryLoop("a", CRITERIA, deps({ check: async () => parseQaVerdict("PASS — evidence: file has 3 rows") }));
+    expect(backed.passed).toBe(true);
+    expect(backed.status).toBe("pass");
+    expect(backed.noVerdict).toBeUndefined();
   });
 });
 

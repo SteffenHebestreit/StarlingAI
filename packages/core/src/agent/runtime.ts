@@ -363,6 +363,7 @@ import {
 import {
   runWithPhaseTimings,
   buildTurnPerformanceMetrics,
+  timedQaModelCall,
 } from "./turn-metrics.js";
 
 // Re-export the originally-exported metrics symbols so existing imports from
@@ -1815,8 +1816,12 @@ async function _runTurn(
         // Always log the verdict (not just the positive case) so the audit shows the classifier RAN
         // and what it decided — otherwise a silent "no" is indistinguishable from the classifier being
         // absent/disabled, which made the "did it fire?" question undiagnosable from the audit.
+        // `answered` separates a judged "clear" from a reply with no verdict in it, which resolves to
+        // the same fail-safe clear: "clear 6 of 6" could not rule out six empty replies (review of
+        // the thinking-off verdicts, D3a).
         logAudit("guardrail_flagged", {
           type: upfrontSourceSensitive ? "upfront_source_sensitive_detected" : "upfront_source_sensitive_clear",
+          answered: upfrontJudgeAnswered,
         }, { sessionId: session.id, severity: "info" });
       } catch (err) {
         log.debug({ err, sessionId: session.id }, "Up-front source-sensitivity classifier failed — relying on post-draft guards");
@@ -2468,7 +2473,7 @@ async function _runTurn(
           // (and there is none under an active model preset) it now builds from the
           // orchestrator's own merged config with the routing tier's thinking-off controls over
           // it, so the verdict costs a verdict rather than a reasoning pass mid-turn.
-          const oversightResp = await routingTierProvider().complete(
+          const oversightResp = await runWithCallAttribution({ callSite: "routing_tier", agentName: "turn_oversight" }, () => routingTierProvider().complete(
             buildTurnOversightPrompt({
               objective: oversightPlan?.objective?.trim() || userMessage,
               ...(oversightPlan?.acceptanceCriteria?.length ? { acceptanceCriteria: oversightPlan.acceptanceCriteria } : {}),
@@ -2479,7 +2484,8 @@ async function _runTurn(
             }),
             [],
             signal,
-          );
+          ));
+          // Labelled like the other routing-tier verdicts (review of the thinking-off verdicts, D4).
           oversight = parseTurnOversightVerdict(oversightResp.content);
         } catch {
           // fail-open: an oversight error must never derail a healthy run.
@@ -3624,7 +3630,9 @@ async function _runTurn(
         const judgeProvider = getChatProviderForTier("routing");
         if (judgeProvider) {
           try {
-            const verdictRaw = (await judgeProvider.complete(buildUngroundedClaimJudgeMessages(userMessage, rawResponse), [], signal)).content ?? "";
+            // Labelled like the up-front judge (review of the thinking-off verdicts, D4).
+            const verdictRaw = (await runWithCallAttribution({ callSite: "routing_tier", agentName: "ungrounded_claim_judge" }, () =>
+              judgeProvider.complete(buildUngroundedClaimJudgeMessages(userMessage, rawResponse), [], signal))).content ?? "";
             if (parseUngroundedClaimVerdict(verdictRaw)) {
               requiresUngroundedFactualResearch = true;
               logAudit("guardrail_flagged", { type: "semantic_ungrounded_factual_detected" }, { sessionId: session.id, severity: "info" });
@@ -5363,8 +5371,10 @@ export async function forceSynthesis(
     // config from agents.defaults.model (the main assistant has no model block of its own) with
     // the active preset applied; the turn-effort overlay it omits sets exactly the two fields
     // this call overrides anyway. (2) The controls are written out rather than taken from
-    // tierModelDefaults("synthesis"), which is deliberately {} — the QA VERDICT calls below keep
-    // their deliberation, and that stays as it is.
+    // tierModelDefaults("synthesis"), which is {}. That {} used to be what kept the QA VERDICT
+    // calls below deliberating; they no longer lean on it — each verdict carries its own
+    // per-call controls, thinking-off unless orchestration.qaVerdictReasoning is on (see
+    // qaVerdictCallOptions).
     const synthesisProvider = getChatProviderForTier("synthesis")
       ?? createChatProvider({
         ...applyActiveModelPreset(getConfig().agents.defaults.model, getConfig()),
@@ -5373,7 +5383,11 @@ export async function forceSynthesis(
       });
 
     try {
-      const response = await synthesisProvider.complete(messages, [], synthAbort.signal);
+      // Labelled so its provider row reads callSite "synthesis", not the orchestrator's
+      // main_turn: RequestCallSite had the label and nothing set it, so every rewrite, the QA
+      // loop's included, was logged as though the orchestrator had made it.
+      const response = await runWithCallAttribution({ callSite: "synthesis" }, () =>
+        synthesisProvider.complete(messages, [], synthAbort.signal));
       const text = response.content?.trim();
       return text || null;
     } finally {
@@ -5385,12 +5399,34 @@ export async function forceSynthesis(
 }
 
 /**
+ * Per-call options for a QA VERDICT: the one-line PASS / FAIL: … reply of the delivery gate and
+ * of the consistency gate. They used to run with the provider's own controls, which with no
+ * synthesis tier means the thinking-on orchestrator: session f4ebf47b paid 30.1 s and 47.4 s for
+ * two verdicts (1,646 and 2,682 completion tokens), 77 s of a 145 s turn. The owner then
+ * measured the 35B serially on the same classification (2026-09-25): 1.4–5× faster with reasoning
+ * off, and with it on it sometimes answered NOTHING, ~600 thinking tokens and empty content.
+ *
+ * Per-call controls, not a rebuilt provider, so the verdict still runs on the caller's own
+ * provider — its preset scope, its effort overlay and its failover chain's circuit state, the
+ * three things getChatProviderForTier's comment says a provider built from the defaults loses.
+ * Both fields on purpose, as SYNTHESIS_CALL_CONTROLS: a graded pin in a config withholds the
+ * enable_thinking flag, and "none" is the value that reaches the wire past it.
+ * orchestration.qaVerdictReasoning brings the deliberation back without a code change.
+ */
+const QA_VERDICT_CONTROLS = { enableThinking: false, reasoningEffort: "none" } as const;
+
+function qaVerdictCallOptions(): { controls: typeof QA_VERDICT_CONTROLS } | undefined {
+  return effectiveOrchestration().qaVerdictReasoning === true ? undefined : { controls: QA_VERDICT_CONTROLS };
+}
+
+/**
  * Final QA delivery gate (staged orchestration — docs/staged-orchestration.md).
  * After the existing correctness gates have refined `answer`, verify it against the
  * turn plan's acceptance criteria and loop ONE improvement pass per unmet round until
  * a QA check passes or the round budget is spent. The bounded fail-open loop lives in
  * qa-delivery-loop.ts; this supplies model-backed check (a verdict-only call on the
- * synthesis tier) and improve (the established forceSynthesis repair). Any error or
+ * synthesis tier, thinking-off — see qaVerdictCallOptions) and improve (the established
+ * forceSynthesis repair). Any error or
  * empty improvement ships the best answer so far — the gate never blocks delivery.
  */
 async function runQaDeliveryGate(
@@ -5403,7 +5439,7 @@ async function runQaDeliveryGate(
   escalate?: (current: string, flaws: string, crit: string[]) => Promise<string | null>,
   requireEvidence = false,
   turnUserWords?: TurnUserWords,
-): Promise<{ answer: string; changed: boolean; rounds: number; passed: boolean; status: QaVerdictStatus; evidence?: string; artifactProbeStatus: ArtifactProbeStatus; artifactProbeCount: number; escalated: boolean; unverified: boolean }> {
+): Promise<{ answer: string; changed: boolean; rounds: number; passed: boolean; status: QaVerdictStatus; evidence?: string; artifactProbeStatus: ArtifactProbeStatus; artifactProbeCount: number; escalated: boolean; unverified: boolean; noVerdict?: boolean }> {
   const verdictProvider = getChatProviderForTier("synthesis") ?? provider;
 
   // Tool-equipped clean-context judge (orchestration.qaToolJudge): when this turn produced
@@ -5463,7 +5499,7 @@ async function runQaDeliveryGate(
       }));
 
   const check = async (current: string, crit: string[]): Promise<QaVerdict> => {
-    if (signal.aborted) return { pass: true }; // fail open on abort
+    if (signal.aborted) return { pass: true, noVerdict: true }; // fail open on abort — nobody judged it
     // QA-304: deterministic artifact probes run FIRST — no model call. A broken,
     // truncated, or dead artifact is an objective FAIL with reproducible receipts
     // that no reviewer prose can rubber-stamp past; passing receipts become
@@ -5559,7 +5595,8 @@ async function runQaDeliveryGate(
     ];
     const abort = new AbortController();
     try {
-      const resp = await verdictProvider.complete(messages, [], abort.signal);
+      const resp = await timedQaModelCall(() => runWithCallAttribution({ callSite: "qa", agentName: "qa_verdict" }, () =>
+        verdictProvider.complete(messages, [], abort.signal, qaVerdictCallOptions())));
       return parseQaVerdict(resp.content ?? "");
     } finally {
       abort.abort();
@@ -5572,7 +5609,9 @@ async function runQaDeliveryGate(
       + "Fix ONLY these flaws while keeping everything that was already correct, in the SAME language as the user's request:\n"
       + flaws
       + "\nReturn the COMPLETE corrected answer (not a diff, not a note). Ground every claim in this conversation's tool results and shared findings; do not invent facts to satisfy a criterion — if something genuinely cannot be verified, mark it unverified rather than fabricating it.";
-    const improved = await forceSynthesis(session, provider, signal, instruction);
+    // forceSynthesis labels the call "synthesis"; the agent name says which rewrite it was.
+    const improved = await timedQaModelCall(() => runWithCallAttribution({ agentName: "qa_improve" }, () =>
+      forceSynthesis(session, provider, signal, instruction)));
     if (!improved) return null;
     const candidate = sanitizeUserFacingAssistantResponse(improved, 0);
     // Reject a catastrophic shrink (the improver collapsed the answer to a stub).
@@ -5625,6 +5664,7 @@ async function runQaDeliveryGate(
     artifactProbeCount,
     escalated: result.escalated,
     unverified: result.unverified,
+    ...(result.noVerdict ? { noVerdict: true } : {}),
   };
 }
 
@@ -5642,15 +5682,17 @@ async function runDeliverableConsistencyGate(
   answer: string,
   userStatements: string,
   maxRounds: number,
-): Promise<{ answer: string; changed: boolean; rounds: number; passed: boolean }> {
+): Promise<{ answer: string; changed: boolean; rounds: number; passed: boolean; status: QaVerdictStatus; noVerdict?: boolean }> {
   const verdictProvider = getChatProviderForTier("synthesis") ?? provider;
 
   const check = async (current: string): Promise<QaVerdict> => {
-    if (signal.aborted) return { pass: true }; // fail open on abort
+    if (signal.aborted) return { pass: true, noVerdict: true }; // fail open on abort — nobody judged it
     const messages = buildDeliverableConsistencyCheckMessages(current, userStatements);
     const abort = new AbortController();
     try {
-      const resp = await verdictProvider.complete(messages, [], abort.signal);
+      // The same one-line PASS / FAIL: … verdict as the delivery gate's, so the same controls.
+      const resp = await timedQaModelCall(() => runWithCallAttribution({ callSite: "qa", agentName: "consistency_verdict" }, () =>
+        verdictProvider.complete(messages, [], abort.signal, qaVerdictCallOptions())));
       return parseQaVerdict(resp.content ?? "");
     } finally {
       abort.abort();
@@ -5659,7 +5701,8 @@ async function runDeliverableConsistencyGate(
 
   const improve = async (current: string, flaws: string): Promise<string | null> => {
     if (signal.aborted) return null;
-    const improved = await forceSynthesis(session, provider, signal, buildDeliverableConsistencyRepairInstruction(flaws));
+    const improved = await timedQaModelCall(() => runWithCallAttribution({ agentName: "consistency_repair" }, () =>
+      forceSynthesis(session, provider, signal, buildDeliverableConsistencyRepairInstruction(flaws))));
     if (!improved) return null;
     const candidate = sanitizeUserFacingAssistantResponse(improved, 0);
     // Reject a catastrophic shrink (the fixer collapsed the answer to a stub).
@@ -5677,6 +5720,11 @@ async function runDeliverableConsistencyGate(
     changed: result.answer.trim() !== answer.trim(),
     rounds: result.rounds,
     passed: result.passed,
+    // This gate asks for a bare "PASS" (deliverable-consistency.ts), which the shared parser reads
+    // as unverified for want of evidence, so every genuine pass was logged status "unverified" and
+    // a reader counting "pass" saw none (review of the thinking-off verdicts, D1).
+    status: result.passed && !result.noVerdict ? "pass" : result.status,
+    ...(result.noVerdict ? { noVerdict: true } : {}),
   };
 }
 

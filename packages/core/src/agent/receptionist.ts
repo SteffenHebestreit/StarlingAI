@@ -25,6 +25,7 @@
 import { getConfig } from "../config/loader.js";
 import { applyActiveModelPreset, createChatProvider, getChatProviderForTier, tierModelDefaults } from "../providers/index.js";
 import { effectiveOrchestration } from "../runtime/effort-context.js";
+import { runWithCallAttribution } from "../runtime/request-context.js";
 import { scanOutput } from "../guardrails/output.js";
 import { answerAssertsSpecifics } from "./citation-honesty.js";
 import { buildDynamicTurnGuidance } from "./intent-classifier.js";
@@ -376,7 +377,11 @@ export async function tryReceptionistFastLaneDetailed(
   } catch { /* default: unnamed */ }
 
   const result = await runReceptionist(userMessage, {
-    complete: async (messages) => (await provider.complete(messages, [], signal)).content ?? "",
+    // A routing-tier call like the triage and the source-sensitivity judge, labelled like them.
+    // Unlabelled it inherited the turn's own context, so its provider row read agentName main,
+    // callSite main_turn — indistinguishable from the orchestrator's first call on the same model.
+    complete: async (messages) => (await runWithCallAttribution({ callSite: "routing_tier", agentName: "receptionist" }, () =>
+      provider.complete(messages, [], signal))).content ?? "",
     memoryCapsule: capsule || undefined,
     assistantName,
     personaLines: getReceptionistPersonaLines(),
