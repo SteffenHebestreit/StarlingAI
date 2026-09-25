@@ -112,6 +112,110 @@ export async function askLaya(
   }
 }
 
+/** laya-browser's next step for one page (`POST /v1/browser/step`, docker/laya/app/browser.py). */
+export interface LayaBrowserStep {
+  /** CLICK, TYPE_TEXT, SELECT, one of the page's controls (SCROLL_DOWN, SCROLL_UP, PRESS_ENTER, WAIT), DONE or BLOCKED. */
+  operation: string;
+  operationProbability: number;
+  operationProbabilities: Record<string, number>;
+  /** For CLICK, TYPE_TEXT and SELECT: the element, named by the observation's own action id and node. */
+  target: {
+    index: string;
+    actionId: string;
+    node: number | null;
+    kind: string;
+    label: string;
+    role: string | null;
+    value?: string;
+    probability: number;
+    alternatives: Array<{ index: string; actionId: string; node: number | null; label: string; probability: number }>;
+  } | null;
+  /** For a control: the control. */
+  control: { actionId: string; kind: string; label: string; delta?: number; key?: string } | null;
+  /** Round trip, as measured here. */
+  ms: number;
+}
+
+function finiteProbability(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1 + 1e-9;
+}
+
+/** The step as the sidecar sent it, checked; null for anything that does not fit the contract. */
+function readBrowserStep(raw: unknown, ms: number): LayaBrowserStep | null {
+  if (!raw || typeof raw !== "object") return null;
+  const body = raw as Record<string, unknown>;
+  const operation = body["operation"];
+  const probabilities = body["operationProbabilities"];
+  if (typeof operation !== "string" || !finiteProbability(body["operationProbability"])) return null;
+  if (!probabilities || typeof probabilities !== "object") return null;
+  const operationProbabilities: Record<string, number> = {};
+  for (const [key, value] of Object.entries(probabilities as Record<string, unknown>)) {
+    if (!finiteProbability(value)) return null;
+    operationProbabilities[key] = value;
+  }
+  if (operationProbabilities[operation] === undefined) return null;
+  const target = body["target"];
+  const control = body["control"];
+  if (target !== null && target !== undefined) {
+    const t = target as Record<string, unknown>;
+    if (typeof t["actionId"] !== "string" || !finiteProbability(t["probability"]) || typeof t["label"] !== "string") return null;
+    if (t["node"] !== null && t["node"] !== undefined && typeof t["node"] !== "number") return null;
+  }
+  if (control !== null && control !== undefined && typeof (control as Record<string, unknown>)["actionId"] !== "string") return null;
+  return {
+    operation,
+    operationProbability: body["operationProbability"] as number,
+    operationProbabilities,
+    target: target ? {
+      ...(target as NonNullable<LayaBrowserStep["target"]>),
+      node: typeof (target as Record<string, unknown>)["node"] === "number" ? (target as { node: number }).node : null,
+      alternatives: Array.isArray((target as Record<string, unknown>)["alternatives"])
+        ? (target as { alternatives: NonNullable<LayaBrowserStep["target"]>["alternatives"] }).alternatives
+        : [],
+    } : null,
+    control: control ? (control as NonNullable<LayaBrowserStep["control"]>) : null,
+    ms,
+  };
+}
+
+/**
+ * Ask laya-browser for the next step on one observed page. `null` when no sidecar is configured,
+ * the breaker is open, the request fails or times out (`decisions.browser.timeoutMs`), or the
+ * answer does not fit the contract. Shares the breaker with `askLaya`: it is one sidecar.
+ */
+export async function askLayaBrowser(
+  body: { goal: string; observation: Record<string, unknown>; history: unknown[]; excluded?: string[] },
+  signal?: AbortSignal,
+): Promise<LayaBrowserStep | null> {
+  if (!layaConfigured()) return null;
+  const now = Date.now();
+  if (circuitOpenUntil > now) return null;
+  const timeoutMs = getConfig().decisions.browser?.timeoutMs ?? 5_000;
+  const started = Date.now();
+  try {
+    const response = await fetch(endpoint("/v1/browser/step"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
+    });
+    if (!response.ok) {
+      recordFailure(Date.now(), `browser step HTTP ${response.status}`);
+      return null;
+    }
+    const step = readBrowserStep(await response.json(), Date.now() - started);
+    if (!step) {
+      recordFailure(Date.now(), "browser step does not fit the contract");
+      return null;
+    }
+    recordSuccess();
+    return step;
+  } catch (err) {
+    if (!signal?.aborted) recordFailure(Date.now(), err instanceof Error ? err.message : String(err));
+    return null;
+  }
+}
+
 /** The sidecar's own health report, bypassing the breaker; null when it cannot be reached. */
 export async function layaHealth(timeoutMs = 3_000): Promise<Record<string, unknown> | null> {
   if (!layaConfigured()) return null;

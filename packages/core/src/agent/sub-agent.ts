@@ -11,6 +11,7 @@
  *  - Audit entries tagged with the parent session ID so tracing works
  */
 
+import { createBrowserDeciderForRun, type DrivenStep } from "../decisions/browser-step.js";
 import { decide } from "../decisions/decide.js";
 import { layaConfigured } from "../decisions/laya-client.js";
 import { GOAL_MET } from "../decisions/points.js";
@@ -1754,6 +1755,16 @@ export function describeMutatedWorkspaceFiles(
  * successful login look like it failed (and trips the blocked-iteration loop
  * detector). The loop detector still catches genuinely stuck repeats.
  */
+/** A step laya-browser took, as the response of the model call it replaces: one tool call, no text, no tokens. */
+function drivenStepResponse(step: DrivenStep): LLMResponse {
+  return {
+    content: null,
+    tool_calls: [step.toolCall],
+    usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+    finishReason: "tool_calls",
+  };
+}
+
 export function isLiveStateTool(name: string): boolean {
   return name.startsWith("browser_") || name.startsWith("computer_");
 }
@@ -2634,6 +2645,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
   // in the finally below; request_human_assist flips it to "needs help" on a
   // CAPTCHA. Only when a browser-vnc backend is actually reachable.
   let browserSessionId: string | undefined;
+  // laya-browser beside an agent holding browser_click (decisions.browser); null while it is off.
+  let browserDecider: ReturnType<typeof createBrowserDeciderForRun> = null;
   if (opts.agentName === "browser_agent" && browserSessionManager.isEnabled()) {
     try {
       browserSessionId = browserSessionManager.register({
@@ -2824,7 +2837,9 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // carries no run-derived number at all (sub-agent-prompt-guidance.ts). Consumers: that
     // instruction and the loop below.
     const effortSubAgentIterations = effortRunProfile?.subAgentMaxIterations;
-    const maxIterations = opts.maxIterationsOverride === 0
+    // `let` for one reason: a step laya-browser takes in the model's place runs as an iteration
+    // but costs no model call, so it gives that iteration back (decisions.browser, bounded there).
+    let maxIterations = opts.maxIterationsOverride === 0
       ? Number.MAX_SAFE_INTEGER
       : (opts.maxIterationsOverride
           ?? (effortSubAgentIterations === 0 ? Number.MAX_SAFE_INTEGER : effortSubAgentIterations)
@@ -4483,6 +4498,13 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     supervisorTimer = setInterval(() => superviseProgress("timer"), PROGRESS_CHECK_INTERVAL_MS);
     supervisorTimer.unref?.();
 
+    browserDecider = createBrowserDeciderForRun({
+      agentName: opts.agentName,
+      sessionId: subSessionId,
+      task: sanitizedTask,
+      toolNames: effectiveToolNames ?? tools.map((tool) => tool.name),
+    });
+
     while (iterations < maxIterations) {
       // Tools used by THIS iteration alone. `toolNames` accumulates over the whole run, so
       // it cannot answer "did this pass change anything", which is what the read-only streak
@@ -5050,12 +5072,29 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
 
       const messages: LLMMessage[] = composeSubAgentMessages(systemPrompt, history, iterationNudges);
 
-      opts.onProgress?.({
-        agentName: opts.agentName,
-        kind: "thinking",
-        iteration: iterations + 1,
-        summary: `Planning the next delegated step in ${opts.agentName}.`,
-      });
+      // laya-browser's own step, when it is sure of one (decisions.browser mode "drive"): it runs as
+      // this iteration's tool call and no model call is made. Never while the loop has something to
+      // tell the model, wants its answer rather than another action, or is being stopped.
+      const drivenStep: DrivenStep | null = browserDecider
+        && callToolChoice === "auto"
+        && iterationNudges.length === 0
+        && !turnTimeoutReached
+        && !lrgOperatorStop
+        && !supervisorStop
+        && !opts.signal?.aborted
+        ? await browserDecider.proposeStep(llmSignal)
+        : null;
+      // It costs no model call, so it does not use up one of the model's iterations.
+      if (drivenStep && maxIterations < Number.MAX_SAFE_INTEGER) maxIterations += 1;
+
+      if (!drivenStep) {
+        opts.onProgress?.({
+          agentName: opts.agentName,
+          kind: "thinking",
+          iteration: iterations + 1,
+          summary: `Planning the next delegated step in ${opts.agentName}.`,
+        });
+      }
 
       let response;
       try {
@@ -5127,9 +5166,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             longRunningGenerationManager.isUnbounded(subSessionId)
             || longRunningGenerationManager.isTurnUnbounded(subSessionId),
         };
-        response = provider.completeViaStream
-          ? await provider.completeViaStream(messages, effectiveTools, llmSignal, callOptions)
-          : await provider.complete(messages, effectiveTools, llmSignal, callOptions);
+        response = drivenStep
+          ? drivenStepResponse(drivenStep)
+          : provider.completeViaStream
+            ? await provider.completeViaStream(messages, effectiveTools, llmSignal, callOptions)
+            : await provider.complete(messages, effectiveTools, llmSignal, callOptions);
         // WHAT ONE CALL COSTS HERE, observed rather than assumed. The synthesis reserve
         // below is a deadline promise — "leave enough time to write the answer" — and a
         // promise sized by a constant is only kept on a model as fast as the constant.
@@ -5671,6 +5712,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         }
 
         history.push({ role: "assistant", content: result });
+        browserDecider?.noteFinalAnswer();
 
         // ONE ORDERING FOR EVERY TERMINAL PATH: findings first, completion row last.
         // The max-iterations path already joins before its completion row; without this the
@@ -5766,6 +5808,9 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         content: response.content,
         tool_calls: assistantToolCalls,
       });
+
+      // laya-browser's view of the model's step, taken before the step changes the page.
+      if (browserDecider && !drivenStep) await browserDecider.beforeModelActions(response.tool_calls, signal);
 
       const toolResults: LLMMessage[] = [];
       // Which calls announced a start on the progress channel, and which announced an end.
@@ -6258,6 +6303,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
 
         const result = await executeTool(tc.name, tc.arguments, toolContext, { toolCallId: tc.id });
         executedToolThisIteration = true;
+        browserDecider?.afterToolCall(tc, result);
         if (isDelegationToolName(tc.name)) {
           delegationCallsThisIteration += 1;
           // Structural failure signal (no error-string match): the delegate tool reports
@@ -7623,6 +7669,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     if (timeoutHandle) clearTimeout(timeoutHandle);
     humanWaits.dispose();
     if (supervisorTimer) clearInterval(supervisorTimer);
+    browserDecider?.finish();
     // The run's result is already computed; it is handed to the parent only once every
     // finding it gathered is in shared facts (or its distill hit the 60 s deadline).
     await joinPendingShares();

@@ -50,6 +50,42 @@ export const DecisionsSchema = z.object({
     /** The share of Laya's qualified cases the incumbent still decides, to keep measuring. */
     auditRate: z.number().min(0).max(1).default(0.1),
   }).default({}),
+  /**
+   * laya-browser beside the browser agent (decisions/browser-step.ts) — any agent holding browser_click.
+   *
+   * - `off`: not asked.
+   * - `shadow`: before each click, typing, select or final answer of the model, the page is read the way laya-browser
+   *   was trained to read it and laya-browser is asked what it would do. The model acts as always; both choices go
+   *   to the audit and to `decisions/browser-ledger.jsonl`, compared element for element.
+   * - `adaptive`: shadow, and laya-browser clicks and selects on its own wherever the comparisons show it agrees with
+   *   the model — per operation and language, from the lowest confidence (its operation's and its element's, the
+   *   lower of the two) at which the agreement's lower bound reaches `adaptive.targetAgreement` over at least
+   *   `adaptive.minSamples` steps. `adaptive.auditRate` of those steps still go to the model, to keep measuring.
+   *   Until a confidence qualifies it only compares, and does not read the page before the model's turn.
+   * - `drive`: shadow, and laya-browser acts on its own whenever its operation and its element are both at
+   *   `driveMinProbability` or above. Its probabilities are not calibrated: measured on real pages, right and wrong
+   *   elements both came at 0.6–0.7, so a fixed threshold either never acts or acts wrongly — `adaptive` finds the
+   *   level from the evidence.
+   *
+   * In both acting modes: never a form submit, a download, a link into another tab or to an internal host, typing
+   * or finishing. Its steps are ordinary browser_click / browser_select_option calls of the run, marked as its own.
+   */
+  browser: z.object({
+    mode: z.enum(["off", "shadow", "adaptive", "drive"]).default("off"),
+    /** For mode `drive`, and for scrolling and waiting in place in either acting mode. */
+    driveMinProbability: z.number().min(0.5).max(1).default(0.9),
+    /** At most this many steps per run are laya-browser's own. */
+    maxDrivenSteps: z.number().int().min(1).max(50).default(12),
+    /** At most this many in a row before the model is asked again. */
+    maxConsecutiveDriven: z.number().int().min(1).max(20).default(4),
+    /** One step: the page read plus laya-browser's answer. ~20 ms on a GPU, ~2 s on a CPU. */
+    timeoutMs: z.number().int().min(100).max(30_000).default(5_000),
+    /**
+     * laya-browser was trained on English goals only: translate the task once per run with the routing tier
+     * before asking it.
+     */
+    translateGoal: z.boolean().default(true),
+  }).default({}),
   ledger: z.object({
     /**
      * Record every decision Laya was asked about: the case, both answers, who decided. The

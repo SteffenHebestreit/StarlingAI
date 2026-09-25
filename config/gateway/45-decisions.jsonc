@@ -21,8 +21,21 @@
   // To only watch: set "defaultMode": "shadow". To switch one point off: "points": { "<id>": { "mode": "off" } }.
   // Points: fast_lane, source_sensitive, ungrounded_draft, slices_disagree, goal_met.
   // Report: `pnpm --filter @starlingai/core decisions:report`.
+  //
+  // "browser": laya-browser beside the browser agent. It clicks and selects on its own — never a
+  // form submit, a download, a new tab, an internal host, typing or finishing — and the agent's
+  // model takes every other step. Its steps run as the agent's own browser_click /
+  // browser_select_option calls (approvals and guards apply) and are marked as its in the call.
+  // Both choices of every step go to the audit (browser_step) and to
+  // .starlingai/decisions/browser-ledger.jsonl, with the page as it was read.
+  //
+  // "adaptive" acts where the comparisons with the model show it agrees at its confidence, with
+  // the settings above. "drive" acts above a fixed driveMinProbability instead — but its
+  // probabilities are not calibrated: on real pages its right and its wrong elements both came at
+  // 0.6–0.7, so 0.9 never acts and 0.6 acts wrongly about half the time. "shadow" only compares.
   "decisions": {
     "defaultMode": "adaptive",
-    "adaptive": { "targetAgreement": 0.9, "minSamples": 30, "auditRate": 0.1 }
+    "adaptive": { "targetAgreement": 0.9, "minSamples": 30, "auditRate": 0.1 },
+    "browser": { "mode": "adaptive" }
   }
 }

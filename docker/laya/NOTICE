@@ -35,5 +35,6 @@ Code adapted into app/:
 3. tests/fixtures/laya_browser_sample_request.json is cklxx/laya-browser code/sample_request.json (Apache-2.0),
    unchanged.
 
-The jev-ultrafast page snapshot script used by the gateway (packages/core, browser decider) carries the same
-MIT notice, and includes the snapshot changes of cklxx/laya-browser code/jev-ultrafast.patch (Apache-2.0).
+The jev-ultrafast page snapshot script used by the gateway (packages/core/src/decisions/jev-snapshot.ts, the
+browser decider's page read) is jev_ultrafast/snapshot.js @ 1231850 under the same MIT notice, with the snapshot
+changes of cklxx/laya-browser code/jev-ultrafast.patch (Apache-2.0), unchanged otherwise.

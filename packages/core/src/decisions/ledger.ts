@@ -57,6 +57,29 @@ export function appendLedgerRow(row: LedgerRow): Promise<void> {
   return writeChain;
 }
 
+/**
+ * laya-browser's ledger, beside the decision ledger: one row per browser step laya-browser was asked about — the
+ * page as it read it, the goal, the history, the model's action and its own. Kept apart because a step is not a
+ * choice among fixed options; it is the data a laya-browser fine-tune on the swarm's own sites would learn from.
+ */
+export function resolveBrowserLedgerPath(): string {
+  return join(dirname(resolveLedgerPath()), "browser-ledger.jsonl");
+}
+
+export function appendBrowserLedgerRow(row: Record<string, unknown>): Promise<void> {
+  if (getConfig().decisions?.ledger?.enabled === false) return Promise.resolve();
+  const path = resolveBrowserLedgerPath();
+  writeChain = writeChain
+    .then(async () => {
+      await mkdir(dirname(path), { recursive: true });
+      await appendFile(path, `${JSON.stringify(row)}\n`, "utf8");
+    })
+    .catch((err: unknown) => {
+      log.warn({ err, path }, "Could not write the browser ledger");
+    });
+  return writeChain;
+}
+
 /** Every well-formed row in the ledger's tail, oldest first. A missing ledger is an empty one. */
 export async function readLedgerRows(path = resolveLedgerPath()): Promise<LedgerRow[]> {
   let text: string;

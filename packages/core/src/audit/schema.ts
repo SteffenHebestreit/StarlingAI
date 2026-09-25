@@ -40,6 +40,8 @@ export type CoreAuditEventType =
   | "guardrail_flagged"
   /** The Laya decision layer answered, or was asked alongside, one decision point (decisions/decide.ts). */
   | "decision_point"
+  /** laya-browser beside the browser agent: its step and the model's, or one it took itself (decisions/browser-step.ts). */
+  | "browser_step"
   | "output_redacted"
   | "auth_success"
   | "auth_failure"
