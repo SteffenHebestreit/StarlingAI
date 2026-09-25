@@ -23,6 +23,7 @@
     "test:coverage": "vitest run --coverage",
     "test:qwen-speech-smoke": "tsx src/scripts/qwen-speech-smoke.ts",
     "runtime-guidance:evaluate": "tsx src/scripts/runtime-guidance-live-eval.ts",
+    "image-agent:evaluate": "cd ../.. && tsx packages/core/src/scripts/image-agent-live-eval.ts",
     "test:watch": "vitest",
     "check": "tsc --noEmit",
     "lint": "eslint src --max-warnings 0",
