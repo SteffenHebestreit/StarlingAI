@@ -23,7 +23,7 @@
         },
         "language": {
           "description": "Output language for the assessment",
-          "default": "the language of the user's request"
+          "default": "the language the user asked for, otherwise the language of the user's request"
         }
       }
     }

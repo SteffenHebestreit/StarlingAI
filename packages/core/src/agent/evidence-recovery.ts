@@ -37,6 +37,7 @@ import {
 import { forceSynthesis } from "./runtime.js";
 import type { AgentSession } from "./session.js";
 import type { ChatProvider } from "../providers/lmstudio.js";
+import { IN_REPLY_LANGUAGE, localizedFixedText } from "./reply-language.js";
 
 const log = childLogger("agent:runtime");
 
@@ -187,15 +188,21 @@ function formatSharedFactsRecoveryForUserDisplay(evidence: string): string {
 
 export function buildRecoveryEvidenceUserMessage(evidence: string): string {
   const formatted = formatSharedFactsRecoveryForUserDisplay(evidence);
-  // Bilingual preamble + suffix so this works whether the user wrote in German
-  // or English. Both are short — the evidence is the bulk of the message.
+  // No model writes this message, so it is written in the language the person wrote in (German
+  // or English; the preamble used to be German for everyone). The evidence is the bulk of it.
   return [
-    "Die Recherche wurde unterbrochen, bevor ein vollständiges Dossier fertiggestellt werden konnte. Die bisher gesammelten Quellen und Fakten:",
+    localizedFixedText({
+      de: "Die Recherche wurde unterbrochen, bevor ein vollständiges Dossier fertiggestellt werden konnte. Die bisher gesammelten Quellen und Fakten:",
+      en: "The research was interrupted before a complete dossier could be finished. The sources and facts gathered so far:",
+    }),
     formatted,
     // Topic-agnostic footer. NEVER name domain-specific sections here (an earlier version
     // hardcoded "(Produkt-Empfehlungen, Verdrahtung, BOM, Verbesserungen)" — overfit to one
     // hardware-BOM request, audit 65f46046 surfaced it verbatim on a Dresden architecture deck).
-    "Falls Abschnitte fehlen, starte den Lauf bei Bedarf mit einem engeren Fokus erneut, damit ein Spezialist die noch offenen Punkte vollständig abdecken kann.\n(If anything is missing, you can re-run with a narrower focus so a specialist can complete the remaining sections.)",
+    localizedFixedText({
+      de: "Falls Abschnitte fehlen, starte den Lauf bei Bedarf mit einem engeren Fokus erneut, damit ein Spezialist die noch offenen Punkte vollständig abdecken kann.",
+      en: "If anything is missing, you can re-run with a narrower focus so a specialist can complete the remaining sections.",
+    }),
   ].join("\n\n");
 }
 
@@ -258,15 +265,24 @@ function compactSourceSensitiveEvidenceForDisplay(evidence: string): string {
     // header-only junk to the user as "evidence".
     .filter((line) => !isJunkEvidenceValue(line))
     .filter((line) => line.length > 0);
-  return lines.join("\n").trim() || "In diesem Lauf wurde keine verwertbare fachliche Evidenz erzeugt.";
+  return lines.join("\n").trim() || localizedFixedText({
+    de: "In diesem Lauf wurde keine verwertbare fachliche Evidenz erzeugt.",
+    en: "This run produced no usable evidence on the subject.",
+  });
 }
 
 export function formatSourceSensitiveEvidenceBackstop(evidence: string): string {
   const compactEvidence = compactSourceSensitiveEvidenceForDisplay(evidence);
   return [
-    "Die bisher belastbare Evidenz aus diesem Lauf:",
+    localizedFixedText({
+      de: "Die bisher belastbare Evidenz aus diesem Lauf:",
+      en: "The evidence this run could establish so far:",
+    }),
     compactEvidence,
-    "Alle übrigen angefragten Aussagen bleiben unverifiziert oder unvollständig, bis eine erfolgreiche Quellenrecherche vorliegt.",
+    localizedFixedText({
+      de: "Alle übrigen angefragten Aussagen bleiben unverifiziert oder unvollständig, bis eine erfolgreiche Quellenrecherche vorliegt.",
+      en: "Everything else you asked about stays unverified or incomplete until a source search succeeds.",
+    }),
   ].join("\n\n");
 }
 
@@ -296,11 +312,13 @@ export async function synthesizeSourceSensitiveEvidenceBackstop(
   signal: AbortSignal,
   evidence: string,
 ): Promise<string | null> {
+  // This used to say "Answer the user in German", and named its sections in German, whatever
+  // language the user wrote in.
   const instruction = [
     "SOURCE-SENSITIVE RECOVERY SYNTHESIS:",
-    "The prior delegation failed or timed out, but the evidence below was recovered. Answer the user in German using ONLY this recovered evidence and shared findings.",
-    "Do not invent missing manufacturer, interface, protocol, pricing, layout, BOM, or product claims. If a requested section is not supported by the evidence, mark it as unverifiziert/unvollstaendig.",
-    "Do not dump raw page snapshots or tool traces. Convert supported evidence into a concise useful partial answer with: 1) Verifiziert, 2) Noch nicht belegt, 3) Naechster sinnvoller Recherche-Schritt.",
+    `The prior delegation failed or timed out, but the evidence below was recovered. Answer the user ${IN_REPLY_LANGUAGE}, using ONLY this recovered evidence and shared findings.`,
+    "Do not invent missing manufacturer, interface, protocol, pricing, layout, BOM, or product claims. If a requested section is not supported by the evidence, mark it as unverified/incomplete.",
+    "Do not dump raw page snapshots or tool traces. Convert supported evidence into a concise useful partial answer with three parts, headed in the answer's language: 1) verified, 2) not yet supported, 3) the next sensible research step.",
     "Recovered evidence:",
     evidence.trim(),
   ].join("\n");

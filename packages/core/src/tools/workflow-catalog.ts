@@ -968,6 +968,10 @@ async function runSceneInline(
         _turnTotalDelegationLimitOverride: ctx._turnTotalDelegationLimitOverride,
         _workflowExecutionStack: workflowExecutionStack,
         inlineConfig: bootstrapConfig,
+        // The person's words reach a workflow's agents as they reach any delegated specialist:
+        // they carry the language the deliverable must be written in, which the scene's own
+        // task (English, written by its author) cannot.
+        ...(ctx.turnUserWords ? { turnUserWords: ctx.turnUserWords } : {}),
       });
 
       const bootstrapResponse = bootstrapRun.output.trim() || `Workflow bootstrap delegation to ${bootstrapAgent} produced no output.`;
@@ -1139,6 +1143,8 @@ async function runJobInline(
           swarmState: ctx.swarmState,
           onSwarmState: ctx.onSwarmState,
           _workflowExecutionStack: workflowExecutionStack,
+          // Same as the scene bootstrap: the step's task is the job author's, not the person's.
+          ...(ctx.turnUserWords ? { turnUserWords: ctx.turnUserWords } : {}),
         };
         const producedArtifact = (r: { artifacts?: unknown[] }): boolean => Array.isArray(r.artifacts) && r.artifacts.length > 0;
 

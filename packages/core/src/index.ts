@@ -209,6 +209,14 @@ export async function main() {
     log.warn({ err }, "Tool embedding warm-up failed — continuing with lazy embeddings");
   }
 
+  // Load the language detector before the first turn (~80 ms, ~30 MB), so the first turn's
+  // status lines, banners and spoken summary name the right language instead of the default.
+  // Never throws; a failure only means those fall back to the configured default language.
+  {
+    const { warmTextLanguageDetector } = await import("./agent/text-language.js");
+    await warmTextLanguageDetector();
+  }
+
   // Start the event-loop lag monitor before the gateway accepts traffic so any
   // main-thread stall (the real "gateway went unhealthy during a long local-model
   // call" cause) is measured and audited from the first request.

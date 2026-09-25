@@ -166,8 +166,11 @@ describe("the delegation-language normalizer with no routing tier — same rule,
   it("is what both delegate tools call — the wiring, not just the helper", () => {
     const source = readFileSync(fileURLToPath(new URL("../tools/sub-agent.ts", import.meta.url)), "utf8");
     // delegate_to_agent and swarm_delegate. A refactor that puts getChatProvider() back keeps the
-    // helper test green and silently restores the thinking-on call; this fails instead.
-    expect(source.split("provider: delegationLanguageProvider()").length - 1).toBe(2);
+    // helper test green and silently restores the thinking-on call; this fails instead. Both tools
+    // go through one helper, and the helper is the one place the provider is chosen.
+    expect(source.split("provider: delegationLanguageProvider()").length - 1).toBe(1);
+    expect(source.split("task = await normalizeDelegatedTask(task, ctx);").length - 1).toBe(2);
+    expect(source).not.toContain("normalizeDelegationTaskLanguage({ task, provider: getChatProvider()");
     expect(source).not.toContain('getChatProviderForTier("routing") ?? getChatProvider()');
   });
 });

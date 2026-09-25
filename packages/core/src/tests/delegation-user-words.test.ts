@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { renderUserWordsBlock, typedUserWords, userWordsBlockForRun, type TurnUserWords } from "../agent/delegation-user-words.js";
+import { SPECIALIST_REPLY_LANGUAGE_INSTRUCTION } from "../agent/reply-language.js";
 
 /**
  * THE SPECIALIST NEVER SAW WHAT THE USER WROTE.
@@ -39,9 +40,21 @@ describe("renderUserWordsBlock", () => {
     expect(block.length).toBeLessThan(2_000);
   });
 
-  it("adds nothing when the task already quotes the words, whatever the case or spacing", () => {
+  it("does not repeat words the task already quotes, whatever the case or spacing — only the language line", () => {
     const taskQuotingIt = `Original request:\n  NICHT den   fast-tier …\n das result ist schlimmer als das original\n\n${TASK}`;
-    expect(renderUserWordsBlock(words(GERMAN), taskQuotingIt)).toBe("");
+    const block = renderUserWordsBlock(words(GERMAN), taskQuotingIt);
+    expect(block).not.toContain(GERMAN);
+    expect(block).not.toContain("USER'S OWN WORDS");
+    // The words are carried, the instruction to write in their language is not.
+    expect(block).toContain("[REPLY LANGUAGE]");
+    expect(block).toContain(SPECIALIST_REPLY_LANGUAGE_INSTRUCTION);
+  });
+
+  it("tells the specialist to write what the user reads in the user's language, even from an English task", () => {
+    const block = renderUserWordsBlock(words(GERMAN), TASK);
+    expect(block).toContain(SPECIALIST_REPLY_LANGUAGE_INSTRUCTION);
+    expect(SPECIALIST_REPLY_LANGUAGE_INSTRUCTION).toContain("the language the user asked for");
+    expect(SPECIALIST_REPLY_LANGUAGE_INSTRUCTION).toContain("even when the task is written in English");
   });
 
   it("adds nothing when there are no words", () => {
@@ -88,7 +101,9 @@ describe("userWordsBlockForRun", () => {
   });
 
   it("counts the context as already carried", () => {
-    expect(userWordsBlockForRun(undefined, words(GERMAN), TASK, `Shared facts\n${GERMAN}`)).toBe("");
+    const block = userWordsBlockForRun(undefined, words(GERMAN), TASK, `Shared facts\n${GERMAN}`);
+    expect(block).not.toContain(GERMAN);
+    expect(block).toContain("[REPLY LANGUAGE]");
   });
 });
 

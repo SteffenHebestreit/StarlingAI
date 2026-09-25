@@ -23,8 +23,10 @@ describe("buildLeanSynthesisPrompt", () => {
     // Anti-truncation (incl. the German term the base prompt guards against).
     expect(lower).toContain("abgeschnitten");
     expect(lower).toMatch(/truncat|cut off/);
-    // Language mirroring + output format.
-    expect(lower).toContain("user's language");
+    // The reply-language rule (a requested language first, then mirroring) + output format. This is
+    // the only system prompt the call has, so it carries the whole rule, not "the user's language".
+    expect(lower).toContain("reply language: answer in the language the user asked for");
+    expect(lower).toContain("the language of the user's latest message");
     expect(lower).toContain("markdown");
 
     // Genuinely lean — the whole point (well under the ~24.7K monolith).

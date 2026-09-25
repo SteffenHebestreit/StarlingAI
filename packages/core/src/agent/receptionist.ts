@@ -34,6 +34,8 @@ import { listUserMemoryRecords, listWorkspaceMemoryRecords } from "../memory/ser
 import { loadMainAssistantPersonality } from "../personality/service.js";
 import type { LLMMessage } from "../providers/lmstudio.js";
 import { childLogger } from "../logger.js";
+import { defaultReplyLanguage } from "./reply-language.js";
+import { detectTextLanguage } from "./text-language.js";
 
 const log = childLogger("agent:receptionist");
 
@@ -118,6 +120,10 @@ export interface RunReceptionistDeps {
   confidenceAttempt?: boolean;
   /** Candidate-length ceiling for the relaxed Stage-0 gate in confidence-attempt mode. */
   confidenceMaxChars?: number;
+  /** The language the conversation has been using, for a message that carries none. */
+  conversationLanguage?: string;
+  /** agents.mainAssistant.defaultLanguage. */
+  defaultLanguage?: string;
 }
 
 /**
@@ -144,6 +150,8 @@ export async function runReceptionist(
         assistantName: deps.assistantName,
         personaLines: deps.personaLines ?? getReceptionistPersonaLines(),
         confidenceAttempt,
+        ...(deps.conversationLanguage ? { conversationLanguage: deps.conversationLanguage } : {}),
+        ...(deps.defaultLanguage ? { defaultLanguage: deps.defaultLanguage } : {}),
       }),
     );
   } catch (err) {
@@ -223,12 +231,34 @@ export function languageIsUndetermined(userMessage: string): boolean {
 
 export function buildReceptionistMessages(
   userMessage: string,
-  opts: { memoryCapsule?: string; assistantName?: string; personaLines?: readonly string[]; confidenceAttempt?: boolean } = {},
+  opts: {
+    memoryCapsule?: string;
+    assistantName?: string;
+    personaLines?: readonly string[];
+    confidenceAttempt?: boolean;
+    /** The language this conversation has been using (read off the previous reply), if any. */
+    conversationLanguage?: string;
+    /** agents.mainAssistant.defaultLanguage — used only when the conversation has none yet. */
+    defaultLanguage?: string;
+  } = {},
 ): LLMMessage[] {
   // ONE unconditional directive when the message carries no language of its own — a conditional
-  // ("...if ambiguous, default to German") is not reliably followed by the fast-lane model.
+  // ("...if ambiguous, default to German") is not reliably followed by the fast-lane model. The
+  // language it names is the conversation's when there is one: hard-coding German answered an
+  // English speaker's "thanks" in German.
+  const fallbackLanguage = opts.conversationLanguage ?? opts.defaultLanguage ?? defaultReplyLanguage();
+  const fallbackReason = opts.conversationLanguage
+    ? "it is the language this conversation has been using"
+    : `${fallbackLanguage} is this assistant's default language`;
   const languageLine = languageIsUndetermined(userMessage)
-    ? "Reply in GERMAN. This message is a bare greeting/acknowledgement that carries no language of its own, and German is this assistant's default language. Do NOT answer in English."
+    ? `Reply in ${fallbackLanguage.toUpperCase()}. This message is a bare greeting/acknowledgement that carries no language of its own, and ${fallbackReason}. Do NOT answer in any other language.`
+    // KEEP THIS LINE AS IT IS, although it reads as if it forbade "answer in English" written in
+    // German. Measured on the routing model (2026-09-25, 5 such requests x 3, 4 wordings): with it,
+    // the model answered in the requested language or ESCALATED — the full assistant then applies
+    // the whole reply-language rule — and answered in the wrong language once in 15. Every
+    // "if the user asks for a language …" wording, whether a clause after this line, an entry in
+    // the escalation list, or a rule stated first, was answered in the wrong language 3-5 times in
+    // 15: the model took the mirror clause and dropped the exception.
     : "ALWAYS reply in the SAME language as the user's message (German → German, English → English). Never switch the language.";
   const common = [
     ...(opts.personaLines ?? []),
@@ -328,9 +358,17 @@ export type FastLaneEscalateReason =
 export async function tryReceptionistFastLane(
   userMessage: string,
   signal?: AbortSignal,
+  context: FastLaneConversationContext = {},
 ): Promise<FastLaneOutcome | null> {
-  const outcome = await tryReceptionistFastLaneDetailed(userMessage, signal);
+  const outcome = await tryReceptionistFastLaneDetailed(userMessage, signal, context);
   return outcome.handled ? { response: outcome.response } : null;
+}
+
+/** What the fast lane may know about the conversation it is answering inside. */
+export interface FastLaneConversationContext {
+  /** The assistant's previous reply in this session, if any — the language anchor for a
+   *  message that carries none of its own. */
+  previousReply?: string;
 }
 
 /**
@@ -340,6 +378,7 @@ export async function tryReceptionistFastLane(
 export async function tryReceptionistFastLaneDetailed(
   userMessage: string,
   signal?: AbortSignal,
+  context: FastLaneConversationContext = {},
 ): Promise<{ handled: true; response: string } | { handled: false; escalateReason: FastLaneEscalateReason }> {
   const config = getConfig();
   if (!config.receptionist?.enabled) return { handled: false, escalateReason: "disabled" };
@@ -376,7 +415,16 @@ export async function tryReceptionistFastLaneDetailed(
     assistantName = loadMainAssistantPersonality().identity?.name;
   } catch { /* default: unnamed */ }
 
+  // Read the conversation's language off the previous reply, which is written in it. Only a
+  // message with no language of its own uses it. Not awaited: the gateway loads the detector at
+  // boot, and until it has, the configured default stands in.
+  const conversationLanguage = context.previousReply?.trim() && languageIsUndetermined(userMessage)
+    ? detectTextLanguage(context.previousReply)?.name
+    : undefined;
+
   const result = await runReceptionist(userMessage, {
+    ...(conversationLanguage ? { conversationLanguage } : {}),
+    defaultLanguage: defaultReplyLanguage(),
     // A routing-tier call like the triage and the source-sensitivity judge, labelled like them.
     // Unlabelled it inherited the turn's own context, so its provider row read agentName main,
     // callSite main_turn — indistinguishable from the orchestrator's first call on the same model.

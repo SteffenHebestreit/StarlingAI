@@ -267,6 +267,11 @@ export const RateLimitSchema = z.object({
 export const MainAssistantConfigSchema = z.object({
   toolMode: z.enum(["hybrid", "orchestration_only", "delegate_only"]).default("orchestration_only"),
   customInstructions: z.string().trim().min(1).max(16000).optional(),
+  // The reply language when nothing else decides it: the user asked for no language and their
+  // message has none of its own ("hi", an emoji), and the conversation has not established one.
+  // An English name ("German", "English", "French"). The full precedence lives in
+  // agent/reply-language.ts; this is its last step.
+  defaultLanguage: z.string().trim().min(2).max(40).default("German"),
   // When true (default), the model's own routing decision is trusted: a
   // freshness signal stays advisory instead of forcing delegation; false
   // restores the strict enforcement. The flag is read at runtime

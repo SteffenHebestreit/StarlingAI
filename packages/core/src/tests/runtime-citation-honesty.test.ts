@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
+import { warmTextLanguageDetector } from "../agent/text-language.js";
 import {
   answerPresentsSourceCitations,
   stripFabricatedCitations,
@@ -11,7 +12,11 @@ import {
   answerAssertsSpecifics,
   prependTurnIncompleteCaveat,
   prependUnverifiedQaCaveat,
+  bannerLeadsInGerman,
 } from "../agent/citation-honesty.js";
+
+// Banner languages come from the lazily loaded detector (text-language.ts).
+beforeAll(async () => { await warmTextLanguageDetector(); });
 
 // The audited fabricated answer (session 1303e254, condensed): invented 404 links produced with
 // ZERO real retrieval. The harmful, language-free signal is the clickable URL, not any phrase.
@@ -328,5 +333,36 @@ describe("prependUnverifiedQaCaveat (idempotency regression)", () => {
     const once = prependUnverifiedQaCaveat("Die Antwort mit Zahlen: 42 und 2026.");
     expect(once).toMatch(/did NOT confirm this answer against concrete evidence/);
     expect(prependUnverifiedQaCaveat(once)).toBe(once); // second call is a no-op
+  });
+});
+
+// The banner's lead language used to come from a list of German words that also matched English
+// ("it was", "the die"), consulted on the USER'S message first. So an English answer got a
+// German-first banner, and so did an English answer a German speaker had explicitly asked for.
+describe("bannerLeadsInGerman — the answer's language decides", () => {
+  it("reads an English answer as English even when it contains 'was' and 'die'", () => {
+    const answer = "The die was cast in 1714, and the gate was finished two years later by the same workshop.";
+    expect(bannerLeadsInGerman(answer)).toBe(false);
+    const out = prependTurnIncompleteCaveat(answer);
+    expect(out.indexOf("did not finish normally")).toBeLessThan(out.indexOf("nicht vollständig abgeschlossen"));
+  });
+
+  it("follows an English answer a German message asked for, not the message", () => {
+    const askedInGerman = "Erkläre mir bitte auf Englisch, was auf dieser Seite steht: https://example.com/job";
+    const englishAnswer = "The posting describes a senior data engineering role with a focus on streaming pipelines. " + "z".repeat(400);
+    expect(bannerLeadsInGerman(englishAnswer, askedInGerman)).toBe(false);
+    const out = prependUrlNotFetchedCaveat(englishAnswer, askedInGerman);
+    expect(out.indexOf("NOT fetched this turn")).toBeLessThan(out.indexOf("NICHT abgerufen"));
+  });
+
+  it("leads in German for a German answer", () => {
+    expect(bannerLeadsInGerman("Die Stelle beschreibt eine Rolle im Bereich Datenplattformen mit Schwerpunkt auf Streaming.")).toBe(true);
+  });
+
+  it("falls back to the user's message, then to the configured default, when the answer cannot be called", () => {
+    expect(bannerLeadsInGerman("42", "Wie hoch ist der Wert für das nächste Quartal?")).toBe(true);
+    expect(bannerLeadsInGerman("42", "What is the value for the next quarter?")).toBe(false);
+    // Nothing to read at all: the configured default (German unless changed).
+    expect(bannerLeadsInGerman("42", "")).toBe(true);
   });
 });

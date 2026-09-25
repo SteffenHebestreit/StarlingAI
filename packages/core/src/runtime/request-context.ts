@@ -67,6 +67,14 @@ export interface RequestContext {
   /** The model's id for the tool call executing right now, set by executeTool, so a question the
    *  tool raises can be shown next to that call. */
   toolCallId?: string;
+  /**
+   * English name of the language the person wrote this turn in ("German"), when it can be told —
+   * set by runTurn from the user's message (or, for a message with no language of its own, the
+   * previous reply) and inherited by nested turns. Only FIXED text reads it: a status line or a
+   * backstop message that no model writes. Model-written replies follow the reply-language rule
+   * instead, which also honours a language the user asked for.
+   */
+  userMessageLanguage?: string;
 }
 
 /**

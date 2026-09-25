@@ -236,9 +236,25 @@ describe("runtime turn guidance", () => {
 
   it("instructs the model to reply in the user's own language (no German default)", () => {
     // De-lex: the German-default guesser was deleted; language is decided by the LLM from
-    // the user's latest message. The per-turn instruction just echoes that rule.
-    expect(buildLanguageInstructionForTurn("Can you help me debug this issue?")).toContain("Reply in the same language");
-    expect(buildLanguageInstructionForTurn("Kannst du mir beim Debuggen helfen?")).toContain("Reply in the same language");
+    // the user's latest message. The per-turn instruction quotes it and names the rule.
+    for (const message of ["Can you help me debug this issue?", "Kannst du mir beim Debuggen helfen?"]) {
+      const instruction = buildLanguageInstructionForTurn(message);
+      expect(instruction).toContain(JSON.stringify(message));
+      expect(instruction).toContain("otherwise in the language of that message");
+    }
+  });
+
+  it("puts a language the user asked for ahead of the message's own language", () => {
+    // The bug: "Reply in the same language as that message" was the one instruction quoting the
+    // message, so it outranked "answer in English" written in German. The requested language
+    // must come FIRST and the message's language only as the fallback.
+    const instruction = buildLanguageInstructionForTurn("Erkläre mir auf Englisch, wie ein Transformer funktioniert.");
+    const asked = instruction.indexOf("the language the user asked for");
+    const mirror = instruction.indexOf("otherwise in the language of that message");
+    expect(asked).toBeGreaterThan(-1);
+    expect(mirror).toBeGreaterThan(asked);
+    expect(instruction).toContain("standing instruction earlier");
+    expect(instruction).not.toContain("Reply in the same language as that message");
   });
 
   it("enforces the documented per-turn cap for orchestration-heavy tools", () => {

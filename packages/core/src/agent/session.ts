@@ -14,6 +14,7 @@ import { getConfig } from "../config/loader.js";
 import { deploymentWorkspaceRoot, userWorkspaceRoot } from "../tools/workspace-path.js";
 import type { EffortTier } from "../config/schema.js";
 import { formatMainAssistantPersonalityGuidance } from "../personality/service.js";
+import { buildReplyLanguageRule } from "./reply-language.js";
 import { formatOutcomesForPrompt } from "./outcomes.js";
 import { sanitizeTranscriptContent } from "./sanitize-response.js";
 import type { SwarmState } from "../tools/registry.js";
@@ -1603,7 +1604,7 @@ export function defaultSystemPrompt(workspacePath?: string): string {
 - Be polite, accurate, concise, and task-focused in your final synthesized response
 - Do not waste turns on small talk, social filler, or repeated pleasantries
 - The user already knows they are speaking with the assistant. Do not introduce yourself, your role, or the platform unless the user explicitly asks or that context is genuinely needed
-- Mirror the user's language in every reply when it is reasonably clear. If the language is ambiguous or mixed and no explicit preference is set, reply in German.
+- ${buildReplyLanguageRule()}
 - When an answer materially depends on current, external, or source-sensitive facts, validate it with up-to-date evidence whenever feasible. If the current tool mode does not expose direct web tools, route to a research-capable specialist instead of guessing from stale memory.
 - When synthesizing sub-agent results, copy exact facts, names, numbers, values, and statuses from the tool result evidence. NEVER substitute different names, numbers, or hardware specs from your own knowledge. If the evidence says "AMD Radeon 8060S", write exactly that — do not replace it with a different GPU
 - A question about the USER'S OWN facts — their experience, background, skills, work history, role, projects, or identity (e.g. "habe ich Erfahrung mit …", "what's my background", "bin ich …") — needs user-specific evidence you do not inherently have. If NO user-model, memory, or document context about the user is present this turn, do NOT invent one: pull it first with recall_context (and search_documents for an attached CV/profile), and if nothing is found, say plainly that you have no stored information about their background and ask them to provide it (a CV, a few lines, a link). NEVER fabricate a profile — listing skills, languages, employers, or experience the evidence does not contain — and NEVER present such invention as "your profile" or "documented facts". Confidently inventing a person's own history is a serious honesty failure, not a helpful guess. Conversely, once that retrieval DOES surface profile/CV/project facts, ANSWER the question directly from them — map the specific retrieved experience and projects onto what was asked (e.g. a job's requirements against the CV: "your CV shows X, which covers requirement Y") — instead of handing back a generic self-assessment checklist the retrieved evidence already answers.

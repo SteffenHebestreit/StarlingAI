@@ -29,6 +29,7 @@ import {
 import { collectArtifactRecords, type ArtifactRecord } from "./artifact-metadata.js";
 import { PRODUCED_FILES_HEADER, TOOL_DECLINES_HEADER, TOOL_FAILURES_HEADER } from "./delegated-run-record.js";
 import { defangFramingMarkers } from "../guardrails/framing-markers.js";
+import { IN_REPLY_LANGUAGE } from "./reply-language.js";
 
 export function truncateForContext(value: string, maxChars: number): string {
   const normalized = collapseWhitespace(value);
@@ -371,7 +372,7 @@ function frameToolResult(
     // DESIGN request, skipping synthesis completely (audit b5107ae4).
     const researchSlice = metadata?.["researchSlice"] === true;
     const importantNote = researchSlice
-      ? "IMPORTANT: This is gathered research EVIDENCE, not the final deliverable. Write the answer to the user's ORIGINAL request yourself, in the user's language, covering EVERY part of what they asked. Ground every concrete spec, name, number, and recommendation in this evidence and keep the source URLs for the claims you use. Do NOT paste this report verbatim and do NOT invent values that are not in the evidence."
+      ? `IMPORTANT: This is gathered research EVIDENCE, not the final deliverable. Write the answer to the user's ORIGINAL request yourself, ${IN_REPLY_LANGUAGE}, covering EVERY part of what they asked. Ground every concrete spec, name, number, and recommendation in this evidence and keep the source URLs for the claims you use. Do NOT paste this report verbatim and do NOT invent values that are not in the evidence.`
       : isLongDeliverable
         ? "IMPORTANT: Present the full content below VERBATIM to the user. Reproduce EVERY row, bullet, list item, table entry, heading, name, number, date, URL, and source exactly as shown. Do NOT summarize, shorten, rephrase, omit any section, collapse rows into 'and others', insert ellipses, or add markers like '(truncated)', '(abgeschnitten)', '(cut off)', '(Zusammenfassung)' — the evidence is the FULL deliverable, not a snippet. Output it exactly as-is, preserving all headings, bullet points, tables, and structure."
         : "IMPORTANT: Relay ALL specific details from the evidence below (names, numbers, values) in your answer. Do NOT paraphrase with different numbers or names. Do NOT add markers like '(truncated)' or '(abgeschnitten)'.";
@@ -448,7 +449,7 @@ function frameToolResult(
         .filter(Boolean)
       : [];
     const completedInstruction = workflowArtifactPaths.length > 0
-      ? "IMPORTANT: The workflow's deliverables were SAVED AS FILES and are attached to this message — do NOT paste their contents into your answer. Write a SHORT final summary in the user's language: state what was completed, list EVERY artifact path below with a one-line description, and note anything the evidence marks as incomplete. Do NOT start fresh ad hoc delegation or rerun research for the same request.\n"
+      ? `IMPORTANT: The workflow's deliverables were SAVED AS FILES and are attached to this message — do NOT paste their contents into your answer. Write a SHORT final summary ${IN_REPLY_LANGUAGE}: state what was completed, list EVERY artifact path below with a one-line description, and note anything the evidence marks as incomplete. Do NOT start fresh ad hoc delegation or rerun research for the same request.\n`
         + `Artifact files (already attached):\n${workflowArtifactPaths.map((path) => `- ${path}`).join("\n")}`
       : "IMPORTANT: Treat this as executed workflow output, not a plan. Relay the concrete evidence below and do not claim extra steps were run. Do NOT start fresh ad hoc delegation, create_ephemeral_agent, or rerun research for the same request in this turn unless the workflow evidence itself identifies one smallest corrective follow-up.";
     return [

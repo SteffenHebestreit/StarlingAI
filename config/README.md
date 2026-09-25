@@ -50,12 +50,14 @@ Skills are workspace-scoped under `.starlingai/skills/<slug>/SKILL.md` (gitignor
   "agents": {
     "mainAssistant": {
       "toolMode": "orchestration_only", // hybrid | orchestration_only | delegate_only
-      "trustModelRouting": true          // see below
+      "trustModelRouting": true,         // see below
+      "defaultLanguage": "German"        // reply language of last resort, see below
     }
   }
 }
 ```
 
+- **`defaultLanguage`** (default `"German"`) — the last step of the reply-language rule (`agent/reply-language.ts`). A reply is written in the language the user asked for (in the message, or as a standing instruction earlier in the conversation or in their durable facts), otherwise in the language of their latest message; a message with no language of its own ("hi", "ok", an emoji) keeps the conversation's language. Only a conversation that has none yet falls back to this value. Definitions, tool descriptions and agent prompts stay English either way.
 - **`trustModelRouting`** (default `true`) — trusts the model's own decision to answer a turn directly; set `false` to force delegation whenever a turn is flagged freshness-sensitive. The flag is wired and tested at the runtime enforcement site (`agent/turn-setup.ts`), but the production intent classifier does not currently emit `freshnessSensitive=true` (its routing keyword tables were removed), so flipping this flag has no production effect until the classifier emits that signal — tracked in dev-plan `QPR-003`.
 - Regardless of this flag, a turn **never ends empty**: if the model is nudged to delegate but still answers directly, its draft is released (after the security output scan + redactor) rather than being blocked.
 

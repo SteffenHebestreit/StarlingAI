@@ -451,6 +451,63 @@ describe("workflow catalog tools", () => {
     }
   });
 
+  it("run_workflow hands the person's own words to the workflow's agents", async () => {
+    // The scene's task is its author's English; the words are the only place its agents can see
+    // the language the deliverable is for ("auf Englisch", or simply that the person wrote German).
+    const { tempDir, configPath } = writeTempConfig({
+      agents: { defaults: { model: { primary: "lmstudio/qwen/qwen3.5-9b" } } },
+      scenes: {
+        protocol_comparison_paper: {
+          description: "Compare protocols in one grounded paper.",
+          task: "Use mission_coordinator first. Research each protocol, then draft one paper.",
+          allowedAgents: ["mission_coordinator", "researcher", "paper_author"],
+        },
+      },
+      subAgents: {
+        mission_coordinator: { description: "Coordinates multi-step work.", tools: ["search_agents", "delegate_to_agent", "parallel_delegate", "run_task_graph"], maxIterations: 6 },
+        researcher: { description: "Finds official sources.", tools: ["web_search", "web_fetch"], maxIterations: 6 },
+        paper_author: { description: "Drafts papers.", tools: ["write_file"], maxIterations: 4 },
+      },
+    });
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const runSubAgentWithStatsMock = vi.fn(async () => ({
+      output: "done",
+      stats: {
+        agentName: "mission_coordinator",
+        sessionId: "sub:workflow-scene:mission_coordinator:test",
+        promptChars: 0,
+        userContentChars: 0,
+        toolCount: 1,
+        toolNames: ["delegate_to_agent"],
+        iterations: 1,
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        maxIterations: 6,
+        model: "lmstudio/qwen/qwen3.5-9b",
+        capabilities: ["coordination"],
+        outcome: "success",
+        terminalState: "completed",
+      },
+    }));
+    vi.doMock("../agent/sub-agent.js", () => ({ runSubAgentWithStats: runSubAgentWithStatsMock }));
+
+    const [{ getTool }] = await Promise.all([import("../tools/registry.js"), import("../tools/workflow-catalog.js")]);
+    const turnUserWords = { opening: "Schreib mir das Paper bitte auf Englisch.", midTurn: [] };
+    try {
+      const result = await getTool("run_workflow")!.execute(
+        { name: "protocol_comparison_paper", workflowType: "scene" },
+        { sessionId: "workflow-scene", workspacePath: "/workspace", allowedAgents: ["mission_coordinator", "researcher", "paper_author"], turnUserWords },
+      );
+      expect(result.success).toBe(true);
+      const bootstrapCall = (runSubAgentWithStatsMock.mock.calls as any[])[0]?.[0] as Record<string, any> | undefined;
+      expect(bootstrapCall?.turnUserWords).toBe(turnUserWords);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("run_workflow bootstraps coordinator-first scenes through a stripped inline coordinator", async () => {
     const { tempDir, configPath } = writeTempConfig({
       agents: {

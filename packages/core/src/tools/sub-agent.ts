@@ -3684,6 +3684,26 @@ export function delegationLanguageProvider(): ChatProvider {
     });
 }
 
+/**
+ * orchestration.normalizeDelegationToEnglish, for one delegated task: the English task plus an
+ * output-language line, judged from the task and the user's own words. Fail-open: the original
+ * task on any error.
+ */
+async function normalizeDelegatedTask(task: string, ctx: ToolContext): Promise<string> {
+  const normalized = await normalizeDelegationTaskLanguage({
+    task,
+    provider: delegationLanguageProvider(),
+    signal: ctx.signal,
+    ...(ctx.turnUserWords ? { userWords: ctx.turnUserWords } : {}),
+  });
+  if (!normalized.changed) return task;
+  logAudit("delegation_task_normalized_to_english", {
+    sourceLanguage: normalized.sourceLanguage,
+    outputLanguage: normalized.outputLanguage,
+  }, { sessionId: ctx.sessionId, severity: "info" });
+  return normalized.task;
+}
+
 // ─── delegate_to_agent ────────────────────────────────────────────────────────
 
 registerTool({
@@ -3727,13 +3747,9 @@ registerTool({
     const context = args["context"] ? String(args["context"]) : undefined;
     // Work internally in English: translate a non-English task to English for routing +
     // the sub-agent's work, carrying an output-language directive so the deliverable still
-    // comes back in the user's language. Context evidence is left verbatim. Gated, fail-open.
+    // comes back in the language the user wants. Context evidence is left verbatim. Gated, fail-open.
     if (task && effectiveOrchestration().normalizeDelegationToEnglish) {
-      const normalized = await normalizeDelegationTaskLanguage({ task, provider: delegationLanguageProvider(), signal: ctx.signal });
-      if (normalized.sourceLanguage !== "English") {
-        logAudit("delegation_task_normalized_to_english", { sourceLanguage: normalized.sourceLanguage }, { sessionId: ctx.sessionId, severity: "info" });
-        task = normalized.task;
-      }
+      task = await normalizeDelegatedTask(task, ctx);
     }
     const explicitFallbackAgents = Array.isArray(args["fallbackAgents"]) ? args["fallbackAgents"].map(String) : undefined;
     const routingQuery = args["routingQuery"] ? String(args["routingQuery"]) : undefined;
@@ -3828,11 +3844,7 @@ registerTool({
     // Work internally in English (same as the directed path): translate a non-English task
     // for routing + the sub-agent's work, with an output-language directive. Gated, fail-open.
     if (task && effectiveOrchestration().normalizeDelegationToEnglish) {
-      const normalized = await normalizeDelegationTaskLanguage({ task, provider: delegationLanguageProvider(), signal: ctx.signal });
-      if (normalized.sourceLanguage !== "English") {
-        logAudit("delegation_task_normalized_to_english", { sourceLanguage: normalized.sourceLanguage }, { sessionId: ctx.sessionId, severity: "info" });
-        task = normalized.task;
-      }
+      task = await normalizeDelegatedTask(task, ctx);
     }
     const routingQuery = args["routingQuery"] ? String(args["routingQuery"]) : undefined;
     const skillMatchThreshold = typeof args["skillMatchThreshold"] === "number" ? args["skillMatchThreshold"] : undefined;

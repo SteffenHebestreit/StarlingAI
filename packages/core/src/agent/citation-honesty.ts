@@ -1,3 +1,6 @@
+import { IN_REPLY_LANGUAGE, defaultReplyLanguage } from "./reply-language.js";
+import { detectTextLanguage } from "./text-language.js";
+
 // isBroadSourceSensitiveAdvisoryRequest (a bilingual product/BOM/wiring/quality keyword scorer)
 // was DELETED in the de-lexicalization: it was a per-language keyword table and its only caller
 // (hasRecentSparseSourceSensitiveMemoryReuse) sat behind the always-false sourceSensitive gate.
@@ -26,11 +29,11 @@ export function buildSynthesisRequiredDirective(opts: {
   if (artifactPaths.length > 0) {
     return "[SYNTHESIS REQUIRED] The orchestration is COMPLETE and its deliverables are attached to this message as files ("
       + artifactPaths.slice(0, 12).join(", ")
-      + "). Write a SHORT final answer in the user's language: state what was completed, list each attached artifact with a one-line description, and note anything the evidence marks as incomplete. Do NOT paste the documents' contents into the chat and do NOT delegate again.";
+      + `). Write a SHORT final answer ${IN_REPLY_LANGUAGE}: state what was completed, list each attached artifact with a one-line description, and note anything the evidence marks as incomplete. Do NOT paste the documents' contents into the chat and do NOT delegate again.`;
   }
   if (opts.partialEvidence) {
     return "[SYNTHESIS REQUIRED] The research for this turn did NOT complete — the evidence above is PARTIAL and is probably missing the specifics the request needs. "
-      + "Write the most useful answer you honestly can in the user's language, but follow the quality rule strictly: state a concrete fact — a spec, interface, rating, dimension, price, part number, model name, URL, or figure — as confirmed ONLY if it appears verbatim in the evidence above. "
+      + `Write the most useful answer you honestly can ${IN_REPLY_LANGUAGE}, but follow the quality rule strictly: state a concrete fact — a spec, interface, rating, dimension, price, part number, model name, URL, or figure — as confirmed ONLY if it appears verbatim in the evidence above. `
       + "For anything NOT in that evidence, including details you believe you already know, do NOT present it as verified: either omit it, or clearly mark it as UNVERIFIED and say it must be checked against the official datasheet/source. "
       + "Never invent a value to fill a gap. A shorter answer that cleanly separates confirmed facts from unverified suggestions is BETTER than a complete-looking one that fabricates specifics. Do NOT delegate again.";
   }
@@ -40,11 +43,20 @@ export function buildSynthesisRequiredDirective(opts: {
     + "Copy the exact names, numbers, values, task states, and statuses from the evidence into your answer.";
 }
 
-/** Lightweight German detection to localize the unverified-answer caveat. */
-export function answerLooksGerman(text: string): boolean {
-  const t = text.toLowerCase();
-  if (/[äöüß]/.test(t)) return true;
-  return /\b(ich|und|der|die|das|nicht|mit|für|oder|eine?|brauche|möchte|wie|was|kann|mir|dein|deine|ist|sind)\b/.test(t);
+/**
+ * Should a banner on this answer lead with German? The ANSWER decides, because it is written in
+ * the reply language, which is not always the language the user wrote in: a German request for
+ * an English answer gets an English answer, and its banner must lead in English too. The user's
+ * message is consulted only when the answer itself cannot be called.
+ *
+ * This replaced a list of German words that also matched English ("it was", "the die"), so an
+ * ordinary English answer got a German-first banner. text-language.ts explains the detector. When
+ * neither text can be called (or the detector is not loaded yet), the configured default decides.
+ */
+export function bannerLeadsInGerman(answer: string, userMessage = ""): boolean {
+  const detected = detectTextLanguage(answer) ?? detectTextLanguage(userMessage);
+  if (detected) return detected.code === "de";
+  return defaultReplyLanguage().trim().toLowerCase() === "german";
 }
 
 /**
@@ -59,7 +71,7 @@ export function prependUnverifiedSourceCaveat(answer: string, userMessage: strin
   if (answer.includes("NICHT mit aktuellen Online-Quellen") || answer.includes("NOT verified against live web sources")) {
     return answer;
   }
-  const german = answerLooksGerman(userMessage) || answerLooksGerman(answer);
+  const german = bannerLeadsInGerman(answer, userMessage);
   const caveat = german
     ? "> ⚠️ **Ungeprüft:** Diese Antwort beruht auf allgemeinem Wissen und wurde NICHT mit aktuellen Online-Quellen verifiziert. Behandle konkrete Teilenummern, Spezifikationen, Preise und Herstellerangaben als unbestätigte Annahmen, die vor dem Verlass darauf noch zu prüfen sind."
     : "> ⚠️ **Unverified:** This answer is based on general knowledge and was NOT verified against live web sources. Treat specific part numbers, specifications, prices, and manufacturer claims as unconfirmed assumptions to verify before relying on them.";
@@ -87,7 +99,7 @@ export function prependTurnIncompleteCaveat(text: string): string {
   if (text.includes("did not finish normally")) {
     return text;
   }
-  const german = answerLooksGerman(text);
+  const german = bannerLeadsInGerman(text);
   const de =
     "> ⚠️ **Dieser Durchlauf wurde nicht vollständig abgeschlossen** — der Inhalt unten ist ein "
     + "UNVOLLSTÄNDIGER Entwurf aus nicht abgeschlossener Arbeit und wurde NICHT gegen Quellen verifiziert. "
@@ -108,7 +120,7 @@ export function prependTurnIncompleteCaveat(text: string): string {
  * Caveat for a QA-gate PASS that carried no verifiable evidence (orchestration.qaEvidenceRequired).
  * Unlike prependTurnIncompleteCaveat, the run DID finish normally — the honest gap is only that the
  * reviewer could not ground its PASS in a concrete tool-result/artifact fact, so the answer must not
- * be presented as QA-confirmed. Same structural bilingual shape (language chosen by answerLooksGerman,
+ * be presented as QA-confirmed. Same structural bilingual shape (language chosen by bannerLeadsInGerman,
  * both languages emitted so a third-language reader still gets it) and sentinel-phrase dedup. Pure.
  */
 export function prependUnverifiedQaCaveat(text: string): string {
@@ -119,7 +131,7 @@ export function prependUnverifiedQaCaveat(text: string): string {
   if (text.includes("did NOT confirm this answer against concrete evidence")) {
     return text;
   }
-  const german = answerLooksGerman(text);
+  const german = bannerLeadsInGerman(text);
   const de =
     "> ⚠️ **Nicht verifiziert** — die Qualitätsprüfung hat diese Antwort NICHT gegen konkrete Nachweise "
     + "(Tool-Ergebnisse, Artefakte) bestätigt. Behandle konkrete Angaben (Daten, Zahlen, Quellen) als unbestätigt.";
@@ -302,7 +314,7 @@ export function prependUrlNotFetchedCaveat(text: string, userMessage = ""): stri
   ) {
     return text;
   }
-  const german = answerLooksGerman(userMessage) || answerLooksGerman(text);
+  const german = bannerLeadsInGerman(text, userMessage);
   const de =
     "> ⚠️ **Die verlinkte Seite wurde in diesem Durchlauf NICHT abgerufen** — alle darauf bezogenen "
     + "Angaben sind daher ungeprüft und möglicherweise erfunden. Bitte lass mich die Seite tatsächlich "
@@ -310,7 +322,7 @@ export function prependUrlNotFetchedCaveat(text: string, userMessage = ""): stri
   const en =
     "> ⚠️ **The linked page was NOT fetched this turn** — any details attributed to it are unverified and "
     + "may be fabricated. Ask me to fetch it for a grounded answer.";
-  // Bilingual, but lead with the user's language; the secondary line is parenthesized+italic.
+  // Bilingual, but lead with the answer's language; the secondary line is parenthesized+italic.
   const caveat = german
     ? `${de}\n> _(${en.replace(/^> /, "")})_`
     : `${en}\n> _(${de.replace(/^> /, "")})_`;

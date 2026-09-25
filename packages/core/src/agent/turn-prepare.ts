@@ -29,6 +29,7 @@ import { buildDynamicTurnGuidance, extractAssistantName } from "./intent-classif
 import { buildProfileBiasedQuery } from "./user-profile-prefetch.js";
 import { timedPhase, type TurnPerformanceMetrics } from "./turn-metrics.js";
 import type { RunTurnOptions, TurnOutput } from "./turn-types.js";
+import { lastAssistantReplyText } from "./reply-language.js";
 
 const log = childLogger("agent:runtime");
 
@@ -201,8 +202,11 @@ export async function prepareReceptionistFastLane(args: {
 }): Promise<TurnOutput | null> {
   const { eligible, userMessage, signal, opts, session, guardrailEvents, turnStartedAt } = args;
   if (!eligible) return null;
+  // The user's message is already recorded, so this is the reply before it: the language anchor
+  // for a message that carries none of its own.
+  const previousReply = lastAssistantReplyText(session.getHistory());
   const fastLane = await timedPhase("receptionistFastLane", () =>
-    tryReceptionistFastLaneDetailed(userMessage, signal).catch(
+    tryReceptionistFastLaneDetailed(userMessage, signal, previousReply ? { previousReply } : {}).catch(
       (): { handled: false; escalateReason: string } => ({ handled: false, escalateReason: "error" }),
     ),
   );

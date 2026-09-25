@@ -148,6 +148,7 @@ import {
 // from runtime.js (runtime-delegation-loop.test.ts, runtime-guidance.test.ts) keep working.
 export { buildModelVisibleToolResult } from "./tool-result-format.js";
 import { stripDelegatedRunRecord } from "./delegated-run-record.js";
+import { IN_REPLY_LANGUAGE, buildReplyLanguageRule, detectTurnUserLanguage, localizedFixedText } from "./reply-language.js";
 
 // Turn-preparation phases + the blocked() early-exit builder (god-file seam): the
 // pre-loop setup phases of _runTurn and the shared blocked() TurnOutput builder live
@@ -538,7 +539,7 @@ async function finalizeUserFacingAssistantResponse(
       provider,
       signal,
       "You have already executed the necessary tools. Write the final user-facing answer now."
-      + " Synthesize the tool results and [SHARED FINDINGS AVAILABLE] entries into a complete, well-structured answer in the user's language."
+      + ` Synthesize the tool results and [SHARED FINDINGS AVAILABLE] entries into a complete, well-structured answer ${IN_REPLY_LANGUAGE}.`
       + " Do NOT echo raw shared-finding key names (e.g. auto_xxx_yyy) — convert them into readable sentences."
       + " Do NOT narrate searches, fetches, document generation, or tool calls. Never include literal [Tool: ...] traces.",
     );
@@ -1132,6 +1133,10 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
     // So is the turn id, which every turn has: the chat's request id, the one a gateway set around
     // this call, or the enclosing turn's for a nested one; a fresh one for a turn nobody named.
     const turnId = userInput?.turnId ?? currentRequestContext()?.turnId ?? randomUUID();
+    // The person's language, for fixed text only (status lines, backstop messages). Inherited by a
+    // nested turn, whose "message" is a workflow step written by the swarm, not by the person.
+    const userMessageLanguage = currentRequestContext()?.userMessageLanguage
+      ?? detectTurnUserLanguage(opts.userMessage, opts.session.getHistory());
     return await runWithRequestContext(
       {
         userId: opts.session.userId,
@@ -1142,6 +1147,7 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
         turnId,
         // Not inherited: a nested turn writes to its own session, which no chat.send started.
         ...(opts.requestId ? { chatRequestId: opts.requestId } : {}),
+        ...(userMessageLanguage ? { userMessageLanguage } : {}),
       },
       () => runWithPhaseTimings(() => runTurnImpl(opts)),
     );
@@ -2506,7 +2512,14 @@ async function _runTurn(
             reason: oversight.reason,
             directive: oversight.directive.slice(0, 300),
           }, { sessionId: session.id, channel: session.channel, severity: "warn" });
-          opts.onStatus?.({ phase: "oversight", message: "Fortschritts-Check: Ich korrigiere den Kurs, um den Auftrag noch abzuschließen.", iteration: iterationCount });
+          opts.onStatus?.({
+            phase: "oversight",
+            message: localizedFixedText({
+              de: "Fortschritts-Check: Ich korrigiere den Kurs, um den Auftrag noch abzuschließen.",
+              en: "Progress check: correcting course to still finish the task.",
+            }),
+            iteration: iterationCount,
+          });
         } else if (oversight.verdict !== "on_track") {
           // STUCK, or a redirect was already tried and the turn is STILL not progressing →
           // never-empty floor: deliver the best result obtainable from what already exists.
@@ -2521,7 +2534,7 @@ async function _runTurn(
           const synthesized = await forceSynthesis(
             session, provider, signal,
             "A progress monitor determined this max-effort turn can no longer make progress. "
-            + "Using ONLY what has already been gathered and any files already produced this turn, deliver the most complete, useful result you can NOW, in the user's language. "
+            + `Using ONLY what has already been gathered and any files already produced this turn, deliver the most complete, useful result you can NOW, ${IN_REPLY_LANGUAGE}. `
             + "If a file was produced but is incomplete, say so plainly and give its path. Be explicit about what is done and what is not. Do NOT paste large code blocks.",
           );
           if (synthesized) {
@@ -3400,10 +3413,10 @@ async function _runTurn(
         // the paper's TOC ending in "…"). Pivot to a completion summary.
         const rejectedTurnArtifacts = collectTurnArtifactAttachments(session);
         terminalSynthesisInstruction = rejectedTurnArtifacts.length > 0
-          ? "THE WORK IS COMPLETE — WRITE THE FINAL SUMMARY NOW. The deliverables were already built and are ATTACHED to this message as files. Do NOT call any more tools and do NOT paste the documents' contents into the chat. Write a SHORT final answer in the user's language that: (1) states what was completed, (2) lists every attached artifact path with a one-line description ("
+          ? `THE WORK IS COMPLETE — WRITE THE FINAL SUMMARY NOW. The deliverables were already built and are ATTACHED to this message as files. Do NOT call any more tools and do NOT paste the documents' contents into the chat. Write a SHORT final answer ${IN_REPLY_LANGUAGE} that: (1) states what was completed, (2) lists every attached artifact path with a one-line description (`
             + rejectedTurnArtifacts.map((artifact) => String(artifact["relativePath"] ?? artifact["filename"] ?? "artifact")).slice(0, 12).join(", ")
             + "), and (3) notes anything the evidence explicitly marks as incomplete. Nothing more."
-          : "RESEARCH INCOMPLETE — WRITE A PARTIAL ANSWER NOW. The delegated research ran out of time before covering all topics. Do NOT call any more tools. Do NOT write raw search snippets or tool-trace text. Instead write a proper user-facing answer in the user's language that: (1) clearly states the research was incomplete and which topics still need verification, (2) presents every concrete verified fact that IS in the tool results and shared findings above as a structured answer (component names, specs, prices, sources — whatever was found), (3) explicitly marks sections as [unverifiziert — Recherche unvollständig] when no evidence was found for them, and (4) asks the user whether to retry the missing sections. Never dump raw 'Web Search Results for:' blocks. Convert all search snippet evidence into readable prose or a structured list.";
+          : `RESEARCH INCOMPLETE — WRITE A PARTIAL ANSWER NOW. The delegated research ran out of time before covering all topics. Do NOT call any more tools. Do NOT write raw search snippets or tool-trace text. Instead write a proper user-facing answer ${IN_REPLY_LANGUAGE} that: (1) clearly states the research was incomplete and which topics still need verification, (2) presents every concrete verified fact that IS in the tool results and shared findings above as a structured answer (component names, specs, prices, sources — whatever was found), (3) explicitly marks sections as [unverified — research incomplete], worded in that same language, when no evidence was found for them, and (4) asks the user whether to retry the missing sections. Never dump raw 'Web Search Results for:' blocks. Convert all search snippet evidence into readable prose or a structured list.`;
         opts.onStatus?.({ phase: "synthesizing", message: "Stopping repeated tool calls and writing the answer from gathered evidence.", iteration: iterationCount });
         log.warn({ sessionId: session.id, toolCalls: llmResponse.tool_calls.map((toolCall) => toolCall.name) }, "Model attempted more tool calls after synthesis was required — forcing synthesis");
         break;
@@ -3713,7 +3726,7 @@ async function _runTurn(
               provider,
               signal,
               "WEB RESEARCH RESULTS — synthesize the final answer now. A research specialist gathered the findings below for the user's request. "
-              + "Write the complete answer in the SAME language as the user's request, grounded ONLY in these findings and this conversation's tool results. "
+              + `Write the complete answer ${IN_REPLY_LANGUAGE}, grounded ONLY in these findings and this conversation's tool results. `
               + "Do not invent any specifics — names, numbers, dates, sources, or claims — beyond the findings; mark anything the findings do not cover as still to verify.\n"
               + "Findings:\n" + recovery.evidence.slice(0, 6_000),
             );
@@ -3762,7 +3775,7 @@ async function _runTurn(
         const honest = await forceSynthesis(
           session, provider, signal,
           "Your draft re-pasted an earlier turn's answer almost verbatim, which falsely implies the user's NEW request in THIS turn was already carried out — but this turn neither produced nor delegated anything. Do NOT ship that stale copy. "
-          + "Reply briefly and honestly IN THE USER'S LANGUAGE: state that the requested deliverable was NOT built or changed in this turn, and offer to delegate it now to the right specialist (for an HTML/web learning app, content_writer or web_coder). "
+          + `Reply briefly and honestly ${IN_REPLY_LANGUAGE}: state that the requested deliverable was NOT built or changed in this turn, and offer to delegate it now to the right specialist (for an HTML/web learning app, content_writer or web_coder). `
           + "Do NOT re-paste the earlier answer, do NOT invent a file path, and do NOT claim a success you cannot point to in this turn's own results.",
         );
         const honestClean = honest ? sanitizeUserFacingAssistantResponse(honest, iterationCount) : null;
@@ -4808,7 +4821,7 @@ async function _runTurn(
           terminalFinishReason = "delegation_failures_terminal";
           terminalSynthesisInstruction =
             "Two or more consecutive delegation attempts failed this turn, so no further delegation will be attempted. " +
-            "Using ONLY the evidence already gathered in this conversation (including any shared findings), write the best possible final answer NOW, in the user's language. " +
+            `Using ONLY the evidence already gathered in this conversation (including any shared findings), write the best possible final answer NOW, ${IN_REPLY_LANGUAGE}. ` +
             "If no usable evidence exists, tell the user honestly that the information could not be retrieved and suggest a concrete next step. " +
             "Do NOT re-paste an earlier turn's answer as if new work was completed.";
           break;
@@ -4979,7 +4992,7 @@ async function _runTurn(
     const honest = await forceSynthesis(
       session, provider, signal,
       "Your previous draft re-pasted an earlier turn's answer almost verbatim, which falsely implies the user's NEW request in THIS turn was already carried out. Do NOT ship that stale copy. "
-      + "Reply briefly and honestly IN THE USER'S LANGUAGE: describe only what actually happened in THIS turn (what, if anything, was produced or attempted this turn), and if the requested change was NOT applied to the deliverable, say so plainly and offer to delegate it to the right specialist so it gets done. "
+      + `Reply briefly and honestly ${IN_REPLY_LANGUAGE}: describe only what actually happened in THIS turn (what, if anything, was produced or attempted this turn), and if the requested change was NOT applied to the deliverable, say so plainly and offer to delegate it to the right specialist so it gets done. `
       + "Do NOT re-paste the earlier deliverable as if it had been updated, do NOT invent a file path, and do NOT claim a success you cannot point to in this turn's own results.",
     );
     synthesized = (honest && !looksLikeRegurgitatedPriorAnswer(honest, session.getHistory()))
@@ -5304,7 +5317,7 @@ export function buildLeanSynthesisPrompt(opts: { assistantName?: string } = {}):
   return [
     "You are the main assistant inside StarlingAI. The orchestration for this turn is done — you are now writing the FINAL answer for the user from the evidence already gathered in this conversation (tool results and shared findings). You have no tools in this step: do not plan, route, delegate, or describe next actions; just deliver the answer.",
     opts.assistantName ? `Be direct, accurate, and concise. If asked your name, you are "${opts.assistantName}".` : "Be direct, accurate, and concise.",
-    "Reply in the user's language. Format in Markdown — use headings, lists, tables, and fenced code blocks with language tags where they add clarity.",
+    `${buildReplyLanguageRule()} Format in Markdown — use headings, lists, tables, and fenced code blocks with language tags where they add clarity.`,
     "GROUNDING: copy exact facts, names, numbers, values, statuses, and URLs from the tool-result evidence; never substitute values from your own knowledge. If a claim is not supported by the evidence in this conversation, omit it or mark it unverified.",
     "FULL COVERAGE: when the evidence is a list, table, or multi-source set, include EVERY item and EVERY source — do not keep only the first, drop the second half, or replace items with 'and others'.",
     "Never claim the evidence is 'truncated', 'cut off', 'abgeschnitten', or 'not visible' — the full results are in your context; relay every item, number, and URL, and do not append markers like '(truncated)'.",
@@ -5606,7 +5619,7 @@ async function runQaDeliveryGate(
   const improve = async (current: string, flaws: string): Promise<string | null> => {
     if (signal.aborted) return null;
     const instruction = "QA REVIEW found that your previous answer does not yet meet the task's acceptance criteria. "
-      + "Fix ONLY these flaws while keeping everything that was already correct, in the SAME language as the user's request:\n"
+      + `Fix ONLY these flaws while keeping everything that was already correct, ${IN_REPLY_LANGUAGE}:\n`
       + flaws
       + "\nReturn the COMPLETE corrected answer (not a diff, not a note). Ground every claim in this conversation's tool results and shared findings; do not invent facts to satisfy a criterion — if something genuinely cannot be verified, mark it unverified rather than fabricating it.";
     // forceSynthesis labels the call "synthesis"; the agent name says which rewrite it was.

@@ -21,6 +21,7 @@ import { getConfig } from "../config/loader.js";
 import { loadMainAssistantPersonality } from "../personality/service.js";
 import type { MainAssistantToolMode } from "./default-tools.js";
 import { PRODUCT } from "../product/index.js";
+import { buildTurnReplyLanguageInstruction } from "./reply-language.js";
 
 // ── Intent term / pattern tables ─────────────────────────────────────────────
 //
@@ -339,8 +340,7 @@ function computeDynamicTurnGuidance(userMessage: string): DynamicTurnGuidance | 
 
 export function buildLanguageAndIdentityTurnGuidance(userMessage: string): string {
   const profile = loadMainAssistantPersonality();
-  const compactMessage = userMessage.trim().replace(/\s+/g, " ").slice(0, 280);
-  const languageInstruction = buildLanguageInstructionForTurn(compactMessage);
+  const languageInstruction = buildLanguageInstructionForTurn(userMessage);
   const behaviorInstruction = "Be polite, brief, and efficient. Avoid small talk, filler, and unnecessary pleasantries. Do not introduce yourself or mention your name unless the user explicitly asks. The user already knows they are speaking to the assistant.";
   const nameInstruction = profile.identity.name
     ? `If the user explicitly asks for your name or what to call you, use ${JSON.stringify(profile.identity.name)} as your assistant name. Do not call yourself ${JSON.stringify(PRODUCT.name)} in conversation unless the user is explicitly asking about the product or platform name.`
@@ -352,10 +352,13 @@ export function buildLanguageAndIdentityTurnGuidance(userMessage: string): strin
 // DELETED in the de-lexicalization. Language is decided by the LLM from the user's latest
 // message in any language — never a keyword table that defaulted ambiguous openings to German.
 
+/**
+ * The reply-language line for this turn. It used to say only "reply in the same language as that
+ * message", and as the one instruction that quotes the message it outranked everything else: a
+ * German message asking for an English answer got German. The precedence is in reply-language.ts.
+ */
 export function buildLanguageInstructionForTurn(userMessage: string): string {
-  const compactMessage = userMessage.trim().replace(/\s+/g, " ").slice(0, 280);
-  if (!compactMessage) return "Reply in the same language as the user's latest message.";
-  return `The user's latest message is ${JSON.stringify(compactMessage)}. Reply in the same language as that message.`;
+  return buildTurnReplyLanguageInstruction(userMessage);
 }
 
 // ── Soft routing enforcement ──────────────────────────────────────────────────

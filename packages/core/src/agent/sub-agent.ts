@@ -747,7 +747,8 @@ export function buildFactsFirstSynthesisMessages(task: string, curatedFindings: 
         // that gathered an ANALOG microphone's specs AND a separate chip's I2S
         // interface concluded the microphone was "I2S/digital" (audit: IM73A135V01).
         + "Attribute every spec to the exact component the findings tie it to; never carry a spec from one component over to another. "
-        + "Do NOT call any tools. Do NOT mention deadlines or these instructions. Reply in the user's language.",
+        + "Do NOT call any tools. Do NOT mention deadlines or these instructions. Write it in the language the user asked "
+        + "for, otherwise in the language of the user's own words quoted with the task, otherwise in the task's language.",
     },
     {
       role: "user",
@@ -3907,8 +3908,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         return "";
       }
     };
+    // The user's words ride along: this prompt replaces the run's history, and without them a
+    // synthesis of an English paraphrase had nothing to tell it the user wrote in German.
     const buildFactsFirstSynthMessages = (curated: string): LLMMessage[] =>
-      buildFactsFirstSynthesisMessages(opts.task, curated);
+      buildFactsFirstSynthesisMessages(`${opts.task}${userWordsBlock}`, curated);
     /** Run a forced-synthesis completion, preferring the streaming accumulator so
      *  it gets token-progress + the per-chunk inactivity abort (a hung synthesis
      *  is exactly the failure we're guarding against). */

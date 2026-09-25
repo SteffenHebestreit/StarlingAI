@@ -61,6 +61,7 @@ import {
 } from "./citation-honesty.js";
 import { applyCitationHonestyGuard } from "./turn-terminal-guards.js";
 import { findRecentDelegateEvidence } from "./interrupted-delegation-evidence.js";
+import { IN_REPLY_LANGUAGE } from "./reply-language.js";
 import {
   hasRecentSourceSensitivePartialDelegation,
 } from "./source-sensitive-enforcement.js";
@@ -249,7 +250,7 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
         session,
         provider,
         signal,
-        "Research specialists have gathered findings during this turn. Synthesize all [SHARED FINDINGS AVAILABLE] entries and the recovered evidence below into a complete, well-structured answer in the user's language.\n"
+        `Research specialists have gathered findings during this turn. Synthesize all [SHARED FINDINGS AVAILABLE] entries and the recovered evidence below into a complete, well-structured answer ${IN_REPLY_LANGUAGE}.\n`
         + "Do NOT echo raw key names (e.g. auto_xxx_yyy). Convert every finding into readable, user-facing prose.\n"
         + "Recovered evidence:\n" + recoveryEvidence.evidence.slice(0, 5_000),
       );
@@ -388,7 +389,7 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
     const honest = await ctx.forceSynthesis(
       session, provider, signal,
       "Your draft claims the requested file/presentation/document was created, updated, inserted, or embedded — OR it re-pastes an earlier turn's answer almost verbatim — but NOTHING was actually written to the workspace in THIS turn (no file was produced). Do NOT claim it was created or changed and do NOT re-post a previous turn's answer as if this turn's request were done. "
-      + "Reply briefly and honestly IN THE USER'S LANGUAGE: state plainly that the artifact was NOT created or modified this turn, summarize what you actually DID (e.g. gathered/listed information), and offer to have the content specialist build or update the file now. Do NOT invent a file path and do NOT restate a success you cannot point to in this turn's own results.",
+      + `Reply briefly and honestly ${IN_REPLY_LANGUAGE}: state plainly that the artifact was NOT created or modified this turn, summarize what you actually DID (e.g. gathered/listed information), and offer to have the content specialist build or update the file now. Do NOT invent a file path and do NOT restate a success you cannot point to in this turn's own results.`,
     );
     const candidate = honest ? sanitizeUserFacingAssistantResponse(honest, iterationCount) : null;
     finalResponse = (candidate && candidate.trim().length >= 40
@@ -444,7 +445,7 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
       evidenceAnchoringRepairRan = true;
       const anchorInstruction = [
         "EVIDENCE-ANCHORING REPAIR:",
-        "Your previous answer did not reference the verified findings this run gathered. Re-write the answer so it is grounded in the findings below, in the SAME language as the user's request.",
+        `Your previous answer did not reference the verified findings this run gathered. Re-write the answer so it is grounded in the findings below, ${IN_REPLY_LANGUAGE}.`,
         "Use ONLY these findings plus this conversation's tool results. Do not invent any specifics — names, numbers, dates, sources, or claims — beyond them. Mark anything the findings do not support as unverified/incomplete.",
         "Keep it a concise, useful answer — do not dump raw tool traces or page snapshots.",
         "Verified findings:",
@@ -529,8 +530,8 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
             if (signal.aborted) return null;
             const task = "QA RE-PLAN — the delivered answer STILL fails these acceptance criteria after a rewrite, "
               + "which means the gap needs real work, not re-wording. Make a focused plan to fix EXACTLY these flaws "
-              + "and execute it (re-research or re-build as needed), then return the COMPLETE corrected deliverable in "
-              + "the user's language. Ground every claim in tool results; do not fabricate to satisfy a criterion — if "
+              + "and execute it (re-research or re-build as needed), then return the COMPLETE corrected deliverable "
+              + `${IN_REPLY_LANGUAGE}. Ground every claim in tool results; do not fabricate to satisfy a criterion — if `
               + "something genuinely cannot be verified, say so.\n\nUnmet criteria / flaws:\n" + flaws
               + "\n\nAcceptance criteria:\n" + crit.map((c, i) => `${i + 1}. ${c}`).join("\n")
               + "\n\nCurrent answer to improve:\n" + current.slice(0, 6_000);

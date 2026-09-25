@@ -54,6 +54,7 @@ import { childLogger } from "../logger.js";
 import { handleSlackEvent } from "../channels/slack.js";
 import { handleWhatsappEvent, handleWhatsappVerify } from "../channels/whatsapp.js";
 import { buildSpeechSummarySystemPrompt, buildSpeechSummaryUserPrompt } from "./speech-summary.js";
+import { warmTextLanguageDetector } from "../agent/text-language.js";
 import { getRuntimeStatusSnapshot } from "../runtime/status.js";
 import { getModelEndpointHealthSnapshot, syncModelEndpointRuntimeStatus } from "../runtime/model-endpoints.js";
 import { getDeadLetterCount, readDeadLetters } from "../channels/dead-letter.js";
@@ -2502,6 +2503,8 @@ export function createGateway() {
     try {
       const { getChatProvider } = await import("../providers/index.js");
       const provider = getChatProvider();
+      // The prompt names the reply's language; the detector is normally loaded at boot already.
+      await warmTextLanguageDetector();
       const llmResponse = await provider.complete(
         [
           {

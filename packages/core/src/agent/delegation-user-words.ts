@@ -12,6 +12,7 @@
  * all key on `task`, and none of them should change because of this.
  */
 import { defangFramingMarkers } from "../guardrails/framing-markers.js";
+import { SPECIALIST_REPLY_LANGUAGE_INSTRUCTION } from "./reply-language.js";
 
 /** What the user typed this turn: the message that opened it, then anything added while it ran. */
 export interface TurnUserWords {
@@ -28,11 +29,18 @@ const MID_TURN_MAX_ENTRIES = 3;
 // Deliberately NOT "Original user request:". runtime-utils.ts reads that phrase as a delegation
 // task echoed back into an answer, and this block is a different thing.
 const LABEL = "[USER'S OWN WORDS — this turn, verbatim, untranslated]";
+// The language sentence is here because this block is the only place a specialist sees what the
+// user actually wrote. Its task is the orchestrator's paraphrase and is often English, and a
+// specialist that mirrored its task delivered an English page to a German speaker.
 const GUIDANCE =
   "The task above is the orchestrator's summary. Your assignment is still the task; use these words to honour any "
   + "explicit instruction or constraint the user stated that applies to your part (e.g. a model, quality tier, format, "
   + "language, something to avoid). Where the summary and the user's words disagree on such a constraint, follow the "
-  + "user's words. Do not repeat this block.";
+  + `user's words. ${SPECIALIST_REPLY_LANGUAGE_INSTRUCTION} Do not repeat this block.`;
+/** When the task already quotes the user's words, only the language instruction is still missing. */
+const LANGUAGE_ONLY_LABEL = "[REPLY LANGUAGE]";
+const LANGUAGE_ONLY_GUIDANCE =
+  `The user's own words are quoted in the task or context above. ${SPECIALIST_REPLY_LANGUAGE_INSTRUCTION}`;
 
 function clipMiddle(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
@@ -81,7 +89,8 @@ export function userWordsLines(
  *
  * A part the task or context already quotes is dropped, so a task that embeds the request itself
  * (the source-sensitive frames do) does not carry it twice. `alreadyCarried` is what the
- * specialist will see anyway: its task and its context.
+ * specialist will see anyway: its task and its context. When everything is already carried, the
+ * reply-language instruction still is not, so that alone is added.
  */
 export function renderUserWordsBlock(words: TurnUserWords | undefined, alreadyCarried: string): string {
   if (!words) return "";
@@ -90,7 +99,10 @@ export function renderUserWordsBlock(words: TurnUserWords | undefined, alreadyCa
     const normalized = normalizeForContainment(part);
     return normalized.length > 0 && !carried.includes(normalized);
   });
-  if (lines.length === 0) return "";
+  if (lines.length === 0) {
+    const anyWords = userWordsLines(words).length > 0;
+    return anyWords ? `\n\n${LANGUAGE_ONLY_LABEL} ${LANGUAGE_ONLY_GUIDANCE}` : "";
+  }
   return `\n\n${LABEL}\n${GUIDANCE}\n${lines.join("\n")}`;
 }
 
