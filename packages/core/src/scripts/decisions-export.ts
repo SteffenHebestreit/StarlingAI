@@ -97,7 +97,10 @@ async function main(): Promise<void> {
     console.log(`No decision ledger at ${ledger} yet.`);
     return;
   }
-  const items = buildTrainingItems(await readLedgerRows(ledger), pointList ? new Set(pointList.split(",")) : undefined);
+  // Beside the ledger: the incumbents' labels for synthetic messages (decisions:bootstrap), training data only.
+  const bootstrap = join(dirname(ledger), "bootstrap-ledger.jsonl");
+  const rows = [...await readLedgerRows(bootstrap), ...await readLedgerRows(ledger)];
+  const items = buildTrainingItems(rows, pointList ? new Set(pointList.split(",")) : undefined);
   await writeJsonl(out, items);
   const counts: Record<string, number> = {};
   for (const item of items) counts[`${item.point}/${item.language}`] = (counts[`${item.point}/${item.language}`] ?? 0) + 1;

@@ -123,6 +123,96 @@ describe("the sub-agent's goal-met check", () => {
   });
 });
 
+/** A model answering `reply` after `ms`; remembers whether it was called and aborted. */
+function modelAnswering(reply: string, ms = 20) {
+  const seen = { calls: 0, aborted: false };
+  const provider = {
+    complete: (_messages: unknown, _tools: unknown, signal?: AbortSignal) => new Promise((resolve, reject) => {
+      seen.calls += 1;
+      const timer = setTimeout(() => resolve({ content: reply, tool_calls: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 }, finishReason: "stop" }), ms);
+      signal?.addEventListener("abort", () => {
+        seen.aborted = true;
+        clearTimeout(timer);
+        reject(new Error("aborted"));
+      });
+    }),
+  };
+  return { seen, provider: provider as never };
+}
+
+describe("shared-fact distillation", () => {
+  const finding = { objective: "What is the deposit on a can in Denmark?", toolName: "web_fetch", rawEvidence: "Accept all cookies. Log in. Menu. Newsletter. " .repeat(20) };
+
+  it("drops a page Laya is sure holds nothing relevant, without waiting for the model", async () => {
+    await writeConfig({ baseUrl: "http://laya:8080", points: { finding_relevant: { mode: "laya", threshold: 0.8 } } });
+    laya("irrelevant", 0.95);
+    const model = modelAnswering("- Deposit: 1 DKK", 5_000);
+    const { distillFindingForSharedFacts } = await import("../agent/sub-agent.js");
+    const started = Date.now();
+    expect(await distillFindingForSharedFacts({ ...finding, provider: model.provider })).toBe("");
+    expect(Date.now() - started, "waited for the extraction Laya made unnecessary").toBeLessThan(1_000);
+    expect(model.seen.aborted).toBe(true);
+  });
+
+  it("still has the model extract what Laya calls relevant — only the model can", async () => {
+    await writeConfig({ baseUrl: "http://laya:8080", points: { finding_relevant: { mode: "laya", threshold: 0.5 } } });
+    laya("relevant", 0.99);
+    const { distillFindingForSharedFacts } = await import("../agent/sub-agent.js");
+    expect(await distillFindingForSharedFacts({ ...finding, provider: modelAnswering("- Deposit: 1 DKK (pant.dk)").provider })).toBe("- Deposit: 1 DKK (pant.dk)");
+  });
+
+  it("behaves as before with the layer off: the model decides, NONE is nothing", async () => {
+    await writeConfig({ baseUrl: "http://laya:8080", points: { finding_relevant: { mode: "off" } } });
+    const fetchMock = laya("relevant", 0.99);
+    const { distillFindingForSharedFacts } = await import("../agent/sub-agent.js");
+    expect(await distillFindingForSharedFacts({ ...finding, provider: modelAnswering("NONE").provider })).toBe("");
+    expect(await distillFindingForSharedFacts({ ...finding, provider: modelAnswering("- Deposit: 1 DKK").provider })).toBe("- Deposit: 1 DKK");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("the semantic progress judge", () => {
+  const run = { objective: "Compare the deposit schemes of Denmark and Germany", recentActivity: "Latest output:\nFetched pant.dk\n\nRecent tool calls: web_fetch, web_search" };
+
+  it("lets Laya say the run is on track without waiting for the routing tier", async () => {
+    await writeConfig({ baseUrl: "http://laya:8080", points: { run_drifting: { mode: "laya", threshold: 0.8 } } });
+    laya("on_track", 0.95);
+    const model = modelAnswering("{\"verdict\":\"drifting\",\"reason\":\"x\"}", 5_000);
+    const { assessRunProgress } = await import("../agent/sub-agent.js");
+    const started = Date.now();
+    expect((await assessRunProgress({ ...run, provider: model.provider })).verdict).toBe("on_track");
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(model.seen.aborted).toBe(true);
+  });
+
+  it("never lets Laya alone wind a run down: its 'drifting' waits for the routing tier's verdict", async () => {
+    await writeConfig({ baseUrl: "http://laya:8080", points: { run_drifting: { mode: "laya", threshold: 0.5 } } });
+    laya("drifting", 0.99);
+    const { assessRunProgress } = await import("../agent/sub-agent.js");
+    const verdict = await assessRunProgress({ ...run, provider: modelAnswering("{\"verdict\":\"on_track\",\"reason\":\"still researching\"}").provider });
+    expect(verdict).toEqual({ verdict: "on_track", reason: "still researching" });
+    const drifting = await assessRunProgress({ ...run, provider: modelAnswering("{\"verdict\":\"drifting\",\"reason\":\"writing a poem\"}").provider });
+    expect(drifting).toEqual({ verdict: "drifting", reason: "writing a poem" });
+  });
+
+  it("fails open: an unreadable verdict is on track, and is not counted as the routing tier's answer", async () => {
+    await writeConfig({ baseUrl: "http://laya:8080", defaultMode: "shadow" });
+    laya("drifting", 0.9);
+    const { assessRunProgress } = await import("../agent/sub-agent.js");
+    expect((await assessRunProgress({ ...run, provider: modelAnswering("I think it is fine").provider })).verdict).toBe("on_track");
+    const { flushLedgerForTests, readLedgerRows } = await import("../decisions/ledger.js");
+    // This test's row: the ledger file is shared with the tests before it.
+    const shadowRow = async () => (await readLedgerRows()).filter((r) => r.point === "run_drifting" && r.mode === "shadow").at(-1);
+    await vi.waitFor(async () => {
+      await flushLedgerForTests();
+      expect(await shadowRow()).toBeDefined();
+    });
+    const row = (await shadowRow())!;
+    expect(row.laya?.choice).toBe("drifting");
+    expect(row.incumbent, "a parse failure is not a verdict").toBeUndefined();
+  });
+});
+
 describe("the ledger's report and export", () => {
   const row = (choice: string, top: number, incumbent: string | undefined, language = "de"): LedgerRow => ({
     ts: "2026-09-25T20:00:00Z", point: "source_sensitive", language: language as LedgerRow["language"], state: { message: `m${top}${choice}${incumbent}` }, mode: "shadow",

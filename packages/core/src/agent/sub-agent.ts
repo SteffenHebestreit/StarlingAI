@@ -14,7 +14,7 @@
 import { createBrowserDeciderForRun, type DrivenStep } from "../decisions/browser-step.js";
 import { decide } from "../decisions/decide.js";
 import { layaConfigured } from "../decisions/laya-client.js";
-import { GOAL_MET } from "../decisions/points.js";
+import { FINDING_RELEVANT, GOAL_MET, RUN_DRIFTING } from "../decisions/points.js";
 import fs from "node:fs";
 // Named import: two local `path` bindings already exist in this module, and an
 // unqualified `path` default import would shadow-warn against them.
@@ -68,6 +68,7 @@ import {
   MIN_SUBSTANTIVE_OUTPUT_CHARS,
   PROGRESS_CHECK_INTERVAL_MS,
   type ProgressSample,
+  type SemanticProgressResult,
 } from "./progress-verifier.js";
 import { formatScopedMemoryGuidance } from "../memory/service.js";
 import { formatSkillGuidance } from "../skills/service.js";
@@ -200,6 +201,48 @@ const EVIDENCE_GATHERING_TOOL_NAMES = new Set([
  * error, ambiguous reply) returns false, so the existing byte/time ladder still
  * applies; the oversight only ever ENDS work earlier, never prolongs it.
  */
+/**
+ * The semantic progress judge (orchestration.progressVerifierSemantic): is the run still moving
+ * toward its objective? "on_track" may be Laya's alone, so the routing-tier call is then not waited
+ * for; "drifting", which winds the run down, is always the routing tier's to say. Fail-open: anything
+ * but a clear "drifting" is on track.
+ */
+export async function assessRunProgress(params: {
+  objective: string;
+  recentActivity: string;
+  provider: ChatProvider;
+  signal?: AbortSignal;
+  sessionId?: string;
+}): Promise<SemanticProgressResult> {
+  const onTrack: SemanticProgressResult = { verdict: "on_track", reason: "on track" };
+  try {
+    const outcome = await decide<SemanticProgressResult>({
+      point: RUN_DRIFTING,
+      state: { objective: params.objective.slice(0, 800), activity: params.recentActivity.slice(0, 1_600) },
+      languageOf: params.objective,
+      ...(params.sessionId ? { sessionId: params.sessionId } : {}),
+      ...(params.signal ? { signal: params.signal } : {}),
+      layaMayTake: ["on_track"],
+      incumbent: async (decisionSignal) => {
+        const response = await runWithCallAttribution({ callSite: "routing_tier", agentName: "progress_judge" }, () => params.provider.complete(
+          buildProgressJudgePrompt({ objective: params.objective, recentActivity: params.recentActivity }),
+          [],
+          params.signal ? AbortSignal.any([params.signal, decisionSignal]) : decisionSignal,
+        ));
+        // A reply with no verdict in it is no answer: it defaults to on track, and is not counted.
+        return /\{[\s\S]*\}/.test(response.content ?? "") ? parseProgressVerdict(response.content) : undefined;
+      },
+      toKey: (result) => result.verdict,
+      fromKey: (key) => (key === "drifting"
+        ? { verdict: "drifting", reason: "judged drifting" }
+        : { verdict: "on_track", reason: "on track (decision layer)" }),
+    });
+    return outcome.value ?? onTrack;
+  } catch {
+    return onTrack;
+  }
+}
+
 export async function assessOversightGoalMet(
   acceptanceCriteria: string[],
   evidence: string,
@@ -836,6 +879,7 @@ export async function distillFindingForSharedFacts(params: {
   signal?: AbortSignal;
   /** Per-call bound; see DISTILL_CALL_DEADLINE_MS. */
   deadlineMs?: number;
+  sessionId?: string;
 }): Promise<string | null> {
   const objective = params.objective.replace(/\s+/g, " ").trim().slice(0, 600);
   const raw = params.rawEvidence.slice(0, 6000);
@@ -869,10 +913,24 @@ export async function distillFindingForSharedFacts(params: {
   try {
     const deadline = AbortSignal.timeout(params.deadlineMs ?? DISTILL_CALL_DEADLINE_MS);
     const signal = params.signal ? AbortSignal.any([params.signal, deadline]) : deadline;
-    const response = await params.provider.complete(messages, [], signal);
-    const distilled = (response.content ?? "").trim();
-    if (!distilled || /^NONE\b/i.test(distilled)) return "";
-    return distilled;
+    // "Nothing relevant here" is the one answer Laya may give alone: the call is then not waited for.
+    // Relevant content still goes to the model, the only one that can extract it (decisions/decide.ts).
+    const outcome = await decide<string>({
+      point: FINDING_RELEVANT,
+      state: { objective, source: params.toolName, content: raw.slice(0, 2_400) },
+      languageOf: objective,
+      ...(params.sessionId ? { sessionId: params.sessionId } : {}),
+      signal,
+      layaMayTake: ["irrelevant"],
+      incumbent: async (decisionSignal) => {
+        const response = await params.provider.complete(messages, [], AbortSignal.any([signal, decisionSignal]));
+        const distilled = (response.content ?? "").trim();
+        return !distilled || /^NONE\b/i.test(distilled) ? "" : distilled;
+      },
+      toKey: (distilled) => (distilled ? "relevant" : "irrelevant"),
+      fromKey: () => "",
+    });
+    return outcome.value ?? null;
   } catch {
     return null;
   }
@@ -959,6 +1017,7 @@ function autoShareUsefulFinding(params: {
         // provider when no routing tier is set (no behavior change).
         provider: distill!.provider ?? params.provider,
         signal: params.signal,
+        sessionId: params.sessionId,
       });
       if (distilled === "") {
         // Nothing in this result was relevant to the objective — don't pollute facts.
@@ -4536,12 +4595,13 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           // model under the routing controls (thinking off), never on `provider`. Shared
           // with the distillation path so an interval-gated judge does not build (and reset
           // the circuit state of) a provider chain on every check.
-          const judgeResp = await runWithCallAttribution({ callSite: "routing_tier", agentName: "progress_judge" }, () => routingTierProvider().complete(
-            buildProgressJudgePrompt({ objective: opts.task, recentActivity }),
-            [],
-            signal,
-          ));
-          const verdict = parseProgressVerdict(judgeResp.content);
+          const verdict = await assessRunProgress({
+            objective: opts.task,
+            recentActivity,
+            provider: routingTierProvider(),
+            ...(signal ? { signal } : {}),
+            sessionId: subSessionId,
+          });
           if (verdict.verdict === "drifting") {
             windDownForSupervisor();
             logAudit("progress_verifier_intervened", {

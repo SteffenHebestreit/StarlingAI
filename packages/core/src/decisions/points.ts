@@ -22,7 +22,9 @@ export type DecisionPointId =
   | "source_sensitive"
   | "ungrounded_draft"
   | "slices_disagree"
-  | "goal_met";
+  | "goal_met"
+  | "finding_relevant"
+  | "run_drifting";
 
 function point(id: DecisionPointId, question: string, options: Record<string, string>): DecisionPointDefinition {
   return Object.freeze({ id, question, options: Object.freeze(options) });
@@ -88,10 +90,43 @@ export const GOAL_MET = point(
   },
 );
 
+/**
+ * Shared-fact distillation: does fetched content hold anything relevant to the research objective?
+ * (agent/sub-agent.ts distillFindingForSharedFacts). Only "irrelevant" can be Laya's alone — relevant
+ * content still needs the model, the only one that can extract it.
+ */
+export const FINDING_RELEVANT = point(
+  "finding_relevant",
+  "A research step fetched this content for an objective. Decide whether it contains anything relevant to the objective: concrete "
+  + "facts, figures, dates, names, prices, specifications or source links about it. Navigation menus, cookie or login banners, site "
+  + "chrome, errors and content about other subjects do not count.",
+  {
+    relevant: "Relevant: it holds at least one fact, figure, name, date, price or source that serves the objective.",
+    irrelevant: "Nothing relevant: only page chrome, banners, errors or content about something else.",
+  },
+);
+
+/**
+ * Sub-agent semantic progress judge: is a long run still moving toward its objective?
+ * (agent/progress-verifier.ts). Only "on_track" can be Laya's alone — "drifting" winds a run down.
+ */
+export const RUN_DRIFTING = point(
+  "run_drifting",
+  "A long-running agent works toward an objective. Given the objective and a digest of its recent activity, decide whether the "
+  + "activity is still moving toward the objective — not whether it is finished, polished or fast. Only clearly working on the wrong "
+  + "thing, being stuck repeating itself or contradicting the objective counts as drifting; when in doubt it is on track.",
+  {
+    on_track: "On track: the recent activity serves the objective, even if slowly or indirectly.",
+    drifting: "Drifting: clearly working on the wrong thing, stuck repeating itself, or contradicting the objective.",
+  },
+);
+
 export const DECISION_POINTS: Readonly<Record<DecisionPointId, DecisionPointDefinition>> = Object.freeze({
   fast_lane: FAST_LANE,
   source_sensitive: SOURCE_SENSITIVE,
   ungrounded_draft: UNGROUNDED_DRAFT,
   slices_disagree: SLICES_DISAGREE,
   goal_met: GOAL_MET,
+  finding_relevant: FINDING_RELEVANT,
+  run_drifting: RUN_DRIFTING,
 });

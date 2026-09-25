@@ -231,6 +231,7 @@ import {
 import {
   buildUngroundedClaimJudgeMessages,
   buildSourceSensitiveQuestionJudgeMessages,
+  JUDGE_ANSWER_TOKEN_RE,
   parseUngroundedClaimVerdict,
   UNGROUNDED_JUDGE_MIN_CHARS,
 } from "./ungrounded-claim-judge.js";
@@ -1507,13 +1508,6 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
  * below that floor would turn ordinary load into a permanent timeout.
  */
 const TRIAGE_TIMEOUT_MS = 8000;
-
-/**
- * A yes/no token in the judge's reply. Its ABSENCE means the judge did not answer at all,
- * which the fail-safe parse renders as `false` — the same value as a genuine "no". Only
- * this distinguishes them, and the shadow agreement statistic depends on the difference.
- */
-const JUDGE_ANSWER_TOKEN_RE = /\b(yes|no|ja|nein)\b/i;
 
 /** A link in the request. Structural; the same test the dynamic-guidance URL signal uses. */
 const TURN_URL_RE = /https?:\/\/[^\s<>"'`)\]]+/i;

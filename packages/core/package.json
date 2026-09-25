@@ -34,6 +34,7 @@
     "docs:reference": "tsx src/scripts/generate-reference-docs.ts",
     "decisions:report": "tsx src/scripts/decisions-report.ts",
     "decisions:export": "tsx src/scripts/decisions-export.ts",
+    "decisions:bootstrap": "tsx src/scripts/decisions-bootstrap.ts",
     "scenes:evaluate": "tsx src/agent/scene-evaluation-cli.ts",
     "worker:scene": "tsx src/scene-worker-main.ts",
     "routing:eval": "tsx src/agent/routing-eval-cli.ts",

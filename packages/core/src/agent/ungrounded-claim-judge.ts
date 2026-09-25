@@ -82,6 +82,13 @@ export function buildSourceSensitiveQuestionJudgeMessages(userMessage: string): 
 }
 
 /**
+ * A yes/no token in the judge's reply. Its ABSENCE means the judge did not answer at all,
+ * which the fail-safe parse renders as `false` — the same value as a genuine "no". Only
+ * this distinguishes them, and the shadow agreement statistic depends on the difference.
+ */
+export const JUDGE_ANSWER_TOKEN_RE = /\b(yes|no|ja|nein)\b/i;
+
+/**
  * Parse the judge reply. Fail-SAFE toward NOT triggering: only an explicit affirmative verdict
  * returns true. A missing/garbled marker, an error echo, or anything ambiguous returns false, so
  * the runtime simply falls back to the structural tier's decision instead of force-delegating a

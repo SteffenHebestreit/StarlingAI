@@ -223,7 +223,7 @@ export async function runReceptionist(
 }
 
 /** Did the front desk's model hand the message on, rather than answer it? */
-function receptionistEscalated(raw: string, confidenceAttempt: boolean): boolean {
+export function receptionistEscalated(raw: string, confidenceAttempt: boolean): boolean {
   if (confidenceAttempt) return !parseReceptionistConfidence(raw).confident;
   const text = raw.trim();
   return !text || text.includes(ESCALATE_SENTINEL);
