@@ -48,6 +48,11 @@ export interface TurnProgressSample {
   artifacts: number;
   /** Consecutive delegation failures the warden has counted this turn. */
   delegationFailures: number;
+  /** Delegated runs this turn that looped or were stopped by the warden and did not succeed
+   *  (agent/delegation-loop-notes.ts countLoopedPartials; orchestration.loopAwareDelegation, else
+   *  left out). A looped partial arrives with delegationSucceeded:true, so the failure counter
+   *  above never saw it: c297c5ea re-delegated after a 199-iteration loop and read as progress. */
+  loopedPartials?: number;
 }
 
 export type TurnProgressSignal = "progressing" | "churning" | "stalled";
@@ -56,7 +61,8 @@ export type TurnProgressSignal = "progressing" | "churning" | "stalled";
  * Structural turn-progress test (pure — no LLM, no keywords, no topic awareness):
  *  - "progressing": a NEW artifact landed, or new completion tokens / tool calls since
  *     the last sample. The turn is moving; leave it alone.
- *  - "churning": delegated again AND a delegation failure was recorded again, with NO
+ *  - "churning": delegated again AND a delegation failure was recorded again (a looped
+ *     partial counts as one, see loopedPartials), with NO
  *     new artifact — the orchestrator is re-delegating a failing build without producing
  *     a deliverable (the max-effort dying-build retry loop). Narration tokens don't count
  *     as progress here: a real artifact is the only thing that clears this.
@@ -65,7 +71,10 @@ export type TurnProgressSignal = "progressing" | "churning" | "stalled";
  */
 export function classifyTurnProgress(prev: TurnProgressSample, cur: TurnProgressSample): TurnProgressSignal {
   if (cur.artifacts > prev.artifacts) return "progressing";
-  if (cur.delegations > prev.delegations && cur.delegationFailures > prev.delegationFailures) return "churning";
+  // A looped partial is a failure here, whatever its delegationSucceeded says.
+  const failedAgain = cur.delegationFailures > prev.delegationFailures
+    || (cur.loopedPartials ?? 0) > (prev.loopedPartials ?? 0);
+  if (cur.delegations > prev.delegations && failedAgain) return "churning";
   if (cur.completionTokens > prev.completionTokens || cur.toolCalls > prev.toolCalls) return "progressing";
   return "stalled";
 }

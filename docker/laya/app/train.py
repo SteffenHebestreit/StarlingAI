@@ -13,7 +13,9 @@ the incumbent — the LLM call or rule that decides it today — answered, label
 3. trains with laya's RLCD recipe — a noisy-logit policy gradient on a proper scoring rule plus soft cross-entropy,
    one GPU — adapted from cklxx/laya-browser code/finetune/train.py (Apache-2.0, see NOTICE);
 4. fits the choice temperature on the held-out cases and measures the held-out agreement with the incumbent of the
-   checkpoint served now and of the new one;
+   checkpoint served now and of the new one. laya applies a temperature only within [0.5, 5]; a fit that wants a
+   softer one than 5 has the rest folded into the decision head's last layer, a fit that wants a sharper one than 0.5
+   is served at 0.5, and metrics.json says which bound was hit (temperatureFit);
 5. writes LAYA_LOCAL_DIR/<model>/runs/<run id>/ with metrics.json, and makes it `current` only when it agrees with the
    incumbent more often than the checkpoint served now and no point with enough held-out cases got worse. The sidecar
    serves `current` from its next start, and the gateway's statistics start over for the new version.
@@ -281,18 +283,82 @@ def evaluate(logits: List[List[float]], items: List[Dict[str, Any]], temperature
     }
 
 
-# laya applies a checkpoint's temperature only within [0.5, 5.0] (common.py TEMP_MIN / TEMP_MAX): fitting outside
-# that range would record a temperature that is never used.
+# laya applies a checkpoint's temperature only within [0.5, 5.0] (common.py TEMP_MIN / TEMP_MAX): a recorded
+# temperature outside that range is clamped when the checkpoint is loaded.
 TEMPERATURE_RANGE = (0.5, 5.0)
+# How far the fit itself may range: well past laya's range on both sides, so that a fit wanting more than laya applies
+# is seen and reported rather than silently stopped at the edge. Run 20260926-073740 (885 synthetic cases) fitted
+# exactly 5.00, the old grid's edge; on its held-out logits the log loss keeps falling to 8.0 (0.336 at 5, 0.285 at 8).
+FIT_RANGE = (0.05, 100.0)
+
+
+def _nll(logits: List[List[float]], items: List[Dict[str, Any]], temperature: float) -> float:
+    return evaluate(logits, items, temperature)["nll"]
+
+
+def fit_temperature_free(logits: List[List[float]], items: List[Dict[str, Any]]) -> float:
+    """The temperature that minimises the held-out log loss over FIT_RANGE: a log grid, then a golden-section search
+    between the grid points around its best. The loss is convex in 1/T, so the one minimum the grid brackets is it."""
+    if not items:
+        return 1.0
+    low, high = (math.log(bound) for bound in FIT_RANGE)
+    steps = 240
+    grid = [low + (high - low) * i / steps for i in range(steps + 1)]
+    best = min(range(len(grid)), key=lambda i: _nll(logits, items, math.exp(grid[i])))
+    a, b = grid[max(0, best - 1)], grid[min(steps, best + 1)]
+    ratio = (math.sqrt(5) - 1) / 2
+    for _ in range(60):
+        c, d = b - ratio * (b - a), a + ratio * (b - a)
+        if _nll(logits, items, math.exp(c)) <= _nll(logits, items, math.exp(d)):
+            b = d
+        else:
+            a = c
+    return math.exp((a + b) / 2)
+
+
+def temperature_fit(logits: List[List[float]], items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """What the held-out cases ask for (`fitted`), what laya will apply (`served`, within TEMPERATURE_RANGE), which
+    bound the fit hit, and the factor folded into the decision head (`fold`) so that the checkpoint applies `effective`.
+
+    Softening past laya's cap is folded (fold_temperature): the scorer's last layer divides every logit by `fold`, and
+    laya divides by `served` on top, `fitted` in all. Sharpening past its floor is not: laya refuses to sharpen that
+    hard on purpose (common.py: a 0.24 top probability published as 0.99), and so does this.
+    """
+    fitted = fit_temperature_free(logits, items)
+    low, high = TEMPERATURE_RANGE
+    served = min(high, max(low, fitted))
+    bound = "upper" if fitted > high else "lower" if fitted < low else None
+    fold = fitted / high if bound == "upper" else 1.0
+    effective = served * fold
+    return {
+        "fitted": fitted,
+        "served": served,
+        "atBound": bound,
+        "fold": fold,
+        "effective": effective,
+        "nll": {"atEffective": _nll(logits, items, effective), "atServedWithoutFold": _nll(logits, items, served)},
+    }
 
 
 def fit_temperature(logits: List[List[float]], items: List[Dict[str, Any]]) -> float:
-    """The temperature laya will apply that minimises the held-out log loss (calibrate.py's log grid)."""
-    if not items:
-        return 1.0
-    low, high = TEMPERATURE_RANGE
-    grid = [math.exp(math.log(low) + (math.log(high) - math.log(low)) * i / 199) for i in range(200)]
-    return min(grid, key=lambda t: evaluate(logits, items, t)["nll"])
+    """The temperature laya will apply that minimises the held-out log loss: the free fit, confined to laya's range
+    (the loss is unimodal in T, so the confined optimum is the free one clamped)."""
+    return temperature_fit(logits, items)["served"] if items else 1.0
+
+
+def fold_temperature(model: Any, factor: float) -> None:
+    """Divide every choice logit of `model` by `factor` for good: the scorer ends in a linear layer
+    (common.DecisionModel.scorer), so dividing its weight and bias divides its output exactly. The act head reads the
+    softmax of these logits as features; its act_probability is not used here (and is 1.0 upstream, #185)."""
+    import torch
+
+    last = model.scorer[-1]
+    if not isinstance(last, torch.nn.Linear):
+        raise TrainingError("the decision head's scorer does not end in a linear layer: the temperature cannot be folded")
+    with torch.no_grad():
+        last.weight.div_(factor)
+        if last.bias is not None:
+            last.bias.div_(factor)
 
 
 def train(agent: Any, items: List[Dict[str, Any]], epochs: int, log=print) -> None:
@@ -427,15 +493,25 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     train(agent, train_items, epochs)
     held_logits = logits_of(agent, held_items)
-    temperature = fit_temperature(held_logits, held_items)
-    tuned_metrics = evaluate(held_logits, held_items, temperature)
-    print(f"fine-tuned, held out: {tuned_metrics['accuracy']:.3f} agreement, temperature {temperature:.2f}")
+    fit = temperature_fit(held_logits, held_items)
+    temperature = fit["served"]
+    tuned_metrics = evaluate(held_logits, held_items, fit["effective"])
+    print(f"fine-tuned, held out: {tuned_metrics['accuracy']:.3f} agreement, temperature {fit['effective']:.2f}")
+    if fit["atBound"]:
+        low, high = TEMPERATURE_RANGE
+        print(f"temperature: the held-out cases ask for {fit['fitted']:.2f}, past laya's {'upper' if fit['atBound'] == 'upper' else 'lower'} "
+              f"bound ({low}-{high}); log loss {fit['nll']['atEffective']:.4f} served, {fit['nll']['atServedWithoutFold']:.4f} at the bound")
+    if fit["fold"] != 1.0:
+        # A fit this soft means the checkpoint is overconfident on cases it did not train on: served at laya's cap,
+        # its probabilities would claim more certainty than its held-out agreement has.
+        fold_temperature(agent.model, fit["fold"])
+        print(f"folded x{fit['fold']:.3f} into the decision head: laya applies {temperature:.2f} to logits already divided, {fit['effective']:.2f} in all")
 
     run = time.strftime("%Y%m%d-%H%M%S")
     run_dir = os.path.join(references.local_dir(), name, "runs", run)
     ok, why = promotion(base_metrics, tuned_metrics)
     metrics = {"run": run, "base": served, "data": data, "cases": len(cases), "trainCases": len(train_cases),
-               "heldOut": len(held_cases), "epochs": epochs, "temperature": temperature,
+               "heldOut": len(held_cases), "epochs": epochs, "temperature": temperature, "temperatureFit": fit,
                "served": base_metrics, "fineTuned": tuned_metrics, "promoted": ok and not args.no_promote, "why": why}
     save(agent, run_dir, run, temperature, metrics)
     print(f"wrote {run_dir}")

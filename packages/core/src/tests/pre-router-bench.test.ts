@@ -19,6 +19,7 @@ import {
   PRE_ROUTE_POINT,
   PRE_ROUTE_QUESTION,
   agentDescriptionText,
+  answererName,
   benchVerdict,
   buildPreRouteQuestion,
   buildPreRouteReport,
@@ -34,6 +35,9 @@ import {
   mergeCandidates,
   parseLayaAnswer,
   parsePreRouterArgs,
+  isAnswererOutage,
+  pickFromReadout,
+  preRouteCalibration,
   preRouteGold,
   qualifyLevel,
   recallAtK,
@@ -43,12 +47,14 @@ import {
   shortenToTokens,
   simulateGate,
   splitOf,
+  stageOneCriteria,
   trainingLabelKey,
   type GateSimulation,
   type PreRouteBenchSettings,
   type PreRouteObservation,
 } from "../agent/pre-router-bench.js";
 import { GATE_LEVELS, wilsonLowerBound } from "../decisions/gate.js";
+import { applyTemperature, buildReadoutMessages, LETTERS } from "../decisions/logit-readout.js";
 import type { RoutingEvalCase } from "../agent/routing-eval.js";
 
 const LONG = "Web research specialist that finds external sources for a single topic and reports verifiable facts "
@@ -742,5 +748,166 @@ describe("the command line", () => {
     expect(() => parsePreRouterArgs(["--k"])).toThrow(/needs a value/);
     expect(() => parsePreRouterArgs(["--split", "train"])).toThrow(/one of/);
     expect(() => parsePreRouterArgs(["--target", "1.5"])).toThrow();
+  });
+});
+
+// ── The readout backend ──────────────────────────────────────────────────────────────────────────
+
+/** A readout's pick: its log-scores over the options served, "none" last; argmax and top at T = 1. */
+function readoutPick(scores: number[], keys: readonly string[]): PreRouteObservation["laya"] {
+  const p = applyTemperature(scores, 1);
+  const best = p.indexOf(Math.max(...p));
+  return { choice: keys[best]!, top: p[best]!, ms: 900, model: "readout:qwen", logScores: scores };
+}
+
+describe("the readout backend", () => {
+  it("asks the resident model the same question under the same letters Laya reads, none last and always offered", () => {
+    const built = build(agents(30), 5)!;
+    const { messages, keys } = buildReadoutMessages(built.request, built.request.state);
+    const { criteria } = servedCriteria(built.request.options);
+    expect(keys).toEqual(built.keys);
+    expect(keys.at(-1)).toBe(NONE_KEY);
+    for (const [letter, description] of Object.entries(criteria)) expect(messages[0]!.content).toContain(`${letter}: ${description}`);
+    expect(messages[0]!.content).toContain(`${LETTERS[keys.length - 1]}: ${NONE_DESCRIPTION}`);
+    expect(messages[1]!.content).toContain(built.request.state.message);
+  });
+
+  it("takes a readout's answer as the observation's pick, with its log-scores in the order served", () => {
+    const keys = ["researcher", "coder", NONE_KEY];
+    const pick = pickFromReadout({
+      ok: true,
+      answer: { choice: "coder", top: 0.7, probabilities: {}, logScores: { researcher: -2, coder: -0.4, none: -1.5 }, mass: 0.97, temperature: 1, topToken: "B", ms: 850 },
+    }, keys, "readout:qwen");
+    expect(pick).toEqual({ choice: "coder", top: 0.7, ms: 850, model: "readout:qwen", logScores: [-2, -0.4, -1.5] });
+  });
+
+  it("counts a miss as no answer, as a failed Laya call is: the turn would go to the orchestrator", () => {
+    expect(pickFromReadout({ ok: false, reason: "control_token", ms: 800, topToken: "<think>" }, ["a", NONE_KEY], "m")).toEqual({ error: 'readout: control_token (top token "<think>")' });
+    expect(pickFromReadout({ ok: false, reason: "no_logprobs", ms: 800 }, ["a", NONE_KEY], "m")).toEqual({ error: "readout: no_logprobs" });
+  });
+
+  it("refuses an answer that does not score every option served: its log-scores would not line up with the letters", () => {
+    const answer = { choice: "a", top: 0.9, probabilities: {}, logScores: { a: -0.1 }, mass: 0.99, temperature: 1, topToken: "A", ms: 850 };
+    expect(pickFromReadout({ ok: true, answer }, ["a", NONE_KEY], "m")).toEqual({ error: "readout: the answer does not fit the options" });
+    expect(pickFromReadout({ ok: true, answer: { ...answer, choice: "b" } }, ["a", NONE_KEY], "m")).toMatchObject({ error: expect.any(String) });
+  });
+
+  it("tells a readout's miss from an outage: only an outage trips the run's breaker or stops its warm-up", () => {
+    const miss = (reason: "no_letter" | "control_token" | "low_mass", topToken: string) => {
+      const picked = pickFromReadout({ ok: false, reason, ms: 800, topToken }, ["a", NONE_KEY], "m");
+      return "error" in picked ? picked.error : "";
+    };
+    expect(isAnswererOutage(miss("no_letter", "The"))).toBe(false);
+    expect(isAnswererOutage(miss("control_token", "<think>"))).toBe(false);
+    expect(isAnswererOutage(miss("low_mass", "Sure"))).toBe(false);
+    for (const reason of ["no_logprobs", "error", "aborted"] as const) {
+      const picked = pickFromReadout({ ok: false, reason, ms: 10_000 }, ["a", NONE_KEY], "m");
+      expect(isAnswererOutage("error" in picked ? picked.error : ""), reason).toBe(true);
+    }
+    expect(isAnswererOutage("readout: the answer does not fit the options")).toBe(true);
+    expect(isAnswererOutage("HTTP 503"), "every failed Laya answer is one").toBe(true);
+  });
+
+  it("never dispatches on a confident none: the protected answer hands the turn back", () => {
+    const keys = ["a", "b", "c", NONE_KEY];
+    const observations = Array.from({ length: 80 }, (_, i) => obs({
+      fold: (i % 2) as 0 | 1,
+      gold: { kind: "none" },
+      laya: readoutPick([-6, -6, -6, -0.01], keys),
+    }));
+    const gate = simulateGate(observations, LAYA_POLICY, GATE);
+    expect(gate.evaluated).toBe(80);
+    expect(gate.taken).toBe(0);
+  });
+
+  it("scores its calibration cross-fitted: each fold at the temperature fitted on the other, and a fit helps an overconfident readout", () => {
+    const keys = ["a", "b", "c", NONE_KEY];
+    // Always 99% sure of "a", right half the time: overconfident, which a temperature above 1 repairs.
+    const observations = Array.from({ length: 200 }, (_, i) => obs({
+      fold: (i % 2) as 0 | 1,
+      gold: { kind: "agents", acceptable: [i % 4 < 2 ? "a" : "b"] },
+      laya: readoutPick([0, -5.3, -8, -8], keys),
+    }));
+    const block = preRouteCalibration(observations)!;
+    expect(block.cases).toBe(200);
+    expect(block.folds.map((fold) => fold.fittedOn)).toEqual([100, 100]);
+    expect(block.folds.every((fold) => fold.temperature > 1)).toBe(true);
+    expect(block.eceBefore).toBeGreaterThan(0.4);
+    expect(block.eceAfter!).toBeLessThan(block.eceBefore!);
+    expect(preRouteCalibration([obs({ gold: { kind: "none" }, laya: laya(NONE_KEY) })]), "Laya's answers carry no log-scores").toBeNull();
+  });
+
+  it("scores each fold at the other fold's temperature: an always-right fold 1 sharpens fold 0, an overconfident fold 0 softens fold 1", () => {
+    const keys = ["a", "b", "c", NONE_KEY];
+    const foldZero = Array.from({ length: 100 }, (_, i) => obs({ fold: 0, gold: { kind: "agents", acceptable: [i % 2 === 0 ? "a" : "b"] }, laya: readoutPick([0, -5.3, -8, -8], keys) }));
+    const foldOne = Array.from({ length: 100 }, () => obs({ fold: 1, gold: { kind: "agents", acceptable: ["a"] }, laya: readoutPick([0, -1, -2, -2], keys) }));
+    const block = preRouteCalibration([...foldZero, ...foldOne])!;
+    const [zero, one] = block.folds;
+    expect(zero!.temperature, "fold 0 is scored at fold 1's temperature").toBeLessThan(1);
+    expect(one!.temperature, "fold 1 is scored at fold 0's temperature").toBeGreaterThan(1);
+  });
+
+  it("puts the top-1 threshold exactly at 85%", () => {
+    const keys = ["a", "b", "c", NONE_KEY];
+    const cases = (right: number, wrong: number) => [
+      ...Array.from({ length: right }, () => obs({ gold: { kind: "agents", acceptable: ["a"] }, laya: readoutPick([-0.05, -4, -5, -5], keys) })),
+      ...Array.from({ length: wrong }, () => obs({ gold: { kind: "agents", acceptable: ["b"] }, laya: readoutPick([-0.05, -4, -5, -5], keys) })),
+      ...Array.from({ length: 80 }, () => obs({ gold: { kind: "none" }, laya: readoutPick([-5, -5, -5, -0.05], keys) })),
+    ];
+    // 170 of 200 is 85%; 169 of 200 is not.
+    expect(stageOneCriteria(scorePreRoute(cases(90, 30))).met).toBe(true);
+    expect(stageOneCriteria(scorePreRoute(cases(89, 31))).met).toBe(false);
+  });
+
+  it("says stage 1 is met only at 85% top-1 and a none-recall lower bound of 0.95", () => {
+    const keys = ["a", "b", "c", NONE_KEY];
+    const right = (n: number) => Array.from({ length: n }, () => obs({ gold: { kind: "agents", acceptable: ["a"] }, laya: readoutPick([-0.05, -4, -5, -5], keys) }));
+    const none = (n: number, missed = 0) => Array.from({ length: n }, (_, i) => obs({ gold: { kind: "none" }, laya: readoutPick(i < missed ? [-0.05, -4, -5, -5] : [-5, -5, -5, -0.05], keys) }));
+    // 73 of 73 is the fewest flawless "none" cases whose lower bound reaches 0.95.
+    expect(wilsonLowerBound(73, 73)).toBeGreaterThanOrEqual(0.95);
+    expect(wilsonLowerBound(72, 72)).toBeLessThan(0.95);
+    expect(stageOneCriteria(scorePreRoute([...right(100), ...none(73)])).met).toBe(true);
+    const fewNone = stageOneCriteria(scorePreRoute([...right(100), ...none(72)]));
+    expect(fewNone.met).toBe(false);
+    expect(fewNone.reasons.join(" ")).toContain("lower bound");
+    const oneMissed = stageOneCriteria(scorePreRoute([...right(300), ...none(100, 1)]));
+    expect(oneMissed.met, "a none dispatched to a specialist costs minutes").toBe(false);
+    const weak = stageOneCriteria(scorePreRoute([...right(50), ...Array.from({ length: 50 }, () => obs({ gold: { kind: "agents", acceptable: ["b"] }, laya: readoutPick([-0.05, -4, -5, -5], keys) })), ...none(80)]));
+    expect(weak.met).toBe(false);
+    expect(weak.reasons.join(" ")).toContain("top-1");
+    expect(stageOneCriteria(scorePreRoute([])).met).toBe(false);
+  });
+
+  it("names the readout in the report and adds the stage and calibration sections; Laya's window does not apply", () => {
+    const keys = ["a", "b", "c", NONE_KEY];
+    const observations = Array.from({ length: 80 }, (_, i) => obs({
+      fold: (i % 2) as 0 | 1,
+      split: "test",
+      gold: { kind: "agents", acceptable: ["a"] },
+      laya: readoutPick([-0.05, -4, -5, -5], keys),
+    }));
+    const report = buildPreRouteReport({
+      settings: { ...SETTINGS, layaUrl: null, backend: "readout", readoutModel: "qwen" },
+      observations, loaded: 80, skipped: [], noCandidates: [], overWindow: 3, layaSkipped: false,
+    });
+    expect(report.calibration?.["all"]?.cases).toBe(80);
+    expect(report.stage.top1).toBe(1);
+    expect(report.warnings.some((warning) => warning.includes("window"))).toBe(false);
+    expect(report.warnings.some((warning) => warning.includes("whether Readout leaves"))).toBe(true);
+    const markdown = formatPreRouteMarkdown(report);
+    expect(markdown).toContain("**Readout top-1**");
+    expect(markdown).toContain("Readout of qwen");
+    expect(markdown).toContain("## Stage 1");
+    expect(markdown).toContain("## Calibration");
+    expect(markdown).toContain("| level | taken | right | misrouted |");
+    expect(markdown).not.toContain("Laya top-1");
+    expect(answererName(undefined)).toBe("Laya");
+  });
+
+  it("reads --backend, and refuses anything but laya or readout", () => {
+    expect(parsePreRouterArgs(["--backend", "readout"]).backend).toBe("readout");
+    expect(parsePreRouterArgs(["--backend", "laya"]).backend).toBe("laya");
+    expect(parsePreRouterArgs([]).backend).toBeUndefined();
+    expect(() => parsePreRouterArgs(["--backend", "jev"])).toThrow(/one of laya, readout/);
   });
 });

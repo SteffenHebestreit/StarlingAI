@@ -190,7 +190,7 @@ async function main(): Promise<void> {
           const reply = await provider.complete(generationMessages(kind, language, count, batch + 1), [], AbortSignal.timeout(120_000)).catch(() => null);
           for (const message of parseGenerated(reply?.content)) all.add(message);
         }
-        console.log(`${language} ${kind}: ${all.size} messages so far`);
+        console.log(`${language} ${kind.kind}: ${all.size} messages so far`);
       }
     }
     messages = [...all];

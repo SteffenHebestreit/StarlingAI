@@ -2,7 +2,8 @@
  * The decision points Laya may answer: what each one asks and which answers it has.
  *
  * Laya reads the question, each option's description and a JSON "state" (the facts of the case)
- * in one window of about 1024 tokens, and scores every option. Each option is cut to 48 tokens, so
+ * in one window — the checkpoint's own, 1024 tokens, unless the point names a wider one (`maxLen`) —
+ * and scores every option. Each option is cut to 48 tokens, so
  * the options stay short and the detail goes into the question. The wording follows the prompt of
  * the incumbent — the LLM call or rule the point replaces — so both are asked the same thing and
  * their agreement means something. The option keys are what the ledger and the statistics record:
@@ -21,6 +22,13 @@ export interface DecisionPointDefinition {
    * (decisions/gate.ts). Absent where a miss costs only time.
    */
   readonly protect?: string;
+  /**
+   * The window Laya reads this point's case with, in tokens, where the checkpoint's own (1024) would
+   * cut what the incumbent reads; the sidecar allows up to 4096 (docker/laya/app/generic.py). Part of
+   * the version the gate's evidence is kept under (laya-client.ts layaModelVersion): a point read
+   * through another window earns its handover again.
+   */
+  readonly maxLen?: number;
 }
 
 export type DecisionPointId =
@@ -32,8 +40,8 @@ export type DecisionPointId =
   | "finding_relevant"
   | "run_drifting";
 
-function point(id: DecisionPointId, question: string, options: Record<string, string>, protect?: string): DecisionPointDefinition {
-  return Object.freeze({ id, question, options: Object.freeze(options), ...(protect ? { protect } : {}) });
+function point(id: DecisionPointId, question: string, options: Record<string, string>, protect?: string, maxLen?: number): DecisionPointDefinition {
+  return Object.freeze({ id, question, options: Object.freeze(options), ...(protect ? { protect } : {}), ...(maxLen !== undefined ? { maxLen } : {}) });
 }
 
 /** Receptionist: small talk it can answer itself, or a task for the full assistant (agent/receptionist.ts). */
@@ -103,7 +111,10 @@ export const GOAL_MET = point(
 /**
  * Shared-fact distillation: does fetched content hold anything relevant to the research objective?
  * (agent/sub-agent.ts distillFindingForSharedFacts). Only "irrelevant" can be Laya's alone — relevant
- * content still needs the model, the only one that can extract it.
+ * content still needs the model, the only one that can extract it. Laya reads the 6,000 characters
+ * the extraction reads (about 1,500–2,000 tokens with the objective), so a relevant fact near the end
+ * is read, not cut away: the window is the sidecar's cap, 4096, about twice what a case needs. The
+ * call runs beside the work, and no turn waits for it (E1), so the longer read costs no turn time.
  */
 export const FINDING_RELEVANT = point(
   "finding_relevant",
@@ -115,6 +126,7 @@ export const FINDING_RELEVANT = point(
     irrelevant: "Nothing relevant: only page chrome, banners, errors or content about something else.",
   },
   "relevant",
+  4096,
 );
 
 /**

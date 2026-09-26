@@ -483,6 +483,36 @@ export const OrchestrationSchema = z.object({
    *  context still flows from the original run's shared facts. Default OFF until pass^k eval
    *  (behavioral: a retried graph now reuses prior results instead of re-running). */
   durableTaskGraph: z.boolean().default(false),
+  /** Write ownership among the concurrently running siblings of one run_task_graph or
+   *  parallel_delegate (agent/sibling-write-ownership.ts). A path that exactly one running
+   *  sibling's task names is that sibling's; any other path is the first running sibling's to
+   *  write it; another running sibling's write_file / edit_file / generate_* on it is refused with
+   *  a tool result that names the owner. A finished sibling owns nothing, so a dependent node may
+   *  write after its prerequisite. Session c297c5ea: the write_paper node edited the deck twice
+   *  while write_presentation was building it and never wrote paper.md; the three task texts named
+   *  three different files, so only a check at write time could see it. Structural (path tokens
+   *  and path equality), no prompt text. Default ON as a correctness fix; false is the escape hatch
+   *  if a fan-out ever needs siblings to co-write one file. */
+  siblingWriteOwnership: z.boolean().default(true),
+  /** Loop-aware delegation (agent/delegation-loop-notes.ts), for a delegated run the loop brake,
+   *  the busy-stall supervisor or the warden ended, or that used up its iteration limit. Session
+   *  c297c5ea: a content_writer that looped 199 iterations on one grep reached the orchestrator as
+   *  "PARTIAL PROGRESS … Do NOT treat this as a workflow failure. Proceed with any dependent
+   *  tools.", and the artifact gate then sent a fresh mission_coordinator that ran 1,990 s against
+   *  a 720 s timeout. When true:
+   *   (a) that partial's frame says what the run looped on (tool, target, repeats) and "Do NOT
+   *       delegate again for this task in this turn." instead of "Proceed with any dependent tools"
+   *       — the "PARTIAL PROGRESS" verdict line stays byte-identical for the six sniffers on it;
+   *   (b) a later run of the same agent in the same turn is told the looped call (agent + tool +
+   *       target) in its context;
+   *   (d) when the runs that produced a broken artifact looped, the artifact gate's repair is one
+   *       direct builder of that agent instead of a fresh mission_coordinator (and no repair when
+   *       only a coordinator looped: the file ships with its caveat);
+   *   (e) the max-effort turn oversight counts a loop-ended run as a failure for its churn signal
+   *       (a looped partial arrives as delegationSucceeded:true, so it was invisible there).
+   *  Changes what the orchestrator reads and does, so default OFF until a pass^k A/B shows the
+   *  same-turn re-dispatch rate drops without the deliverable rate dropping. */
+  loopAwareDelegation: z.boolean().default(false),
   /** Clamp a sub-agent's turn timeout to the PARENT turn's remaining budget (sub-agent.ts). A leaf
    *  agent's timeout derives from its own config / the gateway timeout, ignoring how much of the parent
    *  turn is left — so a researcher was handed 600s under a 120s low-effort turn, planned for 10 min,

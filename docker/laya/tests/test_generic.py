@@ -27,8 +27,8 @@ def test_options_reach_the_model_under_neutral_letters_in_order():
 def test_answers_come_back_under_the_callers_keys():
     seen = []
 
-    def predict(state, questions):
-        seen.append((state, questions))
+    def predict(state, questions, max_len):
+        seen.append((state, questions, max_len))
         return {"answers": {"q": {"choice": "B", "probabilities": {"A": 0.2, "B": 0.8}}}, "usage": {"input_tokens": 41}}
 
     result = generic.decide_all(predict, [question(), question(id="second", options={"task": "A task.", "small_talk": "Small talk."})])
@@ -38,6 +38,8 @@ def test_answers_come_back_under_the_callers_keys():
     # Each case is its own forward pass with its own state.
     assert seen[0][0] == {"message": "Wie funktioniert das Pfandsystem in Dänemark?"}
     assert list(seen[0][1]) == ["q"]
+    # No window asked for: the checkpoint's own.
+    assert seen[0][2] is None
 
 
 @pytest.mark.parametrize("body, message", [

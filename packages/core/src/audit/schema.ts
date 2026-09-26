@@ -40,6 +40,8 @@ export type CoreAuditEventType =
   | "guardrail_flagged"
   /** The Laya decision layer answered, or was asked alongside, one decision point (decisions/decide.ts). */
   | "decision_point"
+  /** A decision point's incumbent read by its logits, beside or instead of its parsed call (decisions/incumbent-readout.ts). */
+  | "decision_readout"
   /** laya-browser beside the browser agent: its step and the model's, or one it took itself (decisions/browser-step.ts). */
   | "browser_step"
   | "output_redacted"
@@ -70,6 +72,7 @@ export type CoreAuditEventType =
   | "sub_agent_max_iterations"
   | "sub_agent_reasoning"
   | "sub_agent_staged_build_detected"
+  | "sub_agent_head"
   | "plan_executed"
   | "agent_reasoning"
   | "parallel_delegate_started"
@@ -202,6 +205,9 @@ export type CoreAuditEventType =
   | "delegation_depth_ceiling_enforced"
   | "delegation_halted_operator_stop"
   | "delegation_halted_partial_evidence"
+  // orchestration.loopAwareDelegation (b): a run of an agent that already looped this turn was
+  // handed the looped calls in its context (agent/delegation-loop-notes.ts).
+  | "delegation_prior_loop_noted"
   | "delegation_coordinator_recursion_blocked"
   | "delegation_result_reused"
   // Task-lease coordination backend (Redis) unreachable in clustered mode — the
@@ -270,6 +276,8 @@ export type CoreAuditEventType =
   | "coverage_shortfall_resynthesis"
   | "sub_agent_assistant_text_with_tool_calls_suppressed"
   | "sub_agent_tool_loop_detected"
+  // The loop brake withdrew a call (agents.performance.loopBrake): {action, tool, repeats, answered, sinceWrite}.
+  | "sub_agent_tool_loop_enforced"
   | "sub_agent_synthesis_forced"
   | "hallucinated_truncation_bypass"
   | "trajectory_cache_hit"

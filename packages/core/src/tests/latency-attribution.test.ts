@@ -379,6 +379,25 @@ describe("levers", () => {
     expect(attributeLatency(rows).totals.unattributedVision).toEqual({ calls: 2, ms: 22_039 + 12_820 });
   });
 
+  it("loop_brake: nothing without loop rows; a run's time from its FIRST loop row to its end with them", () => {
+    expect(leverColumn(fixtureRows(), "loop_brake")).toEqual([0, 0, 0, 0]);
+    const rows = editableRows();
+    const run = `sub:${SESSION}:image_creator:1790363885538`; // t1's run: 19:18:05.545 → 19:18:28.886
+    rows.push(
+      { id: "loop-1", timestamp: "2026-09-25T19:18:10.000Z", type: "sub_agent_tool_loop_detected", sessionId: run, data: { reason: "identical_args_repeat", tool: "read_file" } },
+      // A later row of the same run changes nothing: the brake would have acted at the first.
+      { id: "loop-2", timestamp: "2026-09-25T19:18:20.000Z", type: "sub_agent_tool_loop_enforced", sessionId: run, data: { action: "refuse", tool: "read_file" } },
+      // Not a sub-agent run's row, and a row after t3's run had ended: neither is claimed.
+      { id: "loop-3", timestamp: "2026-09-25T19:21:00.000Z", type: "sub_agent_tool_loop_detected", sessionId: SESSION, data: {} },
+      { id: "loop-4", timestamp: "2026-09-25T19:29:05.000Z", type: "sub_agent_tool_loop_enforced", sessionId: `sub:${SESSION}:image_creator:1790364057447`, data: {} },
+    );
+    // 19:18:28.886 − 19:18:10.000.
+    expect(leverColumn(rows, "loop_brake")).toEqual([18_886, 0, 0, 0]);
+    // The enforced row alone is a signal too: t2's run 19:19:07.787 → 19:19:15.843, row at 19:19:12.000.
+    rows.push({ id: "loop-5", timestamp: "2026-09-25T19:19:12.000Z", type: "sub_agent_tool_loop_enforced", sessionId: `sub:${SESSION}:image_creator:1790363947782`, data: { action: "refuse" } });
+    expect(leverColumn(rows, "loop_brake")).toEqual([18_886, 3_843, 0, 0]);
+  });
+
   it("shows headersMs of a stream call timed from the send, and says which clock each row used", () => {
     const rows = editableRows();
     rowAt(rows, "provider_model_call", "2026-09-25T19:17:45.479Z").data["headersMs"] = 180;
@@ -411,6 +430,7 @@ describe("levers", () => {
       agent_search_wait: 11_718,
       qa_verdict_candidate: 0,
       vision_structuring: 0,
+      loop_brake: 0,
     });
     for (const lever of LEVERS) expect(lever.assumption(DEFAULT_LATENCY_PARAMS).length).toBeGreaterThan(40);
   });

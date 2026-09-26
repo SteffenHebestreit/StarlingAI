@@ -266,9 +266,11 @@ describe("up-front source-sensitivity classifier — issued after the fast lane,
     expect(upfrontAuditTypes()).toEqual([]);
   });
 
-  // The Laya decision layer: a verdict Laya may give replaces the routing-tier judge's, and the
-  // judge's request — on the wire already — is cancelled rather than waited for.
-  it("takes Laya's verdict when its mode allows, and cancels the judge's request", async () => {
+  // The Laya decision layer: a verdict Laya may give replaces the routing-tier judge's. Mode `laya`
+  // asks Laya first (decisions.layaFirstMs, default 80 ms), so a taken verdict never sends the
+  // judge's request at all: an incumbent aborted right after it went out made the next call on the
+  // same model 952 ms slower (E5, 2026-09-26).
+  it("takes Laya's verdict when its mode allows, and never sends the judge's request", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
       answers: { source_sensitive: { choice: "yes", probabilities: { yes: 0.96, no: 0.04 } } },
     }), { status: 200, headers: { "Content-Type": "application/json" } })));
@@ -276,6 +278,35 @@ describe("up-front source-sensitivity classifier — issued after the fast lane,
       const { AgentSession, runTurn } = await loadRuntime({
         receptionistEnabled: false,
         decisions: { baseUrl: "http://laya:8080", points: { source_sensitive: { mode: "laya", threshold: 0.9 } } },
+      });
+      const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+      streamMock.mockImplementation(() => (async function* () {
+        yield { type: "text_delta", content: "done" };
+        yield { type: "done", finishReason: "stop", usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } };
+      })());
+      // The routing tier would say "no" (the harness default): only Laya's "yes" can produce "detected".
+      await runTurn({ session, userMessage: "Wie funktioniert das Pfandsystem in Dänemark und wer betreibt es?" });
+
+      const rows = logAuditMock.mock.calls
+        .map((args) => args[1] as { type?: string; decidedBy?: string } | undefined)
+        .filter((data) => data?.type?.startsWith("upfront_source_sensitive"));
+      expect(rows).toEqual([{ type: "upfront_source_sensitive_detected", answered: true, decidedBy: "laya" }]);
+      expect(routingCalls.classifier, "the judge Laya replaced was sent anyway").toHaveLength(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  // With decisions.layaFirstMs 0 (the old order) both start at once: the judge's request — on the
+  // wire already — is cancelled rather than waited for.
+  it("with layaFirstMs 0, takes Laya's verdict and cancels the judge's request already sent", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      answers: { source_sensitive: { choice: "yes", probabilities: { yes: 0.96, no: 0.04 } } },
+    }), { status: 200, headers: { "Content-Type": "application/json" } })));
+    try {
+      const { AgentSession, runTurn } = await loadRuntime({
+        receptionistEnabled: false,
+        decisions: { baseUrl: "http://laya:8080", layaFirstMs: 0, points: { source_sensitive: { mode: "laya", threshold: 0.9 } } },
       });
       const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
       streamMock.mockImplementation(() => (async function* () {

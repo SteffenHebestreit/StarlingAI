@@ -31,9 +31,10 @@ export interface ArtifactPathRepair {
 /**
  * A path-shaped token: slash-separated segments ending in an extension. It cannot start inside a
  * word, a URL or an absolute path, and cannot end inside a longer name, so a URL's path is never a
- * candidate.
+ * candidate. Also read by sibling-write-ownership.ts for the files a task names (global: use it
+ * with matchAll, which does not share its lastIndex).
  */
-const PATH_TOKEN = /(?<![\w./:-])([\w.-]+(?:\/[\w.-]+)*\.[A-Za-z0-9]{1,5})(?![\w/-])/g;
+export const PATH_TOKEN = /(?<![\w./:-])([\w.-]+(?:\/[\w.-]+)*\.[A-Za-z0-9]{1,5})(?![\w/-])/g;
 
 /** At most this many dropped or duplicated characters, and one per 12 characters of name. */
 const MAX_EDITS = 2;

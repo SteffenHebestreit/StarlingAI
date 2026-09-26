@@ -15,13 +15,16 @@
  *   answer (against gold, and Laya against the incumbent), the always-majority baselines, latency;
  * - the gate replayed as decisions/gate.ts runs it: levels qualified on a calibration half, applied to the other
  *   half, reporting coverage, the error rate among the cases Laya would take, and the rare-class miss rate;
- * - the projected seconds saved per 100 turns, for today's concurrent start (decisions/decide.ts starts the
- *   incumbent and Laya together) and for a Laya-first order that starts the incumbent only when Laya is not taken.
+ * - the projected seconds saved per 100 turns, for a concurrent start (both at once: decisions/decide.ts where no
+ *   answer has qualified) and for a Laya-first order that starts the incumbent only when Laya is not taken (what
+ *   decide() does once an answer has qualified, decisions.layaFirstMs);
+ * - with --negation, the negation minimal pairs per arm, and with --order-swap, how often Laya's choice changes
+ *   with the order of the options.
  *
  * Pure: the live run is scripts/decisions-bench.ts.
  */
 import { createHash } from "node:crypto";
-import { GATE_LEVELS, languageBucket, wilsonLowerBound, type LanguageBucket } from "../decisions/gate.js";
+import { CONFIRM_SAMPLES, GATE_LEVELS, languageBucket, levelFromCases, wilsonLowerBound, type LanguageBucket } from "../decisions/gate.js";
 import type { LedgerRow } from "../decisions/ledger.js";
 import { DECISION_POINTS, type DecisionPointId } from "../decisions/points.js";
 
@@ -121,6 +124,11 @@ export interface DecisionBenchCase {
   gold?: string;
   tags?: string[];
   note?: string;
+  /**
+   * A negation minimal pair (eval/decisions/negation.example.jsonl): the two cases that share it differ by where a
+   * negation sits. Paired cases are reported on their own (negationPairs) and kept out of the gate replay.
+   */
+  pair?: string;
 }
 
 /** JSONL with `//` comment lines, as eval/routing's case files. A line that is not JSON is an error, loudly. */
@@ -169,6 +177,18 @@ export function lintDecisionCases(cases: readonly DecisionBenchCase[], opts: { r
     if (benchCase.tags !== undefined && (!Array.isArray(benchCase.tags) || benchCase.tags.some((tag) => typeof tag !== "string"))) {
       problems.push(`[${label}] tags must be a list of strings`);
     }
+    if (benchCase.pair !== undefined && (typeof benchCase.pair !== "string" || !benchCase.pair.trim())) {
+      problems.push(`[${label}] pair must be a non-empty string`);
+    }
+  }
+  // A pair is two cases of one point and language: anything else compares nothing.
+  const pairs = new Map<string, DecisionBenchCase[]>();
+  for (const benchCase of cases) {
+    if (typeof benchCase.pair === "string" && benchCase.pair.trim()) pairs.set(benchCase.pair, [...(pairs.get(benchCase.pair) ?? []), benchCase]);
+  }
+  for (const [pair, members] of pairs) {
+    if (members.length !== 2) problems.push(`pair ${pair} has ${members.length} cases, not 2`);
+    else if (members[0]!.point !== members[1]!.point || members[0]!.language !== members[1]!.language) problems.push(`pair ${pair} mixes points or languages`);
   }
   return problems;
 }
@@ -289,6 +309,10 @@ export interface BenchResult {
   laya?: BenchLayaAnswer;
   /** Laya was asked and gave no usable answer: its time and why. */
   layaFailure?: { ms: number; error: string };
+  /** The case's negation pair, if it has one (DecisionBenchCase.pair). */
+  pair?: string;
+  /** --order-swap: Laya's answer with the point's options offered in the reverse order. */
+  layaSwapped?: BenchLayaAnswer;
 }
 
 export type BenchRow = LedgerRow & {
@@ -303,6 +327,8 @@ export type BenchRow = LedgerRow & {
   incumbentCalls?: number;
   incumbentModel?: string;
   errors?: { incumbent?: string; laya?: string };
+  pair?: string;
+  layaSwapped?: { choice: string; top: number };
 };
 
 /**
@@ -338,6 +364,8 @@ export function benchLedgerRow(result: BenchResult, state: Record<string, unknow
     ...(result.incumbent?.calls !== undefined ? { incumbentCalls: result.incumbent.calls } : {}),
     ...(result.incumbent?.model ? { incumbentModel: result.incumbent.model } : {}),
     ...(Object.keys(errors).length ? { errors } : {}),
+    ...(result.pair ? { pair: result.pair } : {}),
+    ...(result.layaSwapped ? { layaSwapped: { choice: result.layaSwapped.choice, top: result.layaSwapped.top } } : {}),
   };
 }
 
@@ -574,39 +602,29 @@ export interface RecallGuard {
 }
 
 /**
- * The lowest confidence level at which these samples qualify, exactly as decisions/gate.ts qualifiedLevel decides
- * it: the cases at or above the level must number at least `minSamples` and the Wilson lower bound of their
- * agreement must reach the target. Once too few cases remain, no higher level can qualify. With a guard (an answer
- * other than the point's protected one), the protected cases must number at least `minSamples` too, and the lower
- * bound of the protected answer's recall at that level must also reach the target.
+ * The lowest confidence level at which these samples, in the order they came, qualify: decisions/gate.ts's own
+ * levelFromCases, so the replay cannot drift from the gate — the fixed sequence from the highest level down, the
+ * confirmation without the newest cases, the drift window, and with a guard (an answer other than the point's
+ * protected one) the protected answer's recall at that level.
  */
 export function qualifyLevel(samples: ReadonlyArray<{ top: number; agree: boolean }>, settings: GateSettings, guard?: RecallGuard): number | null {
-  for (const level of GATE_LEVELS) {
-    let n = 0;
-    let agree = 0;
-    for (const sample of samples) {
-      if (!Number.isFinite(sample.top) || sample.top < level) continue;
-      n += 1;
-      if (sample.agree) agree += 1;
-    }
-    if (n < settings.minSamples) break;
-    if (wilsonLowerBound(agree, n) < settings.targetAgreement) continue;
-    if (guard) {
-      // Too few protected cases: their recall is unknown at every level.
-      if (guard.protectedCases.length < settings.minSamples) break;
-      const missed = guard.protectedCases.filter((seen) => seen.answer === guard.answer && seen.top >= level).length;
-      if (wilsonLowerBound(guard.protectedCases.length - missed, guard.protectedCases.length) < settings.targetAgreement) continue;
-    }
-    return level;
-  }
-  return null;
+  return levelFromCases(samples, settings, guard);
 }
 
 /**
- * The fewest cases, all agreeing, that can qualify at all: 35 at a target of 0.9, although `minSamples` is 30.
+ * The fewest cases, all agreeing, that can qualify at all: 38 at a target of 0.9, although `minSamples` is 30 — 35
+ * for the Wilson bound (30 of 30 is 0.886), and the gate's confirmation asks the same of all but the newest three.
  * Infinity when no number of cases can reach the target.
  */
 export function flawlessSamplesNeeded(settings: GateSettings): number {
+  return flawlessProtectedCasesNeeded(settings) + CONFIRM_SAMPLES;
+}
+
+/**
+ * The fewest protected cases a recall guard needs, all found: 35 at a target of 0.9. The guard is read as it stands,
+ * without the confirmation that asks an answer's own cases to pass without their newest ones.
+ */
+export function flawlessProtectedCasesNeeded(settings: GateSettings): number {
   for (let n = 1; n <= 100_000; n += 1) {
     if (wilsonLowerBound(n, n) >= settings.targetAgreement) return Math.max(n, settings.minSamples);
   }
@@ -676,6 +694,8 @@ export interface GateSimulation {
   reference: GateReference;
   settings: GateSettings;
   flawlessSamplesNeeded: number;
+  /** The fewest protected cases a recall guard needs, all found (no confirmation: the guard is read as it stands). */
+  protectedCasesNeeded: number;
   /** The run held one half only (--split), so that half was split again to replay the gate. */
   nestedSplit: boolean;
   calibrationCases: number;
@@ -692,12 +712,22 @@ export interface GateSimulation {
   takenCaseIds: string[];
 }
 
+/**
+ * The order the calibration half is fed to the gate in: a hash of each case id, the same every run. The gate reads
+ * order — it confirms a level without its newest cases and closes on a drifting newest window — and a case file is
+ * grouped by kind and language, so its own order would read a block of hard cases as drift.
+ */
+export function gateReplayOrder<T extends { caseId: string }>(items: readonly T[]): T[] {
+  const rank = (id: string) => createHash("sha256").update(`order:${id}`).digest().readUInt32BE(0);
+  return [...items].sort((a, b) => rank(a.caseId) - rank(b.caseId) || a.caseId.localeCompare(b.caseId));
+}
+
 /** The level each (gate language, answer) qualifies at on the calibration half. */
 function calibrate(calibration: readonly BenchResult[], profile: BenchPointProfile, reference: GateReference, settings: GateSettings): GateBucket[] {
   const samples = new Map<string, Array<{ top: number; agree: boolean }>>();
   // Per gate language, the cases whose reference was the protected answer: what every other answer's guard reads.
   const protectedByLanguage = new Map<LanguageBucket, Array<{ answer: string; top: number }>>();
-  for (const result of calibration) {
+  for (const result of gateReplayOrder(calibration)) {
     const expected = referenceOf(result, reference);
     // The gate records no sample without both answers, nor one whose confidence is not a number.
     if (!result.laya || expected === undefined || !Number.isFinite(result.laya.top)) continue;
@@ -727,8 +757,8 @@ function calibrate(calibration: readonly BenchResult[], profile: BenchPointProfi
 }
 
 /** Could this bucket qualify at all, were every one of its cases right: its own samples and its guard's. */
-function bucketHasEnough(bucket: GateBucket, needed: number): boolean {
-  return bucket.samples >= needed && (bucket.recallGuard === null || bucket.recallGuard.cases >= needed);
+function bucketHasEnough(bucket: GateBucket, needed: number, protectedNeeded: number): boolean {
+  return bucket.samples >= needed && (bucket.recallGuard === null || bucket.recallGuard.cases >= protectedNeeded);
 }
 
 /** Would the calibrated gate hand this case to Laya? */
@@ -781,6 +811,7 @@ export function simulateGate(
   const mine = representatives(results.filter((result) => result.point === profile.point));
   const groups = groupBy(mine, (result) => models.get(result) ?? "");
   const needed = flawlessSamplesNeeded(settings);
+  const protectedNeeded = flawlessProtectedCasesNeeded(settings);
   return [...groups.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([model, cases]) => {
     let calibration = cases.filter((result) => result.split === "calibration");
     let test = cases.filter((result) => result.split === "test");
@@ -793,7 +824,7 @@ export function simulateGate(
     const takeable = buckets.filter((bucket) => bucket.mayTake);
     const status: GateSimulation["status"] = takeable.some((bucket) => bucket.qualifiedLevel !== null)
       ? "qualified"
-      : takeable.some((bucket) => bucketHasEnough(bucket, needed)) ? "not_qualified" : "insufficient_calibration";
+      : takeable.some((bucket) => bucketHasEnough(bucket, needed, protectedNeeded)) ? "not_qualified" : "insufficient_calibration";
     const taken = new Set(test.filter((result) => takenBy(result, buckets, profile)));
     return {
       point: profile.point,
@@ -801,6 +832,7 @@ export function simulateGate(
       reference,
       settings: { ...settings },
       flawlessSamplesNeeded: needed,
+      protectedCasesNeeded: protectedNeeded,
       nestedSplit,
       calibrationCases: calibration.length,
       testCases: test.length,
@@ -906,9 +938,9 @@ export interface Projection {
   coverage: number | null;
   incumbentMs: { source: "measured" | "fallback"; p50: number | null };
   layaMs: number | null;
-  /** Today's decide(): incumbent and Laya start together; a taken answer aborts the incumbent. */
+  /** Both started at once, as decide() does where no answer has qualified; a taken answer aborts the incumbent. */
   concurrent: SavingsVariant & { abortedIncumbentCallsPer100Turns: number };
-  /** Laya first; the incumbent starts only when Laya's answer is not taken. */
+  /** Laya first, as decide() does where an answer has qualified: the incumbent starts only when Laya's is not taken. */
   layaFirst: SavingsVariant & { incumbentCallsAvoidedPer100Turns: number };
   /** Rare cases (by gold, else by the incumbent) that Laya would take the other way. */
   rareMissesPer100Turns: number;
@@ -1074,7 +1106,7 @@ export function pointVerdict(simulation: GateSimulation, projection: Projection 
     if (guards.length) {
       // Enough cases of the answer itself: what is missing are the protected cases its recall guard counts.
       const protect = guards[0]!.protect;
-      reasons[0] = `the recall guard needs ${needed} "${protect}" cases in one language before Laya may take any other answer there; the calibration half holds at most ${Math.max(...guards.map((guard) => guard.cases))}`;
+      reasons[0] = `the recall guard needs ${simulation.protectedCasesNeeded} "${protect}" cases in one language before Laya may take any other answer there; the calibration half holds at most ${Math.max(...guards.map((guard) => guard.cases))}`;
     }
     return { verdict: "inconclusive", reasons };
   }
@@ -1090,6 +1122,110 @@ export function benchExitCode(verdicts: readonly PointVerdict[]): 0 | 1 | 2 {
   if (verdicts.includes("unsafe")) return 1;
   if (verdicts.length === 0 || verdicts.every((verdict) => verdict === "inconclusive")) return 2;
   return 0;
+}
+
+// ── Negation pairs and option order ─────────────────────────────────────────────────────────────────
+
+export interface NegationSlice {
+  point: string;
+  language: SliceLanguage;
+  model: string;
+  /** Pairs whose gold labels differ: the negation changes what is asked. */
+  flipPairs: number;
+  /** ... of them, both answered right by Laya: it read the negation. */
+  layaBothRight: Rate;
+  /** ... of them, one answer from Laya for both: it read past the negation. */
+  layaSameAnswer: Rate;
+  incumbentBothRight: Rate;
+  incumbentSameAnswer: Rate;
+  /** Pairs whose gold labels are the same: the negation changes nothing that is asked. */
+  controlPairs: number;
+  /** ... of them, one answer from Laya for both, as it should be. */
+  layaKept: Rate;
+  incumbentKept: Rate;
+}
+
+/**
+ * Laya and the incumbent on negation minimal pairs (eval/decisions/negation.example.jsonl), per point, Laya checkpoint
+ * and labelled language. A pair counts where the arm answered both of its cases; a gated case leaves its pair out.
+ */
+export function negationPairs(results: readonly BenchResult[]): NegationSlice[] {
+  const models = modelAssignments(results);
+  const byPair = groupBy(representatives(results).filter((result) => result.pair), (result) => result.pair!);
+  const pairs = [...byPair.values()].filter((members) => members.length === 2 && members.every((member) => member.gold !== undefined));
+  const groups = groupBy(pairs, (members) => `${members[0]!.point}\u0000${models.get(members[0]!) ?? ""}`);
+  const out: NegationSlice[] = [];
+  for (const [key, group] of groups) {
+    const [point, model] = key.split("\u0000") as [string, string];
+    for (const language of SLICE_LANGUAGES) {
+      const mine = language === "all" ? group : group.filter((members) => members[0]!.language === language);
+      const flips = mine.filter(([a, b]) => a!.gold !== b!.gold);
+      const controls = mine.filter(([a, b]) => a!.gold === b!.gold);
+      const laya = (members: BenchResult[]) => members.every((member) => member.laya);
+      const incumbent = (members: BenchResult[]) => members.every((member) => member.incumbent?.choice !== undefined);
+      const layaFlips = flips.filter(laya);
+      const incumbentFlips = flips.filter(incumbent);
+      const layaControls = controls.filter(laya);
+      const incumbentControls = controls.filter(incumbent);
+      out.push({
+        point,
+        language,
+        model,
+        flipPairs: flips.length,
+        layaBothRight: rateOf(layaFlips.filter((members) => members.every((member) => member.laya!.choice === member.gold)).length, layaFlips.length),
+        layaSameAnswer: rateOf(layaFlips.filter(([a, b]) => a!.laya!.choice === b!.laya!.choice).length, layaFlips.length),
+        incumbentBothRight: rateOf(incumbentFlips.filter((members) => members.every((member) => member.incumbent!.choice === member.gold)).length, incumbentFlips.length),
+        incumbentSameAnswer: rateOf(incumbentFlips.filter(([a, b]) => a!.incumbent!.choice === b!.incumbent!.choice).length, incumbentFlips.length),
+        controlPairs: controls.length,
+        layaKept: rateOf(layaControls.filter(([a, b]) => a!.laya!.choice === b!.laya!.choice).length, layaControls.length),
+        incumbentKept: rateOf(incumbentControls.filter(([a, b]) => a!.incumbent!.choice === b!.incumbent!.choice).length, incumbentControls.length),
+      });
+    }
+  }
+  return out.sort((a, b) => a.point.localeCompare(b.point) || a.model.localeCompare(b.model) || SLICE_LANGUAGES.indexOf(a.language) - SLICE_LANGUAGES.indexOf(b.language));
+}
+
+export interface OrderSwapSlice {
+  point: string;
+  language: SliceLanguage;
+  model: string;
+  /** Cases Laya answered with the options in both orders, and on how many its choice changed with the order. */
+  flips: Rate;
+  /** The mean change of the probability it gave its first answer's option. */
+  meanTopShift: number | null;
+}
+
+/**
+ * --order-swap: the same case asked with the point's options in the order the point lists them and in the reverse,
+ * so that the option under the letter A becomes the one under B. A choice that changes with the order is the order's,
+ * not the case's (laya-multilingual: 22.5% of choices on a public set, upstream). Every run counts: the order is what
+ * is compared, within one run.
+ */
+export function orderSwapFlips(results: readonly BenchResult[]): OrderSwapSlice[] {
+  const models = modelAssignments(results);
+  const both = results.filter((result) => !result.gated && result.laya && result.layaSwapped);
+  const groups = groupBy(both, (result) => `${result.point}\u0000${models.get(result) ?? ""}`);
+  const out: OrderSwapSlice[] = [];
+  for (const [key, group] of groups) {
+    const [point, model] = key.split("\u0000") as [string, string];
+    for (const language of SLICE_LANGUAGES) {
+      const mine = language === "all" ? group : group.filter((result) => result.language === language);
+      const shifts = mine.map((result) => Math.abs((result.layaSwapped!.probabilities[result.laya!.choice] ?? 0) - result.laya!.top));
+      out.push({
+        point,
+        language,
+        model,
+        flips: rateOf(mine.filter((result) => result.laya!.choice !== result.layaSwapped!.choice).length, mine.length),
+        meanTopShift: shifts.length ? shifts.reduce((sum, value) => sum + value, 0) / shifts.length : null,
+      });
+    }
+  }
+  return out.sort((a, b) => a.point.localeCompare(b.point) || a.model.localeCompare(b.model) || SLICE_LANGUAGES.indexOf(a.language) - SLICE_LANGUAGES.indexOf(b.language));
+}
+
+/** A point's options in the reverse order: the question --order-swap asks beside the point's own. */
+export function reversedOptions(options: Readonly<Record<string, string>>): Record<string, string> {
+  return Object.fromEntries(Object.entries(options).reverse());
 }
 
 // ── The report ──────────────────────────────────────────────────────────────────────────────────────
@@ -1119,10 +1255,16 @@ export interface BenchReport {
   settings: BenchReportSettings;
   slices: BenchSlice[];
   points: BenchPointReport[];
+  /** Negation minimal pairs, when the run held any (--negation); they take no part in the slices, gate or verdict. */
+  negation: NegationSlice[];
+  /** --order-swap: how often Laya's choice changed with the order of the options. */
+  orderSwap: OrderSwapSlice[];
   exitCode: 0 | 1 | 2;
 }
 
-export function buildBenchReport(results: readonly BenchResult[], settings: BenchReportSettings): BenchReport {
+export function buildBenchReport(all: readonly BenchResult[], settings: BenchReportSettings): BenchReport {
+  // Paired cases are chosen for their negation, not drawn like the others: they would skew every rate below.
+  const results = all.filter((result) => !result.pair);
   const points: BenchPointReport[] = [];
   const present = [...new Set(results.map((result) => result.point))].filter(isBenchPoint).sort();
   for (const id of present) {
@@ -1151,7 +1293,14 @@ export function buildBenchReport(results: readonly BenchResult[], settings: Benc
       });
     }
   }
-  return { settings, slices: summarizeBench(results), points, exitCode: benchExitCode(points.map((point) => point.verdict)) };
+  return {
+    settings,
+    slices: summarizeBench(results),
+    points,
+    negation: negationPairs(all),
+    orderSwap: orderSwapFlips(all),
+    exitCode: benchExitCode(points.map((point) => point.verdict)),
+  };
 }
 
 function pct(value: number | null | undefined): string {
@@ -1206,6 +1355,20 @@ export function renderBenchMarkdown(report: BenchReport, header: readonly string
     if (incumbentSource === "fallback") lines.push("", "The incumbent's time was not measured in this run; the projection uses the attribution's p50.");
     lines.push("", "### Level curve (every case, one fixed level, descriptive)", "", "| level | taken | coverage | wrong vs gold | rare-class miss |", "|---|---|---|---|---|");
     for (const level of point.levels) lines.push(`| ${level.level} | ${level.taken}/${level.cases} | ${pct(level.coverage.rate)} | ${rateCell(level.wrongVsGold)} | ${rateCell(level.rareMiss)} |`);
+    lines.push("");
+  }
+  if (report.negation.length) {
+    lines.push("## Negation pairs", "", "Flip pairs: the negation changes the gold label, and \"same answer\" means the arm read past it. Control pairs: it changes nothing, and the answer should stay.", "");
+    lines.push("| point | checkpoint | lang | flip pairs | Laya both right | Laya same answer | incumbent both right | incumbent same answer | control pairs | Laya kept | incumbent kept |", "|---|---|---|---|---|---|---|---|---|---|---|");
+    for (const slice of report.negation) {
+      lines.push(`| ${slice.point} | ${slice.model || "–"} | ${slice.language} | ${slice.flipPairs} | ${rateCell(slice.layaBothRight)} | ${rateCell(slice.layaSameAnswer)} | ${rateCell(slice.incumbentBothRight)} | ${rateCell(slice.incumbentSameAnswer)} | ${slice.controlPairs} | ${rateCell(slice.layaKept)} | ${rateCell(slice.incumbentKept)} |`);
+    }
+    lines.push("");
+  }
+  if (report.orderSwap.length) {
+    lines.push("## Option order", "", "Each case asked again with the options in reverse order. A flip is a choice the order made.", "");
+    lines.push("| point | checkpoint | lang | flips | mean shift of the first answer's probability |", "|---|---|---|---|---|");
+    for (const slice of report.orderSwap) lines.push(`| ${slice.point} | ${slice.model || "–"} | ${slice.language} | ${rateCell(slice.flips)} | ${slice.meanTopShift === null ? "–" : slice.meanTopShift.toFixed(3)} |`);
     lines.push("");
   }
   return lines.join("\n");

@@ -71,11 +71,12 @@ function layaAnswers(choice: "yes" | "no", top: number) {
   return fetchMock;
 }
 
-/** An incumbent that answers `value` after `ms`, and remembers whether it was aborted. */
+/** An incumbent that answers `value` after `ms`, and remembers when it was sent and whether it was aborted. */
 function incumbentAnswering(value: boolean | undefined, ms = 20) {
-  const seen = { calls: 0, aborted: false };
+  const seen = { calls: 0, aborted: false, sentAt: [] as number[] };
   const run = (signal: AbortSignal) => new Promise<boolean | undefined>((resolve, reject) => {
     seen.calls += 1;
+    seen.sentAt.push(Date.now());
     const timer = setTimeout(() => resolve(value), ms);
     signal.addEventListener("abort", () => {
       seen.aborted = true;
@@ -107,9 +108,9 @@ describe("the gate's statistics", () => {
 
   it("qualifies the lowest confidence whose cases agree well enough, per answer and language", () => {
     const settings = { targetAgreement: 0.9, minSamples: 30 };
-    // Confident "yes" answers agree; unsure ones do not.
-    for (let i = 0; i < 60; i += 1) gate.recordAgreementSample("source_sensitive", "de", "yes", 0.95, true);
-    for (let i = 0; i < 40; i += 1) gate.recordAgreementSample("source_sensitive", "de", "yes", 0.6, false);
+    // Confident "yes" answers agree; unsure ones do not. 240: a level above the lowest is tested once it holds 200.
+    for (let i = 0; i < 240; i += 1) gate.recordAgreementSample("source_sensitive", "de", "yes", 0.95, true);
+    for (let i = 0; i < 160; i += 1) gate.recordAgreementSample("source_sensitive", "de", "yes", 0.6, false);
     expect(gate.qualifiedLevel("source_sensitive", "de", "yes", settings)).toBe(0.7);
     expect(gate.layaMayDecide("source_sensitive", "de", "yes", 0.96, settings)).toBe(true);
     expect(gate.layaMayDecide("source_sensitive", "de", "yes", 0.65, settings)).toBe(false);
@@ -141,11 +142,17 @@ describe("the gate's statistics", () => {
     expect(gate.qualifiedLevel("source_sensitive", "de", "yes", settings, "m", "yes")).toBe(0.5);
   });
 
-  it("never qualifies with fewer cases than minSamples, however well they agree", () => {
+  it("never qualifies with fewer cases than minSamples, and opens only once it also did without its newest cases", () => {
+    const settings = { targetAgreement: 0.5, minSamples: 30 };
     for (let i = 0; i < 29; i += 1) gate.recordAgreementSample("goal_met", "en", "done", 0.99, true);
-    expect(gate.qualifiedLevel("goal_met", "en", "done", { targetAgreement: 0.5, minSamples: 30 })).toBeNull();
+    expect(gate.qualifiedLevel("goal_met", "en", "done", settings)).toBeNull();
+    // 30 would pass on its own; the confirmation asks the same of the 30 before the newest CONFIRM_SAMPLES.
+    for (let n = 30; n < 30 + gate.CONFIRM_SAMPLES; n += 1) {
+      gate.recordAgreementSample("goal_met", "en", "done", 0.99, true);
+      expect(gate.qualifiedLevel("goal_met", "en", "done", settings), `${n} cases`).toBeNull();
+    }
     gate.recordAgreementSample("goal_met", "en", "done", 0.99, true);
-    expect(gate.qualifiedLevel("goal_met", "en", "done", { targetAgreement: 0.5, minSamples: 30 })).toBe(0.5);
+    expect(gate.qualifiedLevel("goal_met", "en", "done", settings)).toBe(0.5);
   });
 });
 
@@ -192,7 +199,7 @@ describe("who decides", () => {
     });
   });
 
-  it("laya: takes Laya's answer at the threshold and aborts the incumbent, below it waits for the incumbent", async () => {
+  it("laya: takes Laya's answer at the threshold without sending the incumbent, below it waits for the incumbent", async () => {
     await writeConfig({ baseUrl: "http://laya:8080", points: { source_sensitive: { mode: "laya", threshold: 0.9 } } });
     layaAnswers("yes", 0.93);
     const slow = incumbentAnswering(false, 5_000);
@@ -201,7 +208,7 @@ describe("who decides", () => {
     expect(taken.value).toBe(true);
     expect(taken.decidedBy).toBe("laya");
     expect(Date.now() - started, "waited for the incumbent Laya had replaced").toBeLessThan(1_000);
-    expect(slow.seen.aborted).toBe(true);
+    expect(slow.seen.calls, "the incumbent Laya replaced was sent anyway").toBe(0);
 
     layaAnswers("yes", 0.8);
     const kept = await sourceSensitive(GERMAN, incumbentAnswering(false).run);
@@ -229,7 +236,7 @@ describe("who decides", () => {
     const proven = await sourceSensitive(GERMAN, slow.run);
     expect(proven.decidedBy).toBe("laya");
     expect(proven.value).toBe(true);
-    expect(slow.seen.aborted).toBe(true);
+    expect(slow.seen.calls, "the incumbent Laya replaced was sent anyway").toBe(0);
 
     // German evidence does not hand Laya English cases.
     const english = await sourceSensitive(ENGLISH, incumbentAnswering(true).run);
@@ -304,6 +311,243 @@ describe("who decides", () => {
     await writeConfig({ baseUrl: "http://laya:8080", defaultMode: "shadow" });
     layaAnswers("no", 0.9);
     await expect(sourceSensitive(GERMAN, async () => { throw new Error("routing tier down"); })).rejects.toThrow("routing tier down");
+  });
+});
+
+describe("Laya first, where its answer could be taken", () => {
+  // Adoption plan 2026-09-26, C6: an incumbent aborted right after it was sent made the next call on the same model
+  // 952 ms slower (E5). Where Laya's answer may be taken, the incumbent waits for it; elsewhere nothing changes.
+  const ADAPTIVE = { baseUrl: "http://laya:8080", defaultMode: "adaptive", adaptive: { targetAgreement: 0.9, minSamples: 30, auditRate: 0 } };
+
+  /** Laya answering "yes" at `top` after `ms`; remembers when it answered. */
+  function layaAfter(ms: number, top = 0.96) {
+    const seen = { answeredAt: 0 };
+    const fetchMock = vi.fn(async () => {
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      seen.answeredAt = Date.now();
+      return new Response(JSON.stringify({
+        answers: { source_sensitive: { choice: "yes", probabilities: { yes: top, no: 1 - top } } },
+        model: "laya-test",
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return { fetchMock, seen };
+  }
+
+  /** Evidence that qualifies German "yes" for laya-test (38 flawless cases are needed at 0.9). */
+  function qualifyYes() {
+    for (let i = 0; i < 40; i += 1) gate.recordAgreementSample("source_sensitive", "de", "yes", 0.96, true, "laya-test", "yes");
+  }
+
+  it("(a) never sends the incumbent when Laya's qualified answer is taken", async () => {
+    await writeConfig(ADAPTIVE);
+    qualifyYes();
+    layaAfter(5);
+    const incumbent = incumbentAnswering(false, 5_000);
+    const outcome = await sourceSensitive(GERMAN, incumbent.run);
+    expect(outcome).toMatchObject({ value: true, decidedBy: "laya" });
+    expect(incumbent.seen.calls, "an incumbent Laya replaced was sent (and aborted)").toBe(0);
+  });
+
+  it("(b) starts the incumbent at once where nothing is qualified, without waiting for Laya", async () => {
+    await writeConfig(ADAPTIVE);
+    const laya = layaAfter(80);
+    const incumbent = incumbentAnswering(false, 5);
+    const started = Date.now();
+    const outcome = await sourceSensitive(GERMAN, incumbent.run);
+    expect(outcome.decidedBy).toBe("incumbent");
+    expect(incumbent.seen.calls).toBe(1);
+    expect(incumbent.seen.sentAt[0]! - started, "the incumbent waited for Laya").toBeLessThan(40);
+    expect(incumbent.seen.sentAt[0]!).toBeLessThan(laya.seen.answeredAt);
+  });
+
+  it("(b2) fails the decision, not the process, when the incumbent fails while Laya is still answering", async () => {
+    await writeConfig(ADAPTIVE);
+    layaAfter(30);
+    // The gateway logs every unhandled rejection as an error (index.ts): an incumbent that fails before decide() has
+    // looked at Laya's answer must reach the caller, and only the caller.
+    const stray: unknown[] = [];
+    const onStray = (reason: unknown) => { stray.push(reason); };
+    process.on("unhandledRejection", onStray);
+    try {
+      await expect(sourceSensitive(GERMAN, async () => { throw new Error("incumbent down"); })).rejects.toThrow("incumbent down");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    } finally {
+      process.off("unhandledRejection", onStray);
+    }
+    expect(stray, "the incumbent's failure went unhandled while decide() waited on Laya").toEqual([]);
+  });
+
+  it("(c) sends an audited case to the incumbent once Laya has answered", async () => {
+    await writeConfig({ ...ADAPTIVE, adaptive: { ...ADAPTIVE.adaptive, auditRate: 1 } });
+    qualifyYes();
+    const laya = layaAfter(20);
+    const incumbent = incumbentAnswering(false, 5);
+    const outcome = await sourceSensitive(GERMAN, incumbent.run);
+    expect(outcome.decidedBy).toBe("incumbent");
+    expect(incumbent.seen.calls).toBe(1);
+    expect(incumbent.seen.sentAt[0]!).toBeGreaterThanOrEqual(laya.seen.answeredAt);
+  });
+
+  it("(d) shadow: starts both at once, however qualified Laya is", async () => {
+    await writeConfig({ ...ADAPTIVE, defaultMode: "shadow" });
+    qualifyYes();
+    const laya = layaAfter(80);
+    const incumbent = incumbentAnswering(false, 5);
+    const started = Date.now();
+    expect((await sourceSensitive(GERMAN, incumbent.run)).decidedBy).toBe("incumbent");
+    expect(incumbent.seen.sentAt[0]! - started).toBeLessThan(40);
+    await vi.waitFor(() => expect(laya.seen.answeredAt).toBeGreaterThan(incumbent.seen.sentAt[0]!));
+  });
+
+  it("(e) starts the incumbent at once while the breaker is open, however long the head start", async () => {
+    await writeConfig({ ...ADAPTIVE, layaFirstMs: 1_000 });
+    const failing = vi.fn(async () => new Response("boom", { status: 500 }));
+    vi.stubGlobal("fetch", failing);
+    for (let i = 0; i < 3; i += 1) await sourceSensitive(GERMAN, incumbentAnswering(false, 1).run);
+    qualifyYes();
+    const incumbent = incumbentAnswering(true, 5);
+    const started = Date.now();
+    const pending = sourceSensitive(GERMAN, incumbent.run);
+    // Sent before decide() first yields: the breaker is read up front, not learnt from Laya's null answer.
+    expect(incumbent.seen.calls, "the incumbent waited on a sidecar the breaker will not ask").toBe(1);
+    expect((await pending).decidedBy).toBe("incumbent");
+    expect(failing, "the open breaker was asked").toHaveBeenCalledTimes(3);
+    expect(incumbent.seen.sentAt[0]! - started).toBeLessThan(40);
+  });
+
+  it("(f) starts the incumbent when Laya overruns its head start, and still takes Laya's answer if it comes in time", async () => {
+    await writeConfig({ ...ADAPTIVE, layaFirstMs: 40 });
+    qualifyYes();
+    layaAfter(250);
+    const incumbent = incumbentAnswering(false, 5_000);
+    const started = Date.now();
+    const outcome = await sourceSensitive(GERMAN, incumbent.run);
+    const waited = incumbent.seen.sentAt[0]! - started;
+    expect(waited, "sent before the head start was over").toBeGreaterThanOrEqual(35);
+    expect(waited, "waited for Laya past the head start").toBeLessThan(200);
+    expect(outcome.decidedBy).toBe("laya");
+    expect(incumbent.seen.aborted, "as when both start at once").toBe(true);
+  });
+
+  it("keeps the old order with layaFirstMs 0", async () => {
+    await writeConfig({ ...ADAPTIVE, layaFirstMs: 0 });
+    qualifyYes();
+    layaAfter(30);
+    const incumbent = incumbentAnswering(false, 5_000);
+    const pending = sourceSensitive(GERMAN, incumbent.run);
+    // Both at once, as before: sent before decide() first yields, not after a zero-length head start.
+    expect(incumbent.seen.calls, "sent after a head start of 0 ms instead of at once").toBe(1);
+    expect((await pending).decidedBy).toBe("laya");
+    expect(incumbent.seen.calls).toBe(1);
+    expect(incumbent.seen.aborted).toBe(true);
+  });
+
+  it("(g) waits only on the version that answers: a checkpoint no longer served does not hold the incumbent back", async () => {
+    await writeConfig(ADAPTIVE);
+    // Evidence for a checkpoint the sidecar served before; it now answers as laya-test, which has none.
+    for (let i = 0; i < 40; i += 1) gate.recordAgreementSample("source_sensitive", "de", "yes", 0.96, true, "laya-previous", "yes");
+    const laya = layaAfter(20);
+    // Before any answer of this process, any version with evidence may be the one that answers: one wait.
+    const first = incumbentAnswering(false, 5);
+    expect((await sourceSensitive(GERMAN, first.run)).decidedBy).toBe("incumbent");
+    expect(first.seen.sentAt[0]!, "the first case did not wait to learn the version").toBeGreaterThanOrEqual(laya.seen.answeredAt);
+    // From then on the version that answered decides, and it has qualified nothing: both at once.
+    const next = incumbentAnswering(false, 5);
+    const pending = sourceSensitive(GERMAN, next.run);
+    expect(next.seen.calls, "the incumbent waited on the previous checkpoint's evidence").toBe(1);
+    expect((await pending).decidedBy).toBe("incumbent");
+  });
+
+  it("(h) waits only where an answer Laya may take has qualified, not any answer of the point", async () => {
+    await writeConfig(ADAPTIVE);
+    // "yes" has qualified; the caller lets Laya take "no" alone (as the receptionist lets it take "task" only).
+    qualifyYes();
+    layaAfter(20);
+    const incumbent = incumbentAnswering(false, 5);
+    const pending = decisions.decide<boolean>({
+      point: decisions.SOURCE_SENSITIVE,
+      state: { message: GERMAN },
+      languageOf: GERMAN,
+      layaMayTake: ["no"],
+      incumbent: incumbent.run,
+      toKey: (value) => (value ? "yes" : "no"),
+      fromKey: (key) => key === "yes",
+    });
+    expect(incumbent.seen.calls, "the incumbent waited for an answer Laya may not take").toBe(1);
+    expect((await pending).decidedBy).toBe("incumbent");
+  });
+});
+
+describe("a point read through its own window", () => {
+  /** A sidecar answering finding_relevant "irrelevant" at `top`, reporting `extra` in the answer. */
+  function sidecar(extra: Record<string, unknown>, top = 0.96) {
+    const fetchMock = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({
+      answers: { finding_relevant: { choice: "irrelevant", probabilities: { relevant: 1 - top, irrelevant: top }, ...extra } },
+      model: "laya-test",
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  function relevance(incumbent: (signal: AbortSignal) => Promise<string | undefined>) {
+    return decisions.decide<string>({
+      point: decisions.FINDING_RELEVANT,
+      state: { objective: ENGLISH, content: "Menu. Cookies." },
+      languageOf: ENGLISH,
+      layaMayTake: ["irrelevant"],
+      incumbent,
+      toKey: (distilled) => (distilled ? "relevant" : "irrelevant"),
+      fromKey: () => "",
+    });
+  }
+
+  it("asks for its window, and keeps its evidence apart from the default window's", async () => {
+    await writeConfig({ baseUrl: "http://laya:8080", defaultMode: "adaptive", adaptive: { targetAgreement: 0.9, minSamples: 30, auditRate: 0 } });
+    expect(decisions.FINDING_RELEVANT.maxLen).toBe(4096);
+    // Evidence earned while Laya read the first 2,400 characters through the checkpoint's own window.
+    for (let i = 0; i < 60; i += 1) gate.recordAgreementSample("finding_relevant", "en", "irrelevant", 0.96, true, "laya-test", "irrelevant");
+    for (let i = 0; i < 60; i += 1) gate.recordAgreementSample("finding_relevant", "en", "relevant", 0.96, true, "laya-test", "relevant");
+    const fetchMock = sidecar({ maxLen: 4096, truncatedTokens: 7 });
+    const outcome = await relevance(async () => "");
+    const sent = JSON.parse(String((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body)) as { questions: Array<Record<string, unknown>> };
+    expect(sent.questions[0]!["max_len"]).toBe(4096);
+    expect(outcome.laya?.model).toBe("laya-test;max_len=4096");
+    expect(outcome.laya?.truncatedTokens).toBe(7);
+    expect(outcome.decidedBy, "the default window's evidence vouched for the wider one").toBe("incumbent");
+    await vi.waitFor(async () => {
+      await ledger.flushLedgerForTests();
+      expect(existsSync(ledgerPath)).toBe(true);
+    });
+    const row = JSON.parse(readFileSync(ledgerPath, "utf8").trim().split("\n").at(-1)!) as Record<string, unknown>;
+    expect(row["laya"]).toMatchObject({ model: "laya-test;max_len=4096", truncatedTokens: 7 });
+  });
+
+  it("files an answer from a sidecar that does not confirm the window apart from both", async () => {
+    await writeConfig({ baseUrl: "http://laya:8080", defaultMode: "shadow" });
+    sidecar({});
+    const outcome = await relevance(async () => "");
+    expect(outcome.decidedBy).toBe("incumbent");
+    await vi.waitFor(async () => {
+      await ledger.flushLedgerForTests();
+      expect(existsSync(ledgerPath)).toBe(true);
+    });
+    const row = JSON.parse(readFileSync(ledgerPath, "utf8").trim().split("\n").at(-1)!) as { laya: { model: string; truncatedTokens?: number } };
+    expect(row.laya.model).toBe("laya-test;max_len=unconfirmed");
+    expect(row.laya.truncatedTokens).toBeUndefined();
+  });
+
+  it("leaves the version of a point without its own window as the sidecar names it", async () => {
+    await writeConfig({ baseUrl: "http://laya:8080", defaultMode: "shadow" });
+    const fetchMock = layaAnswers("yes", 0.97);
+    await sourceSensitive(GERMAN, incumbentAnswering(false).run);
+    const sent = JSON.parse(String((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body)) as { questions: Array<Record<string, unknown>> };
+    expect(sent.questions[0]).not.toHaveProperty("max_len");
+    await vi.waitFor(async () => {
+      await ledger.flushLedgerForTests();
+      expect(existsSync(ledgerPath)).toBe(true);
+    });
+    expect(JSON.parse(readFileSync(ledgerPath, "utf8").trim()).laya.model).toBe("laya-test");
   });
 });
 

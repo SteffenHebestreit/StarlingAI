@@ -291,6 +291,14 @@ export interface ToolContext {
    * tool calls (same ToolContext), like _turnAgentCounts.
    */
   _turnWriteChurnTracker?: Map<string, { count: number }>;
+  /**
+   * The turn's delegated runs that the loop brake acted on or the warden stopped
+   * (agent/delegation-loop-notes.ts). One array per turn, shared by reference with every nested
+   * delegation like _turnAgentCounts, so a loop two levels down reaches the frame, a re-dispatch,
+   * the artifact gate and the turn oversight. Internal — created by the runtime, or lazily by the
+   * first delegation.
+   */
+  _turnLoopRuns?: import("../agent/delegation-loop-notes.js").TurnLoopRecord[];
 }
 
 export interface ToolResult {

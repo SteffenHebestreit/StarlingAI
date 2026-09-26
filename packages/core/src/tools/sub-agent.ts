@@ -6,7 +6,10 @@
  */
 
 import { registerTool, getAllTools, searchToolsByEmbedding, executeTool, type SwarmState, type SwarmTaskAttempt, type SwarmTaskState, type ToolContext, type ToolResult } from "./registry.js";
-import { runSubAgent, runSubAgentWithStats, type SubAgentToolFailure } from "../agent/sub-agent.js";
+import { runSubAgent, runSubAgentWithStats, type SubAgentLoopEnforced, type SubAgentToolFailure, type SubAgentWardenStop } from "../agent/sub-agent.js";
+import { buildPriorLoopNote } from "../agent/delegation-loop-notes.js";
+import { runAsWriteSibling, SiblingWriteGroup } from "../agent/sibling-write-ownership.js";
+import { collectArtifactRecords } from "../agent/artifact-metadata.js";
 // Leaf module shared with agent/sub-agent.ts so the soft deadline and the hard deadline
 // are derived from ONE precedence rule; deriving them separately is how they drifted.
 import {
@@ -1138,6 +1141,8 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       terminalState?: string;
       routingInfo?: RoutingSelectionReason;
       artifacts?: Record<string, unknown>[];
+      loopEnforced?: SubAgentLoopEnforced;
+      wardenStop?: SubAgentWardenStop;
     }
     | undefined;
   /** Routing metadata for agents that were auto-selected by resolveAgentRouting. */
@@ -1150,6 +1155,9 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
     (specialistToolFailures.length > 0 ? { specialistToolFailures: [...specialistToolFailures] } : {});
 
   if (!ctx._turnAgentCounts) ctx._turnAgentCounts = new Map();
+  // The turn's looped runs (agent/delegation-loop-notes.ts). The runtime creates it per turn; a
+  // caller that did not (a scene, a test) gets one here, shared onward by reference.
+  if (!ctx._turnLoopRuns) ctx._turnLoopRuns = [];
 
   // Research-capability gate for EXPLICIT delegations (the routing/bidding gates
   // only cover undirected picks). If a source-sensitive / "search online" task
@@ -1966,6 +1974,21 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           "\nDo NOT repeat these exact approaches. Use a different strategy or source.\n";
         handoffContext = handoffPrefix + (enrichedContext ? `\n${enrichedContext}` : "");
       }
+      // C5' (b), orchestration.loopAwareDelegation: an earlier run of THIS agent in this turn looped,
+      // so this one is told the calls it repeated. Keyed on agent + tool + target, not on how alike
+      // the two tasks read: in c297c5ea the re-dispatch after a 199-iteration loop shared 0.29 of
+      // its words with the first task and would have repeated the loop all the same.
+      const priorLoopNote = effectiveOrchestration().loopAwareDelegation === true
+        ? buildPriorLoopNote(ctx._turnLoopRuns, candidate)
+        : null;
+      if (priorLoopNote) {
+        handoffContext = priorLoopNote + (handoffContext ? `\n\n${handoffContext}` : "");
+        logAudit("delegation_prior_loop_noted", {
+          agentName: candidate,
+          taskTitle: title,
+          calls: (ctx._turnLoopRuns ?? []).filter((record) => record.agent === candidate && record.loop).length,
+        }, { sessionId: ctx.sessionId, severity: "info" });
+      }
 
       // A delegated child must never be handed more time than the parent turn has LEFT, minus the
       // headroom the parent needs to synthesize + deliver what comes back. The caller budget is a
@@ -2026,6 +2049,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         swarmState: ctx.swarmState,
         onSwarmState: ctx.onSwarmState,
         _turnAgentCounts: ctx._turnAgentCounts,
+        _turnLoopRuns: ctx._turnLoopRuns,
         _turnAgentRepeatLimitOverrides: ctx._turnAgentRepeatLimitOverrides,
         _turnTotalDelegationLimitOverride: ctx._turnTotalDelegationLimitOverride,
         _workflowExecutionStack: ctx._workflowExecutionStack,
@@ -2058,6 +2082,10 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         usage?: { promptTokens: number; completionTokens: number; totalTokens: number };
       } | undefined;
       let artifacts: Record<string, unknown>[] = [];
+      // What the loop brake did on this run and whether the warden stopped it (agent/sub-agent.ts
+      // SubAgentLoopEnforced / SubAgentWardenStop), passed up in the result's metadata.
+      let runLoopEnforced: SubAgentLoopEnforced | undefined;
+      let runWardenStop: SubAgentWardenStop | undefined;
 
       if (typeof runSubAgentWithStats === "function") {
         const maybeResult = await runSubAgentWithStats(subAgentArgs);
@@ -2073,6 +2101,19 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
             ? maybeResult.artifacts.map((artifact) => ({ ...artifact }))
             : [];
           if (Array.isArray(maybeResult.toolFailures)) specialistToolFailures.push(...maybeResult.toolFailures);
+          runLoopEnforced = maybeResult.loopEnforced;
+          runWardenStop = maybeResult.wardenStop;
+          if (runLoopEnforced || runWardenStop) {
+            // The turn's record (agent/delegation-loop-notes.ts), shared with every level of it.
+            ctx._turnLoopRuns?.push({
+              agent: candidate,
+              coordinator: agentNameIsCoordinator(candidate),
+              ...(runLoopEnforced ? { loop: { ...runLoopEnforced } } : {}),
+              ...(runWardenStop ? { wardenStop: { ...runWardenStop } } : {}),
+              ...(stats.outcome ? { outcome: stats.outcome } : {}),
+              paths: collectArtifactRecords({ artifacts }).map((record) => record.ref),
+            });
+          }
         } else {
           output = await runSubAgent(subAgentArgs);
         }
@@ -2204,6 +2245,8 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
             ...(stats?.terminalState ? { terminalState: stats.terminalState } : {}),
             ...(routingInfo ? { routingInfo } : {}),
             ...(artifacts.length > 0 ? { artifacts } : {}),
+            ...(runLoopEnforced ? { loopEnforced: runLoopEnforced } : {}),
+            ...(runWardenStop ? { wardenStop: runWardenStop } : {}),
           };
         }
         publishSwarmState(ctx);
@@ -2336,6 +2379,10 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           ...(artifacts.length > 0 ? { artifacts } : {}),
           ...withToolFailures(),
           ...(stats?.terminalState ? { terminalState: stats.terminalState } : {}),
+          // The run looped or the warden stopped it: read by the orchestrator's frame
+          // (agent/tool-result-format.ts, orchestration.loopAwareDelegation).
+          ...(runLoopEnforced ? { loopEnforced: runLoopEnforced } : {}),
+          ...(runWardenStop ? { wardenStop: runWardenStop } : {}),
           ...(routingInfo && { routingReason: { confidence: routingInfo.confidence, matchedTerms: routingInfo.matchedTerms, score: routingInfo.score } }),
         },
       };
@@ -2447,6 +2494,8 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         ...(bestPartialResult.artifacts?.length ? { artifacts: bestPartialResult.artifacts } : {}),
         ...withToolFailures(),
         ...(bestPartialResult.terminalState ? { terminalState: bestPartialResult.terminalState } : {}),
+        ...(bestPartialResult.loopEnforced ? { loopEnforced: bestPartialResult.loopEnforced } : {}),
+        ...(bestPartialResult.wardenStop ? { wardenStop: bestPartialResult.wardenStop } : {}),
         ...(bestPartialResult.routingInfo
           ? {
             routingReason: {
@@ -2790,6 +2839,13 @@ registerTool({
     // And every node's failed tool calls, from failed nodes as well as completed ones.
     const graphToolFailures: unknown[] = [];
     const graphId = `graph_${Date.now()}_${Object.keys(swarmState.tasks).length}`;
+    // Write ownership among the nodes running at the same time (agent/sibling-write-ownership.ts,
+    // orchestration.siblingWriteOwnership). c297c5ea: the write_paper node edited the deck while
+    // write_presentation built it. A node that has finished owns nothing, so a dependent node
+    // (started only once its prerequisites finished) writes freely.
+    const writeGroup = effectiveOrchestration().siblingWriteOwnership !== false && rawNodes.length > 1
+      ? new SiblingWriteGroup("run_task_graph", ctx.workspacePath)
+      : null;
 
     for (const node of rawNodes) {
       getOrCreateSwarmTask(ctx, node.id, node.title ?? summarizeText(node.task, 80), node.dependsOn ?? []);
@@ -2929,7 +2985,8 @@ registerTool({
           void writeTaskGraphNodeStarted(graphDefSessionId, graphId, node.id).catch(() => { /* best-effort marker */ });
         }
 
-        active.set(node.id, executeDelegationWithFallback({
+        const ownerLabel = `node '${node.id}'${node.agentName ? ` (${node.agentName})` : ""}`;
+        active.set(node.id, runAsWriteSibling(writeGroup, node.id, ownerLabel, node.task, () => executeDelegationWithFallback({
           agentName: node.agentName,
           task: node.task,
           context: node.context,
@@ -2939,7 +2996,7 @@ registerTool({
           taskId: node.id,
           taskTitle: node.title,
           dependsOn: node.dependsOn,
-        }, delegatedCtx).then((result) => ({ node, result })));
+        }, delegatedCtx)).then((result) => ({ node, result })));
       }
     };
 
@@ -4086,16 +4143,28 @@ registerTool({
       dispatchTasks.length,
     );
     const taskIds = allocateParallelTaskIds(delegatedCtx, dispatchTasks.length);
+    // Write ownership among the slices, which all run at once (agent/sibling-write-ownership.ts,
+    // orchestration.siblingWriteOwnership): a file one slice's task names, or that a running slice
+    // wrote first, is refused to the others.
+    const writeGroup = effectiveOrchestration().siblingWriteOwnership !== false && dispatchTasks.length > 1
+      ? new SiblingWriteGroup("parallel_delegate", ctx.workspacePath)
+      : null;
 
     const runSlice = (taskSpec: typeof dispatchTasks[number], index: number, ctxOverride: ToolContext) =>
-      executeDelegationWithFallback({
-        ...taskSpec,
-        taskId: taskIds[index],
-        taskTitle: summarizeText(taskSpec.task, 80),
-        // Auto-allocated parallel id — let a later round reuse an earlier same-signature
-        // slice's evidence instead of re-researching it.
-        allowSignatureReuse: true,
-      }, ctxOverride);
+      runAsWriteSibling(
+        writeGroup,
+        `task_${index + 1}`,
+        `task ${index + 1}${taskSpec.agentName ? ` (${taskSpec.agentName})` : ""}`,
+        taskSpec.task,
+        () => executeDelegationWithFallback({
+          ...taskSpec,
+          taskId: taskIds[index],
+          taskTitle: summarizeText(taskSpec.task, 80),
+          // Auto-allocated parallel id — let a later round reuse an earlier same-signature
+          // slice's evidence instead of re-researching it.
+          allowSignatureReuse: true,
+        }, ctxOverride),
+      );
 
     // QUORUM EARLY-SYNTHESIS (orchestration.quorumEarlySynthesis, default-off): return as
     // soon as ceil(quorumFraction * N) slices SUCCEED (+ a straggler grace window), aborting

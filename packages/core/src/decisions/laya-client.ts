@@ -2,8 +2,9 @@
  * The client of the Laya sidecar's generic decision endpoint (docker/laya):
  *
  *   POST {baseUrl}/v1/decide
- *   { "questions": [{ "id", "question", "options": { key: description }, "state": { ... } }] }
- *   → { "answers": { id: { "choice": key, "probabilities": { key: p } } }, "model": "...", "ms": 12 }
+ *   { "questions": [{ "id", "question", "options": { key: description }, "state": { ... }, "max_len"?: tokens }] }
+ *   → { "answers": { id: { "choice": key, "probabilities": { key: p }, "maxLen": tokens, "truncatedTokens": n } },
+ *       "model": "...", "ms": 12 }
  *
  * Never throws: every failure is `null`, and the caller's incumbent decides. A sidecar that is down
  * would otherwise cost every decision its full timeout, so after a run of failures it is not asked
@@ -19,6 +20,8 @@ const FAILURE_THRESHOLD = 3;
 const COOLDOWN_MS = 60_000;
 let consecutiveFailures = 0;
 let circuitOpenUntil = 0;
+/** Per decision point, the version its last answer counted for: what decide() expects the next one to be. */
+const lastVersionByPoint = new Map<string, string>();
 
 export interface LayaAnswer {
   /** The option Laya scored highest. */
@@ -29,14 +32,45 @@ export interface LayaAnswer {
   top: number;
   /** Round trip, as measured here. */
   ms: number;
-  /** The checkpoint version that answered, as the sidecar names it ("" when it did not). */
+  /**
+   * The version the answer counts for: the checkpoint the sidecar names ("" when it did not), and for
+   * a point read with its own window (points.ts `maxLen`) that window (layaModelVersion).
+   */
   model: string;
+  /** How many tokens of the state the window cut off, as the sidecar counted them; absent from an older sidecar. */
+  truncatedTokens?: number;
 }
 
 /** The version a sidecar answer names: a fine-tune's run, else the checkpoint reference. */
 function modelOf(body: unknown): string {
   const model = body && typeof body === "object" ? (body as Record<string, unknown>)["model"] : undefined;
   return typeof model === "string" ? model.slice(0, 300) : "";
+}
+
+/**
+ * The version an answer's agreement counts for. A point read with its own window reads other input than the
+ * checkpoint's default window did (finding_relevant: 6,000 characters instead of 2,400), so its samples must not
+ * vouch for the new input or the other way round: they are kept apart by the window the sidecar confirms having
+ * used, and as "unconfirmed" from a sidecar that does not say — one that ignores max_len reads the default window,
+ * whatever was asked.
+ */
+export function layaModelVersion(model: string, point: Pick<DecisionPointDefinition, "maxLen">, window: number | undefined): string {
+  if (point.maxLen === undefined) return model;
+  return `${model};max_len=${window ?? "unconfirmed"}`;
+}
+
+/** The version this point's last answer counted for, or null before it has answered in this process. */
+export function expectedLayaModel(point: Pick<DecisionPointDefinition, "id">): string | null {
+  return lastVersionByPoint.get(point.id) ?? null;
+}
+
+/** Is the breaker open, so that Laya would not be asked now? */
+export function layaCircuitOpen(now = Date.now()): boolean {
+  return circuitOpenUntil > now;
+}
+
+function finiteCount(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.round(value) : undefined;
 }
 
 /** Is a sidecar configured at all? Without one, no point asks Laya whatever its mode. */
@@ -62,8 +96,9 @@ function recordFailure(now: number, reason: string): void {
 }
 
 /** The answer for one question, checked against the options it was offered. */
-function readAnswer(raw: unknown, options: Readonly<Record<string, string>>, ms: number, model: string): LayaAnswer | null {
+function readAnswer(raw: unknown, point: DecisionPointDefinition, ms: number, model: string): LayaAnswer | null {
   if (!raw || typeof raw !== "object") return null;
+  const options = point.options;
   const record = raw as Record<string, unknown>;
   const choice = typeof record["choice"] === "string" ? record["choice"] : undefined;
   const probabilitiesRaw = record["probabilities"];
@@ -77,7 +112,15 @@ function readAnswer(raw: unknown, options: Readonly<Record<string, string>>, ms:
   const top = probabilities[choice]!;
   // The choice must be the argmax of what it sent: anything else is a contract break, not an answer.
   if (Object.values(probabilities).some((p) => p > top + 1e-9)) return null;
-  return { choice, probabilities, top, ms, model };
+  const truncatedTokens = finiteCount(record["truncatedTokens"]);
+  return {
+    choice,
+    probabilities,
+    top,
+    ms,
+    model: layaModelVersion(model, point, finiteCount(record["maxLen"])),
+    ...(truncatedTokens !== undefined ? { truncatedTokens } : {}),
+  };
 }
 
 /**
@@ -95,10 +138,18 @@ export async function askLaya(
   const timeoutMs = getConfig().decisions.timeoutMs;
   const started = Date.now();
   try {
+    const question = {
+      id: point.id,
+      question: point.question,
+      options: point.options,
+      state,
+      // The point's own window (points.ts maxLen); without it the sidecar reads the checkpoint's default.
+      ...(point.maxLen !== undefined ? { max_len: point.maxLen } : {}),
+    };
     const response = await fetch(endpoint("/v1/decide"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ questions: [{ id: point.id, question: point.question, options: point.options, state }] }),
+      body: JSON.stringify({ questions: [question] }),
       signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
     });
     if (!response.ok) {
@@ -106,12 +157,13 @@ export async function askLaya(
       return null;
     }
     const body = await response.json() as { answers?: Record<string, unknown> };
-    const answer = readAnswer(body.answers?.[point.id], point.options, Date.now() - started, modelOf(body));
+    const answer = readAnswer(body.answers?.[point.id], point, Date.now() - started, modelOf(body));
     if (!answer) {
       recordFailure(Date.now(), "answer does not fit the options");
       return null;
     }
     recordSuccess();
+    lastVersionByPoint.set(point.id, answer.model);
     return answer;
   } catch (err) {
     // The caller's own abort is not the sidecar's failure.
@@ -239,8 +291,9 @@ export async function layaHealth(timeoutMs = 3_000): Promise<Record<string, unkn
   }
 }
 
-/** Test-only: close the breaker. */
+/** Test-only: close the breaker and forget the versions seen. */
 export function resetLayaClientForTests(): void {
   consecutiveFailures = 0;
   circuitOpenUntil = 0;
+  lastVersionByPoint.clear();
 }

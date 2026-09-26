@@ -85,6 +85,7 @@ an upper bound. The real value per point, language and class comes from layer 3.
 | `agent_search_wait` | restructure | `search_agents` / `list_agents` beyond a warm reranker's 3.7 s |
 | `qa_verdict_candidate` | classifier | QA verdicts that passed, less Laya's 20 ms. A verdict followed by an improve call failed and is not claimed. This is a candidate point, not an existing one. |
 | `vision_structuring` | restructure | a vision call's decode beyond a ~64-token structured answer; only rows with call site `vision` |
+| `loop_brake` | restructure | a sub-agent run's time from its first loop row (`sub_agent_tool_loop_enforced` or `_detected`) to its end. An upper bound: the stopped run's synthesis and detections that were not loops are claimed too. |
 
 **Each second counts once.** The combined saving counts every instant of a turn once, at the
 largest weight any lever claims for it, never the sum. Two levers claiming the same second at
@@ -147,9 +148,11 @@ every flag. It answers:
 - Does running the receptionist, the judge and the prefetch side by side save time, or does each
   call get slower? Look at the same small call with 1, 2 and 4 in flight, and which station
   answered.
-- `decide()` starts the incumbent call and Laya together and aborts the incumbent when Laya
+- Wherever Laya is not asked first (shadow, a point that has not qualified, `decisions.layaFirstMs`
+  0), `decide()` starts the incumbent call and Laya together and aborts the incumbent when Laya
   decides. Does the aborted request still occupy a slot or evict the orchestrator's cached
-  prefix?
+  prefix? (E5, 2026-09-26: the next head call was 952 ms slower, which is why a qualified point
+  now asks Laya first.)
 
 Measure on the PRODUCTION PATH: the llama-swap address in `.env` (`SAI_PRIMARY_MODEL_URL`) with
 the model selector `qwen`, never a station's own address or model id. The selector spreads calls
@@ -185,8 +188,10 @@ How to read them:
 - **German and English separately.** The gate keeps them apart, and Laya is weakest in German.
   A figure pooled over both languages hides that.
 - **The qualifying bar is higher than it looks.** The gate uses the Wilson lower bound at 0.9:
-  30 of 30 agreeing cases give 0.886 and do not qualify. It takes about 35 flawless cases per
-  point, language, answer and checkpoint, and every new checkpoint starts again.
+  30 of 30 agreeing cases give 0.886 and do not qualify. It takes about 38 flawless cases per
+  point, language, answer and checkpoint (35 for the bound, and the level must also have
+  qualified without the newest 3), any level above the lowest waits for 200 cases, and every new
+  checkpoint starts again (decisions/gate.ts).
 - **The headline number** is: frequency per turn (layer 1) × coverage at the qualifying level
   (layer 3) × (incumbent ms − Laya ms), as a share of whole-turn wall time. Pass layer 1's
   measured `--frequency` and `--round-ms` so the projection rests on real turns. Never add a
@@ -216,9 +221,10 @@ How to read them:
 - **Stub-provider eval runs** (sessions `eval-*`, ~100 prompt tokens, 0–5 ms per call) are not
   real latency. Leave their audit files out of the input.
 - **Upper bounds.** A lever's figure is what it would remove if it worked perfectly. Whether the
-  answer stays as good is a separate question, for layer 3 and pass^k. Laya also still sends
-  the incumbent's request today (`decide()` starts both), so a Laya decision saves wall time, not
-  load on the model server.
+  answer stays as good is a separate question, for layer 3 and pass^k. Where Laya is asked
+  first (a point that has qualified, `decisions.layaFirstMs`), a taken answer never sends the
+  incumbent's request. Everywhere else `decide()` starts both, and there a Laya decision saves
+  wall time, not load on the model server.
 
 ## Files
 

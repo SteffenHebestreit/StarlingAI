@@ -73,6 +73,56 @@ export function isStagedArtifactBuildRun(toolNames: string[] | undefined, task: 
 }
 
 /**
+ * Tools whose only job is to produce or check a BUILT artifact: the document/page/deck/image
+ * emitters, and the page and app checkers. write_file and edit_file are deliberately absent —
+ * they are how every note-taking specialist saves its work (the researcher, the summarizer and
+ * the evidence analyst all hold both), so holding them says nothing about building a page.
+ */
+export const ARTIFACT_BUILDER_TOOLS: ReadonlySet<string> = new Set([
+  "generate_document", "generate_website", "generate_presentation", "generate_docx", "generate_pptx", "generate_pdf",
+  "render_pdf", "bundle_artifact_zip",
+  "generate_image", "transform_image", "generate_svg", "generate_qr_code",
+  "generate_chart_html", "generate_mermaid_diagram",
+  "spreadsheet_write", "pdf_fill",
+  "verify_page", "verify_app", "serve_app",
+]);
+
+export function holdsArtifactBuilderTool(toolNames: readonly string[] | undefined): boolean {
+  return (toolNames ?? []).some((toolName) => ARTIFACT_BUILDER_TOOLS.has(toolName));
+}
+
+/**
+ * IS THIS UNFINISHED ARTIFACT THIS RUN'S TO FINISH?
+ *
+ * Resume detection reads the conversation's artifact zone, and the staged-build classifier fires
+ * on any write+edit holder with a long task — so in c297c5ea the researcher, dispatched at
+ * 02:11:10 with an 839-character research task, was handed "FIX THE EXISTING BUILD — DO NOT START
+ * OVER" about content_writer's broken reveal.js pages (row 1581bae5), and spent two edit_file
+ * calls on a presentation it had no part in. A resume is the builder's job, so the evidence is
+ * scoped to the runs that build it. Structural, per file:
+ *
+ * - a run holding a dedicated builder tool (ARTIFACT_BUILDER_TOOLS) may finish any artifact:
+ *   content_writer resumed the researcher-made skeleton at 01:29 and that was the right hand-off;
+ * - otherwise only an artifact this AGENT wrote last — a write/edit-only specialist resuming its
+ *   own staged build keeps its resume;
+ * - and an artifact nobody is recorded as having written (a gateway restart, a container run, a
+ *   file from before this conversation) stays everybody's, which is the behaviour before this.
+ *
+ * Why last writer and not any writer: in c297c5ea the researcher HAD written the deck — the first
+ * skeleton, at 01:23, because the fresh staged directive told it to — and content_writer had made
+ * some thirty edits since. "Wrote it once" would have handed it the repair anyway.
+ */
+export function ownsResumeEvidence(params: {
+  agentName: string;
+  toolNames: readonly string[] | undefined;
+  /** The agent recorded as the file's most recent writer in this conversation, if any. */
+  lastWriter: string | undefined;
+}): boolean {
+  if (holdsArtifactBuilderTool(params.toolNames)) return true;
+  return params.lastWriter === undefined || params.lastWriter === params.agentName;
+}
+
+/**
  * The token an unbuilt subsystem carries inside a staged build.
  *
  * The directive used to ask for a COMMENT anchor above a short stub, and session

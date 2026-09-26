@@ -22,6 +22,7 @@ import { DeadlineAbort, salvageToolCallArguments } from "../providers/lmstudio.j
 import type { ChatProvider, LLMMessage, LLMResponse, StreamChunk } from "../providers/lmstudio.js";
 import { assembleTurnSystemMessages } from "./turn-system-prompt.js";
 import { markOrchestratorActivity, markOrchestratorIdle } from "./cache-warmer.js";
+import { filterForcedOrchestrationTools } from "./forced-orchestration-tools.js";
 import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type SwarmState, type ToolContext } from "../tools/registry.js";
 import { isToolAllowed } from "../guardrails/tool-tiers.js";
 import { loadTurnPlan, clearTurnPlanForSession, decidePlanContinuation, renderPlanContinuationDirective } from "./turn-plan.js";
@@ -56,6 +57,7 @@ import {
   TURN_OVERSIGHT_CHECK_INTERVAL_MS,
   type TurnProgressSample,
 } from "./turn-oversight.js";
+import { countLoopedPartials } from "./delegation-loop-notes.js";
 import { childLogger } from "../logger.js";
 import type { AgentSession, SessionHistoryMessage } from "./session.js";
 import { classifyToolIntervention } from "./interventions.js";
@@ -441,7 +443,7 @@ const FORCED_TOOL_CALL_MAX_TOKENS = 4000;
 // helpers can depend on them without importing runtime.js. Re-exported here so
 // every external `import { TurnOutput } from ".../runtime.js"` keeps working.
 import type { RunTurnOptions, TurnOutput } from "./turn-types.js";
-import { decide } from "../decisions/decide.js";
+import { decideWithReadout } from "../decisions/incumbent-readout.js";
 import { layaConfigured } from "../decisions/laya-client.js";
 import { SOURCE_SENSITIVE, UNGROUNDED_DRAFT } from "../decisions/points.js";
 export type { RunTurnOptions, TurnOutput } from "./turn-types.js";
@@ -681,54 +683,11 @@ const EVIDENCE_BACKSTOP_GIVE_UP_REASONS = new Set([
   "delegation_failures_terminal",
 ]);
 
-/**
- * ALLOWLIST of tools that actually ADVANCE a "must orchestrate before answering"
- * turn — delegation launchers + the discovery tools that feed them. When the
- * runtime forces a tool call to COMPEL orchestration (cost-center 1), the forced
- * candidate set is restricted to THESE only.
- *
- * This is deliberately an allowlist, not a blocklist: tool_choice:"required" forces
- * SOME tool, and the slow local model otherwise satisfies it with whatever cheap
- * no-op tool is in scope and loops on it without ever delegating — first
- * memory_store (audit be828e39: ×3 → max_tool_iterations → unsourced fabrication),
- * then record_plan (audit, 5-mic probe: ×3 → "writing final from evidence" with
- * zero research). A blocklist just moves the escape hatch to the next no-op tool;
- * an allowlist closes them all, including any added later. Memory/self/plan/state
- * tools (memory_*, recall_context, record_plan, get_swarm_state, …) are excluded
- * by omission — they're still freely available on non-forced iterations.
- */
-const FORCE_ORCHESTRATION_TOOLS = new Set([
-  "delegate_to_agent",
-  "parallel_delegate",
-  "swarm_delegate",
-  "run_workflow",
-  "run_task_graph",
-  "search_agents",
-  "search_workflows",
-  "list_agents",
-  "create_ephemeral_agent",
-  // execute_plan dispatches every step of the recorded plan — the one call that advances a
-  // planned turn the most, and the one call a forced iteration could not make: the model
-  // recorded a plan, was forced to delegate, and had to re-issue the plan's first step by hand.
-  "execute_plan",
-]);
-
-/** Keep only orchestration/delegation tools so a forced tool call can ONLY be
- * satisfied by an action that advances the turn. Exported for testing. */
-export function filterForcedOrchestrationTools<T extends { name: string }>(
-  tools: readonly T[],
-  plan?: { planRecorded: boolean },
-): T[] {
-  return tools.filter((tool) => {
-    // ONE-SHOT record_plan. execute_plan can only run a plan that exists, and record_plan was
-    // hidden on every forced iteration — so on a first forced iteration execute_plan was a
-    // guaranteed "No plan recorded". While no plan exists the model may record one (once); the
-    // moment it exists, execute_plan is the way forward and record_plan is an escape hatch again.
-    if (tool.name === "record_plan") return plan?.planRecorded === false;
-    if (tool.name === "execute_plan") return plan?.planRecorded !== false;
-    return FORCE_ORCHESTRATION_TOOLS.has(tool.name);
-  });
-}
+// The forced-iteration tool allowlist and its filter live in ./forced-orchestration-tools.ts
+// (moved verbatim) so the prompt-cache warm-keeper can derive the forced heads from the same
+// function without importing this module, which imports it. Re-exported: tests and the latency
+// probe import it from here.
+export { filterForcedOrchestrationTools };
 
 function shouldBypassTerminalSynthesisWithEvidence(
   finishReason: string,
@@ -1640,7 +1599,7 @@ function startUpfrontSourceSensitiveClassifier(
   const signal = AbortSignal.any([turnSignal, abortController.signal]);
   // Laya answers in milliseconds what the routing tier answers in one to two seconds on the shared
   // GPU, before the orchestrator's first call; decisions/decide.ts says when its answer is taken.
-  const verdict = decide<boolean>({
+  const verdict = decideWithReadout<boolean>({
     point: SOURCE_SENSITIVE,
     state: { message: userMessage.slice(0, 2_000) },
     languageOf: userMessage,
@@ -1657,6 +1616,8 @@ function startUpfrontSourceSensitiveClassifier(
     },
     toKey: (sensitive) => (sensitive ? "yes" : "no"),
     fromKey: (key) => key === "yes",
+    // The same question as one letter on the same model, where decisions.readout says so.
+    readout: { provider: classifierProvider, agentName: "source_sensitivity_judge" },
   }).then((outcome) => ({ sensitive: outcome.value === true, answered: outcome.value !== undefined, decidedBy: outcome.decidedBy }));
   verdict.catch(() => { /* consumed at the await site, or discarded after abort() */ });
   return { verdict, abort: () => abortController.abort() };
@@ -2053,6 +2014,9 @@ async function _runTurn(
     // execute_plan's first step moved the deadline, and its next step was clamped to the old one.
     _liveTurnDeadlineMs: () => turnBudget?.currentDeadlineMs?.() ?? toolContext._turnDeadlineMs,
     _workflowExecutionStack: opts._workflowExecutionStack,
+    // The turn's looped delegated runs (delegation-loop-notes.ts), created here so the runs a
+    // nested delegation records reach this turn's oversight and artifact gate.
+    _turnLoopRuns: [],
     // Always an object, even when no entry point supplied the opening words (a scene template):
     // mid-turn steering is typed by a person on every surface, and is pushed in below.
     turnUserWords: { opening: opts.userWords ?? "", midTurn: [] },
@@ -2473,6 +2437,10 @@ async function _runTurn(
         delegations: _turnDelegationCount,
         artifacts: turnArtifacts.length,
         delegationFailures: _consecutiveDelegationFailures,
+        // C5' (e): a looped partial is churn, though it arrives as a successful delegation.
+        ...(effectiveOrchestration().loopAwareDelegation === true
+          ? { loopedPartials: countLoopedPartials(toolContext._turnLoopRuns) }
+          : {}),
       };
       const progressSignal = classifyTurnProgress(_oversightLastSample, curSample);
       _oversightLastSample = curSample;
@@ -3677,7 +3645,7 @@ async function _runTurn(
           try {
             // Laya reads the question and the draft clipped to its window; decisions/decide.ts says
             // when its answer replaces the routing-tier judge's.
-            const outcome = await decide<boolean>({
+            const outcome = await decideWithReadout<boolean>({
               point: UNGROUNDED_DRAFT,
               state: { question: userMessage.slice(0, 800), draft: rawResponse.slice(0, 2_400) },
               languageOf: userMessage,
@@ -3692,6 +3660,7 @@ async function _runTurn(
               },
               toKey: (ungrounded) => (ungrounded ? "yes" : "no"),
               fromKey: (key) => key === "yes",
+              readout: { provider: judgeProvider, agentName: "ungrounded_claim_judge" },
             });
             if (outcome.value === true) {
               requiresUngroundedFactualResearch = true;

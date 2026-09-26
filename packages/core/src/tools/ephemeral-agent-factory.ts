@@ -550,6 +550,7 @@ export async function runArchitectFallback(task: string, ctx: ToolContext): Prom
       swarmState: ctx.swarmState,
       onSwarmState: ctx.onSwarmState,
       _turnAgentCounts: ctx._turnAgentCounts,
+      _turnLoopRuns: ctx._turnLoopRuns,
       _turnAgentRepeatLimitOverrides: ctx._turnAgentRepeatLimitOverrides,
       _turnTotalDelegationLimitOverride: ctx._turnTotalDelegationLimitOverride,
       _workflowExecutionStack: ctx._workflowExecutionStack,

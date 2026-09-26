@@ -62,16 +62,17 @@ describe("the receptionist", () => {
     await writeConfig({ baseUrl: "http://laya:8080", points: { fast_lane: { mode: "laya", threshold: 0.8 } } });
     laya("task", 0.95);
     const { runReceptionist } = await import("../agent/receptionist.js");
-    let aborted = false;
-    const complete = (_messages: unknown, signal?: AbortSignal) => new Promise<string>((resolve) => {
-      signal?.addEventListener("abort", () => { aborted = true; });
+    let sent = false;
+    const complete = (_messages: unknown, _signal?: AbortSignal) => new Promise<string>((resolve) => {
+      sent = true;
       setTimeout(() => resolve("Gern!"), 5_000);
     });
     const started = Date.now();
     const result = await runReceptionist("buch mir einen Flug nach Rom", { complete });
     expect(result).toEqual({ handled: false, escalateReason: "laya-task" });
     expect(Date.now() - started).toBeLessThan(1_000);
-    expect(aborted, "the micro-call Laya replaced kept running").toBe(true);
+    // Laya is asked first where its answer may be taken: the micro-call it replaces is never sent (decide.ts).
+    expect(sent, "the micro-call Laya replaced was sent anyway").toBe(false);
   });
 
   it("still lets the model write the reply when Laya calls it small talk — only the model can", async () => {
@@ -151,7 +152,7 @@ describe("shared-fact distillation", () => {
     const started = Date.now();
     expect(await distillFindingForSharedFacts({ ...finding, provider: model.provider })).toBe("");
     expect(Date.now() - started, "waited for the extraction Laya made unnecessary").toBeLessThan(1_000);
-    expect(model.seen.aborted).toBe(true);
+    expect(model.seen.calls, "the extraction Laya made unnecessary was sent anyway").toBe(0);
   });
 
   it("still has the model extract what Laya calls relevant — only the model can", async () => {
@@ -159,6 +160,52 @@ describe("shared-fact distillation", () => {
     laya("relevant", 0.99);
     const { distillFindingForSharedFacts } = await import("../agent/sub-agent.js");
     expect(await distillFindingForSharedFacts({ ...finding, provider: modelAnswering("- Deposit: 1 DKK (pant.dk)").provider })).toBe("- Deposit: 1 DKK (pant.dk)");
+  });
+
+  it("shows Laya the 6,000 characters the extraction reads, through its own window, and counts it as another version", async () => {
+    await writeConfig({ baseUrl: "http://laya:8080", points: { finding_relevant: { mode: "shadow" } } });
+    // The only relevant sentence sits past character 2,400: the old cut would have shown Laya chrome only.
+    const rawEvidence = `${"Menu. Cookies. Login. ".repeat(130)}The deposit on a can is 1 DKK (pant.dk). ${"Footer. ".repeat(600)}`;
+    expect(rawEvidence.indexOf("1 DKK")).toBeGreaterThan(2_400);
+    const sent: Array<Record<string, unknown>> = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { questions: Array<Record<string, unknown>> };
+      sent.push(body.questions[0]!);
+      return new Response(JSON.stringify({
+        answers: { finding_relevant: { choice: "relevant", probabilities: { relevant: 0.9, irrelevant: 0.1 }, maxLen: 4096, truncatedTokens: 0 } },
+        model: "laya-test",
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }));
+    const { distillFindingForSharedFacts } = await import("../agent/sub-agent.js");
+    await distillFindingForSharedFacts({ ...finding, rawEvidence, provider: modelAnswering("- Deposit: 1 DKK (pant.dk)").provider });
+    const state = sent[0]!["state"] as { content: string };
+    expect(state.content).toHaveLength(6_000);
+    expect(state.content).toContain("1 DKK");
+    expect(sent[0]!["max_len"]).toBe(4096);
+    const { flushLedgerForTests, readLedgerRows } = await import("../decisions/ledger.js");
+    await vi.waitFor(async () => {
+      await flushLedgerForTests();
+      expect((await readLedgerRows()).some((r) => r.point === "finding_relevant" && r.laya?.model === "laya-test;max_len=4096")).toBe(true);
+    });
+    const row = (await readLedgerRows()).filter((r) => r.point === "finding_relevant").at(-1)!;
+    expect(row.laya).toMatchObject({ model: "laya-test;max_len=4096", truncatedTokens: 0 });
+  });
+
+  it("labels the extraction's provider row as a routing-tier call of its own, not the researcher's", async () => {
+    await writeConfig({ baseUrl: "http://laya:8080", points: { finding_relevant: { mode: "off" } } });
+    const { currentAgentName, currentCallSite, runWithCallAttribution } = await import("../runtime/request-context.js");
+    const labels: Array<[string | undefined, string | undefined]> = [];
+    const provider = {
+      complete: async () => {
+        labels.push([currentCallSite(), currentAgentName()]);
+        return { content: "- Deposit: 1 DKK", tool_calls: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 }, finishReason: "stop" };
+      },
+    };
+    const { distillFindingForSharedFacts } = await import("../agent/sub-agent.js");
+    // Inside a researcher's run, whose own calls are labelled sub_agent.
+    await runWithCallAttribution({ callSite: "sub_agent", agentName: "researcher" }, () =>
+      distillFindingForSharedFacts({ ...finding, provider: provider as never }));
+    expect(labels).toEqual([["routing_tier", "finding_distill"]]);
   });
 
   it("behaves as before with the layer off: the model decides, NONE is nothing", async () => {
@@ -182,7 +229,7 @@ describe("the semantic progress judge", () => {
     const started = Date.now();
     expect((await assessRunProgress({ ...run, provider: model.provider })).verdict).toBe("on_track");
     expect(Date.now() - started).toBeLessThan(1_000);
-    expect(model.seen.aborted).toBe(true);
+    expect(model.seen.calls, "the verdict Laya made unnecessary was asked for anyway").toBe(0);
   });
 
   it("never lets Laya alone wind a run down: its 'drifting' waits for the routing tier's verdict", async () => {
@@ -223,16 +270,36 @@ describe("the ledger's report and export", () => {
 
   it("reports agreement per answer and confidence, and the level the gate would qualify", async () => {
     const { buildDecisionReport } = await import("../scripts/decisions-report.js");
+    // 200: a level above the lowest is tested only once it holds that many at a target of 0.9 (gate.ts levelSampleFloor).
     const rows = [
-      ...Array.from({ length: 40 }, () => row("yes", 0.95, "yes")),
-      ...Array.from({ length: 20 }, () => row("yes", 0.6, "no")),
+      ...Array.from({ length: 200 }, () => row("yes", 0.95, "yes")),
+      ...Array.from({ length: 100 }, () => row("yes", 0.6, "no")),
       row("no", 0.7, undefined),
     ];
     const [report] = buildDecisionReport(rows, 0.9, 30);
-    expect(report).toMatchObject({ point: "source_sensitive", language: "de", rows: 61, bothAnswered: 60, layaMedianMs: 18, incumbentMedianMs: 1500 });
-    expect(report!.agreement).toBeCloseTo(40 / 60, 5);
+    expect(report).toMatchObject({ point: "source_sensitive", language: "de", rows: 301, bothAnswered: 300, layaMedianMs: 18, incumbentMedianMs: 1500 });
+    expect(report!.agreement).toBeCloseTo(200 / 300, 5);
     expect(report!.answers).toHaveLength(1);
     expect(report!.answers[0]!.qualifiedLevel).toBe(0.7);
+  });
+
+  it("reports the level the gate itself holds, not one it would have taken from every row", async () => {
+    const { buildDecisionReport } = await import("../scripts/decisions-report.js");
+    const gate = await import("../decisions/gate.js");
+    // A stream that agreed and then stopped agreeing: the per-level rows still average above the target, but the gate
+    // has closed on the newest cases' drift — and the report says what the gate says.
+    const rows = [
+      ...Array.from({ length: 1_000 }, () => row("yes", 0.97, "yes")),
+      ...Array.from({ length: 60 }, (_, i) => row("yes", 0.97, i % 5 === 0 ? "yes" : "no")),
+    ];
+    const [report] = buildDecisionReport(rows, 0.9, 30);
+    const yes = report!.answers[0]!;
+    expect(yes.levels[0]!.lowerBound, "all rows together still pass").toBeGreaterThan(0.9);
+    gate.resetGateForTests();
+    for (const r of rows) gate.recordAgreementSample(r.point, r.language, r.laya!.choice, r.laya!.top, r.laya!.choice === r.incumbent!.choice, "", r.incumbent!.choice);
+    expect(yes.qualifiedLevel).toBe(gate.qualifiedLevel("source_sensitive", "de", "yes", { targetAgreement: 0.9, minSamples: 30 }, "", "yes"));
+    expect(yes.qualifiedLevel).toBeNull();
+    gate.resetGateForTests();
   });
 
   it("does not report a common answer as qualified while its recall of the protected answer is unproven", async () => {

@@ -26,11 +26,21 @@
  *    of turns whose routing round could be skipped, and the error rate among them, are never read
  *    off the cases that chose the threshold. The same simulation runs for a plain threshold on the
  *    embedding score, which is what Laya has to beat to be worth a sidecar.
+ *
+ * `--backend readout` asks the same question of the resident model instead, read by its logits
+ * (decisions/logit-readout.ts: the options under the same letters, one token, thinking off). Laya
+ * measured 30% on routing (JevBench) and weak German; the readout is the model the orchestrator
+ * routes with. Its answer takes Laya's place in every figure, and because it has log-scores per
+ * option, the report adds what a pre-router's stage 1 waits for (plan C8): top-1 at 85% or more,
+ * the lower bound of "none" recall at 0.95 or more — a wrong specialist costs a failed delegation
+ * and a retry, minutes — and the calibration error before and after a temperature fitted on the
+ * other fold.
  */
 
 import { createHash } from "node:crypto";
 
 import { GATE_LEVELS, languageBucket, wilsonLowerBound, type LanguageBucket } from "../decisions/gate.js";
+import { applyTemperature, expectedCalibrationError, fitTemperature, type ReadoutResult, type TemperatureSample } from "../decisions/logit-readout.js";
 import type { TrainingItem } from "../scripts/decisions-export.js";
 import type { RoutingEvalCase } from "./routing-eval.js";
 
@@ -373,8 +383,124 @@ export interface PreRouteObservation {
   optionScores: Array<number | null>;
   /** How long the production capsule took to resolve for this message. */
   capsuleMs?: number;
-  laya?: { choice: string; top: number; ms: number; serverMs?: number; model: string };
+  /**
+   * The answerer's pick: Laya's, or with `--backend readout` the resident model's read by its
+   * logits — then with `logScores`, per option in the order served ("none" last), before any
+   * temperature: what the calibration is fitted on.
+   */
+  laya?: { choice: string; top: number; ms: number; serverMs?: number; model: string; logScores?: number[] };
   layaError?: string;
+}
+
+// ── The readout backend ──────────────────────────────────────────────────────────────────────────
+
+/** Who answers the question: the Laya sidecar, or the resident model read by its logits. */
+export type PreRouteBackend = "laya" | "readout";
+
+/** The name the report gives the answerer. */
+export function answererName(backend: PreRouteBackend | undefined): string {
+  return backend === "readout" ? "Readout" : "Laya";
+}
+
+/**
+ * A readout's answer as an observation's pick, over the question's own keys: the same shape Laya's
+ * answer has, plus the log-scores. A miss is an error, as a failed Laya answer is — the turn would
+ * go to the orchestrator.
+ */
+export function pickFromReadout(result: ReadoutResult, keys: readonly string[], model: string): NonNullable<PreRouteObservation["laya"]> | { error: string } {
+  if (!result.ok) return { error: `readout: ${result.reason}${result.topToken !== undefined ? ` (top token ${JSON.stringify(result.topToken)})` : ""}${result.error ? `: ${result.error}` : ""}` };
+  const { answer } = result;
+  if (!keys.includes(answer.choice) || keys.some((key) => !Number.isFinite(answer.logScores[key]))) {
+    return { error: "readout: the answer does not fit the options" };
+  }
+  return { choice: answer.choice, top: answer.top, ms: answer.ms, model, logScores: keys.map((key) => answer.logScores[key]!) };
+}
+
+/**
+ * A failed answer that says the answerer is down or broken — every failed Laya answer, a readout
+ * that got no top list, failed or ran out of time — as opposed to a readout that read no answer
+ * off the list it got (no option letter on it, a control token on top, too little mass on the
+ * letters). The second is a measured miss: it proves the model answers, so it neither trips the
+ * run's breaker nor stops the run at its warm-up, however many come in a row.
+ */
+export function isAnswererOutage(error: string): boolean {
+  return !/^readout: (no_letter|control_token|low_mass)\b/.test(error);
+}
+
+export interface PreRouteCalibrationSlice {
+  /** Answered cases with log-scores. */
+  cases: number;
+  /** Top-1 confidence against whether the pick was right, at T = 1 and at each fold's fitted T. */
+  eceBefore: number | null;
+  eceAfter: number | null;
+  /** Per fold: the temperature fitted on the OTHER fold's cases. */
+  folds: Array<{ fold: 0 | 1; temperature: number; clamped: boolean; fittedOn: number }>;
+}
+
+/** The option a case's temperature sample is labelled with: the one a fine-tune would learn. */
+function calibrationSample(o: PreRouteObservation): TemperatureSample | null {
+  const scores = o.laya?.logScores;
+  const keys = [...o.options, NONE_KEY];
+  if (!scores || scores.length !== keys.length) return null;
+  return { logScores: scores, label: keys.indexOf(trainingLabelKey(o.gold, keys)) };
+}
+
+function topOf(scores: readonly number[], temperature: number): { index: number; p: number } {
+  const p = applyTemperature(scores, temperature);
+  let index = 0;
+  for (let i = 1; i < p.length; i += 1) if (p[i]! > p[index]!) index = i;
+  return { index, p: p[index]! };
+}
+
+/**
+ * The readout's calibration, cross-fitted like the gate: each fold's cases are scored at the
+ * temperature fitted on the other fold, so the "after" figure is never read off the cases that set
+ * it. Right means right by the gold (any acceptable agent, or none), as everywhere in this report.
+ */
+export function preRouteCalibration(observations: readonly PreRouteObservation[]): PreRouteCalibrationSlice | null {
+  const usable = observations.flatMap((o) => {
+    const sample = calibrationSample(o);
+    return sample ? [{ o, sample, keys: [...o.options, NONE_KEY] }] : [];
+  });
+  if (usable.length === 0) return null;
+  const before: Array<{ confidence: number; correct: boolean }> = [];
+  const after: Array<{ confidence: number; correct: boolean }> = [];
+  const folds: PreRouteCalibrationSlice["folds"] = [];
+  for (const fold of [0, 1] as const) {
+    const fitOn = usable.filter((entry) => entry.o.fold !== fold).map((entry) => entry.sample);
+    const fit = fitTemperature(fitOn);
+    folds.push({ fold, temperature: fit.temperature, clamped: fit.clamped, fittedOn: fit.samples });
+    for (const entry of usable.filter((candidate) => candidate.o.fold === fold)) {
+      const raw = topOf(entry.sample.logScores, 1);
+      const scaled = topOf(entry.sample.logScores, fit.temperature);
+      before.push({ confidence: raw.p, correct: isHit(entry.keys[raw.index], entry.o.gold) });
+      after.push({ confidence: scaled.p, correct: isHit(entry.keys[scaled.index], entry.o.gold) });
+    }
+  }
+  return { cases: usable.length, eceBefore: expectedCalibrationError(before), eceAfter: expectedCalibrationError(after), folds };
+}
+
+/** What stage 1 (a tail hint, flag-gated) waits for: top-1 at 85% and the "none" recall's lower bound at 0.95. */
+export const STAGE_ONE_MIN_TOP1 = 0.85;
+export const STAGE_ONE_MIN_NONE_RECALL_LOWER_BOUND = 0.95;
+
+export interface StageCriteria {
+  top1: number | null;
+  noneRecallLowerBound: number | null;
+  met: boolean;
+  reasons: string[];
+}
+
+export function stageOneCriteria(score: PreRouteScore): StageCriteria {
+  const { top1, noneRecall } = score.laya;
+  const top1Rate = top1.of > 0 ? top1.hit / top1.of : null;
+  const noneLower = noneRecall.of > 0 ? wilsonLowerBound(noneRecall.hit, noneRecall.of) : null;
+  const reasons: string[] = [];
+  if (top1Rate === null) reasons.push("nothing was answered");
+  else if (top1Rate < STAGE_ONE_MIN_TOP1) reasons.push(`top-1 ${pct(top1Rate)} is below ${pct(STAGE_ONE_MIN_TOP1)}`);
+  if (noneLower === null) reasons.push("no gold-none case was answered, so the protection of \"none\" is unmeasured");
+  else if (noneLower < STAGE_ONE_MIN_NONE_RECALL_LOWER_BOUND) reasons.push(`the lower bound of "none" recall is ${noneLower.toFixed(3)}, below ${STAGE_ONE_MIN_NONE_RECALL_LOWER_BOUND}`);
+  return { top1: top1Rate, noneRecallLowerBound: noneLower, met: reasons.length === 0, reasons };
 }
 
 export function isHit(pick: string | undefined, gold: PreRouteGold): boolean {
@@ -605,8 +731,12 @@ export const EMBEDDING_POLICY: GatePolicy = {
 
 /**
  * The lowest level whose cases at or above it number at least `minSamples` with a Wilson lower
- * bound at `targetAgreement` — the loop of decisions/gate.ts qualifiedLevel, over given samples
- * instead of the process-wide ones.
+ * bound at `targetAgreement`, over given samples instead of the process-wide ones. This is the
+ * decision gate's rule as it was until 2026-09-26: decisions/gate.ts levelFromCases now also tests
+ * the levels as one fixed sequence from the top, skips a higher level until it holds
+ * levelSampleFloor cases, and asks for confirmation without the newest CONFIRM_SAMPLES. No runtime
+ * pre-router exists yet, so this bench keeps the simpler rule; one built on this gate would open
+ * no sooner, and at no lower level, than these figures say.
  */
 export function qualifyLevel(
   samples: ReadonlyArray<{ confidence: number; agree: boolean }>,
@@ -844,6 +974,8 @@ export interface BenchVerdict {
 const MAX_FAILURE_SHARE = 0.1;
 
 export function benchVerdict(input: {
+  /** Who answered, as the reasons name it; default Laya. */
+  answerer?: string;
   layaSkipped: boolean;
   /** Cases observed: ranked, whether or not Laya was asked. */
   observed: number;
@@ -859,6 +991,7 @@ export function benchVerdict(input: {
   minCoverage: number;
 }): BenchVerdict {
   const { gate } = input;
+  const who = input.answerer ?? "Laya";
   if (input.unrouted > 0 && input.unrouted / (input.observed + input.unrouted) > MAX_FAILURE_SHARE) {
     return {
       code: 3,
@@ -867,18 +1000,18 @@ export function benchVerdict(input: {
     };
   }
   if (input.layaSkipped) {
-    return { code: 2, status: "INCONCLUSIVE", reasons: ["Laya was not asked (--no-laya): only the capsule and the baselines were measured"] };
+    return { code: 2, status: "INCONCLUSIVE", reasons: [`${who} was not asked (--no-laya): only the capsule and the baselines were measured`] };
   }
   if (input.asked === 0) return { code: 2, status: "INCONCLUSIVE", reasons: ["no case was scored"] };
   if (input.answered === 0) {
-    return { code: 3, status: "ENVIRONMENT-SUSPECT", reasons: [`Laya answered none of ${input.asked} questions`] };
+    return { code: 3, status: "ENVIRONMENT-SUSPECT", reasons: [`${who} answered none of ${input.asked} questions`] };
   }
   const failed = input.asked - input.answered;
   if (failed / input.asked > MAX_FAILURE_SHARE) {
     return {
       code: 3,
       status: "ENVIRONMENT-SUSPECT",
-      reasons: [`Laya failed on ${failed} of ${input.asked} questions: the numbers describe the sidecar's failures, not the pre-router`],
+      reasons: [`${who} failed on ${failed} of ${input.asked} questions: the numbers describe ${who === "Laya" ? "the sidecar's" : "its"} failures, not the pre-router`],
     };
   }
   const target = gate.settings.targetAgreement;
@@ -890,7 +1023,7 @@ export function benchVerdict(input: {
       return {
         code: 2,
         status: "INCONCLUSIVE",
-        reasons: [`no bucket could have qualified, whatever Laya answered: the largest held ${gate.capacity} case(s) where a level was set, `
+        reasons: [`no bucket could have qualified, whatever ${who} answered: the largest held ${gate.capacity} case(s) where a level was set, `
           + `and a ${target} target needs ${needed === null ? "more than any number of" : `at least ${needed}`} flawless ones. Compare the accuracy rows instead`],
       };
     }
@@ -924,6 +1057,10 @@ export interface PreRouteBenchSettings {
   layaUrl: string | null;
   casesFile: string;
   casesSha256?: string;
+  /** Who answered; absent means Laya. */
+  backend?: PreRouteBackend;
+  /** With the readout backend: the model it read. */
+  readoutModel?: string;
 }
 
 export interface PreRouteBenchReport {
@@ -955,6 +1092,10 @@ export interface PreRouteBenchReport {
   };
   curve: CurveRow[];
   savings: SavingsEstimate;
+  /** Stage 1's two thresholds, on every answered case. */
+  stage: StageCriteria;
+  /** Cross-fitted calibration per slice, where the answers carry log-scores (the readout backend). */
+  calibration?: Record<string, PreRouteCalibrationSlice>;
   environment: Record<string, unknown>;
   warnings: string[];
   verdict: BenchVerdict;
@@ -1005,16 +1146,27 @@ export function buildPreRouteReport(input: {
   const headlineGate = headline === "laya" ? laya : layaPerAnswer;
   const all = scorePreRoute(observations);
   const warnings = [...(input.warnings ?? [])];
+  const who = answererName(settings.backend);
   if (all.goldNone === 0) {
-    warnings.push("The cases hold no gold-none message (a direct answer or a multi-step request): whether Laya leaves such turns to the orchestrator is untested, and every skipped turn here was bound for a specialist.");
+    warnings.push(`The cases hold no gold-none message (a direct answer or a multi-step request): whether ${who} leaves such turns to the orchestrator is untested, and every skipped turn here was bound for a specialist.`);
   }
   if (all.laya.models.length > 1) {
-    warnings.push(`Laya answered as ${all.laya.models.length} different versions (${all.laya.models.join(", ")}) during one run: the gate keeps a version's evidence apart, and these numbers mix them.`);
+    warnings.push(`${who} answered as ${all.laya.models.length} different versions (${all.laya.models.join(", ")}) during one run: the gate keeps a version's evidence apart, and these numbers mix them.`);
   }
-  if (input.overWindow > 0) {
+  // Laya's window; the resident model reads the whole question.
+  if (input.overWindow > 0 && settings.backend !== "readout") {
     warnings.push(`${input.overWindow} question(s) are estimated over Laya's ${LAYA_WINDOW_TOKENS}-token window even with shortened options: the model cut something of its own choosing.`);
   }
   const maxK = Math.max(settings.k, ...observations.map((o) => Math.min(o.order.length, MAX_CANDIDATES)));
+  const calibration: Record<string, PreRouteCalibrationSlice> = {};
+  const calibrationSlices: Array<[string, PreRouteObservation[]]> = [["all", answered]];
+  for (const language of [...new Set(answered.map((o) => o.language))].sort()) {
+    calibrationSlices.push([language, answered.filter((o) => o.language === language)]);
+  }
+  for (const [slice, members] of calibrationSlices) {
+    const block = preRouteCalibration(members);
+    if (block) calibration[slice] = block;
+  }
   return {
     kind: "pre-router-bench",
     version: 1,
@@ -1035,9 +1187,12 @@ export function buildPreRouteReport(input: {
     gate: { headline, laya, layaPerAnswer, embedding, ...(layaTestHalf ? { layaTestHalf } : {}) },
     curve: confidenceCurve(observations, settings.target, settings.minSamples),
     savings: estimateSavings(headlineGate, all.laya.msP50, settings.roundMs),
+    stage: stageOneCriteria(all),
+    ...(Object.keys(calibration).length > 0 ? { calibration } : {}),
     environment: input.environment ?? {},
     warnings,
     verdict: benchVerdict({
+      answerer: answererName(settings.backend),
       layaSkipped: input.layaSkipped,
       observed: observations.length,
       unrouted: input.noCandidates.length,
@@ -1079,13 +1234,16 @@ function gateRow(name: string, gate: GateSimulation): string {
 
 export function formatPreRouteMarkdown(report: PreRouteBenchReport): string {
   const { settings, counts, verdict } = report;
+  const who = answererName(settings.backend);
   const lines: string[] = [];
   lines.push("# Pre-router bench", "");
   lines.push(`**${verdict.status}** — ${verdict.reasons.join("; ")}`, "");
   lines.push(`Cases: \`${settings.casesFile}\`${settings.casesSha256 ? ` (sha256 ${settings.casesSha256.slice(0, 12)})` : ""}, `
     + `${counts.observed} observed of ${counts.loaded} loaded, split ${settings.split}. `
     + `K = ${settings.k} agents + none, descriptions from ${settings.describe}. `
-    + `Laya: ${settings.layaUrl ?? "not asked"}, ${counts.answered}/${counts.asked} answered`
+    + (settings.backend === "readout"
+      ? `Readout of ${settings.readoutModel ?? "the routing tier"} (one token, the option letters' top list), ${counts.answered}/${counts.asked} answered`
+      : `Laya: ${settings.layaUrl ?? "not asked"}, ${counts.answered}/${counts.asked} answered`)
     + `${report.slices["all"]?.laya.models.length ? ` by ${report.slices["all"]!.laya.models.join(", ")}` : ""}. Generated ${report.generatedAt}.`, "");
 
   const columns = Object.keys(report.slices);
@@ -1099,18 +1257,19 @@ export function formatPreRouteMarkdown(report: PreRouteBenchReport): string {
   lines.push(row("capsule top-1", (s) => ratio(s.capsuleTop1)));
   lines.push(row("embedding top-1", (s) => ratio(s.embeddingTop1)));
   lines.push(row("always the majority label", (s) => `${ratio(s.majority)}${s.majority.label ? ` ${s.majority.label}` : ""}`));
-  lines.push(row("**Laya top-1**", (s) => ratio(s.laya.top1)));
-  lines.push(row("Laya, right agent offered", (s) => ratio(s.laya.givenOptions)));
-  lines.push(row("Laya says none when no right agent was offered", (s) => ratio(s.laya.abstainWhenUnreachable)));
-  lines.push(row("Laya says none on gold none", (s) => ratio(s.laya.noneRecall)));
-  lines.push(row("Laya ms p50 / p90", (s) => `${ms(s.laya.msP50)} / ${ms(s.laya.msP90)}`));
+  lines.push(row(`**${who} top-1**`, (s) => ratio(s.laya.top1)));
+  lines.push(row(`${who}, right agent offered`, (s) => ratio(s.laya.givenOptions)));
+  lines.push(row(`${who} says none when no right agent was offered`, (s) => ratio(s.laya.abstainWhenUnreachable)));
+  lines.push(row(`${who} says none on gold none`, (s) => ratio(s.laya.noneRecall)));
+  lines.push(row(`… its lower bound (Wilson, 95%)`, (s) => (s.laya.noneRecall.of === 0 ? "n/a" : wilsonLowerBound(s.laya.noneRecall.hit, s.laya.noneRecall.of).toFixed(3))));
+  lines.push(row(`${who} ms p50 / p90`, (s) => `${ms(s.laya.msP50)} / ${ms(s.laya.msP90)}`));
   lines.push(row("capsule ms p50 / p90", (s) => `${ms(s.capsuleMs.p50)} / ${ms(s.capsuleMs.p90)}`));
   lines.push("");
   const all = report.slices["all"];
   if (all && all.laya.answered > 0) {
     const versus = all.laya.versusEmbedding;
-    lines.push(`Laya against the embedding's first choice: Laya alone right ${versus.layaOnly}, embedding alone right ${versus.embeddingOnly} `
-      + `(exact McNemar p = ${versus.pExact.toFixed(3)}). Laya picked none ${all.laya.pickedNone} times; its most common pick `
+    lines.push(`${who} against the embedding's first choice: ${who} alone right ${versus.layaOnly}, embedding alone right ${versus.embeddingOnly} `
+      + `(exact McNemar p = ${versus.pExact.toFixed(3)}). ${who} picked none ${all.laya.pickedNone} times; its most common pick `
       + `${all.laya.topPick ? `${all.laya.topPick.label} took ${pct(all.laya.topPick.share)}` : "n/a"} of its answers, `
       + `the most common label ${all.goldTopShare ? `${all.goldTopShare.label} ${pct(all.goldTopShare.share)}` : "n/a"} of the cases.`, "");
   }
@@ -1122,19 +1281,35 @@ export function formatPreRouteMarkdown(report: PreRouteBenchReport): string {
     + `"Largest bucket" is the most cases one bucket could have gathered where a level was set, had every pick been right: `
     + `below ${flawless ?? "any number"} no answerer could have qualified there.`, "");
   lines.push("| policy | evaluated | skipped (coverage) | wrong (rate, upper bound) | largest bucket | qualified levels |", "|---|---|---|---|---|---|");
-  lines.push(gateRow("Laya, per language", report.gate.laya));
-  lines.push(gateRow("Laya, per language and answer (as production keys it)", report.gate.layaPerAnswer));
+  lines.push(gateRow(`${who}, per language`, report.gate.laya));
+  lines.push(gateRow(`${who}, per language and answer (as production keys it)`, report.gate.layaPerAnswer));
   lines.push(gateRow("embedding top-1 score threshold", report.gate.embedding));
-  if (report.gate.layaTestHalf) lines.push(gateRow("Laya, test half only", report.gate.layaTestHalf));
+  if (report.gate.layaTestHalf) lines.push(gateRow(`${who}, test half only`, report.gate.layaTestHalf));
   lines.push("");
 
-  lines.push("## Laya confidence curve (in-sample, descriptive)", "");
-  lines.push("| level | taken | right | lower bound | coverage | cases needed at this precision |", "|---|---|---|---|---|---|");
+  // Coverage against misroutes: what a dispatch above each level would take, and get wrong.
+  lines.push(`## ${who} confidence curve (in-sample, descriptive)`, "");
+  lines.push("| level | taken | right | misrouted | lower bound | coverage | cases needed at this precision |", "|---|---|---|---|---|---|---|");
   for (const curveRow of report.curve) {
-    lines.push(`| ${curveRow.level} | ${curveRow.taken} | ${curveRow.correct} | ${curveRow.lowerBound.toFixed(3)} | ${pct(curveRow.coverage)} | `
+    lines.push(`| ${curveRow.level} | ${curveRow.taken} | ${curveRow.correct} | ${curveRow.taken - curveRow.correct} | ${curveRow.lowerBound.toFixed(3)} | ${pct(curveRow.coverage)} | `
       + `${curveRow.samplesNeeded ?? (curveRow.taken === 0 ? "n/a" : "never")} |`);
   }
   lines.push("");
+
+  lines.push("## Stage 1 (a tail hint): what it waits for", "");
+  lines.push(`Top-1 at least ${pct(STAGE_ONE_MIN_TOP1)} and the lower bound of "none" recall at least ${STAGE_ONE_MIN_NONE_RECALL_LOWER_BOUND}: `
+    + `top-1 ${report.stage.top1 === null ? "n/a" : pct(report.stage.top1)}, "none" recall lower bound ${report.stage.noneRecallLowerBound === null ? "n/a" : report.stage.noneRecallLowerBound.toFixed(3)} — `
+    + `${report.stage.met ? "**met**" : `**not met**: ${report.stage.reasons.join("; ")}`}.`, "");
+
+  if (report.calibration) {
+    lines.push("## Calibration (cross-fitted: each fold at the temperature fitted on the other)", "");
+    lines.push("| slice | cases | ECE at T=1 | ECE at fitted T | T fold 0 / fold 1 |", "|---|---|---|---|---|");
+    for (const [slice, block] of Object.entries(report.calibration)) {
+      const temperatures = block.folds.map((fold) => `${fold.temperature.toFixed(2)}${fold.clamped ? " (clamped)" : ""}`).join(" / ");
+      lines.push(`| ${slice} | ${block.cases} | ${block.eceBefore === null ? "n/a" : block.eceBefore.toFixed(3)} | ${block.eceAfter === null ? "n/a" : block.eceAfter.toFixed(3)} | ${temperatures} |`);
+    }
+    lines.push("");
+  }
 
   const recall = report.recallAtK.filter((r) => [1, 2, 3, 4, 5, 8, 12, 16, 19].includes(r.k));
   if (recall.length > 0) {
@@ -1146,7 +1321,7 @@ export function formatPreRouteMarkdown(report: PreRouteBenchReport): string {
   if (per100) {
     lines.push(`Per 100 turns of this mix, at an assumed ${(report.savings.roundMs / 1000).toFixed(1)} s routing round: `
       + `${per100.skippedCorrectly.toFixed(1)} rounds skipped correctly = ${per100.grossSecondsSaved.toFixed(1)} s; `
-      + `Laya on every turn costs ${per100.layaSecondsSpent.toFixed(1)} s; net ${per100.netSeconds.toFixed(1)} s. `
+      + `${who} on every turn costs ${per100.layaSecondsSpent.toFixed(1)} s; net ${per100.netSeconds.toFixed(1)} s. `
       + `${per100.wrongDispatches.toFixed(1)} wrong dispatches, whose cost is not measured here.`, "");
   } else {
     lines.push("Nothing was evaluated.", "");
@@ -1155,7 +1330,7 @@ export function formatPreRouteMarkdown(report: PreRouteBenchReport): string {
   if (all) {
     const missed = all.perLabel.filter((entry) => entry.support >= 2 && entry.laya.of > 0 && entry.laya.hit === 0);
     if (missed.length > 0) {
-      lines.push("## Labels Laya never got right (2+ cases)", "", missed.map((entry) => `${entry.label} (${entry.laya.of})`).join(", "), "");
+      lines.push(`## Labels ${who} never got right (2+ cases)`, "", missed.map((entry) => `${entry.label} (${entry.laya.of})`).join(", "), "");
     }
   }
 
@@ -1190,6 +1365,8 @@ export interface PreRouterBenchArgs {
   minCoverage: number;
   noLaya: boolean;
   limit?: number;
+  /** Absent: Laya. */
+  backend?: PreRouteBackend;
 }
 
 export class BenchUsageError extends Error {}
@@ -1204,7 +1381,7 @@ export const DEFAULT_ROUND_MS = 7_900;
 
 const VALUE_FLAGS = new Set([
   "cases", "k", "laya-url", "out", "split", "train-out", "describe", "keying",
-  "target", "min-samples", "round-ms", "min-coverage", "limit",
+  "target", "min-samples", "round-ms", "min-coverage", "limit", "backend",
 ]);
 const BOOLEAN_FLAGS = new Set(["no-laya"]);
 
@@ -1267,6 +1444,8 @@ export function parsePreRouterArgs(argv: readonly string[]): PreRouterBenchArgs 
   if (trainOut !== undefined) args.trainOut = trainOut;
   const limit = values.get("limit");
   if (limit !== undefined) args.limit = numberIn("limit", limit, 1, 1_000_000, true);
+  const backend = values.get("backend");
+  if (backend !== undefined) args.backend = oneOf("backend", backend, ["laya", "readout"] as const);
   return args;
 }
 

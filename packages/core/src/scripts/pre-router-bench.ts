@@ -6,12 +6,19 @@
  *   pnpm --filter @starlingai/core routing:prerouter [--cases <jsonl>] [--k 8] [--laya-url http://127.0.0.1:18080]
  *     [--out <dir>] [--split all|calibration|test] [--train-out <jsonl>] [--describe description|oneliner]
  *     [--keying language|answer] [--target 0.9] [--min-samples 30] [--round-ms 7900] [--min-coverage 0]
- *     [--limit n] [--no-laya]
+ *     [--limit n] [--no-laya] [--backend laya|readout]
  *
  * Per case: the production capsule for the message (resolveAgentRouting with the discovery
  * prefetch's own options, meta-factory agents dropped, cut to four), the embedding ranking behind
  * it, the question agent/pre-router-bench.ts builds from both, and one POST /v1/decide to the
  * sidecar at concurrency 1. Nothing else is called: no chat model, no gateway.
+ *
+ * `--backend readout` asks the resident model instead of Laya: the same question, options and
+ * letters, read by its logits (decisions/logit-readout.ts — one token, thinking off, the letters'
+ * top list) on the routing tier the source judge uses (SAI_PRIMARY_MODEL_URL from .env), at
+ * concurrency 1. The report then adds the calibration error before and after a cross-fitted
+ * temperature and whether stage 1's two thresholds (top-1 85%, "none" recall lower bound 0.95)
+ * are met. Its provider calls are audited to this run's audit.jsonl.
  *
  * Fine-tuning round trip: `--train-out <file>` writes the CALIBRATION half as typed-decisions
  * training items (the format decisions:export writes, options under the letters the sidecar
@@ -40,6 +47,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  answererName,
   BenchUsageError,
   buildPreRouteQuestion,
   buildPreRouteReport,
@@ -49,10 +57,12 @@ import {
   foldOf,
   formatPreRouteMarkdown,
   inSplit,
+  isAnswererOutage,
   mergeCandidates,
   NONE_KEY,
   parseLayaAnswer,
   parsePreRouterArgs,
+  pickFromReadout,
   preRouteGold,
   splitOf,
   agentDescriptionText,
@@ -215,7 +225,31 @@ async function run(args: PreRouterBenchArgs): Promise<number> {
   if (!isEmbeddingAvailable()) {
     throw new EnvironmentError(`embedding search is unavailable: ${JSON.stringify(getEmbeddingSearchStatus())}`);
   }
-  const health = args.noLaya ? null : await layaHealth(args.layaUrl);
+  const readoutBackend = args.backend === "readout";
+  const who = answererName(args.backend);
+  // The readout: the routing tier the up-front source judge runs on, read by its logits.
+  let askAnswerer: (built: BuiltPreRouteQuestion, timeoutMs?: number) => Promise<NonNullable<PreRouteObservation["laya"]> | { error: string }>
+    = (built, timeoutMs) => askLaya(args.layaUrl, built, timeoutMs);
+  let readoutModel: string | undefined;
+  let health: Record<string, unknown> | null = null;
+  if (!args.noLaya && readoutBackend) {
+    const { resolveRoutingTierProvider } = await import("../agent/routing-tier-provider.js");
+    const { askReadout } = await import("../decisions/logit-readout.js");
+    const { runWithCallAttribution } = await import("../runtime/request-context.js");
+    const readoutProvider = resolveRoutingTierProvider();
+    readoutModel = config.agents.defaults.model.tiers?.["routing"] ?? config.agents.defaults.model.primary;
+    const reachable = await readoutProvider.checkHealth().catch((err: unknown) => ({ healthy: false, error: err instanceof Error ? err.message : String(err) }));
+    if (!reachable.healthy) throw new EnvironmentError(`the routing tier (${readoutModel}) is not reachable${reachable.error ? `: ${reachable.error}` : ""}`);
+    health = { backend: "readout", model: readoutModel, ...reachable };
+    askAnswerer = async (built, timeoutMs = LAYA_TIMEOUT_MS) => pickFromReadout(
+      await runWithCallAttribution({ callSite: "routing_tier", agentName: "pre_router_readout" }, () =>
+        askReadout(readoutProvider, built.request, built.request.state, { signal: AbortSignal.timeout(timeoutMs) })),
+      built.keys,
+      `readout:${readoutModel}`,
+    );
+  } else if (!args.noLaya) {
+    health = await layaHealth(args.layaUrl);
+  }
   let warmUp: { ms: number; model: string } | { error: string } | null = null;
 
   const describe = (name: string) => agentDescriptionText(config.subAgents[name], args.describe);
@@ -235,9 +269,11 @@ async function run(args: PreRouterBenchArgs): Promise<number> {
     minSamples: args.minSamples,
     roundMs: args.roundMs,
     minCoverage: args.minCoverage,
-    layaUrl: args.noLaya ? null : args.layaUrl,
+    layaUrl: args.noLaya || readoutBackend ? null : args.layaUrl,
     casesFile,
     casesSha256: createHash("sha256").update(text).digest("hex"),
+    ...(args.backend ? { backend: args.backend } : {}),
+    ...(readoutModel ? { readoutModel } : {}),
   };
   const source = captureEvaluationSourceState(REPO_ROOT);
   const buildReport = () => buildPreRouteReport({
@@ -306,17 +342,22 @@ async function run(args: PreRouterBenchArgs): Promise<number> {
     if (!args.noLaya) {
       if (warmUp === null) {
         // Untimed: the checkpoint may still be loading, and a cold first call is not what a turn pays.
-        const first = await askLaya(args.layaUrl, built, WARM_UP_TIMEOUT_MS);
+        const first = await askAnswerer(built, WARM_UP_TIMEOUT_MS);
         warmUp = "error" in first ? { error: first.error } : { ms: first.ms, model: first.model };
-        if ("error" in first) throw new EnvironmentError(`Laya's first answer failed: ${first.error}`);
+        // A readout that read no answer off a list is a miss, not an outage; no list, or no call, is one.
+        if ("error" in first && isAnswererOutage(first.error)) {
+          throw new EnvironmentError(`${who}'s first answer failed: ${first.error}`);
+        }
       }
       if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
         observation.layaError = `not asked: the previous ${MAX_CONSECUTIVE_FAILURES} questions failed`;
       } else {
-        const answer = await askLaya(args.layaUrl, built);
+        const answer = await askAnswerer(built);
         if ("error" in answer) {
           observation.layaError = answer.error;
-          consecutiveFailures += 1;
+          // Only an outage trips the breaker. A readout's miss came with a top list, so the model is
+          // up: five of them in a row must not leave every later case unasked.
+          consecutiveFailures = isAnswererOutage(answer.error) ? consecutiveFailures + 1 : 0;
         } else {
           observation.laya = answer;
           consecutiveFailures = 0;

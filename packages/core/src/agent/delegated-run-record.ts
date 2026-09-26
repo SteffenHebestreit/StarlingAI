@@ -19,8 +19,16 @@ export const TOOL_FAILURES_HEADER =
   "Tool calls that failed along the way (for you, not for the reply; the run went on after them, so they are not its outcome):";
 export const TOOL_DECLINES_HEADER =
   "Tool calls the user declined (their choice, not a failure; nothing was done in them, so do not retry them):";
+/**
+ * How a partial run was stopped: the loop it was stuck in, the warden, or its iteration limit
+ * (orchestration.loopAwareDelegation). Its line carries the looped call's arguments, which are the
+ * model's own text: a grep for "next step" read as the frame's continuation cue would steer the
+ * turn, so it lives in this block, where no verdict check reads.
+ */
+export const RUN_STOP_HEADER =
+  "How the run was stopped (for you, not for the reply; its evidence below is partial):";
 
-const HEADERS = new Set([PRODUCED_FILES_HEADER, TOOL_FAILURES_HEADER, TOOL_DECLINES_HEADER]);
+const HEADERS = new Set([PRODUCED_FILES_HEADER, TOOL_FAILURES_HEADER, TOOL_DECLINES_HEADER, RUN_STOP_HEADER]);
 
 /** The frame as it read before the block was added: each header and the "- " lines under it go. */
 export function stripDelegatedRunRecord(text: string): string {

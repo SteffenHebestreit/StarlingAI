@@ -14,7 +14,7 @@
  * classifyPostOrchestrationDisposition (which stays in runtime.ts), so runtime.ts
  * imports it back from here — a one-directional edge, no cycle.
  */
-import { effectiveMaxDelegatedResultChars } from "../runtime/effort-context.js";
+import { effectiveMaxDelegatedResultChars, effectiveOrchestration } from "../runtime/effort-context.js";
 import { looksLikeProviderErrorEcho } from "./container-failure.js";
 import { collapseWhitespace, stripPresentationFormatting, looksLikeOrchestrationOnlyEvidence } from "./runtime-utils.js";
 import {
@@ -27,7 +27,7 @@ import {
   looksLikeInterruptedDelegationWithoutUsableEvidence,
 } from "./interrupted-delegation-evidence.js";
 import { collectArtifactRecords, type ArtifactRecord } from "./artifact-metadata.js";
-import { PRODUCED_FILES_HEADER, TOOL_DECLINES_HEADER, TOOL_FAILURES_HEADER } from "./delegated-run-record.js";
+import { PRODUCED_FILES_HEADER, RUN_STOP_HEADER, TOOL_DECLINES_HEADER, TOOL_FAILURES_HEADER } from "./delegated-run-record.js";
 import { defangFramingMarkers } from "../guardrails/framing-markers.js";
 import { IN_REPLY_LANGUAGE } from "./reply-language.js";
 
@@ -175,10 +175,11 @@ function cappedBlock(header: string, lines: string[], maxLines: number): string 
  * that account named the engine the user had asked for; that call had returned a 404, the file came
  * from the fast tier instead, and the final answer repeated the claim. "" when nothing was recorded.
  */
-export function formatDelegatedRunRecord(metadata?: Record<string, unknown>): string {
+export function formatDelegatedRunRecord(metadata?: Record<string, unknown>, runStopLine?: string): string {
   if (!metadata) return "";
   const frameAgent = typeof metadata["agentName"] === "string" ? metadata["agentName"] : undefined;
   return [
+    cappedBlock(RUN_STOP_HEADER, runStopLine ? [`- ${runStopLine}`] : [], 1),
     cappedBlock(
       PRODUCED_FILES_HEADER,
       collectArtifactRecords(metadata).map((record) => producedFileLine(record, frameAgent)),
@@ -189,15 +190,48 @@ export function formatDelegatedRunRecord(metadata?: Record<string, unknown>): st
   ].filter(Boolean).join("\n");
 }
 
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+/**
+ * C5' (a): how a delegated run was stopped, when a loop stop, the warden or its iteration limit
+ * ended it (metadata loopEnforced / wardenStop / terminalState from tools/sub-agent.ts); null for a
+ * run no stop ended. One line for the run record, never for the verdict text: the looped call's
+ * arguments are the model's own words. Its em dashes become hyphens, because the checks that read
+ * a frame without stripping the record key on "— PARTIAL" and "— FAILED".
+ */
+export function delegatedRunStopLine(metadata?: Record<string, unknown>): string | null {
+  if (!metadata) return null;
+  const loop = asRecord(metadata["loopEnforced"]);
+  const loopTool = recordedName(loop?.["tool"]);
+  const loopFact = loop && loopTool && typeof loop["target"] === "string" && typeof loop["repeats"] === "number"
+    ? `looped on ${loopTool} ${singleLine(loop["target"], 160).replace(/—/g, "-")} (x${loop["repeats"]})`
+    : null;
+  if (loopFact && loop?.["endedRun"] === true) return `${loopFact}, and the loop stop ended the run`;
+  const warden = asRecord(metadata["wardenStop"]);
+  if (warden) {
+    return `stopped by the warden (${recordedName(warden["alert"]) ?? "emergency stop"})${loopFact ? `; it had ${loopFact}` : ""}`;
+  }
+  if (metadata["terminalState"] === "max_iterations") return `used up its iteration limit${loopFact ? `; it had ${loopFact}` : ""}`;
+  return null;
+}
+
+/** The partial frame's instruction for a run a stop ended. Harness text only: the facts are in the record above it. */
+const STOPPED_PARTIAL_NOTE = "IMPORTANT: The specialist was stopped before it finished (how is recorded above). "
+  + "Use only the explicit partial evidence below; state what remains unverified or incomplete instead of filling gaps. "
+  + "Do NOT delegate again for this task in this turn.";
+
 export function buildModelVisibleToolResult(
   toolName: string,
   resultText: string,
   metadata?: Record<string, unknown>,
 ): string {
-  const frame = frameToolResult(toolName, resultText, metadata);
+  const stop: { line?: string } = {};
+  const frame = frameToolResult(toolName, resultText, metadata, stop);
   // run_workflow names its files in its own instruction; a second list would repeat them.
   if (toolName === "run_workflow") return frame;
-  const record = formatDelegatedRunRecord(metadata);
+  const record = formatDelegatedRunRecord(metadata, stop.line);
   if (!record) return frame;
   // At the HEAD of the frame, never in the evidence. Every evidence parser (the single-deliverable
   // relay, the failure sniffers, the backstops) reads from the evidence marker on, so it sees the
@@ -222,6 +256,8 @@ function frameToolResult(
   toolName: string,
   resultText: string,
   metadata?: Record<string, unknown>,
+  /** Set to the run-stop line when the frame's instruction points at it (the record carries it). */
+  stop: { line?: string } = {},
 ): string {
   const fallback = truncateForContext(resultText, 600);
 
@@ -337,9 +373,18 @@ function frameToolResult(
     if (delegationPartial) {
       const terminalState = typeof metadata?.["terminalState"] === "string" ? String(metadata["terminalState"]) : undefined;
       const timedOut = terminalState === "timeout";
-      const importantNote = timedOut
-        ? "IMPORTANT: The specialist timed out. Use only the explicit partial evidence below; state what remains unverified or incomplete instead of filling gaps. Do NOT delegate again for this task in this turn."
-        : "IMPORTANT: Use the partial evidence below to continue your workflow. Do NOT treat this as a workflow failure. Proceed with any dependent tools.";
+      // C5' (a), orchestration.loopAwareDelegation. c297c5ea: a content_writer that looped 199
+      // iterations on one grep came back "completed"/partial and was told "Proceed with any
+      // dependent tools", and the same deck got three more builders. A run a stop ended gets the
+      // timeout branch's "Do NOT delegate again", with what stopped it in the run record; the
+      // verdict line above stays byte-identical for the checks that key on "PARTIAL PROGRESS".
+      const stopLine = effectiveOrchestration().loopAwareDelegation === true ? delegatedRunStopLine(metadata) : null;
+      if (stopLine) stop.line = stopLine;
+      const importantNote = stopLine
+        ? STOPPED_PARTIAL_NOTE
+        : timedOut
+          ? "IMPORTANT: The specialist timed out. Use only the explicit partial evidence below; state what remains unverified or incomplete instead of filling gaps. Do NOT delegate again for this task in this turn."
+          : "IMPORTANT: Use the partial evidence below to continue your workflow. Do NOT treat this as a workflow failure. Proceed with any dependent tools.";
       const parts = [
         `Delegated result from ${agentName} — PARTIAL PROGRESS${timedOut ? " (TIMEOUT)" : ""}.`,
         attemptedAgents.length > 1 ? `Attempts: ${attemptedAgents.join(", ")}.` : "",

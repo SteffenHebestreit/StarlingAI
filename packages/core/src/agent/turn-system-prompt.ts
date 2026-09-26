@@ -19,7 +19,8 @@
  * (they are runtime.ts-local) so this module needs no import from runtime.js -
  * keeping the dependency edge one-directional (no import cycle).
  */
-import type { LLMMessage } from "../providers/lmstudio.js";
+import { normalizeMessagesForModel, type LLMMessage } from "../providers/lmstudio.js";
+import { hashText } from "../providers/prompt-head.js";
 import type { AgentSession } from "./session.js";
 import { splitOrchestrationModule } from "./session.js";
 import type { DynamicTurnGuidance } from "./intent-classifier.js";
@@ -105,6 +106,19 @@ export function composeTurnMessages(
   return stable
     ? [...head, ...history, ...guidance]
     : [...head, ...guidance, ...history];
+}
+
+/**
+ * The leading system run of a message list as one text, folded exactly as the provider folds it
+ * before the wire (normalizeMessagesForModel; a non-Gemma id, so only the fold applies). Hashing
+ * this, rather than a join of our own, is what lets the prompt_section_sizes row and the provider
+ * rows name the same head with the same hash. Pass the list as it will be SENT: the fold takes
+ * every system message up to the first other one, which is more than the head when history opens
+ * with one (a long session's earlier-conversation summary).
+ */
+export function foldedSystemText(messages: readonly LLMMessage[]): string {
+  const first = normalizeMessagesForModel(messages, "")[0];
+  return first && first.role === "system" && typeof first.content === "string" ? first.content : "";
 }
 
 export async function assembleTurnSystemMessages(
@@ -395,11 +409,16 @@ export async function assembleTurnSystemMessages(
       : "";
 
     // THE HEAD IS THE CACHE KEY. LM Studio / llama.cpp reuse the KV cache for the longest
-    // unchanged prefix of the rendered prompt, and the chat template renders the tool block
-    // right after the leading run of system messages (which the provider folds into one).
-    // Anything in that run that differs between two calls invalidates everything behind it —
-    // the ~9K-token tool block and the whole history. Measured on this box: an identical prefix
-    // prefilled in 1.36 s; 200 varying characters ahead of it, 6.25 s. So the head holds ONLY
+    // unchanged prefix of the rendered prompt, and the provider folds the leading run of system
+    // messages into one. WHERE the tool block renders depends on the chat template: on the
+    // deployed Qwen3.6 template it renders BEFORE the system text — session 4082ac4f's first turn
+    // reused 12,475 of the warm-up's 12,991 tokens although its head carries this date line after
+    // the lean base, which is only possible with the ~9K-token tool block ahead of the text (the
+    // latency probe's /apply-template check reads the order off the server). Either way the head
+    // is one key: on this hybrid model reuse resumes only from a saved checkpoint, so a change
+    // ANYWHERE in the system text kept 0% of the prompt cached (live probe E2, 2026-09-26), and
+    // everything behind it — the whole history — is prefilled again. Measured on this box: an
+    // identical prefix prefilled in 1.36 s; 200 varying characters ahead of it, 6.25 s. So the head holds ONLY
     // what is invariant within a turn: the base prompt, the (per-turn) orchestration module, the
     // date, and the catalog notice. Everything that changes per iteration — language/identity,
     // dynamic guidance, the plan nudge, the discovery capsule, shared findings — is emitted as
@@ -511,6 +530,27 @@ export async function assembleTurnSystemMessages(
         // tail bytes are re-prefilled per iteration.
         headChars: sumChars(head),
         headMessages: head.length,
+        // Which head, not only how big (providers/prompt-head.ts). headSystemHash is the leading
+        // system run the provider will fold, composed as the send below composes it: the head, plus
+        // a long session's earlier-conversation summary (its collapsed history OPENS with that
+        // system message, so the fold takes it into the head) or, with stablePromptPrefix off, the
+        // turn guidance. So it equals systemHash on this turn's provider_model_call rows (those also
+        // carry toolsHash: the forced subset is chosen per call, after this row) — except on
+        // gpt-oss, whose rows hash the `Reasoning:` line too, and on the rare turn the budget
+        // trimmer below compacts the base prompt after this row.
+        // baseModuleHash leaves the date line out, so it names the head VARIANT across days —
+        // lean base alone, or lean base + orchestration module — which is what deciding which
+        // heads the warm-keeper should keep warm has to count.
+        headSystemHash: hashText(foldedSystemText(composeTurnMessages(
+          head,
+          collapsedHistory,
+          guidance,
+          getConfig().orchestration?.stablePromptPrefix ?? true,
+        ))),
+        baseModuleHash: hashText(foldedSystemText([
+          { role: "system", content: systemPrompt },
+          ...(orchestrationModuleMsg ? [{ role: "system" as const, content: orchestrationModuleMsg }] : []),
+        ])),
         tailChars: sumChars(guidance),
         tailMessages: guidance.length,
         historyChars: lastPromptMetrics.collapsedHistoryChars,

@@ -59,6 +59,7 @@ The enrichment inflates how often the rare class occurs. The projection is there
 |---|---|---|---|---|
 | `fast_lane.example.jsonl` | fast_lane (receptionist) | 216, 7 of them `gated` | 58% | small_talk 41% |
 | `source_sensitive.example.jsonl` | source_sensitive (up-front judge) | 196 | 58% | yes 39% |
+| `negation.example.jsonl` | both, `--negation` only | 44: 22 negation minimal pairs | 50% | – |
 
 Both are **synthetic** and hand-written for this bench (2026-09-26). No message comes from a user
 conversation. Gold follows the point's definition in `packages/core/src/decisions/points.ts` and
@@ -179,6 +180,8 @@ Near-miss kinds (tags):
 | `--prior p=x,…` | fast_lane 0.059, source_sensitive 0.037 | rare-class share of real traffic |
 | `--train-out <jsonl>` | – | write the calibration half in the fine-tuning format (see below) |
 | `--no-incumbent`, `--no-laya` | – | skip an arm |
+| `--negation` | – | also run the negation minimal pairs of `negation.example.jsonl` for the selected points (below) |
+| `--order-swap` | – | ask Laya every case a second time with the point's options in reverse order (below) |
 
 Exit codes:
 
@@ -204,7 +207,15 @@ pnpm reports every non-zero code as 1, so the verdict is also printed.
 - *Calibration.* Confidence levels are qualified on this half exactly as `gate.ts` qualifies them:
   - per detected language (the bucket a turn uses, so a bare "ok" lands in `other`) and per Laya
     answer;
-  - the Wilson lower bound must reach `--target` over at least `--min` cases;
+  - the levels are tested from the highest down, and the first whose Wilson lower bound misses
+    `--target` ends the sequence: the lowest level reached is the one qualified. The lowest level
+    is tested from `--min` cases, every higher one only once it holds 200 at a target of 0.9
+    (`levelSampleFloor` in `gate.ts`); a level with fewer is skipped, not failed;
+  - the level must also qualify without the newest three cases, and the newest 100 at that level
+    must agree at the target less 0.03 at least (0.87 at 0.9), and right after 100 that did not,
+    at the target itself (the gate's confirmation and drift window). The gate reads
+    order, so the calibration half is fed to it in an order hashed from the case ids, the same
+    every run;
   - for source_sensitive, "no" must also pass the recall guard: at least `--min` calibration
     cases in the same language whose reference was "yes", with a lower bound of Laya's "yes"
     recall at that level that reaches `--target`. Each bucket line shows how many "yes" cases
@@ -214,23 +225,27 @@ pnpm reports every non-zero code as 1, so the verdict is also printed.
 - *Test.* The qualified levels are applied to the other half. Coverage, the error rate among the
   cases taken, and the rare-class miss rate come from this half.
 - *One run per case.* Repeats are not independent evidence.
-- *Minimum sample.* At a target of 0.9, qualifying needs **35** agreeing cases (30 agreeing out of
-  30 is only 0.886), then 53 with one disagreement. The recall guard needs as many "yes" cases
-  again. With about 100 cases per point and language, a calibration half holds 20 to 40 per
-  answer, so the verdict is often *inconclusive*. That describes the real gate's data needs. It
-  is not a bench defect. On live traffic where the judge says "yes" rarely, the guard keeps "no"
-  with the incumbent until 35 "yes" turns per language have been seen.
+- *Minimum sample.* At a target of 0.9, qualifying needs **38** agreeing cases: 35 for the Wilson
+  bound (30 agreeing out of 30 is only 0.886), and the same again without the newest three. With
+  one disagreement it is 53 and 56. The recall guard needs 35 "yes" cases, all found. With about
+  100 cases per point and language, a calibration half holds 20 to 40 per answer, so the verdict
+  is often *inconclusive*. That describes the real gate's data needs. It is not a bench defect. On
+  live traffic where the judge says "yes" rarely, the guard keeps "no" with the incumbent until 35
+  "yes" turns per language have been seen. A level above the lowest needs 200 cases before it is
+  tested at all, so a half this size can only qualify the lowest level.
 - *Level curve.* Coverage, errors and rare-class misses for one fixed confidence level over every
   case. It is descriptive: no level is chosen from it.
 
 **Projection**, on the test half:
 
-- *Concurrent* is today's `decide()`: incumbent and Laya start together. A taken case saves the
-  incumbent's time minus Laya's. A case that is not taken costs nothing, unless Laya is the
-  slower of the two.
-- *Laya-first* starts the incumbent only when Laya's answer is not taken. It adds Laya's time to
-  every case that is not taken. In exchange, the GPU never gets an incumbent request that is
-  started and then aborted.
+- *Concurrent*: incumbent and Laya start together, as `decide()` does where no answer of the point
+  has qualified. A taken case saves the incumbent's time minus Laya's. A case that is not taken
+  costs nothing, unless Laya is the slower of the two.
+- *Laya-first* starts the incumbent only when Laya's answer is not taken, as `decide()` does once
+  an answer has qualified (`decisions.layaFirstMs`, at most 80 ms of waiting). It adds Laya's time
+  to every case that is not taken. In exchange, the GPU never gets an incumbent request that is
+  started and then aborted (E5, 2026-09-26: such an abort made the next call on the same model
+  952 ms slower).
 - The audited share (`--audit-rate`) goes to the incumbent in both orders.
 - For fast_lane, small talk that Laya sends on as a task costs the full path instead of the front
   desk's reply. The penalty is 8.2 s, the p50 time to the orchestrator's first token. For
@@ -260,6 +275,29 @@ only. They are thin, so override them with `--frequency` and `--prior` when bett
 | `inconclusive` | no scored case in a language, or the calibration half is too small to qualify anything, counting the "yes" cases the recall guard needs |
 | `no_payoff` | nothing qualified, or the reweighted projection saves no time |
 | `pays_off` | none of the above |
+
+## Negation pairs and option order
+
+Laya's checkpoints are known to read past a negation: upstream issue #377 has "please do NOT
+cancel" answered as cancel_account at 0.9998. `negation.example.jsonl` holds 22 pairs of cases,
+11 per point, German and English. The two cases of a pair differ by where a negation sits
+(nicht, kein, nichts; not, no, don't):
+
+- *flip* pairs: the negation changes what is asked, and the gold labels differ ("Nicht den
+  aktuellen Leitzins, nur was ein Leitzins ist." is `no`; "Den aktuellen Leitzins, nicht nur was
+  ein Leitzins ist." is `yes`);
+- *control* pairs: it changes nothing that is asked, and the gold labels are the same.
+
+`--negation` adds them to a run. Both arms answer them, and the report shows per point and
+language how many flip pairs each arm got both right and how many it answered the same way twice
+(it read past the negation), and how many control pairs it answered the same way (as it should).
+The pairs take no part in the gate replay, the projection, the verdict or `--train-out`, and
+`--split` keeps each pair whole.
+
+`--order-swap` asks Laya every case a second time with the point's options in reverse order, so
+the option under the letter A is now under B. A choice that changes with the order was the
+order's, not the case's; upstream measured 22.5% of choices on a public set. The report shows the
+flip rate and the mean change of the first answer's probability per point and language.
 
 ## Fine-tuning on the calibration half
 

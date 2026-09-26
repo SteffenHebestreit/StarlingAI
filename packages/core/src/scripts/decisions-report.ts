@@ -11,7 +11,7 @@
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { GATE_LEVELS, wilsonLowerBound } from "../decisions/gate.js";
+import { CONFIRM_SAMPLES, DRIFT_WINDOW, GATE_LEVELS, GATE_MAX_SAMPLES_PER_KEY, levelFromCases, levelSampleFloor, wilsonLowerBound } from "../decisions/gate.js";
 import { DECISION_POINTS, type DecisionPointId } from "../decisions/points.js";
 import { readLedgerRows, type LedgerRow } from "../decisions/ledger.js";
 
@@ -107,6 +107,14 @@ export function buildDecisionReport(rows: LedgerRow[], target: number, min: numb
     // The gate's recall guard: the cases the incumbent answered the point's protected answer.
     const protect = DECISION_POINTS[point as DecisionPointId]?.protect;
     const protectedRows = protect ? both.filter((row) => row.incumbent!.choice === protect) : [];
+    // What the gate itself keeps: per answer, the newest cases with a finite confidence, in ledger order.
+    const kept = new Map<string, LedgerRow[]>();
+    for (const row of both) {
+      if (!Number.isFinite(row.laya!.top)) continue;
+      kept.set(row.laya!.choice, [...(kept.get(row.laya!.choice) ?? []), row]);
+    }
+    for (const [answer, rows] of kept) kept.set(answer, rows.slice(-GATE_MAX_SAMPLES_PER_KEY));
+    const guardCases = protect ? [...kept.values()].flat().filter((row) => row.incumbent!.choice === protect) : [];
     const answers = [...new Set(both.map((row) => row.laya!.choice))].sort().map((answer): AnswerReport => {
       const cases = both.filter((row) => row.laya!.choice === answer);
       const guarded = protect !== undefined && answer !== protect;
@@ -122,9 +130,14 @@ export function buildDecisionReport(rows: LedgerRow[], target: number, min: numb
           ...(guarded ? { protectedRecallLowerBound: wilsonLowerBound(protectedRows.length - missed, protectedRows.length) } : {}),
         };
       });
-      const qualified = levels.find((row) => row.cases >= min && row.lowerBound >= target
-        && (!guarded || (protectedRows.length >= min && (row.protectedRecallLowerBound ?? 0) >= target)));
-      return { answer, levels, qualifiedLevel: qualified?.level ?? null };
+      // The gate's own decision on the cases it would hold, in the order they came (decisions/gate.ts
+      // levelFromCases): the per-level rows above describe every case, the level is the gate's.
+      const qualifiedLevel = levelFromCases(
+        (kept.get(answer) ?? []).map((row) => ({ top: row.laya!.top, agree: row.laya!.choice === row.incumbent!.choice })),
+        { targetAgreement: target, minSamples: min },
+        guarded ? { answer, protectedCases: guardCases.map((row) => ({ answer: row.laya!.choice, top: row.laya!.top })) } : undefined,
+      );
+      return { answer, levels, qualifiedLevel };
     });
     return {
       point,
@@ -147,7 +160,12 @@ function pct(value: number | null): string {
 }
 
 function render(report: PointReport[], target: number, min: number): string {
-  const lines = [`Decision ledger — agreement with the incumbent; the gate needs ≥${min} cases with a lower bound ≥${pct(target)}.`, ""];
+  const floor = levelSampleFloor({ targetAgreement: target, minSamples: min });
+  const lines = [
+    `Decision ledger — agreement with the incumbent. The gate tests the levels from the highest down and stops at the first below a lower bound of ${pct(target)}; `
+    + `it tests the lowest from ${min} cases and the others from ${floor}, confirms without the newest ${CONFIRM_SAMPLES}, and closes while the newest ${DRIFT_WINDOW} drift.`,
+    "",
+  ];
   for (const point of report) {
     lines.push(`## ${point.point} (${point.language}${point.model ? `, ${point.model}` : ""}) — ${point.rows} cases, Laya decided ${point.decidedByLaya}, both answered ${point.bothAnswered}, agreement ${pct(point.agreement)}`);
     lines.push(`   median: Laya ${point.layaMedianMs ?? "–"} ms, incumbent ${point.incumbentMedianMs ?? "–"} ms`);

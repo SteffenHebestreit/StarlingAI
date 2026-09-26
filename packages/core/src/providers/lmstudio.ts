@@ -9,6 +9,7 @@ import type { Stream } from "openai/streaming";
 import { childLogger } from "../logger.js";
 import type { ModelConfig } from "../config/schema.js";
 import { resolveStreamTotalCapMs } from "./stream-budget.js";
+import { wireHeadSignature, type PromptHeadSignature } from "./prompt-head.js";
 import { beginProviderCall, recordProviderToken, endProviderCall } from "../observability/provider-activity-monitor.js";
 // The burn threshold is the supervisor's, IMPORTED rather than restated. Copying the
 // literal here is how the two would drift, and the whole point of this guard is that it
@@ -241,6 +242,19 @@ export interface CompletionCallOptions {
    * must still parse defensively.
    */
   responseFormat?: { name: string; schema: Record<string, unknown>; strict?: boolean };
+  /**
+   * Ask for the log-probability of each generated token (OpenAI-compatible `logprobs`), and
+   * with `topLogprobs` the most likely alternatives at each position (`top_logprobs`). The
+   * response then carries them as `logprobs`; unasked, the body and the response are exactly
+   * as before. For a decision read off the model's own distribution over option letters
+   * (decisions/logit-readout.ts): measured 2026-09-26 on the production llama-server, a
+   * one-token call with thinking off answers `A` with the top list [A -0.185, B -2.487,
+   * " A" -2.589, " B" -4.542, …]. complete() only — the streaming path does not request them.
+   * Ignored by providers that do not support it, so a caller must treat a missing list as
+   * "no readout", never as an answer.
+   */
+  logprobs?: boolean;
+  topLogprobs?: number;
 }
 
 export interface StreamCallOptions extends CompletionCallOptions {
@@ -552,6 +566,43 @@ export interface LLMResponse {
    *  `reasoning_burn` is the provider's own mid-stream stop (see ReasoningBurnAbort) —
    *  the caller must wind the run down, not retry it. */
   truncatedBy?: "output_budget" | "deadline" | "transport" | "reasoning_burn";
+  /** Per generated token, its log-probability and the alternatives the server listed — only
+   *  when the call asked for them (CompletionCallOptions.logprobs) and the server sent them. */
+  logprobs?: LLMTokenLogprob[];
+}
+
+/** One generated token as the server scored it: its own log-probability and the top alternatives. */
+export interface LLMTokenLogprob {
+  token: string;
+  logprob: number;
+  /** Most likely first, as listed; empty when only the chosen token was asked for. */
+  topLogprobs: Array<{ token: string; logprob: number }>;
+}
+
+/**
+ * The `choices[0].logprobs.content` list of an OpenAI-compatible answer, checked entry by entry:
+ * a token with no finite log-probability is dropped rather than read as a certainty or an
+ * impossibility. `undefined` when the answer carries no list at all. Pure + exported for testing.
+ */
+export function readChoiceLogprobs(raw: unknown): LLMTokenLogprob[] | undefined {
+  const content = raw && typeof raw === "object" ? (raw as { content?: unknown }).content : undefined;
+  if (!Array.isArray(content)) return undefined;
+  const entry = (value: unknown): { token: string; logprob: number } | null => {
+    if (!value || typeof value !== "object") return null;
+    const { token, logprob } = value as { token?: unknown; logprob?: unknown };
+    return typeof token === "string" && typeof logprob === "number" && Number.isFinite(logprob) ? { token, logprob } : null;
+  };
+  const out: LLMTokenLogprob[] = [];
+  for (const item of content) {
+    const own = entry(item);
+    if (!own) continue;
+    const top = (item as { top_logprobs?: unknown }).top_logprobs;
+    out.push({
+      ...own,
+      topLogprobs: Array.isArray(top) ? top.map(entry).filter((alt): alt is { token: string; logprob: number } => alt !== null) : [],
+    });
+  }
+  return out;
 }
 
 export interface StreamChunk {
@@ -1410,6 +1461,8 @@ export class LMStudioProvider {
     headersAt?: number;
     /** llama-server's own timings for the call, when the server sent them (readServerTimings). */
     timings?: ServerCallTimings;
+    /** The head this request sent (folded system text + tool block), hashed: providers/prompt-head.ts. */
+    head?: PromptHeadSignature;
   }): void {
     const now = Date.now();
     const ext = input.extensions ?? {};
@@ -1440,6 +1493,12 @@ export class LMStudioProvider {
       // Absent, not empty, when the server sent none: a backend without timings must leave
       // the row exactly as it was.
       ...(input.timings ? { timings: input.timings } : {}),
+      // Which head the call carried, so a cold call can be told apart as "the head changed"
+      // (a different headHash from the run's previous call) or "the same head was evicted".
+      // toolsHash alone separates the orchestrator's forced subsets from its full block.
+      ...(input.head
+        ? { headHash: input.head.headHash, toolsHash: input.head.toolsHash, systemHash: input.head.systemHash, systemChars: input.head.systemChars }
+        : {}),
     }, { ...attribution.opts, severity: "info" });
   }
 
@@ -1728,6 +1787,7 @@ export class LMStudioProvider {
       type: "function",
       function: { name: t.name, description: t.description, parameters: t.parameters },
     }));
+    const head = wireHeadSignature(openAIMessages, tools);
 
     let attempt = 0;
     const maxAttempts = this.configuredMaxRetries + 1;
@@ -1777,6 +1837,15 @@ export class LMStudioProvider {
                       strict: options.responseFormat.strict ?? true,
                     },
                   },
+                }
+              : {}),
+            // Only when asked: an unasked call's body is byte-for-byte what it was.
+            ...(options?.logprobs
+              ? {
+                  logprobs: true,
+                  ...(typeof options.topLogprobs === "number" && Number.isFinite(options.topLogprobs) && options.topLogprobs > 0
+                    ? { top_logprobs: Math.floor(options.topLogprobs) }
+                    : {}),
                 }
               : {}),
             temperature: effectiveTemp,
@@ -1841,6 +1910,7 @@ export class LMStudioProvider {
             // Not in the SDK's types; the SDK hands the parsed body through, so it is there
             // whenever llama-server sent it.
             timings: readServerTimings((response as { timings?: unknown }).timings),
+            head,
           });
         }
 
@@ -1857,6 +1927,10 @@ export class LMStudioProvider {
           // The provider's own budget stop, as opposed to the fabricated "length"
           // completeViaStream sets when it salvages a cut stream.
           ...(choice.finish_reason === "length" ? { truncatedBy: "output_budget" as const } : {}),
+          ...(options?.logprobs ? (() => {
+            const logprobs = readChoiceLogprobs((choice as { logprobs?: unknown }).logprobs);
+            return logprobs ? { logprobs } : {};
+          })() : {}),
         };
       } catch (err: unknown) {
         endProviderCall(callId);
@@ -1893,6 +1967,7 @@ export class LMStudioProvider {
             messageCount: messages.length,
             extensions,
             reasoningChars: null,
+            head,
           });
         };
         if (signal?.aborted) {
@@ -2152,6 +2227,7 @@ export class LMStudioProvider {
       type: "function",
       function: { name: t.name, description: t.description, parameters: t.parameters },
     }));
+    const head = wireHeadSignature(openAIMessages, tools);
 
     // Same per-attempt shape as complete() — see resolveCallShape. streamOnce IS the attempt
     // (stream() re-enters it on a retry), so building here rebuilds both halves after a
@@ -2534,6 +2610,7 @@ export class LMStudioProvider {
         extensions,
         reasoningChars: progress.reasoningChars,
         timings: collectedTimings,
+        head,
       });
       throw reason instanceof Error
         ? reason
@@ -2555,6 +2632,7 @@ export class LMStudioProvider {
       // The same counter the burn guard reads: dedicated deltas AND inline <think> spans.
       reasoningChars: progress.reasoningChars,
       timings: collectedTimings,
+      head,
     });
     yield { type: "done", finishReason: collectedFinishReason ?? "stop", usage: collectedUsage };
   }

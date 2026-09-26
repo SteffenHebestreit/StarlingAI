@@ -546,6 +546,8 @@ export interface TurnContext {
   spans: SubAgentSpan[];
   humanWaits: Array<{ startMs: number; endMs: number }>;
   plans: Array<{ atMs: number; stepCount: number | null }>;
+  /** Loop rows of the turn's sub-agent runs (sub_agent_tool_loop_enforced / _detected), in time order. */
+  loopSignals: Array<{ sessionId: string; atMs: number }>;
   performance: Record<string, unknown> | null;
   scorecard: Record<string, unknown> | null;
 }
@@ -638,6 +640,7 @@ function buildTurn(group: readonly AuditRow[], params: LatencyParams): TurnConte
   const waitRequests = new Map<string, number>();
   const humanWaits: Array<{ startMs: number; endMs: number }> = [];
   const plans: Array<{ atMs: number; stepCount: number | null }> = [];
+  const loopSignals: Array<{ sessionId: string; atMs: number }> = [];
   let performance: Record<string, unknown> | null = null;
   let scorecard: Record<string, unknown> | null = null;
 
@@ -727,6 +730,10 @@ function buildTurn(group: readonly AuditRow[], params: LatencyParams): TurnConte
       case "turn_scorecard":
         if (rowSession === sessionId && !scorecard) scorecard = row.data;
         break;
+      case "sub_agent_tool_loop_enforced":
+      case "sub_agent_tool_loop_detected":
+        if (rowSession.startsWith("sub:")) loopSignals.push({ sessionId: rowSession, atMs: at });
+        break;
       default:
         break;
     }
@@ -747,6 +754,7 @@ function buildTurn(group: readonly AuditRow[], params: LatencyParams): TurnConte
     spans,
     humanWaits,
     plans,
+    loopSignals,
     performance,
     scorecard,
   };
@@ -811,6 +819,7 @@ export const LEVER_IDS = [
   "agent_search_wait",
   "qa_verdict_candidate",
   "vision_structuring",
+  "loop_brake",
 ] as const;
 export type LeverId = typeof LEVER_IDS[number];
 
@@ -838,8 +847,9 @@ const LAYA_GATE_CALLS: LeverDefinition = {
     + "The progress judge's \"drifting\" is not Laya's to say either, but its row does not record the verdict, so every progress-judge call is "
     + "claimed. A judge that ran beside work the turn still waits for (document RAG beside the source judge) saves only what that work "
     + "did not cover; the audit does not place that work on the clock, so the judge is claimed in full. "
-    + "Triage and restatement rescue write text, not a choice, and are not claimed. Laya still sends the incumbent request today "
-    + "(decide() starts both), so this saves wall time, not model-server load.",
+    + "Triage and restatement rescue write text, not a choice, and are not claimed. Where Laya is asked first (a point that has "
+    + "qualified, decisions.layaFirstMs) a taken answer never sends the incumbent request; everywhere else decide() starts both, "
+    + "and there this saves wall time, not model-server load.",
   claims: (turn, p) => turn.calls.flatMap((call) => {
     if (!call.decisionPoint) return [];
     if (call.decisionPoint === FAST_LANE.id && turn.fastLane === true) return [];
@@ -977,6 +987,30 @@ const VISION_STRUCTURING: LeverDefinition = {
   }),
 };
 
+/**
+ * What a run spent after its first loop row. Run c297c5ea's content_writer runs logged their first
+ * loop detection within minutes and then circled for up to 20 more: the brake (agents.performance.
+ * loopBrake) exists to end a run there, and this lever says how much turn time that is worth on
+ * the turns measured. On builds with the brake, its refusal row is the signal; before it, the
+ * detections the loop only logged.
+ */
+const LOOP_BRAKE: LeverDefinition = {
+  id: "loop_brake",
+  title: "A looping sub-agent run ends at its first loop signal",
+  kind: "restructure",
+  assumption: () => "A sub-agent run that logged a loop row — the brake's refusal (sub_agent_tool_loop_enforced) or a loop detection "
+    + "(sub_agent_tool_loop_detected: the same arguments again, a write loop, the blocked-iteration stop) — ends at its first one. "
+    + "Claimed: the run's time from that row to its end. An upper bound: the synthesis a stopped run still makes is claimed too, a "
+    + "detection that was not a loop is claimed anyway, and the run's time only shortens the turn where nothing else of the turn ran "
+    + "beside it (runs side by side are counted once, not as the sum). A run the brake already ended claims only the call after its "
+    + "first refusal and its synthesis.",
+  claims: (turn) => turn.spans.flatMap((span) => {
+    const first = turn.loopSignals.find((signal) => signal.sessionId === span.sessionId
+      && signal.atMs >= span.startMs && signal.atMs <= span.endMs);
+    return first ? claim("loop_brake", first.atMs, span.endMs, 1) : [];
+  }),
+};
+
 export const LEVERS: readonly LeverDefinition[] = Object.freeze([
   LAYA_GATE_CALLS,
   PRE_ROUTER_DISPATCH,
@@ -986,6 +1020,7 @@ export const LEVERS: readonly LeverDefinition[] = Object.freeze([
   AGENT_SEARCH_WAIT,
   QA_VERDICT_CANDIDATE,
   VISION_STRUCTURING,
+  LOOP_BRAKE,
 ]);
 
 /** A lever's claims on one turn, cut to the turn's own span. */
@@ -1179,6 +1214,8 @@ export interface LatencyAttribution {
     /** routing:prerouter --round-ms: the span a pre-router would skip, on the turns it could take. */
     preRouterRoundMs: { turns: number; p50: number | null; mean: number | null };
   };
+  /** What rewriting a run's history mid-run cost the call after it (see historyBreakReport). */
+  historyBreaks: HistoryBreakReport;
   notes: string[];
 }
 
@@ -1556,6 +1593,7 @@ export function attributeLatency(rows: readonly AuditRow[], paramsIn: Partial<La
     overlaps,
     decisionPoints,
     handoff,
+    historyBreaks: historyBreakReport(rows, turns),
     notes: buildNotes(inTurnCalls, totals, scope, params),
   };
 }
@@ -1603,6 +1641,156 @@ function buildNotes(calls: readonly CallRecord[], totals: LatencyAttribution["to
       + "in each call's prefill and decode sums; lever claims count such seconds once.");
   }
   return notes;
+}
+
+// ── History breaks ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * Rows that rewrite a run's history in the middle of the run. Every message behind the rewritten
+ * one is new to the server, so the next call of that run re-prefills from the last checkpoint that
+ * still matches — in c297c5ea at exactly cacheN 7,591, the end of content_writer's head: 18.6 s,
+ * 39.6 s (30,269 tokens) and 51.5 s (35,399 tokens) for three such calls, about 110-120 s of the
+ * turn, more than the first-call prewarm the plan had ranked above it. How often that happens is
+ * what the report has to say before anything is redesigned (C3' of the cache plan, "N1").
+ */
+export const HISTORY_BREAK_ROW_TYPES: readonly string[] = ["sub_agent_history_digested", "sub_agent_history_trimmed", "history_compacted"];
+
+/** Slack for a break row written just before the send its call's start is derived from (end − duration). */
+const HISTORY_BREAK_JOIN_SLACK_MS = 250;
+
+export interface HistoryBreakCall {
+  rowId: string;
+  durationMs: number;
+  ttftMs: number | null;
+  promptTokens: number | null;
+  promptN: number | null;
+  cacheN: number | null;
+  promptMs: number | null;
+}
+
+export interface HistoryBreak {
+  /** The turn's index in report.turns (1-based). */
+  turn: number;
+  sessionId: string;
+  agentName: string | null;
+  /** The row types that announced this break (a digest and a trim on one iteration are one break). */
+  rowTypes: string[];
+  /** digestTrigger on a digest row: "batch" (one break per batch of stale mass) or "overflow". */
+  trigger: string | null;
+  atOffsetMs: number;
+  /** The run's next model call after the break: the one that re-prefilled. */
+  next: HistoryBreakCall | null;
+  /** The run's call before the break, for what a call cost when its prefix was still cached. */
+  previous: HistoryBreakCall | null;
+  /** Prompt processing of the next call: llama.cpp's prompt_ms, else its time to first token. */
+  reprefillMs: number | null;
+  /** reprefillMs above the previous call's prompt processing: what the break itself cost. */
+  excessMs: number | null;
+}
+
+export interface HistoryBreakReport {
+  breaks: HistoryBreak[];
+  perTurn: Array<{ turn: number; sessionId: string; breaks: number; reprefillMs: number; excessMs: number; reprocessedTokens: number }>;
+  totals: {
+    breaks: number;
+    turnsAffected: number;
+    reprefillMs: number;
+    excessMs: number;
+    /** promptN of the calls after a break: tokens processed again. */
+    reprocessedTokens: number;
+    /** Breaks with llama.cpp timings on their next call (the others fall back to its TTFT). */
+    withTimings: number;
+    /** Breaks whose run made no further call (the run ended, or its next call left no row). */
+    withoutNextCall: number;
+  };
+}
+
+function breakCall(call: CallRecord): HistoryBreakCall {
+  return {
+    rowId: call.rowId,
+    durationMs: round(call.durationMs),
+    ttftMs: call.ttftMs,
+    promptTokens: call.promptTokens,
+    promptN: call.timings?.promptN ?? null,
+    cacheN: call.timings?.cacheN ?? null,
+    promptMs: call.timings ? round(call.timings.promptMs) : null,
+  };
+}
+
+/** A run's own loop call: the orchestrator's for the top-level session, the sub-agent's for a run. */
+function isLoopCall(call: CallRecord): boolean {
+  return call.role === "orchestrator" || call.role === "sub_agent";
+}
+
+/**
+ * Join every history break with the call it made expensive: the next model call of the same run
+ * (same session, a loop call, started at or after the break), and the run's call before it.
+ * Rows outside any attributed turn are left out, like every other figure here.
+ */
+export function historyBreakReport(rows: readonly AuditRow[], turns: readonly TurnContext[]): HistoryBreakReport {
+  const types = new Set(HISTORY_BREAK_ROW_TYPES);
+  const byNextCall = new Map<string, HistoryBreak>();
+  const breaks: HistoryBreak[] = [];
+  const sorted = rows.filter((row) => types.has(row.type) && row.sessionId).sort((a, b) => tsMs(a) - tsMs(b));
+  for (const row of sorted) {
+    const at = tsMs(row);
+    const sessionId = row.sessionId!;
+    const root = rootSessionId(sessionId);
+    const turnIndex = turns.findIndex((turn) => turn.sessionId === root && at >= turn.startMs && at <= turn.endMs);
+    if (turnIndex < 0) continue;
+    const turn = turns[turnIndex]!;
+    const runCalls = turn.calls.filter((call) => call.sessionId === sessionId && isLoopCall(call));
+    const nextCall = runCalls.find((call) => call.startMs >= at - HISTORY_BREAK_JOIN_SLACK_MS);
+    const previousCall = [...runCalls].reverse().find((call) => call.endMs <= at + HISTORY_BREAK_JOIN_SLACK_MS && call !== nextCall);
+    const trigger = ident(row.data["digestTrigger"]);
+    // One iteration can write a digest row and a trim row; both announce the same rewrite and the
+    // same expensive call, so they are one break.
+    const joined = nextCall ? byNextCall.get(nextCall.rowId) : undefined;
+    if (joined) {
+      if (!joined.rowTypes.includes(row.type)) joined.rowTypes.push(row.type);
+      joined.trigger ??= trigger;
+      continue;
+    }
+    const reprefill = nextCall ? (nextCall.timings?.promptMs ?? nextCall.ttftMs) : null;
+    const before = previousCall ? (previousCall.timings?.promptMs ?? previousCall.ttftMs) : null;
+    const entry: HistoryBreak = {
+      turn: turnIndex + 1,
+      sessionId,
+      agentName: ident(row.data["agentName"]),
+      rowTypes: [row.type],
+      trigger,
+      atOffsetMs: round(at - turn.startMs),
+      next: nextCall ? breakCall(nextCall) : null,
+      previous: previousCall ? breakCall(previousCall) : null,
+      reprefillMs: reprefill === null ? null : round(reprefill),
+      excessMs: reprefill === null ? null : round(Math.max(0, reprefill - (before ?? 0))),
+    };
+    breaks.push(entry);
+    if (nextCall) byNextCall.set(nextCall.rowId, entry);
+  }
+  const perTurnMap = new Map<number, HistoryBreakReport["perTurn"][number]>();
+  for (const entry of breaks) {
+    const slot = perTurnMap.get(entry.turn) ?? { turn: entry.turn, sessionId: turns[entry.turn - 1]!.sessionId, breaks: 0, reprefillMs: 0, excessMs: 0, reprocessedTokens: 0 };
+    slot.breaks += 1;
+    slot.reprefillMs += entry.reprefillMs ?? 0;
+    slot.excessMs += entry.excessMs ?? 0;
+    slot.reprocessedTokens += entry.next?.promptN ?? 0;
+    perTurnMap.set(entry.turn, slot);
+  }
+  const perTurn = [...perTurnMap.values()].sort((a, b) => a.turn - b.turn);
+  return {
+    breaks,
+    perTurn,
+    totals: {
+      breaks: breaks.length,
+      turnsAffected: perTurn.length,
+      reprefillMs: sum(perTurn.map((slot) => slot.reprefillMs)),
+      excessMs: sum(perTurn.map((slot) => slot.excessMs)),
+      reprocessedTokens: sum(perTurn.map((slot) => slot.reprocessedTokens)),
+      withTimings: breaks.filter((entry) => entry.next?.promptMs !== null && entry.next?.promptMs !== undefined).length,
+      withoutNextCall: breaks.filter((entry) => entry.next === null).length,
+    },
+  };
 }
 
 // ── Markdown ─────────────────────────────────────────────────────────────────────────────────
@@ -1757,6 +1945,31 @@ export function renderLatencyMarkdown(report: LatencyAttribution, inputs?: Repor
   }
   if (report.tools.length > 15) lines.push(`| … ${report.tools.length - 15} more | | | ${secs(sum(report.tools.slice(15).map((stat) => stat.totalMs)))} | | | |`);
   lines.push("");
+
+  const hb = report.historyBreaks;
+  lines.push("## Re-prefill after history rewrites", "");
+  lines.push("A digest or trim mid-run rewrites the run's history, so its next model call processes everything behind the last "
+    + "matching checkpoint again. Re-prefill = that call's prompt processing (llama.cpp prompt_ms, else its TTFT); excess = above the run's "
+    + "call before the break. Not a lever: no fix is claimed, this is the size of the problem.", "");
+  if (hb.totals.breaks === 0) {
+    lines.push("No history rewrite on these turns.", "");
+  } else {
+    lines.push(`**${hb.totals.breaks}** break(s) in ${hb.totals.turnsAffected} turn(s): re-prefill ${secs(hb.totals.reprefillMs)} s, excess `
+      + `${secs(hb.totals.excessMs)} s, ${hb.totals.reprocessedTokens} tokens processed again; ${hb.totals.withTimings} with llama.cpp timings, `
+      + `${hb.totals.withoutNextCall} without a following call.`, "");
+    lines.push("| turn | session | breaks | re-prefill s | excess s | tokens again |", "|---:|---|---:|---:|---:|---:|");
+    for (const slot of hb.perTurn) {
+      lines.push(`| ${slot.turn} | ${slot.sessionId.slice(0, 8)} | ${slot.breaks} | ${secs(slot.reprefillMs)} | ${secs(slot.excessMs)} | ${slot.reprocessedTokens} |`);
+    }
+    lines.push("");
+    lines.push("| turn | at s | agent | rows | trigger | next promptN | next cacheN | re-prefill s | before s | excess s |", "|---:|---:|---|---|---|---:|---:|---:|---:|---:|");
+    for (const entry of hb.breaks) {
+      const before = entry.previous ? (entry.previous.promptMs ?? entry.previous.ttftMs) : null;
+      lines.push(`| ${entry.turn} | ${secs(entry.atOffsetMs)} | ${cell(entry.agentName)} | ${entry.rowTypes.join(", ")} | ${cell(entry.trigger)} | `
+        + `${cell(entry.next?.promptN)} | ${cell(entry.next?.cacheN)} | ${secs(entry.reprefillMs)} | ${secs(before)} | ${secs(entry.excessMs)} |`);
+    }
+    lines.push("");
+  }
 
   lines.push("## Notes", "");
   for (const note of report.notes) lines.push(`- ${note}`);

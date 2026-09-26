@@ -23,7 +23,7 @@
  */
 
 import { getConfig } from "../config/loader.js";
-import { decide } from "../decisions/decide.js";
+import { decideWithReadout } from "../decisions/incumbent-readout.js";
 import { FAST_LANE } from "../decisions/points.js";
 import { applyActiveModelPreset, createChatProvider, getChatProviderForTier, tierModelDefaults } from "../providers/index.js";
 import { effectiveOrchestration } from "../runtime/effort-context.js";
@@ -34,7 +34,7 @@ import { buildDynamicTurnGuidance } from "./intent-classifier.js";
 import { getReceptionistEscalateTerms, getReceptionistPersonaLines } from "./receptionist-policy.js";
 import { listUserMemoryRecords, listWorkspaceMemoryRecords } from "../memory/service.js";
 import { loadMainAssistantPersonality } from "../personality/service.js";
-import type { LLMMessage } from "../providers/lmstudio.js";
+import type { ChatProvider, LLMMessage } from "../providers/lmstudio.js";
 import { childLogger } from "../logger.js";
 import { defaultReplyLanguage } from "./reply-language.js";
 import { detectTextLanguage } from "./text-language.js";
@@ -128,6 +128,11 @@ export interface RunReceptionistDeps {
   conversationLanguage?: string;
   /** agents.mainAssistant.defaultLanguage. */
   defaultLanguage?: string;
+  /**
+   * The model `complete` runs on, for the logit readout of the same question (decisions.readout):
+   * "small talk or task?" answered as one letter. Without it the readout is never asked.
+   */
+  readout?: { provider: Pick<ChatProvider, "complete">; signal?: AbortSignal };
 }
 
 /**
@@ -159,7 +164,9 @@ export async function runReceptionist(
     // Laya may call a message a task on its own: then it goes straight to the full assistant and
     // the micro-call — about two seconds on the shared GPU for a message that escalates anyway —
     // is never waited for. "Small talk" it may not decide alone: only the model can write the reply.
-    const outcome = await decide<string>({
+    // The same holds for the logit readout when it decides (decisions.readout "on"): its "task"
+    // escalates without the micro-call, its "small talk" still needs the micro-call's reply.
+    const outcome = await decideWithReadout<string>({
       point: FAST_LANE,
       state: { message: userMessage },
       languageOf: userMessage,
@@ -168,6 +175,12 @@ export async function runReceptionist(
       toKey: (reply) => (receptionistEscalated(reply, confidenceAttempt) ? "task" : "small_talk"),
       fromKey: () => ESCALATE_SENTINEL,
       ...(deps.sessionId ? { sessionId: deps.sessionId } : {}),
+      readout: {
+        provider: deps.readout?.provider,
+        agentName: "receptionist",
+        parsedFor: ["small_talk"],
+        ...(deps.readout?.signal ? { signal: deps.readout.signal } : {}),
+      },
     });
     if (outcome.decidedBy === "laya") return { handled: false, escalateReason: "laya-task" };
     raw = outcome.value ?? "";
@@ -456,6 +469,7 @@ export async function tryReceptionistFastLaneDetailed(
     // callSite main_turn — indistinguishable from the orchestrator's first call on the same model.
     complete: async (messages, callSignal) => (await runWithCallAttribution({ callSite: "routing_tier", agentName: "receptionist" }, () =>
       provider.complete(messages, [], callSignal && signal ? AbortSignal.any([signal, callSignal]) : callSignal ?? signal))).content ?? "",
+    readout: { provider, ...(signal ? { signal } : {}) },
     ...(context.sessionId ? { sessionId: context.sessionId } : {}),
     memoryCapsule: capsule || undefined,
     assistantName,

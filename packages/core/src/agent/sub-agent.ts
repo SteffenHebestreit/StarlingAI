@@ -12,16 +12,17 @@
  */
 
 import { createBrowserDeciderForRun, type DrivenStep } from "../decisions/browser-step.js";
-import { decide } from "../decisions/decide.js";
+import { decideWithReadout } from "../decisions/incumbent-readout.js";
 import { layaConfigured } from "../decisions/laya-client.js";
 import { FINDING_RELEVANT, GOAL_MET, RUN_DRIFTING } from "../decisions/points.js";
 import fs from "node:fs";
 // Named import: two local `path` bindings already exist in this module, and an
 // unqualified `path` default import would shadow-warn against them.
-import { resolve as resolvePath } from "node:path";
+import { resolve as resolvePath, sep as pathSep } from "node:path";
 import { createHash } from "node:crypto";
 import type { LLMMessage, LLMResponse, LLMToolDef, ChatProvider, CompletionCallOptions } from "../providers/lmstudio.js";
-import { DeadlineAbort } from "../providers/lmstudio.js";
+import { DeadlineAbort, estimatePromptTokensForRequest } from "../providers/lmstudio.js";
+import { wireHeadSignature } from "../providers/prompt-head.js";
 import { composeSubAgentMessages, trimSubAgentHistory } from "./sub-agent-history.js";
 import { bindRequestUserInput, HUMAN_WAIT_RECHECK_MS, trackHumanWaits } from "./user-input-broker.js";
 import { isDeclinedByUser } from "./user-input.js";
@@ -59,9 +60,12 @@ import {
   runWithRequestContext,
 } from "../runtime/request-context.js";
 import {
+  classifyCallReplay,
   classifyRunProgress,
   classifyWriteLoop,
   buildProgressJudgePrompt,
+  isNovelToolOutcome,
+  loopTargetOf,
   parseProgressVerdict,
   ARG_SIG_REPEAT_LIMIT,
   EMPTY_PROGRESS_SAMPLE,
@@ -73,7 +77,8 @@ import {
 import { formatScopedMemoryGuidance } from "../memory/service.js";
 import { formatSkillGuidance } from "../skills/service.js";
 import { graphMarkSessionRetrievalsUseful, graphMarkSessionRetrievalsUnhelpful } from "../memory/graph-service.js";
-import { isSessionDegraded } from "./warden.js";
+import { isSessionDegraded, registerWardenRunStop } from "./warden.js";
+import { checkSiblingWrite } from "./sibling-write-ownership.js";
 import { isRunInternalWithdrawalReason } from "./run-blocked-tool-reasons.js";
 import { claimAgentMessages, readAllFacts, type AgentMessageClaim } from "../swarm/memory.js";
 import { sanitizeTranscriptContent } from "./sanitize-response.js";
@@ -94,6 +99,7 @@ import {
   buildSubAgentAgentDiscoveryGuidance,
   sanitizeSubAgentTask,
   isStagedArtifactBuildRun,
+  ownsResumeEvidence,
   buildStagedArtifactBuildGuidance,
   buildStagedBuildResumeGuidance,
   buildStagedBuildFirstStepInstruction,
@@ -216,7 +222,7 @@ export async function assessRunProgress(params: {
 }): Promise<SemanticProgressResult> {
   const onTrack: SemanticProgressResult = { verdict: "on_track", reason: "on track" };
   try {
-    const outcome = await decide<SemanticProgressResult>({
+    const outcome = await decideWithReadout<SemanticProgressResult>({
       point: RUN_DRIFTING,
       state: { objective: params.objective.slice(0, 800), activity: params.recentActivity.slice(0, 1_600) },
       languageOf: params.objective,
@@ -236,6 +242,8 @@ export async function assessRunProgress(params: {
       fromKey: (key) => (key === "drifting"
         ? { verdict: "drifting", reason: "judged drifting" }
         : { verdict: "on_track", reason: "on track (decision layer)" }),
+      // The verdict's 41 decoded tokens are the readout's biggest saving (E1: 647 of 1,830 ms).
+      readout: { provider: params.provider, agentName: "progress_judge" },
     });
     return outcome.value ?? onTrack;
   } catch {
@@ -266,7 +274,7 @@ export async function assessOversightGoalMet(
   try {
     // Laya reads the criteria and the evidence clipped to its window; decisions/decide.ts says when
     // its answer replaces the routing tier's.
-    const outcome = await decide<boolean>({
+    const outcome = await decideWithReadout<boolean>({
       point: GOAL_MET,
       state: { criteria: acceptanceCriteria.slice(0, 12), evidence: (evidence || "(none)").slice(0, 2_400) },
       languageOf: acceptanceCriteria.join("\n"),
@@ -285,6 +293,7 @@ export async function assessOversightGoalMet(
       },
       toKey: (done) => (done ? "done" : "continue"),
       fromKey: (key) => key === "done",
+      readout: { provider, agentName: "goal_met_oversight" },
     });
     return outcome.value === true;
   } catch {
@@ -915,20 +924,30 @@ export async function distillFindingForSharedFacts(params: {
     const signal = params.signal ? AbortSignal.any([params.signal, deadline]) : deadline;
     // "Nothing relevant here" is the one answer Laya may give alone: the call is then not waited for.
     // Relevant content still goes to the model, the only one that can extract it (decisions/decide.ts).
-    const outcome = await decide<string>({
+    const outcome = await decideWithReadout<string>({
       point: FINDING_RELEVANT,
-      state: { objective, source: params.toolName, content: raw.slice(0, 2_400) },
+      // The same 6,000 characters the extraction reads. Laya used to get the first 2,400 and may say
+      // "irrelevant" alone, so a fact past character 2,400 could be dropped by an answer that never
+      // saw it; the gate's samples, taken on the same short view, could not show it (adoption plan
+      // 2026-09-26, C9). FINDING_RELEVANT.maxLen widens Laya's window to hold it.
+      state: { objective, source: params.toolName, content: raw },
       languageOf: objective,
       ...(params.sessionId ? { sessionId: params.sessionId } : {}),
       signal,
       layaMayTake: ["irrelevant"],
       incumbent: async (decisionSignal) => {
-        const response = await params.provider.complete(messages, [], AbortSignal.any([signal, decisionSignal]));
+        // Labelled like the other routing-tier verdicts: unlabelled, its provider row read as the
+        // researcher's own call. Not a DECISION_POINT_BY_AGENT entry in the latency report: the
+        // distillation runs beside the work and no turn waits for it (E1).
+        const response = await runWithCallAttribution({ callSite: "routing_tier", agentName: "finding_distill" }, () =>
+          params.provider.complete(messages, [], AbortSignal.any([signal, decisionSignal])));
         const distilled = (response.content ?? "").trim();
         return !distilled || /^NONE\b/i.test(distilled) ? "" : distilled;
       },
       toKey: (distilled) => (distilled ? "relevant" : "irrelevant"),
       fromKey: () => "",
+      // The readout reads the same clipped state Laya does; "relevant" still needs the extraction.
+      readout: { provider: params.provider, agentName: "finding_distill", parsedFor: ["relevant"] },
     });
     return outcome.value ?? null;
   } catch {
@@ -1306,7 +1325,8 @@ export function requiresInProcessExecution(tools: readonly string[] | undefined)
 // runs. Excluded by design: any tool that reflects mutating state (browser
 // session, computer session, swarm state, mail send/draft, file writes) or
 // queries that may legitimately need a fresh fetch (get_swarm_state, browser_*).
-const IDEMPOTENT_TOOLS = new Set<string>([
+// Exported for the loop replay's copy (agent/loop-replay.ts), which a test holds equal to it.
+export const IDEMPOTENT_TOOLS = new Set<string>([
   "read_file",
   "list_files",
   "list_agents",
@@ -1330,7 +1350,7 @@ const IDEMPOTENT_TOOLS = new Set<string>([
 // Tools whose every call is new work, so even the consecutive-duplicate cache below never answers
 // one: a repeated generate_image is "make another one", and in a chat the person may choose
 // different settings for it. The turn loop exempts the same tool (STATE_DEPENDENT_TOOL_NAMES).
-const NEVER_REPLAYED_TOOLS = new Set<string>(["generate_image"]);
+export const NEVER_REPLAYED_TOOLS = new Set<string>(["generate_image"]);
 
 /**
  * Structural completeness check for a written text artifact, used by the
@@ -1556,6 +1576,93 @@ export interface StubMarkerSite {
  */
 export interface ArtifactScanScope {
   modifiedSinceMs?: number;
+  /**
+   * Whose artifact: consulted for each file inside the time scope, with its absolute path. A
+   * resume scan passes ownsResumeEvidence here so one agent's unfinished build is not evidence
+   * handed to a run that does not build it (see there).
+   */
+  acceptPath?: (absPath: string) => boolean;
+}
+
+/**
+ * WHO WROTE AN ARTIFACT LAST, per conversation: the provenance ownsResumeEvidence reads.
+ *
+ * Recorded where the sub-agent loop already notices a successful file mutation, keyed by the
+ * conversation's ROOT session (a coordinator's specialists, a scene's and the orchestrator's
+ * share one zone: artifactConversationOf) and the resolved absolute path the write reported — a file, or for a directory emitter
+ * its output directory (artifactLastWriter reads both) — the same paths the resume scanners walk. Bounded
+ * like sessionArtifactEpochMs; an evicted or never-recorded file simply has no writer, which
+ * ownsResumeEvidence treats as everybody's (the behaviour before this existed).
+ */
+const artifactLastWriters = new Map<string, Map<string, string>>();
+const MAX_TRACKED_WRITER_CONVERSATIONS = 512;
+const MAX_TRACKED_WRITERS_PER_CONVERSATION = 256;
+
+/**
+ * The conversation a run belongs to, for the writer record: through `sub:` AND `workflow:`
+ * nesting (tools/workflow-catalog.ts names a scene's session workflow:<parent>:<scene>:<uuid>),
+ * the rule gateway/rpc.ts owningChatSessionId and latency-attribution.ts rootSessionId use.
+ * deriveRootSessionId stops at a workflow — right for the shared facts it scopes, wrong here: in
+ * c297c5ea the deck was built inside the sourced_presentation scene and the researcher of
+ * 1581bae5 ran under mission_coordinator, so their records sat in two maps and it saw no writer.
+ */
+function artifactConversationOf(sessionId: string): string {
+  let current = sessionId;
+  for (;;) {
+    const prefix = current.startsWith("sub:") ? "sub:" : current.startsWith("workflow:") ? "workflow:" : null;
+    if (!prefix) return current;
+    const inner = current.slice(prefix.length);
+    const lastColon = inner.lastIndexOf(":");
+    const secondLastColon = lastColon > 0 ? inner.lastIndexOf(":", lastColon - 1) : -1;
+    if (secondLastColon <= 0) return inner;
+    current = inner.slice(0, secondLastColon);
+  }
+}
+
+function artifactPathKey(absPath: string): string {
+  const resolved = resolvePath(absPath);
+  // NTFS is case-insensitive: the model's "Deck.html" and the scanner's "deck.html" are one file.
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+export function noteArtifactWriter(conversationId: string, absPath: string, agentName: string): void {
+  let writers = artifactLastWriters.get(conversationId);
+  if (!writers) {
+    if (artifactLastWriters.size >= MAX_TRACKED_WRITER_CONVERSATIONS) {
+      const oldest = artifactLastWriters.keys().next();
+      if (!oldest.done) artifactLastWriters.delete(oldest.value);
+    }
+    writers = new Map();
+    artifactLastWriters.set(conversationId, writers);
+  }
+  const key = artifactPathKey(absPath);
+  // Re-inserted so the map's order is recency, and the oldest entry is the one evicted.
+  writers.delete(key);
+  if (writers.size >= MAX_TRACKED_WRITERS_PER_CONVERSATION) {
+    const oldest = writers.keys().next();
+    if (!oldest.done) writers.delete(oldest.value);
+  }
+  writers.set(key, agentName);
+}
+
+/**
+ * The agent whose write last COVERED this file: a record of the file itself, or of a directory it
+ * sits in. The directory case is not an edge: generate_presentation and generate_website report
+ * their output DIRECTORY as outputPath, so their pages are only ever recorded that way — and in
+ * c297c5ea the page the researcher was sent to fix (the deck's index.html) was generate_presentation's
+ * and never edit_file'd by content_writer. Keyed by the exact file alone, it had no writer and
+ * stayed everybody's, so the scoping would not have kept the researcher off it. The map is in
+ * recency order, so the last covering entry is the most recent write.
+ */
+export function artifactLastWriter(conversationId: string, absPath: string): string | undefined {
+  const writers = artifactLastWriters.get(conversationId);
+  if (!writers) return undefined;
+  const key = artifactPathKey(absPath);
+  let writer: string | undefined;
+  for (const [recorded, agentName] of writers) {
+    if (key === recorded || key.startsWith(recorded.endsWith(pathSep) ? recorded : `${recorded}${pathSep}`)) writer = agentName;
+  }
+  return writer;
 }
 
 /**
@@ -1596,14 +1703,17 @@ export function sessionArtifactEpoch(sessionId: string): number {
   return now;
 }
 
-/** True when this file is inside the caller's scope — unscoped, or written since it began. */
+/** True when this file is inside the caller's scope — unscoped, or written since it began —
+ *  and, when the caller asks whose it is, the caller's. */
 function withinScanScope(abs: string, scope: ArtifactScanScope | undefined): boolean {
-  if (scope?.modifiedSinceMs === undefined) return true;
-  try {
-    return fs.statSync(abs).mtimeMs >= scope.modifiedSinceMs;
-  } catch {
-    return false;   // cannot date it, cannot claim it
+  if (scope?.modifiedSinceMs !== undefined) {
+    try {
+      if (fs.statSync(abs).mtimeMs < scope.modifiedSinceMs) return false;
+    } catch {
+      return false;   // cannot date it, cannot claim it
+    }
   }
+  return scope?.acceptPath ? scope.acceptPath(abs) : true;
 }
 
 export function findUnfilledStubFiles(
@@ -2266,6 +2376,8 @@ export interface SubAgentRunOptions {
   onSwarmState?: (state: SwarmState) => void;
   /** Shared turn-local delegation counters for nested runs. Internal. */
   _turnAgentCounts?: Map<string, number>;
+  /** The turn's looped delegated runs (ToolContext._turnLoopRuns), shared with nested runs. Internal. */
+  _turnLoopRuns?: import("./delegation-loop-notes.js").TurnLoopRecord[];
   /** Shared per-agent delegation repeat-cap overrides for nested runs. Internal. */
   _turnAgentRepeatLimitOverrides?: Record<string, number>;
   /** Shared total delegation budget override for nested runs. Internal. */
@@ -2346,12 +2458,55 @@ export interface SubAgentToolFailure {
   declinedByUser?: true;
 }
 
+/**
+ * The loop brake acted on this run (agents.performance.loopBrake). Structured, so a delegating
+ * caller can tell the orchestrator what the run looped on without reading its text: the frame's
+ * "PARTIAL PROGRESS" says a looped run and an honestly interrupted one alike, and six sniffers key
+ * on those words, so they cannot carry the difference.
+ *
+ * Set at the FIRST enforcement and never cleared. It says the brake acted, not that the run
+ * failed: a run can be refused once, change course and finish. `endedRun` and the run's own
+ * stats.outcome / stats.terminalState say how it ended.
+ */
+export interface SubAgentLoopEnforced {
+  /** The tool the run kept calling. */
+  tool: string;
+  /** Its arguments as sent, compact JSON clipped to LOOP_TARGET_MAX_CHARS: the path, pattern or URL
+   *  it was stuck on. Model-chosen text, so it may hold words from the task. */
+  target: string;
+  /** "refuse": identical (tool, arguments) calls since the run's last successful write, the refused
+   *  one included (4 on the first refusal). "busy_stall": how often that (tool, arguments) was
+   *  issued during the stalled windows, the most frequent call there. */
+  repeats: number;
+  /** "refuse": the 4th identical call was withdrawn (classifyCallReplay). "busy_stall": the progress
+   *  supervisor wound the run down after STALL_LIMIT busy windows with nothing new (verdict "looping"). */
+  via: "refuse" | "busy_stall";
+  /** The enforcement ended the run: the busy-stall wind-down always does; a refusal does when the
+   *  model kept calling and the blocked-iteration stop fired in an iteration with a refusal in it. */
+  endedRun: boolean;
+}
+
+/**
+ * The warden's emergency stop wound this run down (warden.ts registerWardenRunStop): a tool_storm,
+ * or another kill-switch alert that named the run's own session id. Like the supervisor's wind-down
+ * it ends the run on its next iteration with what it has, so read it with stats.terminalState
+ * ("timeout", or "completed" when the synthesis succeeded).
+ */
+export interface SubAgentWardenStop {
+  /** The alert type, e.g. "tool_storm". */
+  alert: string;
+}
+
 export interface SubAgentRunResult {
   output: string;
   stats: SubAgentExecutionStats;
   artifacts?: Record<string, unknown>[];
   /** The run's failed tool calls, recovered from or not; the last MAX_RECORDED_TOOL_FAILURES. */
   toolFailures?: SubAgentToolFailure[];
+  /** Present only when the loop brake acted on this run; see SubAgentLoopEnforced. */
+  loopEnforced?: SubAgentLoopEnforced;
+  /** Present only when the warden's emergency stop ended this run; see SubAgentWardenStop. */
+  wardenStop?: SubAgentWardenStop;
   /** QPR-004: the turn's quality scorecard when the transport surfaces one
    *  (gateway-routed eval runs capture the turn_scorecard audit event). */
   qualityScorecard?: import("./turn-scorecard.js").TurnQualityScorecard;
@@ -2674,6 +2829,9 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
   // in this function's `finally`). Declared out here, next to `timeoutHandle`, purely
   // so the teardown can reach it.
   let supervisorTimer: ReturnType<typeof setInterval> | undefined;
+  // The warden's emergency-stop registration for this run (registered beside the supervisor
+  // timer, removed in the same `finally`).
+  let unregisterWardenStop: (() => void) | undefined;
 
   // Auto-share distillations + stores in flight (see autoShareUsefulFinding). Declared out
   // here, next to the timers, because the run's `finally` is the one point every return AND
@@ -2978,7 +3136,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // ~100-1,300 per fill pass) while `directiveInjected: false` proved the directive
     // itself had never reached the model.
     const stagedBuildFlags = effectiveOrchestration();
-    const isStagedBuild = stagedBuildFlags.stagedArtifactBuilds !== false
+    const stagedBuildCandidate = stagedBuildFlags.stagedArtifactBuilds !== false
       && isStagedArtifactBuildRun(effectiveToolNames, sanitizedTask);
     // RESUME vs FRESH. The classifier above reads task size and tool capability, which cannot
     // distinguish "build me X" from "X exists, finish it" — and run 2dc5832c is what that costs:
@@ -2990,13 +3148,31 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // run, so unscoped this evidence says "some turn, ever, left an unfinished build" — which
     // handed a fresh Snake build "RESUME AN EXISTING BUILD — DO NOT START OVER" pointed at last
     // week's Tetris, complete with its marker lines as the edits to make.
-    const resumeScope: ArtifactScanScope = {
+    const conversationScope: ArtifactScanScope = {
       modifiedSinceMs: Math.min(
         sessionArtifactEpoch(opts.parentSessionId ?? subSessionId),
         Date.now() - RESUMABLE_ARTIFACT_MAX_AGE_MS,
       ),
     };
-    const stagedResume = isStagedBuild
+    // And scoped to the artifacts THIS run builds (ownsResumeEvidence). Conversation scope alone
+    // handed c297c5ea's researcher "FIX THE EXISTING BUILD" about content_writer's deck. Every
+    // later reader of `resumeScope` — the marker and page corrections, the honest-outcome check —
+    // then judges this run by its own artifacts, not by a sibling's.
+    const artifactConversation = artifactConversationOf(subSessionId);
+    let evidenceSetAside = false;
+    const resumeScope: ArtifactScanScope = {
+      ...conversationScope,
+      acceptPath: (absPath) => {
+        const ours = ownsResumeEvidence({
+          agentName: opts.agentName,
+          toolNames: effectiveToolNames,
+          lastWriter: artifactLastWriter(artifactConversation, absPath),
+        });
+        if (!ours) evidenceSetAside = true;
+        return ours;
+      },
+    };
+    const stagedResume = stagedBuildCandidate
       ? findUnfilledStubFiles(opts.workspacePath, resumeScope)
       : { files: [] as string[], count: 0, markers: [] as StubMarkerSite[] };
     // A BUILD IS NOT DONE BECAUSE THE PLACEHOLDERS ARE GONE.
@@ -3011,16 +3187,26 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // Executing the built page answers the question the marker count was standing in for.
     // Only consulted when the markers are gone: while they remain there is already work
     // queued, and a half-built page failing is expected rather than informative.
-    const brokenPages = isStagedBuild && stagedResume.count === 0
+    const brokenPages = stagedBuildCandidate && stagedResume.count === 0
       ? await findBrokenBuiltPages(opts.workspacePath, resumeScope)
       : [];
     const isResumeBuild = stagedResume.count > 0 || brokenPages.length > 0;
+    // ANOTHER AGENT'S BUILD IS UNDER WAY, AND THIS RUN IS NOT ITS BUILDER. Neither directive fits:
+    // RESUME would hand it someone else's artifact, and FRESH ("SKELETON: one write_file") is how
+    // that same researcher came to write the deck's first skeleton at 01:23 — the whole staged
+    // build was started by the run that should only have researched it. Such a run is not a
+    // staged build at all: no directive, and none of the marker/page corrections below. Checked
+    // only when the builder filter actually set a file aside, so a builder pays nothing extra.
+    const stagedBuildWithheld = stagedBuildCandidate && !isResumeBuild && evidenceSetAside
+      && (findUnfilledStubFiles(opts.workspacePath, conversationScope).count > 0
+        || (await findBrokenBuiltPages(opts.workspacePath, conversationScope)).length > 0);
+    const isStagedBuild = stagedBuildCandidate && !stagedBuildWithheld;
     const stagedBuildGuidance = isStagedBuild && stagedBuildFlags.stagedArtifactBuildDirective === true
       ? (isResumeBuild
           ? buildStagedBuildResumeGuidance(stagedResume.files, stagedResume.count, stagedResume.markers, brokenPages)
           : buildStagedArtifactBuildGuidance())
       : "";
-    if (isStagedBuild) {
+    if (stagedBuildCandidate) {
       logAudit(
         "sub_agent_staged_build_detected",
         {
@@ -3029,7 +3215,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           threshold: STAGED_BUILD_TASK_CHAR_THRESHOLD,
           maxIterations,
           directiveInjected: stagedBuildGuidance.length > 0,
-          mode: isResumeBuild ? "resume" : "fresh",
+          // "withheld": a build of another agent's is under way and this run is not its builder.
+          mode: stagedBuildWithheld ? "withheld" : isResumeBuild ? "resume" : "fresh",
           unfilledMarkers: stagedResume.count,
           markerFiles: stagedResume.files.slice(0, 4),
           brokenPages: brokenPages.slice(0, 3),
@@ -3046,9 +3233,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // reuses KV state for the longest BYTE-identical prefix and holds many prefixes at once
     // (six distinct 4.7k-token prefixes stayed simultaneously warm, 0.41 s each). A prefix
     // that repeats exactly re-prefills in 0.41 s; one that differs ANYWHERE re-prefills in
-    // full — 40 s on deepseek-v4-flash. And the tool block renders directly after this
-    // system message, so a difference here also re-prefills the tool schemas, which are the
-    // bulk of the prompt (infrastructure_agent: 40,717 chars of schema to 2,394 of prompt).
+    // full — 40 s on deepseek-v4-flash. On that template the tool block renders directly after
+    // this system message, so a difference here also re-prefilled the tool schemas, which are the
+    // bulk of the prompt (infrastructure_agent: 40,717 chars of schema to 2,394 of prompt). The
+    // deployed Qwen3.6 template renders the tools AHEAD of it (turn-system-prompt.ts), and on that
+    // hybrid model a change anywhere in the head still keeps 0% of the cache (live probe E2).
     //
     // So the head holds only what is a function of the AGENT and the day: its own prompt,
     // its model, its tool inventory, its name/workspace/date. Everything derived from the
@@ -3150,6 +3339,32 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       );
     }
 
+    // THE HEAD THIS RUN SENDS, as hashes (providers/prompt-head.ts). sub_agent_started cannot
+    // carry it: it is written before the staged directive, the rerank and the degraded cap above
+    // have run, and its effectiveTools is the order BEFORE the rerank — a reorder alone is a full
+    // cold prefill. In c297c5ea all 13 first calls were cold and whether content_writer's
+    // dispatches 3 and 4 shared a head could only be argued from matching restore points; with
+    // this row two dispatches with the same headHash sent the same head bytes, so a cold first
+    // call is either a changed head or an evicted one, and the log says which. The system part is
+    // hashed trimmed, which is the provider's fold of a single system message, so headHash equals
+    // the one on this run's provider_model_call rows (for a template that keeps a system role, and
+    // not on gpt-oss, whose rows also hash the `Reasoning:` line the provider puts ahead of it).
+    {
+      const head = wireHeadSignature([{ role: "system", content: systemPrompt.trim() }], tools);
+      logAudit("sub_agent_head", {
+        agentName: opts.agentName,
+        headHash: head.headHash,
+        toolsHash: head.toolsHash,
+        systemHash: head.systemHash,
+        systemChars: head.systemChars,
+        toolCount: head.toolCount,
+        // The provider's own estimator (the one its output budget is derived from), not a count:
+        // the first call's promptTokens minus its task is the measured figure.
+        headTokensEst: estimatePromptTokensForRequest([{ role: "system", content: systemPrompt }], tools),
+        stagedDirective: stagedBuildGuidance ? (isResumeBuild ? "resume" : "fresh") : "none",
+      }, { sessionId: subSessionId, severity: "info" });
+    }
+
     // A "full" agent maintains the deployment itself — it edits the config shards and runs
     // git — so it works from the SHARED root, not from whoever asked it to. This is the one
     // place scope and root are chosen together, which is why the exemption lives here.
@@ -3188,6 +3403,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // leaf that makes the call (generate_image's tier). Same object, so it is never copied.
       turnUserWords: opts.turnUserWords,
       _turnAgentCounts: opts._turnAgentCounts,
+      _turnLoopRuns: opts._turnLoopRuns,
       _turnAgentRepeatLimitOverrides: opts._turnAgentRepeatLimitOverrides,
       _turnTotalDelegationLimitOverride: opts._turnTotalDelegationLimitOverride,
       _workflowExecutionStack: opts._workflowExecutionStack,
@@ -3338,6 +3554,9 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // down. Read alongside turnTimeoutReached so the wind-down works on runs that have
     // no turnTimeoutMs at all.
     let supervisorStop = false;
+    // Set when the warden's emergency stop named this run (registerWardenRunStop). It winds the
+    // run down through the supervisor's latches; this says who asked, for the run's own account.
+    let wardenStop: SubAgentWardenStop | undefined;
     // The effort-tier long-running policy (low→stop / high→continue) is auto-applied
     // ONCE per run; this latches so it doesn't re-audit every subsequent iteration.
     let lrgAutoHandled = false;
@@ -3347,6 +3566,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     let lrgLastProgressCheckAt = 0;             // throttle: one progress check per window
     let lrgLastJudgeAt = 0;                     // throttle: one semantic judge call per window
     let lrgConsecutiveStalls = 0;               // no-progress samples in a row
+    let lrgConsecutiveBusyStalls = 0;           // of those, busy ones in a row (calls out, nothing new back)
     let lrgLastSample: ProgressSample = EMPTY_PROGRESS_SAMPLE;
     // Cumulative shape counters. reasoningChars was already measured at four sites and
     // consumed at none — it is THE pathology signal and is never counted as progress;
@@ -3398,6 +3618,26 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // the third A sees no `prev` match). Bounded only by per-tool caps and the
     // sub-agent run lifetime; both are tight, so an explicit size cap is unnecessary.
     const idempotentCallCache = new Map<string, { result: string; success: boolean; callCount: number }>();
+    // THE LOOP BRAKE (progress-verifier.ts classifyCallReplay; agents.performance.loopBrake).
+    // Per (tool, exact args): identical calls issued since the last successful write, and the
+    // tool-result messages that carried the answer to the model. Its own map, not argSigRepeats:
+    // that one counts over the whole run and feeds the identical_args_repeat log, while this one
+    // must forget everything a write makes stale — it is cleared with the two caches above. The
+    // messages are kept so the brake can see whether the answer is still verbatim in front of the
+    // model (the stale-result digest and the overflow trim rewrite or drop them).
+    const loopBrakeEnabled = config.agents.performance.loopBrake !== false;
+    const replaysSinceWrite = new Map<string, { calls: number; answers: LLMMessage[] }>();
+    let loopEnforced: SubAgentLoopEnforced | undefined;
+    // One tail hint on the run's first refusal, delivered with the next iteration's nudges.
+    let loopBrakeHint: string | null = null;
+    let loopBrakeHinted = false;
+    // Results this run has seen (isNovelToolOutcome), and how many executed calls brought a new one.
+    const seenToolOutcomes = new Set<string>();
+    let novelToolOutcomes = 0;
+    // Calls issued since the supervisor last saw progress, per (tool, args): names the loop when
+    // the busy-stall rule winds the run down. Emptied on every progress window, so it spans only
+    // the stalled stretch.
+    const attemptsSinceProgress = new Map<string, { tool: string; argsSig: string; count: number }>();
     // Per-tool call counters — prevents a single tool from dominating iteration budget
     const perToolCallCount = new Map<string, number>();
     // Per-(tool, path) counters for path-keyed write tools. A real loop
@@ -3639,13 +3879,16 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       terminalState,
     }))(honestOutcome(rawOutcome));
 
-    // Every return below passes through here, so it also hands back the failed tool calls.
+    // Every return below passes through here, so it also hands back the failed tool calls and
+    // what the loop brake did.
     const withArtifacts = (result: { output: string; stats: SubAgentExecutionStats }): SubAgentRunResult => ({
       ...result,
       ...(artifacts.length > 0
         ? { artifacts: artifacts.map((artifact) => refreshWorkspaceArtifactSnapshot(artifact, opts.workspacePath)) }
         : {}),
       ...(toolFailures.length > 0 ? { toolFailures: toolFailures.slice(-MAX_RECORDED_TOOL_FAILURES) } : {}),
+      ...(loopEnforced ? { loopEnforced: { ...loopEnforced } } : {}),
+      ...(wardenStop ? { wardenStop: { ...wardenStop } } : {}),
     });
 
     const logSubAgentCompletionAudit = (
@@ -3669,6 +3912,14 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           outcome: stats.outcome,
           terminalState: stats.terminalState,
           bytesByTool: Object.fromEntries(bytesByTool),
+          // What the loop brake did, without its target: the arguments are already on the run's
+          // sub_agent_tool_call rows, and this row is read far more widely.
+          ...(loopEnforced ? {
+            loopEnforced: { tool: loopEnforced.tool, via: loopEnforced.via, repeats: loopEnforced.repeats, endedRun: loopEnforced.endedRun },
+          } : {}),
+          // The warden's stop reached this run. With the warden_alert row's timestamp this measures
+          // how long a stopped run took to end (in c297c5ea: never, until this was wired).
+          ...(wardenStop ? { wardenStop: { alert: wardenStop.alert } } : {}),
           ...extra,
         },
         { sessionId: subSessionId, severity },
@@ -4455,7 +4706,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       let distinctWriteHashes = 0;
       for (const hashes of writeHistory.values()) distinctWriteHashes += new Set(hashes).size;
       return {
-        productiveToolCalls: successfulToolCount,
+        // New results, not successful calls (see ProgressSample). With the loop brake off, the
+        // successful-call count and no busy arm: the supervisor exactly as it was before it.
+        productiveToolCalls: loopBrakeEnabled ? novelToolOutcomes : successfulToolCount,
+        attemptedToolCalls: toolCount,
         mutatedPaths: mutatedWorkspacePaths.size,
         distinctWriteHashes,
         outputChars: outputCharsTotal,
@@ -4525,9 +4779,13 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       if (Date.now() - lrgLastProgressCheckAt < PROGRESS_CHECK_INTERVAL_MS) return;
       lrgLastProgressCheckAt = Date.now();
       const cur = sampleProgress();
-      const decision = classifyRunProgress(lrgLastSample, cur, lrgConsecutiveStalls);
+      const decision = classifyRunProgress(lrgLastSample, cur, lrgConsecutiveStalls, lrgConsecutiveBusyStalls, loopBrakeEnabled);
       lrgConsecutiveStalls = decision.consecutiveStalls;
+      lrgConsecutiveBusyStalls = decision.consecutiveBusyStalls;
       lrgLastSample = cur;
+      // The tally names the loop if the stretch of stalled windows ends in a busy-stall wind-down,
+      // so it starts over whenever a window was not a stall.
+      if (decision.consecutiveStalls === 0) attemptsSinceProgress.clear();
       if (decision.action === "continue") return;
       if (decision.action === "ask") {
         // AMBIGUOUS — a run that has produced something and gone quiet may be
@@ -4545,6 +4803,16 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         return;
       }
       windDownForSupervisor();
+      if (decision.verdict === "looping") {
+        // The most frequent call of the stalled stretch is what the run was stuck on.
+        let top: { tool: string; argsSig: string; count: number } | undefined;
+        for (const entry of attemptsSinceProgress.values()) if (!top || entry.count > top.count) top = entry;
+        if (top) {
+          loopEnforced ??= { tool: top.tool, target: loopTargetOf(top.argsSig), repeats: top.count, via: "busy_stall", endedRun: true };
+          // A run first refused and later wound down WAS ended by the brake.
+          loopEnforced.endedRun = true;
+        }
+      }
       logAudit("progress_verifier_intervened", {
         agentName: opts.agentName,
         runSessionId: subSessionId,
@@ -4553,6 +4821,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         reason: decision.reason,
         elapsedMs: Date.now() - runStartedAt,
         productiveToolCalls: cur.productiveToolCalls,
+        attemptedToolCalls: cur.attemptedToolCalls,
         mutatedPaths: cur.mutatedPaths,
         reasoningChars: cur.reasoningChars,
         outputChars: cur.outputChars,
@@ -4561,6 +4830,15 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     };
     supervisorTimer = setInterval(() => superviseProgress("timer"), PROGRESS_CHECK_INTERVAL_MS);
     supervisorTimer.unref?.();
+    // The warden's emergency stop, for THIS run. Its tool_storm counts the calls logged under the
+    // run's own session id and names that id, so it is the run, not the turn, that has to hear it
+    // (warden.ts registerWardenRunStop: until this was wired the stop reached nothing, and the
+    // c297c5ea content_writer runs went on for 2-6 minutes after it). Same wind-down as the
+    // supervisor's: the next iteration synthesises what the run has, never a hard kill.
+    unregisterWardenStop = registerWardenRunStop(subSessionId, (stop) => {
+      wardenStop ??= { alert: stop.alert };
+      windDownForSupervisor();
+    });
 
     browserDecider = createBrowserDeciderForRun({
       agentName: opts.agentName,
@@ -4838,9 +5116,13 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         if (synthesized) {
           return synthesized;
         }
-        const windDownReason = supervisorStop
-          ? "was wound down by the progress supervisor (no forward progress)"
-          : `timed out after ${turnTimeoutMs}ms after finishing the current operation`;
+        // The warden's stop rides the supervisor's latches, so it is checked first: the run was not
+        // judged stalled, it was stopped for a burst of tool calls (or another kill-switch alert).
+        const windDownReason = wardenStop
+          ? `was stopped by the warden (${wardenStop.alert})`
+          : supervisorStop
+            ? "was wound down by the progress supervisor (no forward progress)"
+            : `timed out after ${turnTimeoutMs}ms after finishing the current operation`;
         const interruptedOutcome = classifyInterruptedOutcome({
           successfulToolCount,
           artifacts,
@@ -4855,9 +5137,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           totalTokens: usage.totalTokens,
           durationMs: Date.now() - runStartedAt,
           timeoutMs: turnTimeoutMs,
-          error: supervisorStop
-            ? "progress supervisor wound the run down after no forward progress"
-            : `timeout (${turnTimeoutMs}ms) reached after current operation finished`,
+          error: wardenStop
+            ? `warden stopped the run (${wardenStop.alert})`
+            : supervisorStop
+              ? "progress supervisor wound the run down after no forward progress"
+              : `timeout (${turnTimeoutMs}ms) reached after current operation finished`,
         });
         const output = buildInterruptedSubAgentOutput({
           agentName: opts.agentName,
@@ -5083,6 +5367,14 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           },
           "Sub-agent entered degraded mode mid-turn — nudge injected",
         );
+      }
+
+      // The loop brake's one hint, on the iteration after its first refusal. In the tail with the
+      // other per-iteration nudges, never in the head: a one-shot line in the system prompt would
+      // break the prefix twice, once appearing and once gone (composeSubAgentMessages).
+      if (loopBrakeHint) {
+        iterationNudges.push(loopBrakeHint);
+        loopBrakeHint = null;
       }
 
       // INPUT bound. The completion budget is derived from what the prompt leaves
@@ -5555,7 +5847,9 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             reason: "the provider aborted an in-flight generation that was burning reasoning; "
               + "the run was given a corrective turn demanding one concrete tool call",
             elapsedMs: Date.now() - runStartedAt,
-            productiveToolCalls: successfulToolCount,
+            // The supervisor's own counter (new results with the loop brake on), so every row of
+            // this event type means the same thing by it.
+            productiveToolCalls: sampleProgress().productiveToolCalls,
             mutatedPaths: mutatedWorkspacePaths.size,
             reasoningChars: burnReasoningChars,
             outputChars: outputCharsTotal,
@@ -5582,7 +5876,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           reason: "the provider aborted an in-flight generation that was burning reasoning "
             + "with no tool call and no answer text",
           elapsedMs: Date.now() - runStartedAt,
-          productiveToolCalls: successfulToolCount,
+          productiveToolCalls: sampleProgress().productiveToolCalls,
           mutatedPaths: mutatedWorkspacePaths.size,
           reasoningChars: reasoningCharsTotal,
           outputChars: outputCharsTotal,
@@ -5885,6 +6179,9 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       let decisiveDirectRemoteToolResult: import("../tools/registry.js").ToolResult | null = null;
       let decisiveDirectRemoteToolName: string | null = null;
       let executedToolThisIteration = false;
+      // The loop brake refused a call this iteration (see loopBrakeRefuses): when the blocked-
+      // iteration stop fires on such an iteration, the brake is what ended the run.
+      let refusedThisIteration = false;
       // Structural delegation-dead-end detection: a COORDINATOR sub-agent whose every
       // delegation this iteration FAILED (e.g. coordinator_recursion_blocked — every
       // candidate is itself a coordinator, so no leaf ran) re-fires varying tasks and
@@ -5919,6 +6216,14 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           }
         }
         toolCount++;
+        {
+          // Every issued call, whatever happens to it below: the busy-stall rule's evidence.
+          const issuedSig = JSON.stringify(tc.arguments ?? {});
+          const issuedKey = `${tc.name}::${issuedSig}`;
+          const tally = attemptsSinceProgress.get(issuedKey);
+          if (tally) tally.count += 1;
+          else attemptsSinceProgress.set(issuedKey, { tool: tc.name, argsSig: issuedSig, count: 1 });
+        }
 
         if (tc.arguments && "_parse_error" in tc.arguments) {
           const rawArgs = String((tc.arguments as Record<string, unknown>)["_raw"] ?? "");
@@ -6129,6 +6434,32 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           })()
           : null;
         if (writePath !== null) {
+          // WRITE OWNERSHIP among concurrently running siblings (sibling-write-ownership.ts;
+          // orchestration.siblingWriteOwnership). c297c5ea: the write_paper node of a
+          // run_task_graph edited the deck twice while write_presentation was building it, and
+          // never wrote paper.md. A path a running sibling's task names, or that a running
+          // sibling wrote first, is refused here, before anything else counts the call.
+          // export_workspace_artifact is in PATH_KEYED_WRITE_TOOLS for its per-path cap, but it
+          // only READS an existing file into a download card: refusing it would stop a sibling
+          // from handing over the owner's finished file, and letting it claim would take a file
+          // away from the sibling that is actually writing it.
+          const siblingOwner = tc.name === "export_workspace_artifact" ? null : checkSiblingWrite(writePath);
+          if (siblingOwner) {
+            const refusal = `Refused: '${tc.name}' on '${writePath}': that file belongs to ${siblingOwner.owner}, `
+              + `a sibling task of this ${siblingOwner.kind} running in parallel with yours. Write only the files your own `
+              + "task is for; the owner's version is there once it finishes.";
+            emitSubAgentToolAudit({
+              agentName: opts.agentName,
+              tool: tc.name,
+              phase: "done",
+              args: tc.arguments,
+              toolCallId: tc.id,
+              errorText: refusal,
+              skippedReason: "sibling_write_owned",
+            });
+            toolResults.push({ role: "tool", content: refusal, tool_call_id: tc.id });
+            continue;
+          }
           // Appending to one file is HOW a large artifact is built incrementally
           // (write head → append chunks), so repeated write_file(mode:"append") to
           // the same path is expected, not a loop. Give it a much higher per-path
@@ -6292,9 +6623,67 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             repeats: argSigRepeatCount,
           }, { sessionId: subSessionId, severity: "warn" });
         }
+        // THE LOOP BRAKE (progress-verifier.ts classifyCallReplay), consulted by both cache
+        // branches below before they answer. False: answer from the cache as before. True: this
+        // call was withdrawn, its refusal is already pushed, and it did NOT execute — so unlike a
+        // cached success it leaves executedToolThisIteration alone, and an iteration of refusals
+        // is a blocked one that the two-in-a-row stop below ends. The wire list is not touched.
+        const loopBrakeEntry = loopBrakeEnabled ? replaysSinceWrite.get(idemKey) : undefined;
+        const loopBrakeRefuses = (answerBody: string): boolean => {
+          if (!loopBrakeEntry) return false;
+          // Still verbatim in front of the model: in this iteration's results or in the history,
+          // with the whole answer intact. The digest rewrites a stale result in place and the trim
+          // drops it, and a call after either is the re-read the digest asks for.
+          const verbatim = loopBrakeEntry.answers.some((message) => typeof message.content === "string"
+            && message.content.includes(answerBody)
+            && (toolResults.includes(message) || history.includes(message)));
+          if (!verbatim) loopBrakeEntry.answers = [];
+          const decision = classifyCallReplay({ priorIdenticalSinceWrite: loopBrakeEntry.calls, priorAnswerVerbatim: verbatim });
+          loopBrakeEntry.calls = decision.identicalAfter;
+          if (decision.action === "replay") return false;
+          const answered = loopBrakeEntry.answers.length;
+          const refusal = `Refused: '${tc.name}' with these exact arguments is withdrawn until a file changes. `
+            + `It returned the same result ${answered} times since the last file change, and that answer is still above, `
+            + "unchanged. Calling it again with the same arguments will be refused again. Work from that answer: change "
+            + "the arguments or the approach, or write your final answer.";
+          emitSubAgentToolAudit({
+            agentName: opts.agentName,
+            tool: tc.name,
+            phase: "done",
+            args: tc.arguments,
+            toolCallId: tc.id,
+            errorText: refusal,
+            skippedReason: "loop_brake_refused",
+          });
+          logAudit("sub_agent_tool_loop_enforced", {
+            agentName: opts.agentName,
+            action: "refuse",
+            tool: tc.name,
+            repeats: decision.identicalAfter,
+            answered,
+            sinceWrite: true,
+            toolCallId: tc.id,
+          }, { sessionId: subSessionId, severity: "warn" });
+          toolResults.push({ role: "tool", content: refusal, tool_call_id: tc.id });
+          refusedThisIteration = true;
+          const target = loopTargetOf(argsSig);
+          if (!loopEnforced) {
+            loopEnforced = { tool: tc.name, target, repeats: decision.identicalAfter, via: "refuse", endedRun: false };
+          } else if (loopEnforced.via === "refuse" && loopEnforced.tool === tc.name && loopEnforced.target === target) {
+            loopEnforced.repeats = decision.identicalAfter;
+          }
+          if (!loopBrakeHinted) {
+            loopBrakeHinted = true;
+            loopBrakeHint = `⚠️ LOOP BRAKE: '${tc.name}' was called again with arguments it had already answered ${answered} `
+              + "times since the last file change, and the call was refused. Repeating a call does not change its answer. "
+              + "Use the answer you already have, try a different tool or different arguments, or write your final answer now.";
+          }
+          return true;
+        };
         if (IDEMPOTENT_TOOLS.has(tc.name)) {
           const cached = idempotentCallCache.get(idemKey);
           if (cached) {
+            if (loopBrakeRefuses(cached.result)) continue;
             cached.callCount += 1;
             log.warn(
               { agentName: opts.agentName, tool: tc.name, repeatCount: cached.callCount },
@@ -6313,11 +6702,13 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
               successOverride: cached.success,
               cachedResult: true,
             });
-            toolResults.push({
+            const replayed: LLMMessage = {
               role: "tool",
               content: `${cached.result}\n\n${cachedNote}`,
               tool_call_id: tc.id,
-            });
+            };
+            toolResults.push(replayed);
+            loopBrakeEntry?.answers.push(replayed);
             // A cached *successful* result is a returned result, not a block.
             // Session 39af10b8 (2026-05-29): content_writer re-called
             // read_shared_facts 3× (1 real + 2 cached "no facts"), the cached
@@ -6337,6 +6728,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         // instead of wasting an iteration on a redundant network round-trip.
         const prev = lastToolCallSig.get(tc.name);
         if (prev && prev.args === argsSig && !isLiveStateTool(tc.name) && !NEVER_REPLAYED_TOOLS.has(tc.name)) {
+          if (loopBrakeRefuses(prev.result)) continue;
           log.warn(
             { agentName: opts.agentName, tool: tc.name },
             "Sub-agent repeated identical tool call — returning cached result",
@@ -6354,11 +6746,13 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             successOverride: prev.success,
             cachedResult: true,
           });
-          toolResults.push({
+          const replayed: LLMMessage = {
             role: "tool",
             content: `${prev.result}\n\n${cachedNote}`,
             tool_call_id: tc.id,
-          });
+          };
+          toolResults.push(replayed);
+          loopBrakeEntry?.answers.push(replayed);
           // See the ABA-dedup branch above: a cached-success return is
           // progress, not a blocked iteration. Only a cached failure keeps
           // counting toward the all-tools-stripped loop break.
@@ -6523,6 +6917,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
 
         if (result.success) {
           successfulToolCount += 1;
+          // The supervisor's progress counter: a success counts only when it brought back a result
+          // this run has not seen (isNovelToolOutcome). Taken from resultContent here, before any
+          // note or nudge is appended to the message that carries it.
+          if (isNovelToolOutcome(seenToolOutcomes, tc.name, resultContent, true)) novelToolOutcomes += 1;
           // Track substantive evidence for share_finding nudge (Phase A5)
           const SUBSTANTIVE_THRESHOLDS: Record<string, number> = {
             web_search: 1_024,
@@ -6820,6 +7218,15 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             ? String(meta["outputPath"])
             : (typeof meta["path"] === "string" ? String(meta["path"]) : "");
           if (mutatedPath) mutatedWorkspacePaths.add(mutatedPath);
+          // Provenance for resume scoping (ownsResumeEvidence): this agent is now the file's last
+          // writer in this conversation. Resolved the way the write tools resolve their target, so
+          // it is the same absolute path the resume scanners walk; an unresolvable path is simply
+          // not recorded (no writer = everybody's, the old behaviour).
+          if (mutatedPath) {
+            try {
+              noteArtifactWriter(artifactConversation, resolveWorkspaceWritePath(mutatedPath, effectiveWorkspacePath).resolved, opts.agentName);
+            } catch { /* outside the workspace: nothing to scope */ }
+          }
 
           // A CACHED READ OF A FILE THAT HAS SINCE CHANGED IS A WRONG ANSWER.
           //
@@ -6841,6 +7248,9 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           // change reflects the change.
           idempotentCallCache.clear();
           lastToolCallSig.clear();
+          // The loop brake counts "since the last write" for the same reason: a repeat after a
+          // change is a check of the change, not a loop.
+          replaysSinceWrite.clear();
         }
 
         opts.onProgress?.({
@@ -6857,11 +7267,19 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         });
         if (tc.id) progressFinished.add(tc.id);
 
-        toolResults.push({
+        const executedAnswer: LLMMessage = {
           role: "tool",
           content: resultContent,
           tool_call_id: tc.id,
-        });
+        };
+        toolResults.push(executedAnswer);
+        // A fresh answer restarts the brake's count for this call, and only where a cache can
+        // replay it: live-state tools, NEVER_REPLAYED_TOOLS and a write that just emptied the
+        // caches are never answered from one, so the brake never sees them either.
+        if (loopBrakeEnabled && (idempotentCallCache.has(idemKey)
+          || (lastToolCallSig.get(tc.name)?.args === argsSig && !isLiveStateTool(tc.name) && !NEVER_REPLAYED_TOOLS.has(tc.name)))) {
+          replaysSinceWrite.set(idemKey, { calls: 1, answers: [executedAnswer] });
+        }
       }
 
       // EVERY CALL THAT ANNOUNCED A START ANNOUNCES AN END.
@@ -6953,6 +7371,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
               "Tool calls are disabled from the next step. STOP delegating and write your final answer NOW from the shared facts and evidence already gathered this turn; if nothing usable exists, say so honestly."
             : "\n\n[TOOL LOOP STOP] Every tool call in the last iterations was blocked, capped, or malformed. " +
               "Tool calls are disabled from the next step. Produce the final answer from existing evidence now; do not retry the same tool call.";
+          // The loop brake's refusals are what made this iteration a blocked one: it ended the run.
+          if (refusedThisIteration && loopEnforced) loopEnforced.endedRun = true;
           // The wire list is untouched here — an emptied list re-prefills the whole prompt
           // (see blockedToolReasons). Nothing needs a run-scoped "tools off" flag either:
           // this block BREAKS out of the loop a few lines down, so there is no later
@@ -7734,6 +8154,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     if (timeoutHandle) clearTimeout(timeoutHandle);
     humanWaits.dispose();
     if (supervisorTimer) clearInterval(supervisorTimer);
+    unregisterWardenStop?.();
     browserDecider?.finish();
     // The run's result is already computed; it is handed to the parent only once every
     // finding it gathered is in shared facts (or its distill hit the 60 s deadline).

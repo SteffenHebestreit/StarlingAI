@@ -10,7 +10,7 @@ import sys
 import time
 from pathlib import Path
 
-from app import browser, generic
+from app import browser, generic, window
 from app.server import MODELS
 
 FIXTURE = Path(__file__).parent / "fixtures" / "laya_browser_sample_request.json"
@@ -48,7 +48,8 @@ def main() -> int:
          "state": {"message": "Thanks, that was helpful!"}},
     ]
     generic.validate({"questions": questions})
-    answers = timed("two generic decisions", lambda: generic.decide_all(lambda s, q: decision.run(lambda a: a.system_one(s, q)), questions))
+    answers = timed("two generic decisions", lambda: generic.decide_all(
+        lambda s, q, max_len: decision.run(lambda a: window.system_one_measured(a, s, q, max_len)), questions))
     for qid, answer in answers["answers"].items():
         print("decision", qid, answer)
         if set(answer["probabilities"]) != {"yes", "no"} or answer["choice"] not in ("yes", "no"):

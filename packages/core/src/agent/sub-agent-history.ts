@@ -251,8 +251,10 @@ export function trimSubAgentHistory(
  * Where a sub-agent iteration's nudges go.
  *
  * The head is the KV-cache key: the provider folds the leading system run into one message and
- * the chat template renders the tool block right behind it, so a single character appended to the
- * system prompt re-prefills the tool block AND the whole accumulated history. Measured on a
+ * the chat template renders the tool block next to it (behind it on the template this was measured
+ * on; AHEAD of it on the deployed Qwen3.6 template — see turn-system-prompt.ts), so a single
+ * character appended to the system prompt re-prefills the whole accumulated history, and on the
+ * first template the tool block with it. Measured on a
  * 24,731-token sub-agent context: unchanged head 0.33 s; the same request with the budget-warning
  * text appended to the system message 41.29 s; that identical text moved to a trailing message
  * 0.87 s. Three of the loop's six nudges are one-shot latches, so each of them broke the prefix

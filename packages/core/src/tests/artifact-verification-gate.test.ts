@@ -193,6 +193,81 @@ describe("runArtifactVerificationGate", () => {
     expect(out.status).toBe("not_applicable");
     expect(executeToolMock).not.toHaveBeenCalled();
   });
+
+  // C5' (d), orchestration.loopAwareDelegation. c297c5ea: the broken file came from runs that
+  // looped, and the gate's fresh mission_coordinator re-decomposed the build for 1,990 s.
+  describe("when the runs that produced the broken file looped", () => {
+    const LOOP_ON = { ...ORCHESTRATION_ON, verifyArtifactsMaxRepairAttempts: 3, loopAwareDelegation: true };
+    const loopedWriter = {
+      agent: "content_writer",
+      coordinator: false,
+      loop: { tool: "grep_files", target: "{\"pattern\":\"Reveal\",\"path\":\"deck.html\"}", repeats: 183, via: "refuse", endedRun: true },
+      outcome: "partial",
+      paths: ["generated/cv.pdf"],
+    };
+    const withLoops = (records: unknown[]) => {
+      const built = deps([{ relativePath: "generated/cv.pdf" }]);
+      (built.d.toolContext as unknown as Record<string, unknown>)["_turnLoopRuns"] = records;
+      return built;
+    };
+    const dispatched = () => executeToolMock.mock.calls.map(([, args]) => (args as Record<string, unknown>)["agentName"]);
+
+    it("sends ONE direct builder of the agent that looped, never a fresh mission_coordinator", async () => {
+      orchestrationMock.mockReturnValue(LOOP_ON);
+      write("generated/cv.pdf", "Sorry, here is your CV as text.");
+      executeToolMock.mockResolvedValue({ success: true, output: "tried" });
+      const { d } = withLoops([loopedWriter]);
+
+      const out = await runArtifactVerificationGate(d);
+
+      expect(dispatched()).toEqual(["content_writer"]); // one attempt, although 3 are allowed
+      expect(out.status).toBe("fail");
+      expect(out.repairAttempts).toBe(1);
+    });
+
+    it("sends nobody when only a coordinator looped: the file ships with its caveat", async () => {
+      orchestrationMock.mockReturnValue(LOOP_ON);
+      write("generated/cv.pdf", "Sorry, here is your CV as text.");
+      const { d } = withLoops([{ ...loopedWriter, agent: "mission_coordinator", coordinator: true }]);
+
+      const out = await runArtifactVerificationGate(d);
+
+      expect(executeToolMock).not.toHaveBeenCalled();
+      expect(out.status).toBe("fail");
+      expect(out.repairAttempts).toBe(0);
+    });
+
+    it("a warden-stopped producer counts as looped too", async () => {
+      orchestrationMock.mockReturnValue(LOOP_ON);
+      write("generated/cv.pdf", "Sorry, here is your CV as text.");
+      executeToolMock.mockResolvedValue({ success: true, output: "tried" });
+      const { loop: _loop, ...stoppedWriter } = loopedWriter;
+      const { d } = withLoops([{ ...stoppedWriter, wardenStop: { alert: "tool_storm" } }]);
+
+      await runArtifactVerificationGate(d);
+      expect(dispatched()).toEqual(["content_writer"]);
+    });
+
+    it("a loop that produced a DIFFERENT file changes nothing: the repair is as before", async () => {
+      orchestrationMock.mockReturnValue(LOOP_ON);
+      write("generated/cv.pdf", "Sorry, here is your CV as text.");
+      executeToolMock.mockResolvedValue({ success: true, output: "tried" });
+      const { d } = withLoops([{ ...loopedWriter, paths: ["generated/other.html"] }]);
+
+      await runArtifactVerificationGate(d);
+      expect(dispatched()).toEqual(["mission_coordinator", "mission_coordinator", "mission_coordinator"]);
+    });
+
+    it("with the flag off, a looped producer changes nothing either", async () => {
+      orchestrationMock.mockReturnValue({ ...LOOP_ON, loopAwareDelegation: false });
+      write("generated/cv.pdf", "Sorry, here is your CV as text.");
+      executeToolMock.mockResolvedValue({ success: true, output: "tried" });
+      const { d } = withLoops([loopedWriter]);
+
+      await runArtifactVerificationGate(d);
+      expect(dispatched()).toEqual(["mission_coordinator", "mission_coordinator", "mission_coordinator"]);
+    });
+  });
 });
 
 describe("user-facing text", () => {

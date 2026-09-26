@@ -1799,12 +1799,29 @@ export const ConfigSchema = z.object({
        * orchestrator's stable base system prompt into the model server's KV cache
        * (cache_prompt) on boot and a short idle window after each turn, so the next
        * real turn reuses the prefix instead of paying the cold prefill. Aborts the
-       * instant a real turn starts; strictly best-effort, never slows a turn.
+       * instant a real turn starts; best-effort, but an abort is not free: the server
+       * drops the aborted prompt and the next call ran ~1 s slower (live probe E5).
        * Default off (A/B the first-token latency). See agent/cache-warmer.ts.
        */
       promptCacheWarmKeeper: z.boolean().default(false),
       /** Idle window (ms) after a turn before the warm-keeper re-warms the prefix. */
       promptCacheWarmIdleMs: z.number().int().min(1_000).max(120_000).default(4_000),
+      /**
+       * Warm the heads a FORCED orchestration iteration sends, too (needs
+       * promptCacheWarmKeeper). A turn that must orchestrate before answering sends a
+       * subset of the tool block on its forced calls — record_plan offered while no plan
+       * exists, execute_plan once one does — so its first two forced calls met two heads
+       * the warm-keeper never warmed: c297c5ea paid 12.8 s and 12.7 s to first token, and
+       * live probe E7 prices a switch to a cold subset at 8.3 s. When true, the warm-keeper
+       * queues both subsets on lean base + orchestration module after the full head,
+       * derived through the same filterForcedOrchestrationTools the turn uses. That covers
+       * artifact turns (they carry the module); a plain question the upfront source judge
+       * forces carries none and stays cold until its variant is warmed too. Default off:
+       * each head costs 8-12 s of GPU cold and 2-5 s to re-warm after every turn, may push
+       * sub-agent prefixes out of the host cache, and widens the window in which a user's
+       * message meets an in-flight warm-up. Turn on only after latency-probe E9 passes.
+       */
+      promptCacheWarmForcedHeads: z.boolean().default(false),
       /**
        * Max chars of a single delegated agent's result that the orchestrator
        * relays verbatim. Long deliverables (guides, reports) above this are
@@ -1828,6 +1845,23 @@ export const ConfigSchema = z.object({
        * eval-validated behavior).
        */
       softRoutingEnforcement: z.boolean().default(false),
+      /**
+       * Sub-agent loop brake. Two deterministic rules, no model call:
+       *  - the 4th identical call since the last successful write (after one execution and
+       *    two cached replays), while the earlier answer is still verbatim in the
+       *    conversation, is refused instead of replayed; an iteration of refusals is a blocked one, so the
+       *    existing two-in-a-row stop ends the run with its synthesis (progress-verifier.ts
+       *    classifyCallReplay);
+       *  - the progress supervisor counts NEW results rather than successful calls, and a
+       *    stall of STALL_LIMIT windows that each issued 5+ calls is wound down as "looping"
+       *    even when the run has written files (BUSY_WINDOW_MIN_ATTEMPTED_CALLS).
+       * Motivated by run c297c5ea: four content_writer runs re-issued the same greps for
+       * 587-1,215 s each, three of them to the 199-iteration limit, while the cached-result note
+       * went out 545 times. `pnpm loops:replay` replays both rules over any audit log. Default ON
+       * as a bug-class fix; false restores the pre-brake behaviour of both rules exactly (cached
+       * replays forever, successful calls as progress, no busy arm). See agent/sub-agent.ts.
+       */
+      loopBrake: z.boolean().default(true),
     }).default({}),
     /**
      * Soft per-task budgets enforced AFTER a delegated sub-agent finishes.

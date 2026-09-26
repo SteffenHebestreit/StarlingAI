@@ -17,7 +17,22 @@
  *   E5  whether decide()'s concurrent start of the incumbent is free when Laya is taken and the
  *       incumbent is aborted 20 ms after it was sent;
  *   E6  whether a max_tokens=1 prewarm saves a sub-agent's first prefill, finished or in flight;
- *   E7  what switching between the orchestrator's full tool block and the forced subset costs.
+ *   E7  what switching between the orchestrator's full tool block and the forced subset costs;
+ *   E8  which rule decides whether a NEW conversation on a sub-agent head finds it cached: the
+ *       server's idle-slot save plus its "skip an entry the new prompt shares < 25% of" load rule
+ *       (warm after a run of 1.5x and 3x the head, cold after 6x), or checkpoint eviction (warm at
+ *       every length); whether the head is still there after other agents' conversations ran in
+ *       between (the arm the --no-cache-idle-slots decision rests on); whether a cache entry is
+ *       used up by the conversation that loads it; and how many of three concurrent new
+ *       conversations one prewarm serves;
+ *   E9  whether warming the orchestrator's FORCED heads (the warm-keeper's
+ *       promptCacheWarmForcedHeads) makes a forced turn's first two calls warm, against the
+ *       full head alone, the plan's rejected literal variant, and six large prompts in between.
+ *
+ * On the deployed Qwen3.6 template the TOOL BLOCK renders before the system text, so a nonce in
+ * the system text alone leaves two calls with the same tools sharing their whole tool-block
+ * prefix. E8 and E9 compare arms whose tool blocks are identical, so their nonce also leads the
+ * tool block (withNonceTool).
  *
  * Every prompt is built by the PRODUCTION builder of its call site from SYNTHETIC content only.
  * Three call sites build their prompt inline (goal-met oversight, finding distillation, QA
@@ -45,13 +60,14 @@ import { getReceptionistPersonaLines } from "./receptionist-policy.js";
 import { defaultReplyLanguage } from "./reply-language.js";
 import { defaultSystemPrompt, splitOrchestrationModule } from "./session.js";
 import { buildDisagreementCheckMessages } from "./sub-agent-disagreement.js";
+import { buildStagedArtifactBuildGuidance } from "./sub-agent-prompt-guidance.js";
 import { buildSourceSensitiveQuestionJudgeMessages, buildUngroundedClaimJudgeMessages } from "./ungrounded-claim-judge.js";
 
 // ── Experiments ────────────────────────────────────────────────────────────────────────────────
 
-export type ExperimentId = "E1" | "E2" | "E3" | "E4" | "E5" | "E6" | "E7";
+export type ExperimentId = "E1" | "E2" | "E3" | "E4" | "E5" | "E6" | "E7" | "E8" | "E9";
 
-export const EXPERIMENT_IDS: readonly ExperimentId[] = ["E1", "E2", "E3", "E4", "E5", "E6", "E7"];
+export const EXPERIMENT_IDS: readonly ExperimentId[] = ["E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8", "E9"];
 
 export const EXPERIMENT_QUESTIONS: Readonly<Record<ExperimentId, string>> = {
   E1: "What does each decision point's LLM call cost on the production path, i.e. what would Laya save per call?",
@@ -61,6 +77,8 @@ export const EXPERIMENT_QUESTIONS: Readonly<Record<ExperimentId, string>> = {
   E5: "When the incumbent is aborted shortly after it was sent (Laya taken), does the abort still cost the next call?",
   E6: "Does a max_tokens=1 prewarm save a sub-agent head's first prefill, when finished and when still in flight?",
   E7: "What does switching the orchestrator between its full tool block and the forced subset cost?",
+  E8: "Does a new conversation on a sub-agent head find it cached after a run of 1.5x, 3x and 6x the head, and after other agents' conversations in between, is the entry used up by one conversation, and how many of three concurrent ones does a prewarm serve?",
+  E9: "Does warming the orchestrator's forced heads make a forced turn's first two calls warm, and what does keeping them warm cost?",
 };
 
 // ── Thresholds ─────────────────────────────────────────────────────────────────────────────────
@@ -98,6 +116,56 @@ export const INTERFERENCE_KS = [0, 1, 2, 4] as const;
 export const SUB_AGENT_HEAD_MAX_TOOLS = 12;
 /** E2 filler: English prose tokenises at roughly four characters per token. */
 export const FILLER_CHARS_PER_TOKEN = 4;
+
+/**
+ * E8: run lengths, as multiples of the head, after which a new conversation on the head is tried.
+ * They straddle the server's load rule (llama.cpp 79bfc1d server_prompt_cache::load skips an entry
+ * the new prompt shares less than 25% of, i.e. a run past ~4x its head): 1.5x and 3x predict warm,
+ * 6x cold. Checkpoint eviction would predict warm at all three.
+ */
+export const E8_RUN_MULTIPLIERS = [1.5, 3, 6] as const;
+/** E8: tokens a run grows by per call, about what one sub-agent iteration appends. */
+export const E8_GROWTH_STEP_TOKENS = 1_200;
+/** E8: a bound on one run's calls, whatever the head's size. */
+export const E8_MAX_GROWTH_STEPS = 60;
+/** E8: the task tail of every new conversation, about a production delegation's. */
+export const E8_TAIL_TOKENS = 1_500;
+/** E8: new conversations started together after one prewarm. */
+export const E8_CONCURRENT = 3;
+/**
+ * E8 (d): other agents' conversations between a run and the new conversation on its head, each
+ * on a distinct head of about this many tokens — as many as the station has slots (4), so under
+ * --no-cache-idle-slots one of them has to take the run's slot unless the server keeps it. The
+ * plan recommends that switch only if THIS arm stays warm under it.
+ */
+export const E8_INTERLEAVED_HEADS = 4;
+export const E8_INTERLEAVED_HEAD_TOKENS = 6_000;
+/** E8 "warm": the head reused to this share... */
+export const E8_WARM_HEAD_SHARE = 0.95;
+/** ...no more than the tail plus this many tokens processed... */
+export const E8_WARM_EXTRA_TOKENS = 64;
+/** ...and prompt processing within the tail at the cold rate plus this floor (a fixed 1.5 s cannot
+ *  be met by a 1.5k tail even warm). */
+export const E8_WARM_TAIL_TOKENS_PER_SEC = 900;
+export const E8_WARM_FLOOR_MS = 1_000;
+
+/** E9: a live forced call reused its warmed head when cache_n reaches the warm call's prompt minus this. */
+export const E9_WARM_SLACK_TOKENS = 700;
+/** E9: ...and processed its prompt within this. */
+export const E9_WARM_PROMPT_MS = 3_000;
+/** E9: a live call without a warmed head is cold: at most this much reused... */
+export const E9_COLD_CACHE_TOKENS = COLD_CACHE_TOKENS;
+/** ...and at least this long in prompt processing. */
+export const E9_COLD_PROMPT_MS = 8_000;
+/** E9: the full-head call after the forced heads were warmed must still find this share cached. */
+export const E9_FULL_KEPT_SHARE = 0.9;
+/** E9: TREATMENT is rejected when a live call reused under this share on 2 of 3 repetitions. */
+export const E9_REJECT_SHARE = 0.5;
+/** E9 EVICTION: large prompts between the warm-up and the live call, shaped like content_writer's loop calls. */
+export const E9_EVICTION_PROMPTS = 6;
+export const E9_EVICTION_TOKENS = 30_000;
+/** E8/E9 need this many repetitions for a verdict: the pass criteria are stated "in 3 of 3". */
+export const E8_E9_MIN_REPS = 3;
 
 // ── Synthetic content ──────────────────────────────────────────────────────────────────────────
 
@@ -663,6 +731,59 @@ export function withNonce(messages: readonly LLMMessage[], nonce: string): LLMMe
   return [{ role: "system", content: `[${nonceTag(nonce)} latency probe ${nonce}]` }, ...messages];
 }
 
+/**
+ * The same, for the tool block: a marker tool named after the nonce's hash, first in the array.
+ * On a template that renders the tools BEFORE the system text (the deployed Qwen3.6 one), two
+ * calls that differ only in withNonce still share their whole tool-block prefix, and a checkpoint
+ * inside it lets the "cold" call reuse it. The marker makes the first rendered tool differ too.
+ */
+export function withNonceTool(tools: readonly LLMToolDef[], nonce: string): LLMToolDef[] {
+  return [
+    { name: `probe_marker_${nonceTag(nonce)}`, description: "Latency probe marker. Never call it.", parameters: { type: "object", properties: {} } },
+    ...tools,
+  ];
+}
+
+/**
+ * E8's head: a staged builder's as the runner assembles it — the FRESH staged-build directive
+ * first (a constant string), then the agent's own prompt and the name/workspace/date lines, with
+ * ALL of the agent's tools (no cap: content_writer carries 16, about 7.6k tokens with the prompt).
+ * Still shaped, not byte-exact: the rerank order and the per-agent guidance blocks are left out.
+ */
+export function collectStagedBuilderHead(agentName: string, today: string = subAgentHeadDate()): HeadShape {
+  const config = getConfig();
+  const agent = config.subAgents?.[agentName];
+  if (!agent) throw new Error(`the loaded config has no sub-agent "${agentName}"`);
+  const role = agent.systemPrompt ?? `You are a specialized AI sub-agent named "${agentName}". Complete the given task and return your result.`;
+  const system = `${buildStagedArtifactBuildGuidance()}\n\n${role}\n\nAgent name: ${agentName}\nCurrent workspace: ${config.workspacePath}\nToday's date: ${today}`;
+  return { label: `staged_builder:${agentName}`, system, tools: getToolsAsLLMDefs(agent.tools) };
+}
+
+/**
+ * A head whose leading system run is several messages (lean base, then the orchestration module),
+ * as the warm-keeper sends it (agent/cache-warmer.ts collectWarmHeads). The provider folds them
+ * into one system message, exactly as it folds the turn's own.
+ */
+export interface MultiSystemHead {
+  label: string;
+  system: string[];
+  tools: LLMToolDef[];
+}
+
+/** E9's heads: the three the warm-keeper sends with promptCacheWarmForcedHeads on, and the date line a turn adds after them. */
+export interface ForcedHeadSet {
+  /** Lean base + the full tool block: what every non-forced turn sends. */
+  full: MultiSystemHead;
+  /** Lean base + module, record_plan subset: a forced turn's first call, before a plan exists. */
+  plan: MultiSystemHead;
+  /** Lean base + module, execute_plan subset: a forced call once the plan exists. */
+  dispatch: MultiSystemHead;
+  /** filterForcedOrchestrationTools(full) with NO plan argument: the plan's rejected literal subset. */
+  literalSubsetTools: LLMToolDef[];
+  /** The turn's date line (buildTemporalContextPrompt), which follows the head in a real turn. */
+  temporal: string;
+}
+
 // ── Requests and the wire ──────────────────────────────────────────────────────────────────────
 
 export interface ProbeRequest {
@@ -770,10 +891,14 @@ export interface PlanContext {
   forcedSubsetTools: LLMToolDef[];
   abortAfterMs: number;
   prewarmStaggerMs: number;
+  /** E8: a staged builder's head (collectStagedBuilderHead); required when E8 is planned. */
+  stagedBuilderHead?: HeadShape;
+  /** E9: the warm-keeper's heads with the forced ones; required when E9 is planned. */
+  forcedHeads?: ForcedHeadSet;
 }
 
 /** Case and head-message numbers per experiment, so no two experiments send the same user text. */
-const CASE_OFFSETS: Readonly<Record<ExperimentId, number>> = { E1: 0, E2: 1_000, E3: 2_000, E4: 3_000, E5: 4_000, E6: 5_000, E7: 6_000 };
+const CASE_OFFSETS: Readonly<Record<ExperimentId, number>> = { E1: 0, E2: 1_000, E3: 2_000, E4: 3_000, E5: 4_000, E6: 5_000, E7: 6_000, E8: 7_000, E9: 8_000 };
 
 const E3_SMALL_SHAPES: readonly DecisionShape[] = ["fast_lane", "source_sensitive", "ungrounded_draft", "qa_verdict"];
 const E4_PAIR: readonly DecisionShape[] = ["fast_lane", "source_sensitive"];
@@ -1004,9 +1129,184 @@ function planE7(ctx: PlanContext): ProbePhase[] {
   return phases;
 }
 
+/** A head with the nonce leading BOTH its system text and its tool block (see withNonceTool). */
+function nonceHeadRequest(
+  system: readonly string[],
+  tools: readonly LLMToolDef[],
+  shape: string,
+  step: string,
+  n: string,
+  rest: readonly LLMMessage[],
+  tags?: Record<string, number | string>,
+): ProbeRequest {
+  const messages: LLMMessage[] = [...system.map((content) => ({ role: "system" as const, content })), ...rest];
+  return {
+    step,
+    shape,
+    messages: withNonce(messages, n),
+    tools: withNonceTool(tools, n),
+    maxTokens: HEAD_PROBE_MAX_TOKENS,
+    ...(tags ? { tags } : {}),
+  };
+}
+
+/** A new conversation's task: a distinct synthetic task, padded to about E8_TAIL_TOKENS. */
+function e8Tail(index: number): string {
+  const c = syntheticCase(PROBE_LANGUAGES[index % 2]!, index);
+  return `${c.message}\n\n${fillerText(E8_TAIL_TOKENS - 60)}`;
+}
+
+/** E8's run arms: the three run lengths, then 6x again with a head-only request before the new
+ *  conversations, then 1.5x again with other agents' conversations in between (d). */
+export const E8_ARMS = ["L1.5", "L3", "L6", "L6_head_only", "L1.5_interleaved"] as const;
+
+function planE8(ctx: PlanContext): ProbePhase[] {
+  const head = ctx.stagedBuilderHead;
+  if (!head) throw new Error("E8 needs the staged builder head (PlanContext.stagedBuilderHead)");
+  const phases: ProbePhase[] = [];
+  const nextTail = counter(CASE_OFFSETS.E8);
+  const nextCase = counter(CASE_OFFSETS.E8 + 500);
+  // The runs are sized in ONE unit, the provider's estimator, for the head and the run alike: a
+  // head of tool schemas tokenises denser than the prose a run appends, so sizing the run in real
+  // tokens against an estimated head overshot (3x read as 4x on a prose head). In one unit a run
+  // lands at or under its multiple in real tokens, never over. The verdict measures both sizes off
+  // the answers (head_size, grow_*) and flags a run that ended on the wrong side of 4x.
+  const headEstimate = estimatePromptTokensForRequest(headMessages(head, "."), head.tools);
+  const sizeOf = (messages: readonly LLMMessage[]) => estimatePromptTokensForRequest([{ role: "system", content: head.system }, ...messages], head.tools);
+  const unrelated = (rep: number, label: string, tags: Record<string, number | string>): ProbePhase => {
+    const index = nextCase();
+    return sequential(rep, decisionRequest("source_sensitive", syntheticCase(PROBE_LANGUAGES[index % 2]!, index), ctx, "unrelated", {
+      nonce: nonce(ctx, "E8", rep, `unrelated-${label}-${index}`),
+      tags,
+    }));
+  };
+  for (let rep = 0; rep < ctx.reps; rep += 1) {
+    // The head's own size, on a nonce of its own so it warms nothing the arms use.
+    phases.push(sequential(rep, nonceHeadRequest([head.system], head.tools, "staged_builder_head", "head_size", nonce(ctx, "E8", rep, "size"), [{ role: "user", content: "." }])));
+    for (const arm of E8_ARMS) {
+      const multiplier = arm === "L1.5" || arm === "L1.5_interleaved" ? 1.5 : arm === "L3" ? 3 : 6;
+      const n = nonce(ctx, "E8", rep, arm);
+      const call = (step: string, rest: readonly LLMMessage[], tags: Record<string, number | string> = {}) =>
+        nonceHeadRequest([head.system], head.tools, "staged_builder_head", step, n, rest, { arm, multiplier, ...tags });
+      // The run: its task, then one sub-agent-sized step per call (an assistant turn and the tool
+      // result that answers it), so the server checkpoints at every user message as in a real run.
+      const firstTask: LLMMessage = { role: "user", content: e8Tail(nextTail()) };
+      phases.push(sequential(rep, call("grow_cold", [firstTask])));
+      const history: LLMMessage[] = [firstTask];
+      for (let step = 1; step <= E8_MAX_GROWTH_STEPS && sizeOf(history) < multiplier * headEstimate; step += 1) {
+        history.push(
+          { role: "assistant", content: `Pass ${step}. ${fillerText(E8_GROWTH_STEP_TOKENS / 2)}` },
+          { role: "user", content: `Result of pass ${step}. ${fillerText(E8_GROWTH_STEP_TOKENS / 2)}` },
+        );
+        phases.push(sequential(rep, call("grow", [...history], { step })));
+      }
+      if (arm === "L6_head_only") {
+        // (e) A finished head-only request, then two new conversations: the first should load the
+        // head-only entry; whether the second finds it again says whether loading used it up.
+        phases.push(sequential(rep, call("head_only", [{ role: "user", content: "." }])));
+        phases.push(unrelated(rep, arm, { arm, multiplier }));
+        phases.push(sequential(rep, call("consume_first", [{ role: "user", content: e8Tail(nextTail()) }])));
+        phases.push(sequential(rep, call("consume_second", [{ role: "user", content: e8Tail(nextTail()) }])));
+      } else if (arm === "L1.5_interleaved") {
+        // (d) A run of a length both rules call warm, then other agents' conversations, each on a
+        // head of its own (a nonce leads it, no tools), then the new conversation. Under the
+        // idle-slot save the run's slot went to the host cache when the first of them started, and
+        // this asks whether it outlived them; under --no-cache-idle-slots whether the slot did.
+        for (let i = 0; i < E8_INTERLEAVED_HEADS; i += 1) {
+          phases.push(sequential(rep, {
+            step: "interleaved",
+            shape: "other_agent_head",
+            messages: withNonce([
+              { role: "system", content: `Another agent's instructions. ${fillerText(E8_INTERLEAVED_HEAD_TOKENS)}` },
+              { role: "user", content: "." },
+            ], nonce(ctx, "E8", rep, `interleaved-${i}`)),
+            tools: [],
+            maxTokens: HEAD_PROBE_MAX_TOKENS,
+            tags: { arm, multiplier, i },
+          }));
+        }
+        phases.push(sequential(rep, call("new_conversation_interleaved", [{ role: "user", content: e8Tail(nextTail()) }])));
+      } else {
+        // (c) One unrelated call — its start is when the server saves and clears the idle slots —
+        // then a NEW conversation on the same head with a different task.
+        phases.push(unrelated(rep, arm, { arm, multiplier }));
+        phases.push(sequential(rep, call("new_conversation", [{ role: "user", content: e8Tail(nextTail()) }])));
+      }
+    }
+    // (f) One finished prewarm, then E8_CONCURRENT new conversations at once.
+    const f = nonce(ctx, "E8", rep, "concurrent");
+    phases.push(sequential(rep, nonceHeadRequest([head.system], head.tools, "staged_builder_head", "prewarm", f, [{ role: "user", content: "." }], { arm: "concurrent" })));
+    phases.push({
+      rep,
+      calls: Array.from({ length: E8_CONCURRENT }, (_, i) => ({
+        request: nonceHeadRequest([head.system], head.tools, "staged_builder_head", "concurrent_new", f, [{ role: "user", content: e8Tail(nextTail()) }], { arm: "concurrent", slot: i }),
+        startAfterMs: 0,
+      })),
+    });
+  }
+  return phases;
+}
+
+/** E9's arms, interleaved within every repetition. */
+export const E9_ARMS = ["control", "treatment", "literal", "eviction"] as const;
+
+function planE9(ctx: PlanContext): ProbePhase[] {
+  const heads = ctx.forcedHeads;
+  if (!heads) throw new Error("E9 needs the warm-keeper's forced heads (PlanContext.forcedHeads)");
+  const phases: ProbePhase[] = [];
+  const nextUser = counter(CASE_OFFSETS.E9);
+  const history = syntheticHistory();
+  for (let rep = 0; rep < ctx.reps; rep += 1) {
+    for (const arm of E9_ARMS) {
+      const n = nonce(ctx, "E9", rep, arm);
+      const warm = (head: { system: readonly string[]; tools: readonly LLMToolDef[] }, shape: string, step: string) =>
+        sequential(rep, nonceHeadRequest(head.system, head.tools, shape, `${arm}_${step}`, n, [{ role: "user", content: "." }], { arm }));
+      // A live forced call as the turn sends it: the head, the date line after it, a history, the user.
+      const live = (head: MultiSystemHead, shape: string, step: string) =>
+        sequential(rep, nonceHeadRequest([...head.system, heads.temporal], head.tools, shape, `${arm}_${step}`, n, [
+          ...history,
+          { role: "user", content: headUserMessage(nextUser()) },
+        ], { arm, toolCount: head.tools.length }));
+      phases.push(warm(heads.full, "orchestrator_head", "warm_full"));
+      if (arm === "treatment" || arm === "eviction") {
+        phases.push(warm(heads.plan, "forced_plan_head", "warm_plan"));
+        phases.push(warm(heads.dispatch, "forced_dispatch_head", "warm_dispatch"));
+      } else if (arm === "literal") {
+        // The two heads the plan's corrections ruled out: the no-plan-argument subset on the lean
+        // base, and the full block on lean base + module.
+        phases.push(warm({ system: heads.full.system, tools: heads.literalSubsetTools }, "forced_dispatch_head", "warm_literal_subset"));
+        phases.push(warm({ system: heads.plan.system, tools: heads.full.tools }, "orchestrator_head", "warm_full_module"));
+      }
+      if (arm === "eviction") {
+        for (let i = 0; i < E9_EVICTION_PROMPTS; i += 1) {
+          const e = nonce(ctx, "E9", rep, `evict-${i}`);
+          phases.push(sequential(rep, {
+            step: `${arm}_evict`,
+            shape: "eviction_prompt",
+            messages: withNonce([{ role: "system", content: "Eviction probe: a prompt the size of a long content_writer loop call." }, { role: "user", content: fillerText(E9_EVICTION_TOKENS) }], e),
+            tools: [],
+            maxTokens: HEAD_PROBE_MAX_TOKENS,
+            tags: { arm, i },
+          }));
+        }
+      }
+      phases.push(live(heads.plan, "forced_plan_head", "live_a"));
+      if (arm !== "eviction") phases.push(live(heads.dispatch, "forced_dispatch_head", "live_b"));
+      if (arm === "treatment") {
+        // The full head still cached next to the forced ones, then what keeping them warm costs
+        // after a turn: the warm-keeper's re-warm of each forced head.
+        phases.push(live(heads.full, "orchestrator_head", "full_after"));
+        phases.push(warm(heads.plan, "forced_plan_head", "rewarm_plan"));
+        phases.push(warm(heads.dispatch, "forced_dispatch_head", "rewarm_dispatch"));
+      }
+    }
+  }
+  return phases;
+}
+
 export function buildExperimentPlan(id: ExperimentId, ctx: PlanContext): ExperimentPlan {
   const builders: Record<ExperimentId, (c: PlanContext) => ProbePhase[]> = {
-    E1: planE1, E2: planE2, E3: planE3, E4: planE4, E5: planE5, E6: planE6, E7: planE7,
+    E1: planE1, E2: planE2, E3: planE3, E4: planE4, E5: planE5, E6: planE6, E7: planE7, E8: planE8, E9: planE9,
   };
   return { id, question: EXPERIMENT_QUESTIONS[id], phases: builders[id](ctx) };
 }
@@ -1825,6 +2125,204 @@ function verdictE7(all: readonly CallResult[]): ExperimentVerdict {
   };
 }
 
+/** E8's "warm": the head reused, only the tail processed, and processed in about the tail's time. */
+export function isE8Warm(r: CallResult, headTokens: number, tailTokens: number): boolean {
+  const t = r.timings;
+  if (!t || t.cacheN === undefined) return false;
+  return t.cacheN >= E8_WARM_HEAD_SHARE * headTokens
+    && t.promptN <= tailTokens + E8_WARM_EXTRA_TOKENS
+    && t.promptMs <= (tailTokens / E8_WARM_TAIL_TOKENS_PER_SEC) * 1_000 + E8_WARM_FLOOR_MS;
+}
+
+function tagOf(r: CallResult, key: string): number | string | undefined {
+  return r.tags?.[key];
+}
+
+function verdictE8(all: readonly CallResult[]): ExperimentVerdict {
+  const results = ofExperiment(all, "E8");
+  const notes = [stationNote(results)].filter((n): n is string => n !== null);
+  const headTokens = median(scoredStep(results, "head_size").map((r) => totalPromptTokens(r)).filter((v): v is number => v !== undefined));
+  if (headTokens === null) return inconclusive("E8", "The head's size was not measured (no head_size call answered with a token count).", notes);
+  const tails = scoredStep(results, "grow_cold").map((r) => totalPromptTokens(r)).filter((v): v is number => v !== undefined).map((v) => v - headTokens);
+  const tailTokens = median(tails);
+  if (tailTokens === null || tailTokens <= 0) return inconclusive("E8", "The task tail's size could not be derived (no grow_cold call answered).", notes, { headTokens: round(headTokens) });
+
+  const numbers: Record<string, number | null> = { headTokens: round(headTokens), tailTokens: round(tailTokens) };
+  const warmAt = new Map<number, boolean>();
+  let measuredLengths = 0;
+  for (const multiplier of E8_RUN_MULTIPLIERS) {
+    const calls = scoredStep(results, "new_conversation").filter((r) => tagOf(r, "multiplier") === multiplier);
+    const warm = calls.filter((r) => isE8Warm(r, headTokens, tailTokens)).length;
+    // The length the run actually reached: its last grow call (results are in time order) against
+    // the measured head. The plan sized the runs with an estimate; this is what the rule saw.
+    const lastGrow = new Map<number, CallResult>();
+    for (const r of results) {
+      if (isScored(r) && (r.step === "grow" || r.step === "grow_cold") && tagOf(r, "arm") === `L${multiplier}`) lastGrow.set(r.rep, r);
+    }
+    const reached = median([...lastGrow.values()].map((r) => (totalPromptTokens(r) ?? 0) / headTokens));
+    const key = String(multiplier).replace(".", "_");
+    // The runs were sized with an estimate; a run that ended on the wrong side of the rule's ~4x
+    // boundary cannot test it, whatever its new conversation did.
+    if (reached !== null && (multiplier < 4) !== (reached < 4)) {
+      notes.push(`The ${multiplier}x run reached ${round(reached, 2)}x the measured head, on the other side of the 4x boundary it was meant to test.`);
+    }
+    numbers[`L${key}Calls`] = calls.length;
+    numbers[`L${key}Warm`] = warm;
+    numbers[`L${key}ReachedMultiple`] = round(reached, 2);
+    numbers[`L${key}CacheNMedian`] = round(medianOf(calls, (r) => r.timings?.cacheN));
+    numbers[`L${key}PromptMsMedian`] = round(medianOf(calls, (r) => r.timings?.promptMs));
+    if (calls.length >= MIN_PAIRS) {
+      measuredLengths += 1;
+      warmAt.set(multiplier, warm * 2 > calls.length);
+    }
+  }
+  if (measuredLengths < E8_RUN_MULTIPLIERS.length) {
+    return inconclusive("E8", "Not every run length had its new conversation measured at least twice.", notes, numbers);
+  }
+  const [short, mid, long] = E8_RUN_MULTIPLIERS.map((m) => warmAt.get(m) === true);
+  const code = short && mid && !long ? "load_rule_quarter_share"
+    : short && mid && long ? "entries_survive"
+      : !short && !mid && !long ? "no_reuse_across_conversations"
+        : "mixed";
+
+  // (e) the head-only rescue and whether one conversation used the entry up.
+  const first = scoredStep(results, "consume_first");
+  const second = scoredStep(results, "consume_second");
+  const firstWarm = first.filter((r) => isE8Warm(r, headTokens, tailTokens)).length;
+  const secondWarm = second.filter((r) => isE8Warm(r, headTokens, tailTokens)).length;
+  numbers["consumeFirstWarm"] = firstWarm;
+  numbers["consumeFirstCalls"] = first.length;
+  numbers["consumeSecondWarm"] = secondWarm;
+  numbers["consumeSecondCalls"] = second.length;
+
+  // (d) the head after other agents' conversations in between: what the idle-slot switch is decided on.
+  const interleaved = scoredStep(results, "new_conversation_interleaved");
+  const interleavedWarm = interleaved.filter((r) => isE8Warm(r, headTokens, tailTokens)).length;
+  numbers["interleavedWarm"] = interleavedWarm;
+  numbers["interleavedCalls"] = interleaved.length;
+
+  // (f) how many of the concurrent new conversations one prewarm served, per repetition.
+  const perRep = new Map<number, number>();
+  for (const r of scoredStep(results, "concurrent_new")) perRep.set(r.rep, (perRep.get(r.rep) ?? 0) + (isE8Warm(r, headTokens, tailTokens) ? 1 : 0));
+  numbers["concurrentReps"] = perRep.size;
+  numbers["concurrentWarmMedian"] = round(median([...perRep.values()]), 1);
+  numbers["concurrentExactlyOneReps"] = [...perRep.values()].filter((w) => w === 1).length;
+
+  const lengths = E8_RUN_MULTIPLIERS.map((m) => `${m}x ${warmAt.get(m) ? "warm" : "cold"}`).join(", ");
+  const mechanism = code === "load_rule_quarter_share"
+    ? "as the server's load rule predicts (an entry the new prompt shares under a quarter of is skipped), not checkpoint eviction"
+    : code === "entries_survive"
+      ? "every length warm: entries survive long runs (checkpoint eviction and the quarter rule both refuted; the idle-slot save may be off)"
+      : code === "no_reuse_across_conversations"
+        ? "no length warm: a new conversation did not find the head at all"
+        : "a pattern neither rule predicts";
+  const consumed = first.length === 0 ? ""
+    : ` After a 6x run, a finished head-only request made the next new conversation warm in ${firstWarm} of ${first.length}, and the one after it in ${secondWarm} of ${second.length}${secondWarm === 0 && firstWarm > 0 ? " (the entry was used up)" : ""}.`;
+  const concurrent = perRep.size === 0 ? "" : ` One prewarm served a median ${round(median([...perRep.values()]), 1)} of ${E8_CONCURRENT} concurrent new conversations (exactly one in ${numbers["concurrentExactlyOneReps"]} of ${perRep.size} repetitions).`;
+  const between = interleaved.length === 0 ? ""
+    : ` With ${E8_INTERLEAVED_HEADS} other agents' conversations in between, a 1.5x run's head was still warm in ${interleavedWarm} of ${interleaved.length}${interleavedWarm * 2 > interleaved.length ? "" : " (the other traffic pushed it out)"}.`;
+  const reps = new Set(results.filter((r) => r.step === "new_conversation").map((r) => r.rep)).size;
+  if (reps < E8_E9_MIN_REPS) notes.push(`${reps} repetition(s); the plan's criteria are stated over ${E8_E9_MIN_REPS}.`);
+  return {
+    experiment: "E8",
+    question: EXPERIMENT_QUESTIONS.E8,
+    code,
+    conclusive: notes.length === 0,
+    answer: `A new conversation on a ${round(headTokens)}-token head (tail ${round(tailTokens)}) was ${lengths} after a run of that length: ${mechanism}.${between}${consumed}${concurrent}`,
+    numbers,
+    notes,
+  };
+}
+
+function verdictE9(all: readonly CallResult[]): ExperimentVerdict {
+  const results = ofExperiment(all, "E9");
+  const notes = [stationNote(results)].filter((n): n is string => n !== null);
+  const at = (rep: number, step: string): CallResult | undefined => results.find((r) => r.rep === rep && r.step === step && isScored(r));
+  const reps = [...new Set(results.map((r) => r.rep))].sort((a, b) => a - b);
+  const numbers: Record<string, number | null> = {};
+
+  let treatmentPass = 0;
+  let controlCold = 0;
+  let separated = 0;
+  let rejectedReps = 0;
+  let fullKept = 0;
+  let measured = 0;
+  for (const rep of reps) {
+    const tA = at(rep, "treatment_live_a");
+    const tB = at(rep, "treatment_live_b");
+    const wA = at(rep, "treatment_warm_plan");
+    const wB = at(rep, "treatment_warm_dispatch");
+    const cA = at(rep, "control_live_a");
+    const cB = at(rep, "control_live_b");
+    if (!tA || !tB || !wA || !wB || !cA || !cB) continue;
+    measured += 1;
+    const warmHit = (live: CallResult, warmCall: CallResult): boolean => {
+      const warmN = totalPromptTokens(warmCall);
+      return warmN !== undefined && (live.timings!.cacheN ?? 0) >= warmN - E9_WARM_SLACK_TOKENS && live.timings!.promptMs <= E9_WARM_PROMPT_MS;
+    };
+    const cold = (live: CallResult): boolean => (live.timings!.cacheN ?? 0) <= E9_COLD_CACHE_TOKENS && live.timings!.promptMs >= E9_COLD_PROMPT_MS;
+    if (warmHit(tA, wA) && warmHit(tB, wB)) treatmentPass += 1;
+    if (cold(cA) && cold(cB)) controlCold += 1;
+    if (Math.max(tA.timings!.promptMs, tB.timings!.promptMs) < Math.min(cA.timings!.promptMs, cB.timings!.promptMs)) separated += 1;
+    if (Math.min(cacheShare(tA) ?? 0, cacheShare(tB) ?? 0) < E9_REJECT_SHARE) rejectedReps += 1;
+    const fullAfter = at(rep, "treatment_full_after");
+    if (fullAfter && (cacheShare(fullAfter) ?? 0) >= E9_FULL_KEPT_SHARE) fullKept += 1;
+  }
+  const med = (step: string, pick: (r: CallResult) => number | undefined) => round(medianOf(scoredStep(results, step), pick));
+  const share = (step: string) => round(median(scoredStep(results, step).map((r) => cacheShare(r)).filter((v): v is number => v !== undefined)), 3);
+  Object.assign(numbers, {
+    repsMeasured: measured,
+    treatmentPassReps: treatmentPass,
+    controlColdReps: controlCold,
+    separatedReps: separated,
+    treatmentRejectedReps: rejectedReps,
+    fullKeptReps: fullKept,
+    treatmentLiveAPromptMs: med("treatment_live_a", (r) => r.timings?.promptMs),
+    treatmentLiveBPromptMs: med("treatment_live_b", (r) => r.timings?.promptMs),
+    treatmentLiveAShare: share("treatment_live_a"),
+    treatmentLiveBShare: share("treatment_live_b"),
+    controlLiveAPromptMs: med("control_live_a", (r) => r.timings?.promptMs),
+    controlLiveBPromptMs: med("control_live_b", (r) => r.timings?.promptMs),
+    literalLiveAShare: share("literal_live_a"),
+    literalLiveBShare: share("literal_live_b"),
+    literalLiveAPromptMs: med("literal_live_a", (r) => r.timings?.promptMs),
+    literalLiveBPromptMs: med("literal_live_b", (r) => r.timings?.promptMs),
+    evictionLiveAShare: share("eviction_live_a"),
+    evictionLiveAPromptMs: med("eviction_live_a", (r) => r.timings?.promptMs),
+    fullAfterShare: share("treatment_full_after"),
+    // What keeping the forced heads warm costs: cold (a new nonce each repetition) and re-warm.
+    warmPlanColdMs: med("treatment_warm_plan", (r) => r.timings?.promptMs),
+    warmDispatchColdMs: med("treatment_warm_dispatch", (r) => r.timings?.promptMs),
+    rewarmPlanMs: med("treatment_rewarm_plan", (r) => r.timings?.promptMs),
+    rewarmDispatchMs: med("treatment_rewarm_dispatch", (r) => r.timings?.promptMs),
+  });
+  if (measured < E8_E9_MIN_REPS) {
+    return inconclusive("E9", `${measured} repetition(s) measured both arms' live calls; the pass criteria need ${E8_E9_MIN_REPS} of ${E8_E9_MIN_REPS}.`, notes, numbers);
+  }
+  const rejected = rejectedReps >= 2;
+  const passed = !rejected && treatmentPass === measured && controlCold === measured && separated === measured && fullKept === measured;
+  const code = rejected ? "treatment_rejected" : passed ? "forced_heads_warm" : "criteria_not_met";
+  const failed = [
+    treatmentPass < measured ? `TREATMENT live calls warm in ${treatmentPass} of ${measured}` : null,
+    controlCold < measured ? `CONTROL live calls cold in ${controlCold} of ${measured}` : null,
+    separated < measured ? `the arms' prompt times separated in ${separated} of ${measured}` : null,
+    fullKept < measured ? `the full head kept ≥${E9_FULL_KEPT_SHARE * 100}% cached in ${fullKept} of ${measured}` : null,
+  ].filter((s): s is string => s !== null);
+  return {
+    experiment: "E9",
+    question: EXPERIMENT_QUESTIONS.E9,
+    code,
+    conclusive: notes.length === 0,
+    answer: rejected
+      ? `REJECTED: with the forced heads warmed, a live forced call still reused under ${E9_REJECT_SHARE * 100}% of its prompt in ${rejectedReps} of ${measured} repetitions.`
+      : passed
+        ? `Warming the forced heads works: both live forced calls reused their head (${numbers["treatmentLiveAPromptMs"]} / ${numbers["treatmentLiveBPromptMs"]} ms of prompt) where the full head alone left them cold (${numbers["controlLiveAPromptMs"]} / ${numbers["controlLiveBPromptMs"]} ms), and the full head stayed cached. Keeping them warm costs ${numbers["warmPlanColdMs"]} + ${numbers["warmDispatchColdMs"]} ms cold and ${numbers["rewarmPlanMs"]} + ${numbers["rewarmDispatchMs"]} ms per re-warm.`
+        : `The pass criteria were not all met: ${failed.join("; ")}.`,
+    numbers,
+    notes,
+  };
+}
+
 export function computeVerdict(id: ExperimentId, results: readonly CallResult[], ctx: VerdictContext): ExperimentVerdict {
   switch (id) {
     case "E1": return verdictE1(results, ctx);
@@ -1834,6 +2332,8 @@ export function computeVerdict(id: ExperimentId, results: readonly CallResult[],
     case "E5": return verdictE5(results);
     case "E6": return verdictE6(results);
     case "E7": return verdictE7(results);
+    case "E8": return verdictE8(results);
+    case "E9": return verdictE9(results);
   }
 }
 
@@ -1862,6 +2362,10 @@ const SERVER_SWITCHES: Readonly<Record<string, string>> = {
   "-kvu": "kvUnified", "--kv-unified": "kvUnified",
   "--cont-batching": "contBatching", "-cb": "contBatching",
   "--no-cont-batching": "noContBatching", "-nocb": "noContBatching",
+  // E8 is run with and without it: the switch that decides whether idle slots are saved to the
+  // host cache and cleared whenever a task starts (on by default with a unified KV cache).
+  "--cache-idle-slots": "cacheIdleSlots",
+  "--no-cache-idle-slots": "noCacheIdleSlots",
 };
 
 /**
@@ -2069,7 +2573,13 @@ export function buildProbeReport(input: ReportInput): ProbeReport {
       ? coldCallsOf("E2", "cold")
       : head.label === "forced_subset"
         ? coldCallsOf("E7", "subset_cold")
-        : coldCallsOf("E6", "cold_first_call");
+        : head.label.startsWith("staged_builder:")
+          ? coldCallsOf("E8", "head_size")
+          : head.label === "forced_plan"
+            ? coldCallsOf("E9", "treatment_warm_plan")
+            : head.label === "forced_dispatch"
+              ? coldCallsOf("E9", "treatment_warm_dispatch")
+              : coldCallsOf("E6", "cold_first_call");
     return headFacts(head, cold);
   });
   const experiments = input.experiments.map((id) => computeVerdict(id, results, input.verdictContext));

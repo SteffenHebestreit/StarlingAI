@@ -8,6 +8,7 @@
  *     [--laya-url http://127.0.0.1:18080] [--no-incumbent] [--no-laya] [--repeat 1] [--split all|calibration|test]
  *     [--target 0.9] [--min 30] [--audit-rate 0.1] [--max-rare-miss 0.1]
  *     [--frequency fast_lane=0.6,source_sensitive=1] [--prior fast_lane=0.06] [--train-out <jsonl>] [--out <dir>]
+ *     [--negation] [--order-swap]
  *
  * The incumbent arm is the production path: the configured routing tier (from the repo root, the llama-swap
  * address in .env and the tier's model selector), with the incumbents' own prompts and parsers
@@ -23,6 +24,11 @@
  *
  * --train-out writes the calibration half, labelled by the incumbent, in the fine-tuning format of
  * decisions:export. A checkpoint trained on it is scored on cases it never saw with --split test.
+ *
+ * --negation adds the negation minimal pairs (eval/decisions/negation.example.jsonl) for the selected points: both
+ * arms answer them, and the report shows per pair whether an arm read the negation. They take no part in the gate
+ * replay, the projection or the verdict, and --split leaves them whole. --order-swap asks Laya every case a second
+ * time with the point's options in reverse order and reports how often its choice changed with the order.
  *
  * Exit codes: 0 judged and nothing unsafe, 1 a point's replayed gate would take cases it gets wrong or lose its rare
  * class, 2 a usage mistake or nothing could be judged, 3 the environment is suspect (a backend unreachable, or more
@@ -46,6 +52,7 @@ import {
   profileDataset,
   readTimings,
   renderBenchMarkdown,
+  reversedOptions,
   type BenchPointId,
   type BenchReportSettings,
   type BenchResult,
@@ -74,7 +81,7 @@ class UsageError extends Error {}
 const VALUE_FLAGS = new Set([
   "points", "cases", "laya-url", "repeat", "split", "target", "min", "audit-rate", "max-rare-miss", "frequency", "prior", "train-out", "out",
 ]);
-const SWITCHES = new Set(["no-incumbent", "no-laya"]);
+const SWITCHES = new Set(["no-incumbent", "no-laya", "negation", "order-swap"]);
 const DEFAULT_LAYA_URL = "http://127.0.0.1:18080";
 /** More failed calls than this share and the run describes the environment, not the decision. */
 const MAX_FAILURE_SHARE = 0.2;
@@ -174,6 +181,8 @@ async function main(): Promise<number> {
   const trainOut = values.get("train-out");
   if (trainOut && !useIncumbent) throw new UsageError("--train-out writes the incumbent's labels: it needs the incumbent arm");
   const layaUrl = (values.get("laya-url") ?? DEFAULT_LAYA_URL).trim();
+  const orderSwap = switches.has("order-swap");
+  if (orderSwap && !useLaya) throw new UsageError("--order-swap asks Laya twice: it needs the Laya arm");
 
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const outDir = fromRoot(values.get("out") ?? join(".starlingai", "live-check", "decisions-bench", stamp));
@@ -202,6 +211,7 @@ async function main(): Promise<number> {
   // The cases.
   const casesArg = values.get("cases");
   const files = casesArg ? [fromRoot(casesArg)] : points.map((point) => defaultCaseFile(point as BenchPointId));
+  if (switches.has("negation")) files.push(join(REPO_ROOT, "eval", "decisions", "negation.example.jsonl"));
   const cases: DecisionBenchCase[] = [];
   for (const file of files) {
     const text = await readFile(file, "utf8").catch(() => { throw new UsageError(`cannot read the case file ${file}`); });
@@ -209,7 +219,8 @@ async function main(): Promise<number> {
   }
   const problems = lintDecisionCases(cases);
   if (problems.length) throw new UsageError(`the cases cannot be measured:\n  - ${problems.join("\n  - ")}`);
-  const selected = cases.filter((benchCase) => points.includes(benchCase.point) && (split === "all" || benchSplit(benchCase.id) === split));
+  // A negation pair is kept whole: its two cases are compared with each other, not split between halves.
+  const selected = cases.filter((benchCase) => points.includes(benchCase.point) && (split === "all" || benchCase.pair !== undefined || benchSplit(benchCase.id) === split));
   if (selected.length === 0) throw new UsageError("no case matches --points and --split");
   if (!config.receptionist?.enabled && points.includes("fast_lane")) {
     console.warn("receptionist.enabled is off in this config: no turn asks fast_lane, whatever this run measures.");
@@ -234,7 +245,7 @@ async function main(): Promise<number> {
   const header = [
     `Run ${stamp}, git ${source.revision?.slice(0, 12) ?? "?"}${source.status?.trim() ? " (dirty tree)" : ""}.`,
     useIncumbent ? `Incumbent: routing tier ${tierModel} at ${config.providers.lmstudio?.baseUrl ?? "?"}.` : "Incumbent: not run (--no-incumbent); the gate is replayed against gold.",
-    useLaya ? `Laya: ${layaUrl}, ${String(laya?.["device"] ?? "device unknown")}, timeout ${config.decisions.timeoutMs} ms.` : "Laya: not run (--no-laya).",
+    useLaya ? `Laya: ${layaUrl}, ${String(laya?.["device"] ?? "device unknown")}, timeout ${config.decisions.timeoutMs} ms${orderSwap ? ", every case asked again with the options reversed (--order-swap)" : ""}.` : "Laya: not run (--no-laya).",
     `Cases: ${selected.length} (${files.map((file) => file.replace(REPO_ROOT, ".")).join(", ")}), split ${split}, repeat ${repeat}.`,
   ];
   console.log(header.join("\n"));
@@ -281,6 +292,7 @@ async function main(): Promise<number> {
           split: benchSplit(benchCase.id),
           attempt,
           ...(benchCase.tags?.length ? { tags: benchCase.tags } : {}),
+          ...(benchCase.pair !== undefined ? { pair: benchCase.pair } : {}),
         };
         if (point === "fast_lane" && !frontDeskLets(message)) {
           result.gated = true;
@@ -308,6 +320,12 @@ async function main(): Promise<number> {
             const answer = await askLaya(DECISION_POINTS[point], state);
             if (answer) result.laya = answer;
             else result.layaFailure = { ms: performance.now() - started, error: "no usable answer: timed out, failed, or answered outside the options" };
+            if (orderSwap) {
+              // The same question with the options reversed: the option under A is now under B.
+              const swapped = { ...DECISION_POINTS[point], options: reversedOptions(DECISION_POINTS[point].options) };
+              const again = await askLaya(swapped, state);
+              if (again) result.layaSwapped = again;
+            }
           };
           // Alternate which arm goes first.
           const arms = [...(useIncumbent ? [runIncumbent] : []), ...(useLaya ? [runLaya] : [])];
@@ -348,7 +366,8 @@ async function main(): Promise<number> {
 
   let trainItems = 0;
   if (trainOut) {
-    const calibration = rows.filter((row) => row.split === "calibration" && !row.gated && row.incumbent);
+    // Not the negation pairs: they measure whether a checkpoint reads a negation, and must stay unseen by it.
+    const calibration = rows.filter((row) => row.split === "calibration" && !row.gated && !row.pair && row.incumbent);
     const items = buildTrainingItems(calibration);
     const path = fromRoot(trainOut);
     await mkdir(resolve(path, ".."), { recursive: true });
@@ -372,7 +391,7 @@ async function main(): Promise<number> {
     trainItems,
     report,
     // The ledger's own view of the same rows: agreement per confidence level, as decisions:report prints it.
-    ledgerView: buildDecisionReport(rows.filter((row) => !row.gated), target, min),
+    ledgerView: buildDecisionReport(rows.filter((row) => !row.gated && !row.pair), target, min),
   };
   await writeFile(reportPath, `${JSON.stringify(json, null, 2)}\n`, "utf8");
   await writeFile(markdownPath, renderBenchMarkdown(report, [...header, ...(environment.length ? [`ENVIRONMENT-SUSPECT: ${environment.join("; ")}`] : [])]), "utf8");

@@ -49,6 +49,32 @@ describe("classifyTurnProgress", () => {
   it("reads a counter reset as no-progress (stalled), not progress", () => {
     expect(classifyTurnProgress(base, { completionTokens: 0, toolCalls: 0, delegations: 0, artifacts: 0, delegationFailures: 0 })).toBe("stalled");
   });
+
+  // C5' (e): a looped partial comes back with delegationSucceeded:true, so the failure counter
+  // stays flat. c297c5ea re-delegated after a 199-iteration loop, which read as progress.
+  describe("a looped partial (orchestration.loopAwareDelegation)", () => {
+    const withLoops: TurnProgressSample = { ...base, loopedPartials: 1 };
+
+    it("followed by a new delegation and no new artifact is churning", () => {
+      const cur = { ...withLoops, delegations: base.delegations + 1, loopedPartials: 2, toolCalls: base.toolCalls + 1 };
+      expect(classifyTurnProgress(withLoops, cur)).toBe("churning");
+    });
+
+    it("followed by a new artifact is progressing", () => {
+      const cur = { ...withLoops, delegations: base.delegations + 1, loopedPartials: 2, artifacts: base.artifacts + 1 };
+      expect(classifyTurnProgress(withLoops, cur)).toBe("progressing");
+    });
+
+    it("an earlier loop, and a new delegation that did not loop, is not churn", () => {
+      const cur = { ...withLoops, delegations: base.delegations + 1, toolCalls: base.toolCalls + 1 };
+      expect(classifyTurnProgress(withLoops, cur)).toBe("progressing");
+    });
+
+    it("without the field (flag off), a looped partial reads as before", () => {
+      const cur = { ...base, delegations: base.delegations + 1, toolCalls: base.toolCalls + 1 };
+      expect(classifyTurnProgress(base, cur)).toBe("progressing");
+    });
+  });
 });
 
 describe("parseTurnOversightVerdict", () => {

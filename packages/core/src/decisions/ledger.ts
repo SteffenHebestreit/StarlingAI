@@ -23,8 +23,12 @@ export interface LedgerRow {
   /** What Laya read about the case. */
   state: Record<string, unknown>;
   mode: string;
-  /** `model`: the checkpoint version that answered; the gate's statistics are kept per version. */
-  laya?: { choice: string; top: number; probabilities: Record<string, number>; ms: number; model?: string };
+  /**
+   * `model`: the version that answered (the checkpoint, and a point's own window: laya-client.ts layaModelVersion);
+   * the gate's statistics are kept per version. `truncatedTokens`: how many tokens of the state Laya's window cut
+   * off, as the sidecar counted them — a case it answered without reading all of.
+   */
+  laya?: { choice: string; top: number; probabilities: Record<string, number>; ms: number; model?: string; truncatedTokens?: number };
   incumbent?: { choice: string; ms: number };
   decidedBy: "laya" | "incumbent";
   sessionId?: string;
@@ -77,6 +81,55 @@ export function appendBrowserLedgerRow(row: Record<string, unknown>): Promise<vo
     })
     .catch((err: unknown) => {
       log.warn({ err, path }, "Could not write the browser ledger");
+    });
+  return writeChain;
+}
+
+/**
+ * The incumbent readout's ledger (decisions/incumbent-readout.ts), beside the decision ledger: one row per decision
+ * whose incumbent was also, or only, read by its logits — the case, the readout's probabilities and log-scores, the
+ * parsed answer when the parsed call ran, and which of the two decided. Kept apart because its rows are a different
+ * incumbent's: the decision ledger's agreement counts must not mix them (`incumbentVersion` names which one decided).
+ * The log-scores are what a temperature is fitted on, and the probabilities are soft labels for a Laya fine-tune.
+ */
+export interface ReadoutLedgerRow {
+  ts: string;
+  point: string;
+  language: LanguageBucket;
+  state: Record<string, unknown>;
+  mode: "shadow" | "on";
+  /** The incumbent whose answer was used: "parsed" (today's call and parser) or the readout's version. */
+  incumbentVersion: string;
+  /**
+   * The version of the readout that was asked, whoever decided: a shadow row's `incumbentVersion` is "parsed", and
+   * without this its readout answers could not be told apart from a later readout's when a temperature is fitted.
+   */
+  readoutVersion: string;
+  decidedBy: "readout" | "parsed";
+  readout:
+    | { choice: string; top: number; probabilities: Record<string, number>; logScores: Record<string, number>; mass: number; temperature: number; ms: number }
+    | { miss: string; ms: number; topToken?: string };
+  /** When the parsed call ran: its answer (null when it gave none) and time. */
+  parsed?: { choice: string | null; ms: number };
+  /** Both answered: did they agree? */
+  agree?: boolean;
+  sessionId?: string;
+}
+
+export function resolveReadoutLedgerPath(): string {
+  return join(dirname(resolveLedgerPath()), "readout-ledger.jsonl");
+}
+
+export function appendReadoutLedgerRow(row: ReadoutLedgerRow): Promise<void> {
+  if (getConfig().decisions?.ledger?.enabled === false) return Promise.resolve();
+  const path = resolveReadoutLedgerPath();
+  writeChain = writeChain
+    .then(async () => {
+      await mkdir(dirname(path), { recursive: true });
+      await appendFile(path, `${JSON.stringify(row)}\n`, "utf8");
+    })
+    .catch((err: unknown) => {
+      log.warn({ err, path }, "Could not write the readout ledger");
     });
   return writeChain;
 }

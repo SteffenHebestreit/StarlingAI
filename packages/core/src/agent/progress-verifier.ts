@@ -36,6 +36,7 @@
  * timeout resolves to on_track, because stopping a healthy run is far worse than
  * missing some drift.
  */
+import { createHash } from "node:crypto";
 import type { LLMMessage } from "../providers/lmstudio.js";
 
 /** How often the supervisor samples a run (ms). Matches the soft long-running
@@ -282,11 +283,21 @@ export type ProgressVerdict = "on_track" | "burning" | "stalled" | "looping" | "
  * progress signal, and the old structural guard trusted it as the latter.
  */
 export interface ProgressSample {
-  /** Tool calls that EXECUTED and SUCCEEDED. Structural, not a keyword list: cache
-   *  hits, cap-blocked calls and consecutive duplicates all short-circuit before
-   *  this is incremented, so a model re-reading the same context in circles never
-   *  moves it. */
+  /** Tool calls that EXECUTED, SUCCEEDED and brought back a result this run had not seen
+   *  before (isNovelToolOutcome). Structural, not a keyword list: cache hits, cap-blocked
+   *  calls and consecutive duplicates all short-circuit before this is counted, so a model
+   *  re-reading the same context in circles never moves it.
+   *
+   *  "Succeeded" alone was the old definition, and run c297c5ea showed what it misses: a
+   *  write between two greps drops the read caches, so the next identical grep EXECUTES and
+   *  succeeds, and a successful "No matches" is still nothing new. Counting successes, a run
+   *  that rewrote a file now and then while re-asking the same questions read as working. */
   productiveToolCalls: number;
+  /** Every tool call the run ISSUED, whatever became of it: executed, served from a cache,
+   *  refused, capped or malformed. Only the busy/quiet split below reads it: a window with
+   *  many calls and nothing new is a loop, a window with no calls at all may be a pause to
+   *  compose or verify. */
+  attemptedToolCalls: number;
   /** Distinct workspace paths successfully written or edited. */
   mutatedPaths: number;
   /** Distinct content hashes written across all paths — a rewrite with NEW content
@@ -319,6 +330,7 @@ export interface ProgressSample {
 
 export const EMPTY_PROGRESS_SAMPLE: ProgressSample = {
   productiveToolCalls: 0,
+  attemptedToolCalls: 0,
   mutatedPaths: 0,
   distinctWriteHashes: 0,
   outputChars: 0,
@@ -335,6 +347,55 @@ export interface ProgressDecision {
   verdict: ProgressVerdict;
   reason: string;
   consecutiveStalls: number;
+  /** How many of those consecutive stall windows in a row were BUSY (see BUSY_WINDOW_MIN_ATTEMPTED_CALLS).
+   *  The caller hands it back on the next sample, like consecutiveStalls. */
+  consecutiveBusyStalls: number;
+}
+
+/**
+ * ── A BUSY STALL IS A LOOP, WHATEVER THE RUN HAS WRITTEN ────────────────────────────
+ *
+ * A stall window with at least this many calls issued is BUSY: the run is acting, and none of
+ * it brings anything new. STALL_LIMIT busy windows in a row wind the run down as "looping",
+ * even when it has written files.
+ *
+ * The written-files exemption exists for a QUIET stall — a run that wrote something and went
+ * silent may be composing or verifying, so that shape goes to the operator dock ('ask'). But at
+ * max effort every long run holds an unbounded grant, and notifyLongRunning drops the 'ask' of an
+ * unbounded run (long-running-generation.ts), so the exemption was a hole: in run c297c5ea two
+ * content_writer runs had made 2 successful edit_file calls each and then re-issued the same greps
+ * to their 199-iteration limit, 836 s and 1,215 s, with nothing watching.
+ *
+ * 5 is far below what a loop issues (the looping 180 s windows of c297c5ea carried 14-74 calls
+ * each) and far above a pause to compose, which issues none: one long generation is one call's
+ * worth of window. Replayed over that turn (pnpm loops:replay, agent/loop-replay.ts), the rule winds
+ * the four looping runs down at 540, 720, 720 and 900 s and no run that ended in success. Only one
+ * run that ended in success made 20 or more calls in that log, so the false-alarm rate is not
+ * estimable from it.
+ */
+export const BUSY_WINDOW_MIN_ATTEMPTED_CALLS = 5;
+
+/**
+ * The run's memory of results it has already seen, for productiveToolCalls. Bounded: past it a
+ * result that is not in the set counts as new, so a very long healthy run can only be credited
+ * too much, never stalled by a full set.
+ */
+export const NOVEL_OUTCOME_MEMORY = 4_096;
+
+/**
+ * Did this tool call bring back something the run has not seen? Records it when it did.
+ *
+ * Keyed on the tool and the exact result text, not the arguments: thirteen differently worded
+ * searches that all come back empty are one outcome, and a re-read after an edit changed the file
+ * is a new one. A failed call is never new — an error the model keeps provoking is not progress.
+ * Pure apart from the set it is handed; no keywords, so it reads any tool in any language.
+ */
+export function isNovelToolOutcome(seen: Set<string>, tool: string, resultContent: string, success: boolean): boolean {
+  if (!success) return false;
+  const key = createHash("sha1").update(tool).update("\0").update(resultContent).digest("hex");
+  if (seen.has(key)) return false;
+  if (seen.size < NOVEL_OUTCOME_MEMORY) seen.add(key);
+  return true;
 }
 
 /**
@@ -371,14 +432,21 @@ export function hasForwardProgress(prev: ProgressSample, cur: ProgressSample): b
  *
  *  WARM: consecutive windows with no productive call, no new path, no new content
  *    hash and no substantive new output. Reasoning may be pouring in; that is the
- *    pathology, not an exemption. A warm run that has written files and gone quiet
+ *    pathology, not an exemption. A warm run that has written files and gone QUIET
  *    may legitimately be verifying, so THAT case goes to the dock too; a run that
- *    has written nothing is not ambiguous.
+ *    has written nothing is not ambiguous. A run that stays BUSY through those
+ *    windows — calls going out, nothing new coming back — is looping, and is wound
+ *    down whatever it has written (BUSY_WINDOW_MIN_ATTEMPTED_CALLS).
+ *
+ * `busyStall` false turns the busy arm off (agents.performance.loopBrake); every
+ * other rule is unchanged by it.
  */
 export function classifyRunProgress(
   prev: ProgressSample,
   cur: ProgressSample,
   consecutiveStalls: number,
+  consecutiveBusyStalls = 0,
+  busyStall = true,
 ): ProgressDecision {
   const producedSomething = cur.mutatedPaths > 0;
   const tookAction = cur.productiveToolCalls > 0 || producedSomething;
@@ -394,6 +462,7 @@ export function classifyRunProgress(
         action: wrote ? "ask" : "wind_down",
         verdict: "burning",
         consecutiveStalls: 0,
+        consecutiveBusyStalls: 0,
         reason: `${cur.reasoningChars} reasoning chars with no productive tool call and no workspace change `
           + `(ceiling ${REASONING_ABSOLUTE_CEILING_CHARS}, output ${cur.outputChars} chars) — `
           + `the run is thinking, not working`,
@@ -404,19 +473,33 @@ export function classifyRunProgress(
       verdict: "on_track",
       reason: "no productive action yet, still within the reasoning budget",
       consecutiveStalls: 0,
+      consecutiveBusyStalls: 0,
     };
   }
   if (hasForwardProgress(prev, cur)) {
-    return { action: "continue", verdict: "on_track", reason: "forward progress", consecutiveStalls: 0 };
+    return { action: "continue", verdict: "on_track", reason: "forward progress", consecutiveStalls: 0, consecutiveBusyStalls: 0 };
   }
   const stalls = consecutiveStalls + 1;
+  const attempted = cur.attemptedToolCalls - prev.attemptedToolCalls;
+  const busyStalls = busyStall && attempted >= BUSY_WINDOW_MIN_ATTEMPTED_CALLS ? consecutiveBusyStalls + 1 : 0;
+  if (busyStalls >= STALL_LIMIT) {
+    return {
+      action: "wind_down",
+      verdict: "looping",
+      consecutiveStalls: stalls,
+      consecutiveBusyStalls: busyStalls,
+      reason: `${attempted} tool calls in the last ${Math.round(PROGRESS_CHECK_INTERVAL_MS / 1000)}s window and none brought `
+        + `back anything new, ${busyStalls} windows in a row (${cur.productiveToolCalls} new results in the whole run)`,
+    };
+  }
   if (stalls < STALL_LIMIT) {
-    return { action: "continue", verdict: "on_track", reason: "first no-progress window", consecutiveStalls: stalls };
+    return { action: "continue", verdict: "on_track", reason: "first no-progress window", consecutiveStalls: stalls, consecutiveBusyStalls: busyStalls };
   }
   return {
     action: producedSomething ? "ask" : "wind_down",
     verdict: "stalled",
     consecutiveStalls: stalls,
+    consecutiveBusyStalls: busyStalls,
     reason: `no productive tool call, no workspace change and no substantive new output across ${stalls} `
       + `${Math.round(PROGRESS_CHECK_INTERVAL_MS / 1000)}s windows (reasoning ${cur.reasoningChars} chars)`,
   };
@@ -433,6 +516,64 @@ export const IDENTICAL_WRITE_LIMIT = 2;
 /** Same tool, byte-identical arguments, this many times in one run = a loop.
  *  3, not 2: one legitimate retry after a transient failure is 2. */
 export const ARG_SIG_REPEAT_LIMIT = 3;
+
+/**
+ * ── THE LOOP BRAKE: A REPLAY IS AN ANSWER, THE FOURTH IS A REFUSAL ─────────────────
+ *
+ * The run's two caches answer an identical call with the earlier result plus a note ("cached
+ * result — move on"), and nothing more. Notes do not brake a loop: in run c297c5ea the note went
+ * out 545 times, and four content_writer runs re-issued their most repeated call 128, 110, 99 and
+ * 68 times, three of them to the 199-iteration limit, 587-1,215 s each. So from the fourth
+ * identical call since the last successful write — three earlier identical calls, whose answer the
+ * model already holds — the call is refused instead of answered. A refused call did nothing, so an
+ * iteration of refusals is a blocked iteration, and the existing two-in-a-row stop
+ * (BLOCKED_TOOL_ITERATION_THRESHOLD in sub-agent.ts) ends the run with its synthesis at the fifth.
+ * The wire tool list never changes. Replayed over that turn (pnpm loops:replay), the four runs stop
+ * at 165, 263, 338 and 527 s, and no run that ended in success is refused at all.
+ *
+ * Why the fourth and not the third: session 39af10b8's content_writer re-read its context three
+ * times and then wrote the file. Refusing the third would have ended that run one call before its
+ * write (the test pinning it has exactly one call of margin). Refusing the fourth instead of the
+ * third costs about 1% of the replayed saving over c297c5ea's runs (2,095 vs 2,113 working seconds;
+ * refusing the fifth, 2,062). The published loop detectors act at 4 (OpenHands), 5 (Gemini CLI)
+ * and the 4th occurrence (unwedge).
+ *
+ * Only WHILE THE ANSWER IS STILL THERE. The stale-result digest shrinks old tool results to
+ * head+tail and tells the model to re-read the source if it needs the middle, and an overflow trim
+ * drops old messages outright. A call whose earlier answer is no longer verbatim in front of the
+ * model is not a loop, it is the re-read the digest asked for: it gets the full answer, and the
+ * count starts again from it.
+ */
+export const LOOP_REFUSE_AFTER_IDENTICAL = 3;
+
+export interface CallReplayDecision {
+  /** "replay": answer from the cache, as before the brake. "refuse": withdraw the call. */
+  action: "replay" | "refuse";
+  /** The identical-call count to carry forward, this call included. 1 after a reset. */
+  identicalAfter: number;
+}
+
+/**
+ * What to do with a call the run's cache could answer. Pure; the caller supplies how many
+ * identical calls went out since the last successful write, and whether the earlier answer is
+ * still verbatim in the conversation.
+ */
+export function classifyCallReplay(input: { priorIdenticalSinceWrite: number; priorAnswerVerbatim: boolean }): CallReplayDecision {
+  if (!input.priorAnswerVerbatim) return { action: "replay", identicalAfter: 1 };
+  if (input.priorIdenticalSinceWrite >= LOOP_REFUSE_AFTER_IDENTICAL) {
+    return { action: "refuse", identicalAfter: input.priorIdenticalSinceWrite + 1 };
+  }
+  return { action: "replay", identicalAfter: input.priorIdenticalSinceWrite + 1 };
+}
+
+/** How much of a looping call's arguments a loop report names. The arguments ARE the target (a
+ *  path, a pattern, a URL), so they are clipped, not interpreted: no per-tool key list. */
+export const LOOP_TARGET_MAX_CHARS = 160;
+
+export function loopTargetOf(argsJson: string): string {
+  const compact = argsJson.replace(/\s+/g, " ").trim();
+  return compact.length > LOOP_TARGET_MAX_CHARS ? `${compact.slice(0, LOOP_TARGET_MAX_CHARS - 1)}…` : compact;
+}
 
 export type WriteLoopKind = "identical_rewrite" | "content_oscillation";
 

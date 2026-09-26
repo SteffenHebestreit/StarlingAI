@@ -1,10 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
+  classifyCallReplay,
   classifyRunProgress,
   classifyWriteLoop,
   hasForwardProgress,
   buildProgressJudgePrompt,
+  isNovelToolOutcome,
+  loopTargetOf,
   parseProgressVerdict,
+  BUSY_WINDOW_MIN_ATTEMPTED_CALLS,
+  LOOP_REFUSE_AFTER_IDENTICAL,
+  LOOP_TARGET_MAX_CHARS,
+  NOVEL_OUTCOME_MEMORY,
   REASONING_ABSOLUTE_CEILING_CHARS,
   detectReasoningLoop,
   EMPTY_PROGRESS_SAMPLE,
@@ -36,12 +43,14 @@ const WINDOW_S = PROGRESS_CHECK_INTERVAL_MS / 1000;
 function replay(samples: readonly ProgressSample[]): { decisions: ProgressDecision[]; stoppedAtWindow: number | null } {
   let prev = EMPTY_PROGRESS_SAMPLE;
   let stalls = 0;
+  let busyStalls = 0;
   const decisions: ProgressDecision[] = [];
   let stoppedAtWindow: number | null = null;
   samples.forEach((cur, i) => {
     if (stoppedAtWindow !== null) return;
-    const d = classifyRunProgress(prev, cur, stalls);
+    const d = classifyRunProgress(prev, cur, stalls, busyStalls);
     stalls = d.consecutiveStalls;
+    busyStalls = d.consecutiveBusyStalls;
     prev = cur;
     decisions.push(d);
     if (d.action === "wind_down") stoppedAtWindow = i;
@@ -324,6 +333,162 @@ describe("progress supervisor — write-loop detection by content hash", () => {
     const revertedFlatCap = (writes: number) => writes >= 2;
     expect(revertedFlatCap(2)).toBe(true);
     expect(classifyWriteLoop(["a1", "b2"], "c3")).toBeNull();
+  });
+});
+
+/**
+ * A BUSY STALL IS A LOOP. Run c297c5ea's two longest content_writer loops had each made two real
+ * edits, so the stall rule said 'ask' instead of winding them down — and at max effort the run held
+ * an unbounded grant, whose 'ask' notifyLongRunning drops. They kept re-issuing the same greps for
+ * 836 and 1,215 s. The windows below have the shape of those runs: files written, calls going out,
+ * nothing new coming back.
+ */
+describe("progress supervisor — busy stall", () => {
+  const windows = (count: number, attemptedPerWindow: number): ProgressSample[] => Array.from(
+    { length: count },
+    (_, i) => sample({
+      productiveToolCalls: 6,
+      mutatedPaths: 1,
+      distinctWriteHashes: 2,
+      reasoningChars: 30_000 + i * 900,
+      attemptedToolCalls: 40 + i * attemptedPerWindow,
+    }),
+  );
+
+  it("winds a run that has written files down as looping after STALL_LIMIT busy windows", () => {
+    const busy = [sample({ productiveToolCalls: 6, mutatedPaths: 1, distinctWriteHashes: 2, attemptedToolCalls: 40 }), ...windows(3, 40).slice(1)];
+    const { decisions, stoppedAtWindow } = replay(busy);
+    expect(stoppedAtWindow).toBe(STALL_LIMIT);
+    expect(decisions.at(-1)).toMatchObject({ action: "wind_down", verdict: "looping", consecutiveBusyStalls: STALL_LIMIT });
+  });
+
+  it("keeps 'ask' for the same run when it went QUIET instead — a pause to compose or verify", () => {
+    const quiet = [sample({ productiveToolCalls: 6, mutatedPaths: 1, distinctWriteHashes: 2, attemptedToolCalls: 40 }), ...windows(3, 0).slice(1)];
+    const { decisions, stoppedAtWindow } = replay(quiet);
+    expect(stoppedAtWindow).toBeNull();
+    expect(decisions.at(-1)).toMatchObject({ action: "ask", verdict: "stalled" });
+  });
+
+  it("needs BUSY_WINDOW_MIN_ATTEMPTED_CALLS calls in a window; one call fewer is a quiet window", () => {
+    const base = sample({ productiveToolCalls: 6, mutatedPaths: 1, attemptedToolCalls: 40 });
+    const at = (n: number) => sample({ ...base, attemptedToolCalls: 40 + n });
+    expect(classifyRunProgress(base, at(BUSY_WINDOW_MIN_ATTEMPTED_CALLS), 1, 1)).toMatchObject({ action: "wind_down", verdict: "looping" });
+    expect(classifyRunProgress(base, at(BUSY_WINDOW_MIN_ATTEMPTED_CALLS - 1), 1, 1)).toMatchObject({ action: "ask", verdict: "stalled" });
+  });
+
+  it("the threshold is 5 calls, pinned by value: a window with 4 is quiet, one with 5 is busy", () => {
+    // Pinned by value, not through the constant: the case above passes for ANY value of it. 5 sits
+    // between a pause to compose (0-1 calls in a window) and c297c5ea's looping windows (14-74);
+    // moving it is a decision about both, and it should break a test when it is made.
+    expect(BUSY_WINDOW_MIN_ATTEMPTED_CALLS).toBe(5);
+    const base = sample({ productiveToolCalls: 6, mutatedPaths: 1, attemptedToolCalls: 40 });
+    expect(classifyRunProgress(base, sample({ ...base, attemptedToolCalls: 44 }), 1, 1)).toMatchObject({ action: "ask", verdict: "stalled", consecutiveBusyStalls: 0 });
+    expect(classifyRunProgress(base, sample({ ...base, attemptedToolCalls: 45 }), 1, 1)).toMatchObject({ action: "wind_down", verdict: "looping" });
+  });
+
+  it("the busy windows must be consecutive: a quiet window in between starts the count again", () => {
+    const base = sample({ productiveToolCalls: 6, mutatedPaths: 1, attemptedToolCalls: 40 });
+    const d = classifyRunProgress(base, sample({ ...base, attemptedToolCalls: 60 }), 1, 0);
+    expect(d.consecutiveBusyStalls).toBe(1);
+    expect(d.action).toBe("ask");
+  });
+
+  it("busy, quiet, busy is never two busy windows in a row: the quiet one resets the busy count", () => {
+    // The case above only shows a busy window counting from 0. This one is the reset itself: a
+    // count carried across the quiet window would read busy-quiet-busy as 2 and wind a run down
+    // that paused in between.
+    const w0 = sample({ productiveToolCalls: 6, mutatedPaths: 1, attemptedToolCalls: 40 });
+    const w1 = sample({ ...w0, attemptedToolCalls: 60 });
+    const w2 = sample({ ...w0, attemptedToolCalls: 60 });
+    const w3 = sample({ ...w0, attemptedToolCalls: 80 });
+    const busy = classifyRunProgress(w0, w1, 0, 0);
+    expect(busy).toMatchObject({ action: "continue", consecutiveStalls: 1, consecutiveBusyStalls: 1 });
+    const quiet = classifyRunProgress(w1, w2, busy.consecutiveStalls, busy.consecutiveBusyStalls);
+    expect(quiet).toMatchObject({ action: "ask", verdict: "stalled", consecutiveBusyStalls: 0 });
+    const busyAgain = classifyRunProgress(w2, w3, quiet.consecutiveStalls, quiet.consecutiveBusyStalls);
+    expect(busyAgain).toMatchObject({ action: "ask", verdict: "stalled", consecutiveBusyStalls: 1 });
+  });
+
+  it("with the loop brake off (busyStall false) the same busy run gets today's 'ask'", () => {
+    const base = sample({ productiveToolCalls: 6, mutatedPaths: 1, attemptedToolCalls: 40 });
+    expect(classifyRunProgress(base, sample({ ...base, attemptedToolCalls: 80 }), 1, 1, false)).toMatchObject({ action: "ask", verdict: "stalled" });
+  });
+
+  it("never touches the healthy build, nor a verification phase whose checks keep returning new results", () => {
+    // The healthy fixture with calls going out in every window (it made a call every ~108 s).
+    const healthy = BACKEND_CODER_HEALTHY.map((s, i) => sample({ ...s, attemptedToolCalls: i * 6 }));
+    // Then four windows of verify_page with no writes: each verdict differs, so each is a new result.
+    const last = healthy.at(-1)!;
+    const verifying = Array.from({ length: 4 }, (_, i) => sample({
+      ...last,
+      productiveToolCalls: last.productiveToolCalls + i + 1,
+      attemptedToolCalls: last.attemptedToolCalls + (i + 1) * 8,
+    }));
+    const { decisions, stoppedAtWindow } = replay([...healthy, ...verifying]);
+    expect(stoppedAtWindow).toBeNull();
+    expect(decisions.every((d) => d.action === "continue")).toBe(true);
+  });
+});
+
+describe("progress supervisor — what counts as a new result", () => {
+  it("an identical (tool, result) pair counts once, whatever the arguments were", () => {
+    const seen = new Set<string>();
+    expect(isNovelToolOutcome(seen, "grep_files", "No matches.", true)).toBe(true);
+    expect(isNovelToolOutcome(seen, "grep_files", "No matches.", true)).toBe(false);
+  });
+
+  it("a re-read after an edit changed the bytes counts again; the same bytes do not", () => {
+    const seen = new Set<string>();
+    expect(isNovelToolOutcome(seen, "read_file", "<html>v1</html>", true)).toBe(true);
+    expect(isNovelToolOutcome(seen, "read_file", "<html>v2</html>", true)).toBe(true);
+    expect(isNovelToolOutcome(seen, "read_file", "<html>v2</html>", true)).toBe(false);
+  });
+
+  it("the same text from another tool is another outcome", () => {
+    const seen = new Set<string>();
+    expect(isNovelToolOutcome(seen, "grep_files", "No matches.", true)).toBe(true);
+    expect(isNovelToolOutcome(seen, "glob_files", "No matches.", true)).toBe(true);
+  });
+
+  it("a failed call never counts, and is not remembered", () => {
+    const seen = new Set<string>();
+    expect(isNovelToolOutcome(seen, "web_fetch", "Error: 404", false)).toBe(false);
+    expect(seen.size).toBe(0);
+  });
+
+  it("a full memory credits an unseen result instead of stalling the run, and still knows what it holds", () => {
+    const seen = new Set<string>();
+    for (let i = 0; i < NOVEL_OUTCOME_MEMORY; i++) isNovelToolOutcome(seen, "t", `r${i}`, true);
+    expect(seen.size).toBe(NOVEL_OUTCOME_MEMORY);
+    expect(isNovelToolOutcome(seen, "t", "unseen", true)).toBe(true);
+    expect(isNovelToolOutcome(seen, "t", "r0", true)).toBe(false);
+    expect(seen.size).toBe(NOVEL_OUTCOME_MEMORY);
+  });
+});
+
+describe("loop brake — classifyCallReplay", () => {
+  it("replays the first, second and third identical call as today", () => {
+    for (const prior of [0, 1, 2]) {
+      expect(classifyCallReplay({ priorIdenticalSinceWrite: prior, priorAnswerVerbatim: true })).toEqual({ action: "replay", identicalAfter: prior + 1 });
+    }
+  });
+
+  it("refuses the fourth while the earlier answer is still verbatim in front of the model", () => {
+    expect(LOOP_REFUSE_AFTER_IDENTICAL).toBe(3);
+    expect(classifyCallReplay({ priorIdenticalSinceWrite: 3, priorAnswerVerbatim: true })).toEqual({ action: "refuse", identicalAfter: 4 });
+    expect(classifyCallReplay({ priorIdenticalSinceWrite: 7, priorAnswerVerbatim: true }).action).toBe("refuse");
+  });
+
+  it("answers in full and starts the count again once the digest or a trim took the answer away", () => {
+    expect(classifyCallReplay({ priorIdenticalSinceWrite: 3, priorAnswerVerbatim: false })).toEqual({ action: "replay", identicalAfter: 1 });
+    expect(classifyCallReplay({ priorIdenticalSinceWrite: 12, priorAnswerVerbatim: false })).toEqual({ action: "replay", identicalAfter: 1 });
+  });
+
+  it("names the loop's target by its arguments, clipped", () => {
+    expect(loopTargetOf('{"pattern":"Reveal","path":"deck.html"}')).toBe('{"pattern":"Reveal","path":"deck.html"}');
+    const long = loopTargetOf(JSON.stringify({ query: "q".repeat(500) }));
+    expect(long).toHaveLength(LOOP_TARGET_MAX_CHARS);
+    expect(long.endsWith("…")).toBe(true);
   });
 });
 

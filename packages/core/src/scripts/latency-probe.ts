@@ -5,7 +5,9 @@
  * It measures the prompt-processing facts that decide which restructuring pays off: what one
  * decision call costs (E1), how far cache reuse reaches (E2), whether small calls evict the
  * orchestrator head (E3), whether parallel small calls help (E4), whether an aborted incumbent is
- * free (E5), whether a prefill prewarm helps (E6) and what a tool-subset switch costs (E7).
+ * free (E5), whether a prefill prewarm helps (E6), what a tool-subset switch costs (E7), which
+ * rule decides whether a new conversation finds a sub-agent head cached (E8), and whether warming
+ * the orchestrator's forced heads makes a forced turn warm (E9).
  * agent/latency-probe-scenarios.ts defines the calls and the verdicts; this file sends them and
  * writes the report.
  *
@@ -16,9 +18,18 @@
  *
  * Usage (from the repo root; the package script changes there first):
  *   pnpm --filter @starlingai/core latency:probe [--base-url <url>] [--model <id>]
- *     [--experiments E1,E2,E3,E4,E5,E6,E7] [--reps 3] [--out <dir>] [--laya-ms 20] [--abort-ms 20]
- *     [--stagger-ms 1500] [--sub-agent image_creator] [--turn-ms <ms>] [--max-minutes 15]
- *     [--timeout-ms 180000] [--no-restore]
+ *     [--experiments E1,E2,E3,E4,E5,E6,E7,E8,E9] [--reps 3] [--out <dir>] [--laya-ms 20] [--abort-ms 20]
+ *     [--stagger-ms 1500] [--sub-agent image_creator] [--builder content_writer] [--turn-ms <ms>]
+ *     [--max-minutes 15] [--timeout-ms 180000] [--no-restore]
+ * E8 and E9 are not in the default set: each is a long run of its own (E8 grows five runs to up to
+ * 6x a ~7.6k-token head per repetition and puts four other agents' conversations between one of
+ * them and its new conversation, about 105 calls; E9 sends six 30k-token prompts in its
+ * eviction arm), so they are named explicitly and given the time:
+ *   latency:probe --experiments E8 --reps 3 --max-minutes 45
+ *   latency:probe --experiments E9 --reps 3 --max-minutes 40
+ * E8's answer depends on the server's --no-cache-idle-slots switch, which the report reads off
+ * llama-swap's /running: run it once as the server is, and again after the switch changes.
+ * --builder names the sub-agent whose staged-build head E8 uses.
  * --base-url defaults to SAI_PRIMARY_MODEL_URL (.env), --model to the configured primary model.
  * E2-E7 compare repetitions and need --reps 2 or more; at --reps 1 they come back inconclusive (E1
  * still answers, from one German and one English warm call per shape), so --reps 1 is a smoke run.
@@ -46,8 +57,10 @@ import { loadConfig } from "../config/loader.js";
 class UsageError extends Error {}
 
 const FLAGS_WITH_VALUE = new Set([
-  "base-url", "model", "experiments", "reps", "out", "laya-ms", "abort-ms", "stagger-ms", "sub-agent", "turn-ms", "max-minutes", "timeout-ms",
+  "base-url", "model", "experiments", "reps", "out", "laya-ms", "abort-ms", "stagger-ms", "sub-agent", "builder", "turn-ms", "max-minutes", "timeout-ms",
 ]);
+/** Long runs of their own: planned only when named (see the usage above). */
+const OPT_IN_EXPERIMENTS = new Set(["E8", "E9"]);
 const SWITCHES = new Set(["no-restore"]);
 
 function parseArgs(argv: readonly string[]): { values: Map<string, string>; switches: Set<string> } {
@@ -114,6 +127,7 @@ async function main(): Promise<void> {
   const turnMsRaw = values.get("turn-ms");
   const turnMs = turnMsRaw === undefined ? undefined : numberFlag(values, "turn-ms", 0, (n) => n > 0, "a number of milliseconds above 0");
   const subAgent = values.get("sub-agent") ?? "image_creator";
+  const builder = values.get("builder") ?? "content_writer";
   const restore = !switches.has("no-restore");
 
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -141,7 +155,7 @@ async function main(): Promise<void> {
   const experimentsArg = values.get("experiments");
   const experiments = experimentsArg
     ? [...new Set(experimentsArg.split(",").map((e) => e.trim().toUpperCase()).filter(Boolean))]
-    : [...S.EXPERIMENT_IDS];
+    : S.EXPERIMENT_IDS.filter((id) => !OPT_IN_EXPERIMENTS.has(id));
   for (const e of experiments) {
     if (!(S.EXPERIMENT_IDS as readonly string[]).includes(e)) throw new UsageError(`--experiments: unknown experiment "${e}" (known: ${S.EXPERIMENT_IDS.join(", ")})`);
   }
@@ -167,16 +181,48 @@ async function main(): Promise<void> {
       throw new UsageError(`--sub-agent: ${describeError(err)}`);
     }
   }
+  const { filterForcedOrchestrationTools } = await import("../agent/forced-orchestration-tools.js");
   let forcedSubsetTools: Scenarios.HeadShape["tools"] = [];
   if (selected.includes("E7")) {
-    const { filterForcedOrchestrationTools } = await import("../agent/runtime.js");
     // The first forced iteration of a turn without a plan: record_plan offered, execute_plan withheld.
     forcedSubsetTools = filterForcedOrchestrationTools(orchestratorHead.tools, { planRecorded: false });
   }
+  let stagedBuilderHead: Scenarios.HeadShape | undefined;
+  if (selected.includes("E8")) {
+    try {
+      stagedBuilderHead = S.collectStagedBuilderHead(builder);
+    } catch (err) {
+      throw new UsageError(`--builder: ${describeError(err)}`);
+    }
+  }
+  let forcedHeads: Scenarios.ForcedHeadSet | undefined;
+  if (selected.includes("E9")) {
+    // The warm-keeper's own heads, with the forced ones whatever the flag says: E9 is what decides
+    // whether the flag should be turned on. The date line is the turn's own builder's.
+    const { collectWarmHeads } = await import("../agent/cache-warmer.js");
+    const { buildTemporalContextPrompt } = await import("../agent/runtime.js");
+    const warm = collectWarmHeads({ forcedHeads: true });
+    const pick = (label: string): Scenarios.MultiSystemHead => {
+      const head = warm.find((h) => h.label === label);
+      if (!head) throw new Error(`the warm-keeper built no "${label}" head (is the tool registry empty?)`);
+      return { label, system: head.system.map((m) => String(m.content ?? "")), tools: head.tools };
+    };
+    const full = pick("full");
+    forcedHeads = {
+      full,
+      plan: pick("forced_plan"),
+      dispatch: pick("forced_dispatch"),
+      literalSubsetTools: filterForcedOrchestrationTools(full.tools),
+      temporal: buildTemporalContextPrompt(),
+    };
+  }
+  const flat = (head: Scenarios.MultiSystemHead, label: string): Scenarios.HeadShape => ({ label, system: head.system.join("\n\n"), tools: head.tools });
   const heads: Scenarios.HeadShape[] = [
     orchestratorHead,
     ...(selected.includes("E6") ? [subAgentHead] : []),
     ...(selected.includes("E7") ? [{ label: "forced_subset", system: orchestratorHead.system, tools: forcedSubsetTools }] : []),
+    ...(stagedBuilderHead ? [stagedBuilderHead] : []),
+    ...(forcedHeads ? [flat(forcedHeads.plan, "forced_plan"), flat(forcedHeads.dispatch, "forced_dispatch")] : []),
   ];
 
   const runId = randomUUID().slice(0, 8);
@@ -189,6 +235,8 @@ async function main(): Promise<void> {
     forcedSubsetTools,
     abortAfterMs,
     prewarmStaggerMs,
+    ...(stagedBuilderHead ? { stagedBuilderHead } : {}),
+    ...(forcedHeads ? { forcedHeads } : {}),
   };
   const plans = selected.map((id) => S.buildExperimentPlan(id, ctx));
   const plannedCalls = plans.reduce((sum, plan) => sum + plan.phases.reduce((n, phase) => n + phase.calls.length, 0), 0);
@@ -203,6 +251,7 @@ async function main(): Promise<void> {
     abortAfterMs,
     prewarmStaggerMs,
     subAgent: selected.includes("E6") ? subAgent : null,
+    builder: selected.includes("E8") ? builder : null,
     turnMs: turnMs ?? null,
     maxMinutes,
     callTimeoutMs,

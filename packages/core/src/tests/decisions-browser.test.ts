@@ -387,11 +387,14 @@ describe("adaptive: laya-browser acts where the comparisons show it agrees", () 
   const snapshot = "- link \"Home\" [ref=e5]\n- link \"Products\" [ref=e7]";
   const noAudits = { adaptive: { targetAgreement: 0.9, minSamples: 30, auditRate: 0 } };
 
-  /** 40 steps where laya-browser's click at 0.65 agreed with the model, and 10 at 0.55 where it did not. */
+  /**
+   * 200 steps where laya-browser's click at 0.65 agreed with the model, and 40 at 0.55 where it did not. 200: a level
+   * above the lowest is tested only once it holds that many at a target of 0.9 (decisions/gate.ts levelSampleFloor).
+   */
   async function evidence() {
     const { recordAgreementSample } = await import("../decisions/gate.js");
-    for (let i = 0; i < 40; i += 1) recordAgreementSample("browser_step", "en", "CLICK", 0.65, true, "laya-browser-test");
-    for (let i = 0; i < 10; i += 1) recordAgreementSample("browser_step", "en", "CLICK", 0.55, false, "laya-browser-test");
+    for (let i = 0; i < 200; i += 1) recordAgreementSample("browser_step", "en", "CLICK", 0.65, true, "laya-browser-test");
+    for (let i = 0; i < 40; i += 1) recordAgreementSample("browser_step", "en", "CLICK", 0.55, false, "laya-browser-test");
   }
 
   it("reads no page before the model's turn while nothing has qualified, and learns from every comparison", async () => {
@@ -558,13 +561,13 @@ describe("the report", () => {
   it("shows laya-browser as the point browser_step, qualified where the gate would qualify it", async () => {
     const { browserRowsForReport, buildDecisionReport } = await import("../scripts/decisions-report.js");
     const rows = [
-      ...Array.from({ length: 40 }, () => ({ point: "browser_step", language: "en", mode: "adaptive", decidedBy: "model", laya: { operation: "CLICK", ms: 20 }, gate: { answer: "CLICK", top: 0.7, agree: true } })),
-      ...Array.from({ length: 5 }, () => ({ point: "browser_step", language: "en", mode: "adaptive", decidedBy: "model", laya: { operation: "CLICK", ms: 20 }, gate: { answer: "CLICK", top: 0.55, agree: false } })),
+      ...Array.from({ length: 200 }, () => ({ point: "browser_step", language: "en", mode: "adaptive", decidedBy: "model", laya: { operation: "CLICK", ms: 20 }, gate: { answer: "CLICK", top: 0.7, agree: true } })),
+      ...Array.from({ length: 25 }, () => ({ point: "browser_step", language: "en", mode: "adaptive", decidedBy: "model", laya: { operation: "CLICK", ms: 20 }, gate: { answer: "CLICK", top: 0.55, agree: false } })),
       { point: "browser_step", language: "en", mode: "adaptive", decidedBy: "laya", laya: { operation: "CLICK", operationProbability: 0.9, target: { probability: 0.72 }, ms: 18 } },
       { point: "fast_lane", language: "en", decidedBy: "model" },
     ];
     const [report] = buildDecisionReport(browserRowsForReport(rows), 0.9, 30);
-    expect(report).toMatchObject({ point: "browser_step", language: "en", rows: 46, decidedByLaya: 1, bothAnswered: 45, incumbentMedianMs: null });
+    expect(report).toMatchObject({ point: "browser_step", language: "en", rows: 226, decidedByLaya: 1, bothAnswered: 225, incumbentMedianMs: null });
     expect(report!.answers).toEqual([expect.objectContaining({ answer: "CLICK", qualifiedLevel: 0.6 })]);
   });
 

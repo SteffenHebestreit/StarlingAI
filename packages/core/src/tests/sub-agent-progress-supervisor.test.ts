@@ -94,14 +94,19 @@ function installSteppingClock(): () => void {
  * One iteration. All three fixtures emit the same wall of reasoning and one tool call per
  * iteration; the ONLY difference is the call itself.
  *
- *  worker   a different topic every time — executes and succeeds, so successfulToolCount
- *           climbs.
- *  staller  the SAME topic every time — the first executes, and every repeat after it is
- *           served from the idempotent-call cache, which short-circuits before
- *           successfulToolCount by design. A model re-reading the same context in circles.
+ *  worker   a different query every time — executes, succeeds and brings back a result the
+ *           run has not seen, so the supervisor's progress counter climbs.
+ *  staller  the SAME query every time — the first executes, and every repeat after it is
+ *           served from the idempotent-call cache, which short-circuits before the
+ *           progress counter by design. A model re-reading the same context in circles.
  *  burner   a GRANTED tool whose every call fails. It has to be granted: an ungranted
  *           name is rejected by a different path that ends the run on its own, which
  *           would make this test pass without the supervisor doing anything.
+ *
+ * The argument is `query`, which the tool answers with the query in it. It was `topic`, which
+ * read_shared_facts ignores, so the "worker" got the byte-identical "No shared facts available
+ * yet" eight times: working only while progress meant a successful call. Progress is a NEW
+ * result now (isNovelToolOutcome), and eight identical answers are the loop shape itself.
  */
 function iteration(index: number, fixture: Fixture, reasoningChars: number) {
   const call = fixture === "burner"
@@ -109,7 +114,7 @@ function iteration(index: number, fixture: Fixture, reasoningChars: number) {
     : {
       id: `call-${index}`,
       name: "read_shared_facts",
-      arguments: { topic: fixture === "worker" ? `topic-${index}` : "the same topic, forever" },
+      arguments: { query: fixture === "worker" ? `topic-${index}` : "the same topic, forever" },
     };
   return {
     content: "",
@@ -187,5 +192,155 @@ describe("sub-agent progress supervisor — wiring", () => {
     // It used its whole budget having burned 8 x 20,000 = 160,000 reasoning chars — 3.5x
     // the cold-start budget — without ever being flagged, because it was working.
     expect(calls).toBeGreaterThanOrEqual(maxIterations);
+  });
+});
+
+/**
+ * THE BUSY STALL, at max effort — the hole run c297c5ea fell through.
+ *
+ * Max effort grants every long run an unbounded budget, and the supervisor's 'ask' for a run that
+ * has written something is dropped for an unbounded run (notifyLongRunning), so a run that wrote
+ * one file and then circled was watched by nothing. The loop here is the one the refusal rule
+ * cannot see: the arguments change every call (a fresh pattern each time), so no cache ever
+ * answers, every call executes and succeeds — and every answer is the same "No matches.". Counted
+ * as successful calls that is progress in every window; counted as new results it is a stall
+ * with 5 calls in each window, i.e. busy.
+ */
+describe("sub-agent progress supervisor — a busy stall at max effort", () => {
+  const BUSY_CALLS_PER_ITERATION = 5;
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    delete process.env["SAI_CONFIG_PATH"];
+    completeMock.mockReset();
+    vi.resetModules();
+    const configLoader = await import("../config/loader.js");
+    configLoader.resetConfigForTests();
+  });
+
+  /** `loopBrake: false` runs it with agents.performance.loopBrake off; `writeFirst: false` skips the
+   *  opening edit; `samePattern` asks the SAME grep every call (so the caches answer the repeats). */
+  async function runBusyLoop(
+    grepOutput: (pattern: string) => string,
+    maxIterations: number,
+    opts: { loopBrake?: boolean; writeFirst?: boolean; samePattern?: boolean } = {},
+  ) {
+    const tempDir = mkdtempSync(join(tmpdir(), "starlingai-busy-stall-"));
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      ...(opts.loopBrake === false ? { agents: { performance: { loopBrake: false } } } : {}),
+      subAgents: {
+        busy_agent: {
+          description: "Busy-stall fixture",
+          systemPrompt: "Work the task.",
+          tools: ["edit_file", "grep_files"],
+          maxIterations,
+          turnTimeoutMs: 1_800_000,
+        },
+      },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const step = installSteppingClock();
+    let turn = 0;
+    let pattern = 0;
+    completeMock.mockImplementation(() => {
+      // One real edit first — the run HAS written something, which is what made the old rule say 'ask'.
+      const tool_calls = turn++ === 0 && opts.writeFirst !== false
+        ? [{ id: "edit-0", name: "edit_file", arguments: { path: "deck.html", old_string: "a", new_string: "b" } }]
+        : Array.from({ length: BUSY_CALLS_PER_ITERATION }, () => {
+          pattern += 1;
+          return { id: `grep-${pattern}`, name: "grep_files", arguments: { pattern: opts.samePattern ? "p" : `p${pattern}`, path: "deck.html" } };
+        });
+      step();
+      return Promise.resolve({ content: "", tool_calls, usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 }, finishReason: "tool_calls" });
+    });
+
+    const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+    const { registerTool, unregisterTool } = await import("../tools/registry.js");
+    const { runWithEffortContext } = await import("../runtime/effort-context.js");
+    let greps = 0;
+    registerTool({
+      name: "edit_file",
+      description: "Stub edit.",
+      parameters: { type: "object", properties: {} },
+      async execute(args) {
+        return { success: true, output: `Edited ${String(args["path"])}.`, metadata: { outputPath: String(args["path"]), path: String(args["path"]) } };
+      },
+    });
+    registerTool({
+      name: "grep_files",
+      description: "Stub grep.",
+      parameters: { type: "object", properties: {} },
+      async execute(args) {
+        greps += 1;
+        return { success: true, output: grepOutput(String(args["pattern"])) };
+      },
+    });
+    try {
+      const result = await runWithEffortContext("max", () => runSubAgentWithStats({
+        agentName: "busy_agent",
+        task: "Find where the deck initialises.",
+        parentSessionId: "busy-stall-wiring",
+        workspacePath: tempDir,
+      }));
+      return { result, greps, calls: completeMock.mock.calls.length };
+    } finally {
+      unregisterTool("edit_file");
+      unregisterTool("grep_files");
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }
+
+  it("winds the run down as looping within two windows of the loop's start, though it wrote a file", async () => {
+    const { result, greps, calls } = await runBusyLoop(() => "No matches.", 12);
+    expect(result.output).toContain(SUPERVISOR_WIND_DOWN);
+    // One window per model call: the edit's window and the first grep window each bring a new
+    // result ("No matches." is new once); the next two are busy with nothing new, and the sample
+    // after them winds the run down. Then the wind-down's own synthesis call — 5 in all, of 12.
+    expect(calls).toBe(5);
+    // Every grep executed — no cache and no refusal is what stopped this one.
+    expect(greps).toBe(3 * BUSY_CALLS_PER_ITERATION);
+    expect(result.loopEnforced).toMatchObject({ tool: "grep_files", via: "busy_stall", endedRun: true });
+  });
+
+  it("leaves the same run alone when each call brings back something new", async () => {
+    const { result, calls } = await runBusyLoop((pattern) => `deck.html:12: ${pattern} found`, 8);
+    expect(result.output).not.toContain(SUPERVISOR_WIND_DOWN);
+    expect(calls).toBeGreaterThanOrEqual(8);
+    expect(result.loopEnforced).toBeUndefined();
+  });
+
+  // THE ESCAPE HATCH, through the loop. agents.performance.loopBrake false promises the supervisor
+  // exactly as it was: successful calls as progress AND no busy arm. The pure-policy test cannot see
+  // whether sub-agent.ts passes the flag on, and each half of the promise needs its own run,
+  // because either half alone hides the other.
+
+  it("loopBrake false: a run that wrote a file and then re-asks the cached grep is not wound down (no busy arm)", async () => {
+    // The same grep every call: one execution, then cache replays. Successful calls stay flat, so
+    // the old rule sees a stall with a file written — 'ask', which max effort drops. With the busy
+    // arm wired in regardless of the flag, 5 cached calls a window would wind it down as looping.
+    const { result, calls, greps } = await runBusyLoop(() => "No matches.", 8, { loopBrake: false, samePattern: true });
+    expect(greps).toBe(1);
+    expect(result.output).not.toContain(SUPERVISOR_WIND_DOWN);
+    expect(calls).toBeGreaterThanOrEqual(8);
+    expect(result.loopEnforced).toBeUndefined();
+  });
+
+  it("loopBrake false: successful calls are progress again, so fresh questions with the same empty answer run on", async () => {
+    // Nothing written, every call a new pattern that executes and succeeds with the same text.
+    // Counted as successes (the old rule) that is progress in every window; counted as new results
+    // it is a stall with nothing written, which winds the run down.
+    const { result, calls } = await runBusyLoop(() => "No matches.", 8, { loopBrake: false, writeFirst: false });
+    expect(result.output).not.toContain(SUPERVISOR_WIND_DOWN);
+    expect(calls).toBeGreaterThanOrEqual(8);
+    expect(result.loopEnforced).toBeUndefined();
+  });
+
+  it("loopBrake on: the same fresh-questions run IS wound down, so the case above discriminates", async () => {
+    const { result, calls } = await runBusyLoop(() => "No matches.", 8, { writeFirst: false });
+    expect(result.output).toContain(SUPERVISOR_WIND_DOWN);
+    expect(calls).toBeLessThan(8);
   });
 });

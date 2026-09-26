@@ -1,8 +1,9 @@
 """The Laya sidecar: fast local choice decisions for StarlingAI.
 
     GET  /health               models, devices, calls, CPU fallbacks
-    POST /v1/decide            {"questions": [{"id", "question", "options": {key: description}, "state"}]}
-                               -> {"answers": {id: {"choice": key, "probabilities": {key: p}}}, "ms", "tokens"}
+    POST /v1/decide            {"questions": [{"id", "question", "options": {key: description}, "state", "max_len"?}]}
+                               -> {"answers": {id: {"choice": key, "probabilities": {key: p}, "maxLen", "truncatedTokens"}},
+                                   "ms", "tokens"}
     POST /v1/browser/step      {"goal", "observation": <jev snapshot>, "history": [...], "excluded": [...]}
                                -> {"operation", "operationProbability", "target" | "control", ...}
 
@@ -30,7 +31,7 @@ from typing import Any, Dict
 from fastapi import Body, FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from . import browser, generic, references
+from . import browser, generic, references, window
 from .models import Model
 
 logging.basicConfig(level=os.environ.get("LAYA_LOG_LEVEL", "INFO"))
@@ -104,7 +105,9 @@ def decide(body: Any = Body(...)):
     def run() -> Dict[str, Any]:
         questions = generic.validate(body)
         model = MODELS["decision"]
-        result = generic.decide_all(lambda state, qs: model.run(lambda agent: agent.system_one(state, qs)), questions)
+        # Each question through its own window (generic.window_of), with the tokens that window cut (app/window.py).
+        result = generic.decide_all(
+            lambda state, qs, max_len: model.run(lambda agent: window.system_one_measured(agent, state, qs, max_len)), questions)
         return {**result, "model": model.version}
     return _answer(run)
 

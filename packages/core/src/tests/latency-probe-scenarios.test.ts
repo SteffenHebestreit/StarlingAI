@@ -336,6 +336,16 @@ describe("the probe's heads and inline prompts match the running code", () => {
     expect(fresh.subAgentHeadDate(new Date(2026, 8, 25))).toBe("Friday, September 25, 2026");
   });
 
+  it("shapes E8's staged-builder head: the fresh staged directive first, the agent's prompt, and every tool uncapped", async () => {
+    const { S: fresh } = await boot({});
+    const { buildStagedArtifactBuildGuidance } = await import("../agent/sub-agent-prompt-guidance.js");
+    const head = fresh.collectStagedBuilderHead("wide_agent", "Friday, September 25, 2026");
+    expect(head.system.startsWith(`${buildStagedArtifactBuildGuidance()}\n\nYou do much.\n\nAgent name: wide_agent\n`)).toBe(true);
+    // No SUB_AGENT_HEAD_MAX_TOOLS cap: the head is the agent's whole tool block, as the runner sends it.
+    expect(head.tools.length).toBeGreaterThan(fresh.SUB_AGENT_HEAD_MAX_TOOLS);
+    expect(() => fresh.collectStagedBuilderHead("no_such_agent")).toThrow(/no sub-agent "no_such_agent"/);
+  });
+
   it("reads the decision settings the way the call sites read them", async () => {
     const off = { qaEvidenceRequired: false, qaToolJudge: false, qaStrictVerdicts: false };
     const { S: plain } = await boot({}, { orchestration: off });
@@ -421,7 +431,7 @@ describe("experiment plans", () => {
   });
 
   it("opens every nonce line with a start no other nonce of the run shares, so a cold call finds nothing cached", () => {
-    const ctx = context({ reps: 3 });
+    const ctx = context({ reps: 3, stagedBuilderHead: STAGED, forcedHeads: FORCED });
     const lines = new Set<string>();
     for (const id of S.EXPERIMENT_IDS) {
       for (const r of requestsOf(S.buildExperimentPlan(id, ctx))) if (firstSystem(r).includes("latency probe")) lines.add(firstSystem(r));
@@ -1162,5 +1172,269 @@ describe("report", () => {
     }
     expect(json).not.toContain(HEAD.system);
     expect(json).not.toContain(S.SYNTHETIC_MEMORY_CAPSULE.slice(0, 40));
+  });
+});
+
+// ── E8 and E9: the cache plan's probes ─────────────────────────────────────────────────────────
+
+/** A head big enough that the E8 runs have steps to take: ~32k characters of system text. */
+const STAGED: S.HeadShape = { label: "staged_builder:probe", system: `STAGED BUILD directive.\n\n${S.fillerText(8_000)}`, tools: [tool("write_file"), tool("edit_file")] };
+const MODULE = "## Swarm Rules\nRoute to specialists.";
+const FORCED: S.ForcedHeadSet = {
+  full: { label: "full", system: [HEAD.system], tools: HEAD.tools },
+  plan: { label: "forced_plan", system: [HEAD.system, MODULE], tools: [tool("delegate_to_agent"), tool("search_agents"), tool("record_plan")] },
+  dispatch: { label: "forced_dispatch", system: [HEAD.system, MODULE], tools: [tool("delegate_to_agent"), tool("search_agents"), tool("execute_plan")] },
+  literalSubsetTools: [tool("delegate_to_agent"), tool("search_agents"), tool("execute_plan")],
+  temporal: "Authoritative temporal context for this turn: a synthetic date line.",
+};
+
+describe("E8 and E9 plans", () => {
+  it("withNonceTool puts a marker named after the nonce first in the tool block, so a tools-first template is cold too", () => {
+    const a = S.withNonceTool(HEAD.tools, "run1-E8-r0-L3");
+    const b = S.withNonceTool(HEAD.tools, "run1-E8-r0-L6");
+    expect(a.slice(1)).toEqual(HEAD.tools);
+    expect(a[0]!.name).toBe(`probe_marker_${S.nonceTag("run1-E8-r0-L3")}`);
+    expect(a[0]!.name).not.toBe(b[0]!.name);
+  });
+
+  it("E8: per repetition the head's size, five runs grown to their multiple, other agents' traffic in (d), and the concurrent arm", async () => {
+    const { estimatePromptTokensForRequest: estimate } = await import("../providers/lmstudio.js");
+    const plan = S.buildExperimentPlan("E8", context({ reps: 1, stagedBuilderHead: STAGED }));
+    const requests = requestsOf(plan);
+    expect(requests[0]!.step).toBe("head_size");
+    const headEstimate = estimate(S.headMessages(STAGED, "."), STAGED.tools);
+    for (const arm of S.E8_ARMS) {
+      const armCalls = requests.filter((r) => r.tags?.["arm"] === arm && r.step !== "unrelated" && r.step !== "interleaved");
+      const multiplier = Number(armCalls[0]!.tags!["multiplier"]);
+      // One nonce per arm, in the system text AND leading the tool block, on every call of the arm.
+      expect(new Set(armCalls.map((r) => firstSystem(r))).size).toBe(1);
+      expect(new Set(armCalls.map((r) => r.tools[0]!.name)).size).toBe(1);
+      expect(armCalls.every((r) => r.tools.length === STAGED.tools.length + 1)).toBe(true);
+      // The run grows by appending: every grow call extends the one before it.
+      const grows = armCalls.filter((r) => r.step === "grow_cold" || r.step === "grow");
+      for (let i = 1; i < grows.length; i += 1) {
+        expect(grows[i]!.messages.slice(0, grows[i - 1]!.messages.length)).toEqual(grows[i - 1]!.messages);
+      }
+      // ...to its multiple of the head, measured in one unit (the provider's estimator), and by no
+      // more than one step past it.
+      const last = grows[grows.length - 1]!;
+      const reached = estimate(last.messages.slice(1), STAGED.tools);
+      const step = estimate(last.messages.slice(-2));
+      expect(reached).toBeGreaterThanOrEqual(multiplier * headEstimate);
+      expect(reached).toBeLessThan(multiplier * headEstimate + step + 50);
+      const tail = armCalls.slice(grows.length).map((r) => r.step);
+      expect(tail).toEqual(arm === "L6_head_only" ? ["head_only", "consume_first", "consume_second"]
+        : arm === "L1.5_interleaved" ? ["new_conversation_interleaved"] : ["new_conversation"]);
+      // A new conversation: the same head, a different task.
+      const fresh = armCalls[grows.length + (arm === "L6_head_only" ? 1 : 0)]!;
+      expect(fresh.messages.length).toBe(3);
+      expect(lastUser(fresh)).not.toBe(lastUser(grows[0]!));
+    }
+    // The unrelated call before a new conversation has a nonce of its own: it shares nothing.
+    const unrelated = requests.filter((r) => r.step === "unrelated");
+    expect(unrelated).toHaveLength(S.E8_ARMS.length - 1);
+    expect(new Set(unrelated.map((r) => firstSystem(r))).size).toBe(S.E8_ARMS.length - 1);
+    // (d): after the 1.5x run and before its new conversation, other agents' conversations — one
+    // per slot, each on a head of its own (its own nonce, no tools) of about 6k tokens.
+    const interleavedArm = requests.filter((r) => r.tags?.["arm"] === "L1.5_interleaved").map((r) => r.step);
+    const lastGrowAt = interleavedArm.lastIndexOf("grow");
+    expect(interleavedArm.slice(lastGrowAt + 1)).toEqual([...Array<string>(S.E8_INTERLEAVED_HEADS).fill("interleaved"), "new_conversation_interleaved"]);
+    const others = requests.filter((r) => r.step === "interleaved");
+    expect(new Set(others.map((r) => firstSystem(r))).size).toBe(S.E8_INTERLEAVED_HEADS);
+    expect(others.every((r) => r.tools.length === 0)).toBe(true);
+    // Sized like the filler everywhere else here: about four characters per token of English prose.
+    const otherChars = others[0]!.messages.reduce((n, m) => n + String(m.content ?? "").length, 0);
+    expect(otherChars).toBeGreaterThan(S.E8_INTERLEAVED_HEAD_TOKENS * S.FILLER_CHARS_PER_TOKEN * 0.95);
+    expect(otherChars).toBeLessThan(S.E8_INTERLEAVED_HEAD_TOKENS * S.FILLER_CHARS_PER_TOKEN * 1.1);
+    // (f): a finished prewarm, then three new conversations in ONE phase.
+    const concurrent = plan.phases[plan.phases.length - 1]!;
+    expect(concurrent.calls.map((c) => c.request.step)).toEqual(["concurrent_new", "concurrent_new", "concurrent_new"]);
+    expect(plan.phases[plan.phases.length - 2]!.calls[0]!.request.step).toBe("prewarm");
+    expect(() => S.buildExperimentPlan("E8", context())).toThrow(/staged builder head/);
+  });
+
+  it("E9: four interleaved arms; in TREATMENT each live forced call's head starts with a head the arm warmed", async () => {
+    const { normalizeMessagesForModel } = await import("../providers/lmstudio.js");
+    const folded = (r: S.ProbeRequest) => String(normalizeMessagesForModel(r.messages, "qwen")[0]!.content);
+    const plan = S.buildExperimentPlan("E9", context({ reps: 1, forcedHeads: FORCED }));
+    const requests = requestsOf(plan);
+    const steps = (arm: string) => requests.filter((r) => r.tags?.["arm"] === arm).map((r) => r.step);
+    expect(steps("control")).toEqual(["control_warm_full", "control_live_a", "control_live_b"]);
+    expect(steps("treatment")).toEqual(["treatment_warm_full", "treatment_warm_plan", "treatment_warm_dispatch", "treatment_live_a", "treatment_live_b", "treatment_full_after", "treatment_rewarm_plan", "treatment_rewarm_dispatch"]);
+    expect(steps("literal")).toEqual(["literal_warm_full", "literal_warm_literal_subset", "literal_warm_full_module", "literal_live_a", "literal_live_b"]);
+    expect(steps("eviction")).toEqual(["eviction_warm_full", "eviction_warm_plan", "eviction_warm_dispatch", ...Array<string>(S.E9_EVICTION_PROMPTS).fill("eviction_evict"), "eviction_live_a"]);
+
+    const byStep = (step: string) => requests.find((r) => r.step === step)!;
+    for (const [warmStep, liveStep] of [["treatment_warm_plan", "treatment_live_a"], ["treatment_warm_dispatch", "treatment_live_b"]] as const) {
+      const warm = byStep(warmStep);
+      const live = byStep(liveStep);
+      expect(JSON.stringify(live.tools)).toBe(JSON.stringify(warm.tools));
+      expect(folded(live).startsWith(folded(warm))).toBe(true);
+      expect(folded(live).length).toBeGreaterThan(folded(warm).length);
+      expect(folded(live)).toContain(FORCED.temporal);
+    }
+    // CONTROL warmed only the full block: its live forced call meets a tool block nothing warmed.
+    expect(JSON.stringify(byStep("control_live_a").tools)).not.toBe(JSON.stringify(byStep("control_warm_full").tools));
+    // LITERAL: the no-plan-argument subset on the lean base, and the full block on base + module.
+    expect(byStep("literal_warm_literal_subset").tools.slice(1)).toEqual(FORCED.literalSubsetTools);
+    expect(folded(byStep("literal_warm_full_module"))).toContain(MODULE);
+    // Every arm its own nonce; the eviction prompts each their own too, and about 30k tokens.
+    expect(new Set(S.E9_ARMS.map((arm) => firstSystem(byStep(`${arm}_warm_full`)))).size).toBe(4);
+    const evictions = requests.filter((r) => r.step === "eviction_evict");
+    expect(new Set(evictions.map((r) => firstSystem(r))).size).toBe(S.E9_EVICTION_PROMPTS);
+    expect(lastUser(evictions[0]!).length).toBeGreaterThan(S.E9_EVICTION_TOKENS * S.FILLER_CHARS_PER_TOKEN * 0.95);
+    expect(() => S.buildExperimentPlan("E9", context())).toThrow(/forced heads/);
+  });
+
+  it("records the server's idle-slot switch, which decides what E8 should see", () => {
+    expect(S.extractServerFlags("llama-server -m /m/q.gguf --no-cache-idle-slots -np 4")).toMatchObject({ noCacheIdleSlots: true, parallel: "4" });
+    expect(S.extractServerFlags("llama-server --cache-idle-slots")).toMatchObject({ cacheIdleSlots: true });
+  });
+});
+
+describe("E8 verdict", () => {
+  const H = 7_600;
+  const T = 1_500;
+  const tagged = (r: S.CallResult, tags: Record<string, number | string>): S.CallResult => ({ ...r, tags });
+  const warmCall = (step: string, rep: number, tags: Record<string, number | string>) =>
+    tagged(canned("E8", step, rep, { wall: 2_500, promptN: T, cacheN: H, promptMs: 2_000 }), tags);
+  const coldCall = (step: string, rep: number, tags: Record<string, number | string>) =>
+    tagged(canned("E8", step, rep, { wall: 11_000, promptN: H + T, cacheN: 0, promptMs: 10_000 }), tags);
+  function e8(warmAt: Record<string, boolean>, opts: { reps?: number; consume?: [boolean, boolean]; concurrentWarm?: number } = {}): S.CallResult[] {
+    const out: S.CallResult[] = [];
+    for (let rep = 0; rep < (opts.reps ?? 3); rep += 1) {
+      out.push(canned("E8", "head_size", rep, { promptN: H, cacheN: 0, promptMs: 8_000 }));
+      for (const m of S.E8_RUN_MULTIPLIERS) {
+        const arm = `L${m}`;
+        out.push(tagged(canned("E8", "grow_cold", rep, { promptN: H + T, cacheN: 0, promptMs: 10_000 }), { arm, multiplier: m }));
+        out.push(tagged(canned("E8", "grow", rep, { promptN: 1_200, cacheN: Math.round(m * H) - 1_200, promptMs: 1_500 }), { arm, multiplier: m, step: 9 }));
+        out.push((warmAt[arm] ? warmCall : coldCall)("new_conversation", rep, { arm, multiplier: m }));
+      }
+      if (opts.consume) {
+        out.push((opts.consume[0] ? warmCall : coldCall)("consume_first", rep, { arm: "L6_head_only", multiplier: 6 }));
+        out.push((opts.consume[1] ? warmCall : coldCall)("consume_second", rep, { arm: "L6_head_only", multiplier: 6 }));
+      }
+      for (let i = 0; i < S.E8_CONCURRENT; i += 1) {
+        out.push((i < (opts.concurrentWarm ?? 1) ? warmCall : coldCall)("concurrent_new", rep, { arm: "concurrent", slot: i }));
+      }
+    }
+    return out;
+  }
+
+  it("calls a call warm only when the head was reused, only the tail processed, in about the tail's time", () => {
+    const base = canned("E8", "new_conversation", 0, { promptN: T, cacheN: H, promptMs: 2_000 });
+    expect(S.isE8Warm(base, H, T)).toBe(true);
+    // 0.95 x 7,600 = 7,220 reused; the tail plus 64 processed; 1,500/900 s + 1 s = 2,667 ms.
+    expect(S.isE8Warm(canned("E8", "x", 0, { promptN: T, cacheN: 7_219, promptMs: 2_000 }), H, T)).toBe(false);
+    expect(S.isE8Warm(canned("E8", "x", 0, { promptN: T + 65, cacheN: H, promptMs: 2_000 }), H, T)).toBe(false);
+    expect(S.isE8Warm(canned("E8", "x", 0, { promptN: T, cacheN: H, promptMs: 2_700 }), H, T)).toBe(false);
+  });
+
+  it("names the rule: warm at 1.5x and 3x, cold at 6x is the quarter-share load rule, not checkpoint eviction", () => {
+    const v = S.computeVerdict("E8", e8({ "L1.5": true, L3: true, L6: false }, { consume: [true, false], concurrentWarm: 1 }), CTX);
+    expect(v.code).toBe("load_rule_quarter_share");
+    expect(v.conclusive).toBe(true);
+    expect(v.numbers["headTokens"]).toBe(H);
+    expect(v.numbers["tailTokens"]).toBe(T);
+    expect(v.numbers["L3ReachedMultiple"]).toBe(3);
+    expect(v.numbers["consumeFirstWarm"]).toBe(3);
+    expect(v.numbers["consumeSecondWarm"]).toBe(0);
+    expect(v.numbers["concurrentExactlyOneReps"]).toBe(3);
+    expect(v.answer).toContain("used up");
+    expect(S.computeVerdict("E8", e8({ "L1.5": true, L3: true, L6: true }), CTX).code).toBe("entries_survive");
+    expect(S.computeVerdict("E8", e8({ "L1.5": false, L3: false, L6: false }), CTX).code).toBe("no_reuse_across_conversations");
+    expect(S.computeVerdict("E8", e8({ "L1.5": false, L3: true, L6: false }), CTX).code).toBe("mixed");
+    // Warm only after the SHORT run is not the quarter rule either: at 3x the new prompt still
+    // shares a third of the entry, so the rule predicts warm there too.
+    expect(S.computeVerdict("E8", e8({ "L1.5": true, L3: false, L6: false }), CTX).code).toBe("mixed");
+  });
+
+  it("reports (d), the head after other agents' conversations, apart from the plain 1.5x arm", () => {
+    const withInterleaved = (warm: boolean) => e8({ "L1.5": true, L3: true, L6: false }).concat([0, 1, 2].map((rep) =>
+      (warm ? warmCall : coldCall)("new_conversation_interleaved", rep, { arm: "L1.5_interleaved", multiplier: 1.5 })));
+    const kept = S.computeVerdict("E8", withInterleaved(true), CTX);
+    expect(kept.numbers).toMatchObject({ interleavedWarm: 3, interleavedCalls: 3, "L1_5Calls": 3, "L1_5Warm": 3 });
+    expect(kept.answer).toContain("still warm in 3 of 3");
+    const lost = S.computeVerdict("E8", withInterleaved(false), CTX);
+    expect(lost.numbers).toMatchObject({ interleavedWarm: 0, interleavedCalls: 3, "L1_5Warm": 3 });
+    expect(lost.answer).toContain("pushed it out");
+    // It is a separate question: it does not move the rule's classification.
+    expect(lost.code).toBe("load_rule_quarter_share");
+  });
+
+  it("is not conclusive with fewer than three repetitions, a run on the wrong side of 4x, or without the head's size", () => {
+    expect(S.computeVerdict("E8", e8({ "L1.5": true, L3: true, L6: false }, { reps: 2 }), CTX).conclusive).toBe(false);
+    const overshot = e8({ "L1.5": true, L3: true, L6: false }).map((r) => r.step === "grow" && r.tags?.["arm"] === "L3"
+      ? { ...r, timings: { ...r.timings!, cacheN: Math.round(4.5 * H) - 1_200 } }
+      : r);
+    const v = S.computeVerdict("E8", overshot, CTX);
+    expect(v.conclusive).toBe(false);
+    expect(v.notes.join(" ")).toContain("other side of the 4x boundary");
+    expect(S.computeVerdict("E8", e8({ L3: true }).filter((r) => r.step !== "head_size"), CTX).code).toBe("inconclusive");
+  });
+});
+
+describe("E9 verdict", () => {
+  const liveRow = (step: string, rep: number, cacheN: number, promptN: number, promptMs: number) =>
+    canned("E9", step, rep, { wall: promptMs + 500, promptN, cacheN, promptMs });
+  function e9(opts: { reps?: number; treatmentCacheN?: number; controlCacheN?: number; fullShare?: number } = {}): S.CallResult[] {
+    const out: S.CallResult[] = [];
+    for (let rep = 0; rep < (opts.reps ?? 3); rep += 1) {
+      out.push(liveRow("treatment_warm_plan", rep, 0, 12_500, 13_000));
+      out.push(liveRow("treatment_warm_dispatch", rep, 0, 12_400, 12_900));
+      const tc = opts.treatmentCacheN ?? 12_000;
+      out.push(liveRow("treatment_live_a", rep, tc, 13_400 - tc, tc >= 11_800 ? 2_000 : 9_000));
+      out.push(liveRow("treatment_live_b", rep, tc, 13_300 - tc, tc >= 11_800 ? 1_900 : 9_000));
+      const cc = opts.controlCacheN ?? 0;
+      out.push(liveRow("control_live_a", rep, cc, 13_400 - cc, 12_500));
+      out.push(liveRow("control_live_b", rep, cc, 13_300 - cc, 12_400));
+      const share = opts.fullShare ?? 0.95;
+      out.push(liveRow("treatment_full_after", rep, Math.round(14_000 * share), Math.round(14_000 * (1 - share)), 2_500));
+      out.push(liveRow("treatment_rewarm_plan", rep, 12_000, 500, 900));
+      out.push(liveRow("treatment_rewarm_dispatch", rep, 12_000, 400, 800));
+      out.push(liveRow("literal_live_a", rep, 0, 13_400, 12_000));
+      out.push(liveRow("literal_live_b", rep, 9_000, 4_300, 5_000));
+      out.push(liveRow("eviction_live_a", rep, 0, 13_400, 12_600));
+    }
+    return out;
+  }
+
+  it("passes when TREATMENT's forced calls reuse their heads, CONTROL's do not, the arms separate and the full head stays", () => {
+    const v = S.computeVerdict("E9", e9(), CTX);
+    expect(v.code).toBe("forced_heads_warm");
+    expect(v.conclusive).toBe(true);
+    expect(v.numbers).toMatchObject({ treatmentPassReps: 3, controlColdReps: 3, separatedReps: 3, fullKeptReps: 3, warmPlanColdMs: 13_000, rewarmPlanMs: 900 });
+    expect(v.numbers["literalLiveBShare"]).toBeCloseTo(9_000 / 13_300, 3);
+  });
+
+  it("rejects TREATMENT that reused under half its prompt on two of three repetitions", () => {
+    expect(S.computeVerdict("E9", e9({ treatmentCacheN: 3_000 }), CTX).code).toBe("treatment_rejected");
+    // The rule is two of three, not three of three: one good repetition does not rescue it...
+    const twoBad = e9().map((r) => (r.rep < 2 && r.step.startsWith("treatment_live_") ? { ...r, timings: { ...r.timings!, cacheN: 3_000, promptN: 10_400, promptMs: 9_000 } } : r));
+    expect(S.computeVerdict("E9", twoBad, CTX).code).toBe("treatment_rejected");
+    // ...and one bad repetition alone is a failed criterion, not a rejection.
+    const oneBad = e9().map((r) => (r.rep === 0 && r.step.startsWith("treatment_live_") ? { ...r, timings: { ...r.timings!, cacheN: 3_000, promptN: 10_400, promptMs: 9_000 } } : r));
+    expect(S.computeVerdict("E9", oneBad, CTX).code).toBe("criteria_not_met");
+  });
+
+  it("counts a live call warm only when it reused the warm call's prompt to within the slack", () => {
+    // treatment_warm_plan processed 12,500 tokens, so live A must find at least 12,500 - 700 = 11,800.
+    const at = (cacheN: number) => e9().map((r) => (r.step === "treatment_live_a" ? { ...r, timings: { ...r.timings!, cacheN, promptN: 13_400 - cacheN, promptMs: 2_000 } } : r));
+    expect(S.computeVerdict("E9", at(11_800), CTX).code).toBe("forced_heads_warm");
+    const short = S.computeVerdict("E9", at(11_799), CTX);
+    expect(short.code).toBe("criteria_not_met");
+    expect(short.answer).toContain("TREATMENT live calls warm in 0 of 3");
+  });
+
+  it("does not pass when CONTROL was already warm, or the full head was pushed out", () => {
+    // A CONTROL live call that found 5,000 tokens: the arms were not independent.
+    const warmControl = S.computeVerdict("E9", e9({ controlCacheN: 5_000 }), CTX);
+    expect(warmControl.code).toBe("criteria_not_met");
+    expect(warmControl.answer).toContain("CONTROL live calls cold in 0 of 3");
+    expect(S.computeVerdict("E9", e9({ fullShare: 0.5 }), CTX).code).toBe("criteria_not_met");
+  });
+
+  it("gives no verdict under three repetitions", () => {
+    expect(S.computeVerdict("E9", e9({ reps: 2 }), CTX).code).toBe("inconclusive");
   });
 });

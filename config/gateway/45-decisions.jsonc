@@ -44,6 +44,16 @@
   // A run replaces the served checkpoint only when it agrees with the incumbent more often on
   // held-out cases (.starlingai/laya/<model>/runs/<run>/metrics.json says why). The gate's evidence
   // is kept per checkpoint version, so a new one earns its handover from its own cases.
+  //
+  // "readout" (default off everywhere): the incumbent itself read by its logits — the resident
+  // model answers one option letter with thinking off, and its probabilities over the letters are
+  // the answer (packages/core/src/decisions/logit-readout.ts). "shadow" asks it beside today's call
+  // and records both in .starlingai/decisions/readout-ledger.jsonl; "on" lets it decide, but only
+  // on a point whose own Laya mode is "off" (the default below is adaptive): where Laya learns
+  // from the incumbent, the ledger cannot yet tell the readout's answers apart, so "on" runs as
+  // "shadow" there. Measure first: `pnpm --filter @starlingai/core decisions:readout` (agreement
+  // with today's answer, ECE before and after a fitted temperature, flips under a swapped option
+  // order, wall time).
   "decisions": {
     "defaultMode": "adaptive",
     "adaptive": { "targetAgreement": 0.9, "minSamples": 30, "auditRate": 0.1 },

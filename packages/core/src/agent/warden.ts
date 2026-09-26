@@ -209,6 +209,43 @@ export function isSessionTurnActive(sessionId: string): boolean {
   return Boolean(controller && !controller.signal.aborted);
 }
 
+// ── Sub-agent run stop registry ───────────────────────────────────────────────
+// A sub-agent run counts its tool calls under its OWN session id (sub:<parent>:<agent>:<ts>),
+// so a tool_storm names the run, not the turn. The turn registry above never held such an id,
+// and its prefix match runs the other way (a stored turn id that starts with the subject), so the
+// kill switch reached nothing: in c297c5ea five session_emergency_stopped alerts on content_writer
+// runs (01:49:35 and 01:53:35, 02:01:05 and 02:04:35, 02:39:35) stopped none of them, and each ran
+// on for another 2-6 minutes. A running sub-agent registers here instead. Its handler winds the
+// run down the way the progress supervisor does, so the next iteration hands back what the run
+// has; the turn and the run's siblings go on.
+
+/** What the warden tells a run it stops. */
+export interface WardenRunStop {
+  alert: WardenAlert["type"];
+  detail: string;
+}
+
+/** run session id → the run's wind-down. */
+const _runStopHandlers = new Map<string, (stop: WardenRunStop) => void>();
+
+/**
+ * Register a running sub-agent under its own session id for the warden's emergency stop. Returns
+ * the deregistration, which removes only this handler (a later run cannot reuse the id, but a
+ * handler must never outlive the run that registered it).
+ */
+export function registerWardenRunStop(runSessionId: string, onStop: (stop: WardenRunStop) => void): () => void {
+  _runStopHandlers.set(runSessionId, onStop);
+  return () => {
+    if (_runStopHandlers.get(runSessionId) === onStop) _runStopHandlers.delete(runSessionId);
+  };
+}
+
+/** Whether a run is registered for the emergency stop (for tests: a handler that outlived its run
+ *  would keep the run's whole closure, its history included, alive for the life of the process). */
+export function isWardenRunStopRegistered(runSessionId: string): boolean {
+  return _runStopHandlers.has(runSessionId);
+}
+
 /**
  * Abort the active turn for a session IF this process owns it (CTL-205: the
  * distributed control plane calls this on every process; only the owner acts).
@@ -617,6 +654,7 @@ export function resetWardenForTests(): void {
   _toolStormImminentCooldown.clear();
   _agentMessageImminentCooldown.clear();
   _sessionAbortControllers.clear();
+  _runStopHandlers.clear();
   _degradedSessions.clear();
   _alertRing.length = 0;
   _alertsEmitted = 0;
@@ -1067,6 +1105,27 @@ function maybeAbortSession(alert: WardenAlert): void {
   if (!["tool_storm", "tool_escape_attempt", "computer_credential_prompt_loop", "computer_clipboard_exfiltration"].includes(alert.type)) return;
 
   const sessionId = extractSessionIdFromSubject(alert.subject);
+
+  // A running sub-agent named by its full session id (see registerWardenRunStop). Exact match
+  // only: a subject cut to a prefix ("agent@<first 20 chars>") would match every run of the turn.
+  // The whole subject is tried first: tool_storm names the run's id verbatim, and that id can hold
+  // an "@" (an MCP caller's user name is part of its parent id, "sub:mcp:<user>:<uuid>:..."), which
+  // extractSessionIdFromSubject would cut at, so the stop reached nothing again.
+  const runKey = _runStopHandlers.has(alert.subject) ? alert.subject : sessionId;
+  const stopRun = runKey ? _runStopHandlers.get(runKey) : undefined;
+  if (runKey && stopRun) {
+    _runStopHandlers.delete(runKey);
+    try {
+      stopRun({ alert: alert.type, detail: alert.detail });
+      log.warn(
+        { sessionId: runKey.slice(0, 60), alertType: alert.type },
+        "Warden wound down a running sub-agent due to anomaly",
+      );
+    } catch (err) {
+      log.warn({ err, alertType: alert.type }, "Warden run stop handler threw");
+    }
+    return;
+  }
   if (!sessionId) return;
 
   // Scan the registry: the stored key is the full sessionId but the subject may be a prefix

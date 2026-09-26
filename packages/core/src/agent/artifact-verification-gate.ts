@@ -32,6 +32,7 @@ import { effectiveOrchestration } from "../runtime/effort-context.js";
 import { executeTool, type ToolContext } from "../tools/registry.js";
 import { probeArtifacts, summarizeProbeFailures, type ArtifactProbeReport } from "./artifact-probes.js";
 import { collectJudgeableArtifactRefs } from "./qa-tool-judge.js";
+import { loopedProducersOf } from "./delegation-loop-notes.js";
 import type { AgentSession } from "./session.js";
 
 const log = childLogger("agent:artifact-verification");
@@ -132,19 +133,54 @@ export async function runArtifactVerificationGate(deps: ArtifactVerificationDeps
 
     // ── Hard failure: something on disk is genuinely broken. ──
     let failures = summarizeProbeFailures(first.report);
-    logAudit("artifact_verification_failed", { failures, probedCount }, { sessionId: deps.session.id, severity: "warn" });
+    // The runs this turn that produced a broken file and looped, or that the warden stopped
+    // (agent/delegation-loop-notes.ts). Recorded on the failure row whatever the flag says.
+    const brokenTargets = first.report.receipts
+      .filter((receipt) => receipt.status === "fail" && receipt.severity !== "soft")
+      .map((receipt) => receipt.target);
+    const loopedProducers = loopedProducersOf(brokenTargets, deps.toolContext._turnLoopRuns);
+    logAudit("artifact_verification_failed", {
+      failures,
+      probedCount,
+      ...(loopedProducers.length > 0 ? {
+        loopedProducers: loopedProducers.map((record) => ({
+          agent: record.agent,
+          ...(record.loop ? { tool: record.loop.tool, repeats: record.loop.repeats, via: record.loop.via } : {}),
+          ...(record.wardenStop ? { wardenStop: record.wardenStop.alert } : {}),
+        })),
+      } : {}),
+    }, { sessionId: deps.session.id, severity: "warn" });
 
-    const maxAttempts = orchestration.verifyArtifactsRepair
+    let maxAttempts = orchestration.verifyArtifactsRepair
       ? Math.max(0, orchestration.verifyArtifactsMaxRepairAttempts)
       : 0;
     if (maxAttempts === 0) {
       return { status: "fail", failures, probedCount, repairAttempts: 0 };
     }
 
+    // C5' (d), orchestration.loopAwareDelegation. c297c5ea: the file was broken because the runs
+    // building it looped, and the fresh mission_coordinator this gate sent re-decomposed the same
+    // build and ran 1,990 s against a 720 s timeout. When the producers looped, the repair is ONE
+    // direct builder of the agent that looped (told the looped calls by the prior-loop note on
+    // its delegation); when only a coordinator looped, there is no builder to send, and the file
+    // ships with its caveat.
+    let repairAgent = "mission_coordinator";
+    if (orchestration.loopAwareDelegation === true && loopedProducers.length > 0) {
+      const builder = loopedProducers.find((record) => !record.coordinator);
+      if (!builder) {
+        logAudit("artifact_verification_unrepaired", {
+          failures, probedCount, repairAttempts: 0, repairRoute: "caveat_looped_producer",
+        }, { sessionId: deps.session.id, severity: "error" });
+        return { status: "fail", failures, probedCount, repairAttempts: 0 };
+      }
+      repairAgent = builder.agent;
+      maxAttempts = 1;
+    }
+
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       if (deps.signal.aborted) break;
       repairAttempts = attempt;
-      const repaired = await attemptRepair(deps, failures);
+      const repaired = await attemptRepair(deps, failures, repairAgent);
       if (!repaired) break;
 
       const recheck = await probeCurrentArtifacts(deps);
@@ -156,7 +192,12 @@ export async function runArtifactVerificationGate(deps: ArtifactVerificationDeps
       failures = summarizeProbeFailures(recheck.report);
     }
 
-    logAudit("artifact_verification_unrepaired", { failures, probedCount, repairAttempts }, { sessionId: deps.session.id, severity: "error" });
+    logAudit("artifact_verification_unrepaired", {
+      failures,
+      probedCount,
+      repairAttempts,
+      ...(repairAgent !== "mission_coordinator" ? { repairRoute: "direct_builder", repairAgent } : {}),
+    }, { sessionId: deps.session.id, severity: "error" });
     return { status: "fail", failures, probedCount, repairAttempts };
   } catch (err) {
     // Verification is a safety net, never a new failure mode. If it breaks, say so and move on.
@@ -166,11 +207,11 @@ export async function runArtifactVerificationGate(deps: ArtifactVerificationDeps
 }
 
 /** One bounded rebuild delegation. Returns false when the delegation could not run. */
-async function attemptRepair(deps: ArtifactVerificationDeps, failures: string): Promise<boolean> {
+async function attemptRepair(deps: ArtifactVerificationDeps, failures: string, agentName: string): Promise<boolean> {
   try {
     const result = await executeTool(
       "delegate_to_agent",
-      { agentName: "mission_coordinator", task: buildRepairTask(failures) },
+      { agentName, task: buildRepairTask(failures) },
       // NOT allowDelegationAfterOperatorStop. That flag does more than exempt one
       // call — it CLEARS the session's operator-Stop latch, and its safety argument
       // in sub-agent.ts is explicitly that the agent it unblocks holds no delegate

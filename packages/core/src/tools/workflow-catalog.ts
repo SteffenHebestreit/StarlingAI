@@ -964,6 +964,7 @@ async function runSceneInline(
         swarmState: ctx.swarmState,
         onSwarmState: ctx.onSwarmState,
         _turnAgentCounts: ctx._turnAgentCounts,
+        _turnLoopRuns: ctx._turnLoopRuns,
         _turnAgentRepeatLimitOverrides: ctx._turnAgentRepeatLimitOverrides,
         _turnTotalDelegationLimitOverride: ctx._turnTotalDelegationLimitOverride,
         _workflowExecutionStack: workflowExecutionStack,

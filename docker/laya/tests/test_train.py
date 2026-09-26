@@ -1,6 +1,9 @@
 """Fine-tuning data: cases built from the gateway's exports exactly as the sidecar serves the questions, the held-out
 split, the balancing and the promotion rule — everything short of the model itself, so no torch is needed."""
 import json
+import math
+
+import pytest
 
 from app import browser, generic, train
 
@@ -155,3 +158,91 @@ def test_the_temperature_is_fitted_within_the_range_laya_applies():
     assert abs(train.fit_temperature([[8.0, 0.0]] * 3, items) - 0.5) < 1e-9
     # And cases that are all wrong want it as soft as laya allows.
     assert abs(train.fit_temperature([[0.0, 8.0]] * 3, items) - 5.0) < 1e-9
+
+
+def synthetic_logits(t_true, n=4_000, seed=7):
+    """Two-option cases whose labels are drawn from softmax(z / t_true): the temperature that generated them is the one
+    a fit must find."""
+    import random
+    rng = random.Random(seed)
+    logits, items = [], []
+    for _ in range(n):
+        gap = rng.uniform(-12.0, 12.0)
+        p_first = 1.0 / (1.0 + math.exp(-gap / t_true))
+        logits.append([gap, 0.0])
+        items.append({"label": 0 if rng.random() < p_first else 1, "point": "p", "markers": [1, 2]})
+    return logits, items
+
+
+def test_the_fit_recovers_a_temperature_inside_laya_s_range():
+    logits, items = synthetic_logits(2.0)
+    fit = train.temperature_fit(logits, items)
+    assert abs(fit["fitted"] - 2.0) / 2.0 < 0.05
+    assert fit["atBound"] is None and fit["fold"] == 1.0 and fit["served"] == fit["fitted"] == fit["effective"]
+    assert train.fit_temperature(logits, items) == fit["served"]
+
+
+def test_a_fit_softer_than_laya_s_cap_is_recovered_reported_and_folded():
+    # Run 20260926-073740: the held-out loss kept falling past 5.00, the old grid's edge, to about 8.
+    logits, items = synthetic_logits(8.0)
+    fit = train.temperature_fit(logits, items)
+    assert abs(fit["fitted"] - 8.0) / 8.0 < 0.05, fit
+    assert fit["atBound"] == "upper"
+    assert fit["served"] == train.TEMPERATURE_RANGE[1]
+    assert abs(fit["fold"] * fit["served"] - fit["fitted"]) < 1e-9
+    assert fit["nll"]["atEffective"] < fit["nll"]["atServedWithoutFold"], "what is served must be the better fit"
+
+
+def test_a_fit_sharper_than_laya_s_floor_is_reported_and_served_at_the_floor():
+    logits, items = synthetic_logits(0.25)
+    fit = train.temperature_fit(logits, items)
+    assert abs(fit["fitted"] - 0.25) / 0.25 < 0.05, fit
+    assert fit["atBound"] == "lower"
+    assert fit["served"] == fit["effective"] == train.TEMPERATURE_RANGE[0], "never sharper than laya allows"
+    assert fit["fold"] == 1.0
+
+
+def test_folding_divides_every_choice_logit_exactly():
+    torch = pytest.importorskip("torch")
+    torch.manual_seed(0)
+    model = torch.nn.Module()
+    model.scorer = torch.nn.Sequential(torch.nn.LayerNorm(8), torch.nn.Linear(8, 8), torch.nn.GELU(), torch.nn.Linear(8, 1))
+    x = torch.randn(5, 3, 8)
+    before = model.scorer(x).detach()
+    train.fold_temperature(model, 1.6)
+    after = model.scorer(x).detach()
+    assert torch.allclose(after, before / 1.6, atol=1e-6)
+
+
+def test_the_run_saves_the_checkpoint_its_metrics_describe(monkeypatch, tmp_path):
+    """main() with the model stubbed out: held-out cases that ask for a temperature of 8 are saved at laya's cap of 5
+    with the rest folded into the head BEFORE the checkpoint is written — else metrics.json would describe a softer
+    checkpoint than the one served."""
+    import types
+
+    held_logits, held_items = synthetic_logits(8.0)
+    cases = [types.SimpleNamespace(point="p", gold="A") for _ in range(10)]
+    agent = types.SimpleNamespace(model=object())
+    folded, saved = [], {}
+    data = tmp_path / "export.jsonl"
+    data.write_text("", encoding="utf-8")
+    monkeypatch.setattr(train.references, "reference", lambda name: "base-checkpoint")
+    monkeypatch.setattr(train.references, "local_dir", lambda: str(tmp_path))
+    monkeypatch.setattr(train, "read_jsonl", lambda path: [])
+    monkeypatch.setattr(train, "decision_cases", lambda rows: (cases, 0))
+    monkeypatch.setattr(train, "split", lambda all_cases: (all_cases[:5], all_cases[5:]))
+    monkeypatch.setattr(train, "load_agent", lambda reference, device, name: agent)
+    monkeypatch.setattr(train, "balanced", lambda some: some)
+    monkeypatch.setattr(train, "encode", lambda a, some: held_items)
+    monkeypatch.setattr(train, "logits_of", lambda a, items: held_logits)
+    monkeypatch.setattr(train, "train", lambda a, items, epochs: None)
+    monkeypatch.setattr(train, "fold_temperature", lambda model, factor: folded.append((model, factor)))
+    monkeypatch.setattr(train, "save", lambda a, out, run, temperature, metrics: saved.update(
+        temperature=temperature, metrics=metrics, folded_before=len(folded)))
+
+    assert train.main(["decision", "--data", str(data), "--min-cases", "0", "--no-promote"]) == 0
+    fit = saved["metrics"]["temperatureFit"]
+    assert fit["atBound"] == "upper" and abs(fit["effective"] - 8.0) / 8.0 < 0.05, fit
+    assert saved["temperature"] == saved["metrics"]["temperature"] == train.TEMPERATURE_RANGE[1], "laya is given what it applies"
+    assert folded == [(agent.model, fit["fold"])], "the rest of the fitted temperature was not folded into the head"
+    assert saved["folded_before"] == 1, "the checkpoint was written before the fold"

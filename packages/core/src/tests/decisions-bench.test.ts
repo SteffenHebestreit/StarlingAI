@@ -21,10 +21,14 @@ import {
   flawlessSamplesNeeded,
   levelCurve,
   lintDecisionCases,
+  negationPairs,
+  orderSwapFlips,
+  reversedOptions,
   parseDecisionCases,
   pointVerdict,
   profileDataset,
   projectSavings,
+  gateReplayOrder,
   qualifyLevel,
   readTimings,
   renderBenchMarkdown,
@@ -36,7 +40,7 @@ import {
   type GateSimulation,
   type ProjectionSettings,
 } from "../agent/decisions-bench.js";
-import { GATE_LEVELS, qualifiedLevel, recordAgreementSample, resetGateForTests, wilsonLowerBound } from "../decisions/gate.js";
+import { CONFIRM_SAMPLES, GATE_LEVELS, qualifiedLevel, recordAgreementSample, resetGateForTests, wilsonLowerBound } from "../decisions/gate.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CORE = resolve(HERE, "../..");
@@ -111,7 +115,8 @@ describe("the gate replay qualifies exactly as decisions/gate.ts does", () => {
         return { caseId: `r${round}-${i}`, point: "source_sensitive", language, gateLanguage: language, gold: incumbent, split: "calibration", attempt: 0, incumbent: { choice: incumbent, ms: 1 }, laya: laya(choice, tops[Math.floor(random() * tops.length)]!, 20, "m") };
       });
       resetGateForTests();
-      for (const result of results) {
+      // In the order the replay feeds the gate: the gate reads order (its confirmation and drift window).
+      for (const result of gateReplayOrder(results)) {
         recordAgreementSample("source_sensitive", result.gateLanguage!, result.laya!.choice, result.laya!.top, result.laya!.choice === result.incumbent!.choice, "m", result.incumbent!.choice);
       }
       // Every case in the calibration half: the replay splits a run with no test case again, so ask for the buckets
@@ -128,13 +133,18 @@ describe("the gate replay qualifies exactly as decisions/gate.ts does", () => {
     resetGateForTests();
   });
 
-  it("needs 35 cases that all agree at 0.9 — the 30 of minSamples never bind", () => {
-    expect(flawlessSamplesNeeded(GATE)).toBe(35);
+  it("needs 38 cases that all agree at 0.9 — 35 for the bound, and the same again without the newest three", () => {
+    expect(flawlessSamplesNeeded(GATE)).toBe(35 + CONFIRM_SAMPLES);
     expect(wilsonLowerBound(30, 30)).toBeLessThan(0.9);
-    expect(flawlessSamplesNeeded({ targetAgreement: 0.9, minSamples: 40 })).toBe(40);
-    const needed = flawlessSamplesNeeded({ targetAgreement: 0.8, minSamples: 5 });
+    expect(wilsonLowerBound(35, 35)).toBeGreaterThanOrEqual(0.9);
+    expect(flawlessSamplesNeeded({ targetAgreement: 0.9, minSamples: 40 })).toBe(40 + CONFIRM_SAMPLES);
+    const needed = flawlessSamplesNeeded({ targetAgreement: 0.8, minSamples: 5 }) - CONFIRM_SAMPLES;
     expect(wilsonLowerBound(needed, needed)).toBeGreaterThanOrEqual(0.8);
     expect(wilsonLowerBound(needed - 1, needed - 1)).toBeLessThan(0.8);
+    // And the gate itself opens exactly there.
+    const flawless = (n: number) => Array.from({ length: n }, () => ({ top: 0.99, agree: true }));
+    expect(qualifyLevel(flawless(35 + CONFIRM_SAMPLES), GATE)).toBe(0.5);
+    expect(qualifyLevel(flawless(35 + CONFIRM_SAMPLES - 1), GATE)).toBeNull();
     expect(flawlessSamplesNeeded({ targetAgreement: 1, minSamples: 5 })).toBe(Number.POSITIVE_INFINITY);
   });
 });
@@ -253,7 +263,7 @@ describe("the gate replay", () => {
     expect(simulation!.status).toBe("insufficient_calibration");
     const judged = pointVerdict(simulation!, undefined, SS, { targetAgreement: 0.9, maxRareMiss: 0.1 });
     expect(judged.verdict).toBe("inconclusive");
-    expect(judged.reasons[0]).toMatch(/at most 20 cases .* needs 35/);
+    expect(judged.reasons[0]).toMatch(/at most 20 cases .* needs 38/);
   });
 
   it("splits a run that holds one half only a second time", () => {
@@ -514,6 +524,76 @@ function loadDataset(point: "fast_lane" | "source_sensitive"): DecisionBenchCase
   return parseDecisionCases(readFileSync(join(REPO, "eval", "decisions", `${point}.example.jsonl`), "utf8"));
 }
 
+function loadNegationPairs(): DecisionBenchCase[] {
+  return parseDecisionCases(readFileSync(join(REPO, "eval", "decisions", "negation.example.jsonl"), "utf8"));
+}
+
+describe("negation pairs and option order", () => {
+  /** One pair: two cases of source_sensitive, gold `goldA`/`goldB`, answered by Laya and the incumbent as given. */
+  function pair(id: string, language: string, goldA: string, goldB: string, laya: [string, string], incumbent: [string, string]): BenchResult[] {
+    return [0, 1].map((i) => ({
+      caseId: `${id}${i === 0 ? "a" : "b"}`, point: "source_sensitive", language, gold: i === 0 ? goldA : goldB, split: "test" as const, attempt: 0, pair: id,
+      laya: { choice: laya[i]!, top: 0.9, ms: 20, model: "m1", probabilities: { [laya[i]!]: 0.9 } },
+      incumbent: { choice: incumbent[i]!, ms: 1_000 },
+    }));
+  }
+
+  it("counts, per pair the negation flips, whether each arm read it — and per control pair, whether it kept its answer", () => {
+    const results = [
+      // Laya reads past the negation twice and reads it once; the incumbent reads it every time.
+      ...pair("p1", "de", "no", "yes", ["no", "no"], ["no", "yes"]),
+      ...pair("p2", "de", "no", "yes", ["yes", "yes"], ["no", "yes"]),
+      ...pair("p3", "en", "no", "yes", ["no", "yes"], ["no", "yes"]),
+      // Controls: the negation changes nothing; Laya flips on one of them.
+      ...pair("c1", "de", "yes", "yes", ["yes", "no"], ["yes", "yes"]),
+      ...pair("c2", "en", "no", "no", ["no", "no"], ["no", "no"]),
+    ];
+    const all = negationPairs(results).find((slice) => slice.language === "all")!;
+    expect(all).toMatchObject({ point: "source_sensitive", model: "m1", flipPairs: 3, controlPairs: 2 });
+    expect(all.layaSameAnswer).toMatchObject({ hits: 2, n: 3 });
+    expect(all.layaBothRight).toMatchObject({ hits: 1, n: 3 });
+    expect(all.incumbentBothRight).toMatchObject({ hits: 3, n: 3 });
+    expect(all.incumbentSameAnswer).toMatchObject({ hits: 0, n: 3 });
+    expect(all.layaKept).toMatchObject({ hits: 1, n: 2 });
+    expect(all.incumbentKept).toMatchObject({ hits: 2, n: 2 });
+    expect(negationPairs(results).find((slice) => slice.language === "de")!.flipPairs).toBe(2);
+  });
+
+  it("keeps the pairs out of the slices, the gate replay and the verdict", () => {
+    const plain = many(40, { point: "source_sensitive", language: "de", gold: "no", split: "calibration", incumbent: { choice: "no", ms: 1_800 }, laya: laya("no", 0.97) }, "x");
+    const withPairs = [...plain, ...pair("p1", "de", "no", "yes", ["no", "no"], ["no", "yes"])];
+    const settings: BenchReportSettings = { gate: GATE, reference: "incumbent", projection: PROJECTION, verdict: { targetAgreement: 0.9, maxRareMiss: 0.1 } };
+    const without = buildBenchReport(plain, settings);
+    const report = buildBenchReport(withPairs, settings);
+    expect(report.slices).toEqual(without.slices);
+    expect(report.points.map((point) => point.simulation)).toEqual(without.points.map((point) => point.simulation));
+    expect(report.negation.find((slice) => slice.language === "all")!.flipPairs).toBe(1);
+    expect(without.negation).toEqual([]);
+    expect(renderBenchMarkdown(report)).toContain("## Negation pairs");
+  });
+
+  it("reports how often Laya's choice changed with the order of the options, per point and language", () => {
+    const swapped = (id: string, language: string, choice: string, again: string): BenchResult => ({
+      caseId: id, point: "fast_lane", language, gold: "task", split: "test", attempt: 0,
+      laya: { choice, top: 0.8, ms: 20, model: "m1", probabilities: { [choice]: 0.8 } },
+      layaSwapped: { choice: again, top: 0.7, ms: 20, model: "m1", probabilities: { [again]: 0.7, [choice]: again === choice ? 0.7 : 0.3 } },
+    });
+    const results = [swapped("a", "de", "task", "small_talk"), swapped("b", "de", "task", "task"), swapped("c", "en", "task", "task"), swapped("d", "en", "small_talk", "small_talk")];
+    const slices = orderSwapFlips(results);
+    expect(slices.find((slice) => slice.language === "all")!.flips).toMatchObject({ hits: 1, n: 4, rate: 0.25 });
+    expect(slices.find((slice) => slice.language === "de")!.flips).toMatchObject({ hits: 1, n: 2 });
+    expect(slices.find((slice) => slice.language === "all")!.meanTopShift).toBeCloseTo((0.5 + 0.1 + 0.1 + 0.1) / 4, 6);
+    expect(Object.keys(reversedOptions({ small_talk: "s", task: "t" }))).toEqual(["task", "small_talk"]);
+  });
+
+  it("lints a pair that is not two cases of one point and language", () => {
+    const base: DecisionBenchCase = { id: "a", point: "fast_lane", language: "de", state: { message: "hi" }, gold: "small_talk", pair: "p" };
+    expect(lintDecisionCases([base, { ...base, id: "b" }])).toEqual([]);
+    expect(lintDecisionCases([base])).toEqual(["pair p has 1 cases, not 2"]);
+    expect(lintDecisionCases([base, { ...base, id: "b", language: "en" }])).toEqual(["pair p mixes points or languages"]);
+  });
+});
+
 describe("the case files", () => {
   it("parse JSONL with comment lines, and name the line that is not JSON", () => {
     expect(parseDecisionCases('// header\n\n{"id":"a","point":"fast_lane","language":"de","state":{"message":"hi"},"gold":"small_talk"}\n')).toHaveLength(1);
@@ -600,8 +680,41 @@ describe("the case files", () => {
   });
 
   it("no id is used in both files", () => {
-    const ids = [...loadDataset("fast_lane"), ...loadDataset("source_sensitive")].map((benchCase) => benchCase.id);
+    const ids = [...loadDataset("fast_lane"), ...loadDataset("source_sensitive"), ...loadNegationPairs()].map((benchCase) => benchCase.id);
     expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  describe("negation pairs", () => {
+    const cases = loadNegationPairs();
+    const pairs = [...new Set(cases.map((benchCase) => benchCase.pair!))].map((pair) => cases.filter((benchCase) => benchCase.pair === pair));
+
+    it("is well formed: every case in a pair of two, of one point and language, gold an option of the point", () => {
+      expect(lintDecisionCases(cases, { requireGold: true })).toEqual([]);
+      expect(cases.every((benchCase) => typeof benchCase.pair === "string")).toBe(true);
+      expect(pairs.every((members) => members.length === 2)).toBe(true);
+    });
+
+    it("has pairs the negation flips and pairs it does not, for both points in both languages", () => {
+      for (const point of ["fast_lane", "source_sensitive"]) {
+        for (const language of ["de", "en"]) {
+          const mine = pairs.filter(([a]) => a!.point === point && a!.language === language);
+          const flips = mine.filter(([a, b]) => a!.gold !== b!.gold);
+          const controls = mine.filter(([a, b]) => a!.gold === b!.gold);
+          expect(flips.length, `${point} ${language} flip pairs`).toBeGreaterThanOrEqual(3);
+          expect(controls.length, `${point} ${language} control pairs`).toBeGreaterThanOrEqual(2);
+          // The tags say which kind a pair is, and must agree with the labels.
+          for (const [a, b] of flips) expect([a!.tags, b!.tags]).toEqual([["negation-pair", "flip"], ["negation-pair", "flip"]]);
+          for (const [a, b] of controls) expect([a!.tags, b!.tags]).toEqual([["negation-pair", "control"], ["negation-pair", "control"]]);
+        }
+      }
+    });
+
+    it("reaches the fast lane's model: the front desk refuses none of its cases", async () => {
+      const { classifyFrontDesk } = await import("../agent/receptionist.js");
+      for (const benchCase of cases.filter((candidate) => candidate.point === "fast_lane")) {
+        expect(classifyFrontDesk(caseMessage(benchCase), { alwaysEscalateTerms: [], confidenceAttempt: false }).fastLane, benchCase.id).toBe(true);
+      }
+    });
   });
 
   it("a case keeps its half whatever else is in the file", () => {

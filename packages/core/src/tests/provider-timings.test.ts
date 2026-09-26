@@ -57,11 +57,14 @@ const LLAMA_TIMINGS = {
 };
 const EXPECTED_TIMINGS = { cacheN: 12_991, promptN: 925, promptMs: 1_010.4, predictedN: 5, predictedMs: 89.3 };
 
-/** The keys a complete() row carried before timings existed. A row from a backend with no
- *  timings must still have exactly these: no `timings: undefined`, no empty object. */
+/** The keys a complete() row carried before timings existed, plus the head hashes every row now
+ *  carries (providers/prompt-head.ts: they describe the request, so they need no server). A row
+ *  from a backend with no timings must still have exactly these: no `timings: undefined`, no
+ *  empty object. */
 const COMPLETE_ROW_KEYS = [
   "completionTokens", "controls", "durationMs", "finishReason", "messageCount", "mode", "model",
   "promptTokens", "reasoningChars", "reasoningTokens", "toolCount",
+  "headHash", "toolsHash", "systemHash", "systemChars",
 ].sort();
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -144,6 +147,42 @@ describe("complete() — the server's timings on the row", () => {
     const row = modelCalls()[0]!.data;
     expect(row["finishReason"]).toBe("error");
     expect(Object.keys(row).sort()).toEqual(COMPLETE_ROW_KEYS);
+  });
+
+  it("names the head it sent: the folded system text and the tool block in wire order", async () => {
+    // M0 of the cache plan. The orchestrator's forced iterations send a SUBSET of its tools
+    // (record_plan while no plan exists, execute_plan once one does), and c297c5ea's first two
+    // forced calls were both cold because the subset flipped between them; the rows only said
+    // toolCount 10. With toolsHash on the row that switch is visible, and headHash names the
+    // whole head (the leading system run as the provider folds it + the tools).
+    const { LMStudioProvider } = await providerModule();
+    const { promptHeadSignature } = await import("../providers/prompt-head.js");
+    const provider = withClient(new LMStudioProvider("http://localhost:1234/v1", "test", base, { maxRetries: 0 }), async () => ({
+      choices: [{ message: { content: "ok", tool_calls: [] }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 40, completion_tokens: 1, total_tokens: 41 },
+    }));
+    const tool = (name: string) => ({ name, description: `${name} tool`, parameters: { type: "object", properties: {} } });
+    const full = [tool("delegate_to_agent"), tool("record_plan"), tool("memory_store")];
+    const subset = [tool("delegate_to_agent"), tool("record_plan")];
+    const messages = [
+      { role: "system" as const, content: "  Lean base.  " },
+      { role: "system" as const, content: "Module." },
+      { role: "user" as const, content: "hi" },
+    ];
+
+    await provider.complete(messages, full);
+    await provider.complete(messages, subset);
+    await provider.complete(messages, [...full].reverse());
+
+    const [a, b, c] = modelCalls().map((r) => r.data);
+    // The provider folds the leading run (trimmed, joined by a blank line) before the wire.
+    expect(a!["headHash"]).toBe(promptHeadSignature("Lean base.\n\nModule.", full).headHash);
+    expect(a!["systemChars"]).toBe("Lean base.\n\nModule.".length);
+    expect(b!["systemHash"]).toBe(a!["systemHash"]);
+    expect(b!["toolsHash"]).not.toBe(a!["toolsHash"]);
+    expect(b!["headHash"]).not.toBe(a!["headHash"]);
+    // Same tools, other order: a different head on the wire, so a different hash.
+    expect(c!["toolsHash"]).not.toBe(a!["toolsHash"]);
   });
 });
 

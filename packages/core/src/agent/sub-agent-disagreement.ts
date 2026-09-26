@@ -7,7 +7,7 @@
  * the live check does ONE routing-tier completion and fails OPEN (no marker) on any error
  * so it can never block or break a turn.
  */
-import { decide } from "../decisions/decide.js";
+import { decideWithReadout } from "../decisions/incumbent-readout.js";
 import { layaConfigured } from "../decisions/laya-client.js";
 import { SLICES_DISAGREE } from "../decisions/points.js";
 import { getChatProviderForTier } from "../providers/index.js";
@@ -77,7 +77,7 @@ export async function checkSubAgentDisagreement(
     // Laya reads every output clipped so all of them fit its window together. Its "disagree" names
     // no conflict — the marker then asks the orchestrator to find it — while the routing tier's does.
     const perOutput = Math.max(200, Math.floor(2_400 / outputs.length));
-    const outcome = await decide<{ disagree: boolean; detail: string }>({
+    const outcome = await decideWithReadout<{ disagree: boolean; detail: string }>({
       point: SLICES_DISAGREE,
       state: { outputs: outputs.map((output) => ({ label: output.label, text: output.text.slice(0, perOutput) })) },
       languageOf: outputs.map((output) => output.text).join("\n").slice(0, 2_000),
@@ -92,6 +92,8 @@ export async function checkSubAgentDisagreement(
       },
       toKey: (verdict) => (verdict.disagree ? "disagree" : "agree"),
       fromKey: (key) => ({ disagree: key === "disagree", detail: "" }),
+      // A readout's "disagree" names no conflict either, as Laya's does not.
+      readout: { provider, agentName: "disagreement_check" },
     });
     return outcome.value?.disagree ? renderDisagreementMarker(outcome.value.detail) : null;
   } catch (err) {
