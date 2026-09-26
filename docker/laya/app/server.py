@@ -8,12 +8,13 @@
                                -> {"operation", "operationProbability", "target" | "control", ...}
 
 Configuration (environment):
-    LAYA_DECISION_MODEL   checkpoint for /v1/decide     (default convaiinnovations/laya#multilingual)
-    LAYA_BROWSER_MODEL    checkpoint for browser steps  (default cklxx/laya-browser#v14s)
+    LAYA_DECISION_MODEL   checkpoint for /v1/decide     (default convaiinnovations/laya@55cf4c4ebb4ebe31b2550e8bdf3bd21b99753851#multilingual)
+    LAYA_BROWSER_MODEL    checkpoint for browser steps  (default cklxx/laya-browser@7139587325a39cd8639900bff21c3a2145969fd8#v15s;
+                          <repo>[@<revision>][#<subfolder>], app/models.py load_reference)
     LAYA_LOCAL_DIR        fine-tuned checkpoints (default /models/local); <dir>/<model>/current wins over the above
     LAYA_DEVICE           cuda | cpu | unset for automatic
     LAYA_PRELOAD          comma list of models to load at start (default decision,browser; empty = on first use)
-    LAYA_BROWSER_CHUNK    widest choice decided in one pass (default 60, as laya-browser v14s recommends)
+    LAYA_BROWSER_CHUNK    widest choice decided in one pass (default 60, as laya-browser recommends)
 
 Every answer names the model version that gave it ("model"): a fine-tune's run id, else the checkpoint reference.
 The gateway keeps its agreement statistics per version, so a new checkpoint earns its handover again.

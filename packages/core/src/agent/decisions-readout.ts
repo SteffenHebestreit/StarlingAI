@@ -96,14 +96,34 @@ export function casesFromBootstrap(rows: readonly LedgerRow[]): ReadoutBenchCase
 }
 
 /**
- * Per point and language, the first `perLanguage` cases (0: all), hand-labelled ones first; the
- * same message twice is one case. Languages other than German and English are left out: the
- * temperatures are fitted per language and the plan measures these two.
+ * The cases taken round-robin over their gold labels, each label's cases in an order hashed from
+ * their ids. The fixture files are grouped by label, so the first N in file order measured one answer
+ * only: run 2026-09-26T10-46 took 20 small-talk fast-lane cases of 20 and never saw a task.
+ */
+function stratified(cases: readonly ReadoutBenchCase[]): ReadoutBenchCase[] {
+  const rank = (id: string): string => createHash("sha256").update(id).digest("hex");
+  const groups = new Map<string, ReadoutBenchCase[]>();
+  for (const benchCase of cases) {
+    const key = `${benchCase.point}\u0000${benchCase.language}\u0000${benchCase.gold ?? ""}`;
+    groups.set(key, [...(groups.get(key) ?? []), benchCase]);
+  }
+  return [...groups.values()]
+    .flatMap((group) => [...group].sort((a, b) => rank(a.id).localeCompare(rank(b.id))).map((benchCase, position) => ({ benchCase, position })))
+    .sort((a, b) => a.position - b.position
+      || (a.benchCase.gold ?? "").localeCompare(b.benchCase.gold ?? "")
+      || rank(a.benchCase.id).localeCompare(rank(b.benchCase.id)))
+    .map(({ benchCase }) => benchCase);
+}
+
+/**
+ * Per point and language, up to `perLanguage` cases (0: all), hand-labelled ones first and spread over
+ * their gold labels; the same message twice is one case. Languages other than German and English are
+ * left out: the temperatures are fitted per language and the plan measures these two.
  */
 export function selectCases(cases: readonly ReadoutBenchCase[], points: readonly string[], perLanguage: number): ReadoutBenchCase[] {
   const seen = new Set<string>();
   const taken = new Map<string, number>();
-  const ordered = [...cases.filter((c) => c.source === "fixture"), ...cases.filter((c) => c.source !== "fixture")];
+  const ordered = [...stratified(cases.filter((c) => c.source === "fixture")), ...stratified(cases.filter((c) => c.source !== "fixture"))];
   const out: ReadoutBenchCase[] = [];
   for (const benchCase of ordered) {
     if (!points.includes(benchCase.point) || (benchCase.language !== "de" && benchCase.language !== "en")) continue;

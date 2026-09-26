@@ -207,11 +207,9 @@ def read_jsonl(path: str) -> List[Dict[str, Any]]:
 # ── The model ───────────────────────────────────────────────────────────────────────────────────
 
 def load_agent(reference: str, device: Optional[str], name: str) -> Any:
-    import laya
-    from .models import parse_reference
+    from .models import load_reference
 
-    repo, subfolder = parse_reference(reference)
-    agent = laya.load(repo, subfolder=subfolder, device=device)
+    agent = load_reference(reference, device)
     if name == "browser":
         browser.configure_agent(agent)
     return agent

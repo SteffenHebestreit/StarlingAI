@@ -1,4 +1,4 @@
-"""One browser step decided by laya-browser (cklxx/laya-browser, v14s).
+"""One browser step decided by laya-browser (cklxx/laya-browser, v15s).
 
 The request is built exactly as the model was trained on:
 

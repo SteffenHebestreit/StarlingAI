@@ -58,9 +58,20 @@ describe("the cases", () => {
       ...casesFromFixtures([fixture("f1", "source_sensitive", "de", "fix de 1", "yes"), fixture("f2", "source_sensitive", "de", "fix de 2", "no"), fixture("f3", "fast_lane", "en", "hi", "small_talk")]),
     ];
     const picked = selectCases(cases, ["source_sensitive"], 2);
-    expect(picked.map((c) => c.id)).toEqual(["f1", "f2"]);
+    expect(picked.map((c) => c.id).sort()).toEqual(["f1", "f2"]);
     const all = selectCases(cases, ["source_sensitive", "fast_lane"], 0);
-    expect(all.map((c) => c.id)).toEqual(["f1", "f2", "f3", cases[0]!.id]);
+    expect(all.map((c) => c.id).slice(0, 3).sort()).toEqual(["f1", "f2", "f3"]);
+    expect(all.map((c) => c.id).slice(3)).toEqual([cases[0]!.id]);
+  });
+
+  it("spreads a quota over the gold labels of a file grouped by label", () => {
+    const grouped = [
+      ...Array.from({ length: 10 }, (_, i) => fixture(`st-${i}`, "fast_lane", "de", `hallo ${i}`, "small_talk")),
+      ...Array.from({ length: 10 }, (_, i) => fixture(`task-${i}`, "fast_lane", "de", `rechne ${i}`, "task")),
+    ];
+    const picked = selectCases(casesFromFixtures(grouped), ["fast_lane"], 4);
+    expect(picked.filter((c) => c.gold === "small_talk")).toHaveLength(2);
+    expect(picked.filter((c) => c.gold === "task")).toHaveLength(2);
   });
 
   it("swaps the options for the position-bias measurement", () => {

@@ -1,7 +1,7 @@
 """Smoke test with the real checkpoints; run inside the image: python -m tests.smoke
 
-1. laya-browser v14s on its own published sample step must answer the recorded operation (TYPE_TEXT; the model
-   card's reference gives p=0.92 on this step).
+1. laya-browser on its own published sample step must answer the recorded operation (TYPE_TEXT; the model card's
+   reference gave v14s p=0.92 on this step).
 2. The generic decision model must answer two yes/no cases under the caller's keys. Zero-shot accuracy is NOT
    checked here — the stock checkpoint is not expected to make these decisions well before it is fine-tuned.
 """

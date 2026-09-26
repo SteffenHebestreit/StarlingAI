@@ -8,9 +8,13 @@ from __future__ import annotations
 
 import os
 
+# Pinned to a commit (models.load_reference): a hub repo's main branch moves, and cklxx/laya-browser removed the
+# subfolder we served from main on 2026-09-26. v15s is the same format (laya_fmt v3, head_max_len 768) and the same
+# serving code as v14s, retrained without the DAgger set that leaked suite-A goals into v10-v14s. A new reference is a
+# new model version, so the gateway's gate starts its evidence again.
 DEFAULTS = {
-    "decision": ("LAYA_DECISION_MODEL", "convaiinnovations/laya#multilingual"),
-    "browser": ("LAYA_BROWSER_MODEL", "cklxx/laya-browser#v14s"),
+    "decision": ("LAYA_DECISION_MODEL", "convaiinnovations/laya@55cf4c4ebb4ebe31b2550e8bdf3bd21b99753851#multilingual"),
+    "browser": ("LAYA_BROWSER_MODEL", "cklxx/laya-browser@7139587325a39cd8639900bff21c3a2145969fd8#v15s"),
 }
 
 
