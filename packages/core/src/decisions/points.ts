@@ -15,6 +15,12 @@ export interface DecisionPointDefinition {
   readonly question: string;
   /** Each answer's key and what it means. */
   readonly options: Readonly<Record<string, string>>;
+  /**
+   * The answer whose misses cost quality — research skipped, a conflict hidden, gathering stopped too
+   * early. Laya's other answers are taken only once it has shown it does not miss this one
+   * (decisions/gate.ts). Absent where a miss costs only time.
+   */
+  readonly protect?: string;
 }
 
 export type DecisionPointId =
@@ -26,8 +32,8 @@ export type DecisionPointId =
   | "finding_relevant"
   | "run_drifting";
 
-function point(id: DecisionPointId, question: string, options: Record<string, string>): DecisionPointDefinition {
-  return Object.freeze({ id, question, options: Object.freeze(options) });
+function point(id: DecisionPointId, question: string, options: Record<string, string>, protect?: string): DecisionPointDefinition {
+  return Object.freeze({ id, question, options: Object.freeze(options), ...(protect ? { protect } : {}) });
 }
 
 /** Receptionist: small talk it can answer itself, or a task for the full assistant (agent/receptionist.ts). */
@@ -53,6 +59,7 @@ export const SOURCE_SENSITIVE = point(
     yes: "Yes: it depends on specific real-world facts that must be verified or may have changed.",
     no: "No: general knowledge, a concept in principle, reasoning, writing, code, small talk, or the user's own content.",
   },
+  "yes",
 );
 
 /** Post-draft judge: does a tool-free draft lean on unsourced external facts? (agent/ungrounded-claim-judge.ts). */
@@ -66,6 +73,7 @@ export const UNGROUNDED_DRAFT = point(
     yes: "Yes: it relies on specific external facts that would need a source.",
     no: "No: general knowledge, a definition, reasoning, advice, a calculation, code, small talk, or the user's own content.",
   },
+  "yes",
 );
 
 /** Parallel slices: do independent results for one task contradict each other? (agent/sub-agent-disagreement.ts). */
@@ -77,6 +85,7 @@ export const SLICES_DISAGREE = point(
     agree: "Consistent: no contradiction, only differences in wording, detail or coverage.",
     disagree: "Conflicting: they contradict each other on a fact, figure, conclusion or recommendation.",
   },
+  "disagree",
 );
 
 /** Sub-agent oversight: is the evidence already enough to answer? (agent/sub-agent.ts assessOversightGoalMet). */
@@ -88,6 +97,7 @@ export const GOAL_MET = point(
     done: "Done: the evidence already covers every acceptance criterion.",
     continue: "Continue: at least one criterion is clearly not covered yet.",
   },
+  "continue",
 );
 
 /**
@@ -104,6 +114,7 @@ export const FINDING_RELEVANT = point(
     relevant: "Relevant: it holds at least one fact, figure, name, date, price or source that serves the objective.",
     irrelevant: "Nothing relevant: only page chrome, banners, errors or content about something else.",
   },
+  "relevant",
 );
 
 /**
@@ -119,6 +130,7 @@ export const RUN_DRIFTING = point(
     on_track: "On track: the recent activity serves the objective, even if slowly or indirectly.",
     drifting: "Drifting: clearly working on the wrong thing, stuck repeating itself, or contradicting the objective.",
   },
+  "drifting",
 );
 
 export const DECISION_POINTS: Readonly<Record<DecisionPointId, DecisionPointDefinition>> = Object.freeze({

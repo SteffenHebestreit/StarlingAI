@@ -15,6 +15,18 @@
  * And per MODEL VERSION — the checkpoint that answered (the sidecar names it in every answer). A
  * fine-tuned checkpoint is a different model: what its predecessor proved says nothing about it, so
  * it earns its handover from its own cases.
+ *
+ * Agreement of Laya's answer is precision, and precision alone cannot protect a rare answer: when
+ * the incumbent says "no" 99 times in 100, a Laya that always says "no" agrees 99% of the time and
+ * misses every "yes". So a point names the answer whose misses cost quality (`protect`, e.g. "yes,
+ * research first"), and Laya's other answers qualify at a level only when, among the cases the
+ * incumbent answered `protect`, Laya gave the other answer at that level or above in so few that
+ * the lower bound of the protected answer's recall also reaches `targetAgreement` — over at least
+ * `minSamples` such cases. On traffic where the protected answer is rare this takes long, and it
+ * should: until then the incumbent decides.
+ *
+ * `minSamples` is a floor, not the number needed: 30 of 30 has a lower bound of 0.886, so a 0.9
+ * target needs 35 flawless cases (53 with one disagreement).
  */
 
 /** The confidence levels considered, lowest first. */
@@ -31,6 +43,8 @@ export interface GateSettings {
 interface Sample {
   top: number;
   agree: boolean;
+  /** The incumbent's answer, when it was recorded: what the recall guard counts. */
+  incumbent?: string;
 }
 
 /** "de", "en" or "other" — the languages kept apart. */
@@ -48,15 +62,43 @@ function sampleKey(point: string, language: LanguageBucket, answer: string, mode
   return `${point}|${language}|${answer}|${model}`;
 }
 
-/** Record one case where both answered; `model` is the version that answered. */
-export function recordAgreementSample(point: string, language: LanguageBucket, layaAnswer: string, top: number, agree: boolean, model = ""): void {
+/** Record one case where both answered; `model` is the version that answered, `incumbent` what the incumbent said. */
+export function recordAgreementSample(
+  point: string,
+  language: LanguageBucket,
+  layaAnswer: string,
+  top: number,
+  agree: boolean,
+  model = "",
+  incumbent?: string,
+): void {
   if (!Number.isFinite(top)) return;
   const key = sampleKey(point, language, layaAnswer, model);
   const list = samples.get(key) ?? [];
-  list.push({ top, agree });
+  list.push({ top, agree, ...(incumbent !== undefined ? { incumbent } : {}) });
   if (list.length > MAX_SAMPLES_PER_KEY) list.splice(0, list.length - MAX_SAMPLES_PER_KEY);
   samples.set(key, list);
-  for (const cached of levelCache.keys()) if (cached.startsWith(`${key}|`)) levelCache.delete(cached);
+  // Every answer of this point and language: the recall guard of one answer reads the others' samples.
+  const prefix = `${point}|${language}|`;
+  for (const cached of levelCache.keys()) if (cached.startsWith(prefix)) levelCache.delete(cached);
+}
+
+/** The cases the incumbent answered `protect`, with what Laya answered them and how sure it was. */
+function protectedCases(point: string, language: LanguageBucket, model: string, protect: string): Array<{ answer: string; top: number }> {
+  const prefix = `${point}|${language}|`;
+  const out: Array<{ answer: string; top: number }> = [];
+  for (const [key, list] of samples) {
+    if (!key.startsWith(prefix)) continue;
+    // The version may itself contain "|": it is everything after the third.
+    const [, , answer, ...rest] = key.split("|") as [string, string, string, ...string[]];
+    if (rest.join("|") !== model) continue;
+    for (const sample of list) {
+      // A sample recorded without the incumbent's answer still says it when the two agreed.
+      const incumbent = sample.incumbent ?? (sample.agree ? answer : undefined);
+      if (incumbent === protect) out.push({ answer, top: sample.top });
+    }
+  }
+  return out;
 }
 
 /**
@@ -72,13 +114,26 @@ export function wilsonLowerBound(agree: number, n: number, z = 1.96): number {
   return Math.max(0, (centre - margin) / (1 + z2 / n));
 }
 
-/** The lowest confidence at which `model`'s `answer` may be taken, or null while none qualifies. */
-export function qualifiedLevel(point: string, language: LanguageBucket, answer: string, settings: GateSettings, model = ""): number | null {
+/**
+ * The lowest confidence at which `model`'s `answer` may be taken, or null while none qualifies. With
+ * `protect` (the point's costly-to-miss answer), any other answer must also leave the protected
+ * answer's recall above the target at that level.
+ */
+export function qualifiedLevel(
+  point: string,
+  language: LanguageBucket,
+  answer: string,
+  settings: GateSettings,
+  model = "",
+  protect?: string,
+): number | null {
   const key = sampleKey(point, language, answer, model);
-  const cacheKey = `${key}|${settings.targetAgreement}|${settings.minSamples}`;
+  const guard = protect !== undefined && protect !== answer ? protect : undefined;
+  const cacheKey = `${key}|${settings.targetAgreement}|${settings.minSamples}|${guard ?? ""}`;
   const cached = levelCache.get(cacheKey);
   if (cached !== undefined) return cached;
   const list = samples.get(key) ?? [];
+  const guarded = guard !== undefined ? protectedCases(point, language, model, guard) : null;
   let level: number | null = null;
   for (const candidate of GATE_LEVELS) {
     let n = 0;
@@ -90,10 +145,15 @@ export function qualifiedLevel(point: string, language: LanguageBucket, answer: 
     }
     // Fewer cases at every higher level: once too few remain, no higher level can qualify.
     if (n < settings.minSamples) break;
-    if (wilsonLowerBound(agree, n) >= settings.targetAgreement) {
-      level = candidate;
-      break;
+    if (wilsonLowerBound(agree, n) < settings.targetAgreement) continue;
+    if (guarded) {
+      // Too few protected cases seen: their recall is unknown at every level.
+      if (guarded.length < settings.minSamples) break;
+      const missed = guarded.filter((seen) => seen.answer === answer && seen.top >= candidate).length;
+      if (wilsonLowerBound(guarded.length - missed, guarded.length) < settings.targetAgreement) continue;
     }
+    level = candidate;
+    break;
   }
   levelCache.set(cacheKey, level);
   return level;
@@ -106,8 +166,16 @@ export function modelsWithSamples(point: string, language: LanguageBucket, answe
 }
 
 /** May `model`'s `answer`, given with probability `top`, be taken for this point and language? */
-export function layaMayDecide(point: string, language: LanguageBucket, answer: string, top: number, settings: GateSettings, model = ""): boolean {
-  const level = qualifiedLevel(point, language, answer, settings, model);
+export function layaMayDecide(
+  point: string,
+  language: LanguageBucket,
+  answer: string,
+  top: number,
+  settings: GateSettings,
+  model = "",
+  protect?: string,
+): boolean {
+  const level = qualifiedLevel(point, language, answer, settings, model, protect);
   return level !== null && top >= level;
 }
 

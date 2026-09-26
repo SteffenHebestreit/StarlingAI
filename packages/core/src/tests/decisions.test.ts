@@ -125,6 +125,22 @@ describe("the gate's statistics", () => {
     expect(gate.qualifiedLevel("ungrounded_draft", "de", "no", { targetAgreement: 0.9, minSamples: 30 })).toBeNull();
   });
 
+  it("does not let an answer qualify on precision while it misses the protected answer", () => {
+    const settings = { targetAgreement: 0.9, minSamples: 30 };
+    // The incumbent says "no" 200 times and "yes" 5 times; Laya says "no" every time.
+    for (let i = 0; i < 200; i += 1) gate.recordAgreementSample("source_sensitive", "de", "no", 0.95, true, "m", "no");
+    for (let i = 0; i < 5; i += 1) gate.recordAgreementSample("source_sensitive", "de", "no", 0.95, false, "m", "yes");
+    expect(gate.qualifiedLevel("source_sensitive", "de", "no", settings, "m"), "precision alone: 200 of 205").toBe(0.5);
+    expect(gate.qualifiedLevel("source_sensitive", "de", "no", settings, "m", "yes"), "5 protected cases, all missed").toBeNull();
+    // Laya does find the "yes" cases it is shown — but the 5 misses still sink the recall's lower bound.
+    for (let i = 0; i < 40; i += 1) gate.recordAgreementSample("source_sensitive", "de", "yes", 0.95, true, "m", "yes");
+    expect(gate.qualifiedLevel("source_sensitive", "de", "no", settings, "m", "yes"), "40 of 45 found").toBeNull();
+    for (let i = 0; i < 100; i += 1) gate.recordAgreementSample("source_sensitive", "de", "yes", 0.95, true, "m", "yes");
+    expect(gate.qualifiedLevel("source_sensitive", "de", "no", settings, "m", "yes"), "140 of 145 found").toBe(0.5);
+    // The protected answer itself is never held back by its own recall.
+    expect(gate.qualifiedLevel("source_sensitive", "de", "yes", settings, "m", "yes")).toBe(0.5);
+  });
+
   it("never qualifies with fewer cases than minSamples, however well they agree", () => {
     for (let i = 0; i < 29; i += 1) gate.recordAgreementSample("goal_met", "en", "done", 0.99, true);
     expect(gate.qualifiedLevel("goal_met", "en", "done", { targetAgreement: 0.5, minSamples: 30 })).toBeNull();
@@ -218,6 +234,33 @@ describe("who decides", () => {
     // German evidence does not hand Laya English cases.
     const english = await sourceSensitive(ENGLISH, incumbentAnswering(true).run);
     expect(english.decidedBy).toBe("incumbent");
+  });
+
+  it("adaptive: Laya's common answer waits for the incumbent until Laya has shown it finds the rare one", async () => {
+    await writeConfig({ baseUrl: "http://laya:8080", defaultMode: "adaptive", adaptive: { targetAgreement: 0.9, minSamples: 30, auditRate: 0 } });
+    // "No" agrees with the incumbent 60 times out of 60 — but no "yes" case has been seen yet.
+    for (let i = 0; i < 60; i += 1) gate.recordAgreementSample("source_sensitive", "de", "no", 0.96, true, "laya-test", "no");
+    layaAnswers("no", 0.96);
+    const slow = incumbentAnswering(false, 300);
+    expect((await sourceSensitive(GERMAN, slow.run)).decidedBy, "an unseen rare answer: the incumbent decides").toBe("incumbent");
+    // Laya recorded the incumbent's answer to that case as well.
+    for (let i = 0; i < 40; i += 1) gate.recordAgreementSample("source_sensitive", "de", "yes", 0.96, true, "laya-test", "yes");
+    expect((await sourceSensitive(GERMAN, incumbentAnswering(false, 5_000).run)).decidedBy, "and once it has shown it").toBe("laya");
+  });
+
+  it("adaptive: misses of the rare answer that surface later withdraw the handover", async () => {
+    // Every case audited, so the incumbent answers each one and every miss is recorded.
+    await writeConfig({ baseUrl: "http://laya:8080", defaultMode: "adaptive", adaptive: { targetAgreement: 0.9, minSamples: 30, auditRate: 1 } });
+    for (let i = 0; i < 300; i += 1) gate.recordAgreementSample("source_sensitive", "de", "no", 0.96, true, "laya-test", "no");
+    for (let i = 0; i < 40; i += 1) gate.recordAgreementSample("source_sensitive", "de", "yes", 0.96, true, "laya-test", "yes");
+    const settings = { targetAgreement: 0.9, minSamples: 30 };
+    expect(gate.qualifiedLevel("source_sensitive", "de", "no", settings, "laya-test", "yes")).toBe(0.5);
+    // Five research questions Laya calls "no" and the judge calls "yes". Its "no" stays precise (300 of
+    // 305): only the misses of "yes" — 40 of 45 found — may withdraw it.
+    layaAnswers("no", 0.96);
+    for (let i = 0; i < 5; i += 1) await sourceSensitive(GERMAN, incumbentAnswering(true).run);
+    expect(gate.qualifiedLevel("source_sensitive", "de", "no", settings, "laya-test")).toBe(0.5);
+    expect(gate.qualifiedLevel("source_sensitive", "de", "no", settings, "laya-test", "yes"), "40 of 45 found").toBeNull();
   });
 
   it("adaptive: an audited case still goes to the incumbent and keeps measuring", async () => {

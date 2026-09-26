@@ -74,7 +74,7 @@ export function seedDecisionGate(): Promise<void> {
       let seeded = 0;
       for (const row of rows) {
         if (!row.laya || !row.incumbent) continue;
-        recordAgreementSample(row.point, row.language, row.laya.choice, row.laya.top, row.laya.choice === row.incumbent.choice, row.laya.model ?? "");
+        recordAgreementSample(row.point, row.language, row.laya.choice, row.laya.top, row.laya.choice === row.incumbent.choice, row.laya.model ?? "", row.incumbent.choice);
         seeded += 1;
       }
       if (seeded > 0) log.info({ seeded }, "Decision gate rebuilt from the ledger");
@@ -100,7 +100,7 @@ function settle(request: DecisionRequest<unknown>, settled: Settled): void {
     const incumbentKey = incumbent?.key;
     const agree = laya && incumbentKey !== undefined ? laya.choice === incumbentKey : undefined;
     if (laya && incumbentKey !== undefined) {
-      recordAgreementSample(request.point.id, settled.language, laya.choice, laya.top, agree === true, laya.model);
+      recordAgreementSample(request.point.id, settled.language, laya.choice, laya.top, agree === true, laya.model, incumbentKey);
     }
     void appendLedgerRow({
       ts: new Date().toISOString(),
@@ -167,7 +167,7 @@ export async function decide<T>(request: DecisionRequest<T>): Promise<DecisionOu
   const adaptive = getConfig().decisions.adaptive;
   const layaQualifies = laya !== null
     && (request.layaMayTake?.includes(laya.choice) ?? true)
-    && (mode === "laya" ? laya.top >= threshold : layaMayDecide(request.point.id, language, laya.choice, laya.top, adaptive, laya.model));
+    && (mode === "laya" ? laya.top >= threshold : layaMayDecide(request.point.id, language, laya.choice, laya.top, adaptive, laya.model, request.point.protect));
   // A share of the cases Laya would take still goes to the incumbent in adaptive mode: without
   // them the agreement could not be measured once Laya decides, and drift would go unseen.
   const audited = mode === "adaptive" && layaQualifies && Math.random() < adaptive.auditRate;
