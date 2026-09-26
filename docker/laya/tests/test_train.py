@@ -233,6 +233,8 @@ def test_the_run_saves_the_checkpoint_its_metrics_describe(monkeypatch, tmp_path
     monkeypatch.setattr(train, "split", lambda all_cases: (all_cases[:5], all_cases[5:]))
     monkeypatch.setattr(train, "load_agent", lambda reference, device, name: agent)
     monkeypatch.setattr(train, "balanced", lambda some: some)
+    monkeypatch.setattr(train, "order_augmented", lambda some: some)
+    monkeypatch.setattr(train, "order_flips", lambda a, some: {"flips": 0, "pairs": len(some)})
     monkeypatch.setattr(train, "encode", lambda a, some: held_items)
     monkeypatch.setattr(train, "logits_of", lambda a, items: held_logits)
     monkeypatch.setattr(train, "train", lambda a, items, epochs: None)
@@ -246,3 +248,57 @@ def test_the_run_saves_the_checkpoint_its_metrics_describe(monkeypatch, tmp_path
     assert saved["temperature"] == saved["metrics"]["temperature"] == train.TEMPERATURE_RANGE[1], "laya is given what it applies"
     assert folded == [(agent.model, fit["fold"])], "the rest of the fitted temperature was not folded into the head"
     assert saved["folded_before"] == 1, "the checkpoint was written before the fold"
+
+
+def test_a_reordered_case_carries_its_answer_with_its_option():
+    two = train.Case("fast_lane", "g", {"message": "hi"}, {"type": "choice", "instructions": "i", "criteria": {"A": "small talk", "B": "a task"}}, "A")
+    flipped = train.reordered(two)
+    assert flipped.question["criteria"] == {"A": "a task", "B": "small talk"}
+    assert flipped.gold == "B" and flipped.question["criteria"][flipped.gold] == "small talk"
+    assert flipped.group == two.group, "a case and its twin are held out together"
+    three = train.Case("p", "g", {}, {"type": "choice", "instructions": "i", "criteria": {"A": "x", "B": "y", "C": "z"}}, "B")
+    assert train.reordered(three).gold == "B" and train.reordered(three).question["criteria"]["B"] == "y"
+    assert train.reordered(train.Case("p", "g", {}, three.question, "A")).question["criteria"][train.reordered(train.Case("p", "g", {}, three.question, "A")).gold] == "x"
+
+
+def test_decision_training_sees_every_case_in_both_orders(monkeypatch, tmp_path):
+    import types
+
+    rows = [{"point": "fast_lane", "state": json.dumps({"message": f"m{i}"}), "questions": {"fast_lane": {
+        "type": "choice", "instructions": "i", "criteria": {"A": "small talk", "B": "a task"}}},
+        "gold": {"fast_lane": {"label": "A" if i % 3 else "B"}}} for i in range(12)]
+    seen = {}
+    monkeypatch.setattr(train.references, "reference", lambda name: "base")
+    monkeypatch.setattr(train.references, "local_dir", lambda: str(tmp_path))
+    monkeypatch.setattr(train, "read_jsonl", lambda path: rows)
+    monkeypatch.setattr(train, "load_agent", lambda reference, device, name: types.SimpleNamespace(model=object()))
+    monkeypatch.setattr(train, "encode", lambda a, some: [{"point": c.point, "label": c.label(), "text": c.question["criteria"][c.gold]} for c in some])
+    monkeypatch.setattr(train, "logits_of", lambda a, items: [[0.0, 1.0] for _ in items])
+    monkeypatch.setattr(train, "train", lambda a, items, epochs: seen.update(items=items))
+    monkeypatch.setattr(train, "fold_temperature", lambda model, factor: None)
+    monkeypatch.setattr(train, "save", lambda *a, **k: None)
+    data = tmp_path / "export.jsonl"
+    data.write_text("", encoding="utf-8")
+    assert train.main(["decision", "--data", str(data), "--min-cases", "0", "--no-promote"]) == 0
+    items = seen["items"]
+    assert len(items) % 2 == 0
+    for served, twin in zip(items[0::2], items[1::2]):
+        assert served["text"] == twin["text"] and served["label"] != twin["label"], "the twin answers the same option at the other letter"
+    assert train.main(["decision", "--data", str(data), "--min-cases", "0", "--no-promote", "--no-order-augment"]) == 0
+    assert all(item["label"] == ["small talk", "a task"].index(item["text"]) for item in seen["items"]), "served order only"
+
+
+def test_order_flips_counts_an_answer_that_follows_the_letter():
+    import types
+
+    cases = [train.Case("p", str(i), {}, {"type": "choice", "instructions": "i", "criteria": {"A": "x", "B": "y"}}, "A") for i in range(4)]
+    stub = types.SimpleNamespace()
+    real_encode, real_logits = train.encode, train.logits_of
+    try:
+        train.encode = lambda a, some: [{"label": 0} for _ in some]
+        train.logits_of = lambda a, items: [[1.0, 0.0] for _ in items]   # always the first letter: every case flips
+        assert train.order_flips(stub, cases) == {"flips": 4, "pairs": 4}
+        train.logits_of = lambda a, items: [[1.0, 0.0] if i % 2 == 0 else [0.0, 1.0] for i, _ in enumerate(items)]
+        assert train.order_flips(stub, cases) == {"flips": 0, "pairs": 4}, "the same option both times"
+    finally:
+        train.encode, train.logits_of = real_encode, real_logits

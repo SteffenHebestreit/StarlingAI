@@ -163,6 +163,38 @@ def split(cases: List[Case]) -> Tuple[List[Case], List[Case]]:
     return train, held
 
 
+def reordered(case: Case) -> Case:
+    """The case with its options in reverse order under the same letters: the answer moves with its option."""
+    keys = list(case.question["criteria"])
+    texts = [case.question["criteria"][key] for key in keys]
+    gold = keys[len(keys) - 1 - keys.index(case.gold)]
+    return Case(case.point, case.group, case.state, {**case.question, "criteria": dict(zip(keys, reversed(texts)))}, gold)
+
+
+def order_augmented(cases: List[Case]) -> List[Case]:
+    """Every decision case twice: as served, and with its options reversed.
+
+    The sidecar asks a point's options in the point's order every time, so a fine-tune can learn where the answer
+    sits instead of what it says. The first fine-tunes did (run 20260926-112034, decisions:bench --order-swap on its
+    test half): reversing the options changed the answer in 18% of fast_lane and 40-45% of source_sensitive cases,
+    where the resident model read by its letter logits changed 1 of 160. Training on both orders takes the shortcut away.
+    """
+    return [twin for case in cases for twin in (case, reordered(case))]
+
+
+def order_flips(agent: Any, cases: List[Case]) -> Dict[str, int]:
+    """How many of these cases change their answer when their options are reversed (pairs that both encode)."""
+    pairs = [items for items in (encode(agent, [case, reordered(case)]) for case in cases) if len(items) == 2]
+    logits = logits_of(agent, [item for pair in pairs for item in pair]) if pairs else []
+    flips = 0
+    for k in range(len(pairs)):
+        served, reverse = logits[2 * k], logits[2 * k + 1]
+        n = len(served)
+        if max(range(n), key=lambda i: served[i]) != n - 1 - max(range(n), key=lambda i: reverse[i]):
+            flips += 1
+    return {"flips": flips, "pairs": len(pairs)}
+
+
 def balanced(cases: List[Case]) -> List[Case]:
     """The training cases, rarer answers of each point repeated towards BALANCE_SHARE of the most common one."""
     counts: Dict[str, Counter] = defaultdict(Counter)
@@ -462,6 +494,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--device", default=os.environ.get("LAYA_DEVICE") or None)
     parser.add_argument("--limit", type=int, default=0, help="use only the first N cases (a smoke run)")
     parser.add_argument("--no-promote", action="store_true", help="write the run, never make it current")
+    parser.add_argument("--no-order-augment", action="store_true",
+                        help="decision: train on the served option order only (an A/B against order_augmented)")
     args = parser.parse_args(argv)
 
     name = args.model
@@ -484,17 +518,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     served = references.reference(name)
     print(f"base: {served}")
     agent = load_agent(served, args.device, name)
-    train_items = encode(agent, balanced(train_cases))
+    augment = name == "decision" and not args.no_order_augment
+    train_items = encode(agent, order_augmented(balanced(train_cases)) if augment else balanced(train_cases))
     held_items = encode(agent, held_cases)
     base_metrics = evaluate(logits_of(agent, held_items), held_items)
-    print(f"served checkpoint, held out: {base_metrics['accuracy']:.3f} agreement over {base_metrics['n']} cases")
+    base_flips = order_flips(agent, held_cases) if name == "decision" else None
+    print(f"served checkpoint, held out: {base_metrics['accuracy']:.3f} agreement over {base_metrics['n']} cases"
+          + (f", {base_flips['flips']}/{base_flips['pairs']} answers change with the option order" if base_flips else ""))
 
     train(agent, train_items, epochs)
     held_logits = logits_of(agent, held_items)
     fit = temperature_fit(held_logits, held_items)
     temperature = fit["served"]
     tuned_metrics = evaluate(held_logits, held_items, fit["effective"])
-    print(f"fine-tuned, held out: {tuned_metrics['accuracy']:.3f} agreement, temperature {fit['effective']:.2f}")
+    tuned_flips = order_flips(agent, held_cases) if name == "decision" else None
+    print(f"fine-tuned, held out: {tuned_metrics['accuracy']:.3f} agreement, temperature {fit['effective']:.2f}"
+          + (f", {tuned_flips['flips']}/{tuned_flips['pairs']} answers change with the option order" if tuned_flips else ""))
     if fit["atBound"]:
         low, high = TEMPERATURE_RANGE
         print(f"temperature: the held-out cases ask for {fit['fitted']:.2f}, past laya's {'upper' if fit['atBound'] == 'upper' else 'lower'} "
@@ -510,7 +549,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ok, why = promotion(base_metrics, tuned_metrics)
     metrics = {"run": run, "base": served, "data": data, "cases": len(cases), "trainCases": len(train_cases),
                "heldOut": len(held_cases), "epochs": epochs, "temperature": temperature, "temperatureFit": fit,
-               "served": base_metrics, "fineTuned": tuned_metrics, "promoted": ok and not args.no_promote, "why": why}
+               "served": base_metrics, "fineTuned": tuned_metrics, "promoted": ok and not args.no_promote, "why": why,
+               "orderAugmented": augment, "orderFlips": {"served": base_flips, "fineTuned": tuned_flips}}
     save(agent, run_dir, run, temperature, metrics)
     print(f"wrote {run_dir}")
     if ok and not args.no_promote:
