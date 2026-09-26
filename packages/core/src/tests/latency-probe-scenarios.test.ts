@@ -1380,6 +1380,7 @@ describe("E9 verdict", () => {
   function e9(opts: { reps?: number; treatmentCacheN?: number; controlCacheN?: number; fullShare?: number } = {}): S.CallResult[] {
     const out: S.CallResult[] = [];
     for (let rep = 0; rep < (opts.reps ?? 3); rep += 1) {
+      out.push(liveRow("treatment_warm_full", rep, 0, 13_000, 14_000));
       out.push(liveRow("treatment_warm_plan", rep, 0, 12_500, 13_000));
       out.push(liveRow("treatment_warm_dispatch", rep, 0, 12_400, 12_900));
       const tc = opts.treatmentCacheN ?? 12_000;
@@ -1432,6 +1433,16 @@ describe("E9 verdict", () => {
     expect(warmControl.code).toBe("criteria_not_met");
     expect(warmControl.answer).toContain("CONTROL live calls cold in 0 of 3");
     expect(S.computeVerdict("E9", e9({ fullShare: 0.5 }), CTX).code).toBe("criteria_not_met");
+  });
+
+  it("judges the full head kept by the head's own tokens, not the whole prompt with the call's new tail", () => {
+    // Run 2026-09-26T11-06: a 13,071-token head, then a call that reused 12,555 and processed its own 1,640-token tail.
+    const live = (cacheN: number, promptN: number) => e9().flatMap((r) => (r.step === "treatment_warm_full"
+      ? [{ ...r, timings: { ...r.timings!, cacheN: 0, promptN: 13_071 } }]
+      : r.step === "treatment_full_after" ? [{ ...r, timings: { ...r.timings!, cacheN, promptN } }] : [r]));
+    expect(S.computeVerdict("E9", live(12_555, 1_640), CTX).numbers["fullKeptReps"]).toBe(3);
+    expect(S.computeVerdict("E9", live(11_764, 2_431), CTX).numbers["fullKeptReps"]).toBe(3);
+    expect(S.computeVerdict("E9", live(11_763, 2_432), CTX).numbers["fullKeptReps"]).toBe(0);
   });
 
   it("gives no verdict under three repetitions", () => {

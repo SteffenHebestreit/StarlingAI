@@ -2265,8 +2265,13 @@ function verdictE9(all: readonly CallResult[]): ExperimentVerdict {
     if (cold(cA) && cold(cB)) controlCold += 1;
     if (Math.max(tA.timings!.promptMs, tB.timings!.promptMs) < Math.min(cA.timings!.promptMs, cB.timings!.promptMs)) separated += 1;
     if (Math.min(cacheShare(tA) ?? 0, cacheShare(tB) ?? 0) < E9_REJECT_SHARE) rejectedReps += 1;
+    // Kept means the warmed full HEAD is still cached: its reused tokens against the head's own length, as the live
+    // calls are judged against their warm call. Against the whole prompt the call's own new tail (its message and
+    // nonce, ~1.6k tokens) counted as lost head: run 2026-09-26T11-06 kept 12,555 of a 13,071-token head (96%) in
+    // every rep and read 88%.
     const fullAfter = at(rep, "treatment_full_after");
-    if (fullAfter && (cacheShare(fullAfter) ?? 0) >= E9_FULL_KEPT_SHARE) fullKept += 1;
+    const warmFullN = totalPromptTokens(at(rep, "treatment_warm_full") ?? {});
+    if (fullAfter && warmFullN && (fullAfter.timings?.cacheN ?? 0) >= E9_FULL_KEPT_SHARE * warmFullN) fullKept += 1;
   }
   const med = (step: string, pick: (r: CallResult) => number | undefined) => round(medianOf(scoredStep(results, step), pick));
   const share = (step: string) => round(median(scoredStep(results, step).map((r) => cacheShare(r)).filter((v): v is number => v !== undefined)), 3);

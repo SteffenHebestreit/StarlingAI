@@ -50,7 +50,14 @@
       // real turn starts, so it never queues ahead of a user — but on a busy box that GPU
       // time is not free. If first-turn TTFT does not fall to roughly a warm prefill, turn it
       // back off rather than leaving it running.
-      "promptCacheWarmKeeper": true
+      "promptCacheWarmKeeper": true,
+      // Also warm the two forced orchestration heads a source-sensitive or artifact turn switches to (record_plan,
+      // then execute_plan, on lean base + orchestration module). Live probe E9, 2026-09-26, 3 of 3 reps: the two
+      // forced calls reused their heads, 2.8 s of prompt each against 12.2 / 11.7 s cold, the full head stayed
+      // cached, and they stayed warm after six 26k-token prompts in between. Cost: ~10.6 + 10.2 s of idle GPU once,
+      // ~1.5 s per head to re-warm, only while no turn runs. After a rebuild, check that the forced calls'
+      // provider_model_call rows show cacheN >= 9k; if they do not, turn this back off.
+      "promptCacheWarmForcedHeads": true
     }
   },
   "gateway": {
