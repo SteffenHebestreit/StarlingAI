@@ -9,7 +9,27 @@ import { UNFINISHED_STUB_MARKER } from "../agent/sub-agent-prompt-guidance.js";
 import { buildArtifactTextPreview } from "./artifact-preview.js";
 
 const log = childLogger("tool:filesystem");
-const MAX_FILE_SIZE = 1024 * 1024; // 1MB read limit
+/**
+ * Largest text file read_file, edit_file and a grep_files aimed at one file open. It was 1 MB, and the swarm's
+ * own generators write past that: generate_presentation inlines a deck's local images as data: URIs so the deck
+ * is self-contained, and ten photos made index.html 3.9 MB (run c297c5ea). The content_writer that had built the
+ * deck could neither read nor edit it, grep_files skipped it and answered "No matches", and the agent spent 20
+ * minutes and 300 iterations looking. Reading or rewriting 16 MB takes milliseconds; what a big file must not do
+ * is flood the context, which the head+tail and windowed reads and clipLine prevent.
+ */
+export const MAX_TEXT_FILE_BYTES = 16 * 1024 * 1024;
+
+/** Longest line a read shows whole. One line of a generated file can be megabytes — an inlined image — which
+ *  shown whole fills the context and tells the model nothing. */
+export const MAX_SHOWN_LINE_CHARS = 2_000;
+
+/** `line` whole when it is at most `max` long, else the `max` chars around `focus` with what was left out counted. */
+export function clipLine(line: string, focus = 0, max = MAX_SHOWN_LINE_CHARS): string {
+  if (line.length <= max) return line;
+  const start = Math.max(0, Math.min(focus - Math.floor(max / 2), line.length - max));
+  const end = start + max;
+  return `${start > 0 ? `[${start} chars not shown]` : ""}${line.slice(start, end)}${end < line.length ? `[${line.length - end} chars not shown]` : ""}`;
+}
 /**
  * Bound on an UNWINDOWED read — `read_file(path)` with neither offset nor limit.
  *
@@ -120,7 +140,7 @@ export function isSensitiveWorkspacePath(relativePath: string): boolean {
   return SENSITIVE_READ_PATTERNS.some((re) => re.test(rel));
 }
 
-function guardPath(path: string, workspacePath: string): { safe: boolean; resolved: string } {
+export function guardPath(path: string, workspacePath: string): { safe: boolean; resolved: string } {
   try {
     const { resolved } = resolvePathWithinWorkspace(path, workspacePath);
     // Refuse secrets / VCS internals — on the lexical path AND, when the target exists,
@@ -208,8 +228,12 @@ registerTool({
     if (stat.isDirectory()) {
       return { success: false, output: "", error: "Path is a directory, use list_files instead" };
     }
-    if (stat.size > MAX_FILE_SIZE) {
-      return { success: false, output: "", error: `File too large (${stat.size} bytes > ${MAX_FILE_SIZE} limit)` };
+    if (stat.size > MAX_TEXT_FILE_BYTES) {
+      return {
+        success: false,
+        output: "",
+        error: `File too large to read (${stat.size} bytes > ${MAX_TEXT_FILE_BYTES} limit). Find the lines you need with grep_files, passing this file as path.`,
+      };
     }
 
     const ext = extname(resolved).toLowerCase();
@@ -227,7 +251,7 @@ registerTool({
         const start = (offset ?? 1) - 1;
         const end = limit !== undefined ? start + limit : lines.length;
         const window = lines.slice(start, end);
-        const shown = window.map((l, i) => `${start + i + 1}\t${l}`).join("\n");
+        const shown = window.map((l, i) => `${start + i + 1}\t${clipLine(l)}`).join("\n");
         return {
           success: true,
           output: shown,
@@ -694,8 +718,8 @@ registerTool({
     if (!existsSync(resolved)) return { success: false, output: "", error: `File not found: ${path}` };
 
     const stat = statSync(resolved);
-    if (stat.size > MAX_FILE_SIZE) {
-      return { success: false, output: "", error: `File too large (${stat.size} bytes > ${MAX_FILE_SIZE} limit)` };
+    if (stat.size > MAX_TEXT_FILE_BYTES) {
+      return { success: false, output: "", error: `File too large to edit (${stat.size} bytes > ${MAX_TEXT_FILE_BYTES} limit)` };
     }
 
     const ext = extname(resolved).toLowerCase();
@@ -721,6 +745,7 @@ registerTool({
           ? content.split("\n")
               .filter(line => line.includes(UNFINISHED_STUB_MARKER))
               .map(line => line.trim())
+              .map(line => clipLine(line, line.indexOf(UNFINISHED_STUB_MARKER)))
               .slice(0, 20)
           : [];
         const hint = !missedAStub ? ""

@@ -13,7 +13,7 @@ import { readFileSync, statSync, readdirSync, existsSync } from "node:fs";
 import { join, relative, extname, sep } from "node:path";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
-import { isSensitiveWorkspacePath } from "./filesystem.js";
+import { isSensitiveWorkspacePath, guardPath, clipLine, MAX_TEXT_FILE_BYTES } from "./filesystem.js";
 import { resolvePathWithinWorkspace } from "./workspace-path.js";
 
 const log = childLogger("tool:code-navigation");
@@ -24,8 +24,14 @@ const SKIP_DIRS = new Set([
   ".venv", "venv", "__pycache__", ".cache", ".pnpm-store", "target",
 ]);
 const MAX_RESULTS = 300;
+/** Largest file a search over a directory opens; a larger one is named in the result, not silently passed over. */
 const MAX_GREP_FILE_BYTES = 2 * 1024 * 1024;
+/** Longest line a match block shows whole; a longer one shows this much around the match. */
+const MAX_GREP_LINE_CHARS = 500;
 const MAX_WALK_ENTRIES = 20_000;
+const BINARY_EXTENSIONS = new Set([
+  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf", ".zip", ".docx", ".pptx", ".xlsx", ".woff", ".woff2", ".ico", ".mp4", ".wav",
+]);
 
 function fail(error: string): ToolResult {
   return { success: false, output: "", error };
@@ -172,7 +178,7 @@ registerTool({
     properties: {
       pattern: { type: "string", description: "Regular expression to search for." },
       glob: { type: "string", description: "Optional file filter, e.g. '**/*.ts'. Defaults to all text files." },
-      path: { type: "string", description: "Optional subdirectory to search within, workspace-relative." },
+      path: { type: "string", description: "Optional subdirectory or single file to search within, workspace-relative." },
       context: { type: "number", description: "Lines of context to show around each match (default 2, max 10)." },
       ignore_case: { type: "boolean", description: "Case-insensitive match. Default false." },
       limit: { type: "number", description: "Maximum matches to return (default 100)." },
@@ -189,7 +195,13 @@ registerTool({
     const limit = Math.min(500, Math.max(1, Number(args["limit"]) || 100));
 
     let re: RegExp;
-    try { re = new RegExp(pattern, args["ignore_case"] === true ? "i" : ""); }
+    // The whole-file pre-test must read ^ and $ at line boundaries, as the per-line test does: without the
+    // m flag a /^export/ skipped every file whose FIRST line was not an export and answered "No matches".
+    let fileRe: RegExp;
+    try {
+      re = new RegExp(pattern, args["ignore_case"] === true ? "i" : "");
+      fileRe = new RegExp(pattern, args["ignore_case"] === true ? "im" : "m");
+    }
     catch (err) { return fail(`Invalid regular expression: ${err instanceof Error ? err.message : String(err)}`); }
 
     // The DEFAULT root goes through the resolver too. Taking ctx.workspacePath raw skipped the
@@ -199,14 +211,22 @@ registerTool({
     // files from another's. workspace-search.ts resolves "." for the same reason.
     let root = resolvePathWithinWorkspace(".", ctx.workspacePath).resolved;
     const sub = typeof args["path"] === "string" ? args["path"].trim() : "";
+    // A path naming one FILE searches that file. The walk below only descends directories, so a file
+    // path searched nothing and answered "No matches" — which the caller believes: run c297c5ea's
+    // content_writer grepped its own deck nearly 300 times for lines that were there.
+    let namedFile = false;
     if (sub) {
       try { root = resolvePathWithinWorkspace(sub, ctx.workspacePath).resolved; }
       catch { return fail("path must be a relative path within the workspace"); }
-      if (!existsSync(root)) return fail(`Directory not found: ${sub}`);
+      if (!existsSync(root)) return fail(`Path not found: ${sub}`);
+      try { namedFile = statSync(root).isFile(); } catch { return fail(`Path not found: ${sub}`); }
+      // The walk refuses secrets entry by entry; a named file gets read_file's guard, symlinks included.
+      if (namedFile && !guardPath(sub, ctx.workspacePath).safe) return fail(`Access denied: ${sub}`);
+      if (namedFile && BINARY_EXTENSIONS.has(extname(root).toLowerCase())) return fail(`${sub} is a binary file; grep_files searches text.`);
     }
     if (!existsSync(root)) return fail("No files to search yet — nothing has been written to your working zone.");
 
-    const globStr = typeof args["glob"] === "string" ? args["glob"].trim() : "";
+    const globStr = typeof args["glob"] === "string" && !namedFile ? args["glob"].trim() : "";
     let globRe: RegExp | null = null;
     if (globStr) {
       try { globRe = globToRegExp(globStr); } catch { return fail(`Invalid glob: ${globStr}`); }
@@ -215,53 +235,68 @@ registerTool({
     const blocks: string[] = [];
     let matchCount = 0;
     let filesWithMatches = 0;
+    /** Files passed over for their size: named in the answer, so "No matches" never means "not looked at". */
+    const tooLarge: Array<{ path: string; bytes: number }> = [];
     const prefix = sub ? relative(ctx.workspacePath, root).split(sep).join("/") : "";
+    // One file asked for by name is opened up to read_file's limit; a directory search keeps its lower one.
+    const maxBytes = namedFile ? MAX_TEXT_FILE_BYTES : MAX_GREP_FILE_BYTES;
 
-    walk(root, (rel, abs) => {
-      if (matchCount >= limit) return false;
-      const full = prefix ? `${prefix}/${rel}` : rel;
-      if (globRe && !globRe.test(full)) return;
+    const searchFile = (full: string, abs: string): void => {
       // Skip obvious binaries cheaply — extension first, size second.
-      const ext = extname(rel).toLowerCase();
-      if ([".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf", ".zip", ".docx", ".pptx", ".xlsx", ".woff", ".woff2", ".ico", ".mp4", ".wav"].includes(ext)) return;
+      if (BINARY_EXTENSIONS.has(extname(abs).toLowerCase())) return;
       let stat;
       try { stat = statSync(abs); } catch { return; }
-      if (stat.size > MAX_GREP_FILE_BYTES) return;
+      if (stat.size > maxBytes) { tooLarge.push({ path: full, bytes: stat.size }); return; }
 
       let text: string;
       try { text = readFileSync(abs, "utf-8"); } catch { return; }
       if (text.includes(String.fromCharCode(0))) return;   // NUL byte: a binary that slipped the extension check
-      if (!re.test(text)) { re.lastIndex = 0; return; }
-      re.lastIndex = 0;
+      if (!fileRe.test(text)) return;
 
       const lines = text.split("\n");
       let fileHits = 0;
       for (let i = 0; i < lines.length && matchCount < limit; i++) {
-        if (!re.test(lines[i]!)) { re.lastIndex = 0; continue; }
-        re.lastIndex = 0;
+        const at = lines[i]!.search(re);
+        if (at < 0) continue;
         const from = Math.max(0, i - contextLines);
         const to = Math.min(lines.length - 1, i + contextLines);
         const body = [];
         for (let j = from; j <= to; j++) {
-          body.push(`${j === i ? ">" : " "} ${j + 1}\t${lines[j]}`);
+          body.push(`${j === i ? ">" : " "} ${j + 1}\t${clipLine(lines[j]!, j === i ? at : 0, MAX_GREP_LINE_CHARS)}`);
         }
         blocks.push(`${full}:${i + 1}\n${body.join("\n")}`);
         matchCount++;
         fileHits++;
       }
       if (fileHits > 0) filesWithMatches++;
-    });
+    };
 
+    if (namedFile) {
+      searchFile(prefix, root);
+    } else {
+      walk(root, (rel, abs) => {
+        if (matchCount >= limit) return false;
+        const full = prefix ? `${prefix}/${rel}` : rel;
+        if (globRe && !globRe.test(full)) return;
+        searchFile(full, abs);
+      });
+    }
+
+    const notSearched = tooLarge.length === 0 ? "" : `\n\nNot searched, larger than ${maxBytes} bytes: `
+      + tooLarge.slice(0, 10).map((file) => `${file.path} (${file.bytes} bytes)`).join(", ")
+      + (tooLarge.length > 10 ? ` and ${tooLarge.length - 10} more` : "")
+      + (namedFile ? "." : ". Pass one of them as path to search it on its own.");
     return {
       success: true,
-      output: blocks.length === 0
+      output: (blocks.length === 0
         ? `No matches for /${pattern}/${globStr ? ` in ${globStr}` : ""}.`
-        : blocks.join("\n\n"),
+        : blocks.join("\n\n")) + notSearched,
       metadata: {
         pattern,
         matches: matchCount,
         files: filesWithMatches,
         truncated: matchCount >= limit,
+        ...(tooLarge.length > 0 ? { notSearchedTooLarge: tooLarge.length } : {}),
         ...(globStr ? { glob: globStr } : {}),
       },
     };

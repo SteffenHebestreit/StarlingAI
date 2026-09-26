@@ -1320,6 +1320,11 @@ const IDEMPOTENT_TOOLS = new Set<string>([
   "web_search",
   "web_fetch",
   "workspace_search",
+  // Read-only over the workspace like read_file, and dropped with it on every write below. Outside the
+  // set, run c297c5ea's content_writer re-ran the same few greps nearly 300 times, alternating between them, which
+  // the consecutive check misses and the repeat detector only logged.
+  "grep_files",
+  "glob_files",
 ]);
 
 // Tools whose every call is new work, so even the consecutive-duplicate cache below never answers

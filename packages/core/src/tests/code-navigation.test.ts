@@ -163,3 +163,78 @@ describe("glob_files / grep_files respect the working zone by default", () => {
     expect(String(r.output)).toContain("10-core-agents.jsonc");
   });
 });
+
+/**
+ * "NO MATCHES" MUST MEAN THE FILE WAS SEARCHED.
+ *
+ * Run c297c5ea: generate_presentation inlined ten photos into the deck, index.html came to 3.9 MB, and
+ * the content_writer grepped it nearly 300 times for a script tag that was there. A path naming a file
+ * searched nothing (the walk only descends directories), a file over the size limit was skipped without
+ * a word, and both answered "No matches" — which the model believed.
+ */
+describe("grep_files answers for what it searched", () => {
+  const cleanup: string[] = [];
+  let ws: string;
+  const photo = `<img src="data:image/jpeg;base64,${"QUJD".repeat(750_000)}">`;   // one 3 MB line
+
+  beforeEach(() => {
+    ws = mkdtempSync(join(tmpdir(), "sai-nav-big-"));
+    cleanup.push(ws);
+    mkdirSync(join(ws, "generated", "presentation"), { recursive: true });
+    writeFileSync(join(ws, "generated", "presentation", "index.html"), [
+      "<!DOCTYPE html>",
+      "<section>",
+      `  ${photo}`,
+      "</section>",
+      "<script src=\"reveal.js\"></script>",
+      "<script>Reveal.initialize({ hash: true });</script>",
+    ].join("\n"));
+    writeFileSync(join(ws, "generated", "presentation", "notes.md"), "# Notes\nexport this deck\n");
+    writeFileSync(join(ws, ".env"), "SECRET=1\n");
+  });
+
+  afterEach(() => { for (const d of cleanup.splice(0)) rmSync(d, { recursive: true, force: true }); });
+
+  async function grep(args: Record<string, unknown>) {
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/code-navigation.js"),
+    ]);
+    return getTool("grep_files")!.execute(args, { sessionId: "s", workspacePath: ws } as never);
+  }
+
+  it("searches the file a path names, however it was generated", async () => {
+    const r = await grep({ pattern: "Reveal\.initialize", path: "generated/presentation/index.html" });
+    expect(r.success).toBe(true);
+    expect(r.metadata?.["matches"]).toBe(1);
+    expect(String(r.output)).toContain("generated/presentation/index.html:6");
+  });
+
+  it("shows a window of a megabyte line around the match, not the line", async () => {
+    const r = await grep({ pattern: "data:image", path: "generated/presentation/index.html", context: 1 });
+    expect(r.metadata?.["matches"]).toBe(1);
+    const out = String(r.output);
+    expect(out).toContain("data:image/jpeg;base64,");
+    expect(out).toMatch(/chars not shown/);
+    expect(out.length).toBeLessThan(2_000);
+  });
+
+  it("names a file a directory search passed over for its size, instead of answering no matches", async () => {
+    const r = await grep({ pattern: "Reveal", path: "generated/presentation" });
+    expect(r.metadata?.["matches"]).toBe(0);
+    expect(r.metadata?.["notSearchedTooLarge"]).toBe(1);
+    expect(String(r.output)).toMatch(/Not searched, larger than \d+ bytes: generated\/presentation\/index\.html/);
+  });
+
+  it("reads ^ at the start of every line, not only the file's first", async () => {
+    const r = await grep({ pattern: "^export", path: "generated/presentation" });
+    expect(r.metadata?.["matches"]).toBe(1);
+    expect(String(r.output)).toContain("generated/presentation/notes.md:2");
+  });
+
+  it("refuses a named secret as read_file does", async () => {
+    const r = await grep({ pattern: "SECRET", path: ".env" });
+    expect(r.success).toBe(false);
+    expect(String(r.output)).not.toContain("SECRET=1");
+  });
+});

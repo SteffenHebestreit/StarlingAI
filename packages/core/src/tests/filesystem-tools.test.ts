@@ -438,3 +438,48 @@ describe("filesystem tools — sensitive-path denylist (#9)", () => {
     }
   });
 });
+
+/**
+ * A deck with inlined photos is a text file of several megabytes (run c297c5ea: 3.9 MB). read_file and
+ * edit_file refused anything over 1 MB, so the agent that built the deck could neither check nor fix it.
+ */
+describe("read_file and edit_file on a generated file of several megabytes", () => {
+  const tempDir = mkdtempSync(join(tmpdir(), "starlingai-fs-big-"));
+  const photo = `<img src="data:image/jpeg;base64,${"QUJD".repeat(750_000)}">`;   // one 3 MB line
+
+  beforeAll(async () => {
+    mkdirSync(join(tempDir, "generated", "deck"), { recursive: true });
+    writeFileSync(join(tempDir, "generated", "deck", "index.html"),
+      ["<!DOCTYPE html>", `  ${photo}`, "<script>Reveal.initialize({ hash: true });</script>", ""].join("\n"));
+    await import("../tools/filesystem.js");
+  });
+
+  const ctx = { sessionId: "s", workspacePath: tempDir };
+
+  it("reads a window of it with the long line clipped", async () => {
+    const { getTool } = await import("../tools/registry.js");
+    const r = await getTool("read_file")!.execute({ path: "generated/deck/index.html", offset: 1, limit: 3 }, ctx);
+    expect(r.success).toBe(true);
+    const out = String(r.output);
+    expect(out).toContain("3\t<script>Reveal.initialize({ hash: true });</script>");
+    expect(out).toMatch(/2\t {2}<img src="data:image\/jpeg;base64,QUJD.*\[\d+ chars not shown\]/);
+    expect(out.length).toBeLessThan(3_000);
+  });
+
+  it("reads it unwindowed as head and tail", async () => {
+    const { getTool } = await import("../tools/registry.js");
+    const r = await getTool("read_file")!.execute({ path: "generated/deck/index.html" }, ctx);
+    expect(r.success).toBe(true);
+    expect(r.metadata?.["truncated"]).toBe(true);
+    expect(String(r.output).length).toBeLessThan(20_000);
+  });
+
+  it("edits it", async () => {
+    const { getTool } = await import("../tools/registry.js");
+    const r = await getTool("edit_file")!.execute(
+      { path: "deck/index.html", old_string: "hash: true", new_string: "hash: true, slideNumber: true" }, ctx);
+    expect(r.success).toBe(true);
+    const back = await getTool("read_file")!.execute({ path: "generated/deck/index.html", offset: 3, limit: 1 }, ctx);
+    expect(String(back.output)).toContain("slideNumber: true");
+  });
+});
