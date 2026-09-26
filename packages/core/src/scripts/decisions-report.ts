@@ -12,6 +12,7 @@ import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { GATE_LEVELS, wilsonLowerBound } from "../decisions/gate.js";
+import { DECISION_POINTS, type DecisionPointId } from "../decisions/points.js";
 import { readLedgerRows, type LedgerRow } from "../decisions/ledger.js";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
@@ -26,6 +27,11 @@ export interface LevelRow {
   cases: number;
   agreement: number;
   lowerBound: number;
+  /**
+   * For an answer other than the point's protected one (decisions/points.ts `protect`): the lower bound
+   * of the protected answer's recall at this level, which the gate also requires (decisions/gate.ts).
+   */
+  protectedRecallLowerBound?: number;
 }
 
 export interface AnswerReport {
@@ -98,14 +104,26 @@ export function buildDecisionReport(rows: LedgerRow[], target: number, min: numb
     const model = rest.join("|");
     const both = group.filter((row) => row.laya && row.incumbent);
     const agreeing = both.filter((row) => row.laya!.choice === row.incumbent!.choice).length;
+    // The gate's recall guard: the cases the incumbent answered the point's protected answer.
+    const protect = DECISION_POINTS[point as DecisionPointId]?.protect;
+    const protectedRows = protect ? both.filter((row) => row.incumbent!.choice === protect) : [];
     const answers = [...new Set(both.map((row) => row.laya!.choice))].sort().map((answer): AnswerReport => {
       const cases = both.filter((row) => row.laya!.choice === answer);
-      const levels = GATE_LEVELS.map((level) => {
+      const guarded = protect !== undefined && answer !== protect;
+      const levels = GATE_LEVELS.map((level): LevelRow => {
         const above = cases.filter((row) => row.laya!.top >= level);
         const agree = above.filter((row) => row.laya!.choice === row.incumbent!.choice).length;
-        return { level, cases: above.length, agreement: above.length ? agree / above.length : 0, lowerBound: wilsonLowerBound(agree, above.length) };
+        const missed = protectedRows.filter((row) => row.laya!.choice === answer && row.laya!.top >= level).length;
+        return {
+          level,
+          cases: above.length,
+          agreement: above.length ? agree / above.length : 0,
+          lowerBound: wilsonLowerBound(agree, above.length),
+          ...(guarded ? { protectedRecallLowerBound: wilsonLowerBound(protectedRows.length - missed, protectedRows.length) } : {}),
+        };
       });
-      const qualified = levels.find((row) => row.cases >= min && row.lowerBound >= target);
+      const qualified = levels.find((row) => row.cases >= min && row.lowerBound >= target
+        && (!guarded || (protectedRows.length >= min && (row.protectedRecallLowerBound ?? 0) >= target)));
       return { answer, levels, qualifiedLevel: qualified?.level ?? null };
     });
     return {

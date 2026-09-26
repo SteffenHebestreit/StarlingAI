@@ -1,0 +1,4 @@
+# A deployment's own decision cases (fast_lane.jsonl, source_sensitive.jsonl) hold its users' messages: keep them
+# local. The synthetic *.example.jsonl files are the committed starting point.
+*.jsonl
+!*.example.jsonl

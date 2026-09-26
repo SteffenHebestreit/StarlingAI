@@ -1,0 +1,207 @@
+// source_sensitive — the up-front judge's question: does answering this well need specific, checkable real-world
+// facts that must be looked up rather than recalled (decisions/points.ts SOURCE_SENSITIVE, the judge prompt in
+// agent/ungrounded-claim-judge.ts)? SYNTHETIC and hand-labelled by the SUBJECT of the message, not its words: see
+// eval/decisions/README.md for the rules.
+//
+// Enriched on purpose: "yes" is about 39% here and 0 of 25 on the attributed traffic, because a Laya that always
+// says "no" agrees with that traffic perfectly; only cases that contain the rare class can show what it misses, and
+// the gate's recall guard on "yes" needs them before Laya may take "no". The bench reweighs to a traffic prior for
+// its projection.
+//
+// Run: pnpm --filter @starlingai/core decisions:bench --points source_sensitive
+{"id": "ss-de-001", "point": "source_sensitive", "language": "de", "state": {"message": "Was kostet ein Deutschlandticket im Monat?"}, "gold": "yes", "tags": ["price"]}
+{"id": "ss-de-002", "point": "source_sensitive", "language": "de", "state": {"message": "was kostet n döner grad in berlin"}, "gold": "yes", "tags": ["price", "casual-fact", "typo"]}
+{"id": "ss-de-003", "point": "source_sensitive", "language": "de", "state": {"message": "Wie viel kostet ein iPhone 16 Pro gerade?"}, "gold": "yes", "tags": ["price", "brand"]}
+{"id": "ss-de-004", "point": "source_sensitive", "language": "de", "state": {"message": "Wie hoch sind die Tagesgeldzinsen bei der ING?"}, "gold": "yes", "tags": ["rate", "brand"]}
+{"id": "ss-de-005", "point": "source_sensitive", "language": "de", "state": {"message": "Wie hoch ist die Inflationsrate in Deutschland im Moment?"}, "gold": "yes", "tags": ["statistic", "current"]}
+{"id": "ss-de-006", "point": "source_sensitive", "language": "de", "state": {"message": "Wie viele Einwohner hat München?"}, "gold": "yes", "tags": ["statistic"]}
+{"id": "ss-de-007", "point": "source_sensitive", "language": "de", "state": {"message": "Was verdient ein Pflegefachmann in Bayern im Schnitt?"}, "gold": "yes", "tags": ["statistic"]}
+{"id": "ss-de-008", "point": "source_sensitive", "language": "de", "state": {"message": "Wie teuer ist der Rundfunkbeitrag pro Monat?"}, "gold": "yes", "tags": ["price", "scheme"]}
+{"id": "ss-de-009", "point": "source_sensitive", "language": "de", "state": {"message": "Was kostet eine Stunde Parken am Flughafen Frankfurt?"}, "gold": "yes", "tags": ["price", "place"]}
+{"id": "ss-de-010", "point": "source_sensitive", "language": "de", "state": {"message": "Welche Gebühren nimmt PayPal bei Zahlungen aus dem Ausland?"}, "gold": "yes", "tags": ["price", "brand"]}
+{"id": "ss-de-011", "point": "source_sensitive", "language": "de", "state": {"message": "Darf mein Vermieter die Kaution einbehalten, wenn ich Dübellöcher nicht zugemacht habe?"}, "gold": "yes", "tags": ["law"]}
+{"id": "ss-de-012", "point": "source_sensitive", "language": "de", "state": {"message": "Wie lange ist die Kündigungsfrist bei einem unbefristeten Arbeitsvertrag nach 6 Jahren?"}, "gold": "yes", "tags": ["law"]}
+{"id": "ss-de-013", "point": "source_sensitive", "language": "de", "state": {"message": "Bis wann muss ich meine Steuererklärung für 2025 abgeben?"}, "gold": "yes", "tags": ["law", "date"]}
+{"id": "ss-de-014", "point": "source_sensitive", "language": "de", "state": {"message": "Ist es erlaubt, auf dem Balkon zu grillen?"}, "gold": "yes", "tags": ["law"]}
+{"id": "ss-de-015", "point": "source_sensitive", "language": "de", "state": {"message": "Welche Regeln gelten für Drohnenflüge über Wohngebieten?"}, "gold": "yes", "tags": ["law"]}
+{"id": "ss-de-016", "point": "source_sensitive", "language": "de", "state": {"message": "Brauche ich für Thailand ein Visum?"}, "gold": "yes", "tags": ["rule", "place"]}
+{"id": "ss-de-017", "point": "source_sensitive", "language": "de", "state": {"message": "Wie viel Ibuprofen darf ich maximal am Tag nehmen?"}, "gold": "yes", "tags": ["rule", "health"]}
+{"id": "ss-de-018", "point": "source_sensitive", "language": "de", "state": {"message": "Schreib einen Einspruch gegen meinen Steuerbescheid und nenn die aktuellen Fristen"}, "gold": "yes", "tags": ["writing", "law", "near-miss"]}
+{"id": "ss-de-019", "point": "source_sensitive", "language": "de", "state": {"message": "wer is eigentlich grad bundeskanzler"}, "gold": "yes", "tags": ["current", "casual-fact", "typo"]}
+{"id": "ss-de-020", "point": "source_sensitive", "language": "de", "state": {"message": "Was ist heute in der Politik passiert?"}, "gold": "yes", "tags": ["current"]}
+{"id": "ss-de-021", "point": "source_sensitive", "language": "de", "state": {"message": "Wer hat gestern das Spiel Bayern gegen Dortmund gewonnen?"}, "gold": "yes", "tags": ["current", "sport"]}
+{"id": "ss-de-022", "point": "source_sensitive", "language": "de", "state": {"message": "Wann ist dieses Jahr der Black Friday?"}, "gold": "yes", "tags": ["date"]}
+{"id": "ss-de-023", "point": "source_sensitive", "language": "de", "state": {"message": "Wann fährt der letzte Bus von Tübingen nach Reutlingen?"}, "gold": "yes", "tags": ["current", "place", "casual-fact"]}
+{"id": "ss-de-024", "point": "source_sensitive", "language": "de", "state": {"message": "Hat der Aldi in der Hauptstraße am Samstag bis 20 Uhr offen?"}, "gold": "yes", "tags": ["brand", "place", "casual-fact"]}
+{"id": "ss-de-025", "point": "source_sensitive", "language": "de", "state": {"message": "Gibt es gerade Streiks bei der Bahn?"}, "gold": "yes", "tags": ["current", "brand"]}
+{"id": "ss-de-026", "point": "source_sensitive", "language": "de", "state": {"message": "Erklär mir, wie die Schufa funktioniert"}, "gold": "yes", "tags": ["specific-system", "near-miss"]}
+{"id": "ss-de-027", "point": "source_sensitive", "language": "de", "state": {"message": "Wie funktioniert die Förderung für Wärmepumpen in Deutschland?"}, "gold": "yes", "tags": ["specific-system", "near-miss"]}
+{"id": "ss-de-028", "point": "source_sensitive", "language": "de", "state": {"message": "Wie beantrage ich Elterngeld?"}, "gold": "yes", "tags": ["specific-system"]}
+{"id": "ss-de-029", "point": "source_sensitive", "language": "de", "state": {"message": "Wie läuft die Anmeldung beim Bürgeramt in Hamburg ab?"}, "gold": "yes", "tags": ["specific-system", "place"]}
+{"id": "ss-de-030", "point": "source_sensitive", "language": "de", "state": {"message": "Wie funktioniert das Pfandsystem in Deutschland genau?"}, "gold": "yes", "tags": ["specific-system"]}
+{"id": "ss-de-031", "point": "source_sensitive", "language": "de", "state": {"message": "Wie kündige ich mein Abo bei Netflix?"}, "gold": "yes", "tags": ["specific-system", "brand"]}
+{"id": "ss-de-032", "point": "source_sensitive", "language": "de", "state": {"message": "Welche Leistungen übernimmt die Techniker Krankenkasse bei Zahnreinigung?"}, "gold": "yes", "tags": ["specific-system", "brand"]}
+{"id": "ss-de-033", "point": "source_sensitive", "language": "de", "state": {"message": "Welcher Laptop ist gerade am besten für Videoschnitt unter 1500 Euro?"}, "gold": "yes", "tags": ["recommendation"]}
+{"id": "ss-de-034", "point": "source_sensitive", "language": "de", "state": {"message": "Vergleich mal Spotify und Apple Music"}, "gold": "yes", "tags": ["recommendation", "brand"]}
+{"id": "ss-de-035", "point": "source_sensitive", "language": "de", "state": {"message": "Welche Version von Node.js ist die aktuelle LTS?"}, "gold": "yes", "tags": ["version", "code-adjacent", "near-miss"]}
+{"id": "ss-de-036", "point": "source_sensitive", "language": "de", "state": {"message": "Welche Programmiersprache soll ich als Anfänger lernen?"}, "gold": "yes", "tags": ["recommendation", "near-miss"]}
+{"id": "ss-de-037", "point": "source_sensitive", "language": "de", "state": {"message": "Welches E-Auto hat aktuell die größte Reichweite?"}, "gold": "yes", "tags": ["recommendation"]}
+{"id": "ss-de-038", "point": "source_sensitive", "language": "de", "state": {"message": "Welcher Stromanbieter ist in Köln gerade am günstigsten?"}, "gold": "yes", "tags": ["recommendation", "price", "place"]}
+{"id": "ss-de-039", "point": "source_sensitive", "language": "de", "state": {"message": "Ohne Recherche bitte: Wie hoch ist der Mindestlohn gerade?"}, "gold": "yes", "tags": ["do-not-look-up", "near-miss"]}
+{"id": "ss-de-040", "point": "source_sensitive", "language": "de", "state": {"message": "Aus dem Kopf: Wie hoch ist die Mehrwertsteuer in Österreich?"}, "gold": "yes", "tags": ["do-not-look-up", "near-miss"]}
+{"id": "ss-de-041", "point": "source_sensitive", "language": "de", "state": {"message": "Schnell und ohne nachzuschauen: Was kostet Porto für einen Brief?"}, "gold": "yes", "tags": ["do-not-look-up", "price", "near-miss"]}
+{"id": "ss-de-042", "point": "source_sensitive", "language": "de", "state": {"message": "Stimmt das, was in meinem Text steht: 'Der Spitzensteuersatz liegt bei 42 Prozent'?"}, "gold": "yes", "tags": ["own-text", "near-miss"]}
+{"id": "ss-de-043", "point": "source_sensitive", "language": "de", "state": {"message": "In meiner Präsentation steht, dass Norwegen 90% E-Autos bei Neuzulassungen hat. Passt das noch?"}, "gold": "yes", "tags": ["own-text", "statistic", "near-miss"]}
+{"id": "ss-de-044", "point": "source_sensitive", "language": "de", "state": {"message": "Kannst du prüfen, ob die Öffnungszeiten auf meinem Flyer noch stimmen? Bürgeramt Mitte: Mo-Fr 8-18 Uhr"}, "gold": "yes", "tags": ["own-text", "place", "near-miss"]}
+{"id": "ss-de-045", "point": "source_sensitive", "language": "de", "state": {"message": "Wie funktioniert eine Wärmepumpe?"}, "gold": "no", "tags": ["concept", "near-miss"]}
+{"id": "ss-de-046", "point": "source_sensitive", "language": "de", "state": {"message": "Was ist Photosynthese?"}, "gold": "no", "tags": ["concept"]}
+{"id": "ss-de-047", "point": "source_sensitive", "language": "de", "state": {"message": "Erklär mir, wie eine Hash-Map intern funktioniert"}, "gold": "no", "tags": ["concept", "code"]}
+{"id": "ss-de-048", "point": "source_sensitive", "language": "de", "state": {"message": "Was ist der Unterschied zwischen Wetter und Klima?"}, "gold": "no", "tags": ["concept"]}
+{"id": "ss-de-049", "point": "source_sensitive", "language": "de", "state": {"message": "Wie entsteht ein Regenbogen?"}, "gold": "no", "tags": ["concept"]}
+{"id": "ss-de-050", "point": "source_sensitive", "language": "de", "state": {"message": "Was bedeutet Inflation eigentlich?"}, "gold": "no", "tags": ["concept", "near-miss"]}
+{"id": "ss-de-051", "point": "source_sensitive", "language": "de", "state": {"message": "Wie funktioniert Zinseszins?"}, "gold": "no", "tags": ["concept"]}
+{"id": "ss-de-052", "point": "source_sensitive", "language": "de", "state": {"message": "Was ist ein Mietvertrag?"}, "gold": "no", "tags": ["definition"]}
+{"id": "ss-de-053", "point": "source_sensitive", "language": "de", "state": {"message": "Was macht eigentlich eine Zentralbank?"}, "gold": "no", "tags": ["concept", "near-miss"]}
+{"id": "ss-de-054", "point": "source_sensitive", "language": "de", "state": {"message": "Wie funktioniert HTTPS vom Prinzip her?"}, "gold": "no", "tags": ["concept"]}
+{"id": "ss-de-055", "point": "source_sensitive", "language": "de", "state": {"message": "Warum ist der Himmel blau?"}, "gold": "no", "tags": ["concept"]}
+{"id": "ss-de-056", "point": "source_sensitive", "language": "de", "state": {"message": "Was ist der Satz des Pythagoras?"}, "gold": "no", "tags": ["concept"]}
+{"id": "ss-de-057", "point": "source_sensitive", "language": "de", "state": {"message": "Recherchier mal, was Rekursion ist"}, "gold": "no", "tags": ["lookup-verb", "concept", "near-miss"]}
+{"id": "ss-de-058", "point": "source_sensitive", "language": "de", "state": {"message": "Such nichts raus, erklär mir einfach, was ein Hash ist"}, "gold": "no", "tags": ["do-not-look-up", "concept", "near-miss"]}
+{"id": "ss-de-059", "point": "source_sensitive", "language": "de", "state": {"message": "Kannst du nachschauen, was der Unterschied zwischen Virus und Bakterium ist?"}, "gold": "no", "tags": ["lookup-verb", "concept", "near-miss"]}
+{"id": "ss-de-060", "point": "source_sensitive", "language": "de", "state": {"message": "Worauf sollte ich beim Laptopkauf allgemein achten?"}, "gold": "no", "tags": ["advice", "near-miss"]}
+{"id": "ss-de-061", "point": "source_sensitive", "language": "de", "state": {"message": "Ist es besser, morgens oder abends zu joggen?"}, "gold": "no", "tags": ["advice"]}
+{"id": "ss-de-062", "point": "source_sensitive", "language": "de", "state": {"message": "Wie kann ich mich besser konzentrieren?"}, "gold": "no", "tags": ["advice"]}
+{"id": "ss-de-063", "point": "source_sensitive", "language": "de", "state": {"message": "Wie bereite ich mich auf ein Vorstellungsgespräch vor?"}, "gold": "no", "tags": ["advice"]}
+{"id": "ss-de-064", "point": "source_sensitive", "language": "de", "state": {"message": "Wie sage ich meinem Chef, dass ich überlastet bin?"}, "gold": "no", "tags": ["advice"]}
+{"id": "ss-de-065", "point": "source_sensitive", "language": "de", "state": {"message": "Wie mache ich einen Hefeteig?"}, "gold": "no", "tags": ["advice", "recipe"]}
+{"id": "ss-de-066", "point": "source_sensitive", "language": "de", "state": {"message": "Tipps, um Geld zu sparen?"}, "gold": "no", "tags": ["advice"]}
+{"id": "ss-de-067", "point": "source_sensitive", "language": "de", "state": {"message": "Was ist 15% von 340?"}, "gold": "no", "tags": ["compute"]}
+{"id": "ss-de-068", "point": "source_sensitive", "language": "de", "state": {"message": "Wie viel Zinsen bekomme ich bei 3% auf 10.000 € nach 5 Jahren?"}, "gold": "no", "tags": ["compute", "near-miss"]}
+{"id": "ss-de-069", "point": "source_sensitive", "language": "de", "state": {"message": "Rechne 7 Uhr plus 11 Stunden"}, "gold": "no", "tags": ["compute"]}
+{"id": "ss-de-070", "point": "source_sensitive", "language": "de", "state": {"message": "Ich verdiene 3200 netto und zahle 1100 Miete, wie viel Prozent ist das?"}, "gold": "no", "tags": ["compute", "own-content"]}
+{"id": "ss-de-071", "point": "source_sensitive", "language": "de", "state": {"message": "Wie viele Sekunden hat ein Tag?"}, "gold": "no", "tags": ["compute"]}
+{"id": "ss-de-072", "point": "source_sensitive", "language": "de", "state": {"message": "Schreib eine Python-Funktion, die eine Liste umdreht"}, "gold": "no", "tags": ["code"]}
+{"id": "ss-de-073", "point": "source_sensitive", "language": "de", "state": {"message": "Warum gibt mein Code 'undefined' zurück? function f(){ let x; return x; }"}, "gold": "no", "tags": ["code", "own-content"]}
+{"id": "ss-de-074", "point": "source_sensitive", "language": "de", "state": {"message": "Wie schreibe ich eine for-Schleife in JavaScript?"}, "gold": "no", "tags": ["code"]}
+{"id": "ss-de-075", "point": "source_sensitive", "language": "de", "state": {"message": "Mach aus diesem SQL eine lesbare Version: select a,b from t where c=1 and d=2"}, "gold": "no", "tags": ["code", "own-content"]}
+{"id": "ss-de-076", "point": "source_sensitive", "language": "de", "state": {"message": "Schreib ein Gedicht über meinen alten VW Golf"}, "gold": "no", "tags": ["writing", "brand-in-passing", "near-miss"]}
+{"id": "ss-de-077", "point": "source_sensitive", "language": "de", "state": {"message": "Formuliere eine Mail an den Lidl-Kundenservice, dass mein Paket nicht angekommen ist"}, "gold": "no", "tags": ["writing", "brand-in-passing", "near-miss"]}
+{"id": "ss-de-078", "point": "source_sensitive", "language": "de", "state": {"message": "Mein iPhone ist runtergefallen und ich bin total genervt. Hast du ein paar aufmunternde Worte?"}, "gold": "no", "tags": ["small-talk", "brand-in-passing", "near-miss"]}
+{"id": "ss-de-079", "point": "source_sensitive", "language": "de", "state": {"message": "Schreib eine Absage für ein Vorstellungsgespräch"}, "gold": "no", "tags": ["writing"]}
+{"id": "ss-de-080", "point": "source_sensitive", "language": "de", "state": {"message": "Denk dir eine Gutenachtgeschichte über einen Drachen aus"}, "gold": "no", "tags": ["writing"]}
+{"id": "ss-de-081", "point": "source_sensitive", "language": "de", "state": {"message": "Schreib einen lustigen Text für eine Geburtstagskarte für meinen Kollegen bei der Telekom"}, "gold": "no", "tags": ["writing", "brand-in-passing", "near-miss"]}
+{"id": "ss-de-082", "point": "source_sensitive", "language": "de", "state": {"message": "Formulier eine Stellenanzeige für einen Werkstudenten in unserem Café"}, "gold": "no", "tags": ["writing"]}
+{"id": "ss-de-083", "point": "source_sensitive", "language": "de", "state": {"message": "Übersetze 'Kündigungsfrist' ins Englische"}, "gold": "no", "tags": ["translate"]}
+{"id": "ss-de-084", "point": "source_sensitive", "language": "de", "state": {"message": "Gib mir 5 Namensideen für ein Startup, das Fahrräder repariert"}, "gold": "no", "tags": ["writing"]}
+{"id": "ss-de-085", "point": "source_sensitive", "language": "de", "state": {"message": "Schreib mir einen Einkaufszettel für Spaghetti Bolognese"}, "gold": "no", "tags": ["writing"]}
+{"id": "ss-de-086", "point": "source_sensitive", "language": "de", "state": {"message": "Fass meinen Text zusammen: 'Im Q3 haben wir bei Müller & Söhne 12% mehr Umsatz gemacht, vor allem durch das neue Lager in Ulm.'"}, "gold": "no", "tags": ["own-text", "near-miss"]}
+{"id": "ss-de-087", "point": "source_sensitive", "language": "de", "state": {"message": "Übersetze meine Mail ins Englische: 'Sehr geehrte Damen und Herren, anbei die Unterlagen für die Firma Bosch.'"}, "gold": "no", "tags": ["own-text", "translate", "near-miss"]}
+{"id": "ss-de-088", "point": "source_sensitive", "language": "de", "state": {"message": "Hier meine Notizen vom Meeting, mach daraus eine To-do-Liste: Budget klären, Anna fragt Lieferant, Deadline Freitag"}, "gold": "no", "tags": ["own-text"]}
+{"id": "ss-de-089", "point": "source_sensitive", "language": "de", "state": {"message": "Korrigier bitte die Rechtschreibung: 'Wir haben gestern mit Amazon telefonirt und die Rechnung reklamirt.'"}, "gold": "no", "tags": ["own-text", "brand-in-passing", "near-miss"]}
+{"id": "ss-de-090", "point": "source_sensitive", "language": "de", "state": {"message": "Kürze diesen Absatz auf zwei Sätze: Unser Verein trifft sich jeden Dienstag im Gemeindehaus. Neue Mitglieder sind willkommen. Bitte bringt Hallenschuhe mit."}, "gold": "no", "tags": ["own-text"]}
+{"id": "ss-de-091", "point": "source_sensitive", "language": "de", "state": {"message": "Klingt meine Bewerbung zu steif? 'Hiermit bewerbe ich mich auf die Stelle als Buchhalterin bei der Sparkasse.'"}, "gold": "no", "tags": ["own-text", "brand-in-passing", "near-miss"]}
+{"id": "ss-de-092", "point": "source_sensitive", "language": "de", "state": {"message": "Hallo, wie geht's?"}, "gold": "no", "tags": ["small-talk"]}
+{"id": "ss-de-093", "point": "source_sensitive", "language": "de", "state": {"message": "Danke, das hat geholfen!"}, "gold": "no", "tags": ["small-talk"]}
+{"id": "ss-de-094", "point": "source_sensitive", "language": "de", "state": {"message": "Guten Morgen!"}, "gold": "no", "tags": ["small-talk"]}
+{"id": "ss-de-095", "point": "source_sensitive", "language": "de", "state": {"message": "Was kannst du alles?"}, "gold": "no", "tags": ["about-assistant"]}
+{"id": "ss-de-096", "point": "source_sensitive", "language": "de", "state": {"message": "Wie heißt du?"}, "gold": "no", "tags": ["about-assistant"]}
+{"id": "ss-de-097", "point": "source_sensitive", "language": "de", "state": {"message": "haha ok"}, "gold": "no", "tags": ["small-talk", "one-word"]}
+{"id": "ss-de-098", "point": "source_sensitive", "language": "de", "state": {"message": "mach es kürzer"}, "gold": "no", "tags": ["follow-up"]}
+{"id": "ss-de-099", "point": "source_sensitive", "language": "de", "state": {"message": "nochmal, aber freundlicher"}, "gold": "no", "tags": ["follow-up"]}
+{"id": "ss-de-100", "point": "source_sensitive", "language": "de", "state": {"message": "und jetzt als Tabelle"}, "gold": "no", "tags": ["follow-up"]}
+{"id": "ss-de-101", "point": "source_sensitive", "language": "de", "state": {"message": "Kannst du das Bild von vorhin heller machen?"}, "gold": "no", "tags": ["follow-up"]}
+{"id": "ss-de-102", "point": "source_sensitive", "language": "de", "state": {"message": "Was hältst du von Homeoffice?"}, "gold": "no", "tags": ["opinion"]}
+{"id": "ss-de-103", "point": "source_sensitive", "language": "de", "state": {"message": "Ist Ehrlichkeit immer die beste Strategie?"}, "gold": "no", "tags": ["opinion"]}
+{"id": "ss-de-104", "point": "source_sensitive", "language": "de", "state": {"message": "Was spricht für und gegen ein Tempolimit, rein argumentativ?"}, "gold": "no", "tags": ["opinion", "near-miss"]}
+{"id": "ss-de-105", "point": "source_sensitive", "language": "de", "state": {"message": "Wenn alle Katzen Tiere sind und Minka eine Katze ist, was folgt daraus?"}, "gold": "no", "tags": ["reasoning"]}
+{"id": "ss-de-106", "point": "source_sensitive", "language": "de", "state": {"message": "Mal mir ein Bild von einem Leuchtturm im Sturm"}, "gold": "no", "tags": ["image"]}
+{"id": "ss-de-107", "point": "source_sensitive", "language": "de", "state": {"message": "Erstell ein Logo für meine Bäckerei 'Kornblume'"}, "gold": "no", "tags": ["image"]}
+{"id": "ss-de-108", "point": "source_sensitive", "language": "de", "state": {"message": "Mach das Bild realistischer"}, "gold": "no", "tags": ["image", "follow-up"]}
+{"id": "ss-de-109", "point": "source_sensitive", "language": "de", "state": {"message": "Generier mir ein Bild wie von Van Gogh, aber mit Hochhäusern"}, "gold": "no", "tags": ["image", "brand-in-passing", "near-miss"]}
+{"id": "ss-de-110", "point": "source_sensitive", "language": "de", "state": {"message": "erklär mir bitte kurz was ein algoritmus is"}, "gold": "no", "tags": ["concept", "typo"]}
+{"id": "ss-de-111", "point": "source_sensitive", "language": "de", "state": {"message": "zusammenfassung?"}, "gold": "no", "tags": ["follow-up", "one-word"]}
+{"id": "ss-de-112", "point": "source_sensitive", "language": "de", "state": {"message": "übersetzen"}, "gold": "no", "tags": ["follow-up", "one-word"]}
+{"id": "ss-de-113", "point": "source_sensitive", "language": "de", "state": {"message": "was is ne primzahl"}, "gold": "no", "tags": ["concept", "typo"]}
+{"id": "ss-en-001", "point": "source_sensitive", "language": "en", "state": {"message": "How much does a Netflix Premium subscription cost?"}, "gold": "yes", "tags": ["price", "brand"]}
+{"id": "ss-en-002", "point": "source_sensitive", "language": "en", "state": {"message": "whats the price of a big mac in the uk rn"}, "gold": "yes", "tags": ["price", "casual-fact", "typo"]}
+{"id": "ss-en-003", "point": "source_sensitive", "language": "en", "state": {"message": "What's the current mortgage rate in the US?"}, "gold": "yes", "tags": ["rate", "current"]}
+{"id": "ss-en-004", "point": "source_sensitive", "language": "en", "state": {"message": "How many people live in Toronto?"}, "gold": "yes", "tags": ["statistic"]}
+{"id": "ss-en-005", "point": "source_sensitive", "language": "en", "state": {"message": "What's the average salary of a nurse in Texas?"}, "gold": "yes", "tags": ["statistic"]}
+{"id": "ss-en-006", "point": "source_sensitive", "language": "en", "state": {"message": "What fees does Wise charge for sending euros to the US?"}, "gold": "yes", "tags": ["price", "brand"]}
+{"id": "ss-en-007", "point": "source_sensitive", "language": "en", "state": {"message": "Can my landlord keep my deposit for small nail holes?"}, "gold": "yes", "tags": ["law"]}
+{"id": "ss-en-008", "point": "source_sensitive", "language": "en", "state": {"message": "When is the tax filing deadline this year?"}, "gold": "yes", "tags": ["law", "date"]}
+{"id": "ss-en-009", "point": "source_sensitive", "language": "en", "state": {"message": "Do I need a visa to visit Japan as a German citizen?"}, "gold": "yes", "tags": ["rule", "place"]}
+{"id": "ss-en-010", "point": "source_sensitive", "language": "en", "state": {"message": "What's the maximum daily dose of paracetamol?"}, "gold": "yes", "tags": ["rule", "health"]}
+{"id": "ss-en-011", "point": "source_sensitive", "language": "en", "state": {"message": "Is it legal to fly a drone in a city park?"}, "gold": "yes", "tags": ["law"]}
+{"id": "ss-en-012", "point": "source_sensitive", "language": "en", "state": {"message": "who's the prime minister of the uk now"}, "gold": "yes", "tags": ["current", "casual-fact", "typo"]}
+{"id": "ss-en-013", "point": "source_sensitive", "language": "en", "state": {"message": "What happened in the news today?"}, "gold": "yes", "tags": ["current"]}
+{"id": "ss-en-014", "point": "source_sensitive", "language": "en", "state": {"message": "Who won the Champions League final?"}, "gold": "yes", "tags": ["current", "sport"]}
+{"id": "ss-en-015", "point": "source_sensitive", "language": "en", "state": {"message": "When does the next iPhone come out?"}, "gold": "yes", "tags": ["date", "brand"]}
+{"id": "ss-en-016", "point": "source_sensitive", "language": "en", "state": {"message": "Is the London Underground on strike this week?"}, "gold": "yes", "tags": ["current", "place"]}
+{"id": "ss-en-017", "point": "source_sensitive", "language": "en", "state": {"message": "How does the UK's Universal Credit work?"}, "gold": "yes", "tags": ["specific-system", "near-miss"]}
+{"id": "ss-en-018", "point": "source_sensitive", "language": "en", "state": {"message": "How do I cancel my Amazon Prime membership?"}, "gold": "yes", "tags": ["specific-system", "brand"]}
+{"id": "ss-en-019", "point": "source_sensitive", "language": "en", "state": {"message": "How does Medicare Part D work?"}, "gold": "yes", "tags": ["specific-system"]}
+{"id": "ss-en-020", "point": "source_sensitive", "language": "en", "state": {"message": "How do I apply for a US passport renewal?"}, "gold": "yes", "tags": ["specific-system"]}
+{"id": "ss-en-021", "point": "source_sensitive", "language": "en", "state": {"message": "What's the best phone for photography right now?"}, "gold": "yes", "tags": ["recommendation"]}
+{"id": "ss-en-022", "point": "source_sensitive", "language": "en", "state": {"message": "Compare Notion and Obsidian for note taking"}, "gold": "yes", "tags": ["recommendation", "brand"]}
+{"id": "ss-en-023", "point": "source_sensitive", "language": "en", "state": {"message": "What's the latest stable version of Python?"}, "gold": "yes", "tags": ["version", "code-adjacent", "near-miss"]}
+{"id": "ss-en-024", "point": "source_sensitive", "language": "en", "state": {"message": "Which JavaScript framework should I learn in 2026?"}, "gold": "yes", "tags": ["recommendation", "near-miss"]}
+{"id": "ss-en-025", "point": "source_sensitive", "language": "en", "state": {"message": "Which password manager is most secure today?"}, "gold": "yes", "tags": ["recommendation"]}
+{"id": "ss-en-026", "point": "source_sensitive", "language": "en", "state": {"message": "Don't google it, just tell me the current federal minimum wage"}, "gold": "yes", "tags": ["do-not-look-up", "near-miss"]}
+{"id": "ss-en-027", "point": "source_sensitive", "language": "en", "state": {"message": "Off the top of your head: how much is a first-class stamp?"}, "gold": "yes", "tags": ["do-not-look-up", "price", "near-miss"]}
+{"id": "ss-en-028", "point": "source_sensitive", "language": "en", "state": {"message": "My essay says 'Tesla sold 1.8 million cars last year' — is that still right?"}, "gold": "yes", "tags": ["own-text", "statistic", "near-miss"]}
+{"id": "ss-en-029", "point": "source_sensitive", "language": "en", "state": {"message": "Check whether this line in my slides is correct: 'The EU AI Act applies from 2025.'"}, "gold": "yes", "tags": ["own-text", "law", "near-miss"]}
+{"id": "ss-en-030", "point": "source_sensitive", "language": "en", "state": {"message": "Write a complaint letter to my airline citing my rights under EU flight delay rules"}, "gold": "yes", "tags": ["writing", "law", "near-miss"]}
+{"id": "ss-en-031", "point": "source_sensitive", "language": "en", "state": {"message": "Is the Golden Gate Bridge toll paid by camera now?"}, "gold": "yes", "tags": ["specific-system", "place"]}
+{"id": "ss-en-032", "point": "source_sensitive", "language": "en", "state": {"message": "What are the opening hours of the British Museum?"}, "gold": "yes", "tags": ["place", "casual-fact"]}
+{"id": "ss-en-033", "point": "source_sensitive", "language": "en", "state": {"message": "How does a heat pump work?"}, "gold": "no", "tags": ["concept", "near-miss"]}
+{"id": "ss-en-034", "point": "source_sensitive", "language": "en", "state": {"message": "How does TCP work?"}, "gold": "no", "tags": ["concept", "code"]}
+{"id": "ss-en-035", "point": "source_sensitive", "language": "en", "state": {"message": "What is photosynthesis?"}, "gold": "no", "tags": ["concept"]}
+{"id": "ss-en-036", "point": "source_sensitive", "language": "en", "state": {"message": "Explain the difference between weather and climate"}, "gold": "no", "tags": ["concept"]}
+{"id": "ss-en-037", "point": "source_sensitive", "language": "en", "state": {"message": "What does inflation actually mean?"}, "gold": "no", "tags": ["concept", "near-miss"]}
+{"id": "ss-en-038", "point": "source_sensitive", "language": "en", "state": {"message": "How does compound interest work?"}, "gold": "no", "tags": ["concept"]}
+{"id": "ss-en-039", "point": "source_sensitive", "language": "en", "state": {"message": "What is a central bank for, in general?"}, "gold": "no", "tags": ["concept", "near-miss"]}
+{"id": "ss-en-040", "point": "source_sensitive", "language": "en", "state": {"message": "Why is the sky blue?"}, "gold": "no", "tags": ["concept"]}
+{"id": "ss-en-041", "point": "source_sensitive", "language": "en", "state": {"message": "Look up what photosynthesis is"}, "gold": "no", "tags": ["lookup-verb", "concept", "near-miss"]}
+{"id": "ss-en-042", "point": "source_sensitive", "language": "en", "state": {"message": "Don't search anything, just explain what a linked list is"}, "gold": "no", "tags": ["do-not-look-up", "concept", "near-miss"]}
+{"id": "ss-en-043", "point": "source_sensitive", "language": "en", "state": {"message": "What should I generally look for when buying a laptop?"}, "gold": "no", "tags": ["advice", "near-miss"]}
+{"id": "ss-en-044", "point": "source_sensitive", "language": "en", "state": {"message": "Is it better to run in the morning or the evening?"}, "gold": "no", "tags": ["advice"]}
+{"id": "ss-en-045", "point": "source_sensitive", "language": "en", "state": {"message": "How can I focus better when working from home?"}, "gold": "no", "tags": ["advice"]}
+{"id": "ss-en-046", "point": "source_sensitive", "language": "en", "state": {"message": "How do I prepare for a job interview?"}, "gold": "no", "tags": ["advice"]}
+{"id": "ss-en-047", "point": "source_sensitive", "language": "en", "state": {"message": "How do I make sourdough bread?"}, "gold": "no", "tags": ["advice", "recipe"]}
+{"id": "ss-en-048", "point": "source_sensitive", "language": "en", "state": {"message": "What's 18% of 420?"}, "gold": "no", "tags": ["compute"]}
+{"id": "ss-en-049", "point": "source_sensitive", "language": "en", "state": {"message": "If I save 200 a month at 4% interest, how much do I have after 3 years?"}, "gold": "no", "tags": ["compute", "near-miss"]}
+{"id": "ss-en-050", "point": "source_sensitive", "language": "en", "state": {"message": "I earn 4,000 a month and rent is 1,300. What share is that?"}, "gold": "no", "tags": ["compute", "own-content"]}
+{"id": "ss-en-051", "point": "source_sensitive", "language": "en", "state": {"message": "Write a Python function that checks if a string is a palindrome"}, "gold": "no", "tags": ["code"]}
+{"id": "ss-en-052", "point": "source_sensitive", "language": "en", "state": {"message": "Why does my loop never end? while (i < 10) { console.log(i) }"}, "gold": "no", "tags": ["code", "own-content"]}
+{"id": "ss-en-053", "point": "source_sensitive", "language": "en", "state": {"message": "Refactor this: if (x == true) { return true } else { return false }"}, "gold": "no", "tags": ["code", "own-content"]}
+{"id": "ss-en-054", "point": "source_sensitive", "language": "en", "state": {"message": "Write a poem about my old Toyota Corolla"}, "gold": "no", "tags": ["writing", "brand-in-passing", "near-miss"]}
+{"id": "ss-en-055", "point": "source_sensitive", "language": "en", "state": {"message": "Draft an email to IKEA support saying my order arrived damaged"}, "gold": "no", "tags": ["writing", "brand-in-passing", "near-miss"]}
+{"id": "ss-en-056", "point": "source_sensitive", "language": "en", "state": {"message": "Write a birthday message for my colleague at Google"}, "gold": "no", "tags": ["writing", "brand-in-passing", "near-miss"]}
+{"id": "ss-en-057", "point": "source_sensitive", "language": "en", "state": {"message": "Write a short story about a lighthouse keeper"}, "gold": "no", "tags": ["writing"]}
+{"id": "ss-en-058", "point": "source_sensitive", "language": "en", "state": {"message": "Give me five names for a bike repair startup"}, "gold": "no", "tags": ["writing"]}
+{"id": "ss-en-059", "point": "source_sensitive", "language": "en", "state": {"message": "Translate 'notice period' into German"}, "gold": "no", "tags": ["translate"]}
+{"id": "ss-en-060", "point": "source_sensitive", "language": "en", "state": {"message": "Write a polite decline for a meeting invite"}, "gold": "no", "tags": ["writing"]}
+{"id": "ss-en-061", "point": "source_sensitive", "language": "en", "state": {"message": "Summarize my notes: 'Q3 revenue at Acme up 12%, new warehouse in Leeds, hire two drivers.'"}, "gold": "no", "tags": ["own-text", "near-miss"]}
+{"id": "ss-en-062", "point": "source_sensitive", "language": "en", "state": {"message": "Proofread: 'We spoke with Microsoft yesterday and there going to send the invoice.'"}, "gold": "no", "tags": ["own-text", "brand-in-passing", "near-miss"]}
+{"id": "ss-en-063", "point": "source_sensitive", "language": "en", "state": {"message": "Turn this into a to-do list: call bank, book dentist, email Sarah about Friday"}, "gold": "no", "tags": ["own-text"]}
+{"id": "ss-en-064", "point": "source_sensitive", "language": "en", "state": {"message": "Does my cover letter sound too formal? 'I am writing to apply for the analyst role at Deloitte.'"}, "gold": "no", "tags": ["own-text", "brand-in-passing", "near-miss"]}
+{"id": "ss-en-065", "point": "source_sensitive", "language": "en", "state": {"message": "Shorten this to one sentence: Our club meets every Tuesday. Newcomers are welcome. Bring indoor shoes."}, "gold": "no", "tags": ["own-text"]}
+{"id": "ss-en-066", "point": "source_sensitive", "language": "en", "state": {"message": "Hi, how are you?"}, "gold": "no", "tags": ["small-talk"]}
+{"id": "ss-en-067", "point": "source_sensitive", "language": "en", "state": {"message": "Thanks, that was helpful!"}, "gold": "no", "tags": ["small-talk"]}
+{"id": "ss-en-068", "point": "source_sensitive", "language": "en", "state": {"message": "What's your name?"}, "gold": "no", "tags": ["about-assistant"]}
+{"id": "ss-en-069", "point": "source_sensitive", "language": "en", "state": {"message": "What can you do?"}, "gold": "no", "tags": ["about-assistant"]}
+{"id": "ss-en-070", "point": "source_sensitive", "language": "en", "state": {"message": "make it shorter"}, "gold": "no", "tags": ["follow-up"]}
+{"id": "ss-en-071", "point": "source_sensitive", "language": "en", "state": {"message": "again, but friendlier"}, "gold": "no", "tags": ["follow-up"]}
+{"id": "ss-en-072", "point": "source_sensitive", "language": "en", "state": {"message": "Can you make the last picture brighter?"}, "gold": "no", "tags": ["follow-up", "image"]}
+{"id": "ss-en-073", "point": "source_sensitive", "language": "en", "state": {"message": "What do you think about remote work?"}, "gold": "no", "tags": ["opinion"]}
+{"id": "ss-en-074", "point": "source_sensitive", "language": "en", "state": {"message": "Is honesty always the best policy?"}, "gold": "no", "tags": ["opinion"]}
+{"id": "ss-en-075", "point": "source_sensitive", "language": "en", "state": {"message": "Give me the arguments for and against a speed limit, purely in principle"}, "gold": "no", "tags": ["opinion", "near-miss"]}
+{"id": "ss-en-076", "point": "source_sensitive", "language": "en", "state": {"message": "If all birds have feathers and Tweety is a bird, what follows?"}, "gold": "no", "tags": ["reasoning"]}
+{"id": "ss-en-077", "point": "source_sensitive", "language": "en", "state": {"message": "Draw a lighthouse in a storm"}, "gold": "no", "tags": ["image"]}
+{"id": "ss-en-078", "point": "source_sensitive", "language": "en", "state": {"message": "Make a logo for my bakery called Cornflower"}, "gold": "no", "tags": ["image"]}
+{"id": "ss-en-079", "point": "source_sensitive", "language": "en", "state": {"message": "Paint my city skyline in the style of Van Gogh"}, "gold": "no", "tags": ["image", "brand-in-passing", "near-miss"]}
+{"id": "ss-en-080", "point": "source_sensitive", "language": "en", "state": {"message": "explain what an algoritm is pls"}, "gold": "no", "tags": ["concept", "typo"]}
+{"id": "ss-en-081", "point": "source_sensitive", "language": "en", "state": {"message": "summary?"}, "gold": "no", "tags": ["follow-up", "one-word"]}
+{"id": "ss-en-082", "point": "source_sensitive", "language": "en", "state": {"message": "whats a prime number"}, "gold": "no", "tags": ["concept", "typo"]}
+{"id": "ss-en-083", "point": "source_sensitive", "language": "en", "state": {"message": "What is a lease agreement?"}, "gold": "no", "tags": ["definition"]}

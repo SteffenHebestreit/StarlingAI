@@ -34,11 +34,15 @@
     "docs:reference": "tsx src/scripts/generate-reference-docs.ts",
     "decisions:report": "tsx src/scripts/decisions-report.ts",
     "decisions:export": "tsx src/scripts/decisions-export.ts",
-    "decisions:bootstrap": "tsx src/scripts/decisions-bootstrap.ts",
+    "decisions:bootstrap": "cd ../.. && tsx packages/core/src/scripts/decisions-bootstrap.ts",
+    "decisions:bench": "cd ../.. && tsx packages/core/src/scripts/decisions-bench.ts",
+    "latency:report": "tsx src/scripts/latency-report.ts",
+    "latency:probe": "cd ../.. && tsx packages/core/src/scripts/latency-probe.ts",
     "scenes:evaluate": "tsx src/agent/scene-evaluation-cli.ts",
     "worker:scene": "tsx src/scene-worker-main.ts",
     "routing:eval": "tsx src/agent/routing-eval-cli.ts",
-    "routing:eval:discriminance": "tsx src/scripts/routing-eval-discriminance.ts"
+    "routing:eval:discriminance": "tsx src/scripts/routing-eval-discriminance.ts",
+    "routing:prerouter": "cd ../.. && tsx packages/core/src/scripts/pre-router-bench.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.104.2",

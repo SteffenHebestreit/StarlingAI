@@ -274,3 +274,121 @@ Both commands print which catalog they loaded and how many agents they found, be
 guarding the wrong catalog is a silent no-op — and that is exactly what happened when the
 canary first shipped: it ran from `packages/core`, found the zero-agent stub sitting there,
 and reported a missing embedding model.
+
+---
+
+## Pre-router bench
+
+```
+pnpm --filter @starlingai/core routing:prerouter                        # every case, K = 8
+pnpm --filter @starlingai/core routing:prerouter -- --train-out <file>  # also write training items
+pnpm --filter @starlingai/core routing:prerouter -- --split test        # after fine-tuning on them
+```
+
+On real turns the orchestrator's first call only routed in 17 of 19: a `search_agents`, one
+delegation or a one-step plan, at 4.9-12.4 s a turn. This asks whether Laya, handed the
+embedding capsule's candidates when the message arrives, could make that call instead: often
+enough right, and sure enough when it is, that the round could be skipped.
+
+Per case it resolves the capsule exactly as the discovery prefetch does, reads the embedding
+ranking behind it, and asks the sidecar one question: "Which specialist should handle this
+request?", over the top K agents (the capsule first, then the ranking; meta-factory agents
+dropped) plus **none**, which leaves the turn to the orchestrator. Each agent is described by its
+catalog description, cut to the 48 tokens Laya reads and shorter when many options would
+overflow its 1024-token window (`--describe oneliner` uses the taxonomy one-liners instead, which
+are the labeller's notes rather than descriptions). K is at most 19: the sidecar takes 20
+options and one is none.
+
+It calls the embedding endpoint on llama-swap and the Laya sidecar (`--laya-url`, default
+`http://127.0.0.1:18080`), at concurrency 1, and nothing else. Reports go to
+`.starlingai/live-check/pre-router-bench/<timestamp>/`: `report.md`, `report.json` with every
+case, `questions.jsonl` with exactly what Laya was sent, and the run's own audit log.
+
+### What it reports
+
+| line | why it is there |
+|---|---|
+| capsule recall, option recall | whether a right agent was offered at all. Laya chooses among the options and cannot find a missing one, so these cap everything below |
+| embedding top-1, always the majority label | what a pre-router costs without Laya, and what a classifier that learned the label skew would score |
+| Laya top-1, given a right option | its accuracy, and its accuracy where it had a chance |
+| Laya says none when nothing right was offered | the only view this corpus gives of whether Laya knows when to hand a turn back |
+| discordant pairs against the embedding | whether Laya's right answers are ones the embedding already had (exact McNemar p) |
+| per-label accuracy, pick concentration | a classifier that answers one label for everything looks accurate on a skewed corpus |
+| gate simulation | the share of turns whose routing round could be skipped, and the error rate among them |
+
+The gate simulation mirrors `decisions/gate.ts`: the lowest level at which at least
+`--min-samples` picks reach `--target` agreement by the Wilson lower bound. It is CROSS-FITTED:
+the cases fall into two folds by a hash of their id (a different cut from the calibration/test
+split), and each fold's level is set on the other fold's cases before it is applied, so no
+skipped turn is judged by a threshold it helped choose. A none pick is never taken and never an
+error; that turn simply costs what it costs today. Three versions run on the same cases:
+
+- **Laya, per language**: the default headline.
+- **Laya, per language and answer**: how production keys the gate. With 49 answers, no agent
+  gathers 35 agreeing cases per language from a corpus this size (no agent is right for more than
+  9 of the 138), so there is no coverage here even for a perfect Laya. That is the real cost of a
+  49-way decision point, and it applies to the live ledger too. `--keying answer` makes this the
+  verdict, which is then inconclusive.
+- **An embedding-score threshold**: the pre-router that needs no sidecar, since the prefetch
+  already computes the score. If it skips as many turns at the same error rate, Laya adds nothing.
+
+The savings line is an estimate: skipped rounds × `--round-ms` (default 7.9 s, the p50 of the
+orchestrator's first call on 10 image turns), minus Laya's p50 on every turn. Only correct skips are
+credited. A wrong dispatch is counted separately, because its cost (a failed delegation, a
+recovery round) is not measured here. The capsule is not charged, since the prompt build waits for
+it today.
+
+### What it cannot tell you
+
+- **The none class.** Every live case expects a specialist. A case with `"expect": {"admitted": false}`
+  and no agent named is scored as gold none (a direct answer, a multi-step request), and
+  `routing:eval` reads it the same way, as "nothing should be admitted". Until such cases
+  exist, whether Laya leaves those turns to the orchestrator is untested, and the report says so.
+- **Follow-ups.** The cases are single messages. A "same agent as last turn" rule was right on 11
+  of 12 real follow-ups, but it needs a session, so it is not a baseline here. A pre-router that
+  skips the orchestrator must still pass on the context a follow-up leans on.
+- **Qualifying at a 0.9 target at all.** A bucket needs at least 35 flawless picks (53 with one
+  error). The 50 English cases fall into folds of 27 and 23, so English can never qualify from
+  this corpus. The German folds hold 43 and 45 cases, so German qualifies only if nearly every
+  confident pick is right. The test half alone holds 44 German cases (folds of 21 and 23) and 24
+  English ones, so no bucket can qualify on it at all. The gate table's "largest bucket" column
+  gives the most cases a perfect answerer could have gathered where a level was set. When no
+  bucket could have reached the flawless count, the run is inconclusive (exit 2), not a failure:
+  the case count decided it, not Laya. The confidence curve in the report shows how many cases
+  each observed precision would need, which separates "too few cases" from "not precise enough".
+- **Production's agreement.** Production counts agreement with the incumbent (the orchestrator's
+  own routing). The bench counts agreement with the label, which is stricter where the orchestrator
+  misroutes and more lenient where the label is generous.
+- **Capsule order off the network.** On a workstation the reranker is unreachable. In the default
+  `ordering` blend mode that changes the capsule's order, not its members. The report records
+  whether the reranker answered.
+
+### Fine-tuning round trip
+
+`--train-out <file>` writes the calibration half (by a hash of the case id, so adding cases
+moves no other case between halves) as typed-decisions training items, the format
+`decisions:export` writes. The options appear under the letters `generic.to_laya` serves, the
+gold is one-hot on the first right agent offered, and it is none when no right agent was offered.
+Two traps when training on it:
+
+- `app.train decision` refuses fewer than 200 training cases by default and holds out every fifth
+  one again, so pass `--min-cases`.
+- A promoted checkpoint answers EVERY decision point. Train into a separate `LAYA_LOCAL_DIR` (or
+  pass `--no-promote` and serve the run from its own sidecar), so the production `current` is not
+  replaced by a model tuned on one point.
+
+Then serve the new checkpoint and re-run with `--split test`. Compare the test half across the
+two runs, since it is the only population the new checkpoint has not seen. Compare its ACCURACY
+rows, not its gate: the `test/de` and `test/en` columns of the `--split all` run against the `de`
+and `en` columns of the `--split test` run (Laya top-1, Laya with a right agent offered, Laya
+saying none when none was). Both runs use the same cases. The gate cannot qualify any bucket on
+the test half's 68 cases, so a `--split test` run exits 2 whatever the checkpoint does, and the
+"Laya, test half only" gate row is empty by construction. Whether the new checkpoint could skip
+routing rounds needs more cases than this corpus has. A `--split all` run is valid only for a
+checkpoint that was not trained on these cases.
+
+Exit codes: `0` a pick qualified and held on the other fold, `1` none qualified or it did not
+hold, `2` usage error, nothing scored (`--no-laya` included), or no bucket could have qualified even
+with every pick right, `3` environment-suspect: embeddings or Laya unreachable, or the embedding
+search or Laya failed on more than a tenth of the cases. A case the embedding search could not rank
+is left out of every figure and named in the report, never scored as a routing miss.

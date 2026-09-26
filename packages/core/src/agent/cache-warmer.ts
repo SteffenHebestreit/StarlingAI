@@ -23,9 +23,24 @@ import { getChatProvider } from "../providers/index.js";
 import { defaultSystemPrompt, splitOrchestrationModule } from "./session.js";
 import { getToolsAsLLMDefs } from "../tools/registry.js";
 import { getMainAssistantToolNames } from "./default-tools.js";
+import { runWithCallAttribution, type RequestCallSite } from "../runtime/request-context.js";
 import { childLogger } from "../logger.js";
 
 const log = childLogger("agent:cache-warmer");
+
+/**
+ * The label the warm-up's provider_model_call rows carry. Unlabelled, they were a large
+ * prompt with no session and no call site, which an analysis of the audit log could not tell
+ * apart from an orchestrator call that lost its context, and their GPU time (several seconds
+ * after every turn, about 15 s cold at boot) could not be charged to anything.
+ */
+const CACHE_WARM_ATTRIBUTION = {
+  callSite: "cache_warm" as RequestCallSite,
+  agentName: "cache_warmer",
+  // The re-warm timer fires in whatever context markOrchestratorIdle ran in. The warm-up is
+  // between turns and belongs to none of them, so it must not carry a session it inherited.
+  sessionId: undefined,
+};
 
 let rewarmTimer: ReturnType<typeof setTimeout> | null = null;
 let warmAbort: AbortController | null = null;
@@ -89,7 +104,8 @@ async function warmOnce(): Promise<void> {
   try {
     // The prefill of `base` plus the tool block is the entire point; the tiny generation
     // off a "." user message is cheap and irrelevant to the cached prefix.
-    await provider.complete([{ role: "system", content: base }, { role: "user", content: "." }], tools, ac.signal);
+    await runWithCallAttribution(CACHE_WARM_ATTRIBUTION, () =>
+      provider.complete([{ role: "system", content: base }, { role: "user", content: "." }], tools, ac.signal));
     if (!ac.signal.aborted) {
       log.debug(
         { ms: Date.now() - t0, baseChars: base.length, toolCount: tools.length, toolChars: JSON.stringify(tools).length },

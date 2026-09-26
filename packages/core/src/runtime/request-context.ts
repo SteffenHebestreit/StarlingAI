@@ -88,7 +88,11 @@ export type RequestCallSite =
   | "routing_tier"
   | "synthesis"
   | "qa"
-  | "background";
+  | "background"
+  /** The prompt-cache warm-keeper between turns (agent/cache-warmer.ts). */
+  | "cache_warm"
+  /** An image analysis call (tools/multimodal.ts analyzeImageBytes). */
+  | "vision";
 
 const storage = new AsyncLocalStorage<RequestContext>();
 

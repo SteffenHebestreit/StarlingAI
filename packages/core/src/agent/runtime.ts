@@ -365,6 +365,7 @@ import {
 import {
   runWithPhaseTimings,
   buildTurnPerformanceMetrics,
+  timedPhase,
   timedQaModelCall,
 } from "./turn-metrics.js";
 
@@ -1838,7 +1839,12 @@ async function _runTurn(
   ) {
     if (upfrontClassifier) {
       try {
-        const upfrontVerdict = await upfrontClassifier.verdict;
+        // Timed as its own phase so the wait stops landing in untrackedMs, where a turn could
+        // not show that it spent two seconds on this verdict. This is the WAIT here, not the
+        // call: the request went out before the document search, and the part of it that
+        // overlapped that search is already inside the documentRag phase, so nothing is
+        // counted twice.
+        const upfrontVerdict = await timedPhase("sourceSensitiveJudgeWait", () => upfrontClassifier.verdict);
         upfrontSourceSensitive = upfrontVerdict.sensitive;
         // A reply with no yes/no token resolves to the fail-safe false; that is a
         // non-answer, not a verdict, and is excluded from the agreement statistic.

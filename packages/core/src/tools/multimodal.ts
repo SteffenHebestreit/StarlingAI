@@ -48,7 +48,9 @@ import { readAllFacts, writeSharedFact } from "../swarm/memory.js";
 import { getSessionRecord } from "../agent/session.js";
 import { holdTurnClocks } from "../agent/user-input-broker.js";
 import { DECLINED_BY_USER_METADATA_KEY } from "../agent/user-input.js";
-import { currentRequestContext } from "../runtime/request-context.js";
+import { currentCallAttribution, currentRequestContext } from "../runtime/request-context.js";
+import { logAudit } from "../audit/logger.js";
+import { readServerTimings } from "../providers/lmstudio.js";
 import type { MultimodalImageGenerationConfig } from "../config/schemas/multimodal.js";
 import { deriveSharedSessionId } from "./memory.js";
 import { resolveProviderEndpointForModel } from "../providers/index.js";
@@ -1647,43 +1649,101 @@ export async function analyzeImageBytes(bytes: Uint8Array, contentType: string, 
   // and leaves the actual content field empty.
   const needsThinkingOff = /(qwen|gemma-4)/i.test(modelId);
 
-  const response = await fetchWithTimeout(
-    `${baseUrl}/chat/completions`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey}`,
+  // ONE provider_model_call ROW PER VISION CALL, shaped like the chat provider's.
+  //
+  // This is a raw request to the same model server the chat calls use, and it used to leave no
+  // row at all: in the one fully audited session it took 13-25 s a call, about 60 s in all
+  // against 14 s for both routing classifiers together, and no latency analysis could see it.
+  // The row carries the chat row's fields so one query reads both. agentName and callSite name
+  // the call; `requestedBy` keeps the agent that asked, which the ambient context would
+  // otherwise have put in agentName. It is written on failure too (finishReason "error", no
+  // usage), because a call that failed still spent the time, and counting only the ones that
+  // returned would bias every figure. The analyze_image tool's own tool_call row spans this
+  // call, so an analysis that adds tool time to model time must count it once, not twice.
+  const startedAt = Date.now();
+  const auditVisionCall = (result: {
+    finishReason: unknown;
+    usage?: unknown;
+    timings?: unknown;
+    reasoning?: unknown;
+  } | undefined): void => {
+    const attribution = currentCallAttribution();
+    const usage = result?.usage && typeof result.usage === "object" ? result.usage as Record<string, unknown> : undefined;
+    const count = (value: unknown): number | null => (typeof value === "number" ? value : null);
+    const details = usage?.["completion_tokens_details"] as Record<string, unknown> | undefined;
+    const timings = readServerTimings(result?.timings);
+    logAudit("provider_model_call", {
+      ...(attribution.data.agentName ? { requestedBy: attribution.data.agentName } : {}),
+      agentName: "analyze_image",
+      callSite: "vision",
+      model: modelId,
+      mode: "complete",
+      durationMs: Date.now() - startedAt,
+      promptTokens: count(usage?.["prompt_tokens"]),
+      completionTokens: count(usage?.["completion_tokens"]),
+      reasoningTokens: count(details?.["reasoning_tokens"]),
+      reasoningChars: result ? (typeof result.reasoning === "string" ? result.reasoning.length : 0) : null,
+      finishReason: result ? (typeof result.finishReason === "string" ? result.finishReason : null) : "error",
+      toolCount: 0,
+      messageCount: 1,
+      controls: {
+        reasoningEffort: null,
+        enableThinking: needsThinkingOff ? false : null,
+        cachePrompt: false,
       },
-      body: JSON.stringify({
-        model: modelId,
-        messages: [{
-          role: "user",
-          content: [
-            { type: "image_url", image_url: { url: dataUrl } },
-            { type: "text", text: prompt },
-          ],
-        }],
-        max_tokens: 2048,
-        temperature: 0.1,
-        ...(needsThinkingOff && {
-          chat_template_kwargs: { enable_thinking: false },
+      ...(timings ? { timings } : {}),
+    }, { ...attribution.opts, severity: "info" });
+  };
+
+  let body: Record<string, unknown>;
+  try {
+    const response = await fetchWithTimeout(
+      `${baseUrl}/chat/completions`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: modelId,
+          messages: [{
+            role: "user",
+            content: [
+              { type: "image_url", image_url: { url: dataUrl } },
+              { type: "text", text: prompt },
+            ],
+          }],
+          max_tokens: 2048,
+          temperature: 0.1,
+          ...(needsThinkingOff && {
+            chat_template_kwargs: { enable_thinking: false },
+          }),
         }),
-      }),
-    },
-    config.multimodal.files.visionTimeoutMs,
-  );
+      },
+      config.multimodal.files.visionTimeoutMs,
+    );
 
-  if (!response.ok) {
-    throw new Error(await extractUpstreamError(response, "Vision analysis failed"));
+    if (!response.ok) {
+      throw new Error(await extractUpstreamError(response, "Vision analysis failed"));
+    }
+
+    body = await parseUpstreamJsonResponse(response, "Vision analysis returned a non-JSON response");
+  } catch (error) {
+    auditVisionCall(undefined);
+    throw error;
   }
-
-  const body = await parseUpstreamJsonResponse(response, "Vision analysis returned a non-JSON response");
   const choices = Array.isArray(body["choices"]) ? body["choices"] : [];
   const firstChoice = choices[0];
   const message = firstChoice && typeof firstChoice === "object" && "message" in firstChoice
     ? (firstChoice["message"] as Record<string, unknown>)
     : undefined;
+  auditVisionCall({
+    finishReason: firstChoice && typeof firstChoice === "object" ? (firstChoice as Record<string, unknown>)["finish_reason"] : undefined,
+    usage: body["usage"],
+    timings: body["timings"],
+    reasoning: message?.["reasoning_content"],
+  });
   const content = message?.["content"];
   // Some providers return content as an array of {type,text} segments.
   const text = typeof content === "string"

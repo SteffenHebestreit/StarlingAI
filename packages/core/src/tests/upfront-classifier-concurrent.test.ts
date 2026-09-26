@@ -29,6 +29,8 @@ const routingCalls = vi.hoisted(() => ({
   classifierCallsWhenReceptionistIssued: -1,
   receptionistReply: null as null | { resolve: (text: string) => void },
   classifierVerdict: "VERDICT: no",
+  /** How long the judge takes to answer, for the test that times the turn's wait for it. */
+  classifierDelayMs: 0,
 }));
 const streamMock = vi.hoisted(() => vi.fn());
 const routingCompleteMock = vi.hoisted(() => vi.fn(async (messages: Array<{ content: unknown }>, _tools: unknown[], signal?: AbortSignal) => {
@@ -36,6 +38,7 @@ const routingCompleteMock = vi.hoisted(() => vi.fn(async (messages: Array<{ cont
   const reply = (content: string) => ({ content, tool_calls: [], usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 }, finishReason: "stop" });
   if (system.includes("You are a routing classifier")) {
     routingCalls.classifier.push({ signal });
+    if (routingCalls.classifierDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, routingCalls.classifierDelayMs));
     return reply(routingCalls.classifierVerdict);
   }
   if (system.includes("<ESCALATE>")) {
@@ -138,6 +141,7 @@ describe("up-front source-sensitivity classifier — issued after the fast lane,
     routingCalls.classifierCallsWhenReceptionistIssued = -1;
     routingCalls.receptionistReply = null;
     routingCalls.classifierVerdict = "VERDICT: no";
+    routingCalls.classifierDelayMs = 0;
     ragState.contextBlock = null;
     ragState.classifierCallsWhenRagIssued = -1;
     vi.resetModules();
@@ -218,6 +222,27 @@ describe("up-front source-sensitivity classifier — issued after the fast lane,
     } finally {
       routingCalls.classifierVerdict = saved;
     }
+  });
+
+  it("times the turn's wait for the verdict as its own phase, so it is not left in untrackedMs", async () => {
+    // A live turn showed untrackedMs of 2.1 s against a 2.0 s judge call: the wait for this
+    // verdict was hiding there.
+    const JUDGE_MS = 120;
+    routingCalls.classifierDelayMs = JUDGE_MS;
+    streamMock.mockImplementation(() => (async function* () {
+      yield { type: "text_delta", content: "done" };
+      yield { type: "done", finishReason: "stop", usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } };
+    })());
+    const { AgentSession, runTurn } = await loadRuntime({ receptionistEnabled: false });
+    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+
+    const out = await runTurn({ session, userMessage: "Wer betreibt das Pfandsystem in Dänemark?" });
+
+    expect(routingCalls.classifier).toHaveLength(1);
+    const waitMs = out.performance?.phaseTimingsMs?.["sourceSensitiveJudgeWait"];
+    expect(waitMs, JSON.stringify(out.performance?.phaseTimingsMs)).toBeTypeOf("number");
+    // The document search here is instant, so nearly all of the judge's time is waited for.
+    expect(waitMs!).toBeGreaterThanOrEqual(JUDGE_MS - 20);
   });
 
   it("aborts the speculative request and logs no verdict when the turn turns out to be document-grounded", async () => {

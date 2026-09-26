@@ -31,6 +31,11 @@ function arg(name: string): string | undefined {
   return index >= 0 ? process.argv[index + 1] : undefined;
 }
 
+/** Where the gateway's decision ledger lies from the repository root, unless configured elsewhere: the default --ledger. */
+export function defaultLedgerPath(): string {
+  return join(repoRoot, ".starlingai", "decisions", "ledger.jsonl");
+}
+
 export interface TrainingItem {
   point: string;
   language: string;
@@ -88,17 +93,18 @@ async function writeJsonl(path: string, rows: ReadonlyArray<unknown>): Promise<v
 }
 
 async function main(): Promise<void> {
-  const ledger = arg("ledger") ?? join(repoRoot, ".starlingai", "decisions", "ledger.jsonl");
+  const ledger = arg("ledger") ?? defaultLedgerPath();
   const out = arg("out") ?? join(repoRoot, ".starlingai", "laya", "data", "ledger-export.jsonl");
   const browserLedger = join(dirname(ledger), "browser-ledger.jsonl");
   const browserOut = join(dirname(out), "browser-export.jsonl");
-  const pointList = arg("points");
-  if (!existsSync(ledger) && !existsSync(browserLedger)) {
-    console.log(`No decision ledger at ${ledger} yet.`);
-    return;
-  }
   // Beside the ledger: the incumbents' labels for synthetic messages (decisions:bootstrap), training data only.
   const bootstrap = join(dirname(ledger), "bootstrap-ledger.jsonl");
+  const pointList = arg("points");
+  // The bootstrap's labels alone are enough: they exist for the day before real turns have filled the ledger.
+  if (!existsSync(ledger) && !existsSync(bootstrap) && !existsSync(browserLedger)) {
+    console.log(`No decision ledger at ${ledger} yet, and no bootstrap-ledger.jsonl or browser-ledger.jsonl beside it.`);
+    return;
+  }
   const rows = [...await readLedgerRows(bootstrap), ...await readLedgerRows(ledger)];
   const items = buildTrainingItems(rows, pointList ? new Set(pointList.split(",")) : undefined);
   await writeJsonl(out, items);

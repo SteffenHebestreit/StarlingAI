@@ -819,6 +819,52 @@ function reasoningTokensOf(usage: unknown): number | undefined {
   return typeof details?.reasoning_tokens === "number" ? details.reasoning_tokens : undefined;
 }
 
+/**
+ * The server's own account of one call, as llama.cpp's llama-server reports it: a `timings`
+ * object at the top level of a non-streamed response, and on the last chunk of a streamed one.
+ *
+ * It is the only figure that splits a prompt into the tokens the server actually processed
+ * (promptN) and the tokens it reused from the slot's cache (cacheN), with the milliseconds the
+ * processing took. The client cannot make that split: its time to first token also holds the
+ * connection, llama-swap's routing and any wait for a free slot, so a cache miss and a queue
+ * look the same from here. Every latency question about prompt processing turns on these
+ * numbers, and until they were read the rows could only infer them from promptTokens and ttft.
+ */
+export interface ServerCallTimings {
+  /** Prompt tokens the server processed for this call, i.e. not served from its cache. */
+  promptN?: number;
+  /** Prompt tokens reused from the slot's KV cache. */
+  cacheN?: number;
+  promptMs?: number;
+  /** Tokens generated. */
+  predictedN?: number;
+  predictedMs?: number;
+}
+
+const SERVER_TIMING_FIELDS: ReadonlyArray<readonly [wire: string, field: keyof ServerCallTimings]> = [
+  ["prompt_n", "promptN"],
+  ["cache_n", "cacheN"],
+  ["prompt_ms", "promptMs"],
+  ["predicted_n", "predictedN"],
+  ["predicted_ms", "predictedMs"],
+];
+
+/**
+ * Read llama-server's `timings` object, or undefined when there is none. LM Studio, vLLM and
+ * OpenAI send no such object, and llama-server writes -1 for a count it has no value for; both
+ * leave the field out, because a zero would read as a measurement ("nothing was cached").
+ */
+export function readServerTimings(raw: unknown): ServerCallTimings | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const source = raw as Record<string, unknown>;
+  const timings: ServerCallTimings = {};
+  for (const [wire, field] of SERVER_TIMING_FIELDS) {
+    const value = source[wire];
+    if (typeof value === "number" && Number.isFinite(value) && value >= 0) timings[field] = value;
+  }
+  return Object.keys(timings).length > 0 ? timings : undefined;
+}
+
 export function detectThinkingFamily(modelId: string): ThinkingFamily {
   const m = modelId.toLowerCase();
   if (m.includes("gpt-oss") || m.includes("gpt_oss")) return "gpt-oss";
@@ -1358,6 +1404,12 @@ export class LMStudioProvider {
      *  figure the row can carry. 0 means the parser ran and saw none; null means there
      *  was no response to read. */
     reasoningChars: number | null;
+    /** Stream only: when the response headers arrived. `startedAt` is the send in both modes,
+     *  so `headersMs` is the part of durationMs and ttftMs spent before the server answered at
+     *  all. Its presence also marks a stream row measured from the send (see streamOnce). */
+    headersAt?: number;
+    /** llama-server's own timings for the call, when the server sent them (readServerTimings). */
+    timings?: ServerCallTimings;
   }): void {
     const now = Date.now();
     const ext = input.extensions ?? {};
@@ -1371,6 +1423,7 @@ export class LMStudioProvider {
       model: input.modelId,
       mode: input.mode,
       durationMs: now - input.startedAt,
+      ...(input.headersAt !== undefined ? { headersMs: input.headersAt - input.startedAt } : {}),
       ...(input.firstTokenAt !== undefined ? { ttftMs: input.firstTokenAt - input.startedAt } : {}),
       promptTokens: input.usage?.promptTokens ?? null,
       completionTokens: input.usage?.completionTokens ?? null,
@@ -1384,6 +1437,9 @@ export class LMStudioProvider {
         enableThinking: kwargs?.["enable_thinking"] ?? kwargs?.["thinking"] ?? null,
         cachePrompt: ext["cache_prompt"] === true,
       },
+      // Absent, not empty, when the server sent none: a backend without timings must leave
+      // the row exactly as it was.
+      ...(input.timings ? { timings: input.timings } : {}),
     }, { ...attribution.opts, severity: "info" });
   }
 
@@ -1782,6 +1838,9 @@ export class LMStudioProvider {
             messageCount: messages.length,
             extensions,
             reasoningChars: split.reasoning?.length ?? 0,
+            // Not in the SDK's types; the SDK hands the parsed body through, so it is there
+            // whenever llama-server sent it.
+            timings: readServerTimings((response as { timings?: unknown }).timings),
           });
         }
 
@@ -2116,6 +2175,16 @@ export class LMStudioProvider {
     const streamAc = new AbortController();
     const streamSignal = signal ? AbortSignal.any([signal, streamAc.signal]) : streamAc.signal;
 
+    // THE CLOCK STARTS AT THE SEND, as complete()'s does.
+    //
+    // It used to start below, once create() had returned, and create() returns only when the
+    // response headers have arrived. Whatever the server did before answering at all (llama-swap
+    // routing the request or loading a model, a wait for a free slot) fell outside this row's
+    // durationMs and ttftMs, while complete() counted it, so the main-turn and sub-agent rows
+    // (stream) could not be compared with the classifier and QA rows (complete). Both figures
+    // keep their names and now run from the send; `headersMs` is the part before the headers.
+    // A stream row that carries headersMs was measured this way, one without it the old way.
+    const startedAt = Date.now();
     const createStream = this.client.chat.completions.create.bind(this.client.chat.completions);
     const stream = await this.withHardTimeout(streamSignal, this.requestTimeoutMs + 5000, (s) => createStream(
       {
@@ -2153,12 +2222,13 @@ export class LMStudioProvider {
       } as Parameters<typeof createStream>[0],
       { signal: s }
     )) as Stream<ChatCompletionChunk>;
+    const headersAt = Date.now();
 
     const toolCallBuffers = new Map<number, { id: string; name: string; args: string }>();
     let collectedFinishReason: string | undefined;
     let collectedUsage: StreamChunk["usage"] | undefined;
+    let collectedTimings: ServerCallTimings | undefined;
     let firstChunkAt: number | undefined;
-    const startedAt = Date.now();
     // In-flight visibility: track token progress so the monitor can tell
     // producing (tokens flowing) from prefill (no first token yet) from stalled.
     const callId = beginProviderCall({ model: modelId, mode: "stream" });
@@ -2298,6 +2368,11 @@ export class LMStudioProvider {
             ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
           };
         }
+        // llama-server puts its timings on the stream's last chunk (the usage chunk, whose
+        // choices are empty, so this read must come before the delta check below). Kept as
+        // the latest one seen, which also covers a server that reports them on every chunk.
+        const chunkTimings = readServerTimings((chunk as { timings?: unknown }).timings);
+        if (chunkTimings) collectedTimings = chunkTimings;
 
         const delta = chunk.choices[0]?.delta;
         if (!delta) continue;
@@ -2450,6 +2525,7 @@ export class LMStudioProvider {
         modelId,
         mode: "stream",
         startedAt,
+        headersAt,
         ...(firstChunkAt !== undefined ? { firstTokenAt: firstChunkAt } : {}),
         usage: collectedUsage,
         finishReason: "aborted",
@@ -2457,6 +2533,7 @@ export class LMStudioProvider {
         messageCount: messages.length,
         extensions,
         reasoningChars: progress.reasoningChars,
+        timings: collectedTimings,
       });
       throw reason instanceof Error
         ? reason
@@ -2468,6 +2545,7 @@ export class LMStudioProvider {
       modelId,
       mode: "stream",
       startedAt,
+      headersAt,
       ...(firstChunkAt !== undefined ? { firstTokenAt: firstChunkAt } : {}),
       usage: collectedUsage,
       finishReason: collectedFinishReason,
@@ -2476,6 +2554,7 @@ export class LMStudioProvider {
       extensions,
       // The same counter the burn guard reads: dedicated deltas AND inline <think> spans.
       reasoningChars: progress.reasoningChars,
+      timings: collectedTimings,
     });
     yield { type: "done", finishReason: collectedFinishReason ?? "stop", usage: collectedUsage };
   }

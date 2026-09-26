@@ -14,6 +14,9 @@
  *    decisions:export reads them as training data; the gate never does — it only counts a comparison on a real turn.
  *
  * It calls the routing tier about (2 + per-kind x 10 / 20) + messages x 2 times: run it where that model is reachable.
+ * It runs from the repository root (the package script changes there first): anywhere else the config loader reads a
+ * different config, and under packages/core that is a stub with no receptionist and no routing tier. Its own provider
+ * calls are audited to bootstrap-audit.jsonl beside its output, never to the gateway's audit log.
  */
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -24,11 +27,12 @@ import { defaultReplyLanguage } from "../agent/reply-language.js";
 import { resolveRoutingTierProvider } from "../agent/routing-tier-provider.js";
 import { detectTextLanguage, warmTextLanguageDetector } from "../agent/text-language.js";
 import { buildSourceSensitiveQuestionJudgeMessages, JUDGE_ANSWER_TOKEN_RE, parseUngroundedClaimVerdict } from "../agent/ungrounded-claim-judge.js";
-import { getConfig } from "../config/loader.js";
+import { getConfig, loadConfig } from "../config/loader.js";
 import { getChatProviderForTier } from "../providers/index.js";
 import { languageBucket } from "../decisions/gate.js";
 import { resolveLedgerPath, type LedgerRow } from "../decisions/ledger.js";
 import type { ChatProvider, LLMMessage } from "../providers/lmstudio.js";
+import { defaultLedgerPath } from "./decisions-export.js";
 
 function arg(name: string): string | undefined {
   const index = process.argv.indexOf(`--${name}`);
@@ -112,6 +116,16 @@ export async function labelFastLane(provider: ChatProvider, message: string): Pr
   return receptionistEscalated(reply, confidenceAttempt) ? "task" : "small_talk";
 }
 
+/**
+ * Where the labels go: beside a ledger configured elsewhere (decisions.ledger.path, SAI_DECISIONS_LEDGER), otherwise
+ * beside the ledger decisions:export reads by default — not wherever the working directory's audit log happens to
+ * put the ledger, which under packages/core was a directory the export never looks in.
+ */
+export function bootstrapLedgerPath(): string {
+  const configured = Boolean(getConfig().decisions?.ledger?.path?.trim() || process.env["SAI_DECISIONS_LEDGER"]?.trim());
+  return join(dirname(configured ? resolveLedgerPath() : defaultLedgerPath()), "bootstrap-ledger.jsonl");
+}
+
 export function bootstrapRow(point: "fast_lane" | "source_sensitive", message: string, choice: string, ms: number): LedgerRow {
   return {
     ts: new Date().toISOString(),
@@ -141,9 +155,25 @@ async function readCorpus(path: string): Promise<string[]> {
 }
 
 async function main(): Promise<void> {
+  // .env first, before the config is loaded: it holds the address of the model backend the host can reach. Loaded
+  // here rather than by a static import, so a test that imports this module's helpers does not take in the repo's
+  // .env with it.
+  const { REPO_ROOT } = await import("../agent/eval-env-bootstrap.js");
+  // Windows paths compare without case: a shell may report the drive as f: where Node reports F:.
+  const here = resolve(process.cwd());
+  const root = resolve(REPO_ROOT);
+  if (!process.env["SAI_CONFIG_PATH"]?.trim() && (process.platform === "win32" ? here.toLowerCase() !== root.toLowerCase() : here !== root)) {
+    console.error(`usage: run from the repository root (${REPO_ROOT}); the package script does \`cd ../..\` first. Here the config loader would read ${process.cwd()}.`);
+    process.exit(2);
+  }
+  // Without writing its compiled copy: from the repo root that is ./starlingai.json, the live gateway's config.
+  loadConfig({ skipCompiledWrite: true });
   const perKind = Number(arg("per-kind") ?? 25);
   const corpus = arg("corpus");
-  const out = arg("out") ?? join(dirname(resolveLedgerPath()), "bootstrap-ledger.jsonl");
+  const outArg = arg("out");
+  const out = outArg ? resolve(REPO_ROOT, outArg) : bootstrapLedgerPath();
+  // Set after the output path is resolved: the ledger's default location follows the audit log's.
+  process.env["SAI_AUDIT_LOG"] = join(dirname(out), "bootstrap-audit.jsonl");
   await warmTextLanguageDetector();
   const provider = resolveRoutingTierProvider();
   // The receptionist's lane runs its tier with reasoning off (agent/receptionist.ts).
@@ -180,7 +210,8 @@ async function main(): Promise<void> {
     if (done % 25 === 0) console.log(`${done}/${messages.length} messages labelled`, counts);
   }
   console.log(`Wrote the labels of ${messages.length} messages to ${out}:`, counts);
-  console.log("Next: pnpm --filter @starlingai/core decisions:export, then train (see config/gateway/45-decisions.jsonc).");
+  const exportLedger = join(dirname(out), "ledger.jsonl");
+  console.log(`Next: pnpm --filter @starlingai/core decisions:export${exportLedger === defaultLedgerPath() ? "" : ` --ledger ${exportLedger}`}, then train (see config/gateway/45-decisions.jsonc).`);
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {

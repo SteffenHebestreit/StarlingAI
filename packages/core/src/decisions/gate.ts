@@ -29,6 +29,8 @@
  * target needs 35 flawless cases (53 with one disagreement).
  */
 
+import { DECISION_POINTS, type DecisionPointId } from "./points.js";
+
 /** The confidence levels considered, lowest first. */
 export const GATE_LEVELS = [0.5, 0.6, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 0.98] as const;
 
@@ -179,8 +181,14 @@ export function layaMayDecide(
   return level !== null && top >= level;
 }
 
-/** What the gate knows, for the report and the health check. */
-export function gateSnapshot(settings: GateSettings): Array<{
+/**
+ * What the gate knows, for the report and the health check. `protectOf` names each point's protected
+ * answer, so a qualified level here is the one decide() would use; default: the decision points' own.
+ */
+export function gateSnapshot(
+  settings: GateSettings,
+  protectOf: (point: string) => string | undefined = (point) => DECISION_POINTS[point as DecisionPointId]?.protect,
+): Array<{
   point: string;
   language: LanguageBucket;
   answer: string;
@@ -201,7 +209,7 @@ export function gateSnapshot(settings: GateSettings): Array<{
       model,
       samples: list.length,
       agreement: list.length > 0 ? agree / list.length : 0,
-      qualifiedLevel: qualifiedLevel(point, language, answer, settings, model),
+      qualifiedLevel: qualifiedLevel(point, language, answer, settings, model, protectOf(point)),
     };
   }).sort((a, b) => a.point.localeCompare(b.point) || a.language.localeCompare(b.language) || a.answer.localeCompare(b.answer) || a.model.localeCompare(b.model));
 }

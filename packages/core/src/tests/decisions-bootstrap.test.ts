@@ -28,7 +28,7 @@ afterAll(() => {
 });
 
 function model(reply: string) {
-  const complete = vi.fn(async () => ({ content: reply, tool_calls: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 }, finishReason: "stop" }));
+  const complete = vi.fn(async (..._args: unknown[]) => ({ content: reply, tool_calls: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 }, finishReason: "stop" }));
   return { complete, provider: { complete } as never };
 }
 

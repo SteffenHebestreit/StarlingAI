@@ -64,6 +64,16 @@
       ]
     },
     {
+      // Layer 1 of the latency suite (eval/latency/README.md): real audit rows, scrubbed, in; no
+      // model and no network, so its figures are the same on every run.
+      "name": "latency-attribution",
+      "kind": "deterministic",
+      "description": "Latency attribution from audit rows: turn grouping, the critical path before the orchestrator, lever savings each second counted once, no user text in the report.",
+      "testFiles": [
+        "src/tests/latency-attribution.test.ts"
+      ]
+    },
+    {
       // The two-process lease race against real Redis runs in CI (service
       // container) and anywhere REDIS_URL is exported; it is its own pack so
       // its result is published in the same envelope.

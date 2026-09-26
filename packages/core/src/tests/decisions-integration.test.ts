@@ -235,6 +235,17 @@ describe("the ledger's report and export", () => {
     expect(report!.answers[0]!.qualifiedLevel).toBe(0.7);
   });
 
+  it("does not report a common answer as qualified while its recall of the protected answer is unproven", async () => {
+    const { buildDecisionReport } = await import("../scripts/decisions-report.js");
+    // "no" agrees 200 times; the 5 cases the judge called "yes" Laya called "no".
+    const rows = [...Array.from({ length: 200 }, () => row("no", 0.95, "no")), ...Array.from({ length: 5 }, () => row("no", 0.95, "yes"))];
+    const [report] = buildDecisionReport(rows, 0.9, 30);
+    const no = report!.answers.find((answer) => answer.answer === "no")!;
+    expect(no.levels[0]!.lowerBound, "precision alone would qualify it").toBeGreaterThan(0.9);
+    expect(no.levels[0]!.protectedRecallLowerBound).toBe(0);
+    expect(no.qualifiedLevel).toBeNull();
+  });
+
   it("exports the incumbent's answers as training items, asked exactly as the sidecar asks", async () => {
     const { buildTrainingItems } = await import("../scripts/decisions-export.js");
     const { SOURCE_SENSITIVE } = await import("../decisions/points.js");
