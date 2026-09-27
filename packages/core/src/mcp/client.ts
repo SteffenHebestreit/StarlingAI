@@ -270,9 +270,13 @@ function sanitizeDockerName(value: string): string {
 
 async function listContainersByImage(image: string): Promise<string[]> {
   try {
+    // Only the gateway's own containers of that image, by the name every one of them gets. By image alone this swept
+    // the whole host: a gateway start on 2026-09-28 removed another tool's mcp/playwright container
+    // (Docker MCP Toolkit's browser, running for 3 hours) along with its own.
     const { stdout } = await execFileAsync("docker", [
       "ps", "-aq",
       "--filter", `ancestor=${image}`,
+      "--filter", `name=^${MCP_CONTAINER_NAME_PREFIX}`,
     ]);
     return stdout.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
   } catch (err) {

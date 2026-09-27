@@ -57,7 +57,7 @@ Every public schema field, where it is declared, and how many production files r
 | `blendMode` | packages/core/src/config/schemas/retrieval.ts:40 | 4 |
 | `blockOn` | packages/core/src/config/schema.ts:1239 | 1 |
 | `botToken` | packages/core/src/config/schemas/channels.ts:10 | 10 |
-| `browser` | packages/core/src/config/schemas/decisions.ts:85 | 67 |
+| `browser` | packages/core/src/config/schemas/decisions.ts:85 | 68 |
 | `bucket` | packages/core/src/config/schema.ts:458 | 18 |
 | `budget` | packages/core/src/config/schema.ts:1616 | 84 |
 | `budgets` | packages/core/src/config/schema.ts:519 | 13 |
