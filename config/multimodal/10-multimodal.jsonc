@@ -77,9 +77,10 @@
       "timeoutMs": 120000,
       // ~170 s per image plus ~25 s of weight reload after ten minutes idle. 210000 left
       // almost no margin once the render alone is 170, so a queued or contended request
-      // would have been abandoned while it was still going to succeed. Both timeouts are for a
-      // render at the tier's defaults (1024x1024, 20 steps); a request with more steps, a larger
-      // size or true CFG gets proportionally more, never less.
+      // would have been abandoned while it was still going to succeed. Both timeouts are for the
+      // tier's MEASURED reference render (1024x1024, 20 steps — IMAGE_TIER_REFERENCE_RENDER), not
+      // for its defaults below; a request with more steps, a larger size or true CFG gets
+      // proportionally more, never less. The 40-step quality default therefore gets 600 s.
       "qualityTimeoutMs": 300000,
       // The cluster's OWN limit: llama-swap gives up on a request to its corsair peer after
       // `peers.corsair.timeouts.responseHeader` (600 s), and the quality engine sends nothing
@@ -132,13 +133,40 @@
       // The tiers disagree about guidance and BOTH read the field, so one shared value is
       // wrong for one of them. Measured with the seed pinned so only guidance could vary:
       // the fast tier rendered differently at 1.0 than at 7.5, and the quality tier took 22 s
-      // at guidance 4 against 11 s at 1.0 — Qwen-Image carries its own embedded guidance
-      // (3.5 in its generation record), so true CFG there is redundant AND doubles the
-      // forward passes per step.
-      "qualityDefaults": { "steps": 20, "guidanceScale": 1 },
-      // NOT ACTIVE — the route below returned 404 on re-test while the provider was being
-      // reconfigured, so it stays commented until it is verified again. The CLIENT support for
-      // it is shipped and tested; only this wiring is pending.
+      // at guidance 4 against 11 s at 1.0 — true CFG doubles the forward passes per step.
+      //
+      // QUALITY ENGINE — what it is and what it honours (researched and measured 2026-09-26/27):
+      // - Qwen-Image-2.1, Alibaba's release of 2026-09-20: a new 7B DiT with a Qwen3-VL-8B text
+      //   encoder. Advice written for the older Qwen-Image (true CFG 4, 1328² sizes, the
+      //   "Ultra HD, 4K" prompt suffix) does NOT apply to it.
+      // - STEPS 40: the model card's and the diffusers pipeline's default. 20 was our own choice
+      //   for time; the user raised it to 50 in the settings step (session 6ece6f2a). About
+      //   5-6 min at 1024x1024 on corsair's iGPU (estimated from the 20-step measurement).
+      // - GUIDANCE 1: the model is meant to be sampled WITHOUT guidance (pipeline default
+      //   true_cfg_scale 1.0) and has no guidance input at all — the "Guidance: 3.5" in every
+      //   render's record is sd.cpp's unused default, NOT embedded guidance as this comment once
+      //   said. A NEGATIVE PROMPT NEEDS GUIDANCE > 1: at 1 it changed nothing (identical pixels
+      //   with the seed pinned), at 4 it worked (mean distance 56) at twice the time.
+      // - SIZES are multiples of 32; the official ones are all ~4 MP (2048x2048, 2752x1536, ...),
+      //   which will not fit in maxRenderMs on this hardware (not measured). At ~1 MP the
+      //   pipeline's own shapes are round(√(1024² × ratio) / 32) × 32: 1376x768 for 16:9,
+      //   1184x896 for 4:3 — rendered live at exactly 1376x768.
+      // - SAMPLER / SCHEDULER / FLOW SHIFT: not request fields on this endpoint, and deliberately
+      //   not exposed. sd.cpp's default scheduler is the model's own resolution-dependent
+      //   schedule; naming ANY scheduler falls back to a generic shift-3 schedule, off-spec for
+      //   this model, and a flow shift is ignored without one (recorded in the PNG, identical
+      //   pixels). The only route to them — an <sd_cpp_extra_args> block inside the prompt,
+      //   which also overrode STEPS past the render limit — is stripped by the client.
+      // - ENGINE BUILD: corsair runs stable-diffusion.cpp master-889 (c678dfe, 2026-09-20). That
+      //   predates b167b94 (#2048, 2026-09-24: this model's flow schedule — shift parameters and
+      //   a 0.02 terminal sigma — aligned with the official defaults; before it, grid artifacts
+      //   at 2K) and 0a9340c (#2054, 2026-09-25: VAE convolution scaling). Every quality render
+      //   so far ran the old schedule. Upgrading sd.cpp on corsair is the biggest quality lever
+      //   left; re-measure render times afterwards.
+      "qualityDefaults": { "steps": 40, "guidanceScale": 1 },
+      // NOT ACTIVE — and now has nothing to point at: re-tested 2026-09-26, the worker's shim
+      // answers POST /sdapi/v1/txt2img with 404 "this server exposes /v1/images/generations and
+      // /v1/images/edits". The CLIENT support for it is shipped and tested; only a route is missing.
       //
       // It was wanted because an earlier build of the OpenAI route parsed `prompt` and `size`
       // and discarded the rest (eight probes varying steps, seed, cfg and negative prompt all

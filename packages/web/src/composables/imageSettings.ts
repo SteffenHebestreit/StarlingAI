@@ -6,7 +6,8 @@
  * rule; the checks here mirror its rules so a mistake shows next to its field before the round
  * trip, not instead of it. Measured with the seed pinned, both engines honour seed, steps,
  * guidance and the negative prompt, so no field is greyed out per engine — only the size of a
- * fixed-size engine and editing on one that cannot edit are.
+ * fixed-size engine and editing on one that cannot edit are. The negative prompt needs guidance
+ * above 1 to do anything, and the form says so beside it (negativePromptNote).
  *
  * Deliberately free of Vue and of the store, like turnSteps.
  */
@@ -141,7 +142,7 @@ export type ImageSettingsField =
   | "baseCandidateId" | "strength" | "mask" | "maskBlur" | "_form";
 
 const DEFAULT_BOUNDS: ImageSettingsBounds = {
-  size: { min: 256, max: 2048, step: 64, fixed: 1024 },
+  size: { min: 256, max: 2048, step: 32, fixed: 1024 },
   steps: [1, 100],
   guidance: [0, 20],
   seed: [0, 4294967295],
@@ -290,8 +291,8 @@ export const LONG_RENDER_SECONDS = 600;
 
 /**
  * How long a render on `engine` should take with these settings: its time at its own defaults,
- * scaled by steps × area, and doubled where the engine's default guidance is ≤ 1 (embedded
- * guidance) and these settings turn on true CFG, which runs a second forward pass per step.
+ * scaled by steps × area, and doubled where the engine's default guidance is ≤ 1 (no CFG) and
+ * these settings turn on true CFG, which runs a second forward pass per step.
  *
  * Mirrors imageRenderWork / expectedImageRenderSeconds in core's multimodal/image-generation.ts,
  * which sets the render's timeout by the same figure — change both together. Session 807684e9
@@ -374,7 +375,7 @@ export function renderLimitProblem(form: ImageSettingsForm, payload: ImageSettin
     + ` ${Math.round(limit.serverSeconds / 60)} min, so it would fail.`;
   if (cfgDoubles && withoutCfg <= limit.allowedSeconds) {
     return `${head} At guidance ${defaultGuidance}, this engine's default, it takes ${etaLabel(withoutCfg)}: higher guidance`
-      + " doubles the time here without improving the picture.";
+      + " doubles the time here.";
   }
   const maxSteps = Math.floor((form.steps * limit.allowedSeconds) / withoutCfg);
   return maxSteps >= 1
@@ -530,18 +531,41 @@ export interface SizePreset {
   height: number;
 }
 
-/** A few common shapes that fit the bounds, square first. */
+/**
+ * A few common shapes at about one megapixel on the size grid, square first: each is
+ * round(√(area × ratio) / step) × step wide, the way the quality engine's own pipeline picks its
+ * sizes. On the 32 grid that is 1376×768 for 16:9 and 1184×896 for 4:3, where hard-coded
+ * 64-grid shapes (1344×768, 1152×896) were off the engine's own.
+ */
 export function sizePresets(bounds: ImageSettingsBounds): SizePreset[] {
-  const presets: SizePreset[] = [
-    { label: "Square", width: 1024, height: 1024 },
-    { label: "Landscape 4:3", width: 1152, height: 896 },
-    { label: "Portrait 3:4", width: 896, height: 1152 },
-    { label: "Wide 16:9", width: 1344, height: 768 },
-    { label: "Tall 9:16", width: 768, height: 1344 },
-    { label: "Small", width: 512, height: 512 },
+  const step = bounds.size.step > 0 ? bounds.size.step : 1;
+  const shape = (label: string, ratio: number, side = 1024): SizePreset => {
+    const width = Math.sqrt(side * side * ratio);
+    return { label, width: Math.round(width / step) * step, height: Math.round(width / ratio / step) * step };
+  };
+  const presets = [
+    shape("Square", 1),
+    shape("Landscape 4:3", 4 / 3),
+    shape("Portrait 3:4", 3 / 4),
+    shape("Wide 16:9", 16 / 9),
+    shape("Tall 9:16", 9 / 16),
+    shape("Small", 1, 512),
   ];
-  const fits = (value: number) => value >= bounds.size.min && value <= bounds.size.max && value % bounds.size.step === 0;
+  const fits = (value: number) => value >= bounds.size.min && value <= bounds.size.max && value % step === 0;
   return presets.filter((preset) => fits(preset.width) && fits(preset.height));
+}
+
+/**
+ * Said under the negative prompt when it cannot do anything: at guidance ≤ 1 there is no
+ * classifier-free guidance for it to steer. Measured on the quality engine with the seed pinned:
+ * identical pixels with and without one at guidance 1. Mirrors negativePromptHasNoEffect in core's
+ * multimodal/image-generation.ts, which tells the agent the same after the render.
+ */
+export function negativePromptNote(form: ImageSettingsForm, payload: ImageSettingsPayload): string {
+  if (!form.negativePrompt.trim() || form.guidanceScale > 1) return "";
+  const doubles = (engineFor(payload, form.tier)?.defaults.guidanceScale ?? 0) <= 1;
+  return `Has no effect at guidance ${form.guidanceScale}: set guidance above 1 to use it`
+    + (doubles ? ", which doubles the render time on this engine." : ".");
 }
 
 /** What a strength does, in the two bands that are known to work. */

@@ -92,6 +92,7 @@
               @input="form.touched.negativePrompt = true"
             />
             <p v-if="errors.negativePrompt" class="ism__error">{{ errors.negativePrompt }}</p>
+            <p v-else-if="negativeNote" class="ism__warn">{{ negativeNote }}</p>
           </fieldset>
 
           <!-- Edit a picture -->
@@ -284,6 +285,7 @@ import {
   imageFieldErrors,
   initialForm,
   longRenderWarning,
+  negativePromptNote,
   renderLimitProblem,
   randomSeed,
   selectBase,
@@ -327,6 +329,8 @@ const editing = computed(() => Boolean(form.value.baseCandidateId));
 const anyEditor = computed(() => props.payload.engines.some((engine) => engine.canEdit));
 const lock = computed(() => sizeLock(form.value, props.payload));
 const presets = computed(() => sizePresets(props.payload.bounds));
+// A negative prompt at guidance ≤ 1 changes nothing; said beside it rather than discovered later.
+const negativeNote = computed(() => negativePromptNote(form.value, props.payload));
 // What these settings should take; also the running step's ETA once they are sent.
 const estimateSeconds = computed(() => formEstimateSeconds(form.value, props.payload));
 // Past the image server's own limit the settings would fail, which outranks merely taking long.

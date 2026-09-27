@@ -61,10 +61,10 @@ function watch<T>(promise: Promise<T>) {
 }
 
 describe("the render budget follows the request", () => {
-  it("scales with steps, area and true CFG against the tier's own defaults", () => {
+  it("scales with steps, area and true CFG against the tier's measured reference render", () => {
     expect(imageRenderWork(CLUSTER, { tier: "quality", steps: 20, width: 1024, height: 1024, guidanceScale: 1 })).toBe(1);
     expect(imageRenderWork(CLUSTER, { ...SESSION_807684E9, guidanceScale: 1 })).toBeCloseTo((57 / 20) * ((1344 * 768) / (1024 * 1024)), 6);
-    // True CFG doubles the forward passes where the engine's default is embedded guidance (≤ 1)…
+    // True CFG doubles the forward passes where the engine renders without it (guidance ≤ 1)…
     expect(imageRenderWork(CLUSTER, { tier: "quality", steps: 20, width: 1024, height: 1024, guidanceScale: 4 })).toBe(2);
     // …and not on an engine that already runs CFG at its default.
     expect(imageRenderWork(CLUSTER, { tier: "fast", steps: 20, width: 1024, height: 1024, guidanceScale: 9 })).toBe(1);
@@ -77,7 +77,23 @@ describe("the render budget follows the request", () => {
     expect(expectedImageRenderSeconds(CLUSTER, shape)).toBeCloseTo(170 * 2.8055, 0);
   });
 
-  it("keeps the configured budget at the defaults, and never gives a smaller request less", () => {
+  it("measures work from the REFERENCE render, not the configured defaults: a 40-step default gets 40 steps' time", () => {
+    // The quality default moved from 20 to Qwen-Image 2.1's official 40 steps. Work measured against
+    // the defaults would have called that render 1.0 — 170 s expected and the 300 s budget of a
+    // 20-step one — and abandoned a ~340 s render at 300 s while the engine rendered on.
+    const forty: ImageGenerationBackendConfig = { ...CLUSTER, qualityDefaults: { steps: 40, guidanceScale: 1 } };
+    const atDefaults = { tier: "quality" as const, steps: 40, width: 1024, height: 1024, guidanceScale: 1 };
+    expect(imageRenderWork(forty, atDefaults)).toBe(2);
+    expect(expectedImageRenderSeconds(forty, atDefaults)).toBe(340);
+    expect(imageRequestTimeoutMs(forty, atDefaults)).toBe(600_000);
+    // The server's own limit still caps it, with the grace an answer may take to arrive.
+    expect(imageRequestTimeoutMs({ ...forty, maxRenderMs: 600_000 }, atDefaults)).toBe(600_000);
+    expect(imageRenderLimitError({ ...forty, maxRenderMs: 600_000 }, atDefaults)).toBeUndefined();
+    // And the measurement is not moved by a heavier default: 20 steps are still 20 steps' time.
+    expect(expectedImageRenderSeconds(forty, { ...atDefaults, steps: 20 })).toBe(170);
+  });
+
+  it("keeps the configured budget at the reference render, and never gives a smaller request less", () => {
     expect(imageRequestTimeoutMs(CLUSTER, { tier: "quality", steps: 20, width: 1024, height: 1024, guidanceScale: 1 })).toBe(300_000);
     expect(imageRequestTimeoutMs(CLUSTER, { tier: "quality", steps: 8, width: 512, height: 512, guidanceScale: 1 })).toBe(300_000);
     expect(imageRequestTimeoutMs(CLUSTER, { tier: "fast", steps: 20, width: 1024, height: 1024, guidanceScale: 7.5 })).toBe(120_000);
@@ -354,7 +370,7 @@ describe("the image server's own limit", () => {
     expect(message).toContain("Qwen-Image 2.1 (the quality tier) would need about 17 min for 60 steps at 1024x1024 with guidance 2.5");
     expect(message).toContain("the image server gives up on any render after 10 min, so it would fail. Nothing was rendered.");
     expect(message).toContain("At guidance 1, the engine's default, the same steps and size take about 9 min");
-    expect(message).toContain("guidance above 1 doubles the time on this engine without improving the picture");
+    expect(message).toContain("guidance above 1 doubles the time on this engine");
 
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
@@ -379,7 +395,7 @@ describe("the image server's own limit", () => {
     expect(at(80)).toContain("At 1344x768, at most 64 steps fit.");
     // Too long even at the default guidance: the steps that fit are counted without the doubling.
     expect(imageRenderLimitError(LIMITED, { tier: "quality", steps: 100, width: 1024, height: 1024, guidanceScale: 3 }))
-      .toContain("At 1024x1024 with guidance 1 (guidance above 1 doubles the time on this engine without improving the picture), at most 63 steps fit.");
+      .toContain("At 1024x1024 with guidance 1 (guidance above 1 doubles the time on this engine), at most 63 steps fit.");
   });
 
   it("never waits much past the moment the server gives up", () => {

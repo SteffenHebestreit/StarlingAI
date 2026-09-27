@@ -141,6 +141,8 @@ interface ResolvedImageRequest extends ImageGenerationRequest {
   tier: ImageGenerationTier;
   /** True when the tier was raised because the one asked for cannot edit. */
   tierUpgradedForEdit?: boolean;
+  /** True when an `<sd_cpp_extra_args>` block was removed from the prompt (stripEngineArgs). */
+  engineArgsRemoved?: boolean;
   width: number;
   height: number;
   steps: number;
@@ -163,6 +165,10 @@ export interface ImageGenerationResult {
   tier?: ImageGenerationTier;
   /** Set when the tier was raised because editing needs a tier the caller did not ask for. */
   tierUpgradedForEdit?: boolean;
+  /** Set when an `<sd_cpp_extra_args>` block was removed from the prompt before it was sent. */
+  engineArgsRemoved?: boolean;
+  /** Set when the render carried a negative prompt at guidance ≤ 1, where it changes nothing. */
+  negativePromptIgnored?: boolean;
   mimeType: string;
   extension: string;
   width?: number;
@@ -333,6 +339,8 @@ export async function requestImageGeneration(
     ...result,
     tier: result.tier ?? request.tier,
     ...(request.tierUpgradedForEdit ? { tierUpgradedForEdit: true } : {}),
+    ...(request.engineArgsRemoved ? { engineArgsRemoved: true } : {}),
+    ...(negativePromptHasNoEffect(request) ? { negativePromptIgnored: true } : {}),
   };
 }
 
@@ -417,17 +425,59 @@ function resolveImageRequest(
     ? baseSize
     : undefined;
 
+  // Settings travel in their own fields and nowhere else; see stripEngineArgs.
+  const prompt = stripEngineArgs(input.prompt);
+  if (!prompt.text) {
+    throw new Error("The prompt is empty once its <sd_cpp_extra_args> block is removed. Nothing was rendered: describe the picture in the prompt.");
+  }
+  const negativeRaw = input.negativePrompt ?? tierDefaults.negativePrompt;
+  const negative = negativeRaw === undefined ? undefined : stripEngineArgs(negativeRaw);
+
   return {
     ...input,
+    prompt: prompt.text,
     tier,
     ...(model ? { model } : {}),
     ...(tierUpgradedForEdit ? { tierUpgradedForEdit: true } : {}),
+    ...(prompt.removed || negative?.removed ? { engineArgsRemoved: true } : {}),
     width: input.width ?? editSize?.width ?? tierDefaults.width,
     height: input.height ?? editSize?.height ?? tierDefaults.height,
     steps: input.steps ?? tierDefaults.steps,
     guidanceScale: input.guidanceScale ?? tierDefaults.guidanceScale,
-    negativePrompt: input.negativePrompt ?? tierDefaults.negativePrompt,
+    negativePrompt: negative?.text,
   };
+}
+
+/**
+ * The prompt without stable-diffusion.cpp's `<sd_cpp_extra_args>{json}</sd_cpp_extra_args>` block.
+ *
+ * sd-server reads that block out of the PROMPT TEXT and applies it over the request's own fields.
+ * Measured 2026-09-26 on the quality engine: it set the sampler, the scheduler and the STEPS — asked
+ * for 2, the engine ran 4 while the endpoint's `usage.steps` still said 2. So a pasted prompt could
+ * start a render the image server cuts off at 600 s, past the limit check and the settings step,
+ * and every record of it would name the wrong settings. Each tag becomes a space, repeated until
+ * none is left, so removing one cannot splice two halves into a new one.
+ */
+export function stripEngineArgs(text: string): { text: string; removed: boolean } {
+  let out = text;
+  for (;;) {
+    const next = out
+      .replace(/<sd_cpp_extra_args>[\s\S]*?<\/sd_cpp_extra_args>/gi, " ")
+      .replace(/<\/?sd_cpp_extra_args>/gi, " ");
+    if (next === out) break;
+    out = next;
+  }
+  return out === text ? { text, removed: false } : { text: out.replace(/\s{2,}/g, " ").trim(), removed: true };
+}
+
+/**
+ * A negative prompt that cannot change the picture: at guidance ≤ 1 there is no classifier-free
+ * guidance, so the negative prompt has nothing to steer against. Measured 2026-09-26 on the quality
+ * engine with the seed pinned: identical pixels with and without one at guidance 1, a mean distance
+ * of 56 at guidance 4 — at twice the time.
+ */
+export function negativePromptHasNoEffect(request: { negativePrompt?: string; guidanceScale: number }): boolean {
+  return Boolean(request.negativePrompt?.trim()) && request.guidanceScale <= 1;
 }
 
 /** What a tier renders with when the request names nothing: the size, steps and guidance its time was measured at. */
@@ -452,31 +502,44 @@ export function imageTierDefaults(config: ImageGenerationBackendConfig, tier: Im
 }
 
 /**
- * How long each tier takes AT ITS DEFAULTS, in seconds: about ten for the fast engine, ~170 for a
- * quality render at 1024x1024 and 20 steps (measured 169 s). Every other request's time is this
- * scaled by imageRenderWork.
+ * How long each tier takes for its REFERENCE RENDER (IMAGE_TIER_REFERENCE_RENDER), in seconds:
+ * about ten for the fast engine, ~170 for a quality render at 1024x1024 and 20 steps (measured
+ * 169 s). Every other request's time is this scaled by imageRenderWork.
  */
 export const IMAGE_TIER_EXPECTED_SECONDS: Record<ImageGenerationTier, number> = { fast: 10, quality: 170 };
+
+/**
+ * The render each IMAGE_TIER_EXPECTED_SECONDS figure was MEASURED at. A fact about the hardware,
+ * so it is fixed here rather than read from the tier's configured defaults: the two used to be the
+ * same thing, and raising the quality default from 20 steps to the model's official 40 would then
+ * have kept "170 s at the defaults" — a 40-step render handed the 300 s budget of a 20-step one and
+ * abandoned at 300 s while the engine rendered on (the session 807684e9 failure). The same holds
+ * for a defaultSteps an administrator changes on the Settings page.
+ */
+export const IMAGE_TIER_REFERENCE_RENDER: Record<ImageGenerationTier, ImageSize & { steps: number; guidanceScale: number }> = {
+  fast: { width: 1024, height: 1024, steps: 20, guidanceScale: 7.5 },
+  quality: { width: 1024, height: 1024, steps: 20, guidanceScale: 1 },
+};
 
 /** The parts of a resolved request that decide how long it renders. */
 export type ImageRenderShape = Pick<ImageRequestPreview, "tier" | "width" | "height" | "steps" | "guidanceScale">;
 
 /**
- * The work a resolved request is, relative to its tier's defaults: 1 renders in the tier's usual
- * time, 2.8 takes 2.8 times as long.
+ * The work a resolved request is, relative to its tier's reference render: 1 renders in the tier's
+ * measured time, 2.8 takes 2.8 times as long.
  *
  * A diffusion render costs one forward pass per step per latent pixel, so the time scales with
- * steps and with area; and true CFG runs a second pass per step, which on an engine whose default
- * guidance is ≤ 1 (embedded guidance, no CFG) doubles it — measured 22 s against 11 s on the
- * quality tier. Session 807684e9: the user set a quality render to 57 steps at 1344x768, about
- * eight minutes, against a fixed 300 s budget; it was abandoned at exactly 300 s while the device
- * kept rendering, and the retry queued behind the abandoned render inside the backend.
+ * steps and with area; and true CFG runs a second pass per step, which on an engine that renders
+ * at guidance ≤ 1 (no CFG) doubles it — measured 22 s against 11 s on the quality tier. Session
+ * 807684e9: the user set a quality render to 57 steps at 1344x768, about eight minutes, against a
+ * fixed 300 s budget; it was abandoned at exactly 300 s while the device kept rendering, and the
+ * retry queued behind the abandoned render inside the backend.
  */
-export function imageRenderWork(config: ImageGenerationBackendConfig, request: ImageRenderShape): number {
-  const defaults = imageTierDefaults(config, request.tier);
-  const steps = request.steps / defaults.steps;
-  const area = (request.width * request.height) / (defaults.width * defaults.height);
-  const cfg = defaults.guidanceScale <= 1 && request.guidanceScale > 1 ? 2 : 1;
+export function imageRenderWork(_config: ImageGenerationBackendConfig, request: ImageRenderShape): number {
+  const reference = IMAGE_TIER_REFERENCE_RENDER[request.tier];
+  const steps = request.steps / reference.steps;
+  const area = (request.width * request.height) / (reference.width * reference.height);
+  const cfg = reference.guidanceScale <= 1 && request.guidanceScale > 1 ? 2 : 1;
   const work = steps * area * cfg;
   return Number.isFinite(work) && work > 0 ? work : 1;
 }
@@ -489,8 +552,9 @@ function tierTimeoutMs(config: ImageGenerationBackendConfig, tier: ImageGenerati
 
 /**
  * How long this request may take before it is abandoned: the tier's configured timeout, scaled up
- * by the request's work and never below it. The configured figure is sized for a default render
- * plus a weight reload after idle, so a smaller request keeps that margin rather than losing it.
+ * by the request's work and never below it. The configured figure is sized for the tier's
+ * reference render plus a weight reload after idle, so a smaller request keeps that margin rather
+ * than losing it.
  */
 export function imageRequestTimeoutMs(config: ImageGenerationBackendConfig, request: ImageRenderShape): number {
   const scaled = Math.round(tierTimeoutMs(config, request.tier) * Math.max(1, imageRenderWork(config, request)));
@@ -498,7 +562,7 @@ export function imageRequestTimeoutMs(config: ImageGenerationBackendConfig, requ
   return config.maxRenderMs ? Math.min(scaled, config.maxRenderMs + IMAGE_SERVER_CUT_GRACE_MS) : scaled;
 }
 
-/** How long this request should take: the tier's time at its defaults, scaled by the request's work. */
+/** How long this request should take: the tier's measured time, scaled by the request's work. */
 export function expectedImageRenderSeconds(config: ImageGenerationBackendConfig, request: ImageRenderShape): number {
   return IMAGE_TIER_EXPECTED_SECONDS[request.tier] * imageRenderWork(config, request);
 }
@@ -530,7 +594,9 @@ function renderFitAdvice(config: ImageGenerationBackendConfig, request: ImageRen
   const defaults = imageTierDefaults(config, request.tier);
   const cfgDoubles = defaults.guidanceScale <= 1 && request.guidanceScale > 1;
   const withoutCfg = expectedImageRenderSeconds(config, cfgDoubles ? { ...request, guidanceScale: defaults.guidanceScale } : request);
-  const cfgNote = `guidance above ${defaults.guidanceScale} doubles the time on this engine without improving the picture`;
+  // Not "without improving the picture": the quality engine is meant to render without guidance,
+  // but guidance is also what gives a negative prompt its effect, and that is the person's call.
+  const cfgNote = `guidance above ${defaults.guidanceScale} doubles the time on this engine`;
   if (cfgDoubles && withoutCfg <= allowedSeconds) {
     return `At guidance ${defaults.guidanceScale}, the engine's default, the same steps and size take about`
       + ` ${formatRenderDuration(withoutCfg)} — ${cfgNote}.`;
@@ -1223,9 +1289,15 @@ function resolveTierBackend(
 /** Both tiers of the cluster endpoint run fixed-resolution pipelines. */
 const OPENAI_IMAGE_SIZE = 1024;
 
-/** The sizes a render may ask for: the schema's bounds, a 64-pixel grid, and the one size a
- *  fixed-size engine accepts. */
-export const IMAGE_SIZE_BOUNDS = { min: 256, max: 2048, step: 64, fixed: OPENAI_IMAGE_SIZE } as const;
+/**
+ * The sizes a render may ask for: the schema's bounds, a 32-pixel grid, and the one size a
+ * fixed-size engine accepts.
+ *
+ * 32, not 64: Qwen-Image 2.1's own pipeline requires multiples of 32 (VAE factor 16 × patch 2) and
+ * picks its sizes on that grid — round(√(area × ratio) / 32) × 32 gives 1376x768 for 16:9 at 1 MP,
+ * which a 64 grid cannot express. Rendered live at exactly 1376x768 on 2026-09-27.
+ */
+export const IMAGE_SIZE_BOUNDS = { min: 256, max: 2048, step: 32, fixed: OPENAI_IMAGE_SIZE } as const;
 
 /**
  * Statuses the endpoint uses to mean "ask again", not "your request is wrong".
@@ -1402,15 +1474,14 @@ async function requestOpenAiImageGeneration(
     // because no shim agreed on the name; this endpoint settled on `image`, and `strength` is
     // likewise the single accepted spelling — not `denoising_strength`.
     //
-    // CORRECTION, measured 2026-09-22: this comment used to claim the endpoint "rejects
-    // unknown parameters by name rather than ignoring them". It does NOT. A request carrying
-    // `__definitely_not_real__: 1` returned HTTP 200 and a real image; so did `mask_image`,
-    // which is the near-miss spelling of a field that DOES exist. Most unknown names are
-    // silently dropped, so a misspelled parameter costs a full render and changes nothing,
-    // and you cannot use a rejection to discover which names the backend honours — that reads
-    // as a working feature and is how a silent no-op gets shipped. A few names ARE
-    // special-cased loudly: `mask` is validated and rejected with param "mask" when it selects
-    // nothing, selects everything, or is not an image.
+    // The endpoint's behaviour on unknown names has flipped twice. 2026-09-22 it silently dropped
+    // them (`__definitely_not_real__` and the near-miss `mask_image` both returned 200 and a
+    // picture). Re-measured 2026-09-26 it REJECTS them by name with HTTP 400 and lists what it
+    // takes: guidance_scale, image, mask, mask_blur, model, n, negative_prompt, output_format,
+    // prompt, response_format, seed, size, steps, strength, user. Send only those; a sampler,
+    // scheduler or flow shift has no field here at all (see stripEngineArgs for the one way
+    // around that, which is closed). `mask` is also validated and rejected with param "mask"
+    // when it selects nothing, selects everything, or is not an image.
     payload["image"] = input.initImage;
     payload["strength"] = input.strength ?? DEFAULT_EDIT_STRENGTH;
     if (input.mask) {

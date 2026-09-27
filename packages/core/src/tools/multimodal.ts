@@ -11,11 +11,14 @@ import {
   ImageUpstreamRequestError,
   checkImageGenerationHealth,
   describeImageTierChoices,
+  describeRenderDuration,
+  expectedImageRenderSeconds,
   imageEngineLabel,
   imageGenerationServiceConfigured,
   imageRenderLimitError,
   imageRequestBoundsError,
   imageTierChoices,
+  imageTierDefaults,
   previewImageRequest,
   readImageHeaderSize,
   requestImageGeneration,
@@ -522,7 +525,7 @@ registerTool({
 
 const GENERATE_IMAGE_DESCRIPTION =
   "Generate an image from a text prompt and save it to the workspace. Two tiers: `fast` (the default,"
-  + " ~10s on dedicated hardware, costs the rest of the system nothing) and `quality` (~2-3 min, runs one"
+  + " seconds on dedicated hardware, costs the rest of the system nothing) and `quality` (minutes, runs one"
   + " at a time cluster-wide and slows every other model on that machine while it runs). See the `tier`"
   + " parameter for when each is right. In a chat the user may first see your settings and keep them,"
   + " change engine, prompt, size, steps, seed or base picture, paint a mask, or skip the render; the"
@@ -539,13 +542,22 @@ function describeImageEngines(): string {
   try {
     const config = getConfig().multimodal?.imageGeneration;
     const engines = config ? describeImageTierChoices(config) : "";
+    // Computed, not written into the text: the quality default moved from 20 to 40 steps and the
+    // "~2-3 min" this replaced would have been half the real time.
+    const times = config
+      ? imageTierChoices(config).map((choice) => `\`${choice.tier}\` about ${describeRenderDuration(
+        expectedImageRenderSeconds(config, { tier: choice.tier, ...imageTierDefaults(config, choice.tier) }),
+      )}`).join(", ")
+      : "";
     // The server's limit, so the agent does not propose a render it would cut off.
     const limit = config?.maxRenderMs
       ? ` The image server gives up on any render after ${Math.round(config.maxRenderMs / 60_000)} min, and a render`
         + " expected to take longer is refused before it runs: more steps, a larger size and guidance above an engine's"
         + " default of 1 or less (which doubles the time) all make it longer."
       : "";
-    return (engines ? ` Engines: ${engines}. A user who names one of these is asking for that tier.` : "") + limit;
+    return (engines ? ` Engines: ${engines}. A user who names one of these is asking for that tier.` : "")
+      + (times ? ` At its defaults a render takes: ${times}.` : "")
+      + limit;
   } catch {
     return "";
   }
@@ -579,7 +591,14 @@ registerTool({
           "Rarely needed — choose the engine with `tier`. Accepts only the model ids or engine names"
           + " listed in this tool's description; any other name is refused before anything renders.",
       },
-      negativePrompt: { type: "string", description: "Optional negative prompt to steer generation away from unwanted content" },
+      negativePrompt: {
+        type: "string",
+        description:
+          "Optional negative prompt to steer generation away from unwanted content. It ONLY works with"
+          + " guidance above 1: at guidance 1 or less — the quality engine's default — it changes nothing"
+          + " (measured: identical pixels), and raising guidance above 1 there doubles the render time."
+          + " On the quality engine, describe what you want in the prompt instead.",
+      },
       width: {
         type: "number",
         description:
@@ -595,7 +614,13 @@ registerTool({
         type: "number",
         description: "Number of diffusion steps, 1 to 100 (higher = better quality, slower: the render time grows with them). Omit to use the configured default.",
       },
-      guidanceScale: { type: "number", description: "Guidance scale — how closely the model follows the prompt. Omit to use the configured default." },
+      guidanceScale: {
+        type: "number",
+        description:
+          "Guidance scale — how closely the model follows the prompt, and what gives a negative prompt its"
+          + " effect (none at 1 or less). Omit to use the configured default: the quality engine is meant to"
+          + " render at 1, and anything above 1 doubles its time.",
+      },
       seed: { type: "number", description: "Optional random seed for reproducible results" },
       tier: {
         type: "string",
@@ -604,7 +629,7 @@ registerTool({
           "Which engine renders it. 'fast' is the default: about ten seconds on dedicated hardware,"
           + " costing the rest of the system nothing — right for an ordinary picture, a realistic"
           + " one included (with the register first it comes back photographic). 'quality' takes"
-          + " two to three minutes, runs one at a time across the whole cluster and slows every"
+          + " minutes (this tool's description says how many), runs one at a time across the whole cluster and slows every"
           + " other model on that machine by roughly 70% while it runs. Choose 'quality' when the"
           + " user was unhappy with a fast result or asks for a better one, names the quality"
           + " engine, or when the new picture must keep an EXISTING picture's layout: measured here"
@@ -753,8 +778,8 @@ registerTool({
       // The tiers want DIFFERENT sampling defaults and both read the fields. Measured with
       // the seed pinned so only the parameter could vary: the fast tier renders differently
       // at guidance 1.0 than at 7.5, and the quality tier costs 22s at guidance 4 against
-      // 11s at 1.0 because its model carries embedded guidance and true CFG doubles the
-      // forward passes. One shared default is wrong for one of them whichever value it takes.
+      // 11s at 1.0 because true CFG doubles the forward passes — and Qwen-Image 2.1 is meant
+      // to render without it. One shared default is wrong for one of them whichever value it takes.
       // Read the base image before anything else touches the backend, so a bad path fails
       // immediately rather than after a two-minute render.
       let baseFile: WorkspaceBinaryFile | undefined;
@@ -923,6 +948,14 @@ registerTool({
           + (result.tierUpgradedForEdit
             ? ` — NOTE: editing is only available on the slower quality tier, so this used it`
               + " rather than the fast one. Say so if the user asked for speed."
+            : "")
+          + (result.engineArgsRemoved
+            ? " — NOTE: an <sd_cpp_extra_args> block was removed from the prompt before it was sent; settings"
+              + " go in this tool's own parameters, and the ones above are what ran."
+            : "")
+          + (result.negativePromptIgnored
+            ? " — NOTE: the negative prompt had no effect: at guidance 1 or less nothing uses it. Do not tell the"
+              + " user it steered the picture."
             : "")
           + (encoded.correctedFrom
             ? ` — NOTE: ${encoded.correctedFrom} cannot be produced here, so the file is ${encoded.extension}.`

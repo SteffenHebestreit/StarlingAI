@@ -148,7 +148,7 @@ describe("the settings proposal", () => {
       },
     ]);
     expect(proposal.bounds).toEqual({
-      size: { min: 256, max: 2048, step: 64, fixed: 1024 },
+      size: { min: 256, max: 2048, step: 32, fixed: 1024 },
       steps: [1, 100], guidance: [0, 20], seed: [0, 4294967295], strength: [0.05, 1], maskBlur: [0, 256],
       promptMax: 4000, negativeMax: 2000,
     });
@@ -156,6 +156,18 @@ describe("the settings proposal", () => {
     expect(proposal.agent).toEqual({
       prompt: "a lighthouse", tier: "fast", width: 1024, height: 1024, steps: 20, guidanceScale: 7.5, hasMask: false,
     });
+  });
+
+  it("sends each engine's time AT ITS DEFAULTS, derived from the measured reference, so 40 default steps read ~340 s", async () => {
+    // The form scales `expectedSeconds` from `defaults`. When the figure was the raw 20-step
+    // measurement, raising the quality default to the model's official 40 steps would have shown
+    // "~3 min" for a ~6 min render — and the render's own budget would have halved with it.
+    const forty: ImageGenerationBackendConfig = { ...CONFIG, qualityDefaults: { steps: 40, guidanceScale: 1 } };
+    const proposal = buildImageSettingsProposal(forty, { prompt: "a lighthouse", tier: "quality" }, []);
+    expect(proposal.engines.find((engine) => engine.tier === "quality")).toMatchObject({
+      defaults: { steps: 40, guidanceScale: 1 }, expectedSeconds: 340,
+    });
+    expect(proposal.engines.find((engine) => engine.tier === "fast")).toMatchObject({ expectedSeconds: 10 });
   });
 
   it("shows an edit exactly as it would run: the editing engine, the base's own size, the default strength", async () => {
@@ -249,6 +261,13 @@ describe("validating an answer", () => {
     expect(verdict.ok, JSON.stringify(verdict)).toBe(true);
   });
 
+  it("accepts the quality engine's own 16:9 shape, 1376x768, which the old 64-pixel grid refused", async () => {
+    // round(√(1024² × 16/9) / 32) × 32 — how Qwen-Image 2.1's pipeline sizes a 1 MP picture; rendered live at it.
+    const answer = withSettings(validGenerateAnswer(), { tier: "quality", width: 1376, height: 768, guidanceScale: 1 });
+    const verdict = await validateImageSettingsAnswer(answer, await editContext(await editFixture()));
+    expect(verdict.ok, JSON.stringify(verdict)).toBe(true);
+  });
+
   const rejectsGenerate: Array<[string, (answer: Record<string, unknown>) => Record<string, unknown>, string, RegExp]> = [
     ["a tier the deployment does not have", (a) => withSettings(a, { tier: "ultra" }), "settings.tier", /must be one of: fast, quality/],
     ["an empty prompt", (a) => withSettings(a, { prompt: "   " }), "settings.prompt", /must not be empty/],
@@ -263,7 +282,7 @@ describe("validating an answer", () => {
     ["a seed past 2^32-1", (a) => withSettings(a, { seed: 4_294_967_296 }), "settings.seed", /whole number from 0 to 4294967295/],
     ["a size the fixed-size engine rejects", (a) => withSettings(a, { width: 512, height: 512 }), "settings.width", /Segmind Vega renders 1024x1024 only/],
     ["a fractional width", (a) => withSettings(a, { width: 1024.5 }), "settings.width", /whole numbers/],
-    ["a size off the 64-pixel grid", (a) => withSettings(a, { tier: "quality", width: 1000, height: 768 }), "settings.width", /in steps of 64/],
+    ["a size off the 32-pixel grid", (a) => withSettings(a, { tier: "quality", width: 1000, height: 768 }), "settings.width", /in steps of 32/],
     ["a size past the bounds", (a) => withSettings(a, { tier: "quality", width: 1024, height: 4096 }), "settings.height", /from 256 to 2048/],
     ["an edit block that is not an object", (a) => withSettings(a, { edit: "c1" }), "settings.edit", /must be an object/],
   ];

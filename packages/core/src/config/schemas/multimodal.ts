@@ -83,10 +83,12 @@ export const MultimodalImageGenerationSchema = MultimodalServiceSchema.extend({
    * The documented worst case is 150 s of generation plus about 25 s of weight reload after
    * ten minutes idle, so anything under ~180 s abandons requests that were going to succeed.
    *
-   * Both this and `timeoutMs` bound a render at the tier's DEFAULTS. A request with more steps, a
-   * larger size or true CFG on an embedded-guidance engine gets proportionally more, never less
-   * (imageRequestTimeoutMs): 57 steps at 1344x768 is ~8 minutes on the quality engine, and a flat
-   * 300 s abandoned it while the device kept rendering (session 807684e9).
+   * Both this and `timeoutMs` bound the tier's REFERENCE render (IMAGE_TIER_REFERENCE_RENDER:
+   * 1024x1024, 20 steps, guidance ≤ 1 on the quality tier) — not its configured defaults, which
+   * may be heavier. A request with more steps, a larger size or true CFG on an engine that renders
+   * without it gets proportionally more, never less (imageRequestTimeoutMs): 57 steps at 1344x768
+   * is ~8 minutes on the quality engine, and a flat 300 s abandoned it while the device kept
+   * rendering (session 807684e9).
    */
   qualityTimeoutMs: z.number().int().min(10_000).max(600_000).default(210_000),
   /**
@@ -156,13 +158,16 @@ export const MultimodalImageGenerationSchema = MultimodalServiceSchema.extend({
    * They do differ, and one value for both is actively harmful. Measured against the live
    * endpoint with the seed pinned so only the parameter could vary: the fast tier at
    * guidance 1.0 and at 7.5 produced different images, so it genuinely reads the field and
-   * wants 7.5. The quality tier wants 1.0 — Qwen-Image carries embedded guidance (3.5 in its
-   * own record), so true CFG is redundant there AND doubles the forward passes per step:
-   * guidance 4 measured 22 s against 11 s at guidance 1, same size and step count.
+   * wants 7.5. The quality tier wants 1.0 — Qwen-Image 2.1 is meant to be sampled without
+   * guidance (its pipeline defaults `true_cfg_scale` to 1.0; the transformer has no guidance
+   * input, so the "Guidance: 3.5" in each render's record is sd.cpp's unused default, NOT
+   * embedded guidance as this comment once claimed). True CFG there doubles the forward passes
+   * per step — guidance 4 measured 22 s against 11 s at guidance 1 — and is what a negative
+   * prompt needs: at guidance 1 a negative prompt changes nothing (identical pixels, measured).
    *
-   * So sending the fast tier's 7.5 to the quality tier would double its cost for a worse
-   * picture, and sending the quality tier's 1.0 to the fast tier would flatten that one.
-   * Anything left unset here falls back to the `default*` fields above.
+   * So sending the fast tier's 7.5 to the quality tier would double its cost, and sending the
+   * quality tier's 1.0 to the fast tier would flatten that one. Anything left unset here falls
+   * back to the `default*` fields above.
    */
   qualityDefaults: z.object({
     steps: z.number().int().min(1).max(100).optional(),

@@ -20,9 +20,9 @@ import {
   DEFAULT_EDIT_STRENGTH,
   IMAGE_SIZE_BOUNDS,
   IMAGE_STEPS_BOUNDS,
-  IMAGE_TIER_EXPECTED_SECONDS,
   decodesWithinDeclaredSize,
   describeRenderDuration,
+  expectedImageRenderSeconds,
   fitsImageSizeBounds,
   imageDeviceBusyMs,
   imageEngineLabel,
@@ -30,6 +30,7 @@ import {
   imageRenderOverLimit,
   imageTierChoices,
   imageTierDefaults,
+  negativePromptHasNoEffect,
   previewImageRequest,
   readImageHeaderSize,
   type ImageGenerationBackendConfig,
@@ -101,9 +102,12 @@ export interface ImageSettingsEngine {
   label?: string;
   fixedSize: boolean;
   canEdit: boolean;
-  /** What the engine renders with when nothing is set — the size, steps and guidance `expectedSeconds` was measured at. */
+  /** What the engine renders with when nothing is set. */
   defaults: { width: number; height: number; steps: number; guidanceScale: number; negativePrompt?: string };
-  /** At `defaults`; any other settings scale it by imageRenderWork, which the form mirrors. */
+  /**
+   * The expected time AT `defaults`, derived from the tier's measured reference render; the form
+   * scales it from `defaults` to other settings, mirroring imageRenderWork.
+   */
   expectedSeconds: number;
   /**
    * Set while the engine still finishes a render abandoned at its timeout: the next render waits
@@ -330,7 +334,9 @@ export function imageSettingsEngines(config: ImageGenerationBackendConfig): Imag
         guidanceScale: defaults.guidanceScale,
         ...(defaults.negativePrompt ? { negativePrompt: defaults.negativePrompt } : {}),
       },
-      expectedSeconds: IMAGE_TIER_EXPECTED_SECONDS[choice.tier],
+      // At the defaults, not the reference: the form scales from `defaults`, so a quality default
+      // of 40 steps must arrive as ~340 s, or its "~3 min" would be half the real time.
+      expectedSeconds: Math.round(expectedImageRenderSeconds(config, { tier: choice.tier, ...defaults })),
       ...(busySeconds > 0 ? { busySeconds } : {}),
     };
   });
@@ -746,7 +752,9 @@ export function describeRenderSettings(
     `${resolved.steps} steps`,
     `guidance ${resolved.guidanceScale}`,
     typeof request.seed === "number" ? `seed ${request.seed}` : "random seed",
-    resolved.negativePrompt ? "a negative prompt" : "no negative prompt",
+    !resolved.negativePrompt ? "no negative prompt"
+      : negativePromptHasNoEffect(resolved) ? "a negative prompt (no effect at this guidance)"
+        : "a negative prompt",
   ];
   if (request.initImage) {
     const mask = extras.maskPath
