@@ -57,7 +57,13 @@
       // cached, and they stayed warm after six 26k-token prompts in between. Cost: ~10.6 + 10.2 s of idle GPU once,
       // ~1.5 s per head to re-warm, only while no turn runs. After a rebuild, check that the forced calls'
       // provider_model_call rows show cacheN >= 9k; if they do not, turn this back off.
-      "promptCacheWarmForcedHeads": true
+      "promptCacheWarmForcedHeads": true,
+      // Re-warm a sub-agent's head after a run that outgrew it 4x, so the next dispatch of that agent finds it cached.
+      // Live probe E8, 2026-09-26: an 8k head was cold after a 6x run and one head-only request made the next two new
+      // conversations warm (3 of 3), ~0.8 s of prompt against ~7 s of cold prefill saved per dispatch. After a rebuild,
+      // read the sub_agent_head_rewarm rows and cacheN on the next same-head dispatch's first call; if it stays cold, or
+      // a re-warm shows up beside a real call, turn this back off.
+      "subAgentHeadRewarm": true
     }
   },
   "gateway": {
