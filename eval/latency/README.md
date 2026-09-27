@@ -120,8 +120,10 @@ claim is the interval a call ran, so a judge that ran beside other work the turn
    so a turn that was fast only because it failed does not pass for a fast turn. A one-line
    timeline follows per turn.
 7. **Call sites.** Count, p50/p90 duration, p50 TTFT and prompt tokens, and cold/partial/warm per
-   call site and agent. Calls without a session (the cache warm-keeper) are listed apart. They
-   are on no turn's critical path, but they share the model server with the turns.
+   call site and agent. Calls without a session, and cache warm-ups (`cache_warm`: the
+   warm-keeper, and a sub-agent's head re-warm, which carries the run it follows) are listed
+   apart, marked "(off turn)". They are on no turn's critical path, but they share the model
+   server with the turns.
 
 The rows can hold the user's words. The report copies no string from a row except identifiers
 (agent, tool and call-site names, statuses) and message lengths, and a test enforces this with
@@ -139,8 +141,8 @@ pnpm --filter @starlingai/core latency:probe --experiments E1 --reps 1        # 
 Layer 1 can only infer what a call spent on its prompt. Layer 2 sends calls built with the
 production message builders (receptionist, source judge, the orchestrator's head) around
 synthetic user text, and reads llama-server's own `timings`. Its experiments are E1 (what one
-decision call costs) to E7 (what a tool-subset switch costs); the script's header lists them and
-every flag. It answers:
+decision call costs) to E9 (whether the forced orchestrator heads stay warm); the script's header
+lists them and every flag. It answers:
 
 - Is the ~0.7–2 s every small call costs fixed overhead, or prompt processing that caching could
   remove? Look at `prompt_n` against `cache_n`, and `queue = wall − prompt_ms − predicted_ms`,
@@ -153,6 +155,20 @@ every flag. It answers:
   decides. Does the aborted request still occupy a slot or evict the orchestrator's cached
   prefix? (E5, 2026-09-26: the next head call was 952 ms slower, which is why a qualified point
   now asks Laya first.)
+
+**E8 and `agents.performance.subAgentHeadRewarm`.** E8 (2026-09-26) found why a sub-agent's
+re-dispatch starts cold. A new conversation on content_writer's 8,041-token head was warm after a
+previous run on it reached 1.5x or 3x the head, and cold after 6x: llama-server skips a cached
+entry the new prompt shares under a quarter of. One finished head-only request after the 6x run
+(`head_only`: the head, a one-character user turn, `max_tokens` 1) made the next two new
+conversations warm in 3 of 3, for ~0.8 s of prompt. It served none of three concurrent ones. The
+flag (default off, `agent/sub-agent-head-rewarm.ts`) sends that request when an in-process run
+ends whose last call was more than 4x its head. A new dispatch of the same agent on the same head
+waits for it before its first call, until it has been out 8 s, because E6 prices a prewarm still
+in flight at +5.1 s; for the same reason a run sends none while such a dispatch is on its way to
+its first call. Each re-warm writes a `sub_agent_head_rewarm` row, and layer 1 counts its call off
+the turn. To check the rule on the current server build, run
+`pnpm --filter @starlingai/core latency:probe --experiments E8 --reps 3`.
 
 Measure on the PRODUCTION PATH: the llama-swap address in `.env` (`SAI_PRIMARY_MODEL_URL`) with
 the model selector `qwen`, never a station's own address or model id. The selector spreads calls

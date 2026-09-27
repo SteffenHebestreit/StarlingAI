@@ -9,7 +9,8 @@
  * - The TURN is the span from the user's message (message_received) to the reply (message_sent), per
  *   top-level session. A sub-agent's rows (session `sub:<parent>:<agent>:<ts>`) belong to the turn of
  *   their parent session that was open when they were written. Rows with no session (the cache
- *   warm-keeper, warden alerts) belong to no turn and are reported apart.
+ *   warm-keeper, warden alerts) belong to no turn and are reported apart, and so do cache warm-up
+ *   calls that carry one (callSite cache_warm: a sub-agent's head re-warm).
  * - Each model call is split into prefill, decode and overhead: from llama.cpp's own `timings` when
  *   the row carries them, else from the time to first token (stream calls), else as its duration
  *   minus completionTokens at the decode rate (complete calls, whose per-call overhead then sits
@@ -580,7 +581,14 @@ export function buildTurnContexts(rows: readonly AuditRow[], params: LatencyPara
   const offTurnCalls: CallRecord[] = [];
   let offTurnRows = 0;
   for (const row of sorted) {
-    if (!row.sessionId) {
+    // A cache warm-up is on no turn's critical path, whatever session it carries: the warm-keeper's
+    // carry none, and a sub-agent's head re-warm (agent/sub-agent-head-rewarm.ts) carries the run
+    // it follows, so it can be traced to that run. It goes out as the run ends and nothing in the
+    // turn waits on it (a dispatch that joins it shows the wait as a gap before its own first
+    // call). Counted in the turn, its time would be added to the turn's model time although it ran
+    // beside the turn, and it would read as one more call of the run it follows.
+    const warmUp = row.type === "provider_model_call" && row.data["callSite"] === "cache_warm";
+    if (!row.sessionId || warmUp) {
       offTurnRows += 1;
       if (row.type === "provider_model_call") {
         const call = toCallRecord(row, params);
@@ -1389,7 +1397,7 @@ function callSiteStats(calls: readonly CallRecord[], offTurn: boolean): CallSite
     const prompts = group.flatMap((call) => (call.promptTokens !== null ? [call.promptTokens] : []));
     const count = (cls: PrefillClass): number => group.filter((call) => call.estimate.prefillClass === cls).length;
     return {
-      label: offTurn ? `${label} (no session)` : label,
+      label: offTurn ? `${label} (off turn)` : label,
       callSite: group[0]!.callSite,
       agentName: group[0]!.agentName,
       offTurn,
@@ -1629,8 +1637,9 @@ function buildNotes(calls: readonly CallRecord[], totals: LatencyAttribution["to
   notes.push("Embedding calls (discovery prefetch, search_agents, tool rerank) run on the same model server and are not audited as model "
     + "calls: their time sits in tool durations, phase timings and gaps.");
   if (totals.offTurnCalls > 0) {
-    notes.push(`${totals.offTurnCalls} model call(s) with no session (the cache warm-keeper, among others) took ${(totals.offTurnCallMs / 1_000).toFixed(1)} s `
-      + "of model-server time outside any turn. They are on no turn's critical path, but they share the server with the turns.");
+    notes.push(`${totals.offTurnCalls} model call(s) with no session or a cache warm-up (the warm-keeper, a sub-agent's head re-warm) took `
+      + `${(totals.offTurnCallMs / 1_000).toFixed(1)} s of model-server time outside any turn. They are on no turn's critical path, but they share `
+      + "the server with the turns.");
   }
   if (totals.relabelledCalls > 0) {
     notes.push(`${totals.relabelledCalls} tool-less main_turn call(s) that finished before the receptionist's verdict row were counted as `

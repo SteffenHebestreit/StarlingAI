@@ -183,13 +183,17 @@ export function collectWarmHeads(opts: { /** Override the flag: the latency prob
  * system line prepended at position 0 (lmstudio.ts withReasoningSystemLine), so a thinking-off
  * warm-up would warm a head the turn — sent with its own level — never shares. There the
  * controls are left out and only the output ceiling applies.
+ *
+ * `primaryModel` names the model the warmed head is sent to when it is not the orchestrator's: a
+ * sub-agent's head re-warm (agent/sub-agent-head-rewarm.ts) runs on that agent's own model, and
+ * whether the off-switch is head text is a property of that model's family.
  */
 export const WARM_CALL_MAX_TOKENS = 1;
 const WARM_THINKING_OFF = { enableThinking: false, reasoningEffort: "none" } as const;
-export function warmCallOptions(): CompletionCallOptions {
+export function warmCallOptions(primaryModel?: string): CompletionCallOptions {
   let headSafe: boolean;
   try {
-    const primary = applyActiveModelPreset(getConfig().agents.defaults.model).primary;
+    const primary = primaryModel ?? applyActiveModelPreset(getConfig().agents.defaults.model).primary;
     const modelId = primary.includes("/") ? primary.split("/").slice(1).join("/") : primary;
     headSafe = !resolveThinkingControls(modelId, WARM_THINKING_OFF).systemReasoningLine;
   } catch {

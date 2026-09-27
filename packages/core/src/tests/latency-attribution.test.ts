@@ -103,6 +103,36 @@ describe("turn grouping", () => {
     expect(report.scope.subAgents).toEqual([{ agentName: "image_creator", runs: 4 }]);
   });
 
+  it("keeps a sub-agent's head re-warm off the turn although it carries the run's session", () => {
+    // agent/sub-agent-head-rewarm.ts: the re-warm goes out as the run ends (19:18:28.886), stamped
+    // with that run's session so it can be traced to it, and nothing in the turn waits on it.
+    const RUN = `sub:${SESSION}:image_creator:1790363885538`;
+    const rows: AuditRow[] = [
+      ...fixtureRows(),
+      {
+        id: "rewarm-1", timestamp: "2026-09-25T19:18:30.100Z", type: "provider_model_call", sessionId: RUN,
+        data: { callSite: "cache_warm", agentName: "image_creator_head_rewarm", mode: "complete", durationMs: 1_200, promptTokens: 8_044, completionTokens: 1, toolCount: 16 },
+      },
+      {
+        id: "rewarm-2", timestamp: "2026-09-25T19:18:30.101Z", type: "sub_agent_head_rewarm", sessionId: RUN,
+        data: { agentName: "image_creator", headHash: "0123456789abcdef", headTokens: 10_581, runPromptTokens: 52_000, ratio: 4.91, ms: 1_200, ok: true },
+      },
+    ];
+    const report = attributeLatency(rows);
+    // Turn 1's seven calls, as without it; the re-warm joins the five warm-keeper calls apart.
+    expect(report.turns.map((turn) => turn.llm.calls)).toEqual([7, 4, 8, 13]);
+    expect(report.turns[0]!.timeline.filter((e) => e.kind === "model_call" && e.level === "sub")).toHaveLength(2);
+    expect(report.totals.offTurnCalls).toBe(6);
+    expect(report.totals.offTurnCallMs).toBe(attributeLatency(fixtureRows()).totals.offTurnCallMs + 1_200);
+    const stat = report.callSites.find((s) => s.agentName === "image_creator_head_rewarm");
+    expect(stat).toMatchObject({ callSite: "cache_warm", offTurn: true, calls: 1, label: "cache_warm/image_creator_head_rewarm (off turn)" });
+    expect(report.callSites.filter((s) => !s.offTurn).some((s) => s.callSite === "cache_warm")).toBe(false);
+    // Grouping keeps it out too, not only the figures built on it.
+    const contexts = buildTurnContexts(rows);
+    expect(contexts.turns[0]!.calls.some((call) => call.callSite === "cache_warm")).toBe(false);
+    expect(contexts.offTurnCalls.some((call) => call.rowId === "rewarm-1")).toBe(true);
+  });
+
   it("separates rendering and the human settings dialog from the rest of the turn", () => {
     const t3 = attributeLatency(fixtureRows()).turns[2]!;
     // generate_image 19:21:38.038 → 19:28:55.510 = 437,472 ms, of which the user spent 22,203 ms in the dialog.

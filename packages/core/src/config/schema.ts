@@ -1823,6 +1823,25 @@ export const ConfigSchema = z.object({
        */
       promptCacheWarmForcedHeads: z.boolean().default(false),
       /**
+       * Re-warm a sub-agent's head after a long run on it, so the next dispatch of that agent
+       * does not start cold. Live probe E8 (2026-09-26): a new conversation on content_writer's
+       * 8,041-token head was warm after a previous run on the head grew to 1.5x or 3x of it and
+       * cold after 6x — llama-server skips a cached entry the new prompt shares under a quarter
+       * of — and in c297c5ea every content_writer re-dispatch paid 9-22 s of cold prefill after
+       * ~5x runs. One finished head-only request (the head, a one-character user turn, max_tokens
+       * 1) made the next two new conversations warm in 3 of 3 for ~0.8 s of prompt. When true, an
+       * in-process run on a prompt-caching OpenAI-compatible provider whose last loop call was
+       * more than 4x its head sends that request as it ends, and a new dispatch of the same agent
+       * with the same head in the same conversation waits for it (until it has been out 8 s)
+       * before its first call: a prewarm still in flight when the real call starts costs +5.1 s
+       * (probe E6). For the same reason a run sends none while such a dispatch is on its way to
+       * its first call. It does not help parallel dispatches (one prewarm served 0 of 3
+       * concurrent ones in E8).
+       * Default off: each re-warm is up to ~3.6 s of wall on the model server's queue. Check with
+       * latency-probe E8. See agent/sub-agent-head-rewarm.ts.
+       */
+      subAgentHeadRewarm: z.boolean().default(false),
+      /**
        * Max chars of a single delegated agent's result that the orchestrator
        * relays verbatim. Long deliverables (guides, reports) above this are
        * truncated before the relay, cutting the user's answer off mid-way. The

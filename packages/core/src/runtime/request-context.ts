@@ -89,7 +89,9 @@ export type RequestCallSite =
   | "synthesis"
   | "qa"
   | "background"
-  /** The prompt-cache warm-keeper between turns (agent/cache-warmer.ts). */
+  /** A prompt-cache warm-up: the warm-keeper between turns (agent/cache-warmer.ts), and a
+   *  sub-agent's head re-warm after a long run (agent/sub-agent-head-rewarm.ts). On no turn's
+   *  critical path; latency:report sets these rows apart. */
   | "cache_warm"
   /** An image analysis call (tools/multimodal.ts analyzeImageBytes). */
   | "vision";

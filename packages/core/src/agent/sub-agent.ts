@@ -24,6 +24,7 @@ import type { LLMMessage, LLMResponse, LLMToolDef, ChatProvider, CompletionCallO
 import { DeadlineAbort, estimatePromptTokensForRequest } from "../providers/lmstudio.js";
 import { wireHeadSignature } from "../providers/prompt-head.js";
 import { composeSubAgentMessages, trimSubAgentHistory } from "./sub-agent-history.js";
+import { createSubAgentHeadRewarm, type SubAgentHeadRewarm } from "./sub-agent-head-rewarm.js";
 import { bindRequestUserInput, HUMAN_WAIT_RECHECK_MS, trackHumanWaits } from "./user-input-broker.js";
 import { isDeclinedByUser } from "./user-input.js";
 import { getConfig } from "../config/loader.js";
@@ -2832,6 +2833,9 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
   // The warden's emergency-stop registration for this run (registered beside the supervisor
   // timer, removed in the same `finally`).
   let unregisterWardenStop: (() => void) | undefined;
+  // The re-warm of this run's head (agents.performance.subAgentHeadRewarm): created once the head
+  // is built, told of the run's end in the `finally` — every return and every throw passes there.
+  let headRewarm: SubAgentHeadRewarm | null = null;
 
   // Auto-share distillations + stores in flight (see autoShareUsefulFinding). Declared out
   // here, next to the timers, because the run's `finally` is the one point every return AND
@@ -3349,21 +3353,44 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // hashed trimmed, which is the provider's fold of a single system message, so headHash equals
     // the one on this run's provider_model_call rows (for a template that keeps a system role, and
     // not on gpt-oss, whose rows also hash the `Reasoning:` line the provider puts ahead of it).
-    {
-      const head = wireHeadSignature([{ role: "system", content: systemPrompt.trim() }], tools);
-      logAudit("sub_agent_head", {
-        agentName: opts.agentName,
-        headHash: head.headHash,
-        toolsHash: head.toolsHash,
-        systemHash: head.systemHash,
-        systemChars: head.systemChars,
-        toolCount: head.toolCount,
-        // The provider's own estimator (the one its output budget is derived from), not a count:
-        // the first call's promptTokens minus its task is the measured figure.
-        headTokensEst: estimatePromptTokensForRequest([{ role: "system", content: systemPrompt }], tools),
-        stagedDirective: stagedBuildGuidance ? (isResumeBuild ? "resume" : "fresh") : "none",
-      }, { sessionId: subSessionId, severity: "info" });
-    }
+    const head = wireHeadSignature([{ role: "system", content: systemPrompt.trim() }], tools);
+    // The provider's own estimator (the one its output budget is derived from), not a count:
+    // the first call's promptTokens minus its task is the measured figure.
+    const headTokensEst = estimatePromptTokensForRequest([{ role: "system", content: systemPrompt }], tools);
+    logAudit("sub_agent_head", {
+      agentName: opts.agentName,
+      headHash: head.headHash,
+      toolsHash: head.toolsHash,
+      systemHash: head.systemHash,
+      systemChars: head.systemChars,
+      toolCount: head.toolCount,
+      headTokensEst,
+      stagedDirective: stagedBuildGuidance ? (isResumeBuild ? "resume" : "fresh") : "none",
+    }, { sessionId: subSessionId, severity: "info" });
+
+    // THE HEAD RE-WARM (agents.performance.subAgentHeadRewarm, agent/sub-agent-head-rewarm.ts).
+    // Live probe E8: a new dispatch on this head starts cold when the previous run on it grew past
+    // ~4x the head (6x cold, 3x warm) — c297c5ea's content_writer re-dispatches paid 9-22 s each —
+    // and one head-only request as that run ends makes the next dispatches warm. Here the run
+    // joins an in-flight re-warm of its own head before its first model call: probe E6 prices a
+    // prewarm still in flight when the real call starts at +5.1 s, and a finished one saves 6.8 s.
+    headRewarm = createSubAgentHeadRewarm({
+      agentName: opts.agentName,
+      // The conversation through workflow nesting too (artifactConversationOf): in c297c5ea content_writer ran inside the
+      // sourced_presentation scene and was then delegated again by the main turn, and deriveRootSessionId, which stops at a
+      // workflow, gave the two runs two keys, so the second would not have waited for the first one's re-warm.
+      rootConversation: artifactConversationOf(subSessionId),
+      subSessionId,
+      runStartedAt,
+      headHash: head.headHash,
+      headTokens: headTokensEst,
+      tools,
+      provider,
+      providerId: providerEndpoint.providerId,
+      promptCache: modelConfig.promptCache,
+      modelPrimary: modelConfig.primary,
+    });
+    if (headRewarm) await headRewarm.joinInFlight(signal);
 
     // A "full" agent maintains the deployment itself — it edits the config shards and runs
     // git — so it works from the SHARED root, not from whoever asked it to. This is the one
@@ -5733,6 +5760,9 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       usage.promptTokens += response.usage.promptTokens;
       usage.completionTokens += response.usage.completionTokens;
       usage.totalTokens += response.usage.totalTokens;
+      // What this call left in the server's cache, for the head re-warm as the run ends. A step
+      // laya-browser took in the model's place sent nothing.
+      if (!drivenStep) headRewarm?.noteLoopCall(messages, effectiveTools, response.usage.promptTokens);
 
       // Surface the model's chain-of-thought for this iteration to the UI
       // (behind a debug toggle) and the audit log. This is exactly where the
@@ -8151,6 +8181,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       stats: maxIterationsStats,
     });
   } finally {
+    // FIRST, before anything below awaits (joinPendingShares can hold this finally for up to 60 s):
+    // the run's last call is done, and E8 sent its head-only request straight after the run, when
+    // it processed 13 tokens (cache_n 8,031). Fire-and-forget; a stopped turn sends none.
+    headRewarm?.runEnded({ signal: opts.signal });
     if (timeoutHandle) clearTimeout(timeoutHandle);
     humanWaits.dispose();
     if (supervisorTimer) clearInterval(supervisorTimer);
