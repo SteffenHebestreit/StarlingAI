@@ -521,6 +521,8 @@ export async function askIntentReadout(
       topLogprobs,
       grammar: options.facets ? buildIntentGrammar(options.facets) : INTENT_READOUT_GRAMMAR,
       temperature: options.samplingTemperature ?? 0,
+      // Off: the config's repeat penalty would push a slot's written letter off its argmax (lmstudio.ts repeatPenalty).
+      repeatPenalty: 1,
     });
     const ms = Date.now() - started;
     if (!response.logprobs || response.logprobs.length === 0) return { ok: false, reason: "no_logprobs", ms };

@@ -331,6 +331,7 @@ describe("the call", () => {
       topLogprobs: 20,
       grammar: INTENT_READOUT_GRAMMAR,
       temperature: 0,
+      repeatPenalty: 1,
     });
     expect(calls[0]!.messages).toEqual(buildIntentReadoutMessages({ userMessage: "a request" }));
     expect(result.ok && result.readout.facets.decision?.choice).toBe("single_agent");

@@ -171,6 +171,22 @@ describe("per-call temperature", () => {
   });
 });
 
+describe("per-call repeat penalty", () => {
+  // workspace/agents/00-platform.jsonc pins 1.05; a multi-slot readout needs it off, or the letter written at a slot
+  // is not the argmax its top list reports (intent:bench 2026-09-28: 75 slots at temperature 0).
+  const pinned = { ...base, repeatPenalty: 1.05 } as ModelConfig;
+
+  it("replaces the config's repeat penalty for the call that asks, in complete() and stream()", async () => {
+    expect((await bodyOf(undefined, pinned))["repeat_penalty"]).toBe(1.05);
+    expect((await bodyOf({ repeatPenalty: 1 }, pinned))["repeat_penalty"]).toBe(1);
+    expect((await streamBodyOf({ repeatPenalty: 1 }))["repeat_penalty"]).toBe(1);
+  });
+
+  it("sends none when neither the call nor the config sets one", async () => {
+    expect("repeat_penalty" in (await bodyOf())).toBe(false);
+  });
+});
+
 describe("the token list of a grammar-bound reply", () => {
   it("hands back every generated token in order, each with its own alternatives", async () => {
     const { provider } = mockProvider();

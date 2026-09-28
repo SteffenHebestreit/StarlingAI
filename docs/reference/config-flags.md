@@ -388,7 +388,7 @@ Every public schema field, where it is declared, and how many production files r
 | `region` | packages/core/src/config/schema.ts:457 | 18 |
 | `rejectOverMaxBytes` | packages/core/src/config/schema.ts:482 | 3 |
 | `relaySingleDeliverable` | packages/core/src/config/schemas/orchestration.ts:845 | 1 |
-| `repeatPenalty` | packages/core/src/config/schema.ts:171 | 4 |
+| `repeatPenalty` | packages/core/src/config/schema.ts:171 | 5 |
 | `replyText` | packages/core/src/config/schema.ts:1344 | 3 |
 | `requestDelayMs` | packages/core/src/config/schemas/retrieval.ts:192 | 1 |
 | `requestsPerMinute` | packages/core/src/config/schema.ts:264 | 1 |

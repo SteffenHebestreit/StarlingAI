@@ -284,6 +284,14 @@ export interface CompletionCallOptions {
    * Anthropic provider ignores it.
    */
   temperature?: number;
+  /**
+   * The repeat penalty for THIS call, in place of the model config's (workspace/agents/00-platform.jsonc pins 1.05).
+   * A multi-slot readout needs 1 (off): the penalty lowers a letter that already appears in the prompt's option
+   * list or at an earlier slot, so the letter WRITTEN at a slot is not the argmax its top list reports, and every
+   * later slot is read after it. intent:bench of 2026-09-28 counted 75 such slots at temperature 0. The Anthropic
+   * provider ignores it.
+   */
+  repeatPenalty?: number;
 }
 
 export interface StreamCallOptions extends CompletionCallOptions {
@@ -1890,7 +1898,7 @@ export class LMStudioProvider {
             ...(effectiveTopP !== undefined && { top_p: effectiveTopP }),
             ...(this.modelConfig.topK !== undefined && { top_k: this.modelConfig.topK }),
             ...(this.modelConfig.minP !== undefined && { min_p: this.modelConfig.minP }),
-            ...(this.modelConfig.repeatPenalty !== undefined && { repeat_penalty: this.modelConfig.repeatPenalty }),
+            ...((options?.repeatPenalty ?? this.modelConfig.repeatPenalty) !== undefined && { repeat_penalty: options?.repeatPenalty ?? this.modelConfig.repeatPenalty }),
             ...(this.modelConfig.seed !== undefined && { seed: this.modelConfig.seed }),
             // Provider extensions (thinking controls + prompt-cache reuse) go at the
             // TOP LEVEL — `extra_body` is a Python-SDK client-side concept and never
@@ -2328,7 +2336,7 @@ export class LMStudioProvider {
         ...(streamEffectiveTopP !== undefined && { top_p: streamEffectiveTopP }),
         ...(this.modelConfig.topK !== undefined && { top_k: this.modelConfig.topK }),
         ...(this.modelConfig.minP !== undefined && { min_p: this.modelConfig.minP }),
-        ...(this.modelConfig.repeatPenalty !== undefined && { repeat_penalty: this.modelConfig.repeatPenalty }),
+        ...((options?.repeatPenalty ?? this.modelConfig.repeatPenalty) !== undefined && { repeat_penalty: options?.repeatPenalty ?? this.modelConfig.repeatPenalty }),
         ...(this.modelConfig.seed !== undefined && { seed: this.modelConfig.seed }),
         // Top-level, not extra_body — see buildProviderExtensions.
         ...(extensions ?? {}),
