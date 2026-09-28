@@ -18,7 +18,11 @@
  *   - coverage and accuracy above each confidence level and each margin level: what a consumer
  *     gating on top ≥ x (or top − runner-up ≥ y) would take and get right;
  *   - with --order-swap, how often the choice changes when each facet's options are offered in
- *     reverse order (letter-position bias, which a letter readout can have and a word answer not);
+ *     reverse order (letter-position bias, which a letter readout can have and a word answer not),
+ *     how often the two orders agree, and the reversed pass alone and the two passes averaged per
+ *     option (as askIntentReadout `bothOrders` combines them) scored as the main pass is: accuracy,
+ *     ECE and coverage, with the verdict the averaged readout would get as an extra column — the
+ *     run's verdicts and exit code stay the main pass's;
  *   - wall time per call, and per language whether the restatement (query_en) came back non-empty —
  *     the idcm-1 note measured triage writing one on 9 of 15 German requests.
  *
@@ -28,12 +32,13 @@
 import { createHash } from "node:crypto";
 
 import {
+  averageOrderReadings,
   INTENT_FACET_BY_NAME,
   INTENT_FACETS,
   INTENT_READOUT_VERSION,
   triageVerdictKeys,
-  type IntentFacetDefinition,
   type IntentFacetName,
+  type IntentFacetOrders,
   type IntentReadoutResult,
   type IntentTemperatures,
 } from "../decisions/intent-readout.js";
@@ -158,14 +163,8 @@ export function profileIntentCases(cases: readonly IntentBenchCase[]): IntentDat
   return { cases: cases.length, byLanguage, germanShare: cases.length ? (byLanguage["de"] ?? 0) / cases.length : 0, perFacet };
 }
 
-/**
- * The same facets with each one's options in reverse order, for --order-swap: the option under A is
- * now under the last letter. The grammar is unchanged (it depends only on how many options there
- * are); the prefix is a different one.
- */
-export function reversedFacets(facets: readonly IntentFacetDefinition[] = INTENT_FACETS): IntentFacetDefinition[] {
-  return facets.map((definition) => ({ ...definition, keys: [...definition.keys].reverse() }));
-}
+/** --order-swap's facets, each one's options reversed: the readout's own (its `bothOrders` second pass asks the same). */
+export { reversedFacets } from "../decisions/intent-readout.js";
 
 // ── One case's arms ──────────────────────────────────────────────────────────────────────────────
 
@@ -179,6 +178,8 @@ export interface FacetReading {
   logScores: Record<string, number>;
   /** The option the reply actually wrote at the slot. */
   sampled?: string;
+  /** An averaged reading's two passes (averagedArm); absent on one pass's. */
+  orders?: IntentFacetOrders;
 }
 
 export interface ReadoutArm {
@@ -261,6 +262,55 @@ export interface IntentBenchResult {
   /** --order-swap: the readout with every facet's options reversed. */
   swapped?: ReadoutArm;
   triage?: TriageArm;
+}
+
+/**
+ * The two passes of --order-swap combined as askIntentReadout `bothOrders` combines its two calls
+ * (decisions/intent-readout.ts combineOrderReadouts), from the arms the bench keeps: per facet the
+ * two readings averaged per option (averageOrderReadings, at T = 1), a facet one pass missed that
+ * pass's alone, a facet both missed the main pass's miss. The same rule for the passes: the main
+ * pass failing is the averaged readout failing; a swapped pass that failed leaves every facet the
+ * main pass's alone, one aborted (its timeout) leaves no reading. No swapped pass, no averaged
+ * reading. Time and tokens are the two passes' sum. Pure.
+ */
+export function averagedArm(main: ReadoutArm | undefined, swapped: ReadoutArm | undefined): ReadoutArm | undefined {
+  if (!main || !swapped) return undefined;
+  if (!main.ok) return main;
+  if (!swapped.ok && swapped.failure === "aborted") return { ms: main.ms + swapped.ms, ok: false, failure: "aborted", facets: {}, misses: {}, queryEnChars: 0, tokens: 0 };
+  const facets: ReadoutArm["facets"] = {};
+  const misses: ReadoutArm["misses"] = {};
+  for (const facet of INTENT_FACET_NAMES) {
+    const averaged = averageOrderReadings(INTENT_FACET_BY_NAME[facet].keys, main.facets[facet], swapped.ok ? swapped.facets[facet] : undefined);
+    if (!averaged) {
+      const miss = main.misses[facet] ?? swapped.misses[facet];
+      if (miss !== undefined) misses[facet] = miss;
+      continue;
+    }
+    facets[facet] = {
+      choice: averaged.choice,
+      top: averaged.top,
+      margin: averaged.margin,
+      ...(averaged.runnerUp !== undefined ? { runnerUp: averaged.runnerUp } : {}),
+      logScores: averaged.logScores,
+      orders: averaged.orders,
+    };
+  }
+  const { timings: _timings, ...rest } = main;
+  return { ...rest, facets, misses, ms: main.ms + swapped.ms, tokens: main.tokens + swapped.tokens };
+}
+
+/**
+ * --order-swap: every case that was asked again, with the reversed pass, or the two averaged
+ * (averagedArm), in the main pass's place — so the main pass's own scoring reads it unchanged,
+ * triage comparison included. Pure.
+ */
+export function orderSwapView(results: readonly IntentBenchResult[], arm: "swapped" | "averaged"): IntentBenchResult[] {
+  return results.flatMap((result) => {
+    if (!result.swapped) return [];
+    const { readout: main, swapped, first: _first, ...rest } = result;
+    const readout = arm === "swapped" ? swapped : averagedArm(main, swapped);
+    return [{ ...rest, ...(readout ? { readout } : {}) }];
+  });
 }
 
 // ── Small statistics ─────────────────────────────────────────────────────────────────────────────
@@ -648,6 +698,65 @@ export function facetVerdict(slices: readonly IntentFacetSlice[]): { verdict: In
   return { verdict: "holds", reasons: [...reasons, `against the constant: ${versus}`] };
 }
 
+// ── The order swap, scored ───────────────────────────────────────────────────────────────────────
+
+/** One arm of --order-swap in one language, scored as the main pass's slice is (a subset of its figures). */
+export type OrderArmSlice = Pick<IntentFacetSlice, "language" | "asked" | "read" | "accuracy" | "majority" | "calibration" | "confidenceCurve" | "marginCurve" | "triage"> & {
+  /** Averaged readings that are one pass's alone: the other pass missed the facet or failed. */
+  singlePass: number;
+};
+
+export interface OrderSwapFacet {
+  /** Per language: both passes read the facet and chose the same option (the complement of `flips`). */
+  agreement: Array<Rate & { language: SliceLanguage }>;
+  /** The reversed pass alone. */
+  swapped: OrderArmSlice[];
+  /**
+   * The two passes averaged per option (averagedArm), with the verdict that readout would get: an
+   * extra column. The run's verdict and exit code are the main pass's.
+   */
+  averaged: { verdict: IntentFacetVerdict; reasons: string[]; slices: OrderArmSlice[] };
+}
+
+function orderArmSlice(slice: IntentFacetSlice, singlePass: number): OrderArmSlice {
+  return {
+    language: slice.language,
+    asked: slice.asked,
+    read: slice.read,
+    accuracy: slice.accuracy,
+    majority: slice.majority,
+    calibration: slice.calibration,
+    confidenceCurve: slice.confidenceCurve,
+    marginCurve: slice.marginCurve,
+    triage: slice.triage,
+    singlePass,
+  };
+}
+
+/**
+ * One facet's --order-swap figures, from the main pass's slices (for the agreement) and the two
+ * views of the results (orderSwapView). Pure.
+ */
+export function scoreOrderSwap(
+  facet: IntentFacetName,
+  mainSlices: readonly IntentFacetSlice[],
+  swappedView: readonly IntentBenchResult[],
+  averagedView: readonly IntentBenchResult[],
+): OrderSwapFacet {
+  const singlePassIn = (view: readonly IntentBenchResult[], language: SliceLanguage) => sliceResults(view, language)
+    .filter((result) => result.readout?.ok && result.readout.facets[facet]?.orders?.singlePass !== undefined).length;
+  const swappedSlices = SLICE_LANGUAGES.map((language) => scoreFacetSlice(swappedView, facet, language));
+  const averagedSlices = SLICE_LANGUAGES.map((language) => scoreFacetSlice(averagedView, facet, language));
+  return {
+    agreement: mainSlices.map((slice) => ({ language: slice.language, ...rateOf(slice.flips.n - slice.flips.hits, slice.flips.n) })),
+    swapped: swappedSlices.map((slice) => orderArmSlice(slice, 0)),
+    averaged: {
+      ...facetVerdict(averagedSlices),
+      slices: averagedSlices.map((slice) => orderArmSlice(slice, singlePassIn(averagedView, slice.language))),
+    },
+  };
+}
+
 export interface SuggestedTemperatures {
   /** Per facet and detected language bucket, fitted on every reading against gold. */
   fits: Partial<Record<IntentFacetName, Partial<Record<LanguageBucket, TemperatureFit>>>>;
@@ -715,7 +824,8 @@ export interface IntentBenchReport {
   readoutVersion: string;
   settings: IntentBenchSettings;
   counts: { cases: number; readoutAsked: number; readoutOk: number; swappedAsked: number; triageAsked: number; triageAnswered: number };
-  facets: Array<{ facet: IntentFacetName; verdict: IntentFacetVerdict; reasons: string[]; slices: IntentFacetSlice[] }>;
+  /** `orderSwap` only when some case was asked again with the options reversed. */
+  facets: Array<{ facet: IntentFacetName; verdict: IntentFacetVerdict; reasons: string[]; slices: IntentFacetSlice[]; orderSwap?: OrderSwapFacet }>;
   languages: IntentLanguageSlice[];
   suggestedTemperatures: SuggestedTemperatures;
   warnings: string[];
@@ -723,9 +833,13 @@ export interface IntentBenchReport {
 }
 
 export function buildIntentBenchReport(results: readonly IntentBenchResult[], settings: IntentBenchSettings): IntentBenchReport {
+  const swapAsked = results.some((result) => result.swapped !== undefined);
+  const swappedView = swapAsked ? orderSwapView(results, "swapped") : [];
+  const averagedView = swapAsked ? orderSwapView(results, "averaged") : [];
   const facets = INTENT_FACET_NAMES.map((facet) => {
     const slices = SLICE_LANGUAGES.map((language) => scoreFacetSlice(results, facet, language));
-    return { facet, ...facetVerdict(slices), slices };
+    // The verdict is the main pass's alone; the order swap's figures only sit beside it.
+    return { facet, ...facetVerdict(slices), slices, ...(swapAsked ? { orderSwap: scoreOrderSwap(facet, slices, swappedView, averagedView) } : {}) };
   });
   const languages = SLICE_LANGUAGES.map((language) => scoreLanguageSlice(results, language));
   const readoutAsked = results.filter((result) => result.readout !== undefined).length;
@@ -736,6 +850,7 @@ export function buildIntentBenchReport(results: readonly IntentBenchResult[], se
   }
   if (settings.orderSwap) {
     warnings.push("The swapped pass runs after the main pass, on its own prefix: its ms describe that prefix, and it does not disturb the main pass's cache.");
+    warnings.push("The averaged column combines the two passes as askIntentReadout bothOrders does, but not its time: here each pass ran with its own prefix warm, while bothOrders asks the two prefixes back to back on every request. Its verdict is an extra column; the run's verdict and exit code are the main pass's.");
   }
   const differs = facets.reduce((sum, entry) => sum + entry.slices.find((slice) => slice.language === "all")!.sampledDiffers, 0);
   if (differs > 0) {
@@ -809,6 +924,20 @@ function curveCell(rows: readonly CurveRow[], level: number): string {
   return row ? `${pct(row.coverage)} · ${row.accuracy === null ? "n/a" : pct(row.accuracy)}` : "n/a";
 }
 
+/**
+ * The averaged readout's verdict and accuracy beside one order's, and how often the two orders
+ * agreed, all languages: the verdict table's extra column and the console's. Null without
+ * --order-swap.
+ */
+export function orderSwapCell(entry: IntentBenchReport["facets"][number]): string | null {
+  const swap = entry.orderSwap;
+  if (!swap) return null;
+  const averaged = swap.averaged.slices.find((slice) => slice.language === "all")!;
+  const main = entry.slices.find((slice) => slice.language === "all")!;
+  const agreement = swap.agreement.find((rate) => rate.language === "all")!;
+  return `${swap.averaged.verdict.replace(/_/g, " ")} · ${ratio(averaged.accuracy)} against one order's ${ratio(main.accuracy)}; orders agree ${ratio(agreement)}`;
+}
+
 export function renderIntentBenchMarkdown(report: IntentBenchReport, header: readonly string[] = []): string {
   const lines: string[] = ["# Intent readout bench", "", ...header, ""];
   lines.push(`Readout ${report.readoutVersion}; ${report.counts.cases} cases, ${report.counts.readoutOk}/${report.counts.readoutAsked} readouts came back with a token list`
@@ -816,8 +945,14 @@ export function renderIntentBenchMarkdown(report: IntentBenchReport, header: rea
     + `${report.settings.orderSwap ? `, ${report.counts.swappedAsked} asked again with the options reversed` : ""}. `
     + `Sampling temperature ${report.settings.samplingTemperature}, top ${report.settings.topLogprobs}, min letter mass ${report.settings.minMass}.`, "");
 
-  lines.push("## Verdict per facet", "", "| facet | verdict | why |", "|---|---|---|");
-  for (const entry of report.facets) lines.push(`| ${entry.facet} | **${entry.verdict.replace(/_/g, " ")}** | ${entry.reasons.join("; ")} |`);
+  if (report.facets.some((entry) => entry.orderSwap)) {
+    // The averaged readout's verdict sits beside the main pass's; it decides nothing here.
+    lines.push("## Verdict per facet", "", "| facet | verdict | why | both orders averaged (extra column, not the verdict) |", "|---|---|---|---|");
+    for (const entry of report.facets) lines.push(`| ${entry.facet} | **${entry.verdict.replace(/_/g, " ")}** | ${entry.reasons.join("; ")} | ${orderSwapCell(entry) ?? "n/a"} |`);
+  } else {
+    lines.push("## Verdict per facet", "", "| facet | verdict | why |", "|---|---|---|");
+    for (const entry of report.facets) lines.push(`| ${entry.facet} | **${entry.verdict.replace(/_/g, " ")}** | ${entry.reasons.join("; ")} |`);
+  }
   lines.push("");
 
   lines.push("## Per language", "");
@@ -861,6 +996,25 @@ export function renderIntentBenchMarkdown(report: IntentBenchReport, header: rea
     for (const level of [0.85, 0.95]) lines.push(row(`top ≥ ${level}: coverage · accuracy`, (s) => curveCell(s.confidenceCurve, level)));
     for (const level of [0.15, 0.5]) lines.push(row(`margin ≥ ${level}: coverage · accuracy`, (s) => curveCell(s.marginCurve, level)));
     if (report.settings.orderSwap) lines.push(row("flips with the options reversed (mean shift)", (s) => `${ratio(s.flips)}${s.flips.meanTopShift !== null ? ` (${s.flips.meanTopShift.toFixed(3)})` : ""}`));
+    const swap = entry.orderSwap;
+    if (swap) {
+      const armRow = (label: string, arm: readonly OrderArmSlice[], cell: (slice: OrderArmSlice) => string) => row(label, (s) => {
+        const slice = arm.find((entryOfArm) => entryOfArm.language === s.language);
+        return slice ? cell(slice) : "n/a";
+      });
+      lines.push(row("orders agree", (s) => {
+        const agreement = swap.agreement.find((rate) => rate.language === s.language);
+        return agreement ? ratio(agreement) : "n/a";
+      }));
+      lines.push(armRow("accuracy, options reversed", swap.swapped, (s) => ratio(s.accuracy)));
+      lines.push(armRow("**accuracy, both orders averaged**", swap.averaged.slices, (s) => `${ratio(s.accuracy)}${s.accuracy.lowerBound !== null ? `, ≥${pct(s.accuracy.lowerBound)}` : ""}${s.singlePass > 0 ? `; ${s.singlePass} from one order only` : ""}`));
+      if (swap.averaged.slices.some((slice) => slice.triage)) {
+        lines.push(armRow("averaged / triage on the same cases", swap.averaged.slices, (s) => (s.triage ? `${ratio(s.triage.readoutOnBoth)} / ${ratio(s.triage.triageOnBoth)}` : "n/a")));
+      }
+      lines.push(armRow("averaged: ECE vs gold, T=1 → fitted (cal/test)", swap.averaged.slices, (s) => calibrationCell(s.calibration)));
+      lines.push(armRow("averaged: top ≥ 0.85: coverage · accuracy", swap.averaged.slices, (s) => curveCell(s.confidenceCurve, 0.85)));
+      lines.push(armRow("averaged: margin ≥ 0.15: coverage · accuracy", swap.averaged.slices, (s) => curveCell(s.marginCurve, 0.15)));
+    }
     lines.push("");
 
     const all = entry.slices.find((slice) => slice.language === "all")!;

@@ -49,6 +49,21 @@
  *     user message): a change to any of them is a different readout, and its rows must never be
  *     counted with the old one's.
  *
+ * BOTH ORDERS (askIntentReadout `bothOrders`, off by default). A letter readout can favour a letter
+ * for where it stands, and the facets with many options do: intent:bench 2026-09-28T03-11-59-336Z
+ * (312 synthetic cases, repeat penalty off) asked every case again with each facet's options
+ * reversed, and the choice changed on 30.6% of the mode readings, 38.1% of deliverable and of
+ * decision, 14.7% of domain, 0.3-10.9% of the yes/no facets. Averaging the two passes'
+ * probabilities option by option raised accuracy against gold on six facets of seven: mode 74.2 →
+ * 84.8%, domain 80.8 → 84.0%, deliverable 75.5 → 83.2%, alone 80.4 → 86.2%, source_sensitive
+ * 89.7 → 91.7%, decision 69.6 → 72.9%, multi 98.3% either way. So the mode asks the served order
+ * and then every facet reversed (reversedFacets: same grammar, another prefix), reads each pass's
+ * letters back to their options, and averages per option (averageOrderReadings). The price is a
+ * second call on a second ~1k-token prefix. The two go one after the other, never together: the
+ * server has four slots, probe E4 measured small calls in parallel about 0.4 s slower each, and
+ * in sequence an abort between them keeps the second from being sent at all. Its readings are
+ * INTENT_READOUT_BOTH_ORDERS_VERSION's, never counted with one order's.
+ *
  * The sampling temperature defaults to 0. A slot's top list is the raw distribution whatever the
  * sampler does (logit-readout.ts), but each later slot is conditioned on the letter SAMPLED before
  * it: at the routing tier's thinking-off 0.7 a runner-up written at `mode` would change what
@@ -71,6 +86,7 @@ import type { RequestFacets } from "../agent/routing-taxonomy.js";
 import type { ChatProvider, LLMMessage, LLMTokenLogprob } from "../providers/lmstudio.js";
 import { languageBucket, type LanguageBucket } from "./gate.js";
 import {
+  applyTemperature,
   askReadout,
   DEFAULT_MIN_LETTER_MASS,
   LETTERS,
@@ -92,6 +108,16 @@ import { buildPreRouteQuestion, NONE_KEY, PRE_ROUTE_POINT } from "./pre-route-qu
  * readouts are never counted together (a test pins all three to this version).
  */
 export const INTENT_READOUT_VERSION = "intent-readout-v1";
+
+/**
+ * The order-averaged readout's version (askIntentReadout `bothOrders`): INTENT_READOUT_VERSION's
+ * prefix, the same asked with every facet's options reversed (reversedFacets), and the two readings
+ * averaged option by option (combineOrderReadouts). Its choices, probabilities and margins are not
+ * one pass's, so its rows are never counted with one pass's. It follows INTENT_READOUT_VERSION;
+ * change the suffix with the way the two passes are combined (a test pins the reversed prefix to
+ * it too).
+ */
+export const INTENT_READOUT_BOTH_ORDERS_VERSION = `${INTENT_READOUT_VERSION}:both-orders`;
 
 /** The facets, in the order the reply writes them. */
 export type IntentFacetName = "mode" | "domain" | "deliverable" | "multi" | "alone" | "source_sensitive" | "decision";
@@ -201,6 +227,16 @@ export const INTENT_FACETS: readonly IntentFacetDefinition[] = Object.freeze([
 export const INTENT_FACET_BY_NAME: Readonly<Record<IntentFacetName, IntentFacetDefinition>> = Object.freeze(
   Object.fromEntries(INTENT_FACETS.map((definition) => [definition.name, definition])) as Record<IntentFacetName, IntentFacetDefinition>,
 );
+
+/**
+ * The same facets with each one's options in reverse order: the option under A is now under the
+ * last letter. The grammar is unchanged (it depends only on how many options there are); the
+ * prefix is a different one. The `bothOrders` readout's second pass, and intent:bench
+ * --order-swap's.
+ */
+export function reversedFacets(facets: readonly IntentFacetDefinition[] = INTENT_FACETS): IntentFacetDefinition[] {
+  return facets.map((definition) => ({ ...definition, keys: [...definition.keys].reverse() }));
+}
 
 /** The free-text line, always last. */
 export const QUERY_EN_LABEL = "query_en";
@@ -356,8 +392,26 @@ export interface IntentFacetRead {
   /** The probability the facet's letters held on the raw top list. */
   mass: number;
   temperature: number;
-  /** The option the reply actually wrote at this slot, when its token spells one; later slots were read after it. */
+  /**
+   * The option the reply actually wrote at this slot, when its token spells one; later slots were
+   * read after it. On a `bothOrders` reading, the served reply's (the reversed one's where only it
+   * read the facet): the average's choice may differ from it.
+   */
   sampled?: string;
+  /** A `bothOrders` reading's two passes; absent on one pass's reading. */
+  orders?: IntentFacetOrders;
+}
+
+/** What each order read of one facet, when the readout asked both (averageOrderReadings). */
+export interface IntentFacetOrders {
+  /** The served order's own choice; absent when that pass missed the facet. */
+  served?: string;
+  /** The reversed order's own choice, as the option its letter stood for; absent when that pass missed the facet. */
+  reversed?: string;
+  /** Both passes read the facet and chose the same option; absent when only one read it. */
+  agreed?: boolean;
+  /** Only this pass read the facet: the reading is that pass's alone. */
+  singlePass?: "served" | "reversed";
 }
 
 /** Why a facet has no reading: its line or letter is not in the reply, or its slot's top list gave no answer. */
@@ -384,10 +438,15 @@ export interface IntentReadout {
    */
   queryEn: string;
   language: LanguageBucket;
-  /** Generated tokens with a log-probability. */
+  /** Generated tokens with a log-probability (both calls' on a `bothOrders` readout). */
   tokens: number;
-  /** Round trip, when the reading came from a call. */
+  /** Round trip, when the reading came from a call (both calls, one after the other, on a `bothOrders` readout). */
   ms: number;
+  /**
+   * A `bothOrders` readout's second call, with the options reversed: its round trip and tokens, or
+   * why it gave no reading — then every facet is the served pass's alone. Absent on one pass.
+   */
+  reversed?: { ms: number; tokens: number; failure?: "no_logprobs" | "error" };
 }
 
 export interface ParseIntentReadoutOptions {
@@ -475,6 +534,136 @@ export function parseIntentReadout(tokens: readonly LLMTokenLogprob[], options: 
   return { version: INTENT_READOUT_VERSION, facets, misses, queryEn, language, tokens: tokens.length, ms: options.ms ?? 0 };
 }
 
+// ── Both orders ──────────────────────────────────────────────────────────────────────────────────
+
+/** One pass's reading of a facet as the averaging takes it: its own choice, and its log-scores keyed by option. */
+export interface OrderPassReading {
+  choice: string;
+  logScores: Readonly<Record<string, number>>;
+}
+
+/** One facet read in both orders, as one reading. */
+export interface OrderAveragedReading {
+  choice: string;
+  top: number;
+  runnerUp: string | undefined;
+  margin: number;
+  /** Per option, after the temperature. */
+  probabilities: Record<string, number>;
+  /** Per option, the log of the averaged distribution at T = 1: what a temperature for this mode is fitted on. */
+  logScores: Record<string, number>;
+  orders: IntentFacetOrders;
+}
+
+/**
+ * One facet's two readings — its options in the served order, and reversed — as one. Each pass's
+ * log-scores are renormalised at T = 1 (softmax over the facet's options); both are keyed by
+ * option, so the reversed pass's letters are already mapped back to the options they stood for.
+ * The two distributions are averaged option by option, in probability space, and the choice, top,
+ * runner-up and margin are taken from the average. The temperature applies to the log of the
+ * average: at T = 1 the probabilities ARE the average, and a temperature fitted on averaged
+ * readings (intent:bench --order-swap, its averaged column) is the one that belongs here, not a
+ * one-pass fit. A facet only one pass read is that pass's reading alone (`singlePass`); read by
+ * neither, undefined. A tie goes to the earlier option in `keys`. Pure.
+ */
+export function averageOrderReadings(
+  keys: readonly string[],
+  served: OrderPassReading | undefined,
+  reversed: OrderPassReading | undefined,
+  temperature = 1,
+): OrderAveragedReading | undefined {
+  const distribution = (reading: OrderPassReading | undefined): number[] | undefined => {
+    if (!reading) return undefined;
+    const scores = keys.map((key) => reading.logScores[key]);
+    return scores.every((score): score is number => typeof score === "number" && Number.isFinite(score)) ? applyTemperature(scores, 1) : undefined;
+  };
+  const first = distribution(served);
+  const second = distribution(reversed);
+  const averaged = first && second ? first.map((p, i) => (p + second[i]!) / 2) : first ?? second;
+  if (!averaged) return undefined;
+  // Floored so a probability that underflowed stays a finite log-score.
+  const logScores = averaged.map((p) => Math.log(Math.max(p, Number.MIN_VALUE)));
+  const tempered = applyTemperature(logScores, temperature);
+  let best = 0;
+  for (let i = 1; i < tempered.length; i += 1) if (tempered[i]! > tempered[best]!) best = i;
+  const probabilities = Object.fromEntries(keys.map((key, i) => [key, tempered[i]!]));
+  const { runnerUp, margin } = marginOf(probabilities);
+  const orders: IntentFacetOrders = first && second
+    ? { served: served!.choice, reversed: reversed!.choice, agreed: served!.choice === reversed!.choice }
+    : first
+      ? { served: served!.choice, singlePass: "served" }
+      : { reversed: reversed!.choice, singlePass: "reversed" };
+  return {
+    choice: keys[best]!,
+    top: tempered[best]!,
+    runnerUp,
+    margin,
+    probabilities,
+    logScores: Object.fromEntries(keys.map((key, i) => [key, logScores[i]!])),
+    orders,
+  };
+}
+
+/** A reversed pass that gave no reading: its round trip, and why. */
+export interface ReversedPassFailure {
+  failure: "no_logprobs" | "error";
+  ms: number;
+}
+
+/**
+ * The `bothOrders` readout from its two passes, each read at T = 1: every facet averaged
+ * (averageOrderReadings) at its temperature for the served pass's language; the restatement and
+ * the language from the served pass; the tokens of both. A reversed pass that gave no reading
+ * leaves every facet the served pass's alone; a facet neither pass read keeps the served pass's
+ * miss. `ms` is the caller's wall time over both calls, the sum of the two round trips otherwise.
+ * Pure.
+ */
+export function combineOrderReadouts(
+  served: IntentReadout,
+  reversed: IntentReadout | ReversedPassFailure,
+  options: { facets?: readonly IntentFacetDefinition[]; temperatures?: IntentTemperatures; ms?: number } = {},
+): IntentReadout {
+  const second = "facets" in reversed ? reversed : undefined;
+  const facets: IntentReadout["facets"] = {};
+  const misses: IntentReadout["misses"] = {};
+  for (const definition of options.facets ?? INTENT_FACETS) {
+    const one = served.facets[definition.name];
+    const other = second?.facets[definition.name];
+    const temperature = temperatureFor(options.temperatures, definition.name, served.language);
+    const averaged = averageOrderReadings(definition.keys, one, other, temperature);
+    if (!averaged) {
+      misses[definition.name] = served.misses[definition.name] ?? second?.misses[definition.name] ?? { reason: "no_slot" };
+      continue;
+    }
+    const passes = [one, other].filter((read): read is IntentFacetRead => read !== undefined);
+    const sampled = one ? one.sampled : other?.sampled;
+    facets[definition.name] = {
+      choice: averaged.choice,
+      top: averaged.top,
+      runnerUp: averaged.runnerUp,
+      margin: averaged.margin,
+      probabilities: averaged.probabilities,
+      logScores: averaged.logScores,
+      mass: passes.reduce((sum, read) => sum + read.mass, 0) / passes.length,
+      temperature,
+      ...(sampled !== undefined ? { sampled } : {}),
+      orders: averaged.orders,
+    };
+  }
+  const reversedMs = second ? second.ms : reversed.ms;
+  const reversedTokens = second ? second.tokens : 0;
+  return {
+    version: INTENT_READOUT_BOTH_ORDERS_VERSION,
+    facets,
+    misses,
+    queryEn: served.queryEn,
+    language: served.language,
+    tokens: served.tokens + reversedTokens,
+    ms: options.ms ?? served.ms + reversedMs,
+    reversed: second ? { ms: reversedMs, tokens: reversedTokens } : { ms: reversedMs, tokens: 0, failure: (reversed as ReversedPassFailure).failure },
+  };
+}
+
 // ── Asking ───────────────────────────────────────────────────────────────────────────────────────
 
 export interface IntentReadoutOptions {
@@ -494,32 +683,43 @@ export interface IntentReadoutOptions {
    * follow them. Such a readout is not INTENT_READOUT_VERSION's; its rows must be kept apart.
    */
   facets?: readonly IntentFacetDefinition[];
+  /**
+   * Ask twice — the options in the served order (`facets`, default INTENT_FACETS), then every
+   * facet's reversed (reversedFacets) — and average the two readings per option
+   * (combineOrderReadouts; see the file header for why and what it measured). The calls go one
+   * after the other; `signal` covers both, and an abort before the second keeps it from being
+   * sent. The served pass failing is the readout failing, and the reversed order is not asked: the
+   * same server with the same grammar gives the same no-list or error. A reversed pass that fails
+   * leaves every facet the served pass's alone; an abort during it is an aborted readout, never a
+   * half one. `temperatures` apply to the average (fit them on averaged readings). Default off:
+   * one call. The readout is INTENT_READOUT_BOTH_ORDERS_VERSION's.
+   */
+  bothOrders?: boolean;
 }
 
 export type IntentReadoutResult =
   | { ok: true; readout: IntentReadout }
   | { ok: false; reason: "no_logprobs" | "error" | "aborted"; ms: number; error?: string };
 
-/**
- * Ask the routing tier for the request's facets in one grammar-bound call and read them. Never
- * throws: a failed call is a miss, and the caller proceeds as it does without a reading.
- */
-export async function askIntentReadout(
+/** One grammar-bound call over `facets` (the default prefix when undefined), read at `temperatures`. Never throws. */
+async function askIntentReadoutOnce(
   provider: Pick<ChatProvider, "complete">,
   input: TriageInput,
-  options: IntentReadoutOptions = {},
+  options: IntentReadoutOptions,
+  language: LanguageBucket,
+  facets: readonly IntentFacetDefinition[] | undefined,
+  temperatures: IntentTemperatures | undefined,
 ): Promise<IntentReadoutResult> {
   const started = Date.now();
   const topLogprobs = Math.max(2, Math.min(MAX_TOP_LOGPROBS, Math.floor(options.topLogprobs ?? MAX_TOP_LOGPROBS)));
   const maxTokens = Math.max(1, Math.floor(options.maxTokens ?? INTENT_READOUT_MAX_TOKENS));
-  const language = options.language ?? languageBucket(detectTextLanguage(input.userMessage)?.code);
   try {
-    const response = await provider.complete(buildIntentReadoutMessages(input, options.facets), [], options.signal, {
+    const response = await provider.complete(buildIntentReadoutMessages(input, facets), [], options.signal, {
       controls: READOUT_CONTROLS,
       maxTokens,
       logprobs: true,
       topLogprobs,
-      grammar: options.facets ? buildIntentGrammar(options.facets) : INTENT_READOUT_GRAMMAR,
+      grammar: facets ? buildIntentGrammar(facets) : INTENT_READOUT_GRAMMAR,
       temperature: options.samplingTemperature ?? 0,
       // Off: the config's repeat penalty would push a slot's written letter off its argmax (lmstudio.ts repeatPenalty).
       repeatPenalty: 1,
@@ -530,11 +730,11 @@ export async function askIntentReadout(
       ok: true,
       readout: parseIntentReadout(response.logprobs, {
         language,
-        ...(options.temperatures ? { temperatures: options.temperatures } : {}),
+        ...(temperatures ? { temperatures } : {}),
         ...(options.minMass !== undefined ? { minMass: options.minMass } : {}),
         content: response.content,
         ms,
-        ...(options.facets ? { facets: options.facets } : {}),
+        ...(facets ? { facets } : {}),
       }),
     };
   } catch (err) {
@@ -542,6 +742,39 @@ export async function askIntentReadout(
     if (options.signal?.aborted) return { ok: false, reason: "aborted", ms };
     return { ok: false, reason: "error", ms, error: err instanceof Error ? err.message.slice(0, 300) : String(err).slice(0, 300) };
   }
+}
+
+/**
+ * Ask the routing tier for the request's facets in one grammar-bound call and read them — or, with
+ * `bothOrders`, in two, the second with every facet's options reversed, averaged per option. Never
+ * throws: a failed call is a miss, and the caller proceeds as it does without a reading.
+ */
+export async function askIntentReadout(
+  provider: Pick<ChatProvider, "complete">,
+  input: TriageInput,
+  options: IntentReadoutOptions = {},
+): Promise<IntentReadoutResult> {
+  const language = options.language ?? languageBucket(detectTextLanguage(input.userMessage)?.code);
+  if (!options.bothOrders) return askIntentReadoutOnce(provider, input, options, language, options.facets, options.temperatures);
+  const started = Date.now();
+  // Each pass at T = 1: the temperature applies to the average, not to either pass.
+  const served = await askIntentReadoutOnce(provider, input, options, language, options.facets, undefined);
+  if (!served.ok) return served;
+  if (options.signal?.aborted) return { ok: false, reason: "aborted", ms: Date.now() - started };
+  const reversed = await askIntentReadoutOnce(provider, input, options, language, reversedFacets(options.facets ?? INTENT_FACETS), undefined);
+  const ms = Date.now() - started;
+  let second: IntentReadout | ReversedPassFailure;
+  if (reversed.ok) second = reversed.readout;
+  else if (reversed.reason === "aborted") return { ok: false, reason: "aborted", ms };
+  else second = { failure: reversed.reason, ms: reversed.ms };
+  return {
+    ok: true,
+    readout: combineOrderReadouts(served.readout, second, {
+      ...(options.facets ? { facets: options.facets } : {}),
+      ...(options.temperatures ? { temperatures: options.temperatures } : {}),
+      ms,
+    }),
+  };
 }
 
 // ── Confidence ───────────────────────────────────────────────────────────────────────────────────

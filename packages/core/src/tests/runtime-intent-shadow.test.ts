@@ -116,12 +116,26 @@ function tok(token: string, top: Array<[string, number]> = [[token, -0.01], ["\n
   return { token, logprob: top.find(([t]) => t === token)?.[1] ?? -0.01, topLogprobs: top.map(([t, logprob]) => ({ token: t, logprob })) };
 }
 
-/** The readout's reply: every facet on letter A (yes on the yes/no facets), then the restatement. */
-function intentReply(facetNames: readonly string[], query: string): LLMResponse {
+type FacetOptions = ReadonlyArray<{ name: string; keys: readonly string[] }>;
+
+/** Asked with every facet's options reversed (the both-orders readout's second call): the first facet's last option stands under A. */
+function isReversedPrefix(messages: unknown, facets: FacetOptions): boolean {
+  const system = (messages as Array<{ content: unknown }> | undefined)?.[0]?.content;
+  return typeof system === "string" && system.includes(`\nA: ${facets[0]!.keys.at(-1)}`);
+}
+
+/**
+ * The readout's reply: every facet on its first option (yes on the yes/no facets), then the
+ * restatement — under letter A in the served order, under the facet's last letter when asked with
+ * the options reversed, so both orders read the same options.
+ */
+function intentReply(facets: FacetOptions, query: string, reversed = false): LLMResponse {
   const tokens: LLMTokenLogprob[] = [];
-  for (const name of facetNames) {
+  for (const { name, keys } of facets) {
+    const letter = reversed ? String.fromCharCode(64 + keys.length) : "A";
+    const other = letter === "A" ? "B" : "A";
     if (tokens.length > 0) tokens.push(tok("\n"));
-    tokens.push(tok(name), tok(":"), tok(" A", [[" A", -0.03], [" B", -3.8], ["\n", -7]]));
+    tokens.push(tok(name), tok(":"), tok(` ${letter}`, [[` ${letter}`, -0.03], [` ${other}`, -3.8], ["\n", -7]]));
   }
   tokens.push(tok("\n"), tok("query_en"), tok(":"), tok(` ${query}`));
   return {
@@ -160,10 +174,10 @@ function letterReply(letter: string): LLMResponse {
   } as unknown as LLMResponse;
 }
 
-function wireProvider(facetNames: readonly string[], query = "Explain the current base rate."): void {
-  completeMock.mockImplementation(async (_messages: unknown, _tools: unknown, _signal: unknown, options?: CompletionCallOptions) => (
+function wireProvider(facets: FacetOptions, query = "Explain the current base rate."): void {
+  completeMock.mockImplementation(async (messages: unknown, _tools: unknown, _signal: unknown, options?: CompletionCallOptions) => (
     options?.grammar
-      ? intentReply(facetNames, query)
+      ? intentReply(facets, query, isReversedPrefix(messages, facets))
       : options?.logprobs && options.maxTokens === 1
         ? letterReply("B")
         : { content: "VERDICT: yes", tool_calls: [], usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 }, finishReason: "stop" }
@@ -193,7 +207,7 @@ describe("intentReadout through runTurn", () => {
     const results: Array<{ response: string; streams: number; completes: number; shadowCallsAtResolve: number }> = [];
     for (const mode of ["off", "shadow"] as const) {
       const { AgentSession, runTurn, shadow, INTENT_FACETS } = await loadRuntime(mode);
-      wireProvider(INTENT_FACETS.map((facet) => facet.name));
+      wireProvider(INTENT_FACETS);
       const out = await runTurn({
         session: new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." }),
         userMessage: QUESTION,
@@ -208,7 +222,8 @@ describe("intentReadout through runTurn", () => {
         expect(readoutCalls()).toHaveLength(0);
         expect(shadowRows()).toHaveLength(0);
       } else {
-        expect(readoutCalls()).toHaveLength(1);
+        // The readout in both option orders.
+        expect(readoutCalls()).toHaveLength(2);
         expect(shadowRows()).toHaveLength(1);
       }
       streamMock.mockReset();
@@ -220,13 +235,14 @@ describe("intentReadout through runTurn", () => {
 
   it("logs the readout beside the judge's verdict and the turn's own facts, attributed to the turn", async () => {
     const { AgentSession, runTurn, shadow, INTENT_FACETS } = await loadRuntime("shadow");
-    wireProvider(INTENT_FACETS.map((facet) => facet.name));
+    wireProvider(INTENT_FACETS);
     const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
     await runTurn({ session, userMessage: QUESTION });
     await shadow.settleIntentShadowForTests();
     const row = shadowRows()[0] as { status: string; actual: Record<string, unknown>; readout: { facets: Record<string, { choice: string }> } };
     expect(row.status).toBe("ok");
-    expect(row.readout.facets["source_sensitive"]!.choice).toBe("yes");
+    // Both orders read yes, and the row says so.
+    expect(row.readout.facets["source_sensitive"]).toMatchObject({ choice: "yes", orderAgreed: true });
     expect(row.actual).toMatchObject({
       fastLane: "not_offered",
       judge: { status: "answered", verdict: true },
@@ -243,7 +259,7 @@ describe("intentReadout through runTurn", () => {
     // The one direct outcome decision=answer_direct is checked against. The front desk's row is
     // written inside the turn's request context, so the tap's own-turn filter (inTurn) keeps it.
     const { AgentSession, runTurn, shadow, INTENT_FACETS } = await loadRuntime("shadow", { receptionist: true });
-    wireProvider(INTENT_FACETS.map((facet) => facet.name));
+    wireProvider(INTENT_FACETS);
     const out = await runTurn({ session: new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "t" }), userMessage: "hi there" });
     await shadow.settleIntentShadowForTests();
     // The orchestrator never ran: the reply is the front desk's.
@@ -257,12 +273,12 @@ describe("intentReadout through runTurn", () => {
 
   it("is aborted by the next turn's start", async () => {
     const { AgentSession, runTurn, shadow, INTENT_FACETS } = await loadRuntime("shadow");
-    wireProvider(INTENT_FACETS.map((facet) => facet.name));
+    wireProvider(INTENT_FACETS);
     let aborted = false;
-    completeMock.mockImplementation((_messages: unknown, _tools: unknown, signal: AbortSignal | undefined, options?: CompletionCallOptions) => {
+    completeMock.mockImplementation((messages: unknown, _tools: unknown, signal: AbortSignal | undefined, options?: CompletionCallOptions) => {
       if (!options?.grammar) return Promise.resolve({ content: "VERDICT: no", tool_calls: [], usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 }, finishReason: "stop" });
-      // The first readout hangs until the next turn aborts it; later ones answer.
-      if (readoutCalls().length > 1) return Promise.resolve(intentReply(INTENT_FACETS.map((facet) => facet.name), "Later."));
+      // The first readout hangs until the next turn aborts it (its reversed order is then never asked); later ones answer.
+      if (readoutCalls().length > 1) return Promise.resolve(intentReply(INTENT_FACETS, "Later.", isReversedPrefix(messages, INTENT_FACETS)));
       return new Promise((_resolve, reject) => signal?.addEventListener("abort", () => {
         aborted = true;
         reject(new DOMException("aborted", "AbortError"));
@@ -276,21 +292,26 @@ describe("intentReadout through runTurn", () => {
     expect(aborted).toBe(true);
     await shadow.settleIntentShadowForTests();
     expect(shadowRows().map((row) => row["status"])).toEqual(["aborted", "ok"]);
+    // The aborted shadow's one call, then the next turn's both orders.
+    expect(readoutCalls()).toHaveLength(3);
   });
 
   it("reads the new request against the PREVIOUS exchange, as the facet triage does", async () => {
     const { AgentSession, runTurn, shadow, INTENT_FACETS } = await loadRuntime("shadow");
-    wireProvider(INTENT_FACETS.map((facet) => facet.name));
+    wireProvider(INTENT_FACETS);
     const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "t" });
     await runTurn({ session, userMessage: "first question about rates" });
     await shadow.settleIntentShadowForTests();
     await runTurn({ session, userMessage: "and the one before that" });
     await shadow.settleIntentShadowForTests();
     const cases = readoutCalls().map((call) => String((call[0] as Array<{ content: unknown }>).at(-1)!.content));
-    expect(cases).toHaveLength(2);
+    // Each turn's readout in both orders, on the same case.
+    expect(cases).toHaveLength(4);
+    expect(cases[1]).toBe(cases[0]);
+    expect(cases[3]).toBe(cases[2]);
     expect(cases[0]).toBe("Request:\nfirst question about rates");
     // The digest is the first exchange; read after the turn it would have been the second one's own.
-    expect(cases[1]).toBe(
+    expect(cases[2]).toBe(
       "Previous turn (for reference only — label the NEW request):\nUser asked: first question about rates\n"
       + "Assistant answered: Here is the answer.\n\nNew request:\nand the one before that",
     );
@@ -299,7 +320,7 @@ describe("intentReadout through runTurn", () => {
 
   it("does not shadow a turn run inside another (a workflow step)", async () => {
     const { AgentSession, runTurn, shadow, requestContext, INTENT_FACETS } = await loadRuntime("shadow");
-    wireProvider(INTENT_FACETS.map((facet) => facet.name));
+    wireProvider(INTENT_FACETS);
     await requestContext.runWithRequestContext({ sessionId: "outer", agentName: "main", callSite: "main_turn" }, () => runTurn({
       session: new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "t" }),
       userMessage: QUESTION,
@@ -311,7 +332,7 @@ describe("intentReadout through runTurn", () => {
 
   it("asks the pre-route question over the capsule the first iteration got", async () => {
     const { AgentSession, runTurn, shadow, INTENT_FACETS } = await loadRuntime("shadow", { capsule: { agents: ["researcher", "web_coder"] } });
-    wireProvider(INTENT_FACETS.map((facet) => facet.name));
+    wireProvider(INTENT_FACETS);
     await runTurn({ session: new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "t" }), userMessage: QUESTION });
     expect(preRouteCalls()).toHaveLength(0);
     await shadow.settleIntentShadowForTests();
@@ -324,7 +345,7 @@ describe("intentReadout through runTurn", () => {
 
   it("does not count a capsule that came after the prompt stopped waiting for it", async () => {
     const { AgentSession, runTurn, shadow, INTENT_FACETS } = await loadRuntime("shadow", { capsule: { agents: ["researcher"], delayMs: 2_700 } });
-    wireProvider(INTENT_FACETS.map((facet) => facet.name));
+    wireProvider(INTENT_FACETS);
     await runTurn({ session: new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "t" }), userMessage: QUESTION });
     await new Promise((resolve) => setTimeout(resolve, 400));
     await shadow.settleIntentShadowForTests();
@@ -337,7 +358,7 @@ describe("intentReadout through runTurn", () => {
   it("writes none of the user's words, nor the restatement, into the row", async () => {
     const { AgentSession, runTurn, shadow, INTENT_FACETS } = await loadRuntime("shadow");
     const canaryMessage = "Wie teuer ist das Zwitscherbaumticket beim Kanarienverkehrsverbund heute";
-    wireProvider(INTENT_FACETS.map((facet) => facet.name), "How expensive is the Pfefferminzkobold ticket today");
+    wireProvider(INTENT_FACETS, "How expensive is the Pfefferminzkobold ticket today");
     await runTurn({ session: new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "t" }), userMessage: canaryMessage });
     await shadow.settleIntentShadowForTests();
     const rows = shadowRows();

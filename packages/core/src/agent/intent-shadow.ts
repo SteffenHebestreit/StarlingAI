@@ -12,21 +12,30 @@
  * reply is out. The consumers that will read it (the workflow gate, the module include, the
  * pre-router) need it BEFORE the turn; this only measures whether it would have been right.
  *
+ * BOTH ORDERS. The readout is asked in both option orders and averaged (askIntentReadout
+ * `bothOrders`: the served order, then every facet's options reversed, one call after the other):
+ * on the bench that averaging read six facets of seven better than one order did, and moved the
+ * multi-option facets most, the ones a letter's position swayed. The row says per facet whether the
+ * two orders agreed, and carries INTENT_READOUT_BOTH_ORDERS_VERSION, so intent:report never counts
+ * it with a one-order row.
+ *
  * NEVER IN THE WAY.
  *  - It is scheduled on a macrotask once runTurn has resolved: the gateway sends the reply in that
  *    promise's continuation (gateway/rpc.ts), which runs first.
- *  - Any turn start aborts it, as it aborts the warm-keeper (agent/cache-warmer.ts). Probe E5 prices
- *    an abort at about a second on the next head call — paid only when the user writes again within
- *    the second or two the shadow takes.
+ *  - Any turn start aborts it, as it aborts the warm-keeper (agent/cache-warmer.ts): the call on the
+ *    wire, and the calls after it are never sent. Probe E5 prices an abort at about a second on the
+ *    next head call — paid only when the user writes again within the two or three seconds the
+ *    shadow's three calls take.
  *  - It is skipped while any turn runs, and while an earlier shadow's request is still open (an
  *    aborted request holds the slot until the provider has really let go of it). It is not asked
  *    of an Anthropic model (a Claude preset): no grammar, no logprobs, and a paid call.
  *  - Its provider rows carry callSite "intent_shadow", which latency:report keeps off the turn.
  *  - It starts right after the reply, and the warm-keeper re-warms the orchestrator's head only after
- *    its idle window (4 s default): the shadow's ~1k-token prefix, if it displaces that head on a
- *    one-slot server, is displaced before the re-warm rather than after it — when the shadow ends
- *    inside that window. It is capped at INTENT_SHADOW_TIMEOUT_MS, not at the window, so a slow one
- *    (a cold prefill of both prefixes) can still be on the wire when the re-warm goes out.
+ *    its idle window (4 s default): the shadow's two ~1k-token prefixes (one per option order), if
+ *    they displace that head on a one-slot server, displace it before the re-warm rather than after
+ *    — when the shadow ends inside that window. It is capped at INTENT_SHADOW_TIMEOUT_MS, not at the
+ *    window, so a slow one (a cold prefill of its prefixes) can still be on the wire when the
+ *    re-warm goes out.
  *
  * WHICH TURNS. Every top-level turn that was not blocked, the fast lane's included: the front desk
  * answering is the one direct outcome the readout's decision=answer_direct can be checked against,
@@ -63,7 +72,7 @@ import {
   askPreRouteReadout,
   INTENT_FACET_BY_NAME,
   INTENT_FACETS,
-  INTENT_READOUT_VERSION,
+  INTENT_READOUT_BOTH_ORDERS_VERSION,
   type IntentFacetName,
   type IntentReadoutResult,
   type PreRouteReadoutResult,
@@ -80,9 +89,10 @@ import type { TurnOutput } from "./turn-types.js";
 const log = childLogger("agent:intent-shadow");
 
 /**
- * Wall-clock bound on the shadow's calls together. The readout measured 0.86-1.16 s warm and the
- * pre-route question is one token; a cold prefill of the ~1k-token prefix is a few seconds more. A
- * request still open after this is not a measurement worth holding the slot for.
+ * Wall-clock bound on the shadow's calls together. The readout measured 0.86-1.16 s warm, asked
+ * here twice (both option orders), and the pre-route question is one token; a cold prefill of a
+ * ~1k-token prefix is a few seconds more. A request still open after this is not a measurement
+ * worth holding the slot for.
  */
 export const INTENT_SHADOW_TIMEOUT_MS = 15_000;
 
@@ -513,10 +523,11 @@ async function askShadowReadings(turn: CollectingTurn, outcome: IntentShadowOutc
     ...(turn.userId ? { userId: turn.userId } : {}),
     callSite: "intent_shadow" as const,
   };
+  // Both option orders, averaged: two calls in sequence, both under `signal`.
   const intent = await runWithRequestContext({ ...context, agentName: "intent_readout" }, () => askIntentReadout(
     provider,
     { userMessage: turn.userMessage, ...(turn.priorTurnDigest ? { priorTurnDigest: turn.priorTurnDigest } : {}) },
-    { signal },
+    { signal, bothOrders: true },
   ));
   const stopped = (): string | null => (turnStarted.aborted ? "new_turn" : timeout.aborted ? "timeout" : null);
   let preRoute: PreRouteReadoutResult | null = null;
@@ -540,7 +551,9 @@ const round4 = (value: number): number => Math.round(value * 10_000) / 10_000;
 /**
  * The row's data: letters mapped to option keys, probabilities, agent names, enum statuses,
  * lengths and ids. Never a string of the user's: the message and the digest are not in `turn`'s
- * part of it at all, and the restatement goes in as its length. Pure; exported for the tests.
+ * part of it at all, and the restatement goes in as its length. Per facet of a both-orders reading,
+ * whether the two orders agreed (null when only one read it, with which one). Pure; exported for
+ * the tests.
  */
 export function buildIntentShadowRowData(
   turn: { turnId: string; userMessage: string; priorTurnDigest: string | undefined },
@@ -561,6 +574,9 @@ export function buildIntentShadowRowData(
           margin: round4(read.margin),
           runnerUp: read.runnerUp ?? null,
           ...(read.sampled !== undefined ? { sampled: read.sampled } : {}),
+          ...(read.orders
+            ? { orderAgreed: read.orders.agreed ?? null, ...(read.orders.singlePass ? { singlePass: read.orders.singlePass } : {}) }
+            : {}),
         };
       } else {
         // The reason only: a miss's raw top token is model text, and not worth the doubt.
@@ -588,7 +604,8 @@ export function buildIntentShadowRowData(
       : { status: pre.reason, ms: pre.ms };
   const agents = [...new Set(outcome.subAgentRuns)].slice(0, MAX_AGENTS_KEPT);
   return {
-    version: INTENT_READOUT_VERSION,
+    // The readout the shadow asks (both orders), also on a row whose readout failed or was skipped.
+    version: INTENT_READOUT_BOTH_ORDERS_VERSION,
     turnId: identifier(turn.turnId) ?? "(other)",
     status: readings.status,
     reason: readings.reason,
@@ -596,7 +613,16 @@ export function buildIntentShadowRowData(
     messageChars: turn.userMessage.length,
     priorDigest: Boolean(turn.priorTurnDigest),
     readout: intent
-      ? { ms: intent.ms, tokens: intent.tokens, queryEnChars: intent.queryEn.length, facets, misses }
+      ? {
+          ms: intent.ms,
+          tokens: intent.tokens,
+          queryEnChars: intent.queryEn.length,
+          facets,
+          misses,
+          ...(intent.reversed
+            ? { reversed: { ms: intent.reversed.ms, tokens: intent.reversed.tokens, failure: intent.reversed.failure ?? null } }
+            : {}),
+        }
       : null,
     readoutFailure: readings.intent && !readings.intent.ok ? readings.intent.reason : null,
     preRoute,

@@ -1,7 +1,8 @@
 /**
  * intent:bench — the labelled synthetic cases (eval/intent/intent.example.jsonl) and the arithmetic that
  * scores the intent readout against them (agent/intent-bench.ts), plus the readout's `facets` option the
- * --order-swap pass asks through. Pure logic and recorded provider answers only: no model is called.
+ * --order-swap pass asks through and the averaged column built from the two passes. Pure logic and
+ * recorded provider answers only: no model is called.
  */
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -11,6 +12,7 @@ import { describe, expect, it } from "vitest";
 
 import { benchSplit } from "../agent/decisions-bench.js";
 import {
+  averagedArm,
   buildIntentBenchReport,
   CONFIDENCE_LEVELS,
   facetCalibration,
@@ -19,6 +21,7 @@ import {
   lintIntentCases,
   MARGIN_LEVELS,
   MIN_SCORED_PER_FACET,
+  orderSwapCell,
   parseIntentBenchArgs,
   parseIntentCases,
   profileIntentCases,
@@ -257,6 +260,104 @@ describe("the order swap", () => {
     const result = await askIntentReadout(provider, { userMessage: "x" }, { language: "en" });
     expect(calls[0]!.messages[0]!.content).toBe(INTENT_READOUT_SYSTEM_PROMPT);
     expect(result.ok && result.readout.facets.mode?.choice).toBe("GATHER");
+  });
+});
+
+describe("the two passes averaged", () => {
+  it("combines the main and the swapped arm as the readout's bothOrders call combines its two, on the same recorded replies", async () => {
+    // Main: every facet right at 0.9. Reversed: right at 0.8 but for decision, which it reads as answer_direct.
+    const swappedFacets = reversedFacets();
+    const servedReply = recordedReply(GOLD, INTENT_FACETS, " x", 0.9);
+    const reversedReply = recordedReply({ ...GOLD, decision: "answer_direct" }, swappedFacets, " x", 0.8);
+    const main = readoutArmFrom(await askIntentReadout(recordedProvider(() => ({ logprobs: servedReply })).provider, { userMessage: "x" }, { language: "en" }));
+    const swapped = readoutArmFrom(await askIntentReadout(recordedProvider(() => ({ logprobs: reversedReply })).provider, { userMessage: "x" }, { language: "en", facets: swappedFacets }));
+    const averaged = averagedArm(main, swapped)!;
+    const both = recordedProvider((messages) => ({ logprobs: messages[0]!.content === INTENT_READOUT_SYSTEM_PROMPT ? servedReply : reversedReply }));
+    const live = await askIntentReadout(both.provider, { userMessage: "x" }, { language: "en", bothOrders: true });
+    expect(both.calls).toHaveLength(2);
+    expect(live.ok).toBe(true);
+    if (!live.ok) return;
+    for (const facet of INTENT_FACET_NAMES) {
+      const read = live.readout.facets[facet]!;
+      expect(averaged.facets[facet], facet).toMatchObject({ choice: read.choice, runnerUp: read.runnerUp, orders: read.orders });
+      expect(averaged.facets[facet]!.top, facet).toBeCloseTo(read.top, 10);
+      expect(averaged.facets[facet]!.margin, facet).toBeCloseTo(read.margin, 10);
+      for (const key of INTENT_FACET_BY_NAME[facet].keys) expect(averaged.facets[facet]!.logScores[key], `${facet} ${key}`).toBeCloseTo(read.logScores[key]!, 10);
+    }
+    // decision: single_agent 0.9 against answer_direct 0.8 reversed — the pair disagrees, the average keeps single_agent (0.45 to 0.40).
+    expect(averaged.facets.decision).toMatchObject({ choice: "single_agent", runnerUp: "answer_direct", orders: { served: "single_agent", reversed: "answer_direct", agreed: false } });
+    expect(averaged.facets.decision!.top).toBeCloseTo(0.45, 3);
+    expect(averaged.facets.mode!.orders).toEqual({ served: "GATHER", reversed: "GATHER", agreed: true });
+    expect(averaged).toMatchObject({ ok: true, ms: main.ms + swapped.ms, tokens: main.tokens + swapped.tokens, queryEnChars: main.queryEnChars });
+  });
+
+  it("follows the readout's rule when a pass fails: the main pass's failure, the main pass alone, or nothing", () => {
+    const main = arm({ mode: reading("mode", "GATHER", 0.8), alone: reading("alone", "yes", 0.9) });
+    // The swapped call failed: every facet the main pass's alone.
+    const failed = averagedArm(main, arm({}, { ok: false, failure: "error" }))!;
+    expect(failed.ok).toBe(true);
+    expect(failed.facets.mode).toMatchObject({ choice: "GATHER", orders: { served: "GATHER", singlePass: "served" } });
+    expect(failed.facets.mode!.top).toBeCloseTo(0.8, 10);
+    // Its time is both passes' (1 s each here): the swapped call was made and waited for.
+    expect(failed.ms).toBe(2_000);
+    // A facet one pass missed: the other pass's reading alone.
+    const partly = averagedArm(main, arm({ mode: reading("mode", "VERIFY", 0.7) }, { misses: { alone: "low_mass" } }))!;
+    expect(partly.facets.alone).toMatchObject({ choice: "yes", orders: { served: "yes", singlePass: "served" } });
+    expect(partly.facets.mode!.orders).toEqual({ served: "GATHER", reversed: "VERIFY", agreed: false });
+    const missedByBoth = averagedArm(arm({}, { misses: { multi: "no_slot" } }), arm({}, { misses: { multi: "low_mass" } }))!;
+    expect(missedByBoth.facets.multi).toBeUndefined();
+    expect(missedByBoth.misses).toEqual({ multi: "no_slot" });
+    // Aborted (its timeout): no reading. The main pass failing: the main pass's failure. No swapped pass: nothing.
+    expect(averagedArm(main, arm({}, { ok: false, failure: "aborted" }))).toMatchObject({ ok: false, failure: "aborted", facets: {} });
+    const mainFailed = arm({}, { ok: false, failure: "no_logprobs" });
+    expect(averagedArm(mainFailed, arm({ mode: reading("mode", "GATHER", 0.9) }))).toEqual(mainFailed);
+    expect(averagedArm(main, undefined)).toBeUndefined();
+  });
+
+  it("reports the averaged column and the order agreement beside the main pass, and leaves the main verdict and exit code as they were", () => {
+    const mode = (choice: string, top: number, runnerUp: string) => ({ mode: reading("mode", choice, top, runnerUp) });
+    const results = [
+      // Main right, reversed wrong: GATHER (0.80 + 0.30) / 2 = 0.55 — the average right.
+      result("de", {}, arm(mode("GATHER", 0.8, "VERIFY")), { swapped: arm(mode("VERIFY", 0.7, "GATHER")) }),
+      // Main wrong, reversed right: GATHER (0.40 + 0.90) / 2 = 0.65 — the average right.
+      result("en", {}, arm(mode("VERIFY", 0.6, "GATHER")), { swapped: arm(mode("GATHER", 0.9, "VERIFY")) }),
+      // Both right: GATHER 0.85.
+      result("en", {}, arm(mode("GATHER", 0.9, "converse")), { swapped: arm(mode("GATHER", 0.8, "converse")) }),
+      // The reversed pass missed it: the main pass's wrong GATHER alone, 0.7.
+      result("de", { mode: "PRODUCE" }, arm(mode("GATHER", 0.7, "PRODUCE")), { swapped: arm({}, { misses: { mode: "low_mass" } }) }),
+      // Never asked again: in the main pass only.
+      result("de", {}, arm(mode("GATHER", 0.9, "VERIFY"))),
+    ];
+    const settings = { ...SETTINGS, orderSwap: true };
+    const report = buildIntentBenchReport(results, settings);
+    const entry = report.facets.find((facet) => facet.facet === "mode")!;
+    const swap = entry.orderSwap!;
+    const all = <T extends { language: string }>(rows: readonly T[]) => rows.find((row) => row.language === "all")!;
+    expect(all(entry.slices).accuracy).toMatchObject({ hits: 3, n: 5 });
+    expect(all(swap.agreement)).toMatchObject({ hits: 1, n: 3 });
+    expect(swap.agreement.find((row) => row.language === "de")).toMatchObject({ hits: 0, n: 1 });
+    expect(all(swap.swapped).accuracy).toMatchObject({ hits: 2, n: 3 });
+    expect(all(swap.averaged.slices).accuracy).toMatchObject({ hits: 3, n: 4 });
+    expect(all(swap.averaged.slices).singlePass).toBe(1);
+    expect(swap.averaged.slices.find((slice) => slice.language === "en")!.accuracy).toMatchObject({ hits: 2, n: 2 });
+    // Coverage read off the averaged tops (0.55, 0.65, 0.85, 0.70), not either pass's.
+    expect(all(swap.averaged.slices).confidenceCurve.find((row) => row.level === 0.5)).toMatchObject({ taken: 4, correct: 3 });
+    expect(all(swap.averaged.slices).confidenceCurve.find((row) => row.level === 0.6)).toMatchObject({ taken: 3, correct: 2 });
+    expect(all(swap.averaged.slices).marginCurve.find((row) => row.level === 0.2)).toMatchObject({ taken: 3 });
+    // An extra column: the main pass's verdicts, reasons and exit code are those of the same run without the swap.
+    const without = buildIntentBenchReport(results.map(({ swapped: _swapped, ...rest }) => rest), SETTINGS);
+    expect(report.facets.map((facet) => [facet.verdict, facet.reasons])).toEqual(without.facets.map((facet) => [facet.verdict, facet.reasons]));
+    expect(report.exitCode).toBe(without.exitCode);
+    expect(without.facets.every((facet) => facet.orderSwap === undefined)).toBe(true);
+    expect(orderSwapCell(entry)).toBe(`${swap.averaged.verdict} · 3/4 (75%) against one order's 3/5 (60%); orders agree 1/3 (33.3%)`);
+    const markdown = renderIntentBenchMarkdown(report);
+    expect(markdown).toContain("| facet | verdict | why | both orders averaged (extra column, not the verdict) |");
+    expect(markdown).toContain(`| mode | **${entry.verdict.replace(/_/g, " ")}** | ${entry.reasons.join("; ")} | ${orderSwapCell(entry)} |`);
+    // Columns de, en, all.
+    expect(markdown).toMatch(/\| \*\*accuracy, both orders averaged\*\* \| 1\/2 \(50%\), ≥[\d.]+%; 1 from one order only \| 2\/2 \(100%\), ≥[\d.]+% \| 3\/4 \(75%\), ≥[\d.]+%; 1 from one order only \|/);
+    expect(markdown).toContain("| orders agree | 0/1 (0%) | 1/2 (50%) | 1/3 (33.3%) |");
+    expect(markdown).toContain("| accuracy, options reversed | 0/1 (0%) | 2/2 (100%) | 2/3 (66.7%) |");
+    expect(renderIntentBenchMarkdown(without)).not.toContain("both orders averaged");
   });
 });
 

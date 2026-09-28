@@ -30,6 +30,11 @@
  * plus "none". The bench's 72.5% was measured with eight options cut from the whole embedding
  * ranking, so the two top-1 figures are not the same measurement.
  *
+ * The shadow asks the readout in both option orders and averages them (askIntentReadout
+ * `bothOrders`), so the rows read by default are INTENT_READOUT_BOTH_ORDERS_VERSION's; a one-order
+ * row (INTENT_READOUT_VERSION, the shadow before it asked both) is another readout, left out and
+ * counted.
+ *
  * Privacy: the rows hold no user text by construction; this module copies nothing out of a row
  * but identifiers that pass IDENTIFIER_RE, option keys that are the facet's own, and numbers.
  */
@@ -38,7 +43,7 @@ import {
   DEFAULT_CONFIDENCE,
   INTENT_FACET_BY_NAME,
   INTENT_FACETS,
-  INTENT_READOUT_VERSION,
+  INTENT_READOUT_BOTH_ORDERS_VERSION,
   type IntentFacetName,
 } from "../decisions/intent-readout.js";
 import { NONE_KEY } from "../decisions/pre-route-question.js";
@@ -137,11 +142,11 @@ function readTriage(value: unknown): Partial<Record<IntentFacetName, string>> | 
 }
 
 /**
- * The shadow rows of the current readout version, and how many rows of other versions were left
- * out: a row names the prefix, grammar and case template it was read with, and two readouts are
- * never counted together.
+ * The shadow rows of the current readout version — the one the shadow asks, both orders — and how
+ * many rows of other versions were left out: a row names the prefix, grammar, case template and
+ * order mode it was read with, and two readouts are never counted together.
  */
-export function readShadowTurns(rows: readonly AuditRow[], version: string = INTENT_READOUT_VERSION): {
+export function readShadowTurns(rows: readonly AuditRow[], version: string = INTENT_READOUT_BOTH_ORDERS_VERSION): {
   turns: ShadowTurn[];
   otherVersions: Record<string, number>;
 } {
@@ -344,7 +349,7 @@ function tally(values: readonly string[]): Record<string, number> {
 }
 
 export function buildIntentReport(rows: readonly AuditRow[], options: { version?: string; thinDataTurns?: number } = {}): IntentReport {
-  const version = options.version ?? INTENT_READOUT_VERSION;
+  const version = options.version ?? INTENT_READOUT_BOTH_ORDERS_VERSION;
   const thinDataTurns = options.thinDataTurns ?? THIN_DATA_TURNS;
   const { turns, otherVersions } = readShadowTurns(rows, version);
   const read = turns.filter((turn) => Object.keys(turn.facets).length > 0);
@@ -477,7 +482,7 @@ export function buildIntentReport(rows: readonly AuditRow[], options: { version?
     notes.push(`THIN DATA: ${read.length} turn(s) with a reading, below the ${thinDataTurns} a figure here needs. Treat every rate as an anecdote.`);
   }
   if (Object.keys(otherVersions).length > 0) {
-    notes.push(`Rows of another readout version were left out (${Object.entries(otherVersions).map(([name, count]) => `${name}: ${count}`).join(", ")}): a different prefix, grammar or case template is a different readout.`);
+    notes.push(`Rows of another readout version were left out (${Object.entries(otherVersions).map(([name, count]) => `${name}: ${count}`).join(", ")}): a different prefix, grammar, case template or order mode is a different readout.`);
   }
   notes.push("\"Actual\" is what the orchestrator and the judge did, not what was right: these are agreement rates, not accuracy.");
   notes.push("The pre-router is offered the turn's own capsule (at most four agents) plus \"none\"; the bench's 72.5% top-1 was eight options from the whole embedding ranking.");

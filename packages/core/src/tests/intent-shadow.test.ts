@@ -1,8 +1,9 @@
 /**
  * The intent readout's post-turn shadow (agent/intent-shadow.ts): it is asked only after the turn
- * has delivered, never with the flag off, never while a turn runs; any turn start aborts it; the row
- * sets the readout beside what the turn did, read from the turn's own audit rows; and the row holds
- * no user text. Recorded providers only — no model is called.
+ * has delivered, never with the flag off, never while a turn runs, in both option orders one call
+ * after the other; any turn start aborts it, whichever call is on the wire; the row sets the readout
+ * beside what the turn did, read from the turn's own audit rows, says per facet whether the two
+ * orders agreed, and holds no user text. Recorded providers only — no model is called.
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -69,7 +70,16 @@ import {
 } from "../agent/intent-shadow.js";
 import { logAudit } from "../audit/logger.js";
 import { OrchestrationSchema } from "../config/schemas/orchestration.js";
-import { INTENT_FACETS, INTENT_READOUT_GRAMMAR } from "../decisions/intent-readout.js";
+import {
+  buildIntentReadoutSystemPrompt,
+  INTENT_FACETS,
+  INTENT_READOUT_BOTH_ORDERS_VERSION,
+  INTENT_READOUT_GRAMMAR,
+  INTENT_READOUT_SYSTEM_PROMPT,
+  INTENT_READOUT_VERSION,
+  reversedFacets,
+} from "../decisions/intent-readout.js";
+import { LETTERS } from "../decisions/logit-readout.js";
 import { currentRequestContext, runWithRequestContext } from "../runtime/request-context.js";
 import { warmTextLanguageDetector } from "../agent/text-language.js";
 import type { TurnOutput } from "../agent/turn-types.js";
@@ -83,13 +93,34 @@ function tok(token: string, top: Top = [[token, -0.01], ["\n", -6]]): LLMTokenLo
   return { token, logprob: own, topLogprobs: top.map(([t, logprob]) => ({ token: t, logprob })) };
 }
 
-/** The measured token shape (decisions/intent-readout.ts): label, ":", " <letter>", newline; the restatement last. */
-function intentReply(letters: Partial<Record<string, string>>, query: string): LLMResponse {
+/** The prefix of the both-orders readout's second call: every facet's options reversed. */
+const REVERSED_PREFIX = buildIntentReadoutSystemPrompt(reversedFacets());
+
+function isReversed(messages: readonly LLMMessage[]): boolean {
+  return messages[0]?.content === REVERSED_PREFIX;
+}
+
+/**
+ * The measured token shape (decisions/intent-readout.ts): label, ":", " <letter>", newline; the
+ * restatement last. `letters` are the served order's; asked with the options reversed, the reply
+ * writes the letter each option has there, so both orders read the same options — unless
+ * `reversedLetters` says otherwise for a facet, or `reversedMisses` puts a control token on its slot.
+ */
+function intentReply(
+  letters: Partial<Record<string, string>>,
+  query: string,
+  reversed = false,
+  opts: { reversedLetters?: Partial<Record<string, string>>; reversedMisses?: readonly string[] } = {},
+): LLMResponse {
   const tokens: LLMTokenLogprob[] = [];
   for (const definition of INTENT_FACETS) {
-    const letter = letters[definition.name] ?? "A";
+    const served = letters[definition.name] ?? "A";
+    const letter = !reversed ? served : opts.reversedLetters?.[definition.name] ?? LETTERS[definition.keys.length - 1 - LETTERS.indexOf(served)]!;
+    const top: Array<[string, number]> = reversed && opts.reversedMisses?.includes(definition.name)
+      ? [["<|im_end|>", -0.05], [` ${letter}`, -3.5]]
+      : [[` ${letter}`, -0.05], [letter === "A" ? " B" : " A", -3.5], ["\n", -7]];
     if (tokens.length > 0) tokens.push(tok("\n"));
-    tokens.push(tok(definition.name), tok(":"), tok(` ${letter}`, [[` ${letter}`, -0.05], [letter === "A" ? " B" : " A", -3.5], ["\n", -7]]));
+    tokens.push(tok(definition.name), tok(":"), tok(` ${letter}`, top));
   }
   tokens.push(tok("\n"), tok("query_en"), tok(":"), tok(` ${query}`));
   return {
@@ -114,6 +145,8 @@ function letterReply(letter: string): LLMResponse {
 
 interface Call {
   kind: "intent" | "pre_route";
+  /** An intent call on the reversed prefix: the both-orders readout's second call. */
+  reversed: boolean;
   messages: LLMMessage[];
   signal: AbortSignal | undefined;
   options: CompletionCallOptions | undefined;
@@ -123,14 +156,25 @@ interface Call {
 const calls: Call[] = [];
 const order: string[] = [];
 
-/** The default routing tier: answers both questions at once, records what it was asked and under which attribution. */
-function recordingProvider(opts: { query?: string; letters?: Partial<Record<string, string>>; preRoute?: string } = {}): Complete {
+function recordCall(messages: LLMMessage[], signal: AbortSignal | undefined, options: CompletionCallOptions | undefined): Call {
+  const call: Call = { kind: options?.grammar ? "intent" : "pre_route", reversed: isReversed(messages), messages, signal, options, context: currentRequestContext() };
+  calls.push(call);
+  return call;
+}
+
+/** The default routing tier: answers every question at once, records what it was asked and under which attribution. */
+function recordingProvider(opts: {
+  query?: string;
+  letters?: Partial<Record<string, string>>;
+  reversedLetters?: Partial<Record<string, string>>;
+  reversedMisses?: readonly string[];
+  preRoute?: string;
+} = {}): Complete {
   return async (messages, _tools, signal, options) => {
-    const kind = options?.grammar ? "intent" : "pre_route";
-    calls.push({ kind, messages, signal, options, context: currentRequestContext() });
-    order.push(kind);
-    return kind === "intent"
-      ? intentReply(opts.letters ?? { mode: "C", decision: "C" }, opts.query ?? "Restated request.")
+    const call = recordCall(messages, signal, options);
+    order.push(call.kind);
+    return call.kind === "intent"
+      ? intentReply(opts.letters ?? { mode: "C", decision: "C" }, opts.query ?? "Restated request.", call.reversed, opts)
       : letterReply(opts.preRoute ?? "A");
   };
 }
@@ -138,9 +182,9 @@ function recordingProvider(opts: { query?: string; letters?: Partial<Record<stri
 /** A routing tier that answers after `ms`, or rejects the moment its signal aborts (as fetch does). */
 function slowProvider(ms: number, honourAbort = true): Complete {
   return (messages, _tools, signal, options) => {
-    calls.push({ kind: options?.grammar ? "intent" : "pre_route", messages, signal, options, context: currentRequestContext() });
+    const call = recordCall(messages, signal, options);
     return new Promise<LLMResponse>((resolve, reject) => {
-      const timer = setTimeout(() => resolve(intentReply({}, "Restated.")), ms);
+      const timer = setTimeout(() => resolve(intentReply({}, "Restated.", call.reversed)), ms);
       if (honourAbort) {
         signal?.addEventListener("abort", () => {
           clearTimeout(timer);
@@ -248,20 +292,42 @@ describe("when the shadow runs", () => {
     await Promise.resolve();
     expect(calls).toHaveLength(0);
     await settleIntentShadowForTests();
-    expect(order).toEqual(["delivered", "intent"]);
+    // The readout in both orders, one call after the other.
+    expect(order).toEqual(["delivered", "intent", "intent"]);
     expect(onlyRow().status).toBe("ok");
   });
 
-  it("asks one grammar-bound, greedy readout call, attributed to its own call site on the turn's session", async () => {
+  it("asks the readout in both option orders, grammar-bound and greedy, one call after the other, attributed to its own call site on the turn's session", async () => {
+    // Each call answers after a few milliseconds; a second one sent before the first returned counts as overlap.
+    let open = 0;
+    let maxOpen = 0;
+    const answer = recordingProvider();
+    useProvider(async (messages, tools, signal, options) => {
+      open += 1;
+      maxOpen = Math.max(maxOpen, open);
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        return await answer(messages, tools, signal, options);
+      } finally {
+        open -= 1;
+      }
+    });
     const handle = intentShadowTurnStarted(turnInput({ userId: "alice" }));
     noteIntentShadowCapsule("sess-1", { status: "ok", agents: ["researcher", "web_coder"] });
     intentShadowTurnEnded(handle, output());
     await settleIntentShadowForTests();
     const intent = calls.filter((call) => call.kind === "intent");
-    expect(intent).toHaveLength(1);
-    expect(intent[0]!.options?.grammar).toBe(INTENT_READOUT_GRAMMAR);
-    expect(intent[0]!.options?.temperature).toBe(0);
-    expect(intent[0]!.context).toMatchObject({ callSite: "intent_shadow", agentName: "intent_readout", sessionId: "sess-1", turnId: "turn-1", userId: "alice" });
+    expect(intent).toHaveLength(2);
+    expect(maxOpen).toBe(1);
+    // The served order first, then every facet's options reversed, on the same grammar and case.
+    expect(intent.map((call) => call.messages[0]!.content)).toEqual([INTENT_READOUT_SYSTEM_PROMPT, REVERSED_PREFIX]);
+    expect(intent[1]!.messages[1]).toEqual(intent[0]!.messages[1]);
+    for (const call of intent) {
+      expect(call.options?.grammar).toBe(INTENT_READOUT_GRAMMAR);
+      expect(call.options?.temperature).toBe(0);
+      expect(call.context).toMatchObject({ callSite: "intent_shadow", agentName: "intent_readout", sessionId: "sess-1", turnId: "turn-1", userId: "alice" });
+    }
+    expect(intent[1]!.signal).toBe(intent[0]!.signal);
     const pre = calls.filter((call) => call.kind === "pre_route");
     expect(pre).toHaveLength(1);
     expect(pre[0]!.context).toMatchObject({ callSite: "intent_shadow", agentName: "pre_router_readout", sessionId: "sess-1" });
@@ -287,8 +353,33 @@ describe("when the shadow runs", () => {
     expect(row.status).toBe("aborted");
     expect(row.reason).toBe("new_turn");
     expect(row.readout).toBeNull();
-    // No pre-route question after the abort.
+    // Neither the reversed order's call nor the pre-route question after the abort.
     expect(calls).toHaveLength(1);
+    intentShadowTurnEnded(other, undefined);
+  });
+
+  it("is aborted during the reversed order's call too: that call sees the abort, and the row is no half reading", async () => {
+    // The served order answers at once; the reversed call hangs until its signal aborts.
+    const answer = recordingProvider();
+    useProvider((messages, tools, signal, options) => {
+      if (!isReversed(messages)) return answer(messages, tools, signal, options);
+      recordCall(messages, signal, options);
+      return new Promise<LLMResponse>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+      });
+    });
+    const handle = intentShadowTurnStarted(turnInput());
+    noteIntentShadowCapsule("sess-1", { status: "ok", agents: ["researcher"] });
+    intentShadowTurnEnded(handle, output());
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(calls.map((call) => call.reversed)).toEqual([false, true]);
+    expect(calls[1]!.signal?.aborted).toBe(false);
+    const other = intentShadowTurnStarted(turnInput({ sessionId: "sess-2", turnId: "turn-2" }));
+    expect(calls[1]!.signal?.aborted).toBe(true);
+    await settleIntentShadowForTests();
+    expect(onlyRow()).toMatchObject({ status: "aborted", reason: "new_turn", readout: null, readoutFailure: "aborted" });
+    // No pre-route question after the abort.
+    expect(calls).toHaveLength(2);
     intentShadowTurnEnded(other, undefined);
   });
 
@@ -301,7 +392,8 @@ describe("when the shadow runs", () => {
     expect(onlyRow()).toMatchObject({ status: "skipped", reason: "busy", readout: null });
     intentShadowTurnEnded(second, output());
     await settleIntentShadowForTests();
-    expect(calls.filter((call) => call.kind === "intent")).toHaveLength(1);
+    // The second turn's readout, in both orders.
+    expect(calls.filter((call) => call.kind === "intent")).toHaveLength(2);
     expect(shadowRows().map((row) => row["status"])).toEqual(["skipped", "ok"]);
   });
 
@@ -324,10 +416,16 @@ describe("when the shadow runs", () => {
     // request it holds is released at once, so a second one sent by mistake fails the count
     // below instead of hanging the suite.
     const held: Array<() => void> = [];
-    const release = () => { for (const resolve of held.splice(0)) resolve(); };
+    let released = false;
+    const release = () => {
+      released = true;
+      for (const resolve of held.splice(0)) resolve();
+    };
     useProvider((messages, _tools, signal, options) => {
-      calls.push({ kind: options?.grammar ? "intent" : "pre_route", messages, signal, options, context: currentRequestContext() });
-      return new Promise<LLMResponse>((resolve) => { held.push(() => resolve(intentReply({}, "Restated."))); });
+      const call = recordCall(messages, signal, options);
+      // After the release every request answers at once, so a later one cannot hang the suite either.
+      if (released) return Promise.resolve(intentReply({}, "Restated.", call.reversed));
+      return new Promise<LLMResponse>((resolve) => { held.push(() => resolve(intentReply({}, "Restated.", call.reversed))); });
     });
     const first = intentShadowTurnStarted(turnInput());
     intentShadowTurnEnded(first, output());
@@ -619,6 +717,35 @@ describe("the row", () => {
     expect(row.preRoute).toMatchObject({ status: "ok", choice: "web_coder", none: false, accepted: "web_coder" });
     expect(row.actual["capsule"]).toEqual({ status: "ok", agents: ["researcher", "web_coder"], trimmed: false });
     expect(row["language"]).toBe("en");
+  });
+
+  it("says per facet whether the two orders agreed, and carries the both-orders version, never one order's", async () => {
+    // alone: yes served (A), and with the options reversed ([no, yes]) A again — "no". multi: the
+    // reversed reply has a control token on its slot, so only the served order read it.
+    useProvider(recordingProvider({ reversedLetters: { alone: "A" }, reversedMisses: ["multi"] }));
+    const handle = intentShadowTurnStarted(turnInput());
+    intentShadowTurnEnded(handle, output());
+    await settleIntentShadowForTests();
+    const row = onlyRow();
+    expect(row["version"]).toBe(INTENT_READOUT_BOTH_ORDERS_VERSION);
+    expect(row["version"]).not.toBe(INTENT_READOUT_VERSION);
+    const facets = row.readout!["facets"] as Record<string, Record<string, unknown>>;
+    expect(facets["mode"]).toMatchObject({ choice: "PRODUCE", orderAgreed: true });
+    expect(facets["mode"]).not.toHaveProperty("singlePass");
+    expect(facets["alone"]).toMatchObject({ orderAgreed: false });
+    expect(facets["multi"]).toMatchObject({ choice: "yes", orderAgreed: null, singlePass: "served" });
+    const reversed = row.readout!["reversed"] as { ms: number; tokens: number; failure: string | null };
+    expect(reversed.failure).toBeNull();
+    expect(reversed.tokens).toBeGreaterThan(0);
+    expect(typeof reversed.ms).toBe("number");
+    // A row the shadow could not read still names the readout it asks.
+    const skipped = buildIntentShadowRowData(
+      { turnId: "t", userMessage: "x", priorTurnDigest: undefined },
+      { ...facts(), wallMs: 5, workflowPressure: [], workflowForced: false, moduleSplit: false },
+      "other",
+      { status: "skipped", reason: "busy", intent: null, preRoute: null },
+    );
+    expect(skipped["version"]).toBe(INTENT_READOUT_BOTH_ORDERS_VERSION);
   });
 
   it("holds no user text: not the message, not the digest, not the English restatement", async () => {

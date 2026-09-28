@@ -6,7 +6,10 @@
  * parser). agent/intent-bench.ts scores the run per facet and language: accuracy against gold and against
  * the always-majority baseline and triage, the confusion matrix, ECE before and after a temperature
  * fitted on the calibration half (applied to the test half), coverage and accuracy over confidence and
- * margin levels, flips under --order-swap, wall ms, and whether German cases get a restatement.
+ * margin levels, flips under --order-swap, wall ms, and whether German cases get a restatement. With
+ * --order-swap also the order-agreement rate, and the reversed pass alone and both passes averaged per
+ * option (askIntentReadout bothOrders' combination) scored the same way: the averaged readout's verdict
+ * is printed beside each facet's as an extra column and never sets the exit code.
  *
  *   pnpm --filter @starlingai/core intent:bench [--cases <jsonl> [--cases <jsonl> …]] [--with-triage]
  *     [--order-swap] [--split all|calibration|test] [--limit n] [--top-logprobs 20] [--min-mass 0.5]
@@ -47,6 +50,7 @@ import {
   casesDigest,
   IntentBenchUsageError,
   lintIntentCases,
+  orderSwapCell,
   parseIntentBenchArgs,
   parseIntentCases,
   profileIntentCases,
@@ -299,7 +303,10 @@ async function main(): Promise<number> {
   await writeFile(markdownPath, renderIntentBenchMarkdown(report, [...header, ...(environment.length ? [`ENVIRONMENT-SUSPECT: ${environment.join("; ")}`] : [])]), "utf8");
 
   console.log("");
-  for (const entry of report.facets) console.log(`  ${entry.facet.padEnd(17)} ${entry.verdict.toUpperCase().padEnd(15)} ${entry.reasons.join("; ")}`);
+  for (const entry of report.facets) {
+    const averaged = orderSwapCell(entry);
+    console.log(`  ${entry.facet.padEnd(17)} ${entry.verdict.toUpperCase().padEnd(15)} ${entry.reasons.join("; ")}${averaged ? `\n  ${"".padEnd(17)} both orders averaged (extra column): ${averaged}` : ""}`);
+  }
   if (environment.length) console.error(`\nENVIRONMENT-SUSPECT RUN — not a verdict:\n  - ${environment.join("\n  - ")}`);
   console.log(`\nReport: ${markdownPath}\nJSON:   ${reportPath}\nRows:   ${rowsPath} (holds the messages; keep it local)`);
   return exitCode;

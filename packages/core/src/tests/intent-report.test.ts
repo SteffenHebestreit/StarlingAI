@@ -13,6 +13,7 @@ import type { AuditRow } from "../agent/latency-attribution.js";
 import type { LanguageBucket } from "../decisions/gate.js";
 import {
   INTENT_FACET_BY_NAME,
+  INTENT_READOUT_BOTH_ORDERS_VERSION,
   INTENT_READOUT_VERSION,
   type IntentFacetName,
   type IntentFacetRead,
@@ -121,6 +122,20 @@ describe("reading the rows", () => {
     expect(first.facets.decision).toEqual({ choice: "single_agent", top: 0.9, margin: 0.8 });
     expect(first.preRoute).toEqual({ status: "ok", choice: "researcher", top: 0.9, margin: 0.8 });
     expect(first.actual).toMatchObject({ judgeStatus: "answered", judgeVerdict: true, firstAgent: "researcher", subAgentRuns: 1, moduleIncluded: true, capsuleAgents: ["researcher", "web_coder"], capsuleTrimmed: false });
+  });
+
+  it("reads the both-orders rows the shadow writes by default, and never counts a one-order row with them", () => {
+    // A row of the shadow before it asked both orders: the same builder, one order's version.
+    const rows = fixture();
+    const oneOrder: AuditRow = { ...rows[0]!, id: "row-one-order", data: { ...rows[0]!.data, version: INTENT_READOUT_VERSION } };
+    const both = buildIntentReport([...rows, oneOrder]);
+    expect(both.version).toBe(INTENT_READOUT_BOTH_ORDERS_VERSION);
+    expect(both.scope.rows).toBe(7);
+    expect(both.scope.otherVersions).toEqual({ "intent-readout-v0": 1, [INTENT_READOUT_VERSION]: 1 });
+    // Asked for by name, the one-order rows are read alone.
+    const single = buildIntentReport([...rows, oneOrder], { version: INTENT_READOUT_VERSION });
+    expect(single.scope.rows).toBe(1);
+    expect(single.scope.otherVersions).toEqual({ "intent-readout-v0": 1, [INTENT_READOUT_BOTH_ORDERS_VERSION]: 7 });
   });
 
   it("counts the capsules the prompt budget trimmed", () => {
@@ -299,7 +314,7 @@ describe("the Markdown report", () => {
   it("leads with the scope and the THIN DATA warning", () => {
     const markdown = renderIntentReportMarkdown(buildIntentReport(fixture()));
     const lines = markdown.split("\n");
-    expect(lines[0]).toBe(`# Intent readout vs. real turns (${INTENT_READOUT_VERSION})`);
+    expect(lines[0]).toBe(`# Intent readout vs. real turns (${INTENT_READOUT_BOTH_ORDERS_VERSION})`);
     expect(lines[2]).toMatch(/^> \*\*THIN DATA — 6 turn\(s\) with a reading/);
     // The pre-router's top-1 row: 2 of 5.
     expect(markdown).toContain("| all | 40.0% (2/5, LB ");

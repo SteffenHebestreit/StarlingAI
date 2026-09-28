@@ -1,7 +1,8 @@
 /**
  * The intent readout (decisions/intent-readout.ts): the grammar and the frozen prefix generated from
  * the facet definitions, each facet's letter located in a recorded token list and read off its top
- * list, the renormalisation, the temperature, the margin, the call, and the pre-router's readout
+ * list, the renormalisation, the temperature, the margin, the call, the both-orders readout (the
+ * options reversed on a second call, the two averaged per option), and the pre-router's readout
  * with "none" protected. Pure logic and recorded providers only — no model is called.
  */
 import { createHash } from "node:crypto";
@@ -14,11 +15,14 @@ import {
   acceptPreRoute,
   askIntentReadout,
   askPreRouteReadout,
+  averageOrderReadings,
   buildIntentGrammar,
   buildIntentReadoutMessages,
+  buildIntentReadoutSystemPrompt,
   DEFAULT_CONFIDENCE,
   INTENT_FACET_BY_NAME,
   INTENT_FACETS,
+  INTENT_READOUT_BOTH_ORDERS_VERSION,
   INTENT_READOUT_GRAMMAR,
   INTENT_READOUT_MAX_TOKENS,
   INTENT_READOUT_SYSTEM_PROMPT,
@@ -30,9 +34,11 @@ import {
   parseIntentReadout,
   preRouteReadoutFrom,
   readFacetSlot,
+  reversedFacets,
   slotLetterOf,
   triageVerdictKeys,
   type IntentFacetDefinition,
+  type IntentFacetName,
   type PreRouteReadout,
 } from "../decisions/intent-readout.js";
 import { applyTemperature, LETTERS } from "../decisions/logit-readout.js";
@@ -46,6 +52,9 @@ const PINNED_HASH = "8befdb40c9a072b9";
 
 /** sha256 of the intent-readout-v1 case template (triage's user message, its wording and cuts), first 16 hex digits. */
 const PINNED_CASE_HASH = "0fa0b81078aa2c65";
+
+/** sha256 of the intent-readout-v1:both-orders prefixes and grammars (served, then reversed), first 16 hex digits. */
+const PINNED_BOTH_ORDERS_HASH = "ede0afae784d6e12";
 
 /** One generated token as readChoiceLogprobs hands it over. */
 function tok(token: string, top: Top = [[token, -0.01], ["\n", -6]]): LLMTokenLogprob {
@@ -157,6 +166,19 @@ describe("the grammar and the prefix, generated from the facets", () => {
     ];
     const caseHash = createHash("sha256").update(JSON.stringify(cases)).digest("hex").slice(0, 16);
     expect({ version: INTENT_READOUT_VERSION, caseHash }).toEqual({ version: "intent-readout-v1", caseHash: PINNED_CASE_HASH });
+  });
+
+  it("names the both-orders readout apart from one order's, and changes its reversed prefix only with it", () => {
+    // Its readings are not one pass's: two rows of the two modes are never counted together.
+    expect(INTENT_READOUT_BOTH_ORDERS_VERSION).not.toBe(INTENT_READOUT_VERSION);
+    // A failure here means the served or the reversed prefix or grammar changed: bump the version
+    // (INTENT_READOUT_VERSION for the prefix; the suffix for how the two are combined) and record the new hash.
+    const reversed = reversedFacets();
+    const hash = createHash("sha256")
+      .update(INTENT_READOUT_SYSTEM_PROMPT).update("\u0000").update(INTENT_READOUT_GRAMMAR).update("\u0000")
+      .update(buildIntentReadoutSystemPrompt(reversed)).update("\u0000").update(buildIntentGrammar(reversed))
+      .digest("hex").slice(0, 16);
+    expect({ version: INTENT_READOUT_BOTH_ORDERS_VERSION, hash }).toEqual({ version: "intent-readout-v1:both-orders", hash: PINNED_BOTH_ORDERS_HASH });
   });
 });
 
@@ -559,5 +581,232 @@ describe("the call's options and the reading's inputs reach where they are used"
     expect(warm.ok && warm.readout.temperature).toBe(2);
     expect(calls[0]!.options).toMatchObject({ topLogprobs: 5 });
     expect(await askPreRouteReadout(provider, input, { minMass: 0.999 })).toMatchObject({ ok: false, reason: "low_mass" });
+  });
+});
+
+// ── Both orders ──────────────────────────────────────────────────────────────────────────────────
+
+const REVERSED_PREFIX = buildIntentReadoutSystemPrompt(reversedFacets());
+
+type Slot = { written: string; top: Top };
+
+/** A slot as the reply to the reversed prefix writes it: every letter moved to where its option stands there. */
+function mirrored(slot: Slot, count: number): Slot {
+  const flip = (letter: string) => LETTERS[count - 1 - LETTERS.indexOf(letter)]!;
+  return {
+    written: flip(slot.written),
+    top: slot.top.map(([token, logprob]) => {
+      const letter = /^ ([A-Z])$/.exec(token)?.[1];
+      return [letter ? ` ${flip(letter)}` : token, logprob];
+    }),
+  };
+}
+
+/** Every slot mirrored: the reversed order read to exactly the same distribution per option. */
+function mirroredSlots(slots: Partial<Record<string, Slot>>): Partial<Record<string, Slot>> {
+  return Object.fromEntries(Object.entries(slots).map(([name, slot]) => [name, mirrored(slot!, INTENT_FACET_BY_NAME[name as IntentFacetName].keys.length)]));
+}
+
+/** An answer: a reply, a thrown error, or a reply that waits on the call's signal. */
+type OrderAnswer = Partial<LLMResponse> | Error | ((signal: AbortSignal | undefined) => Promise<Partial<LLMResponse>>);
+
+/** A recorded routing tier that answers the served prefix and the reversed one each its own way, and counts the calls open at once. */
+function bothOrdersProvider(served: OrderAnswer, reversed: OrderAnswer) {
+  const calls: Array<{ reversed: boolean; messages: LLMMessage[]; options?: CompletionCallOptions }> = [];
+  let open = 0;
+  let maxOpen = 0;
+  const provider = {
+    complete: async (messages: LLMMessage[], _tools: unknown, signal?: AbortSignal, options?: CompletionCallOptions): Promise<LLMResponse> => {
+      const isReversed = messages[0]!.content === REVERSED_PREFIX;
+      calls.push({ reversed: isReversed, messages, ...(options ? { options } : {}) });
+      open += 1;
+      maxOpen = Math.max(maxOpen, open);
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        const answer = isReversed ? reversed : served;
+        if (answer instanceof Error) throw answer;
+        const body = typeof answer === "function" ? await answer(signal) : answer;
+        return { content: null, tool_calls: [], usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 }, finishReason: "stop", ...body };
+      } finally {
+        open -= 1;
+      }
+    },
+  };
+  return { provider, calls, maxOpen: () => maxOpen };
+}
+
+const ln = Math.log;
+
+// mode: PRODUCE (C) 0.70 and GATHER (B) 0.20 served; reversed, PRODUCE is D and GATHER E, at 0.50 and 0.45.
+const SERVED_MODE: Slot = { written: "C", top: [[" C", ln(0.7)], [" B", ln(0.2)], [" A", ln(0.04)], [" D", ln(0.03)], [" E", ln(0.02)], [" F", ln(0.01)]] };
+const REVERSED_MODE: Slot = { written: "D", top: [[" D", ln(0.5)], [" E", ln(0.45)], [" A", ln(0.02)], [" B", ln(0.01)], [" C", ln(0.01)], [" F", ln(0.01)]] };
+// decision: single_agent (B) 0.55 over answer_direct (A) 0.40 served; reversed, answer_direct (E) 0.80 over single_agent (D) 0.15.
+const SERVED_DECISION: Slot = { written: "B", top: [[" B", ln(0.55)], [" A", ln(0.4)], [" C", ln(0.02)], [" D", ln(0.02)], [" E", ln(0.01)]] };
+const REVERSED_DECISION: Slot = { written: "E", top: [[" E", ln(0.8)], [" D", ln(0.15)], [" A", ln(0.02)], [" B", ln(0.02)], [" C", ln(0.01)]] };
+// alone: yes (A) 0.6 served; reversed [no, yes], no (A) 0.9 — each renormalised over its letters,
+// which hold 0.6 of the served list and 0.9 of the reversed one (the rest on "\n"): averaging the
+// raw letter probabilities instead would weigh the pass with more letter mass more.
+const SERVED_ALONE: Slot = { written: "A", top: [[" A", ln(0.36)], [" B", ln(0.24)], ["\n", ln(0.4)]] };
+const REVERSED_ALONE: Slot = { written: "A", top: [[" A", ln(0.81)], [" B", ln(0.09)], ["\n", ln(0.1)]] };
+
+const SERVED_SLOTS = { ...FULL, mode: SERVED_MODE, decision: SERVED_DECISION, alone: SERVED_ALONE };
+const REVERSED_SLOTS: Partial<Record<string, Slot>> = { ...mirroredSlots(FULL), mode: REVERSED_MODE, decision: REVERSED_DECISION, alone: REVERSED_ALONE };
+
+describe("both orders", () => {
+  it("asks the served order, then every facet reversed, one call after the other, on the same grammar and case", async () => {
+    const { provider, calls, maxOpen } = bothOrdersProvider({ logprobs: reply(SERVED_SLOTS) }, { logprobs: reply(REVERSED_SLOTS) });
+    const result = await askIntentReadout(provider, { userMessage: "a request", priorTurnDigest: "an earlier turn" }, { language: "en", bothOrders: true });
+    expect(calls.map((call) => call.reversed)).toEqual([false, true]);
+    expect(calls[0]!.messages[0]!.content).toBe(INTENT_READOUT_SYSTEM_PROMPT);
+    expect(calls[1]!.messages[0]!.content).toBe(buildIntentReadoutSystemPrompt(reversedFacets()));
+    expect(calls[1]!.messages[1]).toEqual(calls[0]!.messages[1]);
+    expect(calls.map((call) => call.options?.grammar)).toEqual([INTENT_READOUT_GRAMMAR, INTENT_READOUT_GRAMMAR]);
+    expect(calls[1]!.options).toEqual(calls[0]!.options);
+    expect(maxOpen()).toBe(1);
+    expect(result.ok && result.readout.version).toBe(INTENT_READOUT_BOTH_ORDERS_VERSION);
+    // Off by default: one call, one order's version.
+    const one = bothOrdersProvider({ logprobs: reply(SERVED_SLOTS) }, { logprobs: reply(REVERSED_SLOTS) });
+    const single = await askIntentReadout(one.provider, { userMessage: "a request" }, { language: "en" });
+    expect(one.calls).toHaveLength(1);
+    expect(single.ok && single.readout.version).toBe(INTENT_READOUT_VERSION);
+    expect(single.ok && single.readout.facets.mode?.orders).toBeUndefined();
+  });
+
+  it("averages the two orders' probabilities per option, the reversed letters read back as the options they stood for", async () => {
+    const { provider } = bothOrdersProvider({ logprobs: reply(SERVED_SLOTS, " Served restatement.") }, { logprobs: reply(REVERSED_SLOTS, " Reversed restatement.") });
+    const result = await askIntentReadout(provider, { userMessage: "a request" }, { language: "en", bothOrders: true });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const { facets } = result.readout;
+    const expectProbabilities = (name: IntentFacetName, expected: Record<string, number>) => {
+      for (const [key, p] of Object.entries(expected)) expect(facets[name]!.probabilities[key], `${name} ${key}`).toBeCloseTo(p, 10);
+    };
+    // mode, the orders agreeing: PRODUCE (0.70 + 0.50) / 2, GATHER (0.20 + 0.45) / 2, …
+    expectProbabilities("mode", { converse: 0.025, GATHER: 0.325, PRODUCE: 0.6, ACT: 0.02, VERIFY: 0.015, ORCHESTRATE: 0.015 });
+    expect(facets.mode).toMatchObject({ choice: "PRODUCE", runnerUp: "GATHER", orders: { served: "PRODUCE", reversed: "PRODUCE", agreed: true } });
+    expect(facets.mode!.top).toBeCloseTo(0.6, 10);
+    expect(facets.mode!.margin).toBeCloseTo(0.275, 10);
+    // decision, a disagreeing pair: served single_agent, reversed answer_direct; the average's side wins.
+    expectProbabilities("decision", { answer_direct: 0.6, single_agent: 0.35, workflow: 0.015, coordinate: 0.02, clarify: 0.015 });
+    expect(facets.decision).toMatchObject({ choice: "answer_direct", runnerUp: "single_agent", orders: { served: "single_agent", reversed: "answer_direct", agreed: false } });
+    expect(facets.decision!.margin).toBeCloseTo(0.25, 10);
+    // alone, a disagreeing yes/no pair: yes (0.6 + 0.1) / 2, no (0.4 + 0.9) / 2 — each pass
+    // renormalised over its letters first (raw letter probabilities would give 0.30 / 0.70).
+    expectProbabilities("alone", { yes: 0.35, no: 0.65 });
+    expect(facets.alone).toMatchObject({ choice: "no", orders: { served: "yes", reversed: "no", agreed: false } });
+    expect(facets.alone!.logScores["no"]).toBeCloseTo(Math.log(0.65), 10);
+    // The letter mass is the two passes' mean: (0.6 + 0.9) / 2.
+    expect(facets.alone!.mass).toBeCloseTo(0.75, 10);
+    // A facet both orders read alike (the reversed reply mirrored) keeps one pass's distribution.
+    const one = parseIntentReadout(reply(FULL));
+    for (const name of ["domain", "deliverable", "multi", "source_sensitive"] as const) {
+      expect(facets[name]!.orders).toEqual({ served: one.facets[name]!.choice, reversed: one.facets[name]!.choice, agreed: true });
+      for (const key of INTENT_FACET_BY_NAME[name].keys) expect(facets[name]!.probabilities[key], `${name} ${key}`).toBeCloseTo(one.facets[name]!.probabilities[key]!, 10);
+    }
+    // The restatement is the served pass's; the tokens are both calls'.
+    expect(result.readout.queryEn).toBe("Served restatement.");
+    const servedTokens = reply(SERVED_SLOTS, " Served restatement.").length;
+    const reversedTokens = reply(REVERSED_SLOTS, " Reversed restatement.").length;
+    expect(result.readout.tokens).toBe(servedTokens + reversedTokens);
+    expect(result.readout.reversed).toMatchObject({ tokens: reversedTokens });
+    expect(result.readout.reversed!.failure).toBeUndefined();
+    // The reversed call's own round trip (the recorded tier answers after 5 ms), inside the wall time of both.
+    expect(result.readout.reversed!.ms).toBeGreaterThan(0);
+    expect(result.readout.ms).toBeGreaterThanOrEqual(result.readout.reversed!.ms);
+    expect(facets.mode!.sampled).toBe("PRODUCE");
+  });
+
+  it("breaks a tie in the average toward the served order's earlier option", () => {
+    // yes 0.6 / no 0.4 served, the reverse reversed: exactly 0.5 each on average.
+    const tied = averageOrderReadings(["yes", "no"], { choice: "yes", logScores: { yes: ln(0.6), no: ln(0.4) } }, { choice: "no", logScores: { yes: ln(0.4), no: ln(0.6) } });
+    expect(tied).toMatchObject({ choice: "yes", runnerUp: "no", orders: { served: "yes", reversed: "no", agreed: false } });
+    expect(tied!.top).toBeCloseTo(0.5, 10);
+    expect(tied!.margin).toBeCloseTo(0, 10);
+    expect(averageOrderReadings(["yes", "no"], undefined, undefined)).toBeUndefined();
+  });
+
+  it("applies a facet's temperature to the log of the average, not to each order before it", async () => {
+    const { provider } = bothOrdersProvider({ logprobs: reply(SERVED_SLOTS) }, { logprobs: reply(REVERSED_SLOTS) });
+    const result = await askIntentReadout(provider, { userMessage: "a request" }, { language: "en", bothOrders: true, temperatures: { alone: { en: 2 } } });
+    const alone = result.ok ? result.readout.facets.alone! : undefined;
+    const expected = applyTemperature([Math.log(0.35), Math.log(0.65)], 2);
+    expect(alone?.temperature).toBe(2);
+    expect(alone?.probabilities["yes"]).toBeCloseTo(expected[0]!, 10);
+    expect(alone?.probabilities["no"]).toBeCloseTo(expected[1]!, 10);
+    // The log-scores stay the average's at T = 1: what a temperature for this mode is fitted on.
+    expect(alone?.logScores["yes"]).toBeCloseTo(Math.log(0.35), 10);
+    expect(result.ok && result.readout.facets.mode!.temperature).toBe(1);
+  });
+
+  it("takes a facet one order missed from the other order alone, says which, and misses a facet both missed", async () => {
+    const { multi: _multi, domain: _servedDomain, ...served } = SERVED_SLOTS;
+    const controlToken = (written: string): Slot => ({ written, top: [["<|im_end|>", -0.1], [` ${written}`, -2.5]] });
+    const reversed = { ...REVERSED_SLOTS, source_sensitive: controlToken("B"), domain: controlToken("K") };
+    const { provider } = bothOrdersProvider({ logprobs: reply(served) }, { logprobs: reply(reversed) });
+    const result = await askIntentReadout(provider, { userMessage: "a request" }, { language: "en", bothOrders: true });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const one = parseIntentReadout(reply(FULL));
+    // multi: no line in the served reply, read by the reversed order alone.
+    expect(result.readout.facets.multi).toMatchObject({ choice: "no", orders: { reversed: "no", singlePass: "reversed" } });
+    expect(result.readout.facets.multi!.orders!.agreed).toBeUndefined();
+    expect(result.readout.facets.multi!.probabilities["no"]).toBeCloseTo(one.facets.multi!.probabilities["no"]!, 10);
+    expect(result.readout.facets.multi!.mass).toBeCloseTo(one.facets.multi!.mass, 10);
+    // What that pass wrote, as the option its letter stood for there (A under [no, yes]).
+    expect(result.readout.facets.multi!.sampled).toBe("no");
+    // source_sensitive: a control token in the reversed reply, read by the served order alone.
+    expect(result.readout.facets.source_sensitive).toMatchObject({ choice: "yes", orders: { served: "yes", singlePass: "served" } });
+    expect(result.readout.facets.source_sensitive!.probabilities["yes"]).toBeCloseTo(one.facets.source_sensitive!.probabilities["yes"]!, 10);
+    // domain: neither order read it (no line served, a control token reversed), and the served order's reason stands.
+    expect(result.readout.facets.domain).toBeUndefined();
+    expect(result.readout.misses).toEqual({ domain: { reason: "no_slot" } });
+    expect(result.readout.facets.mode!.orders!.singlePass).toBeUndefined();
+  });
+
+  it("leaves every facet the served order's alone when the reversed call fails, and asks nothing more when the served call fails", async () => {
+    const failed = bothOrdersProvider({ logprobs: reply(SERVED_SLOTS) }, new Error("500 slot unavailable"));
+    const result = await askIntentReadout(failed.provider, { userMessage: "a request" }, { language: "en", bothOrders: true });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const one = parseIntentReadout(reply(SERVED_SLOTS));
+    expect(result.readout.version).toBe(INTENT_READOUT_BOTH_ORDERS_VERSION);
+    expect(result.readout.reversed).toMatchObject({ tokens: 0, failure: "error" });
+    for (const definition of INTENT_FACETS) {
+      expect(result.readout.facets[definition.name], definition.name).toMatchObject({ choice: one.facets[definition.name]!.choice, orders: { singlePass: "served" } });
+      expect(result.readout.facets[definition.name]!.top).toBeCloseTo(one.facets[definition.name]!.top, 10);
+    }
+    const noList = bothOrdersProvider({ logprobs: reply(SERVED_SLOTS) }, { logprobs: [] });
+    const withoutList = await askIntentReadout(noList.provider, { userMessage: "a request" }, { language: "en", bothOrders: true });
+    expect(withoutList.ok && withoutList.readout.reversed?.failure).toBe("no_logprobs");
+    for (const served of [new Error("400 grammar"), { logprobs: [] }] as OrderAnswer[]) {
+      const { provider, calls } = bothOrdersProvider(served, { logprobs: reply(REVERSED_SLOTS) });
+      const outcome = await askIntentReadout(provider, { userMessage: "a request" }, { language: "en", bothOrders: true });
+      expect(outcome.ok).toBe(false);
+      expect(calls).toHaveLength(1);
+    }
+  });
+
+  it("stops at an abort: nothing is sent after it, and one during the reversed call is an aborted readout, never half a reading", async () => {
+    // Aborted while the served call answers: the reversed call is never sent.
+    const early = new AbortController();
+    const first = bothOrdersProvider(async () => {
+      early.abort();
+      return { logprobs: reply(SERVED_SLOTS) };
+    }, { logprobs: reply(REVERSED_SLOTS) });
+    expect(await askIntentReadout(first.provider, { userMessage: "a request" }, { language: "en", bothOrders: true, signal: early.signal })).toMatchObject({ ok: false, reason: "aborted" });
+    expect(first.calls).toHaveLength(1);
+    // Aborted during the reversed call: that call sees the abort, and the served pass is not passed off as the reading.
+    const late = new AbortController();
+    const seen: boolean[] = [];
+    const second = bothOrdersProvider({ logprobs: reply(SERVED_SLOTS) }, (signal) => new Promise((_resolve, reject) => {
+      signal?.addEventListener("abort", () => {
+        seen.push(signal.aborted);
+        reject(new DOMException("aborted", "AbortError"));
+      }, { once: true });
+      setTimeout(() => late.abort(), 5);
+    }));
+    expect(await askIntentReadout(second.provider, { userMessage: "a request" }, { language: "en", bothOrders: true, signal: late.signal })).toMatchObject({ ok: false, reason: "aborted" });
+    expect(second.calls.map((call) => call.reversed)).toEqual([false, true]);
+    expect(seen).toEqual([true]);
   });
 });

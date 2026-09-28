@@ -765,9 +765,9 @@ export const OrchestrationSchema = z.object({
    * the front desk answering is the one direct outcome the readout's "answer directly" can be
    * checked against.
    *
-   * Costs one routing-tier call of about 1 s (plus one for the pre-router when the turn had a
-   * capsule) after every top-level turn, and the readout's ~1k-token prefix can displace a warm
-   * head on a server with one slot until the warm-keeper re-warms it — default "off".
+   * Costs two ~1 s routing-tier calls after every top-level turn, in sequence (the readout in the
+   * served option order, then reversed), plus one for the pre-router when there was a capsule; their
+   * two ~1k-token prefixes can displace a warm head on a one-slot server until re-warmed — default "off".
    */
   intentReadout: z.enum(["off", "shadow"]).default("off"),
   /**
