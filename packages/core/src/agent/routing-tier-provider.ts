@@ -13,7 +13,7 @@
  * tool path (tools/sub-agent.ts) need it, and importing the turn from a tool would close a
  * cycle.
  */
-import { applyActiveModelPreset, createChatProvider, getChatProviderForTier, tierModelDefaults } from "../providers/index.js";
+import { applyActiveModelPreset, createChatProvider, getActiveModelPreset, getChatProviderForTier, tierModelDefaults } from "../providers/index.js";
 import type { ChatProvider } from "../providers/index.js";
 import { getConfig } from "../config/loader.js";
 
@@ -23,4 +23,16 @@ export function resolveRoutingTierProvider(): ChatProvider {
       ...applyActiveModelPreset(getConfig().agents.defaults.model),
       ...tierModelDefaults("routing"),
     });
+}
+
+/**
+ * The model id routing-tier work goes to, by the rule above: the tier's own model, or — under a
+ * model preset (where getChatProviderForTier returns null), or with no tier configured — the turn's
+ * own. Its provider prefix ("anthropic/…") tells a caller that needs what only a llama.cpp server
+ * gives (a GBNF grammar, token logprobs) that the call would be paid for and could not answer.
+ */
+export function routingTierModelId(): string {
+  const config = getConfig();
+  const tierModel = getActiveModelPreset(config) ? undefined : config.agents.defaults.model.tiers?.["routing"];
+  return tierModel ?? applyActiveModelPreset(config.agents.defaults.model).primary;
 }

@@ -283,7 +283,29 @@ and reported a missing embedding model.
 pnpm --filter @starlingai/core routing:prerouter                        # every case, K = 8
 pnpm --filter @starlingai/core routing:prerouter -- --train-out <file>  # also write training items
 pnpm --filter @starlingai/core routing:prerouter -- --split test        # after fine-tuning on them
+pnpm --filter @starlingai/core routing:prerouter -- --cases eval/routing/live-cases.jsonl --cases eval/routing/none-cases.example.jsonl
 ```
+
+`--cases` may be given more than once: the files are read in order and scored as one corpus, and an
+id used in two of them is refused. The last line adds `none-cases.example.jsonl` to the live cases: 79
+synthetic messages (40 German, 39 English) whose right answer is no specialist. They fall into three kinds,
+tagged:
+
+- `direct-answer`: small talk, the assistant itself, a concept, a calculation, a short rewrite;
+- `clarify`: the goal or the input is missing;
+- `multi-step-chain`: two short steps for two different specialists.
+
+Without them the "none" rows below are empty. Why 79: a flawless answerer on n none cases reaches a
+Wilson lower bound of n / (n + 1.96²). Stage 1 waits for 0.95, which takes 73 cases, so with the 47 of
+the first draft (at most 0.924) the stage would have failed on the count alone.
+
+With the none cases in the corpus, the pooled **top-1** row moves with their share: they are easy by
+design, and an answerer right on 78% of the 138 live cases and on every none case pools to 86%. So
+stage 1's top-1 is the one on the gold-agent cases (its own row, "top-1 on gold-agent cases"), and the
+none cases count only through the none recall. The gate simulation and the confidence curve never take
+a "none" pick, so a none case enters them only as a specialist wrongly dispatched, and in the coverage's
+denominator: coverage there falls with the none share, the error rate does not. `--limit` takes the first
+n cases of the files in order, so a limited run with the live file first holds no none case.
 
 On real turns the orchestrator's first call only routed in 17 of 19: a `search_agents`, one
 delegation or a one-step plan, at 4.9-12.4 s a turn. This asks whether Laya, handed the
@@ -310,7 +332,7 @@ case, `questions.jsonl` with exactly what Laya was sent, and the run's own audit
 |---|---|
 | capsule recall, option recall | whether a right agent was offered at all. Laya chooses among the options and cannot find a missing one, so these cap everything below |
 | embedding top-1, always the majority label | what a pre-router costs without Laya, and what a classifier that learned the label skew would score |
-| Laya top-1, given a right option | its accuracy, and its accuracy where it had a chance |
+| Laya top-1, on gold-agent cases, given a right option | its accuracy (pooled, gold none included), on the specialist cases alone (stage 1's), and where it had a chance |
 | Laya says none when nothing right was offered | the only view this corpus gives of whether Laya knows when to hand a turn back |
 | discordant pairs against the embedding | whether Laya's right answers are ones the embedding already had (exact McNemar p) |
 | per-label accuracy, pick concentration | a classifier that answers one label for everything looks accurate on a skewed corpus |
@@ -340,10 +362,12 @@ it today.
 
 ### What it cannot tell you
 
-- **The none class.** Every live case expects a specialist. A case with `"expect": {"admitted": false}`
-  and no agent named is scored as gold none (a direct answer, a multi-step request), and
-  `routing:eval` reads it the same way, as "nothing should be admitted". Until such cases
-  exist, whether Laya leaves those turns to the orchestrator is untested, and the report says so.
+- **The none class, from the live cases alone.** Every live case expects a specialist. A case with
+  `"expect": {"admitted": false}` and no agent named is scored as gold none. `none-cases.example.jsonl`
+  holds such cases; without it, whether the answerer leaves those turns to the orchestrator is
+  untested, and the report says so. `routing:eval` reads the same field differently, as "the embedding
+  admits nothing", and a multi-step chain may well admit the specialists of its parts. So the none
+  file is for the pre-router only; do not add it to a `routing:eval` run.
 - **Follow-ups.** The cases are single messages. A "same agent as last turn" rule was right on 11
   of 12 real follow-ups, but it needs a session, so it is not a baseline here. A pre-router that
   skips the orchestrator must still pass on the context a follow-up leans on.

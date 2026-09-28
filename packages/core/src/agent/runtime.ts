@@ -22,6 +22,7 @@ import { DeadlineAbort, salvageToolCallArguments } from "../providers/lmstudio.j
 import type { ChatProvider, LLMMessage, LLMResponse, StreamChunk } from "../providers/lmstudio.js";
 import { assembleTurnSystemMessages } from "./turn-system-prompt.js";
 import { markOrchestratorActivity, markOrchestratorIdle } from "./cache-warmer.js";
+import { intentShadowTurnEnded, intentShadowTurnStarted, type IntentShadowHandle } from "./intent-shadow.js";
 import { filterForcedOrchestrationTools } from "./forced-orchestration-tools.js";
 import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type SwarmState, type ToolContext } from "../tools/registry.js";
 import { isToolAllowed } from "../guardrails/tool-tiers.js";
@@ -1079,6 +1080,11 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
   // Tell the prompt-cache warm-keeper the orchestrator model is busy (abort any
   // in-flight warm-up so it never queues ahead of this turn); re-arm on completion.
   markOrchestratorActivity();
+  // The intent readout's post-turn shadow (orchestration.intentReadout, agent/intent-shadow.ts):
+  // every turn start aborts a shadow in flight, and a shadowed turn's reply is out before its
+  // shadow is asked. `delivered` stays undefined for a turn that threw.
+  let intentShadow: IntentShadowHandle | undefined;
+  let delivered: TurnOutput | undefined;
   try {
     // Run the ENTIRE turn under the authenticated user's request context so that
     // prompt assembly, personality, the user-model, and durable memory all see the
@@ -1101,7 +1107,18 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
     // nested turn, whose "message" is a workflow step written by the swarm, not by the person.
     const userMessageLanguage = currentRequestContext()?.userMessageLanguage
       ?? detectTurnUserLanguage(opts.userMessage, opts.session.getHistory());
-    return await runWithRequestContext(
+    intentShadow = intentShadowTurnStarted({
+      sessionId: opts.session.id,
+      turnId,
+      ...(opts.session.userId ? { userId: opts.session.userId } : {}),
+      channel: opts.session.channel,
+      userMessage: opts.userMessage,
+      // Read now, before the turn records its message: the same digest the facet triage reads.
+      priorTurnDigest: () => buildPriorTurnDigest(opts.session),
+      // Any attribution already set means a turn (or a sub-agent) is running this one.
+      nested: currentRequestContext()?.callSite !== undefined,
+    });
+    delivered = await runWithRequestContext(
       {
         userId: opts.session.userId,
         sessionId: opts.session.id,
@@ -1115,8 +1132,10 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
       },
       () => runWithPhaseTimings(() => runTurnImpl(opts)),
     );
+    return delivered;
   } finally {
     markOrchestratorIdle();
+    intentShadowTurnEnded(intentShadow, delivered);
   }
 }
 

@@ -1,0 +1,98 @@
+// Pre-router "none" cases: messages whose right answer is NO specialist, so the orchestrator keeps the turn.
+// SYNTHETIC and hand-labelled; no message comes from a user conversation.
+//
+// For routing:prerouter only. `"expect": {"admitted": false}` with no agent named is how that bench reads gold none
+// (agent/pre-router-bench.ts preRouteGold). routing:eval reads the same field as "the embedding admits nothing", a
+// different question: a multi-step chain may well admit the specialists of its parts. Do not add this file to a
+// routing:eval run.
+//
+// Three kinds, tagged:
+//   direct-answer    small talk, the assistant itself, a concept, a calculation on given numbers, a short rewrite or
+//                    translation: the orchestrator answers in its own reply, no tool, no lookup.
+//   clarify          the goal or the input is missing and nothing in the message supplies it: only the orchestrator
+//                    can ask back; any specialist would guess.
+//   multi-step-chain two short steps for two different specialists, the second depending on the first: a
+//                    single dispatch does half the job. These are short chains the orchestrator plans itself, not
+//                    the decompose-and-merge missions the catalog's coordinators exist for (those name a coordinator
+//                    in live-cases.jsonl).
+//
+// Run: pnpm --filter @starlingai/core routing:prerouter -- --backend readout --cases eval/routing/live-cases.jsonl --cases eval/routing/none-cases.example.jsonl
+{"id":"none-de-001","query":"Moin! Na, alles fit bei dir?","language":"de","note":"A greeting that asks nothing a tool could answer.","expect":{"admitted":false},"tags":["direct-answer","greeting"]}
+{"id":"none-de-002","query":"Vielen Dank, das hat mir echt weitergeholfen.","language":"de","note":"Thanks after a finished turn: nothing to do.","expect":{"admitted":false},"tags":["direct-answer","thanks"]}
+{"id":"none-de-003","query":"Wie heißt du eigentlich?","language":"de","note":"A question about the assistant itself, answered from what it knows about itself.","expect":{"admitted":false},"tags":["direct-answer","about-assistant"]}
+{"id":"none-de-004","query":"Was kannst du alles?","language":"de","note":"Capabilities in broad terms: the orchestrator's own answer, not any one specialist's.","expect":{"admitted":false},"tags":["direct-answer","about-assistant"]}
+{"id":"none-de-005","query":"Was ist der Unterschied zwischen Zins und Zinseszins?","language":"de","note":"A concept from stable general knowledge; no current figure is asked.","expect":{"admitted":false},"tags":["direct-answer","concept"]}
+{"id":"none-de-006","query":"Wie viel sind 3 mal 17?","language":"de","note":"Arithmetic on the numbers given, answered in the reply; a sandbox run would be slower than the answer.","expect":{"admitted":false},"tags":["direct-answer","calculation"]}
+{"id":"none-de-007","query":"Schreibt man in 'seit gestern' seit oder seid?","language":"de","note":"A spelling question from general knowledge.","expect":{"admitted":false},"tags":["direct-answer","grammar"]}
+{"id":"none-de-008","query":"Was heißt 'Guten Appetit' auf Italienisch?","language":"de","note":"A two-word translation, answered in the reply.","expect":{"admitted":false},"tags":["direct-answer","translate"]}
+{"id":"none-de-009","query":"Formulier den Satz etwas lockerer: 'Wir bitten um zeitnahe Rückmeldung.'","language":"de","note":"A one-sentence rewrite of the user's own text: no document, no tool.","expect":{"admitted":false},"tags":["direct-answer","own-text"]}
+{"id":"none-de-010","query":"Erklär mir in zwei Sätzen, was eine Blockchain ist, ohne was nachzuschauen.","language":"de","note":"A concept in principle, and the user asks for no lookup.","expect":{"admitted":false},"tags":["direct-answer","concept","do-not-look-up"]}
+{"id":"none-de-011","query":"Ich hatte einen anstrengenden Tag, erzähl mir was Nettes.","language":"de","note":"Chit-chat: the reply is the whole job.","expect":{"admitted":false},"tags":["direct-answer","small-talk"]}
+{"id":"none-de-012","query":"Hab heute meinen Führerschein bekommen!","language":"de","note":"News about the user that asks for nothing.","expect":{"admitted":false},"tags":["direct-answer","news-about-self"]}
+{"id":"none-de-013","query":"ok, passt so","language":"de","note":"An acknowledgement.","expect":{"admitted":false},"tags":["direct-answer","one-word"]}
+{"id":"none-de-014","query":"Warum sind Blätter eigentlich grün?","language":"de","note":"A science question from stable general knowledge.","expect":{"admitted":false},"tags":["direct-answer","concept"]}
+{"id":"none-de-015","query":"Kannst du mir bei was helfen?","language":"de","note":"An opener with no task yet: the reply asks what it is about.","expect":{"admitted":false},"tags":["direct-answer","opener"]}
+{"id":"none-de-016","query":"Mach das bitte.","language":"de","note":"No referent and no earlier turn: only the orchestrator can ask what is meant.","expect":{"admitted":false},"tags":["clarify","no-context"]}
+{"id":"none-de-017","query":"Schick es ihr.","language":"de","note":"Neither the thing nor the recipient is known; a mail specialist would have to guess both.","expect":{"admitted":false},"tags":["clarify","no-context"]}
+{"id":"none-de-018","query":"Wie war das nochmal mit dem Ding von vorhin?","language":"de","note":"Refers to something the message does not carry.","expect":{"admitted":false},"tags":["clarify","no-context"]}
+{"id":"none-de-019","query":"Ändere das so, wie wir es besprochen haben.","language":"de","note":"The change and its object are both outside the message.","expect":{"admitted":false},"tags":["clarify","no-context"]}
+{"id":"none-de-020","query":"Ich brauche da was für morgen.","language":"de","note":"A goal with no content: the orchestrator asks back.","expect":{"admitted":false},"tags":["clarify","vague"]}
+{"id":"none-de-021","query":"Schau nach, wie morgen das Wetter in Bremen wird, und wenn es regnet, verschieb meinen Termin 'Grillen' auf Sonntag.","language":"de","note":"A lookup, then a calendar change that depends on it: two specialists in sequence, planned by the orchestrator.","expect":{"admitted":false},"tags":["multi-step-chain"]}
+{"id":"none-de-022","query":"Finde heraus, wann heute der letzte Zug von Kassel nach Göttingen fährt, und trag ihn mir in den Kalender ein.","language":"de","note":"A timetable lookup feeding a calendar entry: neither specialist does both.","expect":{"admitted":false},"tags":["multi-step-chain"]}
+{"id":"none-de-023","query":"Lies die Datei error.log, erklär mir den Fehler und leg dafür ein Issue im Repo an.","language":"de","note":"Log reading, then an issue written from its result: two capabilities in sequence.","expect":{"admitted":false},"tags":["multi-step-chain","attachment"]}
+{"id":"none-de-024","query":"Mach aus den Zahlen in zahlen.csv ein Diagramm und schick es per Mail an meinen Chef.","language":"de","note":"A chart, then a mail carrying it: a single dispatch does half the job.","expect":{"admitted":false},"tags":["multi-step-chain","attachment"]}
+{"id":"none-en-001","query":"Hello! How are you doing today?","language":"en","note":"A greeting that asks nothing a tool could answer.","expect":{"admitted":false},"tags":["direct-answer","greeting"]}
+{"id":"none-en-002","query":"Cheers, that's perfect.","language":"en","note":"Thanks after a finished turn.","expect":{"admitted":false},"tags":["direct-answer","thanks"]}
+{"id":"none-en-003","query":"Are you a human or a bot?","language":"en","note":"A question about the assistant itself.","expect":{"admitted":false},"tags":["direct-answer","about-assistant"]}
+{"id":"none-en-004","query":"What languages do you speak?","language":"en","note":"The assistant's own abilities in broad terms.","expect":{"admitted":false},"tags":["direct-answer","about-assistant"]}
+{"id":"none-en-005","query":"What's the difference between a simile and a metaphor?","language":"en","note":"A definition from stable general knowledge.","expect":{"admitted":false},"tags":["direct-answer","concept"]}
+{"id":"none-en-006","query":"What's 15 percent of 80?","language":"en","note":"Arithmetic on the numbers given.","expect":{"admitted":false},"tags":["direct-answer","calculation"]}
+{"id":"none-en-007","query":"Is it 'affect' or 'effect' in 'the weather affected my mood'?","language":"en","note":"A usage question from general knowledge.","expect":{"admitted":false},"tags":["direct-answer","grammar"]}
+{"id":"none-en-008","query":"How do you say 'thank you' in Japanese?","language":"en","note":"A two-word translation.","expect":{"admitted":false},"tags":["direct-answer","translate"]}
+{"id":"none-en-009","query":"Make this sound less stiff: 'Kindly revert at your earliest convenience.'","language":"en","note":"A one-sentence rewrite of the user's own text.","expect":{"admitted":false},"tags":["direct-answer","own-text"]}
+{"id":"none-en-010","query":"Without looking anything up, explain in two sentences what a VPN does.","language":"en","note":"A concept in principle; the user asks for no lookup.","expect":{"admitted":false},"tags":["direct-answer","concept","do-not-look-up"]}
+{"id":"none-en-011","query":"Rough day. Tell me something cheerful.","language":"en","note":"Chit-chat: the reply is the whole job.","expect":{"admitted":false},"tags":["direct-answer","small-talk"]}
+{"id":"none-en-012","query":"I finally finished painting the kitchen!","language":"en","note":"News about the user that asks for nothing.","expect":{"admitted":false},"tags":["direct-answer","news-about-self"]}
+{"id":"none-en-013","query":"alright, thanks","language":"en","note":"An acknowledgement.","expect":{"admitted":false},"tags":["direct-answer","one-word"]}
+{"id":"none-en-014","query":"Why does ice float on water?","language":"en","note":"A science question from stable general knowledge.","expect":{"admitted":false},"tags":["direct-answer","concept"]}
+{"id":"none-en-015","query":"Do that again.","language":"en","note":"No referent and no earlier turn.","expect":{"admitted":false},"tags":["clarify","no-context"]}
+{"id":"none-en-016","query":"Send it to her.","language":"en","note":"Neither the thing nor the recipient is known.","expect":{"admitted":false},"tags":["clarify","no-context"]}
+{"id":"none-en-017","query":"Fix it the way we discussed.","language":"en","note":"The change and its object are both outside the message.","expect":{"admitted":false},"tags":["clarify","no-context"]}
+{"id":"none-en-018","query":"I need something for tomorrow.","language":"en","note":"A goal with no content.","expect":{"admitted":false},"tags":["clarify","vague"]}
+{"id":"none-en-019","query":"Can you handle the thing from earlier?","language":"en","note":"Refers to something the message does not carry.","expect":{"admitted":false},"tags":["clarify","no-context"]}
+{"id":"none-en-020","query":"Check tomorrow's weather in Leeds and, if it's going to rain, move my 'picnic' event to Sunday.","language":"en","note":"A lookup, then a calendar change that depends on it.","expect":{"admitted":false},"tags":["multi-step-chain"]}
+{"id":"none-en-021","query":"Find out when the last train from Oxford to London leaves tonight and add it to my calendar.","language":"en","note":"A timetable lookup feeding a calendar entry.","expect":{"admitted":false},"tags":["multi-step-chain"]}
+{"id":"none-en-022","query":"Read error.log, explain what went wrong and open an issue for it in the repo.","language":"en","note":"Log reading, then an issue written from its result.","expect":{"admitted":false},"tags":["multi-step-chain","attachment"]}
+{"id":"none-en-023","query":"Turn the numbers in figures.csv into a chart and email it to my manager.","language":"en","note":"A chart, then a mail carrying it.","expect":{"admitted":false},"tags":["multi-step-chain","attachment"]}
+{"id":"none-de-025","query":"Hi, schön dass es dich gibt!","language":"de","note":"A friendly opener that asks nothing.","expect":{"admitted":false},"tags":["direct-answer","greeting"]}
+{"id":"none-de-026","query":"Kannst du mir kurz erklären, was ein Algorithmus ist?","language":"de","note":"A concept from stable general knowledge.","expect":{"admitted":false},"tags":["direct-answer","concept"]}
+{"id":"none-de-027","query":"Was ist die Hälfte von 350?","language":"de","note":"Arithmetic on the number given.","expect":{"admitted":false},"tags":["direct-answer","calculation"]}
+{"id":"none-de-028","query":"Wie schreibt man Rhythmus richtig?","language":"de","note":"A spelling question from general knowledge.","expect":{"admitted":false},"tags":["direct-answer","grammar"]}
+{"id":"none-de-029","query":"Passt 'effektiv' oder 'effizient' besser, wenn ich Zeit spare?","language":"de","note":"A word-choice question answered in the reply.","expect":{"admitted":false},"tags":["direct-answer","grammar"]}
+{"id":"none-de-030","query":"Sag mal, wirst du eigentlich nie müde?","language":"de","note":"A question about the assistant itself.","expect":{"admitted":false},"tags":["direct-answer","about-assistant"]}
+{"id":"none-de-031","query":"Danke, du hast mir den Tag gerettet!","language":"de","note":"Thanks after a finished turn.","expect":{"admitted":false},"tags":["direct-answer","thanks"]}
+{"id":"none-de-032","query":"Was ist ein anderes Wort für 'wichtig'?","language":"de","note":"A synonym from general knowledge.","expect":{"admitted":false},"tags":["direct-answer","grammar"]}
+{"id":"none-de-033","query":"Formulier 'Ich kann leider nicht kommen' etwas höflicher.","language":"de","note":"A one-sentence rewrite of the user's own text.","expect":{"admitted":false},"tags":["direct-answer","own-text"]}
+{"id":"none-de-034","query":"Warum gibt es eigentlich Schaltjahre?","language":"de","note":"A science question from stable general knowledge.","expect":{"admitted":false},"tags":["direct-answer","concept"]}
+{"id":"none-de-035","query":"Mach das nochmal.","language":"de","note":"No referent and no earlier turn.","expect":{"admitted":false},"tags":["clarify","no-context"]}
+{"id":"none-de-036","query":"Kannst du das anpassen?","language":"de","note":"Neither the object nor the change is in the message.","expect":{"admitted":false},"tags":["clarify","no-context"]}
+{"id":"none-de-037","query":"Ich hab da ein Problem.","language":"de","note":"A need with no content: the orchestrator asks what it is.","expect":{"admitted":false},"tags":["clarify","vague"]}
+{"id":"none-de-038","query":"Schick mir das bitte nochmal.","language":"de","note":"Refers to something the message does not carry.","expect":{"admitted":false},"tags":["clarify","no-context"]}
+{"id":"none-de-039","query":"Such die Adresse der Stadtbücherei Ulm raus und schick sie meiner Mutter per SMS.","language":"de","note":"A lookup, then a message carrying its result.","expect":{"admitted":false},"tags":["multi-step-chain"]}
+{"id":"none-de-040","query":"Rechne in kosten.xlsx die Summe aus und trag den Betrag als Erinnerung für Freitag in meinen Kalender ein.","language":"de","note":"A calculation on a file, then a calendar entry from its result.","expect":{"admitted":false},"tags":["multi-step-chain","attachment"]}
+{"id":"none-en-024","query":"Good morning! Hope you're having a nice day.","language":"en","note":"A greeting that asks nothing.","expect":{"admitted":false},"tags":["direct-answer","greeting"]}
+{"id":"none-en-025","query":"What does 'ephemeral' mean?","language":"en","note":"A definition from general knowledge.","expect":{"admitted":false},"tags":["direct-answer","concept"]}
+{"id":"none-en-026","query":"What's half of 350?","language":"en","note":"Arithmetic on the number given.","expect":{"admitted":false},"tags":["direct-answer","calculation"]}
+{"id":"none-en-027","query":"Is it 'who' or 'whom' in 'to ___ it may concern'?","language":"en","note":"A usage question from general knowledge.","expect":{"admitted":false},"tags":["direct-answer","grammar"]}
+{"id":"none-en-028","query":"Give me another word for 'important'.","language":"en","note":"A synonym from general knowledge.","expect":{"admitted":false},"tags":["direct-answer","grammar"]}
+{"id":"none-en-029","query":"Do you ever get bored?","language":"en","note":"A question about the assistant itself.","expect":{"admitted":false},"tags":["direct-answer","about-assistant"]}
+{"id":"none-en-030","query":"Thanks, you saved my afternoon.","language":"en","note":"Thanks after a finished turn.","expect":{"admitted":false},"tags":["direct-answer","thanks"]}
+{"id":"none-en-031","query":"Make 'I can't make it' sound a bit more polite.","language":"en","note":"A one-sentence rewrite of the user's own text.","expect":{"admitted":false},"tags":["direct-answer","own-text"]}
+{"id":"none-en-032","query":"Why do we have leap years?","language":"en","note":"A science question from stable general knowledge.","expect":{"admitted":false},"tags":["direct-answer","concept"]}
+{"id":"none-en-033","query":"ok got it","language":"en","note":"An acknowledgement.","expect":{"admitted":false},"tags":["direct-answer","one-word"]}
+{"id":"none-en-034","query":"Change it.","language":"en","note":"Neither the object nor the change is in the message.","expect":{"admitted":false},"tags":["clarify","no-context"]}
+{"id":"none-en-035","query":"Can you send that again?","language":"en","note":"Refers to something the message does not carry.","expect":{"admitted":false},"tags":["clarify","no-context"]}
+{"id":"none-en-036","query":"I have a problem.","language":"en","note":"A need with no content.","expect":{"admitted":false},"tags":["clarify","vague"]}
+{"id":"none-en-037","query":"Do the same for the other one.","language":"en","note":"No referent and no earlier turn.","expect":{"admitted":false},"tags":["clarify","no-context"]}
+{"id":"none-en-038","query":"Look up the address of the Leeds Central Library and text it to my mom.","language":"en","note":"A lookup, then a message carrying its result.","expect":{"admitted":false},"tags":["multi-step-chain"]}
+{"id":"none-en-039","query":"Sum up the totals in costs.xlsx and add the amount as a reminder in my calendar for Friday.","language":"en","note":"A calculation on a file, then a calendar entry from its result.","expect":{"admitted":false},"tags":["multi-step-chain","attachment"]}

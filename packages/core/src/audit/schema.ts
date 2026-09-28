@@ -101,6 +101,9 @@ export type CoreAuditEventType =
   | "prompt_section_sizes"
   | "tool_restriction_refused"
   | "routing_triage_decided"
+  /** The intent readout asked after a turn, beside what the turn did (agent/intent-shadow.ts,
+   *  orchestration.intentReadout). Letters, probabilities, agent names and lengths only. */
+  | "intent_readout_shadow"
   | "discovery_prefetch"
   | "history_compacted"
   | "session_memory_consolidated"

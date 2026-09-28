@@ -133,6 +133,35 @@ describe("turn grouping", () => {
     expect(contexts.offTurnCalls.some((call) => call.rowId === "rewarm-1")).toBe(true);
   });
 
+  it("keeps the intent readout's post-turn shadow off the turn it measures", () => {
+    // agent/intent-shadow.ts: asked after turn 1's reply (message_sent 19:18:34.049), under the
+    // turn's session so it can be joined to it, and aborted by the next turn — nothing waits on it.
+    const rows: AuditRow[] = [
+      ...fixtureRows(),
+      {
+        id: "shadow-1", timestamp: "2026-09-25T19:18:34.300Z", type: "provider_model_call", sessionId: SESSION,
+        data: { callSite: "intent_shadow", agentName: "intent_readout", mode: "complete", durationMs: 1_050, promptTokens: 980, completionTokens: 41, toolCount: 0 },
+      },
+      {
+        id: "shadow-2", timestamp: "2026-09-25T19:18:35.500Z", type: "provider_model_call", sessionId: SESSION,
+        data: { callSite: "intent_shadow", agentName: "pre_router_readout", mode: "complete", durationMs: 420, promptTokens: 610, completionTokens: 1, toolCount: 0 },
+      },
+      {
+        id: "shadow-3", timestamp: "2026-09-25T19:18:35.510Z", type: "intent_readout_shadow", sessionId: SESSION,
+        data: { version: "intent-readout-v1", status: "ok" },
+      },
+    ];
+    const report = attributeLatency(rows);
+    const base = attributeLatency(fixtureRows());
+    expect(report.turns.map((turn) => turn.llm.calls)).toEqual([7, 4, 8, 13]);
+    expect(report.turns.map((turn) => turn.wallMs)).toEqual(base.turns.map((turn) => turn.wallMs));
+    expect(report.totals.offTurnCalls).toBe(base.totals.offTurnCalls + 2);
+    expect(report.callSites.filter((s) => !s.offTurn).some((s) => s.callSite === "intent_shadow")).toBe(false);
+    const contexts = buildTurnContexts(rows);
+    expect(contexts.offTurnRows).toBe(buildTurnContexts(fixtureRows()).offTurnRows + 3);
+    expect(contexts.turns[0]!.calls.some((call) => call.callSite === "intent_shadow")).toBe(false);
+  });
+
   it("separates rendering and the human settings dialog from the rest of the turn", () => {
     const t3 = attributeLatency(fixtureRows()).turns[2]!;
     // generate_image 19:21:38.038 → 19:28:55.510 = 437,472 ms, of which the user spent 22,203 ms in the dialog.

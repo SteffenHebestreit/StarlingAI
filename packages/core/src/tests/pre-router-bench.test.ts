@@ -4,6 +4,9 @@
  * replace the orchestrator's routing round. Pure logic only — no model, no sidecar, no network.
  */
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   CAPSULE_MAX_AGENTS,
@@ -47,6 +50,7 @@ import {
   shortenToTokens,
   simulateGate,
   splitOf,
+  STAGE_ONE_MIN_NONE_RECALL_LOWER_BOUND,
   stageOneCriteria,
   trainingLabelKey,
   type GateSimulation,
@@ -55,7 +59,7 @@ import {
 } from "../agent/pre-router-bench.js";
 import { GATE_LEVELS, wilsonLowerBound } from "../decisions/gate.js";
 import { applyTemperature, buildReadoutMessages, LETTERS } from "../decisions/logit-readout.js";
-import type { RoutingEvalCase } from "../agent/routing-eval.js";
+import { lintCases, parseCaseFile, type RoutingEvalCase } from "../agent/routing-eval.js";
 
 const LONG = "Web research specialist that finds external sources for a single topic and reports verifiable facts "
   + "with exact source attribution — official documentation, specifications and standards, release notes, vendor "
@@ -221,6 +225,31 @@ describe("the gold of a routing case", () => {
     expect(preRouteGold(routingCase({ acceptable: ["a"] }, { flags: { directiveAgent: "a" } }))).toHaveProperty("skip");
     expect(preRouteGold(routingCase({ admitted: true }))).toHaveProperty("skip");
   });
+
+  describe("the committed gold-none cases (eval/routing/none-cases.example.jsonl)", () => {
+    const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
+    const read = (name: string) => parseCaseFile(readFileSync(join(repo, "eval", "routing", name), "utf8"));
+    const none = read("none-cases.example.jsonl");
+
+    it("are enough for stage 1's none-recall bound to be reachable, all gold none, in German and English, each kind in both", () => {
+      expect(lintCases(none)).toEqual([]);
+      // Flawless, n cases reach a Wilson lower bound of n / (n + 1.96²): 47 reach 0.924, and stage 1
+      // waits for 0.95, which needs 73. Fewer cases would fail the stage on the count alone.
+      expect(wilsonLowerBound(none.length, none.length)).toBeGreaterThanOrEqual(STAGE_ONE_MIN_NONE_RECALL_LOWER_BOUND);
+      for (const evalCase of none) expect(preRouteGold(evalCase), evalCase.id).toEqual({ gold: { kind: "none" } });
+      for (const language of ["de", "en"] as const) {
+        const mine = none.filter((evalCase) => evalCase.language === language);
+        expect(mine.length, language).toBeGreaterThanOrEqual(15);
+        for (const kind of ["direct-answer", "clarify", "multi-step-chain"]) {
+          expect(mine.some((evalCase) => evalCase.tags?.includes(kind)), `${language} ${kind}`).toBe(true);
+        }
+      }
+    });
+
+    it("join the live example cases without an id clash", () => {
+      expect(lintCases([...read("live-cases.example.jsonl"), ...none])).toEqual([]);
+    });
+  });
 });
 
 describe("the halves", () => {
@@ -321,6 +350,7 @@ describe("scoring", () => {
     expect(score.laya.answered).toBe(5);
     expect(score.laya.failed).toBe(1);
     expect(score.laya.top1).toEqual({ hit: 2, of: 5 });
+    expect(score.laya.top1Agents).toEqual({ hit: 2, of: 4 });
     expect(score.laya.givenOptions).toEqual({ hit: 2, of: 3 });
     expect(score.laya.abstainWhenUnreachable).toEqual({ hit: 1, of: 1 });
     expect(score.laya.noneRecall).toEqual({ hit: 0, of: 1 });
@@ -731,7 +761,7 @@ describe("the command line", () => {
       "--train-out", "t.jsonl", "--describe", "oneliner", "--keying", "answer", "--target", "0.95",
       "--min-samples", "35", "--round-ms", "5000", "--min-coverage", "0.2", "--limit", "10", "--no-laya",
     ])).toEqual({
-      cases: "x.jsonl", k: 12, layaUrl: "http://h:1", out: "o", split: "test", trainOut: "t.jsonl",
+      cases: ["x.jsonl"], k: 12, layaUrl: "http://h:1", out: "o", split: "test", trainOut: "t.jsonl",
       describe: "oneliner", keying: "answer", target: 0.95, minSamples: 35, roundMs: 5_000, minCoverage: 0.2,
       limit: 10, noLaya: true,
     });
@@ -739,6 +769,12 @@ describe("the command line", () => {
 
   it("passes over the separator pnpm may hand through", () => {
     expect(parsePreRouterArgs(["--", "--k", "4"]).k).toBe(4);
+  });
+
+  it("keeps every --cases file in order, so the gold-none cases can join the live ones, and refuses one given twice", () => {
+    expect(parsePreRouterArgs(["--cases", "live.jsonl", "--k", "4", "--cases", "none.jsonl"]).cases).toEqual(["live.jsonl", "none.jsonl"]);
+    expect(parsePreRouterArgs([]).cases).toBeUndefined();
+    expect(() => parsePreRouterArgs(["--cases", "a.jsonl", "--cases", "a.jsonl"])).toThrow(/given twice/);
   });
 
   it("refuses K 20, which would send 21 options, and any other mistake rather than running the defaults", () => {
@@ -847,16 +883,33 @@ describe("the readout backend", () => {
     expect(one!.temperature, "fold 1 is scored at fold 0's temperature").toBeGreaterThan(1);
   });
 
-  it("puts the top-1 threshold exactly at 85%", () => {
+  it("puts the top-1 threshold exactly at 85%, on the gold-agent cases", () => {
     const keys = ["a", "b", "c", NONE_KEY];
     const cases = (right: number, wrong: number) => [
       ...Array.from({ length: right }, () => obs({ gold: { kind: "agents", acceptable: ["a"] }, laya: readoutPick([-0.05, -4, -5, -5], keys) })),
       ...Array.from({ length: wrong }, () => obs({ gold: { kind: "agents", acceptable: ["b"] }, laya: readoutPick([-0.05, -4, -5, -5], keys) })),
       ...Array.from({ length: 80 }, () => obs({ gold: { kind: "none" }, laya: readoutPick([-5, -5, -5, -0.05], keys) })),
     ];
-    // 170 of 200 is 85%; 169 of 200 is not.
-    expect(stageOneCriteria(scorePreRoute(cases(90, 30))).met).toBe(true);
-    expect(stageOneCriteria(scorePreRoute(cases(89, 31))).met).toBe(false);
+    // 102 of 120 specialist cases is 85%; 101 of 120 is not, whatever the 80 none cases add.
+    expect(stageOneCriteria(scorePreRoute(cases(102, 18))).met).toBe(true);
+    expect(stageOneCriteria(scorePreRoute(cases(101, 19))).met).toBe(false);
+  });
+
+  it("never lets the gold-none cases carry the specialist top-1 over the threshold", () => {
+    const keys = ["a", "b", "c", NONE_KEY];
+    // The 138 live cases at 78% and the 79 none cases all right: 187 of 217 pooled, 86%.
+    const observations = [
+      ...Array.from({ length: 108 }, () => obs({ gold: { kind: "agents", acceptable: ["a"] }, laya: readoutPick([-0.05, -4, -5, -5], keys) })),
+      ...Array.from({ length: 30 }, () => obs({ gold: { kind: "agents", acceptable: ["b"] }, laya: readoutPick([-0.05, -4, -5, -5], keys) })),
+      ...Array.from({ length: 79 }, () => obs({ gold: { kind: "none" }, laya: readoutPick([-5, -5, -5, -0.05], keys) })),
+    ];
+    const score = scorePreRoute(observations);
+    expect(score.laya.top1).toEqual({ hit: 187, of: 217 });
+    expect(score.laya.top1Agents).toEqual({ hit: 108, of: 138 });
+    const stage = stageOneCriteria(score);
+    expect(stage.top1).toBeCloseTo(108 / 138, 9);
+    expect(stage.met).toBe(false);
+    expect(stage.reasons.join(" ")).toContain("gold-agent");
   });
 
   it("says stage 1 is met only at 85% top-1 and a none-recall lower bound of 0.95", () => {

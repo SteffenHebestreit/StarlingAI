@@ -57,9 +57,10 @@ export const TEMPERATURE_BOUNDS = Object.freeze({ min: 0.05, max: 20 });
  * Thinking off by both fields, as the synthesis passes send it (agent/sub-agent.ts
  * SYNTHESIS_CALL_CONTROLS): the enable_thinking family withholds the flag when a graded pin vetoes
  * it, and an explicit "none" is the only value that reaches the wire past that pin. A thinking
- * model's first token would be `<think>`, which is no answer.
+ * model's first token would be `<think>`, which is no answer. Exported for the intent readout
+ * (decisions/intent-readout.ts), whose slots are read the same way.
  */
-const READOUT_CONTROLS = { enableThinking: false, reasoningEffort: "none" } as const;
+export const READOUT_CONTROLS = { enableThinking: false, reasoningEffort: "none" } as const;
 
 /** What a readout asks: a decision point's definition fits as it is. */
 export interface ReadoutQuestion {
@@ -167,11 +168,16 @@ export interface LetterDistribution {
 /**
  * The option letters' log-probabilities from one token's top list, or why there are none. `count`
  * options, lettered A, B, … in order.
+ *
+ * `letterOf` says which option letter a listed token spells; default `letterOfToken`. The intent
+ * readout passes its own for a slot whose token also carries the text before the letter (a
+ * tokenizer that merges ":" and "C" into ":C" lists ":A", ":B" as the alternatives).
  */
 export function scoreLetters(
   top: readonly TopLogprob[],
   count: number,
   minMass = DEFAULT_MIN_LETTER_MASS,
+  letterOf: (token: string) => string | undefined = (token) => letterOfToken(token, count),
 ): { ok: true; value: LetterDistribution } | { ok: false; reason: ReadoutMissReason; topToken?: string } {
   const listed = top.filter((entry) => typeof entry.token === "string" && Number.isFinite(entry.logprob));
   if (listed.length < 2) return { ok: false, reason: "no_logprobs" };
@@ -184,8 +190,9 @@ export function scoreLetters(
     // A server lists each token once; a repeat is not a second vote.
     if (seen.has(entry.token)) continue;
     seen.add(entry.token);
-    const letter = letterOfToken(entry.token, count);
-    if (letter !== undefined) probability[LETTERS.indexOf(letter)]! += Math.exp(entry.logprob);
+    const letter = letterOf(entry.token);
+    const index = letter === undefined ? -1 : LETTERS.indexOf(letter);
+    if (index >= 0 && index < count) probability[index]! += Math.exp(entry.logprob);
   }
   const mass = probability.reduce((sum, p) => sum + p, 0);
   if (mass === 0) return { ok: false, reason: "no_letter", topToken };

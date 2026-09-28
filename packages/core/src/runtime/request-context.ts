@@ -93,6 +93,10 @@ export type RequestCallSite =
    *  sub-agent's head re-warm after a long run (agent/sub-agent-head-rewarm.ts). On no turn's
    *  critical path; latency:report sets these rows apart. */
   | "cache_warm"
+  /** The intent readout's post-turn shadow (agent/intent-shadow.ts): asked after the reply went out
+   *  and aborted by the next turn, so it is on no turn's critical path either; latency:report
+   *  sets these rows apart like the warm-ups. */
+  | "intent_shadow"
   /** An image analysis call (tools/multimodal.ts analyzeImageBytes). */
   | "vision";
 

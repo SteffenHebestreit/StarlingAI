@@ -255,6 +255,35 @@ export interface CompletionCallOptions {
    */
   logprobs?: boolean;
   topLogprobs?: number;
+  /**
+   * A GBNF grammar the reply must follow, for THIS call: llama.cpp's own `grammar` field, which
+   * llama-server applies while sampling (llama-swap passes the body through). For a reply whose
+   * every line has a fixed place — the intent readout (decisions/intent-readout.ts) reads one option
+   * letter per line off `logprobs` and needs each letter at a known slot. Measured on the
+   * production llama-server 2026-09-28: `root ::= "mode: " [A-F] "\ndecision: " [A-E] …` came back
+   * exactly in that shape, one logprobs entry per generated token, 0.86-1.16 s with the system
+   * prefix cached.
+   *
+   * Only in the body when set, so an unasked call's body is byte-for-byte what it was. A llama.cpp
+   * extension: the Anthropic provider ignores it, and an OpenAI-compatible server that does not
+   * know it may ignore it (the reply is then unconstrained) or refuse the request (OpenAI's own
+   * API answers 400), so a caller sends it to a llama.cpp endpoint and treats a failed call as a
+   * miss. llama-server refuses a grammar beside `response_format`'s schema, so when both are set
+   * the grammar is sent and the schema is not; it also refuses a custom grammar beside tools.
+   */
+  grammar?: string;
+  /**
+   * The sampling temperature for THIS call, in place of the model config's pin. Honoured exactly as
+   * that pin is (resolveSamplingForCall): on a thinking-off call it is what goes on the wire; on a
+   * Qwen thinking-on call it is refused, as the pin is, because Qwen's cards document repetition
+   * loops at low temperature with thinking on — unless the config pins topP, which leaves every
+   * pin untouched, this one too. It wins over the config's own pin. For a multi-slot readout: each letter's top list is the
+   * raw distribution whatever the temperature (logit-readout.ts), but every LATER slot is
+   * conditioned on the letter actually SAMPLED at the earlier ones, so a sampled runner-up at one
+   * slot changes what the next is read on. At 0 the path is the argmax at every slot. The
+   * Anthropic provider ignores it.
+   */
+  temperature?: number;
 }
 
 export interface StreamCallOptions extends CompletionCallOptions {
@@ -1584,11 +1613,14 @@ export class LMStudioProvider {
    * effortForEndpoint) a thinking-OFF call went out with reasoning_effort "low" — thinking ON —
    * carrying the agent's thinking-off low-temperature pin: exactly the near-greedy-with-thinking
    * pairing resolveSamplingForCall exists to refuse, and silently. Called per ATTEMPT, because
-   * the ladder can step between attempts of the same call.
+   * the ladder can step between attempts of the same call. `temperatureOverride` is a call's
+   * own temperature (CompletionCallOptions.temperature), taken in the pin's place and refused
+   * where the pin would be.
    */
   private resolveCallShape(
     modelId: string,
     controlsOverride?: CompletionCallOptions["controls"],
+    temperatureOverride?: number,
   ): { extensions: Record<string, unknown> | undefined; sampling: { temperature: number; topP?: number } } {
     const extensions = this.buildProviderExtensions(modelId, controlsOverride);
     const kwargs = extensions?.["chat_template_kwargs"] as Record<string, unknown> | undefined;
@@ -1599,7 +1631,9 @@ export class LMStudioProvider {
       ...(typeof enableThinking === "boolean" ? { enableThinking } : {}),
     };
     const sampling = resolveSamplingForCall(modelId, wire, {
-      temperature: this.modelConfig.temperature,
+      temperature: typeof temperatureOverride === "number" && Number.isFinite(temperatureOverride) && temperatureOverride >= 0
+        ? temperatureOverride
+        : this.modelConfig.temperature,
       topP: this.modelConfig.topP,
     });
     if (sampling.ignoredTemperaturePin !== undefined) {
@@ -1800,7 +1834,7 @@ export class LMStudioProvider {
       // temperature pin; thinking-off honours the pin; an explicit topP is never touched.
       // Rebuilt per attempt because a rejected reasoning_effort steps the ladder — and steps
       // the thinking state, which is why the sampling has to be rebuilt with it.
-      const { extensions, sampling } = this.resolveCallShape(modelId, options?.controls);
+      const { extensions, sampling } = this.resolveCallShape(modelId, options?.controls, options?.temperature);
       const effectiveTemp = sampling.temperature;
       const effectiveTopP = sampling.topP;
       // In-flight visibility: a non-streaming complete() is a black box (no token
@@ -1827,7 +1861,10 @@ export class LMStudioProvider {
             // Same default and the same per-call override as the streaming path: the
             // forced-tool-call callers (options.toolChoice "required") land on BOTH.
             tool_choice: openAITools.length > 0 ? (options?.toolChoice ?? "auto") : undefined,
-            ...(options?.responseFormat
+            // llama.cpp's grammar, only when asked; it replaces the schema, which llama-server
+            // refuses beside it (CompletionCallOptions.grammar).
+            ...(options?.grammar ? { grammar: options.grammar } : {}),
+            ...(options?.responseFormat && !options.grammar
               ? {
                   response_format: {
                     type: "json_schema",
@@ -2233,7 +2270,7 @@ export class LMStudioProvider {
     // (stream() re-enters it on a retry), so building here rebuilds both halves after a
     // reasoning_effort rejection has stepped the ladder. The extensions are handed to the
     // audit row unchanged, so the row reports what THIS call sent rather than instance defaults.
-    const { extensions, sampling } = this.resolveCallShape(modelId, options?.controls);
+    const { extensions, sampling } = this.resolveCallShape(modelId, options?.controls, options?.temperature);
     const streamEffectiveTemp = sampling.temperature;
     const streamEffectiveTopP = sampling.topP;
 
@@ -2272,7 +2309,9 @@ export class LMStudioProvider {
         // (source-sensitive / required-research) — that wasted full draft is a
         // multi-minute cost on the slow local model (audit 5d51862f).
         tool_choice: openAITools.length > 0 ? (options?.toolChoice ?? "auto") : undefined,
-        ...(options?.responseFormat
+        // As in complete(): the grammar only when asked, in the schema's place.
+        ...(options?.grammar ? { grammar: options.grammar } : {}),
+        ...(options?.responseFormat && !options.grammar
           ? {
               response_format: {
                 type: "json_schema",

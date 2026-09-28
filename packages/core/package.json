@@ -38,6 +38,8 @@
     "decisions:bench": "cd ../.. && tsx packages/core/src/scripts/decisions-bench.ts",
     "decisions:readout": "cd ../.. && tsx packages/core/src/scripts/decisions-readout.ts",
     "latency:report": "tsx src/scripts/latency-report.ts",
+    "intent:report": "tsx src/scripts/intent-report.ts",
+    "intent:bench": "cd ../.. && tsx packages/core/src/scripts/intent-bench.ts",
     "loops:replay": "tsx src/scripts/loops-replay.ts",
     "latency:probe": "cd ../.. && tsx packages/core/src/scripts/latency-probe.ts",
     "scenes:evaluate": "tsx src/agent/scene-evaluation-cli.ts",

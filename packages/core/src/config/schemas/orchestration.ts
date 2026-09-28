@@ -744,6 +744,33 @@ export const OrchestrationSchema = z.object({
    */
   routingTriage: z.enum(["off", "shadow"]).default("off"),
   /**
+   * Intent readout — the request's facets read off ONE grammar-bound letter reply of the routing
+   * tier (decisions/intent-readout.ts), and the pre-router's pick read the same way over the
+   * turn's discovery capsule.
+   *
+   * The single-question letter readout beat the parsed incumbents on synthetic gold (source
+   * sensitivity 100% vs 93.8%, fast lane 97.5% vs 95%) and read the pre-route question at 72.5%
+   * top-1, 78 of 80 right at a top probability of 0.85 or more (2026-09-27). What it has never
+   * been measured against is what real turns then DID.
+   *
+   * "shadow" asks both AFTER a top-level turn has delivered its reply, fire-and-forget, and logs
+   * `intent_readout_shadow`: each facet's choice, top probability and margin, the pre-router's
+   * pick, and beside them the turn's own outcomes (the up-front source judge's verdict, whether
+   * the fast lane answered, the specialists it delegated to, whether a workflow ran and whether
+   * the score threshold forced it, whether the orchestration module was included). The turn is
+   * unchanged: the calls go out after delivery, are aborted the moment any turn starts, are
+   * skipped while another turn runs, and carry their own call site (`intent_shadow`), which
+   * latency:report keeps off the turn. `pnpm intent:report` turns the rows into the agreement
+   * tables that decide whether any consumer may read the readout. Fast-lane turns are included:
+   * the front desk answering is the one direct outcome the readout's "answer directly" can be
+   * checked against.
+   *
+   * Costs one routing-tier call of about 1 s (plus one for the pre-router when the turn had a
+   * capsule) after every top-level turn, and the readout's ~1k-token prefix can displace a warm
+   * head on a server with one slot until the warm-keeper re-warms it — default "off".
+   */
+  intentReadout: z.enum(["off", "shadow"]).default("off"),
+  /**
    * Let routing-tier work run under an active model preset.
    *
    * `getChatProviderForTier` returns null while a preset is active — deliberately, because

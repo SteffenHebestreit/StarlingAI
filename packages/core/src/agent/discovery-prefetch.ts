@@ -65,7 +65,18 @@ export function formatDiscoveryCapsule(
  */
 export async function prefetchCapabilityCandidates(
   query: string,
-  opts?: { allowedAgents?: string[]; maxAgents?: number; maxWorkflows?: number; sessionId?: string },
+  opts?: {
+    allowedAgents?: string[];
+    maxAgents?: number;
+    maxWorkflows?: number;
+    sessionId?: string;
+    /**
+     * The capsule's agent names, in the order the capsule lists them, once they are known (also
+     * when there are none). The capsule itself is text; the intent readout's shadow needs the
+     * candidate list the turn actually had (agent/intent-shadow.ts).
+     */
+    onAgents?: (names: readonly string[]) => void;
+  },
 ): Promise<string> {
   const q = query.trim();
   if (!q) return "";
@@ -121,5 +132,10 @@ export async function prefetchCapabilityCandidates(
     description: workflow.description,
   }));
 
+  try {
+    opts?.onAgents?.(agents.map((agent) => agent.name));
+  } catch {
+    // An observer's failure is never the capsule's.
+  }
   return formatDiscoveryCapsule(agents, workflows);
 }

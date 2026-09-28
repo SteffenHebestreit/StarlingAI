@@ -3,7 +3,7 @@
  * routing:prerouter — could Laya, handed the embedding capsule's candidates at message arrival,
  * pick the specialist well enough to skip the orchestrator's routing round?
  *
- *   pnpm --filter @starlingai/core routing:prerouter [--cases <jsonl>] [--k 8] [--laya-url http://127.0.0.1:18080]
+ *   pnpm --filter @starlingai/core routing:prerouter [--cases <jsonl> [--cases <jsonl> …]] [--k 8] [--laya-url http://127.0.0.1:18080]
  *     [--out <dir>] [--split all|calibration|test] [--train-out <jsonl>] [--describe description|oneliner]
  *     [--keying language|answer] [--target 0.9] [--min-samples 30] [--round-ms 7900] [--min-coverage 0]
  *     [--limit n] [--no-laya] [--backend laya|readout]
@@ -166,19 +166,29 @@ async function run(args: PreRouterBenchArgs): Promise<number> {
   process.env["SAI_AUDIT_LOG"] = join(outDir, "audit.jsonl");
   process.env["SAI_EMBEDDING_CACHE"] ??= join(benchRoot, "embedding-cache.json");
 
-  const casesFile = args.cases
-    ? inputPath(args.cases)
-    : DEFAULT_CASES.map((path) => resolve(REPO_ROOT, path)).find((path) => existsSync(path));
-  if (!casesFile || !existsSync(casesFile)) {
-    throw new BenchUsageError(`no case file at ${casesFile ?? DEFAULT_CASES.join(" or ")}`);
+  // Every --cases file in order, as one corpus (the gold-none cases join the live ones this way);
+  // without any, the deployment's own live cases, else the committed example.
+  const defaultFile = DEFAULT_CASES.map((path) => resolve(REPO_ROOT, path)).find((path) => existsSync(path));
+  const caseFiles = args.cases ? args.cases.map(inputPath) : defaultFile ? [defaultFile] : [];
+  if (caseFiles.length === 0) throw new BenchUsageError(`no case file at ${DEFAULT_CASES.join(" or ")}`);
+  const texts: string[] = [];
+  let cases: RoutingEvalCase[] = [];
+  for (const file of caseFiles) {
+    if (!existsSync(file)) throw new BenchUsageError(`no case file at ${file}`);
+    const fileText = await readFile(file, "utf8");
+    texts.push(fileText);
+    try {
+      cases.push(...parseCaseFile(fileText));
+    } catch (err) {
+      throw new BenchUsageError(`${file}: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
-  const text = await readFile(casesFile, "utf8");
-  let cases: RoutingEvalCase[];
-  try {
-    cases = parseCaseFile(text);
-  } catch (err) {
-    throw new BenchUsageError(`${casesFile}: ${err instanceof Error ? err.message : String(err)}`);
-  }
+  const casesFile = caseFiles.join(" + ");
+  // One file hashes as it always did, so a re-run's sha256 still matches an earlier report's.
+  const casesSha256 = texts.length === 1
+    ? createHash("sha256").update(texts[0]!).digest("hex")
+    : createHash("sha256").update(texts.map((fileText) => createHash("sha256").update(fileText).digest("hex")).join("\n")).digest("hex");
+  // A duplicate id across two files is caught here like one within a file.
   const problems = lintCases(cases);
   if (problems.length > 0) throw new BenchUsageError(`the case file is not usable:\n  - ${problems.join("\n  - ")}`);
   if (args.limit !== undefined) cases = cases.slice(0, args.limit);
@@ -271,7 +281,7 @@ async function run(args: PreRouterBenchArgs): Promise<number> {
     minCoverage: args.minCoverage,
     layaUrl: args.noLaya || readoutBackend ? null : args.layaUrl,
     casesFile,
-    casesSha256: createHash("sha256").update(text).digest("hex"),
+    casesSha256,
     ...(args.backend ? { backend: args.backend } : {}),
     ...(readoutModel ? { readoutModel } : {}),
   };

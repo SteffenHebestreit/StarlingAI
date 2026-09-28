@@ -10,7 +10,8 @@
  *   top-level session. A sub-agent's rows (session `sub:<parent>:<agent>:<ts>`) belong to the turn of
  *   their parent session that was open when they were written. Rows with no session (the cache
  *   warm-keeper, warden alerts) belong to no turn and are reported apart, and so do cache warm-up
- *   calls that carry one (callSite cache_warm: a sub-agent's head re-warm).
+ *   calls that carry one (callSite cache_warm: a sub-agent's head re-warm) and the intent readout's
+ *   post-turn shadow (callSite intent_shadow, and its intent_readout_shadow row).
  * - Each model call is split into prefill, decode and overhead: from llama.cpp's own `timings` when
  *   the row carries them, else from the time to first token (stream calls), else as its duration
  *   minus completionTokens at the decode rate (complete calls, whose per-call overhead then sits
@@ -588,7 +589,12 @@ export function buildTurnContexts(rows: readonly AuditRow[], params: LatencyPara
     // call). Counted in the turn, its time would be added to the turn's model time although it ran
     // beside the turn, and it would read as one more call of the run it follows.
     const warmUp = row.type === "provider_model_call" && row.data["callSite"] === "cache_warm";
-    if (!row.sessionId || warmUp) {
+    // The intent readout's shadow (agent/intent-shadow.ts) carries the turn it measures, and is
+    // asked after that turn's reply went out and aborted by the next one: its calls and its row sit
+    // after message_sent, where a turn without that row would otherwise run on to them.
+    const intentShadow = (row.type === "provider_model_call" && row.data["callSite"] === "intent_shadow")
+      || row.type === "intent_readout_shadow";
+    if (!row.sessionId || warmUp || intentShadow) {
       offTurnRows += 1;
       if (row.type === "provider_model_call") {
         const call = toCallRecord(row, params);

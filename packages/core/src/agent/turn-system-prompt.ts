@@ -43,6 +43,7 @@ import { retrieveSkillGuidance } from "../skills/service.js";
 import { formatUserModelGuidance } from "../user-model/service.js";
 import { buildMemoryCapsule } from "./receptionist.js";
 import { prefetchCapabilityCandidates } from "./discovery-prefetch.js";
+import { noteIntentShadowCapsule } from "./intent-shadow.js";
 import { buildUserProfileEvidence } from "./user-profile-prefetch.js";
 import { logAudit } from "../audit/logger.js";
 import { getConfig } from "../config/loader.js";
@@ -237,15 +238,27 @@ export async function assembleTurnSystemMessages(
             // so a slow prefetch is abandoned (empty capsule) rather than delaying the
             // turn; the model then discovers on demand.
             let timer: ReturnType<typeof setTimeout> | undefined;
+            // The capsule's agent names, for the intent readout's shadow (agent/intent-shadow.ts):
+            // the candidate list the turn actually had, so none when the capsule came too late.
+            let capsuleAgents: readonly string[] = [];
+            let capsuleLate = false;
             try {
-              return await Promise.race([
+              const capsule = await Promise.race([
                 // Scoped to the grant: unscoped, the capsule named agents the turn could not call.
                 prefetchCapabilityCandidates(userMessage, {
                   ...(allowedAgents ? { allowedAgents: [...allowedAgents] } : {}),
                   sessionId: session.id,
+                  onAgents: (names) => { capsuleAgents = names; },
                 }),
-                new Promise<string>((resolve) => { timer = setTimeout(() => resolve(""), DISCOVERY_PREFETCH_BUDGET_MS); }),
+                new Promise<string>((resolve) => {
+                  timer = setTimeout(() => {
+                    capsuleLate = true;
+                    resolve("");
+                  }, DISCOVERY_PREFETCH_BUDGET_MS);
+                }),
               ]);
+              noteIntentShadowCapsule(session.id, capsuleLate ? { status: "timeout" } : { status: "ok", agents: capsuleAgents });
+              return capsule;
             } finally {
               if (timer) clearTimeout(timer);
             }
