@@ -189,10 +189,12 @@ describe("receptionist — micro-call", () => {
   });
 
   it("redacts a leaked secret and escalates on empty/over-long/throw", async () => {
-    const leaked = "Sure! Your key is sk-abcdefghijklmnopqrstuvwxyz1234567890ABCD by the way.";
+    // Made-up keys are assembled at run time: as literals they are secret-scanner hits (GitHub, 2026-09-29).
+    const fakeKey = ["sk", "abcdefghijklmnopqrstuvwxyz1234567890ABCD"].join("-");
+    const leaked = `Sure! Your key is ${fakeKey} by the way.`;
     const red = await runReceptionist("hi", { complete: async () => leaked });
     expect(red.handled).toBe(true);
-    expect(red.response).not.toContain("sk-abcdefghijklmnopqrstuvwxyz1234567890ABCD");
+    expect(red.response).not.toContain(fakeKey);
     expect(red.response).toContain("[REDACTED");
 
     expect((await runReceptionist("hi", { complete: async () => "" })).handled).toBe(false);

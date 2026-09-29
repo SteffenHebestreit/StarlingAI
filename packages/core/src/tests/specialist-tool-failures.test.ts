@@ -149,7 +149,9 @@ describe("failed tool calls inside a delegated run", () => {
   it("redacts a secret in the error before cutting the line, so no fragment of it survives", async () => {
     // The key starts 220 characters in and runs past the 240-character cut. Cut first, the 20
     // characters left are too short for the key pattern and would travel to the browser as-is.
-    const key = "sk-A1b2C3d4E5f6G7h8J9k0L1m2N3p4Q5r6S7t8U9v0";
+    // A made-up key, assembled at run time: as one literal it is a secret-scanner hit (GitHub flagged it
+    // as an OpenAI API key on 2026-09-29), although the redaction pattern only needs it at run time.
+    const key = ["sk", "A1b2C3d4E5f6G7h8J9k0L1m2N3p4Q5r6S7t8U9v0"].join("-");
     const error = `Exit code 22: ${"curl request to the upstream billing service failed ".repeat(4).slice(0, 206)}${key} (401)`;
     expect(error.indexOf(key)).toBeLessThan(240);
     expect(error.indexOf(key) + key.length).toBeGreaterThan(240);

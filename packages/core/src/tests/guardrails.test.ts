@@ -102,13 +102,14 @@ describe("scanOutput", () => {
   });
 
   it("redacts OpenAI API keys", () => {
-    const r = scanOutput("Your key is sk-abcdefghijklmnopqrstuvwxyz1234567890ABCD");
+    // Made-up keys are assembled at run time: as literals they are secret-scanner hits (GitHub, 2026-09-29).
+    const r = scanOutput(`Your key is ${["sk", "abcdefghijklmnopqrstuvwxyz1234567890ABCD"].join("-")}`);
     expect(r.detectedTypes).toContain("openai_key");
     expect(r.redacted).toContain("[REDACTED:openai_key]");
   });
 
   it("redacts Anthropic API keys", () => {
-    const r = scanOutput("Use key: sk-ant-api03-abcdefghijklmnopqrstuvwxyz1234567890ABCDEFGH");
+    const r = scanOutput(`Use key: ${["sk", "ant", "api03", "abcdefghijklmnopqrstuvwxyz1234567890ABCDEFGH"].join("-")}`);
     expect(r.detectedTypes).toContain("anthropic_key");
   });
 
