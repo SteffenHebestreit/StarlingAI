@@ -1,8 +1,12 @@
 // GENERATED ROUTING TAXONOMY — do not hand-edit.
 //
-// Seed labels for the IDCM routing taxonomy on all 49 agents: L1 execution mode x L2
+// Seed labels for the IDCM routing taxonomy on the catalog's agents: L1 execution mode x L2
 // capability domain, plus the orthogonal facets (deliverable, completes, inputModality,
 // riskTier, executionShape, surface). See docs/intent-routing-redesign.md.
+//
+// Only agents the repository defines are labelled here. process_memory_keeper, defined in the gitignored
+// workspace/agents/60-processmem.local.jsonc, carries its label in that file: here it made a phantom agent with
+// no text in every checkout without the local shard, and CI failed its label as stale (2026-09-29).
 //
 // PROVENANCE: two taxonomies were derived independently — one top-down from the research
 // consensus, one bottom-up by clustering this catalog — and merged with a written reason per
@@ -816,32 +820,6 @@
         "oneLiner": "Screens a planned action/output for policy+approval risk (destructive ops/credentials/egress/privacy); domain-agnostic -> cross_domain. Distinct from quality_supervisor(complete vs allowed). Reacha...",
         "sourceHash": "699e4973ffb57f3a",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
-        "labeledAt": "2026-09-19"
-      }
-    },
-    "process_memory_keeper": {
-      "routingGenerated": {
-        "mode": "ACT",
-        "domain": [
-          "data"
-        ],
-        "deliverable": [
-          "config_change"
-        ],
-        "completes": [
-          "config_change"
-        ],
-        "inputModality": [
-          "text"
-        ],
-        "riskTier": "mutating_external",
-        "executionShape": "single_agent",
-        "surface": [
-          "external_network"
-        ],
-        "oneLiner": "Persists+queries long-running matters in the ProcessMem MCP store (cases/disputes/correspondence). ACT (durable external record). L2=data is a fold -- a dedicated 'memory' domain would hold only th...",
-        "sourceHash": "ad7c05c530d87355",
-        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated) — low confidence",
         "labeledAt": "2026-09-19"
       }
     },
