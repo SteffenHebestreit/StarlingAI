@@ -140,8 +140,8 @@
       //   encoder. Advice written for the older Qwen-Image (true CFG 4, 1328² sizes, the
       //   "Ultra HD, 4K" prompt suffix) does NOT apply to it.
       // - STEPS 40: the model card's and the diffusers pipeline's default. 20 was our own choice
-      //   for time; the user raised it to 50 in the settings step (session 6ece6f2a). About
-      //   5-6 min at 1024x1024 on corsair's iGPU (estimated from the 20-step measurement).
+      //   for time; the user raised it to 50 in the settings step (session 6ece6f2a). Measured
+      //   322-328 s at 1024x1024 on corsair's iGPU (the estimate the client uses says ~340 s).
       // - GUIDANCE 1: the model is meant to be sampled WITHOUT guidance (pipeline default
       //   true_cfg_scale 1.0) and has no guidance input at all — the "Guidance: 3.5" in every
       //   render's record is sd.cpp's unused default, NOT embedded guidance as this comment once
@@ -157,12 +157,15 @@
       //   this model, and a flow shift is ignored without one (recorded in the PNG, identical
       //   pixels). The only route to them — an <sd_cpp_extra_args> block inside the prompt,
       //   which also overrode STEPS past the render limit — is stripped by the client.
-      // - ENGINE BUILD: corsair runs stable-diffusion.cpp master-889 (c678dfe, 2026-09-20). That
-      //   predates b167b94 (#2048, 2026-09-24: this model's flow schedule — shift parameters and
-      //   a 0.02 terminal sigma — aligned with the official defaults; before it, grid artifacts
-      //   at 2K) and 0a9340c (#2054, 2026-09-25: VAE convolution scaling). Every quality render
-      //   so far ran the old schedule. Upgrading sd.cpp on corsair is the biggest quality lever
-      //   left; re-measure render times afterwards.
+      // - ENGINE BUILD: corsair runs stable-diffusion.cpp master-929 (3f8527a, the prebuilt Vulkan
+      //   release) since 2026-10-05, replacing master-889 (c678dfe), which predated b167b94 (#2048:
+      //   this model's flow schedule aligned with the official defaults) and 0a9340c (#2054: VAE
+      //   convolution scaling). Measured on the same seed at 1024x1024, 40 steps: 321.8 s before,
+      //   327.9 s after; the picture moved by a mean of only 2.9 — at ~1 MP the fix is fidelity,
+      //   not a visible change (it mattered at 2K). Edits and masked edits measured identical on
+      //   both builds. A faint 4-px periodic pattern (strong in a phase-mean metric, visible at 3x)
+      //   is present on BOTH builds; upstream (#2041) traces the 2K grid to sd.cpp's DiT output
+      //   rather than the VAE. Rollback on corsair: ~/sd-upgrade/rollback-to-889.sh.
       "qualityDefaults": { "steps": 40, "guidanceScale": 1 },
       // NOT ACTIVE — and now has nothing to point at: re-tested 2026-09-26, the worker's shim
       // answers POST /sdapi/v1/txt2img with 404 "this server exposes /v1/images/generations and

@@ -152,6 +152,18 @@ interface ResolvedImageRequest extends ImageGenerationRequest {
 /** Default for how far an edit may move from its base: a visible change that still recognisably follows it. */
 export const DEFAULT_EDIT_STRENGTH = 0.45;
 
+/**
+ * The feather a masked edit gets when none was asked for, in pixels.
+ *
+ * Without one the endpoint does not paste the original back: the engine re-renders the whole
+ * picture and the "protected" region drifts. Measured 2026-10-05 on the quality engine with a
+ * left-half mask at strength 0.8, mean distance from the base in the protected half: 8.4 with no
+ * feather (on both sd.cpp builds tried), 1.3 at 24 — and 0.00, the original pixels, beyond the
+ * feather band. The endpoint's own default is 0, so every masked edit that named no feather broke
+ * the promise generate_image makes, that everything outside the mask comes back untouched.
+ */
+export const DEFAULT_MASK_BLUR = 24;
+
 export interface ImageGenerationHealth {
   ok: boolean;
   disabled?: true;
@@ -440,6 +452,8 @@ function resolveImageRequest(
     ...(model ? { model } : {}),
     ...(tierUpgradedForEdit ? { tierUpgradedForEdit: true } : {}),
     ...(prompt.removed || negative?.removed ? { engineArgsRemoved: true } : {}),
+    // A masked edit keeps its protected region only with a feather; see DEFAULT_MASK_BLUR.
+    ...(input.mask && input.maskBlur === undefined ? { maskBlur: DEFAULT_MASK_BLUR } : {}),
     width: input.width ?? editSize?.width ?? tierDefaults.width,
     height: input.height ?? editSize?.height ?? tierDefaults.height,
     steps: input.steps ?? tierDefaults.steps,
@@ -659,6 +673,14 @@ export class ImageRenderTooLongError extends Error {
 export const IMAGE_STEPS_BOUNDS = { min: 1, max: 100 } as const;
 
 /**
+ * The mask feather a render may ask for, in pixels — the settings form's bound as well. The cluster's
+ * image endpoint refuses anything past 64 with HTTP 400 "'mask_blur' must be between 0 and 64 pixels"
+ * (read from its source 2026-10-05), and the form used to offer up to 256: a feather of 100 waited for
+ * the engine and then failed.
+ */
+export const IMAGE_MASK_BLUR_BOUNDS = { min: 0, max: 64 } as const;
+
+/**
  * Why a request's steps or size are outside what may be rendered, or undefined.
  *
  * The budget scales with the work, so nothing else bounds it: 1000 steps at 2048x2048 with true
@@ -667,11 +689,15 @@ export const IMAGE_STEPS_BOUNDS = { min: 1, max: 100 } as const;
  * different render is reported as the one asked for. The minimum size is left to the backend: a
  * 64x64 render is a real request on the quality engine.
  */
-export function imageRequestBoundsError(input: Pick<ImageGenerationRequest, "steps" | "width" | "height">): string | undefined {
+export function imageRequestBoundsError(input: Pick<ImageGenerationRequest, "steps" | "width" | "height" | "maskBlur">): string | undefined {
   const problems: string[] = [];
   const { min, max } = IMAGE_STEPS_BOUNDS;
   if (input.steps !== undefined && !(Number.isInteger(input.steps) && input.steps >= min && input.steps <= max)) {
     problems.push(`steps must be a whole number from ${min} to ${max} (asked for ${input.steps})`);
+  }
+  const blur = IMAGE_MASK_BLUR_BOUNDS;
+  if (input.maskBlur !== undefined && !(Number.isFinite(input.maskBlur) && input.maskBlur >= blur.min && input.maskBlur <= blur.max)) {
+    problems.push(`maskBlur must be from ${blur.min} to ${blur.max} pixels (asked for ${input.maskBlur})`);
   }
   for (const [name, side] of [["width", input.width], ["height", input.height]] as const) {
     if (side !== undefined && !(Number.isInteger(side) && side > 0 && side <= IMAGE_SIZE_BOUNDS.max)) {

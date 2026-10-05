@@ -18,6 +18,7 @@ import { checkInput } from "../guardrails/input.js";
 import type { UserInputFieldError, UserInputValidation } from "../agent/user-input.js";
 import {
   DEFAULT_EDIT_STRENGTH,
+  IMAGE_MASK_BLUR_BOUNDS,
   IMAGE_SIZE_BOUNDS,
   IMAGE_STEPS_BOUNDS,
   decodesWithinDeclaredSize,
@@ -47,7 +48,7 @@ export const IMAGE_SETTINGS_BOUNDS = {
   guidance: [0, 20],
   seed: [0, 4_294_967_295],
   strength: [0.05, 1],
-  maskBlur: [0, 256],
+  maskBlur: [IMAGE_MASK_BLUR_BOUNDS.min, IMAGE_MASK_BLUR_BOUNDS.max],
   promptMax: 4000,
   negativeMax: 2000,
 } as const;

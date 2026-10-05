@@ -149,7 +149,7 @@ describe("the settings proposal", () => {
     ]);
     expect(proposal.bounds).toEqual({
       size: { min: 256, max: 2048, step: 32, fixed: 1024 },
-      steps: [1, 100], guidance: [0, 20], seed: [0, 4294967295], strength: [0.05, 1], maskBlur: [0, 256],
+      steps: [1, 100], guidance: [0, 20], seed: [0, 4294967295], strength: [0.05, 1], maskBlur: [0, 64],
       promptMax: 4000, negativeMax: 2000,
     });
     expect(proposal.mode).toBe("generate");
@@ -297,7 +297,7 @@ describe("validating an answer", () => {
     ["an edit on the engine that cannot edit", (a) => withSettings(a, { tier: "fast" }), "settings.tier", /Segmind Vega cannot edit a picture; choose Qwen-Image 2.1/],
     ["a base the form never offered", (a) => withEdit(a, { baseCandidateId: "../../.env" }), "settings.edit.baseCandidateId", /not one of the offered pictures/],
     ["a strength below 0.05", (a) => withEdit(a, { strength: 0.01 }), "settings.edit.strength", /number from 0.05 to 1/],
-    ["a feather past 256", (a) => withEdit(a, { maskBlur: 300 }), "settings.edit.maskBlur", /whole number from 0 to 256/],
+    ["a feather past the endpoint's 64", (a) => withEdit(a, { maskBlur: 65 }), "settings.edit.maskBlur", /whole number from 0 to 64/],
     ["a size other than the base's", (a) => withSettings(a, { width: 384, height: 256 }), "settings.width", /must be 320x256, the size of the base picture/],
     ["a mask that is not a PNG data URL", (a) => withEdit(a, { maskDataUrl: "data:image/jpeg;base64,/9j/4AAQ" }), "settings.edit.maskDataUrl", /must be a PNG data URL/],
     ["a mask whose bytes are not a PNG", (a) => withEdit(a, { maskDataUrl: dataUrl(Buffer.from("GIF89a-not-png")) }), "settings.edit.maskDataUrl", /not a PNG/],

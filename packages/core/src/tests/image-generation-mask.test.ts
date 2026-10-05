@@ -101,9 +101,36 @@ describe("masked edits", () => {
   it("carries mask_blur when asked, because the engine binarizes and the seam is the tell", async () => {
     const calls = stub();
 
-    await maskedEdit({ maskBlur: 24 });
+    await maskedEdit({ maskBlur: 12 });
+
+    expect(calls[0]!.form!.get("mask_blur")).toBe("12");
+  });
+
+  it("feathers a mask that names no feather, so the protected region comes back untouched", async () => {
+    // The endpoint's own default is 0, and at 0 it does not paste the original back: measured
+    // 2026-10-05, the protected half drifted by a mean of 8.4, against 0.00 beyond the band at 24.
+    const calls = stub();
+
+    await maskedEdit();
 
     expect(calls[0]!.form!.get("mask_blur")).toBe("24");
+  });
+
+  it("keeps an explicit hard cut of 0 — a default, not an override", async () => {
+    const calls = stub();
+
+    await maskedEdit({ maskBlur: 0 });
+
+    expect(calls[0]!.form!.get("mask_blur")).toBe("0");
+  });
+
+  it("refuses a feather past the endpoint's 64 px before anything is sent", async () => {
+    // The endpoint answers 400 "'mask_blur' must be between 0 and 64 pixels" — after the render
+    // slot was waited for. The settings form used to offer up to 256.
+    const calls = stub();
+
+    await expect(maskedEdit({ maskBlur: 65 })).rejects.toThrow("maskBlur must be from 0 to 64 pixels (asked for 65)");
+    expect(calls).toHaveLength(0);
   });
 
   it("still sends an UNMASKED edit as JSON — the control that keeps the working path working", async () => {

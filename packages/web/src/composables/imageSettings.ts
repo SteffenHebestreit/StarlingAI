@@ -147,7 +147,7 @@ const DEFAULT_BOUNDS: ImageSettingsBounds = {
   guidance: [0, 20],
   seed: [0, 4294967295],
   strength: [0.05, 1],
-  maskBlur: [0, 256],
+  maskBlur: [0, 64],
   promptMax: 4000,
   negativeMax: 2000,
 };
@@ -650,8 +650,8 @@ export function validateForm(form: ImageSettingsForm, payload: ImageSettingsPayl
 /** The answer for "render with these settings". */
 export function buildConfigureAnswer(form: ImageSettingsForm, payload: ImageSettingsPayload, alwaysAuto: boolean): ImageSettingsAnswer {
   const base = candidateFor(payload, form.baseCandidateId);
-  // The feather goes only when the user set it or the agent had, so the server's own default is
-  // not replaced by this card's slider position.
+  // The feather goes only when the user set it or the agent had; otherwise the render applies its
+  // own default, the 24 px this slider starts at (DEFAULT_MASK_BLUR in core's image-generation.ts).
   const sendBlur = form.touched.maskBlur || payload.agent.maskBlur !== undefined;
   const mask = form.mask === "painted" && form.maskDataUrl
     ? { maskDataUrl: form.maskDataUrl }
