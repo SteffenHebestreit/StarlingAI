@@ -165,6 +165,16 @@ function dispatchTargetOf(step: TurnPlanStep): string | null {
 }
 
 /**
+ * Whether this executor would dispatch at least one of the plan's steps. record_plan's plan-round
+ * fold (orchestration.planRoundFold) asks before it runs the plan in its own call: a plan made only
+ * of the orchestrator's own work has nothing to dispatch, and folding it would cost a report and
+ * save no round. Read through dispatchTargetOf, so the two can never disagree about a step.
+ */
+export function planHasDispatchableStep(plan: Pick<TurnPlan, "steps">): boolean {
+  return plan.steps.some((step) => dispatchTargetOf(step) !== null);
+}
+
+/**
  * A tool-less `direct` step that consumes other steps' results and that nothing depends on: the
  * plan's description of the reply the orchestrator writes next ("summarize the findings"). Reported as YOURS TO
  * DO it demanded another execute_plan({completed}) round trip — and showed the dashboard a plan
@@ -502,16 +512,21 @@ registerTool({
     }
 
     const sections = [`Plan: ${done.length}/${plan.steps.length} step(s) completed.`];
-    if (done.length > 0) sections.push(`COMPLETED:\n${describe(done)}`);
+    // WHAT IS STILL OWED COMES FIRST (2026-10-05). The results run to 16K and the collapsed history
+    // keeps the head of a plan report (12K on its own turn, 2K after it), so a FAILED or YOURS TO DO
+    // list printed after them was the part cut off — the model read "every step's result" and not
+    // which ones had failed. The outstanding sections below are pushed here; the results after them.
+    const resultSections: string[] = [];
+    if (done.length > 0) resultSections.push(`COMPLETED:\n${describe(done)}`);
     if (reported.length > 0) {
-      sections.push(`RESULTS — write the final answer from these:\n\n${reported.join("\n\n")}`
+      resultSections.push(`RESULTS — write the final answer from these:\n\n${reported.join("\n\n")}`
         + (omitted > 0 ? `\n\n(${omitted} further result(s) omitted for length.)` : ""));
     }
     if (reasoningLeaves.length > 0) {
       // Counted as done because nothing dispatches it — but said plainly, so a step that names
       // real work the model forgot to give a tool ("write the file", "send the mail") is not
       // quietly reported as finished.
-      sections.push(`FINAL STEP — yours, in the reply (nothing dispatches it):\n`
+      resultSections.push(`FINAL STEP — yours, in the reply (nothing dispatches it):\n`
         + reasoningLeaves.map((id) => `  - ${id} — ${byId.get(id)?.description ?? ""}`).join("\n")
         + `\nIt did not run. If it needs a tool after all (writing a file, sending mail), call that tool now, before answering.`);
     }
@@ -547,6 +562,7 @@ registerTool({
       sections.push(`PER-TURN BUDGET REACHED for ${capHit} (${getPerTurnToolCallLimit(capHit)} per turn): the step(s) needing it were not dispatched. `
         + `Narrow the plan, do them yourself, or tell the user what is missing.`);
     }
+    sections.push(...resultSections);
     if (marked.length > 0 || retried.length > 0 || unknownIds.length > 0) {
       sections.push([
         marked.length > 0 ? `Marked done: ${marked.join(", ")}.` : "",
@@ -589,6 +605,11 @@ registerTool({
         nestedCalls,
         // Reported for the audit line and the report, not consumed by the turn.
         delegated: dispatchedOk.filter((id) => byId.get(id)?.kind !== "direct").length,
+        // Which steps are still owed, by id — record_plan's folded receipt names them in its first
+        // line, where no history cap can cut them off.
+        ...(outstanding > 0
+          ? { outstandingSteps: [...failed, ...manual, ...pending].map((o) => ({ id: o.id, status: o.status })) }
+          : {}),
         ...(artifacts.length > 0 ? { artifacts } : {}),
         ...(specialistToolFailures.length > 0 ? { specialistToolFailures } : {}),
       },

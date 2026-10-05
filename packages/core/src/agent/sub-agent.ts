@@ -25,11 +25,12 @@ import { DeadlineAbort, estimatePromptTokensForRequest } from "../providers/lmst
 import { wireHeadSignature } from "../providers/prompt-head.js";
 import { composeSubAgentMessages, trimSubAgentHistory } from "./sub-agent-history.js";
 import { createSubAgentHeadRewarm, type SubAgentHeadRewarm } from "./sub-agent-head-rewarm.js";
+import { orderSubAgentTools } from "./sub-agent-tool-order.js";
 import { bindRequestUserInput, HUMAN_WAIT_RECHECK_MS, trackHumanWaits } from "./user-input-broker.js";
 import { isDeclinedByUser } from "./user-input.js";
 import { getConfig } from "../config/loader.js";
 import { currentEffortProfile, effectiveOrchestration, effectiveSubAgentTurnSloMs } from "../runtime/effort-context.js";
-import { getToolsAsLLMDefs, rerankToolsForTask, executeTool, normalizeToolCall, type ToolContext, type SwarmState, type ToolResult } from "../tools/registry.js";
+import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type ToolContext, type SwarmState, type ToolResult } from "../tools/registry.js";
 import { isToolAllowed } from "../guardrails/tool-tiers.js";
 import { scanOutput } from "../guardrails/output.js";
 import { neutralizeToolResultFraming } from "../guardrails/input.js";
@@ -84,6 +85,7 @@ import { isRunInternalWithdrawalReason } from "./run-blocked-tool-reasons.js";
 import { claimAgentMessages, readAllFacts, type AgentMessageClaim } from "../swarm/memory.js";
 import { sanitizeTranscriptContent } from "./sanitize-response.js";
 import { truncateToolResult, extractKeyFacts, extractedFindingIsLowValue, stripEditorialNotes } from "../tools/result-shaping.js";
+import { inferCompletedRunOutcome } from "../tools/delegation-artifact-classification.js";
 import { buildDynamicTurnGuidance } from "./intent-classifier.js";
 import { looksLikeArtifactCreationRequest } from "./deliverable-intent.js";
 import { shareFinding } from "../tools/memory.js";
@@ -767,6 +769,55 @@ function hashSharedFindingKey(value: string): string {
     hash = Math.imul(hash, 16777619);
   }
   return (hash >>> 0).toString(36);
+}
+
+/**
+ * Claim the peer messages addressed to this agent for one run (A2A, send_agent_message), and
+ * render them for its first user turn. Never throws: a swarm bus or Redis that is down leaves the
+ * run without peer messages, as before. Started with the run's other setup lookups.
+ */
+async function claimPeerMessagesForRun(
+  subSessionId: string,
+  agentName: string,
+  effectiveTurnTimeoutMs: number | undefined,
+): Promise<{ claim: AgentMessageClaim | null; context: string }> {
+  try {
+    // Read from the ROOT session bucket the WRITE side targets: send_agent_message writes via
+    // deriveSharedSessionId(ctx.sessionId) (→ root), so draining the per-run CHILD subSessionId
+    // here found nothing and peer messages were silently lost. deriveRootSessionId is identical
+    // to that write-side derivation, so read and write now hit the same bucket.
+    // ADR-003 deferred ack: the claim is held open and acknowledged only when this
+    // run records a success/partial outcome — a crashed or failed run leaves the
+    // messages pending, so they redeliver instead of being silently lost.
+    // Visibility scales with THIS run's budget (2×, capped at 30 min): the claim is
+    // held for the whole run, and a static window shorter than the run would let a
+    // concurrent same-agent claim re-deliver (duplicate injection) and eventually
+    // dead-letter messages a healthy run is still processing.
+    const messageVisibilityMs = effectiveTurnTimeoutMs && effectiveTurnTimeoutMs > 0
+      ? Math.max(120_000, Math.min(2 * effectiveTurnTimeoutMs, 1_800_000))
+      : 1_800_000; // "unbound" agents get the cap
+    const claim = await claimAgentMessages(deriveRootSessionId(subSessionId), agentName, { visibilityMs: messageVisibilityMs });
+    const pending = claim.messages;
+    if (pending.length === 0) return { claim, context: "" };
+    logAudit("a2a_messages_delivered", {
+      agentName,
+      count: pending.length,
+      fromAgents: [...new Set(pending.map((m) => m.fromAgent))],
+    }, { sessionId: subSessionId, severity: "info", channel: "swarm" });
+    return {
+      claim,
+      context: `\n\n## Pending messages from peer agents\n${pending
+        .map((m) => {
+          // Sanitize message content to prevent prompt injection from peer agents
+          const safeContent = sanitizeTranscriptContent("user", m.content, false);
+          return `From ${m.fromAgent} [${m.ts}]: ${safeContent}`;
+        })
+        .join("\n---\n")}`,
+    };
+  } catch (err) {
+    log.debug({ err, agentName }, "Failed to consume A2A messages — swarm bus or Redis may be unavailable");
+    return { claim: null, context: "" };
+  }
 }
 
 async function formatSharedFactsContext(sessionId: string, maxChars = 2_400): Promise<{ content: string; signature: string }> {
@@ -1843,12 +1894,19 @@ export async function findBrokenBuiltPages(workspaceRoot: string, scope?: Artifa
   };
 
   try { walk(artifactRoot, zoneRel, 0); } catch { /* fail open */ }
-  for (const page of pages) {
+  // TOGETHER, NOT ONE AFTER ANOTHER (finding 2026-10-05). Each check is its own child process, and
+  // a staged build's setup runs this before its first model call — up to four pages in series, each
+  // a node start plus the page's frames. checkBuiltPage also holds each verdict while the page's
+  // bytes are unchanged, so the second and later passes over the same pages cost a stat and a read.
+  const verdicts = await Promise.all(pages.map(async (page) => {
     try {
-      const verdict = await checkBuiltPage(page.abs, page.relPath);
-      if (!verdict.ok) broken.push(verdict.detail);
-    } catch { /* a harness failure must never invent a defect */ }
-  }
+      return await checkBuiltPage(page.abs, page.relPath);
+    } catch {
+      return { ok: true, detail: "" };   // a harness failure must never invent a defect
+    }
+  }));
+  // In walk order, as before: the first broken page is the one the resume directive names first.
+  for (const verdict of verdicts) if (!verdict.ok) broken.push(verdict.detail);
   return broken;
 }
 
@@ -3079,24 +3137,44 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       targetAgent: opts.agentName,
       limit: 3,
     });
-    const memoryGuidance = await formatScopedMemoryGuidance(opts.workspacePath, sanitizedTask, {
-      sessionId: opts.parentSessionId,
-      targetAgent: opts.agentName,
-      scopes: ["session", "workspace", "user", "agent"],
-      limit: 4,
-      maxChars: Math.min(1_400, Math.round((config.agents.performance?.promptBudgetChars ?? 32_000) * 0.06)),
-    });
-    // Procedural memory for specialists: surface relevant learned procedures for
-    // this specific delegated task. Relevance-gated (empty when nothing matches)
-    // and bounded, mirroring the flow/memory guidance above.
-    const skillGuidance = config.skillLibrary.enabled
-      ? await formatSkillGuidance(opts.workspacePath, sanitizedTask, {
-          maxChars: Math.min(1_200, Math.round((config.agents.performance?.promptBudgetChars ?? 32_000) * 0.06)),
-          // Agent-scoped: boost + surface procedures explicitly tagged for this
-          // specialist so its own learned skills reliably reach it.
-          agent: opts.agentName,
-        })
-      : "";
+    // THE RUN'S SETUP LOOKUPS START TOGETHER (finding 2026-10-05). Memory guidance, skill guidance,
+    // the tool order and the peer-message claim each wait on their own round-trip — three of them
+    // an embedding — and none reads another's result, yet they ran one after
+    // another before the run's first model call. They are started here, overlap the staged-build
+    // page checks below as well, and are awaited once, where the prompt is assembled.
+    const setupLookups = Promise.all([
+      formatScopedMemoryGuidance(opts.workspacePath, sanitizedTask, {
+        sessionId: opts.parentSessionId,
+        targetAgent: opts.agentName,
+        scopes: ["session", "workspace", "user", "agent"],
+        limit: 4,
+        maxChars: Math.min(1_400, Math.round((config.agents.performance?.promptBudgetChars ?? 32_000) * 0.06)),
+      }),
+      // Procedural memory for specialists: surface relevant learned procedures for
+      // this specific delegated task. Relevance-gated (empty when nothing matches)
+      // and bounded, mirroring the flow/memory guidance above.
+      config.skillLibrary.enabled
+        ? formatSkillGuidance(opts.workspacePath, sanitizedTask, {
+            maxChars: Math.min(1_200, Math.round((config.agents.performance?.promptBudgetChars ?? 32_000) * 0.06)),
+            // Agent-scoped: boost + surface procedures explicitly tagged for this
+            // specialist so its own learned skills reliably reach it.
+            agent: opts.agentName,
+          })
+        : Promise.resolve(""),
+      // Get available tools for this agent, in the order its runs send them. E20: ranked by
+      // semantic relevance — the RANKING KEY note where the order is used, below, says why it is held.
+      orderSubAgentTools({
+        agentName: opts.agentName,
+        rankingKey: agentCfg.description?.trim() || opts.agentName,
+        tools: getToolsAsLLMDefs(effectiveToolNames),
+        minTools: effectiveOrchestration().toolRerankMinTools ?? 6,
+      }),
+      claimPeerMessagesForRun(subSessionId, opts.agentName, effectiveTurnTimeoutMs),
+      // Not the shared facts: they are read where the first message is composed, after the head
+      // re-warm join and the page checks — facts a sibling publishes meanwhile belong in it.
+    ]);
+    // Awaited below; this only keeps a rejection that lands before then from going unhandled.
+    setupLookups.catch(() => {});
     const taskModeGuidance = buildTaskModeGuidance(opts.agentName, sanitizedTask);
     const modelExecutionGuidance = buildModelExecutionGuidance(modelConfig.primary, modelConfig.enableThinking);
     const toolInventoryGuidance = buildSubAgentToolInventory(effectiveToolNames);
@@ -3285,6 +3363,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // (orchestration.stablePromptPrefix, default on). With the flag off, the blocks go back
     // inside the system prompt, ahead of the tool schemas, as they were.
     const stablePrefix = effectiveOrchestration().stablePromptPrefix ?? true;
+    // The setup lookups started above, awaited once.
+    const [memoryGuidance, skillGuidance, orderedTools, peerMessages] = await setupLookups;
     const taskDerivedContext = [
       flowGuidance,
       skillGuidance,
@@ -3303,8 +3383,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
 
     // Get available tools for this agent. E20: rerank by semantic relevance so the model sees
     // the most relevant tools first — useful when the tool list is large and the model's
-    // attention budget is finite.
-    let tools = getToolsAsLLMDefs(effectiveToolNames);
+    // attention budget is finite. Ranked in setupLookups above (orderSubAgentTools).
+    let tools = orderedTools;
     // Rerank by semantic relevance only above a toolset-size threshold (B24): a small
     // toolset fits the model's attention, so we skip the embed round-trip. The threshold is
     // configurable (orchestration.toolRerankMinTools, default 6 = the long-standing value).
@@ -3324,12 +3404,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // better key besides: a specialist's useful tools follow from its job, not from how one
     // task happened to be worded. 45 of the 49 configured agents carry more than
     // toolRerankMinTools tools, so this is very nearly all of them.
-    try {
-      const toolRankingKey = agentCfg.description?.trim() || opts.agentName;
-      tools = await rerankToolsForTask(tools, toolRankingKey, effectiveOrchestration().toolRerankMinTools ?? 6);
-    } catch (err) {
-      log.debug({ err, agentName: opts.agentName }, "Tool rerank failed — using registration order");
-    }
+    //
+    // AND THE RANKING IS HELD (agent/sub-agent-tool-order.ts, finding 2026-10-05). Recomputed per
+    // dispatch, a failed or stalled embedding fell back to registration order — the same rotation
+    // as above, for an agent whose tools had not changed. The first full ranking per agent and
+    // tool set is reused for the process lifetime, and the embedder is not asked again.
 
     // E19 graceful-degradation ladder: if the warden flagged this session
     // with an imminent storm/flood alert, tighten the tool budget so the
@@ -3447,44 +3526,14 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // Agents can send messages to peers via send_agent_message. Those messages
     // are queued in swarm/memory.ts and delivered here at the start of the next
     // run — giving the agent a chance to act on them without the orchestrator
-    // mediating the content.
-    let a2aContext = "";
-    let a2aMessageClaim: AgentMessageClaim | null = null;
-    try {
-      // Read from the ROOT session bucket the WRITE side targets: send_agent_message writes via
-      // deriveSharedSessionId(ctx.sessionId) (→ root), so draining the per-run CHILD subSessionId
-      // here found nothing and peer messages were silently lost. deriveRootSessionId is identical
-      // to that write-side derivation, so read and write now hit the same bucket.
-      // ADR-003 deferred ack: the claim is held open and acknowledged only when this
-      // run records a success/partial outcome — a crashed or failed run leaves the
-      // messages pending, so they redeliver instead of being silently lost.
-      // Visibility scales with THIS run's budget (2×, capped at 30 min): the claim is
-      // held for the whole run, and a static window shorter than the run would let a
-      // concurrent same-agent claim re-deliver (duplicate injection) and eventually
-      // dead-letter messages a healthy run is still processing.
-      const messageVisibilityMs = effectiveTurnTimeoutMs && effectiveTurnTimeoutMs > 0
-        ? Math.max(120_000, Math.min(2 * effectiveTurnTimeoutMs, 1_800_000))
-        : 1_800_000; // "unbound" agents get the cap
-      a2aMessageClaim = await claimAgentMessages(deriveRootSessionId(subSessionId), opts.agentName, { visibilityMs: messageVisibilityMs });
-      const pending = a2aMessageClaim.messages;
-      if (pending.length > 0) {
-        a2aContext = `\n\n## Pending messages from peer agents\n${pending
-          .map((m) => {
-            // Sanitize message content to prevent prompt injection from peer agents
-            const safeContent = sanitizeTranscriptContent("user", m.content, false);
-            return `From ${m.fromAgent} [${m.ts}]: ${safeContent}`;
-          })
-          .join("\n---\n")}`;
-        logAudit("a2a_messages_delivered", {
-          agentName: opts.agentName,
-          count: pending.length,
-          fromAgents: [...new Set(pending.map((m) => m.fromAgent))],
-        }, { sessionId: subSessionId, severity: "info", channel: "swarm" });
-      }
-    } catch (err) {
-      log.debug({ err, agentName: opts.agentName }, "Failed to consume A2A messages — swarm bus or Redis may be unavailable");
-    }
+    // mediating the content. Claimed with the other setup lookups (claimPeerMessagesForRun).
+    const a2aContext = peerMessages.context;
+    let a2aMessageClaim: AgentMessageClaim | null = peerMessages.claim;
 
+    // Read HERE, not with the setup lookups: between those and this point the run may wait up to
+    // ~8 s on its head's re-warm and on the page checks, and a fact a sibling publishes in that
+    // window would otherwise reach this run only after its first tool round, or never (2026-10-05).
+    // An in-process / Redis read, so it costs next to nothing on the path.
     const initialSharedFacts = await formatSharedFactsContext(subSessionId);
     let lastSharedFactsSignature = initialSharedFacts.signature;
     const sharedFactsContext = initialSharedFacts.content
@@ -3916,6 +3965,22 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       ...(toolFailures.length > 0 ? { toolFailures: toolFailures.slice(-MAX_RECORDED_TOOL_FAILURES) } : {}),
       ...(loopEnforced ? { loopEnforced: { ...loopEnforced } } : {}),
       ...(wardenStop ? { wardenStop: { ...wardenStop } } : {}),
+    });
+
+    // The outcome of a run that ended normally, read from STRUCTURE first — its own
+    // `<final_answer status>`, the artifacts and evidence it left (figures the task did not
+    // already contain), whether every one of its WORK calls failed — with the five failure phrases
+    // only as the tie-breaker (2026-10-05; see inferCompletedRunOutcome). Only this run's own
+    // failed calls count: a nested specialist's failures ride along in toolFailures, and the
+    // person's declines are not failures.
+    const completedRunOutcome = (text: string): SubAgentOutcome => inferCompletedRunOutcome(text, {
+      toolCount,
+      toolNames,
+      failedToolNames: toolFailures
+        .filter((failure) => failure.agent === opts.agentName && !failure.declinedByUser)
+        .map((failure) => failure.tool),
+      artifactCount: artifacts.length,
+      task: opts.task,
     });
 
     const logSubAgentCompletionAudit = (
@@ -4488,9 +4553,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
 
         const semanticOutcome: SubAgentOutcome = recovered.forcedOutcome
           ?? truncationRecovered.forcedOutcome
-          ?? (/no results|not found|unable to|failed to|error:/i.test(result.slice(0, 300))
-            ? "partial"
-            : "success");
+          ?? completedRunOutcome(result);
         const stats = buildStats("completed", semanticOutcome);
         const suspicious = rejectSuspiciousNoToolOutput(
           opts,
@@ -4633,9 +4696,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         }
 
         const semanticOutcome: SubAgentOutcome = recovered.forcedOutcome
-          ?? (/no results|not found|unable to|failed to|error:/i.test(result.slice(0, 300))
-            ? "partial"
-            : "success");
+          ?? completedRunOutcome(result);
         const stats = buildStats("completed", semanticOutcome);
         const suspicious = rejectSuspiciousNoToolOutput(
           opts,
@@ -6085,9 +6146,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
 
         const semanticOutcome: SubAgentOutcome = recovered.forcedOutcome
           ?? truncationRecovered.forcedOutcome
-          ?? (/no results|not found|unable to|failed to|error:/i.test(result.slice(0, 300))
-            ? "partial"
-            : "success");
+          ?? completedRunOutcome(result);
         const stats = buildStats("completed", semanticOutcome);
         const suspicious = rejectSuspiciousNoToolOutput(
           opts,

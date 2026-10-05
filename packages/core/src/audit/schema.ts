@@ -75,6 +75,7 @@ export type CoreAuditEventType =
   | "sub_agent_head"
   | "sub_agent_head_rewarm"
   | "plan_executed"
+  | "plan_round_folded"
   | "agent_reasoning"
   | "parallel_delegate_started"
   | "parallel_delegate_deduplicated"

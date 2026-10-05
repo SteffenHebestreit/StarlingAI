@@ -253,6 +253,9 @@ describe("failed tool calls inside a delegated run", () => {
     });
 
     expect(result.toolFailures).toEqual([{ agent: "image_creator", tool: "generate_image", error: SKIP, declinedByUser: true }]);
+    // Neither a decline nor a specialist's call is the coordinator's own failed call (2026-10-05:
+    // the run's outcome counts only its own failed calls).
+    expect(result.stats.outcome).toBe("success");
   }, 30_000);
 
   it("a coordinator passes on the failures of the specialist it delegated to", async () => {
@@ -274,5 +277,155 @@ describe("failed tool calls inside a delegated run", () => {
     });
 
     expect(result.toolFailures).toEqual([DRAW_FAILURE]);
+    // The specialist's failure is not the coordinator's: its own call (the delegation) worked.
+    expect(result.stats.outcome).toBe("success");
   }, 30_000);
+
+  it("a specialist's failed calls are not the coordinator's own failed work (no artifact to hide behind)", async () => {
+    await registerLeafTools();
+    completeMock.mockImplementation(async (messages: Message[]) => {
+      if (!systemIncludes(messages, "COORD-3K9")) {
+        // The researcher: its only fetch fails (403), it answers from what it knows.
+        return toolResultsIn(messages) === 0 ? call("f1", "web_fetch", { url: "https://tides.example" }) : answer("High tide in Hamburg is around 6 pm.");
+      }
+      if (toolResultsIn(messages) === 0) {
+        return call("dl1", "delegate_to_agent", { agentName: "researcher", task: "When is high tide in Hamburg?" });
+      }
+      return answer("The researcher reports high tide in Hamburg around 6 pm.");
+    });
+
+    const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+    const result = await runSubAgentWithStats({
+      agentName: "art_director",
+      task: "Find out when high tide is in Hamburg.",
+      parentSessionId: "parent-failures-coordinator-no-artifact",
+      workspacePath: tempDir,
+    });
+
+    expect(result.toolFailures?.some((failure) => failure.agent === "researcher")).toBe(true);
+    expect(result.artifacts ?? []).toHaveLength(0);
+    expect(result.stats.outcome).toBe("success");
+  }, 30_000);
+
+  // The outcome of a normally-ending run is read from STRUCTURE first (2026-10-05). It used to be
+  // five English failure phrases over the first 300 characters and nothing else.
+  describe("the run's outcome reads its structure, not only its prose (2026-10-05)", () => {
+    // Every work call failed: a failure when the answer reports one, else partial — the answer is
+    // kept and flagged (review 2026-10-05; before, the German report below was a success).
+    const runWhereEveryFetchFails = async (finalAnswer: string, parentSessionId: string) => {
+      await registerLeafTools();
+      completeMock.mockImplementation(async (messages: Message[]) => {
+        const done = toolResultsIn(messages);
+        if (done === 0) return call("f1", "web_fetch", { url: "https://example.com/a" });
+        if (done === 1) return call("f2", "web_fetch", { url: "https://example.com/b" });
+        return answer(finalAnswer);
+      });
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      return runSubAgentWithStats({ agentName: "researcher", task: "Finde die Gezeitentabelle.", parentSessionId, workspacePath: tempDir });
+    };
+
+    it("every call failed and the answer reports it → failure", async () => {
+      const result = await runWhereEveryFetchFails("No results found; the source was unreachable.", "parent-outcome-all-failed-en");
+      expect(result.toolFailures?.length).toBe(2);
+      expect(result.stats.terminalState).toBe("completed");
+      expect(result.stats.outcome).toBe("failure");
+    }, 30_000);
+
+    it("every call failed but an answer came back → partial, in any language", async () => {
+      const result = await runWhereEveryFetchFails("Keine Ergebnisse gefunden; Quelle nicht erreichbar.", "parent-outcome-all-failed-de");
+      expect(result.toolFailures?.length).toBe(2);
+      expect(result.stats.outcome).toBe("partial");
+    }, 30_000);
+
+    it("the run's own <final_answer status=\"success\"> outranks a failure word in the answer", async () => {
+      await registerLeafTools();
+      const { registerTool } = await import("../tools/registry.js");
+      registerTool({
+        name: "web_fetch",
+        description: "Fetch a page.",
+        parameters: { type: "object", properties: {} },
+        async execute() {
+          return { success: true, output: "404 Not Found — the server cannot find the requested resource." };
+        },
+      });
+      completeMock.mockImplementation(async (messages: Message[]) =>
+        toolResultsIn(messages) === 0
+          ? call("f1", "web_fetch", { url: "https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404" })
+          : answer('<final_answer status="success">The HTTP 404 not found response means the server cannot find the requested resource; unlike 410 Gone it does not say the removal is permanent.</final_answer>'));
+
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const result = await runSubAgentWithStats({
+        agentName: "researcher",
+        task: "What does an HTTP 404 response mean?",
+        parentSessionId: "parent-outcome-explicit",
+        workspacePath: tempDir,
+      });
+
+      expect(result.stats.outcome).toBe("success");
+    }, 30_000);
+
+    it("delegate_to_agent keeps an explicitly successful answer that talks about a failure", async () => {
+      await registerLeafTools();
+      const { registerTool, getTool } = await import("../tools/registry.js");
+      registerTool({
+        name: "web_fetch",
+        description: "Fetch a page.",
+        parameters: { type: "object", properties: {} },
+        async execute() {
+          return { success: true, output: "404 Not Found — the server cannot find the requested resource." };
+        },
+      });
+      completeMock.mockImplementation(async (messages: Message[]) =>
+        toolResultsIn(messages) === 0
+          ? call("f1", "web_fetch", { url: "https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404" })
+          : answer('<final_answer status="success">The HTTP 404 not found response means the server cannot find the requested resource; unlike 410 Gone it does not say the removal is permanent.</final_answer>'));
+
+      const ctx: ToolContext = { sessionId: "s-outcome-explicit-delegate", workspacePath: tempDir, swarmState: freshSwarmState() };
+      const result = await getTool("delegate_to_agent")!.execute(
+        { agentName: "researcher", task: "What does an HTTP 404 response mean?" },
+        ctx,
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.metadata?.["delegationVerdict"]).toBe("explicit");
+      expect(result.metadata?.["delegationOutcome"]).toBe("success");
+      expect(result.output).toContain("410 Gone");
+    }, 60_000);
+
+    it("delegate_to_agent records whether the result carries its OWN evidence — figures from the task do not count", async () => {
+      await registerLeafTools();
+      const { registerTool, getTool } = await import("../tools/registry.js");
+      const delegate = async (task: string, finalAnswer: string, sessionId: string) => {
+        // Registered per delegation: a run can bring the built-in web_fetch back into the registry.
+        registerTool({
+          name: "web_fetch",
+          description: "Fetch a page.",
+          parameters: { type: "object", properties: {} },
+          async execute() {
+            return { success: true, output: "Datasheet: supply 3.3 V, active current 12 mA." };
+          },
+        });
+        completeMock.mockImplementation(async (messages: Message[]) =>
+          toolResultsIn(messages) === 0 ? call("f1", "web_fetch", { url: "https://vendor.example/sensor" }) : answer(finalAnswer));
+        const ctx: ToolContext = { sessionId, workspacePath: tempDir, swarmState: freshSwarmState() };
+        return getTool("delegate_to_agent")!.execute({ agentName: "researcher", task }, ctx);
+      };
+
+      const own = await delegate(
+        "What does the sensor draw?",
+        "The first fetch failed to load the vendor page, so I used the datasheet: the sensor draws 12 mA at 3.3 V.",
+        "s-evidence-own",
+      );
+      expect(own.metadata?.["delegationEvidence"]).toBe(true);
+
+      const echoed = await delegate(
+        "Does the sensor draw 12 mA at 3.3 V?",
+        "The datasheet confirms it: the sensor draws 12 mA at 3.3 V.",
+        "s-evidence-echoed",
+      );
+      expect(echoed.metadata?.["delegationSucceeded"]).toBe(true); // the success path, where the flag is written
+      expect(echoed.metadata?.["specialistToolFailures"]).toBeUndefined(); // its fetch worked: only the task filter decides
+      expect(echoed.metadata?.["delegationEvidence"]).toBeUndefined();
+    }, 60_000);
+  });
 });

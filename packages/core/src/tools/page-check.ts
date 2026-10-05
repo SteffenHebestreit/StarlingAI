@@ -36,6 +36,7 @@
  * is the bounded check that can run on every build without one.
  */
 import { readFileSync, existsSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -184,6 +185,7 @@ export async function runScriptsIsolated(
         return {
           errors: [`the page did not finish within ${Math.round(ISOLATED_RUN_TIMEOUT_MS / 1000)}s and was stopped`],
           consoleErrors: [], framesRun: 0, canvasPainting: new Map(),
+          timedOut: true,
         };
       }
       lastStderr = result.stderr;
@@ -192,7 +194,7 @@ export async function runScriptsIsolated(
     try {
       const parsed = JSON.parse(result.stdout) as {
         errors: string[]; consoleErrors: string[]; framesRun: number;
-        canvases: Array<[string, CanvasPaintReport]>;
+        canvases: Array<[string, CanvasPaintReport]>; timedOut?: boolean;
       };
       workerCommand = argv;
       return {
@@ -200,6 +202,7 @@ export async function runScriptsIsolated(
         consoleErrors: parsed.consoleErrors ?? [],
         framesRun: parsed.framesRun ?? 0,
         canvasPainting: new Map((parsed.canvases ?? []).map(([id, report]) => [id, () => report])),
+        ...(parsed.timedOut === true ? { timedOut: true } : {}),
       };
     } catch {
       lastStderr = result.stderr || result.stdout.slice(0, 500);
@@ -223,7 +226,9 @@ export async function runScriptsIsolated(
  */
 export async function checkBuiltPage(absHtmlPath: string, relLabel: string): Promise<{ ok: boolean; detail: string }> {
   let html: string;
+  let stat: { mtimeMs: number; size: number };
   try {
+    stat = statSync(absHtmlPath);
     html = readFileSync(absHtmlPath, "utf-8");
   } catch {
     return { ok: true, detail: "" };   // unreadable is not evidence of breakage
@@ -231,13 +236,29 @@ export async function checkBuiltPage(absHtmlPath: string, relLabel: string): Pro
   const { scripts, externalMisses } = collectScripts(html, absHtmlPath);
   if (scripts.length === 0 && externalMisses.length === 0) return { ok: true, detail: "" };
 
+  // THE SAME PAGE IS NOT RUN TWICE (finding 2026-10-05). A staged build's setup checks the built
+  // pages, finds none of its own broken, then checks the whole conversation's; its end checks
+  // them again, and so does the turn's artifact gate — a child process each time, for bytes that
+  // had not changed. A verdict is held for the page's path, mtime and size, and for its bytes and
+  // the scripts it loads: a same-folder script can change while the HTML does not, and a rewrite
+  // can keep both the size and (on a coarse clock) the mtime.
+  const verdictKey = [
+    absHtmlPath,
+    stat.mtimeMs,
+    stat.size,
+    createHash("sha1").update(JSON.stringify([html, scripts, externalMisses])).digest("hex"),
+  ].join("|");
+  const held = heldPageVerdicts.get(verdictKey);
+  if (held) return held.ok ? { ok: true, detail: "" } : { ok: false, detail: `${relLabel}: ${held.problem}` };
+
   let report: RunReport | null;
   try {
     report = await runScriptsIsolated(scripts, collectElementIds(html), collectDeclaredElements(html));
   } catch {
     return { ok: true, detail: "" };   // a harness failure must never invent a defect
   }
-  if (!report) return { ok: true, detail: "" };   // the check could not run; that is not a defect
+  // The check could not run; that is not a defect — and not a verdict to hold either.
+  if (!report) return { ok: true, detail: "" };
 
   const problems = [...report.errors, ...report.consoleErrors.map((c) => `console.error — ${c}`)];
   // A REF THIS PROBE CANNOT OPEN IS NOT PROOF THE PAGE IS BROKEN.
@@ -258,8 +279,31 @@ export async function checkBuiltPage(absHtmlPath: string, relLabel: string): Pro
     if (verdict.status === "fail") problems.push(verdict.detail);
   }
 
+  // A timeout — a script over the vm's 3 s, or the kill timer — can be the machine's load at that
+  // moment (up to four checks run at once), so it is reported but never held.
+  if (!report.timedOut) {
+    holdPageVerdict(verdictKey, problems.length === 0 ? { ok: true } : { ok: false, problem: problems[0]! });
+  }
   if (problems.length === 0) return { ok: true, detail: "" };
   return { ok: false, detail: `${relLabel}: ${problems[0]}` };
+}
+
+/** Held page verdicts (checkBuiltPage), oldest first; bounded so a long-lived gateway cannot grow it. */
+const heldPageVerdicts = new Map<string, { ok: true } | { ok: false; problem: string }>();
+const HELD_PAGE_VERDICTS_MAX = 256;
+
+function holdPageVerdict(key: string, verdict: { ok: true } | { ok: false; problem: string }): void {
+  heldPageVerdicts.delete(key);
+  heldPageVerdicts.set(key, verdict);
+  while (heldPageVerdicts.size > HELD_PAGE_VERDICTS_MAX) {
+    const oldest = heldPageVerdicts.keys().next().value;
+    if (oldest === undefined) break;
+    heldPageVerdicts.delete(oldest);
+  }
+}
+
+export function _resetPageVerdictsForTests(): void {
+  heldPageVerdicts.clear();
 }
 
 registerTool({

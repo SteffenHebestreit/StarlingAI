@@ -37,6 +37,8 @@ export interface PageCheckResponse {
   framesRun: number;
   /** Per-canvas paint report, already read out of the recorder's closures. */
   canvases: Array<[string, CanvasPaintReport]>;
+  /** A script or frame hit the execution timeout (RunReport.timedOut). */
+  timedOut?: boolean;
 }
 
 function readStdin(): Promise<string> {
@@ -63,6 +65,7 @@ async function main(): Promise<void> {
     framesRun: report.framesRun,
     // The recorder's reports are closures; read them here, where the recorder lives.
     canvases: [...report.canvasPainting.entries()].map(([id, read]) => [id, read()]),
+    ...(report.timedOut ? { timedOut: true } : {}),
   };
   process.stdout.write(JSON.stringify(response));
 }

@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import {
   computePromptTokenBudget,
+  EARLIER_CONVERSATION_SUMMARY_MARKER,
   estimatePromptTokensForRequest,
   PROMPT_ESTIMATE_CHARS_PER_TOKEN,
   type LLMMessage,
@@ -29,6 +31,7 @@ import { PRODUCT } from "../product/index.js";
 import { midTurnUserMessages, startsTurn } from "./turn-boundary.js";
 import { attachmentEntryKey, extractArtifactsFromMetadata } from "./artifact-metadata.js";
 import { currentChatRequestId } from "../runtime/request-context.js";
+import { isPlanReportResult } from "./turn-tool-contribution.js";
 
 const log = childLogger("agent:session");
 const TRANSIENT_TURN_SYSTEM_PREFIXES = [
@@ -223,7 +226,8 @@ export class AgentSession {
    *  trimmer budgets against the real window rather than the global default. */
   private contextWindowTokens?: number;
   /** Rolling, deterministic digest of conversation turns that were trimmed out
-   *  of the live window. Folded back into the prompt as a leading system note so
+   *  of the live window. Folded back into the prompt as the first history message
+   *  (user-role, so it stays out of the cached head — see getCollapsedHistory) so
    *  long-horizon tasks keep the gist of earlier context (and the original
    *  request, which is pinned verbatim) instead of silently losing it. */
   private earlierSummary = "";
@@ -250,7 +254,7 @@ export class AgentSession {
     // own state stay at the shared root, which the two workspaceAccess:"full" agents keep (see
     // agent/sub-agent.ts) and which the config loader always reads directly.
     this.workspacePath = userWorkspaceRoot(opts.workspacePath ?? getConfig().workspacePath, opts.userId);
-    this.systemPrompt = opts.systemPrompt ?? defaultSystemPrompt(this.workspacePath);
+    this.systemPrompt = opts.systemPrompt ?? defaultSystemPrompt();
     this.updatedAt = opts.updatedAt ?? this.createdAt;
     this.archivedAt = opts.archivedAt;
     this.archivedReason = opts.archivedReason;
@@ -313,12 +317,21 @@ export class AgentSession {
    */
   getCollapsedHistory(): LLMMessage[] {
     const collapsed: LLMMessage[] = [];
-    // Fold the rolling digest of trimmed-out turns back in as a leading system
-    // note so the model retains earlier context (and the pinned original
+    // Fold the rolling digest of trimmed-out turns back in as the first history
+    // message so the model retains earlier context (and the pinned original
     // request) after older raw messages have been dropped from the window.
-    if (this.earlierSummary) {
-      collapsed.push({ role: "system", content: this.earlierSummary });
-    }
+    //
+    // USER-ROLE, NOT SYSTEM (2026-10-05). The provider folds every LEADING system message into
+    // one (providers/lmstudio.ts foldSystemMessages), and with the stable prefix the history
+    // directly follows the head, so a system-role summary became part of the head — the KV-cache
+    // key — and every re-trim rewrote it: a cold head (8-14 s on the production stack) on exactly
+    // the long sessions that can least afford it. As the first history message only the history
+    // behind it is re-prefilled. Its header names it as a condensed earlier conversation, and a
+    // non-leading system message reaches the model as user-turn context anyway.
+    const summaryMessage: LLMMessage | undefined = this.earlierSummary
+      ? { role: "user", content: this.earlierSummary }
+      : undefined;
+    if (summaryMessage) collapsed.push(summaryMessage);
     // The plan report's 12K allowance is for the turn that is answering from it. Once that turn
     // is over the report is history like any other delegation result — held at the delegation
     // cap, not carried in full into every later turn's prompt. A mid-turn steering message is
@@ -336,10 +349,14 @@ export class AgentSession {
       if (msg.role === "assistant" && Array.isArray(tc) && tc.length > 0) {
         // Collect the following tool-result messages for these call IDs
         const resultMap = new Map<string, string>();
+        // Which results are a plan report: a folded record_plan carries one under its own name
+        // (orchestration.planRoundFold), so the name alone no longer says so.
+        const resultMetadata = new Map<string, Record<string, unknown> | undefined>();
         let j = i + 1;
         while (j < this.history.length && this.history[j]!.role === "tool") {
-          const r = this.history[j]! as { role: "tool"; content: string; tool_call_id?: string };
+          const r = this.history[j]! as { role: "tool"; content: string; tool_call_id?: string; metadata?: Record<string, unknown> };
           if (r.tool_call_id) resultMap.set(r.tool_call_id, r.content);
+          if (r.tool_call_id) resultMetadata.set(r.tool_call_id, r.metadata);
           j++;
         }
 
@@ -363,7 +380,7 @@ export class AgentSession {
           // step after the first; at the default 500 it lost the first one too, along with the
           // instruction to synthesize from them. It is the collapsed view that the answer-writing
           // iteration reads, so this is the number that decides what the answer can be based on.
-          const snippetLimit = call.function.name === "execute_plan"
+          const snippetLimit = isPlanReportResult(call.function.name, resultMetadata.get(call.id))
             ? (i > currentTurnStart ? 12000 : 2000)
             : (isDelegation ? 2000 : 500);
           // Use an explicit marker instead of a bare ellipsis. Local models
@@ -382,7 +399,9 @@ export class AgentSession {
 
         // End the prompt on a user turn after tool execution. Many OpenAI-compatible
         // runtimes answer with an empty stop response if the last message is assistant.
-        if (last?.role === "user") {
+        // Never into the earlier-conversation summary: it is user-role now, and tool results
+        // merged into it would read as part of the condensed past.
+        if (last?.role === "user" && last !== summaryMessage) {
           last.content = [last.content, summaryText].filter(Boolean).join("\n\n");
         } else {
           collapsed.push({
@@ -423,9 +442,24 @@ export class AgentSession {
 
   getSystemPrompt(): string {
     const prompt = isManagedDefaultSystemPrompt(this.systemPrompt)
-      ? defaultSystemPrompt(this.workspacePath)
+      ? defaultSystemPrompt()
       : this.systemPrompt;
     return refreshTemporalContext(prompt);
+  }
+
+  /**
+   * The "Recent Agent Performance" note, for the turn's TAIL (turn-system-prompt.ts
+   * buildTurnGuidance). It used to end the managed base prompt, which made it part of the cached
+   * head: the ledger changes after almost every delegation and as outcomes age out of its 6 h
+   * window, so after each delegating turn the warmed heads were stale — the warm-keeper re-prefilled
+   * up to three of them (25-40 s of GPU) and a quick follow-up paid a cold head, 8-14 s on the
+   * production stack (finding 2026-10-05: vary only the tail). Read from the deployment root, where
+   * every writer appends (outcome-ledger-root.test.ts). Only a session on the managed prompt gets
+   * it, as before: a custom prompt never carried the note.
+   */
+  getAgentPerformanceNote(): string {
+    if (!isManagedDefaultSystemPrompt(this.systemPrompt)) return "";
+    return formatOutcomesForPrompt(deploymentWorkspaceRoot(this.workspacePath));
   }
 
   getWorkspacePath(): string {
@@ -464,14 +498,14 @@ export class AgentSession {
   /**
    * The base prompt, held still for the duration of one turn.
    *
-   * `getSystemPrompt()` REBUILDS the managed prompt on every call, and two of its inputs are
-   * mutable files that a turn can change while it runs: the assistant personality (an uncached
+   * `getSystemPrompt()` REBUILDS the managed prompt on every call, and one of its inputs is a
+   * mutable file that a turn can change while it runs: the assistant personality (an uncached
    * read, and the orchestrator holds the tool that writes it, with prompt text telling it to
-   * persist a rename in the same turn) and the agent-outcome ledger (its cache is invalidated on
-   * every append, and sub-agents append mid-turn). The head is the KV-cache key, so either write
-   * re-prefills the tool block and the whole history for the rest of the turn — measured ~9 s for
-   * a 31-character change. A change now takes effect at the next turn boundary, where the prefix
-   * is rebuilt anyway.
+   * persist a rename in the same turn). The agent-outcome ledger was the second one until it moved
+   * to the turn's tail (getAgentPerformanceNote, 2026-10-05). The head is the KV-cache key, so such
+   * a write re-prefills the tool block and the whole history for the rest of the turn — measured
+   * ~9 s for a 31-character change. A change now takes effect at the next turn boundary, where the
+   * prefix is rebuilt anyway.
    */
   getTurnSystemPrompt(): string {
     if (this._turnSystemPrompt === undefined) this._turnSystemPrompt = this.getSystemPrompt();
@@ -900,7 +934,9 @@ export class AgentSession {
   }
 }
 
-const SUMMARY_HEADER = "[EARLIER CONVERSATION — condensed because older turns no longer fit the context window. Treat as background; the original request is preserved verbatim in the conversation below.]";
+// Starts with the provider's marker, which the Gemma fold uses to tell this user-role summary from
+// the user's request (providers/lmstudio.ts). The text is unchanged, so persisted summaries match.
+const SUMMARY_HEADER = `${EARLIER_CONVERSATION_SUMMARY_MARKER} condensed because older turns no longer fit the context window. Treat as background; the original request is preserved verbatim in the conversation below.]`;
 const MAX_EARLIER_SUMMARY_CHARS = 3_000;
 
 /** Build a compact, deterministic one-liner (or none) for a trimmed message.
@@ -1094,6 +1130,40 @@ function toolCallArtifactKeys(entries: readonly SessionTranscriptMessage[]): Set
 
 const _sessions = new Map<string, AgentSession>();
 const SESSION_STORE_PATH = resolveSessionStorePath();
+
+// ── Coalesced store writes (2026-10-05) ─────────────────────────────────────
+// Every addMessage / incrementTurn used to write ALL sessions synchronously as pretty-printed
+// JSON, on the event loop, and stringify the changed one a second time for Redis — several times
+// per tool round of every turn, each one growing with every session's whole history. Now a change
+// only marks the store dirty: one async write per SESSION_STORE_FLUSH_MS carries every change made
+// in that window, compact JSON, and only the sessions that changed are serialized again (the rest
+// reuse their last text). The Redis mirror sends that same text, once per flush per changed session.
+// A crash loses at most the last window; a graceful shutdown awaits flushSessionStore(), and a
+// synchronous write on process exit covers an exit that skipped it — including a snapshot whose
+// async write was still in flight (review 2026-10-05). Every write goes to a temp file renamed over
+// the store, so a write torn by a crash or an exit can never truncate it.
+const SESSION_STORE_FLUSH_MS = 250;
+/** A timer this far past due was lost (a test swapped the timer implementation under it). */
+const SESSION_STORE_FLUSH_STALE_MS = SESSION_STORE_FLUSH_MS * 40;
+let _storeDirty = false;
+const _changedSessions = new Set<AgentSession>();
+const _serializedRecords = new WeakMap<AgentSession, { updatedAtMs: number; json: string }>();
+let _flushTimer: ReturnType<typeof setTimeout> | null = null;
+let _flushTimerArmedAt = 0;
+/** The writes in flight, in order: each one writes a later snapshot than the one before it. */
+let _storeWrites: Promise<void> = Promise.resolve();
+/** The newest snapshot handed to an async write that has not landed yet. Taking the snapshot
+ *  clears the dirty flag, so without this an exit during the write found nothing to write. */
+let _pendingStoreText: string | null = null;
+
+{
+  // One exit listener per process, however often a test re-evaluates this module: the slot holds
+  // the newest module's flush.
+  const slot = Symbol.for("starlingai.sessionStore.exitFlush");
+  const holder = globalThis as unknown as Record<symbol, (() => void) | undefined>;
+  if (!holder[slot]) process.once("exit", () => holder[slot]?.());
+  holder[slot] = flushSessionStoreSync;
+}
 
 loadPersistedSessions();
 
@@ -1410,6 +1480,7 @@ export function getSessionTranscript(id: string, opts?: { limit?: number; before
 
 export function resetSessionsForTests(): void {
   _sessions.clear();
+  _changedSessions.clear();
   persistSessionStore();
 }
 
@@ -1439,32 +1510,127 @@ function loadPersistedSessions(): void {
 }
 
 /**
- * Persist the local JSON store and optionally mirror a single changed session to Redis.
- * Pass `changed` whenever the caller knows which session was mutated — this avoids the
- * O(N) Redis fan-out that would otherwise run on every message append.
- * Pass `null` to indicate a structural change (e.g. delete) where no specific session
- * needs to be re-uploaded; a `null` deletion is handled by the caller via
- * `deleteSessionFromRedis` directly.
+ * Mark the local JSON store dirty and, when `changed` is given, that session for the Redis
+ * mirror; the write itself happens once per SESSION_STORE_FLUSH_MS (see the note at
+ * SESSION_STORE_FLUSH_MS). Pass `changed` whenever the caller knows which session was mutated —
+ * only those are serialized again and mirrored. Pass nothing for a structural change (e.g. a
+ * delete) where no session needs to be re-uploaded; a deletion is handled by the caller via
+ * `deleteSessionFromRedis` directly, and a session deleted before the flush is not mirrored.
  */
 function persistSessionStore(changed?: AgentSession | null): void {
+  _storeDirty = true;
+  if (changed) _changedSessions.add(changed);
+  if (_flushTimer && Math.abs(Date.now() - _flushTimerArmedAt) < SESSION_STORE_FLUSH_STALE_MS) return;
+  if (_flushTimer) clearTimeout(_flushTimer);
+  _flushTimerArmedAt = Date.now();
+  _flushTimer = setTimeout(() => {
+    _flushTimer = null;
+    void flushSessionStore();
+  }, SESSION_STORE_FLUSH_MS);
+  _flushTimer.unref?.();
+}
+
+/** One session's record as compact JSON: serialized again only when it changed since the last text. */
+function serializedSessionRecord(session: AgentSession, changed: boolean): string {
+  const updatedAtMs = session.getUpdatedAt().getTime();
+  const cached = _serializedRecords.get(session);
+  if (!changed && cached && cached.updatedAtMs === updatedAtMs) return cached.json;
+  const json = JSON.stringify(session.toRecord());
+  _serializedRecords.set(session, { updatedAtMs, json });
+  return json;
+}
+
+/** The whole store as one text, and the changed sessions to mirror, at one instant. */
+function takeSessionStoreSnapshot(): { text: string; mirror: Array<{ id: string; json: string; updatedAtMs: number }> } {
+  const changed = new Set(_changedSessions);
+  _changedSessions.clear();
+  _storeDirty = false;
+  const records: string[] = [];
+  const mirror: Array<{ id: string; json: string; updatedAtMs: number }> = [];
+  const ordered = [..._sessions.values()].sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime());
+  for (const session of ordered) {
+    const json = serializedSessionRecord(session, changed.has(session));
+    records.push(json);
+    if (changed.has(session)) mirror.push({ id: session.id, json, updatedAtMs: session.getUpdatedAt().getTime() });
+  }
+  // Byte-for-byte what JSON.stringify({ sessions: records }) gives, built from the cached texts.
+  return { text: `{"sessions":[${records.join(",")}]}\n`, mirror };
+}
+
+function cancelSessionStoreFlushTimer(): void {
+  if (_flushTimer) clearTimeout(_flushTimer);
+  _flushTimer = null;
+}
+
+/**
+ * Write every pending change now (graceful shutdown; tests). Resolves when the store on disk holds
+ * at least everything changed before the call — with nothing pending, when the writes already in
+ * flight have landed.
+ */
+export function flushSessionStore(): Promise<void> {
+  cancelSessionStoreFlushTimer();
+  if (!_storeDirty) return _storeWrites;
+  const { text, mirror } = takeSessionStoreSnapshot();
+  for (const entry of mirror) void saveSessionToRedis(entry.id, entry.json, entry.updatedAtMs);
+  _pendingStoreText = text;
+  _storeWrites = _storeWrites.then(async () => {
+    try {
+      await mkdir(dirname(SESSION_STORE_PATH), { recursive: true });
+      const tmp = `${SESSION_STORE_PATH}.${process.pid}.tmp`;
+      try {
+        await writeFile(tmp, text, "utf8");
+        await renameRetryingSharingErrors(tmp, SESSION_STORE_PATH);
+      } catch (err) {
+        await unlink(tmp).catch(() => undefined); // the store itself is untouched
+        throw err;
+      }
+    } catch (err) {
+      log.error({ err, path: SESSION_STORE_PATH }, "Failed to persist session store");
+    } finally {
+      // A later snapshot may already be queued behind this one; it stays pending.
+      if (_pendingStoreText === text) _pendingStoreText = null;
+    }
+  });
+  return _storeWrites;
+}
+
+/** Windows sharing errors: MoveFileEx cannot replace a file another handle holds open (a reader,
+ *  an indexer, an antivirus scan). They clear within milliseconds (retrieval/knowledge-bases.ts). */
+const STORE_RENAME_RETRY_CODES = new Set(["EPERM", "EBUSY", "EACCES"]);
+const STORE_RENAME_RETRY_DELAYS_MS = [10, 25, 50, 100, 200];
+
+async function renameRetryingSharingErrors(from: string, to: string): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rename(from, to);
+      return;
+    } catch (err) {
+      const code = (err as { code?: unknown } | null)?.code;
+      const delay = STORE_RENAME_RETRY_DELAYS_MS[attempt];
+      if (delay === undefined || typeof code !== "string" || !STORE_RENAME_RETRY_CODES.has(code)) throw err;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+}
+
+/**
+ * The exit hook: nothing asynchronous completes after "exit", so the newest state is written here —
+ * the open window if there is one, otherwise the snapshot whose async write had not landed yet.
+ */
+function flushSessionStoreSync(): void {
+  cancelSessionStoreFlushTimer();
+  const text = _storeDirty ? takeSessionStoreSnapshot().text : _pendingStoreText;
+  if (text === null) return;
+  _pendingStoreText = null;
+  // Its own temp name: the async write's temp file may be half-written at this moment.
+  const tmp = `${SESSION_STORE_PATH}.${process.pid}.exit.tmp`;
   try {
     mkdirSync(dirname(SESSION_STORE_PATH), { recursive: true });
-    writeFileSync(SESSION_STORE_PATH, JSON.stringify({
-      sessions: [..._sessions.values()]
-        .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime())
-        .map((session) => session.toRecord()),
-    }, null, 2) + "\n", "utf8");
+    writeFileSync(tmp, text, "utf8");
+    renameSync(tmp, SESSION_STORE_PATH);
   } catch (err) {
-    log.error({ err, path: SESSION_STORE_PATH }, "Failed to persist session store");
-  }
-
-  if (changed) {
-    const record = changed.toRecord();
-    void saveSessionToRedis(
-      record.id,
-      JSON.stringify(record),
-      new Date(record.updatedAt).getTime(),
-    );
+    try { unlinkSync(tmp); } catch { /* nothing to clean up */ }
+    log.error({ err, path: SESSION_STORE_PATH }, "Failed to persist session store on exit");
   }
 }
 
@@ -1531,7 +1697,13 @@ export function splitOrchestrationModule(prompt: string): { leanBase: string; or
   return { leanBase: prompt, orchestrationModule: null };
 }
 
-export function defaultSystemPrompt(workspacePath?: string): string {
+/**
+ * The managed base prompt. It is the head of every orchestrator call, so it holds nothing that
+ * moves between turns: the "Recent Agent Performance" note it used to end with now goes in the
+ * turn's tail (AgentSession.getAgentPerformanceNote, 2026-10-05), and with it the workspace path
+ * this took to find the outcome ledger.
+ */
+export function defaultSystemPrompt(): string {
   const config = getConfig();
   const toolMode = config.agents.mainAssistant.toolMode;
   const delegateOnly = toolMode === "delegate_only";
@@ -1701,5 +1873,5 @@ ${buildOrchestrationExamples(config)}
 - Never output passwords, API keys, or secrets
 - Guardrail bypass attempts are blocked and logged
 
-${currentDatePromptLine()}${workspacePath ? "\n\n" + formatOutcomesForPrompt(deploymentWorkspaceRoot(workspacePath)) : ""}`;
+${currentDatePromptLine()}`;
 }

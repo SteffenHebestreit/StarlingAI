@@ -548,6 +548,11 @@ export interface TurnContext {
   spans: SubAgentSpan[];
   humanWaits: Array<{ startMs: number; endMs: number }>;
   plans: Array<{ atMs: number; stepCount: number | null }>;
+  /** When the turn's plan executor finished a run (plan_executed rows). A run that lies between the
+   *  call that recorded a plan and the next orchestrator call was folded into record_plan
+   *  (orchestration.planRoundFold): that next call is the answer, not a round spent acting on the
+   *  plan. Optional so hand-built contexts stay valid. */
+  planRuns?: number[];
   /** Loop rows of the turn's sub-agent runs (sub_agent_tool_loop_enforced / _detected), in time order. */
   loopSignals: Array<{ sessionId: string; atMs: number }>;
   performance: Record<string, unknown> | null;
@@ -654,6 +659,7 @@ function buildTurn(group: readonly AuditRow[], params: LatencyParams): TurnConte
   const waitRequests = new Map<string, number>();
   const humanWaits: Array<{ startMs: number; endMs: number }> = [];
   const plans: Array<{ atMs: number; stepCount: number | null }> = [];
+  const planRuns: number[] = [];
   const loopSignals: Array<{ sessionId: string; atMs: number }> = [];
   let performance: Record<string, unknown> | null = null;
   let scorecard: Record<string, unknown> | null = null;
@@ -738,6 +744,9 @@ function buildTurn(group: readonly AuditRow[], params: LatencyParams): TurnConte
       case "flow_plan_recorded":
         if (rowSession === sessionId) plans.push({ atMs: at, stepCount: num(row.data["stepCount"]) });
         break;
+      case "plan_executed":
+        if (rowSession === sessionId) planRuns.push(at);
+        break;
       case "turn_performance":
         if (rowSession === sessionId && !performance) performance = row.data;
         break;
@@ -768,6 +777,7 @@ function buildTurn(group: readonly AuditRow[], params: LatencyParams): TurnConte
     spans,
     humanWaits,
     plans,
+    planRuns,
     loopSignals,
     performance,
     scorecard,
@@ -807,7 +817,11 @@ export function findDispatch(turn: TurnContext): DispatchInfo | null {
   const dispatch = orchestratorTools.find((tool) => spansInside(turn, tool).some((span) => span.direct && span.sessionId.startsWith(`sub:${turn.sessionId}:`)));
   if (!dispatch) return null;
   const direct = spansInside(turn, dispatch).filter((span) => span.direct).length;
-  const plan = [...turn.plans].reverse().find((marker) => marker.atMs <= dispatch.startMs);
+  // A folded record_plan (orchestration.planRoundFold) IS the dispatch, and writes its plan marker
+  // inside that call: read before the call's start, a multi-step folded plan looked unplanned and
+  // single, and pre_router_dispatch claimed its planning call as removable.
+  const plan = [...turn.plans].reverse().find((marker) => marker.atMs <= dispatch.startMs
+    || (dispatch.tool === "record_plan" && marker.atMs <= dispatch.endMs));
   const planSteps = plan?.stepCount ?? null;
   const toolsBefore = orchestratorTools.filter((tool) => tool !== dispatch && tool.startMs < dispatch.startMs).map((tool) => tool.tool);
   const single = direct === 1 && (!plan || planSteps === 1);
@@ -904,6 +918,9 @@ const PLAN_ROUND_FOLD: LeverDefinition = {
       if (!before || !after) return [];
       const asked = turn.requested.filter((req) => req.atMs >= before.endMs && req.atMs <= after.startMs);
       if (asked.length === 0 || asked.some((req) => req.tool !== "record_plan")) return [];
+      // Already folded: the plan ran inside record_plan, so the next call answers from its results.
+      // Claiming it would count the whole execution, and the answer, as a removable round.
+      if ((turn.planRuns ?? []).some((atMs) => atMs >= before.endMs && atMs <= after.startMs)) return [];
       return claim("plan_round_fold", before.endMs, after.endMs, 1);
     });
   },

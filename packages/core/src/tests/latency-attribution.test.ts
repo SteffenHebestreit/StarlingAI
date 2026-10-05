@@ -383,6 +383,29 @@ describe("levers", () => {
     expect(leverColumn(rows, "plan_round_fold")).toEqual([0, 0, 0, 0]);
   });
 
+  it("findDispatch: a folded record_plan dispatches, and the plan it records inside that call counts", () => {
+    // Turn 4 as a folded turn would log it: no separate record_plan call, the dispatching call IS
+    // record_plan, and its flow_plan_recorded row lands inside it (after its start, 20:04:05.679).
+    const rows = editableRows().filter((row) => !(row.type === "tool_call_completed" && row.timestamp === "2026-09-25T20:04:00.329Z"));
+    rowAt(rows, "tool_call_completed", "2026-09-25T20:12:48.268Z").data["tool"] = "record_plan";
+    const marker = rowAt(rows, "flow_plan_recorded", "2026-09-25T20:04:00.328Z");
+    marker.timestamp = "2026-09-25T20:04:05.690Z";
+    marker.data["stepCount"] = 2;
+    const report = attributeLatency(rows);
+    expect(report.turns[3]!.dispatch).toMatchObject({ tool: "record_plan", planSteps: 2, single: false, preRoutable: false });
+    // A two-step plan is not one a pre-router could have dispatched directly.
+    expect(report.turns[3]!.levers.pre_router_dispatch).toBe(0);
+  });
+
+  it("plan_round_fold: not when the plan already ran inside record_plan (orchestration.planRoundFold)", () => {
+    // A folded record_plan runs the executor in its own call, so its plan_executed row lands before
+    // the next orchestrator call (which starts 20:04:05.615 − 5,096 = 20:04:00.519). That call is
+    // the answer written from the results — claiming it would count the plan's whole run.
+    const rows = editableRows();
+    rows.push({ id: "folded-run", timestamp: "2026-09-25T20:04:00.400Z", type: "plan_executed", sessionId: SESSION, data: { steps: 1, done: 1 } });
+    expect(leverColumn(rows, "plan_round_fold")).toEqual([0, 0, 0, 0]);
+  });
+
   it("subagent_prewarm: only a cold first call, and only its prefill above the warm TTFT", () => {
     // t1's first image_creator call: TTFT 7,067 − 1,500. The first calls of t2–t4 were not cold.
     expect(leverColumn(fixtureRows(), "subagent_prewarm")).toEqual([5_567, 0, 0, 0]);

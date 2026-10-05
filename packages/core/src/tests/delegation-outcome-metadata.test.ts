@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildModelVisibleToolResult, isExplicitDelegationSuccess } from "../agent/tool-result-format.js";
+import { buildModelVisibleToolResult, isExplicitDelegationSuccess, looksLikeDelegatedFailureEvidence } from "../agent/tool-result-format.js";
 import { classifyPostOrchestrationDisposition } from "../agent/runtime.js";
 
 // A specialist that ended its loop normally while asking for data it never got.
@@ -40,7 +40,7 @@ describe("delegation verdicts — only an explicit one beats the prose sniff", (
   });
 
   it("the frame and the post-orchestration classifier apply the same rule", () => {
-    for (const metadata of [HEURISTIC, EXPLICIT, { agentName: "researcher", delegationSucceeded: true }]) {
+    for (const metadata of [HEURISTIC, EXPLICIT, { agentName: "researcher", delegationSucceeded: true }, { ...HEURISTIC, delegationEvidence: true }]) {
       const framed = buildModelVisibleToolResult("delegate_to_agent", REPORT, metadata);
       expect(disposition(framed, metadata) === "failure").toBe(/TASK FAILED/.test(framed));
     }
@@ -51,6 +51,25 @@ describe("delegation verdicts — only an explicit one beats the prose sniff", (
     for (const text of ["Sub-agent produced no final response.", "Sub-agent 'coder' container error: unknown"]) {
       expect(buildModelVisibleToolResult("delegate_to_agent", text, { ...EXPLICIT, agentName: "coder" })).toMatch(/TASK FAILED/);
     }
+  });
+
+  // 2026-10-05: generic failure vocabulary is as often the SUBJECT of a good answer as a report
+  // of failure. It no longer marks a result failed when the result carries concrete evidence; a
+  // statement about the TASK ("task cannot be completed, please provide …") still does.
+  // The evidence that sets a failure WORD aside is judged upstream, where the task is known
+  // (tools/sub-agent.ts → metadata.delegationEvidence). From the text alone, figures echoed from the
+  // task looked like evidence (review 2026-10-05: "No results found for the 2 A / 5 V charger query").
+  it("a failure word inside an answer with its OWN evidence is not a failure; a task blocker still is", () => {
+    const WITH_EVIDENCE = { ...HEURISTIC, delegationEvidence: true };
+    expect(looksLikeDelegatedFailureEvidence(REPORT, { ownEvidence: true })).toBe(false);
+    expect(buildModelVisibleToolResult("delegate_to_agent", REPORT, WITH_EVIDENCE)).toMatch(/TASK COMPLETED/);
+    expect(disposition(buildModelVisibleToolResult("delegate_to_agent", REPORT, WITH_EVIDENCE), WITH_EVIDENCE)).not.toBe("failure");
+    // Without the upstream verdict the text alone decides, as before: echoed figures are no rescue.
+    expect(looksLikeDelegatedFailureEvidence(REPORT)).toBe(true);
+    expect(looksLikeDelegatedFailureEvidence("No results found for the 2 A / 5 V charger query.")).toBe(true);
+    // A blocker and an opening "Error:" are failures even with evidence.
+    expect(looksLikeDelegatedFailureEvidence(NEEDS_DATA, { ownEvidence: true })).toBe(true);
+    expect(looksLikeDelegatedFailureEvidence("Error: the page returned 3 KB of markup and no table.", { ownEvidence: true })).toBe(true);
   });
 
   it("reads the verdict's source, not the defaulted outcome", () => {

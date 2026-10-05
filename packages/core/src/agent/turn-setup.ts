@@ -9,6 +9,63 @@ import { lookupTrajectory } from "../memory/trajectory-cache.js";
 import { toSoftRoutingHint, type DynamicTurnGuidance } from "./intent-classifier.js";
 import { userMessageCarriesActionableUrl } from "./citation-honesty.js";
 import type { MainAssistantToolMode } from "./default-tools.js";
+import { prefetchCapabilityCandidates } from "./discovery-prefetch.js";
+import { noteIntentShadowCapsule } from "./intent-shadow.js";
+import { timedPhase } from "./turn-metrics.js";
+
+/**
+ * HARD latency cap on the discovery capsule: the embedding round-trip behind it can stall on a cold
+ * or queued embed backend (observed ~15 s on a busy LM Studio). A slow prefetch is abandoned (empty
+ * capsule) rather than delaying the turn; the model then discovers on demand.
+ */
+export const DISCOVERY_PREFETCH_BUDGET_MS = 2500;
+
+/**
+ * Start a turn's discovery prefetch (orchestration.discoveryPrefetch): bounded by `budgetMs`, timed
+ * as the `discoveryPrefetch` phase, noted for the intent readout's shadow, and never rejecting — an
+ * error and the timeout both resolve to "".
+ *
+ * WHERE IT STARTS (finding 2026-10-05). It reads only the user's message and the turn's agent grant,
+ * so the runtime starts it the moment the receptionist's fast lane has declined the turn, beside the
+ * source judge, and hands the promise to the first prompt assembly. Started inside that assembly it
+ * began only after the judge's wait and the document retrieval, and its embedding round-trip — up to
+ * the whole cap — sat on the path to the first orchestrator token instead of behind them.
+ */
+export function startDiscoveryPrefetch(params: {
+  userMessage: string;
+  sessionId: string;
+  /** The turn's agent grant (a scene, a restricted session): unscoped, the capsule named agents the turn could not call. */
+  allowedAgents?: readonly string[];
+  budgetMs?: number;
+}): Promise<string> {
+  const budgetMs = params.budgetMs ?? DISCOVERY_PREFETCH_BUDGET_MS;
+  return timedPhase("discoveryPrefetch", async () => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    // The capsule's agent names, for the intent readout's shadow (agent/intent-shadow.ts): the
+    // candidate list the turn actually had, so none when the capsule came too late.
+    let capsuleAgents: readonly string[] = [];
+    let capsuleLate = false;
+    try {
+      const capsule = await Promise.race([
+        prefetchCapabilityCandidates(params.userMessage, {
+          ...(params.allowedAgents ? { allowedAgents: [...params.allowedAgents] } : {}),
+          sessionId: params.sessionId,
+          onAgents: (names) => { capsuleAgents = names; },
+        }),
+        new Promise<string>((resolve) => {
+          timer = setTimeout(() => {
+            capsuleLate = true;
+            resolve("");
+          }, budgetMs);
+        }),
+      ]);
+      noteIntentShadowCapsule(params.sessionId, capsuleLate ? { status: "timeout" } : { status: "ok", agents: capsuleAgents });
+      return capsule;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }).catch(() => "");
+}
 
 export interface TrajectoryInjection {
   /** Extra `[CACHED RECENT EVIDENCE …]` system context, or "" when no usable hit. */
@@ -19,10 +76,26 @@ export interface TrajectoryInjection {
 }
 
 /**
+ * Whether iteration 0 injects the per-turn context blocks — memory, user model, skills, flow
+ * guidance and the cached trajectory. Not under agents.performance.leanContextInjection, where the
+ * model pulls that context with recall_context instead. One definition for the prompt assembly that
+ * injects the blocks (turn-system-prompt.ts) and the up-front lookups that feed them.
+ */
+export function turnContextInjected(): boolean {
+  return getConfig().agents.performance.leanContextInjection !== true;
+}
+
+/**
  * Before the first LLM call, look up a cached trajectory for a semantically similar
  * recent query and, on a hit, return it as extra system context so the model can
  * decide whether to reuse or re-research the evidence. Best-effort — a lookup error
  * yields the empty result and never blocks the turn. Emits trajectory_cache_hit.
+ *
+ * NOT WHEN IT CANNOT BE SHOWN (finding 2026-10-05). The lookup sits on the critical path (a query
+ * embedding plus a parse of the cache file), and under leanContextInjection — the default — the
+ * prompt assembly never injects its result. It now runs only when turnContextInjected(), the same
+ * condition the assembly injects on; the identity it returns is still only a candidate until the
+ * assembly reports the context as shown (AssembleTurnSystemMessagesResult.trajectoryShown).
  */
 export async function lookupTrajectoryInjection(params: {
   userMessage: string;
@@ -33,6 +106,7 @@ export async function lookupTrajectoryInjection(params: {
 }): Promise<TrajectoryInjection> {
   let trajectoryInjectionContext = "";
   let injectedTrajectoryIdentity: { normalizedQuery: string; finishedAt: string } | null = null;
+  if (!turnContextInjected()) return { trajectoryInjectionContext, injectedTrajectoryIdentity };
   try {
     const cachedHit = await lookupTrajectory(
       params.userMessage,

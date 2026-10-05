@@ -71,10 +71,42 @@ describe("AgentSession collapsed history", () => {
     // History was actually trimmed (not all 49 messages retained).
     expect(history.length).toBeLessThan(49);
 
-    // The dropped turns survive as a leading digest system message.
+    // The dropped turns survive as a leading digest message — user-role, so the provider's fold of
+    // the leading system run stops at the real head and a re-trim does not move it (2026-10-05).
     const collapsed = session.getCollapsedHistory();
-    expect(collapsed[0]?.role).toBe("system");
+    expect(collapsed[0]?.role).toBe("user");
     expect(collapsed[0]?.content).toContain("EARLIER CONVERSATION");
+    expect(collapsed.some((message) => message.role === "system")).toBe(false);
+    // ...and the pinned original request follows it as its own message.
+    expect(collapsed[1]?.content).toContain("ORIGINAL TASK");
+  });
+
+  it("never merges tool results into the earlier-conversation summary", () => {
+    // The summary is user-role (2026-10-05), and the collapse folds a tool round into the user
+    // message before it. With no pinned request between them, that message was the summary.
+    const summary = "[EARLIER CONVERSATION — condensed]\n• user: build the report";
+    const at = new Date().toISOString();
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+      earlierSummary: summary,
+      history: [
+        {
+          role: "assistant",
+          content: "",
+          timestamp: at,
+          tool_calls: [{ id: "call_read", type: "function", function: { name: "read_file", arguments: JSON.stringify({ path: "a.txt" }) } }],
+        },
+        { role: "tool", tool_call_id: "call_read", content: "file body", timestamp: at },
+      ],
+    });
+
+    const collapsed = session.getCollapsedHistory();
+
+    expect(collapsed[0]).toEqual({ role: "user", content: summary });
+    expect(collapsed[1]?.role).toBe("user");
+    expect(collapsed[1]?.content).toContain("[Tool: read_file(path: a.txt) → file body]");
   });
 
   it("drops stale transient synthesis system messages before the next user turn", () => {

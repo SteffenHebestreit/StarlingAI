@@ -201,7 +201,9 @@ async function main(): Promise<void> {
     // whether the flag should be turned on. The date line is the turn's own builder's.
     const { collectWarmHeads } = await import("../agent/cache-warmer.js");
     const { buildTemporalContextPrompt } = await import("../agent/runtime.js");
-    const warm = collectWarmHeads({ forcedHeads: true });
+    // stableToolBlock "off": E9 measures the forced SUBSET heads. Under "freeze" (the deployment
+    // shard since 2026-10-05) the warm-keeper no longer builds them, since no forced call sends one.
+    const warm = collectWarmHeads({ forcedHeads: true, stableToolBlock: "off" });
     const pick = (label: string): Scenarios.MultiSystemHead => {
       const head = warm.find((h) => h.label === label);
       if (!head) throw new Error(`the warm-keeper built no "${label}" head (is the tool registry empty?)`);

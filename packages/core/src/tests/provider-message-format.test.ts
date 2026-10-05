@@ -107,6 +107,33 @@ describe("normalizeMessagesForModel", () => {
     expect(normalized[1]).toMatchObject({ role: "assistant", content: "Ready." });
   });
 
+  it("folds Gemma's instructions into the user's request, not into a long session's earlier-conversation summary", async () => {
+    // Since 2026-10-05 the summary of trimmed-out turns is a user-role message opening the history
+    // (so the stable head stays out of it). Folded into it, the instructions read "Current request
+    // or continuation: [EARLIER CONVERSATION …]". A real compacted session, so the session's header
+    // and the provider's marker cannot drift apart unnoticed.
+    const { AgentSession } = await import("../agent/session.js");
+    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    session.setContextWindow(2048);
+    session.addMessage({ role: "user", content: "ORIGINAL TASK: build the quarterly revenue report." });
+    for (let i = 0; i < 24; i++) {
+      session.addMessage({ role: "assistant", content: `Working on step ${i}. ` + "x".repeat(300) });
+      session.addMessage({ role: "user", content: `Follow-up ${i}: ` + "y".repeat(300) });
+    }
+    const collapsed = session.getCollapsedHistory();
+    expect(String(collapsed[0]?.content)).toMatch(/^\[EARLIER CONVERSATION/);
+
+    const normalized = normalizeMessagesForModel([{ role: "system", content: "You are a precise code reviewer." }, ...collapsed], "gemma-4-26b-a4b-it");
+
+    // The summary passes through untouched...
+    expect(normalized[0]).toEqual(collapsed[0]);
+    // ...and the instructions lead the first REAL user message, the pinned request.
+    expect(normalized[1]?.role).toBe("user");
+    expect(String(normalized[1]?.content)).toContain("You are a precise code reviewer.");
+    expect(String(normalized[1]?.content)).toContain("Current request or continuation:\nORIGINAL TASK: build the quarterly revenue report.");
+    expect(normalized.filter((message) => String(message.content).includes("Follow these instructions"))).toHaveLength(1);
+  });
+
   it("adds a synthetic user instruction turn for Gemma when no user message exists yet", () => {
     const messages: LLMMessage[] = [
       { role: "system", content: "You are a tool-calling assistant." },

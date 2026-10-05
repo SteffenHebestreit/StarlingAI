@@ -167,6 +167,48 @@ describe("buildIterationToolRestriction", () => {
   });
 });
 
+describe("resolveIterationTools — the discovery withhold survives freeze (review 2026-10-05)", () => {
+  // The tests above hand buildIterationToolRestriction a ready-made forcedTools, so they could not
+  // see that under freeze the forced subset was cut from the UN-narrowed block: search_agents and
+  // list_agents are forced-orchestration tools, and after a no-match a forced iteration allowed the
+  // search that had just come back empty. These run the real filterForcedOrchestrationTools.
+  const tools = [
+    "delegate_to_agent", "search_agents", "list_agents", "search_workflows", "execute_plan",
+    "record_plan", "memory_store", "recall_context",
+  ].map((name) => ({ name }));
+  const afterNoMatch = { tools, withholdDiscoveryTools: true, forceWanted: true, planRecorded: async () => true };
+
+  it("a forced iteration after a no-match allows exactly what 'off' offers — no discovery tool", async () => {
+    const { resolveIterationTools } = await import("../agent/runtime.js");
+    const off = await resolveIterationTools({ ...afterNoMatch, freeze: false });
+    const frozen = await resolveIterationTools({ ...afterNoMatch, freeze: true });
+
+    const offered = off.streamTools.map((tool) => tool.name).sort();
+    expect(offered).toEqual(["delegate_to_agent", "execute_plan", "search_workflows"]);
+    expect(frozen.forceToolChoice).toBe(true);
+    expect(frozen.restriction?.reason).toBe("must_orchestrate");
+    expect([...frozen.restriction!.allowed].sort()).toEqual(offered);
+    // The wire array is still the whole block: only the call site narrows.
+    expect(frozen.streamTools).toBe(tools);
+  });
+
+  it("an unforced iteration after a no-match withholds the discovery tools at the call site", async () => {
+    const { resolveIterationTools } = await import("../agent/runtime.js");
+    const frozen = await resolveIterationTools({ ...afterNoMatch, forceWanted: false, freeze: true });
+    expect(frozen.restriction?.reason).toBe("discovery_withheld");
+    expect(frozen.restriction!.allowed.has("search_agents")).toBe(false);
+    expect(frozen.restriction!.allowed.has("list_agents")).toBe(false);
+    expect(frozen.restriction!.allowed.has("memory_store")).toBe(true);
+  });
+
+  it("the control: with no no-match, a forced iteration may still search", async () => {
+    const { resolveIterationTools } = await import("../agent/runtime.js");
+    const frozen = await resolveIterationTools({ ...afterNoMatch, withholdDiscoveryTools: false, freeze: true });
+    expect(frozen.restriction!.allowed.has("search_agents")).toBe(true);
+    expect(frozen.restriction!.allowed.has("list_agents")).toBe(true);
+  });
+});
+
 describe("orchestration.stableToolBlock", () => {
   it('freeze: every iteration of a turn receives a byte-identical tool array, including the forced one', async () => {
     const { AgentSession, resetSessionsForTests, runTurn } = await loadRuntime("freeze");

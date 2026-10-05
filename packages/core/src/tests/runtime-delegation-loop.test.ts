@@ -841,6 +841,46 @@ describe("runtime delegated-loop regressions", () => {
     expect(vi.mocked(logAudit).mock.calls.filter((call) => call[0] === "turn_scorecard")).toHaveLength(1);
   });
 
+  // Adversarial review 2026-10-05: the sanitizer no longer empties narration, so a max-iteration
+  // synthesis that is only step narration survived as the answer of an already overrun turn. The
+  // forced-terminal path now chooses its fallback for narration the way it did for empty text.
+  it("does not ship a narration-only max-iteration synthesis as the answer", async () => {
+    const fresh = await loadFreshRuntimeForToolMode("hybrid");
+    streamMock.mockImplementation(() => createToolCallStream("web_1", "web_search", { query: "portable recorder mcu" }));
+    completeMock.mockResolvedValueOnce({
+      content: "Let me compile the final report now.",
+      tool_calls: [],
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      finishReason: "stop",
+    });
+    fresh.registerTool({
+      name: "web_search",
+      description: "Search the web.",
+      parameters: { type: "object", properties: {} },
+      execute: vi.fn(async () => ({
+        success: true,
+        output: "Observed evidence:\nESP32-P4 and STM32U5 are relevant MCU options.",
+      })),
+    });
+    const session = new fresh.AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await fresh.runTurn({
+      session,
+      userMessage: "Summarize portable recorder MCU options.",
+      maxIterationsOverride: 1,
+    });
+
+    expect(result.performance?.finishReason).toBe("max_tool_iterations");
+    expect(result.response).not.toContain("Let me compile the final report now.");
+    expect(result.response.trim().length).toBeGreaterThan(0);
+    // …and the overrun turn does not pay for ANOTHER forced synthesis to replace the narration.
+    expect(completeMock).toHaveBeenCalledTimes(1);
+  });
+
   it("resynthesizes empty post-tool final responses into a direct answer", async () => {
     let llmCallCount = 0;
     streamMock.mockImplementation(() => {

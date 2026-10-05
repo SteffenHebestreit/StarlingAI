@@ -11,7 +11,7 @@
  * - TTL enforced on read: stale entries are never returned.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { isEmbeddingAvailable, computeQueryEmbedding, cosineSimilarity } from "../providers/embeddings.js";
 import { appendJsonLine, readLastRecords } from "./bounded-ndjson-store.js";
@@ -175,6 +175,63 @@ export function invalidateTrajectory(
 export function _resetTrajectoryInvalidationForTests(): void {
   _invalidationsByWorkspace.clear();
   _loadedWorkspaces.clear();
+  _parsedTails.clear();
+}
+
+// ── Parsed tail ────────────────────────────────────────────────────────────
+// Only the most recent tail of the cache is useful — older entries are either expired or dominated
+// by newer ones. Reading the tail keeps the hot-path cost bounded as the file grows toward
+// MAX_CACHE_LINES; keeping it PARSED keeps it bounded across turns too (finding 2026-10-05). Each
+// lookup used to re-read and JSON-parse up to LOOKUP_TAIL_LINES lines, each carrying a full
+// embedding vector, then re-serialise every entry for the credential check — on the critical path
+// before the first model call, though the file changes only when a turn finishes. The parse is
+// reused while the file's size and mtime are unchanged; anything time- or invalidation-dependent
+// (TTL, the blocklist) is still decided per lookup.
+
+const LOOKUP_TAIL_LINES = 500;
+/** Workspaces whose parsed tail is held (per-user workspaces each have their own file). */
+const PARSED_TAIL_MAX_FILES = 16;
+
+interface ParsedTailEntry {
+  /** Without its queryEmbedding: the vector below is the only copy held (see CachedTrajectoryEntry). */
+  entry: CachedTrajectoryEntry;
+  finishedMs: number;
+  /** Credential-shaped (defence in depth — should not exist); decided once per parse. */
+  credentialShaped: boolean;
+  vector: Float32Array | null;
+}
+
+const _parsedTails = new Map<string, { size: number; mtimeMs: number; entries: ParsedTailEntry[] }>();
+
+function readParsedTail(filePath: string): ParsedTailEntry[] {
+  let size: number;
+  let mtimeMs: number;
+  try {
+    ({ size, mtimeMs } = statSync(filePath));
+  } catch {
+    return [];
+  }
+  const held = _parsedTails.get(filePath);
+  if (held && held.size === size && held.mtimeMs === mtimeMs) {
+    // Most recently used last, so the eviction below drops the coldest workspace.
+    _parsedTails.delete(filePath);
+    _parsedTails.set(filePath, held);
+    return held.entries;
+  }
+  const entries = readLastRecords<TrajectoryEntry>(filePath, LOOKUP_TAIL_LINES).map(({ queryEmbedding, ...entry }) => ({
+    entry,
+    finishedMs: new Date(entry.finishedAt).getTime(),
+    credentialShaped: CREDENTIAL_RE.test(JSON.stringify(entry)),
+    vector: Array.isArray(queryEmbedding) && queryEmbedding.length > 0 ? new Float32Array(queryEmbedding) : null,
+  }));
+  _parsedTails.delete(filePath);
+  _parsedTails.set(filePath, { size, mtimeMs, entries });
+  while (_parsedTails.size > PARSED_TAIL_MAX_FILES) {
+    const coldest = _parsedTails.keys().next().value;
+    if (coldest === undefined) break;
+    _parsedTails.delete(coldest);
+  }
+  return entries;
 }
 
 // ── Read ───────────────────────────────────────────────────────────────────
@@ -185,9 +242,17 @@ export function _resetTrajectoryInvalidationForTests(): void {
  * outcome.
  */
 export interface TrajectoryLookupResult {
-  entry: TrajectoryEntry;
+  entry: CachedTrajectoryEntry;
   similarity: number;
 }
+
+/**
+ * A cached entry as a lookup holds and returns it: without the stored query embedding. The parsed
+ * tail is kept across turns (readParsedTail), and holding the number[] beside its Float32Array copy
+ * doubled the heaviest part of every entry — about 12 bytes per dimension per entry, ~100 MB at
+ * 1024 dimensions x 500 entries x 16 workspaces. No caller reads the vector back.
+ */
+export type CachedTrajectoryEntry = Omit<TrajectoryEntry, "queryEmbedding">;
 
 /**
  * Look up a cached trajectory for a semantically similar query.
@@ -222,27 +287,21 @@ export async function lookupTrajectory(
   const now = Date.now();
   const invalidationMap = getInvalidationMap(workspacePath);
 
-  let bestEntry: TrajectoryEntry | null = null;
+  let bestEntry: CachedTrajectoryEntry | null = null;
   let bestSim = 0;
 
-  // Only the most recent tail of the cache is useful — older entries are
-  // either expired or dominated by newer ones.  Reading the tail keeps the
-  // hot-path cost bounded even as the file grows toward MAX_CACHE_LINES.
-  const entries = readLastRecords<TrajectoryEntry>(filePath, 500);
-  for (const entry of entries) {
+  // The parsed tail, reused while the file is unchanged (readParsedTail).
+  for (const { entry, finishedMs, credentialShaped, vector } of readParsedTail(filePath)) {
     // TTL check
-    const finishedMs = new Date(entry.finishedAt).getTime();
     if (Number.isNaN(finishedMs) || (now - finishedMs) > entry.ttlSeconds * 1000) continue;
     // Skip entries marked bad in this or a prior process for this workspace
     const invalidationExpiresAt = invalidationMap.get(trajectoryIdentity(entry));
     if (invalidationExpiresAt !== undefined && invalidationExpiresAt > now) continue;
     // Security: skip credential-shaped entries (defence in depth — should not exist)
-    const serialized = JSON.stringify(entry);
-    if (CREDENTIAL_RE.test(serialized)) continue;
+    if (credentialShaped) continue;
     // Embedding similarity
-    if (!Array.isArray(entry.queryEmbedding) || entry.queryEmbedding.length === 0) continue;
-    const entryVec = new Float32Array(entry.queryEmbedding);
-    const sim = cosineSimilarity(queryEmbedding, entryVec);
+    if (!vector) continue;
+    const sim = cosineSimilarity(queryEmbedding, vector);
     if (sim >= SIMILARITY_THRESHOLD && sim > bestSim) {
       bestSim = sim;
       bestEntry = entry;

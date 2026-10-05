@@ -30,6 +30,7 @@ import { collectArtifactRecords, type ArtifactRecord } from "./artifact-metadata
 import { PRODUCED_FILES_HEADER, RUN_STOP_HEADER, TOOL_DECLINES_HEADER, TOOL_FAILURES_HEADER } from "./delegated-run-record.js";
 import { defangFramingMarkers } from "../guardrails/framing-markers.js";
 import { IN_REPLY_LANGUAGE } from "./reply-language.js";
+import { isPlanReportResult } from "./turn-tool-contribution.js";
 
 export function truncateForContext(value: string, maxChars: number): string {
   const normalized = collapseWhitespace(value);
@@ -72,15 +73,33 @@ export function looksLikeStructuralDelegationFailure(value: string): boolean {
   return /\b(container error|containerized delegation failed|sandbox (?:bootstrap|startup|start) failed|bootstrap failed|runtime crash(?:ed)?|terminated unexpectedly)\b/i.test(preview);
 }
 
-export function looksLikeDelegatedFailureEvidence(value: string): boolean {
+/**
+ * The prose failure sniff over a delegated result. Two kinds of phrase, weighed differently
+ * (2026-10-05): statements about the TASK or the RUN ("task cannot be completed", "please provide
+ * … to proceed", "delegation limit", "Error: …" as the opening) are failure reports wherever they
+ * stand; generic failure vocabulary ("not found", "failed to", "timed out", "incomplete") is just
+ * as often the SUBJECT of a good answer ("the first attempt failed to reach the vendor site, so I
+ * used the cached datasheet: 12 mA at 3.3 V") and is set aside only when `opts.ownEvidence` says
+ * the result carries concrete evidence of its own. That verdict is judged UPSTREAM, where the task
+ * is known (tools/sub-agent.ts `delegationEvidence`; see delegationCarriesOwnEvidence): from the
+ * text alone, figures echoed from the task ("No results found for the 2 A / 5 V charger query")
+ * looked like evidence (adversarial review 2026-10-05).
+ */
+export function looksLikeDelegatedFailureEvidence(value: string, opts?: { ownEvidence?: boolean }): boolean {
   const preview = value.trim().slice(0, 600);
   if (!preview) return false;
   if (looksLikeStructuralDelegationFailure(preview)) return true;
   return /^error:/i.test(preview)
-    || /\b(no results|not found|unable to|failed to|timed out|cancelled|incomplete|max.{0,20}iterations|could not complete|did not complete|cannot complete|cannot proceed|delegation limit|already failed|not permitted|produced no final response|no usable delegated result returned)\b/i.test(preview)
+    || (/\b(no results|not found|unable to|failed to|timed out|cancelled|incomplete)\b/i.test(preview) && opts?.ownEvidence !== true)
+    || /\b(max.{0,20}iterations|could not complete|did not complete|cannot complete|cannot proceed|delegation limit|already failed|not permitted|produced no final response|no usable delegated result returned)\b/i.test(preview)
     || /\bis already running via\s+(?:[a-z0-9_:-]*(?:_agent|_coordinator)|researcher|another agent)\b/i.test(preview)
     || /\bNo (?:agents|workflows) matched\b/i.test(preview)
     || /\b(blocker:|missing source data|required .* unavailable|requested .* unavailable|not available in the current workspace|not available in the workspace|could not be fulfilled with exact figures|cannot be generated at this time|please provide the structured json data to proceed|please provide the source data to proceed|please provide .*json data|i need .*structured json.* to proceed|i need .*data to proceed|task cannot be completed|table does not exist|confirmed non-existent|no source provided the specific .* data)\b/i.test(preview);
+}
+
+/** The delegation recorded that its result carries its own concrete evidence (tools/sub-agent.ts). */
+export function delegationCarriesOwnEvidence(metadata?: Record<string, unknown>): { ownEvidence: boolean } {
+  return { ownEvidence: metadata?.["delegationEvidence"] === true };
 }
 
 /**
@@ -237,7 +256,8 @@ export function buildModelVisibleToolResult(
   // relay, the failure sniffers, the backstops) reads from the evidence marker on, so it sees the
   // same bytes as before. And the head survives every cap: the 1,600-char evidence cap, the plan
   // report's cap and the head-first cap on collapsed history.
-  if (toolName === "execute_plan") {
+  // record_plan too, once it has folded the plan round and carries the report (isPlanReportResult).
+  if (isPlanReportResult(toolName, metadata)) {
     // The plan report has no evidence marker; its first paragraph is the "Plan: N/M" roll-call.
     const end = frame.indexOf("\n\n");
     return end < 0 ? `${frame}\n\n${record}` : `${frame.slice(0, end)}\n\n${record}${frame.slice(end)}`;
@@ -305,7 +325,7 @@ function frameToolResult(
         || (!reportedSuccess && (
           metadata?.["delegationSucceeded"] === false
           || /^error:/i.test(cleaned)
-          || looksLikeDelegatedFailureEvidence(cleaned)
+          || looksLikeDelegatedFailureEvidence(cleaned, delegationCarriesOwnEvidence(metadata))
         ))
       ));
 
@@ -431,7 +451,9 @@ function frameToolResult(
     return parts.join("\n");
   }
 
-  if (toolName === "execute_plan") {
+  // A folded record_plan carries the same report (orchestration.planRoundFold), and at the 600-char
+  // fallback it would lose every step's result the same way.
+  if (isPlanReportResult(toolName, metadata)) {
     // THE REPORT IS THE DELIVERABLE. It carries every completed step's result — and a `direct` or
     // `reuse` step's output reaches the model through no other channel, since those run as nested
     // calls inside the tool and never become tool messages of their own. Without a branch here it

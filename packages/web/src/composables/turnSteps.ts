@@ -121,6 +121,31 @@ export function isDelegation(step: Pick<TurnStep, "name">): boolean {
 }
 
 /**
+ * Tools that run several specialists under one call — progress hosts, never a single target.
+ * record_plan is one too: with orchestration.planRoundFold the runtime runs the plan inside the
+ * record_plan call, and its specialists' progress lines had no row to land on.
+ */
+const FAN_OUT_TOOLS = new Set(["parallel_delegate", "execute_plan", "run_task_graph", "run_workflow", "record_plan"]);
+
+export function isFanOut(step: Pick<TurnStep, "name">): boolean {
+  return FAN_OUT_TOOLS.has(step.name);
+}
+
+/** A record_plan that ran its plan in the same call (orchestration.planRoundFold) and carries the report. */
+function ranThePlan(step: Pick<TurnStep, "name" | "metadata">): boolean {
+  return step.name === "execute_plan" || (step.name === "record_plan" && step.metadata?.["planExecution"] === true);
+}
+
+/** "k/N done · f failed" for a plan run, or undefined when the report carries no counts. */
+function planRunOutcome(meta: Record<string, unknown>): string | undefined {
+  const done = num(meta["done"]);
+  const total = num(meta["steps"]);
+  const failed = num(meta["failed"]);
+  if (done === undefined || total === undefined) return undefined;
+  return `${done}/${total} done${failed ? ` · ${failed} failed` : ""}`;
+}
+
+/**
  * Bookkeeping a specialist does for the swarm rather than for the reader — publishing and
  * reading shared facts. Real calls, so the side panel still lists them; but a row saying
  * "share_finding latest_image" in the middle of the answer is plumbing, not progress.
@@ -146,6 +171,8 @@ export function stepTitle(step: TurnStep): string {
     case "run_task_graph": return "Ran a task graph";
     case "record_plan": {
       const steps = Array.isArray(args["steps"]) ? args["steps"].length : undefined;
+      // Folded: the same call also ran the plan, so it reads like execute_plan's row.
+      if (ranThePlan(step)) return steps ? `Planned and ran ${steps} step${steps === 1 ? "" : "s"}` : "Ran the plan";
       return steps ? `Planned ${steps} step${steps === 1 ? "" : "s"}` : "Planned the work";
     }
     case "execute_plan": return "Ran the plan";
@@ -216,17 +243,20 @@ export function stepOutcome(step: TurnStep): string | undefined {
       return top ? `→ ${top}${score !== undefined ? ` (${Math.round(score * 100)}%)` : ""}` : "no match";
     }
     case "record_plan": {
+      // Folded: what matters is how the run went, exactly as on execute_plan's row.
+      if (ranThePlan(step)) {
+        const ran = planRunOutcome(meta);
+        if (ran) return ran;
+      }
       const count = num(meta["stepCount"]);
       const risk = str(meta["riskTier"]);
       return [count !== undefined ? `${count} step${count === 1 ? "" : "s"}` : undefined, risk ? `risk ${risk}` : undefined]
         .filter(Boolean).join(" · ") || undefined;
     }
     case "execute_plan": {
-      const done = num(meta["done"]);
-      const total = num(meta["steps"]);
-      const failed = num(meta["failed"]);
-      if (done === undefined || total === undefined) break;
-      return `${done}/${total} done${failed ? ` · ${failed} failed` : ""}`;
+      const ran = planRunOutcome(meta);
+      if (!ran) break;
+      return ran;
     }
     case "delegate_to_agent":
     case "swarm_delegate": {

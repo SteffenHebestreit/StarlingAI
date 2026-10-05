@@ -5,7 +5,7 @@ import { useAuditStore } from "./audit";
 import { useComputerStore } from "./computer";
 import { useNotificationStore } from "./notifications";
 import { useShellStore } from "./shell";
-import { isDelegation, isFailedResult, stepsFromToolCalls, type TurnStep } from "../composables/turnSteps";
+import { isDelegation, isFailedResult, isFanOut, stepsFromToolCalls, type TurnStep } from "../composables/turnSteps";
 import { mergeFinalAssistantContent, mergeSegmentAssistantContent, transcriptAssistantContent } from "../composables/assistantContent";
 import {
   appendUnread, landTurn, liveCallId, markUnread, newSteerMessage, progressSteps, readSteeringEntries, resteer, resumeTurnSegments,
@@ -1796,8 +1796,7 @@ export const useGatewayStore = defineStore("gateway", () => {
   // otherwise never learn happened. "synthesizing" is only the FORCED path now (a loop or the
   // iteration cap cut the turn short); the routine after-every-round line is "reviewing" and
   // stays live-status only.
-  /** Tools that run several specialists under one call — progress hosts, never a single target. */
-  const FAN_OUT_TOOLS = new Set(["parallel_delegate", "execute_plan", "run_task_graph", "run_workflow"]);
+  // Tools that run several specialists under one call are progress hosts (isFanOut, turnSteps.ts).
 
   // Not "steering": a message read mid-turn now shows as the user's own bubble between the
   // segments before and after it, and a note saying so as well would tell it twice.
@@ -1878,7 +1877,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     // Anything that fans work out — or a line from deeper in a single delegation — goes to the
     // newest running host as progress only. Before, a fan-out row had no way to receive these
     // at all and they were dropped, leaving the row silent while several specialists worked.
-    const host = running.find(candidate => FAN_OUT_TOOLS.has(candidate.name)) ?? single[0];
+    const host = running.find(isFanOut) ?? single[0];
     if (!host) return;
     host.progress = agent && !message.toLowerCase().includes(agent.toLowerCase())
       ? `${agent}: ${message}`

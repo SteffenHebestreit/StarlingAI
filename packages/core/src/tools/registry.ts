@@ -207,6 +207,14 @@ export interface ToolContext {
    */
   getTurnToolCallCount?: (toolName: string) => number;
   /**
+   * The names of every tool call in the model response the current call belongs to, set by the
+   * orchestrator's turn loop once per response. A tool that would act on the response's behalf
+   * reads it to make sure no sibling call is already doing that work: record_plan folds the plan's
+   * execution into its own call (orchestration.planRoundFold) only when it was the response's ONLY
+   * call. Undefined (a sub-agent, a direct invocation) means "unknown" and such a tool does not act.
+   */
+  responseToolCalls?: readonly string[];
+  /**
    * Tool names that MUST pause for human approval regardless of tier defaults.
    * Enforced unconditionally — cannot be bypassed by config or tier settings.
    */
@@ -422,11 +430,16 @@ async function _getToolEmbedding(h: ToolHandler): Promise<Float32Array | null> {
  * Non-destructive — tools with unavailable embeddings retain their input
  * order at the tail. Tie-breaks prefer lower `costHint` / `latencyHint`.
  * When embeddings are unavailable the input list is returned unchanged.
+ *
+ * `report.ranked` is set when the order is the full ranking — the query embedded and every
+ * registered tool's embedding was available — so a caller can tell it from a fallback (input order,
+ * or failed tools pushed to the tail) and keep only a real ranking (agent/sub-agent-tool-order.ts).
  */
 export async function rerankToolsForTask(
   defs: LLMToolDef[],
   task: string,
   minTools = 1,
+  report?: { ranked?: boolean },
 ): Promise<LLMToolDef[]> {
   // Skip the rerank embedding for small toolsets — they fit the model's attention and don't
   // need semantic ordering (B24, orchestration.toolRerankMinTools). minTools=1 preserves the
@@ -436,12 +449,16 @@ export async function rerankToolsForTask(
   const queryVec = await computeQueryEmbedding(task);
   if (!queryVec) return defs;
 
+  let embeddingMissing = false;
   const scored = await Promise.all(
     defs.map(async (def, idx) => {
       const handler = _registry.get(def.name);
       if (!handler) return { def, score: -Infinity, idx };
       const vec = await _getToolEmbedding(handler);
-      if (!vec) return { def, score: -Infinity, idx };
+      if (!vec) {
+        embeddingMissing = true;
+        return { def, score: -Infinity, idx };
+      }
       const sim = cosineSimilarity(queryVec, vec);
       const costAdj = HINT_WEIGHT[handler.costHint ?? "medium"];
       const latAdj = HINT_WEIGHT[handler.latencyHint ?? "medium"];
@@ -453,6 +470,7 @@ export async function rerankToolsForTask(
     if (b.score !== a.score) return b.score - a.score;
     return a.idx - b.idx;
   });
+  if (report && !embeddingMissing) report.ranked = true;
   return scored.map(s => s.def);
 }
 

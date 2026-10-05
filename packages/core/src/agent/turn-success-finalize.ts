@@ -61,6 +61,12 @@ export interface FinalizeSuccessfulTurnParams {
   freshnessSensitive: boolean;
   injectedSkillSlugs: string[];
   heldOutSkillSlugs: string[];
+  /**
+   * The cached trajectory the model was SHOWN this turn (in the prompt as sent, after the budget
+   * trimmer), or null. The runtime passes only that one: a lookup hit that was never injected —
+   * every hit under leanContextInjection, or one the trimmer dropped — took no part in the answer,
+   * so it is neither logged as used nor invalidated by it (finding 2026-10-05).
+   */
   injectedTrajectoryIdentity: { normalizedQuery: string; finishedAt: string } | null;
   userMessage: string;
   guardrailEvents: TurnOutput["guardrailEvents"];

@@ -40,6 +40,10 @@ export const DELEGATION_WAIT_TOOL_NAMES: ReadonlySet<string> = new Set([
   // a plan of four five-minute steps had none of its waiting credited back: the deadline never
   // moved, later steps were handed the floor of the budget, and the turn was cut off mid-plan.
   "execute_plan",
+  // ...and record_plan runs execute_plan inside its own call when it folds the plan round
+  // (orchestration.planRoundFold). Unfolded it returns in milliseconds, or after the operator's
+  // plan approval, which is a wait on a person like ask_user's — neither is the model's time.
+  "record_plan",
 ]);
 
 /**
@@ -83,7 +87,19 @@ export const STATE_DEPENDENT_TOOL_NAMES: ReadonlySet<string> = new Set([
  * signal that disables the honesty chain (audit 1303e254) — reachable from a payload rather than
  * from a tool name. An allowlist keeps the reporter side of this seam ours.
  */
-const NESTED_CALL_REPORTERS: ReadonlySet<string> = new Set(["execute_plan", "parallel_delegate"]);
+// record_plan: a folded plan round (orchestration.planRoundFold) runs execute_plan inside the call
+// and reports the steps it dispatched exactly as execute_plan does.
+const NESTED_CALL_REPORTERS: ReadonlySet<string> = new Set(["execute_plan", "parallel_delegate", "record_plan"]);
+
+/**
+ * Whether a tool result is a plan-execution report: execute_plan's, or record_plan's when it folded
+ * the plan round and ran the plan in its own call (orchestration.planRoundFold). Every place that
+ * gives the plan report its own treatment by tool NAME — the model-visible frame, the history
+ * snippet — asks this instead, so the folded report is not cut to a generic tool result's size.
+ */
+export function isPlanReportResult(toolName: string, metadata: Record<string, unknown> | undefined): boolean {
+  return toolName === "execute_plan" || (toolName === "record_plan" && metadata?.["planExecution"] === true);
+}
 
 /** What is known BEFORE the call runs, from the tool name alone. */
 export interface ToolCallContribution {

@@ -766,6 +766,13 @@ export function salvageToolCallArguments(raw: string | undefined | null): Record
 
 const GEMMA_INSTRUCTION_PREAMBLE = "Follow these instructions for the entire conversation.";
 
+/**
+ * How a long session's earlier-conversation summary begins (agent/session.ts SUMMARY_HEADER is
+ * built from it). Since 2026-10-05 that summary is a user-role message opening the history, so the
+ * stable head stays out of it; the Gemma fold below must not mistake it for the user's request.
+ */
+export const EARLIER_CONVERSATION_SUMMARY_MARKER = "[EARLIER CONVERSATION —";
+
 function isGemmaModelId(modelId: string): boolean {
   return modelId.toLowerCase().includes("gemma");
 }
@@ -1317,7 +1324,11 @@ export function normalizeMessagesForModel(
 
   const normalized = cloned.slice(leadingSystemCount);
   const instructionBlock = `${GEMMA_INSTRUCTION_PREAMBLE}\n\n${leadingSystemPrompts.join("\n\n")}`;
-  const firstUserIndex = normalized.findIndex((message) => message.role === "user" && typeof message.content === "string");
+  // The first REAL user message: an earlier-conversation summary is user-role too, and folded into
+  // it the instructions read "Current request or continuation: [EARLIER CONVERSATION …]".
+  const firstUserIndex = normalized.findIndex((message) => message.role === "user"
+    && typeof message.content === "string"
+    && !message.content.startsWith(EARLIER_CONVERSATION_SUMMARY_MARKER));
 
   if (firstUserIndex >= 0) {
     const firstUser = normalized[firstUserIndex]!;

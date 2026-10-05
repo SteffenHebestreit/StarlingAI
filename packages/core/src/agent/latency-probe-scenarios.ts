@@ -682,7 +682,7 @@ export interface HeadShape {
  */
 export function collectOrchestratorHead(): HeadShape {
   const config = getConfig();
-  let system = defaultSystemPrompt(config.workspacePath);
+  let system = defaultSystemPrompt();
   if (config.agents?.performance?.splitOrchestrationPrompt === true) system = splitOrchestrationModule(system).leanBase;
   return { label: "orchestrator", system, tools: getToolsAsLLMDefs(getMainAssistantToolNames()) };
 }

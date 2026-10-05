@@ -70,15 +70,20 @@ function idleMs(): number {
 function forcedHeadsEnabled(): boolean {
   return getConfig().agents?.performance?.promptCacheWarmForcedHeads === true;
 }
+function toolBlockFrozen(): boolean {
+  return (getConfig().orchestration?.stableToolBlock ?? "off") === "freeze";
+}
 
 /** One head the warm-keeper prefills: the leading system run as the turn emits it, and a tool block. */
 export interface WarmHead {
   /**
    * "full": the head of every turn that is not forced (lean base + the whole tool block).
+   * "full_module": lean base + orchestration module + the whole tool block — under
+   *   orchestration.stableToolBlock "freeze", what a forced iteration of a module turn sends.
    * "forced_plan": the first forced iteration of a turn with no plan yet (record_plan offered).
    * "forced_dispatch": a forced iteration once the plan exists (execute_plan offered).
    */
-  label: "full" | "forced_plan" | "forced_dispatch";
+  label: "full" | "full_module" | "forced_plan" | "forced_dispatch";
   /** The system messages in the order turn-system-prompt.ts buildStableHead emits them; the
    *  provider folds them exactly as it folds the turn's, so the warm prefix is a prefix of it. */
   system: LLMMessage[];
@@ -111,10 +116,22 @@ export interface WarmHead {
  * prompt_section_sizes.baseModuleHash); a variant earns a slot here from those counts, not
  * from a guess. Each extra head costs 8-12 s of GPU cold and 2-5 s to re-warm after every
  * turn, and widens the window in which a user's message meets an in-flight warm-up.
+ *
+ * UNDER orchestration.stableToolBlock "freeze" THERE ARE NO SUBSET HEADS (2026-10-05). A forced
+ * iteration then sends the turn's whole tool block and enforces the subset at the call site
+ * (refusals logged as tool_restriction_refused), so its head is the full head, plus the module on
+ * a module turn. The forced heads are then "full" itself and "full_module" (lean base + module +
+ * the whole tool block); the two subset heads would warm a prefix no call sends. Without a split
+ * there is no module, and the full head is the only one.
  */
-export function collectWarmHeads(opts: { /** Override the flag: the latency probe (E9) measures these heads before anyone turns it on. */ forcedHeads?: boolean } = {}): WarmHead[] {
+export function collectWarmHeads(opts: {
+  /** Override the flag: the latency probe (E9) measures these heads before anyone turns it on. */
+  forcedHeads?: boolean;
+  /** Override orchestration.stableToolBlock: E9 measures the forced SUBSET heads whatever the deployment runs. */
+  stableToolBlock?: "off" | "freeze";
+} = {}): WarmHead[] {
   const config = getConfig();
-  let base = defaultSystemPrompt(config.workspacePath);
+  let base = defaultSystemPrompt();
   let orchestrationModule: string | null = null;
   // Warm the SAME lean base the split turn actually sends — otherwise the warmed KV prefix
   // diverges at "## Swarm Rules" from the live lean base and the warm-up buys almost nothing.
@@ -162,10 +179,17 @@ export function collectWarmHeads(opts: { /** Override the flag: the latency prob
       { role: "system", content: base },
       ...(orchestrationModule ? [{ role: "system" as const, content: orchestrationModule }] : []),
     ];
-    heads.push(
-      { label: "forced_plan", system, tools: filterForcedOrchestrationTools(tools, { planRecorded: false }) },
-      { label: "forced_dispatch", system, tools: filterForcedOrchestrationTools(tools, { planRecorded: true }) },
-    );
+    const frozen = (opts.stableToolBlock ?? (toolBlockFrozen() ? "freeze" : "off")) === "freeze";
+    if (frozen) {
+      // The forced call sends the full block: its head is "full" (already queued) or, on a module
+      // turn, this one. Same tool array as "full", so the two differ only after the lean base.
+      if (orchestrationModule) heads.push({ label: "full_module", system, tools });
+    } else {
+      heads.push(
+        { label: "forced_plan", system, tools: filterForcedOrchestrationTools(tools, { planRecorded: false }) },
+        { label: "forced_dispatch", system, tools: filterForcedOrchestrationTools(tools, { planRecorded: true }) },
+      );
+    }
   }
   return heads;
 }

@@ -151,6 +151,17 @@ export interface RunReport {
   framesRun: number;
   /** Where the page actually painted, per canvas it touched. Empty for a page with none. */
   canvasPainting: Map<string, () => CanvasPaintReport>;
+  /**
+   * A script or frame hit the vm's execution timeout (ERR_SCRIPT_EXECUTION_TIMEOUT), or the
+   * parent's kill timer stopped the run. Such a verdict says as much about the machine's load at
+   * that moment as about the page, so it is never held (page-check.ts checkBuiltPage).
+   */
+  timedOut?: boolean;
+}
+
+/** vm's timeout, read from the error's code rather than its message. */
+function isExecutionTimeout(err: unknown): boolean {
+  return (err as { code?: unknown } | null)?.code === "ERR_SCRIPT_EXECUTION_TIMEOUT";
 }
 
 /**
@@ -329,6 +340,7 @@ export function runScripts(
         filename: SCRIPT_VM_FILENAME,
       });
     } catch (err) {
+      if (isExecutionTimeout(err)) report.timedOut = true;
       const message = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
       report.errors.push(`${script.label} — ${message}${describeErrorSite(err, script.code)}`);
       // Later scripts usually depend on the failed one; keep going so the report names the
@@ -356,6 +368,7 @@ export function runScripts(
       runInContext("__pendingFrame(0)", context, { timeout: SCRIPT_TIMEOUT_MS });
       report.framesRun++;
     } catch (err) {
+      if (isExecutionTimeout(err)) report.timedOut = true;
       const message = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
       report.errors.push(`animation frame ${i + 1} — ${message}${describeErrorSite(err, scripts.map(s2 => s2.code).join("\n"))}`);
       break;

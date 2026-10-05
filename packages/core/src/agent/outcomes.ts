@@ -173,6 +173,13 @@ export function computeAdaptiveSubAgentTimeoutMs(
 /**
  * Returns a compact Markdown section summarising recent agent performance.
  * Empty string if there's nothing noteworthy.
+ *
+ * It goes into the turn's TAIL, not the base prompt (AgentSession.getAgentPerformanceNote,
+ * 2026-10-05). At the end of the base it was part of the cached head, and it changes after
+ * almost every delegation and as outcomes age out of the window, so each delegating turn left
+ * the warmed heads stale. In the tail a changing count costs nothing, so the success count
+ * stays: without it, 2 partials out of ~27 runs read like 2 out of 2, under a line that tells
+ * the model to prefer another agent.
  */
 export function formatOutcomesForPrompt(workspacePath: string): string {
   const cutoffMs = Date.now() - PROMPT_OUTCOME_LOOKBACK_MS;

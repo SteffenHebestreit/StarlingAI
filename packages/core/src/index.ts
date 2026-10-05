@@ -26,7 +26,7 @@ import { startProviderActivityMonitor, stopProviderActivityMonitor } from "./obs
 import { startRecoveryMetrics, stopRecoveryMetrics } from "./observability/recovery-metrics.js";
 import { initSceneJobStore, shutdownSceneJobStore } from "./agent/jobs.js";
 import { startSceneJobWorker, stopSceneJobWorker } from "./agent/scene-worker.js";
-import { initSessionRedis, startSessionPruner, stopSessionPruner } from "./agent/session.js";
+import { flushSessionStore, initSessionRedis, startSessionPruner, stopSessionPruner } from "./agent/session.js";
 import { startCacheWarmer, stopCacheWarmer } from "./agent/cache-warmer.js";
 import { closeSessionRedis } from "./agent/session-redis.js";
 import { syncConfiguredJobTriggers } from "./runtime/job-triggers.js";
@@ -444,6 +444,9 @@ export async function main() {
       disposeAllPluginWorkers();
     } catch { /* best-effort */ }
     await flushAuditLog();
+    // Session-store writes are coalesced (one per 250 ms, agent/session.ts): write the last window,
+    // and queue its Redis mirror, before the Redis connection closes.
+    await flushSessionStore();
     await closeSessionRedis();
     try {
       const { closeRedis } = await import("./guardrails/redis-client.js");

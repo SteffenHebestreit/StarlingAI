@@ -143,6 +143,7 @@ export { looksLikeRegurgitatedPriorAnswer } from "./runtime-utils.js";
 import {
   buildModelVisibleToolResult,
   isExplicitDelegationSuccess,
+  delegationCarriesOwnEvidence,
   looksLikeDelegatedFailureEvidence,
   looksLikeStructuralDelegationFailure,
 } from "./tool-result-format.js";
@@ -188,6 +189,7 @@ import {
   findRecentJunkDelegationResult,
   findRecentFailedDelegation,
 } from "./response-finalization.js";
+import { isExecutionChatterOnly } from "./sanitize-response.js";
 
 // Required-research fallback routing + search-agents-no-match cluster (god-file
 // seam): pure routing helpers that push a stalled source-sensitive turn into a
@@ -254,7 +256,7 @@ import { applyTerminalResponseGuards, type TerminalGuardContext } from "./turn-f
 import { finalizeSuccessfulTurn } from "./turn-success-finalize.js";
 import { buildTurnQualityScorecard, createTurnQualitySignals, type ArtifactProbeStatus } from "./turn-scorecard.js";
 // Turn-setup spans lifted out of runTurnImpl (god-file seam).
-import { lookupTrajectoryInjection, computeTurnEnforcementSignals } from "./turn-setup.js";
+import { lookupTrajectoryInjection, computeTurnEnforcementSignals, startDiscoveryPrefetch } from "./turn-setup.js";
 
 // D5 delegation-wait budget math (shared with the gateway hard-timeout layer; kept out of this
 // heavily-mocked module so gateway/rpc.ts can import it without going through runtime.js).
@@ -1036,7 +1038,7 @@ export function classifyPostOrchestrationDisposition(
       // over the prose sniff — the same rule as the model-visible frame in tool-result-format.ts.
       // The runtime's defaulted "success" is not a verdict.
       || (!delegationPartial && looksLikeStructuralDelegationFailure(observedEvidence))
-      || (!delegationPartial && !isExplicitDelegationSuccess(metadata) && looksLikeDelegatedFailureEvidence(observedEvidence))
+      || (!delegationPartial && !isExplicitDelegationSuccess(metadata) && looksLikeDelegatedFailureEvidence(observedEvidence, delegationCarriesOwnEvidence(metadata)))
     ) {
       return "failure";
     }
@@ -1512,7 +1514,9 @@ export function buildIterationToolRestriction(input: {
   withholdDiscoveryTools: boolean;
 }): { allowed: Set<string>; reason: "must_orchestrate" | "discovery_withheld" } | undefined {
   // Forcing is the stronger restriction and subsumes the discovery one: the forced subset
-  // is chosen for its ability to ADVANCE the turn, and a repeat search does not.
+  // is chosen for its ability to ADVANCE the turn, and a repeat search does not. That holds
+  // only because `forcedTools` is cut from the DISCOVERY-NARROWED list (resolveIterationTools):
+  // search_agents and list_agents are forced-orchestration tools themselves.
   if (input.forceToolChoice) {
     return { allowed: new Set(input.forcedTools.map((tool) => tool.name)), reason: "must_orchestrate" };
   }
@@ -1523,6 +1527,54 @@ export function buildIterationToolRestriction(input: {
     };
   }
   return undefined;
+}
+
+/**
+ * What one iteration offers: the tools it may CALL, the forced subset, the array on the wire, and
+ * under `stableToolBlock: "freeze"` the call-site allowlist that carries the narrowing.
+ *
+ * The discovery withhold narrows what the iteration may call under BOTH wire policies; only the
+ * wire array stays whole under freeze. It used to be skipped under freeze, so the forced subset was
+ * cut from the full block and kept search_agents and list_agents (both forced-orchestration tools):
+ * after a no-match, a forced iteration allowed the very search that had come back empty, and the
+ * refusal for any other tool suggested it (review of 2026-10-05). Exported so the composition with
+ * the real filterForcedOrchestrationTools is asserted under both policies.
+ */
+export async function resolveIterationTools<T extends { name: string }>(input: {
+  tools: T[];
+  freeze: boolean;
+  withholdDiscoveryTools: boolean;
+  /** The turn must orchestrate before answering and forcing is enabled. */
+  forceWanted: boolean;
+  /** Read only when forcing applies: whether this turn has recorded its plan yet. */
+  planRecorded: () => Promise<boolean>;
+}): Promise<{
+  forcedPlanState: { planRecorded: boolean } | undefined;
+  forcedTools: T[];
+  forceToolChoice: boolean;
+  streamTools: T[];
+  restriction: ReturnType<typeof buildIterationToolRestriction>;
+}> {
+  const activeTools = input.withholdDiscoveryTools
+    ? input.tools.filter((tool) => !DISCOVERY_TOOL_NAMES.has(tool.name))
+    : input.tools;
+  const wantForceToolChoice = input.forceWanted && activeTools.length > 0;
+  // When forcing a tool call to compel orchestration, drop the always-available
+  // direct memory/self tools so tool_choice:"required" can only be satisfied by a
+  // real orchestration/delegation tool. Without this the slow model loops on
+  // memory_store and never delegates (audit be828e39).
+  const forcedPlanState = wantForceToolChoice ? { planRecorded: await input.planRecorded() } : undefined;
+  const forcedTools = wantForceToolChoice ? filterForcedOrchestrationTools(activeTools, forcedPlanState) : activeTools;
+  const forceToolChoice = wantForceToolChoice && forcedTools.length > 0;
+  // Under "freeze" the wire array stays the turn's array; the narrowing that would have
+  // been expressed by sending fewer schemas becomes this per-iteration allowlist, applied
+  // where the call is dispatched. Without it, tool_choice:"required" over the full block
+  // can be satisfied by memory_store — the loop audit be828e39 recorded.
+  const restriction = input.freeze
+    ? buildIterationToolRestriction({ tools: input.tools, forcedTools, forceToolChoice, withholdDiscoveryTools: input.withholdDiscoveryTools })
+    : undefined;
+  const streamTools = input.freeze ? input.tools : (forceToolChoice ? forcedTools : activeTools);
+  return { forcedPlanState, forcedTools, forceToolChoice, streamTools, restriction };
 }
 
 /**
@@ -1757,6 +1809,16 @@ async function _runTurn(
   )
     ? startUpfrontSourceSensitiveClassifier(userMessage, signal, session.id)
     : null;
+
+  // ── Discovery prefetch: STARTED here, consumed by the first prompt assembly ──
+  // It reads only the user's message and the turn's agent grant, so like the judge above it starts
+  // the moment the fast lane has declined the turn (finding 2026-10-05). Started inside the first
+  // prompt assembly it began only after the judge's wait and the document retrieval, and its
+  // embedding round-trip (capped at DISCOVERY_PREFETCH_BUDGET_MS) sat on the path to the first
+  // orchestrator token instead of behind them. Never rejects; iteration 0 awaits it.
+  const startedDiscoveryPrefetch = getConfig().orchestration?.discoveryPrefetch
+    ? startDiscoveryPrefetch({ userMessage, sessionId: session.id, ...(opts.allowedAgents ? { allowedAgents: opts.allowedAgents } : {}) })
+    : undefined;
 
   // ── Facet triage (orchestration.routingTriage) ──────────────────────────────
   // Issued alongside the judge and the document retrieval, not after the embedding
@@ -2336,6 +2398,11 @@ async function _runTurn(
     sessionId: session.id,
     channel: session.channel,
   });
+  // The cached trajectory the model was actually SHOWN — set from the first prompt assembly, which
+  // may have dropped it to fit the budget. Only a shown entry is scored "used" or invalidated by
+  // this turn's outcome (turn-success-finalize.ts): crediting or blaming one the model never saw
+  // taught the cache about turns it took no part in (finding 2026-10-05).
+  let shownTrajectoryIdentity: typeof injectedTrajectoryIdentity = null;
 
   // ── Main agent loop ───────────────────────────────────────────────────────
   while (iterationCount < maxToolIterations) {
@@ -2591,11 +2658,13 @@ async function _runTurn(
       lastPromptMetrics: assembledPromptMetrics,
       injectedSkillSlugs: assembledInjectedSkillSlugs,
       heldOutSkillSlugs: assembledHeldOutSkillSlugs,
+      trajectoryShown,
     } = await assembleTurnSystemMessages({
       session,
       iterationCount,
       userMessage,
       allowedAgents: opts.allowedAgents,
+      ...(startedDiscoveryPrefetch ? { startedDiscoveryPrefetch } : {}),
       initialDynamicGuidance,
       documentRagFoundDocs,
       trajectoryInjectionContext,
@@ -2624,6 +2693,7 @@ async function _runTurn(
     lastPromptMetrics = assembledPromptMetrics;
     injectedSkillSlugs = assembledInjectedSkillSlugs;
     heldOutSkillSlugs = assembledHeldOutSkillSlugs;
+    if (iterationCount === 0 && trajectoryShown) shownTrajectoryIdentity = injectedTrajectoryIdentity;
 
     if (iterationCount === 0 && dynamicGuidance) {
       logAudit("turn_guidance_applied", {
@@ -2679,15 +2749,12 @@ async function _runTurn(
       // EVERY iteration and the two restrictions below (discovery withheld after a
       // search_agents no-match; the forced-orchestration subset) are enforced at the call
       // site instead. Same capability, same refusals — the bytes just stop moving, which is
-      // what the KV prefix is keyed on.
+      // what the KV prefix is keyed on. Both are computed in resolveIterationTools.
       // effectiveOrchestration(), not getConfig(): the eval harness flips orchestration flags
       // through an AsyncLocalStorage overlay, and a flag read straight from the config is
       // invisible to it — so the A/B this flag's own documentation calls for could not be run.
       const freezeToolBlock = (effectiveOrchestration().stableToolBlock ?? "off") === "freeze";
       const withholdDiscoveryTools = Boolean(searchAgentsNoMatchFallbackPrompt) && !softRoutingEnforcement;
-      const activeTools = (withholdDiscoveryTools && !freezeToolBlock)
-        ? tools.filter((tool) => !DISCOVERY_TOOL_NAMES.has(tool.name))
-        : tools;
       // Cost-center 1 (audit 5d51862f): while the turn still MUST orchestrate and has NOT
       // yet delegated, force a tool call so the slow local model can't burn ~2 min drafting
       // a tool-free prose answer that the source-sensitive / required-research guardrail
@@ -2713,24 +2780,15 @@ async function _runTurn(
         && _turnDelegationCount === 0
         && !workflowRunCompletedThisTurn
         && ((_turnToolCallCounts.get("run_workflow") ?? 0) === 0);
-      const wantForceToolChoice = mustOrchestrateBeforeAnswering
-        && activeTools.length > 0
-        && (getConfig().orchestration?.forceToolChoiceWhenOrchestrationRequired ?? true);
-      // When forcing a tool call to compel orchestration, drop the always-available
-      // direct memory/self tools so tool_choice:"required" can only be satisfied by a
-      // real orchestration/delegation tool. Without this the slow model loops on
-      // memory_store and never delegates (audit be828e39).
-      const forcedPlanState = wantForceToolChoice ? { planRecorded: (await loadTurnPlan(session.id)) !== null } : undefined;
-      const forcedTools = wantForceToolChoice ? filterForcedOrchestrationTools(activeTools, forcedPlanState) : activeTools;
-      const forceToolChoice = wantForceToolChoice && forcedTools.length > 0;
-      // Under "freeze" the wire array stays the turn's array; the narrowing that would have
-      // been expressed by sending fewer schemas becomes this per-iteration allowlist, applied
-      // where the call is dispatched. Without it, tool_choice:"required" over the full block
-      // can be satisfied by memory_store — the loop audit be828e39 recorded.
-      iterationToolRestriction = freezeToolBlock
-        ? buildIterationToolRestriction({ tools, forcedTools, forceToolChoice, withholdDiscoveryTools })
-        : undefined;
-      const streamTools = freezeToolBlock ? tools : (forceToolChoice ? forcedTools : activeTools);
+      const { forcedPlanState, forceToolChoice, streamTools, restriction } = await resolveIterationTools({
+        tools,
+        freeze: freezeToolBlock,
+        withholdDiscoveryTools,
+        forceWanted: mustOrchestrateBeforeAnswering
+          && (getConfig().orchestration?.forceToolChoiceWhenOrchestrationRequired ?? true),
+        planRecorded: async () => (await loadTurnPlan(session.id)) !== null,
+      });
+      iterationToolRestriction = restriction;
       llmResponse = await collectStream(
         provider.stream(
           messages,
@@ -3817,7 +3875,7 @@ async function _runTurn(
           + "Do NOT re-paste the earlier answer, do NOT invent a file path, and do NOT claim a success you cannot point to in this turn's own results.",
         );
         const honestClean = honest ? sanitizeUserFacingAssistantResponse(honest, iterationCount) : null;
-        rawResponse = (honestClean && honestClean.trim().length > 0 && !looksLikeRegurgitatedPriorAnswer(honestClean, session.getHistory()))
+        rawResponse = (honestClean && honestClean.trim().length > 0 && !isExecutionChatterOnly(honestClean) && !looksLikeRegurgitatedPriorAnswer(honestClean, session.getHistory()))
           ? honestClean
           : "Ich habe die Lernplattform/das Artefakt in diesem Schritt nicht tatsächlich gebaut und gebe die vorherige Antwort nicht erneut als erledigt aus. Bestätige kurz, dann delegiere ich den Bau an den passenden Spezialisten (content_writer bzw. web_coder).\n\nI did not actually build the platform/artifact this turn and won't re-post the previous answer as if it were done. Confirm and I'll delegate the build to the right specialist (content_writer / web_coder).";
       }
@@ -3903,7 +3961,7 @@ async function _runTurn(
         freshnessSensitive: initialDynamicGuidance?.freshnessSensitive ?? false,
         injectedSkillSlugs,
         heldOutSkillSlugs,
-        injectedTrajectoryIdentity,
+        injectedTrajectoryIdentity: shownTrajectoryIdentity,
         userMessage,
         guardrailEvents,
         artifactCount: collectTurnArtifactAttachments(session).filter((artifact) => artifact["isDirectory"] !== true).length,
@@ -3950,6 +4008,10 @@ async function _runTurn(
     const toolResultMessages: Array<LLMMessage & { metadata?: Record<string, unknown> }> = [];
     let workflowExecutionCorrectionPending = false;
     let workflowExecutionCorrectionExhausted = false;
+    // What else this response asked for, for a tool that acts on the response's behalf: record_plan
+    // folds the plan's execution into its own call only when it was the response's one call
+    // (orchestration.planRoundFold, ToolContext.responseToolCalls).
+    toolContext.responseToolCalls = llmResponse.tool_calls.map((call) => call.name);
 
     for (const tc of llmResponse.tool_calls) {
       if (signal.aborted) break;
@@ -5136,7 +5198,13 @@ async function _runTurn(
     : useSuppressedTextOverSynthesis && lastSuppressedAssistantText !== null
       ? lastSuppressedAssistantText
       : (synthesized ?? fallbackMsg);
-  const normalizedFinalMsg = sanitizeUserFacingAssistantResponse(finalCandidate, iterationCount) || fallbackMsg;
+  // A synthesis that is only step narration ("Let me compile the final report now.") is no answer
+  // on a turn that is already over its budget — the sanitizer no longer empties it (2026-10-05),
+  // so the fallback is chosen here, as the emptied text used to choose it.
+  const sanitizedFinalCandidate = sanitizeUserFacingAssistantResponse(finalCandidate, iterationCount);
+  const normalizedFinalMsg = sanitizedFinalCandidate && !isExecutionChatterOnly(sanitizedFinalCandidate)
+    ? sanitizedFinalCandidate
+    : fallbackMsg;
   const evidenceBackstopMsg = looksLikeGenericNoUsableReply(normalizedFinalMsg)
     ? (evidenceForUserDisplay ?? resolveEmptyAssistantResponseFallback("", "", session))
     : normalizedFinalMsg;
@@ -5326,7 +5394,7 @@ async function _runTurn(
     freshnessSensitive: initialDynamicGuidance?.freshnessSensitive ?? false,
     injectedSkillSlugs,
     heldOutSkillSlugs,
-    injectedTrajectoryIdentity,
+    injectedTrajectoryIdentity: shownTrajectoryIdentity,
     userMessage,
     guardrailEvents,
     artifactCount: collectTurnArtifactAttachments(session).filter((artifact) => artifact["isDirectory"] !== true).length,

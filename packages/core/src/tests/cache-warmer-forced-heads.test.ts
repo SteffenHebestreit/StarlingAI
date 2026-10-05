@@ -95,7 +95,7 @@ const SOURCE_TURN = "What does a regional rail pass cost right now?";
 
 let dir: string | undefined;
 
-function writeConfig(performance: Record<string, unknown>): string {
+function writeConfig(performance: Record<string, unknown>, orchestration: Record<string, unknown> = {}): string {
   dir = mkdtempSync(join(tmpdir(), "sai-warm-forced-"));
   writeFileSync(join(dir, "starlingai.json"), JSON.stringify({
     agents: {
@@ -103,7 +103,7 @@ function writeConfig(performance: Record<string, unknown>): string {
       mainAssistant: { toolMode: "orchestration_only" },
       performance: { splitOrchestrationPrompt: true, promptCacheWarmKeeper: true, promptCacheWarmIdleMs: 1_000, ...performance },
     },
-    orchestration: { upfrontSourceSensitiveClassifier: true, forceToolChoiceWhenOrchestrationRequired: true },
+    orchestration: { upfrontSourceSensitiveClassifier: true, forceToolChoiceWhenOrchestrationRequired: true, ...orchestration },
     subAgents: { probe_agent: { description: "Finds things.", systemPrompt: "You find things.", tools: ["read_file"] } },
     workspacePath: dir,
   }), "utf8");
@@ -170,14 +170,14 @@ async function forcedCallsOfTurns(): Promise<ForcedCall[]> {
   return out;
 }
 
-async function bootWarmer(): Promise<{ warm: Captured[]; warmer: typeof import("../agent/cache-warmer.js") }> {
+async function bootWarmer(expectedHeads = 3): Promise<{ warm: Captured[]; warmer: typeof import("../agent/cache-warmer.js") }> {
   completeMock.mockReset();
   completeMock.mockImplementation(async () => ({ content: "ok", tool_calls: [], usage: { promptTokens: 0, completionTokens: 1, totalTokens: 1 }, finishReason: "stop" }));
   vi.resetModules();
   await import("../tools/register-builtins.js");
   const warmer = await import("../agent/cache-warmer.js");
   warmer.startCacheWarmer();
-  for (let i = 0; i < 200 && completeMock.mock.calls.length < 3; i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+  for (let i = 0; i < 200 && completeMock.mock.calls.length < expectedHeads; i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
   await new Promise((resolve) => setTimeout(resolve, 20));
   warmer.stopCacheWarmer();
   return { warm: completeMock.mock.calls.map((args) => ({ messages: args[0] as LLMMessage[], tools: args[1] as LLMToolDef[] })), warmer };
@@ -302,6 +302,79 @@ describe("the warm-keeper warms the forced heads a turn actually sends", () => {
   }, 60_000);
 });
 
+describe("under orchestration.stableToolBlock freeze, the forced heads are the full block (2026-10-05)", () => {
+  // Frozen, a forced iteration sends the turn's whole tool array and enforces the subset at the
+  // call site, so the subset heads are a prefix no call sends. Live probe E7 priced each switch to
+  // a subset at 8.3 s; the warm-keeper now warms lean base + full tools and lean base + module +
+  // full tools instead.
+  afterEach(async () => {
+    delete process.env["SAI_CONFIG_PATH"];
+    streamMock.mockReset();
+    completeMock.mockReset();
+    auditMock.mockReset();
+    routingCompleteMock.mockClear();
+    planState.recorded = false;
+    if (dir) { rmSync(dir, { recursive: true, force: true }); dir = undefined; }
+    vi.resetModules();
+    (await import("../config/loader.js")).resetConfigForTests();
+  });
+
+  it("every forced call, module turn or not, in both plan states, meets a warm head; the subset heads would cover none of the module turns", async () => {
+    writeConfig({ promptCacheWarmForcedHeads: true }, { stableToolBlock: "freeze" });
+    const forced = await forcedCallsOfTurns();
+    expect(forced).toHaveLength(4);
+    const { warm, warmer } = await bootWarmer(2);
+    expect(warmer.collectWarmHeads().map((h) => h.label)).toEqual(["full", "full_module"]);
+    expect(warm).toHaveLength(2);
+
+    // The freeze contract at the forced call: all four sent the one full block the warm heads carry.
+    const full = wireTools(warm[0]!.tools);
+    expect(forced.every((c) => wireTools(c.tools) === full)).toBe(true);
+    expect(wireTools(warm[1]!.tools)).toBe(full);
+    expect(forced.filter((c) => c.moduleChars > 0).map((c) => c.label)).toEqual(["artifact/planRecorded=false", "artifact/planRecorded=true"]);
+
+    // Covered: the module turns by "full_module" (prefix past lean base + module), the plain ones by "full".
+    expect(await uncovered(forced, warm)).toEqual([]);
+
+    // Discriminates: the subset heads the flag-off warm-keeper builds cover no module turn — a
+    // different tool array, reason (i) — and the full head alone stops short of the module (iii).
+    const subsetHeads = warmer.collectWarmHeads({ stableToolBlock: "off" }).slice(1)
+      .map((h) => ({ messages: [...h.system, { role: "user" as const, content: "." }], tools: h.tools }));
+    expect(subsetHeads).toHaveLength(2);
+    const moduleTurns = forced.filter((c) => c.moduleChars > 0);
+    const subsetMisses = await uncovered(moduleTurns, [warm[0]!, ...subsetHeads]);
+    expect(subsetMisses).toHaveLength(2);
+    expect(subsetMisses.every((m) => m.includes("(iii)"))).toBe(true);
+    const subsetOnly = await uncovered(moduleTurns, subsetHeads);
+    expect(subsetOnly.every((m) => m.includes("(i)"))).toBe(true);
+  }, 60_000);
+
+  it("builds full + full_module with the flag on, only full with it off or with no module to split off", async () => {
+    writeConfig({}, { stableToolBlock: "freeze" });
+    vi.resetModules();
+    await import("../tools/register-builtins.js");
+    const warmer = await import("../agent/cache-warmer.js");
+    expect(warmer.collectWarmHeads().map((h) => h.label)).toEqual(["full"]);
+    const heads = warmer.collectWarmHeads({ forcedHeads: true });
+    expect(heads.map((h) => h.label)).toEqual(["full", "full_module"]);
+    // Lean base, then the module, as buildStableHead emits them; the same tool array as "full".
+    expect(heads[1]!.system).toHaveLength(2);
+    expect(heads[1]!.system[0]).toEqual(heads[0]!.system[0]);
+    expect(wireTools(heads[1]!.tools)).toBe(wireTools(heads[0]!.tools));
+    // The probe's override still builds the subset heads E9 measures.
+    expect(warmer.collectWarmHeads({ forcedHeads: true, stableToolBlock: "off" }).map((h) => h.label)).toEqual(["full", "forced_plan", "forced_dispatch"]);
+
+    // No split, no module: the forced head IS the full head, so nothing else is warmed.
+    rmSync(dir!, { recursive: true, force: true });
+    writeConfig({ splitOrchestrationPrompt: false }, { stableToolBlock: "freeze" });
+    vi.resetModules();
+    (await import("../config/loader.js")).resetConfigForTests();
+    await import("../tools/register-builtins.js");
+    const unsplit = await import("../agent/cache-warmer.js");
+    expect(unsplit.collectWarmHeads({ forcedHeads: true }).map((h) => h.label)).toEqual(["full"]);
+  }, 30_000);
+});
+
 describe("M0: prompt_section_sizes names the head the turn sent", () => {
   afterEach(async () => {
     delete process.env["SAI_CONFIG_PATH"];
@@ -332,29 +405,83 @@ describe("M0: prompt_section_sizes names the head the turn sent", () => {
     expect(moduleTurns[0]!.baseModuleHash).not.toBe(plainTurns[0]!.baseModuleHash);
   }, 60_000);
 
-  it("headSystemHash still names what was sent when the session carries an earlier-conversation summary", async () => {
-    // A long session's collapsed history OPENS with a system message (the rolling summary of the
-    // trimmed-out turns), and the provider folds it into the head with the rest of the leading run.
-    // Hashing the head alone then named a head no call ever sent, so the row could not be joined
-    // with its turn's provider rows exactly on the sessions whose summary moves the cache key.
-    writeConfig({});
-    planState.recorded = false;
+  /** One turn on `session`; its first main call's messages, folded as the provider folds them, and its prompt_section_sizes row. */
+  async function firstCallOfTurn(
+    runTurn: typeof import("../agent/runtime.js")["runTurn"],
+    session: InstanceType<typeof import("../agent/session.js")["AgentSession"]>,
+  ): Promise<{ folded: LLMMessage[]; sizes: Record<string, unknown> | undefined }> {
+    const { normalizeMessagesForModel } = await import("../providers/lmstudio.js");
     streamMock.mockReset();
     auditMock.mockReset();
     streamBurnThenAnswer();
-    vi.resetModules();
-    await import("../tools/register-builtins.js");
-    const [{ AgentSession }, { runTurn }, { normalizeMessagesForModel }, { hashText }] = await Promise.all([
-      import("../agent/session.js"), import("../agent/runtime.js"), import("../providers/lmstudio.js"), import("../providers/prompt-head.js"),
-    ]);
-    const session = new AgentSession({ channel: "test", workspacePath: dir!, earlierSummary: "Summary of earlier turns: a synthetic note." });
     await runTurn({ session, userMessage: SOURCE_TURN });
     const first = streamMock.mock.calls[0];
     expect(first, "the turn made no main call").toBeDefined();
-    const sent = String(normalizeMessagesForModel(first![0] as LLMMessage[], "qwen")[0]?.content ?? "");
-    expect(sent).toContain("Summary of earlier turns");
-    const sizes = auditMock.mock.calls.find((args) => args[0] === "prompt_section_sizes")?.[1] as Record<string, unknown> | undefined;
-    expect(sizes?.["headSystemHash"]).toBe(hashText(sent));
+    return {
+      folded: normalizeMessagesForModel(first![0] as LLMMessage[], "qwen") as LLMMessage[],
+      sizes: auditMock.mock.calls.find((args) => args[0] === "prompt_section_sizes")?.[1] as Record<string, unknown> | undefined,
+    };
+  }
+  const headOf = (folded: readonly LLMMessage[]): string => (folded[0]?.role === "system" ? String(folded[0].content ?? "") : "");
+
+  it("L2: a session with an earlier-conversation summary sends the same head bytes as one without, and headSystemHash names it", async () => {
+    // The rolling summary of trimmed-out turns opened the collapsed history as a SYSTEM message, so
+    // the provider folded it into the head and every re-trim rewrote the KV-cache key: a cold head
+    // on the long sessions (finding 2026-10-05). It is a user-role history message now, so the fold
+    // stops at the real head and the summary rides behind it.
+    writeConfig({});
+    planState.recorded = false;
+    vi.resetModules();
+    await import("../tools/register-builtins.js");
+    const [{ AgentSession }, { runTurn }, { hashText }] = await Promise.all([
+      import("../agent/session.js"), import("../agent/runtime.js"), import("../providers/prompt-head.js"),
+    ]);
+    const summary = "Summary of earlier turns: a synthetic note.";
+    const withSummary = await firstCallOfTurn(runTurn, new AgentSession({ channel: "test", workspacePath: dir!, earlierSummary: summary }));
+    const without = await firstCallOfTurn(runTurn, new AgentSession({ channel: "test", workspacePath: dir! }));
+
+    expect(headOf(withSummary.folded).length).toBeGreaterThan(0);
+    expect(headOf(withSummary.folded)).toBe(headOf(without.folded));
+    expect(headOf(withSummary.folded)).not.toContain(summary);
+    // The summary is still sent: the first message behind the head, before the user's request.
+    expect(withSummary.folded[1]).toEqual({ role: "user", content: summary });
+    expect(String(withSummary.folded[2]?.content ?? "")).toContain(SOURCE_TURN);
+    // M0 stays joined: the row's hash is the head the provider sent.
+    expect(withSummary.sizes?.["headSystemHash"]).toBe(hashText(headOf(withSummary.folded)));
+    expect(withSummary.sizes?.["headSystemHash"]).toBe(without.sizes?.["headSystemHash"]);
+  }, 60_000);
+
+  it("L1: two turns over different outcome ledgers send a byte-identical head; the agent-performance note rides in the tail", async () => {
+    // "Recent Agent Performance" ended the base prompt, and the ledger changes after almost every
+    // delegation, so each delegating turn left the warmed heads stale (finding 2026-10-05).
+    writeConfig({});
+    planState.recorded = false;
+    vi.resetModules();
+    await import("../tools/register-builtins.js");
+    const [{ AgentSession }, { runTurn }, { appendOutcome }] = await Promise.all([
+      import("../agent/session.js"), import("../agent/runtime.js"), import("../agent/outcomes.js"),
+    ]);
+    // The managed prompt (no systemPrompt): only that one ever carried the note.
+    const session = new AgentSession({ channel: "test", workspacePath: dir! });
+    const before = await firstCallOfTurn(runTurn, session);
+    for (const n of [1, 2]) {
+      appendOutcome(dir!, { ts: new Date(Date.now() - n * 1_000).toISOString(), agent: "researcher", task: `look it up ${n}`, outcome: "failure", iterations: 1, totalTokens: 10 });
+    }
+    const after = await firstCallOfTurn(runTurn, session);
+
+    expect(headOf(after.folded).length).toBeGreaterThan(0);
+    expect(headOf(after.folded)).toBe(headOf(before.folded));
+    expect(after.sizes?.["headSystemHash"]).toBe(before.sizes?.["headSystemHash"]);
+    // The control: the first turn's ledger was empty, so it had no note anywhere.
+    expect(before.folded.some((m) => String(m.content ?? "").includes("Recent Agent Performance"))).toBe(false);
+    // The second turn carries it in the tail: behind this turn's request, outside the head.
+    let requestAt = -1;
+    after.folded.forEach((m, i) => { if (m.role === "user" && m.content === SOURCE_TURN) requestAt = i; });
+    const noteAt = after.folded.findIndex((m) => String(m.content ?? "").includes("## Recent Agent Performance"));
+    expect(requestAt).toBeGreaterThan(0);
+    expect(noteAt).toBeGreaterThan(requestAt);
+    expect(String(after.folded[noteAt]!.content)).toContain("**researcher**: 2 failure(s), 0 partial(s) [0 success(es)]");
+    expect(Number(after.sizes?.["agentPerformance"] ?? 0)).toBeGreaterThan(0);
   }, 60_000);
 });
 

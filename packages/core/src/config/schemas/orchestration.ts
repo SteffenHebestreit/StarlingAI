@@ -49,6 +49,20 @@ export const OrchestrationSchema = z.object({
    *  it stays gated until a pass^k eval confirms it doesn't over-run single-
    *  deliverable turns. */
   planDrivenContinuation: z.boolean().default(false),
+  /** Plan round fold (latency lever plan_round_fold, finding 2026-10-05). record_plan used to
+   *  only save the plan and answer "CALL execute_plan", so every planned turn paid one extra
+   *  orchestrator round just to issue that call: 1-2 s warm, 8-13 s on a cold head, more with
+   *  thinking on. When true, a record_plan that was the ONLY call of its response and whose plan
+   *  has a dispatchable step (a delegate step, a reuse step naming its workflow, a direct step
+   *  naming its tool) runs the execute_plan executor in the same tool call and returns the plan
+   *  receipt and the execution report together. It does not fold while a plan approval is
+   *  pending or was refused (the approval pause still runs first), when the low-effort budget
+   *  warning fires (the orchestrator decides first), when execute_plan is outside the caller's
+   *  grant or at its per-turn cap, or for a sub-agent. The folded steps are reported to the turn
+   *  like execute_plan's (nestedCalls), so the delegation tally, per-turn tool counts and
+   *  planDrivenContinuation read the same outcomes. Off restores the two-round shape.
+   *  Default: true. */
+  planRoundFold: z.boolean().default(true),
   /** Autonomous-mode anti-refusal (audit 763394da). `--auto` sets autoApprove
    *  (auto-approve tool calls) but does NOT tell the model "execute autonomously,
    *  don't ask" — so an --auto multi-step build was met with a clarifying question

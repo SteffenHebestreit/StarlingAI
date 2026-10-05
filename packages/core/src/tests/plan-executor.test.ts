@@ -233,6 +233,24 @@ describe("execute_plan dispatches each step to the tool that runs that kind", ()
     expect(result.output).toMatch(/RESULTS/);
   });
 
+  it("puts what is still owed ABOVE the results, where a clipped history still shows it", async () => {
+    // The results run to 16K and the collapsed history keeps the head of the report: printed after
+    // them, the FAILED list was the part cut off, so the model saw every result and not the failure.
+    respond = (name) => (name === "web_search"
+      ? { success: false, output: "", error: "search backend down" }
+      : { success: true, output: `FINDINGS ${"x".repeat(5_000)}` });
+    await persistTurnPlan(SESSION, basePlan([
+      { id: "s1", description: "research", kind: "delegate", parallelGroup: 1 },
+      { id: "s2", description: "look it up", kind: "direct", tool: "web_search", toolArgs: { query: "q" }, parallelGroup: 1 },
+    ]));
+
+    const result = await run();
+    expect(result.output.indexOf("FAILED")).toBeGreaterThan(0);
+    expect(result.output.indexOf("FAILED")).toBeLessThan(result.output.indexOf("RESULTS"));
+    // ...and the ids are in the metadata, for record_plan's folded receipt to name.
+    expect(result.metadata?.["outstandingSteps"]).toEqual([{ id: "s2", status: "failed" }]);
+  });
+
   it("keeps a step's result across calls, so a resumed plan has not lost it", async () => {
     respond = () => ({ success: true, output: "THE FINDING: rfc-9110 section 9" });
     await persistTurnPlan(SESSION, basePlan([

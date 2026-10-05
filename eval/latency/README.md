@@ -80,7 +80,7 @@ an upper bound. The real value per point, language and class comes from layer 3.
 |---|---|---|
 | `laya_gate_calls` | classifier | every routing-tier judge that decides a Laya point, minus Laya's 20 ms. A receptionist that answered itself is not claimed, because Laya may only say "task" there. |
 | `pre_router_dispatch` | classifier | the span from the first orchestrator call to the dispatch, on turns whose first dispatch starts one sub-agent (a delegation or a one-step plan) after nothing but agent search or planning. The gate calls before it are not claimed again. |
-| `plan_round_fold` | restructure | the orchestrator round after a response that did nothing but `record_plan` |
+| `plan_round_fold` | restructure | the orchestrator round after a response that did nothing but `record_plan`. Not claimed when the plan already ran inside that call (`orchestration.planRoundFold`, on by default since 2026-10-05: a `plan_executed` row before the next orchestrator call) — that call is then the answer. |
 | `subagent_prewarm` | restructure | a sub-agent's cold first call: its prefill above a warm 1.5 s |
 | `agent_search_wait` | restructure | `search_agents` / `list_agents` beyond a warm reranker's 3.7 s |
 | `qa_verdict_candidate` | classifier | QA verdicts that passed, less Laya's 20 ms. A verdict followed by an improve call failed and is not claimed. This is a candidate point, not an existing one. |
