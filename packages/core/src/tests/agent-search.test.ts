@@ -310,6 +310,9 @@ describe("search_agents tool", () => {
         },
       },
       subAgents,
+      // An unavailable index admits nobody, which is the trigger for the restatement rescue
+      // (default on) — a triage call to the unmocked chat provider at host.docker.internal.
+      orchestration: { routingRestatementRescue: false },
     }), "utf8");
 
     process.env["SAI_CONFIG_PATH"] = configPath;

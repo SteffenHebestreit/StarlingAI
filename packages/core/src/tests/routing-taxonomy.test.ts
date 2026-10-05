@@ -61,6 +61,31 @@ describe("lintTaxonomy", () => {
     expect(findings[0]!.kind).toBe("missing");
   });
 
+  it("flags an ORPHAN label — one that merged onto a name no shard defines", () => {
+    // The shape a label shard leaves behind when its entry is renamed, removed, or moved to
+    // a gitignored *.local.jsonc (process_memory_keeper, 2026-09-29): the merge produces an
+    // entry made of nothing but the label.
+    const defined = { description: "Keeps process memory.", capabilities: ["memory"], tags: [], tools: ["write_file"] };
+    const label = { ...baseTaxonomy, sourceHash: taxonomySourceHash(defined) };
+
+    const orphaned = lintTaxonomy({
+      subAgents: { gone: { routingGenerated: label } as never },
+      scenes: { gone_scene: { routing: { ...baseTaxonomy, executionShape: "workflow" } } as never },
+      jobs: { gone_job: { routing: baseTaxonomy, routingGenerated: label } as never },
+    });
+    // One finding per entry, each named for what it is. Before this kind existed the agent
+    // read as "stale" (its hash covers text that is not there) and the authored scene passed.
+    expect(orphaned.map((finding) => `${finding.kind} ${finding.entry}`)).toEqual([
+      "orphan agent gone",
+      "orphan scene gone_scene",
+      "orphan job gone_job",
+    ]);
+
+    // DISCRIMINANCE: the same label on an entry that IS defined is clean, so the finding is
+    // about the missing definition, not about the label.
+    expect(lintTaxonomy({ subAgents: { kept: { ...defined, routingGenerated: label } as never } })).toEqual([]);
+  });
+
   it("flags a label that went stale against an edited description", () => {
     const entry = { description: "original text", capabilities: [], tags: [], tools: [] };
     const hash = taxonomySourceHash(entry);

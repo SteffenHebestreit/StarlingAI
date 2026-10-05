@@ -80,9 +80,12 @@ export function taxonomySourceHash(entry: {
 
 export interface TaxonomyLintFinding {
   entry: string;
-  kind: "missing" | "stale" | "inconsistent";
+  kind: "missing" | "stale" | "inconsistent" | "orphan";
   detail: string;
 }
+
+/** The only keys a label file contributes; an entry made of nothing else was never defined. */
+const LABEL_ONLY_KEYS: ReadonlySet<string> = new Set(["routing", "routingGenerated"]);
 
 /**
  * Consistency checks that do NOT need an embedding backend, so they can gate every PR.
@@ -96,7 +99,15 @@ export interface TaxonomyLintFinding {
  *  - a `completes` deliverable the entry does not even produce,
  *  - `cross_domain` paired with a real domain: the sentinel means "domain-agnostic", so the
  *    pairing is a contradiction rather than a refinement,
- *  - a scene or job that is not shaped as a workflow.
+ *  - a scene or job that is not shaped as a workflow,
+ *  - an ORPHAN: an entry whose only keys are `routing`/`routingGenerated`. Labels live in
+ *    their own shard (59-routing.generated.jsonc) and merge onto the entry by name, so a
+ *    label whose entry was renamed, removed or moved into an untracked *.local.jsonc shard
+ *    creates a phantom entry with no text. Reported as itself rather than as the "stale"
+ *    label it would otherwise read as (its hash covers text that no longer exists).
+ *
+ * Run it on the merged shards as JSON, before schema parsing: parsed entries carry
+ * defaulted fields, so an orphan would no longer look like one.
  */
 export function lintTaxonomy(catalog: {
   subAgents?: Record<string, SubAgentConfig>;
@@ -111,6 +122,15 @@ export function lintTaxonomy(catalog: {
     entry: TaxonomyBearing & { steps?: unknown },
   ): void => {
     const label = `${kind} ${name}`;
+    const keys = Object.keys(entry ?? {});
+    if (keys.length > 0 && keys.every((key) => LABEL_ONLY_KEYS.has(key))) {
+      findings.push({
+        entry: label,
+        kind: "orphan",
+        detail: "carries a routing label but nothing defines the entry; remove the label or define the entry in a tracked shard",
+      });
+      return;
+    }
     const taxonomy = resolveRoutingTaxonomy(entry);
     if (!taxonomy) {
       findings.push({ entry: label, kind: "missing", detail: "no routing or routingGenerated block" });

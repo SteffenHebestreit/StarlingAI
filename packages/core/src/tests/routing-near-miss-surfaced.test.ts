@@ -43,7 +43,11 @@ async function searchWith(surfaceRoutingNearMisses: boolean) {
     agents: { defaults: { model: { primary: "lmstudio/qwen", embeddingModel: "lmstudio/embed" } } },
     subAgents: AGENTS,
     retrieval: { reranker: { enabled: false } },
-    orchestration: { surfaceRoutingNearMisses },
+    // The restatement rescue (default on) runs triage on the CHAT model after an empty pass,
+    // which is exactly this test's shape. Nothing here mocks that provider, so the rescue
+    // dialled the default host.docker.internal endpoint: a real model on a developer box,
+    // ENOTFOUND in CI. The near-miss message is what is under test, not the rescue.
+    orchestration: { surfaceRoutingNearMisses, routingRestatementRescue: false },
   }), "utf8");
   process.env["SAI_CONFIG_PATH"] = configPath;
   // The agent index is cached to disk and keyed by catalog text; without this the second
