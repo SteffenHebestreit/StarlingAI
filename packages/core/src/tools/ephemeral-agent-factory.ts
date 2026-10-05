@@ -29,6 +29,7 @@ import { buildAgentIndex } from "../providers/embeddings.js";
 import { getEmbeddingProvider } from "../providers/index.js";
 import { formatSharedContextForPrompt } from "../swarm/memory.js";
 import { isWebReachingToolName, looksLikeFailureResult, looksLikeArtifactDeliverableMiss } from "./sub-agent.js";
+import { parseFinalAnswerTag } from "./delegation-artifact-classification.js";
 
 const log = childLogger("tool:sub-agent");
 
@@ -568,11 +569,7 @@ export async function runArchitectFallback(task: string, ctx: ToolContext): Prom
     return null;
   }
 
-  let parsedOutcome: any = null;
-  const tagMatch = result.match(/<final_answer\s+status="([^"]+)">([\s\S]*?)<\/final_answer>/i);
-  if (tagMatch) {
-    parsedOutcome = { status: tagMatch[1]!.toLowerCase(), data: tagMatch[2]!.trim() };
-  }
+  const parsedOutcome = parseFinalAnswerTag(result);
 
   const success = terminalState === undefined || terminalState === "completed"
     ? (parsedOutcome ? parsedOutcome.status !== "failure" && parsedOutcome.status !== "needs_info" : !looksLikeFailureResult(result))

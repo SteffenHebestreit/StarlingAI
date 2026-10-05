@@ -107,8 +107,9 @@ export function looksLikeComposedGuideRequest(userMessage: string): boolean {
   return askToProduce.test(t);
 }
 
-const ARTIFACT_NOUN_RE =
-  /\b(presentation|pr[äa]sentation|slides?|slide deck|folien|foliensatz|deck|website|web ?site|webseite|webpage|web ?page|landing ?page|microsite|app|web ?app|webapp|anwendung|applikation|\w*plattform|\w*platform|document|dokument|report|bericht|paper|file|datei|index\.html|html|reveal\.?js|dashboard|chart|diagram|diagramm|brochure|flyer|poster|pdf|docx|pptx|artifact|artefakt)\b/i;
+const ARTIFACT_NOUN_ALTERNATION =
+  String.raw`presentation|pr[äa]sentation|slides?|slide deck|folien|foliensatz|deck|website|web ?site|webseite|webpage|web ?page|landing ?page|microsite|app|web ?app|webapp|anwendung|applikation|\w*plattform|\w*platform|document|dokument|report|bericht|paper|file|datei|index\.html|html|reveal\.?js|dashboard|chart|diagram|diagramm|brochure|flyer|poster|pdf|docx|pptx|artifact|artefakt`;
+const ARTIFACT_NOUN_RE = new RegExp(String.raw`\b(${ARTIFACT_NOUN_ALTERNATION})\b`, "i");
 
 /** A concrete artifact FILENAME named in the answer (e.g. `cpsaf-learning-platform.html`) —
  * as strong a deliverable signal as an artifact noun (audit 1ac79471 turn 1: a zero-tool
@@ -130,43 +131,201 @@ export function looksLikeArtifactMutationRequest(userMessage: string): boolean {
   return ARTIFACT_NOUN_RE.test(t);
 }
 
+// ── Completion-claim GRAMMAR (verified false positive 2026-10-05) ────────────────────────
+// A completion verb next to an artifact noun is not yet a claim. "Bei PDF/A werden alle
+// Schriften in das Dokument eingebettet" / "all fonts are embedded in the file" — a correct,
+// tool-free answer to a PDF vs PDF/A question — was read as "I embedded it into the document"
+// and suppressed: replaced with the canned "Ich habe in diesem Schritt nichts gebaut" denial or
+// rerouted into a corrective build, or bannered "file NOT created". What separates a claim from
+// prose about how things work is grammar, not vocabulary:
+//   - first person in the perfect/past        "Ich habe … eingefügt", "I updated …"
+//   - a COMPLETED passive                      "… wurden … eingefügt", "has been updated"
+//   - a present state with completion deixis   "ist jetzt aktualisiert", "is now saved"
+//   - a verbless headline ending on the verb   "✅ Präsentation aktualisiert", "Deck updated"
+//   - a clause that OPENS on the completion verb "Updated the deck …", "Saved to report.pdf"
+//   - the artifact as subject of a finished state      "Your deck is updated", "Die Präsentation
+//                                                      ist fertig"
+//   - availability with deixis or a file      "ist jetzt … verfügbar", "is ready: report.pdf"
+//   - a completion adjective + a pointer      "Here is the updated presentation: …"
+//   - pointing the user at a concrete deliverable FILE that does not exist  "Öffne `quiz.html`",
+//     "Download it here: output/deck.html" — whatever the grammar
+// A generic present passive ("werden … eingebettet", "are embedded") is none of these.
+// An existing file excuses ONLY a pure pointer (no completion verb, no completion adjective):
+// nothing was written THIS turn, so "the deck was saved as output/deck.html" is false even when
+// an earlier turn left that file behind (adversarial review 2026-10-05).
+
+/** English completion verbs (simple past = participle) — the predicate of "I updated …". */
+const EN_COMPLETION_VERB = String.raw`(?:inserted|embedded|updated|created|saved|added|modified|written|wrote|generated|built|produced|deployed)`;
+/** German completion participles — the clause-final predicate of "ich habe … eingefügt". */
+const DE_COMPLETION_PARTICIPLE = String.raw`(?:eingef(?:ü|ue|u)gt|eingebettet|aktualisiert|erstellt|gespeichert|hinzugef(?:ü|ue|u)gt|ge(?:ä|ae)ndert|(?:ü|ue)berarbeitet|erg(?:ä|ae)nzt|integriert|eingebunden|ersetzt|gebaut|angelegt|fertiggestellt|bereitgestellt)`;
+// Unicode-aware word edges: JS \b is ASCII-only (no edge before "überarbeitet"), and a bare
+// substring match read "eingebetteten Schriften" (an adjective) as the participle. A "/" is no
+// edge either: "generated/deck.html" is a folder, not the verb "generated".
+const WORD_START = String.raw`(?<![\p{L}\d_/])`;
+const WORD_END = String.raw`(?![\p{L}\d_/])`;
+const EN_VERB = `${WORD_START}${EN_COMPLETION_VERB}${WORD_END}`;
+const DE_VERB = `${WORD_START}${DE_COMPLETION_PARTICIPLE}${WORD_END}`;
+const ANY_COMPLETION_VERB = `${WORD_START}(?:${EN_COMPLETION_VERB}|${DE_COMPLETION_PARTICIPLE})${WORD_END}`;
+const ARTIFACT_FILE_EXT = "html?|pdf|docx?|pptx?|xlsx?|zip|csv|md|json|svg|png|jpe?g";
+
+// German perfect: the participle closes the clause, so the window stops at a comma — a
+// subordinate clause after the comma is not the speaker's claim.
+const FIRST_PERSON_COMPLETION_RE = new RegExp(
+  String.raw`${WORD_START}(?:i|we)(?:'ve|’ve|\s+have|\s+had)?(?:\s+(?:just|now|also|already|successfully|then|finally|completely|fully))*\s+${EN_VERB}`
+  + String.raw`|${WORD_START}(?:ich|wir)\s+(?:habe|hab|haben|hatte|hatten)${WORD_END}[^,]{0,160}?${DE_VERB}`
+  + String.raw`|${WORD_START}(?:habe|hab|haben|hatte|hatten)\s+(?:ich|wir)${WORD_END}[^,]{0,160}?${DE_VERB}`,
+  "iu",
+);
+const COMPLETED_PASSIVE_RE = new RegExp(
+  String.raw`${WORD_START}(?:wurde|wurden|worden)${WORD_END}[^,]{0,120}?${DE_VERB}`
+  + String.raw`|${DE_VERB}\s+worden${WORD_END}`
+  + String.raw`|${WORD_START}(?:was|were|has\s+been|have\s+been|had\s+been)\s+(?:\p{L}+ly\s+|now\s+|just\s+|also\s+|already\s+)?${EN_VERB}`,
+  "iu",
+);
+const DEICTIC_STATE_CLAIM_RE = new RegExp(
+  String.raw`${WORD_START}(?:ist|sind|is|are)${WORD_END}[^,]{0,60}?${WORD_START}(?:jetzt|nun|now|bereits|already|erfolgreich|successfully)${WORD_END}[^,]{0,60}?${ANY_COMPLETION_VERB}`,
+  "iu",
+);
+// The participle is the clause's last word (or is followed only by where the file went:
+// "→ output/deck.html", ": output/deck.html", "to report.pdf").
+const HEADLINE_CLAIM_RE = new RegExp(
+  String.raw`${ANY_COMPLETION_VERB}(?:\s*(?:→|->|:|–|—)?\s*(?:(?:to|in|at|as|under|unter|im|als|nach|auf)\s+)?[\x60"'„“*_\[(]*[\w./-]+\.(?:${ARTIFACT_FILE_EXT})[\x60"'“”*_\])]*)?[\s\p{P}\p{S}]*$`,
+  "iu",
+);
+// A clause that opens (after a bullet, emoji or markup) on the completion verb and goes on to its
+// object — "Updated the deck …", "Added the images to …", "Created report.pdf …", "Saved to
+// report.pdf". The object must follow as a determiner, preposition or file, so an adjective use
+// ("Embedded fonts are required in PDF/A") is not a claim.
+const CLAUSE_INITIAL_COMPLETION_RE = new RegExp(
+  String.raw`^[\s\p{P}\p{S}]*${ANY_COMPLETION_VERB}\s+(?:(?:the|a|an|your|this|these|those|all|its|their|die|der|das|den|dem|eine|einen|ein|deine|dein|ihre|alle|to|into|in|as|at|under|unter|im|als|nach|zu)${WORD_END}|[\x60"'„“*_\[(]*(?:[\w.-]+\/)*[\w-]{2,}\.(?:${ARTIFACT_FILE_EXT})\b)`,
+  "iu",
+);
+// The artifact itself as the subject of a finished state: "Your deck is updated", "Die
+// Präsentation ist fertig", "The website is live now". A determiner is required — "PDF/A files
+// are ready for archiving" talks about a kind of file, not a deliverable.
+const FINISHED_STATE = String.raw`${EN_COMPLETION_VERB}|${DE_COMPLETION_PARTICIPLE}|fertig|ready|done|complete|completed|finished|available|verf(?:ü|ue|u)gbar|bereit|einsatzbereit|vollst(?:ä|ae)ndig|live|online`;
+const SUBJECT_STATE_CLAIM_RE = new RegExp(
+  String.raw`${WORD_START}(?:your|the|this|our|my|dein|deine|die|der|das|ihre|eure|unsere|mein|meine)\s+(?:[\p{L}-]+\s+){0,2}?(?:${ARTIFACT_NOUN_ALTERNATION})\s+(?:is|are|ist|sind)\s+(?:(?:now|jetzt|nun|bereits|already|erfolgreich|successfully)\s+)?(?:${FINISHED_STATE})${WORD_END}`,
+  "iu",
+);
+// A completion adjective on the artifact ("the updated presentation", "die aktualisierte
+// Präsentation", "the new deck") together with a pointer to it (a file, "here", "find", …).
+const COMPLETION_ADJECTIVE_RE = new RegExp(
+  String.raw`${WORD_START}(?:updated|new|revised|finished|final|edited|modified|generated|created|aktualisierte[nmrs]?|neue[nmrs]?|(?:ü|ue)berarbeitete[nmrs]?|fertige[nmrs]?|erstellte[nmrs]?|generierte[nmrs]?)\s+(?:[\p{L}-]+\s+)?(?:${ARTIFACT_NOUN_ALTERNATION})${WORD_END}`,
+  "iu",
+);
+const POINTER_WORD_RE = /(?<![\p{L}])(?:here|hier|herunterladen|download|attached|anbei|find|findest|finden|unten|below)(?![\p{L}])/iu;
+// Deliverable file types a pointer can hand over (code/config files like package.json are not a
+// deliverable the user is pointed at).
+const POINTER_FILE_EXT = "html?|pdf|docx?|pptx?|xlsx?|zip|csv|svg|png|jpe?g";
+const POINTER_FILE_RE = new RegExp(String.raw`(?<![\w./-])(?:[\w.-]+\/)*[\w-]{2,}\.(?:${POINTER_FILE_EXT})\b`, "gi");
+// The clause tells the USER to make or change a file ("Save it as report.pdf", "Export the slides
+// to deck.pdf", "Füge … in die index.html ein") — advice, not a delivery. Base forms of the
+// completion/authoring verbs (a closed class: the completion verbs above in their base form).
+const INSTRUCTION_START_RE = /^[\s\p{P}\p{S}]*(?:insert|embed|update|create|save|add|modify|write|generate|build|produce|deploy|name|call|rename|put|copy|move|edit|export|convert|upload|attach|füge|speichere|erstelle|erzeuge|schreibe|benenne|nenne|kopiere|verschiebe|bearbeite|exportiere)(?![\p{L}])/iu;
+const EXEMPLIFY_RE = /(?<![\p{L}])(?:e\.g\.|z\.\s?b\.|for example|for instance|zum beispiel|beispielsweise|such as|etwa)(?![\p{L}])/iu;
+const USER_OWNED_BEFORE_RE = /(?<![\p{L}])(?:your|dein|deine|deinen|deinem|ihre|ihren|eure|euren)\s+(?:[\w-]+\s+)?$/iu;
+const FINITE_VERB_RE = /(?<![\p{L}])(?:is|are|was|were|be|been|has|have|had|can|could|will|would|should|must|may|might|do|does|did|wird|werden|wurde|wurden|ist|sind|war|waren|hat|haben|habe|kann|k(?:ö|oe)nnen|muss|m(?:ü|ue)ssen|soll|sollte|sollten|darf|d(?:ü|ue)rfen)(?![\p{L}])/iu;
+const HEADLINE_MAX_WORDS = 6;
+// Delivery phrasing without a completion verb (audit 1ac79471 turn 1: "Die Plattform ist
+// jetzt … verfügbar" + "Öffne die Datei `cpsaf-learning-platform.html`" — a fabricated
+// delivery with zero tools that the verb list alone missed). Predicate-anchored
+// ("ist … verfügbar") so an honest OFFER ("ich bin bereit, die Datei zu erstellen")
+// does not trip it, and deixis-anchored ("jetzt", "now", "hier", "in your workspace") so a
+// general statement ("PDF/A files are ready for archiving") does not either.
+const AVAILABILITY_CLAIM_RE =
+  /\b(?:ist|sind|is|are|steht|stehen|liegt|liegen)\b(?:[^.!?\n]|\.(?=\S)){0,60}\b(?:verf[üu]gbar|einsatzbereit|bereit|fertig|available|ready)\b/i;
+const DELIVERY_DEIXIS_RE = /(?<![\p{L}])(?:jetzt|nun|now|hier|here|bereits|already|sofort|workspace|download)(?![\p{L}])/iu;
+// Pointers ("öffne index.html im Browser", "Download it here: output/deck.html") need a concrete
+// FILENAME — NOT a bare device/program target: "öffne dein E-Mail-Programm im Browser" is everyday
+// advice to the user, not a delivery claim, and `\bapp\b` matches inside hyphenated compounds like
+// "E-Mail-App" (session 24826c33: an email-check answer was suppressed over exactly that
+// phrasing). The bare word "file"/"Datei" does not count either ("open the file in Acrobat and
+// check the fonts" is advice). See POINTER_FILE_RE below.
+// A named file with its folder prefix ("generated/deck/index.html"), so the existence check
+// sees the path the answer gave, not only its last segment.
+const ARTIFACT_PATH_ALL_RE = new RegExp(String.raw`(?<![\w./-])(?:[\w.-]+\/)*[\w-]{2,}\.(?:${ARTIFACT_FILE_EXT})\b`, "gi");
+const CLAIM_NEGATION_RE =
+  /(\bnicht\b|\bkein|\bniemals\b|\bohne\b|\bnot\b|\bnever\b|couldn'?t|could ?not|cannot|can'?t|\bno\b|\bunable\b|konnte)/i;
+
 /**
  * The answer ASSERTS, as a completed fact, that it created/updated/saved/inserted the
  * artifact — yet the caller only invokes this when NO artifact was produced this turn, so a
  * match means a FALSE "I updated the presentation" claim (audit 14661623 turn 2: the run
  * gathered image URLs, never rebuilt the deck, but said "Die Bilder wurden eingefügt …
  * URLs überprüft"). Clause-scoped so a negated, honest "I did NOT update the deck" is not
- * flagged. Structural + bilingual; needs a completion verb AND an artifact noun in the SAME
- * clause, with no negation in that clause.
+ * flagged. Structural + bilingual: a claim GRAMMAR (see above) AND a deliverable — an artifact
+ * noun or a concrete filename — in the SAME clause, with no negation in that clause.
+ *
+ * `fileExists` (workspace-relative): a clause that only POINTS at files which really exist
+ * ("Öffne report.pdf" for a file an earlier turn made) is a reference, not a fabricated
+ * delivery. Existence excuses nothing else: a clause with completion grammar or a completion
+ * adjective ("the deck was saved as output/deck.html", "open output/deck.html to see the UPDATED
+ * presentation") claims work THIS turn, and nothing was written this turn.
  */
-export function claimsArtifactWrittenButUnproduced(value: string): boolean {
+export function claimsArtifactWrittenButUnproduced(
+  value: string,
+  opts?: { fileExists?: (ref: string) => boolean },
+): boolean {
   const text = value ?? "";
   if (!text.trim()) return false;
-  const claimVerb =
-    /(eingef[üu]gt|eingebettet|aktualisiert|erstellt|gespeichert|hinzugef[üu]gt|geändert|überarbeitet|ergänzt|integriert|eingebunden|ersetzt|gebaut|angelegt|fertiggestellt|bereitgestellt|inserted|embedded|updated|created|saved|added|modified|written|generated|built|produced|deployed)/i;
-  // Delivery phrasing without a completion verb (audit 1ac79471 turn 1: "Die Plattform ist
-  // jetzt … verfügbar" + "Öffne die Datei `cpsaf-learning-platform.html`" — a fabricated
-  // delivery with zero tools that the verb list alone missed). Predicate-anchored
-  // ("ist … verfügbar") so an honest OFFER ("ich bin bereit, die Datei zu erstellen")
-  // does not trip it.
-  const availabilityClaim =
-    /\b(?:ist|sind|is|are|steht|stehen|liegt|liegen)\b[^.!?\n]{0,60}\b(?:verf[üu]gbar|einsatzbereit|bereit|fertig|available|ready)\b/i;
-  // (?:^|\s…) instead of a leading \b: JS \b is ASCII-only and never matches before "Öffne".
-  // Anchored to a FILE object — the word datei/file or a concrete filename ("öffne
-  // index.html im Browser") — NOT a bare device/program target: "öffne dein
-  // E-Mail-Programm im Browser" is everyday advice to the user, not a delivery claim,
-  // and `\bapp\b` matches inside hyphenated compounds like "E-Mail-App" (session
-  // 24826c33: an email-check answer was suppressed over exactly that phrasing).
-  const openImperative = /(?:^|[\s*_>`"'(])(?:öffne|öffnen sie|open)\b[^.!?\n]{0,50}(?:\b(?:datei|file)\b|[\w-]{2,}\.(?:html?|pdf|docx?|pptx?|xlsx?|zip|csv|md|json|svg|png|jpe?g)\b)/i;
-  const negation =
-    /(\bnicht\b|\bkein|\bniemals\b|\bohne\b|\bnot\b|\bnever\b|couldn'?t|could ?not|cannot|can'?t|\bno\b|\bunable\b|konnte)/i;
-  // Split into clauses so a negated clause ("… wurde NICHT geändert") can't trip the claim.
-  for (const clause of text.split(/[.!?\n;:]+/)) {
-    const delivers = claimVerb.test(clause) || availabilityClaim.test(clause) || openImperative.test(clause);
-    const namesArtifact = ARTIFACT_NOUN_RE.test(clause) || ARTIFACT_FILENAME_RE.test(clause);
-    if (delivers && namesArtifact && !negation.test(clause)) return true;
+  const fileExists = opts?.fileExists ?? (() => false);
+  for (const clause of claimClauses(text)) {
+    if (!clause.trim() || CLAIM_NEGATION_RE.test(clause)) continue;
+    const files = [...clause.matchAll(ARTIFACT_PATH_ALL_RE)].map((match) => match[0]);
+    if (!ARTIFACT_NOUN_RE.test(clause) && files.length === 0) continue;
+
+    // Completion grammar: a claim whether or not the named file exists.
+    if (FIRST_PERSON_COMPLETION_RE.test(clause) || CLAUSE_INITIAL_COMPLETION_RE.test(clause)) return true;
+    if (COMPLETED_PASSIVE_RE.test(clause) || DEICTIC_STATE_CLAIM_RE.test(clause) || SUBJECT_STATE_CLAIM_RE.test(clause)) return true;
+    const words = clause.trim().split(/\s+/u).filter((word) => /[\p{L}\d]/u.test(word) && !/\.\w{2,5}$/u.test(word));
+    if (words.length <= HEADLINE_MAX_WORDS && !FINITE_VERB_RE.test(clause) && HEADLINE_CLAIM_RE.test(clause.trim())) return true;
+    const pointsAtFile = files.length > 0;
+    if (AVAILABILITY_CLAIM_RE.test(clause) && (DELIVERY_DEIXIS_RE.test(clause) || pointsAtFile)) return true;
+    if (COMPLETION_ADJECTIVE_RE.test(clause) && (pointsAtFile || POINTER_WORD_RE.test(clause))) return true;
+
+    // A pure pointer: hands the user a deliverable file — a claim when that file does not exist.
+    if (INSTRUCTION_START_RE.test(clause) || EXEMPLIFY_RE.test(clause)) continue;
+    for (const pointer of clause.matchAll(POINTER_FILE_RE)) {
+      if (USER_OWNED_BEFORE_RE.test(clause.slice(0, pointer.index))) continue;
+      if (!fileExists(pointer[0])) return true;
+    }
   }
   return false;
+}
+
+// A colon that introduces a file path or link keeps the clause together ("Here is the updated
+// presentation: output/deck.html"); any other colon ends it.
+const COLON_BEFORE_PATH_RE = new RegExp(String.raw`^\s*[\x60"'„“*_\[(]*(?:\/\/|(?:[\w.-]+\/)*[\w-]{2,}\.(?:${ARTIFACT_FILE_EXT})\b)`, "i");
+
+/**
+ * The answer's clauses, so a negated or questioning clause ("… wurde NICHT geändert") cannot trip
+ * the claim. A period ends a clause only before whitespace or the end, so "quiz.html" stays one
+ * token. A question contributes only what precedes its last comma/dash ("Ich habe die
+ * Präsentation aktualisiert, soll ich sie auch exportieren?" still claims the update; "Soll ich
+ * die Plattform bauen?" claims nothing).
+ */
+function claimClauses(text: string): string[] {
+  const clauses: string[] = [];
+  let start = 0;
+  const push = (end: number, question: boolean): void => {
+    const clause = text.slice(start, end);
+    if (!question) { clauses.push(clause); return; }
+    const lastBreak = Math.max(clause.lastIndexOf(","), clause.lastIndexOf("—"), clause.lastIndexOf("–"));
+    if (lastBreak > 0) clauses.push(clause.slice(0, lastBreak));
+  };
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i]!;
+    let boundary = false;
+    if (ch === "\n" || ch === ";") boundary = true;
+    else if (ch === "." || ch === "!" || ch === "?") boundary = i + 1 >= text.length || /[\s"'”)*_]/.test(text[i + 1]!);
+    else if (ch === ":") boundary = !COLON_BEFORE_PATH_RE.test(text.slice(i + 1, i + 200));
+    if (!boundary) continue;
+    push(i, ch === "?" || text.slice(Math.max(start, i - 2), i).includes("?"));
+    start = i + 1;
+  }
+  push(text.length, false);
+  return clauses;
 }
 
 /**

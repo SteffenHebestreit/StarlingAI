@@ -126,4 +126,115 @@ describe("claimsArtifactWrittenButUnproduced", () => {
       )).toBe(true);
     });
   });
+
+  // Verified 2026-10-05: a correct, tool-free answer to "PDF vs PDF/A?" said fonts are embedded
+  // in the document — completion verb + artifact noun in one clause — and the zero-work guard
+  // replaced it with the canned "nothing was built" denial. A claim needs claim GRAMMAR.
+  describe("generic prose about embedding/creating is not a claim (2026-10-05)", () => {
+    it("does NOT flag a present-tense explanation of how a format works", () => {
+      for (const answer of [
+        "Bei PDF/A werden alle Schriften in das Dokument eingebettet, damit es in Jahrzehnten noch identisch aussieht.",
+        "In PDF/A, all fonts are embedded in the file, so it renders the same decades later.",
+        "Ich empfehle PDF/A, weil dort alle Schriften eingebettet sind.",
+        "PDF/A files are ready for long-term archiving.",
+        "Open the file in Acrobat and check the font list.",
+      ]) {
+        expect(claimsArtifactWrittenButUnproduced(answer), answer).toBe(false);
+      }
+    });
+
+    it("still flags each claim grammar", () => {
+      for (const claim of [
+        "Die Präsentation wurde erstellt und liegt im Workspace.",
+        "The deck has been updated with the new figures.",
+        "Die Präsentation ist jetzt aktualisiert.",
+        "✅ Präsentation aktualisiert",
+      ]) {
+        expect(claimsArtifactWrittenButUnproduced(claim), claim).toBe(true);
+      }
+    });
+
+    it("a pointer at a file that EXISTS is a reference, not a fabricated delivery", () => {
+      const fileExists = (ref: string) => ref === "reports/q3.pdf";
+      expect(claimsArtifactWrittenButUnproduced("Öffne reports/q3.pdf in deinem Browser.", { fileExists })).toBe(false);
+      expect(claimsArtifactWrittenButUnproduced("Öffne reports/q4.pdf in deinem Browser.", { fileExists })).toBe(true);
+      // A first-person completion claim stays false-by-construction: nothing was written THIS turn.
+      expect(claimsArtifactWrittenButUnproduced("Ich habe reports/q3.pdf erstellt.", { fileExists })).toBe(true);
+    });
+  });
+
+  // Adversarial review 2026-10-05 of the grammar fix above: an existing file excused real claims,
+  // and several claim shapes were missed outright. Nothing was written this turn in any of these.
+  describe("claims the grammar fix missed (review 2026-10-05)", () => {
+    const exists = (ref: string) => ref === "output/deck.html" || ref === "report.pdf" || ref === "generated/deck.html";
+
+    it("an existing file excuses only a PURE pointer, never completion grammar or a completion adjective", () => {
+      for (const claim of [
+        "Die Präsentation wurde unter output/deck.html aktualisiert.",
+        "Die Präsentation wurde aktualisiert und liegt unter output/deck.html.",
+        "The deck was saved as output/deck.html.",
+        "Saved to report.pdf.",
+        "Open output/deck.html to see the updated presentation.",
+        "Updated: output/deck.html",
+        "✅ Präsentation aktualisiert → output/deck.html",
+        "You can find the updated deck at output/deck.html.",
+        "Der Bericht steht jetzt als report.pdf bereit.",
+      ]) {
+        expect(claimsArtifactWrittenButUnproduced(claim, { fileExists: exists }), claim).toBe(true);
+      }
+      // Pure pointers at real files stay excused — also inside the conventional generated/ folder,
+      // whose name is not the verb "generated".
+      expect(claimsArtifactWrittenButUnproduced("Die Präsentation liegt jetzt unter generated/deck.html.", { fileExists: exists })).toBe(false);
+      expect(claimsArtifactWrittenButUnproduced("Download it here: output/deck.html", { fileExists: exists })).toBe(false);
+    });
+
+    it("flags the shapes that were missed even when the file does not exist", () => {
+      for (const claim of [
+        "Here is the updated presentation: output/deck.html",
+        "Hier ist die aktualisierte Präsentation: output/deck.html",
+        "Your report is ready: report.pdf",
+        "Die aktualisierte Präsentation findest du unter output/deck.html.",
+        "You can find the updated deck at output/deck.html.",
+        "Your report is ready at report.pdf",
+        "Updated the deck with the new images.",
+        "Added the images to the deck.",
+        "Created report.pdf with the summary.",
+        "Your deck is updated.",
+        "Fertig – die Präsentation ist aktualisiert.",
+        "Die Präsentation ist fertig.",
+        "✅ Präsentation aktualisiert → output/deck.html",
+        "Download it here: output/deck.html",
+        "Ich habe die Präsentation aktualisiert, soll ich sie auch als PDF exportieren?",
+      ]) {
+        expect(claimsArtifactWrittenButUnproduced(claim), claim).toBe(true);
+      }
+    });
+
+    it("advice, examples, the user's own files and adjective uses are not claims", () => {
+      for (const prose of [
+        "Save it as report.pdf and attach it to the mail.",
+        "A good file name would be, for example, report-q3.pdf.",
+        "Open your report.pdf and check page 3.",
+        "Embedded fonts are required in PDF/A.",
+        "PDF/A files are ready for long-term archiving.",
+      ]) {
+        expect(claimsArtifactWrittenButUnproduced(prose), prose).toBe(false);
+      }
+    });
+  });
+});
+
+describe("answerReferencedFileExists — whole path segments (review 2026-10-05)", () => {
+  it("a bare file name does not borrow the existence of a deeper recorded path", async () => {
+    const { answerReferencedFileExists } = await import("../agent/turn-finalize-guards.js");
+    const session = {
+      getWorkspacePath: () => "/nonexistent-workspace-for-test",
+      getHistory: () => [{ role: "tool", metadata: { outputPath: "apps/old/index.html" } }],
+    };
+    const exists = answerReferencedFileExists(session as never);
+    expect(exists("index.html")).toBe(false);
+    expect(exists("old/index.html")).toBe(true);
+    expect(exists("apps/old/index.html")).toBe(true);
+    expect(exists("pold/index.html")).toBe(false);
+  });
 });

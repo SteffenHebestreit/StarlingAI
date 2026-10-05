@@ -13,13 +13,20 @@
  * text-dedup, intent-classifier, runtime-utils). It must NEVER import from
  * runtime.js — keep it cycle-free.
  */
-import { sanitizeAssistantContent, NARRATED_TOOL_TEXT_RE } from "./sanitize-response.js";
+import { sanitizeFinalAnswerContent, isExecutionChatterOnly, NARRATED_TOOL_TEXT_RE } from "./sanitize-response.js";
 import { looksLikeDegenerateRepetition, collapseRepeatedMarkdownSections } from "./text-dedup.js";
 import { DELEGATE_TOOL_RESULT_RE, looksLikeDelegateMetadata } from "./runtime-utils.js";
 import { stripDelegatedRunRecord } from "./delegated-run-record.js";
 
+/**
+ * Whether the turn ran tools no longer decides whether a paragraph of its FINAL answer is deleted
+ * (verified 2026-10-05: "I'll be direct: option B is cheaper and faster." was deleted from a
+ * tool-using turn's answer). The paragraph filter keys off narrated tool markup in the text itself;
+ * a tool turn only loses a LEADING run of one-sentence step narration ahead of real content — see
+ * sanitizeFinalAnswerContent.
+ */
 export function sanitizeUserFacingAssistantResponse(value: string, toolIterations: number): string {
-  const cleaned = sanitizeAssistantContent(value, toolIterations > 0);
+  const cleaned = sanitizeFinalAnswerContent(value, { stripLeadingNarration: toolIterations > 0 });
   // Final safety net: a slow local model can collapse into a repetition loop during
   // synthesis and emit the same section many times. Never ship that verbatim — keep
   // the first occurrence of each unique section (audit 9fd16384: 17× repeated block).
@@ -39,6 +46,11 @@ export function shouldResynthesizeUserFacingResponse(raw: string, cleaned: strin
   if (!raw.trim() || cleaned.length === 0) return true;
   if (toolIterations > 0 && looksLikeGenericNoUsableReply(cleaned)) return true;
   if (toolIterations === 0) return false;
+  // A tool-using turn that ENDED on pure step narration ("Let me check the datasheet.") has no
+  // answer yet. The sanitizer used to signal this by emptying the text; it no longer deletes
+  // paragraphs from a final answer, so the decision to write one is made here — and if that
+  // synthesis fails, the narration itself is the fallback rather than an empty reply.
+  if (isExecutionChatterOnly(cleaned)) return true;
   if (!NARRATED_TOOL_TEXT_RE.test(raw)) return false;
   return cleaned.length === 0 || cleaned.length < Math.min(120, Math.ceil(raw.length / 3));
 }

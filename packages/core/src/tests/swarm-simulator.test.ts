@@ -594,6 +594,29 @@ describe("swarm simulator — non-artifact question is never dragged into the bu
     expect(result.response).not.toMatch(/Bau der angeforderten Datei/);
   });
 
+  // Verified 2026-10-05: the request NAMES an artifact type ("PDF"), so it is artifact-shaped, and
+  // the correct tool-free answer says fonts "werden … in das Dokument eingebettet" — prose about
+  // the format, which the old verb+noun detector read as a delivery claim and replaced with the
+  // canned "nothing was built" denial (or a corrective build). Claim grammar is required now.
+  it("a tool-free explanation that a format EMBEDS fonts is not a fabricated delivery (2026-10-05)", async () => {
+    pinHybridConfig();
+    const explanation =
+      "Der Hauptunterschied: Bei PDF/A werden alle Schriften in das Dokument eingebettet, und externe "
+      + "Inhalte wie Videos oder JavaScript sind verboten. Ein normales PDF darf Schriften nur referenzieren.";
+    streamMock.mockImplementation(() => textStream(explanation));
+    const delegateCalls: Array<Record<string, unknown>> = [];
+    registerArtifactlessDelegate(delegateCalls);
+
+    const result = await runTurn({ session: makeSession(), userMessage: "Was ist der Unterschied zwischen PDF und PDF/A?" });
+
+    expect(result.guardrailEvents ?? []).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ details: "fabricated_zero_work_delivery_suppressed" }),
+    ]));
+    expect(delegateCalls).toHaveLength(0);
+    expect(result.response).toContain("eingebettet");
+    expect(result.response).not.toMatch(/nichts\*\* gebaut|Bau der angeforderten Datei/);
+  });
+
   it("a fabricated tool link on a non-artifact question is REROUTED to a specialist, not built", async () => {
     pinHybridConfig();
     // The conclusive zero-work signal (a tool-minted link) still fires on any turn — but

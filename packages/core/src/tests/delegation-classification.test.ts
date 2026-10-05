@@ -1,6 +1,13 @@
 import { describe, it, expect } from "vitest";
 import { classifyDelegationResult, isNarrativeOnlyDeliverableFailure } from "../tools/sub-agent.js";
 import type { DelegationClassification } from "../tools/sub-agent.js";
+import {
+  carriesConcreteEvidence,
+  inferCompletedRunOutcome,
+  isWorkToolName,
+  looksLikePlanningOnlyResult,
+  parseFinalAnswerTag,
+} from "../tools/delegation-artifact-classification.js";
 
 const baseStats = {
   toolCount: 3,
@@ -619,6 +626,165 @@ describe("classifyDelegationResult — D14", () => {
       "configure the server",
     );
     expect(r).toBe<DelegationClassification>("failure");
+  });
+});
+
+// Verified 2026-10-05: three delegation results were judged by their PROSE alone, against what the
+// run itself left behind. Structure first now: the run's explicit <final_answer status>, its
+// artifacts, the concrete evidence in its text, whether every one of its tool calls failed. Prose
+// only breaks the tie, and never discards evidence.
+describe("classifyDelegationResult — structure before prose (2026-10-05)", () => {
+  const researchStats = {
+    toolCount: 2,
+    toolNames: ["web_search", "web_fetch"],
+    terminalState: "completed",
+    outcome: "success" as const,
+  };
+
+  it("a German recommendation is a conclusion, not a planning loop", () => {
+    // "Aufgrund …" opens a conclusion as often as a plan; it announced no intent. Before, the
+    // opener + an action stem ("nutzt", "verwende") + no terminal marker = planning-only = failure,
+    // and the result was discarded (bestPartialResult skips planning-only text too).
+    const recommendation =
+      "Aufgrund der Datenblätter empfehle ich den ESP32-S3: Er hat zwei I2S-Schnittstellen, nutzt im Deep-Sleep "
+      + "weniger Strom und wird von ESP-IDF direkt unterstützt. Für das Mikrofon verwende den ICS-43434.";
+    expect(carriesConcreteEvidence(recommendation)).toBe(false); // only the opener fix can save it
+    expect(looksLikePlanningOnlyResult(recommendation)).toBe(false);
+    expect(classifyDelegationResult(
+      recommendation, "success", researchStats, undefined, "researcher", "Welcher Mikrocontroller passt für das Aufnahmegerät?",
+    )).toBe<DelegationClassification>("success");
+    // A fronted clause that DOES announce intent is still a planning opener.
+    expect(looksLikePlanningOnlyResult(
+      "Da es sich um eine große Datei handelt, werde ich sie in mehreren Teilen mit write_file schreiben.",
+    )).toBe(true);
+  });
+
+  // Reversed by the adversarial review the same day: an evidence veto on the planning verdict let
+  // stubs that QUOTE figures pass as success (HEAD failed them). A plan with figures is a plan.
+  it("a planning stub stays planning-only even when it quotes figures or a URL", () => {
+    const stub = "I'll compare the ESP32-S3 (240 MHz, 512 KB SRAM) with the RP2040 (133 MHz). Let me search for their datasheets next.";
+    expect(looksLikePlanningOnlyResult(stub)).toBe(true);
+    expect(classifyDelegationResult(
+      stub, "success", { toolCount: 0, toolNames: [], terminalState: "completed", outcome: "success" as const },
+      undefined, "researcher", "Compare ESP32-S3 vs RP2040",
+    )).toBe<DelegationClassification>("failure");
+    expect(looksLikePlanningOnlyResult("Let me fetch the datasheet from https://www.espressif.com/esp32-s3.pdf next.")).toBe(true);
+  });
+
+  it("figures echoed from the task are not evidence", () => {
+    const task = "Find a 2 A / 5 V USB charger";
+    const echo = "No results found for the 2 A / 5 V charger query.";
+    expect(carriesConcreteEvidence(echo)).toBe(true); // what the text alone suggests …
+    expect(carriesConcreteEvidence(echo, task)).toBe(false); // … but the figures came from the task
+    expect(classifyDelegationResult(echo, "success", researchStats, undefined, "researcher", task)).toBe<DelegationClassification>("failure");
+  });
+
+  it("a planning opener with a produced artifact is not a narrative-only failure", () => {
+    const opener = "Let me summarize the comparison: use the cheaper board; the table is in the attached file.";
+    expect(looksLikePlanningOnlyResult(opener)).toBe(true); // the text alone reads as a stub …
+    expect(classifyDelegationResult(
+      opener,
+      "success",
+      { toolCount: 3, toolNames: ["web_search", "write_file"], terminalState: "completed", outcome: "success" as const },
+      undefined,
+      "researcher",
+      "Compare the two boards.",
+      [{ outputPath: "generated/compare.md", sourceTool: "write_file" }],
+    )).not.toBe<DelegationClassification>("failure");
+  });
+
+  it("an explicit success verdict outranks a failure word in the answer", () => {
+    const explanation =
+      "The HTTP 404 not found response means the server cannot find the requested resource; unlike 410 Gone "
+      + "it does not say the removal is permanent.";
+    expect(classifyDelegationResult(
+      explanation, "success", researchStats, undefined, "researcher", "What does an HTTP 404 mean?", [], { explicitVerdict: true },
+    )).toBe<DelegationClassification>("success");
+    // Without any structural verdict the prose still breaks the tie: the run's heuristic "partial"
+    // keeps the text as partial evidence instead of a success — never discarded.
+    expect(classifyDelegationResult(
+      explanation, "partial", { ...researchStats, outcome: "partial" as const }, undefined, "researcher", "What does an HTTP 404 mean?",
+    )).toBe<DelegationClassification>("partial");
+  });
+
+  it("concrete evidence outranks a failure phrase when no verdict was written", () => {
+    expect(classifyDelegationResult(
+      "The first attempt failed to reach the vendor site, so I used the cached datasheet: the sensor draws 12 mA at 3.3 V.",
+      "success", researchStats, undefined, "researcher", "What does the sensor draw?",
+    )).toBe<DelegationClassification>("success");
+  });
+
+  // Every WORK call failed (review 2026-10-05): a failure when the answer reports one — figures do
+  // not rescue it, they may be echoed or remembered — else a PARTIAL: a correct knowledge answer
+  // after a failed search is kept and flagged instead of being discarded as a failure (which marks
+  // the agent degraded, re-dispatches, drops short answers and demotes it in routing).
+  it("every work call failed: failure when the answer reports one, partial (kept) otherwise", () => {
+    const classify = (output: string, failures: number, extra: Record<string, unknown> = {}) => classifyDelegationResult(
+      output, "success", researchStats, undefined, "researcher", "Compare ESP32-S3 vs RP2040", [], { toolFailureCount: failures, ...extra },
+    );
+    expect(classify("Unable to fetch https://vendor.com/pricing (HTTP 403). The search snippet mentioned $49 but I could not verify it.", 2))
+      .toBe<DelegationClassification>("failure");
+    expect(classify("Error: The page returned 503. Retry budget 100% used; 0 B received.", 2))
+      .toBe<DelegationClassification>("failure");
+    expect(["failure", "infrastructure_failure"]).toContain(
+      classify("Failed to retrieve the datasheet: timed out after 30 s. Disk usage on the worker was 100% and memory 95%.", 2),
+    );
+    expect(classify("The capital of Australia is Canberra.", 2)).toBe<DelegationClassification>("partial");
+    // Before 2026-10-05 this was a success; the English failure phrases cannot read it, the failed
+    // calls can — and it is kept as partial rather than discarded.
+    expect(classify("Keine Ergebnisse gefunden; Quelle nicht erreichbar.", 2)).toBe<DelegationClassification>("partial");
+    // One failed fetch among working calls is not a failed run.
+    expect(classify("Keine Ergebnisse gefunden; Quelle nicht erreichbar.", 1)).toBe<DelegationClassification>("success");
+    // The run's own explicit success outranks its tool failures.
+    expect(classify("Keine Ergebnisse gefunden; Quelle nicht erreichbar.", 2, { explicitVerdict: true })).toBe<DelegationClassification>("success");
+  });
+
+  it("failed bookkeeping calls (share_finding, memory_*, notes) are not failed work", () => {
+    const bookkeeping = ["share_finding", "share_finding", "memory_store"];
+    expect(classifyDelegationResult(
+      "Here's the summary of the meeting notes: the team agreed to ship on Friday.",
+      "success",
+      { toolCount: 3, toolNames: bookkeeping, terminalState: "completed", outcome: "success" as const },
+      undefined, "summarizer", "Summarize the meeting notes.", [], { failedToolNames: bookkeeping },
+    )).toBe<DelegationClassification>("success");
+    expect(isWorkToolName("web_fetch")).toBe(true);
+    expect(isWorkToolName("research_notes_read")).toBe(false);
+  });
+});
+
+describe("inferCompletedRunOutcome — a normally-ended run's outcome (2026-10-05)", () => {
+  const run = { toolCount: 2, toolFailureCount: 0, artifactCount: 0 };
+
+  it("reads the run's own <final_answer status> first", () => {
+    const tagged = '<final_answer status="success">The HTTP 404 not found response means the resource is missing.</final_answer>';
+    expect(inferCompletedRunOutcome(tagged, run)).toBe("success");
+    expect(inferCompletedRunOutcome('<final_answer status="needs_info">Which board?</final_answer>', run)).toBe("partial");
+    expect(inferCompletedRunOutcome('<final_answer status="failure">Nothing found.</final_answer>', run)).toBe("failure");
+  });
+
+  it("every work call failed: failure when the answer reports one, partial otherwise", () => {
+    const failed = { ...run, toolFailureCount: 2 };
+    expect(inferCompletedRunOutcome("No results found for the 2 A / 5 V charger query.", failed)).toBe("failure");
+    expect(inferCompletedRunOutcome("Failed to retrieve the datasheet: timed out after 30 s. Memory was at 95% and disk at 100%.", failed)).toBe("failure");
+    expect(inferCompletedRunOutcome("The capital of Australia is Canberra.", failed)).toBe("partial");
+    expect(inferCompletedRunOutcome("Keine Ergebnisse gefunden; Quelle nicht erreichbar.", failed)).toBe("partial");
+    // Bookkeeping failures do not count as failed work.
+    expect(inferCompletedRunOutcome("The team agreed to ship on Friday.", {
+      toolCount: 2, toolNames: ["share_finding", "memory_store"], failedToolNames: ["share_finding", "memory_store"], artifactCount: 0,
+    })).toBe("success");
+  });
+
+  it("the final_answer tag needs its closing tag — one parser for every reader", () => {
+    expect(parseFinalAnswerTag('<final_answer status="Success"> done </final_answer>')).toEqual({ status: "success", data: "done" });
+    expect(parseFinalAnswerTag('<final_answer status="success">The answer, never closed')).toBeNull();
+    expect(inferCompletedRunOutcome('<final_answer status="failure">Nothing found but the run went on', { ...run, artifactCount: 1 })).toBe("success");
+  });
+
+  it("evidence or artifacts outrank the failure phrases; the phrases still break a tie", () => {
+    expect(inferCompletedRunOutcome("The first fetch failed to load, but the cached sheet says 12 mA at 3.3 V.", run)).toBe("success");
+    expect(inferCompletedRunOutcome("Unable to fetch one image; the deck is written.", { ...run, artifactCount: 1 })).toBe("success");
+    expect(inferCompletedRunOutcome("No results for the exact part number.", run)).toBe("partial");
+    expect(inferCompletedRunOutcome("The tide table for Hamburg is attached below.", run)).toBe("success");
   });
 });
 

@@ -10,6 +10,34 @@
 import { isCanonicalResearchSliceTask } from "../agent/source-sensitive-delegation.js";
 import { looksLikeContainerLevelFailure, looksLikeModelTemplateArtifact } from "../agent/container-failure.js";
 
+// ── Concrete evidence in a result's OWN text (2026-10-05) ──────────────────────────────────
+// Units of measure and currencies: symbols, not words of any language. Durations are left out
+// on purpose — "timed out after 30 s" / "after 240000ms" is how a FAILURE reports itself.
+const EVIDENCE_FIGURE_RE = /(?<![\p{L}\d.,])\d+(?:[.,]\d+)?\s?(?:%|‰|°\s?[CF]?|[kKMGTµunm]?(?:Hz|B|bit|bps|V|A|W|Wh|Ah|mAh|Ω|ohm|F|g|m|dB|dBA|dBm|px|fps|rpm|lm|lx|Pa|bar|J|l|L)|mm|cm|km|kg|mg|€|\$|£|EUR|USD|CHF|GBP)(?![\p{L}\d])|[$€£]\s?\d/gu;
+const EVIDENCE_SOURCE_RE = /\bhttps?:\/\/[^\s)>\]]+|(?<![\w@.-])(?:[a-z0-9-]+\.)+(?:com|org|net|io|de|eu|gov|edu|dev|ai|co\.uk|ch|at)\b(?![\w-]*\.\w)/i;
+const EVIDENCE_SCAN_CHARS = 8_000;
+const EVIDENCE_MIN_FIGURES = 2;
+
+/**
+ * True when a delegated result's own text carries concrete evidence: measured figures (a number
+ * with a unit, a percentage, a price) — two of them, or one backed by a cited source (a URL or a
+ * bare domain). Structural and language-independent. A source alone is NOT evidence: a failure
+ * report names the URL it could not reach, and a planning stub names the URL it will fetch next.
+ * Figures the TASK already contained are not evidence either — "No results found for the 2 A /
+ * 5 V charger query" echoes the question (adversarial review 2026-10-05) — so pass `task`.
+ * Evidence lets a result survive a failure PHRASE ("the first attempt failed to reach the vendor
+ * site, so I used the cached datasheet: 12 mA at 3.3 V"); it never outranks the planning verdict
+ * or a run whose every work call failed (see classifyDelegationResult).
+ */
+export function carriesConcreteEvidence(text: string, task = ""): boolean {
+  const scan = (text ?? "").slice(0, EVIDENCE_SCAN_CHARS);
+  if (!scan.trim()) return false;
+  const normalizeFigure = (figure: string): string => figure.replace(/\s+/g, "").toLowerCase();
+  const echoed = new Set((task.match(EVIDENCE_FIGURE_RE) ?? []).map(normalizeFigure));
+  const figures = (scan.match(EVIDENCE_FIGURE_RE) ?? []).filter((figure) => !echoed.has(normalizeFigure(figure))).length;
+  return figures >= EVIDENCE_MIN_FIGURES || (figures >= 1 && EVIDENCE_SOURCE_RE.test(scan));
+}
+
 export function looksLikePlanningOnlyResult(result: string): boolean {
   const preview = result.slice(0, 600).trim();
   if (!preview) return false;
@@ -19,7 +47,13 @@ export function looksLikePlanningOnlyResult(result: string): boolean {
   // showed an entire 3 KB planning loop in German ("Ich werde…", "Lass mich
   // einen anderen Ansatz wählen", "Stattdessen…", "Letztendlich…") that the
   // English-only regex missed entirely.
-  const startsLikePlanning = /^\s*(let me|now let me|first let me|now i can|now i (?:have|understand)\b[\s\S]{0,160}\blet me|i (?:now )?(?:have|understand)\b[\s\S]{0,160}\blet me|i(?:'m| am) going to|i(?:'ll| will)|i(?:'m| am) trying to|i need to|next,? i(?:'m| am) going to|ich werde|ich erstelle|ich nutze|ich verwende|ich entscheide|ich w(?:ä|ae)hle|ich versuche|ich muss|lass mich|stattdessen|letztendlich|allerdings|aufgrund|der (?:beste|pragmatischste|einfachste) ansatz|da (?:es sich|ich|write_file|das))\b/i.test(preview);
+  // 2026-10-05: discourse openers that announce no INTENT were dropped — "Aufgrund …",
+  // "Allerdings …", "Da …" open conclusions just as often ("Aufgrund der Datenblätter
+  // empfehle ich den ESP32-S3 …" was discarded as a planning loop). A fronted clause that
+  // DOES announce intent is still caught structurally: the first sentence inverts the future
+  // auxiliary ("Da es sich um eine große Datei handelt, werde ich sie aufteilen").
+  const startsLikePlanning = /^\s*(let me|now let me|first let me|now i can|now i (?:have|understand)\b[\s\S]{0,160}\blet me|i (?:now )?(?:have|understand)\b[\s\S]{0,160}\blet me|i(?:'m| am) going to|i(?:'ll| will)|i(?:'m| am) trying to|i need to|next,? i(?:'m| am) going to|ich werde|ich erstelle|ich nutze|ich verwende|ich entscheide|ich w(?:ä|ae)hle|ich versuche|ich muss|lass mich|stattdessen|letztendlich|der (?:beste|pragmatischste|einfachste) ansatz)\b/i.test(preview)
+    || /^[^.!?\n]{0,200}?\b(?:werde ich|werden wir)\b/i.test(preview);
   if (!startsLikePlanning) return false;
 
   // English keywords stay strictly bounded so we don't false-match across
@@ -36,6 +70,9 @@ export function looksLikePlanningOnlyResult(result: string): boolean {
   // exact failure mode we want to catch. If the final assistant message
   // opens with planning narrative AND no terminal marker is present, the
   // agent narrated instead of executing regardless of how verbose it got.
+  // Figures in the narration do not rescue it: "I'll compare the ESP32-S3 (240 MHz, 512 KB
+  // SRAM) with the RP2040 (133 MHz). Let me search for their datasheets next." is still a plan
+  // (adversarial review 2026-10-05 — an evidence veto here let such stubs through as success).
   return !terminalMarker;
 }
 
@@ -217,7 +254,12 @@ export function agentCfgCanFulfillArtifactTask(
     || tools.some((t) => PRODUCTIVE_COORDINATOR_TOOLS.has(t));
 }
 
-export function looksLikeFailureResult(result: string): boolean {
+/**
+ * Failure shapes that are not prose: no output at all, the runtime's empty-answer placeholder,
+ * a container that never ran, a reply made only of model template tokens. These hold whatever
+ * verdict the run minted for itself.
+ */
+export function looksLikeStructuralFailureResult(result: string): boolean {
   if (!result.trim()) return true;
   const preview = result.slice(0, 600);
   if (/^sub-agent produced no final response\.?$/i.test(preview.trim())) {
@@ -230,10 +272,28 @@ export function looksLikeFailureResult(result: string): boolean {
   // (e.g. `<|mask_end|>`, `<|im_end|>`).  Apply to the FULL result, not
   // the preview, so that a 12-char template-only output is caught even
   // when the preview happens to be padded.
-  if (looksLikeModelTemplateArtifact(result)) {
+  return looksLikeModelTemplateArtifact(result);
+}
+
+export function looksLikeFailureResult(result: string): boolean {
+  return looksLikeStructuralFailureResult(result) || looksLikeProseFailureResult(result);
+}
+
+/**
+ * The PROSE failure sniff: failure vocabulary, refusals, missing-tool talk, planning-only
+ * narration. A weak signal — "The HTTP 404 not found response means …" is an answer, not a
+ * failure — so classifyDelegationResult consults it only when the run left no structural verdict
+ * (no explicit `<final_answer status>`, no artifacts, no concrete evidence; see there).
+ */
+export function looksLikeProseFailureResult(result: string): boolean {
+  if (!result.trim()) return false;
+  const preview = result.slice(0, 600);
+  if (/\b(no results|not found|unable to|failed to|error:|timed out|cancelled|incomplete|max.{0,20}iterations|sub_agent_max_iterations|could not complete|did not complete|exited with code|exit code)\b/i.test(preview)) {
     return true;
   }
-  if (/\b(no results|not found|unable to|failed to|error:|timed out|cancelled|incomplete|max.{0,20}iterations|sub_agent_max_iterations|could not complete|did not complete|exited with code|exit code)\b/i.test(preview)) {
+  // A result that OPENS with "Error:" reports a failure. The list above never matched it: its
+  // trailing \b needs a word character after the colon (adversarial review 2026-10-05).
+  if (/^\s*error:/i.test(preview)) {
     return true;
   }
 
@@ -253,7 +313,95 @@ export function looksLikeFailureResult(result: string): boolean {
     return true;
   }
 
-  return looksLikePlanningOnlyResult(preview);
+  // The full result, not the preview (the planning check reads its own 600-char window).
+  return looksLikePlanningOnlyResult(result);
+}
+
+/** What a sub-agent run left behind that is not prose — the inputs to a structural verdict. */
+export interface DelegationRunSignals {
+  /** The run closed with its own `<final_answer status="…">…</final_answer>` (parseFinalAnswerTag). */
+  readonly explicitVerdict?: boolean;
+  /** Tool names of THIS run's calls that ran and failed — one entry per failed call; a nested
+   *  specialist's failures and the person's declines excluded. Preferred over the count. */
+  readonly failedToolNames?: readonly string[];
+  /** The same as a count, for callers without the names. */
+  readonly toolFailureCount?: number;
+}
+
+// The run's own bookkeeping — sharing a finding, reading the shared facts, the memory and note
+// tools, the plan record. A failed bookkeeping call is not failed WORK: "a summary after three
+// failed share_finding calls" is still the summary (adversarial review 2026-10-05).
+const NON_WORK_TOOL_NAMES = new Set(["share_finding", "read_shared_facts", "recall_context", "record_plan"]);
+export function isWorkToolName(name: string): boolean {
+  return !NON_WORK_TOOL_NAMES.has(name) && !/^memory_/.test(name) && !/^research_notes?(?:_|$)/.test(name);
+}
+
+/**
+ * Every WORK tool call the run made failed. `toolNames` lists the run's calls, one entry per
+ * call; bookkeeping tools (isWorkToolName) are left out of both sides of the count.
+ */
+export function everyWorkToolCallFailed(
+  toolCount: number | undefined,
+  toolNames: readonly string[] | undefined,
+  run: Pick<DelegationRunSignals, "failedToolNames" | "toolFailureCount">,
+): boolean {
+  const names = toolNames ?? [];
+  if (run.failedToolNames) {
+    const workCalls = names.filter(isWorkToolName).length;
+    return workCalls > 0 && run.failedToolNames.filter(isWorkToolName).length >= workCalls;
+  }
+  if (run.toolFailureCount === undefined) return false;
+  const workCalls = Math.max(0, (toolCount ?? names.length) - names.filter((name) => !isWorkToolName(name)).length);
+  return workCalls > 0 && run.toolFailureCount >= workCalls;
+}
+
+const FINAL_ANSWER_TAG_RE = /<final_answer\s+status="([^"]+)">([\s\S]*?)<\/final_answer>/i;
+
+/**
+ * The sub-agent's own closing verdict, `<final_answer status="…">…</final_answer>` — the ONE
+ * parser every reader uses (tools/sub-agent.ts's delegation verdict and the run outcome below
+ * used to disagree: one required the closing tag, the other accepted the opening tag alone).
+ * Note: no prompt instructs this tag today, so it is a rare, opportunistic signal.
+ */
+export function parseFinalAnswerTag(output: string): { status: string; data: string } | null {
+  const match = FINAL_ANSWER_TAG_RE.exec(output ?? "");
+  return match ? { status: match[1]!.trim().toLowerCase(), data: match[2]!.trim() } : null;
+}
+
+/**
+ * The outcome of a sub-agent run that ENDED NORMALLY (agent/sub-agent.ts, stats.outcome), read
+ * from structure first:
+ *  1. the run's own `<final_answer status>`;
+ *  2. artifacts it produced → success;
+ *  3. every WORK call failed → failure when the answer reports a failure (or is empty), else
+ *     partial — a correct knowledge answer after a failed search ("The capital of Australia is
+ *     Canberra.") is kept and flagged, not discarded (adversarial review 2026-10-05);
+ *  4. concrete evidence not echoed from the task → success;
+ *  5. only then the prose tie-breaker (five failure phrases over the opening) → partial.
+ * Before 2026-10-05 the prose decided alone, so an explicit success that explained an "HTTP 404
+ * not found" response became partial, and "Keine Ergebnisse gefunden" after failed fetches success.
+ */
+export function inferCompletedRunOutcome(
+  output: string,
+  run: {
+    toolCount: number;
+    toolNames?: readonly string[];
+    failedToolNames?: readonly string[];
+    toolFailureCount?: number;
+    artifactCount: number;
+    task?: string;
+  },
+): "success" | "partial" | "failure" {
+  const explicit = parseFinalAnswerTag(output)?.status;
+  if (explicit === "success") return "success";
+  if (explicit === "failure") return "failure";
+  if (explicit) return "partial"; // partial / needs_info: the run itself says it is not done
+  if (run.artifactCount > 0) return "success";
+  if (everyWorkToolCallFailed(run.toolCount, run.toolNames, run)) {
+    return !output.trim() || looksLikeProseFailureResult(output) ? "failure" : "partial";
+  }
+  if (carriesConcreteEvidence(output, run.task)) return "success";
+  return /no results|not found|unable to|failed to|error:/i.test(output.slice(0, 300)) ? "partial" : "success";
 }
 
 export function looksLikeRunningTaskStatusResult(result: string): boolean {
@@ -411,7 +559,17 @@ export type DelegationClassification =
  * terminalState checks, stats.outcome, and the coordinator no-op heuristic.
  *
  * Call AFTER <final_answer> tag parsing has already mutated `output` and
- * `delegationOutcome`.
+ * `delegationOutcome`; pass `run.explicitVerdict` when that tag was present.
+ *
+ * STRUCTURE FIRST (2026-10-05). The run's own `<final_answer status>` is a verdict, and so is
+ * the work it left — artifacts, concrete evidence in its text (figures the task did not already
+ * contain) — and so are its WORK tool calls when every one of them failed. The failure-phrase
+ * sniff only breaks the tie when none of those speaks. Verified misfires before this: an explicit
+ * success explaining "the HTTP 404 not found response" → failure; a datasheet-based German
+ * recommendation → planning-only → failure → discarded; "Keine Ergebnisse gefunden; Quelle nicht
+ * erreichbar" after failed fetches → success. Per the adversarial review the same day: evidence
+ * never outranks the planning verdict (a plan that quotes figures is still a plan) nor a run whose
+ * every work call failed; such a run is a failure when it reports one, else partial (kept).
  */
 export function classifyDelegationResult(
   output: string,
@@ -421,8 +579,13 @@ export function classifyDelegationResult(
   agentName: string,
   task: string,
   artifacts: Record<string, unknown>[] = [],
+  run: DelegationRunSignals = {},
 ): DelegationClassification {
-  const planningOnly = looksLikePlanningOnlyResult(output);
+  const explicitVerdict = run.explicitVerdict === true && delegationOutcome !== undefined;
+  const allWorkFailed = artifacts.length === 0 && everyWorkToolCallFailed(stats?.toolCount, stats?.toolNames, run);
+  const leftEvidence = artifacts.length > 0 || (!allWorkFailed && carriesConcreteEvidence(output, task));
+  const proseDecides = !explicitVerdict && !leftEvidence;
+  const planningOnly = !explicitVerdict && artifacts.length === 0 && looksLikePlanningOnlyResult(output);
 
   // ── Coordinator no-op ──────────────────────────────────────────────────
   // A coordinator that completed without calling any delegation/evidence tools
@@ -481,6 +644,17 @@ export function classifyDelegationResult(
     return "failure";
   }
 
+  // Every WORK call the run made failed: a failure when the answer reports one (or is empty) —
+  // figures in it do not rescue it, they may be echoed or remembered — else a partial: the answer
+  // is kept and delivered, flagged as unbacked by any working tool. Only the run's own explicit
+  // success outranks this.
+  if (!(explicitVerdict && delegationOutcome === "success") && allWorkFailed) {
+    if (!output.trim() || looksLikeProseFailureResult(output)) {
+      return looksLikeInfrastructureFailure(output) ? "infrastructure_failure" : "failure";
+    }
+    return "partial";
+  }
+
   // ── Partial acceptance ─────────────────────────────────────────────────
   const acceptPartial = shouldAcceptPartialDelegation(agentName, task, stats, artifacts);
 
@@ -491,7 +665,8 @@ export function classifyDelegationResult(
     !acceptPartial
     && (
       (stats?.terminalState !== undefined && stats.terminalState !== "completed")
-      || looksLikeFailureResult(output)
+      || looksLikeStructuralFailureResult(output)
+      || (proseDecides && looksLikeProseFailureResult(output))
     );
 
   if (isExplicitFailure || isNeedsInfoUnaccepted || isIncompleteUnaccepted) {

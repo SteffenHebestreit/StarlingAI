@@ -46,12 +46,14 @@ import {
   looksLikeFabricatedToolDeliveryLink,
   looksLikeInlinedAppDocument,
 } from "./deliverable-intent.js";
+import { collectSessionArtifactPaths, workspaceFileExists } from "./artifact-path-repair.js";
 import {
   looksLikeRegurgitatedPriorAnswer,
   looksLikeOrchestrationOnlyEvidence,
   stripPresentationFormatting,
 } from "./runtime-utils.js";
 import { sanitizeUserFacingAssistantResponse } from "./response-finalization.js";
+import { isExecutionChatterOnly } from "./sanitize-response.js";
 import { looksLikeRawSharedFactsDump } from "./runtime-evidence-dump.js";
 import {
   looksLikeTransparentIncompleteReport,
@@ -219,10 +221,37 @@ export function oneShotCriteriaVerifyIsRedundant(qaDeliveryLoopOn: boolean, crit
   return qaDeliveryLoopOn && criteriaCount > 0;
 }
 
+/**
+ * Whether a file the answer names really exists — on disk at that workspace-relative path, or
+ * among the paths this session's tools recorded (an earlier turn's artifact). Only a PURE pointer
+ * at real files is excused by this (claimsArtifactWrittenButUnproduced). The match is by whole
+ * path segments, and a bare file name only matches a recorded file of exactly that path: "index.html"
+ * must not borrow the existence of apps/old/index.html. Lazy and fail-closed to "missing": a lookup
+ * error must never excuse a fabricated file.
+ */
+export function answerReferencedFileExists(session: Pick<AgentSession, "getWorkspacePath" | "getHistory">): (ref: string) => boolean {
+  let onDisk: ((token: string) => boolean) | undefined;
+  let recorded: string[] | undefined;
+  return (ref) => {
+    try {
+      const normalized = ref.replace(/^\.?\//, "");
+      onDisk ??= workspaceFileExists(session.getWorkspacePath());
+      if (onDisk(normalized)) return true;
+      recorded ??= collectSessionArtifactPaths(session.getHistory()).map((path) => path.replace(/^\.?\//, ""));
+      return recorded.some((path) => path === normalized || (normalized.includes("/") && path.endsWith(`/${normalized}`)));
+    } catch {
+      return false;
+    }
+  };
+}
+
 export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Promise<string> {
   const { signal, session, provider, userMessage, toolContext, deliverableIntent, initialDynamicGuidance, guardrailEvents } = ctx;
   const { rawResponse, iterationCount, effectiveToolIterations, terminalFinishReason, toolCallsRequested } = ctx;
   const { currentTurnHasExecutableOrchestration, turnStartedAtMs } = ctx;
+  // Every completion-claim check below reads the same workspace (2026-10-05: a claim now needs
+  // claim grammar, and a pointer at a file that exists is not one).
+  const artifactClaimOptions = { fileExists: answerReferencedFileExists(session) };
 
   let finalResponse = await ctx.finalizeUserFacingAssistantResponse(rawResponse, effectiveToolIterations, session, provider, signal);
 
@@ -372,7 +401,7 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
   // eingefügt … URLs überprüft"). The three AND-conditions keep real builds (an artifact
   // was produced → skipped) and report-only turns (no claim → skipped) untouched;
   // topic-agnostic. Runs for ALL backends, not only source-sensitive ones.
-  const artifactClaimUnbacked = claimsArtifactWrittenButUnproduced(finalResponse);
+  const artifactClaimUnbacked = claimsArtifactWrittenButUnproduced(finalResponse, artifactClaimOptions);
   const staleArtifactReplay = !artifactClaimUnbacked
     && looksLikeRegurgitatedPriorAnswer(finalResponse, session.getHistory());
   if (
@@ -393,7 +422,8 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
     );
     const candidate = honest ? sanitizeUserFacingAssistantResponse(honest, iterationCount) : null;
     finalResponse = (candidate && candidate.trim().length >= 40
-      && !claimsArtifactWrittenButUnproduced(candidate)
+      && !isExecutionChatterOnly(candidate)
+      && !claimsArtifactWrittenButUnproduced(candidate, artifactClaimOptions)
       && !looksLikeRegurgitatedPriorAnswer(candidate, session.getHistory()))
       ? candidate
       : "Ich habe die angeforderte Datei in diesem Schritt **nicht** erstellt oder geändert — ich habe nur die angefragten Informationen gesammelt. Bestätige kurz, dann lasse ich den passenden Spezialisten die Datei jetzt damit bauen bzw. aktualisieren.\n\nI did **not** create or modify the requested file in this turn — I only gathered the requested information. Confirm and I'll have the right specialist build or update it now.";
@@ -791,7 +821,7 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
     toolCallsRequested === 0
     && ctx.collectTurnArtifactAttachments(session).length === 0
     && (looksLikeFabricatedToolDeliveryLink(finalResponse)
-      || (requestIsArtifactShaped && claimsArtifactWrittenButUnproduced(finalResponse))
+      || (requestIsArtifactShaped && claimsArtifactWrittenButUnproduced(finalResponse, artifactClaimOptions))
       || inlinedAppDocumentInsteadOfBuild)
   ) {
     logAudit("guardrail_flagged", {
@@ -875,7 +905,7 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
   if (
     deliverableIntent.wantsArtifactMutation
     && ctx.collectTurnArtifactAttachments(session).length === 0
-    && claimsArtifactWrittenButUnproduced(finalResponse)
+    && claimsArtifactWrittenButUnproduced(finalResponse, artifactClaimOptions)
   ) {
     finalResponse = "> ⚠️ **Die angeforderte Datei wurde in diesem Schritt NICHT erstellt** (der Bau wurde nicht abgeschlossen). Der folgende Inhalt ist nur ein Text-Entwurf — bestätige, dann lasse ich den Inhalts-Spezialisten die Datei jetzt bauen.\n> _The requested file was **not** created this turn (the build did not complete). The content below is a text draft only — confirm and I'll have the content specialist build the file now._\n\n"
       + finalResponse;

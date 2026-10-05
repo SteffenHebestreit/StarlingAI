@@ -51,6 +51,9 @@ import {
 } from "./agent-routing.js";
 import {
   looksLikePlanningOnlyResult,
+  parseFinalAnswerTag,
+  carriesConcreteEvidence,
+  everyWorkToolCallFailed,
   WORKSPACE_MUTATION_TASK_RE,
   ARTIFACT_PRODUCING_TOOLS,
   agentCfgCanFulfillArtifactTask,
@@ -2086,6 +2089,10 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       // SubAgentLoopEnforced / SubAgentWardenStop), passed up in the result's metadata.
       let runLoopEnforced: SubAgentLoopEnforced | undefined;
       let runWardenStop: SubAgentWardenStop | undefined;
+      // Tool calls of THIS run that ran and failed (their tool names) — a nested specialist's
+      // failures and the person's declines excluded. A structural input to
+      // classifyDelegationResult (2026-10-05).
+      let runOwnFailedToolNames: string[] | undefined;
 
       if (typeof runSubAgentWithStats === "function") {
         const maybeResult = await runSubAgentWithStats(subAgentArgs);
@@ -2101,6 +2108,9 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
             ? maybeResult.artifacts.map((artifact) => ({ ...artifact }))
             : [];
           if (Array.isArray(maybeResult.toolFailures)) specialistToolFailures.push(...maybeResult.toolFailures);
+          runOwnFailedToolNames = (maybeResult.toolFailures ?? [])
+            .filter((failure) => (failure.agent ?? candidate) === candidate && !failure.declinedByUser)
+            .map((failure) => failure.tool);
           runLoopEnforced = maybeResult.loopEnforced;
           runWardenStop = maybeResult.wardenStop;
           if (runLoopEnforced || runWardenStop) {
@@ -2144,11 +2154,9 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       if (!await leaseStillCurrent()) return abandonLostLease();
 
       let delegationOutcome = stats?.outcome;
-      let parsedOutcome: any = null;
-      const tagMatch = output.match(/<final_answer\s+status="([^"]+)">([\s\S]*?)<\/final_answer>/i);
-      if (tagMatch) {
-        parsedOutcome = { status: tagMatch[1]!.toLowerCase(), data: tagMatch[2]!.trim() };
-      }
+      // One parser for the tag everywhere (parseFinalAnswerTag; the run's own stats.outcome reads
+      // the same one in agent/sub-agent.ts).
+      const parsedOutcome = parseFinalAnswerTag(output);
 
       if (parsedOutcome && parsedOutcome.status) {
         delegationOutcome = parsedOutcome.status;
@@ -2189,7 +2197,17 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       // coordinatorMicroCompletion / weak variables that used to live here.
       const classification = classifyDelegationResult(
         output, delegationOutcome, stats, agentCfg, candidate, request.task, artifacts,
+        {
+          explicitVerdict: Boolean(parsedOutcome?.status),
+          ...(runOwnFailedToolNames !== undefined ? { failedToolNames: runOwnFailedToolNames } : {}),
+        },
       );
+      // The result's own evidence, judged once here where the task is known (figures echoed from
+      // the task do not count, nor does anything when every work call failed). The orchestrator's
+      // frame reads it from the metadata instead of re-deriving it from the text (2026-10-05).
+      const delegationCarriesEvidence =
+        !everyWorkToolCallFailed(stats?.toolCount, stats?.toolNames, { ...(runOwnFailedToolNames ? { failedToolNames: runOwnFailedToolNames } : {}) })
+        && carriesConcreteEvidence(output, request.task);
       const routingInfo = routingCandidateMap.get(candidate);
 
       attempt.finishedAt = new Date().toISOString();
@@ -2371,6 +2389,10 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           // over the first 300 characters), which is not a verdict and must not silence the
           // orchestrator's failure sniff.
           delegationVerdict: parsedOutcome?.status ? "explicit" : "heuristic",
+          // The text carries its own concrete evidence (see delegationCarriesEvidence): read by
+          // looksLikeDelegatedFailureEvidence, so a failure WORD inside such a result is not a
+          // failure verdict (agent/tool-result-format.ts delegationCarriesOwnEvidence).
+          ...(delegationCarriesEvidence ? { delegationEvidence: true } : {}),
           // MIS-202: the attempt links to its effective (narrowed) contract.
           ...(contractId ? { contractId } : {}),
           // Mark runtime-authored research slices: their output is synthesis
