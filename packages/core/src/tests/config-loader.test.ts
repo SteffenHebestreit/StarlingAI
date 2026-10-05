@@ -904,4 +904,50 @@ describe("config loader mutable overlay", () => {
       rmSync(tempDir, { recursive: true, force: true });
     }
   });
+
+  // A signed-in user's working root is users/<id>/, so their generated/ sits one level below the
+  // depth-0 zone check; and the state dir keeps a JSON file per long-running task. Both were
+  // swept as base shards: an agent's data.json reconfigured the swarm, and a half-written
+  // checkpoint (a base shard that does not parse) refused the whole load.
+  it("does not sweep a user's working root or hidden state dirs into the config merge", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "starlingai-config-user-zones-"));
+    const configDir = join(tempDir, "config");
+    const workspaceDir = join(tempDir, "workspace");
+
+    mkdirSync(join(configDir, "gateway"), { recursive: true });
+    writeFileSync(join(configDir, "gateway", "10-gateway.json"), JSON.stringify({
+      gateway: { port: 8765 },
+    }), "utf8");
+    mkdirSync(join(workspaceDir, "agents"), { recursive: true });
+    writeFileSync(join(workspaceDir, "agents", "10-test.jsonc"), JSON.stringify({
+      subAgents: { zone_probe: { description: "legitimate config-zone agent" } },
+    }), "utf8");
+
+    mkdirSync(join(workspaceDir, "users", "alice-1", "generated"), { recursive: true });
+    writeFileSync(join(workspaceDir, "users", "alice-1", "generated", "data.json"), JSON.stringify({
+      gateway: { port: 9999 },
+      subAgents: { evil_user_generated: { description: "agent-planted in a user's root" } },
+    }), "utf8");
+    mkdirSync(join(workspaceDir, "users", "alice-1", ".starlingai", "memory"), { recursive: true });
+    writeFileSync(join(workspaceDir, "users", "alice-1", ".starlingai", "memory", "m1.json"), JSON.stringify({
+      id: "m1", content: "a private note",
+    }), "utf8");
+    mkdirSync(join(workspaceDir, ".starlingai", "checkpoints"), { recursive: true });
+    writeFileSync(join(workspaceDir, ".starlingai", "checkpoints", "task-1.json"), "{\"taskId\": \"task-1\", \"sta", "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configDir;
+    process.env["SAI_WORKSPACE_CONFIG_PATH"] = workspaceDir;
+    vi.resetModules();
+
+    const configLoader = await import("../config/loader.js");
+
+    try {
+      const config = configLoader.loadConfig();
+      expect(config.gateway.port).toBe(8765);
+      expect(config.subAgents["zone_probe"]).toBeDefined();
+      expect(config.subAgents["evil_user_generated"]).toBeUndefined();
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
 });

@@ -1,5 +1,5 @@
 import { stat } from "node:fs/promises";
-import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { currentWorkspaceScope } from "../runtime/request-context.js";
 import { activeUserScopeSegment, USERS_SUBDIR } from "../runtime/user-scope.js";
 
@@ -127,7 +127,36 @@ export const NON_CONFIG_WORKSPACE_ZONES: ReadonlySet<string> = new Set([
   GENERATED_SUBDIR,
   UPLOADS_SUBDIR,
   SWARM_TOOLS_SUBDIR,
+  // Each signed-in user's working root (userWorkspaceRoot) holds that user's own generated/,
+  // uploads/ and state dir — one level down, where the depth-0 zone check above never looked,
+  // so an agent-written users/<id>/generated/data.json merged into the live config.
+  USERS_SUBDIR,
 ]);
+
+/**
+ * Whether a config-shard sweep skips this directory: a working zone at the top, or a hidden
+ * directory at any depth. Hidden directories hold state, never shards — the state dir under the
+ * workspace keeps a JSON file per long-running task (checkpoints/), and one half-written file
+ * there was read as a base shard, which refuses to boot on a parse error.
+ */
+export function isNonConfigShardDirectory(name: string, depth: number): boolean {
+  return name.startsWith(".") || (depth === 0 && NON_CONFIG_WORKSPACE_ZONES.has(name));
+}
+
+/**
+ * Shard merge order: code-point order on the "/"-joined path relative to the swept directory —
+ * the order `sai config build` (scripts/config-shards.mjs) uses, so the compiled config and the
+ * loaded one merge alike on every OS. localeCompare would weigh case and punctuation by locale,
+ * and Windows separators sort apart from "/".
+ */
+export function compareShardPaths(directory: string): (left: string, right: string) => number {
+  const sortKey = (path: string) => relative(directory, path).split(sep).join("/");
+  return (left, right) => {
+    const a = sortKey(left);
+    const b = sortKey(right);
+    return a < b ? -1 : a > b ? 1 : 0;
+  };
+}
 
 /**
  * Workspace zones a scope-confined ("generated") agent sees verbatim. Everything

@@ -9,4 +9,5 @@
 // straight into the live/compiled config. The loader already skips them; the
 // build script must too, so it can never emit a starlingai.json the loader would
 // then refuse to load.
-export const NON_CONFIG_WORKSPACE_ZONES = Object.freeze(["generated", "uploads", "tools"]);
+// users/ is each signed-in user's working root, with its own generated/ and uploads/.
+export const NON_CONFIG_WORKSPACE_ZONES = Object.freeze(["generated", "uploads", "tools", "users"]);

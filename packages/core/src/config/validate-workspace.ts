@@ -26,7 +26,7 @@ import JSON5 from "json5";
 import { ConfigSchema } from "./schema.js";
 import { validateComputerUseConfig } from "./computer-use-schema.js";
 import { DEFAULT_RUNTIME_DIRECTORY_NAME } from "./loader.js";
-import { NON_CONFIG_WORKSPACE_ZONES } from "../tools/workspace-path.js";
+import { compareShardPaths, isNonConfigShardDirectory } from "../tools/workspace-path.js";
 
 export interface WorkspaceValidationResult {
   ok: boolean;
@@ -107,9 +107,9 @@ function collectShardPaths(directory: string): string[] {
     for (const entry of readdirSync(current, { withFileTypes: true })) {
       const next = resolve(current, entry.name);
       if (entry.isDirectory()) {
-        // Mirror the loader: working zones (generated/, uploads/, tools/) hold
-        // agent output and dynamic-tool bundles, never config shards.
-        if (depth === 0 && NON_CONFIG_WORKSPACE_ZONES.has(entry.name)) continue;
+        // Mirror the loader: working zones (generated/, uploads/, tools/, users/) and
+        // hidden state dirs hold agent output and dynamic-tool bundles, never config shards.
+        if (isNonConfigShardDirectory(entry.name, depth)) continue;
         // The runtime overlay (runtime/runtime.overrides.json) is NOT a base shard:
         // the loader excludes it from the base sweep and applies it LAST on top.
         // Sweeping it here as an ordinary shard would merge it at the wrong
@@ -124,7 +124,7 @@ function collectShardPaths(directory: string): string[] {
     }
   };
   visit(directory, 0);
-  return paths.sort((a, b) => relative(directory, a).localeCompare(relative(directory, b)));
+  return paths.sort(compareShardPaths(directory));
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

@@ -4,7 +4,7 @@ import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 
 import JSON5 from "json5";
 import { ConfigSchema, type Config, type SubAgentConfig } from "./schema.js";
 import { validateComputerUseConfig } from "./computer-use-schema.js";
-import { NON_CONFIG_WORKSPACE_ZONES } from "../tools/workspace-path.js";
+import { compareShardPaths, isNonConfigShardDirectory } from "../tools/workspace-path.js";
 import { logger } from "../logger.js";
 
 import { PRODUCT } from "../product/index.js";
@@ -332,11 +332,11 @@ function collectConfigShardPaths(directoryPath: string, mutablePath: string, com
     for (const entry of readdirSync(currentPath, { withFileTypes: true })) {
       const nextPath = resolve(currentPath, entry.name);
       if (entry.isDirectory()) {
-        // Working zones (generated/, uploads/, tools/) hold agent output, user
-        // uploads, and dynamic-tool bundles — NOT config. Sweeping them would
-        // let an agent-written data.json (or a malicious upload with a top-level
-        // "agents" key) merge straight into the live config on reload.
-        if (depth === 0 && NON_CONFIG_WORKSPACE_ZONES.has(entry.name)) continue;
+        // Working zones (generated/, uploads/, tools/, users/) hold agent output, user
+        // uploads, and dynamic-tool bundles — NOT config, and neither do hidden state
+        // dirs. Sweeping them would let an agent-written data.json (or a malicious
+        // upload with a top-level "agents" key) merge straight into the live config.
+        if (isNonConfigShardDirectory(entry.name, depth)) continue;
         visit(nextPath, depth + 1);
         continue;
       }
@@ -347,7 +347,7 @@ function collectConfigShardPaths(directoryPath: string, mutablePath: string, com
   };
 
   visit(directoryPath, 0);
-  return shardPaths.sort((left, right) => relative(directoryPath, left).localeCompare(relative(directoryPath, right)));
+  return shardPaths.sort(compareShardPaths(directoryPath));
 }
 
 function mergeConfigObjects(base: Record<string, unknown>, overlay: Record<string, unknown>): Record<string, unknown> {
