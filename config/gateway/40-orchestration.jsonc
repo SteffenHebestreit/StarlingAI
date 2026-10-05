@@ -271,7 +271,38 @@
     // non-gateway/CLI turn) and a nested delegation, where inventing a ceiling would REPLACE a
     // leaf's adaptive/default budget with the whole remaining turn instead of shortening it. It
     // clamps AFTER the defaults resolve, so it can only reduce.
-    "clampSubAgentTimeoutToParent": true
+    "clampSubAgentTimeoutToParent": true,
+
+    // Keep the turn's tool array byte-identical on every iteration (2026-10-05). Live probe E7
+    // (2026-09-26) measured 8.3 s per forced tool-subset switch (0% of the prompt reused), and a
+    // forced turn switched twice: to the record_plan subset, then to the execute_plan one. Frozen,
+    // the forced calls send the warmed full head (+ the orchestration module on a module turn),
+    // and the subset is enforced at the call site instead: a call outside it is refused with the
+    // tools that would satisfy the requirement, logged as tool_restriction_refused. The warm-keeper
+    // follows (agent/cache-warmer.ts collectWarmHeads): with promptCacheWarmForcedHeads on it warms
+    // lean base + module + full tools instead of the two subset heads. Watch
+    // tool_restriction_refused: each refusal costs one warm iteration, and if they are frequent the
+    // trade is not paying and this goes back to "off".
+    "stableToolBlock": "freeze",
+
+    // Intent readout in shadow (2026-10-05): after a turn has delivered its reply, one grammar-bound
+    // readout of the resident model (both option orders, averaged) labels the request's intent
+    // facets, and a pre-router readout picks among the turn's capsule agents; an
+    // intent_readout_shadow audit row records both beside what the turn actually did. It never
+    // delays or changes a turn (it starts after delivery and aborts when any new turn starts).
+    // intent:bench 2026-09-28 (312 synthetic DE/EN cases, both orders): mode 85%, domain 84%,
+    // deliverable 83%, source_sensitive 92%, multi 98%, decision 73% ("answer directly" 93%).
+    // Read the real-turn agreement with `pnpm --filter @starlingai/core intent:report` after ~30 turns
+    // before any consumer (pre-router gate, builder choice, workflow fit) is switched on.
+    "intentReadout": "shadow",
+
+    // After a run that looped (loop brake, warden stop or the iteration cap), the delegation frame
+    // says so and not to re-delegate the same task this turn, a re-dispatch of that agent is told
+    // the loop target, the artifact gate sends one direct builder instead of a fresh
+    // mission_coordinator, and oversight counts the looped partial as churn. Motivated by session
+    // c297c5ea (2026-09-26): a looping content_writer partial was re-delegated unchanged, and a
+    // mission_coordinator ran 1,990 s against a 720 s timeout. Watch delegation_prior_loop_noted.
+    "loopAwareDelegation": true
   },
 
   // MIS-201 shadow rollout (dev-plan R2, ADR-001): record task-lifecycle swarm

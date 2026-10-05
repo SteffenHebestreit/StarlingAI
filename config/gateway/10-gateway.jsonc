@@ -57,6 +57,8 @@
       // cached, and they stayed warm after six 26k-token prompts in between. Cost: ~10.6 + 10.2 s of idle GPU once,
       // ~1.5 s per head to re-warm, only while no turn runs. After a rebuild, check that the forced calls'
       // provider_model_call rows show cacheN >= 9k; if they do not, turn this back off.
+      // With orchestration.stableToolBlock "freeze" (40-orchestration.jsonc, 2026-10-05) the forced calls send the
+      // full tool block, so this warms lean base + orchestration module + full tools instead of the two subsets.
       "promptCacheWarmForcedHeads": true,
       // Re-warm a sub-agent's head after a run that outgrew it 4x, so the next dispatch of that agent finds it cached.
       // Live probe E8, 2026-09-26: an 8k head was cold after a 6x run and one head-only request made the next two new

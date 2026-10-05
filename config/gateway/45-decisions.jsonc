@@ -57,6 +57,14 @@
   "decisions": {
     "defaultMode": "adaptive",
     "adaptive": { "targetAgreement": 0.9, "minSamples": 30, "auditRate": 0.1 },
-    "browser": { "mode": "adaptive" }
+    "browser": { "mode": "adaptive" },
+    // source_sensitive is decided by the readout of the resident model. decisions:readout
+    // (2026-09-28, 80 synthetic cases, both languages, gold-labelled): readout 100% vs the parsed
+    // judge 93.8%, with all 4 German misses of the parsed judge on the protected "yes"; option-order
+    // flips 0/80; ~1.1 s like the parsed call. Laya is off for this point: the fine-tuned checkpoint
+    // reached 81-90% with a protected-yes recall of 47% in English, so the gate would not hand it
+    // over, and readout "on" needs the point's Laya mode off to take effect.
+    "points": { "source_sensitive": { "mode": "off" } },
+    "readout": { "points": { "source_sensitive": "on" } }
   }
 }
