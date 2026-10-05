@@ -17,9 +17,15 @@ vi.mock("../swarm/memory.js", () => ({
 }));
 
 vi.mock("../memory/service.js", () => ({
-  searchMemoryRecords: async () => [
-    { scope: "user", kind: "preference", subject: "provider", content: "prefers LM Studio over cloud", tags: [], source: "user", createdAt: "", updatedAt: "" },
-  ],
+  searchMemoryRecordsWithStatus: async () => ({
+    records: [
+      { id: "m1", scope: "user", kind: "preference", subject: "provider", content: "prefers LM Studio over cloud", tags: [], source: "user", createdAt: "", updatedAt: "" },
+    ],
+    semanticRan: true,
+    unmatchedIds: [],
+    notComparedSemantically: 0,
+    candidatesByScope: { user: 1 },
+  }),
 }));
 
 vi.mock("../agent/session-search.js", () => ({

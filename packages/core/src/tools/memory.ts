@@ -26,7 +26,7 @@ import {
   compactUserMemoryRecords,
   compactWorkspaceMemoryRecords,
   promoteMemoryRecords,
-  searchMemoryRecords,
+  searchMemoryRecordsWithStatus,
   storeUserMemoryRecord,
   storeWorkspaceMemoryRecord,
   type DurableMemoryScope,
@@ -500,7 +500,7 @@ registerTool({
   name: "memory_search",
   description:
     "Search memory across user-global, workspace, session-shared facts, and agent lessons/flow memory. " +
-    "Matches against subject, content, tags, and memory kind. " +
+    "Matches words of the query against subject, content, tags, key and memory kind, and by meaning when semantic search is available. " +
     "Returns up to `limit` results (default 10).",
   embeddingDescription: "Search, recall, look up saved notes, remembered facts, past lessons. Erinnerungen suchen, Notizen finden, was wurde gespeichert, Gedächtnis abfragen. Retrieve long-term memory.",
   parameters: {
@@ -508,7 +508,7 @@ registerTool({
     properties: {
       query: {
         type: "string",
-        description: "Search term — matched as a case-insensitive substring",
+        description: "Search term — matched word by word (inflections and compound parts included), and by meaning when semantic search is available",
       },
       limit: {
         type: "number",
@@ -546,28 +546,46 @@ registerTool({
     if (!query) return { success: false, output: "", error: "query is required" };
 
     try {
-      const results = await searchMemoryRecords(ctx.workspacePath, query, {
+      const search = await searchMemoryRecordsWithStatus(ctx.workspacePath, query, {
         limit,
         scopes,
         kinds,
         sessionId: deriveSharedSessionId(ctx.sessionId),
         targetAgent,
       });
+      const results = search.records;
+      const unmatched = new Set(search.unmatchedIds);
+      // Without the semantic check a paraphrase cannot match ("Wann fährt die Fähre ab" against
+      // "The island sailing leaves at 07:40"), so neither an empty answer nor the order of what is
+      // shown says anything about what is stored — and the answer has to say so.
+      const lexicalOnly = search.semanticRan
+        ? ""
+        : "Lexical only — semantic search unavailable; entries marked (no word match) were not matched against the query, and a missing memory is not evidence that nothing is stored.";
+      const uncompared = search.notComparedSemantically > 0
+        ? `${search.notComparedSemantically} stored record(s) without a word match were not compared by meaning — narrow scopes or kinds to include them.`
+        : "";
+      const notes = [lexicalOnly, uncompared].filter(Boolean).join("\n");
+      const metadata = {
+        count: results.length,
+        scopes: scopes ?? ["workspace", "user", "session", "agent"],
+        semanticRan: search.semanticRan,
+        ...(unmatched.size > 0 ? { unmatched: unmatched.size } : {}),
+      };
 
       if (results.length === 0) {
-        return { success: true, output: `No memories found matching '${query}'.`, metadata: { count: 0 } };
+        return { success: true, output: `No memories found matching '${query}'.${notes ? `\n${notes}` : ""}`, metadata };
       }
 
       const formatted = results
         .map((r) =>
-          `**[${r.scope}/${r.kind}] ${r.subject}**${r.tags.length ? ` [${r.tags.join(", ")}]` : ""} _(${r.updatedAt.slice(0, 10)})_\n${r.content.substring(0, 500)}${r.content.length > 500 ? "…" : ""}`
+          `**[${r.scope}/${r.kind}] ${r.subject}**${unmatched.has(r.id) ? " (no word match)" : ""}${r.tags.length ? ` [${r.tags.join(", ")}]` : ""} _(${r.updatedAt.slice(0, 10)})_\n${r.content.substring(0, 500)}${r.content.length > 500 ? "…" : ""}`
         )
         .join("\n\n---\n\n");
 
       return {
         success: true,
-        output: `Found ${results.length} memory entry(ies) for '${query}':\n\n${formatted}`,
-        metadata: { count: results.length, scopes: scopes ?? ["workspace", "user", "session", "agent"] },
+        output: `Found ${results.length} memory entry(ies) for '${query}':${notes ? `\n${notes}` : ""}\n\n${formatted}`,
+        metadata,
       };
     } catch (err) {
       log.error({ err, query }, "memory_search failed");

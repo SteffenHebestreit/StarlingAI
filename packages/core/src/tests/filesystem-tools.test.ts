@@ -437,6 +437,27 @@ describe("filesystem tools — sensitive-path denylist (#9)", () => {
       expect(result.error).not.toMatch(/protected workspace data/i);
     }
   });
+
+  // The denylist also covers `*.env` files at any depth (prod.env), and a runtime's env accessor
+  // ends the same way — so a coder's everyday `node -e "…process.env…"` was refused as a secret read.
+  it("lets runtime env accessors through but still blocks *.env files", async () => {
+    await import("../tools/shell.js");
+    const { getTool } = await import("../tools/registry.js");
+    const ctx = { sessionId: "s-shell-env-accessor", workspacePath: tempDir };
+    const shell = getTool("shell_exec")!;
+
+    for (const command of ['node -e "void process.env"', "grep -rn import.meta.env src", "grep -rn Deno.env ."]) {
+      const result = await shell.execute({ command }, ctx);
+      if (!result.success) {
+        expect(result.error, `"${command}" hit the guard`).not.toMatch(/protected workspace data/i);
+      }
+    }
+    for (const command of ["cat prod.env", "cat config/process.env", "cp docker/staging.env /tmp/x"]) {
+      const result = await shell.execute({ command }, ctx);
+      expect(result.success, `expected "${command}" to be blocked`).toBe(false);
+      expect(result.error).toMatch(/protected workspace data/i);
+    }
+  });
 });
 
 /**

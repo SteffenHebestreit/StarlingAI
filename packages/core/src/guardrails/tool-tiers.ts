@@ -1435,7 +1435,7 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
   },
   extract_email: {
     tier: ToolTier.ZERO_READ_ONLY,
-    description: "Parse an .eml or single-message .mbox file into headers, body, and attachment list",
+    description: "Parse an .eml file, or one message of an .mbox chosen by index, into headers, body, and attachment list",
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },

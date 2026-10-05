@@ -7,6 +7,7 @@
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { getChatProvider } from "../providers/index.js";
 import { searchSessions, summarizeSession } from "../agent/session-search.js";
+import { currentUserId } from "../runtime/request-context.js";
 import { childLogger } from "../logger.js";
 
 const log = childLogger("tool:session-search");
@@ -49,7 +50,10 @@ registerTool({
     const limit = Math.max(1, Math.min(20, Number(args["limit"] ?? 5) || 5));
     const summarize = args["summarize"] === true;
 
-    const matches = searchSessions(query, { limit, excludeSessionId: ctx.sessionId });
+    // Only the requesting user's own sessions under multi-user auth (security finding S2,
+    // 2026-10-05): this searched every account's history. A delegated sub-agent's context may
+    // not carry userId, so fall back to the turn's ambient user, as executeTool does.
+    const matches = searchSessions(query, { limit, excludeSessionId: ctx.sessionId, requestingUserId: ctx.userId ?? currentUserId() });
     if (matches.length === 0) {
       return {
         success: true,

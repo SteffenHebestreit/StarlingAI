@@ -13,6 +13,8 @@ import * as XLSX from "xlsx";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
 import { resolvePathWithinWorkspace } from "./workspace-path.js";
+import { guardPath } from "./filesystem.js";
+import { MAX_TOOL_RESULT_CHARS } from "./result-shaping.js";
 
 const log = childLogger("tool:spreadsheet");
 
@@ -20,8 +22,13 @@ const log = childLogger("tool:spreadsheet");
 const MAX_FILE_BYTES = 50 * 1024 * 1024; // 50 MB
 /** Per-sheet row cap to prevent overwhelming the model context. */
 const MAX_ROWS_PER_SHEET = 2_000;
-/** Output character cap. */
-const MAX_OUTPUT_CHARS = 64_000;
+/**
+ * Characters of row JSON one answer carries. A sub-agent cuts every tool result above
+ * MAX_TOOL_RESULT_CHARS (32,768) to head 70 % + tail 20 %; at the old 64,000 a 2,000-row CSV came
+ * back as "rows 1-730 … start_row=731" while the agent saw rows 1-263 and 657-730 — 393 rows lost,
+ * and the hint skipped them for good. The JSON gets the cap minus headroom for the summary lines.
+ */
+const MAX_JSON_CHARS = MAX_TOOL_RESULT_CHARS - 2_768;
 
 const SUPPORTED_READ_EXTENSIONS = new Set([".xlsx", ".xls", ".xlsm", ".xlsb", ".ods", ".csv"]);
 const SUPPORTED_WRITE_EXTENSIONS = new Set([".xlsx", ".csv"]);
@@ -41,6 +48,53 @@ function normaliseRows(raw: unknown[]): Record<string, unknown>[] {
   });
 }
 
+/** One sheet as returned: a window of its data rows, numbered from 1 below the header row. */
+interface SheetView {
+  columns: string[];
+  totalRows: number;
+  /** 1-based data-row numbers of the first and last row shown; 0/0 when none are. */
+  firstRow: number;
+  lastRow: number;
+  rows: Record<string, unknown>[];
+  /** Why rows after lastRow are missing, when they are. */
+  cutBy?: "max_rows" | "output budget";
+}
+
+/**
+ * The sheets as JSON, one row per line. Laid out by hand so every row's cost is known before it
+ * is added: the output used to be pretty-printed whole and then sliced at a character cap, which
+ * cut through the middle of a row and dropped the `totalRows`/`capped` fields that followed it
+ * together with every later sheet — the caller saw a partial table with nothing saying so.
+ */
+function renderSheetsJson(sheets: Array<[string, SheetView]>): string {
+  const parts = sheets.map(([name, s]) => {
+    const rows = s.rows.map((row) => `      ${JSON.stringify(row)}`).join(",\n");
+    return `  ${JSON.stringify(name)}: {\n`
+      + `    "columns": ${JSON.stringify(s.columns)},\n`
+      + `    "totalRows": ${s.totalRows},\n`
+      + `    "firstRow": ${s.firstRow},\n`
+      + `    "lastRow": ${s.lastRow},\n`
+      + `    "rows": [${rows ? `\n${rows}\n    ` : ""}]\n  }`;
+  });
+  return `{\n${parts.join(",\n")}\n}`;
+}
+
+/** One line per sheet saying which rows are shown and how to get the rest. */
+function describeSheetWindow(name: string, s: SheetView): string {
+  const label = `Sheet ${JSON.stringify(name)}`;
+  if (s.totalRows === 0) return `${label}: no data rows.`;
+  if (s.rows.length === 0) {
+    return s.cutBy === "output budget"
+      ? `${label}: ${s.totalRows} data rows, none fit in this answer's output budget — pass sheet=${JSON.stringify(name)} to read it on its own.`
+      : `${label}: ${s.totalRows} data rows; start_row is past the last one.`;
+  }
+  if (s.firstRow === 1 && s.lastRow === s.totalRows) return `${label}: all ${s.totalRows} data rows.`;
+  const more = s.lastRow < s.totalRows
+    ? ` — rows ${s.lastRow + 1}-${s.totalRows} not shown (${s.cutBy ?? "max_rows"}); pass sheet=${JSON.stringify(name)}, start_row=${s.lastRow + 1} for the next ones.`
+    : ".";
+  return `${label}: data rows ${s.firstRow}-${s.lastRow} of ${s.totalRows}${more}`;
+}
+
 // ─── spreadsheet_read ───────────────────────────────────────────────────────
 
 registerTool({
@@ -49,7 +103,8 @@ registerTool({
     "Read a spreadsheet file from the workspace (.xlsx, .xls, .xlsm, .ods, .csv) and return " +
     "its contents as structured JSON. Each sheet is returned as an array of row objects. " +
     "Use this to inspect data before analysis, transformation, or reporting. " +
-    "Results are capped at 2,000 rows per sheet.",
+    "Results are capped at 2,000 rows per sheet and ~30,000 characters in total; the first lines say " +
+    "which rows of which sheets are shown — page through the rest with start_row, or read one sheet with sheet.",
   embeddingDescription: "Read, parse, load a spreadsheet, Excel file, CSV, XLSX, ODS. Tabelle lesen, Excel-Datei öffnen, CSV parsen, Tabellenkalkulation auswerten. Import tabular data.",
   parameters: {
     type: "object",
@@ -74,6 +129,12 @@ registerTool({
           "1-based row index to treat as the header. Rows before this index are skipped. Default 1.",
         default: 1,
       },
+      start_row: {
+        type: "number",
+        description:
+          "1-based data row (counted below the header row) to start from — for reading the rows after a capped window. Default 1.",
+        default: 1,
+      },
     },
     required: ["path"],
   },
@@ -81,9 +142,20 @@ registerTool({
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const inputPath = String(args["path"] ?? "").trim();
     const sheetFilter = args["sheet"] != null ? String(args["sheet"]) : null;
-    const maxRows = Math.min(Math.max(Number(args["max_rows"] ?? MAX_ROWS_PER_SHEET), 1), MAX_ROWS_PER_SHEET);
+    const positiveInt = (value: unknown, fallback: number): number => {
+      const n = Math.floor(Number(value ?? fallback));
+      return Number.isFinite(n) && n >= 1 ? n : fallback;
+    };
+    const maxRows = Math.min(positiveInt(args["max_rows"], MAX_ROWS_PER_SHEET), MAX_ROWS_PER_SHEET);
+    // header_row was declared and documented but never read, so a sheet with a title block above
+    // its header came back keyed by the title cells.
+    const headerRow = positiveInt(args["header_row"], 1);
+    const startRow = positiveInt(args["start_row"], 1);
 
     if (!inputPath) return fail("path is required");
+    // read_file's guard: a spreadsheet read is a file read, and `.env`-style or `.starlingai/…`
+    // paths must not come back through it (a CSV parser reads a dotenv file happily).
+    if (!guardPath(inputPath, ctx.workspacePath).safe) return fail("path must be a non-protected file within the workspace");
 
     let resolved: string;
     let relativePath: string;
@@ -124,35 +196,77 @@ registerTool({
       );
     }
 
-    const sheets: Record<string, { columns: string[]; rows: Record<string, unknown>[]; totalRows: number; capped: boolean }> = {};
+    const parsed = targetSheets
+      .filter((name) => workbook.Sheets[name])
+      .map((name) => ({
+        name,
+        allRows: normaliseRows(XLSX.utils.sheet_to_json<unknown>(workbook.Sheets[name]!, { defval: null, dateNF: "YYYY-MM-DD", range: headerRow - 1 })),
+      }));
 
-    for (const name of targetSheets) {
-      const ws = workbook.Sheets[name];
-      if (!ws) continue;
+    /** The sheets' rows that fit in `budget` characters of JSON. Each sheet gets an even share of
+     *  what is left, so one wide sheet cannot starve every sheet after it; what a sheet leaves
+     *  unused carries over to the next. */
+    const selectRows = (total: number): Array<[string, SheetView]> => {
+      let budget = total;
+      return parsed.map(({ name, allRows }, i): [string, SheetView] => {
+        const windowRows = allRows.slice(startRow - 1, startRow - 1 + maxRows);
+        const share = Math.floor(budget / (parsed.length - i));
+        const rows: Record<string, unknown>[] = [];
+        let used = 200 + name.length;   // the sheet's own keys and brackets
+        for (const row of windowRows) {
+          let cost: number;
+          try { cost = JSON.stringify(row).length + 8; } catch { cost = Infinity; }
+          if (used + cost > share) break;
+          rows.push(row);
+          used += cost;
+        }
+        budget -= Math.min(used, share);
+        const columnSet = new Set<string>();
+        for (const row of rows.length > 0 ? rows : allRows.slice(0, 1)) for (const key of Object.keys(row)) columnSet.add(key);
+        const cutBy = rows.length < windowRows.length ? "output budget" as const
+          : startRow - 1 + windowRows.length < allRows.length ? "max_rows" as const
+            : undefined;
+        return [name, {
+          columns: [...columnSet],
+          totalRows: allRows.length,
+          firstRow: rows.length > 0 ? startRow : 0,
+          lastRow: rows.length > 0 ? startRow + rows.length - 1 : 0,
+          rows,
+          ...(cutBy ? { cutBy } : {}),
+        }];
+      });
+    };
+    const render = (sheets: Array<[string, SheetView]>): string => {
+      let json: string;
+      try {
+        json = renderSheetsJson(sheets);
+      } catch {
+        json = `[sheets: ${sheets.map(([name]) => name).join(", ")} — data contains non-serialisable values]`;
+      }
+      // What is shown comes FIRST, so no cut can remove it.
+      const summaryLines = [
+        ...(headerRow > 1 ? [`Row ${headerRow} is the header; the ${headerRow - 1} row(s) above it were skipped.`] : []),
+        ...(startRow > 1 ? [`Starting at data row ${startRow}.`] : []),
+        ...sheets.map(([name, s]) => describeSheetWindow(name, s)),
+      ];
+      return `${summaryLines.join("\n")}\n\n${json}`;
+    };
 
-      const allRows = normaliseRows(XLSX.utils.sheet_to_json<unknown>(ws, { defval: null, dateNF: "YYYY-MM-DD" }));
-      const capped = allRows.length > maxRows;
-      const sliced = allRows.slice(0, maxRows);
-      const columnSet = new Set<string>();
-      for (const row of sliced) for (const key of Object.keys(row)) columnSet.add(key);
-      const columns = [...columnSet];
-
-      sheets[name] = { columns, rows: sliced, totalRows: allRows.length, capped };
+    // The whole answer — summary lines included — must pass the tool-result cap untouched. Above
+    // it the result is cut to head + tail, and the rows in the cut-out middle vanish while the
+    // summary still lists them and its start_row hint skips past them. Long sheet names or wide
+    // headers can push the summary past the headroom, so measure and shrink until it fits.
+    let jsonBudget = MAX_JSON_CHARS;
+    let sheets = selectRows(jsonBudget);
+    let output = render(sheets);
+    for (let attempt = 0; attempt < 4 && output.length > MAX_TOOL_RESULT_CHARS; attempt++) {
+      jsonBudget -= output.length - MAX_TOOL_RESULT_CHARS + 500;
+      sheets = selectRows(Math.max(0, jsonBudget));
+      output = render(sheets);
     }
 
-    let output: string;
-    try {
-      output = JSON.stringify(sheets, null, 2);
-    } catch {
-      output = `[sheets: ${Object.keys(sheets).join(", ")} — data contains non-serialisable values]`;
-    }
-
-    if (output.length > MAX_OUTPUT_CHARS) {
-      output = output.slice(0, MAX_OUTPUT_CHARS) + `\n\n[Output truncated at ${MAX_OUTPUT_CHARS} chars]`;
-    }
-
-    const summary = Object.entries(sheets)
-      .map(([name, s]) => `${name}: ${s.rows.length}/${s.totalRows} rows, ${s.columns.length} columns${s.capped ? " (capped)" : ""}`)
+    const summary = sheets
+      .map(([name, s]) => `${name}: ${s.rows.length}/${s.totalRows} rows, ${s.columns.length} columns${s.rows.length < s.totalRows ? " (partial)" : ""}`)
       .join("; ");
 
     return {
@@ -160,7 +274,7 @@ registerTool({
       output,
       metadata: {
         path: relativePath,
-        sheetNames: Object.keys(sheets),
+        sheetNames: sheets.map(([name]) => name),
         summary,
       },
     };

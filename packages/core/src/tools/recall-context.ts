@@ -12,16 +12,18 @@
  *   - relevant learned skills.
  *
  * Each section degrades independently — a failing subsystem (e.g. embeddings
- * offline) is skipped, never failing the whole pull. Read-only, no approval.
+ * offline) is skipped and NAMED in the pack, so its absence is never read as
+ * "nothing stored"; only a pull where every section failed fails. Read-only, no approval.
  */
 
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { deriveSharedSessionId } from "./memory.js";
 import { getConfig } from "../config/loader.js";
 import { getEmbeddingProvider } from "../providers/index.js";
-import { searchMemoryRecords } from "../memory/service.js";
+import { searchMemoryRecordsWithStatus } from "../memory/service.js";
 import { formatUserModelGuidance } from "../user-model/service.js";
 import { searchSessions } from "../agent/session-search.js";
+import { currentUserId } from "../runtime/request-context.js";
 import { searchSharedFacts } from "../swarm/memory.js";
 import { retrieveSkillGuidance } from "../skills/service.js";
 import { buildDynamicTurnGuidance } from "../agent/intent-classifier.js";
@@ -125,6 +127,12 @@ registerTool({
     const sharedSessionId = deriveSharedSessionId(ctx.sessionId);
     const sectionMap = new Map<Section, string>();
     const meta: Record<string, unknown> = { recallIntent: explicitInclude ? "explicit" : plan.intent };
+    /** Sections whose subsystem threw. They were dropped silently, and an all-failed pull said
+     *  "No stored context matched" — a claim about the stores that none of them had backed. */
+    const unreadable: string[] = [];
+    const failedSection = (label: string, err: unknown): void => {
+      unreadable.push(`${label} (${truncate(err instanceof Error ? err.message : String(err), 120)})`);
+    };
 
     if (requested.has("user")) {
       try {
@@ -133,6 +141,7 @@ registerTool({
         if (guidance) sectionMap.set("user", `## User model\n${guidance}`);
       } catch (err) {
         log.debug({ err }, "recall_context: user model failed");
+        failedSection("user model", err);
       }
     }
 
@@ -153,27 +162,41 @@ registerTool({
         }
       } catch (err) {
         log.debug({ err }, "recall_context: shared facts failed");
+        failedSection("working memory", err);
       }
     }
 
     if (requested.has("memory")) {
       try {
-        const records = await searchMemoryRecords(ctx.workspacePath, query, { limit: limitFor("memory"), sessionId: sharedSessionId });
+        const search = await searchMemoryRecordsWithStatus(ctx.workspacePath, query, { limit: limitFor("memory"), sessionId: sharedSessionId });
+        const records = search.records;
+        const unmatched = new Set(search.unmatchedIds);
         meta["memories"] = records.length;
+        if (!search.semanticRan) meta["memoryLexicalOnly"] = true;
         if (records.length > 0) {
+          // Without the semantic check nothing is filtered for relevance, and a paraphrase of the
+          // task has no word in common with it — the pack has to say both.
           sectionMap.set("memory",
             "## Relevant long-term memory\n"
-            + records.map((record) => `- [${record.scope}/${record.kind}] ${record.subject}: ${truncate(record.content, 180)}`).join("\n"),
+            + records.map((record) => `- [${record.scope}/${record.kind}] ${record.subject}${unmatched.has(record.id) ? " (no word match)" : ""}: ${truncate(record.content, 180)}`).join("\n")
+            + (search.semanticRan ? "" : "\n_Lexical only — semantic search unavailable: entries marked (no word match) may be unrelated, and a missing memory is not evidence that nothing is stored._"),
           );
         }
       } catch (err) {
         log.debug({ err }, "recall_context: long-term memory failed");
+        failedSection("long-term memory", err);
       }
     }
 
     if (requested.has("sessions")) {
       try {
-        const matches = searchSessions(query, { limit: limitFor("sessions"), excludeSessionId: ctx.sessionId });
+        // The requesting user's own sessions only, under multi-user auth (security finding S2,
+        // 2026-10-05) — this section pulled every account's conversations into the pack.
+        const matches = searchSessions(query, {
+          limit: limitFor("sessions"),
+          excludeSessionId: ctx.sessionId,
+          requestingUserId: ctx.userId ?? currentUserId(),
+        });
         meta["sessions"] = matches.length;
         if (matches.length > 0) {
           sectionMap.set("sessions",
@@ -186,6 +209,7 @@ registerTool({
         }
       } catch (err) {
         log.debug({ err }, "recall_context: session search failed");
+        failedSection("past sessions", err);
       }
     }
 
@@ -196,6 +220,7 @@ registerTool({
         if (text.trim()) sectionMap.set("skills", `## Relevant skills\n${text.trim()}`);
       } catch (err) {
         log.debug({ err }, "recall_context: skill recall failed");
+        failedSection("skills", err);
       }
     }
 
@@ -236,16 +261,26 @@ registerTool({
         }
       } catch (err) {
         log.debug({ err }, "recall_context: document retrieval failed");
+        failedSection("attached documents", err);
       }
     }
 
     const ordered = order.filter((section) => sectionMap.has(section)).map((section) => sectionMap.get(section)!);
+    const unreadableNote = unreadable.length > 0
+      ? `## Could not be read this time\n_${unreadable.join("; ")}. What these hold is unknown — their absence above is not evidence that nothing is stored._`
+      : "";
+    if (unreadable.length > 0) meta["unreadableSections"] = unreadable;
     const output = [
       `# Planning context for: "${truncate(query, 120)}"`,
       "",
-      ...(ordered.length > 0 ? ordered : ["_No stored context matched this task yet — plan from the request directly._"]),
+      ...(ordered.length > 0 ? ordered : unreadable.length > 0 ? [] : ["_No stored context matched this task yet — plan from the request directly._"]),
+      ...(unreadableNote ? [unreadableNote] : []),
     ].join("\n\n");
 
+    // Every section asked for failed: nothing was recalled, and that is a failure, not an empty pack.
+    if (ordered.length === 0 && unreadable.length > 0 && unreadable.length >= requested.size) {
+      return { success: false, output: "", error: `recall_context could not read any store: ${unreadable.join("; ")}. This is not evidence that nothing is stored.`, metadata: meta };
+    }
     return { success: true, output, metadata: meta };
   },
 });

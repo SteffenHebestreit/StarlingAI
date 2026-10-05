@@ -30,6 +30,11 @@ describe("source-file extractors", () => {
     return { sessionId: "s1", workspacePath: workspace };
   }
 
+  /** extract_calendar opens with a counts line; the event JSON follows the blank line. */
+  function calendarJson(output: string): string {
+    return output.slice(output.indexOf("\n\n") + 2);
+  }
+
   // ── extract_notebook ──────────────────────────────────────────────────────
 
   it("extract_notebook converts code + markdown + outputs to markdown", async () => {
@@ -227,7 +232,7 @@ describe("source-file extractors", () => {
 
     const result = await (await getTool("extract_calendar")).execute({ path: "cal.ics" }, ctx());
     expect(result.success).toBe(true);
-    const events = JSON.parse(result.output) as Array<Record<string, unknown>>;
+    const events = JSON.parse(calendarJson(result.output)) as Array<Record<string, unknown>>;
     expect(events).toHaveLength(1);
     const evt = events[0]!;
     expect(evt["uid"]).toBe("evt-1@example.com");
@@ -263,11 +268,92 @@ describe("source-file extractors", () => {
       includePast: false,
     }, ctx());
     expect(result.success).toBe(true);
-    const events = JSON.parse(result.output) as Array<Record<string, unknown>>;
+    const events = JSON.parse(calendarJson(result.output)) as Array<Record<string, unknown>>;
     expect(events).toHaveLength(1);
     expect(events[0]!["uid"]).toBe("future@example.com");
     expect(result.metadata?.["totalEventCount"]).toBe(2);
     expect(result.metadata?.["skippedPastCount"]).toBe(1);
+    expect(result.output.split("\n")[0]).toBe("1 of 2 event(s) shown; 1 past event(s) not shown — pass includePast: true to include them.");
+  });
+
+  it("extract_calendar keeps a recurring series whose first occurrence is past but whose last is not", async () => {
+    const event = (uid: string, start: string, rrule?: string) => [
+      "BEGIN:VEVENT", `UID:${uid}`, `DTSTART:${start}`, `DTEND:${start.replace(/T08/, "T09")}`, `SUMMARY:${uid}`,
+      ...(rrule ? [`RRULE:${rrule}`] : []), "END:VEVENT",
+    ];
+    const ics = [
+      "BEGIN:VCALENDAR",
+      ...event("standup", "20200106T080000Z", "FREQ=WEEKLY;BYDAY=MO"),
+      ...event("sprint-review", "20200106T080000Z", "FREQ=WEEKLY;COUNT=3"),
+      ...event("old-daily", "20200106T080000Z", "FREQ=DAILY;UNTIL=20200201T000000Z"),
+      // 600 Mondays (into 2035), not 600 days: a BY* rule thins the occurrences, so COUNT alone
+      // cannot place the end and the series is kept.
+      ...event("monday-daily", "20240101T080000Z", "FREQ=DAILY;BYDAY=MO;COUNT=600"),
+      ...event("monthly-board", "20250106T080000Z", "FREQ=MONTHLY;COUNT=600"),
+      ...event("offsite", "20300101T080000Z"),
+      "END:VCALENDAR",
+    ].join("\r\n");
+    writeFileSync(join(workspace, "cal.ics"), ics, "utf8");
+
+    const result = await (await getTool("extract_calendar")).execute({ path: "cal.ics", includePast: false }, ctx());
+    expect(result.success).toBe(true);
+    const uids = (JSON.parse(calendarJson(result.output)) as Array<Record<string, unknown>>).map((e) => e["uid"]);
+    expect(uids).toEqual(["standup", "monday-daily", "monthly-board", "offsite"]);
+    expect(result.output.split("\n")[0]).toBe(
+      "4 of 6 event(s) shown; 3 recurring series, each listed once with its first occurrence and its rrule; 2 past event(s) not shown — pass includePast: true to include them.",
+    );
+  });
+
+  it("extract_email says which message of an .mbox it read, and reads any other by index", async () => {
+    const mbox = [
+      "From a@example.com Wed Apr 23 10:00:00 2026",
+      "From: a@example.com",
+      "Subject: One",
+      "",
+      "Body one.",
+      "From the beginning this line is body text, not a separator.",
+      "",
+      "From b@example.com Wed Apr 23 11:00:00 2026",
+      "From: b@example.com",
+      "Subject: Two",
+      "",
+      "Body two.",
+      "",
+      "From c@example.com Wed Apr 23 12:00:00 2026",
+      "From: c@example.com",
+      "Subject: Three",
+      "",
+      "Body three.",
+    ].join("\n");
+    writeFileSync(join(workspace, "inbox.mbox"), mbox, "utf8");
+    const tool = await getTool("extract_email");
+
+    const first = await tool.execute({ path: "inbox.mbox" }, ctx());
+    expect(first.output.split("\n")[0]).toBe("Message 1 of 3 in inbox.mbox — pass index (1-3) to read another.");
+    expect(first.output).toContain("From the beginning this line is body text");
+    expect(first.metadata?.["messageCount"]).toBe(3);
+
+    const second = await tool.execute({ path: "inbox.mbox", index: 2 }, ctx());
+    expect(second.output).toContain("Message 2 of 3");
+    expect(second.output).toContain("Subject: Two");
+    expect(second.output).toContain("Body two.");
+    expect(second.output).not.toContain("Body one.");
+
+    const past = await tool.execute({ path: "inbox.mbox", index: 4 }, ctx());
+    expect(past.success).toBe(false);
+    expect(past.error).toBe("index must be between 1 and 3 — inbox.mbox holds 3 message(s).");
+  });
+
+  it("refuses protected paths, as read_file does", async () => {
+    const { mkdirSync } = await import("node:fs");
+    mkdirSync(join(workspace, ".starlingai"), { recursive: true });
+    writeFileSync(join(workspace, ".starlingai", "cal.ics"), "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:secret\r\nEND:VEVENT\r\nEND:VCALENDAR", "utf8");
+    writeFileSync(join(workspace, ".starlingai", "mail.eml"), "Subject: secret\n\nsupersecret", "utf8");
+    for (const [name, path] of [["extract_calendar", ".starlingai/cal.ics"], ["extract_email", ".starlingai/mail.eml"]] as const) {
+      const result = await (await getTool(name)).execute({ path }, ctx());
+      expect(result.success, path).toBe(false);
+      expect(result.output).not.toContain("secret");
+    }
   });
 
   it("extract_calendar unfolds RFC 5545 continuation lines", async () => {
@@ -287,7 +373,7 @@ describe("source-file extractors", () => {
 
     const result = await (await getTool("extract_calendar")).execute({ path: "cal.ics" }, ctx());
     expect(result.success).toBe(true);
-    const events = JSON.parse(result.output) as Array<Record<string, unknown>>;
+    const events = JSON.parse(calendarJson(result.output)) as Array<Record<string, unknown>>;
     expect(events[0]!["summary"]).toBe("A really long summary that is folded across three lines");
   });
 

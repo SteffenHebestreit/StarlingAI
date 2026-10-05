@@ -9,7 +9,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
-import { resolvePathWithinWorkspace } from "./workspace-path.js";
+import { guardPath } from "./filesystem.js";
 import { open, stat } from "node:fs/promises";
 
 const log = childLogger("tool:log-stream");
@@ -21,6 +21,38 @@ const EXEC_TIMEOUT_MS = 30_000;
 const MAX_OUTPUT_BYTES = 128 * 1024;
 /** Read only the last N bytes of a file — avoids OOM on multi-GB logs. */
 const FILE_TAIL_BYTES = 512 * 1024;
+/**
+ * How far back a FILTERED read looks. A filter used to run over the same window as a plain tail —
+ * the last `tail` lines of a container, the last 512 KB of a file — so a match one line before that
+ * window answered "(no log lines matched)", which reads as "this never happened". A filter now
+ * searches this much, then the tail applies to the matches, and the answer names the window.
+ */
+const FILTER_SCAN_LINES = 10_000;
+const FILTER_SCAN_MAX_BYTES = 16 * 1024 * 1024;
+const FILTER_SCAN_FILE_BYTES = 32 * 1024 * 1024;
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** Filter, tail, and say what was searched: the lines shown, then one line naming the window. */
+function renderLogWindow(lines: string[], opts: { filter: string; tail: number; window: string }): { output: string; matched: number; shown: number } {
+  const body = lines.length > 0 && lines[lines.length - 1] === "" ? lines.slice(0, -1) : lines;
+  const matched = opts.filter ? body.filter((line) => line.toLowerCase().includes(opts.filter)) : body;
+  const shown = matched.slice(-opts.tail);
+  const text = shown.join("\n").trim();
+  const summary = opts.filter
+    ? `[log_stream: ${matched.length} line(s) matching "${opts.filter}" in ${opts.window}`
+      + (matched.length > shown.length ? `; showing the last ${shown.length} — raise tail (max ${MAX_TAIL}) for more` : "") + "]"
+    : `[log_stream: showing the last ${shown.length} line(s) of ${opts.window}]`;
+  return {
+    output: `${text || (opts.filter ? `(no log lines matched "${opts.filter}")` : "(log is empty)")}\n\n${summary}`,
+    matched: matched.length,
+    shown: shown.length,
+  };
+}
 
 registerTool({
   name: "log_stream",
@@ -28,7 +60,9 @@ registerTool({
     "Tail recent log lines from a Docker Compose service container or a workspace log file. " +
     "For container logs, provide serviceName (e.g. 'gateway', 'agent-worker'). " +
     "For file logs, provide filePath (workspace-relative). " +
-    "Returns the last N lines, optionally filtered by a grep pattern. " +
+    "Returns the last N lines; with a filter, the last N MATCHING lines from a deeper window " +
+    `(the last ${FILTER_SCAN_LINES} container lines, or the last ${FILTER_SCAN_FILE_BYTES / (1024 * 1024)} MB of a file). ` +
+    "The answer always names the window it searched. " +
     "Read-only — does not modify container state.",
   parameters: {
     type: "object",
@@ -92,29 +126,34 @@ registerTool({
         return { success: false, output: "", error: "Invalid serviceName format." };
       }
 
-      const dockerArgs = ["compose", "logs", "--no-color", "--tail", String(tail)];
+      // A filter searches a deep window (narrowed by --since first, when given) and the tail then
+      // applies to the matches; without one, the tail is the window.
+      const scanLines = filter ? FILTER_SCAN_LINES : tail;
+      const dockerArgs = ["compose", "logs", "--no-color", "--tail", String(scanLines)];
       if (since) dockerArgs.push("--since", since);
       dockerArgs.push(serviceName);
 
-      log.info({ serviceName, tail, since, sessionId: ctx.sessionId }, "log_stream container");
+      log.info({ serviceName, tail, since, scanLines, sessionId: ctx.sessionId }, "log_stream container");
 
       try {
         const { stdout, stderr } = await execFileAsync("docker", dockerArgs, {
           timeout: EXEC_TIMEOUT_MS,
-          maxBuffer: MAX_OUTPUT_BYTES,
+          maxBuffer: filter ? FILTER_SCAN_MAX_BYTES : MAX_OUTPUT_BYTES,
           cwd: ctx.workspacePath,
         });
-        let output = [stdout, stderr].filter(Boolean).join("\n");
-        if (filter) {
-          output = output
-            .split("\n")
-            .filter((line) => line.toLowerCase().includes(filter))
-            .join("\n");
-        }
+        const lines = [stdout, stderr].filter(Boolean).join("\n").split("\n");
+        const returned = lines.filter(Boolean).length;
+        const source = `${serviceName}'s log${since ? ` since ${since}` : ""}`;
+        const window = returned < scanLines
+          ? `all ${returned} line(s) of ${source}`
+          : filter
+            ? `the last ${scanLines} lines of ${source} (older lines were not searched)`
+            : `${source} (older lines not shown)`;
+        const rendered = renderLogWindow(lines, { filter, tail, window });
         return {
           success: true,
-          output: output.trim() || "(no log lines matched)",
-          metadata: { serviceName, tail, since: since || undefined, filter: filter || undefined },
+          output: rendered.output,
+          metadata: { serviceName, tail, since: since || undefined, filter: filter || undefined, scannedLines: scanLines, matched: rendered.matched },
         };
       } catch (err: unknown) {
         const e = err as { killed?: boolean; stdout?: string; stderr?: string; message?: string };
@@ -131,22 +170,26 @@ registerTool({
     }
 
     // ── Workspace file log path ──────────────────────────────────────────────
-    let resolvedFilePath: string;
-    try {
-      resolvedFilePath = resolvePathWithinWorkspace(filePathRaw, ctx.workspacePath).resolved;
-    } catch {
+    // read_file's guard, not just the workspace boundary: a log tail is a file read, and
+    // `.env`, `.starlingai/…` or `.git/…` must not come back through it any more than through read_file.
+    const guarded = guardPath(filePathRaw, ctx.workspacePath);
+    if (!guarded.safe) {
       return {
         success: false,
         output: "",
-        error: "filePath must be within the workspace directory.",
+        error: "filePath must be a non-protected file within the workspace directory.",
       };
     }
+    const resolvedFilePath = guarded.resolved;
 
     log.info({ filePath: resolvedFilePath, tail, sessionId: ctx.sessionId }, "log_stream file");
 
     try {
       const fileStat = await stat(resolvedFilePath);
-      const readStart = Math.max(0, fileStat.size - FILE_TAIL_BYTES);
+      if (fileStat.isDirectory()) {
+        return { success: false, output: "", error: `${filePathRaw} is a directory, not a log file — use list_files to see what it holds.` };
+      }
+      const readStart = Math.max(0, fileStat.size - (filter ? FILTER_SCAN_FILE_BYTES : FILE_TAIL_BYTES));
       const readLength = fileStat.size - readStart;
       const buffer = Buffer.alloc(readLength);
       const handle = await open(resolvedFilePath, "r");
@@ -161,15 +204,16 @@ registerTool({
         const firstNl = content.indexOf("\n");
         if (firstNl >= 0) content = content.slice(firstNl + 1);
       }
-      let lines = content.split("\n");
-      if (filter) {
-        lines = lines.filter((line) => line.toLowerCase().includes(filter));
-      }
-      const sliced = lines.slice(-tail).join("\n");
+      const lines = content.split("\n");
+      const lineCount = lines.length > 0 && lines[lines.length - 1] === "" ? lines.length - 1 : lines.length;
+      const window = readStart > 0
+        ? `the last ${formatBytes(readLength)} of ${filePathRaw} (${lineCount} lines; the first ${formatBytes(readStart)} of the ${formatBytes(fileStat.size)} file were not searched)`
+        : `the whole of ${filePathRaw} (${lineCount} lines)`;
+      const rendered = renderLogWindow(lines, { filter, tail, window });
       return {
         success: true,
-        output: sliced.trim() || "(no log lines matched)",
-        metadata: { filePath: filePathRaw, tail, filter: filter || undefined, truncated: readStart > 0 },
+        output: rendered.output + (since ? "\n[since applies to container logs only; it was not applied to this file]" : ""),
+        metadata: { filePath: filePathRaw, tail, filter: filter || undefined, truncated: readStart > 0, matched: rendered.matched },
       };
     } catch (err: unknown) {
       const e = err as { code?: string; message?: string };

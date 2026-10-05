@@ -468,12 +468,16 @@ export function buildInlineDocumentContext(
   return `${header}\n\n${body}`;
 }
 
-/** List the documents visible to this turn's scope. */
-export async function listScopedDocuments(ctx: RagScopeContext): Promise<EngramDocumentInfo[]> {
+/**
+ * List the documents visible to this turn's scope — or null when the document store did not
+ * answer. An outage used to come back as [], which list_documents turned into "No documents have
+ * been ingested", and the model told the user their uploaded files did not exist.
+ */
+export async function listScopedDocuments(ctx: RagScopeContext): Promise<EngramDocumentInfo[] | null> {
   if (!engramConfigured()) return [];
   const scopeSources = new Set(activeScopeSources(ctx));
   const docs = await engramListDocuments();
-  if (!docs) return [];
+  if (!docs) return null;
   return annotateInvalidated(docs.filter((d) => d.sources.some((s) => scopeSources.has(s))));
 }
 

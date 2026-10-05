@@ -14,7 +14,7 @@
  * hard-error — the caller then falls back to the on-demand retrieve-first digest rather
  * than asserting a confirmed-empty result it did not actually establish.
  */
-import { searchMemoryRecords } from "../memory/service.js";
+import { searchMemoryRecordsWithStatus } from "../memory/service.js";
 import { listInScopeDocuments, retrieveDocumentContext } from "../retrieval/document-rag.js";
 
 function truncate(value: string, max: number): string {
@@ -47,6 +47,11 @@ export interface RenderProfileOpts {
    *  marker becomes an honest "you have these documents on file" note instead of "found
    *  nothing" — so an existence/access question never falsely denies holding the user's CV. */
   availableDocuments?: ReadonlyArray<{ title?: string; documentId?: string; invalidated?: boolean }>;
+  /** What the memory side of the lookup could establish. A search that matched nothing is not
+   *  "nothing on file": the user may have stored records that share no word with the question
+   *  ("Was weißt du über mich?" over "Prefers dark mode") or semantic matching may have been down.
+   *  Absent = unknown, which keeps the old wording (callers that predate this field). */
+  memoryOnFile?: { userRecords: number; semanticRan: boolean };
 }
 
 /**
@@ -60,7 +65,7 @@ export function renderUserProfileEvidence(
   chunks: ReadonlyArray<{ title?: string; documentId: string; text: string }> | null,
   opts: RenderProfileOpts = {},
 ): string {
-  const { docsHandledElsewhere = false, documentsAlreadyInjected = false, availableDocuments } = opts;
+  const { docsHandledElsewhere = false, documentsAlreadyInjected = false, availableDocuments, memoryOnFile } = opts;
   // Both sources unavailable (only meaningful when this prefetch owns the doc lookup).
   if (records === null && chunks === null && !docsHandledElsewhere) return "";
 
@@ -105,6 +110,16 @@ export function renderUserProfileEvidence(
         + "them. Do NOT invent their contents. Acknowledge the document(s) by name; if you need their content, ask "
         + "the user to point to the relevant part or rephrase so the right section can be retrieved.";
     }
+    // "Nothing on file" is a claim about the store, not about this search: only make it when the
+    // user has no stored records at all and the search could have matched by meaning.
+    if (memoryOnFile && (memoryOnFile.userRecords > 0 || !memoryOnFile.semanticRan)) {
+      return "[USER PROFILE EVIDENCE — retrieved this turn]\n"
+        + "A profile lookup ran THIS turn, but nothing it found matched this question"
+        + (memoryOnFile.semanticRan ? "" : " (semantic search was unavailable, so only shared words could match)")
+        + (memoryOnFile.userRecords > 0 ? `. The user DOES have ${memoryOnFile.userRecords} stored memory record(s)` : "")
+        + ". That is NOT the same as having nothing on file — do NOT tell the user you have no stored information "
+        + "about them. Look it up with memory_search (scopes: [\"user\"]) or ask what they want to know. Do NOT invent a profile.";
+    }
     return "[USER PROFILE EVIDENCE — retrieved this turn]\n"
       + "A profile lookup ran THIS turn over the user's stored memory and the documents attached to this "
       + "conversation, and found NOTHING on file about their background, skills, experience, or projects. "
@@ -137,13 +152,14 @@ export async function buildUserProfileEvidence(
   // duplicate ~4s engram round-trip + duplicate CV tokens) — we add only memory records,
   // and the renderer keys the confirmed-empty marker off whether the per-turn RAG found
   // docs. Memory records still use the raw query (subject-keyed).
-  const [records, chunks] = await Promise.all([
-    searchMemoryRecords(workspacePath, query, { limit: 6, sessionId }).catch(() => null),
+  const [memorySearch, chunks] = await Promise.all([
+    searchMemoryRecordsWithStatus(workspacePath, query, { limit: 6, sessionId }).catch(() => null),
     opts.skipDocRetrieval
       ? Promise.resolve(null)
       : retrieveDocumentContext(buildProfileBiasedQuery(query), { sessionId, ...(userId ? { userId } : {}) }).catch(() => null),
   ]);
 
+  const records = memorySearch?.records ?? null;
   // When NO document excerpt reached the model this turn (the per-turn RAG injected nothing,
   // or our own retrieval matched nothing — e.g. an existence/access question reranks the CV
   // chunks negative), look up whether the user nonetheless HAS documents on file. This lets
@@ -162,5 +178,6 @@ export async function buildUserProfileEvidence(
     docsHandledElsewhere: opts.skipDocRetrieval === true,
     documentsAlreadyInjected: opts.documentsAlreadyInjected === true,
     ...(availableDocuments && availableDocuments.length > 0 ? { availableDocuments } : {}),
+    ...(memorySearch ? { memoryOnFile: { userRecords: memorySearch.candidatesByScope.user ?? 0, semanticRan: memorySearch.semanticRan } } : {}),
   });
 }

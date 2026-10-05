@@ -17,10 +17,29 @@
 import { getConfig } from "../config/loader.js";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { engramConfigured } from "../retrieval/engram.js";
-import { callerCanAccessKb, type KbAccessContext } from "../retrieval/knowledge-bases.js";
+import { callerCanAccessKb, KnowledgeBaseRegistryUnreadableError, type KbAccessContext } from "../retrieval/knowledge-bases.js";
 
 function fail(error: string): ToolResult {
   return { success: false, output: "", error };
+}
+
+/**
+ * The answer when the registry could not be READ (finding S4, 2026-10-05). Every read error used
+ * to come back as an empty registry, so these tools told the agent "No knowledge bases available
+ * to you yet" while the knowledge bases existed — and the agent repeated it to the user.
+ */
+function registryUnreadable(err: unknown): ToolResult {
+  const detail = err instanceof Error ? err.message : String(err);
+  return fail(
+    `The knowledge-base registry could not be read (${detail}). This is NOT evidence that no knowledge bases exist — `
+    + "say the registry is unavailable, and retry shortly; if it keeps failing, the registry file needs repair.",
+  );
+}
+
+/** registryUnreadable for an unreadable-registry error; anything else (a failed WRITE, say) propagates unchanged. */
+function rethrowUnlessUnreadable(err: unknown): ToolResult {
+  if (err instanceof KnowledgeBaseRegistryUnreadableError) return registryUnreadable(err);
+  throw err;
 }
 
 /** Scope identity for KB access control, derived from the tool context. An
@@ -92,7 +111,9 @@ registerTool({
 
     const idOrName = String(args["knowledge_base"] ?? "").trim();
     if (idOrName) {
-      const kb = await getKnowledgeBase(idOrName, { isCrawlActive });
+      let kb: Awaited<ReturnType<typeof getKnowledgeBase>>;
+      try { kb = await getKnowledgeBase(idOrName, { isCrawlActive }); }
+      catch (err) { return rethrowUnlessUnreadable(err); }
       // Same not-found shape whether it is absent or out-of-scope (no existence disclosure).
       if (!kb || !callerCanAccessKb(kb, who)) return fail(`No knowledge base matches "${idOrName}". Call list_knowledge_bases without arguments to see what exists.`);
       const s = toSummary(kb);
@@ -108,7 +129,10 @@ registerTool({
       return { success: true, output: lines.join("\n"), metadata: { id: s.id, status: s.status, scope: s.scope, pageCount: s.pageCount } };
     }
 
-    const kbs = (await listKnowledgeBases({ isCrawlActive })).filter((kb) => callerCanAccessKb(kb, who));
+    let all: Awaited<ReturnType<typeof listKnowledgeBases>>;
+    try { all = await listKnowledgeBases({ isCrawlActive }); }
+    catch (err) { return rethrowUnlessUnreadable(err); }
+    const kbs = all.filter((kb) => callerCanAccessKb(kb, who));
     if (kbs.length === 0) {
       return {
         success: true,
@@ -151,7 +175,9 @@ registerTool({
 
     const { getKnowledgeBase } = await import("../retrieval/knowledge-bases.js");
     const { isCrawlActive } = await import("../retrieval/kb-crawler.js");
-    const kb = await getKnowledgeBase(idOrName, { isCrawlActive });
+    let kb: Awaited<ReturnType<typeof getKnowledgeBase>>;
+    try { kb = await getKnowledgeBase(idOrName, { isCrawlActive }); }
+    catch (err) { return rethrowUnlessUnreadable(err); }
     if (!kb || !callerCanAccessKb(kb, accessCtx(ctx))) return fail(`No knowledge base matches "${idOrName}". Call list_knowledge_bases to see what exists.`);
     if (Object.keys(kb.pages).length === 0) {
       return fail(
@@ -240,7 +266,8 @@ registerTool({
       ...(ctx.sessionId ? { sessionId: ctx.sessionId } : {}),
       ...(worker ? { worker } : {}),
       ...(ctx.userId ? { createdBy: ctx.userId } : {}),
-    });
+    }).catch(rethrowUnlessUnreadable); // an unreadable registry is reported, and nothing is written (S4)
+    if ("success" in created) return created;
     if (!created.ok) return fail(created.error);
 
     const kb = created.value;
@@ -290,7 +317,9 @@ registerTool({
 
     const { getKnowledgeBase } = await import("../retrieval/knowledge-bases.js");
     const { startKbCrawl, cancelKbCrawl, deleteKnowledgeBase, isCrawlActive } = await import("../retrieval/kb-crawler.js");
-    const kb = await getKnowledgeBase(idOrName, { isCrawlActive });
+    let kb: Awaited<ReturnType<typeof getKnowledgeBase>>;
+    try { kb = await getKnowledgeBase(idOrName, { isCrawlActive }); }
+    catch (err) { return rethrowUnlessUnreadable(err); }
     if (!kb || !callerCanAccessKb(kb, accessCtx(ctx))) return fail(`No knowledge base matches "${idOrName}".`);
 
     switch (action) {
@@ -301,13 +330,15 @@ registerTool({
           : fail(started.error);
       }
       case "cancel": {
-        const cancelled = await cancelKbCrawl(kb.id);
+        const cancelled = await cancelKbCrawl(kb.id).catch(rethrowUnlessUnreadable);
+        if (typeof cancelled === "object") return cancelled;
         return cancelled
           ? { success: true, output: `Cancellation requested for the crawl of "${kb.name}" — it stops at the next page boundary; already-indexed pages are kept.`, metadata: { id: kb.id } }
           : fail(`No crawl is running for "${kb.id}".`);
       }
       case "delete": {
-        const result = await deleteKnowledgeBase(kb.id);
+        const result = await deleteKnowledgeBase(kb.id).catch(rethrowUnlessUnreadable);
+        if ("success" in result) return result;
         if (!result.ok) return fail(result.error ?? "delete failed");
         return {
           success: true,
@@ -353,7 +384,9 @@ registerTool({
 
     const { getKnowledgeBase } = await import("../retrieval/knowledge-bases.js");
     const { isCrawlActive } = await import("../retrieval/kb-crawler.js");
-    const kb = await getKnowledgeBase(idOrName, { isCrawlActive });
+    let kb: Awaited<ReturnType<typeof getKnowledgeBase>>;
+    try { kb = await getKnowledgeBase(idOrName, { isCrawlActive }); }
+    catch (err) { return rethrowUnlessUnreadable(err); }
     if (!kb || !callerCanAccessKb(kb, accessCtx(ctx))) return fail(`No knowledge base matches "${idOrName}". Call list_knowledge_bases to see what exists.`);
     if (Object.keys(kb.pages).length === 0) {
       return fail(

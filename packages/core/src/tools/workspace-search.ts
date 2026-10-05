@@ -2,12 +2,14 @@
  * workspace_search — full-text keyword search across all workspace text files.
  *
  * Returns matching file paths with surrounding context snippets.
- * Skips node_modules, .git, dist, and files larger than 200 KB.
+ * Skips node_modules, .git, dist, files larger than 200 KB, and every path the
+ * file tools' secrets denylist (isSensitiveWorkspacePath) refuses.
  */
 import { readdirSync, readFileSync, statSync, existsSync } from "node:fs";
 import { join, relative } from "node:path";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { resolvePathWithinWorkspace } from "./workspace-path.js";
+import { isSensitiveWorkspacePath } from "./filesystem.js";
 import { childLogger } from "../logger.js";
 
 import { PRODUCT } from "../product/index.js";
@@ -20,25 +22,42 @@ const SKIP_DIRS = new Set([
   ".git", "node_modules", PRODUCT.stateDirName, "dist", "build",
   ".next", ".nuxt", "coverage", ".cache", ".turbo",
 ]);
+// No ".env": a dotenv file holds secrets, never searchable text (security finding S1, 2026-10-05).
 const TEXT_EXTS = new Set([
   ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
   ".json", ".jsonc", ".json5",
   ".md", ".txt", ".yaml", ".yml", ".toml",
-  ".env", ".sh", ".bash",
+  ".sh", ".bash",
   ".py", ".go", ".rs", ".rb", ".java", ".cs",
   ".html", ".css", ".scss", ".sql", ".graphql",
 ]);
 
-function* walkDir(dir: string, depth = 0): Generator<string> {
+/**
+ * True when `abs` is a secret or VCS-internal path as seen from ANY of `roots`.
+ *
+ * Security finding S1 (2026-10-05): this walk never consulted the file tools' denylist, and the
+ * gateway mounts the repository root as /workspace, so workspace_search("canary") returned the
+ * contents of ".env" and "prod.env". The check runs on the path relative to the search root AND
+ * to the workspace root: a search rooted inside a protected directory (a zone under .starlingai/,
+ * say) sees entries like "memory/x.json" that only the workspace-relative form names as protected.
+ * Directories are tested too, so a protected tree is never descended at all.
+ */
+function isSensitiveUnder(roots: readonly string[], abs: string): boolean {
+  return roots.some((root) => isSensitiveWorkspacePath(relative(root, abs)));
+}
+
+function* walkDir(dir: string, roots: readonly string[], depth = 0): Generator<string> {
   if (depth > MAX_DEPTH) return;
   let entries;
   try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
   for (const entry of entries) {
+    const full = join(dir, entry.name);
+    if (isSensitiveUnder(roots, full)) continue;
     if (entry.isDirectory()) {
-      if (!SKIP_DIRS.has(entry.name)) yield* walkDir(join(dir, entry.name), depth + 1);
+      if (!SKIP_DIRS.has(entry.name)) yield* walkDir(full, roots, depth + 1);
     } else if (entry.isFile()) {
       const dot = entry.name.lastIndexOf(".");
-      if (dot >= 0 && TEXT_EXTS.has(entry.name.slice(dot))) yield join(dir, entry.name);
+      if (dot >= 0 && TEXT_EXTS.has(entry.name.slice(dot))) yield full;
     }
   }
 }
@@ -53,11 +72,15 @@ export interface WorkspaceSearchMatch {
  * matching files with context snippets.  Shared between the local
  * workspace_search tool and the federated_workspace_search broadcaster so
  * peers return results in the same shape.
+ *
+ * `workspaceRoot` is the root the secrets denylist is evaluated against when the search is
+ * rooted below it (a scope-confined agent's zone); it defaults to the search root itself.
  */
-export function searchWorkspace(workspacePath: string, query: string, maxResults: number): WorkspaceSearchMatch[] {
+export function searchWorkspace(workspacePath: string, query: string, maxResults: number, workspaceRoot: string = workspacePath): WorkspaceSearchMatch[] {
   const matches: WorkspaceSearchMatch[] = [];
+  const roots = workspaceRoot === workspacePath ? [workspacePath] : [workspacePath, workspaceRoot];
   try {
-    for (const filePath of walkDir(workspacePath)) {
+    for (const filePath of walkDir(workspacePath, roots)) {
       if (matches.length >= maxResults) break;
       const snippets = extractSnippets(filePath, query);
       if (snippets.length > 0) matches.push({ file: relative(workspacePath, filePath), snippets });
@@ -122,7 +145,7 @@ registerTool({
       return { success: true, output: `No workspace files contain "${query}".`, metadata: { count: 0 } };
     }
 
-    const matches = searchWorkspace(searchRoot, query, maxResults);
+    const matches = searchWorkspace(searchRoot, query, maxResults, ctx.workspacePath);
 
     if (matches.length === 0) {
       return { success: true, output: `No workspace files contain "${query}".`, metadata: { count: 0 } };

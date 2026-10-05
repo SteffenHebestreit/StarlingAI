@@ -121,7 +121,7 @@ registerTool({
       attemptedBackends.push(backend);
 
       try {
-        let searchOutcome: { results: SearchResult[]; rewrittenQuery: string; ranking: SearchRankingMetadata };
+        let searchOutcome: { results: SearchResult[]; rewrittenQuery: string; ranking: SearchRankingMetadata; unresponsiveEngines?: string[] };
 
         if (backend === "searxng") {
           searchOutcome = await searchSearxng(query, maxResults, searchConfig.searxngBaseUrl!, searchConfig.timeoutMs);
@@ -152,6 +152,15 @@ registerTool({
           const degraded = streak >= SEARCH_DEGRADED_THRESHOLD;
 
           let output = `No results found for "${query}" from the ${backend} backend.${queryNote}`;
+          // The backends tried before this one are part of the answer. Their errors were collected
+          // and then dropped, so "No results found" read as "nothing exists" when SearXNG had in fact
+          // returned HTTP 503 and only the last-resort scrape came back empty.
+          if (backendErrors.length > 0) {
+            output += `\nBackends tried before it: ${backendErrors.join("; ")}.`;
+            if (backendErrors.some((entry) => !entry.endsWith(": no results"))) {
+              output += "\nOne or more search backends FAILED — this empty result is not evidence that nothing exists.";
+            }
+          }
           if (degraded) {
             output += `\n⚠ The search backend appears degraded (${streak} consecutive queries returned zero results). ` +
               "STOP calling web_search — further attempts will likely fail the same way. " +
@@ -175,6 +184,7 @@ registerTool({
               ranking,
               consecutiveZeroResults: streak,
               searchDegraded: degraded,
+              ...(backendErrors.length > 0 ? { backendErrors } : {}),
             },
           };
         }
@@ -185,10 +195,13 @@ registerTool({
         const formatted = results
           .map(r => `**${r.title}**\n${r.url}\n${r.snippet}`)
           .join("\n\n");
+        const partialNote = searchOutcome.unresponsiveEngines?.length
+          ? `\n(Partial results: ${searchOutcome.unresponsiveEngines.length} search engine(s) did not respond — ${searchOutcome.unresponsiveEngines.join(", ")}.)`
+          : "";
 
         return {
           success: true,
-          output: `**Web Search Results for:** "${query}" (via ${backend})${queryNote}\n\n${formatted}`,
+          output: `**Web Search Results for:** "${query}" (via ${backend})${queryNote}${partialNote}\n\n${formatted}`,
           metadata: {
             query,
             rewrittenQuery,
@@ -197,6 +210,8 @@ registerTool({
             attemptedBackends,
             requestedBackend: searchConfig.requestedBackend,
             ranking,
+            ...(backendErrors.length > 0 ? { backendErrors } : {}),
+            ...(searchOutcome.unresponsiveEngines?.length ? { unresponsiveEngines: searchOutcome.unresponsiveEngines } : {}),
           },
         };
       } catch (err) {
@@ -267,6 +282,10 @@ registerTool({
       // content-type the first GET already returns (and many servers reject HEAD).
       let contentType = "";
       let nativeFetchText: string | null = null;
+      // What the direct GET said, carried to whatever answers in its place. A 404 or 403 used to be
+      // dropped here: the browser then rendered the error page and it came back as the content.
+      let directStatus: number | null = null;
+      let directError = "";
       try {
         const res = await safeFetch(url, 12000, {
           headers: {
@@ -274,6 +293,7 @@ registerTool({
             "Accept": "text/html,application/xhtml+xml,application/json,text/plain,*/*",
           },
         });
+        directStatus = res.status;
         if (res.ok) {
           const ct = res.headers.get("content-type") ?? "";
           contentType = ct;
@@ -305,9 +325,13 @@ registerTool({
             nativeFetchText = raw.trim();
           }
         }
-      } catch {
-        // ignore — fall through to Playwright
+      } catch (err) {
+        // fall through to Playwright, remembering why
+        directError = err instanceof Error ? err.message : String(err);
       }
+      const directNote = directStatus !== null && !(directStatus >= 200 && directStatus < 300)
+        ? `a direct request was answered HTTP ${directStatus}`
+        : directError ? `a direct request failed (${directError})` : "";
 
       if (nativeFetchText !== null) {
         let text = nativeFetchText;
@@ -325,6 +349,7 @@ registerTool({
       // Use Playwright, but convert the accessibility snapshot to readable text
       // rather than passing the raw YAML DOM tree to the LLM.
       const playwrightAvailable = getMcpConnections().has("playwright");
+      let renderedEmpty = false;
       if (playwrightAvailable) {
         try {
           await callPlaywrightTool("browser_navigate", { url });
@@ -333,27 +358,35 @@ registerTool({
             // browser_evaluate takes a FUNCTION. This sent `expression`, which Playwright MCP 1.61
             // rejects as a missing `function`, so this fast path never ran and every page came
             // back as a converted accessibility snapshot instead of its text.
-            text = await callPlaywrightTool("browser_evaluate", {
+            text = evaluateResultText(await callPlaywrightTool("browser_evaluate", {
               function: `() => (document.body?.innerText??'').replace(/\\t/g,' ').replace(/[ \\t]{3,}/g,'  ').replace(/\\n{4,}/g,'\\n\\n\\n').trim()`,
-            });
+            }));
           } catch {
             // Fall back to snapshot and convert to readable text
             log.warn({ url }, "web_fetch: browser_evaluate unavailable, converting snapshot to text");
             const rawSnapshot = await callPlaywrightTool("browser_snapshot", {});
             text = snapshotToReadableText(rawSnapshot);
           }
-          if (text.length > maxLength) {
-            text = text.substring(0, maxLength) + `\n\n[Content truncated at ${maxLength} chars]`;
+          if (!text.trim()) {
+            // An empty render is not the page's content. It was returned as a successful fetch
+            // of nothing; now the last-resort direct fetch gets its turn, and if that is empty
+            // too the call fails and says both were.
+            renderedEmpty = true;
+          } else {
+            if (text.length > maxLength) {
+              text = text.substring(0, maxLength) + `\n\n[Content truncated at ${maxLength} chars]`;
+            }
+            return {
+              success: true,
+              output: `**Content from:** ${url}${directNote ? ` (browser-rendered; ${directNote})` : ""}\n\n${text}${shareSuffix}`,
+              metadata: { url, contentLength: text.length, contentType: contentType || "text/html", fetchMethod: "playwright", ...(directStatus !== null ? { httpStatus: directStatus } : {}) },
+            };
           }
-          return {
-            success: true,
-            output: `**Content from:** ${url}\n\n${text}${shareSuffix}`,
-            metadata: { url, contentLength: text.length, contentType: contentType || "text/html", fetchMethod: "playwright" },
-          };
         } catch (playwrightErr) {
           log.warn({ err: playwrightErr, url }, "web_fetch Playwright failed");
         }
       }
+      const renderedNote = renderedEmpty ? "; the browser rendered the page with no text" : "";
 
       // Last resort: native fetch even if content seems thin
       try {
@@ -364,22 +397,30 @@ registerTool({
           },
         });
         if (!res.ok) {
-          return { success: false, output: "", error: `HTTP ${res.status} from ${url}` };
+          return { success: false, output: "", error: `HTTP ${res.status} from ${url}${renderedNote}` };
         }
         const resContentType = res.headers.get("content-type") ?? "";
         let text = await res.text();
         if (resContentType.includes("text/html")) text = stripHtml(text);
+        if (!text.trim()) {
+          return {
+            success: false,
+            output: "",
+            error: `${url} returned no readable text (HTTP ${res.status}${resContentType ? `, ${resContentType}` : ""})${renderedNote}. `
+              + "The page may be empty, need interaction, or block automated clients — this is not its content.",
+          };
+        }
         if (text.length > maxLength) {
           text = text.substring(0, maxLength) + `\n\n[Content truncated at ${maxLength} chars]`;
         }
         return {
           success: true,
-          output: `**Content from:** ${url}\n\n${text}${shareSuffix}`,
-          metadata: { url, contentLength: text.length, contentType: resContentType, fetchMethod: "native_fallback" },
+          output: `**Content from:** ${url}${renderedEmpty ? " (raw response; the browser rendered no text)" : ""}\n\n${text}${shareSuffix}`,
+          metadata: { url, contentLength: text.length, contentType: resContentType, fetchMethod: "native_fallback", httpStatus: res.status },
         };
       } catch (err) {
         log.error({ err, url }, "web_fetch failed");
-        return { success: false, output: "", error: `Fetch failed: ${String(err)}` };
+        return { success: false, output: "", error: `Fetch failed: ${String(err)}${directNote ? `; earlier, ${directNote}` : ""}${renderedNote}` };
       }
     } catch (err) {
       log.error({ err, url }, "web_fetch failed");
@@ -651,6 +692,24 @@ registerTool({
 });
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/**
+ * The page text inside a browser_evaluate answer. Playwright MCP wraps the returned value as a
+ * JSON literal under `### Result` (followed by other sections); an empty page is `""`, which as
+ * raw text is two quote characters and read as content. Unparseable answers pass through whole.
+ */
+function evaluateResultText(output: string): string {
+  const start = output.indexOf("### Result\n");
+  if (start < 0) return output;
+  const body = output.slice(start + "### Result\n".length);
+  const end = body.search(/\n#{1,4} /);
+  try {
+    const value: unknown = JSON.parse((end >= 0 ? body.slice(0, end) : body).trim());
+    return typeof value === "string" ? value : output;
+  } catch {
+    return output;
+  }
+}
 
 /**
  * Converts a Playwright browser_snapshot accessibility-tree output into compact
@@ -1127,10 +1186,23 @@ export function expandSearchQuery(query: string): string {
 
 // ─── SearXNG (self-hosted, most reliable) ────────────────────────────────────
 
+/** SearXNG's `unresponsive_engines` — `[engine, reason]` pairs — as "engine (reason)" strings. */
+function describeUnresponsiveEngines(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((entry) => {
+    if (Array.isArray(entry)) {
+      const [engine, reason] = entry as unknown[];
+      return reason ? `${String(engine)} (${String(reason)})` : String(engine);
+    }
+    return String(entry);
+  }).filter(Boolean);
+}
+
 async function searchSearxng(query: string, maxResults: number, baseUrl: string, timeoutMs: number): Promise<{
   results: SearchResult[];
   rewrittenQuery: string;
   ranking: SearchRankingMetadata;
+  unresponsiveEngines: string[];
 }> {
   const rewrittenQuery = expandSearchQuery(query);
   const url = `${baseUrl.replace(/\/$/, "")}/search?q=${encodeURIComponent(rewrittenQuery)}&format=json&categories=general&language=auto`;
@@ -1142,7 +1214,7 @@ async function searchSearxng(query: string, maxResults: number, baseUrl: string,
   });
 
   if (!res.ok) throw new Error(`SearXNG returned HTTP ${res.status}`);
-  const data = await res.json() as { results?: Array<{ title?: string; url?: string; content?: string }> };
+  const data = await res.json() as { results?: Array<{ title?: string; url?: string; content?: string }>; unresponsive_engines?: unknown };
 
   const rawResults = (data.results ?? []).map(r => ({
     title: r.title ?? "",
@@ -1150,10 +1222,19 @@ async function searchSearxng(query: string, maxResults: number, baseUrl: string,
     snippet: r.content ?? "",
   })).filter(r => r.title && r.url);
 
+  // An empty result list while engines did not answer is an OUTAGE, not an empty web: SearXNG
+  // reports rate-limited, CAPTCHA'd and timed-out upstreams here and still answers HTTP 200.
+  // Thrown, it is recorded as this backend's error and the next backend is tried.
+  const unresponsiveEngines = describeUnresponsiveEngines(data.unresponsive_engines);
+  if (rawResults.length === 0 && unresponsiveEngines.length > 0) {
+    throw new Error(`SearXNG returned no results and ${unresponsiveEngines.length} engine(s) did not respond: ${unresponsiveEngines.join(", ")}`);
+  }
+
   const rankedResults = rankSearchResults(rewrittenQuery, rawResults, maxResults);
   const signals = extractQuerySignals(rewrittenQuery);
 
   return {
+    unresponsiveEngines,
     results: rankedResults.map(({ score: _score, ...result }) => result),
     rewrittenQuery,
     ranking: {
@@ -1359,10 +1440,11 @@ function formatSearchError(requestedBackend: "auto" | SearchBackend, backendErro
       : "Search failed: no search backend is available.";
   }
 
+  const notEvidence = " — the search did not run, so this is not evidence that nothing exists.";
   if (requestedBackend === "auto") {
-    return `Search failed across available backends: ${backendErrors.join("; ")}`;
+    return `Search failed across available backends: ${backendErrors.join("; ")}${notEvidence}`;
   }
 
-  return `Search failed: ${backendErrors.join("; ")}`;
+  return `Search failed: ${backendErrors.join("; ")}${notEvidence}`;
 }
 

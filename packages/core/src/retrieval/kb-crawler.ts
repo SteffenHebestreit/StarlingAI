@@ -455,7 +455,15 @@ export async function startKbCrawl(kbId: string): Promise<StartCrawlResult> {
   const controller = new AbortController();
   activeCrawls.set(kbId, { controller, startedAt: Date.now(), done: donePromise });
 
-  const kb = await getKnowledgeBase(kbId);
+  // An unreadable registry now THROWS instead of reading as empty (finding S4, 2026-10-05). The
+  // slot reserved above must be released on that path too, or this KB reports "a crawl is already
+  // running" until the process restarts.
+  const kb = await getKnowledgeBase(kbId).catch((err: unknown) => (err instanceof Error ? err : new Error(String(err))));
+  if (kb instanceof Error) {
+    activeCrawls.delete(kbId);
+    resolveDone();
+    return { ok: false, error: kb.message };
+  }
   if (!kb) {
     activeCrawls.delete(kbId);
     resolveDone();
@@ -476,11 +484,17 @@ export async function startKbCrawl(kbId: string): Promise<StartCrawlResult> {
   // stable doc ids to keep even that pathological overlap idempotent.
 
   const startedAt = new Date().toISOString();
-  await mutateKnowledgeBase(kb.id, (record) => {
-    record.status = "crawling";
-    delete record.cancelRequested;
-    record.lastCrawl = { startedAt, pagesVisited: 0, pagesIngested: 0, pagesSkippedUnchanged: 0, pagesFailed: 0 };
-  });
+  try {
+    await mutateKnowledgeBase(kb.id, (record) => {
+      record.status = "crawling";
+      delete record.cancelRequested;
+      record.lastCrawl = { startedAt, pagesVisited: 0, pagesIngested: 0, pagesSkippedUnchanged: 0, pagesFailed: 0 };
+    });
+  } catch (err) {
+    activeCrawls.delete(kb.id);
+    resolveDone();
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
 
   void runCrawl(kb.id, controller.signal)
     .catch((err) => {
@@ -492,6 +506,11 @@ export async function startKbCrawl(kbId: string): Promise<StartCrawlResult> {
           record.lastCrawl.stopReason = "error";
           record.lastCrawl.error = err instanceof Error ? err.message : String(err);
         }
+      }).catch((persistErr: unknown) => {
+        // The registry that failed the crawl may fail this write too; an unhandled rejection
+        // here would take the process down with it.
+        log.error({ err: persistErr, kbId: kb.id }, "could not record the crashed crawl");
+        return undefined;
       });
     })
     .finally(() => {

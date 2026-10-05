@@ -123,12 +123,27 @@ const MIME_TYPES: Record<string, string> = {
 // env_file, and git operations use git COMMANDS, not raw object reads, so nothing
 // legitimate is lost. `.env.example` is the shipped public template — allowed.
 const SENSITIVE_READ_PATTERNS: RegExp[] = [
-  /^\.env(\..+)?$/,             // .env, .env.local, .env.production, …
   /(^|\/)\.starlingai(\/|$)/,   // credential store, jwt secret, audit log, durable memory
   /(^|\/)\.git(\/|$)/,          // VCS internals (objects, refs, hooks, config)
   /(^|\/)credentials\.enc$/,
   /(^|\/)\.jwt_secret$/,
 ];
+
+// Dotenv files at ANY depth and under any name shape (security finding S1, 2026-10-05).
+// The pattern used to be root-only `^\.env(\..+)?$`, so `prod.env`, `docker/staging.env` and
+// `packages/x/.env` were ordinary readable files — workspace_search returned the contents of
+// ".env" and "prod.env" for a canary key. `.env.example` (the public template) stays readable
+// wherever it sits, but only when nothing else on the list matches: `.git/.env.example` is still
+// VCS internals.
+const DOTENV_PATTERNS: RegExp[] = [
+  /(^|\/)\.env([-_.].+|~)?$/,   // .env, .env.local, .env-local, .env_prod, .env~, sub/.env.production, …
+  /(^|\/)\.envrc$/,             // direnv: exports secrets into the shell
+  // prod.env, docker/staging.env, and their editor/backup copies. Only backup suffixes: a source
+  // file such as jest.env.js is code, not a dotenv file.
+  /(^|\/)[^/]+\.env(\.(bak|old|orig|backup|save|swp|tmp)|~)?$/,
+];
+// Public templates, wherever they sit: .env.example/.sample/.template/.dist, example.env, sample.env.
+const DOTENV_TEMPLATE = /(^|\/)(\.env\.(example|sample|template|dist)|(example|sample|template)\.env)$/;
 
 /** True when a workspace-relative path points at a secret / VCS-internal file.
  *  Matched case-INSENSITIVELY: the repo is bind-mounted from Windows/macOS hosts whose
@@ -136,8 +151,11 @@ const SENSITIVE_READ_PATTERNS: RegExp[] = [
  *  a case-sensitive denylist would wave it straight through. */
 export function isSensitiveWorkspacePath(relativePath: string): boolean {
   const rel = relativePath.replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
-  if (rel === ".env.example") return false; // public template
-  return SENSITIVE_READ_PATTERNS.some((re) => re.test(rel));
+  // NTFS alternate data streams: `.env::$DATA` opens `.env` itself on a Windows host.
+  if (process.platform === "win32" && rel.includes(":")) return true;
+  if (SENSITIVE_READ_PATTERNS.some((re) => re.test(rel))) return true;
+  if (DOTENV_TEMPLATE.test(rel)) return false; // public template
+  return DOTENV_PATTERNS.some((re) => re.test(rel));
 }
 
 export function guardPath(path: string, workspacePath: string): { safe: boolean; resolved: string } {
@@ -330,14 +348,43 @@ registerTool({
       return { success: false, output: "", error: `Path not found: ${path}` };
     }
 
-    const entries = listDir(resolved, recursive ? 3 : 0);
+    // A FILE path answered "(empty directory — no files yet…)": readdir threw on it, the catch
+    // swallowed that, and the caller was told an existing file's directory was empty.
+    let rootStat;
+    try { rootStat = statSync(resolved); }
+    catch (err) { return { success: false, output: "", error: `Could not read ${path}: ${errorCode(err)}` }; }
+    if (!rootStat.isDirectory()) {
+      return {
+        success: true,
+        output: `${path} is a file (${rootStat.size} bytes), not a directory — use read_file to read it.`,
+        metadata: { path, count: 0, isFile: true, size: rootStat.size },
+      };
+    }
+
+    const notes: ListDirNotes = { unreadable: 0, cutByDepth: 0 };
+    let entries: string[];
+    try {
+      entries = listDir(resolved, recursive ? LIST_RECURSIVE_DEPTH : 0, recursive, listHintPrefix(path), notes);
+    } catch (err) {
+      return { success: false, output: "", error: `Could not list ${path}: ${errorCode(err)}` };
+    }
+    const footer = [
+      notes.unreadable > 0 ? `${notes.unreadable} entr${notes.unreadable === 1 ? "y" : "ies"} could not be read — marked "unreadable" above.` : "",
+      notes.cutByDepth > 0 ? `${notes.cutByDepth} director${notes.cutByDepth === 1 ? "y was" : "ies were"} not expanded: the recursive listing stops ${LIST_RECURSIVE_DEPTH} levels down — call list_files on the path shown to see inside.` : "",
+    ].filter(Boolean).join("\n");
     // An empty-string output reads as "something went wrong" to the model — it
     // retries the same listing over and over (audit a438ef4a: 5 identical
     // list_files calls on an empty working zone). Say "empty" explicitly.
     return {
       success: true,
-      output: entries.length > 0 ? entries.join("\n") : "(empty directory — no files yet; create files with write_file)",
-      metadata: { path, count: entries.length },
+      output: (entries.length > 0 ? entries.join("\n") : "(empty directory — no files yet; create files with write_file)")
+        + (footer ? `\n\n${footer}` : ""),
+      metadata: {
+        path,
+        count: entries.length,
+        ...(notes.unreadable > 0 ? { unreadable: notes.unreadable } : {}),
+        ...(notes.cutByDepth > 0 ? { cutByDepth: notes.cutByDepth } : {}),
+      },
     };
   },
 });
@@ -857,20 +904,72 @@ registerTool({
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function listDir(dir: string, depth: number): string[] {
+/** How many levels below the listed directory a recursive list_files descends. */
+const LIST_RECURSIVE_DEPTH = 3;
+
+interface ListDirNotes { unreadable: number; cutByDepth: number }
+
+/** The error's code (EACCES, ENOENT, …) when it has one, else its message. */
+function errorCode(err: unknown): string {
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === "string" ? code : err instanceof Error ? err.message : String(err);
+}
+
+/** The caller's own path, as the prefix of a path a follow-up list_files call can take. */
+function listHintPrefix(path: string): string {
+  const trimmed = path.replace(/\\/g, "/").replace(/\/+$/, "");
+  return trimmed === "" || trimmed === "." ? "" : trimmed;
+}
+
+/**
+ * One directory of a listing, every entry accounted for. The try used to wrap the whole loop,
+ * so ONE entry whose stat failed (a broken symlink, a permission error) ended the listing: that
+ * entry and every one after it vanished, and the caller saw a shorter directory than the one on
+ * disk. Now such an entry is listed as unreadable and the loop goes on. A directory the depth
+ * limit stops at is marked with how much lies below it, so a recursive listing never presents a
+ * cut-off subtree as an empty one. Throws only when `dir` itself cannot be read and `isRoot`.
+ */
+function listDir(dir: string, depth: number, recursive: boolean, relDir: string, notes: ListDirNotes, isRoot = true): string[] {
   const entries: string[] = [];
+  let names: string[];
   try {
-    for (const name of readdirSync(dir)) {
-      const full = resolve(dir, name);
-      const stat = statSync(full);
-      const prefix = stat.isDirectory() ? "/" : "";
-      entries.push(`${name}${prefix}`);
-      if (depth > 0 && stat.isDirectory()) {
-        const children = listDir(full, depth - 1).map(c => `  ${c}`);
-        entries.push(...children);
+    names = readdirSync(dir);
+  } catch (err) {
+    if (isRoot) throw err;
+    notes.unreadable++;
+    return [`(unreadable directory: ${errorCode(err)})`];
+  }
+  for (const name of names) {
+    const full = resolve(dir, name);
+    const rel = relDir ? `${relDir}/${name}` : name;
+    let stat;
+    try {
+      stat = statSync(full);
+    } catch (err) {
+      notes.unreadable++;
+      entries.push(`${name} (unreadable: ${errorCode(err)})`);
+      continue;
+    }
+    if (!stat.isDirectory()) {
+      entries.push(name);
+      continue;
+    }
+    if (depth > 0) {
+      entries.push(`${name}/`);
+      entries.push(...listDir(full, depth - 1, recursive, rel, notes, false).map(c => `  ${c}`));
+      continue;
+    }
+    if (recursive) {
+      let below = 0;
+      try { below = readdirSync(full).length; } catch { /* listing it directly reports why */ }
+      if (below > 0) {
+        notes.cutByDepth++;
+        entries.push(`${name}/ (${below} entr${below === 1 ? "y" : "ies"} below the depth limit — list_files path="${rel}")`);
+        continue;
       }
     }
-  } catch { /* ignore permission errors */ }
+    entries.push(`${name}/`);
+  }
   return entries;
 }
 

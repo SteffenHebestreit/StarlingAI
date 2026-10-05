@@ -187,6 +187,9 @@ registerTool({
   async execute(_args, ctx): Promise<ToolResult> {
     if (!engramConfigured()) return fail("Document RAG is not enabled (retrieval.documentRag.enabled).");
     const docs = await listScopedDocuments(ragCtx(ctx));
+    if (docs === null) {
+      return fail("The document store did not respond — the library could not be listed. This is NOT evidence that no documents have been ingested; do not tell the user their files are missing. Try again shortly.");
+    }
     if (docs.length === 0) {
       return { success: true, output: "No documents have been ingested into this conversation's library yet.", metadata: { count: 0 } };
     }

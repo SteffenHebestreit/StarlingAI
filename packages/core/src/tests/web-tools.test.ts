@@ -358,3 +358,100 @@ describe("web_fetch through the browser (Playwright MCP 1.61)", () => {
     expect(result.metadata?.["fetchMethod"]).toBe("playwright");
   });
 });
+
+/**
+ * An empty answer from a search or a fetch is evidence only when the backend actually ran. These are
+ * the cases where it had not — a failed SearXNG, engines that never answered, a 404, a blank render —
+ * and the answer used to read like a clean "nothing there".
+ */
+describe("web_search / web_fetch say when nothing came back because something failed", () => {
+  const ddgEmpty = () => new Response("<html><body><div class=\"no-results\">No results.</div></body></html>", {
+    status: 200, headers: { "Content-Type": "text/html" },
+  });
+
+  async function searchWithConfig(search: Record<string, unknown>) {
+    const loaderModule = await import("../config/loader.js");
+    const realConfig = loaderModule.getConfig();
+    vi.spyOn(loaderModule, "getConfig").mockReturnValue({
+      ...realConfig,
+      retrieval: { ...realConfig.retrieval, search: { timeoutMs: 12000, ...search } as Config["retrieval"]["search"] },
+    });
+    const { getTool } = await import("../tools/registry.js");
+    const { clearSearchSessionState } = await import("../tools/web.js");
+    return async (query: string, sessionId: string) => {
+      clearSearchSessionState(sessionId);
+      return getTool("web_search")!.execute({ query, maxResults: 5 }, { sessionId, workspacePath: "/workspace" });
+    };
+  }
+
+  it("prints the failed backend and says the empty result is not evidence", async () => {
+    const search = await searchWithConfig({ backend: "auto", searxngBaseUrl: "http://search.local" });
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) =>
+      String(input).startsWith("http://search.local/") ? new Response("down", { status: 503 }) : ddgEmpty()));
+
+    const r = await search("quarterly ferry timetable", "session-search-failed-backend");
+    expect(r.success).toBe(true);
+    expect(r.output).toContain("No results found for \"quarterly ferry timetable\" from the duckduckgo backend.");
+    expect(r.output).toContain("Backends tried before it: searxng: SearXNG returned HTTP 503.");
+    expect(r.output).toContain("One or more search backends FAILED — this empty result is not evidence that nothing exists.");
+  });
+
+  it("treats SearXNG's empty answer with unresponsive engines as a failure, not an empty web", async () => {
+    const search = await searchWithConfig({ backend: "auto", searxngBaseUrl: "http://search.local" });
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) =>
+      String(input).startsWith("http://search.local/")
+        ? new Response(JSON.stringify({ results: [], unresponsive_engines: [["google", "timeout"], ["bing", "CAPTCHA"]] }), {
+          status: 200, headers: { "Content-Type": "application/json" },
+        })
+        : ddgEmpty()));
+
+    const r = await search("quarterly ferry timetable", "session-search-unresponsive");
+    expect(r.output).toContain("searxng: SearXNG returned no results and 2 engine(s) did not respond: google (timeout), bing (CAPTCHA)");
+    expect(r.output).toContain("not evidence that nothing exists");
+  });
+
+  it("marks results as partial when some SearXNG engines did not respond", async () => {
+    const search = await searchWithConfig({ backend: "auto", searxngBaseUrl: "http://search.local" });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      results: [{ title: "Ferry timetable 2026", url: "https://example.com/ferry", content: "quarterly ferry timetable" }],
+      unresponsive_engines: [["google", "timeout"]],
+    }), { status: 200, headers: { "Content-Type": "application/json" } })));
+
+    const r = await search("quarterly ferry timetable", "session-search-partial");
+    expect(r.output).toContain("via searxng");
+    expect(r.output).toContain("(Partial results: 1 search engine(s) did not respond — google (timeout).)");
+  });
+
+  it("carries the direct request's HTTP status into a browser-rendered answer", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("<html><body>Not here</body></html>", {
+      status: 404, headers: { "Content-Type": "text/html" },
+    })));
+    const callTool = vi.fn(async (input: { name: string }) => input.name === "browser_evaluate"
+      ? { content: [{ type: "text", text: "### Result\n\"404 — this page could not be found\"\n\n### Ran Playwright code\n```js\nawait page.evaluate()\n```" }] }
+      : { content: [{ type: "text", text: "" }] });
+    mcpConnections.set("playwright", { client: { callTool } });
+
+    const { getTool } = await import("../tools/registry.js");
+    const r = await getTool("web_fetch")!.execute({ url: "http://93.184.215.14/missing" }, { sessionId: "s-fetch-404", workspacePath: "/workspace" });
+    expect(r.success).toBe(true);
+    expect(r.output).toContain("**Content from:** http://93.184.215.14/missing (browser-rendered; a direct request was answered HTTP 404)");
+    expect(r.output).toContain("404 — this page could not be found");
+    expect(r.output, "the evaluate wrapper is not page text").not.toContain("### Ran Playwright code");
+    expect(r.metadata?.["httpStatus"]).toBe(404);
+  });
+
+  it("fails when the browser renders no text and the direct response has none either", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("<html><body><div id=app></div></body></html>", {
+      status: 200, headers: { "Content-Type": "text/html" },
+    })));
+    const callTool = vi.fn(async (input: { name: string }) => input.name === "browser_evaluate"
+      ? { content: [{ type: "text", text: "### Result\n\"\"" }] }
+      : { content: [{ type: "text", text: "" }] });
+    mcpConnections.set("playwright", { client: { callTool } });
+
+    const { getTool } = await import("../tools/registry.js");
+    const r = await getTool("web_fetch")!.execute({ url: "http://93.184.215.14/app" }, { sessionId: "s-fetch-empty", workspacePath: "/workspace" });
+    expect(r.success).toBe(false);
+    expect(r.error).toMatch(/returned no readable text \(HTTP 200, text\/html\); the browser rendered the page with no text\. .*this is not its content/);
+  });
+});

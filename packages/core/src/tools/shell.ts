@@ -161,9 +161,14 @@ function normalizeCommandToken(token: string): string {
     .replace(/^\/+/, "");
 }
 
+/** A runtime's environment accessor ends in ".env" like a dotenv file named `prod.env`, but on a
+ *  command line (`node -e "console.log(process.env)"`, `grep -rn import.meta.env src`) it is code,
+ *  not a path. Only the bare accessor is exempt; `config/process.env` is still a file. */
+const RUNTIME_ENV_ACCESSOR = /^(?:process|import\.meta|Deno|Bun)\.env$/;
+
 function isSensitiveCommandToken(token: string): boolean {
   const rel = normalizeCommandToken(token);
-  return rel.length > 0 && isSensitiveWorkspacePath(rel);
+  return rel.length > 0 && !RUNTIME_ENV_ACCESSOR.test(rel) && isSensitiveWorkspacePath(rel);
 }
 
 function normalizeWorkdir(workdir: string): string | null {

@@ -69,6 +69,8 @@ describe("glob_files / grep_files", () => {
     expect(r.success).toBe(true);
     const paths = String(r.output).split("\n").sort();
     expect(paths).toEqual(["src/alpha.ts", "src/deep/beta.ts"]);   // node_modules excluded
+    // Beside real results the skipped directory is metadata only, not a nudge into dependencies.
+    expect(r.metadata?.["notDescended"]).toEqual(["node_modules"]);
   });
 
   it("reports every literal match with line numbers and context", async () => {
@@ -236,5 +238,102 @@ describe("grep_files answers for what it searched", () => {
     const r = await grep({ pattern: "SECRET", path: ".env" });
     expect(r.success).toBe(false);
     expect(String(r.output)).not.toContain("SECRET=1");
+  });
+});
+
+/**
+ * EVERY GAP IN THE SEARCH IS PART OF THE ANSWER.
+ *
+ * Each case below used to come back as a plain "No matches" / "No files match" / a list that read as
+ * complete: a UTF-16 file (every second byte NUL) dropped as binary, a named file that was never read,
+ * a dist/ directory the glob asked for and the walk skipped anyway, a result list cut at the limit.
+ */
+describe("glob_files / grep_files report what they did not search", () => {
+  const cleanup: string[] = [];
+  let ws: string;
+
+  beforeEach(() => {
+    ws = mkdtempSync(join(tmpdir(), "sai-nav-gaps-"));
+    cleanup.push(ws);
+    mkdirSync(join(ws, "src"), { recursive: true });
+    mkdirSync(join(ws, "dist", "lib"), { recursive: true });
+    mkdirSync(join(ws, "logs"), { recursive: true });
+    const text = "first line\nneedle in a UTF-16 file\n";
+    writeFileSync(join(ws, "logs", "le.txt"), Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(text, "utf16le")]));
+    writeFileSync(join(ws, "logs", "be.txt"), Buffer.concat([Buffer.from([0xfe, 0xff]), Buffer.from(text, "utf16le").swap16()]));
+    writeFileSync(join(ws, "logs", "blob.dat"), Buffer.from([0x6e, 0x65, 0x65, 0x64, 0x6c, 0x65, 0x00, 0x01, 0x02]));
+    writeFileSync(join(ws, "src", "a.ts"), "needle();\nneedle();\n");
+    writeFileSync(join(ws, "dist", "lib", "bundle.js"), "needle();\n");
+  });
+
+  afterEach(() => { for (const d of cleanup.splice(0)) rmSync(d, { recursive: true, force: true }); });
+
+  async function tool(name: string) {
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/code-navigation.js"),
+    ]);
+    return getTool(name)!;
+  }
+  const ctx = () => ({ sessionId: "s", workspacePath: ws }) as never;
+
+  it("decodes a UTF-16 file with a byte-order mark, little- and big-endian", async () => {
+    for (const file of ["logs/le.txt", "logs/be.txt"]) {
+      const r = await (await tool("grep_files")).execute({ pattern: "needle", path: file }, ctx());
+      expect(r.success, file).toBe(true);
+      expect(r.metadata?.["matches"], file).toBe(1);
+      expect(String(r.output)).toContain(`${file}:2`);
+    }
+  });
+
+  it("fails a named file it could not search instead of answering no matches", async () => {
+    const r = await (await tool("grep_files")).execute({ pattern: "needle", path: "logs/blob.dat" }, ctx());
+    expect(r.success).toBe(false);
+    expect(r.error).toMatch(/^Not searched: logs\/blob\.dat — binary content/);
+  });
+
+  it("counts binary files a directory search passed over, and skips known binary types silently", async () => {
+    writeFileSync(join(ws, "logs", "font.ttf"), Buffer.from([0x6e, 0x65, 0x65, 0x64, 0x6c, 0x65, 0x00]));
+    writeFileSync(join(ws, "logs", "cache.sqlite"), Buffer.from([0x6e, 0x65, 0x65, 0x64, 0x6c, 0x65, 0x00]));
+    const r = await (await tool("grep_files")).execute({ pattern: "needle", path: "logs" }, ctx());
+    expect(r.success).toBe(true);
+    expect(r.metadata?.["matches"]).toBe(2);
+    expect(String(r.output)).toContain("1 file(s) with binary content (NUL bytes) were not searched.");
+    expect(String(r.output)).not.toMatch(/blob\.dat|font\.ttf|cache\.sqlite/);
+  });
+
+  it("descends a skipped directory the glob names, and says when it skipped one", async () => {
+    const named = await (await tool("glob_files")).execute({ pattern: "dist/**/*.js" }, ctx());
+    expect(String(named.output).split("\n\n")[0]).toBe("dist/lib/bundle.js");
+    const grepNamed = await (await tool("grep_files")).execute({ pattern: "needle", glob: "dist/**" }, ctx());
+    expect(grepNamed.metadata?.["matches"]).toBe(1);
+
+    const unnamed = await (await tool("grep_files")).execute({ pattern: "needle", glob: "**/*.js" }, ctx());
+    expect(unnamed.metadata?.["matches"]).toBe(0);
+    expect(String(unnamed.output)).toContain("Not searched, skipped as generated or vendored: dist/. If what you are looking for is generated output, name its directory in path or the glob.");
+  });
+
+  it("names skipped directories only for an empty result, and never names a dependency directory", async () => {
+    mkdirSync(join(ws, "node_modules", "pkg"), { recursive: true });
+    writeFileSync(join(ws, "node_modules", "pkg", "index.js"), "needle();\n");
+    const found = await (await tool("grep_files")).execute({ pattern: "needle" }, ctx());
+    expect(found.metadata?.["matches"]).toBeGreaterThan(0);
+    expect(String(found.output)).not.toMatch(/skipped as generated|node_modules/);
+
+    const none = await (await tool("grep_files")).execute({ pattern: "absent-token" }, ctx());
+    expect(String(none.output)).toContain("Not searched, skipped as generated or vendored: dist/; 1 installed-dependency directory.");
+    expect(String(none.output)).not.toContain("node_modules");
+  });
+
+  it("does not report a skipped directory the pattern could not reach into", async () => {
+    const r = await (await tool("glob_files")).execute({ pattern: "src/*.md" }, ctx());
+    expect(String(r.output)).toBe("No files match src/*.md.");
+  });
+
+  it("says how many results the limit cut, and how to get them", async () => {
+    const grep = await (await tool("grep_files")).execute({ pattern: "needle", path: "src", limit: 1 }, ctx());
+    expect(String(grep.output)).toMatch(/Showing 1 of ≥1 matches — the search stopped at the limit.*Raise limit \(max 500\)/);
+    const glob = await (await tool("glob_files")).execute({ pattern: "logs/*.txt", limit: 1 }, ctx());
+    expect(String(glob.output)).toMatch(/Showing 1 of 2 matching paths, most recently modified first — raise limit \(max 300\)/);
   });
 });

@@ -41,12 +41,12 @@ describe("memory search — Unicode tokenization", () => {
 
   it("gives an unrelated word no token credit through an umlaut fragment", async () => {
     const ws = workspace();
-    // searchMemoryRecords has no relevance floor — every record scores at least
-    // scopeWeight + recencyBoost, so presence proves nothing. The bug was a SCORING
-    // bug: the ASCII tokenizer split "Mängelrüge" into ["ngelr","ge"], and "ge" is a
-    // substring of "Klingel", so an unrelated record collected a +0.28 subject bonus.
-    // The assertion is therefore that Klingel scores exactly like a control record
-    // that shares nothing with the query.
+    // No embedder here, so the semantic check cannot run and searchMemoryRecords applies no
+    // relevance floor: every record comes back, ranked, which is what lets this test read the
+    // SCORES. The bug: the ASCII tokenizer split "Mängelrüge" into ["ngelr","ge"], and "ge" is
+    // a substring of "Klingel", so an unrelated record collected a +0.28 subject bonus. The
+    // assertion is therefore that Klingel scores exactly like a control record that shares
+    // nothing with the query — both present, so the comparison is between real scores.
     storeWorkspaceMemoryRecord(ws, {
       key: "maengelruege",
       subject: "Mängelrüge an den Bauunternehmer",
@@ -70,6 +70,7 @@ describe("memory search — Unicode tokenization", () => {
     const score = (key: string) => hits.find((r) => r.key === key)?.score ?? 0;
 
     expect(hits[0]?.key).toBe("maengelruege");
+    expect(hits.map((r) => r.key)).toEqual(expect.arrayContaining(["klingel", "control"]));
     expect(score("maengelruege")).toBeGreaterThan(score("klingel"));
     // The precise anti-false-positive claim: Klingel earned no query credit at all.
     expect(score("klingel")).toBeCloseTo(score("control"), 5);

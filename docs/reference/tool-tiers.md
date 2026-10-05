@@ -37,7 +37,7 @@ Always allowed; no side effects.
 | `datetime_arithmetic` | — | — | Date/time arithmetic — add or subtract durations, compute differences, format/parse without delegating |
 | `export_workspace_artifact` | — | — | Expose an existing workspace file or folder as a downloadable chat artifact |
 | `extract_calendar` | — | — | Parse an .ics file into a structured event list |
-| `extract_email` | — | — | Parse an .eml or single-message .mbox file into headers, body, and attachment list |
+| `extract_email` | — | — | Parse an .eml file, or one message of an .mbox chosen by index, into headers, body, and attachment list |
 | `extract_file_content` | — | — | Convert a workspace file into Markdown using the configured file-conversion service |
 | `extract_notebook` | — | — | Convert a Jupyter .ipynb notebook into a single Markdown document with code, outputs, and image refs |
 | `federated_workspace_search` | — | — | Broadcast workspace_search across federated peer instances and merge ranked results |

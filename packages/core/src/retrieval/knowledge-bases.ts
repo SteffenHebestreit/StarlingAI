@@ -15,13 +15,19 @@
  * drops the engram graph clears the KB manifest too.
  *
  * Like document-registry.ts, writes are serialized per process with a promise
- * chain; concurrent writers in SEPARATE processes (gateway + standalone
- * scene-worker) can race, which is acceptable for this low-traffic manifest.
+ * chain — and so are READS (finding S4, 2026-10-05): on Windows a rename cannot
+ * replace a file another handle has open, so an unlocked read made the
+ * crawler's own write fail with EPERM. Concurrent writers in SEPARATE processes
+ * (gateway + standalone scene-worker) can still race, which is acceptable for
+ * this low-traffic manifest; the rename is retried on Windows sharing errors.
  * Cross-process crawl CANCELLATION works via the `cancelRequested` flag in the
  * record — the crawling process re-reads its record at each progress persist.
+ *
+ * A registry that EXISTS but cannot be read is an error, never "no knowledge
+ * bases": see KnowledgeBaseRegistryUnreadableError.
  */
 import { createHash } from "node:crypto";
-import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
+import { readFile, writeFile, mkdir, rename, unlink } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { getConfig } from "../config/loader.js";
 import { childLogger } from "../logger.js";
@@ -212,14 +218,73 @@ interface KbStoreFile {
   kbs: KnowledgeBaseRecord[];
 }
 
-async function readStore(): Promise<KnowledgeBaseRecord[]> {
-  try {
-    const raw = await readFile(storePath(), "utf8");
-    const parsed = JSON.parse(raw) as Partial<KbStoreFile>;
-    return Array.isArray(parsed.kbs) ? parsed.kbs : [];
-  } catch {
-    return []; // missing/corrupt → empty
+/** Where the registry lives, as named in errors the model and the user read (no host path). */
+const STORE_LABEL = "uploads/.knowledge-bases.json";
+
+/**
+ * The registry file exists but could not be read or parsed.
+ *
+ * Finding S4 (2026-10-05): readStore used to answer EVERY failure — a Windows sharing violation
+ * mid-rename, a permission error, a damaged file — with an empty list. The tools then said "No
+ * knowledge bases available to you yet", and createKnowledgeBase wrote a registry holding only
+ * the new record over the old one, dropping every knowledge base it had failed to read. Only a
+ * MISSING file is empty now; everything else throws this, and nothing is written after it.
+ */
+export class KnowledgeBaseRegistryUnreadableError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "KnowledgeBaseRegistryUnreadableError";
   }
+}
+
+/**
+ * Windows sharing errors. MoveFileEx cannot replace a file another handle holds open — a reader
+ * in another process, an indexer, an antivirus scan — and fails with EPERM; a file mid-replace
+ * can briefly refuse a read the same way. These clear within milliseconds.
+ */
+const TRANSIENT_FS_CODES = new Set(["EPERM", "EBUSY", "EACCES"]);
+const FS_RETRY_DELAYS_MS = [10, 25, 50, 100, 200];
+
+function fsErrorCode(err: unknown): string | undefined {
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === "string" ? code : undefined;
+}
+
+async function retryTransientFs<T>(op: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await op();
+    } catch (err) {
+      const code = fsErrorCode(err);
+      const delay = FS_RETRY_DELAYS_MS[attempt];
+      if (delay === undefined || code === undefined || !TRANSIENT_FS_CODES.has(code)) throw err;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+}
+
+async function readStore(): Promise<KnowledgeBaseRecord[]> {
+  let raw: string;
+  try {
+    raw = await retryTransientFs(() => readFile(storePath(), "utf8"));
+  } catch (err) {
+    if (fsErrorCode(err) === "ENOENT") return []; // no registry yet: genuinely no knowledge bases
+    throw new KnowledgeBaseRegistryUnreadableError(
+      `the knowledge-base registry (${STORE_LABEL}) could not be read: ${fsErrorCode(err) ?? (err instanceof Error ? err.message : String(err))}`,
+      { cause: err },
+    );
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new KnowledgeBaseRegistryUnreadableError(`the knowledge-base registry (${STORE_LABEL}) is not valid JSON`, { cause: err });
+  }
+  const kbs = (parsed as Partial<KbStoreFile> | null)?.kbs;
+  if (!Array.isArray(kbs)) {
+    throw new KnowledgeBaseRegistryUnreadableError(`the knowledge-base registry (${STORE_LABEL}) has no "kbs" list`);
+  }
+  return kbs;
 }
 
 async function writeStore(kbs: KnowledgeBaseRecord[]): Promise<void> {
@@ -229,15 +294,23 @@ async function writeStore(kbs: KnowledgeBaseRecord[]): Promise<void> {
   // Atomic write: the crawler rewrites this file once per ingested page plus
   // every ~2s of progress, so a crash mid-write is a real window. Write to a
   // temp file then rename (atomic on POSIX; MoveFileEx replace on Windows) so a
-  // torn write can never truncate the manifest — readStore's catch maps a
-  // corrupt file to [], which would silently drop every knowledge base.
+  // torn write can never truncate the manifest — a damaged registry is
+  // unreadable, which blocks every knowledge-base operation until it is repaired.
   const tmp = `${path}.${process.pid}.tmp`;
   await writeFile(tmp, `${JSON.stringify(body, null, 2)}\n`, "utf8");
-  await rename(tmp, path);
+  try {
+    // Retried on Windows sharing errors (S4, 2026-10-05): a reader holding the file open made
+    // the replace fail with EPERM, and the crawl write that hit it was lost.
+    await retryTransientFs(() => rename(tmp, path));
+  } catch (err) {
+    await unlink(tmp).catch(() => undefined); // the registry itself is untouched
+    throw err;
+  }
   invalidateAmbientKbCache(); // ambient snapshot below must never outlive a write
 }
 
-// Serialize read-modify-write within this process (document-registry pattern).
+// Serialize every registry access within this process (document-registry pattern) — reads
+// included: a read outside the chain held the file open while a locked write renamed over it.
 let _chain: Promise<unknown> = Promise.resolve();
 function withLock<T>(fn: () => Promise<T>): Promise<T> {
   const run = _chain.then(fn, fn) as Promise<T>;
@@ -486,7 +559,7 @@ function normalizeStale(kb: KnowledgeBaseRecord, isCrawlActive?: (kbId: string) 
 }
 
 export async function listKnowledgeBases(opts?: { isCrawlActive?: (kbId: string) => boolean }): Promise<KnowledgeBaseRecord[]> {
-  return (await readStore()).map((kb) => normalizeStale(kb, opts?.isCrawlActive));
+  return (await withLock(readStore)).map((kb) => normalizeStale(kb, opts?.isCrawlActive));
 }
 
 /** Look up by id, or by case-insensitive exact name as a convenience for agents. */
@@ -496,7 +569,7 @@ export async function getKnowledgeBase(
 ): Promise<KnowledgeBaseRecord | undefined> {
   const needle = idOrName.trim();
   if (!needle) return undefined;
-  const kbs = await readStore();
+  const kbs = await withLock(readStore);
   const found =
     kbs.find((k) => k.id === needle.toLowerCase()) ??
     kbs.find((k) => k.name.toLowerCase() === needle.toLowerCase());
@@ -652,7 +725,7 @@ export async function ambientKbSources(ctx: KbAccessContext = {}): Promise<strin
   if (!kbCfg.enabled) return [];
   let descriptors = _ambientCache && Date.now() - _ambientCache.storedAt <= AMBIENT_TTL_MS ? _ambientCache.descriptors : null;
   if (!descriptors) {
-    const kbs = await readStore();
+    const kbs = await withLock(readStore);
     descriptors = kbs
       .filter((k) => k.ambientRetrieval && k.status === "ready")
       .map((k) => ({ id: k.id, scope: k.scope ?? "workspace", ...(k.ownerId ? { ownerId: k.ownerId } : {}), ...(k.sessionId ? { sessionId: k.sessionId } : {}) }));

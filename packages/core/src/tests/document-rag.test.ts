@@ -17,6 +17,7 @@ import {
   activeScopeSources,
   resolveScopeSource,
   callerManageableSources,
+  listScopedDocuments,
   type RetrievedChunk,
 } from "../retrieval/document-rag.js";
 
@@ -455,6 +456,34 @@ describe("augmentTurnWithDocuments — attachments come from the object store", 
     // content is "we could not read your file" previously flipped that true and
     // disarmed the source-sensitivity classifier and both ungrounded-factual guards.
     expect(aug.retrievalUnavailable).toBe(true);
+    cfg.mockRestore();
+  });
+});
+
+/**
+ * An unreachable document store answered list_documents with "No documents have been ingested into
+ * this conversation's library yet" — and the model told the user their uploads did not exist.
+ * search_documents already told an outage from an empty library; the listing now does too.
+ */
+describe("list_documents — an unreachable store is not an empty library", () => {
+  it("listScopedDocuments is null on an outage and [] only when nothing is in scope", async () => {
+    const cfg = mockDocRagConfig({});
+    vi.spyOn(engram, "engramListDocuments").mockResolvedValueOnce(null);
+    expect(await listScopedDocuments({ sessionId: "s1" })).toBeNull();
+    vi.spyOn(engram, "engramListDocuments").mockResolvedValueOnce([{ id: "docB", title: "B", sources: ["session:other"], chunkCount: 1 }]);
+    expect(await listScopedDocuments({ sessionId: "s1" })).toEqual([]);
+    cfg.mockRestore();
+  });
+
+  it("list_documents fails on an outage instead of saying nothing was ingested", async () => {
+    const cfg = mockDocRagConfig({});
+    vi.spyOn(engram, "engramListDocuments").mockResolvedValue(null);
+    await import("../tools/documents.js");
+    const { getTool } = await import("../tools/registry.js");
+    const r = await getTool("list_documents")!.execute({}, { sessionId: "s1", workspacePath: "/ws" });
+    expect(r.success).toBe(false);
+    expect(r.error).toMatch(/did not respond .*NOT evidence that no documents have been ingested/);
+    expect(r.output).not.toMatch(/No documents have been ingested/);
     cfg.mockRestore();
   });
 });
