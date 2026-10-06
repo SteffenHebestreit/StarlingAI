@@ -60,6 +60,37 @@ describe("audit logger", () => {
     }
   });
 
+  // Session ffe08297 (2026-10-06): a routing loop logged ~12 events a second, and one mkdir + append
+  // per line on the bind-mounted workspace fell hours behind — the file stopped at 08:08 while the
+  // backlog grew in memory. A burst is written as a few appends, every line kept, in order.
+  it("writes a burst of events in a few appends, all of them, in order", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "starlingai-audit-batch-"));
+    let appends = 0;
+    vi.doMock("node:fs/promises", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("node:fs/promises")>();
+      return {
+        ...actual,
+        appendFile: async (...args: Parameters<typeof actual.appendFile>) => {
+          appends++;
+          return actual.appendFile(...args);
+        },
+      };
+    });
+    try {
+      process.env["SAI_AUDIT_LOG"] = join(tempDir, "audit.jsonl");
+      const audit = await import("../audit/logger.js");
+      for (let i = 0; i < 200; i++) audit.logAudit("auth_failure", { marker: `m${i}` });
+      await audit.flushAuditLog();
+
+      expect(readAuditMarkers(join(tempDir, "audit.jsonl"))).toEqual(Array.from({ length: 200 }, (_, i) => `m${i}`));
+      expect(appends).toBeLessThanOrEqual(3);
+      expect(audit.getAuditWriteStatus().pendingWrites).toBe(0);
+    } finally {
+      vi.doUnmock("node:fs/promises");
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("tracks queued audit writes for readiness consumers", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-audit-status-"));
     try {

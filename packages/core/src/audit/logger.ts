@@ -130,20 +130,34 @@ export function getAuditWriteStatus(): AuditWriteStatus {
   return { pendingWrites: _pendingWrites, failedWrites: _failedWrites, lastWriteFailureAt: _lastWriteFailureAt };
 }
 
+/**
+ * Lines waiting for the next write. One write takes everything queued by the time it runs: a
+ * mkdir + append per line fell hours behind on the bind-mounted workspace when a runaway routing
+ * loop logged ~12 events a second (session ffe08297, 2026-10-06) — the file stopped at 08:08 while
+ * the gateway went on queueing in memory.
+ */
+let _batch: string[] = [];
+
 function enqueueWrite(line: string): void {
   _pendingWrites++;
-  _writeChain = _writeChain
-    .then(async () => {
+  _batch.push(line);
+  // A write for the current batch is already chained; it will take this line too.
+  if (_batch.length > 1) return;
+  _writeChain = _writeChain.then(async () => {
+    const lines = _batch;
+    _batch = [];
+    try {
       const auditLogPath = resolveAuditLogPath();
       await mkdir(dirname(auditLogPath), { recursive: true });
-      await appendFile(auditLogPath, line, "utf-8");
-    })
-    .catch(err => {
-      _failedWrites++;
+      await appendFile(auditLogPath, lines.join(""), "utf-8");
+    } catch (err) {
+      _failedWrites += lines.length;
       _lastWriteFailureAt = new Date().toISOString();
-      log.error({ err }, "Failed to write audit log");
-    })
-    .finally(() => { _pendingWrites--; });
+      log.error({ err, lines: lines.length }, "Failed to write audit log");
+    } finally {
+      _pendingWrites -= lines.length;
+    }
+  });
 }
 
 /** Flush any pending audit writes.  Call during graceful shutdown. */

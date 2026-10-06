@@ -45,7 +45,7 @@ Every public schema field, where it is declared, and how many production files r
 | `autoBuildAfterResearch` | packages/core/src/config/schemas/effort.ts:51 | 2 |
 | `autoConsolidateSessions` | packages/core/src/config/schema.ts:1490 | 1 |
 | `autoIngestAttachments` | packages/core/src/config/schemas/retrieval.ts:99 | 3 |
-| `automation` | packages/core/src/config/schema.ts:1090 | 11 |
+| `automation` | packages/core/src/config/schema.ts:1090 | 12 |
 | `autonomousModeAntiRefusal` | packages/core/src/config/schemas/orchestration.ts:77 | 1 |
 | `autoPromoteToScene` | packages/core/src/config/schema.ts:1461 | 3 |
 | `autoReconnect` | packages/core/src/config/schema.ts:770 | 1 |
@@ -286,7 +286,7 @@ Every public schema field, where it is declared, and how many production files r
 | `mcpServer` | packages/core/src/config/schemas/multimodal.ts:16 | 3 |
 | `memoryMb` | packages/core/src/config/schema.ts:811 | 5 |
 | `method` | packages/core/src/config/schema.ts:1023 | 82 |
-| `midTurnSteering` | packages/core/src/config/schemas/orchestration.ts:865 | 2 |
+| `midTurnSteering` | packages/core/src/config/schemas/orchestration.ts:865 | 3 |
 | `minConsolidatedFactChars` | packages/core/src/config/schema.ts:1494 | 1 |
 | `minFailuresBeforeProposal` | packages/core/src/config/schema.ts:1399 | 2 |
 | `minLetterMass` | packages/core/src/config/schemas/decisions.ts:150 | 1 |
@@ -305,7 +305,7 @@ Every public schema field, where it is declared, and how many production files r
 | `moderateToolOutputs` | packages/core/src/config/schema.ts:1237 | 1 |
 | `monthlyUsd` | packages/core/src/config/schema.ts:521 | 2 |
 | `mounts` | packages/core/src/config/schema.ts:683 | 10 |
-| `name` | packages/core/src/config/schema.ts:1958 | 349 |
+| `name` | packages/core/src/config/schema.ts:1958 | 350 |
 | `negativePrompt` | packages/core/src/config/schemas/multimodal.ts:175 | 7 |
 | `network` | packages/core/src/config/schema.ts:684 | 53 |
 | `node` | packages/core/src/config/schema.ts:1042 | 226 |
@@ -313,7 +313,7 @@ Every public schema field, where it is declared, and how many production files r
 | `notes` | packages/core/src/config/schema.ts:790 | 54 |
 | `oneLiner` | packages/core/src/config/schema.ts:899 | 3 |
 | `openaiCompatible` | packages/core/src/config/schema.ts:105 | 2 |
-| `operator` | packages/core/src/config/schema.ts:372 | 102 |
+| `operator` | packages/core/src/config/schema.ts:372 | 103 |
 | `orchestratorMaxToolIterations` | packages/core/src/config/schemas/effort.ts:23 | 1 |
 | `orchestratorTurnSloMs` | packages/core/src/config/schema.ts:1739 | 2 |
 | `orgId` | packages/core/src/config/schema.ts:1125 | 1 |
@@ -405,7 +405,7 @@ Every public schema field, where it is declared, and how many production files r
 | `riskGatedQA` | packages/core/src/config/schemas/effort.ts:47 | 7 |
 | `role` | packages/core/src/config/schema.ts:918 | 125 |
 | `rolesClaim` | packages/core/src/config/schema.ts:394 | 1 |
-| `routing` | packages/core/src/config/schema.ts:236 | 104 |
+| `routing` | packages/core/src/config/schema.ts:236 | 105 |
 | `routingRestatementRescue` | packages/core/src/config/schemas/orchestration.ts:851 | 1 |
 | `routingTierPresetFallback` | packages/core/src/config/schemas/orchestration.ts:808 | 2 |
 | `routingTriage` | packages/core/src/config/schemas/orchestration.ts:759 | 1 |
@@ -451,7 +451,7 @@ Every public schema field, where it is declared, and how many production files r
 | `stableToolBlock` | packages/core/src/config/schemas/orchestration.ts:740 | 3 |
 | `stagedArtifactBuildDirective` | packages/core/src/config/schemas/orchestration.ts:468 | 1 |
 | `stagedArtifactBuilds` | packages/core/src/config/schemas/orchestration.ts:442 | 1 |
-| `steps` | packages/core/src/config/schema.ts:1365 | 73 |
+| `steps` | packages/core/src/config/schema.ts:1365 | 74 |
 | `stopPhrases` | packages/core/src/config/schemas/multimodal.ts:238 | 3 |
 | `store` | packages/core/src/config/schema.ts:1598 | 157 |
 | `subAgentDisagreementVerify` | packages/core/src/config/schemas/orchestration.ts:644 | 2 |
