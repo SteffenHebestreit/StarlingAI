@@ -149,6 +149,7 @@ export type CoreAuditEventType =
   // Mid-turn user steering — fold user guidance into a running turn
   | "turn_steering_enqueued"
   | "turn_steering_injected"
+  | "sub_agent_steering_injected"
   // Structured user input — a tool's question and how it ended (agent/user-input-broker.ts)
   | "user_input_requested"
   | "user_input_resolved"
@@ -214,6 +215,7 @@ export type CoreAuditEventType =
   // handed the looped calls in its context (agent/delegation-loop-notes.ts).
   | "delegation_prior_loop_noted"
   | "delegation_coordinator_recursion_blocked"
+  | "delegation_routing_rounds_exhausted"
   | "delegation_result_reused"
   // Task-lease coordination backend (Redis) unreachable in clustered mode — the
   // delegation was refused rather than misreported as contention (DST-102).

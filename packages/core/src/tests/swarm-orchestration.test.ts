@@ -882,6 +882,86 @@ describe("swarm orchestration tools", () => {
     });
   });
 
+  // Session ffe08297 (2026-10-06): a routed graph node whose top match had reached its per-agent
+  // cap re-routed to that same agent forever (~750 rounds a minute for hours) — re-routing excluded
+  // only ATTEMPTED agents, and a capped one is skipped without an attempt.
+  it("a routed delegation whose top match is at its per-agent cap ends instead of re-routing to it forever", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "starlingai-capped-reroute-"));
+    tempDirs.push(tempDir);
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      agents: { defaults: { model: { primary: "mock-model" } } },
+      subAgents: {
+        browser_agent: {
+          description: "Browser automation specialist for web scraping: navigates pages, clicks, reads page content.",
+          tools: ["browser_navigate", "browser_snapshot"],
+          capabilities: ["browser automation", "web scraping"],
+          maxIterations: 4,
+        },
+      },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+    // The live router, as it scored this query: browser_agent first at high confidence, gone only
+    // when the caller excludes it.
+    let routingPasses = 0;
+    vi.doMock("../tools/agent-routing.js", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("../tools/agent-routing.js")>();
+      return {
+        ...actual,
+        resolveAgentRouting: async (query: string, opts?: { minConfidence?: "high" | "medium" | "low"; excludeAgents?: string[] }) => {
+          routingPasses++;
+          // Live each pass took ~155 ms; yielding keeps a runaway loop from starving the timer below.
+          await new Promise((resolve) => setTimeout(resolve, 1));
+          const results = (opts?.excludeAgents ?? []).includes("browser_agent")
+            ? []
+            : [{ name: "browser_agent", score: 0.889, confidence: "high" as const, matchedTerms: ["browser"] }];
+          return {
+            query, minConfidence: opts?.minConfidence ?? "medium", mode: "hybrid" as const,
+            results, weakCandidates: [], gated: false, trippedAgents: [], allLowConfidence: false,
+          };
+        },
+      };
+    });
+
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+    const delegate = getTool("delegate_to_agent");
+    expect(delegate).toBeDefined();
+
+    const swarmState: SwarmState = {
+      objective: "Scrape listings",
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      tasks: {},
+    };
+    const run = delegate!.execute({
+      task: "Open the listing page and read the first ten offers.",
+      routingQuery: "browser automation for web scraping",
+    }, {
+      sessionId: "session-capped-reroute",
+      workspacePath: tempDir,
+      swarmState,
+      // browser_agent has used its per-agent calls this turn; the turn itself is far from its total.
+      _turnAgentCounts: new Map([["browser_agent", 2]]),
+      _turnTotalDelegationLimitOverride: 20,
+    });
+    const result = await Promise.race([
+      run,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`delegation kept re-routing (${routingPasses} passes)`)), 10_000)),
+    ]);
+    vi.doUnmock("../tools/agent-routing.js");
+
+    // The capped agent never runs; whatever the delegation falls back to afterwards is its
+    // ordinary no-catalog-match path.
+    expect(result).toBeDefined();
+    expect(runSubAgentWithStatsMock.mock.calls.some(([opts]) => opts.agentName === "browser_agent")).toBe(false);
+    // One pass finds the capped agent; the next excludes it and finds nobody (medium + low).
+    expect(routingPasses).toBeLessThanOrEqual(4);
+  }, 30_000);
+
   it("forwards shared delegation budget state into delegated sub-agent runs", async () => {
     const [{ getTool }] = await Promise.all([
       import("../tools/registry.js"),

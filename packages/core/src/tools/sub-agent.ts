@@ -488,6 +488,11 @@ function recomputeTaskTotals(task: SwarmTaskState): void {
 // counts toward the caller's bounded failure budget, so the loop is capped.
 const REUSE_SERVE_LIMIT = 1;
 
+/** Routing rounds one delegation may run before it gives up (executeDelegationWithFallback). Each
+ *  round excludes the agents tried or passed over so far, so the catalog ends the loop long before
+ *  this; the ceiling only backstops a path that queues an agent the exclusions miss. */
+const MAX_ROUTING_ROUNDS_PER_DELEGATION = 32;
+
 function buildExhaustedReuseStop(task: SwarmTaskState, attemptedAgents: string[]): ToolResult {
   // The guidance must live in BOTH fields: parallel_delegate surfaces only a failed
   // slice's `error` to the coordinator, while the single-delegation path surfaces
@@ -1099,6 +1104,14 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   // "No suitable agent completed the task" which makes the coordinator
   // think it's a routing problem and re-delegate the same work.
   const cappedCandidates: string[] = [];
+  // Every candidate passed over WITHOUT an attempt (coordinator recursion, per-agent cap, outside
+  // the turn's scope). Re-routing excluded only ATTEMPTED agents, so a skipped top match came back
+  // on every round: session ffe08297 (2026-10-06) re-routed "browser automation for web scraping"
+  // ~750 times a minute for hours — browser_agent was at its turn cap — and the graph node never
+  // started, while the run's unbounded grant kept every deadline off.
+  const skippedCandidates = new Set<string>();
+  const excludedFromRouting = (): string[] => [...attemptedAgents, ...skippedCandidates];
+  let routingRounds = 0;
   // A coordinator must not delegate to another coordinator — that is pure
   // re-decomposition recursion (audit 687a224b: a depth-1 mission_coordinator
   // spawned a depth-2 mission_coordinator and burned ~24 min before the turn cap).
@@ -1319,11 +1332,23 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         break;
       }
 
+      // Each round excludes one more agent, so the catalog bounds the rounds; this ceiling is the
+      // backstop should any path queue an agent the exclusions miss.
+      if (++routingRounds > MAX_ROUTING_ROUNDS_PER_DELEGATION) {
+        logAudit("delegation_routing_rounds_exhausted", {
+          taskTitle: title,
+          rounds: routingRounds - 1,
+          attemptedAgents,
+          skippedAgents: [...skippedCandidates],
+        }, { sessionId: ctx.sessionId, severity: "warn" });
+        break;
+      }
+
       // ── Step 1: embedding + keyword routing (fast, outcome-boosted) ──────
       // Run first for all undirected delegations — deterministic, uses
       // accumulated outcome data, and incurs no extra latency.
       if (candidateQueue.length === 0) {
-        const allRoutingCandidates = await routeAgentCandidates(request.routingQuery ?? request.task, ctx, attemptedAgents);
+        const allRoutingCandidates = await routeAgentCandidates(request.routingQuery ?? request.task, ctx, excludedFromRouting());
         // Drop candidates that cannot produce the deliverable the task asks
         // for. See agentCanFulfillArtifactTask for the regression context.
         let routingCandidates = allRoutingCandidates.filter((cand) =>
@@ -1448,7 +1473,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       if (candidateQueue.length === 0 && !request.routingQuery && !explicitAgentRequested) {
         const shortened = shortenOverspecifiedRoutingQuery(request.task);
         if (shortened) {
-          const shortlisted = (await routeAgentCandidates(shortened, ctx, attemptedAgents))
+          const shortlisted = (await routeAgentCandidates(shortened, ctx, excludedFromRouting()))
             .filter((cand) => agentCanFulfillArtifactTask(cand.name, request.task, ctx));
           const top = shortlisted[0];
           if (top && shouldPreferCatalogAgent(top.score, top.confidence, skillMatchThreshold)) {
@@ -1548,13 +1573,14 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
     }
 
     const candidate = candidateQueue.shift()!;
-    if (attemptedAgents.includes(candidate)) continue;
+    if (attemptedAgents.includes(candidate) || skippedCandidates.has(candidate)) continue;
 
     // Coordinator→coordinator block: a coordinator caller skips any coordinator
     // candidate so the hierarchy stays flat (coordinator → leaf specialist), instead
     // of nesting mission_coordinator under mission_coordinator. Skipped before the
     // attempt counter so it isn't recorded as a real attempt.
     if (callerIsCoordinator && agentNameIsCoordinator(candidate)) {
+      skippedCandidates.add(candidate);
       if (!skippedCoordinatorCandidates.includes(candidate)) {
         skippedCoordinatorCandidates.push(candidate);
         logAudit("delegation_coordinator_recursion_blocked", {
@@ -1575,12 +1601,14 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       if (!cappedCandidates.includes(candidate)) {
         cappedCandidates.push(candidate);
       }
+      skippedCandidates.add(candidate);
       continue;
     }
     // Skip a candidate this turn's scope forbids BEFORE consuming its per-agent budget or marking
     // it attempted — otherwise a disallowed agent burns per-turn state it never actually ran on
     // (and pollutes the attemptedAgents diagnostic with an agent that was never tried).
     if (ctx.allowedAgents && !ctx.allowedAgents.includes(candidate)) {
+      skippedCandidates.add(candidate);
       continue;
     }
 
