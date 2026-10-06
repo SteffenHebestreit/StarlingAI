@@ -13,6 +13,26 @@ describe("turnSteeringManager", () => {
 
   const texts = (entries: Array<{ text: string }>) => entries.map((entry) => entry.text);
 
+  it("keeps a read-only log of the turn's messages for its specialists, with what the orchestrator took", () => {
+    const token = turnSteeringManager.markTurnActive("root-log");
+    turnSteeringManager.enqueue("root-log", "first");
+    turnSteeringManager.drain("root-log", token);
+    turnSteeringManager.enqueue("root-log", "second");
+    // A nested specialist reads the same turn through its own sub-session id, and reading takes nothing.
+    const nested = "sub:sub:root-log:mission_coordinator:1:browser_agent:2";
+    expect(turnSteeringManager.turnLogOf(nested).map(({ text, taken }) => ({ text, taken }))).toEqual([
+      { text: "first", taken: true },
+      { text: "second", taken: false },
+    ]);
+    expect(texts(turnSteeringManager.drain("root-log", token))).toEqual(["second"]);
+    expect(turnSteeringManager.turnLogOf("root-log").every((m) => m.taken)).toBe(true);
+    // A closed turn has no log, and the next turn starts empty.
+    turnSteeringManager.closeTurn("root-log", token);
+    expect(turnSteeringManager.turnLogOf("root-log")).toEqual([]);
+    turnSteeringManager.markTurnActive("root-log");
+    expect(turnSteeringManager.turnLogOf("root-log")).toEqual([]);
+  });
+
   it("does NOT queue when no turn is active", () => {
     expect(turnSteeringManager.enqueueIfActive("s1", "hello")).toBe(false);
     expect(turnSteeringManager.enqueue("s1", "hello", "client-id-1")).toEqual({ queued: false, active: false });

@@ -39,6 +39,8 @@ const UNREAD_TTL_MS = 3_600_000;
 const MAX_UNREAD_SESSIONS = 1_000;
 /** Ids kept per session as queued since its last drop (_queuedSinceDrop); the oldest goes first. */
 const MAX_QUEUED_SINCE_DROP = 256;
+/** Messages one turn's log keeps for its specialists (turnLogOf); the oldest goes first. */
+const MAX_TURN_LOG = 50;
 /** Chat turns remembered as replaced by another (_replacedBy); the oldest goes first. */
 const MAX_REPLACED_TURNS = 1_000;
 
@@ -82,6 +84,10 @@ interface TurnSteeringState {
   queue: SteeringEntry[];
   /** Every id this turn accepted, drained or not, so a retried POST is never folded twice. */
   seenIds: Set<string>;
+  /** Every message this turn accepted, oldest first, for the specialists running in it (turnLogOf). */
+  log: SteeringEntry[];
+  /** Ids the turn's orchestrator has drained. */
+  takenIds: Set<string>;
 }
 
 /** One chat turn's key in a root's records: request ids are the client's, and two sessions may use
@@ -290,7 +296,7 @@ class TurnSteeringManager {
     // A request id used again for a new turn names that turn now, not the one it replaced: a client
     // reusing ids had a steer into a turn that simply ended refused as replaced (final review, LOW 2).
     if (requestId) this._replacedBy.delete(turnKey(root, requestId));
-    this._turns.set(root, { token, ...(requestId ? { requestId } : {}), queue: [], seenIds: new Set() });
+    this._turns.set(root, { token, ...(requestId ? { requestId } : {}), queue: [], seenIds: new Set(), log: [], takenIds: new Set() });
     return retired;
   }
 
@@ -328,7 +334,10 @@ class TurnSteeringManager {
     const id = typeof clientId === "string" && STEERING_CLIENT_ID_RE.test(clientId) ? clientId : randomUUID();
     if (state.seenIds.has(id)) return { queued: true, active: true, id };
     state.seenIds.add(id);
-    state.queue.push({ id, text: trimmed, enqueuedAt: new Date().toISOString() });
+    const entry = { id, text: trimmed, enqueuedAt: new Date().toISOString() };
+    state.queue.push(entry);
+    state.log.push(entry);
+    if (state.log.length > MAX_TURN_LOG) state.log.shift();
     // Typed into the chat as it is now, after its last drop if it had one (_queuedSinceDrop).
     const sinceDrop = this._queuedSinceDrop.get(root);
     if (sinceDrop) {
@@ -360,7 +369,21 @@ class TurnSteeringManager {
     if (token !== undefined && state.token !== token) return [];
     const queue = state.queue;
     state.queue = [];
+    for (const entry of queue) state.takenIds.add(entry.id);
     return queue;
+  }
+
+  /**
+   * What this turn has accepted so far, oldest first, and whether its orchestrator has drained each
+   * one. Read-only, for the specialists running in the turn (agent/sub-agent.ts): the orchestrator
+   * folds a message in at its own next iteration, and that iteration waits for the delegation to
+   * return — in session ffe08297 a message reached the orchestrator five minutes later and never the
+   * run doing the work. Any (sub-)session id of the turn resolves to its root.
+   */
+  turnLogOf(sessionId: string): Array<SteeringMessage & { taken: boolean }> {
+    const state = this._turns.get(rootOf(sessionId));
+    if (!state) return [];
+    return state.log.map(({ id, text }) => ({ id, text, taken: state.takenIds.has(id) }));
   }
 
   hasPending(sessionId: string): boolean {

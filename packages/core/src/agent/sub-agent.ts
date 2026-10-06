@@ -29,6 +29,8 @@ import { orderSubAgentTools } from "./sub-agent-tool-order.js";
 import { bindRequestUserInput, HUMAN_WAIT_RECHECK_MS, trackHumanWaits } from "./user-input-broker.js";
 import { isDeclinedByUser } from "./user-input.js";
 import { getConfig } from "../config/loader.js";
+import { turnSteeringManager } from "./turn-steering.js";
+import { STEERING_PREFIX } from "./turn-boundary.js";
 import { currentEffortProfile, effectiveOrchestration, effectiveSubAgentTurnSloMs } from "../runtime/effort-context.js";
 import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type ToolContext, type SwarmState, type ToolResult } from "../tools/registry.js";
 import { isToolAllowed } from "../guardrails/tool-tiers.js";
@@ -4928,6 +4930,40 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       windDownForSupervisor();
     });
 
+    // Mid-turn steering for the run doing the work. The orchestrator folds a message in at its own
+    // next iteration, which waits for this delegation to return: in session ffe08297 the user's
+    // message reached the orchestrator five minutes later and never reached this run. So each
+    // iteration reads the turn's steering log and folds in what this run has not seen. What the
+    // orchestrator had already taken when the run started is in its prompt (turnUserWords).
+    const steeringRoot = opts.parentSessionId ?? subSessionId;
+    const steeringSeen = new Set(turnSteeringManager.turnLogOf(steeringRoot).filter((m) => m.taken).map((m) => m.id));
+    const foldNewSteeringIntoRun = (): void => {
+      if (!(getConfig().orchestration?.midTurnSteering ?? true)) return;
+      const fresh = turnSteeringManager.turnLogOf(steeringRoot).filter((m) => !steeringSeen.has(m.id));
+      if (fresh.length === 0) return;
+      for (const message of fresh) steeringSeen.add(message.id);
+      const note = `${STEERING_PREFIX} The user sent this while you were working on this task. It is their own `
+        + "instruction: apply it to the REST of your work now — adjust course, drop what it makes irrelevant — "
+        + "without redoing steps you have finished.\n" + fresh.map((message) => `- ${message.text}`).join("\n");
+      // Strict chat templates reject two user turns in a row: a run that has not answered yet
+      // (or just took a correction) gets the note on its last user message instead.
+      const last = history.at(-1);
+      if (last?.role === "user" && typeof last.content === "string") last.content = `${last.content}\n\n${note}`;
+      else history.push({ role: "user", content: note });
+      logAudit("sub_agent_steering_injected", {
+        agentName: opts.agentName,
+        runSessionId: subSessionId,
+        count: fresh.length,
+        iteration: iterations,
+      }, { sessionId: opts.parentSessionId, severity: "info" });
+      opts.onProgress?.({
+        agentName: opts.agentName,
+        kind: "thinking",
+        iteration: iterations,
+        summary: `${opts.agentName} picked up your message`,
+      });
+    };
+
     browserDecider = createBrowserDeciderForRun({
       agentName: opts.agentName,
       sessionId: subSessionId,
@@ -4943,6 +4979,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // SUPERVISION RUNS FIRST AND ALWAYS, before any budget/tier branch below can
       // decide this run is somebody else's problem.
       superviseProgress("iteration");
+      foldNewSteeringIntoRun();
 
       // SEMANTIC direction judge — opt-in (orchestration.progressVerifierSemantic,
       // default off pending live eval), bounded, fail-open. The structural rules above
