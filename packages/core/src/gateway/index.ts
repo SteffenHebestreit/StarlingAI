@@ -127,7 +127,7 @@ import { syncConfiguredJobTriggers } from "../runtime/job-triggers.js";
 
 import { getExtensionAuthProvider } from "../extension/index.js";
 import { mountExtensionRoutes } from "../extension/loader.js";
-import { findRoutePolicy } from "./route-policies.js";
+import { findRoutePolicy, policyAdmitsRole } from "./route-policies.js";
 
 const log = childLogger("gateway");
 
@@ -165,7 +165,7 @@ export function createGateway() {
     if (!policy) return next();
     const user = await authenticatedUser(c.req.header("Authorization"));
     if (!user) return c.json({ error: "Unauthorized" }, 401);
-    if (!policy.roles.includes(user.role)) {
+    if (!policyAdmitsRole(policy, user.role)) {
       return c.json({ error: `Requires role: ${policy.roles.join(" | ")}` }, 403);
     }
     return next();

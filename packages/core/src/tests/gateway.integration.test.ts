@@ -229,6 +229,59 @@ describe("gateway HTTP bridge", () => {
     }
   }, gatewayTestTimeoutMs);
 
+  // 2026-10-06: an admin creating a knowledge base got "Requires role: operator" — the route-policy
+  // gate matched role names exactly, so the operator-only KB routes refused the higher built-in role.
+  it("lets a higher built-in role through an operator-only route policy, and still refuses a viewer", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "starlingai-route-policy-rank-"));
+    const port = 19300 + Math.floor(Math.random() * 1000);
+    const configPath = join(tempDir, "starlingai.json");
+    const users = [["carol", "admin"], ["olga", "operator"], ["vic", "viewer"]].map(([username, role]) => ({
+      username, passwordHash: "scrypt$placeholder-hash-not-used-here", role, createdAt: "2026-10-06T00:00:00Z",
+    }));
+    writeFileSync(configPath, JSON.stringify({
+      gateway: { port, jwtSecret: "t".repeat(32) },
+      auth: { enabled: true, users },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    delete process.env["SAI_JWT_SECRET"];
+    process.env["SAI_MASTER_KEY"] = "m".repeat(32);
+    process.env["SAI_CRED_STORE"] = join(tempDir, PRODUCT.stateDirName, "credentials.enc");
+    process.env["SAI_AUDIT_LOG"] = join(tempDir, PRODUCT.stateDirName, "audit.jsonl");
+    vi.resetModules();
+
+    const [{ createGateway }, auth] = await Promise.all([
+      import("../gateway/index.js"),
+      import("../gateway/auth.js"),
+    ]);
+    const gateway = createGateway();
+    await gateway.start();
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    try {
+      await waitForHealth(`${baseUrl}/healthz`);
+      const createKb = async (user: string, role: string) => fetch(`${baseUrl}/api/knowledge-bases`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${await auth.createToken(user, { role })}`, "Content-Type": "application/json" },
+        // Deliberately incomplete: the handler's own validation answers once the gate lets it through.
+        body: JSON.stringify({}),
+      });
+
+      for (const [user, role] of [["carol", "admin"], ["olga", "operator"]] as const) {
+        const response = await createKb(user, role);
+        expect(response.status, `${role} was refused by the route policy`).not.toBe(403);
+      }
+      const viewer = await createKb("vic", "viewer");
+      expect(viewer.status).toBe(403);
+      expect(await viewer.json()).toEqual({ error: "Requires role: operator" });
+    } finally {
+      await gateway.stop();
+      auth.resetAuthStateForTests();
+      await flushAuditLogForTests();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, gatewayTestTimeoutMs);
+
   it("steers only the caller's own session, and runs steering text through the input guardrail", async () => {
     // Steering text joins a running turn and reaches every specialist delegated after it as that
     // user's own words. The route used to check only that the token was valid.
