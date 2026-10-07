@@ -82,13 +82,29 @@ describe("recall_context tool", () => {
     const { getTool } = await import("../tools/registry.js");
     const tool = getTool("recall_context");
 
-    const result = await tool!.execute({ query: "anything", include: ["user"] }, CTX);
+    const result = await tool!.execute({ query: "anything", include: ["skills"] }, CTX);
 
     expect(result.success).toBe(true);
-    expect(result.output).toContain("## User model");
+    expect(result.output).toContain("## Relevant skills");
+    expect(result.output).not.toContain("## User model");
     expect(result.output).not.toContain("## Relevant long-term memory");
     expect(result.output).not.toContain("## Recent related sessions");
     expect(result.metadata).not.toHaveProperty("memories");
+  });
+
+  it("searches long-term memory when the user section is asked for", async () => {
+    // What the user asked to be remembered is a memory record, not part of the user model: a recall
+    // of "user" + "facts" (what the model asked for, live) has to find a stored preference.
+    const { getTool } = await import("../tools/registry.js");
+    const tool = getTool("recall_context");
+
+    const result = await tool!.execute({ query: "which provider do I prefer", include: ["user", "facts"] }, CTX);
+
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("## User model");
+    expect(result.output).toContain("## Relevant long-term memory");
+    expect(result.output).toContain("prefers LM Studio");
+    expect(result.output).not.toContain("## Recent related sessions");
   });
 
   it("requires a query", async () => {

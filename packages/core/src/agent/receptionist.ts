@@ -364,7 +364,12 @@ export function buildMemoryCapsule(workspacePath: string, maxChars = 400): strin
   const lines: string[] = [];
   let used = 0;
   for (const record of records) {
-    const line = `- ${singleLine(record.content)}`.slice(0, 160);
+    // With its subject: the content alone often names no topic ("Polarstern-Rooibos" for the user's
+    // favourite tea), and a capsule of bare values could not answer the question it was stored for.
+    const content = singleLine(record.content);
+    const subject = singleLine(record.subject ?? "");
+    const fact = subject && !content.toLowerCase().includes(subject.toLowerCase()) ? `${subject}: ${content}` : content;
+    const line = `- ${fact}`.slice(0, 160);
     if (used + line.length + 1 > maxChars) break;
     lines.push(line);
     used += line.length + 1;
@@ -408,6 +413,9 @@ export interface FastLaneConversationContext {
   previousReply?: string;
   /** For the decision ledger. */
   sessionId?: string;
+  /** The session's workspace root: under multi-user auth the user's own root, where their workspace
+   *  memories are. The configured root is the shared one. */
+  workspacePath?: string;
 }
 
 /**
@@ -444,7 +452,7 @@ export async function tryReceptionistFastLaneDetailed(
 
   let capsule = "";
   try {
-    capsule = buildMemoryCapsule(config.workspacePath);
+    capsule = buildMemoryCapsule(context.workspacePath ?? config.workspacePath);
   } catch (err) {
     log.debug({ err }, "Memory capsule build failed — continuing without it");
   }

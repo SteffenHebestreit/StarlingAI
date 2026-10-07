@@ -221,4 +221,18 @@ describe("receptionist — memory capsule", () => {
     expect(capsule).not.toContain("ephemeral scratch");
     expect(capsule.length).toBeLessThanOrEqual(420);
   });
+
+  it("names each fact's subject, so a bare value still says what it is", () => {
+    // Found by the E2E suite (2026-10-07): the capsule carried "- Polarstern-Rooibos", and asked for
+    // the favourite tea in a new session the model had nothing to connect it to.
+    const ws = mkdtempSync(join(tmpdir(), "recept-mem-"));
+    dirs.push(ws);
+    storeWorkspaceMemoryRecord(ws, { key: "favorite_tea", subject: "Lieblingsteesorte", content: "Polarstern-Rooibos", kind: "preference" });
+    storeWorkspaceMemoryRecord(ws, { key: "editor", subject: "Editor", content: "Editor of choice is Helix.", kind: "preference" });
+
+    const capsule = buildMemoryCapsule(ws, 400);
+    expect(capsule).toContain("- Lieblingsteesorte: Polarstern-Rooibos");
+    // A content that already names its subject is not prefixed twice.
+    expect(capsule).toContain("- Editor of choice is Helix.");
+  });
 });

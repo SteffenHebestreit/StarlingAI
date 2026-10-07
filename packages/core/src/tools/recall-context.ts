@@ -97,7 +97,10 @@ registerTool({
       include: {
         type: "array",
         items: { type: "string", enum: ALL_SECTIONS },
-        description: "Which sections to include. Default: all (user, facts, memory, sessions, skills, documents).",
+        description: "Which sections to include. Default: all. user = what is known about the user: the user model plus "
+          + "long-term memory (always included with user); facts = facts recorded in this session only; memory = long-term "
+          + "memory: stored preferences, facts, and decisions, including what the user asked you to remember; sessions = "
+          + "past conversations; skills = learned procedures; documents = files attached to this conversation.",
       },
     },
     required: ["query"],
@@ -114,6 +117,10 @@ registerTool({
         : ALL_SECTIONS,
     );
     if (requested.size === 0) ALL_SECTIONS.forEach((section) => requested.add(section));
+    // What the user asked to be remembered about them (a preference, a fact) is a long-term memory
+    // record, not part of the user model: a recall of "user" (+ "facts") never searched it and
+    // answered "nothing stored" about a stored preference (found by the E2E suite, 2026-10-07).
+    if (requested.has("user")) requested.add("memory");
 
     // Task-conditional scope (only when the caller didn't pin `include`): the
     // detected intent sets the section order and concentrates the per-section
