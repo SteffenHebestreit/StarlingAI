@@ -91,9 +91,20 @@ const CategorizeRequestSchema = z.object({
  *
  * `store` owns the on-disk draft and category persistence at
  * `MailServiceRuntimeConfig.dataPath`.
+ *
+ * `refreshAccounts`, when given, runs before every request (LiveAccounts.refresh: it
+ * re-reads the accounts overlay at most every few seconds and updates `accounts` in place).
  */
-export function createApp(opts: { accounts: MailAccountConfig[]; store: DraftStore; authToken?: string }) {
+export function createApp(opts: { accounts: MailAccountConfig[]; store: DraftStore; authToken?: string; refreshAccounts?: () => Promise<void> }) {
   const app = new Hono();
+
+  const refreshAccounts = opts.refreshAccounts;
+  if (refreshAccounts) {
+    app.use("*", async (_c, next) => {
+      await refreshAccounts();
+      await next();
+    });
+  }
 
   app.use("*", async (c, next) => {
     // /health must stay unauthenticated: the container healthcheck (and any

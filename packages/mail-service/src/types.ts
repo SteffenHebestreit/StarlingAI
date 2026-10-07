@@ -28,6 +28,11 @@ export interface MailAccountConfig {
   displayName?: string;
   /** Usernames permitted to use this account. Empty/unset = shared (all users). */
   allowedUsers?: string[];
+  /**
+   * Set by LiveAccounts, never read from a file: the `isolatedUsers` a SHARED account is
+   * withheld from. Ignored for an account with allowedUsers (that list already decides).
+   */
+  withheldFrom?: string[];
   imap: MailImapConfig;
   smtp: MailSmtpConfig;
   caldav?: DavCredentials;

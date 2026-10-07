@@ -92,6 +92,11 @@ The service is configured through two channels:
 
 - Any string value prefixed with `$` is resolved against the process environment at load time — use this to keep secrets out of the config file.
 - `allowedUsers` is an optional array of usernames. Empty or omitted = the account is shared with all users; when set, only those authenticated users (matched against the `X-Sai-User` header) may access the account — others get `403`.
+- `isolatedUsers` (top level, optional) names users who see **only** the accounts that list them in `allowedUsers`: every shared account is withheld from them. Used for identities that must never touch the operator's own mail, such as the e2e eval accounts.
+
+### Overlay directory (`accounts.d`)
+
+More accounts can be added while the service runs, without touching the accounts file: every `*.json`, `*.jsonc` or `*.json5` file in the overlay directory (`SAI_MAIL_SERVICE_ACCOUNTS_DIR`, default `accounts.d` beside the accounts file — in Docker `config/mail/accounts.d/`) uses the same format, and the service re-reads the directory at most every 2 s, on the next request. An overlay only adds: an account whose id is already taken is skipped, a file that does not parse or validate is skipped and logged, and `isolatedUsers` of all files are combined. Removing a file removes its accounts. `pnpm e2e:env up` puts the synthetic e2e mailbox here (see `eval/e2e/ENVIRONMENT.md`).
 - `caldav` and `carddav` are optional. Accounts without them return `422` from the matching routes.
 - `imap.port` defaults to `993` / `secure: true`; `smtp.port` defaults to `587` / `secure: false` (STARTTLS).
 
@@ -100,6 +105,7 @@ The service is configured through two channels:
 | Variable | Default | Purpose |
 |---|---|---|
 | `SAI_MAIL_SERVICE_CONFIG_PATH` | `/config/mail/accounts.json` | Path to the accounts file |
+| `SAI_MAIL_SERVICE_ACCOUNTS_DIR` | `accounts.d` beside the accounts file | Overlay directory of further accounts files, re-read while running |
 | `HOST` | `0.0.0.0` | Bind address |
 | `PORT` | `5020` | Listen port |
 | `SAI_MAIL_SERVICE_DATA_PATH` | `/data/mail-service.json` | File (not directory) where drafts and category metadata are persisted. Mount its parent as a volume in Docker. |
@@ -111,7 +117,8 @@ The service is configured through two channels:
 |---|---|
 | `src/index.ts` | Entrypoint — loads config, starts Hono server |
 | `src/app.ts` | Hono app wiring; mounts account, message, draft, calendar, contacts routes |
-| `src/config.ts` | Config loader + Zod schema; env-var reference resolution |
+| `src/config.ts` | Config loader + Zod schema; env-var reference resolution; overlay directory reader |
+| `src/live-accounts.ts` | The live account set: accounts file + overlay directory, re-read while running; `isolatedUsers` |
 | `src/account-access.ts` | Per-user account access control (`allowedUsers` + `X-Sai-User`); resolves accounts, 403 on denied user |
 | `src/imap-client.ts` | IMAP session pool (via imapflow) |
 | `src/smtp-client.ts` | SMTP transport (via nodemailer) |

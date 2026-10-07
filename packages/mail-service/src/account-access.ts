@@ -18,7 +18,9 @@
  *                   restriction cannot be bypassed by simply omitting the header.
  *
  * Set SAI_MAIL_REQUIRE_IDENTIFIED_USER=true wherever gateway auth is enabled.
- * Unbound accounts are shared either way, by design.
+ * Unbound accounts are shared either way, by design — except with the users an
+ * accounts file names in `isolatedUsers` (LiveAccounts marks each shared account
+ * `withheldFrom` them): they see only the accounts that name them.
  */
 import { HTTPException } from "hono/http-exception";
 import type { MailAccountConfig } from "./types.js";
@@ -29,7 +31,10 @@ function requireIdentifiedUser(): boolean {
 
 export function accountAllowsUser(account: MailAccountConfig, user: string | undefined): boolean {
   const allowed = account.allowedUsers;
-  if (!allowed || allowed.length === 0) return true;          // unbound: shared, by design
+  if (!allowed || allowed.length === 0) {                     // unbound: shared, by design…
+    const u = user?.toLowerCase();
+    return !u || !account.withheldFrom?.some((w) => w.toLowerCase() === u); // …but not with an isolated user
+  }
   if (!user) return !requireIdentifiedUser();                 // ambiguous: deployment decides
   const u = user.toLowerCase();
   return allowed.some((a) => a.toLowerCase() === u);
