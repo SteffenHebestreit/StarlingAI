@@ -674,7 +674,7 @@ registerTool({
     const systemPrompt = String(args["systemPrompt"] ?? "").trim();
 
     if (!agentName || !task || !systemPrompt) {
-      return { success: false, output: "", error: "agentName, systemPrompt, and task are required" };
+      return { success: false, output: "", error: "agentName, systemPrompt, and task are required", rejectedBeforeEffect: true };
     }
 
     // Validate and filter tool list
@@ -730,6 +730,7 @@ registerTool({
         output: "",
         error: `Unknown tool(s) requested: ${rejected.join(", ")}. Use search_tools/semantic tool discovery and choose only existing tools. Suggested tools for this task: ${semanticToolMatches.join(", ") || "none"}.`,
         metadata: { agentName, rejectedTools: rejected, suggestedTools: semanticToolMatches },
+        rejectedBeforeEffect: true,
       };
     }
 
@@ -764,6 +765,7 @@ registerTool({
         output: "",
         error: policyIssues.join(" ") + suggestionHint,
         metadata: { agentName, rejectedTools: rejected, grantedTools: tools, suggestedTools: semanticToolMatches },
+        rejectedBeforeEffect: true,
       };
     }
 

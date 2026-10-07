@@ -323,6 +323,13 @@ export interface ToolResult {
    * provably happened before dispatch (DNS, connection refused, validation).
    */
   dispatchUncertain?: boolean;
+  /**
+   * Set by a FAILING tool that turned the request away before doing anything — an invalid request
+   * it asks to have reissued, corrected. The runtime does not count such a call against the tool's
+   * per-turn allowance, once per tool and turn: under a cap of one the corrected call was itself
+   * turned away as over the limit.
+   */
+  rejectedBeforeEffect?: boolean;
 }
 
 const _registry = new Map<string, ToolHandler>();

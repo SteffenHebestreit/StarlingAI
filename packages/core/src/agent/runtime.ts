@@ -267,6 +267,7 @@ import { DEADLINE_LIVENESS_RECHECK_MS } from "./sub-agent-turn-budget.js";
 import {
   deriveDelegationTaskFromArgs,
   getPerTurnToolCallLimit,
+  giveBackRejectedCall,
   buildDelegationLoopResponse,
   collapseDuplicateToolCallsInResponse,
   collapseExcessDirectDelegationsInResponse,
@@ -2130,6 +2131,8 @@ async function _runTurn(
   // Per-tool output tracking within this turn — detects stuck loops (same result ≥N times).
   const _recentOutputsByTool = new Map<string, string[]>();
   const _turnToolCallCounts = new Map<string, number>();
+  /** Tools whose call was turned away before any effect and so given back its count, once a turn. */
+  const _rejectedCallsGivenBack = new Set<string>();
   const _lastToolResultByName = new Map<string, string>();
   const _lastToolCallSig = new Map<string, { args: string; result: string; metadata?: Record<string, unknown>; success?: boolean }>();
   const IDENTICAL_OUTPUT_LOOP_THRESHOLD = 3;
@@ -4424,6 +4427,12 @@ async function _runTurn(
         },
         { sessionId: session.id, severity: result.success ? "info" : "warn" }
       );
+
+      // A call its tool turned away before doing anything does not use up the tool's per-turn
+      // allowance, once per tool and turn. create_ephemeral_agent (cap 1) rejected a mixed-family
+      // grant with "split the mission into focused agents", and the corrected call was then turned
+      // away as over the limit, so the turn answered without running anything (E2E, 2026-10-07).
+      giveBackRejectedCall(_turnToolCallCounts, _rejectedCallsGivenBack, tc.name, result);
 
       let resultText = result.success
         ? result.output

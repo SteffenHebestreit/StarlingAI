@@ -61,6 +61,26 @@ export function getPerTurnToolCallLimit(toolName: string): number | undefined {
   return PER_TURN_TOOL_CALL_LIMITS[toolName];
 }
 
+/**
+ * Give a call its tool turned away before doing anything (ToolResult.rejectedBeforeEffect) back to
+ * the tool's per-turn allowance — once per tool and turn, so a model that keeps sending invalid
+ * calls still runs into the cap. `counts` and `givenBack` are the turn's own; returns whether the
+ * call was given back.
+ */
+export function giveBackRejectedCall(
+  counts: Map<string, number>,
+  givenBack: Set<string>,
+  toolName: string,
+  result: { success: boolean; rejectedBeforeEffect?: boolean },
+): boolean {
+  if (result.success || result.rejectedBeforeEffect !== true || givenBack.has(toolName)) return false;
+  const counted = counts.get(toolName) ?? 0;
+  if (counted === 0 || getPerTurnToolCallLimit(toolName) === undefined) return false;
+  counts.set(toolName, counted - 1);
+  givenBack.add(toolName);
+  return true;
+}
+
 export function buildDelegationLoopResponse(
   session: AgentSession,
   latestOutput: string,
