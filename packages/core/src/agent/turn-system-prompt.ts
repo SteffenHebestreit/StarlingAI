@@ -32,6 +32,7 @@ import {
   looksLikeArtifactCreationRequest,
   looksLikeComposedGuideRequest,
 } from "./deliverable-intent.js";
+import { buildTurnReplyLanguageInstruction, messageHasOwnLanguage } from "./reply-language.js";
 import {
   timedPhase,
   measurePrompt,
@@ -243,9 +244,12 @@ export async function assembleTurnSystemMessages(
     let flowGuidance = injectTurnContext
       ? formatFlowMemoryGuidance(session.getWorkspacePath(), userMessage, { limit: 3 })
       : "";
+    // Later iterations carry no language line, and the head names no default language: a message
+    // with no language of its own (a bare link that needs a fetch) would reach its answer with the
+    // default nowhere in view. Only then is the reply-language line repeated.
     const languageAndIdentityGuidance = iterationCount === 0
       ? buildLanguageAndIdentityTurnGuidance(userMessage)
-      : "";
+      : messageHasOwnLanguage(userMessage) ? "" : buildTurnReplyLanguageInstruction(userMessage);
     // Memory guidance and procedural-skill guidance are independent and each do a
     // query embedding, so run them concurrently instead of serially on time-to-first
     // -LLM-call. (formatFlowMemoryGuidance above is synchronous — it stays out of the

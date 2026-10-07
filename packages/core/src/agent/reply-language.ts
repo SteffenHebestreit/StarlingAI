@@ -49,21 +49,40 @@ export function defaultReplyLanguage(): string {
 export const IN_REPLY_LANGUAGE =
   "in the reply language (the language the user asked for, if they asked for one; otherwise the language of their latest message)";
 
-/** The full rule, written for the orchestrator's system prompt. */
-export function buildReplyLanguageRule(defaultLanguage: string = defaultReplyLanguage()): string {
+/**
+ * The full rule, written for the orchestrator's system prompt.
+ *
+ * It names no default language. Named here and in the per-turn line, the default pulled replies
+ * into it: on the live model an English question got a German answer 7 times in 20, the model's
+ * own reasoning saying "the question is in English, so I'll reply in English" before it wrote
+ * German; named only where it can apply, 2 times in 20 in the same runs (2026-10-07), with a
+ * standing "from now on, English" kept as often as before (14 and 15 of 18). The per-turn line
+ * names the default when the message has no language of its own
+ * (buildTurnReplyLanguageInstruction), the only case it decides. Naming the message's detected
+ * language instead fixed the English question and broke the standing request (6 of 14).
+ */
+export function buildReplyLanguageRule(): string {
   return "Reply language: answer in the language the user asked for — in their latest message, as a standing "
     + "instruction earlier in the conversation, or in the durable facts you were given. Without such a request, "
     + "answer in the language of the user's latest message; when that message has no language of its own (a "
-    + "greeting, \"ok\", an emoji, a bare link or code), keep the language the conversation has been using, or "
-    + `${defaultLanguage} if there is none yet. A language the user names for a deliverable ("write the letter in `
-    + "English\", \"translate this into French\") applies to that deliverable; your own words around it stay in the "
-    + "reply language.";
+    + "greeting, \"ok\", an emoji, a bare link or code), keep the language the conversation has been using. "
+    + "A language the user names for a deliverable (\"write the letter in English\", \"translate this into "
+    + "French\") applies to that deliverable; your own words around it stay in the reply language.";
+}
+
+/** Whether a message has a language of its own, as far as the statistical detector can call it. */
+export function messageHasOwnLanguage(userMessage: string): boolean {
+  return detectTextLanguage(userMessage) !== null;
 }
 
 /**
  * The per-turn copy, which quotes the message it applies to. It is the most specific language
  * instruction the orchestrator sees on the turn, so it has to carry the whole precedence and not
  * just "same language as this message" — that version overrode an explicit request.
+ *
+ * The default language is named only for a message the detector cannot call (a greeting, "ok", a
+ * bare link, code; or any message before the detector has loaded): elsewhere it cannot apply, and
+ * named it pulled the reply into it (see buildReplyLanguageRule).
  */
 export function buildTurnReplyLanguageInstruction(
   userMessage: string,
@@ -71,9 +90,10 @@ export function buildTurnReplyLanguageInstruction(
 ): string {
   const compact = userMessage.trim().replace(/\s+/g, " ").slice(0, 280);
   const subject = compact ? `that message (${JSON.stringify(compact)})` : "the user's latest message";
+  const defaultClause = messageHasOwnLanguage(userMessage) ? "" : ` (${defaultLanguage} if there is none)`;
   return "Reply in the language the user asked for, if they asked for one — in their latest message or as a standing "
     + `instruction earlier; otherwise in the language of ${subject}. If it has no language of its own, keep the `
-    + `language the conversation has been using (${defaultLanguage} if there is none).`;
+    + `language the conversation has been using${defaultClause}.`;
 }
 
 /**

@@ -152,7 +152,7 @@ import {
 // from runtime.js (runtime-delegation-loop.test.ts, runtime-guidance.test.ts) keep working.
 export { buildModelVisibleToolResult } from "./tool-result-format.js";
 import { stripDelegatedRunRecord } from "./delegated-run-record.js";
-import { IN_REPLY_LANGUAGE, buildReplyLanguageRule, detectTurnUserLanguage, localizedFixedText } from "./reply-language.js";
+import { IN_REPLY_LANGUAGE, buildReplyLanguageRule, buildTurnReplyLanguageInstruction, detectTurnUserLanguage, localizedFixedText } from "./reply-language.js";
 
 // Turn-preparation phases + the blocked() early-exit builder (god-file seam): the
 // pre-loop setup phases of _runTurn and the shared blocked() TurnOutput builder live
@@ -5476,13 +5476,18 @@ export async function forceSynthesis(
       synthSystemPrompt = buildLeanSynthesisPrompt({ assistantName });
     }
 
+    // The turn's reply-language line: the system prompt's rule names no default language, so a
+    // message with no language of its own needs the line that does (reply-language.ts).
+    const latestUserMessage = [...session.getHistory()].reverse()
+      .find((message) => message.role === "user" && typeof message.content === "string")?.content;
+    const languageLine = typeof latestUserMessage === "string" ? ` ${buildTurnReplyLanguageInstruction(latestUserMessage)}` : "";
     // Inject a synthesize-now user message (not stored in permanent history)
     const messages: LLMMessage[] = [
       { role: "system", content: synthSystemPrompt },
       { role: "system", content: buildTemporalContextPrompt() },
       ...(sharedFindingsPrompt ? [{ role: "system" as const, content: sharedFindingsPrompt }] : []),
       ...session.getCollapsedHistory(),
-      { role: "user", content: `[SYSTEM INSTRUCTION — RESPOND NOW]: ${instruction} Before drafting, verify every assumption against the tool results and shared findings in this conversation. If a claim is not supported there, omit it or mark it unverified.` },
+      { role: "user", content: `[SYSTEM INSTRUCTION — RESPOND NOW]: ${instruction} Before drafting, verify every assumption against the tool results and shared findings in this conversation. If a claim is not supported there, omit it or mark it unverified.${languageLine}` },
     ];
 
     // No hard timeout on the synthesis call — the provider (LMStudio / API)

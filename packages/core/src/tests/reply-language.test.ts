@@ -59,32 +59,43 @@ beforeEach(() => {
 });
 
 describe("the reply-language rule", () => {
-  it("puts a requested language first, the message's language second, the conversation's third, the default last", () => {
-    const rule = buildReplyLanguageRule("German");
+  it("puts a requested language first, the message's language second, the conversation's third", () => {
+    const rule = buildReplyLanguageRule();
     const order = [
       rule.indexOf("the language the user asked for"),
       rule.indexOf("the language of the user's latest message"),
       rule.indexOf("keep the language the conversation has been using"),
-      rule.indexOf("German if there is none yet"),
     ];
     for (const position of order) expect(position).toBeGreaterThan(-1);
     expect([...order].sort((a, b) => a - b)).toEqual(order);
   });
 
+  it("names the default language only for a message with no language of its own", () => {
+    // Named where it cannot apply, the default pulled English questions into German (2026-10-07).
+    expect(buildReplyLanguageRule()).not.toContain("German");
+    expect(buildTurnReplyLanguageInstruction("ok", "German")).toContain("(German if there is none)");
+    expect(buildTurnReplyLanguageInstruction("How should I store the batteries of my power tools over the winter?", "German"))
+      .not.toContain("German");
+    const german = buildTurnReplyLanguageInstruction("Wie lagere ich die Akkus meiner Elektrowerkzeuge im Winter am besten?", "German");
+    expect(german).not.toContain("if there is none)");
+    // The precedence stays whole either way.
+    expect(german).toContain("the language the user asked for");
+    expect(german).toContain("keep the language the conversation has been using");
+  });
+
   it("treats a standing instruction and the durable facts as a request", () => {
-    const rule = buildReplyLanguageRule("German");
+    const rule = buildReplyLanguageRule();
     expect(rule).toContain("standing instruction earlier in the conversation");
     expect(rule).toContain("durable facts");
   });
 
   it("scopes a language named for a deliverable to that deliverable", () => {
-    expect(buildReplyLanguageRule("German")).toContain("applies to that deliverable");
+    expect(buildReplyLanguageRule()).toContain("applies to that deliverable");
   });
 
   it("uses the configured default language", () => {
     configState.defaultLanguage = "French";
     expect(defaultReplyLanguage()).toBe("French");
-    expect(buildReplyLanguageRule()).toContain("French if there is none yet");
     expect(buildTurnReplyLanguageInstruction("hi")).toContain("(French if there is none)");
   });
 
