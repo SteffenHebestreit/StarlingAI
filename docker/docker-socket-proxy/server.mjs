@@ -152,12 +152,16 @@ function handleRequest(client, method, rawPath, headers, rawHead, rest) {
       toDaemon(client, [Buffer.from(head, "latin1"), outBody]);
     };
     if (body.length >= cl) return finish();
+    // The server keeps half-open sockets (createProxyServer), so a client that closes before its
+    // body is complete has to be answered here.
+    const onEnd = () => { client.removeListener("data", onBody); deny(client, 400, "create/exec body incomplete", method, p); };
     const onBody = (c) => {
       body = Buffer.concat([body, c]);
-      if (body.length > MAX_BODY) { client.removeListener("data", onBody); return deny(client, 413, "create/exec body too large", method, p); }
-      if (body.length >= cl) { client.removeListener("data", onBody); finish(); }
+      if (body.length > MAX_BODY) { client.removeListener("data", onBody); client.removeListener("end", onEnd); return deny(client, 413, "create/exec body too large", method, p); }
+      if (body.length >= cl) { client.removeListener("data", onBody); client.removeListener("end", onEnd); finish(); }
     };
     client.on("data", onBody);
+    client.once("end", onEnd);
     return;
   }
 
@@ -178,10 +182,23 @@ function handleRequest(client, method, rawPath, headers, rawHead, rest) {
   return deny(client, 403, "endpoint not on allow-list", method, p);
 }
 
-const server = net.createServer((client) => {
+/**
+ * allowHalfOpen: the docker CLI half-closes an attach connection as soon as it has no stdin to
+ * send (CloseWrite), then reads the container's output on it. Without it Node ends the client
+ * socket on that FIN, and every attached `docker run` through the proxy exited 0 with no output:
+ * the sandbox's shell_exec / run_script returned "(no output)" for every command (found
+ * 2026-10-07). Every forwarding path ends the client itself once the daemon is done; a client
+ * that closes before its request head is complete is closed here.
+ */
+export function createProxyServer() {
+  return net.createServer({ allowHalfOpen: true }, handleConnection);
+}
+
+function handleConnection(client) {
   client.setNoDelay(true);
   let buf = Buffer.alloc(0);
   let routed = false;
+  client.on("end", () => { if (!routed) { try { client.destroy(); } catch { /* ignore */ } } });
   const onHead = (chunk) => {
     if (routed) return;
     buf = Buffer.concat([buf, chunk]);
@@ -201,8 +218,9 @@ const server = net.createServer((client) => {
   };
   client.on("data", onHead);
   client.on("error", () => { try { client.destroy(); } catch { /* ignore */ } });
-});
+}
 
+const server = createProxyServer();
 server.on("error", (err) => { log({ event: "server-error", message: err.message }); });
 
 // Only bind when run as the entry point (`node server.mjs`); stays importable for tests.
