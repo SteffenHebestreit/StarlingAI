@@ -3068,6 +3068,27 @@ async function _runTurn(
     totalUsage.completionTokens += llmResponse.usage.completionTokens;
     totalUsage.totalTokens += llmResponse.usage.totalTokens;
 
+    // The user named the agent (`--agent`): a response that calls nothing is replaced by the
+    // delegation itself, the user's request as its task. The forced tool choice alone did not hold:
+    // under `tool_choice: required` the local model wrote 13,000 characters of prose, and the turn
+    // shipped them as the answer (E2E, 2026-10-07).
+    if (directiveAgent !== undefined && directiveAgentPending && llmResponse.tool_calls.length === 0) {
+      // Built afresh: the prose call's truncation marker must not mark the dispatch incomplete.
+      llmResponse = {
+        content: null,
+        tool_calls: [{ id: `directive_${randomUUID()}`, name: "delegate_to_agent", arguments: { agentName: directiveAgent, task: userMessage } }],
+        usage: llmResponse.usage,
+        finishReason: "tool_calls",
+      };
+      logAudit("tool_call_recovered", {
+        originalTool: null,
+        rewrittenTo: "delegate_to_agent",
+        reason: "directive_agent_dispatched",
+        agentName: directiveAgent,
+      }, { sessionId: session.id, severity: "warn" });
+      guardrailEvents.push({ type: "tool_recovered", details: `directive_agent_dispatched:${directiveAgent}` });
+    }
+
     for (const tc of llmResponse.tool_calls) normalizeToolCall(tc);
     llmResponse.tool_calls = collapseDuplicateToolCallsInResponse(llmResponse.tool_calls, session.id, guardrailEvents);
     llmResponse.tool_calls = collapseExcessDirectDelegationsInResponse(llmResponse.tool_calls, session.id, guardrailEvents, stashDiscardedBuilderTask);

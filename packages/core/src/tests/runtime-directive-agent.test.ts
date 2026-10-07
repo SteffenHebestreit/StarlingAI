@@ -138,6 +138,26 @@ describe("a turn the user directed to one agent", () => {
     expect(promptOf(1)).not.toContain(DIRECTIVE_LINE);
   });
 
+  it("dispatches the delegation itself when the model answers in prose anyway", async () => {
+    // Live, the local model wrote 13,000 characters of prose under `tool_choice: required`, and the
+    // turn shipped them (E2E, 2026-10-07).
+    const { AgentSession, runTurn } = await loadRuntime();
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      call += 1;
+      return call === 1
+        ? answerStream("int() truncates; use round(). I answered this myself instead of delegating.")
+        : answerStream("Both files truncate with int(); round instead.");
+    });
+
+    const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
+    const result = await runTurn({ session, userMessage: MESSAGE, allowedAgents: ["code_analyst"], directiveAgent: "code_analyst" });
+
+    expect(delegated).toHaveLength(1);
+    expect(delegated[0]).toMatchObject({ agentName: "code_analyst", task: MESSAGE });
+    expect(result.response).not.toContain("I answered this myself");
+  });
+
   it("forces nothing when the agents are only narrowed (a scene's grant)", async () => {
     const { AgentSession, runTurn } = await loadRuntime();
     streamMock.mockImplementation(() => answerStream("int() truncates; use round()."));
