@@ -1,0 +1,108 @@
+// GUARDS: honest tools. What a file says is relayed as it is, and a tool's verdict about a path is
+// passed on as the tool gave it.
+//
+// How a turn can see a file (worked out from the source on 2026-10-07):
+//   - eval/e2e/fixtures/ lives on the host. The gateway runs in Docker with its own workspace volume,
+//     so no turn can open a fixture by path.
+//   - An ATTACHMENT (turn `attachments`) is uploaded through /api/multimodal/persist-attachment
+//     (gateway/index.ts:2002) to uploads/<sessionId>/<timestamp>-<name>. It is stored in the object
+//     store (storage/object-store.ts putUpload), or on disk under the SHARED workspace root with
+//     storage.backend "local". It is NOT under the eval account's working root
+//     (<workspace>/users/<segment>/, tools/workspace-path.ts userWorkspaceRoot), which is where
+//     read_file / list_files resolve paths. Its path is also never shown to the model; it rides only
+//     in the message metadata. The attachment reaches the turn through document RAG
+//     (agent/turn-prepare.ts prepareDocumentRag → retrieval/document-rag.ts): it is ingested into
+//     engram, and a small document's FULL text is put into the prompt
+//     (retrieval.documentRag.inlineSmallDocuments, at most inlineThresholdChars). So a fixture
+//     scenario requires engram.
+//   - A file at a path the turn's tools can see has to be made by a turn. The list scenario below
+//     writes one and checks it over HTTP (GET /api/workspace/file resolves against the same
+//     per-user root, gateway/workspace-routes.ts:143-150).
+[
+  {
+    id: "guards-attached-file-phrase-line",
+    title: "The line holding a phrase is quoted from an attached file",
+    group: "guards",
+    tags: ["tools", "attachments"],
+    description: "Fixture guards/lagerliste.txt holds the word Kalibrierintervall on exactly one line (NW-4417 … PK-2291). A near-miss line says \"Kalibrierung\", and unrelated lines carry their own markers (GS-5512, Hallentor). The reply must quote the matching line, not invent one and not paste the whole file. document_rag_ingest (agent/turn-prepare.ts:292) shows that the attachment reached the turn. If the ingest fails, the model is told the file is unreadable (document-rag.ts ATTACHMENT NOT READABLE), and the reply check fails for that reason.",
+    requires: ["model", "engram"],
+    timeoutMs: 900000,
+    steps: [
+      {
+        kind: "turn",
+        id: "find-phrase",
+        message: "Welche Zeile der angehängten Datei lagerliste.txt enthält das Wort „Kalibrierintervall“? Gib nur diese eine Zeile wörtlich wieder.",
+        attachments: ["guards/lagerliste.txt"],
+        timeoutMs: 600000,
+        expect: {
+          reply: {
+            // The matching line's two codes. Any one separator is accepted, so a typographic hyphen
+            // (NW‐4417) or a space still counts. The near-miss line's NW-4418 does not.
+            matches: ["NW\\W?4417", "PK\\W?2291"],
+            // Markers of unrelated lines: present only if the reply dumped the file instead of
+            // answering.
+            excludes: ["GS-5512", "Hallentor"],
+            maxChars: 700,
+          },
+          events: {
+            must: [{ type: "document_rag_ingest", where: { "data.ingested": { gte: 1 } } }],
+            mustNot: [{ type: "document_rag_ingest", where: { "data.failed": { gte: 1 } } }],
+          },
+        },
+      },
+    ],
+  },
+  {
+    id: "guards-list-files-on-a-file",
+    title: "Listing a path that is a file says it is a file",
+    group: "guards",
+    tags: ["tools", "workspace"],
+    description: "Protects the list_files fix (tools/filesystem.ts:351-362). A FILE path used to answer \"(empty directory — no files yet…)\" because readdir threw on it and the catch swallowed the error. Now the tool answers \"<path> is a file (N bytes), not a directory\". Setup: a turn writes generated/e2e-guards/inventur.txt (write_file overwrites by default, so the step repeats safely), and HTTP confirms it in the eval account's workspace. Then a fresh session, so the answer cannot come from the conversation, asks to list that path as a folder. list_files must report a file (sub_agent_tool_call resultPreview, agent/sub-agent.ts:2338-2341), and the reply must say it is a file, not an empty folder. The file stays in the eval workspace; each run overwrites it.",
+    requires: ["model"],
+    timeoutMs: 1500000,
+    steps: [
+      {
+        kind: "turn",
+        id: "write-file",
+        // --auto: the setup must not wait on a question card (no tool here needs approval).
+        message: "Schreibe die Textdatei generated/e2e-guards/inventur.txt mit genau diesem Inhalt (eine vorhandene Datei darfst du überschreiben): Inventur Westmark: Regal 4, Fach 9 --auto",
+        timeoutMs: 600000,
+      },
+      {
+        kind: "http",
+        id: "file-exists",
+        method: "GET",
+        path: "/api/workspace/file?path=generated/e2e-guards/inventur.txt",
+        expect: { status: 200, bodyIncludes: ["Inventur Westmark"] },
+      },
+      { kind: "newSession" },
+      {
+        kind: "turn",
+        id: "list-a-file",
+        message: "Liste den Inhalt des Ordners generated/e2e-guards/inventur.txt auf.",
+        timeoutMs: 600000,
+        expect: {
+          reply: {
+            // States that the path is a file: "ist kein Ordner, sondern eine Datei", "handelt es sich
+            // um eine Textdatei", "liegt eine Datei", "sondern die Datei", "ist kein Verzeichnis",
+            // "is a text file", "not a directory". "Es ist kein Ordner vorhanden" does NOT count: it
+            // says not found. Gaps skip dots inside the path (inventur.txt).
+            matches: [
+              "\\b(?:ist|is|it's|handelt es sich|verweist|zeigt|liegt|steht)\\b(?:[^.!?\\n]|[.!?](?=\\S)){0,40}?\\b(?:eine|a)\\s+(?:[^\\s.!?,]+\\s+){0,2}?[^\\s.!?,]*?(?:datei|file)\\b|\\bsondern\\s+(?:um\\s+)?(?:eine|die)\\s+(?:[^\\s.!?,]+\\s+)?[^\\s.!?,]*?datei\\b|\\bist\\s+kein(?:e|en)?\\s+(?:ordner|verzeichnis)\\b(?!(?:[^.!?\\n]|[.!?](?=\\S)){0,30}?(?:vorhanden|gefunden))|\\b(?:not|isn't)\\s+a\\s+(?:directory|folder)\\b",
+            ],
+            // The old wrong answer: an empty folder.
+            excludes: ["ist leer", "is empty", "leerer Ordner", "leeren Ordner", "leeres Verzeichnis", "empty directory", "empty folder"],
+          },
+          events: {
+            must: [
+              {
+                type: "sub_agent_tool_call",
+                where: { "data.tool": "list_files", "data.phase": "done", "data.resultPreview": { regex: "is a file" } },
+              },
+            ],
+          },
+        },
+      },
+    ],
+  },
+]

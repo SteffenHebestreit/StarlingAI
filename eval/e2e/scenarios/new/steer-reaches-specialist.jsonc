@@ -1,0 +1,80 @@
+// GROUP "new" — a message added mid-turn reaches the specialist doing the work (commit 252be2c).
+//
+// Before: the orchestrator folded a steering message in at its own next iteration, which waits for
+// the running delegation to return — in session ffe08297 the user's message reached the orchestrator
+// five minutes later and never reached the run doing the work. Now each sub-agent iteration reads the
+// turn's steering log and folds in what it has not seen (agent/sub-agent.ts foldNewSteeringIntoRun).
+//
+// The steer fires as soon as a research-capable specialist starts and narrows the request to one
+// catalogue category. Ground truth (eval/e2e/ENVIRONMENT.md, site/produkte/seite-1..3.html):
+// Messwerkzeug = NW-1203 Wasserwaage Horizont 80 cm, NW-2101 Laser-Entfernungsmesser Lumen 50,
+// NW-2102 Digitaler Messschieber Präzis 150, NW-2103 Kreuzlinienlaser Nordstern. Every other article
+// number (and a few distinctive names of other categories) must be absent from the reply.
+//
+// Events asserted, emitters verified in packages/core/src:
+//   sub_agent_started {agentName, task, ...} on the run's own session  agent/sub-agent.ts:2951
+//     (the variant WITH `stage` is a discovery note on the parent, agent/sub-agent.ts:2734 — excluded)
+//   turn_steering_enqueued {length, queued} on the root session          agent/turn-steering.ts:350
+//   sub_agent_steering_injected {agentName, runSessionId, count, iteration}
+//     on the run's parent session                                        agent/sub-agent.ts:4953
+// Agent names checked against the compiled starlingai.json subAgents; all four run in the gateway
+// process (container.disabled), so they reach the fixture site.
+{
+  id: "new-steer-reaches-running-specialist",
+  title: "A mid-turn message reaches the running research specialist and narrows the answer to one category",
+  group: "new",
+  tags: ["steering", "site", "slow"],
+  description: "Guards 252be2c (session ffe08297): a steer sent while a specialist works must be folded into THAT run (sub_agent_steering_injected for a research-capable agent), not only into the orchestrator after the delegation returns. The reply must honour the steer: Messwerkzeug articles only, none of the 14 articles of the other five categories.",
+  requires: ["model", "e2e-site"],
+  identity: "eval",
+  timeoutMs: 1200000,
+  steps: [
+    {
+      kind: "turn",
+      id: "catalogue-then-narrowed",
+      message: "Liste bitte alle Artikel aus dem Produktkatalog der Nordlicht Werkzeuge GmbH (http://www.nordlicht-werkzeuge.test/produkte/) mit Artikelnummer und Preis auf. Der Katalog hat mehrere Seiten. --auto",
+      effort: "medium",
+      timeoutMs: 900000,
+      during: [
+        {
+          when: {
+            event: {
+              type: "sub_agent_started",
+              where: {
+                "data.agentName": { in: ["researcher", "browser_agent", "source_verifier", "summarizer"] },
+                "data.stage": { exists: false },
+              },
+            },
+          },
+          do: { steer: "Planänderung: Bitte nur die Artikel der Kategorie Messwerkzeug auflisten und alle anderen Kategorien weglassen." },
+        },
+      ],
+      expect: {
+        status: "ok",
+        reply: {
+          // At least one Messwerkzeug article, by number or by name.
+          includesAny: ["NW-1203", "NW-2101", "NW-2102", "NW-2103", "Wasserwaage", "Entfernungsmesser", "Messschieber", "Kreuzlinienlaser"],
+          // No article of Akkuwerkzeug, Handwerkzeug, Werkstatt, Arbeitsschutz or Zubehör.
+          excludes: [
+            "NW-1101", "NW-1102", "NW-1103", "NW-1201", "NW-1202",
+            "NW-2104", "NW-2105", "NW-2106",
+            "NW-3101", "NW-3102", "NW-3103", "NW-3104", "NW-3105", "NW-3106",
+            "Werkstattwagen", "Schutzbrille", "Ratschenkasten", "Bit-Sortiment", "Akku-Bohrhammer",
+          ],
+          minChars: 40,
+        },
+        events: {
+          must: [
+            { type: "turn_steering_enqueued", min: 1 },
+            {
+              type: "sub_agent_steering_injected",
+              where: { "data.agentName": { in: ["researcher", "browser_agent", "source_verifier", "summarizer"] } },
+              min: 1,
+            },
+          ],
+        },
+        agents: { mustRunAny: ["researcher", "browser_agent", "source_verifier", "summarizer"] },
+      },
+    },
+  ],
+}

@@ -1,0 +1,97 @@
+// Data and documents as chat attachments: a CSV for data_analyst, a .docx for document_intake.
+// Fixtures (synthetic): eval/e2e/fixtures/core-build/umsatz-q3-2026.csv,
+// eval/e2e/fixtures/core-build/pruefbericht-pb-2026-0417.docx.
+//
+// How an attachment reaches the turn (verified in the code, not only in the README): the harness
+// stores it like the web client (POST /api/multimodal/persist-attachment → uploads/<session>/<ts>-<name>,
+// gateway/index.ts:2002) and sends its metadata with chat.send. The runtime hands it to the model
+// ONLY through document RAG: retrieval/document-rag.ts augmentTurnWithDocuments ingests it into engram
+// and — for small files (inlineSmallDocuments, ≤ inlineThresholdChars) — puts its full extracted text
+// into a [DOCUMENT CONTEXT] block (agent/turn-prepare.ts:283-300). Without engram the file is invisible
+// to the model, so these scenarios require engram. The upload's path is never given to the model, and
+// under the default S3 upload store list_files/read_file/spreadsheet_read cannot see it (only
+// extract_file_content falls back to the store, tools/multimodal.ts:1507, and needs the exact path) —
+// so the forced specialist works from what the orchestrator hands it. These scenarios therefore check
+// that the attachment was ingested, that the named specialist ran, and that the reply carries the
+// exact facts; they do NOT require the specialist's own file tool to succeed.
+//
+// Ground truth:
+//   umsatz-q3-2026.csv (12 rows, computed locally with Node and Python): total 171747 €; per region
+//     Nord 55297 (highest), West 46215, Süd 38506, Ost 31729.
+//   pruefbericht-pb-2026-0417.docx (built with the repo's docx library; text verified by unzipping):
+//     Ersatzableitstrom 0,08 mA (limit ≤ 0,5 mA); next inspection due 06.04.2027; serial NWLG18-20931.
+//
+// Audit events asserted, verified against packages/core/src:
+//   document_rag_ingest {ingested, failed}  agent/turn-prepare.ts:292 (root session, at turn start)
+//   sub-agent runs via agents.mustRun = sub_agent_started {agentName}  agent/sub-agent.ts:2950
+[
+  {
+    id: "core-build-data-csv-total",
+    title: "Data: data_analyst totals an attached CSV",
+    group: "core",
+    tags: ["data", "attachment"],
+    description: "A synthetic 12-row sales CSV (3 months × 4 regions) attached to the message; data_analyst is forced. Expected: quarter total 171747 € and top region Nord with 55297 € (computed locally). Protects: an attached CSV is ingested and reaches the turn (document_rag_ingest without failures), the forced data specialist runs, and the totals are exact.",
+    requires: ["model", "engram"],
+    timeoutMs: 900000,
+    steps: [
+      {
+        kind: "turn",
+        id: "analyse",
+        message: "Im Anhang ist umsatz-q3-2026.csv mit den Umsätzen eines fiktiven Händlers im dritten Quartal 2026. Wie hoch ist der Gesamtumsatz des Quartals, und welches Gebiet hatte den höchsten Quartalsumsatz (mit Betrag)? --auto",
+        agent: "data_analyst",
+        attachments: ["core-build/umsatz-q3-2026.csv"],
+        timeoutMs: 600000,
+        expect: {
+          reply: {
+            includesAny: ["171747", "171.747", "171,747", "171 747", "171 747", "171 747", "171'747"],
+            matches: ["55[.,'\\u00a0\\u202f ]?297"],
+          },
+          agents: { mustRun: ["data_analyst"] },
+          events: {
+            must: [
+              { type: "document_rag_ingest", where: { "data.ingested": { gte: 1 } } },
+            ],
+            mustNot: [
+              { type: "document_rag_ingest", where: { "data.failed": { gte: 1 } } },
+            ],
+          },
+        },
+      },
+    ],
+  },
+
+  {
+    id: "core-build-doc-intake-docx-fact",
+    title: "Documents: document_intake extracts facts from an attached .docx",
+    group: "core",
+    tags: ["document", "attachment", "docx"],
+    description: "A synthetic test report (.docx with a heading, key/value lines and a results table) attached to the message; document_intake is forced. Expected: Ersatzableitstrom 0,08 mA (a table cell) and next inspection 06.04.2027 (a key/value line). Protects: a binary Office attachment is converted and ingested (document_rag_ingest without failures), the forced extraction specialist runs, and the reply carries the exact values from the file.",
+    requires: ["model", "engram"],
+    timeoutMs: 900000,
+    steps: [
+      {
+        kind: "turn",
+        id: "extract",
+        message: "Im Anhang ist der Prüfbericht pruefbericht-pb-2026-0417.docx. Welcher Ersatzableitstrom wurde gemessen, und wann ist die nächste Prüfung fällig? --auto",
+        agent: "document_intake",
+        attachments: ["core-build/pruefbericht-pb-2026-0417.docx"],
+        timeoutMs: 600000,
+        expect: {
+          reply: {
+            includesAny: ["06.04.2027", "6.4.2027", "6. April 2027", "06. April 2027", "2027-04-06", "April 6, 2027", "6 April 2027"],
+            matches: ["0[,.]08\\s*(mA|Milliampere|milliamp)"],
+          },
+          agents: { mustRun: ["document_intake"] },
+          events: {
+            must: [
+              { type: "document_rag_ingest", where: { "data.ingested": { gte: 1 } } },
+            ],
+            mustNot: [
+              { type: "document_rag_ingest", where: { "data.failed": { gte: 1 } } },
+            ],
+          },
+        },
+      },
+    ],
+  },
+]

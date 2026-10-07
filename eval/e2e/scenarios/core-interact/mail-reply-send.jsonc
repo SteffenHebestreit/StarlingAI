@@ -1,0 +1,61 @@
+// Draft and send a reply from the eval mailbox; GreenMail stores it in the recipient's own mailbox and
+// relays nothing (eval/e2e/ENVIRONMENT.md "Mail"). The recipient address is synthetic (.test).
+//
+// mail_send_draft is tier THREE_PRIVILEGED with requiresPerCallApproval (guardrails/tool-tiers.ts:1156);
+// the harness answers no approval card, so the turn carries --auto (gateway/rpc.ts:329 parseOverrideFlags
+// -> agent/runtime.ts:2059 approves every call of the turn).
+//
+// Ground truth for the reply's content (ENVIRONMENT.md "Prices & shipping"): freight goods (NW-2104,
+// NW-2106) ship by forwarder in 5–8 working days.
+//
+// Event names verified against packages/core/src:
+//   sub_agent_tool_call {agentName, tool, phase}  agent/sub-agent.ts:6527 (start) — tools.mustCall/maxCalls
+//   sub_agent_started {agentName}                 agent/sub-agent.ts:2950 — agents.mustRun
+{
+  id: "core-ix-mail-reply-send",
+  title: "Mail: draft and send a reply; it arrives exactly once at the recipient",
+  group: "core",
+  tags: ["mail", "send"],
+  description: "Delivers a synthetic customer inquiry to eval@e2e.test, then asks the assistant to answer it and send the answer. The mail agent must prepare a draft and send it once (mail_prepare_draft, then mail_send_draft at most once), and GreenMail must hold exactly one message for einkauf@polarhafen-handel.test with the requested subject and the 5–8 working days. Protects: the full draft -> approve -> send path to a real SMTP sink, and against double sends.",
+  requires: ["model", "mail"],
+  timeoutMs: 1200000,
+  steps: [
+    { kind: "mail", action: "clear" },
+    {
+      kind: "mail",
+      action: "deliver",
+      message: {
+        from: "einkauf@polarhafen-handel.test",
+        subject: "Anfrage Lieferzeit Werkbank Fjell 150",
+        text: "Guten Tag,\n\nwie lange dauert die Lieferung der Werkbank Fjell 150 (NW-2106) zu uns nach Polarhafen?\n\nViele Grüße\nEinkauf, Polarhafen Handel (fiktives Unternehmen, Testnachricht)",
+      },
+    },
+    { kind: "mail", action: "expect", match: { subjectIncludes: ["Fjell 150"], min: 1, max: 1 } },
+    {
+      kind: "turn",
+      id: "reply-and-send",
+      message: "In meinem Postfach liegt eine Anfrage von einkauf@polarhafen-handel.test zur Lieferzeit der Werkbank Fjell 150. Schreib bitte eine kurze, höfliche Antwort an einkauf@polarhafen-handel.test mit dem Betreff „Re: Anfrage Lieferzeit Werkbank Fjell 150“: Die Werkbank wird per Spedition geliefert, die Lieferzeit beträgt 5–8 Werktage. Schick die Antwort direkt ab. --auto",
+      timeoutMs: 900000,
+      expect: {
+        reply: {
+          includesAny: ["gesendet", "versendet", "verschickt", "abgeschickt", "versandt", "sent"],
+          // "…, aber nicht abgeschickt" would satisfy the list above.
+          excludes: ["nicht gesendet", "nicht versendet", "nicht verschickt", "nicht abgeschickt", "nicht versandt", "not sent", "not been sent"],
+        },
+        agents: { mustRun: ["mail_agent"] },
+        tools: {
+          mustCall: ["mail_prepare_draft", "mail_send_draft"],
+          mustNotCall: ["mail_delete", "mail_delete_mailbox"],
+          maxCalls: { mail_send_draft: 1 },
+        },
+      },
+    },
+    // GreenMail keeps a mailbox per recipient; the reply landed there exactly once.
+    {
+      kind: "mail",
+      action: "expect",
+      match: { to: "einkauf@polarhafen-handel.test", subjectIncludes: ["Fjell 150"], bodyIncludes: ["Werktage"], min: 1, max: 1 },
+    },
+    { kind: "mail", action: "expect", match: { to: "einkauf@polarhafen-handel.test", min: 1, max: 1 } },
+  ],
+}

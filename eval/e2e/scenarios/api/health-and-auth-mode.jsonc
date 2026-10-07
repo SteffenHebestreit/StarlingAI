@@ -1,0 +1,37 @@
+// GROUP "api" — health, readiness, auth mode and the caller's identity answer as documented.
+//
+//   GET /healthz               → 200 {"status":"ok"}                   gateway/routes/health.ts:22
+//   GET /readyz                → 200 {"status":"ready",...} or 503 "not_ready", with
+//                                deployment.dependencies               gateway/routes/health.ts:42-94
+//   GET /api/health/subsystems → 200 when no subsystem is "unavailable", else 503; body
+//                                {healthy, degraded, checks:[{name,status,detail}]} with checks such as
+//                                event_loop and primary_model           gateway/routes/health.ts:100,
+//                                                                       observability/health-checks.ts:307
+//   GET /api/auth/mode         → {"authEnabled":true,"provider":...}    gateway/index.ts:973
+//   GET /api/auth/me           → {"username","role",...} of the token   gateway/index.ts:1113
+//   GET /api/product           → public product identity                gateway/routes/health.ts:28
+// readyz and subsystems accept 503: a deployment with an optional backend down (e.g. telemetry
+// without QUESTDB_URL reports "unavailable") answers 503 with the same documented body. Every
+// request carries the identity's token; the unauthenticated 401 paths are not reachable from the
+// scenario contract. No model is needed.
+{
+  id: "api-health-and-auth-mode",
+  title: "Health, readiness, auth mode and the caller's identity endpoints answer as documented",
+  group: "api",
+  tags: ["api", "health", "auth", "smoke"],
+  description: "Guards the documented shapes of the health and auth endpoints the harness and the dashboard rely on: /healthz ok, /readyz and /api/health/subsystems with their bodies (200 or 503), /api/auth/mode reporting account login on, /api/auth/me naming each e2e identity with its role (eval = operator, eval-viewer = viewer), and the public /api/product identity.",
+  requires: ["gateway"],
+  identity: "eval",
+  timeoutMs: 180000,
+  steps: [
+    { kind: "http", id: "healthz", method: "GET", path: "/healthz", expect: { status: 200, bodyIncludes: ["\"status\":\"ok\""] } },
+    { kind: "http", id: "readyz", method: "GET", path: "/readyz", expect: { status: [200, 503], bodyIncludes: ["\"status\":", "\"deployment\":", "\"dependencies\":"] } },
+    { kind: "http", id: "subsystems", method: "GET", path: "/api/health/subsystems", expect: { status: [200, 503], bodyIncludes: ["\"healthy\":", "\"checks\":", "\"event_loop\"", "\"primary_model\""] } },
+    // A read: viewers may call it too.
+    { kind: "http", id: "subsystems-viewer", as: "eval-viewer", method: "GET", path: "/api/health/subsystems", expect: { status: [200, 503], bodyIncludes: ["\"checks\":"] } },
+    { kind: "http", id: "auth-mode", method: "GET", path: "/api/auth/mode", expect: { status: 200, bodyIncludes: ["\"authEnabled\":true", "\"provider\":"] } },
+    { kind: "http", id: "me-operator", method: "GET", path: "/api/auth/me", expect: { status: 200, bodyIncludes: ["\"username\":\"eval\"", "\"role\":\"operator\""] } },
+    { kind: "http", id: "me-viewer", as: "eval-viewer", method: "GET", path: "/api/auth/me", expect: { status: 200, bodyIncludes: ["\"username\":\"eval-viewer\"", "\"role\":\"viewer\""] } },
+    { kind: "http", id: "product", method: "GET", path: "/api/product", expect: { status: 200, bodyIncludes: ["\"slug\":", "\"stateDirName\":"] } },
+  ],
+}

@@ -1,0 +1,49 @@
+// Multi-turn context: the second message only makes sense with the first answer ("und welcher davon …").
+// Ground truth (site/produkte/seite-2.html): category Werkstatt = NW-2104 Werkstattwagen Eisberg 459,00 €,
+// NW-2105 Schraubstock Granit 125 64,00 €, NW-2106 Werkbank Fjell 150 289,00 € — all on page 2. The
+// cheapest of them is NW-2105; the cheapest article overall is NW-3102 Schutzbrille Klarsicht (8,90 €,
+// page 3), which is what an answer that lost the reference to "davon" tends to name.
+//
+// The follow-up is short and carries no task signal, so it is a candidate for the receptionist fast lane
+// (agent/receptionist.ts classifyFrontDesk), whose micro-call sees the message and a memory capsule but
+// not the conversation — it must escalate rather than answer.
+{
+  id: "core-ix-context-followup-cheapest",
+  title: "Context: a follow-up that refers to the previous answer is resolved correctly",
+  group: "core",
+  tags: ["context", "multi-turn", "site"],
+  description: "Turn 1 lists the three Werkstatt articles from the paginated catalogue. Turn 2 asks only 'Und welcher davon ist am günstigsten?' in the same session: the answer must be NW-2105 Schraubstock Granit 125 for 64,00 € — not the cheapest article overall. Protects: conversation context across turns (history, the fast lane's escalation, follow-up routing).",
+  requires: ["model", "e2e-site"],
+  timeoutMs: 1500000,
+  steps: [
+    {
+      kind: "turn",
+      id: "list-werkstatt",
+      message: "Welche Artikel der Kategorie „Werkstatt“ führt die Nordlicht Werkzeuge GmbH laut ihrem Online-Katalog http://www.nordlicht-werkzeuge.test/produkte/ ? Der Katalog hat mehrere Seiten. Bitte jeweils mit Artikelnummer und Preis.",
+      timeoutMs: 900000,
+      expect: {
+        reply: {
+          includes: ["NW-2104", "NW-2105", "NW-2106"],
+          matches: ["459", "\\b64(?:[,.]00)?\\b", "289"],
+        },
+      },
+    },
+    {
+      kind: "turn",
+      id: "followup",
+      message: "Und welcher davon ist am günstigsten?",
+      timeoutMs: 600000,
+      expect: {
+        reply: {
+          matches: ["NW-2105|Schraubstock", "\\b64(?:[,.]00)?\\b"],
+          // The overall cheapest article: the reference to the previous answer was lost.
+          excludes: ["NW-3102", "Schutzbrille"],
+        },
+        judge: {
+          rubric: "Die Antwort bezieht sich auf die drei zuvor genannten Werkstatt-Artikel und nennt den Schraubstock Granit 125 (NW-2105) für 64,00 € als den günstigsten davon.",
+          minScore: 7,
+        },
+      },
+    },
+  ],
+}

@@ -1,0 +1,66 @@
+// GROUP "api" — a session belongs to its owner.
+//
+// Two gates stand between eval-viewer and eval's session, and they answer differently:
+//   - READ routes (GET /api/sessions/:id/audit-markdown, /debug-markdown, /shared-facts,
+//     gateway/index.ts:2699-2795) check ownership with callerMayUseSession
+//     (gateway/session-route-access.ts): not the owner, not admin → 404 {"error":"Session not found"},
+//     so the reply does not confirm the id exists.
+//   - MUTATING routes (POST /api/sessions/:id/steer and /stop, gateway/index.ts:2797/2850) are refused
+//     earlier, by the Wave B role gate (gateway/index.ts:945-962: a viewer's POST/PUT/PATCH/DELETE on
+//     /api/* → 403 {"error":"Operator role required for this action"}), registered before those
+//     routes, so the steer handler's own ownership check (404) is never reached for a viewer. The 404
+//     on steer applies to ANOTHER OPERATOR (tests/gateway.integration.test.ts, "steers only the
+//     caller's own session"); the e2e identities have no second operator, so it is not reachable here.
+// The owner's own steer on the idle session is the control: 200 {"steered":false,"active":false}
+// (gateway/rpc.ts steerChatTurn) — the route works, there is just no running turn to take it.
+// Audit export header: agent/debug-session-export.ts:181-185 ("# StarlingAI Session Audit Export",
+// "- Channel: <channel>", "- User: <userId>"); the harness creates sessions on channel "eval".
+[
+  {
+    id: "api-session-owner-only-after-turn",
+    title: "After a turn, the viewer can neither read nor steer nor stop the operator's session",
+    group: "api",
+    tags: ["api", "rbac", "session", "smoke"],
+    description: "Guards per-session ownership on the HTTP session routes after a real turn: eval-viewer reading eval's session (audit and debug export, shared facts) gets 404 Session not found; its steer and stop are refused with 403 by the operator-role gate. The owner can export the session and may call steer (200, steered:false while no turn runs).",
+    requires: ["gateway", "model"],
+    identity: "eval",
+    timeoutMs: 360000,
+    steps: [
+      {
+        kind: "turn",
+        id: "greeting",
+        message: "Hallo! Antworte bitte nur mit einem kurzen Gruß.",
+        timeoutMs: 240000,
+        expect: { status: "ok", reply: { minChars: 2 } },
+      },
+      { kind: "http", id: "owner-reads-audit", method: "GET", path: "/api/sessions/{sessionId}/audit-markdown", expect: { status: 200, bodyIncludes: ["Session Audit Export", "- Channel: eval", "- User: eval"] } },
+      { kind: "http", id: "viewer-audit-refused", as: "eval-viewer", method: "GET", path: "/api/sessions/{sessionId}/audit-markdown", expect: { status: 404, bodyIncludes: ["Session not found"] } },
+      { kind: "http", id: "viewer-debug-refused", as: "eval-viewer", method: "GET", path: "/api/sessions/{sessionId}/debug-markdown", expect: { status: 404, bodyIncludes: ["Session not found"] } },
+      { kind: "http", id: "viewer-facts-refused", as: "eval-viewer", method: "GET", path: "/api/sessions/{sessionId}/shared-facts", expect: { status: 404, bodyIncludes: ["Session not found"] } },
+      { kind: "http", id: "viewer-steer-refused", as: "eval-viewer", method: "POST", path: "/api/sessions/{sessionId}/steer", body: { message: "Bitte fasse dich kurz." }, expect: { status: 403, bodyIncludes: ["Operator role required"] } },
+      { kind: "http", id: "viewer-stop-refused", as: "eval-viewer", method: "POST", path: "/api/sessions/{sessionId}/stop", body: {}, expect: { status: 403, bodyIncludes: ["Operator role required"] } },
+      { kind: "http", id: "owner-steer-idle", method: "POST", path: "/api/sessions/{sessionId}/steer", body: { message: "Bitte fasse dich kurz." }, expect: { status: 200, bodyIncludes: ["\"steered\":false"] } },
+    ],
+  },
+  {
+    // The same gates without a model: the first {sessionId} step creates the session (session.create
+    // as eval), so the ownership rule is checked even where no model backend is up.
+    id: "api-session-owner-only-fresh-session",
+    title: "A fresh session is the operator's alone: the viewer cannot read, steer or stop it",
+    group: "api",
+    tags: ["api", "rbac", "session", "smoke"],
+    description: "Model-free twin of api-session-owner-only-after-turn: on a session created by eval, eval-viewer's reads answer 404 Session not found and its steer and stop answer 403 Operator role required; the owner can export it and call steer (200, steered:false).",
+    requires: ["gateway"],
+    identity: "eval",
+    timeoutMs: 120000,
+    steps: [
+      { kind: "http", id: "owner-reads-audit", method: "GET", path: "/api/sessions/{sessionId}/audit-markdown", expect: { status: 200, bodyIncludes: ["Session Audit Export", "- Channel: eval", "- User: eval"] } },
+      { kind: "http", id: "viewer-audit-refused", as: "eval-viewer", method: "GET", path: "/api/sessions/{sessionId}/audit-markdown", expect: { status: 404, bodyIncludes: ["Session not found"] } },
+      { kind: "http", id: "viewer-debug-refused", as: "eval-viewer", method: "GET", path: "/api/sessions/{sessionId}/debug-markdown", expect: { status: 404, bodyIncludes: ["Session not found"] } },
+      { kind: "http", id: "viewer-facts-refused", as: "eval-viewer", method: "GET", path: "/api/sessions/{sessionId}/shared-facts", expect: { status: 404, bodyIncludes: ["Session not found"] } },
+      { kind: "http", id: "viewer-steer-refused", as: "eval-viewer", method: "POST", path: "/api/sessions/{sessionId}/steer", body: { message: "Bitte fasse dich kurz." }, expect: { status: 403, bodyIncludes: ["Operator role required"] } },
+      { kind: "http", id: "viewer-stop-refused", as: "eval-viewer", method: "POST", path: "/api/sessions/{sessionId}/stop", body: {}, expect: { status: 403, bodyIncludes: ["Operator role required"] } },
+      { kind: "http", id: "owner-steer-idle", method: "POST", path: "/api/sessions/{sessionId}/steer", body: { message: "Bitte fasse dich kurz." }, expect: { status: 200, bodyIncludes: ["\"steered\":false"] } },
+    ],
+  },
+]

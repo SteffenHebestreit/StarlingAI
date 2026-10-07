@@ -1,0 +1,73 @@
+// Knowledge base (crawled corpus in engram) built through the API, then queried in chat.
+//
+// API (gateway/knowledge-base-routes.ts): POST /api/knowledge-bases {id?, name, seedUrls, maxPages,
+// maxDepth, scope, crawlNow} -> 201 {"id","crawlStarted"} and the crawl runs in the background
+// (retrieval/kb-crawler.ts startKbCrawl); GET /api/knowledge-bases/:id -> {"knowledgeBase":{…,"status",
+// "pageCount",…},"pages",…}; DELETE -> {"id","removed":true,…}. Mutations need the operator role (route
+// policy, :18-24); a user-scoped KB is visible to its owner only (retrieval/knowledge-bases.ts:194
+// callerCanAccessKb; other callers get 404, no existence disclosure). A crawl that ingested its page
+// ends "ready" (kb-crawler.ts:873-875). The crawler fetches through the same SSRF guard as web_fetch
+// (kb-crawler.ts:310 -> tools/web.ts:826 hostIsBlocked), so it reaches the fixture host only with the
+// e2e allowlist in place.
+//
+// Ground truth (ENVIRONMENT.md "Documentation (NW-AS 18)"): NW-3104 on charger NW-LG 18: 0 -> 80 % in
+// 38 min; gearbox grease check every 150 operating hours. Both facts exist only on dokumentation.html.
+//
+// Tools: search_knowledge_base is always offered to the orchestrator (agent/default-tools.ts) and held by
+// researcher/browser_agent/source_verifier. No audit event is logged for KB create/crawl/delete.
+// Caveat: if the swarm answers through use_knowledge_base instead, its ephemeral worker runs as
+// "sub:<chat>:ephemeral:kb_…_worker:<ts>", which gateway/rpc.ts:157 owningChatSessionId resolves to
+// "<chat>:ephemeral" — the worker's tool calls never reach a non-admin's audit stream, and
+// tools.mustCall below would miss them.
+{
+  id: "core-ix-kb-documentation-rag",
+  title: "Knowledge base: crawl the documentation page, answer only from it, delete it",
+  group: "core",
+  tags: ["knowledge-base", "rag", "site"],
+  description: "Creates a user-scoped knowledge base over the fixture site's manual page (one page, depth 0) through the REST API as eval, waits for the background crawl to finish, checks that eval-viewer can neither see nor delete it, then asks a question only that page answers and requires search_knowledge_base. Deletes the knowledge base at the end; the first step removes a leftover of an earlier failed attempt (ids are unique). Protects: create -> crawl -> ingest -> scoped retrieval end to end, and the per-user/role boundary of the KB API.",
+  requires: ["model", "engram", "e2e-site"],
+  timeoutMs: 1200000,
+  steps: [
+    // A failed earlier attempt stops before the final delete; its KB would make the POST answer 400.
+    { kind: "http", method: "DELETE", path: "/api/knowledge-bases/core-ix-nw-doku", expect: { status: [200, 404] } },
+    {
+      kind: "http",
+      method: "POST",
+      path: "/api/knowledge-bases",
+      body: {
+        id: "core-ix-nw-doku",
+        name: "E2E Nordlicht Doku (core-ix)",
+        description: "Synthetische Testdaten: Kurzanleitung Akku-Schrauber NW-AS 18 der fiktiven Nordlicht Werkzeuge GmbH.",
+        seedUrls: ["http://www.nordlicht-werkzeuge.test/dokumentation.html"],
+        maxPages: 1,
+        maxDepth: 0,
+        scope: "user",
+        ambientRetrieval: false,
+      },
+      expect: { status: 201, bodyIncludes: ["\"crawlStarted\":true"] },
+    },
+    // One small page: fetch, convert, ingest into engram. No polling step exists, so wait generously.
+    { kind: "wait", ms: 60000 },
+    { kind: "http", method: "GET", path: "/api/knowledge-bases/core-ix-nw-doku", expect: { status: 200, bodyIncludes: ["\"status\":\"ready\"", "\"pageCount\":1"] } },
+    // The KB is eval's: the viewer gets the not-found shape, and the operator-only route policy refuses its delete.
+    { kind: "http", as: "eval-viewer", method: "GET", path: "/api/knowledge-bases/core-ix-nw-doku", expect: { status: 404 } },
+    { kind: "http", as: "eval-viewer", method: "DELETE", path: "/api/knowledge-bases/core-ix-nw-doku", expect: { status: 403 } },
+    {
+      kind: "turn",
+      id: "ask-kb",
+      message: "Suche in der Wissensdatenbank „core-ix-nw-doku“: Wie lange dauert es, den Akku-Pack NW-3104 mit dem Schnellladegerät NW-LG 18 von 0 auf 80 % zu laden, und nach wie vielen Betriebsstunden soll das Getriebefett des Akku-Schraubers NW-AS 18 geprüft werden?",
+      timeoutMs: 600000,
+      expect: {
+        reply: {
+          matches: [
+            "\\b38\\s*(Minuten|min)",
+            "\\b150\\s*(Betriebsstunden|Stunden|operating|hours|h\\b)",
+          ],
+        },
+        tools: { mustCall: ["search_knowledge_base"] },
+      },
+    },
+    { kind: "http", method: "DELETE", path: "/api/knowledge-bases/core-ix-nw-doku", expect: { status: 200, bodyIncludes: ["\"removed\":true"] } },
+    { kind: "http", method: "GET", path: "/api/knowledge-bases/core-ix-nw-doku", expect: { status: 404 } },
+  ],
+}

@@ -1,0 +1,159 @@
+// Code: a computation the coder runs in its sandbox, a tiny web app web_coder builds and verifies,
+// and static analysis of the existing trap fixtures in eval/fixtures/ (README.md, _ground-truth/).
+// Each scenario is about one agent, so it forces it (`agent` → `--agent <name>`).
+//
+// The fixture code is carried IN the message, verbatim from eval/fixtures/*/generated/. As
+// attachments it would reach the turn only as document-RAG text (engram) and never as a file
+// code_analyst can open: the upload's workspace path is not given to the model, and under the
+// default S3 upload store list_files/read_file/grep_files do not see uploads at all.
+//
+// Ground truth:
+//   primes p with 100000 ≤ p ≤ 200000: 8392 primes, sum 1255204276 — computed locally twice (Node
+//     sieve and trial division, Python trial division); neither bound is prime.
+//   twin-bug (eval/fixtures/_ground-truth/twin-bug.md): int(subtotal + tax) truncates in
+//     invoices.py:invoice_total AND, un-asked, in receipts.py:receipt_total.
+//   assessment-trap (eval/fixtures/_ground-truth/assessment-trap.md): applyDiscount treats the
+//     whole-number percent (20) as a fraction: 50 - 50*20 = -950; a diagnosis, no edit.
+//
+// Audit events asserted, verified against packages/core/src:
+//   sub_agent_tool_call {agentName, tool, phase, args, success}
+//     agent/sub-agent.ts:4748 (logAudit), payload :2296; phase "start" (dispatched) at :6527,
+//     phase "done" with args + result.success at :6918
+//   guardrail_flagged {type: "artifact_verification_failed" | "artifact_completion_claim_unbacked_bannered"}
+//     agent/turn-finalize-guards.ts:941 / :913, agent/runtime.ts:4803
+// shell_exec and run_script both run in the Docker sandbox and need per-call approval
+// (guardrails/tool-tiers.ts:784, :790) — hence `--auto`. verify_page returns success only on PASS
+// (tools/page-check.ts:413), verify_app likewise logs a pass/fail verdict (tools/serve-app.ts:440).
+[
+  {
+    id: "core-build-code-sandbox-primes",
+    title: "Code: the coder computes an exact result in its sandbox",
+    group: "core",
+    tags: ["code", "sandbox", "smoke"],
+    description: "The coder writes and runs a script in the Docker sandbox: count and sum of the primes between 100000 and 200000 (8392 primes, sum 1255204276 — computed locally with two methods in Node and Python; not a memorizable value). Protects: the sandbox execution path (run_script/shell_exec dispatched with --auto approval, finishing successfully) and an exact computed answer rather than an estimate.",
+    requires: ["model", "sandbox"],
+    timeoutMs: 900000,
+    steps: [
+      {
+        kind: "turn",
+        id: "compute",
+        message: "Berechne mit einem Skript in der Sandbox, wie viele Primzahlen p es mit 100000 ≤ p ≤ 200000 gibt und wie groß ihre Summe ist. Nenne beide Zahlen. --auto",
+        agent: "coder",
+        timeoutMs: 600000,
+        expect: {
+          reply: {
+            includesAny: ["1255204276", "1.255.204.276", "1,255,204,276", "1 255 204 276", "1 255 204 276", "1 255 204 276", "1'255'204'276"],
+            matches: ["\\b8[.,'\\u00a0\\u202f ]?392\\b"],
+          },
+          agents: { mustRun: ["coder"] },
+          events: {
+            must: [
+              { type: "sub_agent_tool_call", where: { "data.agentName": "coder", "data.tool": { in: ["run_script", "shell_exec"] }, "data.phase": "done", "data.success": true } },
+            ],
+          },
+        },
+      },
+    ],
+  },
+
+  {
+    id: "core-build-code-web-app-verified",
+    title: "Code: web_coder builds a tiny web app and verifies it runs",
+    group: "core",
+    tags: ["code", "web-app", "build", "slow"],
+    description: "web_coder builds a one-page VAT calculator (net amount, 7 % / 19 %, live VAT and gross output). Its prompt requires running verify_page on the built page and fixing until it passes; the message does not ask for the check. Protects: the verification tool is dispatched by web_coder and passes at least once (verify_page succeeds only on PASS), an .html artifact is delivered, and no broken file ships.",
+    requires: ["model"],
+    timeoutMs: 1500000,
+    steps: [
+      {
+        kind: "turn",
+        id: "build",
+        message: "Baue eine kleine Web-App als einzelne Seite: einen Brutto-Netto-Rechner mit einem Eingabefeld für den Nettobetrag, einer Auswahl für 7 % oder 19 % Mehrwertsteuer und einer Anzeige von Mehrwertsteuerbetrag und Bruttobetrag, die sich beim Tippen aktualisiert. --auto",
+        agent: "web_coder",
+        timeoutMs: 1200000,
+        expect: {
+          agents: { mustRun: ["web_coder"] },
+          // index.html written by write_file, or the folder generate_website records (no extension).
+          artifacts: { minCount: 1, pathMatches: ["\\.html?$|^[^.:]+$"] },
+          events: {
+            must: [
+              // The verification ran …
+              { type: "sub_agent_tool_call", where: { "data.agentName": "web_coder", "data.tool": { in: ["verify_page", "verify_app"] }, "data.phase": "start" } },
+              // … and passed at least once.
+              { type: "sub_agent_tool_call", where: { "data.agentName": "web_coder", "data.tool": { in: ["verify_page", "verify_app"] }, "data.phase": "done", "data.success": true } },
+            ],
+            mustNot: [
+              { type: "guardrail_flagged", where: { "data.type": "artifact_verification_failed" } },
+              { type: "guardrail_flagged", where: { "data.type": "artifact_completion_claim_unbacked_bannered" } },
+            ],
+          },
+        },
+      },
+    ],
+  },
+
+  {
+    id: "core-build-code-twin-bug",
+    title: "Static analysis: the twin defect in the second file is named",
+    group: "core",
+    tags: ["code", "static-analysis", "smoke"],
+    description: "eval/fixtures/twin-bug (verbatim, in the message): the task names only invoices.py, the same int(subtotal + tax) truncation also sits in receipts.py. Ground truth eval/fixtures/_ground-truth/twin-bug.md: the hard criterion is that receipts.py is named; the 'TWINS:' line the agent's prompt asks for is format, not gate. Note: the fixture's own comments describe the defect, which makes the case easier than its name suggests. Protects: code_analyst's twin sweep — a defect is reported everywhere it occurs, not only where the user pointed.",
+    requires: ["model"],
+    timeoutMs: 900000,
+    steps: [
+      {
+        kind: "turn",
+        id: "diagnose",
+        message: "Statische Code-Analyse, bitte nichts ausführen und nichts ändern: Die Summen von invoice_total in invoices.py fallen um bis zu einen Cent zu niedrig aus. Benenne das fehlerhafte Konstrukt und nenne jede weitere Stelle im Code unten, an der derselbe Fehler steckt.\n\n# invoices.py\n```python\n\"\"\"Invoice totals.\"\"\"\n\n\ndef invoice_total(line_items):\n    \"\"\"Sum the line items and add 20% tax, returning the amount in whole units.\"\"\"\n    subtotal = sum(item[\"price\"] * item[\"qty\"] for item in line_items)\n    tax = subtotal * 0.2\n    # int() truncates toward zero instead of rounding, so a total like 60.999\n    # is reported as 60 — invoices come out up to a cent low.\n    return int(subtotal + tax)\n```\n\n# receipts.py\n```python\n\"\"\"Receipt totals.\"\"\"\n\n\ndef receipt_total(entries):\n    \"\"\"Sum the entry amounts and add 20% tax, returning the amount in whole units.\"\"\"\n    subtotal = sum(e[\"amount\"] for e in entries)\n    tax = subtotal * 0.2\n    # Same truncation pattern as invoice_total: int() drops the fractional part.\n    return int(subtotal + tax)\n```\n--auto",
+        agent: "code_analyst",
+        timeoutMs: 600000,
+        expect: {
+          reply: {
+            includes: ["receipts.py"],
+            includesAny: ["int(", "int-", "`int`", "truncat", "abgeschnitten", "abschneid", "Nachkommastellen"],
+          },
+          agents: { mustRun: ["code_analyst"] },
+          judge: {
+            rubric: "Die Antwort benennt int(subtotal + tax) in invoice_total (invoices.py) als Ursache, weil int() die Nachkommastellen abschneidet statt zu runden, UND nennt dieselbe Stelle in receipt_total in receipts.py als zweites Vorkommen desselben Fehlers.",
+            minScore: 7,
+          },
+        },
+      },
+    ],
+  },
+
+  {
+    id: "core-build-code-assessment-no-edit",
+    title: "Static analysis: a 'why' question gets a diagnosis and no edit",
+    group: "core",
+    tags: ["code", "static-analysis", "smoke"],
+    description: "eval/fixtures/assessment-trap (cart.js verbatim, in the message): applyDiscount treats the whole-number percent 20 as a fraction (50 - 50*20 = -950 instead of 40). Ground truth eval/fixtures/_ground-truth/assessment-trap.md: the ask is 'why', so the deliverable is a diagnosis and no file change. The e2e version checks the behaviour the agent-eval harness could not: no write_file/edit_file on a cart file was dispatched. Protects: assessment discipline — code_analyst holds write tools but does not fix unasked.",
+    requires: ["model"],
+    timeoutMs: 900000,
+    steps: [
+      {
+        kind: "turn",
+        id: "diagnose",
+        message: "Warum liefert cartTotal für einen Warenkorb von 50 $ mit 20 % Rabatt einen negativen Betrag statt 40 $? Erkläre die Ursache.\n\n# cart.js\n```javascript\n// Shopping cart totals.\n\nfunction applyDiscount(subtotal, percent) {\n  // percent is used as a fraction here, but callers pass whole numbers (20 for 20%).\n  return subtotal - subtotal * percent;\n}\n\nfunction cartTotal(items, discountPercent) {\n  const subtotal = items.reduce((sum, it) => sum + it.price * it.qty, 0);\n  return applyDiscount(subtotal, discountPercent);\n}\n\nmodule.exports = { applyDiscount, cartTotal };\n```\n--auto",
+        agent: "code_analyst",
+        timeoutMs: 600000,
+        expect: {
+          reply: {
+            // The unit mismatch: divide by 100 / pass 0.2 / "fraction" — or the worked result -950.
+            includesAny: ["/ 100", "/100", "durch 100", "by 100", "0.2", "0,2", "fraction", "Bruchteil", "Dezimal", "950"],
+          },
+          agents: { mustRun: ["code_analyst"] },
+          events: {
+            mustNot: [
+              { type: "sub_agent_tool_call", where: { "data.tool": { in: ["write_file", "edit_file"] }, "data.phase": "start", "data.args.path": { regex: "cart" } } },
+            ],
+          },
+          judge: {
+            rubric: "Die Antwort erklärt, dass applyDiscount den Prozentwert 20 als Bruchteil verwendet (50 - 50*20 = -950) statt durch 100 zu teilen, und behauptet nicht, Code geändert oder einen Fix angewendet zu haben.",
+            minScore: 7,
+          },
+        },
+      },
+    ],
+  },
+]

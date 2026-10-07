@@ -1,0 +1,143 @@
+// Research on the fictional company site http://www.nordlicht-werkzeuge.test/ (eval/e2e/site/,
+// eval/e2e/ENVIRONMENT.md). The swarm routes freely: the orchestrator runs orchestration_only, so
+// the page is read by a sub-agent (researcher with web_fetch, or browser_agent with
+// browser_navigate). Every fact asked here exists only on the fictional site, so a correct answer
+// proves the page was read.
+//
+// Ground truth, re-derived from the served pages (not only copied from ENVIRONMENT.md):
+//   site/index.html            founded 1987, 146 employees
+//   site/produkte/seite-1..3   cheapest per category: Akkuwerkzeug NW-1101 129,00 · Handwerkzeug NW-1201
+//                              34,90 · Messwerkzeug NW-1203 27,50 (page 1; the other three are on page 2)
+//                              · Werkstatt NW-2105 64,00 · Arbeitsschutz NW-3102 8,90 · Zubehör NW-3106
+//                              24,90 (special offer, list price 32,90 — still the cheapest Zubehör either way)
+//   site/lager.html            column "Südtal" summed over all 18 rows = 596
+//   site/dokumentation.html    E31 = "Firmware-Prüfsumme fehlerhaft"; reset = hold "M" and "+" 4 seconds
+//                              until the status LED blinks blue three times
+//
+// Audit events asserted, verified against packages/core/src:
+//   sub_agent_tool_call {agentName, tool, phase, toolCallId, args, success}
+//     emitted agent/sub-agent.ts:4748 (logAudit), payload agent/sub-agent.ts:2296
+//     (buildSubAgentToolAuditPayload); phase "start" at :6527, phase "done" with the call's
+//     args and result.success at :6918. web_fetch and browser_navigate both take `url`
+//     (tools/web.ts:250, tools/multimodal.ts:1310).
+[
+  {
+    id: "core-build-site-company-facts",
+    title: "Site research: founding year and headcount from the start page",
+    group: "core",
+    tags: ["site", "research", "smoke"],
+    description: "Plain routed research: two facts that only the fictional start page states (site/index.html: 'Gegründet: 1987', 'Mitarbeiterinnen und Mitarbeiter: 146'). Protects: a URL in the message leads to a real, successful fetch of the site by a sub-agent and the reply carries both facts.",
+    requires: ["model", "e2e-site"],
+    timeoutMs: 900000,
+    steps: [
+      {
+        kind: "turn",
+        id: "ask",
+        message: "Wann wurde die Nordlicht Werkzeuge GmbH gegründet, und wie viele Mitarbeiterinnen und Mitarbeiter hat sie? Die Firmenwebsite ist http://www.nordlicht-werkzeuge.test/ --auto",
+        timeoutMs: 600000,
+        expect: {
+          reply: {
+            includes: ["1987"],
+            matches: ["\\b146\\b"],
+          },
+          events: {
+            must: [
+              { type: "sub_agent_tool_call", where: { "data.phase": "done", "data.success": true, "data.tool": { in: ["web_fetch", "browser_navigate"] }, "data.args.url": { regex: "nordlicht-werkzeuge\\.test" } } },
+            ],
+          },
+        },
+      },
+    ],
+  },
+
+  {
+    id: "core-build-site-cheapest-per-category",
+    title: "Site research: cheapest article per category across all three catalogue pages",
+    group: "core",
+    tags: ["site", "research", "aggregation", "pagination"],
+    description: "Aggregation across the paginated catalogue (site/produkte/seite-1..3.html, 6 articles each). The six category minima are spread over all three pages, and Messwerkzeug straddles the page break: its cheapest article NW-1203 (27,50 €) is the only one on page 1, so an agent that reads page 2 alone answers NW-2102. The current price of NW-3106 is the special offer 24,90 € (page 3), not the struck-out 32,90 €. Protects: following the pagination to the end and aggregating per category instead of answering from the first page. Ground truth computed from the three served pages.",
+    requires: ["model", "e2e-site"],
+    timeoutMs: 1200000,
+    steps: [
+      {
+        kind: "turn",
+        id: "ask",
+        message: "Der Produktkatalog der Nordlicht Werkzeuge GmbH unter http://www.nordlicht-werkzeuge.test/produkte/ ist auf mehrere Seiten verteilt. Nenne für jede Produktkategorie den günstigsten Artikel mit Artikelnummer und aktuellem Preis. --auto",
+        timeoutMs: 900000,
+        expect: {
+          reply: {
+            includes: ["NW-1101", "NW-1201", "NW-1203", "NW-2105", "NW-3102", "NW-3106"],
+            // The Messwerkzeug minimum (page 1) and the current offer price of NW-3106 (page 3).
+            matches: ["27[,.]50", "24[,.]90"],
+          },
+          events: {
+            must: [
+              { type: "sub_agent_tool_call", where: { "data.phase": "done", "data.success": true, "data.tool": { in: ["web_fetch", "browser_navigate"] }, "data.args.url": { regex: "nordlicht-werkzeuge\\.test/produkte" } } },
+            ],
+          },
+          judge: {
+            rubric: "Die Antwort nennt je Kategorie genau einen günstigsten Artikel: Akkuwerkzeug NW-1101 (129,00 €), Handwerkzeug NW-1201 (34,90 €), Messwerkzeug NW-1203 (27,50 €), Werkstatt NW-2105 (64,00 €), Arbeitsschutz NW-3102 (8,90 €), Zubehör NW-3106 (24,90 € im Sonderangebot). Keine erfundenen Artikel oder Preise.",
+            minScore: 7,
+          },
+        },
+      },
+    ],
+  },
+
+  {
+    id: "core-build-site-stock-sum",
+    title: "Site research: sum one column of the stock table",
+    group: "core",
+    tags: ["site", "research", "table"],
+    description: "Table extraction plus arithmetic: the 'Südtal' column of site/lager.html summed over all 18 articles is 596 (computed from the served page; ENVIRONMENT.md lists the same warehouse totals 756 / 596 / 689). Protects: reading every row of a data table and adding it up instead of estimating or stopping at the first rows.",
+    requires: ["model", "e2e-site"],
+    timeoutMs: 1200000,
+    steps: [
+      {
+        kind: "turn",
+        id: "ask",
+        message: "Wie viele Stück lagern laut der Lagerbestandsseite der Nordlicht Werkzeuge GmbH (http://www.nordlicht-werkzeuge.test/lager.html) insgesamt am Standort Südtal, über alle Artikel zusammengezählt? --auto",
+        timeoutMs: 900000,
+        expect: {
+          reply: {
+            matches: ["\\b596\\b"],
+          },
+          events: {
+            must: [
+              { type: "sub_agent_tool_call", where: { "data.phase": "done", "data.success": true, "data.tool": { in: ["web_fetch", "browser_navigate"] }, "data.args.url": { regex: "nordlicht-werkzeuge\\.test/lager" } } },
+            ],
+          },
+        },
+      },
+    ],
+  },
+
+  {
+    id: "core-build-site-doc-only-facts",
+    title: "Site research: facts that only the product documentation states",
+    group: "core",
+    tags: ["site", "research", "docs", "smoke"],
+    description: "Two facts that exist only on site/dokumentation.html, reached from the start page: error code E31 means 'Firmware-Prüfsumme fehlerhaft', and a factory reset holds 'M' and '+' for 4 seconds until the status LED blinks blue three times. No general knowledge can supply them. Protects: navigating from the site's start page to the right sub-page and reporting what it says, not a plausible guess.",
+    requires: ["model", "e2e-site"],
+    timeoutMs: 900000,
+    steps: [
+      {
+        kind: "turn",
+        id: "ask",
+        message: "Laut der Dokumentation des Akku-Schraubers NW-AS 18 auf der Website http://www.nordlicht-werkzeuge.test/: Was bedeutet der Fehlercode E31, und welche Tasten muss man wie lange gedrückt halten, um das Gerät auf Werkseinstellung zurückzusetzen? --auto",
+        timeoutMs: 600000,
+        expect: {
+          reply: {
+            includesAny: ["Prüfsumme", "Pruefsumme", "Checksumme", "checksum"],
+            matches: ["\\b(4|vier|four)\\s*(Sekunden|Sek\\.?|s|seconds)\\b"],
+          },
+          events: {
+            must: [
+              { type: "sub_agent_tool_call", where: { "data.phase": "done", "data.success": true, "data.tool": { in: ["web_fetch", "browser_navigate"] }, "data.args.url": { regex: "nordlicht-werkzeuge\\.test" } } },
+            ],
+          },
+        },
+      },
+    ],
+  },
+]

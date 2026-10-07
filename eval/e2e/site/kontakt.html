@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kontakt &amp; Bestellung – Nordlicht Werkzeuge GmbH</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; color: #1d2733; background: #f6f8fa; line-height: 1.5; }
+  header { background: #12324a; color: #fff; padding: 12px 24px; }
+  header a { color: #fff; }
+  nav a { margin-right: 16px; }
+  main { max-width: 960px; margin: 0 auto; padding: 16px 24px 48px; }
+  footer { font-size: 13px; color: #5a6672; border-top: 1px solid #d0d7de; padding: 12px 24px; text-align: center; }
+  form { background: #fff; border: 1px solid #d0d7de; padding: 16px; max-width: 560px; }
+  label { display: block; margin-top: 10px; font-weight: 600; }
+  input[type=text], input[type=email], input[type=number], select, textarea { width: 100%; padding: 6px; box-sizing: border-box; }
+  .inline label { display: inline; font-weight: normal; margin-right: 12px; }
+  button { margin-top: 14px; padding: 8px 16px; }
+  #fehler { color: #b42318; font-weight: 600; }
+  #bestaetigung { background: #e6f4ea; border: 1px solid #8cc79f; padding: 12px; max-width: 560px; }
+</style>
+</head>
+<body>
+<header>
+  <strong>Nordlicht Werkzeuge GmbH</strong>
+  <nav>
+    <a href="/index.html">Start</a>
+    <a href="/produkte/seite-1.html">Produkte</a>
+    <a href="/preise.html">Preise &amp; Versand</a>
+    <a href="/lager.html">Lagerbestand</a>
+    <a href="/dokumentation.html">Dokumentation</a>
+    <a href="/lieferstatus.html">Lieferstatus</a>
+    <a href="/kontakt.html">Kontakt &amp; Bestellung</a>
+  </nav>
+</header>
+<main>
+  <h1>Kontakt &amp; Bestellung</h1>
+
+  <h2>So erreichen Sie uns</h2>
+  <ul>
+    <li>Vertrieb: <a href="mailto:vertrieb@nordlicht-werkzeuge.test">vertrieb@nordlicht-werkzeuge.test</a> · Telefon +49 000 0000 1100</li>
+    <li>Technischer Support: <a href="mailto:support@nordlicht-werkzeuge.test">support@nordlicht-werkzeuge.test</a> · Telefon +49 000 0000 1200</li>
+    <li>Erreichbar: Montag bis Freitag, 8:00–16:30 Uhr (Freitag nur bis 14:00 Uhr)</li>
+  </ul>
+
+  <h2>Bestellanfrage</h2>
+  <p>Hinweis: Dies ist ein Testformular. Beim Absenden wird nichts übertragen; die Seite zeigt nur eine Bestätigung an.</p>
+  <form id="bestellformular" novalidate>
+    <label for="name">Name</label>
+    <input type="text" id="name" name="name" required autocomplete="off">
+
+    <label for="email">E-Mail</label>
+    <input type="email" id="email" name="email" required autocomplete="off">
+
+    <label for="artikel">Artikel</label>
+    <select id="artikel" name="artikel" required>
+      <option value="">Bitte wählen …</option>
+      <option value="NW-1101">NW-1101 – Akku-Schrauber NW-AS 18</option>
+      <option value="NW-1102">NW-1102 – Akku-Bohrhammer NW-BH 24</option>
+      <option value="NW-1103">NW-1103 – Akku-Winkelschleifer NW-WS 18</option>
+      <option value="NW-1201">NW-1201 – Schraubendreher-Set Polar (12-tlg.)</option>
+      <option value="NW-1202">NW-1202 – Ratschenkasten Fjord (46-tlg.)</option>
+      <option value="NW-1203">NW-1203 – Wasserwaage Horizont 80 cm</option>
+      <option value="NW-2101">NW-2101 – Laser-Entfernungsmesser Lumen 50</option>
+      <option value="NW-2102">NW-2102 – Digitaler Messschieber Präzis 150</option>
+      <option value="NW-2103">NW-2103 – Kreuzlinienlaser Nordstern</option>
+      <option value="NW-2104">NW-2104 – Werkstattwagen Eisberg (7 Schubladen)</option>
+      <option value="NW-2105">NW-2105 – Schraubstock Granit 125</option>
+      <option value="NW-2106">NW-2106 – Werkbank Fjell 150</option>
+      <option value="NW-3101">NW-3101 – Arbeitshandschuhe Frost (10 Paar)</option>
+      <option value="NW-3102">NW-3102 – Schutzbrille Klarsicht</option>
+      <option value="NW-3103">NW-3103 – Gehörschutz Stille 30 dB</option>
+      <option value="NW-3104">NW-3104 – Akku-Pack 18 V / 5,0 Ah</option>
+      <option value="NW-3105">NW-3105 – Schnellladegerät NW-LG 18</option>
+      <option value="NW-3106">NW-3106 – Bit-Sortiment Aurora (64-tlg.)</option>
+    </select>
+
+    <label for="menge">Menge</label>
+    <input type="number" id="menge" name="menge" min="1" max="999" step="1" value="1" required>
+
+    <span class="inline">
+      <label style="display:block;font-weight:600;margin-top:10px">Versandart</label>
+      <input type="radio" id="versand-standard" name="versand" value="standard" checked><label for="versand-standard">Standard</label>
+      <input type="radio" id="versand-express" name="versand" value="express"><label for="versand-express">Express</label>
+    </span>
+
+    <label for="nachricht">Nachricht (optional)</label>
+    <textarea id="nachricht" name="nachricht" rows="3"></textarea>
+
+    <span class="inline">
+      <input type="checkbox" id="datenschutz" name="datenschutz" required>
+      <label for="datenschutz">Ich habe die Datenschutzhinweise gelesen.</label>
+    </span>
+
+    <div><button type="submit" id="absenden">Anfrage senden</button></div>
+    <p id="fehler" role="alert"></p>
+  </form>
+  <div id="bestaetigung" hidden></div>
+</main>
+<footer>
+  Nordlicht Werkzeuge GmbH ist ein <strong>fiktives Unternehmen</strong> – eine Testumgebung für automatisierte Tests.
+  Alle Namen, Adressen, Preise und Angaben sind erfunden. · <a href="/impressum.html">Impressum</a>
+</footer>
+<script>
+  // Nothing leaves this page: the form only validates and shows a confirmation whose
+  // reference is derived from the input — NW-B-<article digits>-<quantity>-<S|E>.
+  (function () {
+    var SPEDITION = { "NW-2104": true, "NW-2106": true };
+    var byId = function (id) { return document.getElementById(id); };
+    var form = byId("bestellformular");
+    var fehler = byId("fehler");
+    var bestaetigung = byId("bestaetigung");
+    form.addEventListener("submit", function (event) {
+      event.preventDefault();
+      fehler.textContent = "";
+      var name = byId("name").value.trim();
+      var email = byId("email").value.trim();
+      var artikel = byId("artikel").value;
+      var menge = Number(byId("menge").value);
+      var express = byId("versand-express").checked;
+      var missing = [];
+      if (!name) missing.push("Name");
+      if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) missing.push("E-Mail");
+      if (!artikel) missing.push("Artikel");
+      if (!Number.isInteger(menge) || menge < 1 || menge > 999) missing.push("Menge (1–999)");
+      if (!byId("datenschutz").checked) missing.push("Datenschutzhinweise");
+      if (missing.length) {
+        fehler.textContent = "Bitte prüfen Sie folgende Angaben: " + missing.join(", ") + ".";
+        return;
+      }
+      if (express && SPEDITION[artikel]) {
+        fehler.textContent = "Speditionsware (NW-2104, NW-2106) kann nicht per Express versandt werden. Bitte wählen Sie Standardversand.";
+        return;
+      }
+      var referenz = "NW-B-" + artikel.slice(3) + "-" + menge + "-" + (express ? "E" : "S");
+      bestaetigung.textContent = "Vielen Dank, " + name + "! Ihre Bestellanfrage ist eingegangen. Referenz: " + referenz +
+        ". Eine Bestätigung geht an " + email + ". (Testformular – es wurden keine Daten übertragen.)";
+      bestaetigung.hidden = false;
+      form.hidden = true;
+    });
+  })();
+</script>
+</body>
+</html>

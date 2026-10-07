@@ -401,6 +401,12 @@ async function cmdStop() {
 
   const composeFiles = ["-f", "docker-compose.yml"];
   const allProfiles = ["--profile", "pentest", "--profile", "computer-desktop", "--profile", "rag", "--profile", "laya"];
+  // The e2e test services (`pnpm e2e:env up`) run in this project on the stack's networks;
+  // `down` has to remove them too, or it cannot remove those networks.
+  if (existsSync("docker-compose.e2e.yml")) {
+    composeFiles.push("-f", "docker-compose.e2e.yml");
+    allProfiles.push("--profile", "e2e");
+  }
 
   hdr(`Stopping ${PRODUCT.name}...`);
   ensureDockerDaemon();

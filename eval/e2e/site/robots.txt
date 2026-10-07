@@ -1,0 +1,3 @@
+# Fictional test site of the StarlingAI e2e suite: crawling is welcome.
+User-agent: *
+Allow: /

@@ -43,7 +43,11 @@
     "runtime-guidance:evaluate": "pnpm --filter @starlingai/core runtime-guidance:evaluate",
     "routing:eval": "pnpm --filter @starlingai/core routing:eval",
     "routing:eval:discriminance": "pnpm --filter @starlingai/core routing:eval:discriminance",
-    "routing:taxonomy-check": "node scripts/routing-taxonomy-check.mjs"
+    "routing:taxonomy-check": "node scripts/routing-taxonomy-check.mjs",
+    "e2e:env": "node scripts/e2e-env.mjs",
+    "e2e:evaluate": "pnpm --filter @starlingai/core e2e:evaluate",
+    "e2e:validate": "pnpm --filter @starlingai/core e2e:validate",
+    "e2e:setup": "pnpm --filter @starlingai/core e2e:setup"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

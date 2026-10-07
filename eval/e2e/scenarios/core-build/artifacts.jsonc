@@ -1,0 +1,201 @@
+// Building artifacts: a static website, a reveal.js deck, a Word document, a PDF, a Mermaid diagram
+// and an HTML chart. Every brief carries all of its content, so no research is needed and the
+// numbers to check are the ones given. `--auto` answers approval and ask_user prompts (the harness
+// answers none) and, for an artifact request, makes the orchestrator start the build instead of
+// replying in prose (agent/runtime.ts autonomousArtifactBuild).
+//
+// Artifact paths as the tools record them (outputPath → the transcript's relativePath, which
+// `artifacts.pathMatches` tests):
+//   generate_website / generate_presentation → the site/deck FOLDER, no extension (tools/website.ts:247,
+//     :415); the deck adds <folder>/notes.md. A hand-written page (write_file) is a .html file
+//     (tools/filesystem.ts:723). Hence "\.html?$|^[^.:]+$": an .html file or an extension-less folder.
+//   generate_docx → .docx (tools/office-output.ts:197) · render_pdf → .pdf (tools/render-pdf.ts:156)
+//   generate_mermaid_diagram → .mmd, extension forced (tools/document-output.ts:31, :277)
+//   generate_chart_html → .html (tools/document-output.ts:397)
+//
+// Audit events asserted, verified against packages/core/src:
+//   sub_agent_tool_call {agentName, tool, phase, args, success}
+//     agent/sub-agent.ts:4748 (logAudit), payload :2296, phase "done" with args + result.success at :6918
+//   guardrail_flagged {type: "artifact_verification_failed"}  — a delivered file failed its integrity
+//     probe and was not repaired: agent/turn-finalize-guards.ts:941, agent/runtime.ts:4803 (relay path)
+//   guardrail_flagged {type: "artifact_completion_claim_unbacked_bannered"} — the answer claimed a file
+//     no tool produced: agent/turn-finalize-guards.ts:913
+[
+  {
+    id: "core-build-artifact-website",
+    title: "Build: a small static website from a complete brief",
+    group: "core",
+    tags: ["build", "website", "slow"],
+    description: "A three-page static site (start, products, contact) for a fictional bakery, all content given. The designated route is content_writer with generate_website (a site folder); web_coder hand-writing index.html is accepted too. Protects: the site is actually written to the workspace and delivered as an artifact, passes the turn's artifact verification, and the answer does not claim a file that was never built.",
+    requires: ["model"],
+    timeoutMs: 1500000,
+    steps: [
+      {
+        kind: "turn",
+        id: "build",
+        message: "Erstelle eine kleine statische Website für die fiktive Bäckerei Morgenrot mit drei Seiten: Start (kurze Begrüßung, Öffnungszeiten Mo–Fr 6:30–18:00 Uhr, Sa 7:00–13:00 Uhr), Sortiment (Roggenbrot 4,20 €, Dinkelvollkornbrot 4,80 €, Laugenbrezel 0,95 €, Apfelkuchen 2,60 € pro Stück) und Kontakt (Musterweg 1, 00000 Polarstadt, Telefon +49 000 123456, info@baeckerei-morgenrot.test). Alle Angaben stehen hier, eine Recherche ist nicht nötig. --auto",
+        timeoutMs: 1200000,
+        expect: {
+          agents: { mustRunAny: ["content_writer", "web_coder"] },
+          artifacts: { minCount: 1, pathMatches: ["\\.html?$|^[^.:]+$"] },
+          events: {
+            mustNot: [
+              { type: "guardrail_flagged", where: { "data.type": "artifact_verification_failed" } },
+              { type: "guardrail_flagged", where: { "data.type": "artifact_completion_claim_unbacked_bannered" } },
+            ],
+          },
+        },
+      },
+    ],
+  },
+
+  {
+    id: "core-build-artifact-revealjs-deck",
+    title: "Build: a reveal.js slide deck from a five-slide outline",
+    group: "core",
+    tags: ["build", "deck", "slow"],
+    description: "A five-slide reveal.js deck from a given outline. Decks route to content_writer, whose prompt mandates generate_presentation (the only tool that assembles reveal.js); its success is the proof the deliverable is a reveal.js deck. Protects: the deck is built with the deck tool, delivered (folder + notes.md), passes artifact verification, and is not claimed without being built.",
+    requires: ["model"],
+    timeoutMs: 1500000,
+    steps: [
+      {
+        kind: "turn",
+        id: "build",
+        message: "Erstelle eine reveal.js-Präsentation mit fünf Folien zum Thema „Digitaler Wartungsplan in der Werkstatt“ (fiktives Beispiel): 1) Titelfolie, 2) Ausgangslage: Wartungstermine stehen heute auf Papierlisten, 3) Ziel: alle Geräte mit Prüffristen in einer Liste, Erinnerung 14 Tage vor Fälligkeit, 4) Zeitplan: Pilot im November, Einführung im Januar, 5) Fazit. Alle Inhalte stehen hier, eine Recherche ist nicht nötig. --auto",
+        timeoutMs: 1200000,
+        expect: {
+          agents: { mustRun: ["content_writer"] },
+          artifacts: { minCount: 1, pathMatches: ["\\.html?$|^[^.:]+$"] },
+          events: {
+            must: [
+              { type: "sub_agent_tool_call", where: { "data.tool": "generate_presentation", "data.phase": "done", "data.success": true } },
+            ],
+            mustNot: [
+              { type: "guardrail_flagged", where: { "data.type": "artifact_verification_failed" } },
+              { type: "guardrail_flagged", where: { "data.type": "artifact_completion_claim_unbacked_bannered" } },
+            ],
+          },
+        },
+      },
+    ],
+  },
+
+  {
+    id: "core-build-artifact-docx",
+    title: "Build: a Word document with a numbered list and a table",
+    group: "core",
+    tags: ["build", "document", "docx", "slow"],
+    description: "A .docx safety briefing with a heading, five numbered rules and a one-row table, all content given. generate_docx is pure JavaScript (no browser). Protects: a Word file is written and delivered by an authoring specialist, passes artifact verification, and is not claimed without being built.",
+    requires: ["model"],
+    timeoutMs: 1500000,
+    steps: [
+      {
+        kind: "turn",
+        id: "build",
+        message: "Erstelle ein Word-Dokument (.docx) „Sicherheitsunterweisung Werkstatt“ für eine fiktive Werkstatt: eine Überschrift, fünf nummerierte Regeln (Schutzbrille tragen; Gehörschutz ab 85 dB; Akkus nur mit dem passenden Ladegerät laden; Kabel vor jedem Gebrauch prüfen; Arbeitsplatz aufgeräumt hinterlassen) und darunter eine Tabelle mit den Spalten Datum, Thema, Dauer und der Zeile 06.10.2026, Jahresunterweisung, 45 Minuten. --auto",
+        timeoutMs: 1200000,
+        expect: {
+          agents: { mustRunAny: ["content_writer", "paper_author", "meeting_briefing_agent"] },
+          artifacts: { minCount: 1, pathMatches: ["\\.docx$"] },
+          events: {
+            mustNot: [
+              { type: "guardrail_flagged", where: { "data.type": "artifact_verification_failed" } },
+              { type: "guardrail_flagged", where: { "data.type": "artifact_completion_claim_unbacked_bannered" } },
+            ],
+          },
+        },
+      },
+    ],
+  },
+
+  {
+    id: "core-build-artifact-pdf",
+    title: "Build: a print-ready PDF notice",
+    group: "core",
+    tags: ["build", "document", "pdf", "slow"],
+    description: "A one-page PDF notice (holiday opening hours of a fictional bakery), all content given. content_writer renders PDFs with render_pdf, which prints through the browser engine of browser-vnc (render.pdf.cdpUrl) — hence requires browser. Protects: a PDF is rendered and delivered, passes artifact verification, and is not claimed without being built.",
+    requires: ["model", "browser"],
+    timeoutMs: 1500000,
+    steps: [
+      {
+        kind: "turn",
+        id: "build",
+        message: "Erstelle ein druckfertiges PDF als Aushang „Öffnungszeiten zwischen den Jahren“ für die fiktive Bäckerei Morgenrot: 24.12. 6:30–12:00 Uhr, 25. und 26.12. geschlossen, 27. bis 30.12. 6:30–18:00 Uhr, 31.12. 6:30–12:00 Uhr, 1.1. geschlossen. Darunter steht der Satz „Wir wünschen frohe Feiertage!“. --auto",
+        timeoutMs: 1200000,
+        expect: {
+          agents: { mustRunAny: ["content_writer", "paper_author", "meeting_briefing_agent"] },
+          artifacts: { minCount: 1, pathMatches: ["\\.pdf$"] },
+          events: {
+            mustNot: [
+              { type: "guardrail_flagged", where: { "data.type": "artifact_verification_failed" } },
+              { type: "guardrail_flagged", where: { "data.type": "artifact_completion_claim_unbacked_bannered" } },
+            ],
+          },
+        },
+      },
+    ],
+  },
+
+  {
+    id: "core-build-artifact-mermaid",
+    title: "Build: a Mermaid flowchart of a given process",
+    group: "core",
+    tags: ["build", "diagram", "slow"],
+    description: "A Mermaid flowchart of a six-step order process with one decision, all steps given. Mermaid diagrams route to diagram_designer, whose tool generate_mermaid_diagram writes a .mmd file. The diagram source is checked for a step of the given process (Zahlung/Payment). Protects: routing to the diagram specialist, a .mmd artifact, and a diagram built from the user's process rather than a generic one.",
+    requires: ["model"],
+    timeoutMs: 1500000,
+    steps: [
+      {
+        kind: "turn",
+        id: "build",
+        message: "Zeichne den folgenden Bestellablauf als Mermaid-Flussdiagramm: Bestellung geht ein → Zahlung prüfen → wenn bezahlt: Ware kommissionieren → Versand → Zustellung; wenn nicht bezahlt: Zahlungserinnerung senden → nach 14 Tagen ohne Zahlung: Bestellung stornieren. --auto",
+        timeoutMs: 1200000,
+        expect: {
+          agents: { mustRun: ["diagram_designer"] },
+          artifacts: { minCount: 1, pathMatches: ["\\.mmd$"] },
+          events: {
+            must: [
+              { type: "sub_agent_tool_call", where: { "data.tool": "generate_mermaid_diagram", "data.phase": "done", "data.success": true, "data.args.diagram": { regex: "[Zz]ahlung|[Pp]ayment" } } },
+            ],
+            mustNot: [
+              { type: "guardrail_flagged", where: { "data.type": "artifact_verification_failed" } },
+              { type: "guardrail_flagged", where: { "data.type": "artifact_completion_claim_unbacked_bannered" } },
+            ],
+          },
+        },
+      },
+    ],
+  },
+
+  {
+    id: "core-build-artifact-html-chart",
+    title: "Build: an HTML bar chart from given numbers",
+    group: "core",
+    tags: ["build", "chart", "slow"],
+    description: "An HTML bar chart of six given daily visitor counts (Mo 132, Di 118, Mi 147, Do 159, Fr 214, Sa 287) of a fictional farm shop. Charts route to chart_designer (generate_chart_html → .html). The tool's arguments are checked for the given maximum 287 and minimum 118 (number or numeric string), so a chart of invented or altered numbers fails. Protects: routing to the chart specialist and plotting exactly the user's data.",
+    requires: ["model"],
+    timeoutMs: 1500000,
+    steps: [
+      {
+        kind: "turn",
+        id: "build",
+        message: "Erstelle ein Balkendiagramm als HTML-Datei aus diesen Besucherzahlen eines fiktiven Hofladens in der Woche ab dem 05.10.2026: Montag 132, Dienstag 118, Mittwoch 147, Donnerstag 159, Freitag 214, Samstag 287. --auto",
+        timeoutMs: 1200000,
+        expect: {
+          agents: { mustRun: ["chart_designer"] },
+          artifacts: { minCount: 1, pathMatches: ["\\.html?$"] },
+          events: {
+            must: [
+              { type: "sub_agent_tool_call", where: { "data.tool": "generate_chart_html", "data.phase": "done", "data.success": true, "data.args.series.0.data": { in: [287, "287"] } } },
+              { type: "sub_agent_tool_call", where: { "data.tool": "generate_chart_html", "data.phase": "done", "data.success": true, "data.args.series.0.data": { in: [118, "118"] } } },
+            ],
+            mustNot: [
+              { type: "guardrail_flagged", where: { "data.type": "artifact_verification_failed" } },
+              { type: "guardrail_flagged", where: { "data.type": "artifact_completion_claim_unbacked_bannered" } },
+            ],
+          },
+        },
+      },
+    ],
+  },
+]

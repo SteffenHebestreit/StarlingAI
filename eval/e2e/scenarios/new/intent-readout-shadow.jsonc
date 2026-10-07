@@ -1,0 +1,57 @@
+// GROUP "new" — the intent readout in shadow (orchestration.intentReadout "shadow", commits 1d3209a
+// and f731513).
+//
+// After a top-level turn has delivered its reply, the shadow asks the routing tier for the request's
+// intent facets in both option orders (and the pre-route question when the turn had a capsule), and
+// logs one intent_readout_shadow row beside what the turn did. It runs post-delivery, so the turn is
+// followed by a wait that keeps its event window open (README: "The event window").
+//
+// Row fields asserted, from agent/intent-shadow.ts (logAudit :650, data built by
+// buildIntentShadowRowData :558-646):
+//   turnId  — the turn's id: for a chat.send turn the request id (gateway/rpc.ts:1252/1279,
+//             agent/runtime.ts:1107), which the harness mints as "e2e-<uuid>". Proves the row belongs
+//             to THIS turn; max 1 proves one row per turn.
+//   version — INTENT_READOUT_BOTH_ORDERS_VERSION, "<readout version>:both-orders"
+//             (decisions/intent-readout.ts:120): the shadow reads both option orders.
+//   status  — "ok" | "failed" | "aborted" | "skipped". "skipped" (another turn was running on the
+//             gateway, or a newer one started) and "aborted" (a turn started mid-readout) are the
+//             environment's; "failed" (no provider, no logprobs, timeout, error) is the regression.
+{
+  id: "new-intent-readout-shadow-row",
+  title: "An ordinary turn gets exactly one intent readout shadow row after its reply, and the readout does not fail",
+  group: "new",
+  tags: ["intent", "shadow", "smoke"],
+  description: "Guards the intent readout shadow (1d3209a, f731513): after an ordinary turn delivers, one intent_readout_shadow row must follow, named by the turn's request id, carrying the both-orders readout version, and not ending in status \"failed\". A missing row means the shadow stopped running; a failed one means the readout (grammar, logprobs, routing tier) broke.",
+  requires: ["model"],
+  identity: "eval",
+  timeoutMs: 420000,
+  steps: [
+    {
+      kind: "turn",
+      id: "ordinary-question",
+      message: "Wofür benutzt man einen Drehmomentschlüssel? Bitte antworte in zwei Sätzen.",
+      timeoutMs: 240000,
+      expect: {
+        status: "ok",
+        reply: { minChars: 20 },
+        events: {
+          must: [
+            {
+              type: "intent_readout_shadow",
+              where: {
+                "data.turnId": { regex: "^e2e-" },
+                "data.version": { regex: "both-orders$" },
+                "data.status": { in: ["ok", "skipped", "aborted"] },
+              },
+              min: 1,
+              max: 1,
+            },
+          ],
+        },
+      },
+    },
+    // The readout starts after the reply and is capped at 15 s (INTENT_SHADOW_TIMEOUT_MS); this wait
+    // keeps the turn's event window open past that.
+    { kind: "wait", ms: 25000 },
+  ],
+}

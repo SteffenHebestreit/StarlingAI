@@ -46,7 +46,10 @@
     "worker:scene": "tsx src/scene-worker-main.ts",
     "routing:eval": "tsx src/agent/routing-eval-cli.ts",
     "routing:eval:discriminance": "tsx src/scripts/routing-eval-discriminance.ts",
-    "routing:prerouter": "cd ../.. && tsx packages/core/src/scripts/pre-router-bench.ts"
+    "routing:prerouter": "cd ../.. && tsx packages/core/src/scripts/pre-router-bench.ts",
+    "e2e:evaluate": "tsx src/e2e/cli.ts evaluate",
+    "e2e:validate": "tsx src/e2e/cli.ts validate",
+    "e2e:setup": "tsx src/e2e/cli.ts setup"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.104.2",

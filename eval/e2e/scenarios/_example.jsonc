@@ -1,0 +1,132 @@
+// EXAMPLE SCENARIO — a commented template of every field the contract has
+// (packages/core/src/e2e/scenario.ts). Files whose name starts with "_" are validated like any other
+// but run only when named: `pnpm e2e:evaluate --id example-site-and-mail`. To write a scenario, copy
+// this file to a new name (no leading "_"), give it a new id and keep only what it needs.
+// `pnpm e2e:validate` checks every file; CI does too (src/tests/e2e-scenarios-valid.test.ts).
+//
+// Data must be synthetic: no personal data, no real credentials, no real mail addresses. The test
+// environment (eval/e2e/ENVIRONMENT.md) provides the fictional site http://www.nordlicht-werkzeuge.test/
+// and the GreenMail mailbox eval@e2e.test.
+{
+  // Unique, kebab-case — also the key in reports and baselines.
+  id: "example-site-and-mail",
+  title: "Example: a site fact under a mid-turn steer, then mail in a fresh session",
+  // Feature group: new | guards | core | api | <family>. Select with --group.
+  group: "core",
+  // Free labels. Select with --tag.
+  tags: ["example", "site", "mail", "steering"],
+  // What the scenario protects, and why — name the regression it was written for, if any.
+  description: "Shows every step kind and expectation. Protects: a steer sent while a specialist works reaches it; the eval account drafts mail without sending it.",
+  // Services the scenario needs. One down → the scenario is SKIPPED with the reason, never failed.
+  // "gateway" is implied by turn/http steps, "mail" by mail steps. Choices: gateway, model, embeddings,
+  // web-search, browser, sandbox, engram, image, mail, e2e-site, computer-desktop, laya, speech.
+  requires: ["model", "e2e-site", "mail"],
+  // Who the turns run as: "eval" (operator, the default) or "eval-viewer" (viewer). Created by `pnpm e2e:setup`.
+  identity: "eval",
+  // Ceiling for one whole attempt, default 15 minutes. A turn still running at the deadline is cancelled.
+  timeoutMs: 900000,
+  // Attempts for this scenario, overriding --repeat. It passes only if every attempt passes (pass^k).
+  repeat: 1,
+  steps: [
+    // Mail step: "clear" empties every GreenMail mailbox (a scenario with mail steps never runs
+    // beside another one).
+    { kind: "mail", action: "clear" },
+
+    {
+      kind: "turn",
+      // Optional; failures are reported as `step 2 turn "site-fact": …`.
+      id: "site-fact",
+      // Sent with chat.send, exactly as the dashboard sends it. Inline flags work as in the
+      // dashboard (`--auto` approves every tool call of the turn; the harness answers no prompts).
+      message: "Wie viele Mitarbeiter hat die Nordlicht Werkzeuge GmbH laut http://www.nordlicht-werkzeuge.test/? Die Notiz im Anhang ist nur Kontext.",
+      // agent: "researcher",   // forces `--agent researcher`; omit to let the swarm route
+      // Effort tier for this message: low | medium | high | max.
+      effort: "medium",
+      // Files under eval/e2e/fixtures/, uploaded into the session and attached like the web client does.
+      attachments: ["example-notes.md"],
+      // Per-turn ceiling (default 10 minutes); the turn is cancelled when it passes.
+      timeoutMs: 600000,
+      // Mid-turn actions, each fired once when its trigger fires.
+      during: [
+        // As soon as a specialist starts, add a message to the running turn (POST /api/sessions/:id/steer).
+        { when: { event: { type: "sub_agent_started", where: { "data.stage": { exists: false } } } }, do: { steer: "Bitte antworte in genau einem Satz." } },
+        // Other forms: { when: { afterMs: 120000 }, do: { stop: true } } stops the turn (chat.cancel).
+      ],
+      expect: {
+        // Final status, default "ok" — checked even when `expect` is left out.
+        status: "ok",
+        reply: {
+          includes: ["146"],                 // every string, case-insensitive
+          includesAny: ["Mitarbeiter", "Beschäftigte"],
+          excludes: ["konnte nicht", "error"],
+          matches: ["\\b146\\b"],            // JS regex, flag "i"
+          language: "de",                    // dominant language: de | en
+          maxChars: 1500,                    // also minChars
+        },
+        // Audit events of this turn: its session and every sub-agent run under it.
+        // `where` maps a dotted path to a literal, {regex}, {gte}, {lte}, {in: [...]} or {exists}.
+        events: {
+          must: [
+            { type: "sub_agent_steering_injected" },           // min defaults to 1
+            { type: "sub_agent_started", where: { "data.stage": { exists: false } }, min: 1, max: 4 },
+          ],
+          mustNot: [{ type: "guardrail_blocked" }],
+        },
+        // Dispatched tool calls, orchestrator and sub-agents. Refused attempts do not count.
+        tools: { mustCall: ["web_fetch"], mustNotCall: ["mail_send_draft"], maxCalls: { web_fetch: 8 } },
+        // Sub-agent runs by agent name.
+        agents: { mustRunAny: ["researcher", "browser_agent"], mustNotRun: ["coder"], maxRuns: 4 },
+        // Files the turn delivered (none expected here); each regex must match a path, flag "i".
+        artifacts: { minCount: 0 },
+        // Wall time from send to final status.
+        durationMs: { max: 600000 },
+        // LLM rubric judge (E2E_JUDGE_URL + E2E_JUDGE_MODEL), only when every check above passed.
+        // Unconfigured, it is reported as skipped and does not fail the attempt.
+        judge: { rubric: "Die Antwort nennt 146 Mitarbeiter, bezieht sich auf die Firmenwebsite und besteht aus einem Satz.", minScore: 7 },
+      },
+    },
+
+    // A turn's audit events count from its send until the next step that is not a wait starts, and
+    // its events/tools/agents expectations (and the judge) are checked then. A wait keeps that
+    // window open for events logged after the final status (the intent readout, scorecards).
+    { kind: "wait", ms: 5000 },
+
+    // HTTP step against the gateway, as the scenario identity unless `as` says otherwise.
+    // `{sessionId}` is the current session. Without expect.status, any 2xx passes.
+    // bodyIncludes is case-sensitive.
+    { kind: "http", method: "GET", path: "/api/sessions/{sessionId}/audit-markdown", expect: { status: 200, bodyIncludes: ["Session Audit Export", "- Channel: eval"] } },
+    // The viewer may not steer: mutating routes need the operator role.
+    { kind: "http", as: "eval-viewer", method: "POST", path: "/api/sessions/{sessionId}/steer", body: { message: "nur ein Test" }, expect: { status: 403 } },
+
+    // Put a synthetic message into the eval inbox (SMTP to GreenMail).
+    {
+      kind: "mail",
+      action: "deliver",
+      message: {
+        from: "vertrieb@nordlicht-werkzeuge.test",
+        subject: "Rückfrage zur Bestellung NW-2104",
+        text: "Guten Tag, bitte bestätigen Sie die Menge (3 Stück) und die Versandart. Viele Grüße, Vertrieb",
+      },
+    },
+    // Give the mail-service a moment to see it.
+    { kind: "wait", ms: 2000 },
+    // Later turns run in a fresh session of the same identity (cross-session behaviour).
+    { kind: "newSession" },
+
+    {
+      kind: "turn",
+      id: "draft-reply",
+      message: "Lies die neueste Mail in meinem Postfach und bereite eine kurze Antwort als Entwurf vor. Nicht senden.",
+      expect: {
+        reply: { includesAny: ["Entwurf", "draft"] },
+        tools: { mustCall: ["mail_read"], mustNotCall: ["mail_send_draft"] },
+        agents: { mustRunAny: ["mail_agent"] },
+      },
+    },
+
+    // Check what arrived: `to` defaults to the eval inbox; min defaults to 1. Here: nothing was sent
+    // to the supplier, because the reply stayed a draft.
+    { kind: "mail", action: "expect", match: { to: "vertrieb@nordlicht-werkzeuge.test", min: 0, max: 0 } },
+    { kind: "mail", action: "expect", match: { subjectIncludes: ["NW-2104"], bodyIncludes: ["3 Stück"], min: 1 } },
+  ],
+}

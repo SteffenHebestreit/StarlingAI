@@ -1,0 +1,61 @@
+// A job run inline from a chat turn: run_workflow -> job "source_grounded_paper_packet" (one step, scene
+// source_backed_paper, no broadcast step). The jobs with a multi_channel_broadcast step are avoided on
+// purpose: they would notify real channels.
+//
+// How it runs (tools/workflow-catalog.ts:1061-1199): runJobInline opens a workflow session
+// "workflow:<chat>:<job>:<uuid>" (:1077-1082) and runs each multi-agent step as an orchestrator turn in it
+// (:1177-1195), so the step's specialists start as "sub:workflow:<chat>:source_grounded_paper_packet:<uuid>:
+// <agent>:<ts>" (agent/sub-agent.ts:2746). The job path has no scene bootstrap, so the conditional
+// "Use document_intake first when …" in the scene's task is left to that orchestrator.
+// `/job <name>` in chat is NOT this path: it queues a background job owned by "job:<name>"
+// (gateway/rpc.ts:920-956) whose sessions never reach the eval account's audit stream.
+//
+// Ground truth (ENVIRONMENT.md "Documentation (NW-AS 18)"): warranty 36 months if registered within
+// 30 days, else 24; gearbox grease check every 150 operating hours; error codes E17, E22, E31, E45.
+//
+// Event names verified against packages/core/src:
+//   tool_call_requested {tool, args}  agent/runtime.ts:4234
+//   sub_agent_started {agentName}     agent/sub-agent.ts:2950, sessionId set at :2746
+{
+  id: "core-ix-workflow-job-sourced-report",
+  title: "Workflow: run the source_grounded_paper_packet job inline on the manual page",
+  group: "core",
+  tags: ["workflow", "job", "site"],
+  description: "Asks for the source_grounded_paper_packet job on the fixture site's manual page. The turn must call run_workflow for that job, researcher must run inside the job's own workflow session (not as a fallback delegation from the chat), a writer must run (paper_author or summarizer), and the chat summary must carry the manual's warranty, maintenance interval and error codes. Protects: job dispatch from chat, step execution in the workflow session, and source-grounded writing.",
+  requires: ["model", "e2e-site"],
+  timeoutMs: 2400000,
+  steps: [
+    {
+      kind: "turn",
+      id: "run-job",
+      message: "Starte den Job „source_grounded_paper_packet“ zum Thema „Wartung, Garantie und Fehlercodes des Akku-Schraubers NW-AS 18“. Einzige Quelle ist die Herstellerdokumentation http://www.nordlicht-werkzeuge.test/dokumentation.html. Fasse die Kernaussagen des Berichts danach hier im Chat zusammen. --auto",
+      timeoutMs: 2100000,
+      expect: {
+        reply: {
+          matches: [
+            "\\b36\\s*-?\\s*(Monat|month)",
+            "\\b150\\s*(Betriebsstunden|Stunden|operating|hours|h\\b)",
+            "E17|E22|E31|E45",
+          ],
+        },
+        tools: { mustCall: ["run_workflow"] },
+        events: {
+          must: [
+            // `where` regexes take no flags: the name is matched with its casing/separator variants.
+            { type: "tool_call_requested", where: { "data.tool": "run_workflow", "data.args.name": { regex: "[Ss]ource[_ -]?[Gg]rounded[_ -]?[Pp]aper[_ -]?[Pp]acket" } } },
+            // researcher ran as a step agent of THIS job (its session hangs off the job's workflow session).
+            { type: "sub_agent_started", where: { "data.agentName": "researcher", "sessionId": { regex: "^(sub:)+workflow:[^:]+:source_grounded_paper_packet:" } } },
+          ],
+        },
+        agents: {
+          mustRun: ["researcher"],
+          mustRunAny: ["paper_author", "summarizer"],
+        },
+        judge: {
+          rubric: "Die Zusammenfassung nennt 36 Monate Garantie bei Registrierung innerhalb von 30 Tagen (sonst 24 Monate), die Prüfung des Getriebefetts alle 150 Betriebsstunden und mindestens einen der Fehlercodes E17, E22, E31, E45 mit seiner Bedeutung, und beruft sich auf die Dokumentationsseite.",
+          minScore: 7,
+        },
+      },
+    },
+  ],
+}
