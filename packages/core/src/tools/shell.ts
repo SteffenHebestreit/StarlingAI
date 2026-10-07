@@ -3,12 +3,14 @@
  * Never executes on the host machine directly.
  */
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { promisify } from "node:util";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
 import { resolveDockerWorkspaceBind } from "./workspace-mount.js";
 import { assertSafeDockerRunArgs } from "./docker-safety.js";
 import { isSensitiveWorkspacePath } from "./filesystem.js";
+import { resolvePathWithinWorkspace, resolveWorkspaceWritePath } from "./workspace-path.js";
 
 const log = childLogger("tool:shell");
 const execFileAsync = promisify(execFile);
@@ -187,6 +189,22 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
+/**
+ * The workspace-relative path of a script to run: as given, or, when nothing is there, where
+ * write_file put it. write_file roots a working agent's writes under generated/, so "write
+ * primes.js, then run primes.js" looked for /workspace/primes.js and failed (E2E, 2026-10-07).
+ */
+export function resolveScriptPath(scriptPath: string, workspacePath: string): string {
+  try {
+    const within = resolvePathWithinWorkspace(scriptPath, workspacePath);
+    if (existsSync(within.resolved)) return within.relativePath;
+    const written = resolveWorkspaceWritePath(scriptPath, workspacePath);
+    return existsSync(written.resolved) ? written.relativePath : within.relativePath;
+  } catch {
+    return scriptPath;
+  }
+}
+
 // ── run_script ────────────────────────────────────────────────────────────────
 
 registerTool({
@@ -253,7 +271,7 @@ registerTool({
       };
     }
 
-    const sandboxScript = `/workspace/${scriptPath}`;
+    const sandboxScript = `/workspace/${resolveScriptPath(scriptPath, ctx.workspacePath)}`;
     const quotedArgs = scriptArgs.map(shellQuote).join(" ");
     const command = `${interpreter} ${shellQuote(sandboxScript)}${quotedArgs ? ` ${quotedArgs}` : ""}`;
 
