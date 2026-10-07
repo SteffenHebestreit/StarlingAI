@@ -475,9 +475,9 @@ function computeDynamicTurnGuidance(userMessage: string): DynamicTurnGuidance | 
 
 // ── Language / identity guidance ──────────────────────────────────────────────
 
-export function buildLanguageAndIdentityTurnGuidance(userMessage: string): string {
+export function buildLanguageAndIdentityTurnGuidance(userMessage: string, opts: { firstTurn?: boolean } = {}): string {
   const profile = loadMainAssistantPersonality();
-  const languageInstruction = buildLanguageInstructionForTurn(userMessage);
+  const languageInstruction = buildLanguageInstructionForTurn(userMessage, opts);
   const behaviorInstruction = "Be polite, brief, and efficient. Avoid small talk, filler, and unnecessary pleasantries. Do not introduce yourself or mention your name unless the user explicitly asks. The user already knows they are speaking to the assistant.";
   const nameInstruction = profile.identity.name
     ? `If the user explicitly asks for your name or what to call you, use ${JSON.stringify(profile.identity.name)} as your assistant name. Do not call yourself ${JSON.stringify(PRODUCT.name)} in conversation unless the user is explicitly asking about the product or platform name.`
@@ -494,8 +494,8 @@ export function buildLanguageAndIdentityTurnGuidance(userMessage: string): strin
  * message", and as the one instruction that quotes the message it outranked everything else: a
  * German message asking for an English answer got German. The precedence is in reply-language.ts.
  */
-export function buildLanguageInstructionForTurn(userMessage: string): string {
-  return buildTurnReplyLanguageInstruction(userMessage);
+export function buildLanguageInstructionForTurn(userMessage: string, opts: { firstTurn?: boolean } = {}): string {
+  return buildTurnReplyLanguageInstruction(userMessage, undefined, opts);
 }
 
 // ── Soft routing enforcement ──────────────────────────────────────────────────

@@ -32,7 +32,7 @@ import {
   looksLikeArtifactCreationRequest,
   looksLikeComposedGuideRequest,
 } from "./deliverable-intent.js";
-import { buildTurnReplyLanguageInstruction, messageHasOwnLanguage } from "./reply-language.js";
+import { buildTurnReplyLanguageInstruction, isFirstUserTurn, messageHasOwnLanguage } from "./reply-language.js";
 import {
   timedPhase,
   measurePrompt,
@@ -248,7 +248,7 @@ export async function assembleTurnSystemMessages(
     // with no language of its own (a bare link that needs a fetch) would reach its answer with the
     // default nowhere in view. Only then is the reply-language line repeated.
     const languageAndIdentityGuidance = iterationCount === 0
-      ? buildLanguageAndIdentityTurnGuidance(userMessage)
+      ? buildLanguageAndIdentityTurnGuidance(userMessage, { firstTurn: isFirstUserTurn(session.getHistory()) })
       : messageHasOwnLanguage(userMessage) ? "" : buildTurnReplyLanguageInstruction(userMessage);
     // Memory guidance and procedural-skill guidance are independent and each do a
     // query embedding, so run them concurrently instead of serially on time-to-first

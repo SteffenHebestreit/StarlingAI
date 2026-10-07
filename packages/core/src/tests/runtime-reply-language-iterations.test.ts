@@ -129,6 +129,20 @@ describe("the default reply language on later calls of a turn", () => {
     expect(promptOf(1)).toContain("(German if there is none)");
   });
 
+  it("names the message's language on the conversation's first turn, and on no later one", async () => {
+    const { AgentSession, runTurn } = await loadRuntime();
+    streamMock.mockImplementation(() => answerStream("Store them cool and half charged."));
+    const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-reply-language-ws-")), systemPrompt: "You are a test agent." });
+
+    await runTurn({ session, userMessage: "How should I store the batteries of my power tools over the winter?" });
+    expect(promptOf(0)).toContain("otherwise in English, the language of that message");
+
+    await runTurn({ session, userMessage: "And what about lithium batteries in a cold garage?" });
+    const second = promptOf(streamMock.mock.calls.length - 1);
+    expect(second).toContain("as a standing instruction earlier");
+    expect(second).not.toContain("otherwise in English");
+  });
+
   it("is named on no call when the message has a language of its own", async () => {
     await runDelegatingTurn("Please summarize what this article says about storing power tool batteries over the winter.");
     expect(streamMock.mock.calls.length).toBeGreaterThanOrEqual(2);

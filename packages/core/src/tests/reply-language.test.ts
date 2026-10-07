@@ -36,6 +36,7 @@ import {
   buildTurnReplyLanguageInstruction,
   defaultReplyLanguage,
   detectTurnUserLanguage,
+  isFirstUserTurn,
   lastAssistantReplyText,
   localizedFixedText,
 } from "../agent/reply-language.js";
@@ -91,6 +92,29 @@ describe("the reply-language rule", () => {
 
   it("scopes a language named for a deliverable to that deliverable", () => {
     expect(buildReplyLanguageRule()).toContain("applies to that deliverable");
+  });
+
+  it("names the message's language on a conversation's first turn only", () => {
+    // Unnamed, an English first question still came back German 5 times in 12; named, never. Later
+    // turns name none: a standing request written earlier lost to a named language (2026-10-07).
+    const english = "How should I store the batteries of my power tools over the winter?";
+    const first = buildTurnReplyLanguageInstruction(english, "German", { firstTurn: true });
+    expect(first).toContain("otherwise in English, the language of that message");
+    // Requests still win: one in the message, or one stored among the durable facts.
+    expect(first).toContain("the language the user asked for, if they asked for one — in that message or in the durable facts");
+    const later = buildTurnReplyLanguageInstruction(english, "German", { firstTurn: false });
+    expect(later).not.toContain("otherwise in English");
+    expect(later).toContain("as a standing instruction earlier");
+    // A message with no language of its own names no language, only the default.
+    const bare = buildTurnReplyLanguageInstruction("ok", "German", { firstTurn: true });
+    expect(bare).not.toContain("otherwise in English");
+    expect(bare).toContain("(German if there is none)");
+  });
+
+  it("knows a first turn by the history holding no earlier user message", () => {
+    expect(isFirstUserTurn([])).toBe(true);
+    expect(isFirstUserTurn([{ role: "system" }, { role: "user" }])).toBe(true);
+    expect(isFirstUserTurn([{ role: "user" }, { role: "assistant" }, { role: "user" }])).toBe(false);
   });
 
   it("uses the configured default language", () => {

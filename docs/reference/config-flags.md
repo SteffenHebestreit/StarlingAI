@@ -11,7 +11,7 @@ Every public schema field, where it is declared, and how many production files r
 | `a2a` | packages/core/src/config/schema.ts:399 | 12 |
 | `accessKeyId` | packages/core/src/config/schema.ts:459 | 2 |
 | `accessToken` | packages/core/src/config/schemas/channels.ts:51 | 9 |
-| `account` | packages/core/src/config/schemas/channels.ts:71 | 78 |
+| `account` | packages/core/src/config/schemas/channels.ts:71 | 79 |
 | `acquireTimeoutMs` | packages/core/src/config/schema.ts:1674 | 1 |
 | `activeModelPreset` | packages/core/src/config/schema.ts:1705 | 2 |
 | `adaptive` | packages/core/src/config/schemas/decisions.ts:57 | 14 |
@@ -30,7 +30,7 @@ Every public schema field, where it is declared, and how many production files r
 | `alwaysEscalateTerms` | packages/core/src/config/schema.ts:1576 | 4 |
 | `ansibleBinary` | packages/core/src/config/schema.ts:1065 | 1 |
 | `ansiblePlaybookBinary` | packages/core/src/config/schema.ts:1066 | 1 |
-| `api` | packages/core/src/config/schema.ts:82 | 129 |
+| `api` | packages/core/src/config/schema.ts:82 | 130 |
 | `apiKey` | packages/core/src/config/schema.ts:68 | 34 |
 | `apiUrl` | packages/core/src/config/schema.ts:1041 | 1 |
 | `approvalChannel` | packages/core/src/config/schema.ts:1317 | 10 |

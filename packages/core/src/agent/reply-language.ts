@@ -76,6 +76,15 @@ export function messageHasOwnLanguage(userMessage: string): boolean {
 }
 
 /**
+ * Whether this is the conversation's first message: the history holds no earlier user message. A
+ * standing language instruction can only be an earlier message, so on a first turn the only
+ * requests left are the message itself and the durable facts.
+ */
+export function isFirstUserTurn(history: readonly { role: string }[]): boolean {
+  return history.filter((message) => message.role === "user").length <= 1;
+}
+
+/**
  * The per-turn copy, which quotes the message it applies to. It is the most specific language
  * instruction the orchestrator sees on the turn, so it has to carry the whole precedence and not
  * just "same language as this message" — that version overrode an explicit request.
@@ -87,13 +96,24 @@ export function messageHasOwnLanguage(userMessage: string): boolean {
 export function buildTurnReplyLanguageInstruction(
   userMessage: string,
   defaultLanguage: string = defaultReplyLanguage(),
+  opts: { firstTurn?: boolean } = {},
 ): string {
   const compact = userMessage.trim().replace(/\s+/g, " ").slice(0, 280);
   const subject = compact ? `that message (${JSON.stringify(compact)})` : "the user's latest message";
-  const defaultClause = messageHasOwnLanguage(userMessage) ? "" : ` (${defaultLanguage} if there is none)`;
+  const own = detectTextLanguage(userMessage);
+  const defaultClause = own ? "" : ` (${defaultLanguage} if there is none)`;
+  const tail = `If it has no language of its own, keep the language the conversation has been using${defaultClause}.`;
+  // On a first turn the line names the message's language. Unnamed, an English first question
+  // still came back German 5 times in 12; named, 0 times in 12 (2026-10-07), with a request in the
+  // message, or one stored among the durable facts, kept every time (6/6, 10/10). Later in a
+  // conversation it names none: a standing "from now on, English" written earlier lost to a named
+  // message language (6 of 14 kept) — see buildReplyLanguageRule.
+  if (own && opts.firstTurn) {
+    return "Reply in the language the user asked for, if they asked for one — in that message or in the durable facts "
+      + `you were given; otherwise in ${own.name}, the language of ${subject}. ${tail}`;
+  }
   return "Reply in the language the user asked for, if they asked for one — in their latest message or as a standing "
-    + `instruction earlier; otherwise in the language of ${subject}. If it has no language of its own, keep the `
-    + `language the conversation has been using${defaultClause}.`;
+    + `instruction earlier; otherwise in the language of ${subject}. ${tail}`;
 }
 
 /**
