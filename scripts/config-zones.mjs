@@ -11,3 +11,8 @@
 // then refuse to load.
 // users/ is each signed-in user's working root, with its own generated/ and uploads/.
 export const NON_CONFIG_WORKSPACE_ZONES = Object.freeze(["generated", "uploads", "tools", "users"]);
+
+// Top-level directories of the CONFIG tree that hold another service's own files. config/mail/ is
+// the mail-service's accounts file: swept as a shard, the real account list landed in the compiled
+// starlingai.json as a top-level `accounts` key. Mirrors NON_CONFIG_BASE_ZONES in workspace-path.ts.
+export const NON_CONFIG_BASE_ZONES = Object.freeze(["mail"]);

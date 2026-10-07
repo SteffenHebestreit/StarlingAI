@@ -4,7 +4,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import JSON5 from "json5";
 import { PRODUCT } from "./product.mjs";
-import { NON_CONFIG_WORKSPACE_ZONES } from "./config-zones.mjs";
+import { NON_CONFIG_BASE_ZONES, NON_CONFIG_WORKSPACE_ZONES } from "./config-zones.mjs";
 // Shard walk, order (code point, not locale) and merge live in one place so the routing
 // taxonomy check (routing-taxonomy-check.mjs) merges exactly what this build does.
 import { collectShardPaths, deepMerge } from "./config-shards.mjs";
@@ -119,7 +119,7 @@ function buildTwoZone() {
 
   if (existsSync(defaultConfigDir) && isDir(defaultConfigDir)) {
     // Two-zone layout
-    for (const shardPath of collectShardPaths(defaultConfigDir)) {
+    for (const shardPath of collectShardPaths(defaultConfigDir, { excludeZones: NON_CONFIG_BASE_ZONES })) {
       const shardRaw = JSON5.parse(readFileSync(shardPath, "utf8"));
       merged = deepMerge(merged, shardRaw);
     }
@@ -132,7 +132,7 @@ function buildTwoZone() {
   } else if (existsSync(legacySourceDir) && isDir(legacySourceDir)) {
     // Legacy single-directory layout
     console.warn("[config-layout] WARNING: Using legacy starling_config/ — migrate to config/ + workspace/ layout");
-    for (const shardPath of collectShardPaths(legacySourceDir, { excludeZones: NON_CONFIG_WORKSPACE_ZONES })) {
+    for (const shardPath of collectShardPaths(legacySourceDir, { excludeZones: [...NON_CONFIG_BASE_ZONES, ...NON_CONFIG_WORKSPACE_ZONES] })) {
       const shardRaw = JSON5.parse(readFileSync(shardPath, "utf8"));
       merged = deepMerge(merged, shardRaw);
     }

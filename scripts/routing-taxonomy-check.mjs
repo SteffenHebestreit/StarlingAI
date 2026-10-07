@@ -25,7 +25,7 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import JSON5 from "json5";
 import { collectShardPaths, deepMerge } from "./config-shards.mjs";
-import { NON_CONFIG_WORKSPACE_ZONES } from "./config-zones.mjs";
+import { NON_CONFIG_BASE_ZONES, NON_CONFIG_WORKSPACE_ZONES } from "./config-zones.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const COLLECTIONS = [["subAgents", "agent"], ["scenes", "scene"], ["jobs", "job"]];
@@ -72,11 +72,11 @@ if (!existsSync(configDir)) fail("no config/ directory at the repo root.");
 const tracked = trackedShardSet();
 const isTracked = (path) => tracked.has(path);
 const shardPaths = [
-  ...collectShardPaths(configDir, { include: isTracked }),
+  ...collectShardPaths(configDir, { excludeZones: NON_CONFIG_BASE_ZONES, include: isTracked }),
   ...collectShardPaths(workspaceDir, { excludeZones: NON_CONFIG_WORKSPACE_ZONES, include: isTracked }),
 ];
 const ignored = [
-  ...collectShardPaths(configDir),
+  ...collectShardPaths(configDir, { excludeZones: NON_CONFIG_BASE_ZONES }),
   ...collectShardPaths(workspaceDir, { excludeZones: NON_CONFIG_WORKSPACE_ZONES }),
 ].filter((path) => !isTracked(path));
 

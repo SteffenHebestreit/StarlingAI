@@ -4,7 +4,7 @@ import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 
 import JSON5 from "json5";
 import { ConfigSchema, type Config, type SubAgentConfig } from "./schema.js";
 import { validateComputerUseConfig } from "./computer-use-schema.js";
-import { compareShardPaths, isNonConfigShardDirectory } from "../tools/workspace-path.js";
+import { compareShardPaths, isNonConfigShardDirectory, NON_CONFIG_BASE_ZONES, NON_CONFIG_WORKSPACE_ZONES } from "../tools/workspace-path.js";
 import { logger } from "../logger.js";
 
 import { PRODUCT } from "../product/index.js";
@@ -218,9 +218,14 @@ function getEffectiveRawConfig(): Record<string, unknown> {
 
 function getBaseRawConfig(): Record<string, unknown> {
   if (CONFIG_SOURCE.baseType === "directory") {
-    const base = readRawConfigDirectory(CONFIG_SOURCE.basePath, CONFIG_SOURCE.mutablePath);
+    // Two-zone layout: each tree skips its own non-config zones. A single legacy directory holds
+    // both kinds, so it skips both.
+    const baseZones = CONFIG_SOURCE.workspacePath
+      ? NON_CONFIG_BASE_ZONES
+      : new Set([...NON_CONFIG_BASE_ZONES, ...NON_CONFIG_WORKSPACE_ZONES]);
+    const base = readRawConfigDirectory(CONFIG_SOURCE.basePath, CONFIG_SOURCE.mutablePath, baseZones);
     if (CONFIG_SOURCE.workspacePath) {
-      const workspace = readRawConfigDirectory(CONFIG_SOURCE.workspacePath, CONFIG_SOURCE.mutablePath);
+      const workspace = readRawConfigDirectory(CONFIG_SOURCE.workspacePath, CONFIG_SOURCE.mutablePath, NON_CONFIG_WORKSPACE_ZONES);
       return applyConfigRemovals(mergeConfigObjects(base, workspace));
     }
     return applyConfigRemovals(base);
@@ -305,14 +310,14 @@ function readRawConfigFile(path: string, kind: "base" | "mutable"): Record<strin
   }
 }
 
-function readRawConfigDirectory(directoryPath: string, mutablePath: string): Record<string, unknown> {
+function readRawConfigDirectory(directoryPath: string, mutablePath: string, zones: ReadonlySet<string>): Record<string, unknown> {
   if (!existsSync(directoryPath) || !isExistingDirectory(directoryPath)) {
     logger.info({ path: directoryPath }, "No config directory found — using defaults");
     return {};
   }
 
   const merged: Record<string, unknown> = {};
-  const shardPaths = collectConfigShardPaths(directoryPath, mutablePath, CONFIG_SOURCE.compiledPath);
+  const shardPaths = collectConfigShardPaths(directoryPath, mutablePath, CONFIG_SOURCE.compiledPath, zones);
 
   for (const shardPath of shardPaths) {
     const shardRaw = readRawConfigFile(shardPath, "base");
@@ -326,7 +331,7 @@ function readRawConfigDirectory(directoryPath: string, mutablePath: string): Rec
   return merged;
 }
 
-function collectConfigShardPaths(directoryPath: string, mutablePath: string, compiledPath: string): string[] {
+function collectConfigShardPaths(directoryPath: string, mutablePath: string, compiledPath: string, zones: ReadonlySet<string>): string[] {
   const shardPaths: string[] = [];
   const visit = (currentPath: string, depth: number) => {
     for (const entry of readdirSync(currentPath, { withFileTypes: true })) {
@@ -336,7 +341,7 @@ function collectConfigShardPaths(directoryPath: string, mutablePath: string, com
         // uploads, and dynamic-tool bundles — NOT config, and neither do hidden state
         // dirs. Sweeping them would let an agent-written data.json (or a malicious
         // upload with a top-level "agents" key) merge straight into the live config.
-        if (isNonConfigShardDirectory(entry.name, depth)) continue;
+        if (isNonConfigShardDirectory(entry.name, depth, zones)) continue;
         visit(nextPath, depth + 1);
         continue;
       }

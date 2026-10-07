@@ -134,13 +134,26 @@ export const NON_CONFIG_WORKSPACE_ZONES: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Whether a config-shard sweep skips this directory: a working zone at the top, or a hidden
- * directory at any depth. Hidden directories hold state, never shards — the state dir under the
- * workspace keeps a JSON file per long-running task (checkpoints/), and one half-written file
- * there was read as a base shard, which refuses to boot on a parse error.
+ * Top-level directories of the CONFIG tree (config/) that hold another service's own files, not
+ * gateway config. config/mail/ is the mail-service's accounts file, which it reads itself: swept as
+ * a shard it put the real mail account list into the compiled starlingai.json as a top-level
+ * `accounts` key (2026-10-07), where nothing reads it, and a malformed edit refused the config load.
  */
-export function isNonConfigShardDirectory(name: string, depth: number): boolean {
-  return name.startsWith(".") || (depth === 0 && NON_CONFIG_WORKSPACE_ZONES.has(name));
+export const NON_CONFIG_BASE_ZONES: ReadonlySet<string> = new Set(["mail"]);
+
+/**
+ * Whether a config-shard sweep skips this directory: one of `zones` at the top (the workspace's
+ * working zones by default; NON_CONFIG_BASE_ZONES for the config tree), or a hidden directory at
+ * any depth. Hidden directories hold state, never shards — the state dir under the workspace keeps
+ * a JSON file per long-running task (checkpoints/), and one half-written file there was read as a
+ * base shard, which refuses to boot on a parse error.
+ */
+export function isNonConfigShardDirectory(
+  name: string,
+  depth: number,
+  zones: ReadonlySet<string> = NON_CONFIG_WORKSPACE_ZONES,
+): boolean {
+  return name.startsWith(".") || (depth === 0 && zones.has(name));
 }
 
 /**

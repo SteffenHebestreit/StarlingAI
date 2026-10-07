@@ -26,7 +26,7 @@ import JSON5 from "json5";
 import { ConfigSchema } from "./schema.js";
 import { validateComputerUseConfig } from "./computer-use-schema.js";
 import { DEFAULT_RUNTIME_DIRECTORY_NAME } from "./loader.js";
-import { compareShardPaths, isNonConfigShardDirectory } from "../tools/workspace-path.js";
+import { compareShardPaths, isNonConfigShardDirectory, NON_CONFIG_BASE_ZONES, NON_CONFIG_WORKSPACE_ZONES } from "../tools/workspace-path.js";
 
 export interface WorkspaceValidationResult {
   ok: boolean;
@@ -100,16 +100,17 @@ export function resolveShardDirs(workspacePath: string): { repoRoot: string; dir
   return { repoRoot, dirs };
 }
 
-/** Sorted .json/.jsonc shard paths under a directory (recursive), like config-layout. */
-function collectShardPaths(directory: string): string[] {
+/** Sorted .json/.jsonc shard paths under a directory (recursive), like config-layout. `zones` are
+ *  the tree's top-level non-config directories (NON_CONFIG_BASE_ZONES for config/). */
+function collectShardPaths(directory: string, zones: ReadonlySet<string>): string[] {
   const paths: string[] = [];
   const visit = (current: string, depth: number) => {
     for (const entry of readdirSync(current, { withFileTypes: true })) {
       const next = resolve(current, entry.name);
       if (entry.isDirectory()) {
-        // Mirror the loader: working zones (generated/, uploads/, tools/, users/) and
-        // hidden state dirs hold agent output and dynamic-tool bundles, never config shards.
-        if (isNonConfigShardDirectory(entry.name, depth)) continue;
+        // Mirror the loader: working zones (generated/, uploads/, tools/, users/; config/mail/ in
+        // the config tree) and hidden state dirs hold data, never config shards.
+        if (isNonConfigShardDirectory(entry.name, depth, zones)) continue;
         // The runtime overlay (runtime/runtime.overrides.json) is NOT a base shard:
         // the loader excludes it from the base sweep and applies it LAST on top.
         // Sweeping it here as an ordinary shard would merge it at the wrong
@@ -148,7 +149,8 @@ function deepMerge(base: Record<string, unknown>, overlay: Record<string, unknow
 function mergeShards(repoRoot: string, dirs: string[], parseErrors: string[]): Record<string, unknown> {
   let merged: Record<string, unknown> = {};
   for (const dir of dirs) {
-    for (const shardPath of collectShardPaths(dir)) {
+    const zones = dir === join(repoRoot, "config") ? NON_CONFIG_BASE_ZONES : NON_CONFIG_WORKSPACE_ZONES;
+    for (const shardPath of collectShardPaths(dir, zones)) {
       let parsed: unknown;
       try {
         parsed = JSON5.parse(readFileSync(shardPath, "utf8"));
