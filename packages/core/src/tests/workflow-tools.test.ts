@@ -713,6 +713,83 @@ describe("workflow catalog tools", () => {
     }
   });
 
+  // A scene whose task gives the work to several agents is a multi-agent plan. Its "Use X first …"
+  // or "Use X to …" lead named only the first, and a leaf agent cannot delegate, so the scene ran
+  // that agent alone: every verified_research_brief went to document_intake (no web tools), and
+  // code_review / security_audit / release_notes_draft dropped all but their first agent.
+  it("run_workflow orchestrates a scene whose task names several leaf agents instead of running the first alone", async () => {
+    const { tempDir, configPath } = writeTempConfig({
+      agents: { defaults: { model: { primary: "lmstudio/qwen/qwen3.5-9b" } } },
+      scenes: {
+        research_brief: {
+          description: "Fact-checked brief.",
+          task: "Use document_intake first when the request starts from attached material, researcher for broad source discovery, and summarizer for the final brief.",
+          allowedAgents: ["document_intake", "researcher", "summarizer"],
+        },
+        advisory_digest: {
+          description: "Advisory digest.",
+          task: "Use researcher to gather current advisories, and summarizer to write the digest.",
+          allowedAgents: ["researcher", "summarizer"],
+        },
+      },
+      subAgents: {
+        document_intake: { description: "Extracts attachments.", tools: ["extract_file_content"], maxIterations: 4 },
+        researcher: { description: "Finds sources.", tools: ["web_search", "web_fetch"], maxIterations: 4 },
+        summarizer: { description: "Summarizes outputs.", tools: ["write_file"], maxIterations: 4 },
+      },
+    });
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const runTurnMock = vi.fn(async (opts: { userMessage: string; allowedAgents?: string[] }) => ({
+      response: `handled: ${opts.userMessage}`,
+      toolCallsExecuted: 1,
+      guardrailEvents: [],
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      blocked: false,
+    }));
+    // A leaf running the scene alone answers like any run; the assertions below say it must not.
+    const runSubAgentWithStatsMock = vi.fn(async (opts: { agentName: string }) => ({
+      output: `${opts.agentName} handled the whole scene.`,
+      stats: {
+        agentName: opts.agentName, sessionId: `sub:workflow:${opts.agentName}:test`, promptChars: 0, userContentChars: 0,
+        toolCount: 1, toolNames: ["write_file"], iterations: 1, usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        maxIterations: 4, model: "lmstudio/qwen/qwen3.5-9b", capabilities: [], outcome: "success", terminalState: "completed",
+      },
+    }));
+    vi.doMock("../agent/runtime.js", () => ({
+      collectTurnArtifactAttachments: () => [],
+      runTurn: runTurnMock,
+    }));
+    vi.doMock("../agent/sub-agent.js", () => ({
+      runSubAgentWithStats: runSubAgentWithStatsMock,
+    }));
+
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/workflow-catalog.js"),
+    ]);
+
+    try {
+      const tool = getTool("run_workflow");
+      expect(tool).toBeDefined();
+      for (const name of ["research_brief", "advisory_digest"]) {
+        runTurnMock.mockClear();
+        const result = await tool!.execute(
+          { name, workflowType: "scene" },
+          { sessionId: `workflow-${name}`, workspacePath: "/workspace" },
+        );
+        expect(result.success, name).toBe(true);
+        expect(runTurnMock, name).toHaveBeenCalledTimes(1);
+      }
+      // No leaf agent ran a scene on its own.
+      expect(runSubAgentWithStatsMock).not.toHaveBeenCalled();
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("run_workflow bootstraps direct browser scenes and strips web_search when the URL is explicit", async () => {
     const { tempDir, configPath } = writeTempConfig({
       agents: {

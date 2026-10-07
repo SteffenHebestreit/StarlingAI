@@ -602,11 +602,31 @@ function resolveSceneBootstrapAgent(
   if (match?.[1]) {
     const agentName = match[1].trim();
     const allowed = !(allowedAgents?.length && !allowedAgents.includes(agentName));
-    if (allowed && getConfig().subAgents[agentName]) return agentName;
+    // A leaf agent runs the scene alone only when the task gives the work to it alone. A task
+    // that names other allowed agents is a multi-agent plan, and a leaf cannot delegate: "Use
+    // document_intake first when the request starts from attached material, researcher for …"
+    // ran document_intake alone — no web or delegation tools — for every research brief, and
+    // code_review, security_audit and release_notes_draft dropped all but their first agent.
+    // Those go through the orchestrated path below with the scene's allowed agents.
+    if (allowed && getConfig().subAgents[agentName] && !taskNamesOtherAgents(scene.task, agentName, allowedAgents)) {
+      return agentName;
+    }
   }
 
   // No explicit "use X" lead — but a single-leaf-agent scene still runs that agent directly.
   return resolveSingleStepLeafAgent(allowedAgents);
+}
+
+/** Whether `task` names an allowed agent other than `leadAgent` as a whole identifier. */
+function taskNamesOtherAgents(task: string, leadAgent: string, allowedAgents: string[] | undefined): boolean {
+  const isIdentifierChar = (ch: string | undefined) => ch !== undefined && /[A-Za-z0-9_]/.test(ch);
+  return (allowedAgents ?? []).some((agent) => {
+    if (agent === leadAgent) return false;
+    for (let at = task.indexOf(agent); at !== -1; at = task.indexOf(agent, at + 1)) {
+      if (!isIdentifierChar(task[at - 1]) && !isIdentifierChar(task[at + agent.length])) return true;
+    }
+    return false;
+  });
 }
 
 function stripCoordinatorBootstrapInstruction(task: string, agentName: string): string {
