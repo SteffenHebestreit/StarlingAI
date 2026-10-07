@@ -653,10 +653,10 @@ function updateDurableMemoryRecordByKey(
   // store path. Both are best-effort and never block the edit.
   if (textChanged && isEmbeddingAvailable()) {
     const embedPromise = _refreshDurableEmbedding(filePath, cacheKey, nextIndex);
-    void upsertMemoryToGraph(result, undefined, undefined, embedPromise)
+    void upsertMemoryToGraph(result, undefined, undefined, embedPromise, dir)
       .catch((err) => log.debug({ err }, "Graph write-through failed (edit)"));
   } else {
-    void upsertMemoryToGraph(result, undefined, undefined, existing.embedding)
+    void upsertMemoryToGraph(result, undefined, undefined, existing.embedding, dir)
       .catch((err) => log.debug({ err }, "Graph write-through failed (edit)"));
   }
   return result;
@@ -784,7 +784,7 @@ function storeDurableMemoryRecord(
   // record independently (two provider round-trips, on different text). Both writes
   // stay fire-and-forget — never the write's critical path.
   const graphWriteThrough = (vec?: Float32Array | number[] | null | Promise<Float32Array | null>) =>
-    upsertMemoryToGraph(result, writeContext?.agentName, writeContext?.sessionId, vec)
+    upsertMemoryToGraph(result, writeContext?.agentName, writeContext?.sessionId, vec, dir)
       .catch((err) => log.debug({ err }, "Graph write-through failed"));
   if (!embedding && isEmbeddingAvailable()) {
     // Indexable text changed: compute the new vector once (written back to the flat

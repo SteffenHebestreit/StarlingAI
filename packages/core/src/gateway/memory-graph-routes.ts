@@ -16,6 +16,7 @@
 import type { Hono } from "hono";
 import { verifyToken, extractBearerToken } from "./auth.js";
 import { getConfig } from "../config/loader.js";
+import { userWorkspaceRoot } from "../tools/workspace-path.js";
 
 export function registerMemoryGraphRoutes(app: Hono): void {
   app.get("/api/memory/entries", async (c) => {
@@ -27,7 +28,9 @@ export function registerMemoryGraphRoutes(app: Hono): void {
       const cfg = (await import("../config/loader.js")).getConfig();
       const records = scope === "user"
         ? listUserMemoryRecords(cfg.workspacePath)
-        : listWorkspaceMemoryRecords(cfg.workspacePath);
+        // The caller's own workspace root: under multi-user auth workspace memory is written per
+        // user, and this read the shared root, so a user's own entries never showed (2026-10-07).
+        : listWorkspaceMemoryRecords(userWorkspaceRoot(cfg.workspacePath));
       const limitRaw = Number(c.req.query("limit") ?? 200);
       // A non-numeric ?limit=abc → NaN → slice(0, NaN) silently returns ZERO records;
       // fall back to the default instead (mirrors sub-agent-routes.ts / health.ts).
@@ -65,7 +68,7 @@ export function registerMemoryGraphRoutes(app: Hono): void {
       const cfg = getConfig();
       const record = scope === "user"
         ? updateUserMemoryRecord(cfg.workspacePath, key, patch)
-        : updateWorkspaceMemoryRecord(cfg.workspacePath, key, patch);
+        : updateWorkspaceMemoryRecord(userWorkspaceRoot(cfg.workspacePath), key, patch);
       if (!record) return c.json({ error: "Memory entry not found" }, 404);
       return c.json({ scope, record });
     } catch (err) {
@@ -83,7 +86,7 @@ export function registerMemoryGraphRoutes(app: Hono): void {
       const cfg = getConfig();
       const deleted = scope === "user"
         ? deleteUserMemoryRecord(cfg.workspacePath, key)
-        : deleteWorkspaceMemoryRecord(cfg.workspacePath, key);
+        : deleteWorkspaceMemoryRecord(userWorkspaceRoot(cfg.workspacePath), key);
       if (!deleted) return c.json({ error: "Memory entry not found" }, 404);
       return c.json({ scope, key, deleted: true });
     } catch (err) {
@@ -100,7 +103,7 @@ export function registerMemoryGraphRoutes(app: Hono): void {
     try {
       const { computeMemoryCurationReport } = await import("../memory/steward.js");
       const cfg = getConfig();
-      return c.json(computeMemoryCurationReport(cfg.workspacePath));
+      return c.json(computeMemoryCurationReport(userWorkspaceRoot(cfg.workspacePath)));
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
     }
@@ -113,8 +116,9 @@ export function registerMemoryGraphRoutes(app: Hono): void {
       const { computeMemoryCurationReport } = await import("../memory/steward.js");
       const { compactWorkspaceMemoryRecords } = await import("../memory/service.js");
       const cfg = getConfig();
-      const before = computeMemoryCurationReport(cfg.workspacePath);
-      const after = compactWorkspaceMemoryRecords(cfg.workspacePath);
+      const root = userWorkspaceRoot(cfg.workspacePath);
+      const before = computeMemoryCurationReport(root);
+      const after = compactWorkspaceMemoryRecords(root);
       return c.json({ before, after });
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);

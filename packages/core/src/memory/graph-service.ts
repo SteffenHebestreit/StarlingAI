@@ -37,17 +37,45 @@ import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
 import { getEmbeddingProvider } from "../providers/index.js";
 import { currentUserId } from "../runtime/request-context.js";
+import { activeUserScopeSegment, USERS_SUBDIR } from "../runtime/user-scope.js";
 
 /**
- * Per-user tenant for graph partitioning: the authenticated userId when
+ * Per-user tenant for 'user'-scope graph nodes: the authenticated userId when
  * multi-user auth is on, else null (single-operator — no partitioning, fully
- * back-compat). Only the 'user' scope is tenant-partitioned; workspace / session
- * / agent scopes stay shared. Pass the record's scope on WRITE (tenant only for
- * user-scope nodes); omit on READ to get the current reader's tenant.
+ * back-compat). Workspace-scope nodes are partitioned too, by their storage root
+ * (graphWorkspaceTenant); session / agent scopes stay shared. Pass the record's
+ * scope on WRITE; omit on READ to get the current reader's tenant.
  */
 function graphUserTenant(scope?: string): string | null {
   if (scope !== undefined && scope !== "user") return null;
   return getConfig().auth?.enabled === true ? (currentUserId() ?? null) : null;
+}
+
+/**
+ * Tenant of a workspace-scope node whose record lives at the SHARED workspace root. Never equal to
+ * a user segment: those always end in "-" plus 16 hex digits (safeUserSegment).
+ */
+export const SHARED_WORKSPACE_TENANT = "shared";
+const USER_SEGMENT_RE = /^[A-Za-z0-9_-]+-[0-9a-f]{16}$/;
+
+/**
+ * Tenant of a workspace-scope node on WRITE, mirroring where its record is stored. Under multi-user
+ * auth a workspace record lives in its writer's own root, <workspace>/users/<segment>/ (agent/session.ts
+ * userWorkspaceRoot), and the graph treated workspace scope as shared: the "Critical Memory" block
+ * every turn injects served one account's workspace decisions and preferences to every other account
+ * (found 2026-10-07). The storage directory decides — the segment after its last `users/` component,
+ * else the shared root — and without one the ambient user's segment does. Null with auth off.
+ */
+export function graphWorkspaceTenant(storageDir?: string): string | null {
+  if (getConfig().auth?.enabled !== true) return null;
+  if (storageDir !== undefined) {
+    const parts = storageDir.replace(/\\/g, "/").split("/");
+    for (let i = parts.length - 2; i >= 0; i--) {
+      if (parts[i] === USERS_SUBDIR && USER_SEGMENT_RE.test(parts[i + 1] ?? "")) return parts[i + 1]!;
+    }
+    return SHARED_WORKSPACE_TENANT;
+  }
+  return activeUserScopeSegment() ?? SHARED_WORKSPACE_TENANT;
 }
 
 const log = childLogger("memory:graph");
@@ -75,6 +103,8 @@ export async function upsertMemoryToGraph(
   // the non-scoring peerCount, so reusing the richer search vector is behavior-neutral.
   // When omitted (other callers), the graph computes its own from record.content.
   sharedEmbedding?: Float32Array | number[] | null | Promise<Float32Array | null>,
+  /** Directory the record is stored in; decides a workspace-scope node's tenant. */
+  storageDir?: string,
 ): Promise<void> {
   if (!isGraphDbAvailable()) return;
 
@@ -102,8 +132,9 @@ export async function upsertMemoryToGraph(
       content: record.content.slice(0, 2000),
       kind: record.kind,
       scope: record.scope,
-      // Per-user tenant for 'user'-scope nodes (multi-user auth); null otherwise.
-      tenant: graphUserTenant(record.scope),
+      // Under multi-user auth: the user for 'user'-scope nodes, the storage root's owner (or
+      // SHARED_WORKSPACE_TENANT) for 'workspace'-scope nodes; null otherwise.
+      tenant: record.scope === "workspace" ? graphWorkspaceTenant(storageDir) : graphUserTenant(record.scope),
       domain,
       topic,
       createdAt: record.createdAt,
@@ -221,10 +252,13 @@ export async function graphL0Layer(
 ): Promise<string> {
   if (!isGraphDbAvailable()) return "";
 
-  // Tenant MUST be in the cache key — else one user's cached L0 block would be
+  // Tenants MUST be in the cache key — else one user's cached L0 block would be
   // served to another user under multi-user auth.
   const tenant = graphUserTenant();
-  const cacheKey = `${domain ?? ""} ${maxChars} ${tenant ?? ""}`;
+  // The reader's own workspace root, plus the shared root's nodes. A node written before
+  // workspace tenants existed has none and is left out under auth (fail closed).
+  const workspaceTenant = graphWorkspaceTenant();
+  const cacheKey = `${domain ?? ""} ${maxChars} ${tenant ?? ""} ${workspaceTenant ?? ""}`;
   const cached = _graphL0Cache.get(cacheKey);
   if (cached && Date.now() - cached.storedAt <= GRAPH_L0_CACHE_TTL_MS) return cached.content;
 
@@ -232,14 +266,21 @@ export async function graphL0Layer(
     const queryPromise = runCypher(`
       MATCH (m:MemoryRecord)
       WHERE m.kind IN ['decision', 'preference']
-        AND (m.scope = 'workspace'
+        AND ((m.scope = 'workspace'
+              AND ($workspaceTenant IS NULL OR m.tenant = $workspaceTenant OR m.tenant = $sharedTenant))
              OR (m.scope = 'user' AND ($tenant IS NULL OR m.tenant = $tenant)))
         AND (m.validTo IS NULL OR m.validTo > $now)
         AND ($domain IS NULL OR m.domain = $domain OR m.domain IS NULL)
       RETURN m.id AS id, m.kind AS kind, m.content AS content
       ORDER BY m.importance DESC, m.updatedAt DESC
       LIMIT 5
-    `, { domain: domain ?? null, now: new Date().toISOString(), tenant }).catch(() => null); // swallow a late rejection after timeout
+    `, {
+      domain: domain ?? null,
+      now: new Date().toISOString(),
+      tenant,
+      workspaceTenant,
+      sharedTenant: SHARED_WORKSPACE_TENANT,
+    }).catch(() => null); // swallow a late rejection after timeout
     const result = await Promise.race([
       queryPromise,
       new Promise<typeof _GRAPH_L0_TIMEOUT>((resolve) => {
