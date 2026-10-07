@@ -2,7 +2,7 @@
  * End-to-end evaluation CLI.
  *
  *   pnpm e2e:evaluate [--group g] [--tag t] [--id x] [--repeat k] [--concurrency n]
- *                     [--baseline report.json] [--out dir] [--scenarios dir] [--list]
+ *                     [--baseline report.json] [--out dir] [--scenarios dir] [--keep-memory] [--list]
  *   pnpm e2e:validate [--scenarios dir]
  *   pnpm e2e:setup [--remove]
  *
@@ -40,7 +40,7 @@ import { buildReport, compareWithBaseline, loadReport, writeReport } from "./rep
 import { resolveSetupPaths, runE2ESetup, SetupRefusedError } from "./setup.js";
 
 const VALUE_FLAGS = new Set(["group", "tag", "id", "repeat", "concurrency", "baseline", "out", "scenarios"]);
-const BOOLEAN_FLAGS = new Set(["remove", "list", "help"]);
+const BOOLEAN_FLAGS = new Set(["remove", "list", "help", "keep-memory"]);
 
 interface ParsedArgs {
   command: string;
@@ -117,7 +117,7 @@ function nonNegativeIntFromEnv(io: CliIo, name: string, fallback: number): numbe
 }
 
 const HELP = `Usage:
-  pnpm e2e:evaluate [--group g] [--tag t] [--id x] [--repeat k] [--concurrency n] [--baseline report.json] [--out dir] [--scenarios dir] [--list]
+  pnpm e2e:evaluate [--group g] [--tag t] [--id x] [--repeat k] [--concurrency n] [--baseline report.json] [--out dir] [--scenarios dir] [--keep-memory] [--list]
   pnpm e2e:validate [--scenarios dir]
   pnpm e2e:setup [--remove]
 See eval/e2e/README.md.`;
@@ -232,6 +232,7 @@ async function evaluate(args: ParsedArgs, io: CliIo, repoRoot: string): Promise<
       repeat,
       concurrency,
       eventGraceMs,
+      resetDurableMemory: !args.booleans.has("keep-memory"),
       signal: interrupt.signal,
     });
     const report = buildReport(results, {

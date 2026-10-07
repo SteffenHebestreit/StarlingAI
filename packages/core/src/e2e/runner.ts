@@ -73,6 +73,13 @@ export interface RunnerOptions {
   /** How long a mail expect waits for its `min` messages to arrive. */
   mailWaitMs?: number;
   mailPollMs?: number;
+  /**
+   * Empty the attempt identity's durable memory before each attempt, when attempts run one at a
+   * time (concurrent attempts share the account, so one would delete another's). What a scenario
+   * stores is in every later turn's prompt (the durable-facts capsule): the memory scenario's
+   * German fact pulled a later English question's reply into German (2026-10-07).
+   */
+  resetDurableMemory?: boolean;
   /** Aborts the run (Ctrl+C): running turns are cancelled, scenarios not started are skipped. */
   signal?: AbortSignal;
 }
@@ -89,6 +96,7 @@ export const RUNNER_DEFAULTS: Required<Omit<RunnerOptions, "signal">> = {
   cancelGraceMs: 30_000,
   mailWaitMs: 30_000,
   mailPollMs: 1_000,
+  resetDurableMemory: true,
 };
 
 export interface DuringRecord {
@@ -388,6 +396,30 @@ function addCounts(target: Record<string, number>, source: Record<string, number
   for (const [key, count] of Object.entries(source)) target[key] = (target[key] ?? 0) + count;
 }
 
+/**
+ * Delete every durable memory entry (user and workspace scope) the identity holds. Best effort: a
+ * gateway without the memory API, or a failed call, leaves the account as it is.
+ */
+export async function resetDurableMemory(identity: string, deps: RunnerDeps, signal?: AbortSignal): Promise<number> {
+  let removed = 0;
+  for (const scope of ["user", "workspace"] as const) {
+    try {
+      const listed = await deps.client.http(identity, "GET", `/api/memory/entries?scope=${scope}&limit=500`, signal ? { signal } : {});
+      if (!listed.ok) continue;
+      const records = (listed.json as { records?: Array<{ key?: unknown }> } | undefined)?.records ?? [];
+      for (const record of records) {
+        if (typeof record.key !== "string" || !record.key) continue;
+        const deleted = await deps.client.http(identity, "DELETE", `/api/memory/entries/${encodeURIComponent(record.key)}?scope=${scope}`, signal ? { signal } : {});
+        if (deleted.ok) removed += 1;
+      }
+    } catch {
+      // Best effort, see above.
+    }
+  }
+  if (removed > 0) deps.log?.(`     reset: removed ${removed} durable memory entr${removed === 1 ? "y" : "ies"} of ${identity}`);
+  return removed;
+}
+
 export async function runAttempt(
   scenario: E2EScenario,
   index: number,
@@ -417,6 +449,9 @@ export async function runAttempt(
   };
   if (opts.signal?.aborted) onRunAbort();
   else opts.signal?.addEventListener("abort", onRunAbort, { once: true });
+  if (opts.resetDurableMemory && opts.concurrency === 1 && !controller.signal.aborted) {
+    await resetDurableMemory(ctx.identity, deps, controller.signal);
+  }
   const steps: StepResult[] = [];
   let open: { window: OpenTurnWindow; result: StepResult } | null = null;
   const closeOpenWindow = async (minimumGapMs: number): Promise<boolean> => {

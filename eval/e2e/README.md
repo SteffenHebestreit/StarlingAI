@@ -57,6 +57,13 @@ pnpm e2e:evaluate --list                            # what would run
 `--out dir` writes the report elsewhere, `--scenarios dir` reads scenarios from another directory.
 Ctrl+C cancels the running turns (`chat.cancel`) and writes the report; a second Ctrl+C quits at once.
 
+**Durable memory is emptied before each attempt.** What a scenario stores (memory_store) reaches every
+later turn of the account through the durable-facts capsule, so one scenario's facts would steer the next
+(the memory scenario's German fact pulled an English question's reply into German, 2026-10-07). With
+`--concurrency 1` (the default) the attempt's identity loses every user- and workspace-scope memory entry
+before the attempt starts. Concurrent attempts share the account, so then nothing is reset. `--keep-memory`
+keeps it.
+
 **Mail-isolation preflight (fail closed).** Before any scenario runs, the harness asks the running
 mail-service — through `pnpm e2e:env status --json`, which calls `GET /api/accounts` inside its container
 with `X-Sai-User: eval` — which accounts `eval` can see. Any account not bound to `eval` (its `allowedUsers`

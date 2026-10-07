@@ -78,6 +78,8 @@ class FakeGateway {
   readonly steers: Array<{ sessionId: string; message: string; requestId?: string; clientMessageId?: string }> = [];
   readonly cancels: string[] = [];
   readonly httpPaths: string[] = [];
+  /** Durable memory keys by `<user>:<scope>`, for the reset before each attempt. */
+  readonly memory = new Map<string, Set<string>>();
   private readonly server = http.createServer((req, res) => void this.handleHttp(req, res));
   private readonly wss = new WebSocketServer({ noServer: true });
   private readonly sessions = new Map<string, { owner: string; transcript: Array<Record<string, unknown>> }>();
@@ -267,6 +269,17 @@ class FakeGateway {
     }
     if (req.method === "GET" && url.pathname.startsWith("/api/echo/")) {
       return json(200, { hello: "world", user, session: decodeURIComponent(url.pathname.slice("/api/echo/".length)), token: "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJldmFsIn0.c2lnbmF0dXJlLXNpZ25hdHVyZQ" });
+    }
+    if (req.method === "GET" && url.pathname === "/api/memory/entries") {
+      const scope = url.searchParams.get("scope") === "user" ? "user" : "workspace";
+      const keys = [...(this.memory.get(`${user}:${scope}`) ?? [])];
+      return json(200, { scope, total: keys.length, returned: keys.length, records: keys.map((key) => ({ key })) });
+    }
+    const memoryEntry = /^\/api\/memory\/entries\/([^/]+)$/.exec(url.pathname);
+    if (req.method === "DELETE" && memoryEntry) {
+      const scope = url.searchParams.get("scope") === "user" ? "user" : "workspace";
+      const deleted = this.memory.get(`${user}:${scope}`)?.delete(decodeURIComponent(memoryEntry[1]!)) ?? false;
+      return deleted ? json(200, { scope, deleted: true }) : json(404, { error: "Memory entry not found" });
     }
     const steer = /^\/api\/sessions\/([^/]+)\/steer$/.exec(url.pathname);
     if (req.method === "POST" && steer) {
@@ -644,6 +657,32 @@ describe("e2e harness against a fake gateway", () => {
     expect(second.attempts[0]!.failures).toEqual(["step 1 turn: attempt timed out after 400 ms while this turn ran (chat.cancel: cancelled=true, final status error)"]);
     expect(second.attempts[0]!.steps).toHaveLength(1);
     expect(gateway.cancels).toContain(secondTurn.requestId);
+  });
+
+  it("empties the attempt identity's durable memory before each attempt, when attempts run one at a time", async () => {
+    // What a scenario stores is in every later turn's prompt: the memory scenario's German fact
+    // pulled a later English question's reply into German (2026-10-07).
+    gateway.memory.set("eval:user", new Set(["favorite_tea"]));
+    gateway.memory.set("eval:workspace", new Set(["project_note"]));
+    gateway.memory.set("eval-viewer:user", new Set(["viewer_note"]));
+    const scenario: E2EScenario = { id: "fake-reset", title: "Reset", group: "core", steps: [{ ...helloTurn }] };
+    try {
+      await runScenario(loaded(scenario), deps(), FAST);
+      expect([...(gateway.memory.get("eval:user") ?? [])]).toEqual([]);
+      expect([...(gateway.memory.get("eval:workspace") ?? [])]).toEqual([]);
+      // Only the attempt's own identity.
+      expect([...(gateway.memory.get("eval-viewer:user") ?? [])]).toEqual(["viewer_note"]);
+
+      // Attempts that run at once share the account: no reset.
+      gateway.memory.set("eval:user", new Set(["favorite_tea"]));
+      await runScenario(loaded(scenario), deps(), { ...FAST, concurrency: 2 });
+      expect([...(gateway.memory.get("eval:user") ?? [])]).toEqual(["favorite_tea"]);
+      // ...and none when switched off.
+      await runScenario(loaded(scenario), deps(), { ...FAST, resetDurableMemory: false });
+      expect([...(gateway.memory.get("eval:user") ?? [])]).toEqual(["favorite_tea"]);
+    } finally {
+      gateway.memory.clear();
+    }
   });
 
   it("skips — never fails — a scenario whose required service is down", async () => {
