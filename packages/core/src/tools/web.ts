@@ -819,14 +819,17 @@ async function fetchWithTimeout(url: string, ms: number, init?: RequestInit): Pr
  * resolution. Uses dns.lookup(all) so BOTH A and AAAA records are checked — a
  * resolve4-only check let an IPv6-only host that maps to a private address slip
  * past. A resolver failure (IP literal / offline resolver) is non-fatal, matching
- * the original guard.
+ * the original guard. The only exemption is an exact name listed in
+ * guardrails.allowedPrivateHosts (see resolvedHostIsBlocked); a host private by
+ * literal is refused whatever that list says.
  */
 export async function hostIsBlocked(host: string): Promise<boolean> {
   const h = host.toLowerCase();
-  if (isPrivateHost(h)) return true;
+  // A trailing dot (FQDN form) must not slip a literal name such as "localhost." past the check.
+  if (isPrivateHost(h) || isPrivateHost(h.replace(/\.$/, ""))) return true;
   try {
     const records = await dnsLookup(h, { all: true });
-    if (records.some((r) => isPrivateHost(r.address))) return true;
+    if (resolvedHostIsBlocked(h, records.map((r) => r.address), configuredPrivateHostAllowlist())) return true;
   } catch {
     /* DNS failure — allow through (IP literal / unavailable resolver) */
   }
@@ -834,11 +837,51 @@ export async function hostIsBlocked(host: string): Promise<boolean> {
 }
 
 /**
+ * Whether a host that resolved to `addresses` is refused. Any private address refuses it,
+ * unless the host is listed in `allowedPrivateHosts` (exact name, any case) — and even a
+ * listed host is refused when one of its addresses is loopback, link-local or unspecified,
+ * so the list can open a fixture on a LAN or container network, never the gateway itself or
+ * a cloud-metadata endpoint.
+ */
+export function resolvedHostIsBlocked(host: string, addresses: readonly string[], allowedPrivateHosts: readonly string[]): boolean {
+  if (!addresses.some((address) => isPrivateHost(address))) return false;
+  const name = host.toLowerCase().replace(/\.$/, "");
+  const listed = allowedPrivateHosts.some((entry) => entry.toLowerCase() === name);
+  return !listed || addresses.some((address) => isNeverAllowedAddress(address));
+}
+
+/**
+ * Addresses no host reaches through the guard, listed or not: loopback, link-local
+ * (169.254.0.0/16 holds the cloud-metadata endpoint; fe80::/10) and the unspecified address,
+ * in IPv4, IPv6 and IPv4-mapped IPv6 form. An IPv4-mapped address in hex form is refused too.
+ */
+export function isNeverAllowedAddress(address: string): boolean {
+  const a = address.replace(/^\[|\]$/g, "").toLowerCase();
+  const mapped = a.startsWith("::ffff:");
+  const v4 = mapped ? a.slice("::ffff:".length) : a;
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(v4)) {
+    return v4.startsWith("127.") || v4.startsWith("169.254.") || v4.startsWith("0.");
+  }
+  if (mapped) return true;
+  return a === "::1" || a === "::" || /^fe[89ab][0-9a-f]:/.test(a);
+}
+
+/** guardrails.allowedPrivateHosts; empty when no config is loaded, so nothing is exempt. */
+function configuredPrivateHostAllowlist(): readonly string[] {
+  try {
+    return getConfig().guardrails?.allowedPrivateHosts ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Shared SSRF gate for tools that hand a URL to an out-of-process fetcher which
  * has no guard of its own (the Playwright browser, which sits on the service
  * network and could otherwise be pointed at http://engram, http://10.x, or a
  * cloud-metadata endpoint and read the response back via a snapshot). Rejects
- * non-http(s) schemes and any host that resolves to a private/internal address.
+ * non-http(s) schemes and any host that resolves to a private/internal address
+ * (bar an exact name in guardrails.allowedPrivateHosts, see hostIsBlocked).
  * Returns a reason string when blocked, or null when the URL is allowed.
  */
 export async function checkUrlSsrf(rawUrl: string): Promise<string | null> {

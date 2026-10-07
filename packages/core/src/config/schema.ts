@@ -1238,6 +1238,21 @@ export const GuardrailsSchema = z.object({
     maxChars: z.number().int().min(256).max(32000).default(6000),
     blockOn: z.enum(["unsafe", "controversial_or_unsafe"]).default("unsafe"),
   }).default({}),
+  /**
+   * Exact host names the SSRF guard lets through although they RESOLVE to a private
+   * (RFC 1918 / unique-local) address: a local fixture service, such as the e2e test site
+   * that `pnpm e2e:env up` lists here in a gitignored shard. Exact names, compared without
+   * case: no wildcards, ports or IP literals. It never opens a host the guard refuses by
+   * NAME (localhost, *.internal, the cloud-metadata names), nor a name that resolves to a
+   * loopback, link-local (incl. 169.254.169.254) or unspecified address. Applies to every
+   * caller of the shared guard (web_fetch, fetch_image, http_request, the browser tools,
+   * the knowledge-base crawler). Empty = no exemption.
+   */
+  allowedPrivateHosts: z.array(z.string().regex(
+    // Dot-separated DNS labels whose last label holds a letter, so an IPv4 literal never matches.
+    /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*(?=[a-z0-9-]*[a-z])[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i,
+    "must be an exact DNS host name (no IP literal, wildcard, port or scheme)",
+  )).default([]),
 });
 
 // ─── Scenes ───────────────────────────────────────────────────────────────────

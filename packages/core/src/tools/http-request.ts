@@ -5,26 +5,15 @@
  * external services.  Request bodies, headers, and query parameters
  * are fully configurable.
  */
-import { lookup as dnsLookup } from "node:dns/promises";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
-import { isPrivateHost } from "./web.js";
+// The one SSRF predicate (private by literal OR by DNS, all address families), shared with
+// web_fetch and the browser tools so guardrails.allowedPrivateHosts means the same everywhere.
+import { hostIsBlocked } from "./web.js";
 
 const log = childLogger("tool:http-request");
 const MAX_RESPONSE_BODY = 64_000; // truncate large bodies
 const MAX_REDIRECTS = 5;
-
-/** SSRF predicate: private by literal OR by DNS (all address families, incl. IPv6). */
-async function hostIsBlocked(host: string): Promise<boolean> {
-  if (isPrivateHost(host)) return true;
-  try {
-    const records = await dnsLookup(host, { all: true });
-    if (records.some((r) => isPrivateHost(r.address))) return true;
-  } catch {
-    /* DNS failure — IP literal / offline resolver; non-fatal */
-  }
-  return false;
-}
 
 registerTool({
   name: "http_request",
