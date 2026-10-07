@@ -25,6 +25,7 @@
 import { randomUUID } from "node:crypto";
 import { childLogger } from "../logger.js";
 import { logAudit } from "../audit/logger.js";
+import { rootSessionOf } from "./session-ids.js";
 
 const log = childLogger("agent:turn-steering");
 
@@ -99,16 +100,7 @@ function turnKey(root: string, requestId: string): string {
 /** Strip `sub:` nesting hops to the root (turn) session id. Mirrors rootOf in
  *  long-running-generation.ts so steering is scoped to the whole turn. */
 function rootOf(sessionId: string): string {
-  let current = sessionId;
-  while (current.startsWith("sub:")) {
-    const inner = current.slice("sub:".length);
-    const lastColon = inner.lastIndexOf(":");
-    if (lastColon === -1) return inner;
-    const secondLastColon = inner.lastIndexOf(":", lastColon - 1);
-    if (secondLastColon === -1) return inner;
-    current = inner.slice(0, secondLastColon);
-  }
-  return current;
+  return rootSessionOf(sessionId);
 }
 
 class TurnSteeringManager {

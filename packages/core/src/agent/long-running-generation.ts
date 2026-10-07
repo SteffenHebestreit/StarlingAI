@@ -34,6 +34,7 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { childLogger } from "../logger.js";
+import { rootSessionOf } from "./session-ids.js";
 import { logAudit } from "../audit/logger.js";
 
 const log = childLogger("agent:long-running");
@@ -41,16 +42,7 @@ const log = childLogger("agent:long-running");
 /** Strip `sub:` nesting hops to the root (turn) session id. Mirrors
  *  deriveRootSessionId in sub-agent.ts so a stop is scoped to the whole turn. */
 function rootOf(sessionId: string): string {
-  let current = sessionId;
-  while (current.startsWith("sub:")) {
-    const inner = current.slice("sub:".length);
-    const lastColon = inner.lastIndexOf(":");
-    if (lastColon === -1) return inner;
-    const secondLastColon = inner.lastIndexOf(":", lastColon - 1);
-    if (secondLastColon === -1) return inner;
-    current = inner.slice(0, secondLastColon);
-  }
-  return current;
+  return rootSessionOf(sessionId);
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────

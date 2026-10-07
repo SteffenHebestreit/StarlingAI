@@ -28,6 +28,7 @@ import { listAllScenes } from "../credentials/scenes.js";
 import { createJob } from "../agent/jobs.js";
 import { getJobDefinition, listAllJobs, resolveJobSteps } from "../credentials/jobs.js";
 import { subscribeToAudit, logAudit } from "../audit/logger.js";
+import { rootSessionOf } from "../agent/session-ids.js";
 import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
 import type { InterventionNotice } from "../agent/interventions.js";
@@ -155,16 +156,7 @@ export function steerChatTurn(sessionId: string, message: string, clientMessageI
 /** The chat a nested session id belongs to: `sub:<parent>:<agent>:<ts>` and
  *  `workflow:<parent>:<name>:<uuid>` embed their parent, at any depth. */
 function owningChatSessionId(sessionId: string): string {
-  let current = sessionId;
-  for (;;) {
-    const prefix = ["sub:", "workflow:"].find((candidate) => current.startsWith(candidate));
-    if (!prefix) return current;
-    const inner = current.slice(prefix.length);
-    const lastColon = inner.lastIndexOf(":");
-    const secondLastColon = lastColon > 0 ? inner.lastIndexOf(":", lastColon - 1) : -1;
-    if (secondLastColon <= 0) return inner;
-    current = inner.slice(0, secondLastColon);
-  }
+  return rootSessionOf(sessionId, ["sub:", "workflow:"]);
 }
 
 /**

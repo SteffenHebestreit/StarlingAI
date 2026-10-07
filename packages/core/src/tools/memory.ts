@@ -8,6 +8,7 @@
  * memory_search — full-text substring search across keys, content, and tags
  */
 import { randomUUID } from "node:crypto";
+import { rootSessionOf } from "../agent/session-ids.js";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, extname } from "node:path";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
@@ -112,16 +113,7 @@ const EVIDENCE_VALIDATION_STATUSES = new Set(["unverified", "tentative", "valida
  * (audit session b4fba9c4, May 2026).
  */
 export function deriveSharedSessionId(sessionId: string): string {
-  let current = sessionId;
-  while (current.startsWith("sub:")) {
-    const inner = current.slice("sub:".length);
-    const lastColon = inner.lastIndexOf(":");
-    if (lastColon === -1) return inner;
-    const secondLastColon = inner.lastIndexOf(":", lastColon - 1);
-    if (secondLastColon === -1) return inner;
-    current = inner.slice(0, secondLastColon);
-  }
-  return current;
+  return rootSessionOf(sessionId);
 }
 
 function deriveAgentName(sessionId: string): string {

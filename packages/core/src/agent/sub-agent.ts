@@ -30,6 +30,7 @@ import { bindRequestUserInput, HUMAN_WAIT_RECHECK_MS, trackHumanWaits } from "./
 import { isDeclinedByUser } from "./user-input.js";
 import { getConfig } from "../config/loader.js";
 import { turnSteeringManager } from "./turn-steering.js";
+import { rootSessionOf } from "./session-ids.js";
 import { STEERING_PREFIX } from "./turn-boundary.js";
 import { currentEffortProfile, effectiveOrchestration, effectiveSubAgentTurnSloMs } from "../runtime/effort-context.js";
 import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type ToolContext, type SwarmState, type ToolResult } from "../tools/registry.js";
@@ -752,16 +753,7 @@ function enforceSourceSensitivePreEvidenceDelegation(
 }
 
 function deriveRootSessionId(sessionId: string): string {
-  let current = sessionId;
-  while (current.startsWith("sub:")) {
-    const inner = current.slice("sub:".length);
-    const lastColon = inner.lastIndexOf(":");
-    if (lastColon === -1) return inner;
-    const secondLastColon = inner.lastIndexOf(":", lastColon - 1);
-    if (secondLastColon === -1) return inner;
-    current = inner.slice(0, secondLastColon);
-  }
-  return current;
+  return rootSessionOf(sessionId);
 }
 
 function hashSharedFindingKey(value: string): string {
@@ -1661,16 +1653,7 @@ const MAX_TRACKED_WRITERS_PER_CONVERSATION = 256;
  * 1581bae5 ran under mission_coordinator, so their records sat in two maps and it saw no writer.
  */
 function artifactConversationOf(sessionId: string): string {
-  let current = sessionId;
-  for (;;) {
-    const prefix = current.startsWith("sub:") ? "sub:" : current.startsWith("workflow:") ? "workflow:" : null;
-    if (!prefix) return current;
-    const inner = current.slice(prefix.length);
-    const lastColon = inner.lastIndexOf(":");
-    const secondLastColon = lastColon > 0 ? inner.lastIndexOf(":", lastColon - 1) : -1;
-    if (secondLastColon <= 0) return inner;
-    current = inner.slice(0, secondLastColon);
-  }
+  return rootSessionOf(sessionId, ["sub:", "workflow:"]);
 }
 
 function artifactPathKey(absPath: string): string {

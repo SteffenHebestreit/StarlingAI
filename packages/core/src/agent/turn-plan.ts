@@ -11,6 +11,7 @@
  * human-facing context.
  */
 import { writeTurnPlan, readTurnPlan, clearTurnPlan, PLAN_VALUE_MAX } from "../swarm/memory.js";
+import { rootSessionOf } from "./session-ids.js";
 import { childLogger } from "../logger.js";
 
 const log = childLogger("turn-plan");
@@ -100,18 +101,7 @@ const MAX_CRITERIA = 12;
 const MAX_STRING = 600;
 
 function rootSessionId(sessionId: string): string {
-  // Strip `sub:` nesting hops to reach the orchestrator's root session, where
-  // the plan lives (mirrors deriveRootSessionId in sub-agent.ts).
-  let current = sessionId;
-  while (current.startsWith("sub:")) {
-    const inner = current.slice("sub:".length);
-    const lastColon = inner.lastIndexOf(":");
-    if (lastColon === -1) return inner;
-    const secondLastColon = inner.lastIndexOf(":", lastColon - 1);
-    if (secondLastColon === -1) return inner;
-    current = inner.slice(0, secondLastColon);
-  }
-  return current;
+  return rootSessionOf(sessionId);
 }
 
 function clampString(value: unknown, fallback = ""): string {
