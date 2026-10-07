@@ -72,6 +72,9 @@ export interface RunTurnOptions {
   userInput?: UserInputChannel;
   /** Sub-agents this turn is allowed to delegate to (undefined = no restriction) */
   allowedAgents?: string[];
+  /** The agent the user directed this turn to (`--agent NAME`; allowedAgents narrows to it too). The
+   *  turn delegates to it before it answers. */
+  directiveAgent?: string;
   /** Tool names that must pause for human approval this turn (enforced unconditionally) */
   humanInLoopSteps?: string[];
   /** Auto-approve all tool calls this turn — skips the approvalCallback gate entirely. */

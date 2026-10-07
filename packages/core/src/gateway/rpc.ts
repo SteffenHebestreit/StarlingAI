@@ -1254,6 +1254,7 @@ export class RpcConnection {
           userAttachments,
           signal: ac.signal,
           allowedAgents: effectiveAllowedAgents,
+          ...(overrideFlags.forceAgent ? { directiveAgent: overrideFlags.forceAgent } : {}),
           humanInLoopSteps,
           autoApprove: overrideFlags.autoApprove,
           maxIterationsOverride: overrideFlags.maxIterationsOverride,

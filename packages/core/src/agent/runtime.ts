@@ -20,7 +20,7 @@ import { runArtifactVerificationGate, buildFailureCaveat, buildUnverifiableCavea
 import { applyActiveModelPreset, createChatProvider, getChatProvider, getChatProviderForTier, getChatProviderWithOverride, tierModelDefaults } from "../providers/index.js";
 import { DeadlineAbort, salvageToolCallArguments } from "../providers/lmstudio.js";
 import type { ChatProvider, LLMMessage, LLMResponse, StreamChunk } from "../providers/lmstudio.js";
-import { assembleTurnSystemMessages } from "./turn-system-prompt.js";
+import { assembleTurnSystemMessages, buildDirectiveAgentPrompt } from "./turn-system-prompt.js";
 import { markOrchestratorActivity, markOrchestratorIdle } from "./cache-warmer.js";
 import { intentShadowTurnEnded, intentShadowTurnStarted, type IntentShadowHandle } from "./intent-shadow.js";
 import { filterForcedOrchestrationTools } from "./forced-orchestration-tools.js";
@@ -2263,6 +2263,11 @@ async function _runTurn(
   });
   let delegatedResearchRetryUsed = false;
   let delegatedResearchEnforcementPrompt = "";
+  // The agent the user directed this turn to (`--agent NAME`). allowedAgents narrows routing to it,
+  // and that alone let the orchestrator answer the turn itself: code_analyst never ran on two
+  // diagnoses the E2E suite pinned to it (2026-10-07), and the agent evaluations that pin an agent
+  // this way were measuring the orchestrator. Until the turn has delegated, it must.
+  const directiveAgent = opts.directiveAgent?.trim() || undefined;
   let maintenanceDelegationRetryUsed = false;
   let maintenanceMisrouteRetryUsed = false;
   let maintenanceDelegationEnforcementPrompt = "";
@@ -2654,6 +2659,7 @@ async function _runTurn(
       }
     }
 
+    const directiveAgentPending = directiveAgent !== undefined && _turnDelegationCount === 0;
     const {
       messages,
       collapsedHistory,
@@ -2684,6 +2690,7 @@ async function _runTurn(
       workflowCatalogEnforcementPrompt,
       approvedRunCandidateEnforcementPrompt,
       workflowExecutionEnforcementPrompt,
+      directiveAgentPrompt: directiveAgentPending ? buildDirectiveAgentPrompt(directiveAgent) : "",
       injectedSkillSlugs,
       heldOutSkillSlugs,
       applyRoutingTone,
@@ -2777,7 +2784,7 @@ async function _runTurn(
         && opts.autoApprove === true
         && deliverableIntent.wantsArtifact;
       const mustOrchestrateBeforeAnswering =
-        (requiresDelegatedResearch || requiresArtifactDelegation || workflowCatalogRequired || requiresMaintenanceDelegation || autonomousArtifactBuild)
+        (requiresDelegatedResearch || requiresArtifactDelegation || workflowCatalogRequired || requiresMaintenanceDelegation || autonomousArtifactBuild || directiveAgentPending)
         && !inWorkflowStep
         && !delegatedResearchRetryUsed
         && _turnDelegationCount === 0

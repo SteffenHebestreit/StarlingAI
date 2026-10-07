@@ -77,6 +77,9 @@ export interface AssembleTurnSystemMessagesParams {
   workflowCatalogEnforcementPrompt: string;
   approvedRunCandidateEnforcementPrompt: string;
   workflowExecutionEnforcementPrompt: string;
+  /** The agent the user directed this turn to (`--agent`), until the turn has delegated: the line
+   *  that names it. Empty otherwise. */
+  directiveAgentPrompt?: string;
   injectedSkillSlugs: string[];
   heldOutSkillSlugs: string[];
   applyRoutingTone: (text: string) => string;
@@ -97,6 +100,17 @@ export interface AssembleTurnSystemMessagesResult {
    * invalidated by the turn's outcome (turn-success-finalize.ts).
    */
   trajectoryShown: boolean;
+}
+
+/**
+ * The line a turn the user directed to one agent (`--agent NAME`) carries until it has delegated.
+ * The tool call is forced as well (the runtime's mustOrchestrateBeforeAnswering); this says where.
+ */
+export function buildDirectiveAgentPrompt(agentName: string): string {
+  const name = JSON.stringify(agentName);
+  return `The user directed this request to the agent ${name} (--agent). Delegate it to that agent with delegate_to_agent `
+    + `(agentName ${name}), passing the request in full; do not answer it yourself and do not route it to another agent. `
+    + "Then answer the user from its result.";
 }
 
 /**
@@ -157,6 +171,7 @@ export async function assembleTurnSystemMessages(
     workflowCatalogEnforcementPrompt,
     approvedRunCandidateEnforcementPrompt,
     workflowExecutionEnforcementPrompt,
+    directiveAgentPrompt = "",
     applyRoutingTone,
     buildTemporalContextPrompt,
   } = params;
@@ -466,6 +481,7 @@ export async function assembleTurnSystemMessages(
       ...(agentPerformanceNote ? [{ role: "system" as const, content: agentPerformanceNote }] : []),
       ...(workflowCatalogGuidance ? [{ role: "system" as const, content: workflowCatalogGuidance }] : []),
       ...(approvedRunCandidateGuidance ? [{ role: "system" as const, content: approvedRunCandidateGuidance }] : []),
+      ...(directiveAgentPrompt ? [{ role: "system" as const, content: directiveAgentPrompt }] : []),
       ...(delegatedResearchEnforcementPrompt ? [{ role: "system" as const, content: delegatedResearchEnforcementPrompt }] : []),
       ...(searchAgentsNoMatchFallbackPrompt ? [{ role: "system" as const, content: applyRoutingTone(searchAgentsNoMatchFallbackPrompt) }] : []),
       ...(maintenanceDelegationEnforcementPrompt ? [{ role: "system" as const, content: applyRoutingTone(maintenanceDelegationEnforcementPrompt) }] : []),
