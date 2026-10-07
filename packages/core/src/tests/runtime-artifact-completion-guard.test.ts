@@ -35,6 +35,21 @@ describe("looksLikeArtifactMutationRequest", () => {
   });
 });
 
+// Found 2026-10-07 by the e2e guard scenarios: an ASCII \b never sits before a leading umlaut, and
+// a "nicht" inside a file name read as the clause's negation.
+describe("German edge cases of the false-completion guard", () => {
+  it("treats requests that open with an umlaut verb as artifact changes", () => {
+    expect(looksLikeArtifactMutationRequest("Ändere die Präsentation unter generated/deck.html")).toBe(true);
+    expect(looksLikeArtifactMutationRequest("Überarbeite den Bericht als PDF")).toBe(true);
+  });
+
+  it("does not take a file name's 'nicht' for a negated claim", () => {
+    expect(claimsArtifactWrittenButUnproduced("Ich habe generated/angebot-nicht-final.html aktualisiert.")).toBe(true);
+    // A real negation still is one.
+    expect(claimsArtifactWrittenButUnproduced("Ich habe generated/angebot.html nicht aktualisiert.")).toBe(false);
+  });
+});
+
 describe("claimsArtifactWrittenButUnproduced", () => {
   it("flags the turn-2 false 'images inserted' claim", () => {
     const answer = [

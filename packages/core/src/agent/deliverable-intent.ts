@@ -126,7 +126,9 @@ export function looksLikeArtifactMutationRequest(userMessage: string): boolean {
   if (looksLikeArtifactCreationRequest(userMessage)) return true;
   const t = (userMessage ?? "").toLowerCase();
   const hasMutateVerb =
-    /\b(update|updated|edit|modify|change|revise|adjust|insert|add|append|embed|replace|fix|aktualisiere?|aktualisier|ändere?|änder|bearbeite?|bearbeit|überarbeite?|überarbeit|ergänze?|ergänz|einf[üu]gen|einf[üu]ge|f[üu]ge|hinzuf[üu]gen|hinzuf[üu]ge|einbette?|einbinden|einbinde|ersetze?|ersetz)\b/.test(t);
+    // Unicode word edges: an ASCII \b never sits before a leading umlaut, so "Ändere …" and
+    // "Überarbeite …" never switched the false-completion guards on (found 2026-10-07).
+    /(?<![\p{L}\p{N}_])(update|updated|edit|modify|change|revise|adjust|insert|add|append|embed|replace|fix|aktualisiere?|aktualisier|ändere?|änder|bearbeite?|bearbeit|überarbeite?|überarbeit|ergänze?|ergänz|einf[üu]gen|einf[üu]ge|f[üu]ge|hinzuf[üu]gen|hinzuf[üu]ge|einbette?|einbinden|einbinde|ersetze?|ersetz)(?![\p{L}\p{N}_])/u.test(t);
   if (!hasMutateVerb) return false;
   return ARTIFACT_NOUN_RE.test(t);
 }
@@ -245,6 +247,11 @@ const DELIVERY_DEIXIS_RE = /(?<![\p{L}])(?:jetzt|nun|now|hier|here|bereits|alrea
 // A named file with its folder prefix ("generated/deck/index.html"), so the existence check
 // sees the path the answer gave, not only its last segment.
 const ARTIFACT_PATH_ALL_RE = new RegExp(String.raw`(?<![\w./-])(?:[\w.-]+\/)*[\w-]{2,}\.(?:${ARTIFACT_FILE_EXT})\b`, "gi");
+/** A clause with its artifact file names masked: a file named "angebot-nicht-final.html" negates
+ *  nothing, yet its "nicht" read as one and let the false claim about it through (found 2026-10-07). */
+function withoutArtifactFileNames(clause: string): string {
+  return clause.replace(ARTIFACT_PATH_ALL_RE, "FILE");
+}
 const CLAIM_NEGATION_RE =
   /(\bnicht\b|\bkein|\bniemals\b|\bohne\b|\bnot\b|\bnever\b|couldn'?t|could ?not|cannot|can'?t|\bno\b|\bunable\b|konnte)/i;
 
@@ -271,7 +278,7 @@ export function claimsArtifactWrittenButUnproduced(
   if (!text.trim()) return false;
   const fileExists = opts?.fileExists ?? (() => false);
   for (const clause of claimClauses(text)) {
-    if (!clause.trim() || CLAIM_NEGATION_RE.test(clause)) continue;
+    if (!clause.trim() || CLAIM_NEGATION_RE.test(withoutArtifactFileNames(clause))) continue;
     const files = [...clause.matchAll(ARTIFACT_PATH_ALL_RE)].map((match) => match[0]);
     if (!ARTIFACT_NOUN_RE.test(clause) && files.length === 0) continue;
 
