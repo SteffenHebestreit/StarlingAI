@@ -944,3 +944,101 @@ describe("web_fetch checks the page the browser landed on", () => {
     expect(calls(callTool)).toEqual([`navigate ${PUBLIC}/preise`, "browser_evaluate"]);
   });
 });
+
+/**
+ * A hop of the chain that ran past its 12 s, or a chain that crawled along hop by hop, failed the
+ * direct request like any network error, and web_fetch handed the URL to the browser: a slow hop
+ * was a way past the per-hop check, since the browser walks the rest of the chain unchecked.
+ * Once a redirect has been followed, running out of time now ends the call.
+ */
+describe("web_fetch's redirect chain has a deadline", () => {
+  // An IP literal: the SSRF guard needs no DNS for it.
+  const PUBLIC = "http://93.184.215.14";
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function webFetch(url: string, sessionId: string) {
+    const { getTool } = await import("../tools/registry.js");
+    return getTool("web_fetch")!.execute({ url }, { sessionId, workspacePath: "/workspace" });
+  }
+
+  /** Runs `call` with fake timers, advancing them until it settles. */
+  async function withFakeTime<T>(call: () => Promise<T>): Promise<T> {
+    vi.useFakeTimers();
+    let settled = false;
+    const pending = call().finally(() => { settled = true; });
+    for (let step = 0; step < 400 && !settled; step++) await vi.advanceTimersByTimeAsync(1_000);
+    return pending;
+  }
+
+  type Page = { delayMs?: number; location?: string; hang?: boolean };
+  /** fetch answering from `pages` after each page's delay; a hanging page answers only its abort. */
+  function web(pages: Record<string, Page>) {
+    const requested: string[] = [];
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      requested.push(url);
+      const page = pages[url] ?? {};
+      return new Promise<Response>((resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal!.reason), { once: true });
+        if (page.hang) return;
+        setTimeout(() => resolve(page.location
+          ? new Response(null, { status: 302, headers: { Location: page.location } })
+          : new Response(`<html><body><p>${"Lieferzeiten und Versandkosten für alle Werkzeuge. ".repeat(8)}</p></body></html>`, {
+            status: 200, headers: { "Content-Type": "text/html" },
+          })), page.delayMs ?? 0);
+      });
+    }));
+    return requested;
+  }
+
+  function renderingBrowser() {
+    const callTool = vi.fn(async (input: { name: string }) => input.name === "browser_evaluate"
+      ? { content: [{ type: "text", text: "### Result\n\"Seite aus dem Browser\"" }] }
+      : { content: [{ type: "text", text: "" }] });
+    mcpConnections.set("playwright", { client: { callTool } });
+    return callTool;
+  }
+
+  it("fails a chain whose third hop does not answer, without calling the browser", async () => {
+    const requested = web({
+      [`${PUBLIC}/a`]: { location: "/b" },
+      [`${PUBLIC}/b`]: { location: "/c" },
+      [`${PUBLIC}/c`]: { hang: true },
+    });
+    const callTool = renderingBrowser();
+
+    const r = await withFakeTime(() => webFetch(`${PUBLIC}/a`, "s-chain-slow-hop"));
+    expect(r.success).toBe(false);
+    expect(r.error).toBe(`${PUBLIC}/a: the redirect chain took too long; it is not followed further`);
+    expect(callTool, "a browser tool was called").not.toHaveBeenCalled();
+    expect(requested).toEqual([`${PUBLIC}/a`, `${PUBLIC}/b`, `${PUBLIC}/c`]);
+  });
+
+  it("fails a chain whose hops each answer in time but together take longer than 72 s", async () => {
+    const pages: Record<string, Page> = {};
+    for (let i = 0; i < 8; i++) pages[`${PUBLIC}/h${i}`] = { delayMs: 11_000, location: `/h${i + 1}` };
+    pages[`${PUBLIC}/h8`] = { delayMs: 11_000 };
+    const requested = web(pages);
+    const callTool = renderingBrowser();
+
+    const r = await withFakeTime(() => webFetch(`${PUBLIC}/h0`, "s-chain-slow-total"));
+    expect(r.success).toBe(false);
+    expect(r.error).toBe(`${PUBLIC}/h0: the redirect chain took too long; it is not followed further`);
+    expect(callTool).not.toHaveBeenCalled();
+    expect(requested).toHaveLength(7);
+  });
+
+  it("still renders the page in the browser when the first request alone is slow", async () => {
+    web({ [`${PUBLIC}/langsam`]: { hang: true } });
+    const callTool = renderingBrowser();
+
+    const r = await withFakeTime(() => webFetch(`${PUBLIC}/langsam`, "s-chain-slow-first"));
+    expect(r.success).toBe(true);
+    expect(r.metadata?.["fetchMethod"]).toBe("playwright");
+    expect(r.output).toContain(`**Content from:** ${PUBLIC}/langsam (browser-rendered; a direct request failed (This operation was aborted))`);
+    expect(callTool.mock.calls.map(([input]) => input.name)).toEqual(["browser_navigate", "browser_evaluate"]);
+  });
+});

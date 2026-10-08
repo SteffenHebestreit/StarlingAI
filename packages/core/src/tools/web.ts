@@ -1,4 +1,4 @@
-import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
+import { getTool, registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
 import type { Config } from "../config/schema.js";
@@ -258,6 +258,18 @@ registerTool({
  */
 const WEB_FETCH_MAX_REDIRECTS = 20;
 
+/**
+ * The longest one web_fetch redirect chain may take, all hops together: the old worst case, the
+ * first request and five redirects at 12 s each. A timeoutMs of web_fetch's own, should it get
+ * one, wins when it is smaller.
+ */
+const WEB_FETCH_CHAIN_BUDGET_MS = 72_000;
+
+function webFetchChainBudgetMs(): number {
+  const own = getTool("web_fetch")?.timeoutMs;
+  return own && own > 0 ? Math.min(WEB_FETCH_CHAIN_BUDGET_MS, own) : WEB_FETCH_CHAIN_BUDGET_MS;
+}
+
 /** web_fetch's answer when the browser ended on a page the guard refuses: nothing from it, and the tab sent away. */
 async function refuseBrowserLanding(url: string, reason: string): Promise<ToolResult> {
   log.warn({ url, reason }, "web_fetch: the browser landed on a page the SSRF guard refuses");
@@ -321,7 +333,7 @@ registerTool({
             "User-Agent": "Mozilla/5.0 (compatible; StarlingAI/0.1; +https://starlingai.io)",
             "Accept": "text/html,application/xhtml+xml,application/json,text/plain,*/*",
           },
-        }, WEB_FETCH_MAX_REDIRECTS);
+        }, WEB_FETCH_MAX_REDIRECTS, webFetchChainBudgetMs());
         directStatus = res.status;
         if (res.ok) {
           const ct = res.headers.get("content-type") ?? "";
@@ -440,7 +452,7 @@ registerTool({
             "User-Agent": "StarlingAI/0.1 (research assistant)",
             "Accept": "text/html,application/xhtml+xml,text/plain,*/*",
           },
-        }, WEB_FETCH_MAX_REDIRECTS);
+        }, WEB_FETCH_MAX_REDIRECTS, webFetchChainBudgetMs());
         if (!res.ok) {
           return { success: false, output: "", error: `HTTP ${res.status} from ${url}${renderedNote}` };
         }
@@ -1078,8 +1090,16 @@ async function safeFetch(url: string, ms: number, init?: RequestInit, maxRedirec
  * safeFetch, also returning the URL of the hop that answered. A page's relative links resolve
  * against that URL, not the one requested (/produkte answered from /produkte/seite-1.html), and
  * `res.url` cannot be relied on for it: it is "" on a Response that was not fetched.
+ *
+ * `chainBudgetMs` bounds the whole chain. Once a redirect has been followed, a hop that runs out
+ * of time, its own `ms` or what is left of the budget, is a refusal rather than a network error:
+ * web_fetch hands a network error to the browser, which walks the rest of the chain unchecked,
+ * so a slow hop was a way past the per-hop check. The first request keeps its own timeout and
+ * fails as before.
  */
-async function safeFetchFinal(url: string, ms: number, init?: RequestInit, maxRedirects = 5): Promise<{ res: Response; finalUrl: string }> {
+async function safeFetchFinal(url: string, ms: number, init?: RequestInit, maxRedirects = 5, chainBudgetMs = Number.POSITIVE_INFINITY): Promise<{ res: Response; finalUrl: string }> {
+  const deadline = Date.now() + chainBudgetMs;
+  const tooSlow = () => new SsrfRefusal(`${url}: the redirect chain took too long; it is not followed further`);
   let current = url;
   // The URLs this chain has requested, fragments dropped (they are never sent).
   const requested = new Set<string>();
@@ -1095,12 +1115,18 @@ async function safeFetchFinal(url: string, ms: number, init?: RequestInit, maxRe
         ? "Fetching private/internal network addresses is not allowed"
         : `${url} redirects to a private/internal network address; fetching it is not allowed`);
     }
+    // The host check above resolves the name, which can take as long as its server likes.
+    const left = deadline - Date.now();
+    if (hop > 0 && left <= 0) throw tooSlow();
     requested.add(withoutFragment(current));
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), ms);
+    const timer = setTimeout(() => controller.abort(), hop === 0 ? ms : Math.min(ms, left));
     let res: Response;
     try {
       res = await fetch(current, { ...init, signal: controller.signal, redirect: "manual" });
+    } catch (err) {
+      if (hop > 0 && controller.signal.aborted) throw tooSlow();
+      throw err;
     } finally {
       clearTimeout(timer);
     }
