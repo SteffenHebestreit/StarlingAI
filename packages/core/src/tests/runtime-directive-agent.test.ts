@@ -94,6 +94,34 @@ vi.mock("../tools/registry.js", async (importOriginal) => {
           metadata: { taskCount: 1, succeeded: 1, failed: 0, nestedCalls: [{ tool: "delegate_to_agent", success: true }] },
         };
       }
+      if (name === "run_task_graph") {
+        // Each node runs its agent, reported as the tool reports it: the node ids by outcome, and
+        // each node's attempts in the swarm state.
+        const nodes = args["nodes"] as Array<{ id: string; agentName: string }>;
+        const startedAt = "2026-10-08T12:00:00.000Z";
+        return {
+          success: true,
+          output: `Swarm task graph complete.\n${nodes.map((node) => `- ${node.id} [completed] ${node.agentName}`).join("\n")}`,
+          metadata: {
+            completed: nodes.map((node) => node.id),
+            failed: [],
+            blocked: [],
+            swarmState: {
+              objective: "Swarm task graph",
+              startedAt,
+              updatedAt: startedAt,
+              tasks: Object.fromEntries(nodes.map((node) => [node.id, {
+                id: node.id,
+                title: node.id,
+                status: "completed",
+                dependsOn: [],
+                selectedAgent: node.agentName,
+                attempts: [{ agentName: node.agentName, status: "completed", startedAt }],
+              }])),
+            },
+          },
+        };
+      }
       if (name === "search_workflows") {
         return {
           success: true,
@@ -379,6 +407,29 @@ describe("a turn the user directed to one agent", () => {
     const result = await runTurn({ session, userMessage: MESSAGE, allowedAgents: ["code_analyst"], directiveAgent: "code_analyst" });
 
     expect(executed).toEqual(["parallel_delegate"]);
+    expect(toolChoiceOf(1)).toBeUndefined();
+    expect(promptOf(1)).not.toContain(DIRECTIVE_LINE);
+    expect(result.response).toContain("MODEL-ANSWER");
+  });
+
+  it("is released once a task graph's node ran the named agent", async () => {
+    // A task graph's result names no agent of its own; its nodes' attempts are in the swarm state it
+    // reports. The release read only delegate_to_agent's and swarm_delegate's results, so after a
+    // graph had run the agent the turn stayed directed to it: the next iteration was forced, and the
+    // model's answer was replaced by a second run of the same agent (review of 6955e34, 2026-10-08).
+    const { AgentSession, runTurn } = await loadRuntime();
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      call += 1;
+      return call === 1
+        ? toolStream("run_task_graph", { nodes: [{ id: "find_bug", agentName: "code_analyst", task: "Find the bug in invoices.py." }] })
+        : answerStream(ANSWER);
+    });
+
+    const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
+    const result = await runTurn({ session, userMessage: MESSAGE, allowedAgents: ["code_analyst"], directiveAgent: "code_analyst" });
+
+    expect(executed).toEqual(["run_task_graph"]);
     expect(toolChoiceOf(1)).toBeUndefined();
     expect(promptOf(1)).not.toContain(DIRECTIVE_LINE);
     expect(result.response).toContain("MODEL-ANSWER");

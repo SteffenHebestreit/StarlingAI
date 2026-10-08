@@ -160,7 +160,7 @@ Every public schema field, where it is declared, and how many production files r
 | `embeddingModel` | packages/core/src/config/schema.ts:173 | 27 |
 | `enabled` | packages/core/src/config/schema.ts:289 | 131 |
 | `enableThinking` | packages/core/src/config/schema.ts:195 | 21 |
-| `endpoint` | packages/core/src/config/schema.ts:456 | 80 |
+| `endpoint` | packages/core/src/config/schema.ts:456 | 81 |
 | `endpointUnits` | packages/core/src/config/schema.ts:1672 | 1 |
 | `enforce` | packages/core/src/config/schema.ts:531 | 24 |
 | `engramApiKey` | packages/core/src/config/schemas/retrieval.ts:94 | 2 |
@@ -309,7 +309,7 @@ Every public schema field, where it is declared, and how many production files r
 | `name` | packages/core/src/config/schema.ts:1973 | 366 |
 | `negativePrompt` | packages/core/src/config/schemas/multimodal.ts:175 | 7 |
 | `network` | packages/core/src/config/schema.ts:684 | 53 |
-| `node` | packages/core/src/config/schema.ts:1042 | 233 |
+| `node` | packages/core/src/config/schema.ts:1042 | 234 |
 | `normalizeDelegationToEnglish` | packages/core/src/config/schemas/orchestration.ts:573 | 2 |
 | `notes` | packages/core/src/config/schema.ts:790 | 55 |
 | `oneLiner` | packages/core/src/config/schema.ts:899 | 3 |
@@ -491,7 +491,7 @@ Every public schema field, where it is declared, and how many production files r
 | `toolMode` | packages/core/src/config/schema.ts:271 | 6 |
 | `toolName` | packages/core/src/config/schemas/multimodal.ts:17 | 71 |
 | `toolRerankMinTools` | packages/core/src/config/schemas/orchestration.ts:651 | 2 |
-| `tools` | packages/core/src/config/schema.ts:921 | 221 |
+| `tools` | packages/core/src/config/schema.ts:921 | 222 |
 | `topK` | packages/core/src/config/schema.ts:169 | 7 |
 | `topLogprobs` | packages/core/src/config/schemas/decisions.ts:145 | 7 |
 | `topP` | packages/core/src/config/schema.ts:168 | 4 |

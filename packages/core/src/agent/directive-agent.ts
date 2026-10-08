@@ -40,17 +40,46 @@ export function isDelegationToAgent(
  * Whether a delegation's result shows that the named agent ran: the agent its result is from, or
  * one of the agents it attempted, since a run that failed still ran. Read from the RESULT because
  * the request proves nothing: a call with unparseable arguments, one naming an agent outside the
- * turn's grant, or one a lease, budget or capacity check turned away names no agent here.
+ * turn's grant, or one a lease, budget or capacity check turned away names no agent here. Only the
+ * delegation tools' own results are read: an infrastructure tool merges a remote endpoint's
+ * metadata into its result (turn-tool-contribution.ts), and a name there proves nothing.
+ *
+ * A task graph's result names no agent of its own. Its nodes ran as delegations, and the swarm
+ * state it reports holds each node's attempts. Unread, a graph that had run the agent left the turn
+ * directed to it, and the model's answer was replaced by a second run of the same agent (review of
+ * 6955e34, 2026-10-08).
  */
 export function delegationRanAgent(
   toolName: string,
   metadata: Record<string, unknown> | undefined,
   agentName: string,
 ): boolean {
+  if (toolName === "run_task_graph") return taskGraphNodeRanAgent(metadata, agentName);
   if (toolName !== "delegate_to_agent" && toolName !== "swarm_delegate") return false;
   if (metadata?.["agentName"] === agentName) return true;
   const attempted = metadata?.["attemptedAgents"];
   return Array.isArray(attempted) && attempted.includes(agentName);
+}
+
+/**
+ * Whether a node of the graph a run_task_graph result reports attempted the agent. Each node the
+ * graph finished, completed or failed, is in the swarm state with the agents it attempted; a node
+ * turned away before any agent ran attempted none, and a blocked node never started.
+ */
+function taskGraphNodeRanAgent(metadata: Record<string, unknown> | undefined, agentName: string): boolean {
+  const swarmState = metadata?.["swarmState"];
+  const tasks = swarmState !== null && typeof swarmState === "object"
+    ? (swarmState as { tasks?: unknown }).tasks
+    : undefined;
+  if (tasks === null || typeof tasks !== "object") return false;
+  const nodeIds = [metadata?.["completed"], metadata?.["failed"]].flatMap((ids) => (Array.isArray(ids) ? ids : []));
+  return nodeIds.some((nodeId) => {
+    const node = (tasks as Record<string, unknown>)[String(nodeId)];
+    const attempts = node !== null && typeof node === "object" ? (node as { attempts?: unknown }).attempts : undefined;
+    return Array.isArray(attempts) && attempts.some((attempt) => (
+      attempt !== null && typeof attempt === "object" && (attempt as { agentName?: unknown }).agentName === agentName
+    ));
+  });
 }
 
 const DOCUMENT_CONTEXT_PREFIX = "[DOCUMENT CONTEXT]";
