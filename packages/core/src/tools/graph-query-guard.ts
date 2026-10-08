@@ -9,22 +9,30 @@
  *   - before it runs, memoryReadRefusal refuses a query that could read memory text other than as a
  *     whole node: one that names a text property (m.content, {content: ...}), reads every property
  *     ({.*}, properties(), values()), indexes a value by a key computed at run time (m[k]), calls a
- *     procedure or a query-module function, or is anything but one read query;
+ *     procedure or a query-module function, names __proto__, or is anything but one read query;
  *   - after it runs, withholdForeignMemory reduces every MemoryRecord node the reader may not see to
- *     its id, kind and scope, wherever it sits in the result: a column, a list, a map, a path.
+ *     its id, kind and scope, wherever it sits in the result: a column, a list, a map, a path. It
+ *     refuses an answer holding a value it cannot take apart.
  *
  * The checks read the query the way Memgraph lexes it (strings, quoted names, comments) and refuse
  * what they cannot read with certainty. Memgraph takes most keywords as variable names too, so a
  * keyword is never trusted to mean the clause it names.
  */
 import {
-  isNode,
-  isPath,
-  isPathSegment,
+  Date as GraphDate,
+  DateTime,
+  Duration,
+  Integer,
+  LocalDateTime,
+  LocalTime,
   Node,
   Path,
   PathSegment,
+  Point,
   Record as GraphRecord,
+  Relationship,
+  Time,
+  UnboundRelationship,
   type QueryResult,
 } from "neo4j-driver";
 import { isGraphMemoryReadable, type GraphMemoryReader } from "../memory/graph-service.js";
@@ -226,6 +234,10 @@ export function memoryReadRefusal(cypher: string, params: Record<string, unknown
     const after = tokens[k + 1];
     const named = token.kind === "word" || token.kind === "quoted";
     if (named && MEMORY_TEXT_PROPERTIES.has(token.text)) return `it names the memory property ${token.text}`;
+    // The driver builds a map by assigning each key, and an assignment to __proto__ sets the map's
+    // prototype: {__proto__: [], leak: m} came back with another account's node whole under leak
+    // (found 2026-10-08). withholdForeignMemory refuses such a map on its own.
+    if (named && token.text === "__proto__") return "it names __proto__, which the graph driver takes as a map's prototype, not as a key";
     // After a dot or a colon the word is a property key, a label or a relationship type, never a clause.
     if (token.kind === "word" && !punct(before, ".") && !punct(before, ":") && OTHER_CLAUSES.has(token.text.toUpperCase())) {
       return `it uses ${token.text.toUpperCase()}`;
@@ -249,32 +261,58 @@ export function memoryReadRefusal(cypher: string, params: Record<string, unknown
   return null;
 }
 
+/** The prototypes of the driver's values that hold no node (see builtBy): they come back as they are. */
+const NODELESS_VALUES: ReadonlySet<unknown> = new Set([
+  Integer.prototype, Relationship.prototype, UnboundRelationship.prototype, Point.prototype, GraphDate.prototype,
+  DateTime.prototype, LocalDateTime.prototype, LocalTime.prototype, Time.prototype, Duration.prototype,
+]);
+
+/**
+ * Whether the driver's class built `value`: its prototype is the class's own. Not instanceof, nor
+ * the driver's isNode() and the like, which read a marker on the class's prototype: a map inherits
+ * both from a node made its prototype, and a map can hold the marker as a key.
+ */
+function builtBy<T extends object>(value: object, type: { prototype: T }): value is T {
+  return Object.getPrototypeOf(value) === type.prototype;
+}
+
 /**
  * The result with every MemoryRecord node the reader may not see reduced to its id, kind and scope,
  * wherever it sits: a column, a list, a map, a path. `withheld` counts the distinct nodes reduced.
+ *
+ * Only what the driver built as a node counts as one (found 2026-10-08). The driver builds a map by
+ * assigning each key, so {__proto__: own, leak: m} came back with the reader's own node as its
+ * prototype, and {__isNode__: true, labels: [], leak: m} with the driver's node marker as a key:
+ * both passed for a readable node and were returned whole, and a map with any other prototype
+ * ({__proto__: [], leak: m}) was returned untouched, another account's node under leak each time.
+ * A map is rebuilt from its own keys, which are all that JSON.stringify writes of it. A value that
+ * is neither a list, a map nor one of the driver's values cannot be taken apart, and the answer is
+ * refused: the error is thrown.
  */
 export function withholdForeignMemory(result: QueryResult, reader: GraphMemoryReader): { result: QueryResult; withheld: number } {
   const withheld = new Set<string>();
   const reduce = (value: unknown): unknown => {
     if (Array.isArray(value)) return value.map(reduce);
     if (value === null || typeof value !== "object") return value;
-    if (isNode(value)) {
+    const prototype: unknown = Object.getPrototypeOf(value);
+    if (prototype === Object.prototype || prototype === null) {
+      return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, reduce(item)]));
+    }
+    if (builtBy(value, Node)) {
       if (isGraphMemoryReadable(value.labels, value.properties, reader)) return value;
       withheld.add(String(value.elementId ?? value.identity));
       const shown: Record<string, unknown> = {};
       for (const key of SHOWN_PROPERTIES) if (key in value.properties) shown[key] = value.properties[key];
       return new Node(value.identity, value.labels, shown, value.elementId);
     }
-    if (isPathSegment(value)) return new PathSegment(reduce(value.start) as Node, value.relationship, reduce(value.end) as Node);
-    if (isPath(value)) {
+    if (builtBy(value, PathSegment)) return new PathSegment(reduce(value.start) as Node, value.relationship, reduce(value.end) as Node);
+    if (builtBy(value, Path)) {
       return new Path(reduce(value.start) as Node, reduce(value.end) as Node, value.segments.map((segment) => reduce(segment) as PathSegment));
     }
-    // A map. Anything else (a relationship, an integer, a temporal or spatial value) holds no node.
-    const prototype: unknown = Object.getPrototypeOf(value);
-    if (prototype === Object.prototype || prototype === null) {
-      return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, reduce(item)]));
-    }
-    return value;
+    if (NODELESS_VALUES.has(prototype)) return value;
+    throw new Error("graph_query does not show this answer under multi-user auth: it holds a value that is neither a list, "
+      + "a map nor one of the graph driver's values (a map key named __proto__ makes one), so another account's memory "
+      + "could not be kept out of it.");
   };
   const records = result.records.map((record) => new GraphRecord(record.keys, record.keys.map((key) => reduce(record.get(key)))));
   return { result: { ...result, records }, withheld: withheld.size };

@@ -2,7 +2,21 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { int, Node, Path, PathSegment, Relationship } from "neo4j-driver";
+import {
+  Date as GraphDate,
+  DateTime,
+  Duration,
+  int,
+  LocalDateTime,
+  LocalTime,
+  Node,
+  Path,
+  PathSegment,
+  Point,
+  Relationship,
+  Time,
+  UnboundRelationship,
+} from "neo4j-driver";
 import type { ToolContext, ToolHandler } from "../tools/registry.js";
 
 /**
@@ -62,6 +76,17 @@ const node = (labels: string[], properties: Record<string, unknown>) => {
 
 function answer(rows: Array<Record<string, unknown>>): void {
   runCypher.mockResolvedValue({ records: rows.map((values) => ({ keys: Object.keys(values), get: (key: string) => values[key] })) });
+}
+
+/**
+ * A map as the driver builds one from Bolt, one assignment per key (_unpackMapWithSize in
+ * neo4j-driver-bolt-connection's packstream-v1): a key named __proto__ sets the map's prototype
+ * instead of adding a key.
+ */
+function boltMap(entries: Array<[string, unknown]>): Record<string, unknown> {
+  const value: Record<string, unknown> = {};
+  for (const [key, item] of entries) value[key] = item;
+  return value;
 }
 
 function memories(aliceSegment: string, bobSegment: string) {
@@ -127,6 +152,73 @@ describe("graph_query under multi-user auth", () => {
     for (const foreign of ["Earl Grey", "Suedhafen", "0.125"]) expect(result.output).not.toContain(foreign);
   });
 
+  // The queries below are refused before they run; the answers stand for one that reaches the graph
+  // some other way, and the reducer has to hold on its own.
+  it("refuses an answer holding a map whose __proto__ key became its prototype", async () => {
+    const { run, scope } = await load(true);
+    const m = memories(scope.safeUserSegment("alice"), scope.safeUserSegment("bob"));
+    const crafted = [
+      // RETURN {__proto__: [], leak: m}: a list as the prototype, so not a plain map, and leak its one key.
+      { x: boltMap([["__proto__", []], ["leak", m.bobPreference]]) },
+      // The reader's own node as the prototype: the map inherits the driver's node marker.
+      { x: { wrap: boltMap([["__proto__", m.alicePreference], ["leak", m.bobNote]]) } },
+    ];
+    for (const row of crafted) {
+      answer([row]);
+      const result = await run("alice", "graph_query", { cypher: "MATCH (m:MemoryRecord) RETURN {wrap: m} AS x LIMIT 50" });
+      for (const foreign of ["Earl Grey", "Suedhafen", "\"bob\""]) expect(`${result.output}${result.error}`).not.toContain(foreign);
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("multi-user");
+    }
+  });
+
+  it("takes a map that carries one of the driver's markers as a key for the map it is", async () => {
+    const { run, scope } = await load(true);
+    const m = memories(scope.safeUserSegment("alice"), scope.safeUserSegment("bob"));
+    // RETURN {asNode: {__isNode__: true, labels: [], properties: {}, leak: m}, asSegment: ..., asPath: ...}
+    answer([{
+      x: {
+        asNode: boltMap([["__isNode__", true], ["labels", []], ["properties", {}], ["leak", m.bobPreference]]),
+        asSegment: boltMap([["__isPathSegment__", true], ["start", m.alicePreference], ["relationship", m.bobNote], ["end", m.alicePreference]]),
+        asPath: boltMap([["__isPath__", true], ["start", m.alicePreference], ["end", m.alicePreference], ["segments", []], ["leak", m.ownerless]]),
+      },
+    }]);
+    const result = await run("alice", "graph_query", { cypher: "MATCH (m:MemoryRecord) RETURN {wrap: m} AS x LIMIT 50" });
+    expect(result.success).toBe(true);
+    for (const foreign of ["Earl Grey", "Suedhafen", "\"bob\"", "budget = 40000"]) expect(result.output).not.toContain(foreign);
+    // Every key of each map comes back, the nodes under them reduced.
+    for (const id of ["mem-bob-user", "mem-bob-ws", "fact:researcher:budget"]) expect(result.output).toContain(`"id": "${id}"`);
+    expect(result.output).toContain("Polarstern-Rooibos");
+    expect(result.output).toContain("3 MemoryRecord node(s) above are not this account's");
+  });
+
+  it("returns the driver's other values as it does with auth off", async () => {
+    const researcher = node(["Agent"], { name: "researcher" });
+    const topic = node(["Topic"], { name: "Nordhafen" });
+    const row = {
+      count: int(3),
+      studied: new Relationship(int(901), researcher.identity, topic.identity, "STUDIED", { since: int(2024) }, "901", researcher.elementId, topic.elementId),
+      hop: new UnboundRelationship(int(902), "NEXT", {}, "902"),
+      at: new DateTime(2026, 10, 8, 17, 30, 0, 0, 7200),
+      day: new GraphDate(2026, 10, 8),
+      clock: new LocalTime(17, 30, 0, 0),
+      local: new LocalDateTime(2026, 10, 8, 17, 30, 0, 0),
+      offsetClock: new Time(17, 30, 0, 0, 7200),
+      span: new Duration(1, 2, 3, 4),
+      place: new Point(int(7203), 1.5, 2.5),
+      nested: { counts: [int(1), int(2)], since: new GraphDate(2026, 1, 1) },
+    };
+    const cypher = "MATCH (a:Agent)-[r]->(t:Topic) RETURN count(*) AS count, r AS studied LIMIT 1";
+    const { run: runWithAuthOff } = await load(false);
+    answer([row]);
+    const off = await runWithAuthOff("alice", "graph_query", { cypher });
+    const { run } = await load(true);
+    answer([row]);
+    const on = await run("alice", "graph_query", { cypher });
+    expect(off.success).toBe(true);
+    expect(on).toEqual(off);
+  });
+
   it("refuses, before it runs, a query that would read memory text other than as a whole node", async () => {
     const { run } = await load(true);
     const refused = [
@@ -160,6 +252,9 @@ describe("graph_query under multi-user auth", () => {
       "MATCH (m) RETURN m; DUMP DATABASE",
       "MATCH (m:MemoryRecord) RETURN 'unclosed",
       "MATCH (m:MemoryRecord) /* never closed RETURN m",
+      // The driver takes a map key named __proto__ for the map's prototype.
+      "MATCH (m:MemoryRecord) RETURN {__proto__: [], leak: m} AS x LIMIT 50",
+      "MATCH (a:MemoryRecord), (m:MemoryRecord) RETURN {wrap: {`__proto__`: a, leak: m}} AS x",
     ];
     for (const cypher of refused) {
       const result = await run("alice", "graph_query", { cypher });
