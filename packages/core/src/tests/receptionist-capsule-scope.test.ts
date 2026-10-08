@@ -33,37 +33,74 @@ vi.mock("../providers/index.js", () => {
 vi.mock("../audit/logger.js", () => ({ logAudit: vi.fn() }));
 
 import { tryReceptionistFastLaneDetailed } from "../agent/receptionist.js";
+import { AgentSession } from "../agent/session.js";
+import { prepareReceptionistFastLane } from "../agent/turn-prepare.js";
 import { getConfig } from "../config/loader.js";
 import { _clearDurableMemoryCaches, storeWorkspaceMemoryRecord } from "../memory/service.js";
 
 const dirs: string[] = [];
+const authBefore = getConfig().auth;
 afterEach(() => {
+  getConfig().auth = authBefore;
   _clearDurableMemoryCaches();
   completeMock.mockReset();
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
+/** A shared root holding one record of its own, with the fast lane on and its prompts captured. */
+function setUp(): { sharedRoot: string; sent: string[] } {
+  const sharedRoot = mkdtempSync(join(tmpdir(), "recept-scope-"));
+  dirs.push(sharedRoot);
+  storeWorkspaceMemoryRecord(sharedRoot, { key: "shared_rule", subject: "Hausregel", content: "Eine Regel an der geteilten Wurzel", kind: "decision" });
+
+  const config = getConfig();
+  config.workspacePath = sharedRoot;
+  config.receptionist = { ...config.receptionist, enabled: true };
+  config.orchestration.routingTierPresetFallback = true;
+  const sent: string[] = [];
+  completeMock.mockImplementation(async (messages: Array<{ content: string }>) => {
+    sent.push(messages.map((message) => message.content).join("\n"));
+    return { content: "Hallo! Wie kann ich helfen?", tool_calls: [], usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 }, finishReason: "stop" };
+  });
+  return { sharedRoot, sent };
+}
+
 describe("receptionist memory capsule scope", () => {
   it("is built from the session's workspace root, not the configured shared root", async () => {
-    const sharedRoot = mkdtempSync(join(tmpdir(), "recept-scope-"));
-    dirs.push(sharedRoot);
+    const { sharedRoot, sent } = setUp();
     const userRoot = join(sharedRoot, "users", "alice-0123456789abcdef");
     storeWorkspaceMemoryRecord(userRoot, { key: "alice_tea", subject: "Lieblingstee", content: "Alices Nordhafen-Mischung", kind: "preference" });
-    storeWorkspaceMemoryRecord(sharedRoot, { key: "shared_rule", subject: "Hausregel", content: "Eine Regel an der geteilten Wurzel", kind: "decision" });
-
-    const config = getConfig();
-    config.workspacePath = sharedRoot;
-    config.receptionist = { ...config.receptionist, enabled: true };
-    config.orchestration.routingTierPresetFallback = true;
-    const sent: string[] = [];
-    completeMock.mockImplementation(async (messages: Array<{ content: string }>) => {
-      sent.push(messages.map((message) => message.content).join("\n"));
-      return { content: "Hallo! Wie kann ich helfen?", tool_calls: [], usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 }, finishReason: "stop" };
-    });
 
     const outcome = await tryReceptionistFastLaneDetailed("hi", undefined, { workspacePath: userRoot });
 
     expect(outcome.handled).toBe(true);
+    const prompt = sent.join("\n");
+    expect(prompt).toContain("Alices Nordhafen-Mischung");
+    expect(prompt).not.toContain("geteilten Wurzel");
+  });
+
+  it("gets that root from the session on a real turn, under multi-user auth", async () => {
+    // The turn is what hands the lane the session's root (turn-prepare.ts), and the field is
+    // optional: without it the code still compiles and the lane falls back to the configured shared
+    // root. Review found (2026-10-08) that no test noticed, because the case above passes the root
+    // to the lane itself.
+    const { sharedRoot, sent } = setUp();
+    getConfig().auth = { ...authBefore, enabled: true };
+    const session = new AgentSession({ channel: "webchat", userId: "alice", systemPrompt: "test" });
+    expect(session.getWorkspacePath()).not.toBe(sharedRoot);
+    storeWorkspaceMemoryRecord(session.getWorkspacePath(), { key: "alice_tea", subject: "Lieblingstee", content: "Alices Nordhafen-Mischung", kind: "preference" });
+
+    const output = await prepareReceptionistFastLane({
+      eligible: true,
+      userMessage: "hi",
+      signal: new AbortController().signal,
+      opts: { session, userMessage: "hi" },
+      session,
+      guardrailEvents: [],
+      turnStartedAt: Date.now(),
+    });
+
+    expect(output?.performance?.finishReason).toBe("receptionist_fast_lane");
     const prompt = sent.join("\n");
     expect(prompt).toContain("Alices Nordhafen-Mischung");
     expect(prompt).not.toContain("geteilten Wurzel");
