@@ -112,6 +112,14 @@ export function addArgumentFigureKeys(into: Set<string>, value: unknown, depth =
   }
 }
 
+/** Every string in a tool call's arguments, at any depth, as the model wrote it: value by value,
+ *  not the call's JSON, where an escape glues a letter to what follows a line break or a tab. */
+export function argumentTexts(value: unknown, depth = 0): string[] {
+  if (typeof value === "string") return [value];
+  if (!value || typeof value !== "object" || depth >= 8) return [];
+  return (Array.isArray(value) ? value : Object.values(value)).flatMap((entry) => argumentTexts(entry, depth + 1));
+}
+
 /** A stretch of an answer, by character offsets, that the figure check reads past. */
 export interface FigureCheckSpan {
   readonly start: number;

@@ -852,7 +852,7 @@ describe("the code a delegated run executed, and the figures it states", () => {
     const SCRIPT = String(INCIDENT.calls[0]!.args["content"]);
     const HONEST = "Das Skript lief nicht: shell_exec endete mit Exit code 1. Ich nenne keine Zahlen. So sieht primes.js aus:\n"
       + "```js\n" + SCRIPT.trimEnd() + "\n```";
-    const runQuoting = async (files: Record<string, string>, finalAnswer: string) => {
+    const runQuoting = async (files: Record<string, string>, finalAnswer: string, command = "cd /workspace && node primes.js") => {
       await registerTools({
         write_file: (args) => ({
           success: true,
@@ -863,13 +863,21 @@ describe("the code a delegated run executed, and the figures it states", () => {
       });
       completeMock.mockImplementation(async (messages: Message[]) => scripted([
         ...Object.entries(files).map(([path, content]) => ({ tool: "write_file", args: { path, content } })),
-        { tool: "shell_exec", args: { command: "cd /workspace && node primes.js" } },
+        { tool: "shell_exec", args: { command } },
       ], finalAnswer)(messages));
       return runAgent("coder", INCIDENT.task, "parent-provenance-quote");
     };
 
     it("an honest report quoting the script it ran is left as it was", async () => {
       const result = await runQuoting({ "primes.js": SCRIPT }, HONEST);
+
+      expect(result.output).toBe(HONEST);
+      expect(result.executions).toEqual({ attempted: 1, failed: 1, succeededWithOutput: 0 });
+    }, 60_000);
+
+    it("the script it ran named after a line break of the command, a shell line continuation", async () => {
+      // In the call's JSON the name follows the escape's "n": `node \\\nprimes.js`.
+      const result = await runQuoting({ "primes.js": SCRIPT }, HONEST, "cd /workspace && node \\\nprimes.js");
 
       expect(result.output).toBe(HONEST);
       expect(result.executions).toEqual({ attempted: 1, failed: 1, succeededWithOutput: 0 });

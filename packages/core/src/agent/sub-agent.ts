@@ -38,6 +38,7 @@ import { isToolAllowed, requiresSandbox } from "../guardrails/tool-tiers.js";
 import {
   addArgumentFigureKeys,
   addReceivedFigureKeys,
+  argumentTexts,
   countUnobservedFigures,
   maskFiguresByKey,
   maskUnobservedFigures,
@@ -3806,7 +3807,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // that quote through too. The texts are the run's own arguments to write_file and edit_file, per
     // file, and never count as received, so a figure its prose states is checked as before.
     const writtenFileText = new Map<string, string>();
-    // The arguments of the sandbox calls that ran (their result reports programOutputChars).
+    // The arguments of the sandbox calls that ran (their result reports programOutputChars), value
+    // by value. Read from the call's JSON, a script named right after a line break of the command
+    // (`node \` and `primes.js` on the next line, a shell line continuation) was glued to the
+    // escape's "n", never matched, and the honest quote of the script it ran came back masked.
     const ranCallArguments: string[] = [];
     // And their commands, as the model wrote them. A command is a claim of the run like any other
     // argument (recordOwnClaims), and an honest report quotes what it ran: "`ls /usr/bin/ | head
@@ -7285,7 +7289,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
               else if (printed > 0) record.succeededWithOutput += 1;
             }
             if (tracksFigures) {
-              ranCallArguments.push(JSON.stringify(tc.arguments ?? {}));
+              ranCallArguments.push(...argumentTexts(tc.arguments));
               const command = tc.arguments?.["command"];
               if (typeof command === "string") ranCommands.push(command);
             }
