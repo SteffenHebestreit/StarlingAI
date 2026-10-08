@@ -78,6 +78,12 @@ attempt's notes in the report say what it left and why:
 operator-only, so its deletes are refused (`HTTP 403`, noted), while a viewer turn can still store memory.
 A listing or a delete that fails is noted too.
 
+A deleted entry's MemGraph node goes with it, so the "Critical Memory" block cannot inject it any more.
+Nodes of entries deleted before that (2026-10-08) stay in the graph until removed by hand. For the eval
+accounts, between runs, in Memgraph (the `memgraph` service): `MATCH (m:MemoryRecord) WHERE m.tenant IN
+['eval', 'eval-viewer', 'eval-1bbd174404efbce9', 'eval-viewer-bddbb40019b93c64'] DETACH DELETE m` (user-scope
+nodes carry the username, workspace-scope nodes the account's storage segment).
+
 Nothing is reset while a turn the harness stopped on the account may still run (`chat.cancel` got no final
 status, or the socket died mid-turn): what it stores after a reset would land in the next attempt. The
 reset waits up to the cancel grace (30 s) for `session.get` to report the turn ended, and is skipped with a

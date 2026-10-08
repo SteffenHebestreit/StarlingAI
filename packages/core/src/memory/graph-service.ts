@@ -322,6 +322,28 @@ export async function graphL0Layer(
   }
 }
 
+// ── Delete-through ────────────────────────────────────────────────────────────
+
+/**
+ * Remove the node of a durable record whose file was deleted, and drop the cached Critical Memory
+ * blocks. The node used to stay ("harmless to the read-only inspector view"), but graphL0Layer
+ * serves a tenant's decision and preference nodes without looking at any file: after the e2e
+ * harness had emptied eval's memory, its deleted "Polarstern-Rooibos" preference was still in the
+ * graph to inject, one orphan more with every re-store under a new id (found 2026-10-08).
+ *
+ * Callers should fire-and-forget: deleteMemoryFromGraph(id).catch(() => {})
+ */
+export async function deleteMemoryFromGraph(id: string): Promise<void> {
+  if (!isGraphDbAvailable()) return;
+  try {
+    await runCypher(`MATCH (m:MemoryRecord {id: $id}) DETACH DELETE m`, { id }, { write: true });
+  } catch (err) {
+    log.warn({ err, id }, "Graph MemoryRecord delete failed");
+  } finally {
+    _graphL0Cache.clear();
+  }
+}
+
 // ── Graph reranking ───────────────────────────────────────────────────────────
 
 /**
