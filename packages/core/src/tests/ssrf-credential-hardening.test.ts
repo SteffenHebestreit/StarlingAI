@@ -38,6 +38,17 @@ describe("isPrivateHost — IPv6 private ranges (WEB-3)", () => {
     }
   });
 
+  // Only "localhost" itself was loopback here; a subdomain of it depended on the resolver, and
+  // one that answers NXDOMAIN let it through while a browser maps it to loopback anyway.
+  it("treats every name under .localhost as loopback, whatever the resolver says", () => {
+    for (const h of ["cdp.localhost", "a.b.localhost", "x.LOCALHOST", "rebind.localhost"]) {
+      expect(isPrivateHost(h), h).toBe(true);
+    }
+    for (const h of ["localhost.example.com", "notlocalhost", "mylocalhost.test"]) {
+      expect(isPrivateHost(h), h).toBe(false);
+    }
+  });
+
   it("blocks 0.0.0.0/8, not just 0.0.0.0", () => {
     for (const h of ["0.1.2.3", "0.255.255.255"]) {
       expect(isPrivateHost(h), h).toBe(true);
@@ -106,6 +117,12 @@ describe("checkUrlSsrf — shared URL guard for browser/out-of-process fetchers"
     "http://[::ffff:0:a9fe:a9fe]/",
   ])("blocks %s, an IPv6 address carrying a private IPv4 address", async (u) => {
     expect(await checkUrlSsrf(u)).toMatch(/private|internal/);
+  });
+
+  it("blocks a name under .localhost before any lookup", async () => {
+    expect(await checkUrlSsrf("http://cdp.localhost:9222/json/version")).toMatch(/private|internal/);
+    const { hostIsBlocked } = await import("../tools/web.js");
+    expect(await hostIsBlocked("x.localhost.")).toBe(true);
   });
 
   it("allows an IPv6 address carrying a public IPv4 address", async () => {

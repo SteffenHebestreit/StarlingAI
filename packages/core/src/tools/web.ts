@@ -1259,8 +1259,9 @@ export function isPrivateHost(host: string): boolean {
   // Strip IPv6 brackets if present; lowercase so IPv6 hextets match case-insensitively.
   const h = host.replace(/^\[|\]$/g, "").toLowerCase();
 
-  // Loopback
-  if (h === "localhost" || h === "127.0.0.1" || h === "::1") return true;
+  // Loopback, and every name under .localhost (RFC 6761): a subdomain of it was left to the
+  // resolver, and one answering NXDOMAIN let it through while a browser maps it to loopback.
+  if (h === "localhost" || h.endsWith(".localhost") || h === "127.0.0.1" || h === "::1") return true;
   // Unspecified / any-address
   if (h === "0.0.0.0" || h === "::") return true;
   // IPv6 Unique-Local Addresses fc00::/7 (fc00–fdff first hextet). The 4-hex-digit

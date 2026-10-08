@@ -36,23 +36,20 @@ vi.mock("node:dns", async (importOriginal) => {
 /**
  * The guard resolved a name to decide and the request resolved it again to connect, so a name
  * whose answers changed in between passed the check on a public address and connected to a
- * private one. Each guarded call site now connects through a dispatcher whose lookup makes the
- * same decision on the addresses it connects to.
+ * private one. Each guarded call site hands fetch the dispatcher whose lookup decides on the
+ * address it connects to, and reports a connection that lookup refused as a refusal.
+ *
+ * These stub fetch: the names the test network lets through to a real connection are all under
+ * .localhost, which the guard refuses by name before any request, so a real connection cannot
+ * show the call site's wiring. The dispatcher itself is shown below, through the real fetch.
  */
-describe("a name that resolves differently at connect time does not reach a private address", () => {
+describe("each guarded call site connects through the guard's dispatcher", () => {
   const ctx: ToolContext = { sessionId: "session-dns-rebinding", workspacePath: "/workspace" };
-  let server: Server;
-  let port = 0;
-  let hits = 0;
+  // An IP literal: the check before the request needs no DNS for it.
+  const FEED = "http://93.184.215.14/feed.xml";
+  const REASON = "feeds.example resolved to a private/internal network address when connecting; the connection is refused";
 
   beforeAll(async () => {
-    server = createServer((_req, res) => {
-      hits += 1;
-      res.writeHead(200, { "content-type": "application/rss+xml" });
-      res.end("<?xml version=\"1.0\"?><rss><channel><title>Loopback</title><item><title>internal item</title><link>http://127.0.0.1/1</link></item></channel></rss>");
-    });
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    port = (server.address() as { port: number }).port;
     await import("../tools/web.js");
     await import("../tools/inline-utils.js");
     await import("../tools/http-request.js");
@@ -60,66 +57,80 @@ describe("a name that resolves differently at connect time does not reach a priv
   });
 
   afterEach(() => {
+    vi.unstubAllGlobals();
     vi.restoreAllMocks();
     mcpConnections.clear();
-    checkAnswers.clear();
-    connectAnswers.clear();
-    hits = 0;
   });
-
-  afterAll(async () => {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-  });
-
-  /** A name the guard's check sees as public and the connection resolves to loopback. */
-  function rebinding(name: string): string {
-    checkAnswers.set(name, [{ address: "93.184.215.14", family: 4 }]);
-    connectAnswers.set(name, [{ address: "127.0.0.1", family: 4 }]);
-    return `http://${name}:${port}/feed.xml`;
-  }
 
   async function run(name: string, args: Record<string, unknown>) {
     const { getTool } = await import("../tools/registry.js");
     return getTool(name)!.execute(args, ctx);
   }
 
-  it("web_fetch: refused before connecting, with no browser fall-through", async () => {
-    const url = rebinding("rebind-web.localhost");
+  /** fetch recording each request's dispatcher and failing it the way a refused connection fails. */
+  function refusingConnections(): unknown[] {
+    const dispatchers: unknown[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: { dispatcher?: unknown }) => {
+      dispatchers.push(init?.dispatcher);
+      throw new TypeError("fetch failed", { cause: Object.assign(new Error(REASON), { code: "ESSRFBLOCKED" }) });
+    }));
+    return dispatchers;
+  }
+
+  it.each([
+    ["web_fetch", { url: FEED }, `${FEED}: ${REASON}`],
+    ["url_inspect", { url: FEED }, `Refusing to probe that URL: ${REASON}.`],
+    ["read_rss_feed", { feedUrl: FEED }, `read_rss_feed failed: Refusing to fetch ${FEED}: ${REASON}`],
+    ["http_request", { url: FEED, method: "GET" }, `Requesting private/internal network addresses is not allowed: ${REASON}`],
+  ])("%s hands fetch the guard's dispatcher and reports a refused connection as a refusal", async (tool, args, error) => {
+    const { guardedDispatcher } = await import("../tools/web.js");
+    const dispatchers = refusingConnections();
     const callTool = vi.fn(async () => ({ content: [{ type: "text", text: "### Result\n\"rendered\"" }] }));
     mcpConnections.set("playwright", { client: { callTool } });
 
-    const r = await run("web_fetch", { url });
+    const r = await run(tool, args);
     expect(r.success).toBe(false);
-    expect(r.error).toBe(`${url}: rebind-web.localhost resolved to a private/internal network address when connecting; the connection is refused`);
+    expect(r.error).toBe(error);
+    expect(dispatchers.length).toBeGreaterThan(0);
+    expect(dispatchers.every((dispatcher) => dispatcher === guardedDispatcher), "a request without the guard's dispatcher").toBe(true);
     expect(callTool, "a browser tool was called").not.toHaveBeenCalled();
-    expect(hits, "the loopback server was reached").toBe(0);
+  });
+});
+
+/**
+ * The dispatcher itself, through Node's global fetch and a real connection: its lookup runs as
+ * the connection is made, and its refusal reaches the caller as the cause of the fetch error.
+ */
+describe("the guard's dispatcher, through the global fetch", () => {
+  let server: Server;
+  let port = 0;
+  let hits = 0;
+
+  beforeAll(async () => {
+    server = createServer((_req, res) => {
+      hits += 1;
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.end("internal");
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    port = (server.address() as { port: number }).port;
   });
 
-  it("url_inspect: refused before connecting", async () => {
-    const url = rebinding("rebind-inspect.localhost");
-
-    const r = await run("url_inspect", { url });
-    expect(r.success).toBe(false);
-    expect(r.error).toBe("Refusing to probe that URL: rebind-inspect.localhost resolved to a private/internal network address when connecting; the connection is refused.");
-    expect(hits).toBe(0);
+  afterAll(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 
-  it("read_rss_feed: refused before connecting", async () => {
-    const url = rebinding("rebind-rss.localhost");
+  it("refuses the connection the default dispatcher makes, so the server is not reached", async () => {
+    const { connectRefusalReason, guardedDispatcher } = await import("../tools/web.js");
+    const url = `http://localhost:${port}/`;
 
-    const r = await run("read_rss_feed", { feedUrl: url });
-    expect(r.success).toBe(false);
-    expect(r.error).toBe(`read_rss_feed failed: Refusing to fetch ${url}: rebind-rss.localhost resolved to a private/internal network address when connecting; the connection is refused`);
-    expect(hits).toBe(0);
-  });
+    const plain = await fetch(url);
+    expect(plain.status, "the server is reachable without the guard").toBe(200);
+    expect(hits).toBe(1);
 
-  it("http_request: refused before connecting", async () => {
-    const url = rebinding("rebind-http.localhost");
-
-    const r = await run("http_request", { url, method: "GET" });
-    expect(r.success).toBe(false);
-    expect(r.error).toBe("Requesting private/internal network addresses is not allowed: rebind-http.localhost resolved to a private/internal network address when connecting; the connection is refused");
-    expect(hits).toBe(0);
+    const refused = await fetch(url, { dispatcher: guardedDispatcher } as RequestInit).then(() => null, (err: unknown) => err);
+    expect(connectRefusalReason(refused)).toBe("localhost resolved to a private/internal network address when connecting; the connection is refused");
+    expect(hits, "the guarded fetch reached the server").toBe(1);
   });
 });
 
