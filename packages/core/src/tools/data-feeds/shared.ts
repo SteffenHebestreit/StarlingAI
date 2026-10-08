@@ -1,8 +1,11 @@
-import { resolve as dnsResolve } from "node:dns/promises";
-import { isPrivateHost } from "../web.js";
+import { checkUrlSsrf } from "../web.js";
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_USER_AGENT = "StarlingAI-DataFeeds/1.0 (+https://github.com/starlingai)";
+/** Redirects a caller-supplied URL is followed through, each target checked first: as many as url_inspect follows. */
+const MAX_REDIRECTS = 5;
+/** The statuses fetch follows as redirects with redirect "follow". */
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
 export interface FetchJsonOptions {
   /** Per-request timeout. Default 10 s. */
@@ -37,8 +40,14 @@ export async function fetchJson<T = unknown>(url: string, opts: FetchJsonOptions
 }
 
 export async function fetchText(url: string, opts: FetchTextOptions = {}): Promise<string> {
+  // A caller's URL was checked once (its host, IPv4 records only, the operator's allowlist
+  // ignored) and fetch then followed redirects on its own, so a public feed URL that redirected
+  // into the private network was fetched and its items returned. web_fetch's guard, with
+  // guardrails.allowedPrivateHosts, now decides the URL and every redirect target before it is
+  // requested.
   if (!opts.trusted) {
-    await assertSafeUrl(url);
+    const refused = await checkUrlSsrf(url);
+    if (refused) throw new Error(`Refusing to fetch ${url}: ${refused}`);
   }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
@@ -47,10 +56,11 @@ export async function fetchText(url: string, opts: FetchTextOptions = {}): Promi
     else opts.signal.addEventListener("abort", () => controller.abort(), { once: true });
   }
   try {
-    const response = await fetch(url, {
+    const init: RequestInit = {
       headers: { "User-Agent": DEFAULT_USER_AGENT, Accept: "application/json, text/*;q=0.9", ...opts.headers },
       signal: controller.signal,
-    });
+    };
+    const response = opts.trusted ? await fetch(url, init) : await fetchFollowingCheckedRedirects(url, init);
     if (!response.ok) {
       throw new Error(`HTTP ${response.status} ${response.statusText} from ${url}`);
     }
@@ -63,29 +73,19 @@ export async function fetchText(url: string, opts: FetchTextOptions = {}): Promi
   }
 }
 
-async function assertSafeUrl(url: string): Promise<void> {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    throw new Error(`Invalid URL: ${url}`);
+/** fetch for a URL the guard let through, each redirect followed by hand once its target passes the guard too. */
+async function fetchFollowingCheckedRedirects(url: string, init: RequestInit): Promise<Response> {
+  let current = url;
+  let response = await fetch(current, { ...init, redirect: "manual" });
+  for (let redirects = 0; REDIRECT_STATUSES.has(response.status) && response.headers.has("location"); redirects++) {
+    if (redirects >= MAX_REDIRECTS) throw new Error(`more than ${MAX_REDIRECTS} redirects`);
+    const next = new URL(response.headers.get("location")!, current).toString();
+    const refused = await checkUrlSsrf(next);
+    if (refused) throw new Error(`Refusing to follow the redirect from ${current}: ${refused}`);
+    current = next;
+    response = await fetch(current, { ...init, redirect: "manual" });
   }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    throw new Error(`URL scheme must be http or https: ${url}`);
-  }
-  const host = parsed.hostname.toLowerCase();
-  if (isPrivateHost(host)) {
-    throw new Error(`Refusing to fetch private/internal host: ${host}`);
-  }
-  try {
-    const addrs = await dnsResolve(host);
-    if (addrs.some((addr) => isPrivateHost(addr))) {
-      throw new Error(`Host ${host} resolves to a private address — refusing to fetch`);
-    }
-  } catch (err) {
-    // Re-throw our explicit refusal; tolerate DNS-unavailable for IP literals.
-    if (err instanceof Error && err.message.startsWith("Host ")) throw err;
-  }
+  return response;
 }
 
 // ─── Tiny TTL cache ─────────────────────────────────────────────────────────

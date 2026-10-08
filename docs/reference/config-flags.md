@@ -21,7 +21,7 @@ Every public schema field, where it is declared, and how many production files r
 | `alertmanager` | packages/core/src/config/schema.ts:1135 | 1 |
 | `all` | packages/core/src/config/schema.ts:1288 | 289 |
 | `allowedAgents` | packages/core/src/config/schema.ts:1308 | 29 |
-| `allowedPrivateHosts` | packages/core/src/config/schema.ts:1251 | 4 |
+| `allowedPrivateHosts` | packages/core/src/config/schema.ts:1251 | 5 |
 | `allowedUserIds` | packages/core/src/config/schemas/channels.ts:11 | 5 |
 | `allowedUsers` | packages/core/src/config/schema.ts:793 | 13 |
 | `allowFrom` | packages/core/src/config/schemas/channels.ts:20 | 5 |
@@ -197,7 +197,7 @@ Every public schema field, where it is declared, and how many production files r
 | `holdoutRate` | packages/core/src/config/schema.ts:1486 | 2 |
 | `honestSynthesisOnPartialEvidence` | packages/core/src/config/schemas/orchestration.ts:602 | 1 |
 | `host` | packages/core/src/config/schema.ts:707 | 115 |
-| `http` | packages/core/src/config/schema.ts:752 | 88 |
+| `http` | packages/core/src/config/schema.ts:752 | 87 |
 | `humanInLoopSteps` | packages/core/src/config/schema.ts:1309 | 20 |
 | `id` | packages/core/src/config/schema.ts:561 | 288 |
 | `ignoreCase` | packages/core/src/config/schema.ts:1356 | 2 |
@@ -308,13 +308,13 @@ Every public schema field, where it is declared, and how many production files r
 | `mounts` | packages/core/src/config/schema.ts:683 | 11 |
 | `name` | packages/core/src/config/schema.ts:1973 | 366 |
 | `negativePrompt` | packages/core/src/config/schemas/multimodal.ts:175 | 7 |
-| `network` | packages/core/src/config/schema.ts:684 | 54 |
-| `node` | packages/core/src/config/schema.ts:1042 | 233 |
+| `network` | packages/core/src/config/schema.ts:684 | 55 |
+| `node` | packages/core/src/config/schema.ts:1042 | 232 |
 | `normalizeDelegationToEnglish` | packages/core/src/config/schemas/orchestration.ts:573 | 2 |
 | `notes` | packages/core/src/config/schema.ts:790 | 55 |
 | `oneLiner` | packages/core/src/config/schema.ts:899 | 3 |
 | `openaiCompatible` | packages/core/src/config/schema.ts:105 | 2 |
-| `operator` | packages/core/src/config/schema.ts:372 | 110 |
+| `operator` | packages/core/src/config/schema.ts:372 | 111 |
 | `orchestratorMaxToolIterations` | packages/core/src/config/schemas/effort.ts:23 | 1 |
 | `orchestratorTurnSloMs` | packages/core/src/config/schema.ts:1754 | 2 |
 | `orgId` | packages/core/src/config/schema.ts:1125 | 1 |
@@ -363,7 +363,7 @@ Every public schema field, where it is declared, and how many production files r
 | `promptCacheWarmKeeper` | packages/core/src/config/schema.ts:1821 | 2 |
 | `promptInjectionBlock` | packages/core/src/config/schema.ts:1218 | 6 |
 | `promptPer1m` | packages/core/src/config/schema.ts:510 | 1 |
-| `protocol` | packages/core/src/config/schema.ts:700 | 52 |
+| `protocol` | packages/core/src/config/schema.ts:700 | 51 |
 | `provider` | packages/core/src/config/schema.ts:431 | 130 |
 | `providers` | packages/core/src/config/schema.ts:1210 | 100 |
 | `publicUrl` | packages/core/src/config/schema.ts:317 | 7 |
