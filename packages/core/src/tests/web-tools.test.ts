@@ -714,4 +714,36 @@ describe("web_fetch lists the page's links after its text", () => {
     const content = r.output.slice(`**Content from:** ${SITE}/katalog\n\n`.length);
     expect(content.length).toBeLessThanOrEqual(8000 + note.length);
   });
+
+  // The section took at least 15% of maxLength from every page, so a text that fit lost its end
+  // to the links: a 6,980-character article at the default 8000 came back cut at 6854 with its
+  // last paragraph gone, and with a truncation note that invites a re-fetch, one more of the
+  // researcher's 16 web_fetch calls.
+  it("returns a page whose text fits in maxLength whole: its links take only the room the text leaves", async () => {
+    const fact = "Fehlercode E31: Firmware-Prüfsumme fehlerhaft, Firmware über die Werkstatt neu aufspielen lassen.";
+    const article = (length: number) => `${`${PROSE} `.repeat(Math.ceil(length / PROSE.length)).slice(0, length - fact.length - 1)} ${fact}`;
+    // Anchors named by aria-label add no text, so the page's text is exactly the article.
+    const menu = Array.from({ length: 40 }, (_, i) => `<a href="/artikel/${i + 1}.html" aria-label="Artikel ${i + 1}"></a>`).join("");
+    const prefix = `**Content from:** ${SITE}/dokumentation\n\n`;
+
+    const near = article(7_200);
+    vi.stubGlobal("fetch", vi.fn(async () => html(`<nav>${menu}</nav><main><p>${near}</p></main>`)));
+    const r = await webFetch({ url: `${SITE}/dokumentation`, maxLength: 8000 }, "s-fetch-links-fits");
+    expect(r.metadata?.["fetchMethod"]).toBe("native");
+    expect(r.output).not.toContain("[Content truncated");
+    const content = r.output.slice(prefix.length);
+    expect(content.startsWith(`${near}\n\n[Links on this page — `), "the whole text, then the links").toBe(true);
+    const { header, lines } = sectionOf(r.output);
+    expect(lines.length).toBeGreaterThan(0);
+    expect(header).toBe(`[Links on this page — ${lines.length} of 40, same site first; a larger maxLength lists more]`);
+    expect(r.metadata?.["linkCount"]).toBe(lines.length);
+    expect(content.length).toBeLessThanOrEqual(8000);
+
+    // A text that fills maxLength exactly leaves no room for links, and is still not cut.
+    const full = article(8_000);
+    vi.stubGlobal("fetch", vi.fn(async () => html(`<nav>${menu}</nav><main><p>${full}</p></main>`)));
+    const filled = await webFetch({ url: `${SITE}/dokumentation`, maxLength: 8000 }, "s-fetch-links-fills");
+    expect(filled.output.slice(prefix.length)).toBe(full);
+    expect(filled.metadata?.["linkCount"]).toBe(0);
+  });
 });

@@ -764,16 +764,20 @@ function parseRenderedPage(answer: string): { text: string; pageUrl: string | nu
 }
 
 /**
- * A page's text with its links section after it, within maxLength. The section takes what the
- * text leaves free, at least LINK_BUDGET_MIN_SHARE and at most LINK_BUDGET_MAX_SHARE of
- * maxLength, so the text keeps priority on a short page and a long page keeps its size; the
- * text is cut to what remains. With no section the text is cut at maxLength as it always was.
+ * A page's text with its links section after it, within maxLength. A text that fits in
+ * maxLength is never cut: the section takes only the room the text leaves, at most
+ * LINK_BUDGET_MAX_SHARE of maxLength, so a page that nearly fills maxLength lists fewer links,
+ * or none. A longer text is cut anyway; the section then takes LINK_BUDGET_MIN_SHARE of
+ * maxLength and the text what remains, so a long page keeps its size. With no section the text
+ * is cut at maxLength as it always was.
+ *
+ * The section's floor used to apply to every page: a 6,980-character article at the default
+ * 8000 lost its last paragraph to the links, behind a truncation note that invites a re-fetch.
  */
 function withLinks(body: string, links: readonly PageLink[], pageUrl: string, maxLength: number): { text: string; linkCount: number } {
-  const budget = Math.min(
-    Math.floor(maxLength * LINK_BUDGET_MAX_SHARE),
-    Math.max(Math.floor(maxLength * LINK_BUDGET_MIN_SHARE), maxLength - body.length - 2),
-  );
+  const budget = body.length <= maxLength
+    ? Math.min(Math.floor(maxLength * LINK_BUDGET_MAX_SHARE), maxLength - body.length - 2)
+    : Math.floor(maxLength * LINK_BUDGET_MIN_SHARE);
   const section = formatLinkSection(links, pageUrl, budget);
   const bodyBudget = maxLength - (section.text ? section.text.length + 2 : 0);
   let text = body;

@@ -27,7 +27,7 @@ export const LINK_SCAN_MAX = 1000;
 export const LINK_LABEL_MAX = 80;
 /** A longer URL is left out of the list rather than printed cut: a cut URL is a wrong URL. */
 export const LINK_URL_MAX = 300;
-/** The section may take this share of maxLength from a body too long to fit beside it. */
+/** The section takes this share of maxLength from a body longer than maxLength, which is cut anyway. */
 export const LINK_BUDGET_MIN_SHARE = 0.15;
 /** The section never takes more than this share of maxLength, however short the body. */
 export const LINK_BUDGET_MAX_SHARE = 0.2;
