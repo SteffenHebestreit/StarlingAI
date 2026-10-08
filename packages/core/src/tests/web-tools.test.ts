@@ -853,3 +853,94 @@ describe("web_fetch never hands the browser a URL the SSRF guard refused", () =>
     expect(callTool.mock.calls.map(([input]) => input.name)).toEqual(["browser_navigate", "browser_evaluate"]);
   });
 });
+
+/**
+ * Only web_fetch's own requests go through the guard. The browser follows a redirect, runs the
+ * page's scripts and may be answered differently from the direct request, and web_fetch returned
+ * whatever page it ended on: a page that sent the browser on to a service on the private network
+ * had that service's text returned as its content.
+ */
+describe("web_fetch checks the page the browser landed on", () => {
+  // An IP literal: the SSRF guard needs no DNS for it.
+  const PUBLIC = "http://93.184.215.14";
+  const INTERNAL = "Grafana admin: datasource passwords";
+
+  async function webFetch(url: string, sessionId: string) {
+    const { getTool } = await import("../tools/registry.js");
+    return getTool("web_fetch")!.execute({ url }, { sessionId, workspacePath: "/workspace" });
+  }
+
+  /** A direct answer with too little text to keep, so web_fetch renders the page in the browser. */
+  function scriptShell() {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("<html><body><div id=\"app\"></div><script src=\"/app.js\"></script></body></html>", {
+      status: 200, headers: { "Content-Type": "text/html" },
+    })));
+  }
+
+  /** Playwright MCP answering each tool with `answers[name]`, and with nothing otherwise. */
+  function browser(answers: Record<string, { text: string; isError?: boolean }>) {
+    const callTool = vi.fn(async (input: { name: string; arguments: Record<string, unknown> }) => ({
+      content: [{ type: "text", text: answers[input.name]?.text ?? "" }],
+      isError: answers[input.name]?.isError ?? false,
+    }));
+    mcpConnections.set("playwright", { client: { callTool } });
+    return callTool;
+  }
+
+  const calls = (callTool: ReturnType<typeof browser>) => callTool.mock.calls.map(([input]) =>
+    input.name === "browser_navigate" ? `navigate ${String(input.arguments["url"])}` : input.name);
+
+  /** What PAGE_TEXT_AND_LINKS returns, as browser_evaluate's answer carries it. */
+  const evaluated = (t: string, u: string) => `### Result\n${JSON.stringify(JSON.stringify({ t, u, l: [] }))}`;
+
+  it("fails when the page's script took the browser to a private host, and sends the tab to about:blank", async () => {
+    scriptShell();
+    const callTool = browser({ browser_evaluate: { text: evaluated(INTERNAL, "http://10.0.0.5:3000/admin") } });
+
+    const r = await webFetch(`${PUBLIC}/app`, "s-landing-script");
+    expect(r.success).toBe(false);
+    expect(r.error).toBe(`${PUBLIC}/app led the browser to a page the guard refuses (requesting private/internal network addresses is not allowed); nothing from that page is returned`);
+    expect(r.output).not.toContain(INTERNAL);
+    expect(calls(callTool)).toEqual([`navigate ${PUBLIC}/app`, "browser_evaluate", "navigate about:blank"]);
+  });
+
+  it("fails as soon as the navigation reports a private page, before reading anything from it", async () => {
+    scriptShell();
+    const callTool = browser({
+      browser_navigate: { text: "### Ran Playwright code\n```js\nawait page.goto('http://93.184.215.14/app');\n```\n### Page\n- Page URL: http://169.254.169.254/latest/meta-data/\n- Page Title: \n" },
+      browser_evaluate: { text: evaluated(INTERNAL, "http://169.254.169.254/latest/meta-data/") },
+    });
+
+    const r = await webFetch(`${PUBLIC}/app`, "s-landing-navigate");
+    expect(r.success).toBe(false);
+    expect(r.error).toMatch(/led the browser to a page the guard refuses/);
+    expect(calls(callTool)).toEqual([`navigate ${PUBLIC}/app`, "navigate about:blank"]);
+  });
+
+  it("fails when the snapshot it falls back to reports a private page", async () => {
+    scriptShell();
+    const callTool = browser({
+      browser_evaluate: { text: "evaluate unavailable", isError: true },
+      browser_snapshot: { text: `### Page\n- Page URL: http://127.0.0.1:9000/\n- Page Title: QuestDB\n### Snapshot\n\`\`\`yaml\n- text: ${INTERNAL}\n\`\`\`` },
+    });
+
+    const r = await webFetch(`${PUBLIC}/app`, "s-landing-snapshot");
+    expect(r.success).toBe(false);
+    expect(r.output).not.toContain(INTERNAL);
+    expect(calls(callTool)).toEqual([`navigate ${PUBLIC}/app`, "browser_evaluate", "browser_snapshot", "navigate about:blank"]);
+  });
+
+  it("still returns a page the browser reached on another public URL", async () => {
+    scriptShell();
+    const callTool = browser({
+      browser_navigate: { text: `### Page\n- Page URL: ${PUBLIC}/neu\n- Page Title: Preise\n` },
+      browser_evaluate: { text: evaluated("Neue Preisliste: Basic 9 EUR, Pro 29 EUR", `${PUBLIC}/neu`) },
+    });
+
+    const r = await webFetch(`${PUBLIC}/preise`, "s-landing-public");
+    expect(r.success).toBe(true);
+    expect(r.metadata?.["fetchMethod"]).toBe("playwright");
+    expect(r.output).toContain("Neue Preisliste: Basic 9 EUR, Pro 29 EUR");
+    expect(calls(callTool)).toEqual([`navigate ${PUBLIC}/preise`, "browser_evaluate"]);
+  });
+});

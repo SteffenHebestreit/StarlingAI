@@ -258,6 +258,13 @@ registerTool({
  */
 const WEB_FETCH_MAX_REDIRECTS = 20;
 
+/** web_fetch's answer when the browser ended on a page the guard refuses: nothing from it, and the tab sent away. */
+async function refuseBrowserLanding(url: string, reason: string): Promise<ToolResult> {
+  log.warn({ url, reason }, "web_fetch: the browser landed on a page the SSRF guard refuses");
+  await leaveRefusedPage();
+  return { success: false, output: "", error: `${url} led the browser to a page the guard refuses (${reason}); nothing from that page is returned` };
+}
+
 registerTool({
   name: "web_fetch",
   description: "Fetch a public URL and return its readable text. HTML pages end with a list of their links (absolute URLs, same site first): follow those instead of guessing paths. JSON is returned verbatim, PDFs as extracted text; JavaScript-only pages are browser-rendered when available.",
@@ -384,21 +391,28 @@ registerTool({
       let renderedEmpty = false;
       if (playwrightAvailable) {
         try {
-          await callPlaywrightTool("browser_navigate", { url });
+          // The browser follows redirects, runs the page's scripts and may be answered unlike the
+          // direct request, and whatever page it ended on came back as this URL's content. That
+          // page is now checked, on arrival and again once read, before anything from it is used.
+          // This keeps the page out of the answer; it cannot take back the request the browser sent.
+          const arrival = await refusedBrowserPage(reportedPageUrls(await callPlaywrightTool("browser_navigate", { url })));
+          if (arrival) return await refuseBrowserLanding(url, arrival);
           let rendered: { text: string; pageUrl: string | null; links: PageLink[] };
+          let pageReport: string;
           try {
             // browser_evaluate takes a FUNCTION. This sent `expression`, which Playwright MCP 1.61
             // rejects as a missing `function`, so this fast path never ran and every page came
             // back as a converted accessibility snapshot instead of its text.
-            rendered = parseRenderedPage(evaluateResultText(await callPlaywrightTool("browser_evaluate", {
-              function: PAGE_TEXT_AND_LINKS,
-            })));
+            pageReport = await callPlaywrightTool("browser_evaluate", { function: PAGE_TEXT_AND_LINKS });
+            rendered = parseRenderedPage(evaluateResultText(pageReport));
           } catch {
             // Fall back to snapshot and convert to readable text
             log.warn({ url }, "web_fetch: browser_evaluate unavailable, converting snapshot to text");
-            const rawSnapshot = await callPlaywrightTool("browser_snapshot", {});
-            rendered = { text: snapshotToReadableText(rawSnapshot), ...snapshotLinks(rawSnapshot, url) };
+            pageReport = await callPlaywrightTool("browser_snapshot", {});
+            rendered = { text: snapshotToReadableText(pageReport), ...snapshotLinks(pageReport, url) };
           }
+          const landing = await refusedBrowserPage([...reportedPageUrls(pageReport), ...(rendered.pageUrl ? [rendered.pageUrl] : [])]);
+          if (landing) return await refuseBrowserLanding(url, landing);
           // Emptiness is the page's text, never the envelope or the links around it.
           if (!rendered.text.trim()) {
             // An empty render is not the page's content. It was returned as a successful fetch
@@ -989,6 +1003,46 @@ export async function checkUrlSsrf(rawUrl: string): Promise<string | null> {
     return "requesting private/internal network addresses is not allowed";
   }
   return null;
+}
+
+/** The page URLs a Playwright MCP answer reports, from its "- Page URL: …" lines. */
+export function reportedPageUrls(output: string): string[] {
+  return [...output.matchAll(/^[ \t]*-[ \t]+Page URL:[ \t]*(\S+)/gm)].map((match) => match[1]!);
+}
+
+/** The last page the guard let the browser show; the same page reported again is not re-checked. */
+let lastClearedPageUrl: string | undefined;
+
+/**
+ * Why the browser may not show the page it reports being on, or null when every one of
+ * `pageUrls` passes. checkUrlSsrf sees only the URL the browser is sent to; a redirect, the page's
+ * own script or a click then moves it with nothing checking where, so the page it ended on is
+ * checked before anything from it is used. An http(s) page goes through checkUrlSsrf (and so
+ * guardrails.allowedPrivateHosts), a local file is refused, and the browser's own pages
+ * (about:blank, an error page) belong to no host.
+ */
+export async function refusedBrowserPage(pageUrls: Iterable<string>): Promise<string | null> {
+  for (const pageUrl of pageUrls) {
+    if (pageUrl === lastClearedPageUrl) continue;
+    const refused = /^file:/i.test(pageUrl)
+      ? "a local file is not allowed"
+      : /^https?:\/\//i.test(pageUrl) ? await checkUrlSsrf(pageUrl) : null;
+    if (refused) {
+      lastClearedPageUrl = undefined;
+      return refused;
+    }
+    if (/^https?:\/\//i.test(pageUrl)) lastClearedPageUrl = pageUrl;
+  }
+  return null;
+}
+
+/** Sends the shared browser tab to about:blank after a refused page, so no later call starts on it. */
+export async function leaveRefusedPage(): Promise<void> {
+  try {
+    await callPlaywrightTool("browser_navigate", { url: "about:blank" });
+  } catch (err) {
+    log.warn({ err }, "could not send the browser to about:blank after a refused page");
+  }
 }
 
 /**
