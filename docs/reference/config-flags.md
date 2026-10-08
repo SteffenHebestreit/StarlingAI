@@ -158,7 +158,7 @@ Every public schema field, where it is declared, and how many production files r
 | `embeddingApiKey` | packages/core/src/config/schema.ts:177 | 6 |
 | `embeddingBaseUrl` | packages/core/src/config/schema.ts:175 | 6 |
 | `embeddingModel` | packages/core/src/config/schema.ts:173 | 27 |
-| `enabled` | packages/core/src/config/schema.ts:289 | 131 |
+| `enabled` | packages/core/src/config/schema.ts:289 | 132 |
 | `enableThinking` | packages/core/src/config/schema.ts:195 | 21 |
 | `endpoint` | packages/core/src/config/schema.ts:456 | 80 |
 | `endpointUnits` | packages/core/src/config/schema.ts:1672 | 1 |
@@ -234,7 +234,7 @@ Every public schema field, where it is declared, and how many production files r
 | `leanContextInjection` | packages/core/src/config/schema.ts:1786 | 3 |
 | `leanSynthesisPrompt` | packages/core/src/config/schemas/orchestration.ts:304 | 1 |
 | `leanToolCatalog` | packages/core/src/config/schema.ts:1776 | 3 |
-| `ledger` | packages/core/src/config/schemas/decisions.ts:101 | 45 |
+| `ledger` | packages/core/src/config/schemas/decisions.ts:101 | 46 |
 | `liftMinSamplesPerArm` | packages/core/src/config/schema.ts:1493 | 1 |
 | `loginUrl` | packages/core/src/config/schema.ts:785 | 6 |
 | `loopAwareDelegation` | packages/core/src/config/schemas/orchestration.ts:529 | 8 |
@@ -314,7 +314,7 @@ Every public schema field, where it is declared, and how many production files r
 | `notes` | packages/core/src/config/schema.ts:790 | 55 |
 | `oneLiner` | packages/core/src/config/schema.ts:899 | 3 |
 | `openaiCompatible` | packages/core/src/config/schema.ts:105 | 2 |
-| `operator` | packages/core/src/config/schema.ts:372 | 110 |
+| `operator` | packages/core/src/config/schema.ts:372 | 111 |
 | `orchestratorMaxToolIterations` | packages/core/src/config/schemas/effort.ts:23 | 1 |
 | `orchestratorTurnSloMs` | packages/core/src/config/schema.ts:1754 | 2 |
 | `orgId` | packages/core/src/config/schema.ts:1125 | 1 |
@@ -413,7 +413,7 @@ Every public schema field, where it is declared, and how many production files r
 | `sampleRate` | packages/core/src/config/schema.ts:551 | 2 |
 | `sandboxShellExec` | packages/core/src/config/schema.ts:1221 | 2 |
 | `scene` | packages/core/src/config/schema.ts:1331 | 77 |
-| `scopes` | packages/core/src/config/schema.ts:390 | 24 |
+| `scopes` | packages/core/src/config/schema.ts:390 | 25 |
 | `searchTimeoutMs` | packages/core/src/config/schemas/retrieval.ts:97 | 2 |
 | `searxngBaseUrl` | packages/core/src/config/schemas/retrieval.ts:77 | 1 |
 | `secret` | packages/core/src/config/schema.ts:983 | 54 |

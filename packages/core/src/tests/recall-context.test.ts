@@ -16,16 +16,22 @@ vi.mock("../swarm/memory.js", () => ({
   ],
 }));
 
+/** Whether multi-user auth is on, as the tool reads it, and the options of each memory search. */
+const harness = vi.hoisted(() => ({ authEnabled: false, memorySearches: [] as Array<Record<string, unknown>> }));
+
 vi.mock("../memory/service.js", () => ({
-  searchMemoryRecordsWithStatus: async () => ({
-    records: [
-      { id: "m1", scope: "user", kind: "preference", subject: "provider", content: "prefers LM Studio over cloud", tags: [], source: "user", createdAt: "", updatedAt: "" },
-    ],
-    semanticRan: true,
-    unmatchedIds: [],
-    notComparedSemantically: 0,
-    candidatesByScope: { user: 1 },
-  }),
+  searchMemoryRecordsWithStatus: async (_workspacePath: string, _query: string, opts: Record<string, unknown>) => {
+    harness.memorySearches.push(opts);
+    return {
+      records: [
+        { id: "m1", scope: "user", kind: "preference", subject: "provider", content: "prefers LM Studio over cloud", tags: [], source: "user", createdAt: "", updatedAt: "" },
+      ],
+      semanticRan: true,
+      unmatchedIds: [],
+      notComparedSemantically: 0,
+      candidatesByScope: { user: 1 },
+    };
+  },
 }));
 
 vi.mock("../agent/session-search.js", () => ({
@@ -39,7 +45,7 @@ vi.mock("../skills/service.js", () => ({
 }));
 
 vi.mock("../config/loader.js", () => ({
-  getConfig: () => ({ agents: { defaults: { model: { embeddingModel: undefined } } } }),
+  getConfig: () => ({ agents: { defaults: { model: { embeddingModel: undefined } } }, auth: { enabled: harness.authEnabled } }),
 }));
 
 vi.mock("../providers/index.js", () => ({
@@ -105,6 +111,24 @@ describe("recall_context tool", () => {
     expect(result.output).toContain("## Relevant long-term memory");
     expect(result.output).toContain("prefers LM Studio");
     expect(result.output).not.toContain("## Recent related sessions");
+  });
+
+  it("searches only the caller's own memory scopes under multi-user auth", async () => {
+    // The agent scope is the deployment's outcome ledger, with every account's delegated tasks in
+    // it: left out under multi-user auth. With one operator the search is made as before.
+    const { getTool } = await import("../tools/registry.js");
+    const tool = getTool("recall_context");
+    harness.memorySearches.length = 0;
+    try {
+      harness.authEnabled = true;
+      await tool!.execute({ query: "which provider do I prefer", include: ["user"] }, CTX);
+    } finally {
+      harness.authEnabled = false;
+    }
+    await tool!.execute({ query: "which provider do I prefer", include: ["user"] }, CTX);
+
+    expect(harness.memorySearches[0]?.["scopes"]).toEqual(["workspace", "user", "session"]);
+    expect(harness.memorySearches[1]).not.toHaveProperty("scopes");
   });
 
   it("requires a query", async () => {

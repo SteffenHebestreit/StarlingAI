@@ -20,7 +20,7 @@ import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { deriveSharedSessionId } from "./memory.js";
 import { getConfig } from "../config/loader.js";
 import { getEmbeddingProvider } from "../providers/index.js";
-import { searchMemoryRecordsWithStatus } from "../memory/service.js";
+import { searchMemoryRecordsWithStatus, type MemoryScope } from "../memory/service.js";
 import { formatUserModelGuidance } from "../user-model/service.js";
 import { searchSessions } from "../agent/session-search.js";
 import { currentUserId } from "../runtime/request-context.js";
@@ -175,7 +175,17 @@ registerTool({
 
     if (requested.has("memory")) {
       try {
-        const search = await searchMemoryRecordsWithStatus(ctx.workspacePath, query, { limit: limitFor("memory"), sessionId: sharedSessionId });
+        // Under multi-user auth, without the agent scope: it includes the deployment's outcome ledger,
+        // where each lesson's subject is the task it was recorded for, from every account, so one
+        // user's question about themselves listed another user's delegated task (found in review,
+        // 2026-10-08). The per-turn memory guidance never searches it either. With one operator the
+        // ledger is that operator's own, and the search is made as before.
+        const scopes: MemoryScope[] | undefined = getConfig().auth?.enabled === true ? ["workspace", "user", "session"] : undefined;
+        const search = await searchMemoryRecordsWithStatus(ctx.workspacePath, query, {
+          limit: limitFor("memory"),
+          sessionId: sharedSessionId,
+          ...(scopes ? { scopes } : {}),
+        });
         const records = search.records;
         const unmatched = new Set(search.unmatchedIds);
         meta["memories"] = records.length;
