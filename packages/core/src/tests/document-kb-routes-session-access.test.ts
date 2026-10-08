@@ -208,7 +208,6 @@ describe("knowledge-base routes and the session a request names", () => {
     const kbId = await aliceSessionKb(aliceSession);
     const q = `sessionId=${encodeURIComponent(aliceSession)}`;
 
-    await expectSessionNotFound(await request("bob", `/api/knowledge-bases?${q}`));
     await expectSessionNotFound(await request("bob", `/api/knowledge-bases/${kbId}?${q}`));
     await expectSessionNotFound(await request("bob", `/api/knowledge-bases/${kbId}?${q}`, { method: "PATCH", json: { name: "Mine now" } }));
     await expectSessionNotFound(await request("bob", `/api/knowledge-bases/${kbId}/crawl?${q}`, { method: "POST" }));
@@ -236,6 +235,32 @@ describe("knowledge-base routes and the session a request names", () => {
       [kbId, "Ferry timetables", "session", aliceSession],
       [ownId, "Bob's ferries", "user", null],
     ]);
+  });
+
+  it("under multi-user auth, lists for another account's or a stale session id as if none had been given", async () => {
+    // The list is what the dashboard's KB page loads, always with the id of the chat it has open. A
+    // 404 for an id the caller may not use emptied the page whenever that chat was gone (deleted,
+    // or a stale id after a wipe). It now answers with what the caller may see, and nothing of the
+    // named session's; a route that names one KB still refuses.
+    const { request, aliceSession } = await deployment(true);
+    const { createKnowledgeBase } = await import("../retrieval/knowledge-bases.js");
+    const shared = await createKnowledgeBase({ name: "Harbour rules", seedUrls: ["https://harbour.example/rules"] });
+    const bobs = await createKnowledgeBase({ name: "Bob's ferries", seedUrls: ["https://bob.example/"], scope: "user", ownerId: "bob" });
+    const alices = await createKnowledgeBase({ name: "Alice's ferries", seedUrls: ["https://alice.example/"], scope: "user", ownerId: "alice" });
+    if (!shared.ok || !bobs.ok || !alices.ok) throw new Error("seeding the KB store failed");
+    const sessionKb = await aliceSessionKb(aliceSession);
+    const listed = async (path: string): Promise<string[]> => {
+      const response = await request("bob", path);
+      expect(response.status, path).toBe(200);
+      return ((await response.json()) as { knowledgeBases: Array<{ id: string }> }).knowledgeBases.map((kb) => kb.id);
+    };
+
+    const bobsList = await listed("/api/knowledge-bases");
+    expect(bobsList).toEqual([shared.value.id, bobs.value.id]);
+    expect(await listed(`/api/knowledge-bases?sessionId=${encodeURIComponent(aliceSession)}`)).toEqual(bobsList);
+    expect(await listed("/api/knowledge-bases?sessionId=7d1e2f3a-4b5c-4d6e-8f70-81920a1b2c3d")).toEqual(bobsList);
+
+    await expectSessionNotFound(await request("bob", `/api/knowledge-bases/${sessionKb}?sessionId=${encodeURIComponent(aliceSession)}`));
   });
 
   it("under multi-user auth, still serves the session's owner", async () => {

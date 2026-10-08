@@ -32,17 +32,24 @@ export function registerKnowledgeBaseRoutes(app: Hono): void {
   // Caller identity for KB scope access control. In multi-user mode the username
   // owns user-scoped KBs; sessionId (query param) owns session-scoped KBs.
   //
-  // Null when the request names a session its caller may not act for (callerMayUseSession, the
-  // rule of the /api/sessions routes). The sessionId was taken as it came, and a session KB is
-  // visible to whoever presents its session's id: a caller who knew another account's session id
-  // could list, inspect, re-crawl, edit or delete that session's KBs (found in review, 2026-10-09).
-  // Under multi-user auth such a request now gets the session routes' opaque 404. With auth off
-  // every caller may, as before.
-  const kbAccessCtx = async (c: Context): Promise<{ userId?: string; sessionId?: string } | null> => {
+  // The sessionId was taken as it came, and a session KB is visible to whoever presents its
+  // session's id: a caller who knew another account's session id could list, inspect, re-crawl,
+  // edit or delete that session's KBs (found in review, 2026-10-09). Under multi-user auth the id
+  // now counts only when its caller may act for that session (callerMayUseSession, the rule of the
+  // /api/sessions routes); `foreignSession` says it named one it may not. With auth off every
+  // caller may, as before.
+  const kbAccess = async (c: Context): Promise<{ who: { userId?: string; sessionId?: string }; foreignSession: boolean }> => {
     const user = await authenticatedUser(c.req.header("Authorization"));
-    const sessionId = c.req.query("sessionId");
-    if (sessionId && !callerMayUseSession(user, sessionId)) return null;
-    return { ...(user?.username ? { userId: user.username } : {}), ...(sessionId ? { sessionId } : {}) };
+    const named = c.req.query("sessionId");
+    const foreignSession = !!named && !callerMayUseSession(user, named);
+    const sessionId = foreignSession ? undefined : named;
+    return { who: { ...(user?.username ? { userId: user.username } : {}), ...(sessionId ? { sessionId } : {}) }, foreignSession };
+  };
+  // For a route that names one KB or changes one: null when the request names a session its caller
+  // may not act for, which the route answers with the session routes' opaque 404.
+  const kbAccessCtx = async (c: Context): Promise<{ userId?: string; sessionId?: string } | null> => {
+    const { who, foreignSession } = await kbAccess(c);
+    return foreignSession ? null : who;
   };
   const sessionNotFound = (c: Context) => c.json({ error: "Session not found" }, 404);
 
@@ -54,8 +61,10 @@ export function registerKnowledgeBaseRoutes(app: Hono): void {
         import("../retrieval/kb-crawler.js"),
         import("../retrieval/engram.js"),
       ]);
-      const who = await kbAccessCtx(c);
-      if (!who) return sessionNotFound(c);
+      // The list answers a session its caller may not act for as if no session had been named: the
+      // KBs the caller may see, and nothing about that session. A 404 here emptied the dashboard's
+      // KB page whenever the chat it had open was gone (deleted, or a stale id after a wipe).
+      const { who } = await kbAccess(c);
       const kbs = filterAccessibleKbs(await listKnowledgeBases({ isCrawlActive }), who);
       return c.json({
         knowledgeBases: kbs.map(toSummary),
