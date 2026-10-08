@@ -39,6 +39,7 @@ import {
   isFirstUserTurn,
   lastAssistantReplyText,
   localizedFixedText,
+  messageHasOwnLanguage,
 } from "../agent/reply-language.js";
 import {
   detectTextLanguage,
@@ -202,6 +203,20 @@ describe("receptionist language line", () => {
     const content = String(buildReceptionistMessages("👍", { defaultLanguage: "French" })[0]!.content);
     expect(content).toContain("Reply in FRENCH");
     expect(content).toContain("French is this assistant's default language");
+  });
+
+  it("reads a first greeting as the full path does: no language of its own", () => {
+    // The detector calls these English, French and Spanish. The fast lane answered them in the
+    // default language and the full path, when it answered instead, named the detected one.
+    for (const greeting of ["Good morning", "Thank you!", "Merci beaucoup", "Buenos días"]) {
+      expect(String(buildReceptionistMessages(greeting, { defaultLanguage: "German" })[0]!.content)).toContain("Reply in GERMAN");
+      const line = buildTurnReplyLanguageInstruction(greeting, "German", { firstTurn: true, userWords: greeting });
+      expect(line).toContain("(German if there is none)");
+      expect(line).not.toMatch(/otherwise in [A-Z]\w+, the language/);
+      expect(messageHasOwnLanguage(greeting)).toBe(false);
+    }
+    // A sentence keeps its language on both.
+    expect(messageHasOwnLanguage("Good morning, how do I reset my router?")).toBe(true);
   });
 
   it("keeps the measured-best line for a message that carries a language", () => {
