@@ -10,6 +10,15 @@ vi.mock("../audit/logger.js", async (importOriginal) => {
     logAudit: vi.fn((type: string, data: Record<string, unknown>) => { rows.push({ type, data }); }),
   };
 });
+/** The provider's warnings, read by the refused-prefill cases below. */
+const warnings: Array<{ fields: Record<string, unknown>; msg: string }> = [];
+vi.mock("../logger.js", () => {
+  const stub: Record<string, unknown> = {};
+  for (const level of ["trace", "debug", "info", "error", "fatal"]) stub[level] = () => undefined;
+  stub["warn"] = (fields: Record<string, unknown>, msg: string) => { warnings.push({ fields, msg }); };
+  stub["child"] = () => stub;
+  return { logger: stub, childLogger: () => stub };
+});
 
 const {
   LMStudioProvider,
@@ -60,10 +69,16 @@ const STREAM_REASONING_CHARS = STREAM_REASONING.join("").length;
 /** What the stub answers on the complete path. */
 const COMPLETE_REASONING = "Considering the definition of wet.";
 
-/** `refuse` answers a request with an error instead (the SDK throws a non-2xx answer at the send). */
-function mockProvider(cfg: Partial<ModelConfig> = {}, refuse?: (body: Record<string, unknown>) => Error | undefined) {
+/** `refuse` answers a request with an error instead (the SDK throws a non-2xx answer at the send).
+ *  `stub.cut` accepts a stream request and drops the connection after its first delta;
+ *  `stub.maxRetries` is the provider's own retry budget, 0 unless set. */
+function mockProvider(
+  cfg: Partial<ModelConfig> = {},
+  refuse?: (body: Record<string, unknown>) => Error | undefined,
+  stub: { cut?: (body: Record<string, unknown>) => boolean; maxRetries?: number } = {},
+) {
   const bodies: Array<Record<string, unknown>> = [];
-  const provider = new LMStudioProvider("http://localhost:1234/v1", "test", { ...base, ...cfg }, { maxRetries: 0 });
+  const provider = new LMStudioProvider("http://localhost:1234/v1", "test", { ...base, ...cfg }, { maxRetries: stub.maxRetries ?? 0 });
   (provider as unknown as { client: unknown }).client = {
     chat: {
       completions: {
@@ -72,9 +87,11 @@ function mockProvider(cfg: Partial<ModelConfig> = {}, refuse?: (body: Record<str
           const refusal = refuse?.(body);
           if (refusal) throw refusal;
           if (body["stream"]) {
+            const cutAfterFirst = stub.cut?.(body) ?? false;
             return (async function* () {
               for (const part of STREAM_REASONING) {
                 yield { choices: [{ delta: { reasoning_content: part }, finish_reason: null }] };
+                if (cutAfterFirst) throw new Error("Premature close");
               }
               yield { choices: [{ delta: { content: "YES" }, finish_reason: null }] };
               yield {
@@ -96,7 +113,10 @@ function mockProvider(cfg: Partial<ModelConfig> = {}, refuse?: (body: Record<str
 
 const modelCalls = () => rows.filter((r) => r.type === "provider_model_call").map((r) => r.data);
 
-beforeEach(() => { rows.length = 0; });
+beforeEach(() => {
+  rows.length = 0;
+  warnings.length = 0;
+});
 afterEach(() => {
   _resetRejectedReasoningEffortsForTests();
   _resetToolCallPrefillRefusalsForTests();
@@ -387,8 +407,8 @@ describe("a prefilled tool call goes out only on a forced call, and only where t
   });
 });
 
-describe("a refused prefill: the endpoint is remembered, and the call is retried once without it", () => {
-  it("complete(): learns the refusal, retries outside the attempt budget, and the next forced call goes without", async () => {
+describe("a refused prefill: the call is retried once without it, and the endpoint is remembered only when that retry is served", () => {
+  it("complete(): retries outside the attempt budget, and once the retry is served the next forced call goes without", async () => {
     // maxRetries 0: without a retry of its own, the refusal would end the call.
     const { provider, bodies } = mockProvider(QWEN_XML, refusePrefilled);
 
@@ -397,11 +417,113 @@ describe("a refused prefill: the endpoint is remembered, and the call is retried
 
     expect(first.content).toBe("YES");
     expect(bodies.map((body) => lastWireMessage(body)["role"])).toEqual(["assistant", "user", "user"]);
+    // The retry reads as the retry; only a call after it reads as a remembered refusal.
     expect(modelCalls().map((row) => [row["finishReason"], row["prefill"], row["prefillSkipped"]])).toEqual([
       ["error", "bare", undefined],
-      ["stop", null, "endpoint_refused"],
+      ["stop", null, "refusal_retry"],
       ["stop", null, "endpoint_refused"],
     ]);
+  });
+
+  it("remembers nothing when the retry without the prefill is refused too: that 4xx was not the prefill's", async () => {
+    // Every request is refused here, prefilled or not. Remembering the first refusal would send
+    // every later forced call to this endpoint without the prefill until the gateway restarts —
+    // the mode that wrote 13,263 characters of prose on 2026-10-07.
+    const notThePrefills = () => Object.assign(new Error("400 Bad Request"), { status: 400 });
+    let refusing = true;
+    const { provider, bodies } = mockProvider(QWEN_XML, () => (refusing ? notThePrefills() : undefined));
+
+    await expect(provider.complete(messages, tools, undefined, FORCED_PREFILLED)).rejects.toThrow(/400/);
+    await expect(provider.completeViaStream(messages, tools, undefined, FORCED_PREFILLED)).rejects.toThrow(/400/);
+    refusing = false;
+    await provider.complete(messages, tools, undefined, FORCED_PREFILLED);
+    await provider.completeViaStream(messages, tools, undefined, FORCED_PREFILLED);
+
+    // Each refused call: the prefilled request, then its one retry without. Then both paths prefill again.
+    expect(bodies.map((body) => lastWireMessage(body)["role"])).toEqual(["assistant", "user", "assistant", "user", "assistant", "assistant"]);
+  });
+
+  it("complete(): only THE retry counts — refused, the retry fails, a budgeted attempt is served, nothing remembered", async () => {
+    // maxRetries 1 gives the call one more attempt after the free retry, 2 s later (faked here).
+    let call = 0;
+    const { provider, bodies } = mockProvider(QWEN_XML, () => {
+      call += 1;
+      if (call === 1) return prefillRefusal();
+      if (call === 2) return Object.assign(new Error("502 Bad Gateway"), { status: 502 });
+      return undefined;
+    }, { maxRetries: 1 });
+
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const served = provider.complete(messages, tools, undefined, FORCED_PREFILLED);
+      await vi.advanceTimersByTimeAsync(2000);
+      expect((await served).content).toBe("YES");
+    } finally {
+      vi.useRealTimers();
+    }
+    await provider.complete(messages, tools, undefined, FORCED_PREFILLED);
+
+    // The rest of the refused call went without the prefill; the next call is prefilled again.
+    expect(bodies.map((body) => lastWireMessage(body)["role"])).toEqual(["assistant", "user", "user", "assistant"]);
+  });
+
+  it("a context overflow is not taken for a refusal: not retried, and the next forced call is still prefilled", async () => {
+    // llama-server answers an overflow with 400 exceed_context_size_error, on the stream path too
+    // (the first error of a stream goes out as a plain response). It is about size, not the
+    // prefill's shape, and the same call without the prefill overflows as well.
+    const overflow = () => Object.assign(
+      new Error("400 request (70123 tokens) exceeds the available context size (65536 tokens), try increasing it"),
+      { status: 400, type: "exceed_context_size_error" },
+    );
+    let overflowing = true;
+    const { provider, bodies } = mockProvider(QWEN_XML, () => (overflowing ? overflow() : undefined));
+
+    await expect(provider.complete(messages, tools, undefined, FORCED_PREFILLED)).rejects.toThrow(/exceeds the available context size/);
+    await expect(provider.completeViaStream(messages, tools, undefined, FORCED_PREFILLED)).rejects.toThrow(/exceeds the available context size/);
+    overflowing = false;
+    await provider.complete(messages, tools, undefined, FORCED_PREFILLED);
+
+    // One request per overflowing call, and the prefill stays on.
+    expect(bodies.map((body) => lastWireMessage(body)["role"])).toEqual(["assistant", "assistant", "assistant"]);
+  });
+
+  it("the stream path remembers the refusal only once the retry is served to the end", async () => {
+    // The first retry is cut after its first delta: the partial is salvaged, but the retry was not
+    // served, so nothing shows the prefill was the cause. The second call's retry is served.
+    let cutRetry = true;
+    const { provider, bodies } = mockProvider(QWEN_XML, refusePrefilled, {
+      cut: (body) => cutRetry && lastWireMessage(body)["role"] === "user",
+    });
+
+    await provider.completeViaStream(messages, tools, undefined, FORCED_PREFILLED);
+    cutRetry = false;
+    await provider.completeViaStream(messages, tools, undefined, FORCED_PREFILLED);
+    await provider.completeViaStream(messages, tools, undefined, FORCED_PREFILLED);
+
+    expect(bodies.map((body) => lastWireMessage(body)["role"])).toEqual(["assistant", "user", "assistant", "user", "user"]);
+  });
+
+  it("the warnings carry what the server answered, redacted", async () => {
+    // An opener the tool-call grammar does not take: llama-server fails the sampler setup with 400
+    // (b11015, server-context.cpp). The key-shaped string stands for anything a server may echo.
+    // A made-up key, assembled at run time: as one literal it is a secret-scanner hit (GitHub
+    // flagged one in a redaction test on 2026-09-29), although the redaction only needs it here.
+    const echoedKey = ["sk", "proj", "ABCDEFGHIJ1234567890"].join("-");
+    const grammarRefusal = () => Object.assign(
+      new Error(`400 Failed to initialize samplers: Unexpected empty grammar stack after accepting piece: < (${echoedKey})`),
+      { status: 400 },
+    );
+    const { provider } = mockProvider(QWEN_XML, (body) => (lastWireMessage(body)["role"] === "assistant" ? grammarRefusal() : undefined));
+    await provider.complete(messages, tools, undefined, FORCED_PREFILLED);
+
+    // One when the call is retried without the prefill, one when the served retry makes it a refusal.
+    const prefillWarnings = warnings.filter((warning) => /prefill/i.test(warning.msg));
+    expect(prefillWarnings).toHaveLength(2);
+    for (const warning of prefillWarnings) {
+      expect(warning.fields["status"]).toBe(400);
+      expect(warning.fields["error"]).toContain("Failed to initialize samplers: Unexpected empty grammar stack");
+      expect(String(warning.fields["error"])).not.toContain("ABCDEFGHIJ");
+    }
   });
 
   it("the stream path: the refusal comes before any chunk, and the retry is served", async () => {
@@ -425,9 +547,12 @@ describe("a refused prefill: the endpoint is remembered, and the call is retried
     });
 
     const result = await provider.completeViaStream(messages, tools, undefined, FORCED_PREFILLED);
+    await provider.completeViaStream(messages, tools, undefined, FORCED_PREFILLED);
 
     expect(result.content).toBe("YES");
-    expect(bodies).toHaveLength(3);
+    // The rest of the call goes without the prefill. The retry itself was dropped, not served, so
+    // nothing was remembered and the next call is prefilled again.
+    expect(bodies.map((body) => lastWireMessage(body)["role"])).toEqual(["assistant", "user", "user", "assistant"]);
   });
 
   it("is remembered per endpoint AND model: another model behind the same address keeps its prefill", async () => {
@@ -460,7 +585,16 @@ describe("a refused prefill: the endpoint is remembered, and the call is retried
   it("reads only a 4xx about the request as a refusal", () => {
     expect(isToolCallPrefillRefusal(prefillRefusal())).toBe(true);
     expect(isToolCallPrefillRefusal({ status: 400, message: "Cannot continue an assistant message that contains tool calls." })).toBe(true);
+    expect(isToolCallPrefillRefusal({ status: 400, message: "400 Failed to initialize samplers: Unexpected empty grammar stack after accepting piece: <" })).toBe(true);
     expect(isToolCallPrefillRefusal({ status: 422, message: "unprocessable" })).toBe(true);
+    // Size, not shape: llama-server's context overflow is a 400 of its own type, and a body over a
+    // proxy's limit is a 413. The same call without the prefill fails the same way.
+    expect(isToolCallPrefillRefusal({
+      status: 400,
+      type: "exceed_context_size_error",
+      message: "400 request (70123 tokens) exceeds the available context size (65536 tokens), try increasing it",
+    })).toBe(false);
+    expect(isToolCallPrefillRefusal({ status: 413, message: "Payload Too Large" })).toBe(false);
     // The credential, time and load: a condition that passes must not switch the prefill off for good.
     for (const status of [401, 403, 408, 429]) expect(isToolCallPrefillRefusal({ status, message: "x" })).toBe(false);
     // A llama-swap restart answers 502 for seconds.

@@ -238,10 +238,11 @@ export const ModelConfigSchema = z.object({
    *  config) all serve that syntax through llama.cpp's Qwen3-Coder handler with
    *  --prefill-assistant (on by default): the opener must be a valid start of the server's
    *  tool-call grammar. A model preset that replaces the model (activeModelPreset) drops it,
-   *  as it drops the tiers and endpoint overrides: the syntax is the replaced model's. An
-   *  endpoint that answers a prefilled request with HTTP 4xx is remembered and gets its forced
-   *  calls without one. Qwen3's JSON tool-call syntax needs a different opener and is not
-   *  covered. The Anthropic provider ignores it. */
+   *  as it drops the tiers and endpoint overrides: the syntax is the replaced model's. A
+   *  prefilled request answered with an HTTP 4xx about the request is retried once without the
+   *  prefill, and only when that retry is served is the endpoint remembered and its forced calls
+   *  sent without one; a context overflow is not taken for a refusal. Qwen3's JSON tool-call
+   *  syntax needs a different opener and is not covered. The Anthropic provider ignores it. */
   toolCallPrefill: z.enum(["qwen-xml"]).optional(),
   /** Optional model-tier ladder. When set, the orchestrator swaps in the
    *  tier-specific model for certain paths instead of `primary`:
