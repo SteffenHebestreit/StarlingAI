@@ -58,7 +58,7 @@ Every public schema field, where it is declared, and how many production files r
 | `blendMode` | packages/core/src/config/schemas/retrieval.ts:40 | 4 |
 | `blockOn` | packages/core/src/config/schema.ts:1239 | 1 |
 | `botToken` | packages/core/src/config/schemas/channels.ts:10 | 10 |
-| `browser` | packages/core/src/config/schemas/decisions.ts:85 | 73 |
+| `browser` | packages/core/src/config/schemas/decisions.ts:85 | 74 |
 | `bucket` | packages/core/src/config/schema.ts:458 | 23 |
 | `budget` | packages/core/src/config/schema.ts:1631 | 90 |
 | `budgets` | packages/core/src/config/schema.ts:519 | 14 |
@@ -197,7 +197,7 @@ Every public schema field, where it is declared, and how many production files r
 | `holdoutRate` | packages/core/src/config/schema.ts:1486 | 2 |
 | `honestSynthesisOnPartialEvidence` | packages/core/src/config/schemas/orchestration.ts:602 | 1 |
 | `host` | packages/core/src/config/schema.ts:707 | 115 |
-| `http` | packages/core/src/config/schema.ts:752 | 87 |
+| `http` | packages/core/src/config/schema.ts:752 | 88 |
 | `humanInLoopSteps` | packages/core/src/config/schema.ts:1309 | 20 |
 | `id` | packages/core/src/config/schema.ts:561 | 288 |
 | `ignoreCase` | packages/core/src/config/schema.ts:1356 | 2 |
@@ -505,7 +505,7 @@ Every public schema field, where it is declared, and how many production files r
 | `type` | packages/core/src/config/schema.ts:964 | 459 |
 | `ungroundedFactualAnswerGuard` | packages/core/src/config/schemas/orchestration.ts:150 | 2 |
 | `upfrontSourceSensitiveClassifier` | packages/core/src/config/schemas/orchestration.ts:183 | 2 |
-| `url` | packages/core/src/config/schema.ts:563 | 147 |
+| `url` | packages/core/src/config/schema.ts:563 | 148 |
 | `urlFetchEnforcement` | packages/core/src/config/schemas/orchestration.ts:130 | 1 |
 | `urlNotFetchedShortAnswerGuard` | packages/core/src/config/schemas/orchestration.ts:283 | 1 |
 | `urls` | packages/core/src/config/schema.ts:786 | 10 |
