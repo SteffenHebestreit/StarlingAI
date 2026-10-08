@@ -85,6 +85,8 @@ class FakeGateway {
   sharedWorkspace = false;
   /** An HTTP status every memory listing answers with instead of the entries. */
   memoryListingStatus: number | null = null;
+  /** The same, for one account's listings only. */
+  readonly memoryListingFailures = new Map<string, number>();
   readonly judgeRequests: Array<Record<string, unknown>> = [];
   readonly chatSends: Array<Record<string, unknown>> = [];
   readonly sessionChannels: string[] = [];
@@ -94,7 +96,7 @@ class FakeGateway {
   /** HTTP requests ("<METHOD> <path>") and "chat.send", in the order they arrived. */
   readonly sequence: string[] = [];
   /** Durable memory by `<store>:<scope>` (store: the account, or "shared"), key → record. */
-  readonly memory = new Map<string, Map<string, { id: string; content: string }>>();
+  readonly memory = new Map<string, Map<string, { id?: string; content: string }>>();
   private memoryCounter = 0;
   /** The dialectic user model by store (user-model/service.ts): its lists only. */
   readonly userModels = new Map<string, Record<string, string[]>>();
@@ -123,12 +125,12 @@ class FakeGateway {
     return !this.authEnabled || (scope === "workspace" && this.sharedWorkspace) ? "shared" : user;
   }
 
-  /** A durable memory entry as memory_store writes one: a fresh id per entry. */
-  remember(store: string, scope: MemoryScope, key: string, content = key): void {
-    const entries = this.memory.get(`${store}:${scope}`) ?? new Map<string, { id: string; content: string }>();
+  /** A durable memory entry as memory_store writes one: a fresh id per entry (withoutId: listed without one). */
+  remember(store: string, scope: MemoryScope, key: string, content = key, options: { withoutId?: boolean } = {}): void {
+    const entries = this.memory.get(`${store}:${scope}`) ?? new Map<string, { id?: string; content: string }>();
     this.memory.set(`${store}:${scope}`, entries);
     this.memoryCounter += 1;
-    entries.set(key, { id: `mem-${this.memoryCounter}`, content });
+    entries.set(key, options.withoutId ? { content } : { id: `mem-${this.memoryCounter}`, content });
   }
 
   memoryKeys(store: string, scope: MemoryScope): string[] {
@@ -314,12 +316,13 @@ class FakeGateway {
       return json(200, { hello: "world", user, session: decodeURIComponent(url.pathname.slice("/api/echo/".length)), token: "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJldmFsIn0.c2lnbmF0dXJlLXNpZ25hdHVyZQ" });
     }
     if (req.method === "GET" && url.pathname === "/api/memory/entries") {
-      if (this.memoryListingStatus !== null) return json(this.memoryListingStatus, { error: "memory store unavailable" });
+      const failure = this.memoryListingStatus ?? this.memoryListingFailures.get(user) ?? null;
+      if (failure !== null) return json(failure, { error: "memory store unavailable" });
       const scope = url.searchParams.get("scope") === "user" ? "user" : "workspace";
       const query = (url.searchParams.get("query") ?? "").toLowerCase();
       const limit = Number(url.searchParams.get("limit") ?? 200);
-      const records = [...(this.memory.get(`${this.storeOf(user, scope)}:${scope}`) ?? new Map<string, { id: string; content: string }>())]
-        .map(([key, entry]) => ({ id: entry.id, key, subject: key, content: entry.content }))
+      const records = [...(this.memory.get(`${this.storeOf(user, scope)}:${scope}`) ?? new Map<string, { id?: string; content: string }>())]
+        .map(([key, entry]) => ({ ...(entry.id ? { id: entry.id } : {}), key, subject: key, content: entry.content }))
         .filter((record) => !query || record.content.toLowerCase().includes(query) || record.key.toLowerCase().includes(query));
       const paged = records.slice(0, limit);
       return json(200, { scope, total: records.length, returned: paged.length, records: paged });
@@ -468,6 +471,7 @@ beforeEach(() => {
   gateway.authEnabled = true;
   gateway.sharedWorkspace = false;
   gateway.memoryListingStatus = null;
+  gateway.memoryListingFailures.clear();
   gateway.memory.clear();
   gateway.userModels.clear();
   gateway.setScripts([
@@ -787,6 +791,50 @@ describe("e2e harness against a fake gateway", () => {
     expect(shared.attempts[0]!.notes).toEqual([
       "memory reset: eval's workspace memory left as it is: eval-viewer lists the same entries, so the gateway keeps that scope in one shared store",
     ]);
+  });
+
+  it("leaves a scope alone when nothing shows it is the eval account's own: no other eval account, its listing failed, an entry without an id", async () => {
+    // Only another eval account's listing tells a shared store apart (a gateway older than 5fc9a8e
+    // keeps workspace memory in one store for every account), so without it the reset proves
+    // nothing, and a delete there takes the operator's memory for good.
+    const scenario: E2EScenario = { id: "fake-reset-unproven", title: "Reset without proof", group: "core", steps: [{ ...helloTurn }] };
+    gateway.sharedWorkspace = true;
+    gateway.remember("shared", "workspace", "operator_decision");
+
+    // A credentials file with eval alone (written by hand, or eval-viewer taken out).
+    gateway.remember("eval", "user", "favorite_tea");
+    const alone = new GatewayClient({ baseUrl: gateway.url, credentials: { eval: credentials()["eval"]! }, rpcTimeoutMs: 5_000, connectTimeoutMs: 5_000 });
+    try {
+      const evalOnly = await runScenario(loaded(scenario), deps({ client: alone }), FAST);
+      expect(evalOnly.attempts[0]!.notes).toEqual([
+        "memory reset: eval's user memory left as it is: cannot tell whether it is eval's own (no other eval account to compare with)",
+        "memory reset: eval's workspace memory left as it is: cannot tell whether it is eval's own (no other eval account to compare with)",
+      ]);
+    } finally {
+      alone.close();
+    }
+    expect(gateway.memoryKeys("shared", "workspace")).toEqual(["operator_decision"]);
+    expect(gateway.memoryKeys("eval", "user")).toEqual(["favorite_tea"]);
+
+    // eval-viewer's listing fails: no answer is no proof.
+    gateway.memory.delete("eval:user");
+    gateway.memoryListingFailures.set("eval-viewer", 500);
+    const unlisted = await runScenario(loaded(scenario), deps(), FAST);
+    expect(unlisted.attempts[0]!.notes).toEqual([
+      "memory reset: eval's workspace memory left as it is: cannot tell whether it is eval's own (eval-viewer's listing answered HTTP 500)",
+    ]);
+    expect(gateway.memoryKeys("shared", "workspace")).toEqual(["operator_decision"]);
+
+    // An entry listed without an id cannot be compared with another account's entries.
+    gateway.memoryListingFailures.clear();
+    gateway.sharedWorkspace = false;
+    gateway.remember("eval", "user", "favorite_tea");
+    gateway.remember("eval", "user", "legacy_note", "legacy_note", { withoutId: true });
+    const idless = await runScenario(loaded(scenario), deps(), FAST);
+    expect(idless.attempts[0]!.notes).toEqual([
+      "memory reset: eval's user memory left as it is: cannot tell whether it is eval's own (an entry without an id)",
+    ]);
+    expect(gateway.memoryKeys("eval", "user")).toEqual(["favorite_tea", "legacy_note"]);
   });
 
   it("says what the reset left: entries the gateway refused to delete, a listing that failed; and empties more than one page", async () => {
