@@ -11,7 +11,7 @@ Every public schema field, where it is declared, and how many production files r
 | `a2a` | packages/core/src/config/schema.ts:399 | 12 |
 | `accessKeyId` | packages/core/src/config/schema.ts:459 | 2 |
 | `accessToken` | packages/core/src/config/schemas/channels.ts:51 | 9 |
-| `account` | packages/core/src/config/schemas/channels.ts:71 | 79 |
+| `account` | packages/core/src/config/schemas/channels.ts:71 | 80 |
 | `acquireTimeoutMs` | packages/core/src/config/schema.ts:1674 | 1 |
 | `activeModelPreset` | packages/core/src/config/schema.ts:1705 | 2 |
 | `adaptive` | packages/core/src/config/schemas/decisions.ts:57 | 14 |
@@ -158,7 +158,7 @@ Every public schema field, where it is declared, and how many production files r
 | `embeddingApiKey` | packages/core/src/config/schema.ts:177 | 6 |
 | `embeddingBaseUrl` | packages/core/src/config/schema.ts:175 | 6 |
 | `embeddingModel` | packages/core/src/config/schema.ts:173 | 27 |
-| `enabled` | packages/core/src/config/schema.ts:289 | 131 |
+| `enabled` | packages/core/src/config/schema.ts:289 | 132 |
 | `enableThinking` | packages/core/src/config/schema.ts:195 | 21 |
 | `endpoint` | packages/core/src/config/schema.ts:456 | 80 |
 | `endpointUnits` | packages/core/src/config/schema.ts:1672 | 1 |
@@ -226,7 +226,7 @@ Every public schema field, where it is declared, and how many production files r
 | `keywords` | packages/core/src/config/schemas/multimodal.ts:237 | 28 |
 | `kubeconfigPath` | packages/core/src/config/schema.ts:1069 | 1 |
 | `kubectlBinary` | packages/core/src/config/schema.ts:1067 | 1 |
-| `label` | packages/core/src/config/schema.ts:249 | 141 |
+| `label` | packages/core/src/config/schema.ts:249 | 142 |
 | `labeledAt` | packages/core/src/config/schema.ts:903 | 1 |
 | `labeledBy` | packages/core/src/config/schema.ts:902 | 1 |
 | `language` | packages/core/src/config/schemas/multimodal.ts:236 | 94 |
@@ -404,7 +404,7 @@ Every public schema field, where it is declared, and how many production files r
 | `retrievalTopK` | packages/core/src/config/schemas/retrieval.ts:103 | 3 |
 | `reuseSessionEvidenceOnRefinement` | packages/core/src/config/schemas/orchestration.ts:586 | 1 |
 | `riskGatedQA` | packages/core/src/config/schemas/effort.ts:47 | 7 |
-| `role` | packages/core/src/config/schema.ts:918 | 128 |
+| `role` | packages/core/src/config/schema.ts:918 | 129 |
 | `rolesClaim` | packages/core/src/config/schema.ts:394 | 1 |
 | `routing` | packages/core/src/config/schema.ts:236 | 105 |
 | `routingRestatementRescue` | packages/core/src/config/schemas/orchestration.ts:851 | 1 |
