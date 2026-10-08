@@ -76,6 +76,17 @@ vi.mock("../tools/registry.js", async (importOriginal) => {
       if (name === "delegate_to_agent" && ctx.allowedAgents && !ctx.allowedAgents.includes(agentName)) {
         return { success: false, output: "", error: `Agent '${agentName}' is not permitted in this scene. Allowed agents: ${ctx.allowedAgents.join(", ")}` };
       }
+      if (name === "delegate_to_agent" && String(args["task"] ?? "").includes("TIMES-OUT")) {
+        // A run that ended without an answer, as executeDelegationWithFallback reports it: the
+        // agents it attempted, and no agent the result is from.
+        delegated.push(args);
+        return {
+          success: false,
+          output: "",
+          error: "Delegation for task 'Find the bug in invoices.py.' failed: No suitable agent completed the task.",
+          metadata: { taskId: "task_1", attemptedAgents: [agentName], delegationSucceeded: false, delegationOutcome: "timeout_cascade", timeoutCascade: true, timedOutAgents: [agentName] },
+        };
+      }
       if (name === "delegate_to_agent") {
         delegated.push(args);
         return {
@@ -391,6 +402,27 @@ describe("a turn the user directed to one agent", () => {
     expect(result.response).toContain("MODEL-ANSWER");
   });
 
+  it("is released by a run of the named agent that failed: the agent ran", async () => {
+    // A run that ended without an answer (every attempt timed out) reports the agents it attempted
+    // and no agent it is from. The agent did run; dispatching it again would repeat the run that
+    // just timed out.
+    const { AgentSession, runTurn } = await loadRuntime();
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      call += 1;
+      return call === 1
+        ? toolStream("delegate_to_agent", { agentName: "code_analyst", task: "Find the bug in invoices.py. TIMES-OUT" })
+        : answerStream(ANSWER);
+    });
+
+    const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
+    await runTurn({ session, userMessage: MESSAGE, allowedAgents: ["code_analyst"], directiveAgent: "code_analyst" });
+
+    expect(delegated).toHaveLength(1);
+    expect(toolChoiceOf(1)).toBeUndefined();
+    expect(promptOf(1)).not.toContain(DIRECTIVE_LINE);
+  });
+
   it("is released once a fan-out reported a delegation that ran", async () => {
     // A tool that reports the calls it made (parallel_delegate, execute_plan) names no agent; on a
     // turn whose grant is the named agent alone, a delegation that ran is that agent's.
@@ -453,6 +485,27 @@ describe("a turn the user directed to one agent", () => {
     expect(executed).toContain("run_workflow");
     expect(delegated).toHaveLength(1);
     expect(delegated[0]).toMatchObject({ agentName: "code_analyst" });
+    expect(result.performance?.finishReason).not.toBe("synthesis_required_tool_call_rejected");
+    expect(result.response).toContain("MODEL-ANSWER");
+  });
+
+  it("lets the named agent, called by its own name as a tool, through after a workflow ran", async () => {
+    // The synthesis-required guard reads the response as the model wrote it. A call of the agent by
+    // its own name becomes the delegation to it only when it runs, after the guard, so the guard has
+    // to know that name as the directed delegation too.
+    const { AgentSession, runTurn } = await loadRuntime({ subAgents: { code_analyst: CODE_ANALYST } });
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      call += 1;
+      if (call === 1) return toolStream("run_workflow", { name: "code_review", workflowType: "scene" });
+      if (call === 2) return toolStream("code_analyst", { task: "Find the bug in invoices.py." });
+      return answerStream(ANSWER);
+    });
+
+    const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
+    const result = await runTurn({ session, userMessage: MESSAGE, allowedAgents: ["code_analyst"], directiveAgent: "code_analyst" });
+
+    expect(delegated).toEqual([expect.objectContaining({ agentName: "code_analyst" })]);
     expect(result.performance?.finishReason).not.toBe("synthesis_required_tool_call_rejected");
     expect(result.response).toContain("MODEL-ANSWER");
   });
