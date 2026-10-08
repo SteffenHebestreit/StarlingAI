@@ -1,0 +1,270 @@
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Hono } from "hono";
+
+/**
+ * The document and knowledge-base routes and the session id a request names (found in review,
+ * 2026-10-09).
+ *
+ * Both took `sessionId` from the query or the body as it came. A session's documents are the ones
+ * whose source is that id's, and a session KB is visible to whoever presents its session's id, so a
+ * caller who knew another account's session id could list, download, mark outdated or delete that
+ * session's documents, upload into it, and list, inspect, re-crawl, edit or delete its KBs, or
+ * create one there with ambient retrieval that then fed the owner's turns. Under multi-user auth a
+ * session id must now be one the caller may use (callerMayUseSession), and a refusal is the session
+ * routes' opaque 404. With auth off every caller may, as before.
+ */
+const SESSION_STORE_DIR = vi.hoisted(() => {
+  // The session store resolves its path when the module loads; a temp one, not the source tree's.
+  const { mkdtempSync: mk } = require("node:fs") as typeof import("node:fs");
+  const { tmpdir: tmp } = require("node:os") as typeof import("node:os");
+  const { join: j } = require("node:path") as typeof import("node:path");
+  const dir = mk(j(tmp(), "doc-kb-routes-sessions-"));
+  process.env["SAI_SESSION_STORE"] = j(dir, "sessions.json");
+  return dir;
+});
+
+/** What reached the document store, the object store and the crawler. */
+const reached = vi.hoisted(() => [] as string[]);
+/** The documents engram holds: set per test. */
+const engramDocs = vi.hoisted(() => ({ list: [] as Array<{ id: string; title: string; chunkCount: number; sources: string[] }> }));
+
+vi.mock("../retrieval/engram.js", async (importActual) => ({
+  ...(await importActual<typeof import("../retrieval/engram.js")>()),
+  engramListDocuments: async () => engramDocs.list,
+  engramConfigured: () => true,
+}));
+vi.mock("../retrieval/document-registry.js", async (importActual) => ({
+  ...(await importActual<typeof import("../retrieval/document-registry.js")>()),
+  listRegistry: async () => [],
+  getRegistryFileEntry: async (documentId: string) => ({
+    documentId, source: "", relativePath: "uploads/notes.md", filename: "notes.md", contentType: "text/markdown",
+  }),
+}));
+vi.mock("../retrieval/document-rag.js", async (importActual) => ({
+  ...(await importActual<typeof import("../retrieval/document-rag.js")>()),
+  forgetDocument: async () => { reached.push("forgetDocument"); return true; },
+  invalidateDocument: async () => { reached.push("invalidateDocument"); return true; },
+  ingestDocumentBytes: async () => {
+    reached.push("ingestDocumentBytes");
+    return { ok: true, result: { documentId: "doc-new", title: "notes", scope: "session", chunkCount: 1, keywords: [], source: "", text: "" } };
+  },
+}));
+vi.mock("../storage/uploads.js", () => ({
+  scanAndStoreUpload: async () => { reached.push("scanAndStoreUpload"); return { ok: true }; },
+}));
+vi.mock("../storage/object-store.js", async (importActual) => ({
+  ...(await importActual<typeof import("../storage/object-store.js")>()),
+  getUpload: async () => { reached.push("getUpload"); return new TextEncoder().encode("the early ferry leaves at 07:40"); },
+}));
+vi.mock("../retrieval/kb-crawler.js", async (importActual) => ({
+  ...(await importActual<typeof import("../retrieval/kb-crawler.js")>()),
+  isCrawlActive: () => false,
+  startKbCrawl: async () => { reached.push("startKbCrawl"); return { ok: true }; },
+  cancelKbCrawl: async () => { reached.push("cancelKbCrawl"); return true; },
+  deleteKnowledgeBase: async () => { reached.push("deleteKnowledgeBase"); return { ok: true, documentsRemoved: 0, documentsFailed: 0 }; },
+}));
+
+const account = (username: string) => ({
+  username, role: "operator", passwordHash: "scrypt$placeholder-hash-not-used-here", createdAt: "2026-10-09T00:00:00Z",
+});
+
+const dirs: string[] = [];
+
+afterEach(async () => {
+  reached.length = 0;
+  engramDocs.list = [];
+  const session = await import("../agent/session.js");
+  for (const active of session.getAllSessions()) session.endSession(active.id);
+  delete process.env["SAI_CONFIG_PATH"];
+  (await import("../config/loader.js")).resetConfigForTests();
+  (await import("../gateway/auth.js")).resetAuthStateForTests();
+  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  vi.resetModules();
+});
+
+afterAll(() => {
+  delete process.env["SAI_SESSION_STORE"];
+  rmSync(SESSION_STORE_DIR, { recursive: true, force: true });
+});
+
+interface Deployment {
+  request: (as: string, path: string, init?: { method?: string; json?: unknown; form?: FormData }) => Promise<Response>;
+  /** A chat session Alice owns. */
+  aliceSession: string;
+}
+
+/** Alice and Bob as accounts when `authEnabled`, the two route groups as the gateway serves them. */
+async function deployment(authEnabled: boolean): Promise<Deployment> {
+  const dir = mkdtempSync(join(tmpdir(), "doc-kb-routes-"));
+  dirs.push(dir);
+  writeFileSync(join(dir, "starlingai.json"), JSON.stringify({
+    workspacePath: dir,
+    gateway: { jwtSecret: "d".repeat(40) },
+    ...(authEnabled ? { auth: { enabled: true, users: [account("alice"), account("bob")] } } : {}),
+  }), "utf8");
+  process.env["SAI_CONFIG_PATH"] = join(dir, "starlingai.json");
+  vi.resetModules();
+
+  const [{ registerDocumentRoutes }, { registerKnowledgeBaseRoutes }, auth, session] = await Promise.all([
+    import("../gateway/document-routes.js"),
+    import("../gateway/knowledge-base-routes.js"),
+    import("../gateway/auth.js"),
+    import("../agent/session.js"),
+  ]);
+  const app = new Hono();
+  registerDocumentRoutes(app);
+  registerKnowledgeBaseRoutes(app);
+  const aliceSession = session.createSession({ channel: "webchat", userId: "alice" }).id;
+
+  const request: Deployment["request"] = async (as, path, init = {}) => {
+    const headers: Record<string, string> = { Authorization: `Bearer ${await auth.createToken(as, { role: "operator" })}` };
+    if (init.json !== undefined) headers["Content-Type"] = "application/json";
+    return app.request(path, {
+      method: init.method ?? "GET",
+      headers,
+      ...(init.json !== undefined ? { body: JSON.stringify(init.json) } : {}),
+      ...(init.form ? { body: init.form } : {}),
+    });
+  };
+  return { request, aliceSession };
+}
+
+/** A document in Alice's session's library. */
+function aliceSessionDocument(aliceSession: string): void {
+  engramDocs.list = [{ id: "doc-ferry", title: "Ferry notes", chunkCount: 2, sources: [`session:${aliceSession}`] }];
+}
+
+/** An upload of a small Markdown file into `sessionId`'s library. */
+function sessionUpload(sessionId: string): FormData {
+  const form = new FormData();
+  form.append("file", new File(["the early ferry leaves at 07:40"], "notes.md", { type: "text/markdown" }));
+  form.append("scope", "session");
+  form.append("sessionId", sessionId);
+  return form;
+}
+
+/** A session KB in Alice's session, with ambient retrieval. */
+async function aliceSessionKb(aliceSession: string): Promise<string> {
+  const { createKnowledgeBase } = await import("../retrieval/knowledge-bases.js");
+  const created = await createKnowledgeBase({
+    name: "Ferry timetables", seedUrls: ["https://ferries.example/timetable"], scope: "session", sessionId: aliceSession, ambientRetrieval: true,
+  });
+  if (!created.ok) throw new Error(created.error);
+  return created.value.id;
+}
+
+async function expectSessionNotFound(response: Response): Promise<void> {
+  expect(response.status).toBe(404);
+  expect(await response.json()).toEqual({ error: "Session not found" });
+}
+
+describe("document routes and the session a request names", () => {
+  it("under multi-user auth, refuses another account's session on every route, and touches nothing", async () => {
+    const { request, aliceSession } = await deployment(true);
+    aliceSessionDocument(aliceSession);
+    const q = `sessionId=${encodeURIComponent(aliceSession)}`;
+
+    await expectSessionNotFound(await request("bob", `/api/documents?${q}`));
+    await expectSessionNotFound(await request("bob", `/api/documents/doc-ferry/file?${q}`));
+    await expectSessionNotFound(await request("bob", `/api/documents/doc-ferry/invalidate?${q}`, { method: "POST" }));
+    await expectSessionNotFound(await request("bob", `/api/documents/doc-ferry?scope=session&${q}`, { method: "DELETE" }));
+    await expectSessionNotFound(await request("bob", "/api/documents", { method: "POST", form: sessionUpload(aliceSession) }));
+    expect(reached).toEqual([]);
+  });
+
+  it("under multi-user auth, still serves the session's owner", async () => {
+    const { request, aliceSession } = await deployment(true);
+    aliceSessionDocument(aliceSession);
+    const q = `sessionId=${encodeURIComponent(aliceSession)}`;
+
+    const list = await request("alice", `/api/documents?${q}`);
+    expect(list.status).toBe(200);
+    expect(((await list.json()) as { documents: Array<{ id: string }> }).documents.map((d) => d.id)).toEqual(["doc-ferry"]);
+    expect((await request("alice", `/api/documents/doc-ferry/file?${q}`)).status).toBe(200);
+    expect((await request("alice", `/api/documents/doc-ferry?scope=session&${q}`, { method: "DELETE" })).status).toBe(200);
+    expect((await request("alice", "/api/documents", { method: "POST", form: sessionUpload(aliceSession) })).status).toBe(200);
+    expect(reached).toEqual(["getUpload", "forgetDocument", "scanAndStoreUpload", "ingestDocumentBytes"]);
+  });
+
+  it("with one operator, takes the session id as it comes, as before", async () => {
+    const { request, aliceSession } = await deployment(false);
+    aliceSessionDocument(aliceSession);
+    const q = `sessionId=${encodeURIComponent(aliceSession)}`;
+
+    expect((await request("bob", `/api/documents?${q}`)).status).toBe(200);
+    expect((await request("bob", `/api/documents/doc-ferry/invalidate?${q}`, { method: "POST" })).status).toBe(200);
+    expect((await request("bob", `/api/documents/doc-ferry?scope=session&${q}`, { method: "DELETE" })).status).toBe(200);
+    expect((await request("bob", "/api/documents", { method: "POST", form: sessionUpload(aliceSession) })).status).toBe(200);
+    expect(reached).toEqual(["invalidateDocument", "forgetDocument", "scanAndStoreUpload", "ingestDocumentBytes"]);
+  });
+});
+
+describe("knowledge-base routes and the session a request names", () => {
+  it("under multi-user auth, refuses another account's session on every route, and changes nothing", async () => {
+    const { request, aliceSession } = await deployment(true);
+    const kbId = await aliceSessionKb(aliceSession);
+    const q = `sessionId=${encodeURIComponent(aliceSession)}`;
+
+    await expectSessionNotFound(await request("bob", `/api/knowledge-bases?${q}`));
+    await expectSessionNotFound(await request("bob", `/api/knowledge-bases/${kbId}?${q}`));
+    await expectSessionNotFound(await request("bob", `/api/knowledge-bases/${kbId}?${q}`, { method: "PATCH", json: { name: "Mine now" } }));
+    await expectSessionNotFound(await request("bob", `/api/knowledge-bases/${kbId}/crawl?${q}`, { method: "POST" }));
+    await expectSessionNotFound(await request("bob", `/api/knowledge-bases/${kbId}/cancel?${q}`, { method: "POST" }));
+    await expectSessionNotFound(await request("bob", `/api/knowledge-bases/${kbId}?${q}`, { method: "DELETE" }));
+    expect(reached).toEqual([]);
+
+    // Nor may he put a KB into her session, new or his own.
+    await expectSessionNotFound(await request("bob", "/api/knowledge-bases", {
+      method: "POST",
+      json: { name: "Ferry strikes", seedUrls: ["https://strikes.example/"], scope: "session", sessionId: aliceSession, ambientRetrieval: true, crawlNow: false },
+    }));
+    const own = await request("bob", "/api/knowledge-bases", {
+      method: "POST", json: { name: "Bob's ferries", seedUrls: ["https://bob.example/"], scope: "user", crawlNow: false },
+    });
+    expect(own.status).toBe(201);
+    const ownId = ((await own.json()) as { id: string }).id;
+    await expectSessionNotFound(await request("bob", `/api/knowledge-bases/${ownId}`, {
+      method: "PATCH", json: { scope: "session", sessionId: aliceSession, ambientRetrieval: true },
+    }));
+
+    const { listKnowledgeBases } = await import("../retrieval/knowledge-bases.js");
+    const kbs = await listKnowledgeBases();
+    expect(kbs.map((kb) => [kb.id, kb.name, kb.scope, kb.sessionId ?? null])).toEqual([
+      [kbId, "Ferry timetables", "session", aliceSession],
+      [ownId, "Bob's ferries", "user", null],
+    ]);
+  });
+
+  it("under multi-user auth, still serves the session's owner", async () => {
+    const { request, aliceSession } = await deployment(true);
+    const kbId = await aliceSessionKb(aliceSession);
+    const q = `sessionId=${encodeURIComponent(aliceSession)}`;
+
+    const list = await request("alice", `/api/knowledge-bases?${q}`);
+    expect(list.status).toBe(200);
+    expect(((await list.json()) as { knowledgeBases: Array<{ id: string }> }).knowledgeBases.map((kb) => kb.id)).toEqual([kbId]);
+    expect((await request("alice", `/api/knowledge-bases/${kbId}/crawl?${q}`, { method: "POST" })).status).toBe(200);
+    expect((await request("alice", "/api/knowledge-bases", {
+      method: "POST",
+      json: { name: "Ferry strikes", seedUrls: ["https://strikes.example/"], scope: "session", sessionId: aliceSession, crawlNow: false },
+    })).status).toBe(201);
+  });
+
+  it("with one operator, takes the session id as it comes, as before", async () => {
+    const { request, aliceSession } = await deployment(false);
+    const kbId = await aliceSessionKb(aliceSession);
+    const q = `sessionId=${encodeURIComponent(aliceSession)}`;
+
+    const list = await request("bob", `/api/knowledge-bases?${q}`);
+    expect(((await list.json()) as { knowledgeBases: Array<{ id: string }> }).knowledgeBases.map((kb) => kb.id)).toEqual([kbId]);
+    expect((await request("bob", `/api/knowledge-bases/${kbId}/crawl?${q}`, { method: "POST" })).status).toBe(200);
+    expect((await request("bob", "/api/knowledge-bases", {
+      method: "POST",
+      json: { name: "Ferry strikes", seedUrls: ["https://strikes.example/"], scope: "session", sessionId: aliceSession, crawlNow: false },
+    })).status).toBe(201);
+    expect(reached).toEqual(["startKbCrawl"]);
+  });
+});

@@ -12,6 +12,7 @@
 import type { Hono, Context } from "hono";
 import { verifyToken, extractBearerToken, authenticatedUser } from "./auth.js";
 import { registerRoutePolicies } from "./route-policies.js";
+import { callerMayUseSession } from "./session-route-access.js";
 import { getConfig } from "../config/loader.js";
 
 export function registerKnowledgeBaseRoutes(app: Hono): void {
@@ -30,11 +31,20 @@ export function registerKnowledgeBaseRoutes(app: Hono): void {
 
   // Caller identity for KB scope access control. In multi-user mode the username
   // owns user-scoped KBs; sessionId (query param) owns session-scoped KBs.
-  const kbAccessCtx = async (c: Context): Promise<{ userId?: string; sessionId?: string }> => {
+  //
+  // Null when the request names a session its caller may not act for (callerMayUseSession, the
+  // rule of the /api/sessions routes). The sessionId was taken as it came, and a session KB is
+  // visible to whoever presents its session's id: a caller who knew another account's session id
+  // could list, inspect, re-crawl, edit or delete that session's KBs (found in review, 2026-10-09).
+  // Under multi-user auth such a request now gets the session routes' opaque 404. With auth off
+  // every caller may, as before.
+  const kbAccessCtx = async (c: Context): Promise<{ userId?: string; sessionId?: string } | null> => {
     const user = await authenticatedUser(c.req.header("Authorization"));
     const sessionId = c.req.query("sessionId");
+    if (sessionId && !callerMayUseSession(user, sessionId)) return null;
     return { ...(user?.username ? { userId: user.username } : {}), ...(sessionId ? { sessionId } : {}) };
   };
+  const sessionNotFound = (c: Context) => c.json({ error: "Session not found" }, 404);
 
   app.get("/api/knowledge-bases", async (c) => {
     if (!await authorized(c.req.header("Authorization"))) return c.json({ error: "Unauthorized" }, 401);
@@ -45,6 +55,7 @@ export function registerKnowledgeBaseRoutes(app: Hono): void {
         import("../retrieval/engram.js"),
       ]);
       const who = await kbAccessCtx(c);
+      if (!who) return sessionNotFound(c);
       const kbs = filterAccessibleKbs(await listKnowledgeBases({ isCrawlActive }), who);
       return c.json({
         knowledgeBases: kbs.map(toSummary),
@@ -63,8 +74,10 @@ export function registerKnowledgeBaseRoutes(app: Hono): void {
         import("../retrieval/knowledge-bases.js"),
         import("../retrieval/kb-crawler.js"),
       ]);
+      const who = await kbAccessCtx(c);
+      if (!who) return sessionNotFound(c);
       const kb = await getKnowledgeBase(c.req.param("id"), { isCrawlActive });
-      if (!kb || !callerCanAccessKb(kb, await kbAccessCtx(c))) return c.json({ error: "Knowledge base not found" }, 404);
+      if (!kb || !callerCanAccessKb(kb, who)) return c.json({ error: "Knowledge base not found" }, 404);
       const pages = Object.values(kb.pages)
         .sort((a, b) => (a.url < b.url ? -1 : 1))
         .slice(0, 1000)
@@ -99,6 +112,10 @@ export function registerKnowledgeBaseRoutes(app: Hono): void {
       ]);
       const scope = ["session", "user", "workspace"].includes(String(body["scope"] ?? "")) ? String(body["scope"]) as "session" | "user" | "workspace" : undefined;
       const sessionId = typeof body["sessionId"] === "string" ? body["sessionId"] : undefined;
+      // A session KB is in the ambient retrieval of its session's turns: one created under another
+      // account's session id fed that account's turns. Under multi-user auth only a session the
+      // caller may act for, as on the routes above.
+      if (sessionId && !callerMayUseSession(user, sessionId)) return sessionNotFound(c);
       const created = await createKnowledgeBase({
         name: String(body["name"] ?? ""),
         seedUrls: Array.isArray(body["seedUrls"]) ? (body["seedUrls"] as string[]) : [],
@@ -138,8 +155,13 @@ export function registerKnowledgeBaseRoutes(app: Hono): void {
     try {
       const body = await c.req.json<Record<string, unknown>>();
       const { updateKnowledgeBase, getKnowledgeBase, callerCanAccessKb, toSummary } = await import("../retrieval/knowledge-bases.js");
+      const who = await kbAccessCtx(c);
+      if (!who) return sessionNotFound(c);
+      // Moving a KB into a session is creating one there: the body's session too.
+      const bodySessionId = typeof body["sessionId"] === "string" ? body["sessionId"] : "";
+      if (bodySessionId && !callerMayUseSession(user, bodySessionId)) return sessionNotFound(c);
       const existing = await getKnowledgeBase(c.req.param("id"));
-      if (!existing || !callerCanAccessKb(existing, await kbAccessCtx(c))) return c.json({ error: "Knowledge base not found" }, 404);
+      if (!existing || !callerCanAccessKb(existing, who)) return c.json({ error: "Knowledge base not found" }, 404);
       const scope = ["session", "user", "workspace"].includes(String(body["scope"] ?? "")) ? String(body["scope"]) as "session" | "user" | "workspace" : undefined;
       const updated = await updateKnowledgeBase(c.req.param("id"), {
         ...(body["name"] !== undefined ? { name: String(body["name"]) } : {}),
@@ -164,19 +186,23 @@ export function registerKnowledgeBaseRoutes(app: Hono): void {
     }
   });
 
-  // Access-gate a lifecycle action (crawl/cancel/delete) on an owned/visible KB.
-  const requireAccess = async (c: Context): Promise<boolean> => {
+  // Access-gate a lifecycle action (crawl/cancel/delete) on an owned/visible KB: the reply that
+  // refuses it, or null when the caller may.
+  const accessRefusal = async (c: Context): Promise<Response | null> => {
+    const who = await kbAccessCtx(c);
+    if (!who) return sessionNotFound(c);
     const id = c.req.param("id");
-    if (!id) return false;
+    if (!id) return c.json({ error: "Knowledge base not found" }, 404);
     const { getKnowledgeBase, callerCanAccessKb } = await import("../retrieval/knowledge-bases.js");
     const kb = await getKnowledgeBase(id);
-    return !!kb && callerCanAccessKb(kb, await kbAccessCtx(c));
+    return kb && callerCanAccessKb(kb, who) ? null : c.json({ error: "Knowledge base not found" }, 404);
   };
 
   app.post("/api/knowledge-bases/:id/crawl", async (c) => {
     if (!await authorized(c.req.header("Authorization"))) return c.json({ error: "Unauthorized" }, 401);
     try {
-      if (!await requireAccess(c)) return c.json({ error: "Knowledge base not found" }, 404);
+      const refused = await accessRefusal(c);
+      if (refused) return refused;
       const { startKbCrawl } = await import("../retrieval/kb-crawler.js");
       const started = await startKbCrawl(c.req.param("id"));
       return started.ok
@@ -190,7 +216,8 @@ export function registerKnowledgeBaseRoutes(app: Hono): void {
   app.post("/api/knowledge-bases/:id/cancel", async (c) => {
     if (!await authorized(c.req.header("Authorization"))) return c.json({ error: "Unauthorized" }, 401);
     try {
-      if (!await requireAccess(c)) return c.json({ error: "Knowledge base not found" }, 404);
+      const refused = await accessRefusal(c);
+      if (refused) return refused;
       const { cancelKbCrawl } = await import("../retrieval/kb-crawler.js");
       const cancelled = await cancelKbCrawl(c.req.param("id"));
       return cancelled
@@ -204,7 +231,8 @@ export function registerKnowledgeBaseRoutes(app: Hono): void {
   app.delete("/api/knowledge-bases/:id", async (c) => {
     if (!await authorized(c.req.header("Authorization"))) return c.json({ error: "Unauthorized" }, 401);
     try {
-      if (!await requireAccess(c)) return c.json({ error: "Knowledge base not found" }, 404);
+      const refused = await accessRefusal(c);
+      if (refused) return refused;
       const { deleteKnowledgeBase } = await import("../retrieval/kb-crawler.js");
       const result = await deleteKnowledgeBase(c.req.param("id"));
       if (!result.ok) return c.json({ error: result.error }, 404);
