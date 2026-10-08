@@ -39,6 +39,7 @@ import {
   addArgumentFigureKeys,
   addReceivedFigureKeys,
   countUnobservedFigures,
+  maskFiguresByKey,
   maskUnobservedFigures,
   namedFileSpans,
   numericDateForms,
@@ -3888,6 +3889,61 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       if (executionRecord.attempted > 0) shadowUnobservedFigures = countUnobservedFigures(text, observedFigureKeys, quoted);
       return text;
     };
+    /**
+     * WHAT THE RUN WROTE ITSELF, HANDED BACK BY A TOOL, IS NOT EVIDENCE IN THE RUNTIME'S OWN
+     * CHANNELS EITHER. The keys of the run's own claims that no input of it contained. In review,
+     * with a broken sandbox, the coder wrote "8393" and "7597648268" into results.md from its head
+     * and its execution failed. Its answer was masked, but a grep over the file was auto-shared as
+     * a fact under a tool-provenance key, which a coordinator then restated unmasked as a success;
+     * and when the model answered nothing, the scaffold below carried both figures to the parent as
+     * "Recovered evidence snippets", from a read-back or from the write's own text preview.
+     * `exceptRanFiles` leaves out the figures of files the run wrote and ran, the code constants
+     * the quoted-code check above reads past too (with the same caveat: a `cat` of a file counts).
+     */
+    const unreceivedOwnClaims = (exceptRanFiles: boolean): Set<string> => {
+      absorbNewHistory();
+      const ranFileKeys = new Set<string>();
+      if (exceptRanFiles) {
+        for (const [path, content] of writtenFileText) if (ranByTheRun(path)) addArgumentFigureKeys(ranFileKeys, content);
+      }
+      return new Set([...ownClaimFigureKeys].filter((key) => !observedFigureKeys.has(key) && !ranFileKeys.has(key)));
+    };
+    // What the last scaffold built masked: a later one replaces it as the run's account.
+    let scaffoldUnobservedFigures = 0;
+    /**
+     * The interrupted-run scaffold (buildInterruptedSubAgentOutput), with its evidence lines masked
+     * for the run's own claims while none of its executions has completed with output, and the
+     * masked figures counted in its record, so the parent's frame and the turn's directive say so.
+     * The runtime's own lines (files on disk, byte counts) are never touched.
+     */
+    const buildScaffold = (params: Parameters<typeof buildInterruptedSubAgentOutput>[0]): string => {
+      if (!tracksFigures || !noExecutionCompleted(executionRecord)) return buildInterruptedSubAgentOutput(params);
+      const unreceived = unreceivedOwnClaims(true);
+      let masked = 0;
+      const output = buildInterruptedSubAgentOutput({
+        ...params,
+        maskEvidence: (line) => {
+          const result = maskFiguresByKey(line, unreceived, writtenFileNameSpans(line));
+          masked += result.masked;
+          return result.text;
+        },
+      });
+      const total = (executionRecord.unobservedFigures ?? 0) - scaffoldUnobservedFigures + masked;
+      scaffoldUnobservedFigures = masked;
+      if (total > 0) executionRecord.unobservedFigures = total;
+      else delete executionRecord.unobservedFigures;
+      if (masked > 0) {
+        logAudit("guardrail_flagged", {
+          type: "sub_agent_unobserved_figures_masked",
+          agentName: opts.agentName,
+          site: "interrupted_scaffold",
+          masked,
+          attempted: executionRecord.attempted,
+          failed: executionRecord.failed,
+        }, { sessionId: subSessionId, severity: "warn" });
+      }
+      return output;
+    };
     // Workspace-relative paths this run successfully wrote or edited, in call order.
     // Feeds describeMutatedWorkspaceFiles on the interrupted paths so a cut-off staged
     // build hands back what is on disk instead of discarding it.
@@ -4507,7 +4563,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         return { result: rawResult, forcedOutcome: null };
       }
 
-      const recovered = buildInterruptedSubAgentOutput({
+      const recovered = buildScaffold({
         agentName: opts.agentName,
         reason: "produced no final response after substantive work.",
         swarmState: opts.swarmState,
@@ -4545,7 +4601,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         return { result: rawResult, forcedOutcome: null };
       }
 
-      const recovered = buildInterruptedSubAgentOutput({
+      const recovered = buildScaffold({
         agentName: opts.agentName,
         reason: "produced an incomplete synthesis after substantive work.",
         swarmState: toolContext.swarmState,
@@ -4792,7 +4848,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         if (result === "Sub-agent produced no final response.") {
           return null;
         }
-        // The model's answer only: a recovered scaffold is the runtime's own account of the run.
+        // The model's answer only: a recovered scaffold is the runtime's own account of the run,
+        // whose evidence lines buildScaffold masked as it built them.
         if (!recovered.forcedOutcome && !truncationRecovered.forcedOutcome) {
           result = quarantineUnobservedFigures(result, "grace_synthesis");
         }
@@ -5523,7 +5580,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
               ? "progress supervisor wound the run down after no forward progress"
               : `timeout (${turnTimeoutMs}ms) reached after current operation finished`,
         });
-        const output = buildInterruptedSubAgentOutput({
+        const output = buildScaffold({
           agentName: opts.agentName,
           reason: windDownReason,
           swarmState: toolContext.swarmState,
@@ -5560,7 +5617,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           timeoutMs: turnTimeoutMs,
           error: "cancelled",
         });
-        const output = buildInterruptedSubAgentOutput({
+        const output = buildScaffold({
           agentName: opts.agentName,
           reason: "was cancelled",
           swarmState: toolContext.swarmState,
@@ -5969,7 +6026,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             timeoutMs: turnTimeoutMs,
             error: "cancelled",
           });
-          const output = buildInterruptedSubAgentOutput({
+          const output = buildScaffold({
             agentName: opts.agentName,
             reason: "was cancelled",
             swarmState: toolContext.swarmState,
@@ -6041,7 +6098,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             timeoutMs: turnTimeoutMs,
             error: `timeout (${turnTimeoutMs}ms) aborted the in-flight completion`,
           });
-          const output = buildInterruptedSubAgentOutput({
+          const output = buildScaffold({
             agentName: opts.agentName,
             reason: `timed out after ${turnTimeoutMs}ms while a completion was still generating`,
             swarmState: toolContext.swarmState,
@@ -6095,7 +6152,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             timeoutMs: turnTimeoutMs,
             error: String(err).slice(0, 200),
           });
-          const output = buildInterruptedSubAgentOutput({
+          const output = buildScaffold({
             agentName: opts.agentName,
             reason: "timed out while finalizing the answer after substantive work",
             swarmState: toolContext.swarmState,
@@ -6313,7 +6370,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           timeoutMs: turnTimeoutMs,
           error: `timeout (${turnTimeoutMs}ms) reached before starting another tool run`,
         });
-        const output = buildInterruptedSubAgentOutput({
+        const output = buildScaffold({
           agentName: opts.agentName,
           reason: `timed out after ${turnTimeoutMs}ms before starting another tool run`,
           swarmState: toolContext.swarmState,
@@ -6447,7 +6504,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         const truncationRecovered = recoverHallucinatedTruncationAfterSubstantiveWork(result);
         result = truncationRecovered.result;
         // E2E 2026-10-07 ended here: "8.393" and "7.597.648.268" after seven sandbox runs that failed
-        // or printed nothing. A recovered scaffold is the runtime's own account and is left alone.
+        // or printed nothing. A recovered scaffold is the runtime's own account, whose evidence lines
+        // buildScaffold masked as it built them.
         if (!recovered.forcedOutcome && !truncationRecovered.forcedOutcome) {
           result = quarantineUnobservedFigures(result, "final_answer");
         }
@@ -7583,7 +7641,22 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
               // The read-back of this run's own write is kept out of shared facts (above)
               // but still reaches recentEvidenceSnippets: that is the run's own working
               // memory, where re-reading what it wrote is exactly the point.
-              const share = readsBackOwnOutput ? null : autoShareUsefulFinding({
+              // So is any other result that hands back figures the run wrote itself and no
+              // input of it held, while none of its executions has completed with output: in
+              // review a grep over the coder's head-written results.md was shared as
+              // auto_coder_grep_files_*, and its coordinator restated the figures as a success.
+              // Checked by figure, not by tool, so a grep, a git diff or a search counts alike.
+              const handsBackOwnClaims = !readsBackOwnOutput && tracksFigures && noExecutionCompleted(executionRecord)
+                && maskFiguresByKey(usefulTrimmed, unreceivedOwnClaims(false), writtenFileNameSpans(usefulTrimmed)).masked > 0;
+              if (handsBackOwnClaims) {
+                logAudit("sub_agent_tool_call", {
+                  agentName: opts.agentName,
+                  tool: tc.name,
+                  phase: "shared_finding_skipped",
+                  reason: "hands_back_own_claims",
+                }, { sessionId: subSessionId, severity: "info" });
+              }
+              const share = readsBackOwnOutput || handsBackOwnClaims ? null : autoShareUsefulFinding({
                 sessionId: subSessionId,
                 agentName: opts.agentName,
                 toolName: tc.name,
@@ -8581,7 +8654,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           artifacts,
         })
       : recoveredEvidenceSnippets.length > 0
-      ? buildInterruptedSubAgentOutput({
+      ? buildScaffold({
           agentName: opts.agentName,
           reason: `reached the maximum number of tool-call iterations (${maxIterations}). Partial result may be incomplete.`,
           swarmState: toolContext.swarmState,

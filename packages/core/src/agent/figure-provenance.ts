@@ -131,10 +131,32 @@ export function maskUnobservedFigures(
   observed: ReadonlySet<string>,
   skip: readonly FigureCheckSpan[] = [],
 ): { text: string; masked: number } {
+  return replaceFigures(text, (key) => !observed.has(key), skip);
+}
+
+/**
+ * `text` with every figure whose key IS in `keys` replaced by the marker, and how many were. For
+ * text a tool handed back to the run, where every figure but the run's own claims is one it
+ * received. A figure inside one of `skip` is left alone and not counted.
+ */
+export function maskFiguresByKey(
+  text: string,
+  keys: ReadonlySet<string>,
+  skip: readonly FigureCheckSpan[] = [],
+): { text: string; masked: number } {
+  if (keys.size === 0) return { text, masked: 0 };
+  return replaceFigures(text, (key) => keys.has(key), skip);
+}
+
+function replaceFigures(
+  text: string,
+  masks: (key: string) => boolean,
+  skip: readonly FigureCheckSpan[],
+): { text: string; masked: number } {
   let masked = 0;
   const result = text.replace(FIGURE_RE, (figure: string, offset: number) => {
     const key = figureKey(figure);
-    if (!countsAsFigure(key) || observed.has(key) || insideSpan(offset, skip)) return figure;
+    if (!countsAsFigure(key) || !masks(key) || insideSpan(offset, skip)) return figure;
     masked++;
     return UNOBSERVED_FIGURE_MARKER;
   });

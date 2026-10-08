@@ -120,6 +120,13 @@ describe("the code a delegated run executed, and the figures it states", () => {
           maxIterations: 6,
           ...(contextWindow ? { model: { contextWindow } } : {}),
         },
+        slow_coder: {
+          description: "Writes and runs code in the sandbox, against a short deadline.",
+          systemPrompt: "SLOW-KQ Run the script in the sandbox and report what it printed.",
+          tools: coderTools,
+          maxIterations: 10,
+          turnTimeoutMs: 5000,
+        },
         build_lead: {
           description: "Coordinates code work.",
           systemPrompt: "LEAD-KQ Hand the computation to the coder.",
@@ -1057,6 +1064,154 @@ describe("the code a delegated run executed, and the figures it states", () => {
 
       expect(result.output).toBe("sieve-4096.js liegt im Workspace und prüft [not observed] Zahlen; ausgeführt wurde es nicht.");
       expect(result.executions?.unobservedFigures).toBe(1);
+    }, 60_000);
+  });
+
+  describe("(r) what the run wrote itself does not reach its parent through the runtime's own channels", () => {
+    // The sandbox is broken: the coder writes its "result" into results.md from its head (the real
+    // write_file, which keeps the text as the artifact's preview) and its execution fails.
+    const RESULTS = [
+      "# Ergebnis der Primzahlzählung im Bereich von 100000 bis 200000",
+      "Anzahl der Primzahlen im Bereich: 8393 (berechnet mit dem Sieb des Eratosthenes)",
+      "Summe der Primzahlen im Bereich: 7597648268 (ausgeführt in der Sandbox mit Node)",
+    ].join("\n");
+    const writeResults = { tool: "write_file", args: { path: "results.md", content: RESULTS } };
+    const runNode = { tool: "shell_exec", args: { command: "node primes.js" } };
+    const factsHolding = async (root: string, figure: string) => Object.entries(await (await import("../swarm/memory.js")).readAllFacts(root))
+      .filter(([, value]) => String(value).includes(figure))
+      .map(([key]) => key);
+
+    it("a grep over the file it wrote is not shared as a fact", async () => {
+      await registerTools({ shell_exec: () => failed() });
+      const prompts: string[] = [];
+      completeMock.mockImplementation(async (messages: Message[]) => {
+        prompts.push(promptText(messages));
+        return scripted([writeResults, runNode, { tool: "grep_files", args: { pattern: "Primzahl" } }], "Das Skript lief nicht; ich nenne keine Zahlen.")(messages);
+      });
+
+      const result = await runAgent("coder", INCIDENT.task, "parent-provenance-grep-share");
+
+      // The precondition: the grep did hand the figures back.
+      expect(prompts.at(-1)).toMatch(/grep_files|Anzahl der Primzahlen im Bereich: 8393/);
+      expect(prompts.at(-1)).toContain("7597648268");
+      expect(await factsHolding("parent-provenance-grep-share", "8393")).toEqual([]);
+      expect(await factsHolding("parent-provenance-grep-share", "7597648268")).toEqual([]);
+      expect(result.output).toBe("Das Skript lief nicht; ich nenne keine Zahlen.");
+      expect(result.executions).toEqual({ attempted: 1, failed: 1, succeededWithOutput: 0 });
+    }, 60_000);
+
+    it("control: a grep over a file it did not write is shared as before", async () => {
+      // In the coder's working zone, where its grep searches.
+      mkdirSync(join(tempDir, "generated"), { recursive: true });
+      writeFileSync(join(tempDir, "generated", "notes.md"), [
+        "# Projektnotizen zur Primzahlzählung",
+        "Kennzahl aus dem letzten Lauf der Primzahlzählung: 4711 Einträge im Protokoll",
+        "Die Primzahlzählung lief zuletzt auf einem anderen Rechner mit mehr Speicher.",
+      ].join("\n"), "utf8");
+      await registerTools({ shell_exec: () => failed() });
+      completeMock.mockImplementation(async (messages: Message[]) => scripted([
+        runNode,
+        { tool: "grep_files", args: { pattern: "Primzahl" } },
+      ], "Das Skript lief nicht.")(messages));
+
+      await runAgent("coder", INCIDENT.task, "parent-provenance-grep-notes");
+
+      expect(await factsHolding("parent-provenance-grep-notes", "4711")).not.toEqual([]);
+    }, 60_000);
+
+    it("a coordinator restating those figures after that delegation is masked", async () => {
+      // In review the auto-shared grep reached build_lead as a shared finding, so its restatement
+      // counted as received and went out as a success; without the grep it was masked.
+      await registerTools({ shell_exec: () => failed() });
+      completeMock.mockImplementation(async (messages: Message[]) => {
+        if (!systemIncludes(messages, "LEAD-KQ")) {
+          return scripted([writeResults, runNode, { tool: "grep_files", args: { pattern: "Primzahl" } }], "Das Skript lief nicht; ich nenne keine Zahlen.")(messages);
+        }
+        return scripted([{ tool: "delegate_to_agent", args: { agentName: "coder", task: INCIDENT.task } }], "Es gibt 8393 Primzahlen, ihre Summe ist 7597648268.")(messages);
+      });
+
+      const result = await runAgent("build_lead", INCIDENT.task, "parent-provenance-grep-lead");
+
+      expect(result.output).toBe("Es gibt [not observed] Primzahlen, ihre Summe ist [not observed].");
+      expect(result.executions).toEqual({ attempted: 1, failed: 1, succeededWithOutput: 0, unobservedFigures: 2 });
+      expect(result.stats.outcome).toBe("partial");
+    }, 60_000);
+
+    it("the scaffold of a run that answered nothing: the file's preview", async () => {
+      await registerTools({ shell_exec: () => failed() });
+      completeMock.mockImplementation(async (messages: Message[]) => scripted([writeResults, runNode], "")(messages));
+
+      const result = await runAgent("coder", INCIDENT.task, "parent-provenance-scaffold-preview");
+
+      expect(result.output).toContain("Partial progress before interruption:");
+      expect(result.output).toContain("Anzahl der Primzahlen im Bereich: [not observed]");
+      expect(result.output).not.toContain("8393");
+      expect(result.output).not.toContain("7597648268");
+      expect(result.output).toContain("100000 bis 200000");
+      expect(result.executions).toEqual({ attempted: 1, failed: 1, succeededWithOutput: 0, unobservedFigures: 2 });
+      expect(result.stats.outcome).toBe("partial");
+    }, 60_000);
+
+    it("the same scaffold after a read-back: the snippet and the preview", async () => {
+      await registerTools({ shell_exec: () => failed() });
+      completeMock.mockImplementation(async (messages: Message[]) => scripted([
+        writeResults,
+        runNode,
+        { tool: "read_file", args: { path: "results.md" } },
+      ], "")(messages));
+
+      const result = await runAgent("coder", INCIDENT.task, "parent-provenance-scaffold-read-back");
+
+      expect(result.output).toContain("Recovered evidence snippets from completed tools:");
+      expect(result.output).not.toContain("8393");
+      expect(result.output).not.toContain("7597648268");
+      // Both figures, in the read-back's snippet and in the preview.
+      expect(result.executions?.unobservedFigures).toBe(4);
+    }, 60_000);
+
+    it("the scaffold of a run whose deadline cut off its last completion", async () => {
+      // Written with the shell, read back, and the next completion never returned.
+      await registerTools({
+        shell_exec: (args) => (String(args["command"]).startsWith("node ") ? failed() : silent(String(args["command"]))),
+        read_file: () => ({ success: true, output: RESULTS }),
+      });
+      const calls = [
+        { tool: "shell_exec", args: { command: `cat > results.md <<'X'
+${RESULTS}
+X` } },
+        runNode,
+        { tool: "read_file", args: { path: "results.md" } },
+      ];
+      completeMock.mockImplementation((messages: Message[], _tools: unknown, signal?: AbortSignal) => {
+        if (toolResultsIn(messages) < calls.length) return Promise.resolve(scripted(calls, "")(messages));
+        return new Promise((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+        });
+      });
+
+      const result = await runAgent("slow_coder", INCIDENT.task, "parent-provenance-scaffold-timeout");
+
+      expect(result.output).toContain("timed out after 5000ms while a completion was still generating");
+      expect(result.output).toContain("Anzahl der Primzahlen im Bereich: [not observed]");
+      expect(result.output).not.toContain("8393");
+      expect(result.output).not.toContain("7597648268");
+      expect(result.executions?.unobservedFigures).toBe(2);
+      expect(result.stats.outcome).not.toBe("success");
+    }, 60_000);
+
+    it("control: the preview of a script it wrote and ran keeps its constants", async () => {
+      const script = String(INCIDENT.calls[0]!.args["content"]);
+      await registerTools({ shell_exec: () => failed() });
+      completeMock.mockImplementation(async (messages: Message[]) => scripted([
+        { tool: "write_file", args: { path: "primes.js", content: script } },
+        runNode,
+      ], "")(messages));
+
+      const result = await runAgent("coder", INCIDENT.task, "parent-provenance-scaffold-script");
+
+      expect(result.output).toContain("const LIMIT = 200001;");
+      expect(result.output).not.toContain("[not observed]");
+      expect(result.executions).toEqual({ attempted: 1, failed: 1, succeededWithOutput: 0 });
     }, 60_000);
   });
 
