@@ -196,14 +196,55 @@ describe("the research gate's turn trigger", () => {
       { id: "s1", kind: "delegate", agent: "web_coder", description: FRENCH_BUILD },
       { id: "s2", kind: "reuse", workflow: "company_facts", description: "Die Angaben über den gespeicherten Ablauf holen.", dependsOn: ["s1"] },
     ]), turnCtx("s-reuse"));
-    // The fetch is refused before it runs (outside this turn's tools): only its place in the plan counts.
+    // A turn that may call web_fetch. No such tool is registered here, so the step fails when it is
+    // reached: only its place in the plan counts.
     await executePlan("s-direct", plan(GERMAN_OBJECTIVE, [
       { id: "s1", kind: "delegate", agent: "web_coder", description: FRENCH_BUILD },
       { id: "s2", kind: "direct", tool: "web_fetch", toolArgs: { url: "http://www.nordlicht-werkzeuge.test/" }, description: "Die Website abrufen.", dependsOn: ["s1"] },
-    ]), turnCtx("s-direct", { allowedTools: ["delegate_to_agent"] }));
+    ]), turnCtx("s-direct", { allowedTools: ["delegate_to_agent", "web_fetch"] }));
 
     // web_coder, then the workflow's own agent; web_coder again for the second plan.
     expect(ran()).toEqual(["web_coder", "researcher", "web_coder"]);
+  }, 30_000);
+
+  /** What a turn the judge flagged may call: its tool mode is orchestration_only, which offers no web tool and loads none. */
+  const judgedTurnTools = async (): Promise<Partial<ToolContext>> => {
+    const tools = await import("../agent/default-tools.js");
+    const { isWebReachingToolName } = await import("../tools/agent-routing.js");
+    // The premise, read from the lists themselves: the getters below leave out every tool this file
+    // never registers, web_fetch included, so they cannot show it.
+    expect([...tools.ALWAYS_AVAILABLE_MAIN_TOOL_NAMES, ...tools.ORCHESTRATION_TOOL_NAMES].filter(isWebReachingToolName)).toEqual([]);
+    return { allowedTools: tools.getMainAssistantToolNames("orchestration_only"), loadableTools: tools.getLoadableDirectMainToolNames("orchestration_only") };
+  };
+
+  // 2f31f387 again, behind an outside step that never runs: counted as the plan's own way out, it
+  // exempted every step, and web_coder kept the fetch it cannot do.
+  it("redirects the step when the plan's web-tool step is one this turn may not call", async () => {
+    await Promise.all([import("../tools/sub-agent.js"), import("../tools/workflow-catalog.js")]);
+    const tools = await judgedTurnTools();
+    const result = await executePlan("s-fetch-refused", plan(GERMAN_OBJECTIVE, [
+      { id: "s1", kind: "direct", tool: "web_fetch", toolArgs: { url: "http://www.nordlicht-werkzeuge.test/" }, description: "Die Website abrufen." },
+      { id: "s2", kind: "delegate", agent: "web_coder", description: GERMAN_STEP },
+    ]), turnCtx("s-fetch-refused", tools));
+
+    expect(result.output).toContain("'web_fetch' is not in this agent's allowed tool set");
+    expect(ran()).toEqual(["researcher"]);
+  }, 30_000);
+
+  it("redirects the step when the plan's reuse step names no workflow, or one that does not exist", async () => {
+    await Promise.all([import("../tools/sub-agent.js"), import("../tools/workflow-catalog.js")]);
+    const tools = await judgedTurnTools();
+    await executePlan("s-reuse-unnamed", plan(GERMAN_OBJECTIVE, [
+      { id: "s1", kind: "reuse", description: "Den gespeicherten Ablauf für Firmenangaben nutzen." },
+      { id: "s2", kind: "delegate", agent: "web_coder", description: GERMAN_STEP },
+    ]), turnCtx("s-reuse-unnamed", tools));
+    const unknown = await executePlan("s-reuse-unknown", plan(GERMAN_OBJECTIVE, [
+      { id: "s1", kind: "reuse", workflow: "firmen_recherche", description: "Den gespeicherten Ablauf für Firmenangaben nutzen." },
+      { id: "s2", kind: "delegate", agent: "web_coder", description: GERMAN_STEP },
+    ]), turnCtx("s-reuse-unknown", tools));
+
+    expect(unknown.output).toContain('no workflow named "firmen_recherche" exists');
+    expect(ran()).toEqual(["researcher", "researcher"]);
   }, 30_000);
 
   it("leaves a builder slice alone when a sibling slice gathers, whichever finishes its checks first", async () => {

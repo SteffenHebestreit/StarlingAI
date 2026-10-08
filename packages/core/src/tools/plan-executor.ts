@@ -191,19 +191,69 @@ function isReasoningOnlyLeaf(plan: TurnPlan, step: TurnPlanStep): boolean {
 }
 
 /**
- * The plan's evidence gather point, on a turn the up-front judge said needs outside facts: the id of
- * the first delegate step whose agent works only from the text it is handed. Undefined — every step
- * runs on the agent it names — when the plan can reach outside the workspace on its own: a reuse
- * step (a workflow may gather), a direct step calling a web tool, or a delegate step naming an agent
- * that reaches outside, naming none, or naming one the catalog does not know. The whole plan is the
- * batch, not the round: a gathering step the scheduler reaches later still means the plan gathers.
+ * Whether the caller may call the tool a step dispatches to.
+ *
+ * ToolContext.allowedTools is a contract on every tool that fans out to other tools: it must not
+ * reach outside the caller's grant. This one dispatches a tool name the MODEL wrote into a plan,
+ * so without the check a step could name anything the tier gate happens to permit.
+ * ...but the lean tool catalog withholds the direct capability tools from the turn and lets the
+ * orchestrator pull one in with load_tool, so the grant alone is narrower than the caller's real
+ * reach: checking it by itself refused every `direct` step naming a normal tool. The loadable set
+ * must come from the CALLER though, not from the config: the runtime narrows a turn's tool mode
+ * on the fly — a source- or artifact-sensitive turn is downgraded to orchestration_only — and
+ * reading the deployment's configured mode here handed those turns back every direct tool the
+ * runtime had just taken away, through a plan step.
  */
-function planEvidenceGatherPoint(plan: TurnPlan, ctx: ToolContext): string | undefined {
-  if (ctx.turnEvidence?.required !== true) return undefined;
-  if (plan.steps.some((step) => step.kind === "reuse" || (step.kind === "direct" && step.tool && isWebReachingToolName(step.tool)))) {
-    return undefined;
-  }
+function stepToolReachable(tool: string, ctx: ToolContext): boolean {
+  return !ctx.allowedTools
+    || ctx.allowedTools.includes(tool)
+    || (ctx.loadableTools ?? []).includes(tool);
+}
+
+/**
+ * Whether a reuse or direct step reaches outside the workspace when it runs: a reuse step that will
+ * run a configured workflow (whose agents may gather), or a direct step calling a web tool the turn
+ * may call. Only a step that really dispatches counts, read through dispatchFor and runStep's own
+ * reach check. A reuse step naming no workflow is handed back to the orchestrator, one naming a
+ * workflow that does not resolve gets a routing miss before anything runs, and a direct fetch is
+ * refused on every turn the judge flagged, whose tool mode (orchestration_only) offers no web tool
+ * and loads none. Each used to count regardless, which exempted every step of its plan: the
+ * 2f31f387 step, placed after one of them, ran on web_coder again.
+ */
+async function stepReachesOutside(plan: TurnPlan, step: TurnPlanStep, ctx: ToolContext): Promise<boolean> {
+  if (step.kind === "delegate") return false;
+  const dispatch = dispatchFor(plan, step, new Map());
+  if ("manual" in dispatch || !stepToolReachable(dispatch.tool, ctx)) return false;
+  if (step.kind === "direct") return isWebReachingToolName(dispatch.tool);
+  // Imported here rather than at the top: the catalog loads the turn runtime, and only a reuse
+  // step on a turn the judge flagged ever asks.
+  const { workflowReferenceRuns } = await import("./workflow-catalog.js");
+  return workflowReferenceRuns(String(dispatch.args["name"] ?? ""), ctx);
+}
+
+/**
+ * Whether the plan may have an evidence gather point, on a turn the up-front judge said needs
+ * outside facts: some delegate step names an agent that works only from the text it is handed, and
+ * nothing in the plan reaches outside the workspace by itself — no delegate step naming an agent
+ * that can, naming none or naming one the catalog does not know, and no reuse or direct step that
+ * will (stepReachesOutside). The whole plan decides, not the round: a gathering step the scheduler
+ * reaches later still means the plan gathers, and every step keeps the agent it names.
+ */
+async function planMayGather(plan: TurnPlan, ctx: ToolContext): Promise<boolean> {
   const delegates = plan.steps.filter((step) => step.kind === "delegate");
+  if (batchEvidenceGatherPoint(ctx, delegates.map((step) => step.agent)) < 0) return false;
+  for (const step of plan.steps) {
+    if (await stepReachesOutside(plan, step, ctx)) return false;
+  }
+  return true;
+}
+
+/**
+ * The gather point among a plan's steps: the first delegate step naming an agent that works only
+ * from handed text, or undefined when there is none.
+ */
+function batchGatherPoint(batch: readonly TurnPlanStep[], ctx: ToolContext): string | undefined {
+  const delegates = batch.filter((step) => step.kind === "delegate");
   const index = batchEvidenceGatherPoint(ctx, delegates.map((step) => step.agent));
   return index >= 0 ? delegates[index]!.id : undefined;
 }
@@ -215,20 +265,7 @@ async function runStep(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<
   /** Stamped on every outcome below, so nothing dispatched goes unreported to the turn. */
   const made = (success: boolean, workflowNotFound = false): StepRun["call"] =>
     ({ tool: dispatch.tool, success, ...(workflowNotFound ? { workflowNotFound: true } : {}) });
-  // ToolContext.allowedTools is a contract on every tool that fans out to other tools: it must not
-  // reach outside the caller's grant. This one dispatches a tool name the MODEL wrote into a plan,
-  // so without the check a step could name anything the tier gate happens to permit.
-  // ...but the lean tool catalog withholds the direct capability tools from the turn and lets the
-  // orchestrator pull one in with load_tool, so the grant alone is narrower than the caller's real
-  // reach: checking it by itself refused every `direct` step naming a normal tool. The loadable set
-  // must come from the CALLER though, not from the config: the runtime narrows a turn's tool mode
-  // on the fly — a source- or artifact-sensitive turn is downgraded to orchestration_only — and
-  // reading the deployment's configured mode here handed those turns back every direct tool the
-  // runtime had just taken away, through a plan step.
-  const reachable = !ctx.allowedTools
-    || ctx.allowedTools.includes(dispatch.tool)
-    || (ctx.loadableTools ?? []).includes(dispatch.tool);
-  if (!reachable) {
+  if (!stepToolReachable(dispatch.tool, ctx)) {
     return { status: "failed", detail: `'${dispatch.tool}' is not in this agent's allowed tool set` };
   }
 
@@ -421,7 +458,11 @@ registerTool({
     // which were then never reported as YOURS TO DO.
     const deferred = new Set<string>();
     let blocked: ReturnType<typeof planFrontier>["blocked"] = [];
-    const gatherPointId = planEvidenceGatherPoint(plan, ctx);
+    // On a turn the judge flagged, the plan's evidence gather point: its first delegate step naming
+    // an agent that works only from handed text. Without a verdict nothing here is even asked.
+    const gatherPointId = ctx.turnEvidence?.required === true && await planMayGather(plan, ctx)
+      ? batchGatherPoint(plan.steps, ctx)
+      : undefined;
 
     let round = 0;
     for (; round < maxRounds; round++) {
