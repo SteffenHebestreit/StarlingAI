@@ -642,6 +642,12 @@ function isDelegationToolName(name: string): boolean {
   return DELEGATION_TOOL_NAMES.has(name);
 }
 
+/** A tool that runs another agent and hands back the record of the code that run executed
+ *  (specialistExecutions, agent/delegated-run-record.ts). */
+function receivesExecutionRecords(name: string): boolean {
+  return isDelegationToolName(name) || name === "create_ephemeral_agent";
+}
+
 // How many `sub:` hops deep this session is. The orchestrator is depth 0; its
 // direct sub-agents are depth 1; their sub-agents depth 2; and so on (mirrors
 // the `deriveRootSessionId` walker). Used to bound the delegation tree.
@@ -3697,9 +3703,20 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // run contained, and the run reported success. Counted at the call site, uncapped: toolFailures
     // keeps only the last MAX_RECORDED_TOOL_FAILURES.
     const executionRecord: DelegatedExecutionRecord = { attempted: 0, failed: 0, succeededWithOutput: 0 };
-    // Only a run that can execute code is checked; a researcher holds no such tool and pays nothing.
+    // The run's OWN executions, without the specialists' records a coordinator adds to the one
+    // above. The two nudges that speak of "your code executions" read this one: in review, a
+    // coordinator that had only delegated a grep (exit 1, no match) and read two notes was told
+    // "None of your 1 code execution has completed with output yet" and lost the instruction to
+    // keep everything it had gathered. The outcome cap and the reported record keep the sum.
+    const ownExecutionRecord: DelegatedExecutionRecord = { attempted: 0, failed: 0, succeededWithOutput: 0 };
+    // Only a run that can execute code, or receive the record of a run that did, is checked; a
+    // researcher holds neither and pays nothing. A coordinator restates what its specialists
+    // returned: in review, build_lead (delegate_to_agent only) answered "8392 … 1255204276" over a
+    // coder whose only execution had failed and whose own answer was masked, and its answer and its
+    // share went unmasked while the record it had added up said none of the code completed.
     // An agent without an allow-list holds every registered tool, so the wire list stands in.
-    const tracksFigures = (effectiveToolNames ?? tools.map((tool) => tool.name)).some(requiresSandbox);
+    const tracksFigures = (effectiveToolNames ?? tools.map((tool) => tool.name))
+      .some((name) => requiresSandbox(name) || receivesExecutionRecords(name));
     // Keys of every figure the run RECEIVED or EXECUTED: its system prompt, every user, tool and
     // system message, its per-iteration nudges, and the arguments of its sandbox calls. Never its
     // own prose, the files it wrote, or what it shared: those are the claims being checked.
@@ -5526,9 +5543,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         // A run whose code never completed with output has gathered no result to "synthesize", and
         // telling it to include ALL facts verbatim is how the coder of E2E 2026-10-07 came to write
         // a table of numbers nothing had computed. In that state the middle of the nudge says what
-        // its executions did instead; replaced, not appended, so the tail stays one message.
-        const finalIterationBody = noExecutionCompleted(executionRecord)
-          ? `None of your ${executionCountPhrase(executionRecord)} completed with output (${executionShortfallPhrase(executionRecord)}), `
+        // its executions did instead; replaced, not appended, so the tail stays one message. Its
+        // own executions only (ownExecutionRecord): a specialist's are not "your code executions".
+        const finalIterationBody = noExecutionCompleted(ownExecutionRecord)
+          ? `None of your ${executionCountPhrase(ownExecutionRecord)} completed with output (${executionShortfallPhrase(ownExecutionRecord)}), `
             + "so no tool has returned a computed value: report what you ran and what came back, and state no figure that no tool returned. "
           : "You have used all your tool-call iterations. Produce your COMPLETE final answer NOW. " +
             "Synthesize everything you have gathered from previous tool calls — include ALL content, " +
@@ -5543,8 +5561,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         );
       } else if (remaining === 2 && toolCount > 0) {
         // Same state, same reason: "you have already gathered substantial content" is false then.
-        const budgetWarningBody = noExecutionCompleted(executionRecord)
-          ? `None of your ${executionCountPhrase(executionRecord)} has completed with output yet (${executionShortfallPhrase(executionRecord)}). `
+        const budgetWarningBody = noExecutionCompleted(ownExecutionRecord)
+          ? `None of your ${executionCountPhrase(ownExecutionRecord)} has completed with output yet (${executionShortfallPhrase(ownExecutionRecord)}). `
             + "Use what remains to get one, or report exactly what failed — state no figure that no tool returned."
           : "You have already gathered substantial content. Stop calling tools UNLESS critical information is still missing. " +
             "Use your next response to produce your complete final answer with all facts, URLs, and evidence you have collected so far.";
@@ -7083,9 +7101,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         {
           const printed = result.metadata?.["programOutputChars"];
           if (requiresSandbox(tc.name) && typeof printed === "number") {
-            executionRecord.attempted += 1;
-            if (!result.success) executionRecord.failed += 1;
-            else if (printed > 0) executionRecord.succeededWithOutput += 1;
+            for (const record of [executionRecord, ownExecutionRecord]) {
+              record.attempted += 1;
+              if (!result.success) record.failed += 1;
+              else if (printed > 0) record.succeededWithOutput += 1;
+            }
           }
         }
         browserDecider?.afterToolCall(tc, result);
@@ -7139,7 +7159,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         // the orchestrator too.
         toolFailures.push(...readToolFailures(result.metadata?.["specialistToolFailures"]));
         // And what they executed: a coordinator whose specialist masked figures did not succeed either.
-        if (isDelegationToolName(tc.name) || tc.name === "create_ephemeral_agent") {
+        if (receivesExecutionRecords(tc.name)) {
           addExecutionRecord(executionRecord, readExecutionRecord(result.metadata?.["specialistExecutions"]));
         }
         let resultContent = result.success

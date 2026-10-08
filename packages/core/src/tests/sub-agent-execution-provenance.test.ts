@@ -123,7 +123,13 @@ describe("the code a delegated run executed, and the figures it states", () => {
         build_lead: {
           description: "Coordinates code work.",
           systemPrompt: "LEAD-KQ Hand the computation to the coder.",
-          tools: ["delegate_to_agent"],
+          tools: ["delegate_to_agent", "share_finding"],
+          maxIterations: 4,
+        },
+        notes_lead: {
+          description: "Coordinates a code check and reads notes.",
+          systemPrompt: "NOTES-LEAD-KQ Have the coder check the code, read the notes and summarize.",
+          tools: ["delegate_to_agent", "read_file"],
           maxIterations: 4,
         },
       },
@@ -333,6 +339,37 @@ describe("the code a delegated run executed, and the figures it states", () => {
       expect(budgetWarning).toContain("You have already gathered substantial content");
       expect(budgetWarning).not.toContain("None of your");
     }, 60_000);
+
+    it("control: a coordinator that ran no code itself keeps both original texts", async () => {
+      // Its record adds up its coder's, whose one grep matched nothing (exit 1), and nothing was
+      // masked. Told "None of your 1 code execution…", it was invited to delegate again, and its
+      // final nudge lost "include ALL content … verbatim" for the notes it had read.
+      await registerTools({
+        shell_exec: () => failed(),
+        read_file: (args) => ({ success: true, output: `Inhalt von ${String(args["path"])}: Die API antwortet mit Status ok.` }),
+      });
+      const nudges: string[] = [];
+      completeMock.mockImplementation(async (messages: Message[]) => {
+        if (!systemIncludes(messages, "NOTES-LEAD-KQ")) {
+          return scripted([{ tool: "shell_exec", args: { command: "grep -n TODO src/app.js" } }], "Keine TODO-Einträge gefunden.")(messages);
+        }
+        nudges.push(trailingNudge(messages));
+        return scripted([
+          { tool: "delegate_to_agent", args: { agentName: "coder", task: "Suche TODO in src/app.js." } },
+          { tool: "read_file", args: { path: "notes/api.md" } },
+          { tool: "read_file", args: { path: "notes/status.md" } },
+        ], "Zusammenfassung der Notizen.")(messages);
+      });
+
+      const result = await runAgent("notes_lead", "Fasse die Notizen zusammen und prüfe die TODOs.", "parent-provenance-lead-nudges");
+
+      expect(result.executions).toEqual({ attempted: 1, failed: 1, succeededWithOutput: 0 });
+      expect(nudges).toHaveLength(4);
+      expect(nudges[2]).toContain("You have already gathered substantial content");
+      expect(nudges[2]).not.toContain("None of your");
+      expect(nudges[3]).toContain("Synthesize everything you have gathered");
+      expect(nudges[3]).not.toContain("None of your");
+    }, 60_000);
   });
 
   it("(f) a figure the run read early still counts after the trim removed it from the history", async () => {
@@ -432,6 +469,47 @@ describe("the code a delegated run executed, and the figures it states", () => {
     expect(result.executions?.unobservedFigures).toBe(2);
     expect(result.stats.outcome).toBe("partial");
   }, 60_000);
+
+  describe("(h) a coordinator that holds no sandbox tool", () => {
+    // Its coder's figures came back masked, and it filled them in from its own head: in review,
+    // build_lead answered "8392 … 1255204276" over a coder whose only execution had failed, and
+    // nothing masked its answer or its share, because it held no tool that runs code.
+    it("is masked against what it received, in its answer and in what it shares", async () => {
+      await registerTools(incidentTools());
+      completeMock.mockImplementation(async (messages: Message[]) => {
+        if (!systemIncludes(messages, "LEAD-KQ")) return scripted(INCIDENT.calls, INCIDENT.reply)(messages);
+        return scripted([
+          { tool: "delegate_to_agent", args: { agentName: "coder", task: INCIDENT.task } },
+          { tool: "share_finding", args: { key: "prime_sum", value: "1255204276" } },
+        ], "Ergebnis: Es gibt 8392 Primzahlen, ihre Summe ist 1255204276.")(messages);
+      });
+
+      const result = await runAgent("build_lead", INCIDENT.task, "parent-provenance-coordinator-own");
+
+      expect(result.output).toBe("Ergebnis: Es gibt [not observed] Primzahlen, ihre Summe ist [not observed].");
+      expect(shared).toEqual([{ key: "prime_sum", value: "[not observed]" }]);
+      // The coder's two, the share's one and the answer's two.
+      expect(result.executions).toEqual({ ...INCIDENT_EXECUTIONS, unobservedFigures: 5 });
+      expect(result.stats.outcome).toBe("partial");
+    }, 60_000);
+
+    it("control: what its coder's script printed it restates as it was", async () => {
+      await registerTools({ shell_exec: () => printed("Anzahl der Primzahlen: 8392\nSumme der Primzahlen:   1255204276") });
+      const leadAnswer = "Ergebnis: Es gibt 8.392 Primzahlen, ihre Summe ist 1.255.204.276.";
+      completeMock.mockImplementation(async (messages: Message[]) => {
+        if (!systemIncludes(messages, "LEAD-KQ")) {
+          return scripted([{ tool: "shell_exec", args: { command: "node primes.js" } }], "Es gibt 8392 Primzahlen, Summe 1255204276.")(messages);
+        }
+        return scripted([{ tool: "delegate_to_agent", args: { agentName: "coder", task: INCIDENT.task } }], leadAnswer)(messages);
+      });
+
+      const result = await runAgent("build_lead", INCIDENT.task, "parent-provenance-coordinator-printed");
+
+      expect(result.output).toBe(leadAnswer);
+      expect(result.executions).toEqual({ attempted: 1, failed: 0, succeededWithOutput: 1 });
+      expect(result.stats.outcome).toBe("success");
+    }, 60_000);
+  });
 
   it("(i) a figure a productive run states that no input contained is measured, never masked", async () => {
     // The partial-output case the mask leaves alone: a script printed, so the gate is closed, and
