@@ -149,6 +149,14 @@ describe("the reply-language rule", () => {
       "Translate this into English: Die Rückerstattung erfolgt nur für volle Abrechnungszeiträume. Bitte wenden Sie sich an unseren Kundendienst.",
       // A comma does not make the question a list.
       "Was heißt das, bitte?\nRefunds are not provided for partial billing periods. Please contact our support team if you believe an exception applies.",
+      // A paste ahead of a colon and the question after it, an error message with colons of its own among them.
+      "Your account has been suspended due to unusual activity: was soll ich jetzt tun?",
+      "TypeError: Cannot read properties of undefined (reading 'map'): woran liegt das?",
+      "Error: ENOENT: no such file or directory, open 'config.json': was mache ich falsch?",
+      "Die Rückerstattung erfolgt nur für volle Abrechnungszeiträume: what does this mean for me?",
+      // Nor do commas after a colon: two parts are no list, and nor are parts longer than a name.
+      "Refunds are not provided for partial billing periods: was heißt das, bitte?",
+      "Refunds are not provided for partial billing periods and the remaining amount will not be credited to your account: was heißt das, bitte, und was kann ich tun?",
     ]) {
       const line = buildTurnReplyLanguageInstruction(mixed, "German", { firstTurn: true, userWords: mixed });
       expect(line).not.toMatch(/otherwise in [A-Z]\w+, the language/);
