@@ -282,3 +282,28 @@ describe("/mcp and the caller a session belongs to", () => {
     expect(runs).toHaveLength(1);
   });
 });
+
+describe("/mcp and a request that opens no session", () => {
+  it("keeps no session for a GET or a non-initialize POST without a session id, and answers as the SDK does", async () => {
+    // Regression (review, 2026-10-09): such a request got a transport of its own that never
+    // initialized and was never closed, so each one left a live Server behind.
+    const { url } = await deployment(true);
+    const token = await tokenFor("alice");
+    const { getMcpHttpSessionCount } = await import("../mcp/server-http.js");
+    const notInitialized = { jsonrpc: "2.0", error: { code: -32000, message: "Bad Request: Server not initialized" }, id: null };
+
+    const get = await rawRequest(url, token, { method: "GET" });
+    expect(get.status).toBe(400);
+    expect(await get.json()).toEqual(notInitialized);
+    const call = await rawRequest(url, token, { body: CALL_RESEARCHER });
+    expect(call.status).toBe(400);
+    expect(await call.json()).toEqual(notInitialized);
+    expect(getMcpHttpSessionCount()).toBe(0);
+    expect(runs).toHaveLength(0);
+
+    // An initialize still opens one, and it serves its caller.
+    const { client } = await connect(url, token);
+    expect(getMcpHttpSessionCount()).toBe(1);
+    expect((await client.callTool({ name: "agent__researcher", arguments: { task: "When do the ferries leave?" } })).isError).toBe(false);
+  });
+});

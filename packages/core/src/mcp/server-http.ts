@@ -37,6 +37,8 @@ import { createStarlingMcpServer, type ExposeContext } from "./server.js";
 const log = childLogger("mcp:server-http");
 
 interface McpHttpSession {
+  /** The id the session is kept under, the one its transport hands the client on initialize. */
+  id: string;
   transport: StreamableHTTPServerTransport;
   server: Server;
   /** The caller that created the session; under multi-user auth the only one that may use it. */
@@ -151,6 +153,7 @@ export async function handleMcpHttpRequest(
     return true;
   }
 
+  let created: McpHttpSession | undefined;
   if (!session) {
     // A present-but-unknown session id is stale / torn-down / forged — never mint a
     // session for it, or an attacker can grow _sessions without bound (the orphan
@@ -167,6 +170,7 @@ export async function handleMcpHttpRequest(
       return true;
     }
     session = await createHttpSession({ caller, role, ...(userId ? { userId } : {}) });
+    created = session;
   }
 
   try {
@@ -176,6 +180,24 @@ export async function handleMcpHttpRequest(
     if (!res.headersSent) {
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "MCP transport failure" }));
+    }
+  }
+
+  // Only an initialize request opens a session: the transport takes its session id then. Any other
+  // request without a session id (a GET, or a POST of anything but initialize) got the SDK's answer
+  // "Server not initialized", and the transport made for it was kept, never initialized and never
+  // closed: its onclose never fires and nothing else removes it, so every such request left a live
+  // Server behind (found in review, 2026-10-09). It is now let go, and the client's answer is the
+  // SDK's, as before.
+  if (created) {
+    if (created.transport.sessionId === undefined) {
+      await discardUninitializedSession(created);
+    } else {
+      logAudit("mcp_server_session_opened", {
+        caller: created.caller,
+        sessionId: created.id,
+        transport: "http",
+      });
     }
   }
   return true;
@@ -195,17 +217,28 @@ async function createHttpSession(ctx: ExposeContext): Promise<McpHttpSession> {
   };
 
   await server.connect(transport);
-  const session: McpHttpSession = { transport, server, caller, ctx };
+  const session: McpHttpSession = { id: generatedId, transport, server, caller, ctx };
   // The transport mints its session id on first POST; track it under the
   // generated id immediately so subsequent requests with the right header
   // can find us, and also under the transport-assigned id once that lands.
   _sessions.set(generatedId, session);
-  logAudit("mcp_server_session_opened", {
-    caller,
-    sessionId: generatedId,
-    transport: "http",
-  });
   return session;
+}
+
+/** Let go of a session whose transport never initialized. No session was opened, so none is
+ *  audited as closed; nobody holds its id, which the transport hands out only on initialize. */
+async function discardUninitializedSession(session: McpHttpSession): Promise<void> {
+  _sessions.delete(session.id);
+  try {
+    await session.server.close();
+  } catch (err) {
+    log.debug({ err }, "Error closing an uninitialized MCP server");
+  }
+  try {
+    await session.transport.close();
+  } catch (err) {
+    log.debug({ err }, "Error closing an uninitialized MCP HTTP transport");
+  }
 }
 
 async function teardownSession(sessionId: string, reason: string): Promise<void> {
