@@ -317,7 +317,7 @@ export function withTurnGatherRole(ctx: ToolContext, isGatherPoint: boolean): To
   return { ...ctx, _turnGatherExempt: true };
 }
 
-/** Index of a batch's evidence gather point among its members' agent names, or -1 (see agent-routing). */
+/** Index of a batch's evidence gather point among its members' agent names, in the order they run, or -1 (see agent-routing). */
 export function batchEvidenceGatherPoint(ctx: ToolContext, agentNames: ReadonlyArray<string | undefined>): number {
   return ctx.turnEvidence?.required === true ? evidenceGatherPoint(agentNames, lookupAgentCapabilities) : -1;
 }
@@ -2955,9 +2955,12 @@ registerTool({
     publishSwarmState(ctx);
 
     const delegatedCtx = withDelegationFanoutAllowance(ctx, rawNodes.map((node) => node.agentName), rawNodes.length);
-    // Same rule as parallel_delegate's slices: at most one node, in node order, may be redirected.
-    const gatherNodeIndex = batchEvidenceGatherPoint(ctx, rawNodes.map((node) => node.agentName));
-    const gatherNodeId = gatherNodeIndex >= 0 ? rawNodes[gatherNodeIndex]?.id : undefined;
+    // Same rule as execute_plan's steps: none when any node can reach outside the workspace, and
+    // otherwise at most one node may be redirected — the first node working from handed text that
+    // the graph STARTS, picked as its wave starts below. The graph runs by its dependsOn edges, so
+    // the node listed first can start last, after a node that ran without the evidence.
+    const graphMayGather = batchEvidenceGatherPoint(ctx, rawNodes.map((node) => node.agentName)) >= 0;
+    let gatherNodeId: string | undefined;
 
     const remaining = new Map(rawNodes.map((node) => [node.id, node]));
     const completed = new Set<string>();
@@ -3095,6 +3098,10 @@ registerTool({
 
     const startReadyNodes = () => {
       const ready = [...remaining.values()].filter((node) => (node.dependsOn ?? []).every((dep) => completed.has(dep)));
+      if (graphMayGather && gatherNodeId === undefined) {
+        const index = batchEvidenceGatherPoint(ctx, ready.map((node) => node.agentName));
+        if (index >= 0) gatherNodeId = ready[index]!.id;
+      }
 
       for (const node of ready) {
         remaining.delete(node.id);

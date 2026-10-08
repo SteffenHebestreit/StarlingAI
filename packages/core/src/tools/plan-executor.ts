@@ -249,8 +249,8 @@ async function planMayGather(plan: TurnPlan, ctx: ToolContext): Promise<boolean>
 }
 
 /**
- * The gather point among a plan's steps: the first delegate step naming an agent that works only
- * from handed text, or undefined when there is none.
+ * The gather point among the steps the scheduler is about to dispatch together: the first delegate
+ * step naming an agent that works only from handed text, or undefined when the batch has none.
  */
 function batchGatherPoint(batch: readonly TurnPlanStep[], ctx: ToolContext): string | undefined {
   const delegates = batch.filter((step) => step.kind === "delegate");
@@ -458,11 +458,16 @@ registerTool({
     // which were then never reported as YOURS TO DO.
     const deferred = new Set<string>();
     let blocked: ReturnType<typeof planFrontier>["blocked"] = [];
-    // On a turn the judge flagged, the plan's evidence gather point: its first delegate step naming
-    // an agent that works only from handed text. Without a verdict nothing here is even asked.
-    const gatherPointId = ctx.turnEvidence?.required === true && await planMayGather(plan, ctx)
-      ? batchGatherPoint(plan.steps, ctx)
-      : undefined;
+    // On a turn the judge flagged, the plan's evidence gather point: the first step naming an agent
+    // that works only from handed text that the scheduler DISPATCHES, picked as its batch goes out.
+    // The scheduler runs a plan by its dependsOn edges, not in the order the model listed the
+    // steps. Picked from the list, it could fall on a final build whose report step ran first,
+    // exempt and without evidence, before the build itself was sent to research: neither
+    // deliverable was made.
+    // A step waiting on the orchestrator's own work, or deferred by the delegate budget, is not
+    // dispatched and so does not hold it either. Without a verdict nothing here is even asked.
+    const mayGather = ctx.turnEvidence?.required === true && await planMayGather(plan, ctx);
+    let gatherPointId: string | undefined;
 
     let round = 0;
     for (; round < maxRounds; round++) {
@@ -485,6 +490,7 @@ registerTool({
       if (round === maxRounds - 1) exitReason = "rounds";
 
       for (const step of batch) statuses.set(step.id, "running");
+      if (mayGather && gatherPointId === undefined) gatherPointId = batchGatherPoint(batch, ctx);
       // The per-agent repeat cap is 2 per turn, so a parallelGroup of three steps sharing one
       // specialist was refused at the third — every other fan-out tool raises the allowance for the
       // batch it is about to issue, and this one did not.

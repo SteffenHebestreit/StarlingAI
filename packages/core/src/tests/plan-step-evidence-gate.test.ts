@@ -247,6 +247,52 @@ describe("the research gate's turn trigger", () => {
     expect(ran()).toEqual(["researcher", "researcher"]);
   }, 30_000);
 
+  /**
+   * Every run writes a file, so a writer's report counts as done and the step after it runs, and
+   * the researcher records what it found as a shared fact, as the real one does.
+   */
+  const agentsDeliver = () => runner.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => ({
+    output: args.agentName === "researcher" ? "researcher: done\nFACT: founding_year = 1987 (impressum)" : `${args.agentName}: done`,
+    stats: { ...statsFor(args), toolNames: ["write_file"] },
+  }));
+
+  // The scheduler runs a plan by its dependsOn edges, not in the order the model listed the steps.
+  // Picked in list order, the gather point was the final build here: the report ran first, exempt and
+  // without evidence, and then the build was sent to research — neither deliverable was made.
+  it("gathers at the first handed-text step the plan RUNS, not the first it lists", async () => {
+    agentsDeliver();
+    // The build is handed the report's result, the redirect's routing note included. That note's
+    // wording arms the gate's English task-text trigger, which stays out only for a build that
+    // renders facts already shared (the render exemption) — with or without a verdict. Hence a build
+    // verb the exemption knows here, not FRENCH_BUILD.
+    await executePlan("s-run-order", plan(GERMAN_OBJECTIVE, [
+      { id: "s1", kind: "delegate", agent: "web_coder", description: "Eine Übersichtsseite mit den Angaben bauen.", dependsOn: ["s2"] },
+      { id: "s2", kind: "delegate", agent: "content_writer", description: "Die Angaben als kurzen Bericht schreiben." },
+    ]), turnCtx("s-run-order"));
+
+    expect(ran()).toEqual(["researcher", "web_coder"]);
+    expect(rows("delegation_explicit_redirected_research_incapable")).toEqual([
+      expect.objectContaining({ requestedAgents: ["content_writer"], redirectedTo: "researcher", trigger: "turn_evidence" }),
+    ]);
+  }, 30_000);
+
+  it("does not hold the gather point for a step waiting on the orchestrator's own work", async () => {
+    agentsDeliver();
+    const ctx = turnCtx("s-waiting");
+    // s1 is the orchestrator's own (no tool), so s2 waits for the next execute_plan call and s3 runs
+    // first. Held by s2, the gather point let the report run without evidence, and the build was then
+    // sent to research when the orchestrator came back.
+    await executePlan("s-waiting", plan(GERMAN_OBJECTIVE, [
+      { id: "s1", kind: "direct", description: "Den Aufbau der Seite festlegen." },
+      { id: "s2", kind: "delegate", agent: "web_coder", description: FRENCH_BUILD, dependsOn: ["s1"] },
+      { id: "s3", kind: "delegate", agent: "content_writer", description: "Die Angaben als kurzen Bericht schreiben." },
+    ]), ctx);
+    const { getTool } = await import("../tools/registry.js");
+    await getTool("execute_plan")!.execute({ completed: ["s1"] }, ctx);
+
+    expect(ran()).toEqual(["researcher", "web_coder"]);
+  }, 30_000);
+
   it("leaves a builder slice alone when a sibling slice gathers, whichever finishes its checks first", async () => {
     const { getTool } = await import("../tools/registry.js");
     await import("../tools/sub-agent.js");
@@ -425,6 +471,21 @@ describe("the research gate's turn trigger", () => {
     }, turnCtx("s-graph-pair"));
 
     expect(ran()).toEqual(["researcher", "web_coder", "researcher"]);
+  }, 30_000);
+
+  it("gathers at the first handed-text node a task graph STARTS, not the first it lists", async () => {
+    agentsDeliver();
+    const { getTool } = await import("../tools/registry.js");
+    await import("../tools/sub-agent.js");
+    await getTool("run_task_graph")!.execute({
+      objective: GERMAN_OBJECTIVE,
+      nodes: [
+        { id: "build", agentName: "web_coder", task: FRENCH_BUILD, dependsOn: ["report"] },
+        { id: "report", agentName: "content_writer", task: "Die Angaben als kurzen Bericht schreiben." },
+      ],
+    }, turnCtx("s-graph-order"));
+
+    expect(ran()).toEqual(["researcher", "web_coder"]);
   }, 30_000);
 });
 

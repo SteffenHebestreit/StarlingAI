@@ -883,11 +883,13 @@ export function agentCfgWorksOnlyFromHandedText(cfg: CapabilityBearing): boolean
 
 /**
  * The member of a batch of delegations — a plan's delegate steps, parallel slices, task-graph
- * nodes, in their order — that may become the turn's evidence gather point when the turn needs
- * outside facts: the first one naming an agent that works only from handed text. -1 when any member
+ * nodes — that may become the turn's evidence gather point when the turn needs outside facts: the
+ * first one, in the order given, naming an agent that works only from handed text. -1 when any member
  * could reach outside the workspace itself (it names such an agent, names none, or names an
  * unknown one): the batch has then already decided where its evidence comes from, and every member
- * keeps the agent it names.
+ * keeps the agent it names. The order given has to be the order the members run in: a plan and a
+ * task graph run by their dependsOn edges, so they ask once for the whole batch (is there a gather
+ * point at all) and then again for each round they dispatch, which picks the first one that runs.
  */
 export function evidenceGatherPoint(
   agentNames: ReadonlyArray<string | undefined>,
