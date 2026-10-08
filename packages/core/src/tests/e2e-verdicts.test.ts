@@ -194,8 +194,10 @@ describe("e2e verdicts — interval and sign test (stats.ts)", () => {
     expect(compareTallies({ passed: 2, trials: 3 }, { passed: 2, trials: 3 }).change).toBe("flaky");
     expect(compareTallies({ passed: 3, trials: 3 }, { passed: 3, trials: 3 }).change).toBe("unchanged");
     expect(compareTallies({ passed: 0, trials: 2 }, { passed: 0, trials: 1 }).change).toBe("unchanged");
-    // No trial in a run (every attempt errored): nothing to compare.
-    expect(compareTallies({ passed: 1, trials: 1 }, { passed: 0, trials: 0 })).toEqual({ change: "inconclusive", ci: null });
+    // No trial in a run (every attempt errored): no pass rate to compare, which is not "too few attempts".
+    expect(compareTallies({ passed: 1, trials: 1 }, { passed: 0, trials: 0 })).toEqual({ change: "no-trial", ci: null });
+    expect(compareTallies({ passed: 0, trials: 0 }, { passed: 3, trials: 3 })).toEqual({ change: "no-trial", ci: null });
+    expect(compareTallies({ passed: 0, trials: 0 }, { passed: 0, trials: 0 })).toEqual({ change: "no-trial", ci: null });
 
     const drop = compareTallies({ passed: 3, trials: 3 }, { passed: 0, trials: 3 }).ci!;
     expect(drop.high).toBeLessThan(0);
@@ -233,7 +235,9 @@ describe("e2e verdicts — interval and sign test (stats.ts)", () => {
     expect(compareSuite(flips(2, 3)).pValue).toBeCloseTo(0.5, 12);
     expect(compareSuite(flips(0, 0))).toMatchObject({ change: "unchanged", pValue: 1 });
     // More attempts see a failure more often: unequal counts stay out of the test.
-    expect(compareSuite([pair([1, 1], [2, 3]), pair([3, 3], [0, 1])])).toMatchObject({ change: "inconclusive", lower: 0, higher: 0, same: 0, unpaired: 2 });
+    expect(compareSuite([pair([1, 1], [2, 3]), pair([3, 3], [0, 1])])).toMatchObject({ change: "inconclusive", lower: 0, higher: 0, same: 0, unpaired: 2, noTrial: 0 });
+    // A run without a trial has no pass count to compare, whatever the other run's count.
+    expect(compareSuite([pair([3, 3], [0, 0]), pair([0, 0], [0, 0]), pair([1, 1], [1, 1])])).toMatchObject({ change: "unchanged", same: 1, unpaired: 0, noTrial: 2 });
   });
 });
 
@@ -376,6 +380,38 @@ describe("e2e verdicts — baseline comparison", () => {
     expect(markdown).toContain("| `recovers` | 0/3 | 3/3 | +100 pp [+10, +100] | improvement |");
     expect(markdown).toContain("| `wobbles` | 3/3 | 2/3 | −33 pp [−75, +35] | flaky |");
     expect(markdown).toContain("| `flips` | 1/1 | 0/1 | −100 pp [−100, +42] | inconclusive |");
+    // At k=3 a uniform pair that disagrees is 3/3 → 0/3, which is decisive: the footnote says no more than that.
+    expect(markdown).toContain("Inconclusive: each run was uniform, but they disagree, and so few attempts cannot tell that from chance; "
+      + "with three attempts or more on both sides (`--repeat 3`) such a complete flip (3/3 → 0/3) is decisive.");
+    expect(markdown).not.toContain("No trial:");
+  });
+
+  it("shows no estimate for a scenario without a trial in a run, and does not blame the attempt count", () => {
+    // Every attempt now ended on a harness error (e.g. the gateway dropped the socket): no verdict on the swarm.
+    const baseline = buildReport([ran("crashes", "PPP"), ran("recovered", "EE"), ran("dark", "EE"), ran("steady", "PPP")], META);
+    const report = buildReport([ran("crashes", "EEE"), ran("recovered", "PP"), ran("dark", "EE"), ran("steady", "PPP")], META);
+    const comparison = compareWithBaseline(report, baseline, "baseline.json");
+    expect(comparison.noTrial.map((delta) => [delta.id, delta.change, delta.ci])).toEqual([
+      ["crashes", "no-trial", null],
+      ["recovered", "no-trial", null],
+      ["dark", "no-trial", null],
+    ]);
+    expect(comparison.inconclusive).toEqual([]);
+    expect(comparison.unchanged).toBe(1);
+    expect(comparison.suite).toMatchObject({ change: "unchanged", same: 1, unpaired: 0, noTrial: 3 });
+
+    report.baseline = comparison;
+    const markdown = renderMarkdown(report);
+    expect(markdown).toContain("0 regression(s), 0 improvement(s), 0 flaky, 0 inconclusive, 3 with no trial, 1 unchanged, 0 new, 0 not run now.");
+    expect(markdown).toContain("- Suite: 0 lower, 0 higher, 1 the same, 3 with no trial in a run left out — unchanged");
+    expect(markdown).toContain("| `crashes` | 3/3 | 0/0 | none: no trial now | no trial |");
+    expect(markdown).toContain("| `recovered` | 0/0 | 2/2 | none: no trial in the baseline | no trial |");
+    expect(markdown).toContain("| `dark` | 0/0 | 0/0 | none: no trial in either run | no trial |");
+    expect(markdown).not.toContain("−100 pp");
+    expect(markdown).not.toContain("+100 pp");
+    // The footnote about the attempt count is for uniform runs that disagree, not for a run without a verdict.
+    expect(markdown).not.toContain("Inconclusive:");
+    expect(markdown).toContain("No trial: in a run, every attempt of the scenario ended on a harness error or was interrupted, so that run has no pass rate to compare.");
   });
 });
 

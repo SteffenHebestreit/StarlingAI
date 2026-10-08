@@ -121,13 +121,14 @@ Every run writes `artifacts/evaluations/e2e/<timestamp>.json` and a Markdown sum
 - **baseline** (with `--baseline`): each scenario run in both reports, by its attempts (harness errors left
   out): **regressed** or **improved** only when the 95 % interval of the pass-rate difference excludes zero
   (3/3 → 0/3 does; 5/5 → 4/5 does not); otherwise **flaky** when it passed and failed within one run, or
-  **inconclusive** when each run was uniform but they disagree (a k=1 flip, 1/1 → 0/1). At k=1 no single
-  scenario can be decisive, so the **suite** is compared too: an exact sign test over the scenarios run with
-  equally many attempts in both — far more lower than higher is a regression. Also new scenarios, ones not
-  run now, and what differs between the two runs' builds (gateway image, harness commit); when either run
-  carried the provenance warning above, the comparison is labelled **confounded**. The baseline never sets
-  the exit code on its own: a scenario, or the suite, can only fall below its baseline by failing attempts
-  now, and a failed scenario exits 1.
+  **inconclusive** when each run was uniform but they disagree (a k=1 flip, 1/1 → 0/1). A scenario whose
+  attempts in one run all ended on a harness error has **no trial** there: no pass rate, so no estimate. At
+  k=1 no single scenario can be decisive, so the **suite** is compared too: an exact sign test over the
+  scenarios run with equally many attempts in both — far more lower than higher is a regression. Also new
+  scenarios, ones not run now, and what differs between the two runs' builds (gateway image, harness
+  commit); when either run carried the provenance warning above, the comparison is labelled **confounded**.
+  The baseline never sets the exit code on its own: a scenario, or the suite, can only fall below its
+  baseline by failing attempts now, and a failed scenario exits 1.
 
 A failure names its step and the exact miss, e.g.
 `step 2 turn "draft-reply": tools.mustNotCall mail_send_draft: expected no call, saw 1 (mail_agent×1)` or

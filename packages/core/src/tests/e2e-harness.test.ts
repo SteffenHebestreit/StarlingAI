@@ -1328,6 +1328,27 @@ describe("e2e CLI (in process, against the fake gateway)", () => {
     expect(regressed.out).toContain("Baseline: 1 regression(s) (cli-pass), 0 flaky, 0 inconclusive, 0 improvement(s);");
   });
 
+  it("names a scenario whose baseline attempts all ended on a harness error as having no trial, with no estimate", async () => {
+    const errored = (index: number) => ({ index, outcome: "error" as const, startedAt: "2026-10-08T09:00:00.000Z", durationMs: 1, failures: ["gateway closed the WebSocket"], notes: [], sessions: [], steps: [], eventTypeCounts: {}, tools: {}, agents: {} });
+    const crashed = buildReport([{
+      id: "cli-pass", title: "CLI pass", group: "core", tags: [], file: "pass.jsonc", status: "failed", services: [], repeat: 3,
+      attempts: [0, 1, 2].map(errored), passCount: 0, passRate: 0, passAll: false, durationMs: 3,
+    }], {
+      startedAt: "2026-10-08T09:00:00.000Z", finishedAt: "2026-10-08T09:00:03.000Z", gatewayUrl: gateway.url,
+      repeat: 3, concurrency: 1, filters: { groups: [], tags: [], ids: ["cli-pass"] }, judge: null, mail: null,
+    });
+    const crashedPath = writeReport(crashed, join(cliDir, "baseline-crashed")).jsonPath;
+    const run = await cli(["evaluate", "--scenarios", "scenarios", "--id", "cli-pass", "--out", "out-no-trial", "--baseline", crashedPath]);
+    expect(run.err).toBe("");
+    expect(run.code).toBe(0);
+    expect(run.out).toContain("Baseline: 0 regression(s), 0 flaky, 0 inconclusive, 0 improvement(s), 1 with no trial (cli-pass); "
+      + "suite not compared: no scenario ran with as many attempts in both runs (1 with no trial in a run left out);");
+    const markdownFile = readdirSync(join(cliDir, "out-no-trial")).find((file) => file.endsWith(".md"))!;
+    const markdown = readFileSync(join(cliDir, "out-no-trial", markdownFile), "utf8");
+    expect(markdown).toContain("| `cli-pass` | 0/0 | 1/1 | none: no trial in the baseline | no trial |");
+    expect(markdown).not.toContain("+100 pp");
+  });
+
   it("exits 3 when a fifth of the selected scenarios were skipped for one service, and prints what the run ran on", async () => {
     mkdirSync(join(cliDir, "suspect"), { recursive: true });
     const turn = (message: string) => [{ kind: "turn", message, expect: { reply: { includes: ["42"] } } }];

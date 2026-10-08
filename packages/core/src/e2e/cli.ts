@@ -147,7 +147,8 @@ function baselineLine(baseline: BaselineComparison): string {
     return ` (${shown}${deltas.length > 6 ? ", …" : ""})`;
   };
   return `Baseline: ${baseline.regressions.length} regression(s)${ids(baseline.regressions)}, ${baseline.flaky.length} flaky${ids(baseline.flaky)}, `
-    + `${baseline.inconclusive.length} inconclusive${ids(baseline.inconclusive)}, ${baseline.improvements.length} improvement(s)${ids(baseline.improvements)}; `
+    + `${baseline.inconclusive.length} inconclusive${ids(baseline.inconclusive)}, ${baseline.improvements.length} improvement(s)${ids(baseline.improvements)}`
+    + `${baseline.noTrial.length > 0 ? `, ${baseline.noTrial.length} with no trial${ids(baseline.noTrial)}` : ""}; `
     + `suite ${describeSuite(baseline.suite)}; builds: ${describeBuildChanges(baseline.buildChanges)}`
     + (baseline.confounded.length > 0 ? `; CONFOUNDED — ${baseline.confounded.join("; ")}` : "");
 }

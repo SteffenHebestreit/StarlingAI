@@ -8,7 +8,8 @@
  * (Agresti–Caffo, the interval the agent harness compares pass counts with) excludes zero. Short of
  * that, a scenario that both passed and failed within one run reads flaky; one whose runs were each
  * uniform but disagree (1/1 then 0/1) reads inconclusive: too few attempts to tell a change from
- * chance.
+ * chance. A run in which every attempt ended on a harness error has no trial, and so no pass rate
+ * to compare: no-trial, which more attempts would not change.
  *
  * At k=1 no single scenario can show a decisive change, so the suite is compared as a whole: an
  * exact sign test over the scenarios run with equally many trials in both runs. Without a change,
@@ -22,7 +23,7 @@ export interface AttemptTally {
   trials: number;
 }
 
-export type ScenarioChange = "regressed" | "improved" | "flaky" | "inconclusive" | "unchanged";
+export type ScenarioChange = "regressed" | "improved" | "flaky" | "inconclusive" | "no-trial" | "unchanged";
 
 export interface ScenarioChangeVerdict {
   change: ScenarioChange;
@@ -40,6 +41,8 @@ export interface SuiteChangeVerdict {
   same: number;
   /** Scenarios left out of the test: their trial counts differ between the runs. */
   unpaired: number;
+  /** Scenarios left out of the test: a run without a trial has no pass count to compare. */
+  noTrial: number;
   /** One-sided exact sign-test p-value in the direction of the larger count (1 when nothing moved). */
   pValue: number;
 }
@@ -53,7 +56,8 @@ const clamp = (value: number): number => Math.min(1, Math.max(-1, value));
 
 /** A scenario's run against its baseline run. */
 export function compareTallies(baseline: AttemptTally, now: AttemptTally): ScenarioChangeVerdict {
-  if (baseline.trials === 0 || now.trials === 0) return { change: "inconclusive", ci: null };
+  // Not "inconclusive", which says more attempts could tell: every attempt of that run erred.
+  if (baseline.trials === 0 || now.trials === 0) return { change: "no-trial", ci: null };
   const interval = proportionDiffCI(now.passed, now.trials, baseline.passed, baseline.trials, Z_95);
   // A difference of two rates lies in [-1, 1]; clamping the display never moves a bound across 0.
   const ci = { low: clamp(interval.low), high: clamp(interval.high) };
@@ -83,9 +87,14 @@ export function compareSuite(pairs: ReadonlyArray<{ baseline: AttemptTally; now:
   let higher = 0;
   let same = 0;
   let unpaired = 0;
+  let noTrial = 0;
   for (const { baseline, now } of pairs) {
+    if (baseline.trials === 0 || now.trials === 0) {
+      noTrial += 1;
+      continue;
+    }
     // Unequal attempt counts are not exchangeable: more attempts see a failure more often.
-    if (baseline.trials === 0 || baseline.trials !== now.trials) {
+    if (baseline.trials !== now.trials) {
       unpaired += 1;
       continue;
     }
@@ -95,8 +104,8 @@ export function compareSuite(pairs: ReadonlyArray<{ baseline: AttemptTally; now:
   }
   const moved = lower + higher;
   // Nothing comparable is not "unchanged".
-  if (moved === 0) return { change: same > 0 ? "unchanged" : "inconclusive", lower, higher, same, unpaired, pValue: 1 };
+  if (moved === 0) return { change: same > 0 ? "unchanged" : "inconclusive", lower, higher, same, unpaired, noTrial, pValue: 1 };
   const pValue = signTestPValue(Math.max(lower, higher), moved);
   const change: SuiteChange = lower === higher || pValue > SUITE_ALPHA ? "inconclusive" : lower > higher ? "regressed" : "improved";
-  return { change, lower, higher, same, unpaired, pValue };
+  return { change, lower, higher, same, unpaired, noTrial, pValue };
 }
