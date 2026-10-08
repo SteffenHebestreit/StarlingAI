@@ -1,10 +1,21 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { resolveScriptPath } from "../tools/shell.js";
+import { getTool } from "../tools/registry.js";
 import { runWithRequestContext } from "../runtime/request-context.js";
+
+// run_script's `docker run`, answered without a sandbox so a test can read the command it was handed.
+// Hoisted: shell.js promisifies execFile when it loads, which is during this file's imports.
+const execFileAsyncMock = vi.hoisted(() => vi.fn(async (_file: string, _args: string[]) => ({ stdout: "8392\n", stderr: "" })));
+vi.mock("node:child_process", async (importOriginal) => {
+  const { promisify } = await import("node:util");
+  const execFile = vi.fn();
+  (execFile as unknown as Record<PropertyKey, unknown>)[promisify.custom] = execFileAsyncMock;
+  return { ...(await importOriginal<typeof import("node:child_process")>()), execFile };
+});
 
 /**
  * run_script finds a script where write_file put it (found by the E2E suite, 2026-10-07).
@@ -61,5 +72,16 @@ describe("run_script path resolution", () => {
   it("keeps the generated/ copy a scope-confined agent's file tools see when the root has one too", () => {
     const ws = workspace(["fib.py", "generated/fib.py"]);
     expect(runWithRequestContext({ workspaceScope: "generated" }, () => resolveScriptPath("fib.py", ws))).toBe("generated/fib.py");
+  });
+
+  // The tests above pin the helper; this one pins that run_script hands the sandbox what it found.
+  // A command that names the script as given ran /workspace/primes.js, which is the E2E failure.
+  it("runs the script in the sandbox where it was found", async () => {
+    const ws = workspace(["generated/primes.js"]);
+    execFileAsyncMock.mockClear();
+    const result = await getTool("run_script")!.execute({ path: "primes.js" }, { sessionId: "run-script-path", workspacePath: ws });
+    expect(result.success).toBe(true);
+    expect(execFileAsyncMock).toHaveBeenCalledTimes(1);
+    expect(execFileAsyncMock.mock.calls[0]?.[1].at(-1)).toBe("node '/workspace/generated/primes.js'");
   });
 });
