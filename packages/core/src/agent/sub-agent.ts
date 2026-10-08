@@ -3776,10 +3776,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // quoted the script it had written, and "const LIMIT = 200001;" came back "const LIMIT = [not
     // observed];": broken code, and an honest report flagged as one that made figures up. So the
     // check reads past a fenced code block that quotes, verbatim and in whole lines, a file the run
-    // wrote and one of its sandbox calls then ran. Only such a file: results.md written from the
-    // run's head and quoted verbatim would hand the read-back case its figure back. The texts are
-    // the run's own arguments to write_file and edit_file, per file, and never count as received,
-    // so a figure its prose states is checked as before.
+    // wrote and that one of its sandbox calls named, a call that ran. Only such a file: results.md
+    // written from the run's head and quoted verbatim would hand the read-back case its figure back.
+    // The call is matched by the file's name, before or after the write, so a `cat results.md` lets
+    // that quote through too. The texts are the run's own arguments to write_file and edit_file, per
+    // file, and never count as received, so a figure its prose states is checked as before.
     const writtenFileText = new Map<string, string>();
     // The arguments of the sandbox calls that ran (their result reports programOutputChars).
     const ranCallArguments: string[] = [];
