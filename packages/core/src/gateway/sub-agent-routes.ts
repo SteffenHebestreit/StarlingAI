@@ -14,7 +14,8 @@ import { verifyToken, extractBearerToken, authenticatedUser, userHasRole } from 
 import type { Context } from "hono";
 import { childLogger } from "../logger.js";
 import { PRODUCT } from "../product/index.js";
-import { canReadRecord, recordReader } from "../runtime/user-scope.js";
+import { canReadRecord, recordAccount, recordReader } from "../runtime/user-scope.js";
+import { presentRequestItem, requestTextReader } from "./config-assistant-visibility.js";
 import { resolveAgentRouting } from "../tools/sub-agent.js";
 import { appendFlowMemoryEntry, readFlowMemoryEntries } from "../agent/flow-memory.js";
 import { listConversationConfigProposals } from "../agent/config-assistant-proposals.js";
@@ -240,7 +241,9 @@ export function registerSubAgentRoutes(app: Hono): void {
 
     const limitRaw = Number(c.req.query("limit") ?? "50");
     const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(200, Math.trunc(limitRaw))) : 50;
-    const entries = readFlowMemoryEntries(getConfig().workspacePath, limit).reverse();
+    // Under multi-user auth an entry's request text goes to its author and an admin only.
+    const mayRead = await requestTextReader(c.req.header("Authorization"));
+    const entries = readFlowMemoryEntries(getConfig().workspacePath, limit).reverse().map((entry) => presentRequestItem(entry, mayRead));
     return c.json({ entries, totalEntries: entries.length });
   });
 
@@ -260,8 +263,10 @@ export function registerSubAgentRoutes(app: Hono): void {
       return c.json({ error: "Invalid flow-memory entry", details: parsed.error.flatten() }, 400);
     }
 
-    const entry = appendFlowMemoryEntry(getConfig().workspacePath, parsed.data);
-    return c.json(entry, 201);
+    // The caller is the entry's author: a body cannot name another account (the schema has no field
+    // for it, and zod drops what it does not know).
+    const entry = appendFlowMemoryEntry(getConfig().workspacePath, { ...parsed.data, account: recordAccount() });
+    return c.json(presentRequestItem(entry, () => true), 201);
   });
 
   app.get("/api/config-assistant/proposals", async (c) => {
@@ -270,7 +275,9 @@ export function registerSubAgentRoutes(app: Hono): void {
 
     const limitRaw = Number(c.req.query("limit") ?? "50");
     const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(100, Math.trunc(limitRaw))) : 50;
-    const proposals = listConversationConfigProposals(getConfig().workspacePath, limit);
+    // Under multi-user auth a proposal's request text goes to its author and an admin only.
+    const mayRead = await requestTextReader(c.req.header("Authorization"));
+    const proposals = listConversationConfigProposals(getConfig().workspacePath, limit).map((proposal) => presentRequestItem(proposal, mayRead));
     return c.json({ proposals, totalEntries: proposals.length });
   });
 

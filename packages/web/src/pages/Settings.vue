@@ -1223,7 +1223,7 @@
                   </summary>
 
                   <div class="mt-3 space-y-3 pl-1">
-                    <div class="text-xs text-gray-400 whitespace-pre-wrap break-words">{{ proposal.request }}</div>
+                    <div v-if="proposal.request" class="text-xs text-gray-400 whitespace-pre-wrap break-words">{{ proposal.request }}</div>
 
                     <div v-if="proposal.validations.length" class="space-y-1.5">
                       <div class="text-[11px] uppercase tracking-[0.18em] text-gray-500">Checks</div>

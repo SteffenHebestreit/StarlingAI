@@ -50,6 +50,11 @@ export interface ConversationConfigProposal {
   lesson?: string;
   appliedAt?: string;
   feedbackHistory: ConversationProposalFeedback[];
+  /** The account that asked for it: its user-scope segment, never the raw user id. Absent with one
+   *  operator, for a request with no user, and on proposals written before it existed. Under
+   *  multi-user auth the request text goes back only to that account and to an admin
+   *  (gateway/config-assistant-visibility.ts). */
+  account?: string;
 }
 
 export function listConversationConfigProposals(workspacePath: string, limit = 50): ConversationConfigProposal[] {
