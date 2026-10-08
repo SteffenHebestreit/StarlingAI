@@ -123,6 +123,22 @@ describe("a name that resolves differently at connect time does not reach a priv
   });
 });
 
+function allowPrivateHosts(hosts: string[]) {
+  const realConfig = loaderModule.getConfig();
+  vi.spyOn(loaderModule, "getConfig").mockReturnValue({
+    ...realConfig,
+    guardrails: { ...realConfig.guardrails, allowedPrivateHosts: hosts },
+  } as typeof realConfig);
+}
+
+/** What guardedConnectLookup hands a connection asking for `hostname`. */
+async function lookUp(hostname: string, all: boolean): Promise<{ error: (Error & { code?: string }) | null; address?: unknown; family?: unknown }> {
+  const { guardedConnectLookup } = await import("../tools/web.js");
+  return new Promise((resolve) => {
+    guardedConnectLookup(hostname, { all }, (error, address, family) => resolve({ error: error as (Error & { code?: string }) | null, address, family }));
+  });
+}
+
 /**
  * The connect-time decision itself, on the lookup undici calls: the same as the guard's, so an
  * operator's allowlisted LAN name still connects. Loopback cannot serve as the positive case
@@ -133,21 +149,6 @@ describe("the connect-time lookup makes the guard's decision", () => {
     vi.restoreAllMocks();
     connectAnswers.clear();
   });
-
-  function allowPrivateHosts(hosts: string[]) {
-    const realConfig = loaderModule.getConfig();
-    vi.spyOn(loaderModule, "getConfig").mockReturnValue({
-      ...realConfig,
-      guardrails: { ...realConfig.guardrails, allowedPrivateHosts: hosts },
-    } as typeof realConfig);
-  }
-
-  async function lookUp(hostname: string, all: boolean): Promise<{ error: (Error & { code?: string }) | null; address?: unknown; family?: unknown }> {
-    const { guardedConnectLookup } = await import("../tools/web.js");
-    return new Promise((resolve) => {
-      guardedConnectLookup(hostname, { all }, (error, address, family) => resolve({ error: error as (Error & { code?: string }) | null, address, family }));
-    });
-  }
 
   it("hands an allowlisted LAN name's address to the connection, in both answer shapes", async () => {
     allowPrivateHosts(["wiki.lan.example"]);
@@ -177,5 +178,44 @@ describe("the connect-time lookup makes the guard's decision", () => {
     connectAnswers.set("www.public.example", [{ address: "93.184.215.14", family: 4 }]);
 
     expect(await lookUp("www.public.example", false)).toEqual({ error: null, address: "93.184.215.14", family: 4 });
+  });
+});
+
+/**
+ * A name whose answer was the metadata address written as IPv4-mapped IPv6 passed both the check
+ * before the request and the lookup its connection made: neither knew that form as private.
+ */
+describe("a name answering with a private IPv4 address written as IPv6", () => {
+  const metadata = [{ address: "::ffff:169.254.169.254", family: 6 }];
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    checkAnswers.clear();
+    connectAnswers.clear();
+  });
+
+  it("is refused by the check before the request", async () => {
+    checkAnswers.set("mapped-metadata.example", metadata);
+    const { checkUrlSsrf, hostIsBlocked } = await import("../tools/web.js");
+
+    expect(await hostIsBlocked("mapped-metadata.example")).toBe(true);
+    expect(await checkUrlSsrf("http://mapped-metadata.example/latest/meta-data/")).toMatch(/private|internal/);
+  });
+
+  it("is refused by the lookup its connection makes, listed or not", async () => {
+    connectAnswers.set("mapped-metadata.example", metadata);
+    expect((await lookUp("mapped-metadata.example", true)).error?.code).toBe("ESSRFBLOCKED");
+
+    allowPrivateHosts(["mapped-metadata.example"]);
+    expect((await lookUp("mapped-metadata.example", true)).error?.code).toBe("ESSRFBLOCKED");
+  });
+
+  it("passes when the IPv4 address inside is public", async () => {
+    checkAnswers.set("mapped-public.example", [{ address: "::ffff:8.8.8.8", family: 6 }]);
+    connectAnswers.set("mapped-public.example", [{ address: "::ffff:8.8.8.8", family: 6 }]);
+    const { hostIsBlocked } = await import("../tools/web.js");
+
+    expect(await hostIsBlocked("mapped-public.example")).toBe(false);
+    expect(await lookUp("mapped-public.example", false)).toEqual({ error: null, address: "::ffff:8.8.8.8", family: 6 });
   });
 });

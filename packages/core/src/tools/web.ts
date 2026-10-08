@@ -956,32 +956,29 @@ export async function hostIsBlocked(host: string): Promise<boolean> {
 }
 
 /**
- * Whether a host that resolved to `addresses` is refused. Any private address refuses it,
- * unless the host is listed in `allowedPrivateHosts` (exact name, any case) — and even a
- * listed host is refused when one of its addresses is loopback, link-local or unspecified,
- * so the list can open a fixture on a LAN or container network, never the gateway itself or
- * a cloud-metadata endpoint.
+ * Whether a host that resolved to `addresses` is refused. A loopback, link-local or
+ * unspecified address refuses it whatever the list says, so the list can open a fixture on a
+ * LAN or container network, never the gateway itself or a cloud-metadata endpoint. Any other
+ * private address refuses it unless the host is listed in `allowedPrivateHosts` (exact name,
+ * any case). The never-allowed test came after the private one and only for a listed host, so
+ * an address the private test did not know (::ffff:169.254.169.254) was let through.
  */
 export function resolvedHostIsBlocked(host: string, addresses: readonly string[], allowedPrivateHosts: readonly string[]): boolean {
+  if (addresses.some((address) => isNeverAllowedAddress(address))) return true;
   if (!addresses.some((address) => isPrivateHost(address))) return false;
   const name = host.toLowerCase().replace(/\.$/, "");
-  const listed = allowedPrivateHosts.some((entry) => entry.toLowerCase() === name);
-  return !listed || addresses.some((address) => isNeverAllowedAddress(address));
+  return !allowedPrivateHosts.some((entry) => entry.toLowerCase() === name);
 }
 
 /**
  * Addresses no host reaches through the guard, listed or not: loopback, link-local
- * (169.254.0.0/16 holds the cloud-metadata endpoint; fe80::/10) and the unspecified address,
- * in IPv4, IPv6 and IPv4-mapped IPv6 form. An IPv4-mapped address in hex form is refused too.
+ * (169.254.0.0/16 holds the cloud-metadata endpoint; fe80::/10) and the unspecified address
+ * (0.0.0.0/8, ::), also as the IPv4 address inside an IPv6 one (embeddedIPv4).
  */
 export function isNeverAllowedAddress(address: string): boolean {
   const a = address.replace(/^\[|\]$/g, "").toLowerCase();
-  const mapped = a.startsWith("::ffff:");
-  const v4 = mapped ? a.slice("::ffff:".length) : a;
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(v4)) {
-    return v4.startsWith("127.") || v4.startsWith("169.254.") || v4.startsWith("0.");
-  }
-  if (mapped) return true;
+  const v4 = /^\d{1,3}(\.\d{1,3}){3}$/.test(a) ? a : embeddedIPv4(a);
+  if (v4 !== null) return v4.startsWith("127.") || v4.startsWith("169.254.") || v4.startsWith("0.");
   return a === "::1" || a === "::" || /^fe[89ab][0-9a-f]:/.test(a);
 }
 
@@ -1203,6 +1200,53 @@ function withoutFragment(url: string): string {
   return hash < 0 ? url : url.slice(0, hash);
 }
 
+/** The eight 16-bit groups of an IPv6 address (a trailing dotted IPv4 counts as two), or null. */
+function ipv6Hextets(address: string): number[] | null {
+  if (!address.includes(":")) return null;
+  let text = address;
+  const tail: number[] = [];
+  const dotted = /^(.*:)(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(text);
+  if (dotted) {
+    const octets = dotted.slice(2, 6).map(Number);
+    if (octets.some((octet) => octet > 255)) return null;
+    tail.push((octets[0]! << 8) | octets[1]!, (octets[2]! << 8) | octets[3]!);
+    text = dotted[1]!.endsWith("::") ? dotted[1]! : dotted[1]!.slice(0, -1);
+  }
+  const halves = text.split("::");
+  if (halves.length > 2) return null;
+  const groups = (part: string) => (part === "" ? [] : part.split(":").map((group) => (/^[0-9a-f]{1,4}$/.test(group) ? parseInt(group, 16) : Number.NaN)));
+  const head = groups(halves[0]!);
+  const rest = halves.length === 2 ? groups(halves[1]!) : [];
+  if ([...head, ...rest].some((group) => Number.isNaN(group))) return null;
+  const known = head.length + rest.length + tail.length;
+  if (halves.length === 1) return known === 8 ? [...head, ...tail] : null;
+  return known <= 7 ? [...head, ...new Array<number>(8 - known).fill(0), ...rest, ...tail] : null;
+}
+
+/**
+ * The IPv4 address an IPv6 address carries, dotted, or null: IPv4-mapped ::ffff:a.b.c.d (also
+ * written ::ffff:xxxx:xxxx), IPv4-translated ::ffff:0:a.b.c.d, the deprecated IPv4-compatible
+ * ::a.b.c.d and the NAT64 well-known prefix 64:ff9b::/96. A connection to any of these reaches
+ * the IPv4 address.
+ */
+function embeddedIPv4(address: string): string | null {
+  const g = ipv6Hextets(address);
+  if (!g) return null;
+  const zeroTo = (end: number) => g.slice(0, end).every((group) => group === 0);
+  const mapped = zeroTo(5) && g[5] === 0xffff;
+  const translated = zeroTo(4) && g[4] === 0xffff && g[5] === 0;
+  const compatible = zeroTo(6);
+  const nat64 = g[0] === 0x64 && g[1] === 0xff9b && g.slice(2, 6).every((group) => group === 0);
+  if (!mapped && !translated && !compatible && !nat64) return null;
+  return `${g[6]! >> 8}.${g[6]! & 0xff}.${g[7]! >> 8}.${g[7]! & 0xff}`;
+}
+
+/** Whether a dotted IPv4 address is loopback, RFC 1918, link-local (metadata) or in 0.0.0.0/8. */
+function isPrivateIPv4(dotted: string): boolean {
+  const [a, b] = dotted.split(".").map(Number);
+  return a === 127 || a === 10 || a === 0 || (a === 172 && b! >= 16 && b! <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254);
+}
+
 export function isPrivateHost(host: string): boolean {
   // Strip IPv6 brackets if present; lowercase so IPv6 hextets match case-insensitively.
   const h = host.replace(/^\[|\]$/g, "").toLowerCase();
@@ -1216,10 +1260,13 @@ export function isPrivateHost(host: string): boolean {
   if (/^f[cd][0-9a-f]{2}:/.test(h)) return true;
   // IPv6 link-local fe80::/10 (fe80–febf first hextet)
   if (/^fe[89ab][0-9a-f]:/.test(h)) return true;
-  // IPv6-mapped IPv4 loopback (::ffff:127.0.0.1)
-  if (/^::ffff:127\./i.test(h)) return true;
-  // IPv6-mapped private ranges
-  if (/^::ffff:(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(h)) return true;
+  // An IPv6 address that carries an IPv4 one reaches that IPv4 address, so it is judged as it.
+  // Only the dotted ::ffff: forms of 127/8 and RFC 1918 were known here, and the metadata
+  // endpoint as ::ffff:169.254.169.254 (::ffff:a9fe:a9fe once URL parsing has written it) passed.
+  const embedded = embeddedIPv4(h);
+  if (embedded !== null) return isPrivateIPv4(embedded);
+  // 0.0.0.0/8 (dotted form): "this network", which reaches the host itself.
+  if (/^0\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h)) return true;
   // Loopback 127.0.0.0/8 (dotted form) — the literal check above only caught
   // 127.0.0.1, so 127.0.0.2 … 127.255.255.255 (all loopback) slipped through.
   if (h.startsWith("127.")) return true;
