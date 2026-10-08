@@ -1634,10 +1634,15 @@ describe("e2e CLI (in process, against the fake gateway)", () => {
 
   beforeAll(() => {
     mkdirSync(join(cliDir, "scenarios"), { recursive: true });
-    mkdirSync(lockDir, { recursive: true });
     writeFileSync(credsFile, JSON.stringify(credentials()));
     writeFileSync(join(cliDir, "scenarios", "pass.jsonc"), JSON.stringify({ id: "cli-pass", title: "CLI pass", group: "core", steps: [{ kind: "turn", message: "hello from the cli", expect: { reply: { includes: ["42"] } } }] }));
     writeFileSync(join(cliDir, "scenarios", "fail.jsonc"), JSON.stringify({ id: "cli-fail", title: "CLI fail", group: "guards", steps: [{ kind: "turn", message: "hello again", expect: { reply: { includes: ["banana"] } } }] }));
+  });
+
+  // A lock one test leaves behind must not refuse the next test's runs.
+  beforeEach(() => {
+    rmSync(lockDir, { recursive: true, force: true });
+    mkdirSync(lockDir, { recursive: true });
   });
 
   // Only what the run needs: no E2E_* variable of the shell leaks in.
