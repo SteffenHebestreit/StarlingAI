@@ -47,7 +47,7 @@ import {
   getApiWebhookKeys,
 } from "../credentials/jobs.js";
 import { handleAguiStream } from "./agui.js";
-import { runSubAgent } from "../agent/sub-agent.js";
+import { runSubAgent, type SubAgentRunOptions } from "../agent/sub-agent.js";
 import { createJob, cancelJob, getJob as getExecutionJob, listJobs, deleteSceneJob } from "../agent/jobs.js";
 import { canSeeSceneJob, presentSceneJob, sceneJobViewer } from "./scene-job-access.js";
 import { resolveApproval, getPendingApproval, listPendingApprovals } from "../approval/store.js";
@@ -3840,12 +3840,22 @@ export function createGateway() {
         : null;
 
       const verified = token ? await verifyToken(token) : null;
-      if (!verified) {
+      // The account the task runs as. The route checked only that the token was signed and ran
+      // the task with no user, so under multi-user auth a memory the caller asked to keep as their
+      // own was stored to the shared workspace, where every other account reads it, and a deleted
+      // account's token kept running agents here for the rest of its lifetime (found in review,
+      // 2026-10-08). There the caller is now resolved against the user store, as on /api and the
+      // AG-UI stream, and a token whose account no longer resolves is refused. With one operator
+      // there is no user store and the run has no user, as before.
+      const a2aUser = verified && getConfig().auth?.enabled === true
+        ? await authenticatedUser(req.headers["authorization"] as string)
+        : null;
+      if (!verified || (getConfig().auth?.enabled === true && !a2aUser)) {
         res.writeHead(401, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32001, message: "Unauthorized" }, id: null }));
         return;
       }
-      const a2aCaller = typeof verified.sub === "string" ? verified.sub : "authenticated";
+      const a2aCaller = a2aUser?.username ?? (typeof verified.sub === "string" ? verified.sub : "authenticated");
 
       const agentName = decodeURIComponent(a2aMatch[1]!);
       // Bound the buffered body so any authenticated caller can't stream an unbounded
@@ -3899,7 +3909,7 @@ export function createGateway() {
             : `a2a:${multiUser ? randomUUID() : Date.now()}`;
           const autoApprove = rpc.params?.["autoApprove"] === true;
 
-          const result = await runSubAgent({
+          const runOptions: SubAgentRunOptions = {
             agentName,
             task,
             context: ctx,
@@ -3908,7 +3918,13 @@ export function createGateway() {
             approvalCallback: autoApprove
               ? async () => true
               : undefined,
-          });
+            // The caller's account on the run's tools (a 'user' memory stays theirs) and on the
+            // request context the run's own memory reads take their account from.
+            ...(a2aUser ? { userId: a2aUser.username } : {}),
+          };
+          const result = a2aUser
+            ? await runWithRequestContext({ userId: a2aUser.username }, () => runSubAgent(runOptions))
+            : await runSubAgent(runOptions);
 
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ jsonrpc: "2.0", result: { output: result, agentName }, id: rpcId }));
