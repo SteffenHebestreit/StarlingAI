@@ -56,18 +56,18 @@ function ledger(dir: string): OutcomeEntry[] {
 
 /** Loads the modules once for the deployment last configured; `run` makes one run of the probe
  *  agent on `task` in the request context of `userId` (none: no user). */
-async function load(dir: string): Promise<{ run: (userId: string | undefined, task: string) => Promise<void>; segment: (userId: string) => string }> {
+async function load(dir: string): Promise<{ run: (userId: string | undefined, task: string, parentSessionId?: string) => Promise<void>; segment: (userId: string) => string }> {
   vi.resetModules();
   (await import("../config/loader.js")).resetConfigForTests();
   const { runWithRequestContext } = await import("../runtime/request-context.js");
   const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
   const { safeUserSegment } = await import("../runtime/user-scope.js");
   return {
-    run: async (userId, task) => {
+    run: async (userId, task, parentSessionId = `parent-${Math.random().toString(36).slice(2)}`) => {
       await runWithRequestContext(userId ? { userId } : {}, () => runSubAgentWithStats({
         agentName: AGENT,
         task,
-        parentSessionId: `parent-${Math.random().toString(36).slice(2)}`,
+        parentSessionId,
         workspacePath: dir,
       }));
     },
@@ -167,6 +167,42 @@ describe("record_lesson and the run that records it", () => {
     expect(entries.find((entry) => entry.task === TASK_B)).toMatchObject({ account: segment("bob") });
     const lesson = entries.find((entry) => entry.lesson === LESSON_A);
     expect(lesson).toMatchObject({ agent: AGENT, task: TASK_A, account: segment("alice") });
+  });
+
+  it("files each sibling's lesson under its own run, though both started in the same millisecond of one parent", async () => {
+    // Same parent, same agent, same millisecond: the two runs' session ids are equal, and a lesson
+    // looked up by session id was filed under whichever run registered last.
+    vi.spyOn(Date, "now").mockReturnValue(Date.UTC(2026, 9, 8, 12, 0, 0));
+    const dir = deployment(false, ["record_lesson"]);
+    const { run } = await load(dir);
+    let bAtFirstStep!: () => void;
+    const bStarted = new Promise<void>((resolve) => { bAtFirstStep = resolve; });
+    let aRecorded!: () => void;
+    const aLessonIn = new Promise<void>((resolve) => { aRecorded = resolve; });
+    completeMock.mockImplementation(async (messages: Message[]) => {
+      const taskOf = (task: string) => messages.some((message) => message.role === "user" && String(message.content).includes(task));
+      const afterTool = messages.some((message) => message.role === "tool");
+      if (taskOf(TASK_A) && !afterTool) {
+        await bStarted;
+        return { content: null, tool_calls: [{ id: "lesson-a", name: "record_lesson", arguments: { lesson: LESSON_A, outcome: "success" } }], usage: USAGE, finishReason: "tool_calls" };
+      }
+      if (taskOf(TASK_A)) aRecorded();
+      if (taskOf(TASK_B) && !afterTool) {
+        bAtFirstStep();
+        await aLessonIn;
+      }
+      return FINAL;
+    });
+
+    try {
+      const runA = run(undefined, TASK_A, "parent-same-ms");
+      const runB = run(undefined, TASK_B, "parent-same-ms");
+      await Promise.all([runA, runB]);
+    } finally {
+      vi.restoreAllMocks();
+    }
+
+    expect(ledger(dir).find((entry) => entry.lesson === LESSON_A)).toMatchObject({ agent: AGENT, task: TASK_A });
   });
 
   it("with one operator, files the lesson under its own run's task, though another task's run finished in between", async () => {

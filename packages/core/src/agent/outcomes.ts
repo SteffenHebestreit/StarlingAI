@@ -70,7 +70,9 @@ export function appendOutcome(workspacePath: string, entry: OutcomeEntry): void 
   }
 }
 
-/** What record_lesson takes from the run it is called in. */
+/** What record_lesson takes from the run it is called in. The run carries it in its request context
+ *  (runtime/request-context.ts attachRequestOutcomeRun), so a lesson is filed under the run's own task:
+ *  the last ledger entry for the agent's name was another run's (found in review, 2026-10-08). */
 export interface OutcomeRun {
   agent: string;
   /** The task as the run's own outcome records it. */
@@ -81,24 +83,6 @@ export interface OutcomeRun {
   progress(): { iterations: number; totalTokens: number };
 }
 
-const _runs = new Map<string, OutcomeRun>();
-
-/**
- * Register an in-process run under the session id its tool calls carry (`sub:<parent>:<agent>:<ts>`),
- * until the returned call removes it. A lesson recorded in the run is filed under the run's own task:
- * the last ledger entry for the agent's name was another run's (found in review, 2026-10-08).
- */
-export function beginOutcomeRun(sessionId: string, run: OutcomeRun): () => void {
-  _runs.set(sessionId, run);
-  return () => {
-    if (_runs.get(sessionId) === run) _runs.delete(sessionId);
-  };
-}
-
-/** The registered run a tool call with this session id belongs to, if any. */
-export function outcomeRunFor(sessionId: string): OutcomeRun | undefined {
-  return _runs.get(sessionId);
-}
 
 export function readRecentOutcomes(workspacePath: string, limit = 40): OutcomeEntry[] {
   const file = resolve(workspacePath, OUTCOMES_FILE);

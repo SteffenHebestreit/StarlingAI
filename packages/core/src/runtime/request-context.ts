@@ -11,6 +11,7 @@
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { UserInputChannel } from "../agent/user-input.js";
+import type { OutcomeRun } from "../agent/outcomes.js";
 
 export interface RequestContext {
   /** Authenticated user (JWT subject / username) that owns this tool execution. */
@@ -75,6 +76,14 @@ export interface RequestContext {
    * instead, which also honours a language the user asked for.
    */
   userMessageLanguage?: string;
+  /**
+   * The in-process sub-agent run doing this work: the task its own outcome records, the account it
+   * runs for and how far it has got, for record_lesson. Attached by the run to its own context
+   * (attachRequestOutcomeRun) before its first tool call, so a nested run replaces the parent's run
+   * it inherits. Its tool calls carry it with the rest of the context, so two runs of one agent
+   * started in the same millisecond, whose session ids are equal, each keep their own.
+   */
+  outcomeRun?: OutcomeRun;
 }
 
 /**
@@ -125,7 +134,8 @@ export function currentUserScopeSegment(): string | undefined {
 /**
  * The whole ambient context, for callers that need to EXTEND it rather than read one
  * field. Returns the live store object: treat it as read-only and spread it, never mutate
- * it (the one sanctioned mutation is {@link attachRequestSessionId}).
+ * it (the sanctioned mutations are {@link attachRequestSessionId} and
+ * {@link attachRequestOutcomeRun}).
  */
 export function currentRequestContext(): Readonly<RequestContext> | undefined {
   return storage.getStore();
@@ -184,6 +194,20 @@ export function currentCallAttribution(): {
 export function attachRequestSessionId(sessionId: string): void {
   const store = storage.getStore();
   if (store && !store.sessionId) store.sessionId = sessionId;
+}
+
+/**
+ * Attach the running sub-agent run to the ALREADY-ACTIVE context, the run's own (established by
+ * runSubAgentWithStats): its counters exist only inside the run. No-op when no context is active.
+ */
+export function attachRequestOutcomeRun(run: OutcomeRun): void {
+  const store = storage.getStore();
+  if (store) store.outcomeRun = run;
+}
+
+/** The in-process sub-agent run doing the active work, if any. */
+export function currentOutcomeRun(): OutcomeRun | undefined {
+  return storage.getStore()?.outcomeRun;
 }
 
 /**

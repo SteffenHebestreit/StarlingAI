@@ -11,7 +11,7 @@ Every public schema field, where it is declared, and how many production files r
 | `a2a` | packages/core/src/config/schema.ts:399 | 12 |
 | `accessKeyId` | packages/core/src/config/schema.ts:459 | 2 |
 | `accessToken` | packages/core/src/config/schemas/channels.ts:51 | 9 |
-| `account` | packages/core/src/config/schemas/channels.ts:71 | 84 |
+| `account` | packages/core/src/config/schemas/channels.ts:71 | 85 |
 | `acquireTimeoutMs` | packages/core/src/config/schema.ts:1674 | 1 |
 | `activeModelPreset` | packages/core/src/config/schema.ts:1705 | 2 |
 | `adaptive` | packages/core/src/config/schemas/decisions.ts:57 | 14 |
@@ -472,7 +472,7 @@ Every public schema field, where it is declared, and how many production files r
 | `systemPrompt` | packages/core/src/config/schema.ts:920 | 20 |
 | `tags` | packages/core/src/config/schema.ts:567 | 76 |
 | `targetAgreement` | packages/core/src/config/schemas/decisions.ts:59 | 5 |
-| `task` | packages/core/src/config/schema.ts:1299 | 141 |
+| `task` | packages/core/src/config/schema.ts:1299 | 142 |
 | `taskConditionalPrompt` | packages/core/src/config/schema.ts:1800 | 1 |
 | `taskGraphFailureDisposition` | packages/core/src/config/schemas/orchestration.ts:488 | 1 |
 | `taskTimeoutMs` | packages/core/src/config/schema.ts:652 | 1 |

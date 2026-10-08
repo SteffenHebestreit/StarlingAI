@@ -13,7 +13,8 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, extname } from "node:path";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
-import { appendOutcome, outcomeRunFor } from "../agent/outcomes.js";
+import { appendOutcome } from "../agent/outcomes.js";
+import { currentOutcomeRun } from "../runtime/request-context.js";
 import { appendAgentMessage, writeSharedFact, readAllFacts, searchSharedFacts, isAtomicFactValue } from "../swarm/memory.js";
 import { appendEvidenceClaim } from "../swarm/evidence-ledger.js";
 import { emitSwarmEvent } from "../swarm/bus.js";
@@ -897,13 +898,13 @@ registerTool({
 
     if (!lesson) return { success: false, output: "", error: "lesson is required" };
 
-    // The run this call belongs to: its task, account and progress (agent/sub-agent.ts registers
-    // each in-process run under the session id its tool calls carry). The lesson used to take the
+    // The run this call belongs to: its task, account and progress (agent/sub-agent.ts attaches each
+    // in-process run to its own request context, which this call inherits). The lesson used to take the
     // task of the latest ledger entry for this agent's name, which was another run's: one that
     // finished meanwhile, possibly for another account, and otherwise the agent's PREVIOUS run, since
     // this run's own outcome is written when it ends (found in review, 2026-10-08). A call from
     // outside a registered run is filed under no one's task.
-    const run = outcomeRunFor(ctx.sessionId);
+    const run = currentOutcomeRun();
     // Derive agent name from sessionId (sub:parentId:agentName:timestamp)
     const parts = ctx.sessionId.split(":");
     const agentName = run?.agent ?? (parts.length >= 3 ? parts[2]! : "unknown");
