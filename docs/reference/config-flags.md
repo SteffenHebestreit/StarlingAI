@@ -239,7 +239,7 @@ Every public schema field, where it is declared, and how many production files r
 | `loginUrl` | packages/core/src/config/schema.ts:785 | 6 |
 | `loopAwareDelegation` | packages/core/src/config/schemas/orchestration.ts:529 | 8 |
 | `loopBrake` | packages/core/src/config/schema.ts:1898 | 6 |
-| `matches` | packages/core/src/config/schema.ts:509 | 107 |
+| `matches` | packages/core/src/config/schema.ts:509 | 108 |
 | `maxActiveTimeMs` | packages/core/src/config/schema.ts:1638 | 2 |
 | `maxBaseCandidates` | packages/core/src/config/schemas/multimodal.ts:230 | 1 |
 | `maxBodyBytes` | packages/core/src/config/schema.ts:315 | 3 |
@@ -483,7 +483,7 @@ Every public schema field, where it is declared, and how many production files r
 | `tierLabels` | packages/core/src/config/schemas/multimodal.ts:215 | 1 |
 | `tiers` | packages/core/src/config/schema.ts:235 | 39 |
 | `timeoutMs` | packages/core/src/config/schema.ts:69 | 103 |
-| `token` | packages/core/src/config/schema.ts:1146 | 184 |
+| `token` | packages/core/src/config/schema.ts:1146 | 183 |
 | `tokenId` | packages/core/src/config/schema.ts:1045 | 1 |
 | `tokenSecret` | packages/core/src/config/schema.ts:1046 | 1 |
 | `toolCallsPerTurn` | packages/core/src/config/schema.ts:265 | 1 |

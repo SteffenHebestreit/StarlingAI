@@ -230,18 +230,25 @@ describe("receptionist language line", () => {
     expect(content).toContain("French is this assistant's default language");
   });
 
-  it("reads a first greeting as the full path does: no language of its own", () => {
-    // The detector calls these English, French and Spanish. The fast lane answered them in the
-    // default language and the full path, when it answered instead, named the detected one.
-    for (const greeting of ["Good morning", "Thank you!", "Merci beaucoup", "Buenos días"]) {
-      expect(String(buildReceptionistMessages(greeting, { defaultLanguage: "German" })[0]!.content)).toContain("Reply in GERMAN");
-      const line = buildTurnReplyLanguageInstruction(greeting, "German", { firstTurn: true, userWords: greeting });
-      expect(line).toContain("(German if there is none)");
-      expect(line).not.toMatch(/otherwise in [A-Z]\w+, the language/);
-      expect(messageHasOwnLanguage(greeting)).toBe(false);
+  it("gives a bare two-word message one directive, while the full path keeps the language the detector reads", () => {
+    // The fast lane's small model answers social turns, and needs the language decided for it.
+    expect(String(buildReceptionistMessages("Weather today?", { defaultLanguage: "German" })[0]!.content)).toContain("Reply in GERMAN");
+    // The full path answers tasks. Read as the fast lane reads them, a two-word request and a short
+    // Chinese or Japanese sentence (no spaces, so one "word") had no language, and opening a
+    // conversation they were pointed at the default.
+    for (const [message, language] of [
+      ["Weather today?", "English"],
+      ["如何在冬天储存电池？", "Chinese"],
+      ["今日のニュースは？", "Japanese"],
+    ] as const) {
+      expect(messageHasOwnLanguage(message)).toBe(true);
+      const line = buildTurnReplyLanguageInstruction(message, "German", { firstTurn: true, userWords: message });
+      expect(line).toContain(`otherwise in ${language}, the language of that message`);
+      expect(line).not.toContain("if there is none)");
     }
-    // A sentence keeps its language on both.
-    expect(messageHasOwnLanguage("Good morning, how do I reset my router?")).toBe(true);
+    // What the detector cannot call has no language on either path.
+    expect(messageHasOwnLanguage("ok")).toBe(false);
+    expect(messageHasOwnLanguage("你好")).toBe(false);
   });
 
   it("keeps the measured-best line for a message that carries a language", () => {

@@ -36,7 +36,7 @@ import { listUserMemoryRecords, listWorkspaceMemoryRecords } from "../memory/ser
 import { loadMainAssistantPersonality } from "../personality/service.js";
 import type { ChatProvider, LLMMessage } from "../providers/lmstudio.js";
 import { childLogger } from "../logger.js";
-import { defaultReplyLanguage, languageIsUndetermined } from "./reply-language.js";
+import { defaultReplyLanguage } from "./reply-language.js";
 import { detectTextLanguage } from "./text-language.js";
 
 const log = childLogger("agent:receptionist");
@@ -242,9 +242,29 @@ export function receptionistEscalated(raw: string, confidenceAttempt: boolean): 
   return !text || text.includes(ESCALATE_SENTINEL);
 }
 
-// Whether a message carries no language of its own. Defined beside the reply-language rule, so the
-// full path answers a first "Good morning" in the language this desk does; re-exported here.
-export { languageIsUndetermined };
+/**
+ * Does the user's message carry NO reliable language signal? A bare social token — "hi", "hey",
+ * "ok", "danke", an emoji — is used verbatim in German chat too, so it does NOT establish English.
+ *
+ * Decided in CODE, deliberately, rather than in the prompt. The prompt-only attempt ("reply in the
+ * same language; if too short/ambiguous default to German") did NOT work on the tiny fast-lane
+ * model: it competes with the stronger "ALWAYS reply in the SAME language (English → English)"
+ * rule, so the model reads the English word "hi", matches that rule, and answers in English —
+ * the observed bug (session 5d9136bd: a German user's "hi" got "Hello! How can I help you
+ * today?"), which survived the first prompt-only fix. When the signal is undetermined the builder
+ * emits ONE unconditional language directive instead, leaving the model nothing to weigh.
+ *
+ * Structural, no keyword table: an umlaut/ß is a positive German marker; otherwise a message of at
+ * most two short word-tokens (or pure emoji/punctuation) is treated as carrying no language.
+ */
+export function languageIsUndetermined(userMessage: string): boolean {
+  const raw = (userMessage ?? "").trim();
+  if (!raw) return true;
+  if (/[äöüß]/i.test(raw)) return false; // unambiguous German marker
+  const words = raw.replace(/[^\p{L}\p{N}\s]/gu, " ").trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return true; // emoji / punctuation only
+  return words.length <= 2 && raw.length <= 15; // a bare greeting or acknowledgement
+}
 
 export function buildReceptionistMessages(
   userMessage: string,

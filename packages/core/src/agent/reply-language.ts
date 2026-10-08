@@ -26,7 +26,7 @@
  */
 import { getConfig } from "../config/loader.js";
 import { currentRequestContext } from "../runtime/request-context.js";
-import { detectTextLanguage, detectUniformTextLanguage, type DetectedLanguage } from "./text-language.js";
+import { detectTextLanguage, detectUniformTextLanguage } from "./text-language.js";
 import { midTurnUserMessages, startsTurn, type TurnBoundaryMessage } from "./turn-boundary.js";
 
 /** Used when config cannot be read (unit tests without a config, a broken shard). */
@@ -71,45 +71,9 @@ export function buildReplyLanguageRule(): string {
     + "French\") applies to that deliverable; your own words around it stay in the reply language.";
 }
 
-/**
- * Does the user's message carry NO reliable language signal? A bare social token — "hi", "hey",
- * "ok", "danke", an emoji — is used verbatim in German chat too, so it does NOT establish English.
- *
- * Decided in CODE, deliberately, rather than in the prompt. The prompt-only attempt ("reply in the
- * same language; if too short/ambiguous default to German") did NOT work on the tiny fast-lane
- * model: it competes with the stronger "ALWAYS reply in the SAME language (English → English)"
- * rule, so the model reads the English word "hi", matches that rule, and answers in English —
- * the observed bug (session 5d9136bd: a German user's "hi" got "Hello! How can I help you
- * today?"), which survived the first prompt-only fix. When the signal is undetermined the fast
- * lane's builder emits ONE unconditional language directive instead, leaving the model nothing to
- * weigh (receptionist.ts).
- *
- * Structural, no keyword table: an umlaut/ß is a positive German marker; otherwise a message of at
- * most two short word-tokens (or pure emoji/punctuation) is treated as carrying no language.
- */
-export function languageIsUndetermined(userMessage: string): boolean {
-  const raw = (userMessage ?? "").trim();
-  if (!raw) return true;
-  if (/[äöüß]/i.test(raw)) return false; // unambiguous German marker
-  const words = raw.replace(/[^\p{L}\p{N}\s]/gu, " ").trim().split(/\s+/).filter(Boolean);
-  if (words.length === 0) return true; // emoji / punctuation only
-  return words.length <= 2 && raw.length <= 15; // a bare greeting or acknowledgement
-}
-
-/**
- * The language a message is written in, or null when it has none of its own: a bare greeting or
- * acknowledgement, or text the detector cannot call. One definition for the fast lane and the full
- * path. The detector calls "Good morning" English and "Merci beaucoup" French, and read that way a
- * first greeting the fast lane answered in the default language got the detected one on the full
- * path, against the rule's own "a greeting" (buildReplyLanguageRule).
- */
-function ownLanguage(text: string | undefined): DetectedLanguage | null {
-  return text === undefined || languageIsUndetermined(text) ? null : detectTextLanguage(text);
-}
-
-/** Whether a message has a language of its own (see ownLanguage). */
+/** Whether a message has a language of its own, as far as the statistical detector can call it. */
 export function messageHasOwnLanguage(userMessage: string): boolean {
-  return ownLanguage(userMessage) !== null;
+  return detectTextLanguage(userMessage) !== null;
 }
 
 /**
@@ -148,16 +112,24 @@ function quotedSubject(text: string): string {
  * instruction the orchestrator sees on the turn, so it has to carry the whole precedence and not
  * just "same language as this message" — that version overrode an explicit request.
  *
- * The default language is named only for a message with no language of its own (a bare greeting,
- * "ok", a bare link, code; or any message before the detector has loaded): elsewhere it cannot
+ * The default language is named only for a message the detector cannot call (a bare "hi" or "ok",
+ * an emoji, a bare link, code; or any message before the detector has loaded): elsewhere it cannot
  * apply, and named it pulled the reply into it (see buildReplyLanguageRule).
+ *
+ * A short message the detector can call keeps its language here. The fast lane gives a message of
+ * two short words the conversation's or the default language instead (languageIsUndetermined): its
+ * small model answers greetings and needs the language decided for it. This path answers tasks.
+ * Read the fast lane's way here, "Weather today?" or a short Chinese sentence opening a
+ * conversation was pointed at the default, a whole answer the person may not read; read by the
+ * detector, a "Good morning" the fast lane would answer in German gets English, one short reply in
+ * a language the person just wrote.
  */
 export function buildTurnReplyLanguageInstruction(
   userMessage: string,
   defaultLanguage: string = defaultReplyLanguage(),
   opts: TurnReplyLanguageOptions = {},
 ): string {
-  const own = ownLanguage(userMessage);
+  const own = detectTextLanguage(userMessage);
   const defaultClause = own ? "" : ` (${defaultLanguage} if there is none)`;
   const tail = `If it has no language of its own, keep the language the conversation has been using${defaultClause}.`;
   // On a first turn the line names the language of what the person typed. Unnamed, an English
@@ -169,7 +141,7 @@ export function buildTurnReplyLanguageInstruction(
   // person's own words, never from a template the swarm wrote or the analysis inlined ahead of a
   // picture's question, and only when every sentence of them is in it. Read as a whole, a German
   // question about an English quote or an error message is English.
-  const named = own && opts.firstTurn && ownLanguage(opts.userWords) ? detectUniformTextLanguage(opts.userWords) : null;
+  const named = own && opts.firstTurn ? detectUniformTextLanguage(opts.userWords) : null;
   if (named) {
     return "Reply in the language the user asked for, if they asked for one — in that message or in the durable facts "
       + `you were given; otherwise in ${named.name}, the language of ${quotedSubject(opts.userWords ?? userMessage)}. ${tail}`;
