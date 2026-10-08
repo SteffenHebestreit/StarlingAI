@@ -8,10 +8,10 @@ Every public schema field, where it is declared, and how many production files r
 
 | Field | Declared in | Read sites |
 | --- | --- | --- |
-| `a2a` | packages/core/src/config/schema.ts:423 | 16 |
+| `a2a` | packages/core/src/config/schema.ts:423 | 17 |
 | `accessKeyId` | packages/core/src/config/schema.ts:483 | 2 |
 | `accessToken` | packages/core/src/config/schemas/channels.ts:51 | 9 |
-| `account` | packages/core/src/config/schemas/channels.ts:71 | 92 |
+| `account` | packages/core/src/config/schemas/channels.ts:71 | 93 |
 | `acquireTimeoutMs` | packages/core/src/config/schema.ts:1698 | 1 |
 | `activeModelPreset` | packages/core/src/config/schema.ts:1729 | 2 |
 | `adaptive` | packages/core/src/config/schemas/decisions.ts:57 | 14 |
@@ -158,7 +158,7 @@ Every public schema field, where it is declared, and how many production files r
 | `embeddingApiKey` | packages/core/src/config/schema.ts:177 | 6 |
 | `embeddingBaseUrl` | packages/core/src/config/schema.ts:175 | 6 |
 | `embeddingModel` | packages/core/src/config/schema.ts:173 | 27 |
-| `enabled` | packages/core/src/config/schema.ts:313 | 135 |
+| `enabled` | packages/core/src/config/schema.ts:313 | 136 |
 | `enableThinking` | packages/core/src/config/schema.ts:195 | 21 |
 | `endpoint` | packages/core/src/config/schema.ts:480 | 83 |
 | `endpointUnits` | packages/core/src/config/schema.ts:1696 | 1 |
@@ -199,7 +199,7 @@ Every public schema field, where it is declared, and how many production files r
 | `host` | packages/core/src/config/schema.ts:731 | 118 |
 | `http` | packages/core/src/config/schema.ts:776 | 89 |
 | `humanInLoopSteps` | packages/core/src/config/schema.ts:1333 | 20 |
-| `id` | packages/core/src/config/schema.ts:585 | 297 |
+| `id` | packages/core/src/config/schema.ts:585 | 298 |
 | `ignoreCase` | packages/core/src/config/schema.ts:1380 | 2 |
 | `image` | packages/core/src/config/schema.ts:704 | 102 |
 | `imapHost` | packages/core/src/config/schemas/channels.ts:57 | 6 |

@@ -1330,3 +1330,56 @@ describe("the frame listing the browser runs in the page", () => {
     expect(await list({ querySelectorAll: () => { throw new Error("detached"); } })).toBeNull();
   });
 });
+
+/**
+ * web_search kept its zero-result streak under the first colon-delimited segment of the session id
+ * (found in review, 2026-10-09). That is a run's root only when the root is a chat session's UUID:
+ * every account's `a2a-in:<user segment>:<id>` runs shared the key `a2a-in`, so four empty searches
+ * in Alice's A2A task hard-blocked web search in Bob's. Under multi-user auth the key is the whole
+ * root; the sub-agents of one run still share it.
+ */
+describe("web_search's zero-result streak and the run it belongs to", () => {
+  const ddgEmpty = () => new Response("<html><body><div class=\"no-results\">No results.</div></body></html>", {
+    status: 200, headers: { "Content-Type": "text/html" },
+  });
+
+  /** web_search against an empty DuckDuckGo, with multi-user auth on or off. */
+  async function emptySearch(authEnabled: boolean) {
+    const loaderModule = await import("../config/loader.js");
+    const realConfig = loaderModule.getConfig();
+    vi.spyOn(loaderModule, "getConfig").mockReturnValue({
+      ...realConfig,
+      auth: { ...realConfig.auth, enabled: authEnabled },
+      retrieval: { ...realConfig.retrieval, search: { backend: "duckduckgo", timeoutMs: 12000 } as Config["retrieval"]["search"] },
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => ddgEmpty()));
+    const { getTool } = await import("../tools/registry.js");
+    const { clearSearchSessionState } = await import("../tools/web.js");
+    const { safeUserSegment } = await import("../runtime/user-scope.js");
+    const runOf = (account: string, agent: string) => `sub:a2a-in:${safeUserSegment(account)}:ferry-plan:${agent}:1790000000000`;
+    for (const sessionId of [runOf("alice", "researcher"), runOf("bob", "researcher"), "a2a-in"]) clearSearchSessionState(sessionId);
+    const search = (sessionId: string) => getTool("web_search")!.execute({ query: "ferry timetable", maxResults: 5 }, { sessionId, workspacePath: "/workspace" });
+    return { search, runOf };
+  }
+
+  it("under multi-user auth, one account's empty A2A searches do not block another account's", async () => {
+    const { search, runOf } = await emptySearch(true);
+    for (let i = 0; i < 4; i += 1) await search(runOf("alice", "researcher"));
+    expect((await search(runOf("alice", "researcher"))).metadata?.["hardBlocked"]).toBe(true);
+    // Another sub-agent of the same run shares its streak, as parallel sub-agents always did.
+    expect((await search(runOf("alice", "writer"))).metadata?.["hardBlocked"]).toBe(true);
+
+    const bob = await search(runOf("bob", "researcher"));
+    expect(bob.metadata?.["hardBlocked"]).toBeUndefined();
+    expect(bob.metadata?.["consecutiveZeroResults"]).toBe(1);
+    // A client session named after the namespace has a streak of its own as well.
+    expect((await search("a2a-in")).metadata?.["consecutiveZeroResults"]).toBe(1);
+  });
+
+  it("with auth off, keeps the streak under the id's first segment, as before", async () => {
+    const { search, runOf } = await emptySearch(false);
+    for (let i = 0; i < 4; i += 1) await search(runOf("alice", "researcher"));
+    expect((await search(runOf("bob", "researcher"))).metadata?.["hardBlocked"]).toBe(true);
+    expect((await search("a2a-in")).metadata?.["hardBlocked"]).toBe(true);
+  });
+});

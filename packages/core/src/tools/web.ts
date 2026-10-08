@@ -10,6 +10,7 @@ import { dirname, posix } from "node:path";
 import { analyzeImageBytes, callPlaywrightTool, extractDocumentBytesToMarkdown } from "./multimodal.js";
 import { resolveWorkspaceWritePath } from "./workspace-path.js";
 import { getMcpConnections } from "../mcp/registry.js";
+import { rootSessionOf } from "../agent/session-ids.js";
 import {
   extractHtmlLinks,
   formatLinkSection,
@@ -38,14 +39,21 @@ const SEARCH_HARD_BLOCK_THRESHOLD = 4;
 const sessionZeroResultStreak = new Map<string, number>();
 
 /**
- * Extract the root session UUID from a potentially nested sub-agent session ID.
+ * The key a run's zero-result streak is kept under: its root session.
  * sub:sub:ROOT:coord:ts:researcher:ts → ROOT
  * sub:ROOT:agent:ts                   → ROOT
  * ROOT                                → ROOT
+ *
+ * Under multi-user auth the whole root (rootSessionOf). The first colon-delimited segment was the
+ * key, and that is the root only when the root is a chat session's UUID: every account's
+ * `a2a-in:<user segment>:<id>` runs shared the key `a2a-in`, every MCP call `mcp`, every
+ * federation run `fed`, and a client session named `a2a-in` joined them. Four zero-result searches
+ * in one account's A2A task then hard-blocked web search for every account's A2A tasks (found in
+ * review, 2026-10-09). With auth off the first segment stays the key, as before.
  */
 function getRootSessionId(sessionId: string): string {
+  if (getConfig().auth?.enabled === true) return rootSessionOf(sessionId);
   const stripped = sessionId.replace(/^(?:sub:)+/, "");
-  // The root session is always the first colon-delimited segment (a UUID)
   const idx = stripped.indexOf(":");
   return idx === -1 ? stripped : stripped.slice(0, idx);
 }
