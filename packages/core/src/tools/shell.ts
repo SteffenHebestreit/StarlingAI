@@ -10,7 +10,7 @@ import { childLogger } from "../logger.js";
 import { resolveDockerWorkspaceBind } from "./workspace-mount.js";
 import { assertSafeDockerRunArgs } from "./docker-safety.js";
 import { isSensitiveWorkspacePath } from "./filesystem.js";
-import { resolvePathWithinWorkspace, resolveWorkspaceWritePath } from "./workspace-path.js";
+import { resolveLiteralWorkspacePath, resolvePathWithinWorkspace, resolveWorkspaceWritePath } from "./workspace-path.js";
 
 const log = childLogger("tool:shell");
 const execFileAsync = promisify(execFile);
@@ -193,13 +193,20 @@ function shellQuote(value: string): string {
  * The workspace-relative path of a script to run: as given, or, when nothing is there, where
  * write_file put it. write_file roots a working agent's writes under generated/, so "write
  * primes.js, then run primes.js" looked for /workspace/primes.js and failed (E2E, 2026-10-07).
+ *
+ * Last, the path exactly as named. For a scope-confined agent "as given" is already re-rooted under
+ * generated/, but its shell_exec runs at /workspace, so a script it wrote there (or a build's dist/)
+ * is at the root and was not found after the change above (review, 2026-10-08). The sandbox is
+ * handed the whole working root, so running it exposes nothing shell_exec could not reach.
  */
 export function resolveScriptPath(scriptPath: string, workspacePath: string): string {
   try {
     const within = resolvePathWithinWorkspace(scriptPath, workspacePath);
     if (existsSync(within.resolved)) return within.relativePath;
     const written = resolveWorkspaceWritePath(scriptPath, workspacePath);
-    return existsSync(written.resolved) ? written.relativePath : within.relativePath;
+    if (existsSync(written.resolved)) return written.relativePath;
+    const literal = resolveLiteralWorkspacePath(scriptPath, workspacePath);
+    return existsSync(literal.resolved) ? literal.relativePath : within.relativePath;
   } catch {
     return scriptPath;
   }

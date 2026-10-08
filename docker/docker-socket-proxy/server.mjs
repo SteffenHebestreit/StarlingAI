@@ -52,16 +52,21 @@ function deny(client, code, reason, method, path) {
  * already fully forwarded and carries a rebuilt `Connection: close` head, so the
  * daemon terminates the response and we never relay a pipelined, un-inspected
  * second request. (Hijacks take the separate spliceHijack path below.)
+ *
+ * Once the daemon has closed its side, ours is closed too. The connection is half-open, so the
+ * daemon's FIN alone ended only the client: every forwarded request left a daemon socket behind, and
+ * the compose healthcheck alone (a GET /_ping every 15 s) had the proxy OOM-killed at its 128m limit
+ * in about three days, failing every docker call in flight (found 2026-10-08).
  */
-function toDaemon(client, initialWrites) {
-  const daemon = net.connect({ path: SOCKET_PATH, allowHalfOpen: true });
+export function toDaemon(client, initialWrites, connect = () => net.connect({ path: SOCKET_PATH, allowHalfOpen: true })) {
+  const daemon = connect();
   const kill = () => { try { client.destroy(); } catch { /* ignore */ } try { daemon.destroy(); } catch { /* ignore */ } };
   daemon.on("error", kill);
   client.on("error", kill);
   daemon.on("connect", () => {
     for (const w of initialWrites) if (w && w.length) daemon.write(w);
     daemon.pipe(client);
-    daemon.on("end", () => { try { client.end(); } catch { /* ignore */ } });
+    daemon.on("end", () => { try { client.end(); } catch { /* ignore */ } try { daemon.end(); } catch { /* ignore */ } });
   });
 }
 
@@ -118,7 +123,14 @@ export function spliceHijack(client, headers, rawHead, rest, connect = () => net
       }
     };
     daemon.on("data", onResp);
-    daemon.on("end", () => { try { client.end(); } catch { /* ignore */ } });
+    // A daemon that hangs up before a complete response head leaves nothing to relay either way, so
+    // our side of its half-open connection is closed too, or the socket is held as toDaemon's was.
+    // After the decision each branch above closes that side itself: a hijack keeps it open for stdin
+    // until the client is done.
+    daemon.on("end", () => {
+      try { client.end(); } catch { /* ignore */ }
+      if (!decided) { try { daemon.end(); } catch { /* ignore */ } }
+    });
   });
 }
 
