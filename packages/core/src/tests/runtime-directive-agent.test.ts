@@ -50,19 +50,52 @@ vi.mock("../guardrails/moderation.js", () => ({
 vi.mock("../guardrails/output.js", () => ({ scanOutput: vi.fn((text: string) => ({ safe: true, redacted: text })) }));
 vi.mock("../audit/logger.js", () => ({ logAudit: vi.fn() }));
 
-/** The specialist, stubbed; everything else is the real registry. */
+/**
+ * The specialist and the orchestration tools around it, stubbed; everything else is the real
+ * registry. `delegated` holds the delegations that reached code_analyst. A delegation naming any
+ * other agent gets the refusal delegate_to_agent gives an agent outside the turn's grant.
+ */
 const delegated = vi.hoisted(() => [] as Array<Record<string, unknown>>);
+const executed = vi.hoisted(() => [] as string[]);
 vi.mock("../tools/registry.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../tools/registry.js")>();
   return {
     ...actual,
     executeTool: vi.fn(async (name: string, args: Record<string, unknown>, ctx: never, meta?: never) => {
+      executed.push(name);
+      if (name === "delegate_to_agent" && args["agentName"] !== "code_analyst") {
+        return { success: false, output: "", error: `Agent '${String(args["agentName"])}' is not permitted in this scene. Allowed agents: code_analyst` };
+      }
       if (name === "delegate_to_agent") {
         delegated.push(args);
         return {
           success: true,
           output: "Delegated result from code_analyst — TASK COMPLETED.\nObserved evidence:\nTRUNCATION-IN-INVOICES-AND-RECEIPTS",
-          metadata: { agentName: "code_analyst", delegationSucceeded: true, delegationOutcome: "success", terminalState: "completed" },
+          metadata: { agentName: "code_analyst", attemptedAgents: ["code_analyst"], delegationSucceeded: true, delegationOutcome: "success", terminalState: "completed" },
+        };
+      }
+      if (name === "create_ephemeral_agent") {
+        return { success: false, output: "", error: "Unknown tool(s) requested: nope.", rejectedBeforeEffect: true };
+      }
+      if (name === "parallel_delegate") {
+        return {
+          success: true,
+          output: "**[code_analyst]**:\nint() truncates the cent in invoices.py and receipts.py.",
+          metadata: { taskCount: 1, succeeded: 1, failed: 0, nestedCalls: [{ tool: "delegate_to_agent", success: true }] },
+        };
+      }
+      if (name === "search_workflows") {
+        return {
+          success: true,
+          output: "Workflow matches: code_review [scene] (0.82)",
+          metadata: { workflowMatches: [{ name: "code_review", workflowType: "scene", score: 0.82, matchedTerms: ["code", "bug", "review"] }] },
+        };
+      }
+      if (name === "run_workflow") {
+        return {
+          success: true,
+          output: "Workflow code_review [scene] completed.\n\nThe review found that total() truncates with int(); use round(subtotal + tax, 2).",
+          metadata: { workflowName: "code_review", workflowType: "scene", blocked: false, stepCount: 1, toolCallsExecuted: 3 },
         };
       }
       return actual.executeTool(name, args, ctx, meta);
@@ -70,12 +103,17 @@ vi.mock("../tools/registry.js", async (importOriginal) => {
   };
 });
 
-function delegateStream() {
+/** A response that calls one tool; `args` as a string is sent as the raw argument text. */
+function toolStream(name: string, args: Record<string, unknown> | string) {
   return (async function* () {
-    yield { type: "tool_call_start", toolCallId: "call_delegate", toolName: "delegate_to_agent" };
-    yield { type: "tool_call_delta", toolCallId: "call_delegate", argumentsDelta: JSON.stringify({ agentName: "code_analyst", task: "Find the bug in invoices.py." }) };
+    yield { type: "tool_call_start", toolCallId: `call_${name}`, toolName: name };
+    yield { type: "tool_call_delta", toolCallId: `call_${name}`, argumentsDelta: typeof args === "string" ? args : JSON.stringify(args) };
     yield { type: "done", finishReason: "tool_calls", usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } };
   })();
+}
+
+function delegateStream() {
+  return toolStream("delegate_to_agent", { agentName: "code_analyst", task: "Find the bug in invoices.py." });
 }
 
 function answerStream(text: string) {
@@ -85,10 +123,19 @@ function answerStream(text: string) {
   })();
 }
 
-async function loadRuntime() {
+const CODE_ANALYST = {
+  description: "Analyzes source code and finds bugs.",
+  capabilities: ["code analysis"],
+  tags: ["code"],
+  tools: ["read_file"],
+  maxIterations: 4,
+};
+
+async function loadRuntime(extra: Record<string, unknown> = {}) {
   const dir = mkdtempSync(join(tmpdir(), "sai-directive-"));
   writeFileSync(join(dir, "starlingai.json"), JSON.stringify({
     agents: { mainAssistant: { toolMode: "orchestration_only" } },
+    ...extra,
   }), "utf8");
   process.env["SAI_CONFIG_PATH"] = join(dir, "starlingai.json");
   vi.resetModules();
@@ -108,6 +155,7 @@ const toolChoiceOf = (callIndex: number): unknown =>
 
 const MESSAGE = "Why does invoices.py undercharge by a cent? def total(subtotal, tax): return int(subtotal + tax)";
 const DIRECTIVE_LINE = 'directed this request to the agent "code_analyst"';
+const ANSWER = "Both files truncate with int(); round instead. MODEL-ANSWER";
 
 describe("a turn the user directed to one agent", () => {
   afterEach(async () => {
@@ -115,6 +163,7 @@ describe("a turn the user directed to one agent", () => {
     streamMock.mockReset();
     completeMock.mockClear();
     delegated.length = 0;
+    executed.length = 0;
     vi.resetModules();
     (await import("../config/loader.js")).resetConfigForTests();
   });
@@ -167,5 +216,109 @@ describe("a turn the user directed to one agent", () => {
 
     expect(toolChoiceOf(0)).toBeUndefined();
     expect(promptOf(0)).not.toContain(DIRECTIVE_LINE);
+  });
+
+  // The directive used to be released by the delegation tally, which is kept on the REQUEST: a call
+  // that never reached the named agent released it, and a call that did reach it without counting
+  // (the agent's name called as a tool) left it pending (review of 0b5089e/a3773aa, 2026-10-08).
+  it.each([
+    ["the delegation's arguments could not be parsed", () => toolStream("delegate_to_agent", "<<not json>>")],
+    ["a delegation to another agent was refused", () => toolStream("delegate_to_agent", { agentName: "coder", task: "Find the bug in invoices.py." })],
+    ["an ephemeral agent was turned away before it ran", () => toolStream("create_ephemeral_agent", { agentName: "x", systemPrompt: "s", tools: ["nope"], task: "Find the bug." })],
+  ])("stays directed when %s", async (_label, firstResponse) => {
+    const { AgentSession, runTurn } = await loadRuntime();
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      call += 1;
+      return call === 1 ? firstResponse() : answerStream("I answered this myself: int() truncates; use round().");
+    });
+
+    const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
+    await runTurn({ session, userMessage: MESSAGE, allowedAgents: ["code_analyst"], directiveAgent: "code_analyst" });
+
+    expect(toolChoiceOf(1)).toBe("required");
+    expect(promptOf(1)).toContain(DIRECTIVE_LINE);
+    expect(delegated).toHaveLength(1);
+    expect(delegated[0]).toMatchObject({ agentName: "code_analyst", task: MESSAGE });
+  });
+
+  it("is released once the named agent ran, even when the model called it by name as a tool", async () => {
+    const { AgentSession, runTurn } = await loadRuntime({ subAgents: { code_analyst: CODE_ANALYST } });
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      call += 1;
+      return call === 1 ? toolStream("code_analyst", { task: "Find the bug in invoices.py." }) : answerStream(ANSWER);
+    });
+
+    const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
+    const result = await runTurn({ session, userMessage: MESSAGE, allowedAgents: ["code_analyst"], directiveAgent: "code_analyst" });
+
+    expect(delegated).toHaveLength(1);
+    expect(toolChoiceOf(1)).toBeUndefined();
+    expect(promptOf(1)).not.toContain(DIRECTIVE_LINE);
+    expect(result.response).toContain("MODEL-ANSWER");
+  });
+
+  it("is released once a fan-out reported a delegation that ran", async () => {
+    // A tool that reports the calls it made (parallel_delegate, execute_plan) names no agent; on a
+    // turn whose grant is the named agent alone, a delegation that ran is that agent's.
+    const { AgentSession, runTurn } = await loadRuntime();
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      call += 1;
+      return call === 1
+        ? toolStream("parallel_delegate", { tasks: [{ agentName: "code_analyst", task: "Find the bug in invoices.py." }] })
+        : answerStream(ANSWER);
+    });
+
+    const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
+    const result = await runTurn({ session, userMessage: MESSAGE, allowedAgents: ["code_analyst"], directiveAgent: "code_analyst" });
+
+    expect(executed).toEqual(["parallel_delegate"]);
+    expect(toolChoiceOf(1)).toBeUndefined();
+    expect(promptOf(1)).not.toContain(DIRECTIVE_LINE);
+    expect(result.response).toContain("MODEL-ANSWER");
+  });
+
+  it("delegates to the named agent after a workflow ran, and answers from both", async () => {
+    // run_workflow adds nothing to the delegation tally, so after a completed workflow the
+    // directive stayed pending next to the [SYNTHESIS REQUIRED] note: the model's answer was
+    // replaced by the delegation, the synthesis-required guard rejected that, and the turn shipped a
+    // forced "RESEARCH INCOMPLETE" partial answer while code_analyst never ran.
+    const { AgentSession, runTurn } = await loadRuntime();
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      call += 1;
+      return call === 1 ? toolStream("run_workflow", { name: "code_review", workflowType: "scene" }) : answerStream(ANSWER);
+    });
+
+    const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
+    const result = await runTurn({ session, userMessage: MESSAGE, allowedAgents: ["code_analyst"], directiveAgent: "code_analyst" });
+
+    expect(executed).toContain("run_workflow");
+    expect(delegated).toHaveLength(1);
+    expect(delegated[0]).toMatchObject({ agentName: "code_analyst" });
+    expect(result.performance?.finishReason).not.toBe("synthesis_required_tool_call_rejected");
+    expect(result.response).toContain("MODEL-ANSWER");
+  });
+
+  it("runs the delegation to the named agent instead of the workflow a catalog search matched", async () => {
+    // The workflow-run nudge dropped the directed delegation once and then rewrote it into the
+    // matched workflow, so the turn ran a workflow nobody asked for before the named agent.
+    const { AgentSession, runTurn } = await loadRuntime();
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      call += 1;
+      if (call === 1) return toolStream("search_workflows", { query: "code bug review" });
+      if (call === 2) return delegateStream();
+      return answerStream(ANSWER);
+    });
+
+    const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
+    const result = await runTurn({ session, userMessage: MESSAGE, allowedAgents: ["code_analyst"], directiveAgent: "code_analyst" });
+
+    expect(executed).not.toContain("run_workflow");
+    expect(delegated).toHaveLength(1);
+    expect(result.response).toContain("MODEL-ANSWER");
   });
 });

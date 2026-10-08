@@ -78,8 +78,8 @@ export interface AssembleTurnSystemMessagesParams {
   workflowCatalogEnforcementPrompt: string;
   approvedRunCandidateEnforcementPrompt: string;
   workflowExecutionEnforcementPrompt: string;
-  /** The agent the user directed this turn to (`--agent`), until the turn has delegated: the line
-   *  that names it. Empty otherwise. */
+  /** The agent the user directed this turn to (`--agent`), until that agent has run: the line that
+   *  names it. Empty otherwise. */
   directiveAgentPrompt?: string;
   injectedSkillSlugs: string[];
   heldOutSkillSlugs: string[];
@@ -104,7 +104,7 @@ export interface AssembleTurnSystemMessagesResult {
 }
 
 /**
- * The line a turn the user directed to one agent (`--agent NAME`) carries until it has delegated.
+ * The line a turn the user directed to one agent (`--agent NAME`) carries until that agent has run.
  * The tool call is forced as well (the runtime's mustOrchestrateBeforeAnswering); this says where.
  */
 export function buildDirectiveAgentPrompt(agentName: string): string {

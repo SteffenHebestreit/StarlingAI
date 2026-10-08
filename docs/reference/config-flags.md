@@ -17,7 +17,7 @@ Every public schema field, where it is declared, and how many production files r
 | `adaptive` | packages/core/src/config/schemas/decisions.ts:57 | 14 |
 | `addHosts` | packages/core/src/config/schema.ts:686 | 1 |
 | `admin` | packages/core/src/config/schema.ts:371 | 27 |
-| `agents` | packages/core/src/config/schema.ts:1695 | 176 |
+| `agents` | packages/core/src/config/schema.ts:1695 | 177 |
 | `alertmanager` | packages/core/src/config/schema.ts:1135 | 1 |
 | `all` | packages/core/src/config/schema.ts:1288 | 289 |
 | `allowedAgents` | packages/core/src/config/schema.ts:1308 | 29 |
@@ -60,12 +60,12 @@ Every public schema field, where it is declared, and how many production files r
 | `botToken` | packages/core/src/config/schemas/channels.ts:10 | 10 |
 | `browser` | packages/core/src/config/schemas/decisions.ts:85 | 72 |
 | `bucket` | packages/core/src/config/schema.ts:458 | 23 |
-| `budget` | packages/core/src/config/schema.ts:1631 | 89 |
+| `budget` | packages/core/src/config/schema.ts:1631 | 90 |
 | `budgets` | packages/core/src/config/schema.ts:519 | 14 |
 | `candidateTopK` | packages/core/src/config/schemas/retrieval.ts:105 | 2 |
 | `capabilities` | packages/core/src/config/schema.ts:908 | 48 |
 | `capabilityCacheTtlMs` | packages/core/src/config/schema.ts:591 | 1 |
-| `capacity` | packages/core/src/config/schema.ts:1669 | 13 |
+| `capacity` | packages/core/src/config/schema.ts:1669 | 14 |
 | `captureMessageAs` | packages/core/src/config/schema.ts:1360 | 2 |
 | `captureRemainderAs` | packages/core/src/config/schema.ts:1361 | 3 |
 | `cdpUrl` | packages/core/src/config/schemas/render.ts:21 | 1 |
@@ -306,7 +306,7 @@ Every public schema field, where it is declared, and how many production files r
 | `moderateToolOutputs` | packages/core/src/config/schema.ts:1237 | 1 |
 | `monthlyUsd` | packages/core/src/config/schema.ts:521 | 2 |
 | `mounts` | packages/core/src/config/schema.ts:683 | 11 |
-| `name` | packages/core/src/config/schema.ts:1973 | 365 |
+| `name` | packages/core/src/config/schema.ts:1973 | 366 |
 | `negativePrompt` | packages/core/src/config/schemas/multimodal.ts:175 | 7 |
 | `network` | packages/core/src/config/schema.ts:684 | 53 |
 | `node` | packages/core/src/config/schema.ts:1042 | 233 |
@@ -489,7 +489,7 @@ Every public schema field, where it is declared, and how many production files r
 | `toolCallsPerTurn` | packages/core/src/config/schema.ts:265 | 1 |
 | `toolCapMultiplier` | packages/core/src/config/schemas/effort.ts:45 | 1 |
 | `toolMode` | packages/core/src/config/schema.ts:271 | 6 |
-| `toolName` | packages/core/src/config/schemas/multimodal.ts:17 | 70 |
+| `toolName` | packages/core/src/config/schemas/multimodal.ts:17 | 71 |
 | `toolRerankMinTools` | packages/core/src/config/schemas/orchestration.ts:651 | 2 |
 | `tools` | packages/core/src/config/schema.ts:921 | 221 |
 | `topK` | packages/core/src/config/schema.ts:169 | 7 |
