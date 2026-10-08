@@ -1770,8 +1770,16 @@ async function _runTurn(
   // Runs BEFORE document-RAG augmentation so a trivial "hi" never pays the
   // (CPU-bound) engram search cost; turns WITH attachments skip the fast lane so
   // their files are always ingested + injected below.
+  //
+  // The agent the user directed this turn to (`--agent NAME`). allowedAgents narrows routing to it,
+  // and that alone let the orchestrator answer the turn itself: code_analyst never ran on two
+  // diagnoses the E2E suite pinned to it (2026-10-07), and the agent evaluations that pin an agent
+  // this way were measuring the orchestrator. Until that agent has run, the turn delegates to it.
+  // Read before the fast lane, which skips such a turn: small talk directed to an agent was answered
+  // by the front desk, and the agent never ran (review of 0b5089e, 2026-10-08).
+  const directiveAgent = opts.directiveAgent?.trim() || undefined;
   const fastLaneOutput = await prepareReceptionistFastLane({
-    eligible: detectedDynamicGuidance === null && !hasTurnAttachments && getConfig().receptionist?.enabled === true,
+    eligible: detectedDynamicGuidance === null && !hasTurnAttachments && directiveAgent === undefined && getConfig().receptionist?.enabled === true,
     userMessage,
     signal,
     opts,
@@ -2264,18 +2272,14 @@ async function _runTurn(
   });
   let delegatedResearchRetryUsed = false;
   let delegatedResearchEnforcementPrompt = "";
-  // The agent the user directed this turn to (`--agent NAME`). allowedAgents narrows routing to it,
-  // and that alone let the orchestrator answer the turn itself: code_analyst never ran on two
-  // diagnoses the E2E suite pinned to it (2026-10-07), and the agent evaluations that pin an agent
-  // this way were measuring the orchestrator. Until that agent has run, the turn delegates to it.
-  const directiveAgent = opts.directiveAgent?.trim() || undefined;
-  // Whether it has: set from a tool RESULT that shows the agent ran (directive-agent.ts). The
-  // delegation tally this used to read is kept on the request, so a delegation the runtime or the
-  // tool turned away (unparseable arguments, another agent outside the grant, an ephemeral agent
-  // refused before it ran) released the directive and the orchestrator answered itself. The agent
-  // called by its own name as a tool ran without counting, so the model's finished answer was then
-  // rewritten into a second delegation; the synthesis-required guard rejected it, and the turn
-  // shipped a forced partial answer (review of 0b5089e/a3773aa, 2026-10-08).
+  // Whether the agent the user directed this turn to (directiveAgent) has run: set from a tool
+  // RESULT that shows the agent ran (directive-agent.ts). The delegation tally this used to read is
+  // kept on the request, so a delegation the runtime or the tool turned away (unparseable
+  // arguments, another agent outside the grant, an ephemeral agent refused before it ran) released
+  // the directive and the orchestrator answered itself. The agent called by its own name as a tool
+  // ran without counting, so the model's finished answer was then rewritten into a second
+  // delegation; the synthesis-required guard rejected it, and the turn shipped a forced partial
+  // answer (review of 0b5089e/a3773aa, 2026-10-08).
   let directiveAgentRan = false;
   let maintenanceDelegationRetryUsed = false;
   let maintenanceMisrouteRetryUsed = false;

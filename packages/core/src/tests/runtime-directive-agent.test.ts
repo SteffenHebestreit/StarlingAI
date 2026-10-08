@@ -9,8 +9,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
  *
  * The flag only narrowed allowedAgents to the one agent, and the orchestrator answered such a turn
  * itself: code_analyst never ran on two diagnoses the suite pinned to it, and the agent evaluations
- * that pin an agent the same way were measuring the orchestrator. Until the turn has delegated, its
- * tool call is forced and a line names the agent.
+ * that pin an agent the same way were measuring the orchestrator. Until that agent has run, the
+ * turn's tool call is forced and a line names the agent.
  */
 
 const streamMock = vi.hoisted(() => vi.fn());
@@ -20,6 +20,8 @@ const completeMock = vi.hoisted(() => vi.fn(async () => ({
   usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
   finishReason: "stop",
 })));
+/** The routing-tier model: none by default, as when no routing tier is configured. */
+const routingTier = vi.hoisted(() => ({ complete: null as null | ((messages: Array<{ content?: unknown }>) => Promise<unknown>) }));
 
 vi.mock("../providers/index.js", () => {
   const provider = {
@@ -34,7 +36,9 @@ vi.mock("../providers/index.js", () => {
     applyActiveModelPreset: (model: unknown) => model,
     getChatProvider: () => provider,
     getChatProviderWithOverride: () => provider,
-    getChatProviderForTier: () => null,
+    getChatProviderForTier: (tier: string) => (tier === "routing" && routingTier.complete
+      ? { ...provider, complete: (messages: Array<{ content?: unknown }>) => routingTier.complete!(messages) }
+      : null),
   };
 });
 
@@ -171,6 +175,7 @@ describe("a turn the user directed to one agent", () => {
     delegated.length = 0;
     executed.length = 0;
     rag.contextBlock = "";
+    routingTier.complete = null;
     vi.resetModules();
     (await import("../config/loader.js")).resetConfigForTests();
   });
@@ -261,6 +266,49 @@ describe("a turn the user directed to one agent", () => {
     const context = String(delegated[0]!["context"]);
     expect(context).toContain("def total(subtotal, tax)");
     expect(context).toContain("10.999 becomes 10");
+  });
+
+  describe("with the receptionist's fast lane on", () => {
+    const GREETING = "Hallo, stell dich kurz vor";
+    const FRONT_DESK = "Hallo! Ich bin dein Assistent. FRONT-DESK";
+    /** A routing-tier model that, as the front desk, answers the greeting itself. */
+    function frontDeskAnswers(): void {
+      routingTier.complete = async (messages) => ({
+        content: String(messages[0]?.content ?? "").includes("<ESCALATE>") ? FRONT_DESK : "VERDICT: no",
+        tool_calls: [],
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        finishReason: "stop",
+      });
+    }
+
+    it("answers small talk at the front desk when no agent is named", async () => {
+      // The control: this setup does reach the fast lane.
+      frontDeskAnswers();
+      const { AgentSession, runTurn } = await loadRuntime({ receptionist: { enabled: true } });
+      streamMock.mockImplementation(() => answerStream(ANSWER));
+
+      const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
+      const result = await runTurn({ session, userMessage: GREETING });
+
+      expect(result.performance?.finishReason).toBe("receptionist_fast_lane");
+      expect(result.response).toContain("FRONT-DESK");
+    });
+
+    it("leaves a turn directed to an agent to that agent, small talk or not", async () => {
+      // The fast lane decided before the directive was read, so "Hallo, stell dich kurz vor
+      // --agent researcher" got the front desk's greeting and researcher never ran (review of
+      // 0b5089e, 2026-10-08). A pinned evaluation with a greeting-shaped case measured the front desk.
+      frontDeskAnswers();
+      const { AgentSession, runTurn } = await loadRuntime({ receptionist: { enabled: true } });
+      streamMock.mockImplementation(() => answerStream(ANSWER));
+
+      const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
+      const result = await runTurn({ session, userMessage: GREETING, allowedAgents: ["researcher"], directiveAgent: "researcher" });
+
+      expect(result.performance?.finishReason).not.toBe("receptionist_fast_lane");
+      expect(result.response).not.toContain("FRONT-DESK");
+      expect(delegated).toEqual([expect.objectContaining({ agentName: "researcher" })]);
+    });
   });
 
   it("forces nothing when the agents are only narrowed (a scene's grant)", async () => {
