@@ -14,12 +14,29 @@
 
 import { registerTool, type ToolResult } from "./registry.js";
 import { isGraphDbAvailable, runCypher, toPlainRecords } from "../db/neo4j.js";
+import { getConfig } from "../config/loader.js";
+import { graphMemoryReader, MEMORY_RECORD_LABEL } from "../memory/graph-service.js";
+import { memoryReadRefusal, withholdForeignMemory } from "./graph-query-guard.js";
 
 const NOT_AVAILABLE: ToolResult = {
   success: false,
   output: "",
   error: "MemGraph is not available. Ensure MEMGRAPH_URL is set and the memgraph service is running.",
 };
+
+/**
+ * MemoryRecord nodes are the memory service's to write. Under multi-user auth one account could plant
+ * one carrying another account's tenant through these tools, and the Critical Memory block would put
+ * its text into that account's prompts (found 2026-10-08).
+ */
+function refuseMemoryNodes(tool: string, ...labels: string[]): ToolResult | null {
+  if (!labels.includes(MEMORY_RECORD_LABEL) || getConfig().auth?.enabled !== true) return null;
+  return {
+    success: false,
+    output: "",
+    error: `${MEMORY_RECORD_LABEL} nodes belong to the memory service: under multi-user auth ${tool} does not write them.`,
+  };
+}
 
 // ── graph_upsert_entity ───────────────────────────────────────────────────────
 
@@ -64,6 +81,8 @@ registerTool({
     }
 
     if (!label || !name) return { success: false, output: "", error: "label and name are required" };
+    const refused = refuseMemoryNodes("graph_upsert_entity", label);
+    if (refused) return refused;
 
     const setClause = Object.keys(props).length > 0
       ? "SET " + Object.keys(props).map(k => `n.${k} = $props.${k}`).join(", ") + (sessionId ? ", n.sessionId = $sessionId" : "")
@@ -124,6 +143,8 @@ registerTool({
     if (!fromLabel || !fromName || !relType || !toLabel || !toName) {
       return { success: false, output: "", error: "fromLabel, fromName, relationship, toLabel, toName are required" };
     }
+    const refused = refuseMemoryNodes("graph_relate", fromLabel, toLabel);
+    if (refused) return refused;
 
     const matchOrMerge = createIfMissing ? "MERGE" : "MATCH";
     const cypher = `
@@ -188,14 +209,32 @@ registerTool({
       }
     }
 
+    // Under multi-user auth the graph holds every account's memory: a memory node leaves it only
+    // whole, and another account's only as its id, kind and scope (tools/graph-query-guard.ts).
+    const reader = graphMemoryReader();
+    const refusal = reader ? memoryReadRefusal(cypher, params) : null;
+    if (refusal) {
+      return {
+        success: false,
+        output: "",
+        error: `graph_query does not run this query under multi-user auth: ${refusal}. Memory nodes leave the graph only whole, `
+          + "another account's with only its id, kind and scope. Return the node itself (MATCH (m:MemoryRecord) RETURN m LIMIT 20) "
+          + "rather than its text, index lists with integer literals, and compare with = rather than IN a one-item list.",
+      };
+    }
+
     try {
       const result = await runCypher(cypher, params, { write: false });
-      const rows = result ? toPlainRecords(result) : [];
+      const shown = result && reader ? withholdForeignMemory(result, reader) : { result, withheld: 0 };
+      const rows = shown.result ? toPlainRecords(shown.result) : [];
+      const withheldNote = shown.withheld > 0
+        ? `\n\n${shown.withheld} MemoryRecord node(s) above are not this account's: they show only their id, kind and scope.`
+        : "";
       return {
         success: true,
         output: rows.length === 0
           ? "Query returned 0 results."
-          : `${rows.length} result(s):\n${JSON.stringify(rows, null, 2)}`,
+          : `${rows.length} result(s):\n${JSON.stringify(rows, null, 2)}${withheldNote}`,
       };
     } catch (err) {
       return { success: false, output: "", error: err instanceof Error ? err.message : String(err) };
