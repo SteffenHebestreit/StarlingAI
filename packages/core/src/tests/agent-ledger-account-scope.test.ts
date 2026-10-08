@@ -262,25 +262,62 @@ describe("where the caller's own agent-scope records are kept, and how many", ()
     expect(output).toContain(BOB_TASK);
   });
 
-  it("under multi-user auth, shows the caller's own flow entries only, chosen before the cap", async () => {
-    withAuth(true);
+  /** Flow entries where their writers put them, the deployment root (the config assistant's
+   *  proposals and POST /api/flow-memory write getConfig().workspacePath): Bob's, then `alice` of
+   *  Alice's (by default more than the 120 a search keeps), then one from before entries carried an
+   *  account. */
+  function seedFlow(alice = 130): { shared: string; bobRoot: string } {
     const shared = mkdtempSync(join(tmpdir(), "agent-ledger-flow-"));
     dirs.push(shared);
-    const bobRoot = userWorkspaceRoot(shared, "bob");
-    const flow = (summary: string, account?: string) => appendFlowMemoryEntry(bobRoot, {
+    const flow = (summary: string, account?: string) => appendFlowMemoryEntry(shared, {
       scope: "workflow", request: "Hamburg ferry settings", summary, targetAgent: "researcher", actions: [], outcome: "applied",
       ...(account ? { account } : {}),
     });
     flow("Bob tuned the researcher for the Hamburg ferries", safeUserSegment("bob"));
-    // More than the 120 flow entries a search keeps, all another account's or from before accounts.
-    for (let i = 1; i <= 130; i++) flow(`Alice's Hamburg change number ${i}`, safeUserSegment("alice"));
+    for (let i = 1; i <= alice; i++) flow(`Alice's Hamburg change number ${i}`, safeUserSegment("alice"));
     flow("A Hamburg change from before accounts");
+    return { shared, bobRoot: userWorkspaceRoot(shared, "bob") };
+  }
+
+  // The read used the caller's own root, where no flow entry is ever written: under multi-user auth
+  // an account never found its own entries (found in review, 2026-10-08).
+  it("under multi-user auth, shows the caller's own flow entries only, from the deployment root, chosen before the cap", async () => {
+    withAuth(true);
+    const { bobRoot } = seedFlow();
 
     const output = await agentSearchAsBob(bobRoot, "Hamburg");
 
     expect(output).toContain("Bob tuned the researcher");
     expect(output).not.toContain("Alice's Hamburg change");
     expect(output).not.toContain("from before accounts");
+  });
+
+  it("under multi-user auth, a sub-agent's lesson guidance carries the caller's own flow entries too", async () => {
+    withAuth(true);
+    const { bobRoot } = seedFlow();
+
+    const guidance = await asBob(() => formatScopedMemoryGuidance(bobRoot, "Hamburg ferry settings", {
+      sessionId: "flow-guidance-bob",
+      targetAgent: "researcher",
+      scopes: ["agent"],
+      limit: 4,
+      maxChars: 1_400,
+    }));
+
+    expect(guidance).toContain("Bob tuned the researcher");
+    expect(guidance).not.toContain("Alice's Hamburg change");
+    expect(guidance).not.toContain("from before accounts");
+  });
+
+  it("with one operator, shows every flow entry of the deployment as before", async () => {
+    withAuth(false);
+    const { shared } = seedFlow(1);
+
+    const output = await agentSearchAsBob(shared, "Hamburg");
+
+    expect(output).toContain("Bob tuned the researcher");
+    expect(output).toContain("Alice's Hamburg change number 1");
+    expect(output).toContain("from before accounts");
   });
 });
 

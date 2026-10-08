@@ -316,8 +316,9 @@ async function authorizeInbound(req: IncomingMessage): Promise<AuthResult> {
 }
 
 /** A caller-chosen session id inside the caller's own namespace under multi-user auth; as it came
- *  with one operator. A config that cannot be read counts as multi-user. */
-function callerScopedSessionId(sessionId: string, caller: string): string {
+ *  with one operator. A config that cannot be read counts as multi-user. The legacy
+ *  /a2a/agents/:name route (gateway/index.ts) uses it too, so an id names one session on both. */
+export function callerScopedSessionId(sessionId: string, caller: string): string {
   let multiUser = true;
   try {
     multiUser = getConfig().auth?.enabled === true;

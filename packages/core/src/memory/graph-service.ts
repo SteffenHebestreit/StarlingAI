@@ -29,8 +29,12 @@
  *   (MemoryRecord)-[:SUPERSEDES {ts, reason}]->(MemoryRecord)
  *   (MemoryRecord)-[:CONTRADICTS {detectedAt, confidence}]->(MemoryRecord)
  *   (Agent)-[:RETRIEVED {ts, sessionId, rank, wasUseful}]->(MemoryRecord)
+ *
+ * Under multi-user auth a Session node's id and a RETRIEVED edge's sessionId hold graphSessionId's
+ * digest of the session id, never the id itself.
  */
 
+import { createHmac, randomBytes } from "node:crypto";
 import { isGraphDbAvailable, runCypher, toPlainRecords } from "../db/neo4j.js";
 import type { MemoryRecord } from "./service.js";
 import { childLogger } from "../logger.js";
@@ -129,6 +133,32 @@ export function isGraphMemoryReadable(
   return false;
 }
 
+/** The key of graphSessionId's digests: drawn once per process and never stored. */
+let _graphSessionKey: Buffer | null = null;
+
+/**
+ * The id a session goes by in the graph: under multi-user auth a digest of the session id keyed by
+ * this process, never the id itself; with one operator the id as it is.
+ *
+ * The graph is one instance for every account, and the session ids it held, on Session nodes and on
+ * RETRIEVED edges, were every account's to read: graph_query projected them as plain strings and the
+ * graph inspector showed the Session nodes (found in review, 2026-10-08). A session id is what a run
+ * names to work in that session's shared facts. The graph only ties a session's records and
+ * retrievals together with it, and the digest does that as well. The key is the process's own, so
+ * after a restart, or in another process, a session goes by another digest: its records then hang
+ * off two Session nodes. The retrieval feedback loop is unaffected, since it marks a turn's
+ * retrievals in the process that recorded them. A config that cannot be read counts as multi-user.
+ */
+export function graphSessionId(sessionId: string): string {
+  let multiUser = true;
+  try {
+    multiUser = getConfig().auth?.enabled === true;
+  } catch { /* fail closed: digest */ }
+  if (!multiUser) return sessionId;
+  _graphSessionKey ??= randomBytes(32);
+  return createHmac("sha256", _graphSessionKey).update(sessionId).digest("hex").slice(0, 32);
+}
+
 const log = childLogger("memory:graph");
 
 export const VECTOR_INDEX_NAME = "memory_embedding";
@@ -166,12 +196,19 @@ export async function upsertMemoryToGraph(
   const topic = record.kind;
 
   try {
+    // Under multi-user auth a write with no user in its context keeps the tenant the node has. The
+    // sleep-time sweep compacts each account's user memory in a context that names its directory
+    // and not the user, and the record the duplicates merged into was stored again with tenant null:
+    // the account lost its own preference from Critical Memory, the graph inspector and graph_query
+    // (found in review, 2026-10-08). A node the graph never had stays without one, which no account
+    // reads. With one operator no reader looks at the tenant, and the write is the one it was.
+    const keepTenant = getConfig().auth?.enabled === true;
     await runCypher(`
       MERGE (m:MemoryRecord {id: $id})
       SET m.content     = $content,
           m.kind        = $kind,
           m.scope       = $scope,
-          m.tenant      = $tenant,
+          m.tenant      = ${keepTenant ? "coalesce($tenant, m.tenant)" : "$tenant"},
           m.domain      = $domain,
           m.topic       = $topic,
           m.importance  = coalesce(m.importance, 0.5),
@@ -223,7 +260,7 @@ export async function upsertMemoryToGraph(
         WITH s
         MATCH (m:MemoryRecord {id: $id})
         MERGE (s)-[:PRODUCED]->(m)
-      `, { sessionId, id: record.id }, { write: true });
+      `, { sessionId: graphSessionId(sessionId), id: record.id }, { write: true });
     } catch (err) {
       log.debug({ err }, "PRODUCED relationship upsert failed");
     }
@@ -313,13 +350,23 @@ export async function graphL0Layer(
   const cached = _graphL0Cache.get(cacheKey);
   if (cached && Date.now() - cached.storedAt <= GRAPH_L0_CACHE_TTL_MS) return cached.content;
 
+  // Under multi-user auth the nodes read are those of the reader rule the graph inspector and
+  // graph_query apply. This read had a rule of its own, in which a null user tenant matched every
+  // node: a request with no user (an A2A, MCP or federation run, and the sub-agent runs started from
+  // one) got every account's user-scope decisions and preferences as its Critical Memory (found in
+  // review, 2026-10-08). With the reader rule a request with no user reads no user node. With one
+  // operator the query is the one it was.
+  const reader = graphMemoryReader();
+  const tenantFilter = reader
+    ? graphMemoryReadablePredicate("m")
+    : `((m.scope = 'workspace'
+              AND ($workspaceTenant IS NULL OR m.tenant = $workspaceTenant OR m.tenant = $sharedTenant))
+             OR (m.scope = 'user' AND ($tenant IS NULL OR m.tenant = $tenant)))`;
   try {
     const queryPromise = runCypher(`
       MATCH (m:MemoryRecord)
       WHERE m.kind IN ['decision', 'preference']
-        AND ((m.scope = 'workspace'
-              AND ($workspaceTenant IS NULL OR m.tenant = $workspaceTenant OR m.tenant = $sharedTenant))
-             OR (m.scope = 'user' AND ($tenant IS NULL OR m.tenant = $tenant)))
+        AND ${tenantFilter}
         AND (m.validTo IS NULL OR m.validTo > $now)
         AND ($domain IS NULL OR m.domain = $domain OR m.domain IS NULL)
       RETURN m.id AS id, m.kind AS kind, m.content AS content
@@ -328,9 +375,7 @@ export async function graphL0Layer(
     `, {
       domain: domain ?? null,
       now: new Date().toISOString(),
-      tenant,
-      workspaceTenant,
-      sharedTenant: SHARED_WORKSPACE_TENANT,
+      ...(reader ?? { tenant, workspaceTenant, sharedTenant: SHARED_WORKSPACE_TENANT }),
     }).catch(() => null); // swallow a late rejection after timeout
     const result = await Promise.race([
       queryPromise,
@@ -535,7 +580,7 @@ export async function graphTrackRetrieval(
     `, {
       id: memoryId,
       agentName,
-      sessionId,
+      sessionId: graphSessionId(sessionId),
       rank,
       now: new Date().toISOString(),
     }, { write: true });
@@ -597,7 +642,7 @@ export async function graphPromoteFact(
       WITH m
       MERGE (s:Session {id: $sessionId})
       MERGE (s)-[:PRODUCED]->(m)
-    `, { id, content, agentName, key, sessionId, now }, { write: true });
+    `, { id, content, agentName, key, sessionId: graphSessionId(sessionId), now }, { write: true });
 
     // If the content changed, record the supersession. The fact uses a STABLE id
     // (one node per agent+key), so the MERGE above overwrote the content in place —
@@ -656,7 +701,7 @@ export async function graphMarkSessionRetrievalsUseful(
             ELSE coalesce(m.importance, 0.5) + $boost
           END
       RETURN count(ret) AS marked
-    `, { sessionId, boost }, { write: true });
+    `, { sessionId: graphSessionId(sessionId), boost }, { write: true });
 
     const marked = asInt(toPlainRecords(result ?? null as never)[0]?.["marked"], 0);
     if (marked > 0) log.debug({ sessionId, marked, boost }, "Retrieval feedback closed");
@@ -698,7 +743,7 @@ export async function graphMarkSessionRetrievalsUnhelpful(
             ELSE coalesce(m.importance, 0.5) - $penalty
           END
       RETURN count(ret) AS marked
-    `, { sessionId, penalty, floor }, { write: true });
+    `, { sessionId: graphSessionId(sessionId), penalty, floor }, { write: true });
 
     const marked = asInt(toPlainRecords(result ?? null as never)[0]?.["marked"], 0);
     if (marked > 0) log.debug({ sessionId, marked, penalty }, "Retrieval negative feedback applied");

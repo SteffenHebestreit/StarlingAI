@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { createServer } from "node:http";
 import { Readable } from "node:stream";
-import { timingSafeEqual } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { resolve, basename, extname } from "node:path";
 import { z } from "zod";
@@ -47,7 +47,7 @@ import {
   getApiWebhookKeys,
 } from "../credentials/jobs.js";
 import { handleAguiStream } from "./agui.js";
-import { runSubAgent } from "../agent/sub-agent.js";
+import { runSubAgent, type SubAgentRunOptions } from "../agent/sub-agent.js";
 import { createJob, cancelJob, getJob as getExecutionJob, listJobs, deleteSceneJob } from "../agent/jobs.js";
 import { canSeeSceneJob, presentSceneJob, sceneJobViewer } from "./scene-job-access.js";
 import { resolveApproval, getPendingApproval, listPendingApprovals } from "../approval/store.js";
@@ -71,6 +71,7 @@ import { getBidderWorkerStatus } from "../swarm/bidder-worker.js";
 import { getSceneJobWorkerStatus } from "../agent/scene-worker.js";
 import { getAgentMessageBacklog, readAllFacts } from "../swarm/memory.js";
 import { deriveSharedSessionId } from "../tools/memory.js";
+import { userWorkspaceRoot } from "../tools/workspace-path.js";
 import { turnSteeringManager } from "../agent/turn-steering.js";
 import { userInputBroker } from "../agent/user-input-broker.js";
 import { getLoadedDynamicTools, listPromotionCandidates, approvePromotion, rejectPromotion, getDynamicToolStats } from "../tools/dynamic-tools.js";
@@ -3839,11 +3840,23 @@ export function createGateway() {
         ? extractBearerToken(req.headers["authorization"] as string)
         : null;
 
-      if (!token || !await verifyToken(token)) {
+      const verified = token ? await verifyToken(token) : null;
+      // The account the task runs as. The route checked only that the token was signed and ran
+      // the task with no user, so under multi-user auth a memory the caller asked to keep as their
+      // own was stored to the shared workspace, where every other account reads it, and a deleted
+      // account's token kept running agents here for the rest of its lifetime (found in review,
+      // 2026-10-08). There the caller is now resolved against the user store, as on /api and the
+      // AG-UI stream, and a token whose account no longer resolves is refused. With one operator
+      // there is no user store and the run has no user, as before.
+      const a2aUser = verified && getConfig().auth?.enabled === true
+        ? await authenticatedUser(req.headers["authorization"] as string)
+        : null;
+      if (!verified || (getConfig().auth?.enabled === true && !a2aUser)) {
         res.writeHead(401, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32001, message: "Unauthorized" }, id: null }));
         return;
       }
+      const a2aCaller = a2aUser?.username ?? (typeof verified.sub === "string" ? verified.sub : "authenticated");
 
       const agentName = decodeURIComponent(a2aMatch[1]!);
       // Bound the buffered body so any authenticated caller can't stream an unbounded
@@ -3884,19 +3897,40 @@ export function createGateway() {
 
           const task  = String(rpc.params?.["task"] ?? "");
           const ctx   = rpc.params?.["context"] ? String(rpc.params["context"]) : undefined;
-          const sessId = rpc.params?.["sessionId"] ? String(rpc.params["sessionId"]) : `a2a:${Date.now()}`;
+          // The session the run works in. A caller-chosen id was used as it came, so under
+          // multi-user auth one account could name another's session and the run read and wrote
+          // that session's shared facts, peer messages and checkpoints (found in review,
+          // 2026-10-08). There it now names a session in the caller's own namespace, the one
+          // tasks/send on the public A2A surface uses; and an id the route mints is not a
+          // timestamp another account could name. With one operator, both as before.
+          const { callerScopedSessionId } = await import("../a2a/server.js");
+          const multiUser = getConfig().auth?.enabled === true;
+          const sessId = rpc.params?.["sessionId"]
+            ? callerScopedSessionId(String(rpc.params["sessionId"]), a2aCaller)
+            : `a2a:${multiUser ? randomUUID() : Date.now()}`;
           const autoApprove = rpc.params?.["autoApprove"] === true;
 
-          const result = await runSubAgent({
+          const runOptions: SubAgentRunOptions = {
             agentName,
             task,
             context: ctx,
             parentSessionId: sessId,
-            workspacePath: getConfig().workspacePath,
+            // The caller's own workspace root, as the caller's chat runs have (AgentSession). In
+            // the shared root a memory stored with the default 'workspace' scope is the shared
+            // root's, and every account reads it.
+            workspacePath: a2aUser
+              ? userWorkspaceRoot(getConfig().workspacePath, a2aUser.username)
+              : getConfig().workspacePath,
             approvalCallback: autoApprove
               ? async () => true
               : undefined,
-          });
+            // The caller's account on the run's tools (a 'user' memory stays theirs) and on the
+            // request context the run's own memory reads take their account from.
+            ...(a2aUser ? { userId: a2aUser.username } : {}),
+          };
+          const result = a2aUser
+            ? await runWithRequestContext({ userId: a2aUser.username }, () => runSubAgent(runOptions))
+            : await runSubAgent(runOptions);
 
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ jsonrpc: "2.0", result: { output: result, agentName }, id: rpcId }));

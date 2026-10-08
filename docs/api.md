@@ -801,10 +801,14 @@ Request:
   "params": {
     "task": "Summarise the following text",
     "context": "optional extra context",
-    "sessionId": "optional-parent-session"
+    "sessionId": "optional-session-id"
   }
 }
 ```
+
+`sessionId` names the session the run works in: the run reads and writes that session's shared facts, peer messages and checkpoints. Leave it out and the run gets a new session of its own. With auth off the id is used as given, so it can name a chat session. Under multi-user auth (`auth.enabled`) it names a session in the caller's own namespace instead, derived from the caller's account and the id: the same id from the same account reaches the same session on this route and on `tasks/send` at `/a2a/v1`, and it never joins an existing chat session, the caller's own included. The response does not carry the session id.
+
+Under multi-user auth the task also runs as the account the token names, with the workspace root and memory that account's chat runs have. A signed token whose account has been removed gets `401`, as on `/api`.
 
 Response:
 

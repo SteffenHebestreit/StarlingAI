@@ -1048,8 +1048,8 @@ function readAgentMemoryRecords(workspacePath: string, targetAgent?: string): Me
   // every other reader resolves it against the shared root. The path threaded through here is the
   // caller's execution root, which per-user workspaces make one account's directory — so this read
   // saw that account's slice of the ledger, which is empty, and an agent's lessons stopped
-  // appearing. Mapped back rather than replaced with config, because this function's OTHER reads
-  // (user-scoped memory above) are correctly per-user and must keep the caller's path.
+  // appearing. Mapped back rather than replaced with config: the caller's root is all this
+  // function is given.
   // The 60-outcome cap used to apply BEFORE the agent filter: with a target agent, its lessons
   // had to be among the deployment's last 60 outcomes of ANY agent, so a busy swarm pushed an
   // idle agent's lessons out and a targeted search found none. Filter first, then cap — by the
@@ -1081,11 +1081,17 @@ function readAgentMemoryRecords(workspacePath: string, targetAgent?: string): Me
     });
   }
 
-  // Flow memory is read whole either way (readFlowMemoryEntries), so under multi-user auth the
-  // caller's own entries are chosen from all of it before the cap.
+  // Flow memory is one file at the deployment root as well: its writers, the config assistant's
+  // proposals and their feedback (gateway/index.ts) and the flow-memory POST route
+  // (gateway/sub-agent-routes.ts), append it there. Under multi-user auth this read used the
+  // caller's execution root, the account's own directory, where no entry is ever written: an
+  // account never found its own entries, and the account filter below never ran for a chat session
+  // (found in review, 2026-10-08). It reads the deployment root there now. The file is read whole
+  // either way (readFlowMemoryEntries), so the caller's own entries are chosen from all of it
+  // before the cap. With one operator the read is as it was.
   const ofTarget = (entry: { targetAgent?: string; assistantAgent?: string }) => !targetAgent || entry.targetAgent === targetAgent || entry.assistantAgent === targetAgent;
   const flowEntries = !reader.all
-    ? readFlowMemoryEntries(workspacePath, Number.MAX_SAFE_INTEGER).filter((entry) => ofTarget(entry) && own(entry.account)).slice(-FLOW_ENTRIES_PER_SEARCH)
+    ? readFlowMemoryEntries(root, Number.MAX_SAFE_INTEGER).filter((entry) => ofTarget(entry) && own(entry.account)).slice(-FLOW_ENTRIES_PER_SEARCH)
     : targetAgent
       ? readFlowMemoryEntries(workspacePath, AGENT_LESSON_SCAN_WINDOW).filter(ofTarget).slice(-FLOW_ENTRIES_PER_SEARCH)
       : readFlowMemoryEntries(workspacePath, FLOW_ENTRIES_PER_SEARCH);

@@ -14,7 +14,7 @@ import { dirname, extname } from "node:path";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
 import { appendOutcome } from "../agent/outcomes.js";
-import { currentOutcomeRun } from "../runtime/request-context.js";
+import { currentOutcomeRun, currentUserId } from "../runtime/request-context.js";
 import { appendAgentMessage, writeSharedFact, readAllFacts, searchSharedFacts, isAtomicFactValue } from "../swarm/memory.js";
 import { appendEvidenceClaim } from "../swarm/evidence-ledger.js";
 import { emitSwarmEvent } from "../swarm/bus.js";
@@ -391,17 +391,32 @@ function formatSharedFindingValue(value: string, metadata: SharedFindingMetadata
   return lines.join("\n");
 }
 
+const USER_SCOPE_REFUSED = "not stored: scope 'user' keeps a memory for the account it belongs to, and this request has no account. The workspace scope is read by every account.";
+
 /** The durable 'user' scope holds cross-workspace personal preferences, so it
  *  needs an authenticated owner. In single-user/token mode (ctx.userId is
  *  undefined) a user-scope write would land in a shared anonymous bucket that
  *  outlives the session and is shared across channels (audit a7b11454: a
  *  token-mode webchat preference stored as user:user) — fall back to
- *  workspace scope instead and surface the downgrade in the tool output. */
+ *  workspace scope instead and surface the downgrade in the tool output.
+ *  Under multi-user auth that workspace is the shared root, whose memories every account reads, and
+ *  requests with no user still reach these tools there (an MCP or federation run, an A2A caller on
+ *  a shared bearer), so a memory someone asked to keep as their own reached every account (found in
+ *  review, 2026-10-08). There a request with no account at all, on the tool call or around it, is
+ *  refused instead; one whose account rides only the request context falls back as before, to that
+ *  account's own part of the workspace. A config that cannot be read counts as multi-user. */
 function resolveDurableWriteScope(
   requested: DurableMemoryScope,
   ctx: ToolContext,
-): { scope: DurableMemoryScope; downgraded: boolean } {
-  if (requested === "user" && !ctx.userId) return { scope: "workspace", downgraded: true };
+): { scope: DurableMemoryScope; downgraded: boolean } | { refused: string } {
+  if (requested === "user" && !ctx.userId) {
+    let multiUser = true;
+    try {
+      multiUser = getConfig().auth?.enabled === true;
+    } catch { /* fail closed */ }
+    if (multiUser && !currentUserId()) return { refused: USER_SCOPE_REFUSED };
+    return { scope: "workspace", downgraded: true };
+  }
   return { scope: requested, downgraded: false };
 }
 
@@ -462,7 +477,9 @@ registerTool({
     if (!key) return { success: false, output: "", error: "key is required" };
     if (!content) return { success: false, output: "", error: "content is required" };
     if (requestedScope !== "workspace" && requestedScope !== "user") return { success: false, output: "", error: "scope must be 'workspace' or 'user'" };
-    const { scope, downgraded } = resolveDurableWriteScope(requestedScope, ctx);
+    const resolved = resolveDurableWriteScope(requestedScope, ctx);
+    if ("refused" in resolved) return { success: false, output: "", error: resolved.refused };
+    const { scope, downgraded } = resolved;
 
     try {
       const entry = (scope === "user" ? storeUserMemoryRecord : storeWorkspaceMemoryRecord)(ctx.workspacePath, {
@@ -779,7 +796,9 @@ registerTool({
     if (requestedDestinationScope !== "workspace" && requestedDestinationScope !== "user") {
       return { success: false, output: "", error: "destinationScope must be 'workspace' or 'user'" };
     }
-    const { scope: destinationScope, downgraded } = resolveDurableWriteScope(requestedDestinationScope, ctx);
+    const resolved = resolveDurableWriteScope(requestedDestinationScope, ctx);
+    if ("refused" in resolved) return { success: false, output: "", error: resolved.refused };
+    const { scope: destinationScope, downgraded } = resolved;
 
     try {
       // A list naming no source scope ("user", the user destination itself) asks for nothing: left
