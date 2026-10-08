@@ -8,6 +8,16 @@ import { dirname, posix } from "node:path";
 import { analyzeImageBytes, callPlaywrightTool, extractDocumentBytesToMarkdown } from "./multimodal.js";
 import { resolveWorkspaceWritePath } from "./workspace-path.js";
 import { getMcpConnections } from "../mcp/registry.js";
+import {
+  extractHtmlLinks,
+  formatLinkSection,
+  LINK_BUDGET_MAX_SHARE,
+  LINK_BUDGET_MIN_SHARE,
+  LINK_SCAN_MAX,
+  renderedLinks,
+  snapshotLinks,
+  type PageLink,
+} from "./page-links.js";
 
 const log = childLogger("tool:web");
 
@@ -242,13 +252,13 @@ registerTool({
 
 registerTool({
   name: "web_fetch",
-  description: "Fetch and read content from a public URL. Uses Playwright for HTML pages (renders JavaScript) and native fetch for JSON APIs. Returns text content.",
+  description: "Fetch a public URL and return its readable text. HTML pages end with a list of their links (absolute URLs, same site first): follow those instead of guessing paths. JSON is returned verbatim, PDFs as extracted text; JavaScript-only pages are browser-rendered when available.",
   embeddingDescription: "Fetch, download, retrieve, load content from a URL or webpage. Webseite abrufen, URL aufrufen, Seiteninhalt laden, HTML holen. Read online page contents.",
   parameters: {
     type: "object",
     properties: {
       url: { type: "string", description: "URL to fetch (must be a public http/https URL)" },
-      maxLength: { type: "number", description: "Max characters to return (default 8000)", default: 8000 },
+      maxLength: { type: "number", description: "Max characters to return, the page's link list included (default 8000)", default: 8000 },
     },
     required: ["url"],
   },
@@ -282,12 +292,16 @@ registerTool({
       // content-type the first GET already returns (and many servers reject HEAD).
       let contentType = "";
       let nativeFetchText: string | null = null;
+      // The page's anchors, read from the HTML before stripHtml drops them, and the URL they
+      // resolve against: the one that finally answered, after redirects.
+      let nativeLinks: PageLink[] = [];
+      let nativePageUrl = url;
       // What the direct GET said, carried to whatever answers in its place. A 404 or 403 used to be
       // dropped here: the browser then rendered the error page and it came back as the content.
       let directStatus: number | null = null;
       let directError = "";
       try {
-        const res = await safeFetch(url, 12000, {
+        const { res, finalUrl } = await safeFetchFinal(url, 12000, {
           headers: {
             "User-Agent": "Mozilla/5.0 (compatible; StarlingAI/0.1; +https://starlingai.io)",
             "Accept": "text/html,application/xhtml+xml,application/json,text/plain,*/*",
@@ -319,8 +333,13 @@ registerTool({
           // HTML / other content: strip markup first (clean prose for static pages),
           // and keep it only if it has real content — JS-rendered pages return little,
           // so they fall through to Playwright below. This avoids the YAML
-          // accessibility-tree noise that browser_snapshot produces.
-          if (ct.includes("text/html")) raw = stripHtml(raw);
+          // accessibility-tree noise that browser_snapshot produces. The test is on the
+          // text alone: a script shell with a long menu still goes to the browser.
+          if (ct.includes("text/html")) {
+            nativeLinks = extractHtmlLinks(raw, finalUrl);
+            nativePageUrl = finalUrl;
+            raw = stripHtml(raw);
+          }
           if (raw.trim().length > 200) {
             nativeFetchText = raw.trim();
           }
@@ -334,14 +353,11 @@ registerTool({
         : directError ? `a direct request failed (${directError})` : "";
 
       if (nativeFetchText !== null) {
-        let text = nativeFetchText;
-        if (text.length > maxLength) {
-          text = text.substring(0, maxLength) + `\n\n[Content truncated at ${maxLength} chars]`;
-        }
+        const { text, linkCount } = withLinks(nativeFetchText, nativeLinks, nativePageUrl, maxLength);
         return {
           success: true,
           output: `**Content from:** ${url}\n\n${text}${shareSuffix}`,
-          metadata: { url, contentLength: text.length, contentType: contentType || "text/html", fetchMethod: "native" },
+          metadata: { url, contentLength: text.length, contentType: contentType || "text/html", fetchMethod: "native", linkCount },
         };
       }
 
@@ -353,33 +369,32 @@ registerTool({
       if (playwrightAvailable) {
         try {
           await callPlaywrightTool("browser_navigate", { url });
-          let text = "";
+          let rendered: { text: string; pageUrl: string | null; links: PageLink[] };
           try {
             // browser_evaluate takes a FUNCTION. This sent `expression`, which Playwright MCP 1.61
             // rejects as a missing `function`, so this fast path never ran and every page came
             // back as a converted accessibility snapshot instead of its text.
-            text = evaluateResultText(await callPlaywrightTool("browser_evaluate", {
-              function: `() => (document.body?.innerText??'').replace(/\\t/g,' ').replace(/[ \\t]{3,}/g,'  ').replace(/\\n{4,}/g,'\\n\\n\\n').trim()`,
-            }));
+            rendered = parseRenderedPage(evaluateResultText(await callPlaywrightTool("browser_evaluate", {
+              function: PAGE_TEXT_AND_LINKS,
+            })));
           } catch {
             // Fall back to snapshot and convert to readable text
             log.warn({ url }, "web_fetch: browser_evaluate unavailable, converting snapshot to text");
             const rawSnapshot = await callPlaywrightTool("browser_snapshot", {});
-            text = snapshotToReadableText(rawSnapshot);
+            rendered = { text: snapshotToReadableText(rawSnapshot), ...snapshotLinks(rawSnapshot, url) };
           }
-          if (!text.trim()) {
+          // Emptiness is the page's text, never the envelope or the links around it.
+          if (!rendered.text.trim()) {
             // An empty render is not the page's content. It was returned as a successful fetch
             // of nothing; now the last-resort direct fetch gets its turn, and if that is empty
             // too the call fails and says both were.
             renderedEmpty = true;
           } else {
-            if (text.length > maxLength) {
-              text = text.substring(0, maxLength) + `\n\n[Content truncated at ${maxLength} chars]`;
-            }
+            const { text, linkCount } = withLinks(rendered.text, rendered.links, rendered.pageUrl ?? url, maxLength);
             return {
               success: true,
               output: `**Content from:** ${url}${directNote ? ` (browser-rendered; ${directNote})` : ""}\n\n${text}${shareSuffix}`,
-              metadata: { url, contentLength: text.length, contentType: contentType || "text/html", fetchMethod: "playwright", ...(directStatus !== null ? { httpStatus: directStatus } : {}) },
+              metadata: { url, contentLength: text.length, contentType: contentType || "text/html", fetchMethod: "playwright", linkCount, ...(directStatus !== null ? { httpStatus: directStatus } : {}) },
             };
           }
         } catch (playwrightErr) {
@@ -390,7 +405,7 @@ registerTool({
 
       // Last resort: native fetch even if content seems thin
       try {
-        const res = await safeFetch(url, 15000, {
+        const { res, finalUrl } = await safeFetchFinal(url, 15000, {
           headers: {
             "User-Agent": "StarlingAI/0.1 (research assistant)",
             "Accept": "text/html,application/xhtml+xml,text/plain,*/*",
@@ -400,9 +415,14 @@ registerTool({
           return { success: false, output: "", error: `HTTP ${res.status} from ${url}${renderedNote}` };
         }
         const resContentType = res.headers.get("content-type") ?? "";
-        let text = await res.text();
-        if (resContentType.includes("text/html")) text = stripHtml(text);
-        if (!text.trim()) {
+        let body = await res.text();
+        let links: PageLink[] = [];
+        if (resContentType.includes("text/html")) {
+          links = extractHtmlLinks(body, finalUrl);
+          body = stripHtml(body);
+        }
+        // A page of links and no text has no readable text either.
+        if (!body.trim()) {
           return {
             success: false,
             output: "",
@@ -410,13 +430,11 @@ registerTool({
               + "The page may be empty, need interaction, or block automated clients — this is not its content.",
           };
         }
-        if (text.length > maxLength) {
-          text = text.substring(0, maxLength) + `\n\n[Content truncated at ${maxLength} chars]`;
-        }
+        const { text, linkCount } = withLinks(body, links, finalUrl, maxLength);
         return {
           success: true,
           output: `**Content from:** ${url}${renderedEmpty ? " (raw response; the browser rendered no text)" : ""}\n\n${text}${shareSuffix}`,
-          metadata: { url, contentLength: text.length, contentType: resContentType, fetchMethod: "native_fallback", httpStatus: res.status },
+          metadata: { url, contentLength: text.length, contentType: resContentType, fetchMethod: "native_fallback", httpStatus: res.status, linkCount },
         };
       } catch (err) {
         log.error({ err, url }, "web_fetch failed");
@@ -712,11 +730,64 @@ function evaluateResultText(output: string): string {
 }
 
 /**
+ * The browser_evaluate function web_fetch sends: the page's text (whitespace evened out as
+ * before), the URL the browser ended on, and its first LINK_SCAN_MAX links as [href, label]
+ * pairs, returned as ONE JSON string. Text and links come back in the same round trip, and a
+ * string result is what evaluateResultText reads. innerText has no link targets, so a rendered
+ * page used to reach the agent with its menu as bare words.
+ */
+const PAGE_TEXT_AND_LINKS = `() => {
+  const t = (document.body?.innerText ?? '').replace(/\\t/g, ' ').replace(/[ \\t]{3,}/g, '  ').replace(/\\n{4,}/g, '\\n\\n\\n').trim();
+  const l = Array.from(document.links ?? []).slice(0, ${LINK_SCAN_MAX}).map((a) => [a.href, (a.innerText || a.getAttribute('aria-label') || a.title || a.querySelector('img')?.alt || '').replace(/\\s+/g, ' ').trim().slice(0, 200)]);
+  return JSON.stringify({ t, u: document.URL, l });
+}`;
+
+/**
+ * PAGE_TEXT_AND_LINKS's answer as text, page URL and links. Any other answer — a plain string,
+ * or an envelope a future Playwright MCP renders differently — is the page text, with no links.
+ * A page URL that is not http(s) (a browser error page's) is dropped; the requested URL stands in.
+ */
+function parseRenderedPage(answer: string): { text: string; pageUrl: string | null; links: PageLink[] } {
+  try {
+    const value: unknown = JSON.parse(answer);
+    if (value && typeof value === "object" && typeof (value as { t?: unknown }).t === "string") {
+      const page = value as { t: string; u?: unknown; l?: unknown };
+      const pageUrl = typeof page.u === "string" && /^https?:\/\//i.test(page.u) ? page.u : null;
+      return { text: page.t, pageUrl, links: renderedLinks(page.l) };
+    }
+  } catch {
+    // not JSON: the answer is the page text itself
+  }
+  return { text: answer, pageUrl: null, links: [] };
+}
+
+/**
+ * A page's text with its links section after it, within maxLength. The section takes what the
+ * text leaves free, at least LINK_BUDGET_MIN_SHARE and at most LINK_BUDGET_MAX_SHARE of
+ * maxLength, so the text keeps priority on a short page and a long page keeps its size; the
+ * text is cut to what remains. With no section the text is cut at maxLength as it always was.
+ */
+function withLinks(body: string, links: readonly PageLink[], pageUrl: string, maxLength: number): { text: string; linkCount: number } {
+  const budget = Math.min(
+    Math.floor(maxLength * LINK_BUDGET_MAX_SHARE),
+    Math.max(Math.floor(maxLength * LINK_BUDGET_MIN_SHARE), maxLength - body.length - 2),
+  );
+  const section = formatLinkSection(links, pageUrl, budget);
+  const bodyBudget = maxLength - (section.text ? section.text.length + 2 : 0);
+  let text = body;
+  if (text.length > bodyBudget) {
+    text = text.substring(0, bodyBudget) + `\n\n[Content truncated at ${bodyBudget} chars]`;
+  }
+  return { text: section.text ? `${text}\n\n${section.text}` : text, linkCount: section.shown };
+}
+
+/**
  * Converts a Playwright browser_snapshot accessibility-tree output into compact
  * readable prose. The snapshot is a YAML DOM tree full of structural nodes
  * (generic, banner, listitem, [ref=eN], [cursor=pointer]) that are pure noise
- * for text synthesis. This function extracts heading and text nodes only and
- * caps output at maxChars.
+ * for text synthesis. This function extracts heading, text and link-label nodes
+ * and caps output at maxChars. Link targets are not part of this text: web_fetch
+ * lists them after it (snapshotLinks).
  */
 function snapshotToReadableText(snapshot: string, maxChars = 4_000): string {
   const titleLine = snapshot.match(/^-\s+Page Title:\s*(.+)$/m)?.[1]?.trim() ?? "";
@@ -732,9 +803,11 @@ function snapshotToReadableText(snapshot: string, maxChars = 4_000): string {
       // - text: "VALUE"  or  - text: VALUE
       const tm = line.match(/^-\s+text:\s+(?:"([^"]+)"|(\S.*\S))$/);
       if (tm) { const v = (tm[1] ?? tm[2] ?? "").trim(); if (v.length > 3) pieces.push(v); continue; }
-      // - link "LABEL" — skip short nav labels
+      // - link "LABEL" — labels of seven or more characters. An English list of nav words
+      // (Contact, About, Home, …) also dropped labels it matched, a keyword table that only
+      // read English pages and hid the navigation the agent needs.
       const lm = line.match(/^-\s+link\s+"([^"]{7,})"/);
-      if (lm?.[1] && !/^(Skip|Close|Back|Next|Previous|Search|Home|Menu|Login|Register|Contact|About|×)/i.test(lm[1])) {
+      if (lm?.[1]) {
         pieces.push(lm[1]); continue;
       }
     }
@@ -908,6 +981,15 @@ export async function checkUrlSsrf(rawUrl: string): Promise<string | null> {
  * user/LLM-supplied URLs — NOT the configured (trusted) search backends.
  */
 async function safeFetch(url: string, ms: number, init?: RequestInit, maxRedirects = 5): Promise<Response> {
+  return (await safeFetchFinal(url, ms, init, maxRedirects)).res;
+}
+
+/**
+ * safeFetch, also returning the URL of the hop that answered. A page's relative links resolve
+ * against that URL, not the one requested (/produkte answered from /produkte/seite-1.html), and
+ * `res.url` cannot be relied on for it: it is "" on a Response that was not fetched.
+ */
+async function safeFetchFinal(url: string, ms: number, init?: RequestInit, maxRedirects = 5): Promise<{ res: Response; finalUrl: string }> {
   let current = url;
   for (let hop = 0; hop <= maxRedirects; hop++) {
     let host: string;
@@ -933,7 +1015,7 @@ async function safeFetch(url: string, ms: number, init?: RequestInit, maxRedirec
       current = next;
       continue;
     }
-    return res;
+    return { res, finalUrl: current };
   }
   throw new Error("Too many redirects");
 }

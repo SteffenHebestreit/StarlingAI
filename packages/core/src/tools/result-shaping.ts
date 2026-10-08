@@ -10,6 +10,8 @@
  * both the introductory context and any trailing summary / footer are preserved.
  */
 
+import { LINK_SECTION_RE } from "./page-links.js";
+
 /** Maximum characters allowed per single tool result before truncation kicks in. */
 export const MAX_TOOL_RESULT_CHARS = 32_768;
 
@@ -62,6 +64,9 @@ export function extractKeyFacts(text: string, toolName: string, maxChars = 600):
     .replace(/\*\*Web Search Results for:\*\*[^\n]*\n?/g, "")
     // Web fetch / browser content header
     .replace(/\*\*Content from:\*\*[^\n]*\n?/g, "")
+    // web_fetch's list of the page's links: navigation for the agent that fetched it, never a
+    // fact for its siblings (the same reason the /url and bare-URL lines go below).
+    .replace(LINK_SECTION_RE, "")
     // Full "### Page state" section including the YAML accessibility tree.
     // The snapshot is a DOM ref tree ([ref=eN], [cursor=pointer], etc.) —
     // pure navigation scaffolding with no synthesis value. Strip everything
