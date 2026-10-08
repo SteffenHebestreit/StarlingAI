@@ -1815,6 +1815,76 @@ describe("run_workflow and the code its runs executed", () => {
     }
   });
 
+  describe("a job's orchestrator step", () => {
+    // A step with several agents runs an orchestrator turn in the job's session, and its
+    // delegations' records are tool messages there. In review only the end of the job read them:
+    // a step whose turn delegated to a coder that masked its figures did not stop the job, and
+    // nothing failed when that read was removed.
+    const PRINTED = { attempted: 1, failed: 0, succeededWithOutput: 1 };
+    const delegation = (executions: Record<string, unknown>) => ({
+      role: "tool",
+      tool_call_id: "d1",
+      content: "Delegated result from coder.",
+      metadata: { agentName: "coder", specialistExecutions: executions, artifacts: [PRIMES] },
+    });
+    type StepSession = { addMessages(messages: unknown[]): void; rewindBeforeIndex(index: number): void };
+    const runOrchestratedJob = async (stepTurns: Array<(session: StepSession) => void>) => {
+      const { tempDir, configPath } = writeTempConfig({
+        agents: { defaults: { model: { primary: "lmstudio/qwen/qwen3.5-9b" } } },
+        scenes: {
+          count_and_report: { description: "Count the primes and report.", task: "Count the primes between 100000 and 200000.", allowedAgents: ["coder", "content_writer"] },
+          explain_count: { description: "Explain the count.", task: "Explain the count of primes.", allowedAgents: ["coder", "content_writer"] },
+        },
+        jobs: {
+          prime_packet: {
+            description: "Count the primes, then explain the count.",
+            steps: [{ scene: "count_and_report", label: "Count" }, { scene: "explain_count", label: "Explain" }],
+          },
+        },
+        subAgents: {
+          coder: { description: "Writes and runs code.", tools: ["write_file", "shell_exec"], maxIterations: 4 },
+          content_writer: { description: "Writes reports.", tools: ["write_file"], maxIterations: 4 },
+        },
+      });
+      process.env["SAI_CONFIG_PATH"] = configPath;
+      vi.resetModules();
+      let turn = 0;
+      const runTurnMock = vi.fn(async (opts: { session: StepSession }) => {
+        stepTurns[turn]?.(opts.session);
+        turn += 1;
+        return { response: `Schritt ${turn} beantwortet.`, toolCallsExecuted: 1, guardrailEvents: [], usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 }, blocked: false };
+      });
+      vi.doMock("../agent/runtime.js", () => ({ collectTurnArtifactAttachments: () => [], runTurn: runTurnMock }));
+      try {
+        return { result: await runWorkflow("prime_packet", "job"), runTurnMock };
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    };
+
+    it("whose turn delegated to a coder that masked its figures stops the job, and the record goes up", async () => {
+      const { result, runTurnMock } = await runOrchestratedJob([(session) => session.addMessages([delegation(MASKED)])]);
+
+      expect(runTurnMock).toHaveBeenCalledTimes(1);
+      expect(result.metadata?.["blocked"]).toBe(true);
+      expect(result.output).toContain("they are masked as [not observed] and were not computed");
+      expect(result.metadata?.["specialistExecutions"]).toEqual(MASKED);
+      expect(result.metadata?.["maskedRuns"]).toEqual([{ agentName: "coder", executions: MASKED, artifacts: [PRIMES] }]);
+    });
+
+    it("whose record the next step's turn compacts out of the session still counts", async () => {
+      const { result, runTurnMock } = await runOrchestratedJob([
+        (session) => session.addMessages([delegation(PRINTED)]),
+        (session) => session.rewindBeforeIndex(0),
+      ]);
+
+      expect(runTurnMock).toHaveBeenCalledTimes(2);
+      expect(result.success).toBe(true);
+      expect(result.metadata?.["specialistExecutions"]).toEqual(PRINTED);
+      expect(result.metadata).not.toHaveProperty("maskedRuns");
+    });
+  });
+
   describe("a step's QA re-attempt", () => {
     // A step that must save a file and saved none runs once more; one of the two attempts is the
     // step's run. In review the discarded first attempt, which had masked its figures, was handed

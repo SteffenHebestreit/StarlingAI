@@ -915,11 +915,16 @@ type WorkflowExecutions = ReturnType<FanOutExecutionRecords["metadata"]>;
  * messages: a coder's masked figures inside a workflow reached the turn as "Workflow … completed"
  * with no record, and the turn's honest directive never fired.
  */
-function addSessionExecutions(into: FanOutExecutionRecords, session: AgentSession): void {
+function addSessionExecutions(into: FanOutExecutionRecords, session: AgentSession, recorded?: WeakSet<object>): void {
   for (const message of session.getHistory()) {
-    if (message.role === "tool" && message.metadata) into.add(message.metadata);
+    if (message.role !== "tool" || !message.metadata || recorded?.has(message)) continue;
+    recorded?.add(message);
+    into.add(message.metadata);
   }
 }
+
+/** What a job step whose run masked figures says, under its answer, in place of a result. */
+const MASKED_STEP_NOTE = `_(This step's run stated figures no tool returned; they are masked as ${UNOBSERVED_FIGURE_MARKER} and were not computed.)_`;
 
 /** A run's result as its delegation's metadata, for the fan-out record. */
 function runExecutionMetadata(
@@ -1151,6 +1156,10 @@ async function runJobInline(
     const sections: string[] = [];
     const directStepArtifacts: Array<Record<string, unknown>> = [];
     const jobExecutions = createFanOutExecutionRecords();
+    // The tool messages of the job's session already in its record. A step's orchestrator turn
+    // leaves its delegations there; they are read right after that turn, before the next step's
+    // turn can compact them out of the history.
+    const recordedToolMessages = new WeakSet<object>();
     let blocked = false;
     let toolCallsExecuted = 0;
     let executedSteps = 0;
@@ -1256,7 +1265,7 @@ async function runJobInline(
         // tools/plan-executor.ts). The job stops there and says why.
         if (unbackedFiguresMasked(run.executions)) {
           stepBlocked = true;
-          stepResponse = `${stepResponse}\n\n_(This step's run stated figures no tool returned; they are masked as ${UNOBSERVED_FIGURE_MARKER} and were not computed.)_`.trim();
+          stepResponse = `${stepResponse}\n\n${MASKED_STEP_NOTE}`.trim();
         }
       } else {
         const result = await runTurn({
@@ -1280,6 +1289,18 @@ async function runJobInline(
         stepResponse = result.response.trim();
         stepBlocked = result.blocked || workflowOutputIsBlocked(result.response);
         toolCallsExecuted += result.toolCallsExecuted;
+        // The delegations this step's turn made, and whether one of them masked figures. In review
+        // only the end of the job read the session, and only for the record: a step whose turn had
+        // delegated to a coder that masked its figures did not stop the job, and the next step ran
+        // on its answer, as the next step after a direct one no longer does (above).
+        const stepRuns = createFanOutExecutionRecords();
+        addSessionExecutions(stepRuns, session, recordedToolMessages);
+        const stepRecord = stepRuns.metadata();
+        jobExecutions.add({ ...stepRecord });
+        if (stepRecord.maskedRuns) {
+          stepBlocked = true;
+          stepResponse = `${stepResponse}\n\n${MASKED_STEP_NOTE}`.trim();
+        }
       }
 
       sections.push(`## ${step.label}\n\n${stepResponse}`.trim());
@@ -1313,7 +1334,6 @@ async function runJobInline(
       artifacts.push(artifact);
     }
 
-    addSessionExecutions(jobExecutions, session);
     return {
       response,
       blocked,

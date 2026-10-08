@@ -802,6 +802,34 @@ describe("execute_plan and the code its steps' runs executed", () => {
     expect(result.metadata?.["artifacts"]).toEqual([PRIMES]);
   });
 
+  it("a step that is itself a fan-out hands its masked runs up as they are, each with its own files", async () => {
+    // A run_workflow (or any fan-out) step carries every run's files and names no agent of its own.
+    // Collapsed into one entry under the step, the workflow's finished report would be named as the
+    // masked coder's unrun output, which is what the entries exist to prevent.
+    const REPORT = { filename: "report.html", outputPath: "generated/report.html", sourceTool: "write_file" };
+    respond = (name) => (name === "run_workflow"
+      ? {
+        success: true,
+        output: "Workflow prime_report [scene] completed.\n\nDer Bericht ist fertig; es gibt [not observed] Primzahlen.",
+        metadata: {
+          workflowName: "prime_report",
+          workflowType: "scene",
+          artifacts: [PRIMES, REPORT],
+          specialistExecutions: MASKED,
+          maskedRuns: [{ agentName: "coder", executions: MASKED, artifacts: [PRIMES] }],
+        },
+      }
+      : { success: true, output: "explained" });
+    await persistTurnPlan(SESSION, basePlan([
+      { id: "s1", description: "count the primes and report", kind: "reuse", workflow: "prime_report" },
+    ]));
+
+    const result = await run();
+
+    expect(result.metadata?.["maskedRuns"]).toEqual([{ agentName: "coder", executions: MASKED, artifacts: [PRIMES] }]);
+    expect(result.metadata?.["artifacts"]).toEqual([PRIMES, REPORT]);
+  });
+
   it("control: a step whose script printed is done, carried on, and its record summed", async () => {
     respond = (name, args) => (name === "delegate_to_agent" && args["agentName"] === "coder"
       ? coder({ attempted: 1, failed: 0, succeededWithOutput: 1 }, "Es gibt 8392 Primzahlen.")
