@@ -139,6 +139,28 @@ export async function lookupTrajectoryInjection(params: {
   return { trajectoryInjectionContext, injectedTrajectoryIdentity };
 }
 
+/**
+ * The evidence requirement a turn hands its tools (ToolContext.turnEvidence), or undefined.
+ *
+ * The up-front judge's verdict reached only the turn's own enforcement (requiresDelegatedResearch,
+ * the tool mode). The delegations the turn then made — inside record_plan's fold and execute_plan
+ * above all — never saw it, so the research gate fell back to an English-only word shape and a plan
+ * written in German ran web_coder on a research step (E2E 2026-10-07). Only the orchestrator's own
+ * turn carries it: a workflow step runs the agents the scene's author named, and a directed turn
+ * (`--agent`) runs the agent the user named.
+ */
+export function turnEvidenceRequirement(params: {
+  upfrontSourceSensitive: boolean;
+  channel: string;
+  workflowDepth: number;
+  directiveAgent?: string;
+}): { required: true } | undefined {
+  if (!params.upfrontSourceSensitive) return undefined;
+  if (params.channel === "workflow" || params.workflowDepth > 0) return undefined;
+  if (params.directiveAgent?.trim()) return undefined;
+  return { required: true };
+}
+
 export interface TurnEnforcementSignals {
   softRoutingEnforcement: boolean;
   applyRoutingTone: (text: string) => string;

@@ -29,7 +29,8 @@ import { loadTurnPlan, persistTurnPlan, type TurnPlan, type TurnPlanStep, type T
 import { planFrontier, planCycle } from "../agent/plan-frontier.js";
 import { BLOCKED_STEP_TOOLS } from "./tool-pipeline.js";
 import { getPerTurnToolCallLimit } from "../agent/delegation-response-collapse.js";
-import { withDelegationFanoutAllowance } from "./sub-agent.js";
+import { withDelegationFanoutAllowance, withTurnGatherRole, batchEvidenceGatherPoint } from "./sub-agent.js";
+import { isWebReachingToolName } from "./agent-routing.js";
 // This tool's output is mostly untrusted delegated content, re-emitted as the orchestrator's own.
 // A step whose result merely quoted an HTML-ish role tag replaced the ENTIRE report with "Tool
 // output blocked by guardrails", while the metadata still said N done and 0 failed, so the turn
@@ -187,6 +188,24 @@ function isReasoningOnlyLeaf(plan: TurnPlan, step: TurnPlanStep): boolean {
   // still handed over as YOURS TO DO.
   if ((step.dependsOn ?? []).length === 0) return false;
   return !plan.steps.some((other) => other.id !== step.id && (other.dependsOn ?? []).includes(step.id));
+}
+
+/**
+ * The plan's evidence gather point, on a turn the up-front judge said needs outside facts: the id of
+ * the first delegate step whose agent works only from the text it is handed. Undefined — every step
+ * runs on the agent it names — when the plan can reach outside the workspace on its own: a reuse
+ * step (a workflow may gather), a direct step calling a web tool, or a delegate step naming an agent
+ * that reaches outside, naming none, or naming one the catalog does not know. The whole plan is the
+ * batch, not the round: a gathering step the scheduler reaches later still means the plan gathers.
+ */
+function planEvidenceGatherPoint(plan: TurnPlan, ctx: ToolContext): string | undefined {
+  if (ctx.turnEvidence?.required !== true) return undefined;
+  if (plan.steps.some((step) => step.kind === "reuse" || (step.kind === "direct" && step.tool && isWebReachingToolName(step.tool)))) {
+    return undefined;
+  }
+  const delegates = plan.steps.filter((step) => step.kind === "delegate");
+  const index = batchEvidenceGatherPoint(ctx, delegates.map((step) => step.agent));
+  return index >= 0 ? delegates[index]!.id : undefined;
 }
 
 /** Dispatch one step to the tool that already knows how to run that kind of work. */
@@ -402,6 +421,7 @@ registerTool({
     // which were then never reported as YOURS TO DO.
     const deferred = new Set<string>();
     let blocked: ReturnType<typeof planFrontier>["blocked"] = [];
+    const gatherPointId = planEvidenceGatherPoint(plan, ctx);
 
     let round = 0;
     for (; round < maxRounds; round++) {
@@ -431,7 +451,7 @@ registerTool({
         ? withDelegationFanoutAllowance(ctx, batch.map((step) => step.agent), batch.length)
         : ctx;
       const outcomes = await Promise.all(
-        batch.map((step) => runStep(plan, step, results, batchCtx).then((run) => ({ step, run }))),
+        batch.map((step) => runStep(plan, step, results, withTurnGatherRole(batchCtx, step.id === gatherPointId)).then((run) => ({ step, run }))),
       );
       for (const { step, run } of outcomes) {
         if (run.call) nestedCalls.push(run.call);
