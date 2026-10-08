@@ -93,7 +93,7 @@ turn/http step and `mail` by any mail step; list the rest in `requires`.
 | `mail` | GreenMail `/api/service/readiness` and `pnpm e2e:env status` `ready.mail` (eval mailbox loaded, isolation verified) |
 | `e2e-site` | the site answers below 500 and `ready.site` (the gateway resolves it, the SSRF exemption is compiled) |
 | `web-search` | `GET $E2E_SEARXNG_URL/healthz` when set; otherwise no route reports SearXNG — **assumed up** |
-| `sandbox` | `/api/health/subsystems`: `sandbox` = ok **and measured** — the gateway's canary ran a `docker run` through shell_exec (socket proxy included) and got back what it printed on stdout and on stderr. A failed run or lost output is down, and so are "not configured", "not checked yet" (no container is started while a turn runs; a verdict serves 5 minutes) and a gateway too old to report the check |
+| `sandbox` | `/api/health/subsystems`: `sandbox` = ok **and measured** — the gateway's canary ran a `docker run` through shell_exec (socket proxy included) and got back what it printed on stdout and on stderr. A failed run or lost output is down, and so are "not configured", "not checked yet" (no container is started while a turn runs; a verdict serves 5 minutes) and a gateway too old to report the check. An ok verdict counts only up to 15 minutes old by its `ageMs` (the gateway's clock): a gateway that is never idle keeps serving its last one |
 
 ## Reports
 

@@ -85,7 +85,7 @@ Every public schema field, where it is declared, and how many production files r
 | `completes` | packages/core/src/config/schema.ts:888 | 14 |
 | `completionPer1m` | packages/core/src/config/schema.ts:511 | 1 |
 | `computerUse` | packages/core/src/config/schema.ts:1946 | 13 |
-| `concurrency` | packages/core/src/config/schemas/retrieval.ts:190 | 23 |
+| `concurrency` | packages/core/src/config/schemas/retrieval.ts:190 | 25 |
 | `concurrentSessions` | packages/core/src/config/schema.ts:266 | 1 |
 | `confidenceAttempt` | packages/core/src/config/schema.ts:1588 | 5 |
 | `confidenceAttemptMaxChars` | packages/core/src/config/schema.ts:1592 | 4 |
@@ -196,7 +196,7 @@ Every public schema field, where it is declared, and how many production files r
 | `historyLimit` | packages/core/src/config/schemas/channels.ts:22 | 5 |
 | `holdoutRate` | packages/core/src/config/schema.ts:1486 | 2 |
 | `honestSynthesisOnPartialEvidence` | packages/core/src/config/schemas/orchestration.ts:602 | 1 |
-| `host` | packages/core/src/config/schema.ts:707 | 112 |
+| `host` | packages/core/src/config/schema.ts:707 | 113 |
 | `http` | packages/core/src/config/schema.ts:752 | 86 |
 | `humanInLoopSteps` | packages/core/src/config/schema.ts:1309 | 20 |
 | `id` | packages/core/src/config/schema.ts:561 | 288 |
@@ -514,7 +514,7 @@ Every public schema field, where it is declared, and how many production files r
 | `usernameClaim` | packages/core/src/config/schema.ts:392 | 1 |
 | `usernameSelector` | packages/core/src/config/schema.ts:787 | 5 |
 | `userProfilePrefetch` | packages/core/src/config/schemas/orchestration.ts:624 | 4 |
-| `users` | packages/core/src/config/schema.ts:433 | 38 |
+| `users` | packages/core/src/config/schema.ts:433 | 39 |
 | `verifyArtifacts` | packages/core/src/config/schemas/orchestration.ts:372 | 2 |
 | `verifyArtifactsMaxRepairAttempts` | packages/core/src/config/schemas/orchestration.ts:380 | 1 |
 | `verifyArtifactsRepair` | packages/core/src/config/schemas/orchestration.ts:377 | 1 |

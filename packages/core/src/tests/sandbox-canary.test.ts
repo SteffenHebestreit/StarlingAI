@@ -234,10 +234,11 @@ describe("checkSandbox", () => {
     const first = await Promise.all([health.checkSandbox(), health.checkSandbox(), health.checkSandbox()]);
     expect(docker).toHaveBeenCalledTimes(1);
     expect(new Set(first.map((check) => check.checkedAt))).toEqual(new Set(["2026-10-08T10:00:00.000Z"]));
+    expect(first.map((check) => check.ageMs)).toEqual([0, 0, 0]);
 
     // A lost-output verdict is kept like any other: a broken channel does not cost a container per poll.
     vi.setSystemTime(new Date("2026-10-08T10:04:59.000Z"));
-    expect(await health.checkSandbox()).toEqual(first[0]);
+    expect(await health.checkSandbox()).toEqual({ ...first[0], ageMs: 299_000 });
     expect(docker).toHaveBeenCalledTimes(1);
 
     vi.setSystemTime(new Date("2026-10-08T10:05:00.000Z"));
@@ -271,7 +272,7 @@ describe("checkSandbox", () => {
     turns.markOrchestratorActivity();
     try {
       const stale = await health.checkSandbox();
-      expect(stale).toMatchObject({ status: "ok", checkedAt: "2026-10-08T10:00:00.000Z" });
+      expect(stale).toMatchObject({ status: "ok", checkedAt: "2026-10-08T10:00:00.000Z", ageMs: 420_000 });
       expect(stale.detail).toMatch(/\(measured 7 min ago; not re-run while a turn is running\)$/);
       expect(docker).toHaveBeenCalledTimes(1);
     } finally {
@@ -356,6 +357,41 @@ describe("the E2E harness's sandbox service", () => {
 
     // A gateway too old to have the canary.
     expect(await sandboxService(subsystems([MODEL_OK]))).toEqual({ service: "sandbox", up: false, detail: 'GET /api/health/subsystems reports no "sandbox" check' });
+  });
+
+  it("takes an ok verdict up to 15 minutes old, as the gateway counts it, and no older", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-08T10:00:00.000Z"));
+    docker.mockImplementation(async (_file: string, args: string[]) => dockerPrints(args));
+    expect(await health.checkSandbox()).toMatchObject({ status: "ok", ageMs: 0 });
+
+    // The canary starts no container while a turn runs, so a gateway that is never idle (a turn that
+    // never ends, a run at --concurrency 2) serves its last verdict for as long as that lasts.
+    turns.markOrchestratorActivity();
+    try {
+      vi.setSystemTime(new Date("2026-10-08T10:15:00.000Z"));
+      const inside = await sandboxService(subsystems([MODEL_OK, await health.checkSandbox()]));
+      expect(inside.up).toBe(true);
+      expect(inside.detail).toMatch(/^sandbox: ok — .*\(measured 15 min ago; not re-run while a turn is running\)$/);
+
+      vi.setSystemTime(new Date("2026-10-08T10:16:00.000Z"));
+      const past = await sandboxService(subsystems([MODEL_OK, await health.checkSandbox()]));
+      expect(past).toEqual({ service: "sandbox", up: false, detail: "sandbox verdict 16 min old, not re-measured while turns run, over the 15 min a scenario takes" });
+      expect(docker).toHaveBeenCalledTimes(1);
+    } finally {
+      turns.markOrchestratorIdle();
+    }
+
+    // The age the gateway counts, never checkedAt against this host's clock: the gateway's VM clock
+    // can drift from it (WSL2 after sleep). A measured verdict without an age is not taken.
+    const verdict = (fields: Partial<SubsystemCheck>): SubsystemCheck => ({ name: "sandbox", status: "ok", detail: "a docker run through shell_exec handed back stdout and stderr (9 ms)", ...fields });
+    expect((await sandboxService(subsystems([MODEL_OK, verdict({ checkedAt: "2026-10-08T08:00:00.000Z", ageMs: 60_000 })]))).up).toBe(true);
+    expect((await sandboxService(subsystems([MODEL_OK, verdict({ checkedAt: "2026-10-08T10:15:59.000Z", ageMs: 20 * 60_000 })]))).up).toBe(false);
+    expect(await sandboxService(subsystems([MODEL_OK, verdict({ checkedAt: "2026-10-08T10:15:59.000Z" })]))).toEqual({
+      service: "sandbox",
+      up: false,
+      detail: "sandbox verdict of unknown age: the gateway reports no ageMs with it",
+    });
   });
 
   it("skips every scenario that needs the sandbox, with the canary's reason, when output is lost", async () => {

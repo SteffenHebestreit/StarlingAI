@@ -38,6 +38,12 @@ export interface SubsystemCheck {
    * probe on every call, and on a canary that has not measured anything (checkSandbox).
    */
   checkedAt?: string;
+  /**
+   * How old that verdict was when served, in ms on the gateway's own clock; present whenever
+   * checkedAt is. A reader that bounds the age reads this, not checkedAt against its own clock: the
+   * gateway's VM clock can drift from the host's (WSL2 after sleep).
+   */
+  ageMs?: number;
 }
 
 export interface SubsystemHealth {
@@ -421,7 +427,10 @@ async function runSandboxCanary(shell: ToolHandler): Promise<SubsystemCheck> {
 /**
  * The sandbox canary as a subsystem check. A verdict serves SANDBOX_CANARY_TTL_MS, and callers that
  * arrive while a run is in flight share it. While a turn is running it starts no container: it
- * reports the last verdict with its age, or "not checked yet" before the first one.
+ * reports the last verdict with its age, or "not checked yet" before the first one. Every verdict
+ * it serves carries ageMs, as a gateway that is never idle (a turn that never ends, several users,
+ * an E2E run at --concurrency 2) serves its last one for as long as that lasts, and the E2E harness
+ * takes one only up to an age it bounds (e2e/services.ts).
  */
 export async function checkSandbox(): Promise<SubsystemCheck> {
   let shell: ToolHandler | undefined;
@@ -439,21 +448,21 @@ export async function checkSandbox(): Promise<SubsystemCheck> {
   // Nothing below awaits before a run is registered, so callers that arrive together share one run.
   if (!shell) return { name: "sandbox", status: "ok", detail: "not configured (shell_exec is disabled by config)" };
   const ageMs = sandboxCanary ? Date.now() - sandboxCanary.at : Infinity;
-  if (sandboxCanary && ageMs < SANDBOX_CANARY_TTL_MS) return sandboxCanary.check;
+  if (sandboxCanary && ageMs < SANDBOX_CANARY_TTL_MS) return { ...sandboxCanary.check, ageMs };
   if (sandboxCanaryRun) return sandboxCanaryRun;
   if (turnsRunning > 0) {
     if (!sandboxCanary) {
       return { name: "sandbox", status: "ok", detail: "not checked yet: the canary starts no container while a turn is running" };
     }
     const last = sandboxCanary.check;
-    return { ...last, detail: `${last.detail ?? ""} (measured ${Math.round(ageMs / 60_000)} min ago; not re-run while a turn is running)` };
+    return { ...last, ageMs, detail: `${last.detail ?? ""} (measured ${Math.round(ageMs / 60_000)} min ago; not re-run while a turn is running)` };
   }
   const run = runSandboxCanary(shell).then((measured) => {
     const at = Date.now();
     const check = { ...measured, checkedAt: new Date(at).toISOString() };
     sandboxCanary = { at, check };
     sandboxCanaryRun = null;
-    return check;
+    return { ...check, ageMs: 0 };
   });
   sandboxCanaryRun = run;
   return run;
