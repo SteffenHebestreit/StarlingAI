@@ -1,9 +1,9 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as configLoader from "../config/loader.js";
-import { appendOutcome, type OutcomeEntry } from "../agent/outcomes.js";
+import { appendOutcome } from "../agent/outcomes.js";
 import { buildUserProfileEvidence } from "../agent/user-profile-prefetch.js";
 import {
   _clearDurableMemoryCaches,
@@ -12,9 +12,8 @@ import {
   searchableMemoryScopes,
   storeWorkspaceMemoryRecord,
 } from "../memory/service.js";
-import { PRODUCT } from "../product/index.js";
 import { runWithRequestContext } from "../runtime/request-context.js";
-import { safeUserSegment } from "../runtime/user-scope.js";
+import { recordAccount, safeUserSegment } from "../runtime/user-scope.js";
 import { getTool } from "../tools/registry.js";
 import { userWorkspaceRoot } from "../tools/workspace-path.js";
 
@@ -180,36 +179,25 @@ describe("the user-profile prefetch and the deployment's agent ledger", () => {
   });
 });
 
-describe("the ledger records whose run it was", () => {
-  function lastEntryLine(shared: string): string {
-    return readFileSync(join(shared, PRODUCT.stateDirName, "agent_outcomes.ndjson"), "utf8").trim().split("\n").at(-1)!;
-  }
-
-  const run: OutcomeEntry = { ts: "2026-10-08T12:00:00.000Z", agent: "researcher", task: "check the ferry times", outcome: "success", iterations: 2, totalTokens: 10 };
-
-  it("under multi-user auth, stamps the account of the request the run belongs to, never the raw user id", () => {
+describe("the account a ledger entry is written for", () => {
+  it("is the user-scope segment of the request's user under multi-user auth, never the raw user id", () => {
     withAuth(true);
-    const shared = mkdtempSync(join(tmpdir(), "agent-ledger-stamp-"));
-    dirs.push(shared);
 
-    runWithRequestContext({ userId: "bob" }, () => appendOutcome(shared, run));
-
-    const line = lastEntryLine(shared);
-    expect(JSON.parse(line)).toMatchObject({ ...run, account: safeUserSegment("bob") });
-    expect(line).not.toContain("\"bob\"");
+    expect(runWithRequestContext({ userId: "bob" }, () => recordAccount())).toBe(safeUserSegment("bob"));
+    expect(safeUserSegment("bob")).not.toBe("bob");
   });
 
-  it("stamps no account on a run with no user, and with one operator writes the entry as before", () => {
+  it("is none for a request with no user, with one operator, and when the config cannot be read", () => {
     withAuth(true);
-    const shared = mkdtempSync(join(tmpdir(), "agent-ledger-stamp-"));
-    dirs.push(shared);
-    appendOutcome(shared, run);
-    expect(JSON.parse(lastEntryLine(shared))).not.toHaveProperty("account");
+    expect(recordAccount()).toBeUndefined();
 
     vi.restoreAllMocks();
     withAuth(false);
-    runWithRequestContext({ userId: "bob" }, () => appendOutcome(shared, run));
-    expect(lastEntryLine(shared)).toBe(JSON.stringify(run));
+    expect(runWithRequestContext({ userId: "bob" }, () => recordAccount())).toBeUndefined();
+
+    vi.restoreAllMocks();
+    vi.spyOn(configLoader, "getConfig").mockImplementation(() => { throw new Error("config unreadable"); });
+    expect(runWithRequestContext({ userId: "bob" }, () => recordAccount())).toBeUndefined();
   });
 });
 

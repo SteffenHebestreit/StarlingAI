@@ -12,7 +12,6 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { childLogger } from "../logger.js";
 import { appendJsonLine, readLastRecords } from "../memory/bounded-ndjson-store.js";
-import { recordAccount } from "../runtime/user-scope.js";
 
 import { PRODUCT } from "../product/index.js";
 
@@ -38,10 +37,14 @@ export interface OutcomeEntry {
   /** G32: Number of share_finding calls made during this run (quality signal). */
   sharedFindingsCount?: number;
   /**
-   * The account the run was for: its user-scope segment (runtime/user-scope.ts), never the raw
-   * user id. Stamped by appendOutcome under multi-user auth; absent with one operator, for a run
-   * with no user, and on entries written before it existed. A reader that shows an entry's task
-   * or lesson shows it only to that account (memory/service.ts, gateway/sub-agent-routes.ts).
+   * The account the run was for: its user-scope segment (runtime/user-scope.ts recordAccount),
+   * never the raw user id. Set by the writers that run for an account: a sub-agent run's outcomes
+   * (agent/sub-agent.ts), a collapsed parallel_delegate (tools/sub-agent.ts) and record_lesson.
+   * Absent with one operator, for a run with no user, for the warden's entries, and on entries
+   * written before it existed. A reader that shows an entry's task or lesson shows it only to that
+   * account (memory/service.ts, gateway/sub-agent-routes.ts). Not stamped here: this module is a
+   * leaf the session and the warden import, and importing the user scope (and through it the
+   * config) from it hung runtime-superseded-turn.test.ts, which imports both at once.
    */
   account?: string;
 }
@@ -60,11 +63,7 @@ const _outcomesCache = new Map<string, { storedAt: number; entries: OutcomeEntry
 export function appendOutcome(workspacePath: string, entry: OutcomeEntry): void {
   try {
     const filePath = resolve(workspacePath, OUTCOMES_FILE);
-    // Whose run it was, unless the writer says: every writer runs in its run's request context
-    // (a sub-agent run inherits the caller's, a tool call re-establishes it), so the ambient user
-    // is the run's. A background sweep has none, and with one operator there is none to stamp.
-    const account = entry.account ?? recordAccount();
-    appendJsonLine(filePath, account === undefined ? entry : { ...entry, account }, { maxLines: MAX_OUTCOMES_LINES });
+    appendJsonLine(filePath, entry, { maxLines: MAX_OUTCOMES_LINES });
     _outcomesCache.delete(filePath); // invalidate so the next read reflects the append
   } catch (err) {
     log.warn({ err }, "Failed to write agent outcome — non-critical, continuing");

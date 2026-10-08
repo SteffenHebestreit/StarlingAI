@@ -80,6 +80,7 @@ export {
 } from "./delegation-artifact-classification.js";
 import { extractInlineHtmlDocument, looksLikeCompleteHtmlDocument } from "../agent/deliverable-intent.js";
 import { getConfig } from "../config/loader.js";
+import { recordAccount } from "../runtime/user-scope.js";
 import { getEmbeddingSearchStatus } from "../providers/embeddings.js";
 import { applyActiveModelPreset, createChatProvider, getEmbeddingProvider, getChatProviderForTier, tierModelDefaults } from "../providers/index.js";
 import type { ChatProvider } from "../providers/lmstudio.js";
@@ -4168,6 +4169,7 @@ registerTool({
       // only — no hard rule, and a partial dedup (3→2) still counts as real partitioning.
       if (dispatchTasks.length === 1 && runnableTasks.length > 1 && ctx.currentAgentName) {
         // Shared root — this is the deployment's routing history, not the caller's.
+        const collapseAccount = recordAccount();
         appendOutcome(getConfig().workspacePath, {
           ts: new Date().toISOString(),
           agent: ctx.currentAgentName,
@@ -4177,6 +4179,8 @@ registerTool({
           totalTokens: 0,
           lesson: "parallel_delegate fan-out collapsed to ONE task (identical slices) — no decomposition value added; this request shape fits a single specialist directly",
           taskKeywords: extractTaskKeywords(dispatchTasks[0]?.task ?? ""),
+          // For the account the delegation is for: under multi-user auth its task is shown to them only.
+          ...(collapseAccount ? { account: collapseAccount } : {}),
         });
       }
     }

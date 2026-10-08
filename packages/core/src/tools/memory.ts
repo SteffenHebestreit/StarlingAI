@@ -21,6 +21,7 @@ import { logAudit } from "../audit/logger.js";
 import { isAgentMessagingSuppressed } from "../agent/warden.js";
 import { readPromotedAgents } from "../agent/promoted-agents.js";
 import { getConfig } from "../config/loader.js";
+import { recordAccount } from "../runtime/user-scope.js";
 import { getEmbeddingProvider } from "../providers/index.js";
 import { getSession } from "../agent/session.js";
 import {
@@ -907,6 +908,8 @@ registerTool({
     const parts = ctx.sessionId.split(":");
     const agentName = run?.agent ?? (parts.length >= 3 ? parts[2]! : "unknown");
     const progress = run?.progress();
+    // The run's account; outside a registered run, the request's.
+    const account = run ? run.account : recordAccount();
 
     // Shared root: the ledger describes the deployment's agents, and a per-user root holds one
     // account's slice of it.
@@ -918,7 +921,7 @@ registerTool({
       iterations: progress?.iterations ?? 0,
       totalTokens: progress?.totalTokens ?? 0,
       lesson,
-      ...(run?.account ? { account: run.account } : {}),
+      ...(account ? { account } : {}),
     });
 
     log.info({ agentName, outcome, lesson }, "Lesson recorded");

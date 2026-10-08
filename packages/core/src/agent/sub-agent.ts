@@ -2183,6 +2183,8 @@ function rejectSuspiciousNoToolOutput(
   // Shared root, like every other writer and reader of this ledger — see the note at the
   // appendOutcome call in the run's own finalizer. A per-user root splits one deployment ledger
   // into one per account, and the readers only ever look at the shared one.
+  // For the account the run is for, like the run's other outcomes (recordOutcome).
+  const account = recordAccount();
   appendOutcome(getConfig().workspacePath, {
     ts: new Date().toISOString(),
     agent: opts.agentName,
@@ -2193,6 +2195,7 @@ function rejectSuspiciousNoToolOutput(
     durationMs: Date.now() - runStartedAt,
     timeoutMs: turnTimeoutMs,
     error: reason,
+    ...(account ? { account } : {}),
   });
 
   return { output: error, stats: failureStats };
@@ -3852,6 +3855,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // G32: task-class fingerprint for outcome-weighted routing (written into every appendOutcome call)
     const taskKeywords = extractTaskKeywords(sanitizedTask);
 
+    // The account this run is for (it inherits the request of the turn that delegated it), on every
+    // outcome it writes and every lesson it records: under multi-user auth a reader shows an entry's
+    // task and lesson to that account only (memory/service.ts).
+    const runAccount = recordAccount();
     /** G32: Thin wrapper that auto-injects taskKeywords + sharedFindingsCount.
      *  Also closes the graph-memory retrieval feedback loop on success/partial
      *  outcomes so retrieved memories that led to a real deliverable get
@@ -3867,6 +3874,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         ...fields,
         taskKeywords,
         sharedFindingsCount: shareFindinCallCount,
+        ...(runAccount ? { account: runAccount } : {}),
       });
       // ADR-003 ack boundary: the run's outcome is durably recorded here. A
       // success/partial outcome means the delivered peer messages were processed
@@ -3895,7 +3903,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     endOutcomeRun = beginOutcomeRun(subSessionId, {
       agent: opts.agentName,
       task: opts.task.slice(0, 200),
-      account: recordAccount(),
+      account: runAccount,
       progress: () => ({ iterations, totalTokens: usage.totalTokens }),
     });
 
