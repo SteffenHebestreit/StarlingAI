@@ -83,6 +83,12 @@ async function synthesizeAfter(
 const GERMAN_QUESTION = "Wie lagere ich die Akkus meiner Elektrowerkzeuge im Winter am besten? Bitte ausführlich.";
 const ENGLISH_QUESTION = "How should I store the batteries of my power tools over the winter?";
 
+/** A conversation's earlier exchange: the turn after it is not the first. */
+const EARLIER_EXCHANGE: SeedMessage[] = [
+  { role: "user", content: "Wie spät ist es gerade in Tokio?" },
+  { role: "assistant", content: "In Tokio ist es gerade neun Uhr morgens." },
+];
+
 /** What the runtime writes into history when the person steers a running turn (runtime.ts). */
 const STEERING: SeedMessage = {
   role: "user",
@@ -130,12 +136,7 @@ describe("forced synthesis reply language", () => {
     // Unnamed, an English first question came back German 5 times in 12 (2026-10-07). Both wordings
     // restate the precedence, so only the named language tells the two apart.
     expect(await synthesizeAfter(ENGLISH_QUESTION)).toContain("otherwise in English, the language of that message");
-    const later = await synthesizeAfter(ENGLISH_QUESTION, {
-      before: [
-        { role: "user", content: "Wie spät ist es gerade in Tokio?" },
-        { role: "assistant", content: "In Tokio ist es gerade neun Uhr morgens." },
-      ],
-    });
+    const later = await synthesizeAfter(ENGLISH_QUESTION, { before: EARLIER_EXCHANGE });
     expect(later).toContain("as a standing instruction earlier");
     expect(later).not.toContain("otherwise in English");
   });
@@ -156,8 +157,12 @@ describe("forced synthesis reply language", () => {
 
   it("quotes the turn's own message past an oversight redirect, which ends no first turn", async () => {
     // The redirect is user-role for the model, but nobody wrote it: the first turn stays a first turn.
-    const instruction = await synthesizeAfter(GERMAN_QUESTION, { during: [OVERSIGHT] });
-    expect(instruction).not.toContain("[OVERSIGHT");
-    expect(instruction).toContain("otherwise in German, the language of that message (\"Wie lagere ich");
+    const first = await synthesizeAfter(GERMAN_QUESTION, { during: [OVERSIGHT] });
+    expect(first).not.toContain("[OVERSIGHT");
+    expect(first).toContain("otherwise in German, the language of that message (\"Wie lagere ich");
+    // Later in a conversation the line names no language, and still quotes the turn's own message.
+    const later = await synthesizeAfter(GERMAN_QUESTION, { before: EARLIER_EXCHANGE, during: [OVERSIGHT] });
+    expect(later).not.toContain("[OVERSIGHT");
+    expect(later).toContain("otherwise in the language of that message (\"Wie lagere ich");
   });
 });
