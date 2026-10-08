@@ -338,12 +338,17 @@ export interface SandboxCanaryProbe {
  * A fresh probe: one random value per stream. Each is printed from two halves, so the command line
  * never holds a value it must hand back: Node's "Command failed: docker run …" error repeats the
  * whole command line, and a command echoed back must not pass for its output.
+ *
+ * The two printfs are joined with &&, not ';'. shell_exec runs a command behind `mkdir -p
+ * '/workspace' && cd '/workspace' &&`, and ';' binds looser than &&: when the sandbox could not use
+ * its workdir, the stderr printf still ran and the run exited 0, so the canary reported lost stdout
+ * and pointed at the docker-socket-proxy while every real command failed on that prefix.
  */
 export function sandboxCanaryProbe(): SandboxCanaryProbe {
   const out = randomBytes(8).toString("hex");
   const err = randomBytes(8).toString("hex");
   return {
-    command: `printf '%s-%s\\n' sai-canary-out ${out}; printf '%s-%s\\n' sai-canary-err ${err} >&2`,
+    command: `printf '%s-%s\\n' sai-canary-out ${out} && printf '%s-%s\\n' sai-canary-err ${err} >&2`,
     stdout: `sai-canary-out-${out}`,
     stderr: `sai-canary-err-${err}`,
   };
@@ -351,10 +356,11 @@ export function sandboxCanaryProbe(): SandboxCanaryProbe {
 
 /**
  * Pure classifier for one canary run, from what shell_exec handed back (stdout and stderr joined).
- * ok takes a docker run that succeeded and both values back. The command cannot fail once it ran,
- * so a failed run with both values back lost the exit status on the way, and shell_exec would call
- * every command failed: that is not ok either. A run that succeeded without the values lost its
- * output: degraded, naming the stream.
+ * ok takes a docker run that succeeded and both values back. A workdir the sandbox cannot use fails
+ * the run in the shell's own words (the printfs follow shell_exec's prefix through &&). Both values
+ * back mean every part of the command ran and the shell exited 0, so a failed run with both values
+ * back lost the exit status on the way, and shell_exec would call every command failed: that is not
+ * ok either. A run that succeeded without the values lost its output: degraded, naming the stream.
  *
  * Never `unavailable`, like engram and Laya above: a broken sandbox stops the tools that run code,
  * not the gateway, and a checkout with no Docker at all must not turn this route to 503.

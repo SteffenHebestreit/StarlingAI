@@ -10,9 +10,11 @@
  */
 import http from "node:http";
 import type { AddressInfo } from "node:net";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SubsystemCheck } from "../observability/health-checks.js";
 import type { HttpResult, GatewayClient } from "../e2e/gateway-client.js";
@@ -42,6 +44,9 @@ function dockerPrints(args: string[]): { stdout: string; stderr: string } {
 function dockerFails(args: string[], code: number | string, stderr = "", stdout = ""): Error {
   return Object.assign(new Error(`Command failed: docker ${args.join(" ")}\n${stderr}`), { code, stdout, stderr });
 }
+
+/** A POSIX shell on this host (CI, Git Bash); without one the real-shell test is skipped. */
+const hasShell = spawnSync("sh", ["-c", "exit 0"]).status === 0;
 
 const workspace = mkdtempSync(join(tmpdir(), "sai-sandbox-canary-"));
 
@@ -86,7 +91,7 @@ describe("checkSandbox", () => {
     expect(docker).toHaveBeenCalledTimes(1);
     const [file, canaryArgs, options] = docker.mock.calls[0] as [string, string[], { timeout: number }];
     expect(file).toBe("docker");
-    expect(canaryArgs.at(-1)).toMatch(/printf '%s-%s\\n' sai-canary-out [0-9a-f]{16}; printf '%s-%s\\n' sai-canary-err [0-9a-f]{16} >&2$/);
+    expect(canaryArgs.at(-1)).toMatch(/&& printf '%s-%s\\n' sai-canary-out [0-9a-f]{16} && printf '%s-%s\\n' sai-canary-err [0-9a-f]{16} >&2$/);
 
     // The same docker run a turn's shell_exec makes: every argument but the command itself.
     const { getTool, executeTool } = await import("../tools/registry.js");
@@ -164,8 +169,8 @@ describe("checkSandbox", () => {
   });
 
   it("is not ok when both values come back but docker run reports a failure (the exit status lost)", async () => {
-    // The command cannot fail once it ran, so this run lost its exit status on the way, and
-    // shell_exec would hand every command back as failed.
+    // Both values back mean every part of the command ran and the shell exited 0, so this run lost
+    // its exit status on the way, and shell_exec would hand every command back as failed.
     docker.mockImplementation(async (_file: string, args: string[]) => {
       const printed = dockerPrints(args);
       throw dockerFails(args, 125, `${printed.stderr}Error response from daemon: wait refused by the socket proxy`, printed.stdout);
@@ -175,6 +180,36 @@ describe("checkSandbox", () => {
 
     expect(check.status).toBe("degraded");
     expect(check.detail).toMatch(/^docker run failed: Exit code 125: sai-canary-err-[0-9a-f]{16} Error response from daemon: wait refused/);
+  });
+
+  // shell_exec runs every command as `mkdir -p '/workspace' && cd '/workspace' && <command>`. The
+  // stub above prints every printf the command holds, whatever joins them, so only a real shell
+  // shows what the canary's own command does behind that prefix.
+  it.skipIf(!hasShell)("reports a workdir the sandbox cannot use in the shell's own words, not as lost output", async () => {
+    const { execFile } = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+    const shell = promisify(execFile);
+    const prefix = "mkdir -p '/workspace' && cd '/workspace' && ";
+    /** docker run as a real `sh -c` on this host, its /workspace moved to `workdir` under the test's directory. */
+    const sandboxAt = (workdir: string) => async (_file: string, args: string[], options: object) => {
+      const command = String(args.at(-1));
+      // A command whose /workspace was not moved would act on this host's /workspace: never run it.
+      if (!command.startsWith(prefix)) throw new Error(`unexpected sandbox command: ${command.slice(0, 60)}`);
+      return shell("sh", ["-c", command.replaceAll("'/workspace'", `'${workdir}'`)], { ...options, cwd: workspace });
+    };
+
+    docker.mockImplementation(sandboxAt("sandbox-root"));
+    expect(await health.checkSandbox()).toMatchObject({ status: "ok" });
+
+    // A workdir under a plain file cannot be made or entered, as a bind mount the sandbox user may
+    // not use (an SELinux host without a relabel, a userns-remapped daemon over a 700 workspace).
+    // With the printfs joined by ';' the stderr one still ran and the run exited 0: "stdout never
+    // came back (check the docker-socket-proxy)", while every real command failed on the prefix.
+    health.resetSandboxCanaryForTests();
+    writeFileSync(join(workspace, "a-file"), "", "utf8");
+    docker.mockImplementation(sandboxAt("a-file/workspace"));
+    const check = await health.checkSandbox();
+    expect(check.status).toBe("degraded");
+    expect(check.detail).toMatch(/^docker run failed: Exit code [1-9]\d*: mkdir: .*a-file/);
   });
 
   it("never rejects when the shell_exec handler throws, so the route still answers", async () => {
