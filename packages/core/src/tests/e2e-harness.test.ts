@@ -11,7 +11,7 @@ import net from "node:net";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { WebSocketServer, type WebSocket } from "ws";
 import bcrypt from "bcryptjs";
 import JSON5 from "json5";
@@ -22,7 +22,15 @@ import {
   rootSessionOf,
   type E2ECredentials,
 } from "../e2e/gateway-client.js";
-import { runScenario, runScenarios, redactSecrets, type RunnerDeps, type RunnerOptions } from "../e2e/runner.js";
+import {
+  adoptUnconfirmedTurns,
+  runScenario,
+  runScenarios,
+  redactSecrets,
+  unconfirmedTurnsOf,
+  type RunnerDeps,
+  type RunnerOptions,
+} from "../e2e/runner.js";
 import {
   environmentStatusFromScript,
   interpretEnvironmentStatus,
@@ -31,7 +39,7 @@ import {
   ServiceProber,
   type ServiceProbeContext,
 } from "../e2e/services.js";
-import { runE2ECli, type CliIo } from "../e2e/cli.js";
+import { runE2ECli, runLockPath, type CliIo, type InterruptHooks } from "../e2e/cli.js";
 import { filterScenarios, loadScenarios } from "../e2e/loader.js";
 import { buildReport, compareWithBaseline, writeReport } from "../e2e/report.js";
 import { resolveSetupPaths, runE2ESetup, SetupRefusedError } from "../e2e/setup.js";
@@ -89,6 +97,10 @@ class FakeGateway {
   readonly memoryListingFailures = new Map<string, number>();
   /** The next chat.send starts its turn, and the socket dies before the send is answered. */
   dropSocketOnNextSend = false;
+  /** The next chat.send is answered with an error, and no turn starts. */
+  refuseNextSend = false;
+  /** When the gateway process started: gateway.status answers with the uptime since. */
+  startedAt = Date.now();
   readonly judgeRequests: Array<Record<string, unknown>> = [];
   readonly chatSends: Array<Record<string, unknown>> = [];
   readonly sessionChannels: string[] = [];
@@ -216,6 +228,9 @@ class FakeGateway {
         case "chat.send":
           this.startTurn(ws, user, params, respond, fail);
           return;
+        case "gateway.status":
+          respond({ status: "running", sessions: this.sessions.size, uptime: (Date.now() - this.startedAt) / 1000 });
+          return;
         case "chat.cancel": {
           const requestId = String(params["requestId"]);
           this.cancels.push(requestId);
@@ -238,6 +253,10 @@ class FakeGateway {
     const message = String(params["message"]);
     const session = this.sessions.get(sessionId);
     if (!session || session.owner !== user) return fail(`Error: Session not found: ${sessionId}`);
+    if (this.refuseNextSend) {
+      this.refuseNextSend = false;
+      return fail("Error: chat.send refused");
+    }
     this.chatSends.push(params);
     this.sequence.push("chat.send");
     const turn: FakeTurn = { requestId, sessionId, ws, steers: [], steerWaiters: [], cancelled: false, onCancel: [], done: false };
@@ -480,6 +499,9 @@ beforeEach(() => {
   gateway.memoryListingStatus = null;
   gateway.memoryListingFailures.clear();
   gateway.dropSocketOnNextSend = false;
+  gateway.refuseNextSend = false;
+  // A gateway that has run for an hour.
+  gateway.startedAt = Date.now() - 3_600_000;
   gateway.memory.clear();
   gateway.userModels.clear();
   gateway.setScripts([
@@ -951,6 +973,32 @@ describe("e2e harness against a fake gateway", () => {
       expect(after.attempts[0]!.notes, drop).toEqual([]);
       expect(gateway.memoryKeys("eval", "user"), drop).toEqual([]);
     }
+  });
+
+  it("stops waiting for a turn an earlier run left once the gateway has restarted since its send, also when its session is gone", async () => {
+    // A wipe restarts the gateway and takes the session: session.get answers with an error, which
+    // confirms nothing, and the turn held back every reset of its account in every later run.
+    const options: RunnerOptions = { ...FAST, cancelGraceMs: 300 };
+    adoptUnconfirmedTurns(client, [{ identity: "eval", requestId: "e2e-before-the-wipe", sessionId: "sess-wiped", sentAt: Date.now() - 60_000 }]);
+    gateway.remember("eval", "user", "favorite_tea");
+    const scenario: E2EScenario = { id: "fake-after-wipe", title: "After a wipe", group: "core", steps: [{ ...helloTurn }] };
+    const waiting = await runScenario(loaded(scenario), deps(), options);
+    expect(waiting.attempts[0]!.notes).toEqual(["memory reset skipped: turn e2e-before-the-wipe of eval was stopped earlier and has not been seen to end"]);
+    expect(gateway.memoryKeys("eval", "user")).toEqual(["favorite_tea"]);
+
+    gateway.startedAt = Date.now();
+    const restarted = await runScenario(loaded(scenario), deps(), options);
+    expect(restarted.attempts[0]!.notes).toEqual([]);
+    expect(gateway.memoryKeys("eval", "user")).toEqual([]);
+    expect(unconfirmedTurnsOf(client)).toEqual([]);
+  });
+
+  it("tracks no turn for a send the gateway refused", async () => {
+    // No turn started: tracked, it would hold a reset back until session.get or a restart said so.
+    gateway.refuseNextSend = true;
+    const refused = await runScenario(loaded({ id: "fake-refused-send", title: "A refused send", group: "guards", steps: [{ ...helloTurn }] }), deps(), FAST);
+    expect(refused.attempts[0]!.failures).toEqual(['step 1 turn "greet": chat.send failed: chat.send: Error: chat.send refused']);
+    expect(unconfirmedTurnsOf(client)).toEqual([]);
   });
 
   it("runs a turn with `as` as that identity, in its own session, beside the scenario identity's", async () => {
@@ -1577,10 +1625,13 @@ describe("e2e harness — pure helpers", () => {
 describe("e2e CLI (in process, against the fake gateway)", () => {
   const cliDir = join(scratch, "cli");
   const credsFile = join(cliDir, "creds.local.json");
+  // The run locks of these runs: never the machine's own temp directory.
+  const lockDir = join(cliDir, "locks");
   const notRunning = async () => ({ json: { mailService: { running: false } } });
 
   beforeAll(() => {
     mkdirSync(join(cliDir, "scenarios"), { recursive: true });
+    mkdirSync(lockDir, { recursive: true });
     writeFileSync(credsFile, JSON.stringify(credentials()));
     writeFileSync(join(cliDir, "scenarios", "pass.jsonc"), JSON.stringify({ id: "cli-pass", title: "CLI pass", group: "core", steps: [{ kind: "turn", message: "hello from the cli", expect: { reply: { includes: ["42"] } } }] }));
     writeFileSync(join(cliDir, "scenarios", "fail.jsonc"), JSON.stringify({ id: "cli-fail", title: "CLI fail", group: "guards", steps: [{ kind: "turn", message: "hello again", expect: { reply: { includes: ["banana"] } } }] }));
@@ -1597,6 +1648,7 @@ describe("e2e CLI (in process, against the fake gateway)", () => {
       out: (line) => out.push(line),
       err: (line) => err.push(line),
       environment: notRunning,
+      lockDir,
       ...extra,
     });
     return { code, out: out.join("\n"), err: err.join("\n") };
@@ -1681,14 +1733,25 @@ describe("e2e CLI (in process, against the fake gateway)", () => {
     expect(existsSync(join(cliDir, "as-refused"))).toBe(false);
   });
 
-  it("runs one evaluate at a time per accounts file: a live run's lock refuses, a dead run's is taken over", async () => {
-    // Two runs share the eval accounts: one's reset before an attempt deleted what the other's
-    // memory scenario stored between its two turns, and the concurrency gate sees only its own process.
-    const lock = join(cliDir, ".e2e-run.local.json");
+  it("runs one evaluate at a time per gateway, whatever accounts file: a live run's lock refuses, a dead run's is taken over", async () => {
+    // Two runs share the gateway's eval accounts: one's reset before an attempt deleted what the
+    // other's memory scenario stored between its two turns, and the concurrency gate sees only its
+    // own process. The lock sat beside the credentials file, so a second checkout (with a copy of the
+    // file) or another E2E_CREDENTIALS_PATH took a lock of its own against the same gateway.
+    const lock = runLockPath(gateway.url, lockDir);
+    const port = Number(new URL(gateway.url).port);
+    for (const spelling of [`http://localhost:${port}/`, `http://[::1]:${port}`, `http://127.0.0.2:${port}`]) {
+      expect(runLockPath(spelling, lockDir), spelling).toBe(lock);
+    }
+    expect(runLockPath(`http://127.0.0.1:${port + 1}`, lockDir)).not.toBe(lock);
+    expect(runLockPath(`http://gateway.example:${port}`, lockDir)).not.toBe(lock);
     // This process stands in for the other run: it is alive.
     writeFileSync(lock, JSON.stringify({ pid: process.pid, startedAt: "2026-10-08T10:00:00.000Z" }));
     const sends = gateway.chatSends.length;
-    const refused = await cli(["evaluate", "--scenarios", "scenarios", "--id", "cli-pass", "--out", "locked"]);
+    const copied = join(cliDir, "other-checkout", "eval", "e2e", ".credentials.local.json");
+    mkdirSync(dirname(copied), { recursive: true });
+    writeFileSync(copied, JSON.stringify(credentials()));
+    const refused = await cli(["evaluate", "--scenarios", "scenarios", "--id", "cli-pass", "--out", "locked"], { env: { ...cliEnv(), E2E_CREDENTIALS_PATH: copied } });
     expect(refused.code).toBe(2);
     expect(refused.err).toBe(`Refusing to run: another e2e run (pid ${process.pid}, since 2026-10-08T10:00:00.000Z) is using the eval accounts, and two runs break each other's scenarios (one's memory reset or mail purge lands in the other's attempts). Wait for it, or delete ${lock} if no such run is left.`);
     expect(gateway.chatSends.length).toBe(sends);
@@ -1702,12 +1765,74 @@ describe("e2e CLI (in process, against the fake gateway)", () => {
     expect(gateway.chatSends.length).toBe(sends);
     expect(existsSync(join(cliDir, "locked"))).toBe(false);
 
-    // A run that ended without removing its lock (a second Ctrl+C, a crash): the lock is taken over.
+    // A run that ended without removing its lock (a crash): the lock is taken over.
     const gone = spawnSync(process.execPath, ["-e", ""]).pid;
     writeFileSync(lock, JSON.stringify({ pid: gone, startedAt: "2026-10-08T09:00:00.000Z" }));
     const run = await cli(["evaluate", "--scenarios", "scenarios", "--id", "cli-pass", "--out", "unlocked"]);
     expect(run.code).toBe(0);
     // Released when the run ends.
+    expect(existsSync(lock)).toBe(false);
+  });
+
+  it("leaves the turns it has not seen end in the lock when it quits, and the next run's reset waits for them", async () => {
+    // A second Ctrl+C deleted the lock and quit while the turn the first one stopped was still
+    // unwinding; the next run took the lock and reset the account under that turn, which could
+    // still store memory into its first attempt.
+    const lock = runLockPath(gateway.url, lockDir);
+    mkdirSync(join(cliDir, "held-scenarios"), { recursive: true });
+    writeFileSync(join(cliDir, "held-scenarios", "hold.jsonc"), JSON.stringify({ id: "cli-hold", title: "CLI held turn", group: "guards", steps: [{ kind: "turn", message: "hold on while I think" }] }));
+    let markStarted: () => void = () => undefined;
+    const started = new Promise<void>((resolveStarted) => { markStarted = resolveStarted; });
+    let markStopped: () => void = () => undefined;
+    const stopped = new Promise<void>((resolveStopped) => { markStopped = resolveStopped; });
+    let finish: () => void = () => undefined;
+    const finished = new Promise<void>((resolveFinished) => { finish = resolveFinished; });
+    gateway.setScripts([
+      { match: /^hold on/, run: async (turn) => {
+        markStarted();
+        await turn.cancelled;
+        gateway.remember(turn.user, "user", "late_fact");
+        markStopped();
+        await finished;
+        turn.finish("ok", "Done after all.");
+      } },
+      { match: /^hello/i, run: helloScript },
+    ]);
+    const keyboard: { ctrlC?: () => void } = {};
+    let lockAtExit: unknown = null;
+    const interrupts: InterruptHooks = {
+      on: (listener) => { keyboard.ctrlC = listener; },
+      off: () => { delete keyboard.ctrlC; },
+      exit: (code) => {
+        lockAtExit = existsSync(lock) ? JSON.parse(readFileSync(lock, "utf8")) : null;
+        throw new Error(`exit ${code}`);
+      },
+    };
+    const runner = { cancelGraceMs: 300 };
+
+    const quitting = cli(["evaluate", "--scenarios", "held-scenarios", "--out", "quit"], { interrupts, runner });
+    await started;
+    const { requestId, sessionId } = gateway.chatSends.at(-1) as { requestId: string; sessionId: string };
+    keyboard.ctrlC!();
+    await stopped;
+    expect(() => keyboard.ctrlC!()).toThrow("exit 130");
+    expect(lockAtExit).toMatchObject({ pid: process.pid, ended: expect.any(String), turns: [{ identity: "eval", requestId, sessionId, sentAt: expect.any(Number) }] });
+    // Here the process lives on: the run ends without the turn's final status, and leaves it in the
+    // lock as well.
+    await quitting;
+    expect(JSON.parse(readFileSync(lock, "utf8"))).toMatchObject({ ended: expect.any(String), turns: [{ requestId }] });
+
+    const waiting = await cli(["evaluate", "--scenarios", "scenarios", "--id", "cli-pass", "--out", "after-quit"], { runner });
+    expect(waiting.code).toBe(0);
+    expect(waiting.out).toContain(`An earlier run left 1 turn(s) it had not seen end (${requestId} of eval)`);
+    expect(waiting.out).toContain(`memory reset skipped: turn ${requestId} of eval was stopped earlier and has not been seen to end`);
+    expect(gateway.memoryKeys("eval", "user")).toEqual(["late_fact"]);
+
+    finish();
+    const resetting = await cli(["evaluate", "--scenarios", "scenarios", "--id", "cli-pass", "--out", "after-end"], { runner });
+    expect(resetting.code).toBe(0);
+    expect(resetting.out).not.toContain("memory reset skipped");
+    expect(gateway.memoryKeys("eval", "user")).toEqual([]);
     expect(existsSync(lock)).toBe(false);
   });
 

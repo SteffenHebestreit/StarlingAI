@@ -401,50 +401,84 @@ function addCounts(target: Record<string, number>, source: Record<string, number
   for (const [key, count] of Object.entries(source)) target[key] = (target[key] ?? 0) + count;
 }
 
-/**
- * Turns this run stopped without seeing them end, by client and identity (request id → session):
- * chat.cancel got no final status within cancelGraceMs, or the socket died mid-turn. Such a turn
- * may still be running on the gateway, and what it stores after the next attempt's reset lands in
- * that attempt's memory.
- */
-const unconfirmedTurns = new WeakMap<GatewayClient, Map<string, Map<string, string>>>();
-const TURN_END_POLL_MS = 250;
+/** A turn whose end the run has not seen. */
+export interface UnconfirmedTurn {
+  identity: string;
+  requestId: string;
+  sessionId: string;
+  /** When the harness sent it (ms since the epoch, this machine's clock). */
+  sentAt: number;
+}
 
-function noteUnconfirmedTurn(ctx: AttemptContext, identity: string, requestId: string, sessionId: string): void {
-  let byIdentity = unconfirmedTurns.get(ctx.deps.client);
+/**
+ * Turns whose end the run has not seen, by client, identity and request id: tracked from before
+ * chat.send until the final status arrives. One still here after its step was stopped without the
+ * harness seeing it end: chat.cancel got no final status within cancelGraceMs, or the socket died
+ * during the send or mid-turn. Such a turn may still be running on the gateway, and what it stores
+ * after the next attempt's reset lands in that attempt's memory. It may outlive the process too, so
+ * a run that ends or quits leaves its turns to the next one (unconfirmedTurnsOf,
+ * adoptUnconfirmedTurns).
+ */
+const unconfirmedTurns = new WeakMap<GatewayClient, Map<string, Map<string, UnconfirmedTurn>>>();
+const TURN_END_POLL_MS = 250;
+/** gateway.status reports the gateway's uptime as it answers; this much slack covers the way back. */
+const RESTART_SLACK_MS = 1_000;
+
+function turnsOf(client: GatewayClient, identity: string): Map<string, UnconfirmedTurn> {
+  let byIdentity = unconfirmedTurns.get(client);
   if (!byIdentity) {
     byIdentity = new Map();
-    unconfirmedTurns.set(ctx.deps.client, byIdentity);
+    unconfirmedTurns.set(client, byIdentity);
   }
   let turns = byIdentity.get(identity);
   if (!turns) {
     turns = new Map();
     byIdentity.set(identity, turns);
   }
-  turns.set(requestId, sessionId);
+  return turns;
 }
 
-/** The turn's final status reached this client, or the gateway says no turn runs in its session. */
-async function turnEnded(identity: string, deps: RunnerDeps, requestId: string, sessionId: string): Promise<boolean> {
+/** Every identity's turns the client's run has not seen end, oldest first. */
+export function unconfirmedTurnsOf(client: GatewayClient): UnconfirmedTurn[] {
+  return [...(unconfirmedTurns.get(client)?.values() ?? [])]
+    .flatMap((turns) => [...turns.values()])
+    .sort((a, b) => a.sentAt - b.sentAt);
+}
+
+/** Turns an earlier run left: a reset of their identity waits for them as for the run's own. */
+export function adoptUnconfirmedTurns(client: GatewayClient, turns: readonly UnconfirmedTurn[]): void {
+  for (const turn of turns) turnsOf(client, turn.identity).set(turn.requestId, { ...turn });
+}
+
+/**
+ * The turn's final status reached this client, or the gateway says no turn runs in its session:
+ * session.get's activeTurn covers a stopped turn that is still unwinding (gateway/rpc.ts), and an
+ * answer without the field confirms nothing. When session.get fails, a gateway process that started
+ * after the send does not run the turn. A wipe restarts the gateway and takes the session with it,
+ * and the session.get error alone would hold every reset of the account back, in every later run.
+ */
+async function turnEnded(turn: UnconfirmedTurn, deps: RunnerDeps): Promise<boolean> {
   try {
-    const connection = await deps.client.connection(identity);
-    if (connection.finalStatusOf(requestId)) return true;
-    // session.get's activeTurn covers a stopped turn that is still unwinding (gateway/rpc.ts); an
-    // answer without the field confirms nothing.
-    return (await connection.getSession(sessionId))["activeTurn"] === false;
+    const connection = await deps.client.connection(turn.identity);
+    if (connection.finalStatusOf(turn.requestId)) return true;
+    const session = await connection.getSession(turn.sessionId).catch(() => null);
+    if (session) return session["activeTurn"] === false;
+    const status = await connection.rpc<unknown>("gateway.status", {});
+    const uptimeS = isRecord(status) && typeof status["uptime"] === "number" ? status["uptime"] : null;
+    return uptimeS !== null && Date.now() - uptimeS * 1000 > turn.sentAt + RESTART_SLACK_MS;
   } catch {
     return false;
   }
 }
 
-/** The identity's stopped turns not seen to end within waitMs; those that ended are forgotten. */
+/** The identity's turns not seen to end within waitMs; those that ended are forgotten. */
 async function turnsStillRunning(identity: string, deps: RunnerDeps, waitMs: number, signal?: AbortSignal): Promise<string[]> {
   const turns = unconfirmedTurns.get(deps.client)?.get(identity);
   if (!turns || turns.size === 0) return [];
   const deadline = Date.now() + waitMs;
   for (;;) {
-    for (const [requestId, sessionId] of [...turns]) {
-      if (await turnEnded(identity, deps, requestId, sessionId)) turns.delete(requestId);
+    for (const turn of [...turns.values()]) {
+      if (await turnEnded(turn, deps)) turns.delete(turn.requestId);
     }
     if (turns.size === 0 || Date.now() >= deadline || signal?.aborted) return [...turns.keys()];
     await sleep(Math.min(TURN_END_POLL_MS, deadline - Date.now()), signal);
@@ -548,9 +582,10 @@ async function sharedStoreReason(identity: string, scope: MemoryEntryScope, list
  * from an earlier run could answer the recall by itself. It is kept per account wherever auth is on,
  * so the gate above is all it needs.
  *
- * Nothing is reset either while a turn this run stopped on the account may still run (waited for up
- * to turnWaitMs): attempts running one at a time is all the concurrency gate sees, and a turn that
- * outlived its chat.cancel can store memory after the reset, into the next attempt.
+ * Nothing is reset either while a turn stopped on the account may still run (waited for up to
+ * turnWaitMs), whether this run stopped it or an earlier one left it in the run lock: attempts
+ * running one at a time is all the concurrency gate sees, and a turn that outlived its chat.cancel
+ * can store memory after the reset, into the next attempt.
  */
 export async function resetDurableMemory(identity: string, deps: RunnerDeps, signal?: AbortSignal, turnWaitMs = 0): Promise<MemoryResetResult> {
   const notes: string[] = [];
@@ -1076,6 +1111,9 @@ async function runTurnStep(step: E2ETurnStep, ctx: AttemptContext): Promise<Step
   const during = new DuringController(step.during ?? [], { connection, client, identity, sessionId, requestId, startSeq });
   const sentAt = Date.now();
   during.attach(sentAt);
+  // Until its final status arrives the turn may be running: a reset of the account waits for it.
+  const tracked = turnsOf(client, identity);
+  tracked.set(requestId, { identity, requestId, sessionId, sentAt });
   try {
     await connection.sendChat({
       sessionId,
@@ -1087,11 +1125,9 @@ async function runTurnStep(step: E2ETurnStep, ctx: AttemptContext): Promise<Step
     });
   } catch (err) {
     during.detach();
-    if (err instanceof E2EInfraError) {
-      // The gateway may have taken the send before the socket failed.
-      noteUnconfirmedTurn(ctx, identity, requestId, sessionId);
-      throw err;
-    }
+    // The gateway may have taken the send before the socket failed: the turn stays tracked.
+    if (err instanceof E2EInfraError) throw err;
+    tracked.delete(requestId);
     return { failures: [`chat.send failed: ${describeError(err)}`], notes };
   }
   during.armTimers();
@@ -1102,8 +1138,8 @@ async function runTurnStep(step: E2ETurnStep, ctx: AttemptContext): Promise<Step
   } catch (err) {
     during.detach();
     if (err instanceof E2EInfraError) {
+      // The final status goes to the dead socket: the turn stays tracked until a reset sees it end.
       const cancelled = await cancelFromFreshConnection(ctx, identity, requestId);
-      noteUnconfirmedTurn(ctx, identity, requestId, sessionId);
       throw new E2EInfraError(`${err.message}; ${cancelled}`);
     }
     throw err;
@@ -1125,8 +1161,6 @@ async function runTurnStep(step: E2ETurnStep, ctx: AttemptContext): Promise<Step
     if (typeof after !== "string") {
       final = after;
       cancel.finalStatus = after.status;
-    } else {
-      noteUnconfirmedTurn(ctx, identity, requestId, sessionId);
     }
     const cancelText = cancel.error
       ? `chat.cancel failed: ${cancel.error}`
@@ -1135,6 +1169,8 @@ async function runTurnStep(step: E2ETurnStep, ctx: AttemptContext): Promise<Step
       ? `${attemptTimeoutFailure(ctx)} while this turn ran (${cancelText})`
       : `turn timed out after ${turnTimeoutMs} ms (${cancelText})`);
   }
+  // Seen to end. A turn stopped without its final status stays tracked.
+  if (final) tracked.delete(requestId);
 
   await during.settle();
   during.detach();

@@ -13,19 +13,22 @@
  *
  * Before any scenario runs, evaluate checks that the eval identity sees no shared mail account
  * (the operator's real mail) and refuses to run — fail closed — when it does or cannot tell. It also
- * refuses while another evaluate run uses the same accounts file (acquireRunLock).
+ * refuses while another evaluate run uses the same gateway (acquireRunLock).
  *
  * Exit codes: 0 every scenario that ran passed · 1 failures or baseline regressions ·
  * 2 usage, invalid scenarios, missing credentials, a refused login, the mail-isolation
- * preflight or another run of the same accounts · 3 environment-suspect (everything skipped, or a
- * quarter of the attempts ended on harness errors). Through pnpm a non-zero code may surface as 1.
+ * preflight or another run against the same gateway · 3 environment-suspect (everything skipped, or
+ * a quarter of the attempts ended on harness errors). Through pnpm a non-zero code may surface as 1.
  */
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { isIP } from "node:net";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { findRepoRoot, resolveE2EPaths } from "./paths.js";
 import { filterScenarios, loadScenarios, type LoadedScenario } from "./loader.js";
-import { describeError, E2EInfraError, GatewayClient, gatewayUrlFromEnv, readCredentialsFile } from "./gateway-client.js";
+import { describeError, E2EInfraError, GatewayClient, gatewayUrlFromEnv, isRecord, readCredentialsFile } from "./gateway-client.js";
 import { judgeConfigFromEnv } from "./judge.js";
 import { mailAdapterFromEnv } from "./mail.js";
 import {
@@ -37,7 +40,14 @@ import {
   type EnvironmentStatusSource,
   type MailIsolationCheck,
 } from "./services.js";
-import { RUNNER_DEFAULTS, runScenarios } from "./runner.js";
+import {
+  adoptUnconfirmedTurns,
+  RUNNER_DEFAULTS,
+  runScenarios,
+  unconfirmedTurnsOf,
+  type RunnerOptions,
+  type UnconfirmedTurn,
+} from "./runner.js";
 import { buildReport, compareWithBaseline, loadReport, writeReport } from "./report.js";
 import { resolveSetupPaths, runE2ESetup, SetupRefusedError } from "./setup.js";
 
@@ -52,6 +62,23 @@ interface ParsedArgs {
 
 class UsageError extends Error {}
 
+/** Where Ctrl+C comes from, and how a second one quits. */
+export interface InterruptHooks {
+  on: (listener: () => void) => void;
+  off: (listener: () => void) => void;
+  exit: (code: number) => void;
+}
+
+const PROCESS_INTERRUPTS: InterruptHooks = {
+  on: (listener) => {
+    process.on("SIGINT", listener);
+  },
+  off: (listener) => {
+    process.off("SIGINT", listener);
+  },
+  exit: (code) => process.exit(code),
+};
+
 /** Where the CLI reads its environment and writes its output; tests replace parts of it. */
 export interface CliIo {
   env: NodeJS.ProcessEnv;
@@ -59,6 +86,12 @@ export interface CliIo {
   err: (line: string) => void;
   /** Ctrl+C cancels running turns (the real CLI only). */
   handleSigint?: boolean;
+  /** Stands in for the process's Ctrl+C and exit (tests); taken like handleSigint. */
+  interrupts?: InterruptHooks;
+  /** The run lock's directory (runLockPath). Default: the system's temp directory. */
+  lockDir?: string;
+  /** Runner timings a test shortens. */
+  runner?: Pick<RunnerOptions, "cancelGraceMs">;
   /** The e2e environment status (`scripts/e2e-env.mjs status --json`); null: none. Default: the repo's script. */
   environment?: EnvironmentStatusSource | null;
   /** The mail-isolation preflight. Default: read from the environment status. */
@@ -148,40 +181,113 @@ function processAlive(pid: number): boolean {
   }
 }
 
-function readRunLock(path: string): { pid: number; startedAt?: string } | null {
+/**
+ * The gateway a URL names, for the run lock: scheme, host, port and path, with every loopback
+ * spelling (localhost, 127.0.0.0/8, ::1) as one, since from this machine they reach one gateway.
+ */
+function gatewayKey(gatewayUrl: string): string {
+  let url: URL;
+  try {
+    url = new URL(gatewayUrl);
+  } catch {
+    return gatewayUrl;
+  }
+  const host = url.hostname.replace(/^\[(.*)\]$/, "$1");
+  const loopback = host === "localhost" || host.endsWith(".localhost")
+    || (isIP(host) === 4 && host.startsWith("127.")) || (isIP(host) === 6 && host === "::1");
+  const port = url.port || (url.protocol === "https:" ? "443" : "80");
+  return `${url.protocol}//${loopback ? "loopback" : host}:${port}${url.pathname.replace(/\/+$/, "")}`;
+}
+
+/**
+ * The gateway's run lock: one file per gateway in the system's temp directory, whichever checkout,
+ * credentials file or spelling of the URL a run uses. The eval accounts are the gateway's.
+ */
+export function runLockPath(gatewayUrl: string, dir = tmpdir()): string {
+  const digest = createHash("sha256").update(gatewayKey(gatewayUrl)).digest("hex").slice(0, 16);
+  return join(dir, `starlingai-e2e-run-${digest}.json`);
+}
+
+interface RunLock {
+  pid: number;
+  startedAt?: string;
+  /** The run ended, leaving turns it had not seen end: the lock is free, the turns pass on. */
+  ended?: string;
+  turns: UnconfirmedTurn[];
+}
+
+function isUnconfirmedTurn(value: unknown): value is UnconfirmedTurn {
+  return isRecord(value)
+    && typeof value["identity"] === "string" && value["identity"] !== ""
+    && typeof value["requestId"] === "string" && value["requestId"] !== ""
+    && typeof value["sessionId"] === "string" && value["sessionId"] !== ""
+    && typeof value["sentAt"] === "number" && Number.isFinite(value["sentAt"]);
+}
+
+/** The lock, or null when it cannot be read: turns it holds but cannot name included, as they may still run. */
+function readRunLock(path: string): RunLock | null {
   try {
     const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
-    if (typeof parsed !== "object" || parsed === null || typeof (parsed as { pid?: unknown }).pid !== "number") return null;
-    const { pid, startedAt } = parsed as { pid: number; startedAt?: unknown };
-    return { pid, ...(typeof startedAt === "string" ? { startedAt } : {}) };
+    if (!isRecord(parsed) || typeof parsed["pid"] !== "number") return null;
+    const turns: unknown = parsed["turns"] ?? [];
+    if (!Array.isArray(turns) || !turns.every(isUnconfirmedTurn)) return null;
+    return {
+      pid: parsed["pid"],
+      ...(typeof parsed["startedAt"] === "string" ? { startedAt: parsed["startedAt"] } : {}),
+      ...(typeof parsed["ended"] === "string" ? { ended: parsed["ended"] } : {}),
+      turns: turns.map(({ identity, requestId, sessionId, sentAt }) => ({ identity, requestId, sessionId, sentAt })),
+    };
   } catch {
     return null;
   }
 }
 
+interface RunLockHandle {
+  /** Turns an earlier run left in the lock. */
+  inherited: UnconfirmedTurn[];
+  /** Gives the lock up; turns not seen to end stay in it for the next run. */
+  release: (turns: readonly UnconfirmedTurn[]) => void;
+}
+
 /**
- * One evaluate run at a time per accounts file. Two runs share the eval accounts, and each resets
- * the attempt identity's memory before every attempt (and a mail scenario purges every mailbox):
- * one run's reset deleted what the other's memory scenario stored between its two turns, and that
- * scenario failed on the harness's own doing. The concurrency gate sees only its own process.
+ * One evaluate run at a time per gateway. Two runs share the gateway's eval accounts, and each
+ * resets the attempt identity's memory before every attempt (and a mail scenario purges every
+ * mailbox): one run's reset deleted what the other's memory scenario stored between its two turns,
+ * and that scenario failed on the harness's own doing. The concurrency gate sees only its own
+ * process. The lock used to sit beside the credentials file, so two checkouts against one gateway
+ * (or two E2E_CREDENTIALS_PATH values) each took a lock of their own.
  *
- * The lock is a file beside the credentials, created exclusively. One whose process is gone (a
- * second Ctrl+C, a crash) is taken over; one that cannot be read counts as held, since a run may be
- * writing it this moment.
+ * The lock is created exclusively. One whose process is gone (a crash) is taken over; one that
+ * cannot be read counts as held, since a run may be writing it this moment. A run that ends, or
+ * quits at once on a second Ctrl+C, leaves the turns it has not seen end in the lock, marked ended:
+ * the next run takes them over, and its reset of their account waits for them. A second Ctrl+C used
+ * to delete the lock while the turn the first one stopped was still unwinding, and the next run
+ * reset the account under a turn that could still store memory.
  */
-function acquireRunLock(path: string): { release: () => void } | { refusal: string } {
+function acquireRunLock(path: string, gatewayUrl: string): RunLockHandle | { refusal: string } {
+  const startedAt = new Date().toISOString();
+  let inherited: UnconfirmedTurn[] = [];
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      writeFileSync(path, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }), { flag: "wx" });
-      return { release: () => { if (readRunLock(path)?.pid === process.pid) rmSync(path, { force: true }); } };
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, JSON.stringify({ pid: process.pid, startedAt, gateway: gatewayUrl }), { flag: "wx" });
+      return {
+        inherited,
+        release: (turns) => {
+          if (readRunLock(path)?.pid !== process.pid) return;
+          if (turns.length === 0) rmSync(path, { force: true });
+          else writeFileSync(path, JSON.stringify({ pid: process.pid, startedAt, gateway: gatewayUrl, ended: new Date().toISOString(), turns }));
+        },
+      };
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw new E2EInfraError(`cannot take the run lock ${path}: ${describeError(err)}`);
     }
     const holder = readRunLock(path);
-    if (!holder || processAlive(holder.pid)) {
+    if (!holder || (!holder.ended && processAlive(holder.pid))) {
       const who = holder ? `another e2e run (pid ${holder.pid}${holder.startedAt ? `, since ${holder.startedAt}` : ""})` : "another e2e run";
       return { refusal: `${who} is using the eval accounts, and two runs break each other's scenarios (one's memory reset or mail purge lands in the other's attempts). Wait for it, or delete ${path} if no such run is left.` };
     }
+    inherited = holder.turns;
     rmSync(path, { force: true });
   }
   return { refusal: `the run lock ${path} could not be taken` };
@@ -254,21 +360,29 @@ async function evaluate(args: ParsedArgs, io: CliIo, repoRoot: string): Promise<
     ...(io.env["E2E_SEARXNG_URL"]?.trim() ? { searxngUrl: io.env["E2E_SEARXNG_URL"].trim() } : {}),
   });
 
-  const lock = acquireRunLock(join(dirname(paths.credentialsPath), ".e2e-run.local.json"));
+  const lock = acquireRunLock(runLockPath(gatewayUrl, io.lockDir), gatewayUrl);
   if ("refusal" in lock) {
     io.err(`Refusing to run: ${lock.refusal}`);
     return 2;
   }
+  if (lock.inherited.length > 0) {
+    adoptUnconfirmedTurns(client, lock.inherited);
+    const named = lock.inherited.map((turn) => `${turn.requestId} of ${turn.identity}`).join(", ");
+    io.out(`An earlier run left ${lock.inherited.length} turn(s) it had not seen end (${named}): the memory reset of their account waits for them.`);
+  }
   const interrupt = new AbortController();
+  const interrupts = io.interrupts ?? (io.handleSigint ? PROCESS_INTERRUPTS : null);
   const onSigint = (): void => {
     if (interrupt.signal.aborted) {
-      lock.release();
-      process.exit(130);
+      // Quits at once, while the turns the first Ctrl+C stopped may still run: the lock keeps them.
+      lock.release(unconfirmedTurnsOf(client));
+      interrupts?.exit(130);
+      return;
     }
     io.err("\nInterrupted — cancelling running turns (Ctrl+C again to quit at once)…");
     interrupt.abort();
   };
-  if (io.handleSigint) process.on("SIGINT", onSigint);
+  interrupts?.on(onSigint);
   try {
     // A refused login would fail every attempt the same way; say so once, up front.
     const [gateway] = await prober.check(["gateway"]);
@@ -293,6 +407,7 @@ async function evaluate(args: ParsedArgs, io: CliIo, repoRoot: string): Promise<
       eventGraceMs,
       resetDurableMemory: !args.booleans.has("keep-memory"),
       signal: interrupt.signal,
+      ...io.runner,
     });
     const report = buildReport(results, {
       startedAt,
@@ -322,9 +437,10 @@ async function evaluate(args: ParsedArgs, io: CliIo, repoRoot: string): Promise<
     if (summary.failed > 0 || (report.baseline?.regressions.length ?? 0) > 0) return 1;
     return 0;
   } finally {
-    if (io.handleSigint) process.off("SIGINT", onSigint);
+    interrupts?.off(onSigint);
+    const unconfirmed = unconfirmedTurnsOf(client);
     client.close();
-    lock.release();
+    lock.release(unconfirmed);
   }
 }
 

@@ -87,14 +87,19 @@ accounts, between runs, in Memgraph (the `memgraph` service): `MATCH (m:MemoryRe
 nodes carry the username, workspace-scope nodes the account's storage segment).
 
 Nothing is reset while a turn the harness stopped on the account may still run (`chat.cancel` got no final
-status, or the socket died mid-turn): what it stores after a reset would land in the next attempt. The
-reset waits up to the cancel grace (30 s) for `session.get` to report the turn ended, and is skipped with a
-note otherwise.
+status, or the socket died during the send or mid-turn): what it stores after a reset would land in the
+next attempt. The reset waits up to the cancel grace (30 s) for `session.get` to report the turn ended, and
+is skipped with a note otherwise. Such turns outlive the run too: a run that ends, or quits at once on a
+second Ctrl+C, while one has not been seen to end leaves it in the run lock (below), and the next run's
+reset of that account waits for it the same way. A turn whose session is gone (`sai wipe`) counts as
+ended once the gateway has restarted since it was sent (`gateway.status` uptime).
 
-**One run at a time.** Two `pnpm e2e:evaluate` runs share the eval accounts, and one's reset or mail purge
-lands in the other's attempts. A run therefore refuses to start (exit code 2) while another run uses the
-same credentials file; the lock is `.e2e-run.local.json` beside that file, and a lock whose process is gone
-(a second Ctrl+C, a crash) is taken over.
+**One run at a time.** Two `pnpm e2e:evaluate` runs share the gateway's eval accounts, and one's reset or
+mail purge lands in the other's attempts. A run therefore refuses to start (exit code 2) while another run
+uses the same gateway, from whichever checkout or credentials file. The lock is
+`starlingai-e2e-run-<hash of the gateway URL>.json` in the system's temp directory (`localhost`, `127.0.0.1`
+and `[::1]` count as one host); a lock whose process is gone (a crash) is taken over, and one that cannot be
+read counts as held — delete it if no run is left.
 
 **Mail-isolation preflight (fail closed).** Before any scenario runs, the harness asks the running
 mail-service — through `pnpm e2e:env status --json`, which calls `GET /api/accounts` inside its container
@@ -105,7 +110,7 @@ safe; one that runs but cannot be asked (Docker unreachable, no answer) stops th
 
 Exit codes: `0` every scenario that ran passed · `1` a scenario failed or the baseline shows a regression ·
 `2` usage error, invalid scenario file, missing credentials, refused login, the mail preflight, or another
-run of the same accounts · `3`
+run against the same gateway · `3`
 environment-suspect (everything was skipped, or ≥ 25 % of the attempts ended on harness errors). Through
 `pnpm` a non-zero code may arrive as 1; `node --import tsx packages/core/src/e2e/cli.ts …` keeps it.
 
