@@ -130,11 +130,19 @@ function detectLanguage(text: string | null | undefined, sureBelowLetters: numbe
   }
 }
 
+/** Where a text can change language: a line break, a sentence end, a quotation mark. */
+const LANGUAGE_PART_BOUNDARY = /\n+|(?<=[.!?…])\s+|(?<=[。！？])|["“”„«»「」『』]+/u;
+
 /**
- * Where a text can change language: a line break, a sentence end, a colon ("Übersetze: <a paste>"
- * was one English part), a quotation mark.
+ * A colon with a space after it, or a full-width one ("9:00" and a link have none). The words ahead
+ * of it are read as one more part, and the part itself stays whole. A colon hands a request over to
+ * a paste ("Übersetze: <an English paste>" was one English part), and as often to a list of names.
+ * Cut off at the colon, the list was read on its own: "Barcelona, Valencia, Sevilla, Granada" reads
+ * as Catalan, and "Plan a 3-day trip for these cities: …" lost the English it is written in, as did
+ * 320 of 320 English and German requests ahead of a list (2026-10-08). Read with its request, 276 of
+ * them are named again, and of 700 messages in two languages not one more is named.
  */
-const LANGUAGE_PART_BOUNDARY = /\n+|(?<=[.!?…:])\s+|(?<=[。！？：])|["“”„«»「」『』]+/u;
+const AFTER_COLON = /(?<=:)\s+|(?<=：)/u;
 
 /**
  * A quoted passage: from a quotation mark at the start of a word to the next one at the end of a
@@ -145,10 +153,11 @@ const QUOTED_PASSAGE =
 
 /**
  * The language of `text` when every line, sentence and quoted passage of it that can be told is in
- * that one language, and so are the words around its quoted passages; null when one of them reads
- * as another, or when the whole cannot be told. Read as a whole, a text is in whichever language has
- * the most letters: a German question about an English quote, an error message or an image analysis
- * reads as English. A long text is read at its start and its end, where the words around a paste are.
+ * that one language, and so are the words around its quoted passages and the words ahead of a colon;
+ * null when one of them reads as another, or when the whole cannot be told. Read as a whole, a text
+ * is in whichever language has the most letters: a German question about an English quote, an error
+ * message or an image analysis reads as English. A long text is read at its start and its end, where
+ * the words around a paste are.
  *
  * A short part has to be told for certain (SURE_BELOW_LETTERS). At the detector's usual bar, "No
  * emojis." after an English request or a list of product names took the language away from a text
@@ -166,7 +175,10 @@ export function detectUniformTextLanguage(text: string | null | undefined): Dete
   // mark is no boundary (an apostrophe looks the same): "Was bedeutet 'Refunds are not provided …'
   // für mich?" was one English sentence.
   const unquoted = read.replace(QUOTED_PASSAGE, " ");
-  const parts = read.split(LANGUAGE_PART_BOUNDARY);
+  const parts = read.split(LANGUAGE_PART_BOUNDARY).flatMap((part) => {
+    const colon = AFTER_COLON.exec(part);
+    return colon ? [part.slice(0, colon.index), part] : [part];
+  });
   for (const part of unquoted === read ? parts : [unquoted, ...parts]) {
     const language = detectLanguage(part, SURE_BELOW_LETTERS);
     if (language && language.code !== whole.code) return null;
