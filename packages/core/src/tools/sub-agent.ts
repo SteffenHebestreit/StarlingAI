@@ -7,6 +7,7 @@
 
 import { registerTool, getAllTools, searchToolsByEmbedding, executeTool, type SwarmState, type SwarmTaskAttempt, type SwarmTaskState, type ToolContext, type ToolResult } from "./registry.js";
 import { runSubAgent, runSubAgentWithStats, type SubAgentLoopEnforced, type SubAgentToolFailure, type SubAgentWardenStop } from "../agent/sub-agent.js";
+import { capOutcomeForUnbackedFigures, readExecutionRecord, type DelegatedExecutionRecord } from "../agent/delegated-run-record.js";
 import { buildPriorLoopNote } from "../agent/delegation-loop-notes.js";
 import { runAsWriteSibling, SiblingWriteGroup } from "../agent/sibling-write-ownership.js";
 import { collectArtifactRecords } from "../agent/artifact-metadata.js";
@@ -1159,6 +1160,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       artifacts?: Record<string, unknown>[];
       loopEnforced?: SubAgentLoopEnforced;
       wardenStop?: SubAgentWardenStop;
+      executions?: DelegatedExecutionRecord;
     }
     | undefined;
   /** Routing metadata for agents that were auto-selected by resolveAgentRouting. */
@@ -2121,6 +2123,9 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       // failures and the person's declines excluded. A structural input to
       // classifyDelegationResult (2026-10-05).
       let runOwnFailedToolNames: string[] | undefined;
+      // The code the run executed and the figures it masked (agent/delegated-run-record.ts),
+      // passed up as specialistExecutions.
+      let runExecutions: DelegatedExecutionRecord | undefined;
 
       if (typeof runSubAgentWithStats === "function") {
         const maybeResult = await runSubAgentWithStats(subAgentArgs);
@@ -2139,6 +2144,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           runOwnFailedToolNames = (maybeResult.toolFailures ?? [])
             .filter((failure) => (failure.agent ?? candidate) === candidate && !failure.declinedByUser)
             .map((failure) => failure.tool);
+          runExecutions = readExecutionRecord(maybeResult.executions) ?? undefined;
           runLoopEnforced = maybeResult.loopEnforced;
           runWardenStop = maybeResult.wardenStop;
           if (runLoopEnforced || runWardenStop) {
@@ -2190,6 +2196,11 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         delegationOutcome = parsedOutcome.status;
         output = parsedOutcome.data || output;
       }
+      // After the tag, so a run's own `<final_answer status="success">` cannot outrank its record:
+      // figures it had to mask were not computed, whatever it says about them (E2E 2026-10-07).
+      // classifyDelegationResult then reads "partial" and no other candidate is run against the
+      // same sandbox.
+      delegationOutcome = capOutcomeForUnbackedFigures(delegationOutcome, runExecutions);
 
       // Delegation-boundary inline-app harvest (audit 1ac79471): a build delegation
       // "succeeds" with ZERO artifacts but pastes the complete app document into its
@@ -2293,6 +2304,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
             ...(artifacts.length > 0 ? { artifacts } : {}),
             ...(runLoopEnforced ? { loopEnforced: runLoopEnforced } : {}),
             ...(runWardenStop ? { wardenStop: runWardenStop } : {}),
+            ...(runExecutions ? { executions: runExecutions } : {}),
           };
         }
         publishSwarmState(ctx);
@@ -2433,6 +2445,8 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           // (agent/tool-result-format.ts, orchestration.loopAwareDelegation).
           ...(runLoopEnforced ? { loopEnforced: runLoopEnforced } : {}),
           ...(runWardenStop ? { wardenStop: runWardenStop } : {}),
+          // What the run executed: read by the frame, the relay and the turn's scorecard.
+          ...(runExecutions ? { specialistExecutions: runExecutions } : {}),
           ...(routingInfo && { routingReason: { confidence: routingInfo.confidence, matchedTerms: routingInfo.matchedTerms, score: routingInfo.score } }),
         },
       };
@@ -2546,6 +2560,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         ...(bestPartialResult.terminalState ? { terminalState: bestPartialResult.terminalState } : {}),
         ...(bestPartialResult.loopEnforced ? { loopEnforced: bestPartialResult.loopEnforced } : {}),
         ...(bestPartialResult.wardenStop ? { wardenStop: bestPartialResult.wardenStop } : {}),
+        ...(bestPartialResult.executions ? { specialistExecutions: bestPartialResult.executions } : {}),
         ...(bestPartialResult.routingInfo
           ? {
             routingReason: {

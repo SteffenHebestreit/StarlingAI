@@ -11,7 +11,7 @@ Every public schema field, where it is declared, and how many production files r
 | `a2a` | packages/core/src/config/schema.ts:399 | 12 |
 | `accessKeyId` | packages/core/src/config/schema.ts:459 | 2 |
 | `accessToken` | packages/core/src/config/schemas/channels.ts:51 | 9 |
-| `account` | packages/core/src/config/schemas/channels.ts:71 | 79 |
+| `account` | packages/core/src/config/schemas/channels.ts:71 | 80 |
 | `acquireTimeoutMs` | packages/core/src/config/schema.ts:1674 | 1 |
 | `activeModelPreset` | packages/core/src/config/schema.ts:1705 | 2 |
 | `adaptive` | packages/core/src/config/schemas/decisions.ts:57 | 14 |
@@ -436,7 +436,7 @@ Every public schema field, where it is declared, and how many production files r
 | `signalCliPath` | packages/core/src/config/schemas/channels.ts:73 | 4 |
 | `signingSecret` | packages/core/src/config/schemas/channels.ts:35 | 6 |
 | `silenceTimeoutMs` | packages/core/src/config/schemas/multimodal.ts:239 | 3 |
-| `silent` | packages/core/src/config/schema.ts:1358 | 34 |
+| `silent` | packages/core/src/config/schema.ts:1358 | 35 |
 | `skillMatchThreshold` | packages/core/src/config/schema.ts:290 | 2 |
 | `sleepTimeConsolidation` | packages/core/src/config/schema.ts:1516 | 2 |
 | `smtpFrom` | packages/core/src/config/schemas/channels.ts:65 | 6 |
@@ -468,7 +468,7 @@ Every public schema field, where it is declared, and how many production files r
 | `suppressUnvalidatedDraftStreaming` | packages/core/src/config/schemas/orchestration.ts:196 | 1 |
 | `surface` | packages/core/src/config/schema.ts:892 | 93 |
 | `surfaceRoutingNearMisses` | packages/core/src/config/schemas/orchestration.ts:832 | 2 |
-| `synthesis` | packages/core/src/config/schema.ts:237 | 57 |
+| `synthesis` | packages/core/src/config/schema.ts:237 | 58 |
 | `systemPrompt` | packages/core/src/config/schema.ts:920 | 20 |
 | `tags` | packages/core/src/config/schema.ts:567 | 76 |
 | `targetAgreement` | packages/core/src/config/schemas/decisions.ts:59 | 5 |
@@ -491,7 +491,7 @@ Every public schema field, where it is declared, and how many production files r
 | `toolMode` | packages/core/src/config/schema.ts:271 | 6 |
 | `toolName` | packages/core/src/config/schemas/multimodal.ts:17 | 70 |
 | `toolRerankMinTools` | packages/core/src/config/schemas/orchestration.ts:651 | 2 |
-| `tools` | packages/core/src/config/schema.ts:921 | 221 |
+| `tools` | packages/core/src/config/schema.ts:921 | 222 |
 | `topK` | packages/core/src/config/schema.ts:169 | 7 |
 | `topLogprobs` | packages/core/src/config/schemas/decisions.ts:145 | 7 |
 | `topP` | packages/core/src/config/schema.ts:168 | 4 |

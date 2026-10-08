@@ -1,6 +1,7 @@
 /**
- * The block a delegation frame carries about what its run RECORDED — the files it produced and
- * the tool calls that failed on the way — and how every other reader of that frame steps past it.
+ * The block a delegation frame carries about what its run RECORDED — the files it produced, the
+ * code it executed and the tool calls that failed on the way — and how every other reader of that
+ * frame steps past it.
  *
  * The block is written into the head of a frame (tool-result-format.ts), but several older checks
  * read the WHOLE frame for their verdict words: "TASK FAILED", "PARTIAL PROGRESS", "timed out", a
@@ -12,6 +13,7 @@
  *
  * A leaf module on purpose: the checks that need it sit below the frame builder in the imports.
  */
+import { UNOBSERVED_FIGURE_MARKER } from "./figure-provenance.js";
 
 export const PRODUCED_FILES_HEADER =
   "Files produced, as recorded by the tool that wrote each (for you, not for the reply; name an engine, tier or model only as given here):";
@@ -27,8 +29,23 @@ export const TOOL_DECLINES_HEADER =
  */
 export const RUN_STOP_HEADER =
   "How the run was stopped (for you, not for the reply; its evidence below is partial):";
+/** The run's code executions, listed when none of them completed with output or when the run masked
+ *  figures (see DelegatedExecutionRecord). */
+export const EXECUTIONS_HEADER = "Code the run executed (for you, not for the reply):";
+/**
+ * The failed calls of a run none of whose code executions completed with output. TOOL_FAILURES_HEADER
+ * says the run went on after its failures, so they are not its outcome; in this state they are.
+ */
+export const TOOL_FAILURES_UNRECOVERED_HEADER = "Tool calls that failed (for you, not for the reply):";
 
-const HEADERS = new Set([PRODUCED_FILES_HEADER, TOOL_FAILURES_HEADER, TOOL_DECLINES_HEADER, RUN_STOP_HEADER]);
+const HEADERS = new Set([
+  PRODUCED_FILES_HEADER,
+  TOOL_FAILURES_HEADER,
+  TOOL_DECLINES_HEADER,
+  RUN_STOP_HEADER,
+  EXECUTIONS_HEADER,
+  TOOL_FAILURES_UNRECOVERED_HEADER,
+]);
 
 /** The frame as it read before the block was added: each header and the "- " lines under it go. */
 export function stripDelegatedRunRecord(text: string): string {
@@ -45,4 +62,97 @@ export function stripDelegatedRunRecord(text: string): string {
     kept.push(line);
   }
   return kept.join("\n");
+}
+
+/**
+ * What a delegated run executed, counted by the run itself (agent/sub-agent.ts) and carried up as
+ * `executions` on its result and `specialistExecutions` in a delegation's metadata.
+ *
+ * An execution is a call to a tool that runs a program in the sandbox (`requiresSandbox`) whose
+ * result reports `programOutputChars`, which those tools set only once the program actually ran.
+ * E2E 2026-10-07: seven of them failed or printed nothing, the coder stated two figures no tool
+ * had returned, and the run reported success. `unobservedFigures` counts the figures it then
+ * masked (agent/figure-provenance.ts): its answer stated them, and nothing it ran produced them.
+ */
+export interface DelegatedExecutionRecord {
+  attempted: number;
+  failed: number;
+  succeededWithOutput: number;
+  unobservedFigures?: number;
+}
+
+function isCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+/** A well-formed record, or null: metadata from another level, or written before records existed. */
+export function readExecutionRecord(value: unknown): DelegatedExecutionRecord | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const { attempted, failed, succeededWithOutput, unobservedFigures } = value as Record<string, unknown>;
+  if (!isCount(attempted) || !isCount(failed) || !isCount(succeededWithOutput)) return null;
+  if (unobservedFigures !== undefined && !isCount(unobservedFigures)) return null;
+  if (failed + succeededWithOutput > attempted) return null;
+  return { attempted, failed, succeededWithOutput, ...(unobservedFigures !== undefined ? { unobservedFigures } : {}) };
+}
+
+/** Adds a nested run's record to the delegating run's own. */
+export function addExecutionRecord(into: DelegatedExecutionRecord, add: DelegatedExecutionRecord | null | undefined): void {
+  if (!add) return;
+  into.attempted += add.attempted;
+  into.failed += add.failed;
+  into.succeededWithOutput += add.succeededWithOutput;
+  if (add.unobservedFigures) into.unobservedFigures = (into.unobservedFigures ?? 0) + add.unobservedFigures;
+}
+
+/** The run executed code and none of it completed with output: every figure it states came from elsewhere. */
+export function noExecutionCompleted(record: DelegatedExecutionRecord | null | undefined): boolean {
+  return Boolean(record) && record!.attempted > 0 && record!.succeededWithOutput === 0;
+}
+
+/** The run's account stated figures that nothing it received or ran contained, and they were masked. */
+export function unbackedFiguresMasked(record: DelegatedExecutionRecord | null | undefined): boolean {
+  return (record?.unobservedFigures ?? 0) > 0;
+}
+
+/**
+ * A run that had to mask figures did not succeed, whatever else it did: the numbers it was asked
+ * for came from the model, not from the code. Every other outcome passes through.
+ */
+export function capOutcomeForUnbackedFigures<T extends string | undefined>(
+  outcome: T,
+  record: DelegatedExecutionRecord | null | undefined,
+): T | "partial" {
+  return outcome === "success" && unbackedFiguresMasked(record) ? "partial" : outcome;
+}
+
+function counted(count: number, one: string, many: string): string {
+  return `${count} ${count === 1 ? one : many}`;
+}
+
+/** "7 code executions" */
+export function executionCountPhrase(record: DelegatedExecutionRecord): string {
+  return counted(record.attempted, "code execution", "code executions");
+}
+
+/** How the executions that did not complete with output ended: "4 failed, 3 printed nothing". */
+export function executionShortfallPhrase(record: DelegatedExecutionRecord): string {
+  const silent = Math.max(0, record.attempted - record.failed - record.succeededWithOutput);
+  const parts = [
+    record.failed > 0 ? `${record.failed} failed` : "",
+    silent > 0 ? `${silent} printed nothing` : "",
+  ].filter(Boolean);
+  return parts.join(", ") || "none failed";
+}
+
+/** The record as one line, for the frame (above the run's account) and the synthesis directive (after it). */
+export function executionRecordLine(record: DelegatedExecutionRecord): string {
+  const masked = record.unobservedFigures ?? 0;
+  const maskedClause = masked > 0
+    ? `; ${counted(masked, "figure", "figures")} in the run's account ${masked === 1 ? "appears" : "appear"} in no tool result and ${masked === 1 ? "is" : "are"} masked as ${UNOBSERVED_FIGURE_MARKER}`
+    : "";
+  if (noExecutionCompleted(record)) {
+    return `${executionCountPhrase(record)}, none completed with output (${executionShortfallPhrase(record)})${maskedClause}`;
+  }
+  const silent = Math.max(0, record.attempted - record.failed - record.succeededWithOutput);
+  return `${executionCountPhrase(record)}: ${record.succeededWithOutput} completed with output, ${record.failed} failed, ${silent} printed nothing${maskedClause}`;
 }
