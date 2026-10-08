@@ -542,6 +542,12 @@ describe("a refused prefill: the call is retried once without it, and the endpoi
 
     expect(first.content).toBe("YES");
     expect(bodies.map((body) => lastWireMessage(body)["role"])).toEqual(["assistant", "user", "user"]);
+    // The refused request wrote no row (it failed before its first chunk). The served retry is the
+    // one that decided, and reads so; the call after it reads the remembered refusal.
+    expect(modelCalls().map((row) => [row["finishReason"], row["prefill"], row["prefillSkipped"]])).toEqual([
+      ["stop", null, "refusal_retry"],
+      ["stop", null, "endpoint_refused"],
+    ]);
   });
 
   it("the stream's retry is not one of its drop-retry attempts: refused, then dropped, then served", async () => {
