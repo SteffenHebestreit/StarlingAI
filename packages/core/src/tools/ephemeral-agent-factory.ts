@@ -524,6 +524,12 @@ export async function runArchitectFallback(task: string, ctx: ToolContext): Prom
     { agentName: ephemeralName, tools, maxIterations, model: model?.primary ?? null, architectAgentName: settings.architectAgentName },
     { sessionId: ctx.sessionId },
   );
+  // An ephemeral agent has no catalog taxonomy, so the research gate counts it as reaching outside
+  // the workspace (agentCfgReachesOutsideWorkspace). Its run claims the turn's outside source
+  // (ToolContext.turnEvidence) the way a catalog agent's dispatch does: this undirected pick never
+  // reaches that dispatch, and without the claim a builder named later this turn, finding no shared
+  // facts yet, would be sent to gather again.
+  if (ctx.turnEvidence && !ctx.turnEvidence.outsideEngaged) ctx.turnEvidence.outsideEngaged = ephemeralName;
 
   let result: string;
   let terminalState: string | undefined;
@@ -834,6 +840,8 @@ registerTool({
     };
 
     const ephemeralName = `ephemeral:${agentName}`;
+    // Same claim as the architect's ephemeral above: no taxonomy, so it counts as reaching outside.
+    if (ctx.turnEvidence && !ctx.turnEvidence.outsideEngaged) ctx.turnEvidence.outsideEngaged = ephemeralName;
 
     const runResult = await runSubAgentWithStats({
       agentName: ephemeralName,

@@ -1243,8 +1243,8 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   // taxonomy, and what this turn has engaged so far. It arms only when every condition holds:
   //  - the judge said this turn needs outside facts (ctx.turnEvidence, orchestrator turns only),
   //  - nothing this turn has reached outside the workspace yet (no such agent dispatched or
-  //    redirected to — ctx.turnEvidence.outsideEngaged), and this delegation is its plan's /
-  //    batch's gather point,
+  //    redirected to, no workflow or ephemeral agent run — ctx.turnEvidence.outsideEngaged), and
+  //    this delegation is its plan's / batch's gather point,
   //  - every agent it names works only from the text it is handed (no outside surface, no source of
   //    its own) — a mailbox, desktop, database or remote-infra agent always keeps its step,
   //  - and, read below, the session holds no shared facts yet: once evidence exists a builder is

@@ -269,6 +269,57 @@ describe("the research gate's turn trigger", () => {
     expect(rows("delegation_explicit_redirected_research_incapable")).toHaveLength(1);
   }, 30_000);
 
+  // A catalog agent's dispatch is not the only way a turn reaches outside. A workflow's agents, and
+  // an ephemeral agent (no catalog taxonomy, so it counts as reaching outside), never pass that
+  // dispatch — each claims the turn's outside source itself. The mocked runs share no facts, so
+  // without the claim the facts guard cannot hold the builder either.
+  it("keeps a builder on its step after a workflow ran this turn", async () => {
+    const { getTool } = await import("../tools/registry.js");
+    await Promise.all([import("../tools/sub-agent.js"), import("../tools/workflow-catalog.js")]);
+    const ctx = turnCtx("s-workflow");
+    const workflow = await getTool("run_workflow")!.execute({ name: "company_facts", workflowType: "scene" }, ctx);
+    await getTool("delegate_to_agent")!.execute({ agentName: "web_coder", task: FRENCH_BUILD }, ctx);
+
+    expect(workflow.success).toBe(true);
+    expect(ran()).toEqual(["researcher", "web_coder"]);
+    expect(ctx.turnEvidence?.outsideEngaged).toBe("workflow:company_facts");
+  }, 30_000);
+
+  it("keeps a builder on its step after the orchestrator ran an ephemeral agent of its own", async () => {
+    const { getTool } = await import("../tools/registry.js");
+    await Promise.all([import("../tools/sub-agent.js"), import("../tools/ephemeral-agent-factory.js")]);
+    const ctx = turnCtx("s-ephemeral");
+    await getTool("create_ephemeral_agent")!.execute({
+      agentName: "site_reader",
+      description: "Reads one company's website.",
+      systemPrompt: "You read the website and report what it states, with the page you read it on.",
+      tools: ["web_search", "web_fetch"],
+      task: GERMAN_STEP,
+    }, ctx);
+    await getTool("delegate_to_agent")!.execute({ agentName: "web_coder", task: FRENCH_BUILD }, ctx);
+
+    expect(ran()).toEqual(["ephemeral:site_reader", "web_coder"]);
+    expect(ctx.turnEvidence?.outsideEngaged).toBe("ephemeral:site_reader");
+  }, 30_000);
+
+  it("keeps a builder on its step after the architect fallback ran an ephemeral agent", async () => {
+    runner.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => ({
+      output: args.agentName === "agent_architect"
+        ? JSON.stringify({ agentName: "site_scout", description: "Reads one website.", systemPrompt: "Read the site and report.", tools: ["web_search", "web_fetch"], maxIterations: 3 })
+        : `${args.agentName}: done`,
+      stats: statsFor(args),
+    }));
+    const { getTool } = await import("../tools/registry.js");
+    const [, { runArchitectFallback }] = await Promise.all([import("../tools/sub-agent.js"), import("../tools/ephemeral-agent-factory.js")]);
+    const ctx = turnCtx("s-architect");
+    const architect = await runArchitectFallback(GERMAN_STEP, ctx);
+    await getTool("delegate_to_agent")!.execute({ agentName: "web_coder", task: FRENCH_BUILD }, ctx);
+
+    expect(architect?.success).toBe(true);
+    expect(ran()).toEqual(["agent_architect", "ephemeral:site_scout", "web_coder"]);
+    expect(ctx.turnEvidence?.outsideEngaged).toBe("ephemeral:site_scout");
+  }, 30_000);
+
   it("never dead-ends: with no research agent this turn may dispatch, the named agent keeps the step", async () => {
     const result = await executePlan("s-scoped", plan(GERMAN_OBJECTIVE, [{ id: "s1", kind: "delegate", agent: "web_coder", description: GERMAN_STEP }]),
       turnCtx("s-scoped", { allowedAgents: ["web_coder"] }));

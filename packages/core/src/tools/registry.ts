@@ -248,8 +248,9 @@ export interface ToolContext {
    * (orchestration.upfrontSourceSensitiveClassifier), set by the runtime on the orchestrator's own
    * turn only — never on a workflow step, a directed (`--agent`) turn or a specialist's context.
    * One object per turn, shared by reference with every context spread from the orchestrator's.
-   * `outsideEngaged` names the first agent this turn that can reach outside the workspace — the one
-   * dispatched or redirected to; once it is set the research gate's turn trigger stays off.
+   * `outsideEngaged` names the first agent this turn that can reach outside the workspace — one
+   * dispatched or redirected to, an ephemeral agent, or a workflow run (`workflow:<name>`); once
+   * it is set the research gate's turn trigger stays off.
    */
   turnEvidence?: { required: true; outsideEngaged?: string };
   /**

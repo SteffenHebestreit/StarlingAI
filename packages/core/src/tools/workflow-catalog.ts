@@ -1598,6 +1598,15 @@ registerTool({
       }
     }
 
+    // A workflow's agents may reach outside the workspace, and what a scene's own turn or a job's
+    // steps share lands in the workflow's session, not in this one. So the workflow claims the
+    // turn's outside source here (ToolContext.turnEvidence), as a plan's reuse step does:
+    // otherwise the research gate's turn trigger, finding no facts in this session, would send a
+    // builder delegated after the workflow off to gather what the workflow just gathered.
+    if (ctx.turnEvidence && !ctx.turnEvidence.outsideEngaged) {
+      ctx.turnEvidence.outsideEngaged = `workflow:${selectedWorkflowName}`;
+    }
+
     if (scene) {
       const result = await runSceneInline(scene, params, workflowContext, ctx);
       const output = `Workflow ${scene.name} [scene] ${result.blocked ? "blocked" : "completed"}${result.bootstrapAgent ? ` via ${result.bootstrapAgent} bootstrap` : ""}.\n\n${result.response}`;
