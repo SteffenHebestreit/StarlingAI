@@ -79,8 +79,8 @@ Several soft nudges also ride here, all eval-gated default-OFF: `splitOrchestrat
 | **engram Document-RAG** | attached files → graph-RAG chunks | source tokens `user:<id>` / `session:<id>` / `workspace:<name>` / `kb:<id>` + gateway RBAC + always-on client post-filter | `retrieval.documentRag.*`: `enabled`, `engramBaseUrl`(`http://engram:8088`), `autoIngestAttachments`(true), `retrievalTopK`(6), `maxContextChars`(6000), `includeUser/WorkspaceDocs` (schema **false**, deployment shard **true** — `config/tooling/10-platform.jsonc`). Inert if disabled / engram unreachable. Tools: `ingest_document`, `search_documents`, `list_documents`, `forget_document`. **Documents page** |
 | **Knowledge Bases** | crawled docs sites → `kb:<id>` corpora | per-KB `KbScope` (session/workspace/user) + registry ACL | `retrieval.knowledgeBases.*` (crawl budgets). **HARD-depends on `documentRag.enabled`**. `create/search/manage_knowledge_base`. **Knowledge page** |
 | **pgvector unified store** | RAG chunks (rag_* tools) | `metadata.sessionId` (session) or global; instance-global table | `DATABASE_URL` env (+ `SAI_PGVECTOR_POOL_MAX`); inert without it. `rag_*` tools (`scope`, `k`, `minScore`) |
-| **MemGraph graph memory** | durable-memory nodes + `RETRIEVED` edges (E26) | scope/domain on nodes (workspace/user); **no `tenant_id`** | `MEMGRAPH_URL`/`NEO4J_URL`; inert → silent flat-file fallback. Tuning is code constants |
-| **Knowledge-graph tools** (`graph_*`) | entities/relations | instance-global (optional `sessionId` node scope) | Tier 0/1 tools; `MEMGRAPH_URL`-gated |
+| **MemGraph graph memory** | durable-memory nodes + `RETRIEVED` edges (E26) | one shared graph; under multi-user auth each memory node carries a `tenant` (its user, or the workspace root that stores it), and the readers (Critical Memory, the graph inspector, `graph_query`) show only the caller's own and the shared root's memory | `MEMGRAPH_URL`/`NEO4J_URL`; inert → silent flat-file fallback. Tuning is code constants |
+| **Knowledge-graph tools** (`graph_*`) | entities/relations | instance-global (optional `sessionId` node scope); under multi-user auth `graph_query` returns another account's memory node as id/kind/scope only and refuses a query that reads memory text other than as a whole node, and the write tools do not write `MemoryRecord` | Tier 0/1 tools; `MEMGRAPH_URL`-gated |
 | **Reranker sidecar** | reorders RAG candidates | global infra (serves routing + RAG) | `retrieval.reranker.*`: `enabled`, `mode`(tei), `model`(Qwen3-Reranker-0.6B). Needs the GPU sidecar |
 | **Embeddings provider** | vectors for all semantic search | global | `agents.defaults.model.embeddingModel` (Qwen3-Embedding-0.6B, 1024d). Inert → everything falls back to keyword |
 
@@ -111,7 +111,7 @@ Several soft nudges also ride here, all eval-gated default-OFF: `splitOrchestrat
 | **Memory page → Memory Store** | durable workspace/user records (scope dropdown) | ✅ edit/delete (`PATCH/DELETE /api/memory/entries/:key`) |
 | **Memory page → Personality** | main-assistant persona | ✅ (`PUT /api/personality`) |
 | **Memory page → Session Facts** | current session's shared-facts | 👁 view (`GET /api/sessions/:id/shared-facts`) |
-| **Memory page → Knowledge Graph** | MemGraph nodes/edges | 👁 view |
+| **Memory page → Knowledge Graph** | MemGraph nodes/edges | 👁 view (operator role under multi-user auth; own + shared memory only) |
 | **Memory page → Curate** | steward report | ✅ apply (`POST /api/memory/curate`) |
 | **Documents page** | personal/workspace document library (engram) | ✅ upload → auto-ingested as `[DOCUMENT CONTEXT]` |
 | **Knowledge Bases page** | crawled corpora | ✅ create/crawl/search |
@@ -134,12 +134,12 @@ Several soft nudges also ride here, all eval-gated default-OFF: `splitOrchestrat
 
 **Guards that fail open (know before relying on them):**
 - `canAccessResource(allowedUsers)` on credential/mail/compute stores: empty/unset `allowedUsers` = **shared to all** (unbound is shared by design). For a resource *explicitly bound* via `allowedUsers`, a caller with `undefined userId` **fails closed when `auth.enabled` is true** and is allowed only when auth is off (`guardrails/resource-access.ts`). So under active multi-user auth an anonymous/token caller cannot reach a bound resource.
-- MemGraph nodes carry `scope`/`domain` but **no `tenant_id`** — no DB-level per-user partition. `graph_*` tools default to a shared global graph.
+- MemGraph is **one graph partitioned at read time**: memory nodes carry a `tenant` under multi-user auth and every reader that returns memory text filters on it, but nothing in the database separates accounts. `SIMILAR_TO` edges and the MAGE jobs still span accounts (a similarity edge can link two accounts' memories), FACT nodes from `graphPromoteFact` carry no tenant (so under auth no account sees their text), and the entity graph of the `graph_*` tools is instance-global.
 - `tenant_id` scope-sets are **planned, not built** (a forward-looking comment in `document-rag.ts`); today's cross-scope enforcement is the client post-filter + the optional (default-OFF) `serverSideScopeFilter`.
 
 **Fixed by the security waves:** ~90 adversarial-review bugs including cross-user memory leaks; the anonymous-write downgrade; document-RAG RBAC + post-filter + engram v0.9.0 server-side sources filter; the 2+-level sub-agent session-id propagation fix; the cross-turn facts guard; secret-value redaction so credentials never enter transcripts.
 
-**Bottom line:** StarlingAI is *session-*, *RAG-document-*, and now *user-scope-durable-tenant-safe* — session facts, RAG documents/KBs, **and** durable user memory / user-model / personality are all partitioned per authenticated user. **Workspace**-scope stores remain intentionally shared per project; the deployment's agent ledger is shared too, with each entry's text shown only to the account it was recorded for. The remaining cross-user gaps are narrower: the credential/mail/compute `canAccessResource` guard still fails open, and MemGraph nodes still carry no `tenant_id` (memory-graph rerank/L0 is a shared graph). Those are the real items before exposing multi-user to *untrusted* accounts.
+**Bottom line:** StarlingAI is *session-*, *RAG-document-*, and now *user-scope-durable-tenant-safe* — session facts, RAG documents/KBs, **and** durable user memory / user-model / personality are all partitioned per authenticated user. **Workspace**-scope stores remain intentionally shared per project; the deployment's agent ledger is shared too, with each entry's text shown only to the account it was recorded for. The remaining cross-user gaps are narrower: the credential/mail/compute `canAccessResource` guard still fails open, and the memory graph is partitioned only at read time (similarity edges and graph jobs still span accounts). Those are the real items before exposing multi-user to *untrusted* accounts.
 
 ---
 

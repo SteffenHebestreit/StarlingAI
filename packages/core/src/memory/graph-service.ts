@@ -78,6 +78,57 @@ export function graphWorkspaceTenant(storageDir?: string): string | null {
   return activeUserScopeSegment() ?? SHARED_WORKSPACE_TENANT;
 }
 
+/** The label of the memory service's nodes. */
+export const MEMORY_RECORD_LABEL = "MemoryRecord";
+
+/**
+ * Whose MemoryRecord text one reader may see under multi-user auth, named as the parameters of
+ * graphMemoryReadablePredicate: the reader's own user-scope nodes, and the workspace nodes of the
+ * reader's own root and of the shared root. The Critical Memory read (graphL0Layer) applies the same
+ * rule. A node with no tenant (written before tenants existed, or by graphPromoteFact) is nobody's.
+ */
+export interface GraphMemoryReader {
+  readerUserTenant: string | null;
+  readerWorkspaceTenant: string;
+  sharedWorkspaceTenant: string;
+}
+
+/**
+ * The ambient reader, or null with auth off, where every node stays readable. The graph is one
+ * instance for every account, and the readers that sample it directly, the graph inspector and
+ * graph_query, returned every account's memory text (found 2026-10-08). With no user in the context
+ * only the shared root's workspace nodes are readable.
+ */
+export function graphMemoryReader(): GraphMemoryReader | null {
+  if (getConfig().auth?.enabled !== true) return null;
+  return {
+    readerUserTenant: graphUserTenant(),
+    readerWorkspaceTenant: graphWorkspaceTenant() ?? SHARED_WORKSPACE_TENANT,
+    sharedWorkspaceTenant: SHARED_WORKSPACE_TENANT,
+  };
+}
+
+/** The reader's rule as a Cypher condition on `variable`; the query binds GraphMemoryReader's fields. */
+export function graphMemoryReadablePredicate(variable: string): string {
+  return `(NOT ${variable}:${MEMORY_RECORD_LABEL}`
+    + ` OR (${variable}.scope = 'user' AND ${variable}.tenant = $readerUserTenant)`
+    + ` OR (${variable}.scope = 'workspace' AND ${variable}.tenant IN [$readerWorkspaceTenant, $sharedWorkspaceTenant]))`;
+}
+
+/** The same rule for a node read back from the graph. Every node that is not a memory is readable. */
+export function isGraphMemoryReadable(
+  labels: readonly string[],
+  properties: Readonly<Record<string, unknown>>,
+  reader: GraphMemoryReader,
+): boolean {
+  if (!labels.includes(MEMORY_RECORD_LABEL)) return true;
+  const tenant = properties["tenant"];
+  if (typeof tenant !== "string") return false;
+  if (properties["scope"] === "user") return tenant === reader.readerUserTenant;
+  if (properties["scope"] === "workspace") return tenant === reader.readerWorkspaceTenant || tenant === reader.sharedWorkspaceTenant;
+  return false;
+}
+
 const log = childLogger("memory:graph");
 
 export const VECTOR_INDEX_NAME = "memory_embedding";
