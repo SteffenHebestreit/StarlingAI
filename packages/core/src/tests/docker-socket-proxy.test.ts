@@ -13,7 +13,7 @@ import {
   // @ts-expect-error — plain .mjs, no types
 } from "../../../../docker/docker-socket-proxy/filter.mjs";
 // @ts-expect-error — plain .mjs, no types
-import { spliceHijack } from "../../../../docker/docker-socket-proxy/server.mjs";
+import { spliceHijack, toDaemon } from "../../../../docker/docker-socket-proxy/server.mjs";
 
 // The legit workspace source on this deployment (Docker Desktop translates F:\StarlingAI).
 const PREFIXES = parseAllowedPrefixes("F:\\StarlingAI", "/run/desktop/mnt/host/f/StarlingAI");
@@ -185,19 +185,73 @@ describe("sanitizeExecBody", () => {
   });
 });
 
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+// A connected TCP socket pair on loopback: [remote end we drive, local end handed to the proxy].
+function socketPair(): Promise<[net.Socket, net.Socket]> {
+  return new Promise((resolve, reject) => {
+    let a: net.Socket;
+    const srv = net.createServer((serverSide) => { srv.close(); resolve([a, serverSide]); });
+    srv.on("error", reject);
+    srv.listen(0, "127.0.0.1", () => { a = net.connect((srv.address() as net.AddressInfo).port, "127.0.0.1"); });
+  });
+}
+
+/**
+ * Fake dockerd that answers the first chunk with `reply` (possibly nothing) and then closes its write
+ * side, as dockerd does for a `Connection: close` request, while it waits for the proxy to close the
+ * connection. `proxyClosed` says whether the proxy did within two seconds.
+ */
+function closingDaemon(reply: string): Promise<{ srv: net.Server; connect: () => net.Socket; proxyClosed: Promise<boolean> }> {
+  let reportClosed: (closed: boolean) => void = () => {};
+  const proxyClosed = new Promise<boolean>((resolve) => { reportClosed = resolve; });
+  const srv = net.createServer({ allowHalfOpen: true }, (sock) => {
+    const timer = setTimeout(() => { reportClosed(false); sock.destroy(); }, 2000);
+    sock.on("error", () => { /* the proxy may reset instead */ });
+    sock.once("data", () => sock.end(reply));
+    sock.on("end", () => { clearTimeout(timer); reportClosed(true); });
+  });
+  return new Promise((resolve) => srv.listen(0, "127.0.0.1", () => {
+    const port = (srv.address() as net.AddressInfo).port;
+    // As the proxy opens its daemon connection: half-open, so a FIN from the daemon ends nothing on its own.
+    resolve({ srv, connect: () => net.connect({ port, host: "127.0.0.1", allowHalfOpen: true }), proxyClosed });
+  }));
+}
+
+/** Everything the remote end receives until the proxy ends the connection (or two seconds pass). */
+function readUntilEnd(sock: net.Socket): Promise<{ got: string; ended: boolean }> {
+  return new Promise((resolve) => {
+    let got = "";
+    const timer = setTimeout(() => resolve({ got, ended: false }), 2000);
+    sock.on("data", (d) => { got += d.toString("latin1"); });
+    sock.on("end", () => { clearTimeout(timer); resolve({ got, ended: true }); });
+  });
+}
+
+/**
+ * Every forwarded request closes its daemon connection once the daemon is done (found 2026-10-08).
+ * The proxy opens that connection half-open, so the daemon's FIN ended only the client: each request
+ * left a socket behind, and the compose healthcheck alone (a GET /_ping every 15 s) had the proxy
+ * OOM-killed at its 128m limit in about three days.
+ */
+describe("toDaemon — the daemon connection is closed after its response", () => {
+  it("relays the response to the client and then closes its own side of the daemon connection", async () => {
+    const daemon = await closingDaemon("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK");
+    const [remote, clientSide] = await socketPair();
+    try {
+      const response = readUntilEnd(remote);
+      toDaemon(clientSide, [Buffer.from("GET /v1.55/_ping HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n", "latin1")], daemon.connect);
+      expect(await response).toEqual({ got: "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK", ended: true });
+      expect(await daemon.proxyClosed).toBe(true);
+    } finally {
+      remote.destroy();
+      clientSide.destroy();
+      daemon.srv.close();
+    }
+  });
+});
+
 describe("spliceHijack — pipelined-request smuggling blocked, real hijack preserved", () => {
-  const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
-
-  // A connected TCP socket pair on loopback: [remote end we drive, local end handed to spliceHijack].
-  function socketPair(): Promise<[net.Socket, net.Socket]> {
-    return new Promise((resolve, reject) => {
-      let a: net.Socket;
-      const srv = net.createServer((serverSide) => { srv.close(); resolve([a, serverSide]); });
-      srv.on("error", reject);
-      srv.listen(0, "127.0.0.1", () => { a = net.connect((srv.address() as net.AddressInfo).port, "127.0.0.1"); });
-    });
-  }
-
   // Fake dockerd that records everything it receives; `respond(sock)` fires on the first chunk.
   function makeDaemon(respond: (sock: net.Socket) => void): Promise<{ srv: net.Server; port: number; received: Buffer[]; }> {
     const received: Buffer[] = [];
@@ -277,5 +331,24 @@ describe("spliceHijack — pipelined-request smuggling blocked, real hijack pres
     await sleep(120);
     expect(Buffer.concat(clientChunks).toString("latin1")).toContain("STREAMED_OUT");
     daemon.srv.close();
+  });
+
+  it("closes the daemon connection when the daemon hangs up before a complete response head", async () => {
+    const daemon = await closingDaemon("HTTP/1.1 200 OK\r\n");
+    const [remote, clientSide] = await socketPair();
+    try {
+      const response = readUntilEnd(remote);
+      const rawHead = Buffer.from(
+        `POST /v1.45/exec/${"d".repeat(64)}/start HTTP/1.1\r\nHost: docker\r\nUpgrade: tcp\r\nConnection: Upgrade\r\nContent-Type: application/json\r\nContent-Length: 16\r\n\r\n`,
+        "latin1",
+      );
+      spliceHijack(clientSide, headersOf(rawHead), rawHead, Buffer.from('{"Detach":false}', "latin1"), daemon.connect);
+      expect((await response).ended).toBe(true);
+      expect(await daemon.proxyClosed).toBe(true);
+    } finally {
+      remote.destroy();
+      clientSide.destroy();
+      daemon.srv.close();
+    }
   });
 });
