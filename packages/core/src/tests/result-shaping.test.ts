@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { extractHtmlLinks, formatLinkSection } from "../tools/page-links.js";
 import { extractedFindingIsLowValue, extractKeyFacts, stripEditorialNotes } from "../tools/result-shaping.js";
 
 /**
@@ -66,6 +67,34 @@ describe("auto-share quality gate — extractedFindingIsLowValue", () => {
       "web_search",
     );
     expect(extractedFindingIsLowValue(extracted)).toBe(false);
+  });
+});
+
+/**
+ * web_fetch appends the fetched page's links after its text. That list is navigation for the
+ * agent that fetched the page; auto-shared as a finding it would fill siblings' shared facts
+ * with menus, the way the /url and bare-URL lines would if they were not stripped.
+ */
+describe("extractKeyFacts — web_fetch's links section", () => {
+  it("keeps the page's facts and drops its link list", () => {
+    const pageUrl = "http://93.184.215.14/";
+    const links = extractHtmlLinks(
+      "<a href=\"/dokumentation.html\">Dokumentation</a> <a href=\"/kontakt.html\">Kontakt</a> <a href=\"https://partner.example/\">Partner</a>",
+      pageUrl,
+    );
+    const section = formatLinkSection(links, pageUrl, 1600).text;
+    const output = `**Content from:** ${pageUrl}\n\n`
+      + "Kurz\n\nGegründet 1987, 146 Mitarbeiter. Ein kurzer Absatz über das Unternehmen und sein Sortiment.\n\n"
+      + `${section}\n\n`
+      + "💡 If this content is useful for your task, call share_finding now to publish key facts for sibling agents before your iteration budget runs out.";
+
+    const facts = extractKeyFacts(output, "web_fetch");
+    expect(facts).toContain("1987");
+    expect(facts).not.toContain("[Links on this page");
+    for (const url of ["http://93.184.215.14/dokumentation.html", "http://93.184.215.14/kontakt.html", "https://partner.example/"]) {
+      expect(facts).not.toContain(url);
+    }
+    expect(facts).toBe("Kurz\n\nGegründet 1987, 146 Mitarbeiter. Ein kurzer Absatz über das Unternehmen und sein Sortiment.");
   });
 });
 

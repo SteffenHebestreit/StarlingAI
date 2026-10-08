@@ -1,3 +1,4 @@
+import { runInNewContext } from "node:vm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Config } from "../config/schema.js";
 import { expandSearchQuery, isPdfContentType, rankSearchResults, rerankSearchResults, resolveSearchBackendConfig } from "../tools/web.js";
@@ -453,5 +454,420 @@ describe("web_search / web_fetch say when nothing came back because something fa
     const r = await getTool("web_fetch")!.execute({ url: "http://93.184.215.14/app" }, { sessionId: "s-fetch-empty", workspacePath: "/workspace" });
     expect(r.success).toBe(false);
     expect(r.error).toMatch(/returned no readable text \(HTTP 200, text\/html\); the browser rendered the page with no text\. .*this is not its content/);
+  });
+});
+
+/**
+ * web_fetch kept no link targets: stripHtml drops `<a href>`, innerText has none, and the snapshot
+ * fallback deleted its `/url` lines. In the E2E run (2026-10-07) the researcher fetched the fixture
+ * shop's start page natively, saw "Dokumentation" with no URL, guessed 14 paths into browser-rendered
+ * 404s and used up its 16 web_fetch calls before reaching /dokumentation.html. Every HTML path now
+ * appends the page's links after its text, inside maxLength.
+ */
+describe("web_fetch lists the page's links after its text", () => {
+  // An IP literal: the SSRF guard needs no DNS for it.
+  const SITE = "http://93.184.215.14";
+  const PROSE = "Die Nordlicht Werkzeuge GmbH entwickelt und vertreibt Akkuwerkzeuge, Handwerkzeuge, "
+    + "Messtechnik und Werkstattausstattung für Handwerksbetriebe in ganz Norddeutschland.";
+  const JS_SHELL = "<div id=\"app\"></div><script src=\"/app.js\"></script>";
+
+  const html = (body: string, status = 200) => new Response(`<!doctype html><html><body>${body}</body></html>`, {
+    status, headers: { "Content-Type": "text/html; charset=utf-8" },
+  });
+
+  async function webFetch(args: Record<string, unknown>, sessionId: string) {
+    const { getTool } = await import("../tools/registry.js");
+    return getTool("web_fetch")!.execute(args, { sessionId, workspacePath: "/workspace" });
+  }
+
+  /** The section's lines after its header, or [] when the output has none. */
+  function sectionOf(output: string): { header: string; lines: string[] } {
+    const start = output.indexOf("[Links on this page");
+    if (start < 0) return { header: "", lines: [] };
+    const [header = "", ...rest] = output.slice(start).split("\n");
+    const end = rest.findIndex((line) => !line.startsWith("- "));
+    return { header, lines: end < 0 ? rest : rest.slice(0, end) };
+  }
+
+  // A stand-in for the page browser_evaluate runs PAGE_TEXT_AND_LINKS in.
+  const anchor = (href: string, innerText: string, extra: { title?: string; aria?: string; alt?: string } = {}) => ({
+    href,
+    innerText,
+    title: extra.title ?? "",
+    getAttribute: (name: string) => (name === "aria-label" ? extra.aria ?? null : null),
+    querySelector: (selector: string) => (selector === "img" && extra.alt ? { alt: extra.alt } : null),
+  });
+
+  /** Playwright MCP 1.61 running the exact `function` web_fetch sends against `document`; `evaluated` holds what it returned. */
+  function browserRendering(document: unknown) {
+    const evaluated: unknown[] = [];
+    const callTool = vi.fn(async (input: { name: string; arguments: Record<string, unknown> }) => {
+      if (input.name !== "browser_evaluate") return { content: [{ type: "text", text: "" }] };
+      const value: unknown = runInNewContext(`(${String(input.arguments["function"])})()`, { document });
+      evaluated.push(value);
+      return {
+        content: [{
+          type: "text",
+          text: `### Result\n${JSON.stringify(value)}\n### Ran Playwright code\n\`\`\`js\nawait page.evaluate('() => { … }');\n\`\`\``,
+        }],
+      };
+    });
+    return { callTool, evaluated };
+  }
+
+  it("lists the start page's links on the native path (the incident)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => html(`
+      <header><strong>Nordlicht Werkzeuge GmbH</strong>
+        <nav><a href="#top">Nach oben</a>
+          <a href="/index.html">Start</a>
+          <a href="/produkte/seite-1.html">Produkte</a>
+          <a href="/dokumentation.html">Dokumentation</a>
+          <a href="/kontakt.html">Kontakt &amp; Bestellung</a>
+        </nav>
+      </header>
+      <main>
+        <h1>Werkzeug für Werkstatt und Baustelle</h1>
+        <p>${PROSE}</p>
+        <ul><li>Gegründet: 1987</li><li>Mitarbeiterinnen und Mitarbeiter: 146</li></ul>
+        <p>Alles Wissenswerte steht in der <a href="/dokumentation.html">Dokumentation</a>.
+          Partner: <a href="https://partner.example/">Partnershop</a>.
+          Schreiben Sie uns: <a href="mailto:info@nordlicht-werkzeuge.test">info@nordlicht-werkzeuge.test</a></p>
+      </main>`)));
+
+    const r = await webFetch({ url: `${SITE}/` }, "s-fetch-links-native");
+    expect(r.success).toBe(true);
+    expect(r.metadata?.["fetchMethod"]).toBe("native");
+    expect(r.output).toContain("Gegründet: 1987");
+    expect(r.output.split(`- Dokumentation -> ${SITE}/dokumentation.html`)).toHaveLength(2);
+    const { header, lines } = sectionOf(r.output);
+    expect(header).toBe("[Links on this page — 5 of 5, same site first]");
+    expect(lines).toEqual([
+      `- Start -> ${SITE}/index.html`,
+      `- Produkte -> ${SITE}/produkte/seite-1.html`,
+      `- Dokumentation -> ${SITE}/dokumentation.html`,
+      `- Kontakt & Bestellung -> ${SITE}/kontakt.html`,
+      "- Partnershop -> https://partner.example/",
+    ]);
+    expect(r.output).not.toContain("mailto:");
+    expect(r.output).not.toContain("#top");
+    expect(r.metadata?.["linkCount"]).toBe(lines.length);
+    expect(r.metadata?.["contentLength"]).toBe(r.output.length - `**Content from:** ${SITE}/\n\n`.length);
+  });
+
+  it("resolves links against the URL that answered after a redirect", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const requested = String(input);
+      if (requested === `${SITE}/produkte`) {
+        return new Response(null, { status: 302, headers: { Location: "/produkte/seite-1.html" } });
+      }
+      if (requested === `${SITE}/produkte/seite-1.html`) {
+        return html(`<h1>Produktkatalog</h1><p>${PROSE}</p>
+          <nav><a href="/produkte/seite-1.html">Produkte</a> <a href="seite-2.html">Seite 2</a> <a href="seite-3.html">Seite 3</a></nav>`);
+      }
+      return html("<p>Nicht gefunden</p>", 404);
+    }));
+
+    const r = await webFetch({ url: `${SITE}/produkte` }, "s-fetch-links-redirect");
+    expect(r.metadata?.["fetchMethod"]).toBe("native");
+    expect(r.output).toContain(`- Seite 2 -> ${SITE}/produkte/seite-2.html`);
+    expect(r.output).toContain(`- Seite 3 -> ${SITE}/produkte/seite-3.html`);
+    expect(r.output).not.toContain(`${SITE}/seite-2.html`);
+    expect(r.output, "the page's own link is not listed").not.toContain(`-> ${SITE}/produkte/seite-1.html`);
+  });
+
+  it("lists the links on the last-resort direct fetch (native_fallback)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => html("<p>Wartungsfenster heute von 22 bis 23 Uhr.</p><a href=\"/status.html\">Status</a>")));
+
+    const r = await webFetch({ url: `${SITE}/portal` }, "s-fetch-links-fallback");
+    expect(r.success).toBe(true);
+    expect(r.metadata?.["fetchMethod"]).toBe("native_fallback");
+    expect(r.output).toContain("Wartungsfenster heute von 22 bis 23 Uhr.");
+    expect(sectionOf(r.output).lines).toEqual([`- Status -> ${SITE}/status.html`]);
+    expect(r.metadata?.["linkCount"]).toBe(1);
+  });
+
+  it("reads a rendered page's text and links in the one browser_evaluate call", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => html(JS_SHELL)));
+    const csvExport = `data:text/csv;charset=utf-8,${"Artikel;Preis%0A".repeat(400)}`;
+    const { callTool, evaluated } = browserRendering({
+      URL: `${SITE}/app`,
+      body: { innerText: "Preisrechner\tNordlicht\n\n\n\n\nBasic 9 EUR, Pro 29 EUR" },
+      links: [
+        anchor(`${SITE}/dokumentation.html`, "Dokumentation"),
+        anchor(`${SITE}/dokumentation.html#e31`, "  Fehlercodes  "),
+        anchor(`${SITE}/app`, "Preisrechner"),
+        anchor(csvExport, "CSV exportieren"),
+        anchor("https://partner.example/", "", { aria: "Partnershop" }),
+        anchor(`${SITE}/logo`, "", { alt: "Logo" }),
+        anchor("mailto:info@nordlicht-werkzeuge.test", "Mail"),
+      ],
+    });
+    mcpConnections.set("playwright", { client: { callTool } });
+
+    const r = await webFetch({ url: `${SITE}/app` }, "s-fetch-links-evaluate");
+    expect(r.success).toBe(true);
+    expect(r.metadata?.["fetchMethod"]).toBe("playwright");
+    expect(r.output, "the page text, whitespace evened out in the browser").toContain("Preisrechner Nordlicht\n\n\nBasic 9 EUR, Pro 29 EUR");
+    expect(sectionOf(r.output).lines).toEqual([
+      `- Dokumentation -> ${SITE}/dokumentation.html`,
+      `- Logo -> ${SITE}/logo`,
+      "- Partnershop -> https://partner.example/",
+    ]);
+    expect(r.output, "the JSON envelope is not page text").not.toContain("\"t\":");
+    expect(r.output).not.toContain("### Ran Playwright code");
+    expect(r.output).not.toContain("mailto:");
+    expect(r.metadata?.["linkCount"]).toBe(3);
+    expect(callTool.mock.calls.map(([input]) => input.name)).toEqual(["browser_navigate", "browser_evaluate"]);
+    // A link too long to list is not sent back from the browser either.
+    const sent = JSON.parse(String(evaluated[0])) as { l: Array<[string, string]> };
+    expect(sent.l.map(([href]) => href)).not.toContain(csvExport);
+    expect(String(evaluated[0]).length).toBeLessThan(1_000);
+  });
+
+  it("lists the links of the snapshot fallback, and keeps its nav labels in the text", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => html(JS_SHELL)));
+    const snapshot = [
+      "### Page",
+      `- Page URL: ${SITE}/`,
+      "- Page Title: Nordlicht Werkzeuge GmbH",
+      "### Snapshot",
+      "```yaml",
+      "- generic [active] [ref=e1]:",
+      "  - navigation [ref=e2]:",
+      "    - link \"Contact & Ordering\" [ref=e3] [cursor=pointer]:",
+      "      - /url: /kontakt.html",
+      "  - main [ref=e4]:",
+      "    - heading \"Werkzeug für Werkstatt und Baustelle\" [level=1] [ref=e5]",
+      "    - paragraph [ref=e6]:",
+      `      - text: ${PROSE}`,
+      "    - paragraph [ref=e7]:",
+      "      - text: Gegründet 1987, 146 Mitarbeiterinnen und Mitarbeiter, 18 Artikel in sechs Kategorien.",
+      "    - listitem [ref=e8]:",
+      "      - 'link \"Kundenportal: Wartungsfenster und Störungen\" [ref=e9] [cursor=pointer]':",
+      "        - /url: /langsam.html",
+      "```",
+    ].join("\n");
+    mcpConnections.set("playwright", {
+      client: {
+        callTool: vi.fn(async (input: { name: string }) => {
+          if (input.name === "browser_evaluate") return { content: [{ type: "text", text: "evaluate unavailable" }], isError: true };
+          if (input.name === "browser_snapshot") return { content: [{ type: "text", text: snapshot }] };
+          return { content: [{ type: "text", text: "" }] };
+        }),
+      },
+    });
+
+    const r = await webFetch({ url: `${SITE}/` }, "s-fetch-links-snapshot");
+    expect(r.success).toBe(true);
+    expect(r.metadata?.["fetchMethod"]).toBe("playwright");
+    const sectionStart = r.output.indexOf("[Links on this page");
+    expect(sectionStart).toBeGreaterThan(0);
+    expect(r.output.slice(0, sectionStart)).toContain("Contact & Ordering");
+    expect(sectionOf(r.output).lines).toEqual([
+      `- Contact & Ordering -> ${SITE}/kontakt.html`,
+      `- Kundenportal: Wartungsfenster und Störungen -> ${SITE}/langsam.html`,
+    ]);
+  });
+
+  it("still renders a script shell whose menu is long but whose text is short (the 200-character test reads the text alone)", async () => {
+    const menu = Array.from({ length: 12 }, (_, i) => `<a href="/bereich-${i + 1}.html">${String.fromCharCode(65 + i)}</a>`).join(" ");
+    vi.stubGlobal("fetch", vi.fn(async () => html(`<nav>${menu}</nav>${JS_SHELL}`)));
+    mcpConnections.set("playwright", {
+      client: {
+        callTool: browserRendering({
+          URL: `${SITE}/konto`,
+          body: { innerText: "Bestellübersicht: 3 offene Aufträge, 1 Rücksendung" },
+          links: [anchor(`${SITE}/bereich-1.html`, "A")],
+        }).callTool,
+      },
+    });
+
+    const r = await webFetch({ url: `${SITE}/konto` }, "s-fetch-links-spa");
+    expect(r.metadata?.["fetchMethod"]).toBe("playwright");
+    expect(r.output).toContain("Bestellübersicht: 3 offene Aufträge, 1 Rücksendung");
+  });
+
+  it("still fails an empty render that has links (emptiness reads the text, not the envelope)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => html("<div id=\"app\"></div>")));
+    mcpConnections.set("playwright", {
+      client: { callTool: browserRendering({ URL: `${SITE}/leer`, body: { innerText: "" }, links: [anchor(`${SITE}/start.html`, "Start")] }).callTool },
+    });
+
+    const r = await webFetch({ url: `${SITE}/leer` }, "s-fetch-links-empty");
+    expect(r.success).toBe(false);
+    expect(r.error).toMatch(/returned no readable text \(HTTP 200, text\/html; charset=utf-8\); the browser rendered the page with no text\./);
+  });
+
+  it("keeps a long page within maxLength: the links take their share from the end of the text", async () => {
+    const prose = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. ".repeat(360);
+    const menu = Array.from({ length: 100 }, (_, i) => `<a href="/artikel/${i + 1}.html">Artikel ${i + 1}</a>`).join(" ");
+    vi.stubGlobal("fetch", vi.fn(async () => html(`<main><p>${prose}</p></main><nav>${menu}</nav>`)));
+
+    const r = await webFetch({ url: `${SITE}/katalog`, maxLength: 8000 }, "s-fetch-links-budget");
+    expect(r.metadata?.["fetchMethod"]).toBe("native");
+    const { header, lines } = sectionOf(r.output);
+    const shown = Number(/^\[Links on this page — (\d+) of 100, same site first; a larger maxLength lists more\]$/.exec(header)?.[1]);
+    expect(shown).toBeGreaterThanOrEqual(10);
+    expect(lines).toHaveLength(shown);
+    const note = /\n\n\[Content truncated at \d+ chars\]/.exec(r.output)?.[0] ?? "";
+    expect(note, "the text was cut").not.toBe("");
+    const content = r.output.slice(`**Content from:** ${SITE}/katalog\n\n`.length);
+    expect(content.length).toBeLessThanOrEqual(8000 + note.length);
+  });
+
+  // The section took at least 15% of maxLength from every page, so a text that fit lost its end
+  // to the links: a 6,980-character article at the default 8000 came back cut at 6854 with its
+  // last paragraph gone, and with a truncation note that invites a re-fetch, one more of the
+  // researcher's 16 web_fetch calls.
+  it("returns a page whose text fits in maxLength whole: its links take only the room the text leaves", async () => {
+    const fact = "Fehlercode E31: Firmware-Prüfsumme fehlerhaft, Firmware über die Werkstatt neu aufspielen lassen.";
+    const article = (length: number) => `${`${PROSE} `.repeat(Math.ceil(length / PROSE.length)).slice(0, length - fact.length - 1)} ${fact}`;
+    // Anchors named by aria-label add no text, so the page's text is exactly the article.
+    const menu = Array.from({ length: 40 }, (_, i) => `<a href="/artikel/${i + 1}.html" aria-label="Artikel ${i + 1}"></a>`).join("");
+    const prefix = `**Content from:** ${SITE}/dokumentation\n\n`;
+
+    const near = article(7_200);
+    vi.stubGlobal("fetch", vi.fn(async () => html(`<nav>${menu}</nav><main><p>${near}</p></main>`)));
+    const r = await webFetch({ url: `${SITE}/dokumentation`, maxLength: 8000 }, "s-fetch-links-fits");
+    expect(r.metadata?.["fetchMethod"]).toBe("native");
+    expect(r.output).not.toContain("[Content truncated");
+    const content = r.output.slice(prefix.length);
+    expect(content.startsWith(`${near}\n\n[Links on this page — `), "the whole text, then the links").toBe(true);
+    const { header, lines } = sectionOf(r.output);
+    expect(lines.length).toBeGreaterThan(0);
+    expect(header).toBe(`[Links on this page — ${lines.length} of 40, same site first; a larger maxLength lists more]`);
+    expect(r.metadata?.["linkCount"]).toBe(lines.length);
+    expect(content.length).toBeLessThanOrEqual(8000);
+
+    // A text that fills maxLength exactly leaves no room for links, and is still not cut.
+    const full = article(8_000);
+    vi.stubGlobal("fetch", vi.fn(async () => html(`<nav>${menu}</nav><main><p>${full}</p></main>`)));
+    const filled = await webFetch({ url: `${SITE}/dokumentation`, maxLength: 8000 }, "s-fetch-links-fills");
+    expect(filled.output.slice(prefix.length)).toBe(full);
+    expect(filled.metadata?.["linkCount"]).toBe(0);
+  });
+
+  // A hash-routed app (Docsify-style docs, Vue or Angular in hash mode) addresses its views as
+  // #/route. With every fragment cleared, each in-app link became the page's own URL and was left
+  // out with it, so the page named its chapters with no URL behind them: the state in which the
+  // researcher guessed paths.
+  it("lists a hash-routed app's views: a #/ fragment is part of the address", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => html(JS_SHELL)));
+    mcpConnections.set("playwright", {
+      client: {
+        callTool: browserRendering({
+          URL: `${SITE}/#/quickstart`,
+          body: { innerText: "Quickstart\n\nInstall the CLI, then run init. Configuration and Plugins are described in their own chapters." },
+          links: [
+            anchor(`${SITE}/#/`, "Home"),
+            anchor(`${SITE}/#/quickstart`, "Quickstart"),
+            anchor(`${SITE}/#/configuration`, "Configuration"),
+            anchor(`${SITE}/#/plugins`, "Plugins"),
+            anchor("https://github.com/example/docs", "GitHub"),
+          ],
+        }).callTool,
+      },
+    });
+
+    const r = await webFetch({ url: `${SITE}/#/quickstart` }, "s-fetch-links-hash-routes");
+    expect(r.metadata?.["fetchMethod"]).toBe("playwright");
+    expect(sectionOf(r.output).lines).toEqual([
+      `- Home -> ${SITE}/#/`,
+      `- Configuration -> ${SITE}/#/configuration`,
+      `- Plugins -> ${SITE}/#/plugins`,
+      "- GitHub -> https://github.com/example/docs",
+    ]);
+  });
+
+  // A JS page can move client-side after it loads (/konto to a sign-in page, often on another
+  // host). The links listed are the page the browser ended on: its own address is left out, and
+  // "same site" is its site. Every browser test before these ended on the URL requested, so
+  // listing against the requested URL failed none of them.
+  it("reads a rendered page's links against the URL the browser ended on", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => html(JS_SHELL)));
+    mcpConnections.set("playwright", {
+      client: {
+        callTool: browserRendering({
+          URL: "https://login.example.org/anmelden",
+          body: { innerText: "Anmelden\n\nBitte melden Sie sich mit Ihrem Kundenkonto an." },
+          links: [
+            anchor(`${SITE}/index.html`, "Zurück zum Shop"),
+            anchor("https://login.example.org/anmelden", "Anmelden"),
+            anchor("https://login.example.org/passwort", "Passwort vergessen"),
+          ],
+        }).callTool,
+      },
+    });
+
+    const r = await webFetch({ url: `${SITE}/konto` }, "s-fetch-links-landing");
+    expect(r.metadata?.["fetchMethod"]).toBe("playwright");
+    expect(sectionOf(r.output).lines).toEqual([
+      "- Passwort vergessen -> https://login.example.org/passwort",
+      `- Zurück zum Shop -> ${SITE}/index.html`,
+    ]);
+  });
+
+  it("reads the snapshot fallback's links against its Page URL, not the URL requested", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => html(JS_SHELL)));
+    const snapshot = [
+      "### Page",
+      "- Page URL: https://login.example.org/anmelden",
+      "- Page Title: Anmelden",
+      "### Snapshot",
+      "```yaml",
+      "- main [ref=e1]:",
+      "  - heading \"Anmelden\" [level=1] [ref=e2]",
+      "  - paragraph [ref=e3]:",
+      "    - text: Bitte melden Sie sich mit Ihrem Kundenkonto an.",
+      "  - link \"Zurück zum Shop\" [ref=e4] [cursor=pointer]:",
+      `    - /url: ${SITE}/index.html`,
+      "  - link \"Anmelden\" [ref=e5] [cursor=pointer]:",
+      "    - /url: /anmelden",
+      "  - link \"Passwort vergessen\" [ref=e6] [cursor=pointer]:",
+      "    - /url: /passwort",
+      "```",
+    ].join("\n");
+    mcpConnections.set("playwright", {
+      client: {
+        callTool: vi.fn(async (input: { name: string }) => {
+          if (input.name === "browser_evaluate") return { content: [{ type: "text", text: "evaluate unavailable" }], isError: true };
+          if (input.name === "browser_snapshot") return { content: [{ type: "text", text: snapshot }] };
+          return { content: [{ type: "text", text: "" }] };
+        }),
+      },
+    });
+
+    const r = await webFetch({ url: `${SITE}/konto` }, "s-fetch-links-snapshot-landing");
+    expect(r.metadata?.["fetchMethod"]).toBe("playwright");
+    expect(sectionOf(r.output).lines).toEqual([
+      "- Passwort vergessen -> https://login.example.org/passwort",
+      `- Zurück zum Shop -> ${SITE}/index.html`,
+    ]);
+  });
+
+  // chrome-error://chromewebdata/ is no page's address: as the page URL it would list the page's
+  // own link and group no link as same site.
+  it("lets the requested URL stand in for a page URL that is not http(s), such as a browser error page's", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => html(JS_SHELL)));
+    mcpConnections.set("playwright", {
+      client: {
+        callTool: browserRendering({
+          URL: "chrome-error://chromewebdata/",
+          body: { innerText: "Diese Seite ist nicht erreichbar.\n\nDie Verbindung wurde unterbrochen." },
+          links: [
+            anchor("https://partner.example/", "Partnershop"),
+            anchor(`${SITE}/konto`, "Konto"),
+            anchor(`${SITE}/hilfe.html`, "Hilfe"),
+          ],
+        }).callTool,
+      },
+    });
+
+    const r = await webFetch({ url: `${SITE}/konto` }, "s-fetch-links-error-page");
+    expect(r.metadata?.["fetchMethod"]).toBe("playwright");
+    expect(sectionOf(r.output).lines).toEqual([
+      `- Hilfe -> ${SITE}/hilfe.html`,
+      "- Partnershop -> https://partner.example/",
+    ]);
   });
 });
