@@ -226,7 +226,7 @@ Every public schema field, where it is declared, and how many production files r
 | `keywords` | packages/core/src/config/schemas/multimodal.ts:237 | 28 |
 | `kubeconfigPath` | packages/core/src/config/schema.ts:1069 | 1 |
 | `kubectlBinary` | packages/core/src/config/schema.ts:1067 | 1 |
-| `label` | packages/core/src/config/schema.ts:249 | 141 |
+| `label` | packages/core/src/config/schema.ts:249 | 142 |
 | `labeledAt` | packages/core/src/config/schema.ts:903 | 1 |
 | `labeledBy` | packages/core/src/config/schema.ts:902 | 1 |
 | `language` | packages/core/src/config/schemas/multimodal.ts:236 | 94 |

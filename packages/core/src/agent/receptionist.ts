@@ -348,6 +348,9 @@ export function parseReceptionistConfidence(raw: string): { confident: boolean; 
   return { confident: marker[1]!.toLowerCase() === "high" && answer.length > 0, answer };
 }
 
+/** Longest capsule line: one fact never takes the whole capsule. */
+const CAPSULE_LINE_MAX = 160;
+
 /**
  * Compressed memory capsule — durable decisions + preferences only, capped hard.
  * The "compressed memory" the front desk gets instead of the full per-turn
@@ -368,13 +371,27 @@ export function buildMemoryCapsule(workspacePath: string, maxChars = 400): strin
     // favourite tea), and a capsule of bare values could not answer the question it was stored for.
     const content = singleLine(record.content);
     const subject = singleLine(record.subject ?? "");
-    const fact = subject && !content.toLowerCase().includes(subject.toLowerCase()) ? `${subject}: ${content}` : content;
-    const line = `- ${fact}`.slice(0, 160);
+    // The value has the line first; the subject gets the room it leaves ("- " and ": " aside). The
+    // line was cut after the subject was prepended, and a subject has no length cap of its own
+    // (memory_promote copies an outcome's task text): a 154-character one left "… live tracking: Us"
+    // and no value.
+    const label = subject && !content.toLowerCase().includes(subject.toLowerCase())
+      ? fitCapsuleLabel(subject, CAPSULE_LINE_MAX - 4 - content.length)
+      : "";
+    const line = `- ${label ? `${label}: ` : ""}${content}`.slice(0, CAPSULE_LINE_MAX);
     if (used + line.length + 1 > maxChars) break;
     lines.push(line);
     used += line.length + 1;
   }
   return lines.join("\n");
+}
+
+/** A subject in at most `room` characters: whole, cut after a word with "…", or left out when not
+ *  even its first word fits. */
+function fitCapsuleLabel(subject: string, room: number): string {
+  if (subject.length <= room) return subject;
+  const cut = subject.slice(0, Math.max(0, room)).lastIndexOf(" ");
+  return cut > 0 ? `${subject.slice(0, cut)}…` : "";
 }
 
 export interface FastLaneOutcome {

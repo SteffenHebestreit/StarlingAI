@@ -235,4 +235,34 @@ describe("receptionist — memory capsule", () => {
     // A content that already names its subject is not prefixed twice.
     expect(capsule).toContain("- Editor of choice is Helix.");
   });
+
+  it("keeps the whole value when the subject is long, and shortens the subject instead", () => {
+    // A subject has no length cap (memory_promote copies an outcome's task text), and the line was
+    // cut after the subject was prepended: this one left "… and live tracking: Us" and no value.
+    const ws = mkdtempSync(join(tmpdir(), "recept-mem-"));
+    dirs.push(ws);
+    const value = "Use Kurierdienst Nord: 39 EUR, insured to 500 EUR, cut-off 14:00.";
+    storeWorkspaceMemoryRecord(ws, {
+      key: "courier_choice",
+      subject: "Research the three cheapest same-day courier options from Hamburg Altona to Lübeck for a 4 kg parcel with insurance, pickup before noon, and live tracking",
+      content: value,
+      kind: "decision",
+    });
+
+    const line = buildMemoryCapsule(ws, 600);
+    expect(line).toContain(`…: ${value}`);
+    expect(line.startsWith("- Research the three cheapest same-day courier options")).toBe(true);
+    expect(line.length).toBeLessThanOrEqual(160);
+  });
+
+  it("leaves the subject out when the value fills the line", () => {
+    // A value that fills the line on its own is shown the way it was before subjects were added: cut
+    // at the line cap, so the room goes to the value rather than to its label.
+    const ws = mkdtempSync(join(tmpdir(), "recept-mem-"));
+    dirs.push(ws);
+    const value = `Ship every parcel with Kurierdienst Nord ${"and keep the insurance receipt ".repeat(5)}`.trim();
+    storeWorkspaceMemoryRecord(ws, { key: "courier_rule", subject: "Courier rule", content: value, kind: "decision" });
+
+    expect(buildMemoryCapsule(ws, 600)).toBe(`- ${value}`.slice(0, 160));
+  });
 });
