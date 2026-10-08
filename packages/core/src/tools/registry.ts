@@ -254,6 +254,22 @@ export interface ToolContext {
    */
   turnUserWords?: TurnUserWords;
   /**
+   * The up-front judge's verdict that answering this turn needs outside facts
+   * (orchestration.upfrontSourceSensitiveClassifier), set by the runtime on the orchestrator's own
+   * turn only — never on a workflow step (nested, or a queued scene or job on the scene worker), a
+   * directed (`--agent`) turn or a specialist's context.
+   * One object per turn, shared by reference with every context spread from the orchestrator's.
+   * `outsideEngaged` names the first agent this turn that can reach outside the workspace — one
+   * dispatched or redirected to, an ephemeral agent, or a workflow run (`workflow:<name>`); once
+   * it is set the research gate's turn trigger stays off.
+   */
+  turnEvidence?: { required: true; outsideEngaged?: string };
+  /**
+   * Internal: this delegation is a member of a plan / parallel batch / task graph and is not that
+   * batch's evidence gather point, so the research gate's turn trigger does not apply to it.
+   */
+  _turnGatherExempt?: boolean;
+  /**
    * Abort signal from the parent turn — propagated to sub-agent delegations.
    * When aborted, delegation loops exit early and return a cancellation error.
    */

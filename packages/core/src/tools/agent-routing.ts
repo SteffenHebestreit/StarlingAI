@@ -16,6 +16,7 @@ import { readPromotedAgents } from "../agent/promoted-agents.js";
 import { readRecentOutcomes, computeAgentCostProfile, computeOutcomeRoutingMultiplier, extractTaskKeywords, type AgentCostProfile } from "../agent/outcomes.js";
 import { rerankCandidates } from "../retrieval/reranker.js";
 import { logAudit } from "../audit/logger.js";
+import { resolveRoutingTaxonomy, type TaxonomyBearing } from "../agent/routing-taxonomy.js";
 
 /**
  * Minimum score for a candidate to qualify when semantic embeddings are
@@ -786,12 +787,16 @@ const SEARCH_ONLINE_TASK_RE = /\b(search online|search the web|web search|look (
 // present, and a workspace/code marker (function, file, symbol, codebase) vetoes it so
 // internal "find/search" tasks (code_analyst's territory) are never misrouted.
 //
-// English-internal (de-lexicalized): these carry no per-language entries. The structural
-// "SOURCE-SENSITIVE DELEGATION" marker (checked first in the function below) stays the PRIMARY
-// signal and is language-independent, so it still fires for any language; this verb+noun shape
-// is the English-only fallback. NOTE: the boundary-translation layer that would render a
-// non-English task to English before this fallback is NOT YET IMPLEMENTED — until it lands, a
-// non-English task relies on the structural marker alone (the verb+noun fallback won't fire).
+// English-internal (de-lexicalized): these carry no per-language entries, so this shape fires for
+// English task text only. The structural "SOURCE-SENSITIVE DELEGATION" marker checked first in the
+// function below is language-independent, but nothing puts it on the orchestrator's own
+// delegations any more: its injector needs the sourceSensitive guidance flag the de-lex hard-wired
+// off, and the boundary translation that would hand this shape English is off by default
+// (orchestration.normalizeDelegationToEnglish). A plan step written in German therefore never
+// matched here, and web_coder ran a "die Website … abrufen" step it cannot do (E2E 2026-10-07,
+// 2f31f387). A non-English research step now reaches the research gate through its TURN TRIGGER
+// (executeDelegationWithFallback in tools/sub-agent.ts): the up-front judge's verdict and the named
+// agent's routing taxonomy, no words at all.
 const WEB_RESEARCH_VERB_RE = /\b(?:research|investigat\w+|searche?s?|find|look\s*up|gather|compare|recommend)\b/i;
 // External web nouns now also cover PRODUCT/MODEL/TOOL SELECTION research — "find the
 // best image MODEL", "compare GPUs", "research the top framework". The field of real
@@ -804,12 +809,12 @@ const EXTERNAL_WEB_NOUN_RE = /\b(?:url|urls|link|links|website|websites|online|p
 const WORKSPACE_CODE_MARKER_RE = /\b(?:codebase|workspace|repository|repo|source\s*code|functions?|methods?|files?|symbols?|class(?:es)?|modules?)\b/i;
 
 /**
- * Whether a delegation task requires fresh external evidence. The authoritative
- * signal is the runtime-injected "SOURCE-SENSITIVE DELEGATION" wrapper (the
- * orchestrator adds it when the turn was classified source-sensitive); we also
- * catch explicit "search online / validate" phrasing and the vetted research
- * patterns. When true, the chosen agent MUST be research-capable — this is a
- * correctness invariant, not a routing preference.
+ * Whether a delegation task requires fresh external evidence, read from the task's text: the
+ * "SOURCE-SENSITIVE DELEGATION" wrapper (rarely injected since the de-lex — see the note above),
+ * explicit "search online / validate" phrasing and the vetted research patterns. When true, the
+ * chosen agent MUST be research-capable — this is a correctness invariant, not a routing
+ * preference. The research gate has a second, language-independent trigger that does not read
+ * the text (the turn trigger in executeDelegationWithFallback).
  */
 export function taskRequiresExternalResearch(task: string): boolean {
   const t = task ?? "";
@@ -827,15 +832,77 @@ export function taskRequiresExternalResearch(task: string): boolean {
 
 /** First configured, research-capable, not-yet-attempted coordinator/specialist
  *  to fall back to when routing produced only research-incapable candidates. */
-export function pickResearchFallbackAgent(attempted: string[]): string | undefined {
+export function pickResearchFallbackAgent(attempted: string[], canDispatch?: (name: string) => boolean): string | undefined {
   const config = getConfig();
   const promoted = readPromotedAgents(config.workspacePath);
   // Prefer the direct web specialist over a coordinator: a single research task
   // does not need a coordinator-of-coordinator hop (the ~20-min web_task_coordinator
   // → researcher loop, session 44ea5c21). Coordinators are the last resort.
   return ["researcher", "browser_agent", "web_task_coordinator", "mission_coordinator"].find(
-    (name) => (config.subAgents[name] || promoted[name]) && agentIsResearchCapable(name) && !attempted.includes(name),
+    (name) => (config.subAgents[name] || promoted[name]) && agentIsResearchCapable(name) && !attempted.includes(name)
+      && (!canDispatch || canDispatch(name)),
   );
+}
+
+type CapabilityBearing = (TaxonomyBearing & { tools?: string[] }) | undefined;
+
+/** Surfaces of the routing taxonomy that stay inside the deployment. Every other surface — the
+ *  open network, a browser, a desktop host, remote infrastructure, the user's own channels — reaches
+ *  a source outside the workspace. */
+const WORKSPACE_SURFACES: ReadonlySet<string> = new Set(["workspace", "local_sandbox", "swarm_internal"]);
+
+/**
+ * Whether an agent can reach anything outside the workspace: it can gather or delegate (the
+ * research gate's own veto, agentCfgIsResearchCapable), or its routing taxonomy names a surface
+ * outside the workspace — a mailbox, a calendar, a desktop, remote infrastructure. Read from the
+ * taxonomy rather than from tool names, because that is where the catalog already records it
+ * (`surface` is derived from the tool list and linted for staleness). An agent with no taxonomy,
+ * or an empty surface list, is treated as reaching out: the turn trigger never touches what it
+ * cannot classify.
+ */
+export function agentCfgReachesOutsideWorkspace(cfg: CapabilityBearing): boolean {
+  if (!cfg || agentCfgIsResearchCapable(cfg)) return true;
+  // A promoted agent is read from its JSON file without the schema's defaults, so a hand-written
+  // routing block can lack `surface` altogether: unclassifiable, not a crash on the delegation path.
+  const surfaces = resolveRoutingTaxonomy(cfg)?.surface ?? [];
+  if (surfaces.length === 0) return true;
+  return surfaces.some((surface) => !WORKSPACE_SURFACES.has(surface));
+}
+
+/**
+ * Whether an agent works only from the text it is handed: confined to the workspace, and its
+ * taxonomy's input is text alone. A builder, writer or generator (web_coder, content_writer,
+ * image_creator). An agent that reads a codebase, an uploaded file or a data table has a source of
+ * its own and is not this — its step may well be about that source.
+ */
+export function agentCfgWorksOnlyFromHandedText(cfg: CapabilityBearing): boolean {
+  if (agentCfgReachesOutsideWorkspace(cfg)) return false;
+  const inputs = resolveRoutingTaxonomy(cfg)?.inputModality ?? [];
+  return inputs.length > 0 && inputs.every((input) => input === "text" || input === "none");
+}
+
+/**
+ * The member of a batch of delegations — a plan's delegate steps, parallel slices, task-graph
+ * nodes — that may become the turn's evidence gather point when the turn needs outside facts: the
+ * first one, in the order given, naming an agent that works only from handed text. -1 when any member
+ * could reach outside the workspace itself (it names such an agent, names none, or names an
+ * unknown one): the batch has then already decided where its evidence comes from, and every member
+ * keeps the agent it names. The order given has to be the order the members run in: a plan and a
+ * task graph run by their dependsOn edges, so they ask once for the whole batch (is there a gather
+ * point at all) and then again for each round they dispatch, which picks the first one that runs.
+ */
+export function evidenceGatherPoint(
+  agentNames: ReadonlyArray<string | undefined>,
+  lookup: (name: string) => CapabilityBearing,
+): number {
+  if (agentNames.some((name) => !name || agentCfgReachesOutsideWorkspace(lookup(name)))) return -1;
+  return agentNames.findIndex((name) => agentCfgWorksOnlyFromHandedText(lookup(name!)));
+}
+
+/** Config-backed lookup for the two predicates above (configured or promoted agent). */
+export function lookupAgentCapabilities(name: string): CapabilityBearing {
+  const config = getConfig();
+  return config.subAgents[name] ?? readPromotedAgents(config.workspacePath)[name];
 }
 
 /**

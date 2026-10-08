@@ -257,7 +257,7 @@ import { applyTerminalResponseGuards, type TerminalGuardContext } from "./turn-f
 import { finalizeSuccessfulTurn } from "./turn-success-finalize.js";
 import { buildTurnQualityScorecard, createTurnQualitySignals, type ArtifactProbeStatus } from "./turn-scorecard.js";
 // Turn-setup spans lifted out of runTurnImpl (god-file seam).
-import { lookupTrajectoryInjection, computeTurnEnforcementSignals, startDiscoveryPrefetch } from "./turn-setup.js";
+import { lookupTrajectoryInjection, computeTurnEnforcementSignals, startDiscoveryPrefetch, turnEvidenceRequirement } from "./turn-setup.js";
 
 // D5 delegation-wait budget math (shared with the gateway hard-timeout layer; kept out of this
 // heavily-mocked module so gateway/rpc.ts can import it without going through runtime.js).
@@ -2077,6 +2077,15 @@ async function _runTurn(
 
   const carriedSwarmTasks = loadPreviousTurnSwarmTasks(session.getHistory());
   const carriedSwarmTaskFingerprint = stableSerialize(carriedSwarmTasks);
+  // The judge's verdict, for the delegations this turn makes (the research gate's turn trigger in
+  // tools/sub-agent.ts). Undefined on every turn the judge did not flag, and then the context
+  // carries no field at all.
+  const turnEvidence = turnEvidenceRequirement({
+    upfrontSourceSensitive,
+    channel: session.channel,
+    workflowDepth: opts._workflowExecutionStack?.length ?? 0,
+    ...(opts.directiveAgent ? { directiveAgent: opts.directiveAgent } : {}),
+  });
   const toolContext: ToolContext = {
     sessionId: session.id,
     workspacePath: session.getWorkspacePath(),
@@ -2116,6 +2125,7 @@ async function _runTurn(
     // Always an object, even when no entry point supplied the opening words (a scene template):
     // mid-turn steering is typed by a person on every surface, and is pushed in below.
     turnUserWords: { opening: opts.userWords ?? "", midTurn: [] },
+    ...(turnEvidence ? { turnEvidence } : {}),
     swarmState: {
       objective: userMessage,
       startedAt: new Date().toISOString(),

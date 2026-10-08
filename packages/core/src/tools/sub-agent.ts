@@ -38,6 +38,10 @@ import {
   agentCfgIsMetaFactory,
   agentIsMetaFactory,
   pickResearchFallbackAgent,
+  agentCfgReachesOutsideWorkspace,
+  agentCfgWorksOnlyFromHandedText,
+  evidenceGatherPoint,
+  lookupAgentCapabilities,
   filterCandidatesByExecutionCapability,
   explicitAgentsCoverTaskExecution,
   countRoutingQueryContentTokens,
@@ -298,6 +302,26 @@ export function withDelegationFanoutAllowance(ctx: ToolContext, agentNames: Arra
     _turnAgentRepeatLimitOverrides: repeatOverrides,
     _turnTotalDelegationLimitOverride: nextTotalLimit,
   };
+}
+
+/**
+ * The context one member of a batch (plan step, parallel slice, graph node) is dispatched with.
+ * The batch's evidence gather point keeps the caller's context; every other member is exempt from
+ * the research gate's turn trigger, so it runs on the agent it names. Only on a turn that carries
+ * an evidence requirement — anywhere else the caller's context comes back untouched. The per-turn
+ * counters are created on the caller's context before the copy, so the copy shares them rather
+ * than starting its own.
+ */
+export function withTurnGatherRole(ctx: ToolContext, isGatherPoint: boolean): ToolContext {
+  if (ctx.turnEvidence?.required !== true || isGatherPoint || ctx._turnGatherExempt === true) return ctx;
+  if (!ctx._turnAgentCounts) ctx._turnAgentCounts = new Map();
+  if (!ctx._turnLoopRuns) ctx._turnLoopRuns = [];
+  return { ...ctx, _turnGatherExempt: true };
+}
+
+/** Index of a batch's evidence gather point among its members' agent names, in the order they run, or -1 (see agent-routing). */
+export function batchEvidenceGatherPoint(ctx: ToolContext, agentNames: ReadonlyArray<string | undefined>): number {
+  return ctx.turnEvidence?.required === true ? evidenceGatherPoint(agentNames, lookupAgentCapabilities) : -1;
 }
 
 function getEphemeralGenerationSettings() {
@@ -1184,6 +1208,13 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   // agent so a generator never runs a research task. Closes the loop the
   // routing/bidding gates opened. Only redirects when a capable fallback exists.
   //
+  // TWO TRIGGERS arm it: the task's own text (taskRequiresExternalResearch, English-only
+  // since the de-lex) and, on a turn the up-front judge said needs outside facts, the TURN
+  // TRIGGER below, which reads no words and so also catches a step written in German.
+  // Everything after the trigger — the render exemption, explicitCoversExecution, the
+  // capable filter and the fallback pick — is the same block for both; only the turn trigger
+  // restricts the fallback to an agent this turn can still dispatch.
+  //
   // EXCEPTION — RENDER/ARTIFACT delegations: writing the deck / creating the file /
   // generating the site from already-gathered shared facts is NOT a gather task, even
   // when the brief is full of source-sensitive wording ("use the verified URLs", "cite
@@ -1204,9 +1235,32 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   const renderCfgPromoted = readPromotedAgents(renderCfgConfig.workspacePath);
   // Pure over the (constant-here) task text — compute once and reuse across the render/redirect
   // block instead of re-running the regex classifier three times on the delegation hot path.
-  const requiresExternalResearch = taskRequiresExternalResearch(request.task);
+  const textRequiresResearch = taskRequiresExternalResearch(request.task);
+  // THE TURN TRIGGER — the same redirect, armed by structure instead of by the task's words.
+  // The word shape above is English-only, so a plan written in German sailed past it: a step
+  // naming web_coder to "die Website … abrufen" ran on web_coder, which cannot read a page, and the
+  // turn answered "not available" (E2E 2026-10-07, sessions 2f31f387 / 9ddd881f / f4fdf38e; the
+  // English twin dee3be85 was redirected only because its OBJECTIVE said "Find … website"). The
+  // signals here are the up-front judge's verdict (an LLM, any language), the named agents' routing
+  // taxonomy, and what this turn has engaged so far. It arms only when every condition holds:
+  //  - the judge said this turn needs outside facts (ctx.turnEvidence, orchestrator turns only),
+  //  - nothing this turn has reached outside the workspace yet (no such agent dispatched or
+  //    redirected to, no workflow or ephemeral agent run — ctx.turnEvidence.outsideEngaged), and
+  //    this delegation is its plan's / batch's gather point,
+  //  - every agent it names works only from the text it is handed (no outside surface, no source of
+  //    its own) — a mailbox, desktop, database or remote-infra agent always keeps its step,
+  //  - and, read below, the session holds no shared facts yet: once evidence exists a builder is
+  //    rendering it, which is the render exemption's own precondition.
+  // It redirects at most once per turn, only to an agent this turn may still dispatch, and leaves
+  // every other choice the model made exactly as it was.
+  const turnTriggerCandidate = ctx.turnEvidence?.required === true
+    && !ctx.turnEvidence.outsideEngaged
+    && ctx._turnGatherExempt !== true
+    && explicitAgentRequested
+    && candidateQueue.length > 0
+    && candidateQueue.every((name) => agentCfgWorksOnlyFromHandedText(renderCfgConfig.subAgents[name] ?? renderCfgPromoted[name]));
   let renderHasGatheredFacts = true;
-  if (requiresExternalResearch) {
+  if (textRequiresResearch || turnTriggerCandidate) {
     try {
       const facts = await readAllFacts(deriveSharedSessionId(ctx.sessionId));
       renderHasGatheredFacts = Object.keys(facts).length > 0;
@@ -1214,6 +1268,10 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       renderHasGatheredFacts = false;
     }
   }
+  // Re-read after the await: a sibling of this delegation may have taken the turn's one redirect.
+  const turnTriggered = turnTriggerCandidate && !renderHasGatheredFacts && !ctx.turnEvidence?.outsideEngaged;
+  const requiresExternalResearch = textRequiresResearch || turnTriggered;
+  const researchTrigger = textRequiresResearch ? "task_text" : "turn_evidence";
   const isArtifactRenderDelegation = renderHasGatheredFacts
     && candidateQueue.length > 0
     && candidateQueue.every((name) =>
@@ -1241,11 +1299,21 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   if (!isArtifactRenderDelegation && !explicitCoversExecution && requiresExternalResearch && candidateQueue.length > 0) {
     const capable = candidateQueue.filter((name) => agentIsResearchCapable(name));
     if (capable.length === 0) {
-      const fallback = pickResearchFallbackAgent(attemptedAgents);
+      // The turn trigger never dead-ends: an explicit request does not fall back to routing, so a
+      // redirect to an agent the attempt loop would skip — outside this turn's allowedAgents, or at
+      // its per-turn cap — would leave the step with nobody. Then the named agent keeps it.
+      const fallback = pickResearchFallbackAgent(
+        attemptedAgents,
+        textRequiresResearch
+          ? undefined
+          : (name) => (!ctx.allowedAgents || ctx.allowedAgents.includes(name))
+            && (ctx._turnAgentCounts?.get(name) ?? 0) < getPerAgentDelegationLimit(ctx, name),
+      );
       logAudit("delegation_explicit_redirected_research_incapable", {
         taskTitle: title,
         requestedAgents: candidateQueue,
         redirectedTo: fallback ?? null,
+        trigger: researchTrigger,
       }, { sessionId: ctx.sessionId });
       if (fallback) {
         routingCandidateMap.set(fallback, {
@@ -1272,7 +1340,14 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       gathersDirectly: candidateQueue[0] ? agentGathersDirectly(candidateQueue[0]) : null,
       narrowed: capable.length > 0 && capable.length < candidateQueue.length,
       explicitAgentRequested,
+      trigger: researchTrigger,
     }, { sessionId: ctx.sessionId });
+  }
+  // Claimed here, synchronously after the decision, so a sibling resuming from its own fact read
+  // sees it (the re-read above): the turn's outside source is now engaged.
+  if (ctx.turnEvidence && !ctx.turnEvidence.outsideEngaged && candidateQueue[0]
+    && agentCfgReachesOutsideWorkspace(renderCfgConfig.subAgents[candidateQueue[0]] ?? renderCfgPromoted[candidateQueue[0]])) {
+    ctx.turnEvidence.outsideEngaged = candidateQueue[0];
   }
 
   while (true) {
@@ -1847,6 +1922,10 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
     try {
     ctx._turnAgentCounts.set(candidate, prevCalls + 1);
     attemptedAgents.push(candidate);
+    // A routed or bid pick that reaches outside the workspace engages the turn's outside source too.
+    if (ctx.turnEvidence && !ctx.turnEvidence.outsideEngaged && agentCfgReachesOutsideWorkspace(agentCfg)) {
+      ctx.turnEvidence.outsideEngaged = candidate;
+    }
 
     const startedAt = new Date().toISOString();
     taskState.status = "running";
@@ -2878,6 +2957,12 @@ registerTool({
     publishSwarmState(ctx);
 
     const delegatedCtx = withDelegationFanoutAllowance(ctx, rawNodes.map((node) => node.agentName), rawNodes.length);
+    // Same rule as execute_plan's steps: none when any node can reach outside the workspace, and
+    // otherwise at most one node may be redirected — the first node working from handed text that
+    // the graph STARTS, picked as its wave starts below. The graph runs by its dependsOn edges, so
+    // the node listed first can start last, after a node that ran without the evidence.
+    const graphMayGather = batchEvidenceGatherPoint(ctx, rawNodes.map((node) => node.agentName)) >= 0;
+    let gatherNodeId: string | undefined;
 
     const remaining = new Map(rawNodes.map((node) => [node.id, node]));
     const completed = new Set<string>();
@@ -3022,6 +3107,10 @@ registerTool({
 
     const startReadyNodes = () => {
       const ready = [...remaining.values()].filter((node) => (node.dependsOn ?? []).every((dep) => completed.has(dep)));
+      if (graphMayGather && gatherNodeId === undefined) {
+        const index = batchEvidenceGatherPoint(ctx, ready.map((node) => node.agentName));
+        if (index >= 0) gatherNodeId = ready[index]!.id;
+      }
 
       for (const node of ready) {
         remaining.delete(node.id);
@@ -3055,7 +3144,7 @@ registerTool({
           taskId: node.id,
           taskTitle: node.title,
           dependsOn: node.dependsOn,
-        }, delegatedCtx)).then((result) => ({ node, result })));
+        }, withTurnGatherRole(delegatedCtx, node.id === gatherNodeId))).then((result) => ({ node, result })));
       }
     };
 
@@ -4219,6 +4308,9 @@ registerTool({
       ? new SiblingWriteGroup("parallel_delegate", ctx.workspacePath)
       : null;
 
+    // On a turn that needs outside facts, at most the first slice that works from handed text may be
+    // redirected to gather them, and none when another slice can reach outside itself.
+    const gatherSlice = batchEvidenceGatherPoint(ctx, dispatchTasks.map((taskSpec) => taskSpec.agentName));
     const runSlice = (taskSpec: typeof dispatchTasks[number], index: number, ctxOverride: ToolContext) =>
       runAsWriteSibling(
         writeGroup,
@@ -4232,7 +4324,7 @@ registerTool({
           // Auto-allocated parallel id — let a later round reuse an earlier same-signature
           // slice's evidence instead of re-researching it.
           allowSignatureReuse: true,
-        }, ctxOverride),
+        }, withTurnGatherRole(ctxOverride, index === gatherSlice)),
       );
 
     // QUORUM EARLY-SYNTHESIS (orchestration.quorumEarlySynthesis, default-off): return as

@@ -67,9 +67,11 @@ describe("research capability gate", () => {
 
   it("flags general web-research tasks that lack the SOURCE-SENSITIVE marker (audit 3ef67aef)", () => {
     // The exact shape that was fabricated by a web-incapable agent: a research/search
-    // verb + external web nouns (URL, price, platforms, providers). De-lex: the gate is
-    // English-internal — a non-English delegation task is boundary-translated first, so
-    // these are the English (translated) equivalents of the original German 3ef67aef case.
+    // verb + external web nouns (URL, price, platforms, providers). De-lex: this shape is
+    // English-only, so these are English equivalents of the original German 3ef67aef case.
+    // Nothing translates a German task first (orchestration.normalizeDelegationToEnglish is
+    // off by default); a German research step reaches the gate through its turn trigger
+    // instead, which plan-step-evidence-gate.test.ts covers.
     expect(taskRequiresExternalResearch(
       "Research the best available learning sources and platforms for the iSAQB CPSA-F exam. Search for providers. For each source give: name, URL, price.",
     )).toBe(true);

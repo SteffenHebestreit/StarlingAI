@@ -1465,6 +1465,135 @@ registerTool({
   },
 });
 
+/**
+ * What run_workflow runs for a reference: the scene or job it resolves to, or the answer it gives
+ * instead of running anything — an ambiguous or unknown name, a workflow already running in this
+ * execution stack, a job naming scenes the config lacks. Both callers read it here, so what
+ * execute_plan predicts about a plan's reuse step (workflowReferenceRuns) is what run_workflow does.
+ */
+function selectWorkflowToRun(
+  name: string,
+  workflowType: WorkflowType | "auto",
+  ctx: ToolContext,
+): { scene: SceneSummary | null; job: JobSummary | null; refusal?: undefined } | { refusal: ToolResult } {
+  const { scene, job, ambiguousMatches, suggestedMatches } = resolveWorkflowReference(name, workflowType);
+
+  if (workflowType === "auto" && scene && job) {
+    return {
+      refusal: {
+        success: false,
+        output: "",
+        error: `Workflow name '${name}' is ambiguous. Specify workflowType='scene' or workflowType='job'.`,
+        metadata: {
+          workflowMatches: buildWorkflowMatchMetadata(rankWorkflowReferenceCandidates(name, workflowType)),
+        },
+      },
+    };
+  }
+
+  if (!scene && !job) {
+    if (ambiguousMatches && ambiguousMatches.length > 1) {
+      const workflowMatches = buildWorkflowMatchMetadata(
+        (suggestedMatches ?? []).filter((candidate) => ambiguousMatches.some((entry) => (
+          entry.name === candidate.entry.name && entry.workflowType === candidate.entry.workflowType
+        ))),
+      );
+      return {
+        refusal: {
+          success: false,
+          output: "",
+          error: `Workflow name '${name}' is ambiguous. Matching workflows: ${ambiguousMatches.map((entry) => `${entry.name} [${entry.workflowType}]`).join(", ")}.`,
+          metadata: workflowMatches.length > 0 ? { workflowMatches } : undefined,
+        },
+      };
+    }
+
+    const workflowMatches = buildWorkflowMatchMetadata(suggestedMatches ?? []);
+    // GRACEFUL, NOT AN ERROR (user directive: "not finding a workflow should not lead
+    // to an error"). A missing workflow is a routing miss, not a system failure —
+    // returning success:false tripped the whole failure cascade (tool_call_failed, the
+    // stop/new-session intervention, [DELEGATION FAILED], warden failure count) and on
+    // the slow local model that pushed it to fabricate a full answer instead of routing
+    // on (audit bd3d60dc). Return SUCCESS with routing guidance so the model simply
+    // delegates; the runtime keys on workflowNotFound to skip the "completed" framing.
+    const closest = workflowMatches.length > 0
+      ? ` Closest saved workflows: ${workflowMatches.map((match) => `${match.name} [${match.workflowType}]`).join(", ")}.`
+      : "";
+    return {
+      refusal: {
+        success: true,
+        output: `No saved workflow matches "${name}" — this is NOT an error, there is simply no reusable workflow for this request.${closest} Do NOT invent another workflow name or call run_workflow again. If one of the listed workflows CLEARLY matches the request, run that exact name; otherwise delegate to mission_coordinator (or answer the user directly).`,
+        metadata: { workflowNotFound: true, ...(workflowMatches.length > 0 ? { workflowMatches } : {}) },
+      },
+    };
+  }
+
+  const selectedWorkflowType = scene ? "scene" : "job";
+  const selectedWorkflowName = scene?.name ?? job!.name;
+  const selectedWorkflowKey = buildWorkflowExecutionKey(selectedWorkflowName, selectedWorkflowType);
+  if (ctx._workflowExecutionStack?.includes(selectedWorkflowKey)) {
+    const error = `Workflow ${selectedWorkflowName} [${selectedWorkflowType}] is already running in this execution stack. Do not re-enter the same workflow from inside itself.`;
+    return {
+      refusal: {
+        success: false,
+        output: error,
+        error,
+        metadata: {
+          workflowName: selectedWorkflowName,
+          workflowType: selectedWorkflowType,
+          blocked: true,
+          recursiveWorkflow: true,
+        },
+      },
+    };
+  }
+
+  // Pre-validate that every scene referenced by the resolved job actually
+  // exists.  resolveJobSteps throws "Job step references unknown scene: X"
+  // when a scene is missing — without this guard, the throw bubbles up the
+  // tool dispatcher and (until the executeTool try/catch was added) killed
+  // the turn silently with no tool_call_failed event.  Surface the missing
+  // names directly so the user knows which scenes to add to scenes: {}.
+  if (job) {
+    const missingScenes = job.steps
+      .map((step) => step.scene)
+      .filter((sceneName, index, arr) => arr.indexOf(sceneName) === index)
+      .filter((sceneName) => !getScene(sceneName));
+    if (missingScenes.length > 0) {
+      return {
+        refusal: {
+          success: false,
+          output: "",
+          error:
+            `Workflow '${job.name}' [job] references ${missingScenes.length === 1 ? "a scene" : "scenes"} that ${missingScenes.length === 1 ? "is" : "are"} not defined in the current config: ${missingScenes.map((s) => `'${s}'`).join(", ")}. `
+            + "Add the missing scene(s) to your starlingai.json under `scenes: { ... }`, or remove the job from your config. "
+            + "Without the underlying scene definitions, the job cannot resolve its steps to executable tasks.",
+          metadata: {
+            workflowName: job.name,
+            workflowType: "job",
+            blocked: true,
+            missingScenes,
+            stepCount: job.steps.length,
+          },
+        },
+      };
+    }
+  }
+
+  return { scene, job };
+}
+
+/**
+ * Whether run_workflow, called the way a plan's reuse step calls it (a name, workflowType auto),
+ * would run a workflow rather than answer with a refusal or a routing miss. execute_plan asks before
+ * a plan runs on a turn the up-front judge flagged: a reuse step that will run a workflow is the
+ * plan's own way of reaching outside the workspace, and one that will not must not count as one.
+ */
+export function workflowReferenceRuns(reference: string, ctx: ToolContext): boolean {
+  const name = reference.trim();
+  return name.length > 0 && selectWorkflowToRun(name, "auto", ctx).refusal === undefined;
+}
+
 registerTool({
   name: "run_workflow",
   description: "Execute a reusable workflow catalog entry inline. Scenes run as one scoped turn, and jobs run their resolved steps in sequence inside a temporary workflow session.",
@@ -1504,98 +1633,18 @@ registerTool({
     const params = normalizeStringMap(args["params"]);
     const workflowContext = typeof args["context"] === "string" ? String(args["context"]) : undefined;
 
-    const { scene, job, ambiguousMatches, suggestedMatches } = resolveWorkflowReference(name, workflowType);
-
-    if (workflowType === "auto" && scene && job) {
-      return {
-        success: false,
-        output: "",
-        error: `Workflow name '${name}' is ambiguous. Specify workflowType='scene' or workflowType='job'.`,
-        metadata: {
-          workflowMatches: buildWorkflowMatchMetadata(rankWorkflowReferenceCandidates(name, workflowType)),
-        },
-      };
-    }
-
-    if (!scene && !job) {
-      if (ambiguousMatches && ambiguousMatches.length > 1) {
-        const workflowMatches = buildWorkflowMatchMetadata(
-          (suggestedMatches ?? []).filter((candidate) => ambiguousMatches.some((entry) => (
-            entry.name === candidate.entry.name && entry.workflowType === candidate.entry.workflowType
-          ))),
-        );
-        return {
-          success: false,
-          output: "",
-          error: `Workflow name '${name}' is ambiguous. Matching workflows: ${ambiguousMatches.map((entry) => `${entry.name} [${entry.workflowType}]`).join(", ")}.`,
-          metadata: workflowMatches.length > 0 ? { workflowMatches } : undefined,
-        };
-      }
-
-      const workflowMatches = buildWorkflowMatchMetadata(suggestedMatches ?? []);
-      // GRACEFUL, NOT AN ERROR (user directive: "not finding a workflow should not lead
-      // to an error"). A missing workflow is a routing miss, not a system failure —
-      // returning success:false tripped the whole failure cascade (tool_call_failed, the
-      // stop/new-session intervention, [DELEGATION FAILED], warden failure count) and on
-      // the slow local model that pushed it to fabricate a full answer instead of routing
-      // on (audit bd3d60dc). Return SUCCESS with routing guidance so the model simply
-      // delegates; the runtime keys on workflowNotFound to skip the "completed" framing.
-      const closest = workflowMatches.length > 0
-        ? ` Closest saved workflows: ${workflowMatches.map((match) => `${match.name} [${match.workflowType}]`).join(", ")}.`
-        : "";
-      return {
-        success: true,
-        output: `No saved workflow matches "${name}" — this is NOT an error, there is simply no reusable workflow for this request.${closest} Do NOT invent another workflow name or call run_workflow again. If one of the listed workflows CLEARLY matches the request, run that exact name; otherwise delegate to mission_coordinator (or answer the user directly).`,
-        metadata: { workflowNotFound: true, ...(workflowMatches.length > 0 ? { workflowMatches } : {}) },
-      };
-    }
-
-    const selectedWorkflowType = scene ? "scene" : "job";
+    const selection = selectWorkflowToRun(name, workflowType, ctx);
+    if (selection.refusal) return selection.refusal;
+    const { scene, job } = selection;
     const selectedWorkflowName = scene?.name ?? job!.name;
-    const selectedWorkflowKey = buildWorkflowExecutionKey(selectedWorkflowName, selectedWorkflowType);
-    if (ctx._workflowExecutionStack?.includes(selectedWorkflowKey)) {
-      const error = `Workflow ${selectedWorkflowName} [${selectedWorkflowType}] is already running in this execution stack. Do not re-enter the same workflow from inside itself.`;
-      return {
-        success: false,
-        output: error,
-        error,
-        metadata: {
-          workflowName: selectedWorkflowName,
-          workflowType: selectedWorkflowType,
-          blocked: true,
-          recursiveWorkflow: true,
-        },
-      };
-    }
 
-    // Pre-validate that every scene referenced by the resolved job actually
-    // exists.  resolveJobSteps throws "Job step references unknown scene: X"
-    // when a scene is missing — without this guard, the throw bubbles up the
-    // tool dispatcher and (until the executeTool try/catch was added) killed
-    // the turn silently with no tool_call_failed event.  Surface the missing
-    // names directly so the user knows which scenes to add to scenes: {}.
-    if (job) {
-      const missingScenes = job.steps
-        .map((step) => step.scene)
-        .filter((sceneName, index, arr) => arr.indexOf(sceneName) === index)
-        .filter((sceneName) => !getScene(sceneName));
-      if (missingScenes.length > 0) {
-        return {
-          success: false,
-          output: "",
-          error:
-            `Workflow '${job.name}' [job] references ${missingScenes.length === 1 ? "a scene" : "scenes"} that ${missingScenes.length === 1 ? "is" : "are"} not defined in the current config: ${missingScenes.map((s) => `'${s}'`).join(", ")}. `
-            + "Add the missing scene(s) to your starlingai.json under `scenes: { ... }`, or remove the job from your config. "
-            + "Without the underlying scene definitions, the job cannot resolve its steps to executable tasks.",
-          metadata: {
-            workflowName: job.name,
-            workflowType: "job",
-            blocked: true,
-            missingScenes,
-            stepCount: job.steps.length,
-          },
-        };
-      }
+    // A workflow's agents may reach outside the workspace, and what a scene's own turn or a job's
+    // steps share lands in the workflow's session, not in this one. So the workflow claims the
+    // turn's outside source here (ToolContext.turnEvidence), as a plan's reuse step does:
+    // otherwise the research gate's turn trigger, finding no facts in this session, would send a
+    // builder delegated after the workflow off to gather what the workflow just gathered.
+    if (ctx.turnEvidence && !ctx.turnEvidence.outsideEngaged) {
+      ctx.turnEvidence.outsideEngaged = `workflow:${selectedWorkflowName}`;
     }
 
     if (scene) {
