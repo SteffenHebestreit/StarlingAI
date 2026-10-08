@@ -465,6 +465,14 @@ describe("a refused prefill: the call is retried once without it, and the endpoi
 
     // The rest of the refused call went without the prefill; the next call is prefilled again.
     expect(bodies.map((body) => lastWireMessage(body)["role"])).toEqual(["assistant", "user", "user", "assistant"]);
+    // One refusal, one deciding retry. The attempt the budget adds after it decides nothing and
+    // reads so: a served "refusal_retry" row says the endpoint was remembered, and this one was not.
+    expect(modelCalls().map((row) => [row["finishReason"], row["prefill"], row["prefillSkipped"]])).toEqual([
+      ["error", "bare", undefined],
+      ["error", null, "refusal_retry"],
+      ["stop", null, "refused_in_call"],
+      ["stop", "bare", undefined],
+    ]);
   });
 
   it("a context overflow is not taken for a refusal: not retried, and the next forced call is still prefilled", async () => {
@@ -553,6 +561,12 @@ describe("a refused prefill: the call is retried once without it, and the endpoi
     // The rest of the call goes without the prefill. The retry itself was dropped, not served, so
     // nothing was remembered and the next call is prefilled again.
     expect(bodies.map((body) => lastWireMessage(body)["role"])).toEqual(["assistant", "user", "user", "assistant"]);
+    // A stream request that fails before its first chunk writes no row, so the served drop retry
+    // carries the call's only row. It is not the retry that decided, and must not read as one.
+    expect(modelCalls().map((row) => [row["finishReason"], row["prefill"], row["prefillSkipped"]])).toEqual([
+      ["stop", null, "refused_in_call"],
+      ["stop", "bare", undefined],
+    ]);
   });
 
   it("is remembered per endpoint AND model: another model behind the same address keeps its prefill", async () => {
