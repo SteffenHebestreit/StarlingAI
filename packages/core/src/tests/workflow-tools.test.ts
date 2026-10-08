@@ -1792,6 +1792,47 @@ describe("run_workflow and the code its runs executed", () => {
     }
   });
 
+  it("a scene's bootstrap coordinator that names the runs under it: they go up as they are", async () => {
+    // The coordinator's files are every run's: its writer's finished report is not the coder's.
+    const REPORT = { filename: "report.html", outputPath: "generated/report.html", sourceTool: "write_file" };
+    const { tempDir, configPath } = writeTempConfig({
+      agents: { defaults: { model: { primary: "lmstudio/qwen/qwen3.5-9b" } } },
+      scenes: {
+        prime_mission: {
+          description: "Count the primes as a mission.",
+          task: "Use mission_coordinator first. It should have the primes between 100000 and 200000 counted and a report written.",
+          allowedAgents: ["mission_coordinator", "coder", "content_writer"],
+        },
+      },
+      subAgents: {
+        mission_coordinator: { description: "Coordinates multi-step work.", tools: ["delegate_to_agent", "parallel_delegate"], maxIterations: 6 },
+        coder: { description: "Writes and runs code.", tools: ["write_file", "shell_exec"], maxIterations: 4 },
+        content_writer: { description: "Writes reports.", tools: ["write_file"], maxIterations: 4 },
+      },
+    });
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+    vi.doMock("../agent/runtime.js", () => ({ collectTurnArtifactAttachments: () => [], runTurn: vi.fn() }));
+    vi.doMock("../agent/sub-agent.js", () => ({
+      runSubAgentWithStats: vi.fn(async () => ({
+        output: "Der Bericht ist fertig; die Zählung lief nicht: es gibt [not observed] Primzahlen.",
+        stats: { outcome: "partial", toolCount: 1, iterations: 2, toolNames: ["parallel_delegate"] },
+        artifacts: [PRIMES, REPORT],
+        executions: MASKED,
+        maskedRuns: [{ agentName: "coder", executions: MASKED, artifacts: [PRIMES] }],
+      })),
+    }));
+
+    try {
+      const result = await runWorkflow("prime_mission", "scene");
+
+      expect(result.metadata?.["maskedRuns"]).toEqual([{ agentName: "coder", executions: MASKED, artifacts: [PRIMES] }]);
+      expect(result.metadata?.["artifacts"]).toEqual([PRIMES, REPORT]);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("a job's step whose run masked figures stops the job, and its record goes up", async () => {
     const { tempDir, configPath } = config();
     process.env["SAI_CONFIG_PATH"] = configPath;

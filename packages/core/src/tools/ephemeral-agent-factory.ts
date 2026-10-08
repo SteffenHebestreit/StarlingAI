@@ -609,12 +609,14 @@ export async function runArchitectFallback(task: string, ctx: ToolContext): Prom
   };
 }
 
-/** The produced files, failed calls and executed code of an ephemeral run, as delegation metadata. */
-function runRecordMetadata(run: { artifacts?: unknown[]; toolFailures?: unknown[]; executions?: unknown }): Record<string, unknown> {
+/** The produced files, failed calls and executed code of an ephemeral run, as delegation metadata,
+ *  with each run under it that masked figures when it delegated (agent/delegated-run-record.ts). */
+function runRecordMetadata(run: { artifacts?: unknown[]; toolFailures?: unknown[]; executions?: unknown; maskedRuns?: unknown[] }): Record<string, unknown> {
   return {
     ...(run.artifacts?.length ? { artifacts: run.artifacts } : {}),
     ...(run.toolFailures?.length ? { specialistToolFailures: run.toolFailures } : {}),
     ...(run.executions ? { specialistExecutions: run.executions } : {}),
+    ...(run.maskedRuns?.length ? { maskedRuns: run.maskedRuns } : {}),
   };
 }
 

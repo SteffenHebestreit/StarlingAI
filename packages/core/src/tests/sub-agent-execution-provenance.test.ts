@@ -139,6 +139,12 @@ describe("the code a delegated run executed, and the figures it states", () => {
           tools: ["parallel_delegate"],
           maxIterations: 4,
         },
+        report_writer: {
+          description: "Writes reports.",
+          systemPrompt: "WRITER-KQ Write the report file.",
+          tools: ["write_file"],
+          maxIterations: 3,
+        },
         graph_lead: {
           description: "Coordinates code work as a task graph.",
           systemPrompt: "GRAPH-LEAD-KQ Hand the computation to the coder.",
@@ -597,6 +603,71 @@ describe("the code a delegated run executed, and the figures it states", () => {
       expect(result.executions).toEqual({ ...INCIDENT_EXECUTIONS, unobservedFigures: 4 });
       expect(result.stats.outcome).toBe("partial");
     }, 60_000);
+
+    describe("through delegate_to_agent to the coordinator, each run that masked figures keeps its own name and files", () => {
+      // In review the coordinator's delegation carried the fan-out's summed record and every file of
+      // it, and no runs by name: the turn named the coder's script and the writer's finished report
+      // both as the coordinator's, written but not run successfully.
+      const REPORT_ANSWER = "Der Bericht generated/report.html ist fertig; die Zählung im Sandbox-Skript lief nicht.";
+      const paths = (artifacts: unknown): unknown[] => (Array.isArray(artifacts) ? artifacts : [])
+        .map((artifact: Record<string, unknown>) => artifact["outputPath"]);
+      const delegateToFanLead = async (root: string, leadAnswer: string) => {
+        await registerTools({
+          ...incidentTools(),
+          write_file: (args) => (String(args["path"] ?? "").includes("report.html")
+            ? { success: true, output: "File written: generated/report.html", metadata: { filename: "report.html", outputPath: "generated/report.html", contentType: "text/html; charset=utf-8" } }
+            : recordedResult("write_file", args)),
+        });
+        completeMock.mockImplementation(async (messages: Message[]) => {
+          if (systemIncludes(messages, "FAN-LEAD-KQ")) {
+            return scripted([{ tool: "parallel_delegate", args: { tasks: [
+              { agentName: "coder", task: INCIDENT.task },
+              { agentName: "report_writer", task: "Schreibe generated/report.html: einen kurzen Bericht über das Sieb des Eratosthenes." },
+            ] } }], leadAnswer)(messages);
+          }
+          if (systemIncludes(messages, "WRITER-KQ")) {
+            return scripted([{ tool: "write_file", args: { path: "generated/report.html", content: "<h1>Bericht</h1><p>Das Sieb.</p>" } }], "Bericht fertig.")(messages);
+          }
+          return scripted(INCIDENT.calls, INCIDENT.reply)(messages);
+        });
+        const { getTool } = await import("../tools/registry.js");
+        const now = new Date().toISOString();
+        return getTool("delegate_to_agent")!.execute(
+          // Its own task, not the coder's: the swarm runs one task text once per turn.
+          { agentName: "fan_lead", task: "Lass die Primzahlen zählen und einen kurzen Bericht über das Verfahren schreiben." },
+          {
+            sessionId: root,
+            workspacePath: tempDir,
+            approvalCallback: async () => true,
+            swarmState: { objective: "test", startedAt: now, updatedAt: now, tasks: {} },
+          },
+        );
+      };
+
+      it("the coder, with its script only; the writer's report is another run's file", async () => {
+        const result = await delegateToFanLead("parent-provenance-fan-delegated", REPORT_ANSWER);
+
+        expect(result.metadata?.["specialistExecutions"]).toEqual(INCIDENT_EXECUTIONS);
+        expect(paths(result.metadata?.["artifacts"])).toEqual(expect.arrayContaining(["generated/primes.js", "generated/report.html"]));
+        const maskedRuns = result.metadata?.["maskedRuns"] as Array<Record<string, unknown>>;
+        expect(maskedRuns?.map((run) => run["agentName"])).toEqual(["coder"]);
+        expect(maskedRuns[0]?.["executions"]).toEqual(INCIDENT_EXECUTIONS);
+        expect(paths(maskedRuns[0]?.["artifacts"])).toEqual(["generated/primes.js"]);
+      }, 60_000);
+
+      it("the coordinator too, when its own answer stated figures, with the files it wrote itself", async () => {
+        const result = await delegateToFanLead("parent-provenance-fan-delegated-own", `${REPORT_ANSWER} ${MADE_UP}`);
+
+        expect(result.output).toContain("Ergebnis: Es gibt [not observed] Primzahlen, ihre Summe ist [not observed].");
+        const maskedRuns = result.metadata?.["maskedRuns"] as Array<Record<string, unknown>>;
+        expect(maskedRuns?.map((run) => run["agentName"])).toEqual(["coder", "fan_lead"]);
+        expect(maskedRuns[1]).toEqual({
+          agentName: "fan_lead",
+          executions: { attempted: 0, failed: 0, succeededWithOutput: 0, unobservedFigures: 2 },
+          artifacts: [],
+        });
+      }, 60_000);
+    });
 
     it("control: what the coder's script printed, the lead restates through parallel_delegate as it was", async () => {
       await registerTools({ shell_exec: () => printed("Anzahl der Primzahlen: 8392\nSumme der Primzahlen:   1255204276") });

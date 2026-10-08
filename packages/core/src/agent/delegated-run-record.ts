@@ -224,6 +224,8 @@ export function executionRecordLine(record: DelegatedExecutionRecord): string {
   if (noExecutionCompleted(record)) {
     return `${executionCountPhrase(record)}, none completed with output (${executionShortfallPhrase(record)})${maskedClause}`;
   }
+  // A coordinator's own entry among a fan-out's masked runs: the code was its specialists'.
+  if (record.attempted === 0) return `ran no code itself${maskedClause}`;
   const silent = Math.max(0, record.attempted - record.failed - record.succeededWithOutput);
   return `${executionCountPhrase(record)}: ${record.succeededWithOutput} completed with output, ${record.failed} failed, ${silent} printed nothing${maskedClause}`;
 }

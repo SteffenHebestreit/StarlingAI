@@ -52,12 +52,13 @@ import {
 import {
   addExecutionRecord,
   capOutcomeForUnbackedFigures,
+  createFanOutExecutionRecords,
   executionCountPhrase,
   executionShortfallPhrase,
   noExecutionCompleted,
-  readExecutionRecord,
   unbackedFiguresMasked,
   type DelegatedExecutionRecord,
+  type MaskedDelegatedRun,
 } from "./delegated-run-record.js";
 import { scanOutput } from "../guardrails/output.js";
 import { neutralizeToolResultFraming } from "../guardrails/input.js";
@@ -2614,6 +2615,10 @@ export interface SubAgentRunResult {
   /** Present only when the run (or a run it delegated to) executed code or masked unobserved
    *  figures; see DelegatedExecutionRecord. */
   executions?: DelegatedExecutionRecord;
+  /** Present only when the run delegated and a run of it masked figures: each such run with its own
+   *  name and files (the delegated ones as they came back, and this run when its own account did),
+   *  so its delegation can tell the turn which run that was. See MaskedDelegatedRun. */
+  maskedRuns?: MaskedDelegatedRun[];
   /** QPR-004: the turn's quality scorecard when the transport surfaces one
    *  (gateway-routed eval runs capture the turn_scorecard audit event). */
   qualityScorecard?: import("./turn-scorecard.js").TurnQualityScorecard;
@@ -3740,6 +3745,16 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // "None of your 1 code execution has completed with output yet" and lost the instruction to
     // keep everything it had gathered. The outcome cap and the reported record keep the sum.
     const ownExecutionRecord: DelegatedExecutionRecord = { attempted: 0, failed: 0, succeededWithOutput: 0 };
+    // EACH RUN THAT MASKED FIGURES, BY NAME. The records a coordinator adds to its own are a sum, and
+    // its artifacts hold every file its specialists wrote. In review an orchestrator delegated to a
+    // coordinator whose parallel_delegate ran a coder (broken sandbox, figures masked) and a writer
+    // that finished generated/report.html; the turn then named both files as the coordinator's,
+    // written but not run successfully, and the finished report never as a deliverable. So the runs
+    // its delegations name are kept apart (createFanOutExecutionRecords), and so are the files this
+    // run recorded itself.
+    const delegatedRuns = createFanOutExecutionRecords();
+    let delegatedToAnotherAgent = false;
+    const ownArtifacts = new Set<Record<string, unknown>>();
     // Only a run that can execute code, or receive the record of a run that did, is checked; a
     // researcher holds neither and pays nothing. A coordinator restates what its specialists
     // returned: in review, build_lead (delegate_to_agent only) answered "8392 … 1255204276" over a
@@ -4262,8 +4277,29 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // the loop brake did, and what code the run executed.
     const executionsToReport = (): DelegatedExecutionRecord | undefined =>
       (executionRecord.attempted > 0 || unbackedFiguresMasked(executionRecord) ? { ...executionRecord } : undefined);
+    // A run that delegated hands back each run that masked figures (see delegatedRuns): those its
+    // delegations named, and itself, with only the files it recorded itself, when figures of its own
+    // account were masked beyond its specialists'. A run that delegated nothing is named by its own
+    // delegation, with its files, as before.
+    const maskedRunsToReport = (): MaskedDelegatedRun[] | undefined => {
+      if (!delegatedToAnotherAgent) return undefined;
+      const delegated = delegatedRuns.metadata();
+      const runs = [...(delegated.maskedRuns ?? [])];
+      const ownMasked = (executionRecord.unobservedFigures ?? 0) - (delegated.specialistExecutions?.unobservedFigures ?? 0);
+      if (ownMasked > 0) {
+        runs.push({
+          agentName: opts.agentName,
+          executions: { ...ownExecutionRecord, unobservedFigures: ownMasked },
+          artifacts: artifacts
+            .filter((artifact) => ownArtifacts.has(artifact))
+            .map((artifact) => refreshWorkspaceArtifactSnapshot(artifact, opts.workspacePath)),
+        });
+      }
+      return runs.length > 0 ? runs : undefined;
+    };
     const withArtifacts = (result: { output: string; stats: SubAgentExecutionStats }): SubAgentRunResult => {
       const executions = executionsToReport();
+      const maskedRuns = maskedRunsToReport();
       return {
         ...result,
         ...(artifacts.length > 0
@@ -4273,6 +4309,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         ...(loopEnforced ? { loopEnforced: { ...loopEnforced } } : {}),
         ...(wardenStop ? { wardenStop: { ...wardenStop } } : {}),
         ...(executions ? { executions } : {}),
+        ...(maskedRuns ? { maskedRuns } : {}),
       };
     };
 
@@ -7366,7 +7403,9 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         toolFailures.push(...readToolFailures(result.metadata?.["specialistToolFailures"]));
         // And what they executed: a coordinator whose specialist masked figures did not succeed either.
         if (receivesExecutionRecords(tc.name)) {
-          addExecutionRecord(executionRecord, readExecutionRecord(result.metadata?.["specialistExecutions"]));
+          delegatedToAnotherAgent = true;
+          const delegatedAgent = tc.arguments?.["agentName"];
+          addExecutionRecord(executionRecord, delegatedRuns.add(result.metadata, typeof delegatedAgent === "string" ? delegatedAgent : undefined));
         }
         let resultContent = result.success
           ? result.output
@@ -7766,10 +7805,14 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           }
         }
 
+        const recordedBefore = artifacts.length;
         recordArtifacts(result.metadata, {
           sourceAgent: opts.agentName,
           sourceTool: tc.name,
         });
+        if (!receivesExecutionRecords(tc.name)) {
+          for (const artifact of artifacts.slice(recordedBefore)) ownArtifacts.add(artifact);
+        }
 
         // Staged-build salvage bookkeeping. edit_file's metadata carries no
         // outputPath/dataUrl/externalUrl, so recordArtifacts ignores it entirely — a

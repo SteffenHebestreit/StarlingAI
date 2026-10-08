@@ -285,6 +285,32 @@ describe("a turn whose delegated run masked figures no tool returned", () => {
     expect(directives[0]).toContain("The turn's other deliverables are attached to this message as files (generated/report.html)");
   });
 
+  it("delegated through a coordinator, is named by the run its delegation names, with that run's file only", async () => {
+    // A coordinator's delegation carries its fan-out's summed record and every file of it; the run
+    // that masked figures comes up by name in maskedRuns (tools/sub-agent.ts, as the coordinator's
+    // run hands it back). In review it did not, and the writer's finished report was named as the
+    // coordinator's output, written but not run successfully.
+    delegation.result = {
+      success: true,
+      output: "[fan_lead]: Der Bericht generated/report.html ist fertig; die Zählung im Sandbox-Skript lief nicht.",
+      metadata: {
+        ...COMPLETED,
+        agentName: "fan_lead",
+        delegationOutcome: "partial",
+        artifacts: [INCIDENT_ARTIFACT, REPORT_DELEGATION.metadata.artifacts[0]],
+        specialistExecutions: INCIDENT_EXECUTIONS,
+        maskedRuns: [{ agentName: "coder", executions: INCIDENT_EXECUTIONS, artifacts: [INCIDENT_ARTIFACT] }],
+      },
+    };
+    const { session } = await runTurnWith({}, [{ id: "call_lead", agentName: "fan_lead", task: "Lass die Primzahlen zählen und berichte." }]);
+
+    const directives = synthesisDirectives(session);
+    expect(directives).toHaveLength(1);
+    expect(directives[0]).toContain("The delegated run of coder stated figures that no tool returned");
+    expect(directives[0]).toContain("name the files it wrote (generated/primes.js) as written but not run successfully");
+    expect(directives[0]).toContain("The turn's other deliverables are attached to this message as files (generated/report.html)");
+  });
+
   it("is not a plan step the next one may build on", async () => {
     recordedPlan.current = TWO_STEP_PLAN;
     await runIncidentTurn(MASKED_DELEGATION, { planDrivenContinuation: true });

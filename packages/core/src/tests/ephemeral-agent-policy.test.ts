@@ -269,6 +269,52 @@ describe("create_ephemeral_agent policy", () => {
     expect(result.success).toBe(true);
   }, 15000);
 
+  it("hands back each run under it that masked figures, with its own files (agent/delegated-run-record.ts)", async () => {
+    // Its delegation's files are every run's; the turn names only the masked run's as unrun.
+    const MASKED = { attempted: 1, failed: 1, succeededWithOutput: 0, unobservedFigures: 2 };
+    const PRIMES = { filename: "primes.js", outputPath: "generated/primes.js", sourceTool: "write_file" };
+    const REPORT = { filename: "report.md", outputPath: "generated/report.md", sourceTool: "write_file" };
+    const maskedRuns = [{ agentName: "coder", executions: MASKED, artifacts: [PRIMES] }];
+    runSubAgentWithStatsMock.mockImplementationOnce(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => ({
+      output: "Der Bericht ist geschrieben; die Zählung lief nicht.",
+      stats: {
+        agentName: args.agentName,
+        sessionId: `sub:${args.parentSessionId}:${args.agentName}:test`,
+        promptChars: 0,
+        userContentChars: 0,
+        toolCount: 2,
+        toolNames: ["write_file", "delegate_to_agent"],
+        iterations: 2,
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        maxIterations: 5,
+        model: "mock",
+        capabilities: [],
+        terminalState: "completed",
+      },
+      artifacts: [PRIMES, REPORT],
+      executions: MASKED,
+      maskedRuns,
+    }));
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+
+    const result = await getTool("create_ephemeral_agent")!.execute({
+      agentName: "prime_report_writer",
+      description: "Writes a report on a prime count from inline context.",
+      systemPrompt: "Write the report the task asks for.",
+      tools: ["read_file", "write_file"],
+      task: "Write generated/report.md about counting the primes.",
+    }, {
+      sessionId: "test-session",
+      workspacePath: "/workspace",
+    });
+
+    expect(result.metadata?.["specialistExecutions"]).toEqual(MASKED);
+    expect(result.metadata?.["maskedRuns"]).toEqual(maskedRuns);
+  }, 15000);
+
   it("generates and starts an ephemeral agent when the best skill match is below threshold", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "starlingai-ephemeral-threshold-"));
     const configPath = join(tempDir, "starlingai.json");

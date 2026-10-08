@@ -926,12 +926,13 @@ function addSessionExecutions(into: FanOutExecutionRecords, session: AgentSessio
 /** What a job step whose run masked figures says, under its answer, in place of a result. */
 const MASKED_STEP_NOTE = `_(This step's run stated figures no tool returned; they are masked as ${UNOBSERVED_FIGURE_MARKER} and were not computed.)_`;
 
-/** A run's result as its delegation's metadata, for the fan-out record. */
+/** A run's result as its delegation's metadata, for the fan-out record: a coordinator's masked runs
+ *  go up as they are, each with its own files. */
 function runExecutionMetadata(
   agentName: string,
-  run: { executions?: unknown; artifacts?: unknown[] },
+  run: { executions?: unknown; artifacts?: unknown[]; maskedRuns?: unknown[] },
 ): Record<string, unknown> {
-  return { agentName, specialistExecutions: run.executions, artifacts: run.artifacts };
+  return { agentName, specialistExecutions: run.executions, artifacts: run.artifacts, maskedRuns: run.maskedRuns };
 }
 
 /**
