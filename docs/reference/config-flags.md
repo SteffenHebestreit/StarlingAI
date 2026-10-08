@@ -158,7 +158,7 @@ Every public schema field, where it is declared, and how many production files r
 | `embeddingApiKey` | packages/core/src/config/schema.ts:177 | 6 |
 | `embeddingBaseUrl` | packages/core/src/config/schema.ts:175 | 6 |
 | `embeddingModel` | packages/core/src/config/schema.ts:173 | 27 |
-| `enabled` | packages/core/src/config/schema.ts:313 | 134 |
+| `enabled` | packages/core/src/config/schema.ts:313 | 135 |
 | `enableThinking` | packages/core/src/config/schema.ts:195 | 21 |
 | `endpoint` | packages/core/src/config/schema.ts:480 | 83 |
 | `endpointUnits` | packages/core/src/config/schema.ts:1696 | 1 |
