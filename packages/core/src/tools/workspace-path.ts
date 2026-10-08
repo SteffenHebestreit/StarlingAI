@@ -191,7 +191,13 @@ function stripVirtualWorkspacePrefix(inputPath: string): string {
   return inputPath.trim();
 }
 
-export function resolvePathWithinWorkspace(inputPath: string, workspacePath: string): { resolved: string; relativePath: string } {
+/**
+ * A workspace path exactly as named: the boundary check of resolvePathWithinWorkspace without its
+ * zone re-root. For the one caller that needs what a sandbox sees: a container is handed the whole
+ * working root at /workspace, whatever the agent's zone, so a script a scope-confined agent's shell
+ * left at the root is there and nowhere under generated/.
+ */
+export function resolveLiteralWorkspacePath(inputPath: string, workspacePath: string): { resolved: string; relativePath: string } {
   const candidatePath = stripVirtualWorkspacePrefix(inputPath);
   const resolvedPath = isAbsolute(candidatePath)
     ? resolve(candidatePath)
@@ -200,7 +206,12 @@ export function resolvePathWithinWorkspace(inputPath: string, workspacePath: str
   if (rel.startsWith("..") || rel === "..") {
     throw new Error("Path escapes workspace boundary");
   }
-  const relativePath = rel === "" ? "." : rel.replace(/\\/g, "/");
+  return { resolved: resolvedPath, relativePath: rel === "" ? "." : rel.replace(/\\/g, "/") };
+}
+
+export function resolvePathWithinWorkspace(inputPath: string, workspacePath: string): { resolved: string; relativePath: string } {
+  const literal = resolveLiteralWorkspacePath(inputPath, workspacePath);
+  const relativePath = literal.relativePath;
 
   // Zone enforcement for scope-confined executions (set per-agent via
   // ToolContext.workspaceScope → AsyncLocalStorage). Re-rooting (instead of
@@ -215,7 +226,7 @@ export function resolvePathWithinWorkspace(inputPath: string, workspacePath: str
     }
   }
 
-  return { resolved: resolvedPath, relativePath };
+  return literal;
 }
 
 /**

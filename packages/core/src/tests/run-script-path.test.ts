@@ -47,4 +47,19 @@ describe("run_script path resolution", () => {
     const resolved = runWithRequestContext({ workspaceScope: "generated" }, () => resolveScriptPath("primes.js", ws));
     expect(resolved).toBe("generated/primes.js");
   });
+
+  // A scope-confined agent's file tools see generated/ in place of the workspace root, but its
+  // shell_exec runs at /workspace: a script it wrote there, or a build's dist/, sits at the root,
+  // and run_script looked only under generated/ for it.
+  it("finds a script a scope-confined agent's shell left at the workspace root", () => {
+    const ws = workspace(["fib.py", "dist/app.js"]);
+    const scoped = (path: string) => runWithRequestContext({ workspaceScope: "generated" }, () => resolveScriptPath(path, ws));
+    expect(scoped("fib.py")).toBe("fib.py");
+    expect(scoped("/workspace/dist/app.js")).toBe("dist/app.js");
+  });
+
+  it("keeps the generated/ copy a scope-confined agent's file tools see when the root has one too", () => {
+    const ws = workspace(["fib.py", "generated/fib.py"]);
+    expect(runWithRequestContext({ workspaceScope: "generated" }, () => resolveScriptPath("fib.py", ws))).toBe("generated/fib.py");
+  });
 });
