@@ -458,11 +458,16 @@ export async function promoteMemoryRecords(
   } = {},
 ): Promise<PromoteMemoryResult> {
   const destinationScope = opts.destinationScope ?? "workspace";
+  const sources = opts.scopes?.length
+    ? opts.scopes.filter((scope): scope is MemoryScope => scope !== destinationScope)
+    : defaultPromotionSourceScopes(destinationScope);
+  // Sources that are all the destination itself leave nothing to promote. Passed on as an empty
+  // list, they reached the search as "no scopes", which reads every scope: a promotion from
+  // workspace into workspace copied session facts and agent lessons nobody asked for.
+  if (sources.length === 0) return { promoted: [], merged: [], skipped: 0, destinationScope };
   const search = await searchMemoryRecordsWithStatus(workspacePath, query, {
     ...opts,
-    scopes: opts.scopes?.length
-      ? opts.scopes.filter((scope): scope is MemoryScope => scope !== destinationScope)
-      : defaultPromotionSourceScopes(destinationScope),
+    scopes: sources,
     limit: Math.max(1, Math.min(20, Math.trunc(opts.maxPromotions ?? opts.limit ?? 5))),
   });
   // A promotion WRITES durable memory: a record that matched the query neither by word nor by

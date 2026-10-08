@@ -34,6 +34,7 @@ import {
   type DurableMemoryScope,
   type MemoryKind,
   type MemoryScope,
+  type PromoteMemoryResult,
 } from "../memory/service.js";
 import { computeMemoryCurationReport } from "../memory/steward.js";
 import {
@@ -766,9 +767,8 @@ registerTool({
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const query = String(args["query"] ?? "").trim();
     const limit = Math.min(20, Math.max(1, Number(args["limit"] ?? 5)));
-    const scopes = Array.isArray(args["scopes"])
-      ? args["scopes"].map(String).filter((value): value is MemoryScope => value === "workspace" || value === "session" || value === "agent")
-      : undefined;
+    const requestedScopes = Array.isArray(args["scopes"]) ? args["scopes"].map(String) : undefined;
+    const scopes = requestedScopes?.filter((value): value is MemoryScope => value === "workspace" || value === "session" || value === "agent");
     const kind = String(args["kind"] ?? "").trim().toLowerCase() as MemoryKind | "";
     const targetAgent = String(args["targetAgent"] ?? "").trim() || undefined;
     const requestedDestinationScope = String(args["destinationScope"] ?? "workspace").trim().toLowerCase() as DurableMemoryScope | "";
@@ -780,18 +780,22 @@ registerTool({
     const { scope: destinationScope, downgraded } = resolveDurableWriteScope(requestedDestinationScope, ctx);
 
     try {
-      const result = await promoteMemoryRecords(ctx.workspacePath, query, {
-        sessionId: deriveSharedSessionId(ctx.sessionId),
-        scopes,
-        targetAgent,
-        destinationKind: kind || undefined,
-        destinationScope,
-        maxPromotions: limit,
-        writeContext: {
-          agentName: ctx.currentAgentName,
-          sessionId: ctx.sessionId,
-        },
-      });
+      // A list naming no source scope ("user", the user destination itself) asks for nothing: left
+      // empty it would reach the service as "no scopes", every default source.
+      const result: PromoteMemoryResult = requestedScopes?.length && !scopes?.length
+        ? { promoted: [], merged: [], skipped: 0, destinationScope }
+        : await promoteMemoryRecords(ctx.workspacePath, query, {
+          sessionId: deriveSharedSessionId(ctx.sessionId),
+          scopes,
+          targetAgent,
+          destinationKind: kind || undefined,
+          destinationScope,
+          maxPromotions: limit,
+          writeContext: {
+            agentName: ctx.currentAgentName,
+            sessionId: ctx.sessionId,
+          },
+        });
 
       const promotedLines = result.promoted.map((record) => `- promoted **${record.subject}** as ${record.kind}`);
       const mergedLines = result.merged.map((record) => `- merged into **${record.subject}** as ${record.kind}`);
