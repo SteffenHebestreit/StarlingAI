@@ -87,6 +87,8 @@ class FakeGateway {
   memoryListingStatus: number | null = null;
   /** The same, for one account's listings only. */
   readonly memoryListingFailures = new Map<string, number>();
+  /** The next chat.send starts its turn, and the socket dies before the send is answered. */
+  dropSocketOnNextSend = false;
   readonly judgeRequests: Array<Record<string, unknown>> = [];
   readonly chatSends: Array<Record<string, unknown>> = [];
   readonly sessionChannels: string[] = [];
@@ -241,8 +243,13 @@ class FakeGateway {
     const turn: FakeTurn = { requestId, sessionId, ws, steers: [], steerWaiters: [], cancelled: false, onCancel: [], done: false };
     this.turns.set(requestId, turn);
     this.activeBySession.set(sessionId, requestId);
-    ws.send(JSON.stringify({ type: "status", data: { requestId, status: "accepted" } }));
-    respond({ accepted: true, requestId });
+    if (this.dropSocketOnNextSend) {
+      this.dropSocketOnNextSend = false;
+      ws.terminate();
+    } else {
+      ws.send(JSON.stringify({ type: "status", data: { requestId, status: "accepted" } }));
+      respond({ accepted: true, requestId });
+    }
     const script = this.scripts.find((candidate) => candidate.match.test(message))?.run;
     const context: TurnContext = {
       sessionId,
@@ -472,6 +479,7 @@ beforeEach(() => {
   gateway.sharedWorkspace = false;
   gateway.memoryListingStatus = null;
   gateway.memoryListingFailures.clear();
+  gateway.dropSocketOnNextSend = false;
   gateway.memory.clear();
   gateway.userModels.clear();
   gateway.setScripts([
@@ -896,6 +904,53 @@ describe("e2e harness against a fake gateway", () => {
     const later = await runScenario(loaded(scenario), deps(), options);
     expect(later.attempts[0]!.notes).toEqual([]);
     expect(gateway.memoryKeys("eval", "user")).toEqual([]);
+  });
+
+  it("waits the same way for a turn whose socket died, mid-turn or during the send, and learns from session.get that it ended", async () => {
+    // Such a turn's final status goes to the dead socket, so only session.get can tell the harness
+    // it ended; until it does, what the turn stores after a reset lands in the next attempt.
+    const options: RunnerOptions = { ...FAST, cancelGraceMs: 300 };
+    const next: E2EScenario = { id: "fake-after-drop", title: "The next attempt", group: "core", steps: [{ ...helloTurn }] };
+    const held = (onStart: (turn: TurnContext) => Promise<void>) => {
+      let release: () => void = () => undefined;
+      const released = new Promise<void>((resolveRelease) => { release = resolveRelease; });
+      let markStored: () => void = () => undefined;
+      const stored = new Promise<void>((resolveStored) => { markStored = resolveStored; });
+      const run: TurnScript = async (turn) => {
+        await onStart(turn);
+        gateway.remember(turn.user, "user", "late_fact");
+        markStored();
+        await released;
+        turn.finish("ok", "Done after all.");
+      };
+      return { run, stored, release: () => release() };
+    };
+
+    for (const drop of ["mid-turn", "send"] as const) {
+      // Mid-turn: every socket drops 50 ms in (a rotated secret, a gateway restart behind a proxy),
+      // and the harness stops the turn from a new connection. During the send: the gateway took the
+      // turn, and the socket died before chat.send was answered.
+      const turn = held(async (running) => {
+        if (drop !== "mid-turn") return;
+        setTimeout(() => gateway.revokeTokens(), 50);
+        await running.cancelled;
+      });
+      gateway.setScripts([{ match: /^drop/, run: turn.run }, { match: /^hello/i, run: helloScript }]);
+      gateway.dropSocketOnNextSend = drop === "send";
+      const dropped = await runScenario(loaded({ id: `fake-drop-${drop}`, title: `Socket dies (${drop})`, group: "guards", steps: [{ kind: "turn", message: `drop the socket (${drop})` }] }), deps(), options);
+      expect(dropped.attempts[0]!.outcome, drop).toBe("error");
+      const requestId = String(gateway.chatSends.at(-1)!["requestId"]);
+      await turn.stored;
+
+      const blocked = await runScenario(loaded(next), deps(), options);
+      expect(blocked.attempts[0]!.notes, drop).toEqual([`memory reset skipped: turn ${requestId} of eval was stopped earlier and has not been seen to end`]);
+      expect(gateway.memoryKeys("eval", "user"), drop).toEqual(["late_fact"]);
+
+      turn.release();
+      const after = await runScenario(loaded(next), deps(), options);
+      expect(after.attempts[0]!.notes, drop).toEqual([]);
+      expect(gateway.memoryKeys("eval", "user"), drop).toEqual([]);
+    }
   });
 
   it("runs a turn with `as` as that identity, in its own session, beside the scenario identity's", async () => {
@@ -1636,6 +1691,14 @@ describe("e2e CLI (in process, against the fake gateway)", () => {
     const refused = await cli(["evaluate", "--scenarios", "scenarios", "--id", "cli-pass", "--out", "locked"]);
     expect(refused.code).toBe(2);
     expect(refused.err).toBe(`Refusing to run: another e2e run (pid ${process.pid}, since 2026-10-08T10:00:00.000Z) is using the eval accounts, and two runs break each other's scenarios (one's memory reset or mail purge lands in the other's attempts). Wait for it, or delete ${lock} if no such run is left.`);
+    expect(gateway.chatSends.length).toBe(sends);
+    expect(existsSync(join(cliDir, "locked"))).toBe(false);
+
+    // A lock that cannot be read may be one a starting run is writing this moment: held.
+    writeFileSync(lock, "{ not json");
+    const unreadable = await cli(["evaluate", "--scenarios", "scenarios", "--id", "cli-pass", "--out", "locked"]);
+    expect(unreadable.code).toBe(2);
+    expect(unreadable.err).toBe(`Refusing to run: another e2e run is using the eval accounts, and two runs break each other's scenarios (one's memory reset or mail purge lands in the other's attempts). Wait for it, or delete ${lock} if no such run is left.`);
     expect(gateway.chatSends.length).toBe(sends);
     expect(existsSync(join(cliDir, "locked"))).toBe(false);
 
