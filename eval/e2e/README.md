@@ -60,9 +60,9 @@ Ctrl+C cancels the running turns (`chat.cancel`) and writes the report; a second
 **Durable memory is emptied before each attempt.** What a scenario stores (memory_store) reaches every
 later turn of the account through the durable-facts capsule, so one scenario's facts would steer the next
 (the memory scenario's German fact pulled an English question's reply into German, 2026-10-07). With
-`--concurrency 1` (the default) the attempt's identity loses every user- and workspace-scope memory entry
-before the attempt starts. Concurrent attempts share the account, so then nothing is reset. `--keep-memory`
-keeps it.
+`--concurrency 1` (the default) the attempt's identity loses every user- and workspace-scope memory entry,
+and its user model (`recall_context` serves it too), before the attempt starts. Concurrent attempts share the
+account, so then nothing is reset. `--keep-memory` keeps it.
 
 A delete cannot be undone, so the reset deletes only what is provably the eval account's own, and the
 attempt's notes in the report say what it left and why:
@@ -74,9 +74,9 @@ attempt's notes in the report say what it left and why:
 - no other eval account lists the same entries — a gateway older than the per-user workspace routes
   (5fc9a8e) keeps workspace memory in one store for every account.
 
-`eval-viewer`'s memory cannot be emptied through the API: every mutating route is operator-only, so its
-deletes are refused (`HTTP 403`, noted), while a viewer turn can still store memory. A listing or a delete
-that fails is noted too.
+`eval-viewer`'s memory and user model cannot be emptied through the API: every mutating route is
+operator-only, so its deletes are refused (`HTTP 403`, noted), while a viewer turn can still store memory.
+A listing or a delete that fails is noted too.
 
 **Mail-isolation preflight (fail closed).** Before any scenario runs, the harness asks the running
 mail-service — through `pnpm e2e:env status --json`, which calls `GET /api/accounts` inside its container

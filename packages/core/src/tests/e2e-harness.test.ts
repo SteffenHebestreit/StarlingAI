@@ -88,9 +88,13 @@ class FakeGateway {
   readonly steers: Array<{ sessionId: string; message: string; requestId?: string; clientMessageId?: string }> = [];
   readonly cancels: string[] = [];
   readonly httpPaths: string[] = [];
+  /** HTTP requests ("<METHOD> <path>") and "chat.send", in the order they arrived. */
+  readonly sequence: string[] = [];
   /** Durable memory by `<store>:<scope>` (store: the account, or "shared"), key → record. */
   readonly memory = new Map<string, Map<string, { id: string; content: string }>>();
   private memoryCounter = 0;
+  /** The dialectic user model by store (user-model/service.ts): its lists only. */
+  readonly userModels = new Map<string, Record<string, string[]>>();
   private readonly server = http.createServer((req, res) => void this.handleHttp(req, res));
   private readonly wss = new WebSocketServer({ noServer: true });
   private readonly sessions = new Map<string, { owner: string; transcript: Array<Record<string, unknown>> }>();
@@ -227,6 +231,7 @@ class FakeGateway {
     const session = this.sessions.get(sessionId);
     if (!session || session.owner !== user) return fail(`Error: Session not found: ${sessionId}`);
     this.chatSends.push(params);
+    this.sequence.push("chat.send");
     const turn: FakeTurn = { requestId, sessionId, ws, steers: [], steerWaiters: [], cancelled: false, onCancel: [], done: false };
     this.turns.set(requestId, turn);
     this.activeBySession.set(sessionId, requestId);
@@ -271,6 +276,7 @@ class FakeGateway {
   private async handleHttp(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const url = new URL(req.url ?? "/", "http://fake");
     this.httpPaths.push(`${req.method} ${url.pathname}`);
+    this.sequence.push(`${req.method} ${url.pathname}`);
     const json = (status: number, body: unknown): void => {
       res.writeHead(status, { "Content-Type": "application/json" });
       res.end(JSON.stringify(body));
@@ -312,6 +318,14 @@ class FakeGateway {
         .filter((record) => !query || record.content.toLowerCase().includes(query) || record.key.toLowerCase().includes(query));
       const paged = records.slice(0, limit);
       return json(200, { scope, total: records.length, returned: paged.length, records: paged });
+    }
+    if (req.method === "GET" && url.pathname === "/api/user-model") {
+      const lists = this.userModels.get(this.storeOf(user, "user")) ?? {};
+      return json(200, { schemaVersion: 1, goals: [], expertise: [], workingStyle: [], communication: [], openQuestions: [], ...lists, revision: 1, updatedAt: "2026-10-08T00:00:00.000Z", updatedBy: "system" });
+    }
+    if (req.method === "POST" && url.pathname === "/api/user-model/reset") {
+      this.userModels.delete(this.storeOf(user, "user"));
+      return json(200, { schemaVersion: 1, goals: [], expertise: [], workingStyle: [], communication: [], openQuestions: [], revision: 2, updatedAt: "2026-10-08T00:00:00.000Z", updatedBy: "user" });
     }
     const memoryEntry = /^\/api\/memory\/entries\/([^/]+)$/.exec(url.pathname);
     if (req.method === "DELETE" && memoryEntry) {
@@ -450,6 +464,7 @@ beforeEach(() => {
   gateway.sharedWorkspace = false;
   gateway.memoryListingStatus = null;
   gateway.memory.clear();
+  gateway.userModels.clear();
   gateway.setScripts([
     { match: /^hello/i, run: helloScript },
     { match: /^steer/i, run: steerScript },
@@ -798,6 +813,31 @@ describe("e2e harness against a fake gateway", () => {
     const paged = await runScenario(loaded(scenario), deps(), FAST);
     expect(gateway.memoryKeys("eval", "user")).toEqual([]);
     expect(paged.attempts[0]!.notes).toEqual([]);
+  });
+
+  it("empties the identity's user model before the attempt's first turn, which recall_context serves", async () => {
+    // The memory scenario accepts user_model_update as the store: a model left from an earlier run
+    // could answer its recall turn on its own.
+    gateway.userModels.set("eval", { workingStyle: ["Lieblingsteesorte: Polarstern-Rooibos"] });
+    gateway.userModels.set("eval-viewer", { goals: ["Teesorten kennenlernen"] });
+    const scenario: E2EScenario = { id: "fake-reset-model", title: "Reset the user model", group: "core", steps: [{ ...helloTurn }] };
+    const start = gateway.sequence.length;
+    const result = await runScenario(loaded(scenario), deps(), FAST);
+    expect(result.attempts[0]!.notes).toEqual([]);
+    expect(gateway.userModels.has("eval")).toBe(false);
+    const sequence = gateway.sequence.slice(start);
+    expect(sequence.indexOf("POST /api/user-model/reset")).toBeGreaterThanOrEqual(0);
+    expect(sequence.indexOf("POST /api/user-model/reset")).toBeLessThan(sequence.indexOf("chat.send"));
+    // Only the attempt's own identity.
+    expect(gateway.userModels.get("eval-viewer")).toEqual({ goals: ["Teesorten kennenlernen"] });
+
+    // The viewer may not reset it (operator-only, like every mutating route): noted. An empty model
+    // is not reset at all.
+    const viewerScenario: E2EScenario = { id: "fake-reset-model-viewer", title: "Reset as the viewer", group: "core", identity: "eval-viewer", steps: [{ ...helloTurn }] };
+    expect((await runScenario(loaded(viewerScenario), deps(), FAST)).attempts[0]!.notes).toEqual(["memory reset: eval-viewer's user model not emptied (HTTP 403)"]);
+    const resets = gateway.sequence.filter((entry) => entry === "POST /api/user-model/reset").length;
+    await runScenario(loaded(scenario), deps(), FAST);
+    expect(gateway.sequence.filter((entry) => entry === "POST /api/user-model/reset").length).toBe(resets);
   });
 
   it("skips — never fails — a scenario whose required service is down", async () => {

@@ -403,6 +403,8 @@ function addCounts(target: Record<string, number>, source: Record<string, number
 export interface MemoryResetResult {
   /** Durable memory entries deleted. */
   removed: number;
+  /** The user model held something and was emptied. */
+  userModelEmptied: boolean;
   /** One line per reason the reset was skipped or left something; they become attempt notes. */
   notes: string[];
 }
@@ -481,16 +483,23 @@ async function sharedStoreReason(identity: string, scope: MemoryEntryScope, list
 }
 
 /**
- * Empty the identity's durable memory (user and workspace scope) before an attempt, but only what
- * is provably the eval account's own: a delete cannot be undone, and a store the reset should not
- * touch is the operator's or another account's (resetRefusal, sharedStoreReason). Whatever it skips
- * or cannot delete comes back as notes: the reset used to drop failed listings and deletes without
- * a word, and eval-viewer's memory was never emptied, because every mutating route is operator-only
- * (the gateway's role gate) while memory_store has no role gate at all.
+ * Empty the identity's durable memory (user and workspace scope) and its user model before an
+ * attempt, but only what is provably the eval account's own: a delete cannot be undone, and a store
+ * the reset should not touch is the operator's or another account's (resetRefusal,
+ * sharedStoreReason). Whatever it skips or cannot delete comes back as notes: the reset used to drop
+ * failed listings and deletes without a word, and eval-viewer's memory was never emptied, because
+ * every mutating route is operator-only (the gateway's role gate) while memory_store has no role
+ * gate at all.
+ *
+ * The user model is a store of its own (user-model/service.ts), and recall_context serves it: the
+ * memory scenario accepts user_model_update as the place its preference is kept, so a model left
+ * from an earlier run could answer the recall by itself. It is kept per account wherever auth is on,
+ * so the gate above is all it needs.
  */
 export async function resetDurableMemory(identity: string, deps: RunnerDeps, signal?: AbortSignal): Promise<MemoryResetResult> {
   const notes: string[] = [];
   let removed = 0;
+  let userModelEmptied = false;
   // A 401 or 403 is the account's answer, not the entry's: the remaining deletes are not tried.
   let forbidden: string | null = null;
   try {
@@ -538,13 +547,25 @@ export async function resetDurableMemory(identity: string, deps: RunnerDeps, sig
           if (refused.size > 0 || progress === 0 || listing.total <= listing.records.length) break;
         }
       }
+      const model = await deps.client.http(identity, "GET", "/api/user-model", signal ? { signal } : {});
+      if (!model.ok) {
+        notes.push(`memory reset: ${identity}'s user model could not be read (HTTP ${model.status})`);
+      } else if (Object.values(isRecord(model.json) ? model.json : {}).some((value) => Array.isArray(value) && value.length > 0)) {
+        const reset = forbidden ? null : await deps.client.http(identity, "POST", "/api/user-model/reset", signal ? { signal } : {});
+        if (reset?.ok) userModelEmptied = true;
+        else notes.push(`memory reset: ${identity}'s user model not emptied (${reset ? `HTTP ${reset.status}` : forbidden})`);
+      }
     }
   } catch (err) {
     if (!signal?.aborted) notes.push(`memory reset stopped: ${describeError(err)}`);
   }
-  if (removed > 0) deps.log?.(`     reset: removed ${removed} durable memory entr${removed === 1 ? "y" : "ies"} of ${identity}`);
+  if (removed > 0) {
+    deps.log?.(`     reset: removed ${removed} durable memory entr${removed === 1 ? "y" : "ies"} of ${identity}${userModelEmptied ? " and emptied its user model" : ""}`);
+  } else if (userModelEmptied) {
+    deps.log?.(`     reset: emptied the user model of ${identity}`);
+  }
   for (const note of notes) deps.log?.(`     ${note}`);
-  return { removed, notes };
+  return { removed, userModelEmptied, notes };
 }
 
 export async function runAttempt(
