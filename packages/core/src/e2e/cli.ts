@@ -22,7 +22,7 @@
  * harness errors). Through pnpm a non-zero code may surface as 1.
  */
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { isIP } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -46,6 +46,7 @@ import {
   RUNNER_DEFAULTS,
   runScenarios,
   unconfirmedTurnsOf,
+  watchUnconfirmedTurns,
   type RunnerOptions,
   type UnconfirmedTurn,
 } from "./runner.js";
@@ -217,6 +218,7 @@ interface RunLock {
   startedAt?: string;
   /** The run ended, leaving turns it had not seen end: the lock is free, the turns pass on. */
   ended?: string;
+  /** Turns not seen to end: while the run holds the lock, those it has in flight; once it ended, those it left. */
   turns: UnconfirmedTurn[];
 }
 
@@ -249,6 +251,13 @@ function readRunLock(path: string): RunLock | null {
 interface RunLockHandle {
   /** Turns an earlier run left in the lock. */
   inherited: UnconfirmedTurn[];
+  /**
+   * Writes the turns not seen to end into the lock, replacing it whole (a temporary file renamed
+   * over it), so a run killed at any moment leaves them. Like release, leaves a lock alone that
+   * another process holds by now (deleted by hand, then taken). Throws when it cannot be written, or
+   * is gone or cannot be read: the turns it should list are then nowhere.
+   */
+  persist: (turns: readonly UnconfirmedTurn[]) => void;
   /** Gives the lock up; turns not seen to end stay in it for the next run. */
   release: (turns: readonly UnconfirmedTurn[]) => void;
 }
@@ -267,16 +276,40 @@ interface RunLockHandle {
  * the next run takes them over, and its reset of their account waits for them. A second Ctrl+C used
  * to delete the lock while the turn the first one stopped was still unwinding, and the next run
  * reset the account under a turn that could still store memory.
+ *
+ * A run that dies leaves them too: the lock lists the turns it inherits from the moment it is taken,
+ * and the run's own as they are sent and seen to end (persist). Only an end of the run used to write
+ * them, so a run killed mid-turn (TaskStop, Stop-Process, a closed terminal) left a lock with none,
+ * and the next run took it over and reset the account under a turn that went on storing memory.
  */
 function acquireRunLock(path: string, gatewayUrl: string): RunLockHandle | { refusal: string } {
   const startedAt = new Date().toISOString();
+  const held = (turns: readonly UnconfirmedTurn[]): string =>
+    JSON.stringify({ pid: process.pid, startedAt, gateway: gatewayUrl, ...(turns.length > 0 ? { turns } : {}) });
   let inherited: UnconfirmedTurn[] = [];
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       mkdirSync(dirname(path), { recursive: true });
-      writeFileSync(path, JSON.stringify({ pid: process.pid, startedAt, gateway: gatewayUrl }), { flag: "wx" });
+      writeFileSync(path, held(inherited), { flag: "wx" });
       return {
         inherited,
+        persist: (turns) => {
+          const holder = readRunLock(path);
+          if (!holder) throw new Error("the lock is gone or cannot be read");
+          if (holder.pid !== process.pid) return;
+          const temporary = `${path}.${process.pid}.tmp`;
+          try {
+            writeFileSync(temporary, held(turns));
+            renameSync(temporary, path);
+          } catch (err) {
+            try {
+              rmSync(temporary, { force: true });
+            } catch {
+              // The write's own error is the one to report.
+            }
+            throw err;
+          }
+        },
         release: (turns) => {
           if (readRunLock(path)?.pid !== process.pid) return;
           if (turns.length === 0) rmSync(path, { force: true });
@@ -390,6 +423,17 @@ async function evaluate(args: ParsedArgs, io: CliIo, repoRoot: string): Promise<
     const named = lock.inherited.map((turn) => `${turn.requestId} of ${turn.identity}`).join(", ");
     io.out(`An earlier run left ${lock.inherited.length} turn(s) it had not seen end (${named}) in ${lockPath}: the memory reset of their account waits for them.`);
   }
+  // The lock lists the turns as they are sent and seen to end, so a run that is killed leaves them.
+  let persistWarned = false;
+  watchUnconfirmedTurns(client, (turns) => {
+    try {
+      lock.persist(turns);
+    } catch (err) {
+      if (persistWarned) return;
+      persistWarned = true;
+      io.err(`Warning: cannot write the turns in flight into the run lock ${lockPath} (${describeError(err)}): if this run is killed, the next one may reset an account under a turn still running.`);
+    }
+  });
   const interrupt = new AbortController();
   const interrupts = io.interrupts ?? (io.handleSigint ? PROCESS_INTERRUPTS : null);
   const onSigint = (): void => {

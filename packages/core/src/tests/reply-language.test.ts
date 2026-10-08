@@ -146,6 +146,17 @@ describe("the reply-language rule", () => {
       // A short question ahead of a paste, without quotation marks: on a line of its own, and before a colon.
       "Was heißt das?\nRefunds are not provided for partial billing periods. Please contact our support team if you believe an exception applies.",
       "Übersetze: Refunds are not provided for partial billing periods. Please contact our support team if you believe an exception applies.",
+      "Translate this into English: Die Rückerstattung erfolgt nur für volle Abrechnungszeiträume. Bitte wenden Sie sich an unseren Kundendienst.",
+      // A comma does not make the question a list.
+      "Was heißt das, bitte?\nRefunds are not provided for partial billing periods. Please contact our support team if you believe an exception applies.",
+      // A paste ahead of a colon and the question after it, an error message with colons of its own among them.
+      "Your account has been suspended due to unusual activity: was soll ich jetzt tun?",
+      "TypeError: Cannot read properties of undefined (reading 'map'): woran liegt das?",
+      "Error: ENOENT: no such file or directory, open 'config.json': was mache ich falsch?",
+      "Die Rückerstattung erfolgt nur für volle Abrechnungszeiträume: what does this mean for me?",
+      // Nor do commas after a colon: two parts are no list, and nor are parts longer than a name.
+      "Refunds are not provided for partial billing periods: was heißt das, bitte?",
+      "Refunds are not provided for partial billing periods and the remaining amount will not be credited to your account: was heißt das, bitte, und was kann ich tun?",
     ]) {
       const line = buildTurnReplyLanguageInstruction(mixed, "German", { firstTurn: true, userWords: mixed });
       expect(line).not.toMatch(/otherwise in [A-Z]\w+, the language/);
@@ -164,6 +175,20 @@ describe("the reply-language rule", () => {
       ["Which of these phones has the best camera?\n- Pixel 9 Pro\n- Galaxy S24 Ultra\n- iPhone 16 Pro", "English"],
       ["Was kann ich heute Abend mit diesen Zutaten kochen?\n- Olivenöl\n- Parmesan\n- Tomaten\n- Spaghetti", "German"],
       ["Schreib eine kurze Absage an den Bewerber. Formeller Ton.", "German"],
+    ] as const) {
+      expect(buildTurnReplyLanguageInstruction(words, "German", { firstTurn: true, userWords: words }))
+        .toContain(`otherwise in ${language}, the language of that message`);
+    }
+  });
+
+  it("reads a list after a colon together with the request ahead of it", () => {
+    // On its own a list of names reads as another language, "Barcelona, Valencia, Sevilla, Granada"
+    // as Catalan. Cut off at the colon, it took the first-turn language away from the request.
+    for (const [words, language] of [
+      ["Rank these programming languages by popularity: Python, JavaScript, Rust, Go, Kotlin", "English"],
+      ["Plan a 3-day trip itinerary for these cities: Barcelona, Valencia, Sevilla, Granada", "English"],
+      ["Compare the populations of: Kraków, Wrocław, Gdańsk and Poznań", "English"],
+      ["Welche dieser Universitäten ist die älteste: Bologna, Salamanca, Coimbra, Padova?", "German"],
     ] as const) {
       expect(buildTurnReplyLanguageInstruction(words, "German", { firstTurn: true, userWords: words }))
         .toContain(`otherwise in ${language}, the language of that message`);

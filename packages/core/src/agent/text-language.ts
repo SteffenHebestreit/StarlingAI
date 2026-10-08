@@ -130,11 +130,35 @@ function detectLanguage(text: string | null | undefined, sureBelowLetters: numbe
   }
 }
 
+/** Where a text can change language: a line break, a sentence end, a quotation mark; a colon too (AFTER_COLON). */
+const LANGUAGE_PART_BOUNDARY = /\n+|(?<=[.!?…])\s+|(?<=[。！？])|["“”„«»「」『』]+/u;
+
 /**
- * Where a text can change language: a line break, a sentence end, a colon ("Übersetze: <a paste>"
- * was one English part), a quotation mark.
+ * A colon with a space after it, or a full-width one ("9:00" and a link have none). A colon hands
+ * a request over to a paste ("Übersetze: <an English paste>") and a paste over to a question
+ * ("TypeError: Cannot read properties of undefined: woran liegt das?"), so the words between two
+ * colons are a part of their own, at every colon of a line. Read with the paste, the question went
+ * unheard: of 100 messages of a paste, a colon and a question in another language, reading only the
+ * words ahead of the first colon and the line as a whole named 99, 89 of them in the paste's
+ * language; this names none (2026-10-08).
  */
-const LANGUAGE_PART_BOUNDARY = /\n+|(?<=[.!?…:])\s+|(?<=[。！？：])|["“”„«»「」『』]+/u;
+const AFTER_COLON = /(?<=:)\s+|(?<=：)/u;
+
+/**
+ * A list of names: three or more items between commas, none longer than three words. A colon
+ * hands a request over to a list as often as to a paste, and read on its own a list is often called
+ * another language: "Barcelona, Valencia, Sevilla, Granada" reads as Catalan, and "Plan a 3-day
+ * trip for these cities: …" lost the English it is written in, as did 320 of 320 English and German
+ * requests ahead of a list. So a list after a colon is no part of its own, and the whole text reads
+ * it with the request it ends: 276 of the 320 are named again, the other 44 read as another language
+ * even whole, and of 700 messages in two languages the same 75 are named as when a list was read on
+ * its own, requests such as "Summarize:" being too short to tell (2026-10-08). Two items are no
+ * list: "was heißt das, bitte?" after a paste is a question, and it is read.
+ */
+function isShortList(words: string): boolean {
+  const items = words.split(/[,，、]/u);
+  return items.length >= 3 && items.every((item) => item.trim().split(/\s+/u).length <= 3);
+}
 
 /**
  * A quoted passage: from a quotation mark at the start of a word to the next one at the end of a
@@ -144,11 +168,12 @@ const QUOTED_PASSAGE =
   /(?<![\p{L}\p{N}])["“”„«»「」『』'‘’‚‹›](?:[^"“”„«»「」『』'‘’‚‹›]|(?<=[\p{L}\p{N}])['’](?=[\p{L}\p{N}]))*?["“”„«»「」『』'‘’‚‹›](?![\p{L}\p{N}])/gu;
 
 /**
- * The language of `text` when every line, sentence and quoted passage of it that can be told is in
- * that one language, and so are the words around its quoted passages; null when one of them reads
- * as another, or when the whole cannot be told. Read as a whole, a text is in whichever language has
- * the most letters: a German question about an English quote, an error message or an image analysis
- * reads as English. A long text is read at its start and its end, where the words around a paste are.
+ * The language of `text` when every line, sentence, quoted passage and stretch between colons of it
+ * that can be told is in that one language, and so are the words around its quoted passages; null
+ * when one of them reads as another, or when the whole cannot be told. Read as a whole, a text is in
+ * whichever language has the most letters: a German question about an English quote, an error
+ * message or an image analysis reads as English. A long text is read at its start and its end, where
+ * the words around a paste are.
  *
  * A short part has to be told for certain (SURE_BELOW_LETTERS). At the detector's usual bar, "No
  * emojis." after an English request or a list of product names took the language away from a text
@@ -166,7 +191,10 @@ export function detectUniformTextLanguage(text: string | null | undefined): Dete
   // mark is no boundary (an apostrophe looks the same): "Was bedeutet 'Refunds are not provided …'
   // für mich?" was one English sentence.
   const unquoted = read.replace(QUOTED_PASSAGE, " ");
-  const parts = read.split(LANGUAGE_PART_BOUNDARY);
+  const parts = read.split(LANGUAGE_PART_BOUNDARY).flatMap((part) => {
+    const [head = "", ...afterColons] = part.split(AFTER_COLON);
+    return [head, ...afterColons.filter((words) => !isShortList(words))];
+  });
   for (const part of unquoted === read ? parts : [unquoted, ...parts]) {
     const language = detectLanguage(part, SURE_BELOW_LETTERS);
     if (language && language.code !== whole.code) return null;
