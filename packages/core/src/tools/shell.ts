@@ -113,23 +113,39 @@ registerTool({
       return {
         success: true,
         output: output || "(no output)",
-        metadata: { command, exitCode: 0, sandboxed: true },
+        metadata: { command, exitCode: 0, sandboxed: true, programOutputChars: printedChars(output) },
       };
     } catch (err: unknown) {
       const e = err as { killed?: boolean; code?: number; stdout?: string; stderr?: string; message?: string };
       if (e.killed) {
-        return { success: false, output: e.stdout ?? "", error: `Command timed out after ${EXEC_TIMEOUT_MS}ms` };
+        return {
+          success: false,
+          output: e.stdout ?? "",
+          error: `Command timed out after ${EXEC_TIMEOUT_MS}ms`,
+          metadata: { command, sandboxed: true, timedOut: true, programOutputChars: printedChars([e.stdout, e.stderr].filter(Boolean).join("\n")) },
+        };
       }
       const output = [e.stdout, e.stderr].filter(Boolean).join("\n");
       return {
         success: false,
         output,
         error: `Exit code ${e.code ?? "?"}: ${e.message ?? "Unknown error"}`,
-        metadata: { sandboxed: true },
+        metadata: { sandboxed: true, exitCode: typeof e.code === "number" ? e.code : null, programOutputChars: printedChars(output) },
       };
     }
   },
 });
+
+/**
+ * What the program printed, counted without the whitespace around it. The result text cannot say:
+ * an empty run reads "(no output)", and a failed one carries only the docker command line. E2E
+ * 2026-10-07: the docker-socket proxy swallowed every byte, three runs "succeeded" with "(no
+ * output)", and the coder answered with figures no run had printed. The field also tells the
+ * sub-agent that the program ran at all; the early refusals above never set it.
+ */
+function printedChars(output: string): number {
+  return output.trim().length;
+}
 
 /**
  * Shell commands bypass the filesystem-tool allowlist, so reject direct
@@ -314,19 +330,24 @@ registerTool({
       return {
         success: true,
         output: output || "(no output)",
-        metadata: { script: scriptPath, exitCode: 0, sandboxed: true },
+        metadata: { script: scriptPath, exitCode: 0, sandboxed: true, programOutputChars: printedChars(output) },
       };
     } catch (err: unknown) {
       const e = err as { killed?: boolean; code?: number; stdout?: string; stderr?: string; message?: string };
       if (e.killed) {
-        return { success: false, output: e.stdout ?? "", error: `Script timed out after ${EXEC_TIMEOUT_MS}ms` };
+        return {
+          success: false,
+          output: e.stdout ?? "",
+          error: `Script timed out after ${EXEC_TIMEOUT_MS}ms`,
+          metadata: { script: scriptPath, sandboxed: true, timedOut: true, programOutputChars: printedChars([e.stdout, e.stderr].filter(Boolean).join("\n")) },
+        };
       }
       const output = [e.stdout, e.stderr].filter(Boolean).join("\n");
       return {
         success: false,
         output,
         error: `Exit code ${e.code ?? "?"}: ${e.message ?? "Unknown error"}`,
-        metadata: { script: scriptPath, sandboxed: true },
+        metadata: { script: scriptPath, sandboxed: true, exitCode: typeof e.code === "number" ? e.code : null, programOutputChars: printedChars(output) },
       };
     }
   },

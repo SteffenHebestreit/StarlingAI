@@ -141,11 +141,13 @@ registerTool({
         timeout: timeoutMs,
         maxBuffer: MAX_OUTPUT_BYTES,
       });
-      const output = [stdout, stderr].filter(Boolean).join("\n") || "(no output)";
+      // What the suite printed, measured before the "(no output)" placeholder stands in for it
+      // (shell.ts printedChars has the why).
+      const printed = [stdout, stderr].filter(Boolean).join("\n");
       return {
         success: true,
-        output,
-        metadata: { suite, command: fullCommand, workdir, sandboxed: true },
+        output: printed || "(no output)",
+        metadata: { suite, command: fullCommand, workdir, sandboxed: true, programOutputChars: printed.trim().length },
       };
     } catch (err: unknown) {
       const e = err as {
@@ -160,7 +162,7 @@ registerTool({
           success: false,
           output: e.stdout ?? "",
           error: `Test suite timed out after ${timeoutMs}ms`,
-          metadata: { sandboxed: true },
+          metadata: { sandboxed: true, timedOut: true, programOutputChars: [e.stdout, e.stderr].filter(Boolean).join("\n").trim().length },
         };
       }
       const output = [e.stdout, e.stderr].filter(Boolean).join("\n");
@@ -178,6 +180,7 @@ registerTool({
           exitCode: e.code ?? 1,
           sandboxed: true,
           testsFailed: true,
+          programOutputChars: output.trim().length,
         },
       };
     }
