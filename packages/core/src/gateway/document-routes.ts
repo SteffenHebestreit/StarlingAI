@@ -10,24 +10,25 @@
  * caller's own documents via callerManageableSources — the round-5 cross-user
  * document-leak fix. Legacy single-operator mode keeps the flat instance-wide view.
  */
-import type { Context, Hono } from "hono";
+import type { Hono } from "hono";
 import { verifyToken, extractBearerToken, authenticatedUser, type AuthenticatedUser } from "./auth.js";
 import { callerMayUseSession } from "./session-route-access.js";
 import { getConfig } from "../config/loader.js";
 
 /**
- * The reply to a request that names a session its caller may not act for, or null when it names
- * none or one the caller may (callerMayUseSession, the rule of the /api/sessions routes).
+ * The session a request names, when its caller may act for it (callerMayUseSession, the rule of the
+ * /api/sessions routes), and "" (no session) when it may not.
  *
  * Every route took the session id from the query or the form as it came, and a session's documents
  * are the ones whose source is that id's: a caller who knew another account's session id could
- * list, download, mark outdated or delete that session's documents, and upload into it, where the
- * owner's turns retrieve them (found in review, 2026-10-09). Under multi-user auth such a request
- * now gets the session routes' opaque 404. With auth off every caller may, as before.
+ * list, download, mark outdated or delete that session's documents (found in review, 2026-10-09).
+ * Under multi-user auth such an id now counts as none, so that session's documents read as not
+ * found and nothing about the session shows. The dashboard sends the id of the chat it has open
+ * with some of these calls, and an id it still holds for a chat that is gone must not fail them.
+ * With auth off every caller may, as before.
  */
-function foreignSessionRefusal(c: Context, user: AuthenticatedUser | null, sessionId: string): Response | null {
-  if (!sessionId || callerMayUseSession(user, sessionId)) return null;
-  return c.json({ error: "Session not found" }, 404);
+function usableSessionId(user: AuthenticatedUser | null, sessionId: string): string {
+  return sessionId && callerMayUseSession(user, sessionId) ? sessionId : "";
 }
 
 export function registerDocumentRoutes(app: Hono): void {
@@ -35,9 +36,7 @@ export function registerDocumentRoutes(app: Hono): void {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
     const user = await authenticatedUser(c.req.header("Authorization"));
-    const sessionId = c.req.query("sessionId") ?? "";
-    const refused = foreignSessionRefusal(c, user, sessionId);
-    if (refused) return refused;
+    const sessionId = usableSessionId(user, c.req.query("sessionId") ?? "");
     try {
       const [{ engramListDocuments }, { listRegistry }, { parseScopeFromSource, callerManageableSources }] = await Promise.all([
         import("../retrieval/engram.js"),
@@ -98,8 +97,10 @@ export function registerDocumentRoutes(app: Hono): void {
     const sessionId = (() => { const s = formData.get("sessionId"); return typeof s === "string" && /^[\w-]{1,64}$/.test(s) ? s : ""; })();
     if (scope === "session" && !sessionId) return c.json({ error: "sessionId is required for session scope" }, 400);
     if (scope === "user" && !user?.username) return c.json({ error: "user scope requires authentication" }, 400);
-    const refused = foreignSessionRefusal(c, user, sessionId);
-    if (refused) return refused;
+    // The session an upload goes into is a write target: under multi-user auth only one the caller
+    // may act for, or the file landed in another account's session library, where that account's
+    // turns retrieve it. Refused with the session routes' opaque 404.
+    if (sessionId && !callerMayUseSession(user, sessionId)) return c.json({ error: "Session not found" }, 404);
 
     try {
       const { basename } = await import("node:path");
@@ -152,9 +153,7 @@ export function registerDocumentRoutes(app: Hono): void {
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
     const user = await authenticatedUser(c.req.header("Authorization"));
     const id = c.req.param("id");
-    const sessionId = c.req.query("sessionId") ?? "";
-    const refused = foreignSessionRefusal(c, user, sessionId);
-    if (refused) return refused;
+    const sessionId = usableSessionId(user, c.req.query("sessionId") ?? "");
     try {
       const { invalidateDocument, callerManageableSources } = await import("../retrieval/document-rag.js");
       if (getConfig().auth.enabled) {
@@ -185,9 +184,7 @@ export function registerDocumentRoutes(app: Hono): void {
     const id = c.req.param("id");
     const scopeRaw = c.req.query("scope");
     const scope = scopeRaw && ["session", "user", "workspace"].includes(scopeRaw) ? scopeRaw as "session" | "user" | "workspace" : undefined;
-    const sessionId = c.req.query("sessionId") ?? "";
-    const refused = foreignSessionRefusal(c, user, sessionId);
-    if (refused) return refused;
+    const sessionId = usableSessionId(user, c.req.query("sessionId") ?? "");
     const ctx = { sessionId, ...(user?.username ? { userId: user.username } : {}) };
     try {
       const { forgetDocument, callerManageableSources, resolveScopeSource, parseScopeFromSource } =
@@ -221,9 +218,7 @@ export function registerDocumentRoutes(app: Hono): void {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
     const user = await authenticatedUser(c.req.header("Authorization"));
-    const sessionId = c.req.query("sessionId") ?? "";
-    const refused = foreignSessionRefusal(c, user, sessionId);
-    if (refused) return refused;
+    const sessionId = usableSessionId(user, c.req.query("sessionId") ?? "");
     const id = c.req.param("id");
     try {
       // Multi-user mode: don't stream another user's / another session's file bytes.

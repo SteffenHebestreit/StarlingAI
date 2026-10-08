@@ -13,8 +13,11 @@ import { Hono } from "hono";
  * caller who knew another account's session id could list, download, mark outdated or delete that
  * session's documents, upload into it, and list, inspect, re-crawl, edit or delete its KBs, or
  * create one there with ambient retrieval that then fed the owner's turns. Under multi-user auth a
- * session id must now be one the caller may use (callerMayUseSession), and a refusal is the session
- * routes' opaque 404. With auth off every caller may, as before.
+ * session id counts only when the caller may use it (callerMayUseSession). On a route that reads or
+ * acts on items, one it may not use counts as no id: the session's items read as not found, and the
+ * dashboard, which sends the id of the chat it has open, keeps working when that chat is gone. Where
+ * the id is where something is written (an upload, a KB's create or update body) it gets the
+ * session routes' opaque 404. With auth off every caller may, as before.
  */
 const SESSION_STORE_DIR = vi.hoisted(() => {
   // The session store resolves its path when the module loads; a temp one, not the source tree's.
@@ -161,18 +164,44 @@ async function expectSessionNotFound(response: Response): Promise<void> {
   expect(await response.json()).toEqual({ error: "Session not found" });
 }
 
+async function expectNotFound(response: Response, error: string): Promise<void> {
+  expect(response.status).toBe(404);
+  expect(await response.json()).toEqual({ error });
+}
+
+/** An id no session has: what the dashboard holds for a chat deleted or wiped since. */
+const STALE_SESSION = "7d1e2f3a-4b5c-4d6e-8f70-81920a1b2c3d";
+
 describe("document routes and the session a request names", () => {
-  it("under multi-user auth, refuses another account's session on every route, and touches nothing", async () => {
+  it("under multi-user auth, finds nothing of another account's session, uploads nothing into it, and touches nothing", async () => {
     const { request, aliceSession } = await deployment(true);
     aliceSessionDocument(aliceSession);
     const q = `sessionId=${encodeURIComponent(aliceSession)}`;
 
-    await expectSessionNotFound(await request("bob", `/api/documents?${q}`));
-    await expectSessionNotFound(await request("bob", `/api/documents/doc-ferry/file?${q}`));
-    await expectSessionNotFound(await request("bob", `/api/documents/doc-ferry/invalidate?${q}`, { method: "POST" }));
-    await expectSessionNotFound(await request("bob", `/api/documents/doc-ferry?scope=session&${q}`, { method: "DELETE" }));
+    const list = await request("bob", `/api/documents?${q}`);
+    expect(list.status).toBe(200);
+    expect(((await list.json()) as { documents: unknown[] }).documents).toEqual([]);
+    await expectNotFound(await request("bob", `/api/documents/doc-ferry/file?${q}`), "No original file is stored for this document");
+    await expectNotFound(await request("bob", `/api/documents/doc-ferry/invalidate?${q}`, { method: "POST" }), "Document not found");
+    await expectNotFound(await request("bob", `/api/documents/doc-ferry?scope=session&${q}`, { method: "DELETE" }), "Document not found");
+    // Her session as the place a file is written to: the session routes' 404.
     await expectSessionNotFound(await request("bob", "/api/documents", { method: "POST", form: sessionUpload(aliceSession) }));
     expect(reached).toEqual([]);
+  });
+
+  it("under multi-user auth, acts on a workspace document when the request names a stale session id", async () => {
+    // Documents.vue sends the open chat's id when it marks a workspace or user document outdated.
+    const { request } = await deployment(true);
+    const [{ getConfig }, { workspaceSource }] = await Promise.all([import("../config/loader.js"), import("../retrieval/document-rag.js")]);
+    engramDocs.list = [{ id: "doc-harbour", title: "Harbour rules", chunkCount: 4, sources: [workspaceSource(getConfig().retrieval.documentRag.workspaceName)] }];
+
+    const invalidated = await request("bob", `/api/documents/doc-harbour/invalidate?sessionId=${STALE_SESSION}`, { method: "POST" });
+    expect(invalidated.status).toBe(200);
+    expect(await invalidated.json()).toEqual({ id: "doc-harbour", invalidated: true });
+    expect((await request("bob", `/api/documents?sessionId=${STALE_SESSION}`)).status).toBe(200);
+    expect(reached).toEqual(["invalidateDocument"]);
+    // An upload into a session no one has is still refused.
+    await expectSessionNotFound(await request("bob", "/api/documents", { method: "POST", form: sessionUpload(STALE_SESSION) }));
   });
 
   it("under multi-user auth, still serves the session's owner", async () => {
@@ -203,16 +232,16 @@ describe("document routes and the session a request names", () => {
 });
 
 describe("knowledge-base routes and the session a request names", () => {
-  it("under multi-user auth, refuses another account's session on every route, and changes nothing", async () => {
+  it("under multi-user auth, finds no KB of another account's session, puts none into it, and changes nothing", async () => {
     const { request, aliceSession } = await deployment(true);
     const kbId = await aliceSessionKb(aliceSession);
     const q = `sessionId=${encodeURIComponent(aliceSession)}`;
 
-    await expectSessionNotFound(await request("bob", `/api/knowledge-bases/${kbId}?${q}`));
-    await expectSessionNotFound(await request("bob", `/api/knowledge-bases/${kbId}?${q}`, { method: "PATCH", json: { name: "Mine now" } }));
-    await expectSessionNotFound(await request("bob", `/api/knowledge-bases/${kbId}/crawl?${q}`, { method: "POST" }));
-    await expectSessionNotFound(await request("bob", `/api/knowledge-bases/${kbId}/cancel?${q}`, { method: "POST" }));
-    await expectSessionNotFound(await request("bob", `/api/knowledge-bases/${kbId}?${q}`, { method: "DELETE" }));
+    await expectNotFound(await request("bob", `/api/knowledge-bases/${kbId}?${q}`), "Knowledge base not found");
+    await expectNotFound(await request("bob", `/api/knowledge-bases/${kbId}?${q}`, { method: "PATCH", json: { name: "Mine now" } }), "Knowledge base not found");
+    await expectNotFound(await request("bob", `/api/knowledge-bases/${kbId}/crawl?${q}`, { method: "POST" }), "Knowledge base not found");
+    await expectNotFound(await request("bob", `/api/knowledge-bases/${kbId}/cancel?${q}`, { method: "POST" }), "Knowledge base not found");
+    await expectNotFound(await request("bob", `/api/knowledge-bases/${kbId}?${q}`, { method: "DELETE" }), "Knowledge base not found");
     expect(reached).toEqual([]);
 
     // Nor may he put a KB into her session, new or his own.
@@ -241,7 +270,7 @@ describe("knowledge-base routes and the session a request names", () => {
     // The list is what the dashboard's KB page loads, always with the id of the chat it has open. A
     // 404 for an id the caller may not use emptied the page whenever that chat was gone (deleted,
     // or a stale id after a wipe). It now answers with what the caller may see, and nothing of the
-    // named session's; a route that names one KB still refuses.
+    // named session's.
     const { request, aliceSession } = await deployment(true);
     const { createKnowledgeBase } = await import("../retrieval/knowledge-bases.js");
     const shared = await createKnowledgeBase({ name: "Harbour rules", seedUrls: ["https://harbour.example/rules"] });
@@ -258,9 +287,31 @@ describe("knowledge-base routes and the session a request names", () => {
     const bobsList = await listed("/api/knowledge-bases");
     expect(bobsList).toEqual([shared.value.id, bobs.value.id]);
     expect(await listed(`/api/knowledge-bases?sessionId=${encodeURIComponent(aliceSession)}`)).toEqual(bobsList);
-    expect(await listed("/api/knowledge-bases?sessionId=7d1e2f3a-4b5c-4d6e-8f70-81920a1b2c3d")).toEqual(bobsList);
+    expect(await listed(`/api/knowledge-bases?sessionId=${STALE_SESSION}`)).toEqual(bobsList);
 
-    await expectSessionNotFound(await request("bob", `/api/knowledge-bases/${sessionKb}?sessionId=${encodeURIComponent(aliceSession)}`));
+    await expectNotFound(await request("bob", `/api/knowledge-bases/${sessionKb}?sessionId=${encodeURIComponent(aliceSession)}`), "Knowledge base not found");
+  });
+
+  it("under multi-user auth, reads, crawls and deletes a workspace KB when the request names a stale session id", async () => {
+    // KnowledgeBases.vue sends the open chat's id on every call, for workspace and own KBs too.
+    const { request } = await deployment(true);
+    const { createKnowledgeBase, listKnowledgeBases } = await import("../retrieval/knowledge-bases.js");
+    const shared = await createKnowledgeBase({ name: "Harbour rules", seedUrls: ["https://harbour.example/rules"] });
+    if (!shared.ok) throw new Error(shared.error);
+    const q = `sessionId=${STALE_SESSION}`;
+
+    const detail = await request("bob", `/api/knowledge-bases/${shared.value.id}?${q}`);
+    expect(detail.status).toBe(200);
+    expect(((await detail.json()) as { knowledgeBase: { id: string } }).knowledgeBase.id).toBe(shared.value.id);
+    expect((await request("bob", `/api/knowledge-bases/${shared.value.id}?${q}`, { method: "PATCH", json: { description: "Port of Kiel" } })).status).toBe(200);
+    expect((await request("bob", `/api/knowledge-bases/${shared.value.id}/crawl?${q}`, { method: "POST" })).status).toBe(200);
+    expect((await request("bob", `/api/knowledge-bases/${shared.value.id}?${q}`, { method: "DELETE" })).status).toBe(200);
+    expect(reached).toEqual(["startKbCrawl", "deleteKnowledgeBase"]);
+    expect((await listKnowledgeBases())[0]?.description).toBe("Port of Kiel");
+    // A KB put into a session no one has is still refused.
+    await expectSessionNotFound(await request("bob", "/api/knowledge-bases", {
+      method: "POST", json: { name: "Ferry strikes", seedUrls: ["https://strikes.example/"], scope: "session", sessionId: STALE_SESSION, crawlNow: false },
+    }));
   });
 
   it("under multi-user auth, still serves the session's owner", async () => {
