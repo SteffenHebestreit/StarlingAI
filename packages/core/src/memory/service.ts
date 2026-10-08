@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, s
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { readRecentOutcomes } from "../agent/outcomes.js";
+import { readRecentOutcomes, type OutcomeEntry } from "../agent/outcomes.js";
 import { readFlowMemoryEntries } from "../agent/flow-memory.js";
 import { readAllFacts } from "../swarm/memory.js";
 import { upsertMemoryToGraph, deleteMemoryFromGraph, graphL0Layer, graphRerank, graphTrackRetrieval } from "./graph-service.js";
@@ -1013,6 +1013,24 @@ const FLOW_ENTRIES_PER_SEARCH = 120;
  *  the outcomes ledger's cached window (agent/outcomes.ts OUTCOMES_CACHE_LIMIT): a deeper read
  *  bypasses that cache and re-reads the file synchronously on every targeted search. */
 const AGENT_LESSON_SCAN_WINDOW = 200;
+/** How far back, under multi-user auth, a search looks for the caller's own outcomes. The ledger
+ *  holds every account's runs, so one account's last lessons can sit behind another account's busy
+ *  day: the read widens fivefold from AGENT_LESSON_SCAN_WINDOW until it holds the caller's last
+ *  AGENT_LESSONS_PER_SEARCH, reaches the start of the ledger, or reaches this many entries. The
+ *  bound keeps a search by an account with few lessons from parsing the whole ledger (up to 50,000
+ *  lines, agent/outcomes.ts MAX_OUTCOMES_LINES) every time. */
+const ACCOUNT_LESSON_SCAN_LIMIT = 5_000;
+
+/** The last AGENT_LESSONS_PER_SEARCH outcomes `keep` admits, from a read that widens as above. */
+function recentKeptOutcomes(root: string, keep: (outcome: OutcomeEntry) => boolean): OutcomeEntry[] {
+  for (let window = AGENT_LESSON_SCAN_WINDOW; ; window = Math.min(window * 5, ACCOUNT_LESSON_SCAN_LIMIT)) {
+    const entries = readRecentOutcomes(root, window);
+    const kept = entries.filter(keep);
+    if (kept.length >= AGENT_LESSONS_PER_SEARCH || entries.length < window || window >= ACCOUNT_LESSON_SCAN_LIMIT) {
+      return kept.slice(-AGENT_LESSONS_PER_SEARCH);
+    }
+  }
+}
 
 function readAgentMemoryRecords(workspacePath: string, targetAgent?: string): MemoryRecord[] {
   const records: MemoryRecord[] = [];
@@ -1035,16 +1053,18 @@ function readAgentMemoryRecords(workspacePath: string, targetAgent?: string): Me
   // The 60-outcome cap used to apply BEFORE the agent filter: with a target agent, its lessons
   // had to be among the deployment's last 60 outcomes of ANY agent, so a busy swarm pushed an
   // idle agent's lessons out and a targeted search found none. Filter first, then cap — by the
-  // caller's account as well, or a busy deployment would push one account's lessons out the same way.
-  const outcomes = targetAgent || !reader.all
-    ? readRecentOutcomes(deploymentWorkspaceRoot(workspacePath), AGENT_LESSON_SCAN_WINDOW)
-      .filter((outcome) => (!targetAgent || outcome.agent === targetAgent) && outcome.lesson?.trim() && own(outcome.account))
-      .slice(-AGENT_LESSONS_PER_SEARCH)
-    : readRecentOutcomes(deploymentWorkspaceRoot(workspacePath), AGENT_LESSONS_PER_SEARCH);
+  // caller's account as well, under multi-user auth, over a read deep enough to find them
+  // (recentKeptOutcomes), or a busy account would push another's lessons out the same way.
+  const root = deploymentWorkspaceRoot(workspacePath);
+  const lessonOfTarget = (outcome: OutcomeEntry) => (!targetAgent || outcome.agent === targetAgent) && Boolean(outcome.lesson?.trim());
+  const outcomes = !reader.all
+    ? recentKeptOutcomes(root, (outcome) => lessonOfTarget(outcome) && own(outcome.account))
+    : targetAgent
+      ? readRecentOutcomes(root, AGENT_LESSON_SCAN_WINDOW).filter(lessonOfTarget).slice(-AGENT_LESSONS_PER_SEARCH)
+      : readRecentOutcomes(root, AGENT_LESSONS_PER_SEARCH);
   for (const outcome of outcomes) {
     if (targetAgent && outcome.agent !== targetAgent) continue;
     if (!outcome.lesson?.trim()) continue;
-    if (!own(outcome.account)) continue;
 
     records.push({
       id: `outcome:${outcome.agent}:${outcome.ts}`,
@@ -1061,14 +1081,16 @@ function readAgentMemoryRecords(workspacePath: string, targetAgent?: string): Me
     });
   }
 
-  const flowEntries = targetAgent || !reader.all
-    ? readFlowMemoryEntries(workspacePath, AGENT_LESSON_SCAN_WINDOW)
-      .filter((entry) => (!targetAgent || entry.targetAgent === targetAgent || entry.assistantAgent === targetAgent) && own(entry.account))
-      .slice(-FLOW_ENTRIES_PER_SEARCH)
-    : readFlowMemoryEntries(workspacePath, FLOW_ENTRIES_PER_SEARCH);
+  // Flow memory is read whole either way (readFlowMemoryEntries), so under multi-user auth the
+  // caller's own entries are chosen from all of it before the cap.
+  const ofTarget = (entry: { targetAgent?: string; assistantAgent?: string }) => !targetAgent || entry.targetAgent === targetAgent || entry.assistantAgent === targetAgent;
+  const flowEntries = !reader.all
+    ? readFlowMemoryEntries(workspacePath, Number.MAX_SAFE_INTEGER).filter((entry) => ofTarget(entry) && own(entry.account)).slice(-FLOW_ENTRIES_PER_SEARCH)
+    : targetAgent
+      ? readFlowMemoryEntries(workspacePath, AGENT_LESSON_SCAN_WINDOW).filter(ofTarget).slice(-FLOW_ENTRIES_PER_SEARCH)
+      : readFlowMemoryEntries(workspacePath, FLOW_ENTRIES_PER_SEARCH);
   for (const entry of flowEntries) {
     if (targetAgent && entry.targetAgent !== targetAgent && entry.assistantAgent !== targetAgent) continue;
-    if (!own(entry.account)) continue;
     records.push({
       id: entry.id,
       scope: "agent",

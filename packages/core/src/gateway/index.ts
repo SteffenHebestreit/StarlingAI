@@ -49,6 +49,7 @@ import {
 import { handleAguiStream } from "./agui.js";
 import { runSubAgent } from "../agent/sub-agent.js";
 import { createJob, cancelJob, getJob as getExecutionJob, listJobs, deleteSceneJob } from "../agent/jobs.js";
+import { canSeeSceneJob, presentSceneJob, sceneJobViewer } from "./scene-job-access.js";
 import { resolveApproval, getPendingApproval, listPendingApprovals } from "../approval/store.js";
 import { childLogger } from "../logger.js";
 import { handleSlackEvent } from "../channels/slack.js";
@@ -121,7 +122,7 @@ import {
 } from "../agent/config-assistant-proposals.js";
 import { appendFlowMemoryEntry } from "../agent/flow-memory.js";
 import { recordAccount } from "../runtime/user-scope.js";
-import { presentRequestItem, requestTextReader } from "./config-assistant-visibility.js";
+import { presentProposal, requestTextReader } from "./config-assistant-visibility.js";
 
 
 import { JobConfigSchema } from "../config/schema.js";
@@ -3009,7 +3010,7 @@ export function createGateway() {
         summary: proposal.summary,
       }, { severity: "info", channel: "config-assistant" });
 
-      return c.json({ proposal: presentRequestItem(proposal, () => true), flowMemoryId: flowEntry.id }, 201);
+      return c.json({ proposal: presentProposal(proposal, () => true), flowMemoryId: flowEntry.id }, 201);
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
     }
@@ -3118,9 +3119,9 @@ export function createGateway() {
         account: proposal.account,
       });
 
-      // Any operator may apply any proposal; the request text goes to its author and an admin only.
+      // Any operator may apply any proposal; it goes back whole to its author and an admin only.
       const mayRead = await requestTextReader(c.req.header("Authorization"));
-      return c.json({ proposal: presentRequestItem(updated ?? proposal, mayRead) });
+      return c.json({ proposal: presentProposal(updated ?? proposal, mayRead) });
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
     }
@@ -3176,9 +3177,9 @@ export function createGateway() {
       account: proposal.account,
     });
 
-    // The request text goes to its author and an admin only.
+    // The proposal goes back whole to its author and an admin only.
     const mayRead = await requestTextReader(c.req.header("Authorization"));
-    return c.json({ proposal: presentRequestItem(updated ?? proposal, mayRead) });
+    return c.json({ proposal: presentProposal(updated ?? proposal, mayRead) });
   });
 
   // ── AG-UI streaming chat (SSE) ────────────────────────────────────────────
@@ -3496,8 +3497,13 @@ export function createGateway() {
     const allowedStatuses = new Set(["queued", "running", "cancelling", "cancelled", "completed", "failed"]);
     const status = statusParam && allowedStatuses.has(statusParam) ? statusParam as "queued" | "running" | "cancelling" | "cancelled" | "completed" | "failed" : undefined;
 
+    // Under multi-user auth a non-admin lists the runs made as themselves (scene-job-access.ts),
+    // chosen in the store before the limit.
+    const viewer = await sceneJobViewer(c.req.header("Authorization"));
+    if (!viewer.all && !viewer.userId) return c.json({ jobs: [] });
+    const jobs = await listJobs({ limit, status, ...(viewer.all ? {} : { userId: viewer.userId }) });
     return c.json({
-      jobs: await listJobs({ limit, status }),
+      jobs: jobs.map((job) => presentSceneJob(job, viewer)),
     });
   });
 
@@ -3508,8 +3514,10 @@ export function createGateway() {
 
     const jobId = c.req.param("jobId");
     const job = await getExecutionJob(jobId);
-    if (!job) return c.json({ error: `Job not found: ${jobId}` }, 404);
-    return c.json(job);
+    // Another account's run reads as missing: its id says nothing about whether it exists.
+    const viewer = await sceneJobViewer(c.req.header("Authorization"));
+    if (!job || !canSeeSceneJob(viewer, job)) return c.json({ error: `Job not found: ${jobId}` }, 404);
+    return c.json(presentSceneJob(job, viewer));
   });
 
   app.post("/api/scenes/jobs/:jobId/cancel", async (c) => {
@@ -3517,9 +3525,13 @@ export function createGateway() {
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
 
     const jobId = c.req.param("jobId");
+    // Only a run the caller may see can be cancelled; checked before cancelJob changes anything.
+    const viewer = await sceneJobViewer(c.req.header("Authorization"));
+    const current = await getExecutionJob(jobId);
+    if (!current || !canSeeSceneJob(viewer, current)) return c.json({ error: `Job not found: ${jobId}` }, 404);
     const job = await cancelJob(jobId);
     if (!job) return c.json({ error: `Job not found: ${jobId}` }, 404);
-    return c.json({ ok: true, job });
+    return c.json({ ok: true, job: presentSceneJob(job, viewer) });
   });
 
   // DELETE /api/scenes/jobs/:jobId — remove a finished scene-job execution row
@@ -3532,7 +3544,8 @@ export function createGateway() {
 
     const jobId = c.req.param("jobId");
     const existing = await getExecutionJob(jobId);
-    if (!existing) return c.json({ error: `Job not found: ${jobId}` }, 404);
+    const viewer = await sceneJobViewer(c.req.header("Authorization"));
+    if (!existing || !canSeeSceneJob(viewer, existing)) return c.json({ error: `Job not found: ${jobId}` }, 404);
     if (existing.status === "queued" || existing.status === "running" || existing.status === "cancelling") {
       return c.json({ error: `Cannot delete an active job (status=${existing.status}). Cancel it first.` }, 409);
     }

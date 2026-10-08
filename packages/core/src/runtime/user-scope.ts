@@ -89,11 +89,12 @@ export { USERS_SUBDIR };
 // carries the user-scope segment of the account it was written for (never the raw user id), so a
 // reader that shows a record's text can keep to the caller's own.
 
-/** The segment to stamp on a record written now: the ambient user's under multi-user auth, none
- *  otherwise. None too when the config cannot be read; such a record is then shown to no one. */
-export function recordAccount(): string | undefined {
+/** The segment to stamp on a record written now: under multi-user auth that of `userId`, or of the
+ *  ambient user when none is given; none otherwise. None too when the config cannot be read; such a
+ *  record is then shown to no one. */
+export function recordAccount(userId?: string): string | undefined {
   try {
-    return activeUserScopeSegment();
+    return activeUserScopeSegment(userId);
   } catch {
     return undefined;
   }
