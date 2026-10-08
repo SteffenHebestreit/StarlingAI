@@ -800,6 +800,50 @@ describe("execute_plan and the code its steps' runs executed", () => {
     expect(result.metadata?.["maskedRuns"]).toEqual([{ agentName: "coder", executions: MASKED, artifacts: [PRIMES] }]);
     // Its file still goes up, to be named as written but not run successfully.
     expect(result.metadata?.["artifacts"]).toEqual([PRIMES]);
+    // And the turn is told the plan's failure is that step's masked figures and nothing else.
+    expect(result.metadata?.["maskedSteps"]).toEqual(["s1"]);
+  });
+
+  it("a step that really failed is not counted among the masked ones (agent/runtime.ts failureIsOnlyMaskedRuns)", async () => {
+    respond = (name, args) => (args["agentName"] === "coder"
+      ? coder(MASKED, "Es gibt [not observed] Primzahlen.")
+      : { success: false, output: "", error: "researcher: every web_search call failed", metadata: { agentName: "researcher", delegationSucceeded: false } });
+    await persistTurnPlan(SESSION, basePlan([
+      { id: "s1", description: "research the sieve's history", kind: "delegate", agent: "researcher" },
+      { id: "s2", description: "count the primes with a script", kind: "delegate", agent: "coder" },
+    ]));
+
+    const result = await run();
+
+    expect(result.metadata?.["failed"]).toBe(2);
+    expect(result.metadata?.["maskedSteps"]).toEqual(["s2"]);
+  });
+
+  it("a workflow step stopped by masked figures and nothing else counts among them; one stopped otherwise does not", async () => {
+    const blockedWorkflow = (byMaskedFigures: boolean): ToolResult => ({
+      success: false,
+      output: "Workflow prime_packet [job] blocked.",
+      error: "Workflow prime_packet [job] blocked.",
+      metadata: {
+        workflowName: "prime_packet",
+        workflowType: "job",
+        blocked: true,
+        ...(byMaskedFigures ? { blockedByMaskedFigures: true } : {}),
+        specialistExecutions: MASKED,
+        maskedRuns: [{ agentName: "coder", executions: MASKED, artifacts: [PRIMES] }],
+      },
+    });
+    const plan = basePlan([{ id: "s1", description: "count and explain the primes", kind: "reuse", workflow: "prime_packet" }]);
+
+    respond = () => blockedWorkflow(true);
+    await persistTurnPlan(SESSION, plan);
+    expect((await run()).metadata?.["maskedSteps"]).toEqual(["s1"]);
+
+    respond = () => blockedWorkflow(false);
+    await persistTurnPlan(SESSION, plan);
+    const result = await run();
+    expect(result.metadata?.["failed"]).toBe(1);
+    expect(result.metadata).not.toHaveProperty("maskedSteps");
   });
 
   it("a step that is itself a fan-out hands its masked runs up as they are, each with its own files", async () => {

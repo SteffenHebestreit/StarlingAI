@@ -357,6 +357,47 @@ describe("a turn whose delegated run masked figures no tool returned", () => {
       expect(turn.qualityScorecard).toMatchObject({ outcomeStatus: "partial", partialOrFailureReason: "delegated_figures_unobserved" });
     });
 
+    it("a step that really failed beside the masked one keeps the failure path, with the masked run's account", async () => {
+      // In review the masked coder step turned the whole plan's failure into the coder's directive:
+      // the research step that had really failed got no failure handling, the counter went back to
+      // 0, and the failed-research backstop never armed.
+      const RESEARCH_FAILED = {
+        success: false,
+        output: "",
+        error: "researcher: every web_search call failed (network unreachable); no source was read.",
+        metadata: {
+          ...COMPLETED,
+          agentName: "researcher",
+          taskId: "task_r",
+          attemptedAgents: ["researcher"],
+          delegationSucceeded: false,
+          delegationOutcome: "failure",
+          terminalState: "failed",
+        },
+      };
+      recordedPlan.current = {
+        ...REPORT_COUNT_EXPLAIN,
+        objective: "the history of the sieve, and the prime count from a script",
+        steps: [
+          { id: "s1", description: "research who first described the sieve, and in which year", kind: "delegate", agent: "researcher" },
+          { id: "s2", description: "count the primes with a script", kind: "delegate", agent: "coder" },
+        ],
+      };
+      delegation.queue = [RESEARCH_FAILED, MASKED_DELEGATION];
+      const { session, turn } = await runTurnWith({ failedResearchHonestyBackstop: true }, executePlan);
+
+      expect(delegation.queue).toHaveLength(0);
+      expect(synthesisDirectives(session)).toEqual([]);
+      const failed = session.getHistory()
+        .filter((message) => message.role === "system" && String(message.content ?? "").startsWith("[DELEGATION FAILED]"))
+        .map((message) => String(message.content));
+      expect(failed).toHaveLength(1);
+      expect(failed[0]).toContain("The delegated run of coder also stated figures that no tool returned");
+      expect(failed[0]).toContain("name the files it wrote (generated/primes.js) as written but not run successfully");
+      expect(turn.qualityScorecard?.wardenFailureCount).toBe(1);
+      expect(auditTypes()).toContain("source_sensitive_failed_delegation_evidence_backstop");
+    });
+
     it("control: a plan whose coder printed synthesizes as before", async () => {
       recordedPlan.current = REPORT_COUNT_EXPLAIN;
       delegation.queue = [REPORT_DELEGATION, PRINTED_DELEGATION, REPORT_DELEGATION];

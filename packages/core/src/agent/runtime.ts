@@ -229,6 +229,7 @@ export {
 // Pure honesty / source-caveat / synthesis-directive text helpers (god-file seam).
 import {
   buildSynthesisRequiredDirective,
+  buildUnobservedRunsNote,
   looksLikeUnsourcedSpecificClaims,
   prependTurnIncompleteCaveat,
 } from "./citation-honesty.js";
@@ -914,6 +915,28 @@ export function taskGraphResultIsFailure(metadata: Record<string, unknown>): boo
   const failed = Array.isArray(metadata["failed"]) && (metadata["failed"] as unknown[]).length > 0;
   const blocked = Array.isArray(metadata["blocked"]) && (metadata["blocked"] as unknown[]).length > 0;
   return failed || blocked;
+}
+
+/**
+ * Whether a result's failure is a run that masked figures, and nothing else: an execute_plan whose
+ * every failed step failed for that (maskedSteps), a workflow stopped by such a step
+ * (blockedByMaskedFigures), or a single delegation whose own run masked them, with nothing under
+ * it masked by another agent. A fan-out (parallel_delegate, run_task_graph) names no agent of its
+ * own, so its failure stays its own.
+ */
+export function failureIsOnlyMaskedRuns(metadata: Record<string, unknown>): boolean {
+  if (metadata["planExecution"] === true) {
+    const failed = typeof metadata["failed"] === "number" ? metadata["failed"] : 0;
+    const maskedSteps = Array.isArray(metadata["maskedSteps"])
+      ? new Set(metadata["maskedSteps"].filter((id): id is string => typeof id === "string")).size
+      : 0;
+    return failed > 0 && maskedSteps >= failed;
+  }
+  if (metadata["blocked"] === true) return metadata["blockedByMaskedFigures"] === true;
+  const agentName = metadata["agentName"];
+  return typeof agentName === "string"
+    && unbackedFiguresMasked(readExecutionRecord(metadata["specialistExecutions"]))
+    && readMaskedRuns(metadata["maskedRuns"]).every((run) => run.agentName === agentName);
 }
 
 export function classifyPostOrchestrationDisposition(
@@ -4920,8 +4943,16 @@ async function _runTurn(
       // builds on it (tools/plan-executor.ts, tools/workflow-catalog.ts), and the plan reads as a
       // failure here. What the turn owes the user then is the honest account a masked
       // delegate_to_agent gets below, not "attempt a different strategy": the sandbox the run
-      // needed did not run its code.
-      const disposition = classifiedDisposition === "failure" && maskedDelegatedRuns.length > 0
+      // needed did not run its code. Only when those runs are the whole failure, though. In review
+      // a plan's research step that really failed sat beside a masked coder step, and the turn got
+      // only the coder's directive: the failure counter went back to 0, the failed-research
+      // backstop never armed, and the research was answered under no guard. Such a failure stays
+      // one, with the masked runs' account added to its directive (buildUnobservedRunsNote).
+      const disposition = classifiedDisposition === "failure"
+        && maskedDelegatedRuns.length > 0
+        && classifyPostOrchestrationDisposition(
+          toolResultMessages.filter((message) => !failureIsOnlyMaskedRuns(message.metadata ?? {})),
+        ) !== "failure"
         ? "synthesize"
         : classifiedDisposition;
       if (disposition === "synthesize") {
@@ -5098,6 +5129,7 @@ async function _runTurn(
         });
       } else if (disposition === "failure") {
         _consecutiveDelegationFailures += 1;
+        const maskedRunsNote = maskedDelegatedRuns.length > 0 ? ` ${buildUnobservedRunsNote(maskedDelegatedRuns)}` : "";
         if (_consecutiveDelegationFailures >= 2) {
           // D16: Warden escalation. The system message alone relied on the model to obey
           // "stop delegating" — a model that keeps delegating (or varies the delegation
@@ -5118,7 +5150,7 @@ async function _runTurn(
               "You MUST stop delegating and respond to the user now. " +
               "If any partial evidence exists in the evidence blocks above, synthesize it into the best possible answer. " +
               "If there is no usable evidence, tell the user honestly that the information could not be retrieved at this time and suggest what they could do next. " +
-              "Do NOT call any more delegation tools in this turn.",
+              "Do NOT call any more delegation tools in this turn." + maskedRunsNote,
           });
           terminalFinishReason = "delegation_failures_terminal";
           terminalSynthesisInstruction =
@@ -5132,7 +5164,7 @@ async function _runTurn(
             role: "system",
             content:
               "[DELEGATION FAILED] The latest delegated action failed or did not return useful evidence. " +
-              "Do NOT retry the same exact delegation. You may attempt a different strategy or ask the user for guidance.",
+              "Do NOT retry the same exact delegation. You may attempt a different strategy or ask the user for guidance." + maskedRunsNote,
           });
         }
       }

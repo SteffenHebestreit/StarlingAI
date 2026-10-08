@@ -115,6 +115,8 @@ interface StepRun {
   toolFailures?: unknown[];
   /** The metadata of the step's result, read for the record of the code its run executed. */
   executionMetadata?: Record<string, unknown>;
+  /** The step failed only because its run masked figures (see the masked-step branch of runStep). */
+  maskedFigures?: true;
 }
 
 /**
@@ -294,7 +296,15 @@ async function runStep(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<
       ...(result.metadata ? { executionMetadata: result.metadata } : {}),
     };
     if (!result.success) {
-      return { status: "failed", detail: (result.error ?? "step failed").slice(0, 300), call: made(false, false, result.metadata), ...failures };
+      return {
+        status: "failed",
+        detail: (result.error ?? "step failed").slice(0, 300),
+        call: made(false, false, result.metadata),
+        ...failures,
+        // A workflow stopped by a step whose run masked figures, and by nothing else
+        // (tools/workflow-catalog.ts): the step failed for the same reason as the branch below.
+        ...(result.metadata?.["blockedByMaskedFigures"] === true ? { maskedFigures: true as const } : {}),
+      };
     }
     // A DELEGATION CAN FAIL ON A SUCCESSFUL ToolResult. delegate_to_agent returns success:true and
     // carries the verdict in metadata: the sub-agent's own <final_answer status="failure">, a
@@ -350,6 +360,7 @@ async function runStep(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<
         call: made(true, false, result.metadata),
         ...forwardedArtifacts,
         ...failures,
+        maskedFigures: true,
       };
     }
     return {
@@ -430,6 +441,10 @@ registerTool({
     const specialistToolFailures: unknown[] = [];
     // The code each dispatched step's run executed (see parallel_delegate).
     const stepExecutions = createFanOutExecutionRecords();
+    // The steps of this call that failed only because their run masked figures. The turn reads the
+    // plan's failure as theirs only when every failed step is one of them (agent/runtime.ts): a
+    // research step that really failed beside a masked coder step keeps the failure path armed.
+    const maskedSteps: string[] = [];
 
     // THE RESUME PATH. Without these a `manual` step is terminal: it is not `pending`, so it is
     // never re-offered, and it never settles, so its dependents stay blocked for good. The tool
@@ -552,6 +567,7 @@ registerTool({
         if (run.artifacts) artifacts.push(...run.artifacts);
         if (run.toolFailures) specialistToolFailures.push(...run.toolFailures);
         stepExecutions.add(run.executionMetadata, step.agent);
+        if (run.status === "failed" && run.maskedFigures) maskedSteps.push(step.id);
         if (run.status === "done" || run.status === "failed") ran.push(step.id);
       }
     }
@@ -718,6 +734,7 @@ registerTool({
         ...(artifacts.length > 0 ? { artifacts } : {}),
         ...(specialistToolFailures.length > 0 ? { specialistToolFailures } : {}),
         ...stepExecutions.metadata(),
+        ...(maskedSteps.length > 0 ? { maskedSteps } : {}),
       },
     };
   },

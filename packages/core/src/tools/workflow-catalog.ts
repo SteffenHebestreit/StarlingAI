@@ -1135,7 +1135,7 @@ async function runJobInline(
   params: Record<string, string>,
   workflowContext: string | undefined,
   ctx: ToolContext,
-): Promise<{ response: string; blocked: boolean; toolCallsExecuted: number; executedSteps: number; artifacts?: Array<Record<string, unknown>>; executions: WorkflowExecutions }> {
+): Promise<{ response: string; blocked: boolean; blockedByMaskedFigures?: true; toolCallsExecuted: number; executedSteps: number; artifacts?: Array<Record<string, unknown>>; executions: WorkflowExecutions }> {
   const steps = resolveJobSteps(job, params);
   const enrichedWorkflowContext = buildWorkflowParamContext(job.description || job.name, params, workflowContext, ctx.swarmState?.objective);
   const workflowTaskId = `workflow:job:${job.name}`;
@@ -1162,6 +1162,9 @@ async function runJobInline(
     // turn can compact them out of the history.
     const recordedToolMessages = new WeakSet<object>();
     let blocked = false;
+    // The step that stopped the job was stopped only because its run masked figures: the turn
+    // reads the job's failure as that run's (agent/runtime.ts, tools/plan-executor.ts).
+    let blockedByMaskedFigures = false;
     let toolCallsExecuted = 0;
     let executedSteps = 0;
 
@@ -1202,6 +1205,7 @@ async function runJobInline(
       const directAgent = resolveSingleStepLeafAgent(allowedAgents);
       let stepResponse: string;
       let stepBlocked: boolean;
+      let stepMaskedFigures = false;
       if (directAgent) {
         const directIntro = `You are the "${directAgent}" specialist running ONE scoped step of a pipeline. Carry out this step's work YOURSELF with your own tools — you have no sub-agents and must not try to delegate.\n\n`;
         const directOpts = {
@@ -1265,6 +1269,7 @@ async function runJobInline(
         // the masked text as its input, as a plan's dependent step did in review (see
         // tools/plan-executor.ts). The job stops there and says why.
         if (unbackedFiguresMasked(run.executions)) {
+          stepMaskedFigures = !stepBlocked;
           stepBlocked = true;
           stepResponse = `${stepResponse}\n\n${MASKED_STEP_NOTE}`.trim();
         }
@@ -1299,6 +1304,7 @@ async function runJobInline(
         const stepRecord = stepRuns.metadata();
         jobExecutions.add({ ...stepRecord });
         if (stepRecord.maskedRuns) {
+          stepMaskedFigures = !stepBlocked;
           stepBlocked = true;
           stepResponse = `${stepResponse}\n\n${MASKED_STEP_NOTE}`.trim();
         }
@@ -1309,6 +1315,7 @@ async function runJobInline(
 
       if (stepBlocked) {
         blocked = true;
+        blockedByMaskedFigures = stepMaskedFigures;
         break;
       }
     }
@@ -1338,6 +1345,7 @@ async function runJobInline(
     return {
       response,
       blocked,
+      ...(blockedByMaskedFigures ? { blockedByMaskedFigures: true as const } : {}),
       toolCallsExecuted,
       executedSteps,
       artifacts,
@@ -1767,6 +1775,7 @@ registerTool({
         workflowName: job!.name,
         workflowType: "job",
         blocked: result.blocked,
+        ...(result.blockedByMaskedFigures ? { blockedByMaskedFigures: true } : {}),
         toolCallsExecuted: result.toolCallsExecuted,
         stepCount: job!.steps.length,
         executedSteps: result.executedSteps,

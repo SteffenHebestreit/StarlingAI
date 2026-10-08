@@ -4,7 +4,7 @@ import { collectArtifactRecords } from "../agent/artifact-metadata.js";
 import { EVIDENCE_SECTION_RE } from "../agent/interrupted-delegation-evidence.js";
 import { extractSingleRelayableDeliverable } from "../agent/deliverable-relay.js";
 import { findRecentJunkDelegationResult } from "../agent/response-finalization.js";
-import { classifyPostOrchestrationDisposition } from "../agent/runtime.js";
+import { classifyPostOrchestrationDisposition, failureIsOnlyMaskedRuns } from "../agent/runtime.js";
 import { AgentSession } from "../agent/session.js";
 import {
   EXECUTIONS_HEADER,
@@ -475,5 +475,34 @@ describe("the code a delegated run executed", () => {
       // A fan-out whose runs printed keeps the frame it had.
       expect(buildModelVisibleToolResult(tool, text, { ...metadata, specialistExecutions: { attempted: 1, failed: 0, succeededWithOutput: 1 } })).toBe(plain);
     }
+  });
+});
+
+describe("a failure that is only the runs that masked figures (agent/runtime.ts)", () => {
+  // Such a failure gets the honest directive a masked delegation gets; any other failure of the
+  // same results keeps the turn's failure path. In review a plan's research step that really failed
+  // beside a masked coder step lost its failure handling.
+  const MASKED = { attempted: 7, failed: 4, succeededWithOutput: 0, unobservedFigures: 2 };
+  const coderRun = { agentName: "coder", executions: MASKED, artifacts: [] };
+
+  it("a plan whose every failed step failed for masked figures, and no other", () => {
+    expect(failureIsOnlyMaskedRuns({ planExecution: true, failed: 1, maskedSteps: ["s2"], specialistExecutions: MASKED })).toBe(true);
+    expect(failureIsOnlyMaskedRuns({ planExecution: true, failed: 2, maskedSteps: ["s2"], specialistExecutions: MASKED })).toBe(false);
+    expect(failureIsOnlyMaskedRuns({ planExecution: true, failed: 2, maskedSteps: ["s2", "s2"], specialistExecutions: MASKED })).toBe(false);
+    expect(failureIsOnlyMaskedRuns({ planExecution: true, failed: 1, specialistExecutions: MASKED })).toBe(false);
+  });
+
+  it("a workflow stopped by masked figures alone", () => {
+    expect(failureIsOnlyMaskedRuns({ workflowType: "job", blocked: true, blockedByMaskedFigures: true, specialistExecutions: MASKED })).toBe(true);
+    expect(failureIsOnlyMaskedRuns({ workflowType: "job", blocked: true, specialistExecutions: MASKED })).toBe(false);
+  });
+
+  it("a delegation whose own run masked them, with nothing under it masked by another agent", () => {
+    expect(failureIsOnlyMaskedRuns({ agentName: "coder", specialistExecutions: MASKED })).toBe(true);
+    expect(failureIsOnlyMaskedRuns({ agentName: "fan_lead", specialistExecutions: MASKED, maskedRuns: [{ ...coderRun, agentName: "fan_lead" }] })).toBe(true);
+    expect(failureIsOnlyMaskedRuns({ agentName: "fan_lead", specialistExecutions: MASKED, maskedRuns: [coderRun] })).toBe(false);
+    expect(failureIsOnlyMaskedRuns({ agentName: "researcher", delegationSucceeded: false })).toBe(false);
+    // A fan-out names no agent of its own.
+    expect(failureIsOnlyMaskedRuns({ completed: ["count"], failed: ["research"], blocked: [], specialistExecutions: MASKED, maskedRuns: [coderRun] })).toBe(false);
   });
 });

@@ -1848,6 +1848,8 @@ describe("run_workflow and the code its runs executed", () => {
       expect(runSubAgentMock.mock.calls.map((c) => (c[0] as { agentName: string }).agentName)).toEqual(["coder"]);
       expect(result.success).toBe(false);
       expect(result.metadata?.["blocked"]).toBe(true);
+      // Stopped by the masked figures and nothing else: the turn reads the failure as that run's.
+      expect(result.metadata?.["blockedByMaskedFigures"]).toBe(true);
       expect(result.output).toContain("they are masked as [not observed] and were not computed");
       expect(result.metadata?.["specialistExecutions"]).toEqual(MASKED);
       expect(result.metadata?.["maskedRuns"]).toEqual([{ agentName: "coder", executions: MASKED, artifacts: [PRIMES] }]);
@@ -1908,6 +1910,7 @@ describe("run_workflow and the code its runs executed", () => {
 
       expect(runTurnMock).toHaveBeenCalledTimes(1);
       expect(result.metadata?.["blocked"]).toBe(true);
+      expect(result.metadata?.["blockedByMaskedFigures"]).toBe(true);
       expect(result.output).toContain("they are masked as [not observed] and were not computed");
       expect(result.metadata?.["specialistExecutions"]).toEqual(MASKED);
       expect(result.metadata?.["maskedRuns"]).toEqual([{ agentName: "coder", executions: MASKED, artifacts: [PRIMES] }]);
@@ -1972,8 +1975,17 @@ describe("run_workflow and the code its runs executed", () => {
       const result = await runQaJob(attempts.masked, attempts.maskedWithFile);
 
       expect(result.metadata?.["blocked"]).toBe(true);
+      expect(result.metadata?.["blockedByMaskedFigures"]).toBe(true);
       expect(result.metadata?.["specialistExecutions"]).toEqual({ attempted: 2, failed: 2, succeededWithOutput: 0, unobservedFigures: 2 });
       expect(result.metadata?.["maskedRuns"]).toEqual([{ agentName: "coder", executions: MASKED, artifacts: [PRIMES] }]);
+    });
+
+    it("still without its file: the job stops for that as well, so the stop is not the masked figures' alone", async () => {
+      const result = await runQaJob(attempts.masked, attempts.masked);
+
+      expect(result.metadata?.["blocked"]).toBe(true);
+      expect(result.output).toContain("none was saved");
+      expect(result.metadata).not.toHaveProperty("blockedByMaskedFigures");
     });
   });
 
