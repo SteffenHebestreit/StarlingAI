@@ -75,6 +75,7 @@ afterEach(async () => {
   runs.length = 0;
   toolCalls.length = 0;
   delete process.env["SAI_CONFIG_PATH"];
+  delete process.env["SAI_CRED_STORE"];
   (await import("../config/loader.js")).resetConfigForTests();
   (await import("../gateway/auth.js")).resetAuthStateForTests();
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
@@ -90,6 +91,14 @@ function writeConfig(dir: string, authEnabled: boolean, roles: Record<string, st
     ...(authEnabled ? { auth: { enabled: true, users } } : {}),
     mcp: { expose: { enabled: true, http: { enabled: true, requireAuth: true } } },
     subAgents: { researcher: { description: "Finds sources.", systemPrompt: "Research.", maxIterations: 2 } },
+    scenes: {
+      ferry_brief: {
+        description: "Brief on a ferry route.",
+        task: "Summarise the timetable for {{route}}.",
+        allowedAgents: ["researcher"],
+        params: { route: { description: "The route." } },
+      },
+    },
   }), "utf8");
 }
 
@@ -99,6 +108,8 @@ async function deployment(authEnabled: boolean): Promise<{ url: string; dir: str
   dirs.push(dir);
   writeConfig(dir, authEnabled);
   process.env["SAI_CONFIG_PATH"] = join(dir, "starlingai.json");
+  // Scenes are also read from the credential store; a temp one, not the developer's.
+  process.env["SAI_CRED_STORE"] = join(dir, "credentials.enc");
   vi.resetModules();
   const { handleMcpHttpRequest } = await import("../mcp/server-http.js");
   const server = createServer((req, res) => {
@@ -200,17 +211,22 @@ describe("/mcp and the account behind a token", () => {
 });
 
 describe("/mcp and the workspace root a call runs in", () => {
-  it("under multi-user auth, runs a signed-in account's delegation and tool call in its own root, as that account", async () => {
+  it("under multi-user auth, runs a signed-in account's delegation, scene and tool call in its own root, as that account", async () => {
     const { url } = await deployment(true);
     const { client } = await connect(url, await tokenFor("alice"));
 
     await client.callTool({ name: "agent__researcher", arguments: { task: "Remember that I prefer the early ferry." } });
+    const scene = await client.callTool({ name: "scene__ferry_brief", arguments: { route: "Kiel to Oslo" } });
     await client.callTool({ name: "read_file", arguments: { path: "timetable.md" } });
 
+    expect(scene.isError).toBe(false);
     const { getConfig } = await import("../config/loader.js");
     const { safeUserSegment } = await import("../runtime/user-scope.js");
     const aliceRoot = resolve(getConfig().workspacePath, "users", safeUserSegment("alice"));
-    expect(runs).toEqual([{ userId: "alice", contextUserId: "alice", workspacePath: aliceRoot }]);
+    expect(runs).toEqual([
+      { userId: "alice", contextUserId: "alice", workspacePath: aliceRoot },
+      { userId: "alice", contextUserId: "alice", workspacePath: aliceRoot },
+    ]);
     expect(toolCalls).toEqual([{ userId: "alice", userRole: "operator", contextUserId: "alice", workspacePath: aliceRoot }]);
   });
 
@@ -219,11 +235,16 @@ describe("/mcp and the workspace root a call runs in", () => {
     const { client } = await connect(url, await tokenFor("alice"));
 
     await client.callTool({ name: "agent__researcher", arguments: { task: "Remember that I prefer the early ferry." } });
+    const scene = await client.callTool({ name: "scene__ferry_brief", arguments: { route: "Kiel to Oslo" } });
     await client.callTool({ name: "read_file", arguments: { path: "timetable.md" } });
 
+    expect(scene.isError).toBe(false);
     const { getConfig } = await import("../config/loader.js");
     const shared = getConfig().workspacePath;
-    expect(runs).toEqual([{ userId: undefined, contextUserId: undefined, workspacePath: shared }]);
+    expect(runs).toEqual([
+      { userId: undefined, contextUserId: undefined, workspacePath: shared },
+      { userId: undefined, contextUserId: undefined, workspacePath: shared },
+    ]);
     expect(toolCalls).toEqual([{ userId: undefined, userRole: undefined, contextUserId: undefined, workspacePath: shared }]);
   });
 });
