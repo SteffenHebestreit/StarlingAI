@@ -113,6 +113,11 @@ export const IdentitySchema = z.enum(["eval", "eval-viewer"]);
 const TurnStepSchema = z.object({
   kind: z.literal("turn"),
   id: z.string().optional(),
+  /**
+   * Run this turn as another identity, in that identity's own session. Lets one attempt store
+   * something as eval and check, right after, that eval-viewer cannot get at it.
+   */
+  as: IdentitySchema.optional(),
   message: z.string().min(1),
   /** Force a specific agent (the dashboard's `--agent <name>` override). Omit to let the swarm route. */
   agent: z.string().optional(),
@@ -129,7 +134,7 @@ const HttpStepSchema = z.object({
   id: z.string().optional(),
   as: IdentitySchema.optional(),
   method: z.enum(["GET", "POST", "PATCH", "PUT", "DELETE"]),
-  /** Gateway path, e.g. "/api/knowledge-bases". `{sessionId}` is replaced with the current session. */
+  /** Gateway path, e.g. "/api/knowledge-bases". `{sessionId}` is replaced with the scenario identity's current session. */
   path: z.string().startsWith("/"),
   body: z.unknown().optional(),
   expect: z.object({
@@ -140,7 +145,7 @@ const HttpStepSchema = z.object({
 
 const WaitStepSchema = z.object({ kind: z.literal("wait"), ms: z.number().int().positive() }).strict();
 
-/** Later turns run in a fresh session of the same identity (cross-session behaviour, e.g. memory). */
+/** Later turns run in a fresh session of their identity (cross-session behaviour, e.g. memory). */
 const NewSessionStepSchema = z.object({ kind: z.literal("newSession") }).strict();
 
 /** Test-environment mailbox (GreenMail): put a message into the eval inbox, or check what arrived. */

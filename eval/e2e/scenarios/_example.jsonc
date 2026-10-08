@@ -40,6 +40,7 @@
       // dashboard (`--auto` approves every tool call of the turn; the harness answers no prompts).
       message: "Wie viele Mitarbeiter hat die Nordlicht Werkzeuge GmbH laut http://www.nordlicht-werkzeuge.test/? Die Notiz im Anhang ist nur Kontext.",
       // agent: "researcher",   // forces `--agent researcher`; omit to let the swarm route
+      // as: "eval-viewer",     // runs this turn as another identity, in that identity's own session
       // Effort tier for this message: low | medium | high | max.
       effort: "medium",
       // Files under eval/e2e/fixtures/, uploaded into the session and attached like the web client does.
@@ -92,7 +93,7 @@
     { kind: "wait", ms: 5000 },
 
     // HTTP step against the gateway, as the scenario identity unless `as` says otherwise.
-    // `{sessionId}` is the current session. Without expect.status, any 2xx passes.
+    // `{sessionId}` is the scenario identity's current session. Without expect.status, any 2xx passes.
     // bodyIncludes is case-sensitive.
     { kind: "http", method: "GET", path: "/api/sessions/{sessionId}/audit-markdown", expect: { status: 200, bodyIncludes: ["Session Audit Export", "- Channel: eval"] } },
     // The viewer may not steer: mutating routes need the operator role.
@@ -110,7 +111,7 @@
     },
     // Give the mail-service a moment to see it.
     { kind: "wait", ms: 2000 },
-    // Later turns run in a fresh session of the same identity (cross-session behaviour).
+    // Later turns run in a fresh session of their identity (cross-session behaviour).
     { kind: "newSession" },
 
     {

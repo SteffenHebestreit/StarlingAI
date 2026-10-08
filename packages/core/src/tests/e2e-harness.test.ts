@@ -38,7 +38,7 @@ import { resolveSetupPaths, runE2ESetup, SetupRefusedError } from "../e2e/setup.
 import { detectReplyLanguage, fieldMatches, summarizeAgents, summarizeTools } from "../e2e/assertions.js";
 import { parseJudgeScore } from "../e2e/judge.js";
 import { GreenMailAdapter, parseMimeMessage, type MailAdapter } from "../e2e/mail.js";
-import { findRepoRoot } from "../e2e/paths.js";
+import { findRepoRoot, resolveE2EPaths } from "../e2e/paths.js";
 import type { E2EScenario } from "../e2e/scenario.js";
 
 // ── fake gateway ─────────────────────────────────────────────────────────────
@@ -58,6 +58,8 @@ interface TurnContext {
   sessionId: string;
   requestId: string;
   message: string;
+  /** The account whose session the turn runs in. */
+  user: string;
   audit: (type: string, data?: Record<string, unknown>, sessionId?: string) => void;
   finish: (status: "ok" | "error" | "blocked", response: string, extra?: Record<string, unknown>) => void;
   addTranscript: (entry: Record<string, unknown>) => void;
@@ -244,6 +246,7 @@ class FakeGateway {
       sessionId,
       requestId,
       message,
+      user,
       audit: (type, data = {}, sid = sessionId) => this.emitAudit(type, sid, data),
       finish: (status, response, extra = {}) => {
         if (turn.done) return;
@@ -845,6 +848,62 @@ describe("e2e harness against a fake gateway", () => {
     const later = await runScenario(loaded(scenario), deps(), options);
     expect(later.attempts[0]!.notes).toEqual([]);
     expect(gateway.memoryKeys("eval", "user")).toEqual([]);
+  });
+
+  it("runs a turn with `as` as that identity, in its own session, beside the scenario identity's", async () => {
+    gateway.setScripts([{ match: /^whoami/, run: async (turn) => turn.finish("ok", `I am ${turn.user}`) }]);
+    const scenario: E2EScenario = {
+      id: "fake-as-turn",
+      title: "A turn as another identity",
+      group: "core",
+      steps: [
+        { kind: "turn", id: "own", message: "whoami first", expect: { reply: { includes: ["I am eval"] } } },
+        { kind: "turn", id: "other", as: "eval-viewer", message: "whoami as the viewer", expect: { reply: { includes: ["I am eval-viewer"] } } },
+        { kind: "turn", id: "own-again", message: "whoami again", expect: { reply: { includes: ["I am eval"] } } },
+        // {sessionId} stays the scenario identity's session.
+        { kind: "http", method: "GET", path: "/api/echo/{sessionId}", expect: { bodyIncludes: ['"user":"eval"'] } },
+      ],
+    };
+    // The other identity's memory is reset before the attempt like the scenario identity's.
+    gateway.remember("eval-viewer", "user", "viewer_note");
+    const result = await runScenario(loaded(scenario), deps(), FAST);
+    const attempt = result.attempts[0]!;
+    expect(attempt.failures).toEqual([]);
+    const [own, other, ownAgain] = attempt.steps.map((step) => step.turn?.sessionId);
+    expect(ownAgain).toBe(own);
+    expect(other).not.toBe(own);
+    expect(attempt.sessions).toEqual([own, other]);
+    expect(attempt.steps[3]!.http?.path).toBe(`/api/echo/${own}`);
+    expect(attempt.notes).toEqual(["memory reset: 1 entry of eval-viewer's user memory not deleted (HTTP 403)"]);
+  });
+
+  it("checks that eval-viewer cannot recall eval's preference with that preference in place, whatever ran before", async () => {
+    // The isolation scenario passed without testing anything when the memory scenario had not run
+    // just before it (--id, --tag isolation): every eval attempt empties eval's memory first.
+    const paths = resolveE2EPaths();
+    const { selected } = filterScenarios(loadScenarios(paths.scenariosDir, paths.fixturesDir).scenarios, { tags: ["isolation"] });
+    expect(selected.map((entry) => entry.scenario.id)).toEqual(["core-ix-memory-viewer-isolation"]);
+    const store: TurnScript = async (turn) => {
+      turn.audit("tool_call_requested", { tool: "memory_store", args: { scope: "user" } });
+      gateway.remember(turn.user, "user", "lieblingstee", "Lieblingsteesorte: Polarstern-Rooibos");
+      turn.audit("tool_call_completed", { tool: "memory_store", success: true });
+      turn.finish("ok", "Gemerkt.");
+    };
+    const recall = (partition: "leaks" | "holds"): TurnScript => async (turn) => {
+      const stores = partition === "leaks" ? [...gateway.memory.values()] : [gateway.memory.get(`${turn.user}:user`)];
+      const known = stores.flatMap((entries) => [...(entries?.values() ?? [])].map((entry) => entry.content));
+      turn.finish("ok", known.length > 0 ? `Gespeichert ist: ${known.join("; ")}` : "Dazu habe ich nichts über dich gespeichert.");
+    };
+
+    gateway.setScripts([{ match: /merke dir/i, run: store }, { match: /Teesorte/i, run: recall("leaks") }]);
+    const leaking = await runScenarios(selected, deps(), FAST);
+    expect(leaking[0]!.status).toBe("failed");
+    expect(leaking[0]!.attempts[0]!.failures).toEqual(['step 2 turn "ask-other-account": reply.excludes "Polarstern": found']);
+
+    gateway.setScripts([{ match: /merke dir/i, run: store }, { match: /Teesorte/i, run: recall("holds") }]);
+    const holding = await runScenarios(selected, deps(), FAST);
+    expect(holding[0]!.attempts[0]!.failures).toEqual([]);
+    expect(holding[0]!.status).toBe("passed");
   });
 
   it("empties the identity's user model before the attempt's first turn, which recall_context serves", async () => {

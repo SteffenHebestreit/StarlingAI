@@ -1,6 +1,7 @@
 /**
  * Runs scenarios against a live gateway: one attempt = the scenario's steps in order, in fresh
- * sessions, as one identity. A scenario repeated k times passes only when all k attempts pass
+ * sessions, as the scenario's identity (a turn with `as` runs as another one, in that identity's
+ * own session). A scenario repeated k times passes only when all k attempts pass
  * (pass^k). Scenarios run `concurrency` at a time (default 1: the model backend is shared);
  * scenarios with mail steps never overlap each other, because a purge empties every mailbox.
  *
@@ -357,7 +358,8 @@ interface AttemptContext {
   attemptTimeoutMs: number;
   /** The run was interrupted (not the attempt's own deadline). */
   interrupted: boolean;
-  sessionId: string | null;
+  /** Each identity's current session; a turn with `as` runs in its identity's own. */
+  sessionIds: Map<string, string>;
   sessions: string[];
 }
 
@@ -645,7 +647,7 @@ export async function runAttempt(
     deadline: startedAt + attemptTimeoutMs,
     attemptTimeoutMs,
     interrupted: false,
-    sessionId: null,
+    sessionIds: new Map(),
     sessions: [],
   };
   const onRunAbort = (): void => {
@@ -656,7 +658,12 @@ export async function runAttempt(
   else opts.signal?.addEventListener("abort", onRunAbort, { once: true });
   const resetNotes: string[] = [];
   if (opts.resetDurableMemory && opts.concurrency === 1 && !controller.signal.aborted) {
-    resetNotes.push(...(await resetDurableMemory(ctx.identity, deps, controller.signal, opts.cancelGraceMs)).notes);
+    // Every identity a turn of the attempt runs as: what any of them stored before would steer it.
+    const identities = new Set([ctx.identity, ...scenario.steps.flatMap((step) => (step.kind === "turn" && step.as ? [step.as] : []))]);
+    for (const identity of identities) {
+      if (controller.signal.aborted) break;
+      resetNotes.push(...(await resetDurableMemory(identity, deps, controller.signal, opts.cancelGraceMs)).notes);
+    }
   }
   const steps: StepResult[] = [];
   let open: { window: OpenTurnWindow; result: StepResult } | null = null;
@@ -744,7 +751,7 @@ function runStepBody(step: E2EStep, ctx: AttemptContext): Promise<StepOutcome> {
         return { failures: [], notes: [] };
       });
     case "newSession":
-      ctx.sessionId = null;
+      ctx.sessionIds.clear();
       return Promise.resolve({ failures: [], notes: [] });
     case "mail":
       return runMailStep(step, ctx);
@@ -755,9 +762,10 @@ function runStepBody(step: E2EStep, ctx: AttemptContext): Promise<StepOutcome> {
   }
 }
 
-async function ensureSession(ctx: AttemptContext): Promise<string> {
-  if (ctx.sessionId) return ctx.sessionId;
-  const connection = await ctx.deps.client.connection(ctx.identity);
+async function ensureSession(ctx: AttemptContext, identity = ctx.identity): Promise<string> {
+  const current = ctx.sessionIds.get(identity);
+  if (current) return current;
+  const connection = await ctx.deps.client.connection(identity);
   let sessionId: string;
   try {
     // "eval": the runtime keeps eval traffic out of its learning loops (LRN-403).
@@ -766,7 +774,7 @@ async function ensureSession(ctx: AttemptContext): Promise<string> {
     if (err instanceof E2EInfraError) throw err;
     throw new E2EInfraError(`session.create failed: ${describeError(err)}`);
   }
-  ctx.sessionId = sessionId;
+  ctx.sessionIds.set(identity, sessionId);
   ctx.sessions.push(sessionId);
   return sessionId;
 }
@@ -919,7 +927,7 @@ interface PreparedMessage {
  * documents stored in the session's uploads/ and sent as attachments; images stored too, with
  * their vision analysis inlined ahead of the text; the bubble text names the files.
  */
-async function prepareMessage(step: E2ETurnStep, sessionId: string, ctx: AttemptContext): Promise<PreparedMessage> {
+async function prepareMessage(step: E2ETurnStep, sessionId: string, ctx: AttemptContext, identity: string): Promise<PreparedMessage> {
   const typed = step.agent ? `${step.message} --agent ${step.agent}` : step.message;
   if (!step.attachments || step.attachments.length === 0) return { message: typed };
   const attachments: Array<Record<string, unknown>> = [];
@@ -933,13 +941,13 @@ async function prepareMessage(step: E2ETurnStep, sessionId: string, ctx: Attempt
     const file = { path, filename, contentType };
     if (contentType.startsWith("image/")) {
       const [stored, analysis] = await Promise.all([
-        ctx.deps.client.uploadAttachment(ctx.identity, sessionId, file, ctx.signal),
-        ctx.deps.client.analyzeImage(ctx.identity, file, ctx.signal),
+        ctx.deps.client.uploadAttachment(identity, sessionId, file, ctx.signal),
+        ctx.deps.client.analyzeImage(identity, file, ctx.signal),
       ]);
       attachments.push({ filename, contentType: stored.contentType, previewMode: "image", size: stored.size, relativePath: stored.relativePath });
       imageContexts.push(`Image analysis (${filename}):\n\n${analysis}`);
     } else {
-      const stored = await ctx.deps.client.uploadAttachment(ctx.identity, sessionId, file, ctx.signal);
+      const stored = await ctx.deps.client.uploadAttachment(identity, sessionId, file, ctx.signal);
       attachments.push({ filename: stored.filename, relativePath: stored.relativePath, contentType: stored.contentType, size: stored.size, previewMode: "download" });
     }
   }
@@ -985,9 +993,9 @@ async function collectArtifacts(connection: GatewayConnection, sessionId: string
 
 /** Best effort: stop a turn whose socket died, from a fresh connection (chat.cancel works across
  *  connections for a session the caller owns). */
-async function cancelFromFreshConnection(ctx: AttemptContext, requestId: string): Promise<string> {
+async function cancelFromFreshConnection(ctx: AttemptContext, identity: string, requestId: string): Promise<string> {
   try {
-    const connection = await ctx.deps.client.connection(ctx.identity);
+    const connection = await ctx.deps.client.connection(identity);
     const result = await connection.cancel(requestId);
     return `chat.cancel from a new connection: cancelled=${result.cancelled}`;
   } catch (err) {
@@ -1051,11 +1059,13 @@ async function closeTurnWindow(window: OpenTurnWindow, result: StepResult, ctx: 
 
 async function runTurnStep(step: E2ETurnStep, ctx: AttemptContext): Promise<StepOutcome> {
   const { client } = ctx.deps;
-  const connection = await client.connection(ctx.identity);
-  const sessionId = await ensureSession(ctx);
+  // A turn with `as` runs as that identity, in its own session.
+  const identity = step.as ?? ctx.identity;
+  const connection = await client.connection(identity);
+  const sessionId = await ensureSession(ctx, identity);
   connection.registerRoot(sessionId);
   const notes: string[] = [];
-  const prepared = await prepareMessage(step, sessionId, ctx);
+  const prepared = await prepareMessage(step, sessionId, ctx, identity);
   const requestId = `e2e-${randomUUID()}`;
   const ownTimeoutMs = step.timeoutMs ?? ctx.opts.defaultTurnTimeoutMs;
   const remainingMs = Math.max(0, ctx.deadline - Date.now());
@@ -1063,7 +1073,7 @@ async function runTurnStep(step: E2ETurnStep, ctx: AttemptContext): Promise<Step
   // When the attempt's deadline is the nearer one, a timeout here is the attempt's.
   const limitedByAttempt = remainingMs < ownTimeoutMs;
   const startSeq = connection.currentSeq();
-  const during = new DuringController(step.during ?? [], { connection, client, identity: ctx.identity, sessionId, requestId, startSeq });
+  const during = new DuringController(step.during ?? [], { connection, client, identity, sessionId, requestId, startSeq });
   const sentAt = Date.now();
   during.attach(sentAt);
   try {
@@ -1079,7 +1089,7 @@ async function runTurnStep(step: E2ETurnStep, ctx: AttemptContext): Promise<Step
     during.detach();
     if (err instanceof E2EInfraError) {
       // The gateway may have taken the send before the socket failed.
-      noteUnconfirmedTurn(ctx, ctx.identity, requestId, sessionId);
+      noteUnconfirmedTurn(ctx, identity, requestId, sessionId);
       throw err;
     }
     return { failures: [`chat.send failed: ${describeError(err)}`], notes };
@@ -1092,8 +1102,8 @@ async function runTurnStep(step: E2ETurnStep, ctx: AttemptContext): Promise<Step
   } catch (err) {
     during.detach();
     if (err instanceof E2EInfraError) {
-      const cancelled = await cancelFromFreshConnection(ctx, requestId);
-      noteUnconfirmedTurn(ctx, ctx.identity, requestId, sessionId);
+      const cancelled = await cancelFromFreshConnection(ctx, identity, requestId);
+      noteUnconfirmedTurn(ctx, identity, requestId, sessionId);
       throw new E2EInfraError(`${err.message}; ${cancelled}`);
     }
     throw err;
@@ -1116,7 +1126,7 @@ async function runTurnStep(step: E2ETurnStep, ctx: AttemptContext): Promise<Step
       final = after;
       cancel.finalStatus = after.status;
     } else {
-      noteUnconfirmedTurn(ctx, ctx.identity, requestId, sessionId);
+      noteUnconfirmedTurn(ctx, identity, requestId, sessionId);
     }
     const cancelText = cancel.error
       ? `chat.cancel failed: ${cancel.error}`

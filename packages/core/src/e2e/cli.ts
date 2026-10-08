@@ -192,7 +192,7 @@ function identitiesOf(selected: readonly LoadedScenario[]): string[] {
   for (const { scenario } of selected) {
     const identity = scenario.identity ?? "eval";
     if (scenario.steps.some((step) => step.kind === "turn" || step.kind === "http")) identities.add(identity);
-    for (const step of scenario.steps) if (step.kind === "http" && step.as) identities.add(step.as);
+    for (const step of scenario.steps) if ((step.kind === "http" || step.kind === "turn") && step.as) identities.add(step.as);
   }
   return [...identities];
 }

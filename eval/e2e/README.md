@@ -60,9 +60,11 @@ Ctrl+C cancels the running turns (`chat.cancel`) and writes the report; a second
 **Durable memory is emptied before each attempt.** What a scenario stores (memory_store) reaches every
 later turn of the account through the durable-facts capsule, so one scenario's facts would steer the next
 (the memory scenario's German fact pulled an English question's reply into German, 2026-10-07). With
-`--concurrency 1` (the default) the attempt's identity loses every user- and workspace-scope memory entry,
-and its user model (`recall_context` serves it too), before the attempt starts. Concurrent attempts share the
-account, so then nothing is reset. `--keep-memory` keeps it.
+`--concurrency 1` (the default) the attempt's identity — and the identity of any turn with `as` — loses every
+user- and workspace-scope memory entry, and its user model (`recall_context` serves it too), before the
+attempt starts. A scenario therefore cannot rely on what an earlier one stored; one that needs a record
+stores it itself (the viewer-isolation scenario: a turn as `eval`, then one `as: "eval-viewer"`).
+Concurrent attempts share the account, so then nothing is reset. `--keep-memory` keeps it.
 
 A delete cannot be undone, so the reset deletes only what is provably the eval account's own, and the
 attempt's notes in the report say what it left and why:
@@ -157,10 +159,10 @@ give it a new kebab-case `id` and keep what you need. One file holds one scenari
 
 | Kind | What it does |
 |---|---|
-| `turn` | `chat.send` into the attempt's current session (created on first use, channel `eval`). `agent` appends `--agent <name>`; `effort` is the message's effort tier; `attachments` (paths under [`fixtures/`](fixtures/)) are uploaded into the session and attached as the web client does (images also get their vision analysis inlined); `timeoutMs` (default 10 min) cancels the turn when it passes. Inline flags work as in the dashboard — the harness answers no approval or question card, so add `--auto` where a turn must not wait for one. |
-| `http` | A gateway request as the scenario identity, or `as`. `{sessionId}` in `path` is the current session. Without `expect.status` any 2xx passes; `bodyIncludes` is case-sensitive. |
+| `turn` | `chat.send` into the attempt's current session (created on first use, channel `eval`). `as` runs the turn as another identity, in that identity's own session — e.g. store something as `eval`, then check as `eval-viewer` in the same attempt. `agent` appends `--agent <name>`; `effort` is the message's effort tier; `attachments` (paths under [`fixtures/`](fixtures/)) are uploaded into the session and attached as the web client does (images also get their vision analysis inlined); `timeoutMs` (default 10 min) cancels the turn when it passes. Inline flags work as in the dashboard — the harness answers no approval or question card, so add `--auto` where a turn must not wait for one. |
+| `http` | A gateway request as the scenario identity, or `as`. `{sessionId}` in `path` is the scenario identity's current session. Without `expect.status` any 2xx passes; `bodyIncludes` is case-sensitive. |
 | `wait` | Sleeps `ms`. Keeps the previous turn's event window open (below). |
-| `newSession` | Later turns run in a fresh session of the same identity. |
+| `newSession` | Later turns run in a fresh session of their identity. |
 | `mail` | `clear` empties every GreenMail mailbox; `deliver` sends `message` over SMTP to the eval inbox; `expect` waits up to 30 s until at least `min` (default 1) messages to `to` (default the eval inbox) match every `subjectIncludes` / `bodyIncludes` (case-insensitive, body decoded), then checks `max`. Scenarios with mail steps never run beside each other. |
 
 The attempt stops at the first failed step. `timeoutMs` of the scenario (default 15 min) bounds the whole
