@@ -137,6 +137,31 @@ describe("rpc session-access isolation", () => {
     expect(responseFor(ws.sent, "getAlice").ok).toBe(true);
   });
 
+  it("starts no session under an id a client names: chat.send to an id no session has is refused", async () => {
+    // An A2A run has no session record, and its id is predictable from the account's name. The
+    // AG-UI stream adopted such an id (review, 2026-10-08); this surface never creates a session
+    // under a client's id, so bob cannot take over the facts bucket of alice's run from here.
+    const [{ RpcConnection }, session, { safeUserSegment }] = await Promise.all([
+      import("../gateway/rpc.js"),
+      import("../agent/session.js"),
+      import("../runtime/user-scope.js"),
+    ]);
+    const aliceRun = `a2a-in:${safeUserSegment("alice")}:ferry-plan`;
+
+    const ws = mockWs();
+    const conn = new RpcConnection(ws as never, "bob", "operator");
+    await conn.handleMessage(JSON.stringify({ id: "send", method: "chat.send", params: { sessionId: aliceRun, message: "what did she find?" } }));
+    const send = responseFor(ws.sent, "send");
+    expect(send.ok).toBe(false);
+    expect(String(send.error)).toContain("not found");
+    expect(session.getSessionRecord(aliceRun)).toBeUndefined();
+
+    // session.create mints the id itself; one a client sends is not taken.
+    await conn.handleMessage(JSON.stringify({ id: "create", method: "session.create", params: { sessionId: aliceRun } }));
+    expect((responseFor(ws.sent, "create").payload as { sessionId: string }).sessionId).not.toBe(aliceRun);
+    expect(session.getSessionRecord(aliceRun)).toBeUndefined();
+  });
+
   it("does not enforce isolation when the connection has no authenticated user (auth off)", async () => {
     const [{ RpcConnection }, session] = await Promise.all([
       import("../gateway/rpc.js"),

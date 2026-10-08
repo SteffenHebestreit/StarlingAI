@@ -48,6 +48,9 @@ describe("AG-UI streaming", () => {
   afterEach(async () => {
     vi.resetModules();
     vi.unmock("../agent/runtime.js");
+    // The vi.unmock in a test's own finally did not undo its vi.doMock: a test that forced auth on
+    // left it on for every test after it.
+    vi.doUnmock("../config/loader.js");
     delete process.env["SAI_CONFIG_PATH"];
 
     const configLoader = await import("../config/loader.js");
@@ -489,6 +492,90 @@ describe("AG-UI streaming", () => {
       expect(ran).toHaveBeenCalledTimes(3);
     } finally {
       vi.unmock("../config/loader.js");
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("under active auth, does not start a session under an id in a namespace the system mints ids in", async () => {
+    // Regression (review, 2026-10-08): an id no session had was adopted as it came. An A2A run has
+    // no session record, and its id is predictable from the account's name, so bob could start a
+    // session under alice's a2a-in run id (or under a sub-agent id of that run), own it, and his
+    // turn, its sub-agents and the shared-facts route read the facts bucket alice's run wrote.
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agui-reserved-"));
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      gateway: { jwtSecret: "a".repeat(32), turnTimeoutMs: 30_000 },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+
+    const ran = vi.fn(async () => ({ response: "ok", toolCallsExecuted: 0, guardrailEvents: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 }, blocked: false }));
+    vi.doMock("../agent/runtime.js", () => ({ runTurn: ran }));
+    vi.doMock("../config/loader.js", async () => {
+      const actual = await vi.importActual<typeof import("../config/loader.js")>("../config/loader.js");
+      return {
+        ...actual,
+        getConfig: () => {
+          const cfg = actual.getConfig();
+          return { ...cfg, auth: { ...cfg.auth, enabled: true, provider: "builtin", users: [] } };
+        },
+      };
+    });
+
+    try {
+      const { handleAguiStream } = await import("../gateway/agui.js");
+      const session = await import("../agent/session.js");
+      const { safeUserSegment } = await import("../runtime/user-scope.js");
+      const aliceRun = `a2a-in:${safeUserSegment("alice")}:ferry-plan`;
+
+      for (const sessionId of [
+        aliceRun,
+        `sub:${aliceRun}:researcher:1790000000000`,
+        `workflow:${aliceRun}:daily_brief:0b6e1f62-5d0c-4a7e-9a52-3c1f0f9d2b11`,
+        "mcp:alice:0b6e1f62-5d0c-4a7e-9a52-3c1f0f9d2b11",
+      ]) {
+        const res = new FakeResponse();
+        await handleAguiStream(res as never, { sessionId, message: "what did she find?" }, { userId: "bob", role: "operator" });
+        expect(res.statusCode, sessionId).toBe(404);
+        expect(session.getSessionRecord(sessionId), sessionId).toBeUndefined();
+      }
+      expect(ran).not.toHaveBeenCalled();
+
+      // A client that pre-generates a UUID still starts its own session under it.
+      const ownId = "5f0c2a8e-7b1d-4c3e-9f6a-2d8b4e1c7a90";
+      const resOwn = new FakeResponse();
+      await handleAguiStream(resOwn as never, { sessionId: ownId, message: "hi" }, { userId: "bob", role: "operator" });
+      expect(resOwn.statusCode).toBe(200);
+      expect(ran).toHaveBeenCalledTimes(1);
+      expect(session.getSessionRecord(ownId)?.userId).toBe("bob");
+    } finally {
+      vi.unmock("../config/loader.js");
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("with auth off, starts a session under any id a request names, as before", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agui-reserved-off-"));
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      gateway: { jwtSecret: "a".repeat(32), turnTimeoutMs: 30_000 },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+
+    let seenSessionId: string | undefined;
+    vi.doMock("../agent/runtime.js", () => ({
+      runTurn: vi.fn(async (opts: Record<string, unknown>) => {
+        seenSessionId = (opts["session"] as { id: string }).id;
+        return { response: "ok", toolCallsExecuted: 0, guardrailEvents: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 }, blocked: false };
+      }),
+    }));
+
+    try {
+      const { handleAguiStream } = await import("../gateway/agui.js");
+      const res = new FakeResponse();
+      await handleAguiStream(res as never, { sessionId: "a2a-in:ferry-plan", message: "hi" });
+      expect(res.statusCode).toBe(200);
+      expect(seenSessionId).toBe("a2a-in:ferry-plan");
+    } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
   });

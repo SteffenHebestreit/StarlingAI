@@ -746,6 +746,8 @@ Body:
 { "sessionId": "...", "message": "Summarise the quarterly report" }
 ```
 
+`sessionId` is optional. An id no session has starts a new session under that id, owned by the caller, so a client may pre-generate one (a UUID, say). Under multi-user auth a session another account owns gets `404`. So does an id no session has when it lies in a namespace the system mints ids in for runs no chat started (`sub:`, `workflow:`, `a2a-in:`, `a2a-out:`, `a2a:`, `mcp:`, `fed:`, `eval:`, `eval-judge:`, `scene-eval:`, `selfimprove:`, `job:`): such a run has no session, and its shared facts live under its id.
+
 It emits the same logical event types used by the WebSocket flow.
 
 In addition to the normal text and tool events, the stream can emit:
