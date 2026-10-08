@@ -21,7 +21,7 @@ Every public schema field, where it is declared, and how many production files r
 | `alertmanager` | packages/core/src/config/schema.ts:1135 | 1 |
 | `all` | packages/core/src/config/schema.ts:1288 | 289 |
 | `allowedAgents` | packages/core/src/config/schema.ts:1308 | 29 |
-| `allowedPrivateHosts` | packages/core/src/config/schema.ts:1251 | 3 |
+| `allowedPrivateHosts` | packages/core/src/config/schema.ts:1251 | 4 |
 | `allowedUserIds` | packages/core/src/config/schemas/channels.ts:11 | 5 |
 | `allowedUsers` | packages/core/src/config/schema.ts:793 | 13 |
 | `allowFrom` | packages/core/src/config/schemas/channels.ts:20 | 5 |
@@ -196,7 +196,7 @@ Every public schema field, where it is declared, and how many production files r
 | `historyLimit` | packages/core/src/config/schemas/channels.ts:22 | 5 |
 | `holdoutRate` | packages/core/src/config/schema.ts:1486 | 2 |
 | `honestSynthesisOnPartialEvidence` | packages/core/src/config/schemas/orchestration.ts:602 | 1 |
-| `host` | packages/core/src/config/schema.ts:707 | 113 |
+| `host` | packages/core/src/config/schema.ts:707 | 114 |
 | `http` | packages/core/src/config/schema.ts:752 | 87 |
 | `humanInLoopSteps` | packages/core/src/config/schema.ts:1309 | 20 |
 | `id` | packages/core/src/config/schema.ts:561 | 288 |
@@ -308,7 +308,7 @@ Every public schema field, where it is declared, and how many production files r
 | `mounts` | packages/core/src/config/schema.ts:683 | 11 |
 | `name` | packages/core/src/config/schema.ts:1973 | 366 |
 | `negativePrompt` | packages/core/src/config/schemas/multimodal.ts:175 | 7 |
-| `network` | packages/core/src/config/schema.ts:684 | 53 |
+| `network` | packages/core/src/config/schema.ts:684 | 54 |
 | `node` | packages/core/src/config/schema.ts:1042 | 233 |
 | `normalizeDelegationToEnglish` | packages/core/src/config/schemas/orchestration.ts:573 | 2 |
 | `notes` | packages/core/src/config/schema.ts:790 | 55 |
