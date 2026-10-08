@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { logAudit } from "../audit/logger.js";
 import { requestApprovalViaChannel } from "../approval/index.js";
 import { archiveSession, createSession, type AgentSession } from "../agent/session.js";
-import { createFanOutExecutionRecords, unbackedFiguresMasked } from "../agent/delegated-run-record.js";
+import { createFanOutExecutionRecords, readExecutionRecord, unbackedFiguresMasked } from "../agent/delegated-run-record.js";
 import { UNOBSERVED_FIGURE_MARKER } from "../agent/figure-provenance.js";
 import { runSubAgentWithStats } from "../agent/sub-agent.js";
 import { runTurn, collectTurnArtifactAttachments } from "../agent/runtime.js";
@@ -929,6 +929,20 @@ function runExecutionMetadata(
   return { agentName, specialistExecutions: run.executions, artifacts: run.artifacts };
 }
 
+/**
+ * A QA attempt the job did not adopt, for the fan-out record: the code it executed still counts, but
+ * what it stated reaches nobody, so nothing it masked is reported. In review the first attempt of an
+ * expectArtifact step masked its figures, the re-attempt saved primes.js and printed the count and
+ * was adopted, and the job still handed back the discarded attempt as a run that masked figures:
+ * the turn was told the values were not computed while its evidence carried the computed ones.
+ */
+function discardedAttemptMetadata(agentName: string, run: { executions?: unknown }): Record<string, unknown> {
+  const record = readExecutionRecord(run.executions);
+  if (!record) return { agentName };
+  const { unobservedFigures: _stated, ...executed } = record;
+  return { agentName, specialistExecutions: executed };
+}
+
 async function runSceneInline(
   scene: SceneSummary,
   params: Record<string, string>,
@@ -1204,7 +1218,7 @@ async function runJobInline(
 
         let run = await runSubAgentWithStats({ ...directOpts, task: `${directIntro}${stepTask}` });
         toolCallsExecuted += run.stats.toolCount;
-        jobExecutions.add(runExecutionMetadata(directAgent, run));
+        let discarded: typeof run | undefined;
 
         // QA deliverable check: a step that MUST persist an output file but produced none
         // gets ONE corrective re-attempt with the failure folded in. A clean retry that
@@ -1216,9 +1230,17 @@ async function runJobInline(
           const correctiveTask = `${directIntro}${stepTask}\n\n[QA RE-ATTEMPT] Your previous attempt did NOT persist the required output file — no artifact was saved. Produce it now and make sure the artifact tool call SUCCEEDS before you stop: pass every array argument as a real JSON array (e.g. slides=[{…}], bullets=[…]) — never a quoted string; use only allowed enum values (an invalid theme is ignored, not rejected); embed any images as Markdown ![alt](images/<file>). Do not paste the file contents into your reply.`;
           const retry = await runSubAgentWithStats({ ...directOpts, task: correctiveTask });
           toolCallsExecuted += retry.stats.toolCount;
-          jobExecutions.add(runExecutionMetadata(directAgent, retry));
-          if (producedArtifact(retry)) run = retry; // adopt the attempt that produced the file
+          if (producedArtifact(retry)) { // adopt the attempt that produced the file
+            discarded = run;
+            run = retry;
+          } else {
+            discarded = retry;
+          }
         }
+        // Recorded once the step's run is settled: the adopted attempt as it ran, the other one
+        // for the code it executed only (discardedAttemptMetadata).
+        jobExecutions.add(runExecutionMetadata(directAgent, run));
+        if (discarded) jobExecutions.add(discardedAttemptMetadata(directAgent, discarded));
 
         stepResponse = run.output.trim() || `Step '${step.label}' produced no output.`;
         stepBlocked = run.stats.outcome === "failure" || workflowOutputIsBlocked(stepResponse);

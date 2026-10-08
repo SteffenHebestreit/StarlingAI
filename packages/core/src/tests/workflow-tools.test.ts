@@ -1815,6 +1815,57 @@ describe("run_workflow and the code its runs executed", () => {
     }
   });
 
+  describe("a step's QA re-attempt", () => {
+    // A step that must save a file and saved none runs once more; one of the two attempts is the
+    // step's run. In review the discarded first attempt, which had masked its figures, was handed
+    // back as a run that masked figures while the adopted re-attempt had computed them.
+    const PRINTED = { attempted: 1, failed: 0, succeededWithOutput: 1 };
+    const attempts = {
+      masked: { output: "Es gibt [not observed] Primzahlen.", stats: { outcome: "partial", toolCount: 1, iterations: 1, toolNames: [] }, artifacts: [], executions: MASKED },
+      printed: { output: "primes.js gab aus: Es gibt 8392 Primzahlen.", stats: { outcome: "success", toolCount: 2, iterations: 2, toolNames: [] }, artifacts: [PRIMES], executions: PRINTED },
+      maskedWithFile: { output: "Es gibt [not observed] Primzahlen.", stats: { outcome: "partial", toolCount: 2, iterations: 2, toolNames: [] }, artifacts: [PRIMES], executions: MASKED },
+    };
+    const runQaJob = async (first: object, second: object) => {
+      const { tempDir, configPath } = writeTempConfig({
+        agents: { defaults: { model: { primary: "lmstudio/qwen/qwen3.5-9b" } } },
+        scenes: {
+          count_primes: { description: "Count the primes.", task: "Count the primes between 100000 and 200000.", allowedAgents: ["coder"], expectArtifact: true },
+        },
+        jobs: { prime_file: { description: "Count the primes into a file.", steps: [{ scene: "count_primes", label: "Count" }] } },
+        subAgents: { coder: { description: "Writes and runs code.", tools: ["write_file", "shell_exec"], maxIterations: 4 } },
+      });
+      process.env["SAI_CONFIG_PATH"] = configPath;
+      vi.resetModules();
+      const runSubAgentMock = vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+      vi.doMock("../agent/runtime.js", () => ({ collectTurnArtifactAttachments: () => [], runTurn: vi.fn() }));
+      vi.doMock("../agent/sub-agent.js", () => ({ runSubAgentWithStats: runSubAgentMock }));
+      try {
+        const result = await runWorkflow("prime_file", "job");
+        expect(runSubAgentMock).toHaveBeenCalledTimes(2);
+        return result;
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    };
+
+    it("adopted with computed figures: the discarded attempt's code counts, its masked figures are not reported", async () => {
+      const result = await runQaJob(attempts.masked, attempts.printed);
+
+      expect(result.success).toBe(true);
+      expect(result.output).toContain("Es gibt 8392 Primzahlen.");
+      expect(result.metadata?.["specialistExecutions"]).toEqual({ attempted: 2, failed: 1, succeededWithOutput: 1 });
+      expect(result.metadata).not.toHaveProperty("maskedRuns");
+    });
+
+    it("adopted with masked figures: the job stops, and the adopted attempt is the run reported", async () => {
+      const result = await runQaJob(attempts.masked, attempts.maskedWithFile);
+
+      expect(result.metadata?.["blocked"]).toBe(true);
+      expect(result.metadata?.["specialistExecutions"]).toEqual({ attempted: 2, failed: 2, succeededWithOutput: 0, unobservedFigures: 2 });
+      expect(result.metadata?.["maskedRuns"]).toEqual([{ agentName: "coder", executions: MASKED, artifacts: [PRIMES] }]);
+    });
+  });
+
   it("control: a job whose coder's script printed runs on, with its record summed", async () => {
     const { tempDir, configPath } = config();
     process.env["SAI_CONFIG_PATH"] = configPath;
