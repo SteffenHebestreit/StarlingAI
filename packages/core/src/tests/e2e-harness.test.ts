@@ -1289,12 +1289,18 @@ describe("e2e CLI (in process, against the fake gateway)", () => {
     expect(all.err).toBe("");
     expect(all.code).toBe(1);
     expect(all.out).toContain("Mail isolation: the mail-service container is not running");
+    expect(all.out).toMatch(/^Build: harness [0-9a-f]{7}( \(dirty\))? · gateway image unknown$/m);
     expect(all.out).toContain("Scenarios: 1 passed, 1 failed, 0 skipped of 2");
     expect(all.out).toMatch(/FAIL cli-fail attempt 1\/1 \([\d.]+ s\): step 1 turn: reply\.includes "banana": not found/);
     const files = readdirSync(join(cliDir, "out-1"));
     expect(files.filter((file) => file.endsWith(".json"))).toHaveLength(1);
     expect(files.filter((file) => file.endsWith(".md"))).toHaveLength(1);
     const reportPath = join(cliDir, "out-1", files.find((file) => file.endsWith(".json"))!);
+    // The run records what it ran on: this checkout's HEAD, and why the gateway image is unknown.
+    const written = JSON.parse(readFileSync(reportPath, "utf8")) as { meta: { provenance: { harness: { sha: string }; gatewayImage: null; missing: string[] } } };
+    expect(written.meta.provenance.harness.sha).toMatch(/^[0-9a-f]{40}/);
+    expect(written.meta.provenance.gatewayImage).toBeNull();
+    expect(written.meta.provenance.missing).toEqual(["gateway image: the e2e environment status names none (no running gateway container of this checkout)"]);
 
     const one = await cli(["evaluate", "--scenarios", "scenarios", "--id", "cli-pass", "--out", "out-2"]);
     expect(one.code).toBe(0);
@@ -1322,17 +1328,30 @@ describe("e2e CLI (in process, against the fake gateway)", () => {
     expect(regressed.out).toContain("Baseline: 1 regression(s) (cli-pass), 0 flaky, 0 inconclusive, 0 improvement(s);");
   });
 
-  it("exits 3 when a fifth of the selected scenarios were skipped for one service", async () => {
+  it("exits 3 when a fifth of the selected scenarios were skipped for one service, and prints what the run ran on", async () => {
     mkdirSync(join(cliDir, "suspect"), { recursive: true });
     const turn = (message: string) => [{ kind: "turn", message, expect: { reply: { includes: ["42"] } } }];
     writeFileSync(join(cliDir, "suspect", "a.jsonc"), JSON.stringify({ id: "suspect-a", title: "Suspect A", group: "core", steps: turn("hello a") }));
     writeFileSync(join(cliDir, "suspect", "b.jsonc"), JSON.stringify({ id: "suspect-b", title: "Suspect B", group: "core", steps: turn("hello b") }));
     writeFileSync(join(cliDir, "suspect", "kb.jsonc"), JSON.stringify({ id: "suspect-kb", title: "Needs engram", group: "core", requires: ["engram"], steps: turn("hello kb") }));
-    const run = await cli(["evaluate", "--scenarios", "suspect", "--out", "suspect-out"]);
+    const provenance = {
+      harness: { sha: "0123456789abcdef0123456789abcdef01234567", dirty: false, committedAt: "2026-10-08T12:00:00+02:00" },
+      gatewayImage: { id: `sha256:${"3b".repeat(32)}`, createdAt: "2026-10-07T21:09:32.557822715Z" },
+      missing: [],
+      warnings: ["the gateway image 3b3b3b3b3b3b was built 2026-10-07T21:09:32.557822715Z, before the harness's HEAD 0123456 was committed (2026-10-08T12:00:00+02:00): the stack may not run the code under test"],
+    };
+    const run = await cli(["evaluate", "--scenarios", "suspect", "--out", "suspect-out"], { provenance: async () => provenance });
     expect(run.err).toBe("");
     expect(run.code).toBe(3);
+    expect(run.out).toContain("Build: harness 0123456 · gateway image 3b3b3b3b3b3b built 2026-10-07T21:09:32.557822715Z");
     expect(run.out).toContain("Scenarios: 2 passed, 0 failed, 1 skipped of 3");
     expect(run.out).toContain("ENVIRONMENT SUSPECT: 1 of 3 selected scenarios were skipped because engram was down (engram: ok — not configured (RAG enhancement off))");
+    expect(run.out).toContain(`PROVENANCE: ${provenance.warnings[0]}`);
+    const reports = readdirSync(join(cliDir, "suspect-out"));
+    const report = JSON.parse(readFileSync(join(cliDir, "suspect-out", reports.find((file) => file.endsWith(".json"))!), "utf8")) as { meta: { provenance: unknown } };
+    expect(report.meta.provenance).toEqual(provenance);
+    const markdown = readFileSync(join(cliDir, "suspect-out", reports.find((file) => file.endsWith(".md"))!), "utf8");
+    expect(markdown).toContain(`> **Provenance** — ${provenance.warnings[0]}`);
   });
 
   it("exits 2 on usage errors and unknown ids, 1 on invalid scenario files", async () => {

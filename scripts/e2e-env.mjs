@@ -209,6 +209,15 @@ function distHasMarker(container, file, marker) {
   return r.ok && Number(r.out) > 0;
 }
 
+/** The image a container runs and when it was built: the e2e report records which build answered. */
+function imageOf(container) {
+  if (!container) return null;
+  const id = docker(["inspect", "--format", "{{.Image}}", container]);
+  if (!id.ok || !id.out) return null;
+  const created = docker(["image", "inspect", "--format", "{{.Created}}", id.out]);
+  return { id: id.out, created: created.ok && created.out ? created.out : null };
+}
+
 /** Accounts the mail-service shows the eval user ({ id, allowedUsers }). The token is expanded INSIDE the container. */
 function mailAccountsForEval(container) {
   if (!container) return null;
@@ -268,6 +277,7 @@ async function collectStatus() {
     },
     gateway: {
       running: Boolean(gatewayRunning),
+      image: imageOf(gatewayRunning),
       imageSupportsAllowlist: distHasMarker(gatewayRunning, GATEWAY_DIST_FILE, GATEWAY_DIST_MARKER),
       resolvesSite: gatewayResolvesSite(gatewayRunning),
     },

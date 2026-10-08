@@ -37,7 +37,8 @@ import {
   type MailIsolationCheck,
 } from "./services.js";
 import { RUNNER_DEFAULTS, runScenarios } from "./runner.js";
-import { buildReport, compareWithBaseline, describeSuite, exitCodeFor, loadReport, writeReport, type BaselineComparison } from "./report.js";
+import { buildReport, compareWithBaseline, describeBuildChanges, describeSuite, exitCodeFor, loadReport, writeReport, type BaselineComparison } from "./report.js";
+import { captureProvenance, describeProvenance, type E2EProvenance } from "./provenance.js";
 import { resolveSetupPaths, runE2ESetup, SetupRefusedError } from "./setup.js";
 
 const VALUE_FLAGS = new Set(["group", "tag", "id", "repeat", "concurrency", "baseline", "out", "scenarios"]);
@@ -62,6 +63,8 @@ export interface CliIo {
   environment?: EnvironmentStatusSource | null;
   /** The mail-isolation preflight. Default: read from the environment status. */
   mailIsolation?: MailIsolationCheck;
+  /** What the run ran on. Default: git of the repo root and the environment status's gateway image. */
+  provenance?: () => Promise<E2EProvenance>;
   repoRoot?: string;
 }
 
@@ -145,7 +148,7 @@ function baselineLine(baseline: BaselineComparison): string {
   };
   return `Baseline: ${baseline.regressions.length} regression(s)${ids(baseline.regressions)}, ${baseline.flaky.length} flaky${ids(baseline.flaky)}, `
     + `${baseline.inconclusive.length} inconclusive${ids(baseline.inconclusive)}, ${baseline.improvements.length} improvement(s)${ids(baseline.improvements)}; `
-    + `suite ${describeSuite(baseline.suite)}`;
+    + `suite ${describeSuite(baseline.suite)}; builds: ${describeBuildChanges(baseline.buildChanges)}`;
 }
 
 function identitiesOf(selected: readonly LoadedScenario[]): string[] {
@@ -200,6 +203,9 @@ async function evaluate(args: ParsedArgs, io: CliIo, repoRoot: string): Promise<
     return 2;
   }
   io.out(`Mail isolation: ${isolation.detail}`);
+  const provenance = await (io.provenance ?? (() => captureProvenance(repoRoot, environment)))();
+  io.out(`Build: ${describeProvenance(provenance)}`);
+  for (const warning of provenance.warnings) io.out(`PROVENANCE: ${warning}`);
 
   const credentials = readCredentialsFile(paths.credentialsPath);
   const gatewayUrl = gatewayUrlFromEnv(io.env);
@@ -256,6 +262,7 @@ async function evaluate(args: ParsedArgs, io: CliIo, repoRoot: string): Promise<
       filters: { groups: filter.groups, tags: filter.tags, ids: filter.ids },
       judge: judge ? `${judge.model} @ ${judge.url}` : null,
       mail: `${mail.name} (inbox ${mail.inbox})`,
+      provenance,
     });
     if (baseline && baselinePath) report.baseline = compareWithBaseline(report, baseline, baselinePath);
     const written = writeReport(report, outDir);
@@ -266,6 +273,7 @@ async function evaluate(args: ParsedArgs, io: CliIo, repoRoot: string): Promise<
     io.out(`Attempts: ${summary.attemptsPassed}/${summary.attempts} passed (${(summary.passRate * 100).toFixed(1)} %), pass^k ${(summary.passAllRate * 100).toFixed(1)} %`);
     if (report.baseline) io.out(baselineLine(report.baseline));
     if (report.environment.suspect) io.out(`ENVIRONMENT SUSPECT: ${report.environment.reasons.join("; ")}`);
+    for (const warning of provenance.warnings) io.out(`PROVENANCE: ${warning}`);
     io.out(`Report: ${written.jsonPath}`);
     io.out(`        ${written.markdownPath}`);
     return exitCodeFor(report);

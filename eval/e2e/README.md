@@ -107,6 +107,10 @@ Every run writes `artifacts/evaluations/e2e/<timestamp>.json` and a Markdown sum
   names it, and says so when it was up for an earlier scenario, i.e. went down during the run — the full run of
   2026-10-07 22:07 skipped 47 of 52 after the model endpoint died); or a quarter of the attempts ended on harness
   errors.
+- **meta.provenance**: what the run ran on — the git HEAD, dirty flag and commit date of the checkout the
+  harness ran from, and the gateway container's image id and build time (from `pnpm e2e:env status --json`),
+  with the reason for any part it could not read. When the image was built before HEAD was committed, the
+  report and the CLI warn that the stack may not run the code under test.
 - **scenarios[]**: status, skip reason, the probed services, and every **attempt**: outcome (`passed`,
   `failed` = an expectation failed, `error` = the harness/environment failed or the run was interrupted),
   duration, failures, notes, the sessions it created (open them in the dashboard's audit/debug export), and
@@ -118,9 +122,10 @@ Every run writes `artifacts/evaluations/e2e/<timestamp>.json` and a Markdown sum
   (3/3 → 0/3 does; 5/5 → 4/5 does not); otherwise **flaky** when it passed and failed within one run, or
   **inconclusive** when each run was uniform but they disagree (a k=1 flip, 1/1 → 0/1). At k=1 no single
   scenario can be decisive, so the **suite** is compared too: an exact sign test over the scenarios run with
-  equally many attempts in both — far more lower than higher is a regression. Also new scenarios and ones not
-  run now. The baseline never sets the exit code on its own: a scenario, or the suite, can only fall below its
-  baseline by failing attempts now, and a failed scenario exits 1.
+  equally many attempts in both — far more lower than higher is a regression. Also new scenarios, ones not
+  run now, and what differs between the two runs' builds (gateway image, harness commit). The baseline never
+  sets the exit code on its own: a scenario, or the suite, can only fall below its baseline by failing
+  attempts now, and a failed scenario exits 1.
 
 A failure names its step and the exact miss, e.g.
 `step 2 turn "draft-reply": tools.mustNotCall mail_send_draft: expected no call, saw 1 (mail_agent×1)` or

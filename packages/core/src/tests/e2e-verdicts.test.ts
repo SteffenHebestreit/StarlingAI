@@ -1,8 +1,9 @@
 /**
- * Run verdicts of the e2e harness (src/e2e): when a run is environment-suspect, and when a scenario
- * or the whole suite regressed against a baseline (stats.ts). The seven reports of 2026-10-07
- * (fixtures/e2e-reports-2026-10-07.json: the reports as the harness wrote them, reduced to the
- * fields the verdicts read) are re-graded with today's rules.
+ * Run verdicts of the e2e harness (src/e2e): when a run is environment-suspect, when a scenario or
+ * the whole suite regressed against a baseline (stats.ts), and what the run ran on
+ * (provenance.ts). The seven reports of 2026-10-07 (fixtures/e2e-reports-2026-10-07.json: the
+ * reports as the harness wrote them, reduced to the fields the verdicts read) are re-graded with
+ * today's rules.
  */
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
@@ -10,6 +11,17 @@ import { buildReport, compareWithBaseline, exitCodeFor, renderMarkdown, type E2E
 import type { AttemptResult, ScenarioResult } from "../e2e/runner.js";
 import type { ServiceState } from "../e2e/services.js";
 import { compareSuite, compareTallies, signTestPValue } from "../e2e/stats.js";
+import {
+  buildChanges,
+  captureProvenance,
+  describeProvenance,
+  gatewayImageFromStatus,
+  provenanceWarnings,
+  readHarnessSource,
+  type E2EProvenance,
+  type GitRunner,
+} from "../e2e/provenance.js";
+import { findRepoRoot } from "../e2e/paths.js";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -290,6 +302,7 @@ describe("e2e verdicts — baseline comparison", () => {
     expect(comparison.missingScenarios).toEqual(["gone"]);
     // drops/flips lower, recovers higher, wobbles lower; errs has 2 trials now against 3.
     expect(comparison.suite).toMatchObject({ change: "inconclusive", lower: 3, higher: 1, same: 1, unpaired: 1 });
+    expect(comparison.buildChanges).toBeNull();
     expect(comparison.regressions[0]).toMatchObject({ baselineTally: { passed: 3, trials: 3 }, tally: { passed: 0, trials: 3 }, change: "regressed" });
 
     report.baseline = comparison;
@@ -297,9 +310,93 @@ describe("e2e verdicts — baseline comparison", () => {
     const markdown = renderMarkdown(report);
     expect(markdown).toContain("1 regression(s), 1 improvement(s), 1 flaky, 1 inconclusive, 2 unchanged, 1 new, 1 not run now.");
     expect(markdown).toContain("- Suite: 3 lower, 1 higher, 1 the same, 1 with unequal attempt counts left out — no decisive change (sign test p = 0.313)");
+    expect(markdown).toContain("- Builds: unknown (a report without provenance)");
     expect(markdown).toContain("| `drops` | 3/3 | 0/3 | −100 pp [−100, −10] | **regression** |");
     expect(markdown).toContain("| `recovers` | 0/3 | 3/3 | +100 pp [+10, +100] | improvement |");
     expect(markdown).toContain("| `wobbles` | 3/3 | 2/3 | −33 pp [−75, +35] | flaky |");
     expect(markdown).toContain("| `flips` | 1/1 | 0/1 | −100 pp [−100, +42] | inconclusive |");
+  });
+});
+
+describe("e2e provenance", () => {
+  const SHA = "0123456789abcdef0123456789abcdef01234567";
+  const fakeGit = (answers: Record<string, string | null>): GitRunner => (_root, args) => answers[args.join(" ")] ?? null;
+  const committed = { "rev-parse HEAD": SHA, "status --porcelain=v1": "", "log -1 --format=%cI HEAD": "2026-10-08T12:00:00+02:00" };
+
+  it("reads HEAD, the dirty flag and the commit date, and never calls an unreadable tree clean", () => {
+    expect(readHarnessSource("/repo", fakeGit(committed))).toEqual({ sha: SHA, dirty: false, committedAt: "2026-10-08T12:00:00+02:00" });
+    expect(readHarnessSource("/repo", fakeGit({ ...committed, "status --porcelain=v1": " M config/gateway/10-gateway.jsonc" }))?.dirty).toBe(true);
+    expect(readHarnessSource("/repo", fakeGit({ ...committed, "status --porcelain=v1": null }))?.dirty).toBe(true);
+    expect(readHarnessSource("/repo", fakeGit({ ...committed, "rev-parse HEAD": null }))).toBeNull();
+    expect(readHarnessSource("/repo", fakeGit({ ...committed, "rev-parse HEAD": "fatal: not a git repository" }))).toBeNull();
+
+    // The real checkout this test runs in.
+    const real = readHarnessSource(findRepoRoot());
+    expect(real?.sha).toMatch(/^[0-9a-f]{40}/);
+    expect(Number.isFinite(Date.parse(real?.committedAt ?? ""))).toBe(true);
+  });
+
+  it("reads the gateway image from the e2e environment status, and records why when it cannot", async () => {
+    const status = { gateway: { running: true, image: { id: `sha256:${"3b".repeat(32)}`, created: "2026-10-07T21:09:32.557822715Z" } } };
+    expect(gatewayImageFromStatus(status)).toEqual({ id: `sha256:${"3b".repeat(32)}`, createdAt: "2026-10-07T21:09:32.557822715Z" });
+    expect(gatewayImageFromStatus({ gateway: { running: false, image: null } })).toBeNull();
+    expect(gatewayImageFromStatus({ mailService: { running: false } })).toBeNull();
+
+    const full = await captureProvenance("/repo", async () => ({ json: status }), fakeGit(committed));
+    expect(full).toEqual({
+      harness: { sha: SHA, dirty: false, committedAt: "2026-10-08T12:00:00+02:00" },
+      gatewayImage: { id: `sha256:${"3b".repeat(32)}`, createdAt: "2026-10-07T21:09:32.557822715Z" },
+      missing: [],
+      // Built the evening before HEAD was committed.
+      warnings: [`the gateway image ${"3b".repeat(6)} was built 2026-10-07T21:09:32.557822715Z, before the harness's HEAD 0123456 was committed (2026-10-08T12:00:00+02:00): the stack may not run the code under test`],
+    });
+    expect(describeProvenance(full)).toBe(`harness 0123456 · gateway image ${"3b".repeat(6)} built 2026-10-07T21:09:32.557822715Z`);
+
+    const blind = await captureProvenance("/repo", async () => ({ error: "pnpm e2e:env status --json gave no status (e2e:env: Docker is not reachable)" }), fakeGit({}));
+    expect(blind).toEqual({
+      harness: null,
+      gatewayImage: null,
+      missing: ["harness: git could not read the checkout at /repo", "gateway image: pnpm e2e:env status --json gave no status (e2e:env: Docker is not reachable)"],
+      warnings: [],
+    });
+    expect(describeProvenance(blind)).toBe("harness unknown · gateway image unknown");
+    expect((await captureProvenance("/repo", null, fakeGit(committed))).missing).toEqual(["gateway image: scripts/e2e-env.mjs not found"]);
+    expect((await captureProvenance("/repo", async () => ({ json: { mailService: { running: false } } }), fakeGit(committed))).missing)
+      .toEqual(["gateway image: the e2e environment status names none (no running gateway container of this checkout)"]);
+  });
+
+  it("warns only when the image was built before HEAD was committed", () => {
+    const harness = { sha: SHA, dirty: false, committedAt: "2026-10-07T18:27:27+02:00" };
+    expect(provenanceWarnings(harness, { id: "sha256:aa", createdAt: "2026-10-07T21:09:32.557822715Z" })).toEqual([]);
+    expect(provenanceWarnings(harness, { id: "sha256:aa", createdAt: "2026-10-07T16:00:00Z" })).toHaveLength(1);
+    expect(provenanceWarnings(harness, { id: "sha256:aa", createdAt: null })).toEqual([]);
+    expect(provenanceWarnings(null, { id: "sha256:aa", createdAt: "2026-10-07T16:00:00Z" })).toEqual([]);
+  });
+
+  it("lists what differs between two runs' builds, and renders it with the baseline", () => {
+    const at = (sha: string, dirty: boolean, image: string | null): E2EProvenance => ({
+      harness: { sha, dirty, committedAt: null },
+      gatewayImage: image ? { id: `sha256:${image}`, createdAt: null } : null,
+      missing: [],
+      warnings: [],
+    });
+    const other = "fedcba9876543210fedcba9876543210fedcba98";
+    expect(buildChanges(at(SHA, false, "a".repeat(64)), at(SHA, false, "a".repeat(64)))).toEqual([]);
+    expect(buildChanges(at(SHA, false, "a".repeat(64)), at(other, true, "b".repeat(64)))).toEqual([
+      `gateway image ${"a".repeat(12)} → ${"b".repeat(12)}`,
+      "harness 0123456 → fedcba9 (dirty)",
+    ]);
+    expect(buildChanges(at(SHA, true, null), at(SHA, true, "b".repeat(64)))).toEqual([
+      "gateway image unknown in the baseline",
+      "harness 0123456 (dirty) in both runs: the uncommitted changes may differ",
+    ]);
+    expect(buildChanges(undefined, at(SHA, false, null))).toBeNull();
+
+    const before = buildReport([ran("a", "P")], { ...META, provenance: at(SHA, false, "a".repeat(64)) });
+    const now = buildReport([ran("a", "P")], { ...META, provenance: at(SHA, false, "b".repeat(64)) });
+    now.baseline = compareWithBaseline(now, before, "before.json");
+    const markdown = renderMarkdown(now);
+    expect(markdown).toContain(`- Build: harness 0123456 · gateway image ${"b".repeat(12)}\n`);
+    expect(markdown).toContain(`- Builds: gateway image ${"a".repeat(12)} → ${"b".repeat(12)}`);
   });
 });

@@ -2,14 +2,15 @@
  * The run report: artifacts/evaluations/e2e/<timestamp>.json plus a Markdown summary beside it.
  * Per scenario: every attempt with its outcome, failures, duration, the audit-event type counts
  * and the tools and agents its turns used; overall: the attempt pass rate and pass^k (the share of
- * scenarios whose every attempt passed). With a baseline report, each scenario run in both reads
- * regressed, improved, flaky, inconclusive or unchanged by an interval test, and the suite as a
- * whole by a sign test (stats.ts).
+ * scenarios whose every attempt passed), and what the run ran on (provenance.ts). With a baseline
+ * report, each scenario run in both reads regressed, improved, flaky, inconclusive or unchanged by
+ * an interval test, and the suite as a whole by a sign test (stats.ts).
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { E2EService } from "./scenario.js";
 import type { ScenarioResult } from "./runner.js";
+import { buildChanges, describeProvenance, type E2EProvenance } from "./provenance.js";
 import { compareSuite, compareTallies, type AttemptTally, type ScenarioChange, type SuiteChangeVerdict } from "./stats.js";
 
 export interface E2ERunMeta {
@@ -23,6 +24,8 @@ export interface E2ERunMeta {
   judge: string | null;
   /** "greenmail @ api (inbox x)", or null. */
   mail: string | null;
+  /** The harness checkout and the gateway image the run ran on; absent in reports before 2026-10-08. */
+  provenance?: E2EProvenance;
 }
 
 export interface E2EReportSummary {
@@ -72,6 +75,8 @@ export interface BaselineComparison {
   missingScenarios: string[];
   /** The scenarios run in both, taken together: the only verdict a k=1 comparison can reach. */
   suite: SuiteChangeVerdict;
+  /** What differs between the two runs' builds; null when either report records no provenance. */
+  buildChanges: string[] | null;
 }
 
 export interface E2EReport {
@@ -240,6 +245,7 @@ export function compareWithBaseline(report: E2EReport, baseline: E2EReport, file
     newScenarios,
     missingScenarios,
     suite: compareSuite(pairs),
+    buildChanges: buildChanges(baseline.meta?.provenance, report.meta.provenance),
   };
 }
 
@@ -250,6 +256,12 @@ export function describeSuite(suite: SuiteChangeVerdict): string {
   if (suite.change === "unchanged") return `${counts} — unchanged`;
   const verdict = suite.change === "inconclusive" ? "no decisive change" : suite.change;
   return `${counts} — ${verdict} (sign test p = ${suite.pValue.toFixed(3)})`;
+}
+
+/** "same gateway image and harness commit", the differences, or why they are unknown. */
+export function describeBuildChanges(changes: string[] | null): string {
+  if (changes === null) return "unknown (a report without provenance)";
+  return changes.length === 0 ? "same gateway image and harness commit" : changes.join("; ");
 }
 
 /**
@@ -307,6 +319,10 @@ export function renderMarkdown(report: E2EReport): string {
   const lines: string[] = [];
   lines.push(`# E2E evaluation ${meta.startedAt}`, "");
   lines.push(`- Gateway: ${meta.gatewayUrl}`);
+  if (meta.provenance) {
+    const missing = meta.provenance.missing.length > 0 ? ` — not recorded: ${meta.provenance.missing.join("; ")}` : "";
+    lines.push(`- Build: ${describeProvenance(meta.provenance)}${missing}`);
+  }
   lines.push(`- Scenarios: ${summary.scenarios} selected — ${summary.passed} passed, ${summary.failed} failed, ${summary.skipped} skipped`);
   lines.push(`- Attempts: ${summary.attemptsPassed}/${summary.attempts} passed (${percent(summary.passRate)}); ${summary.attemptsErrored} ended on a harness error`);
   lines.push(`- pass^k: ${summary.passed}/${summary.run} scenarios passed every attempt (${percent(summary.passAllRate)})`);
@@ -321,12 +337,13 @@ export function renderMarkdown(report: E2EReport): string {
   if (report.environment.suspect) {
     lines.push("", `> **Environment suspect** — ${report.environment.reasons.join("; ")}`);
   }
+  for (const warning of meta.provenance?.warnings ?? []) lines.push("", `> **Provenance** — ${warning}`);
 
   if (report.baseline) {
     const baseline = report.baseline;
     lines.push("", `## Baseline: ${baseline.file}`, "");
     lines.push(`${baseline.regressions.length} regression(s), ${baseline.improvements.length} improvement(s), ${baseline.flaky.length} flaky, ${baseline.inconclusive.length} inconclusive, ${baseline.unchanged} unchanged, ${baseline.newScenarios.length} new, ${baseline.missingScenarios.length} not run now. A scenario counts as regressed or improved only when the 95 % interval of its pass-rate difference excludes zero.`);
-    lines.push("", `- Suite: ${describeSuite(baseline.suite)}`);
+    lines.push("", `- Suite: ${describeSuite(baseline.suite)}`, `- Builds: ${describeBuildChanges(baseline.buildChanges)}`);
     const listed = [...baseline.regressions, ...baseline.improvements, ...baseline.flaky, ...baseline.inconclusive];
     if (listed.length > 0) {
       lines.push("", "| Scenario | Baseline | Now | Δ pass rate (95 % CI) | Verdict |", "|---|---|---|---|---|");
