@@ -2126,6 +2126,8 @@ async function _runTurn(
     // mid-turn steering is typed by a person on every surface, and is pushed in below.
     turnUserWords: { opening: opts.userWords ?? "", midTurn: [] },
     ...(turnEvidence ? { turnEvidence } : {}),
+    // Undefined on a turn no agent was named for, and then the context carries no field at all.
+    ...(directiveAgent ? { directiveAgent } : {}),
     swarmState: {
       objective: userMessage,
       startedAt: new Date().toISOString(),
@@ -2927,7 +2929,13 @@ async function _runTurn(
           details: `forced tool call returned ${llmResponse.content?.length ?? 0} chars of prose and hit the completion cap; continuation skipped`,
         });
       }
-      if (!forcedCallReturnedProse && llmResponse.tool_calls.length === 0 && llmResponse.finishReason === "length") {
+      // Nor is a response the --agent dispatch below replaces: while the directive is pending, one
+      // that calls nothing becomes the delegation, its prose discarded. Continued, a call left unforced
+      // (orchestration.forceToolChoiceWhenOrchestrationRequired off, or after a workflow ran) spent up
+      // to MAX_LENGTH_CONTINUATION_ATTEMPTS slow-model calls on that prose, and on iteration 0 their
+      // text streamed to the user, who then lost it (integration review, 2026-10-08).
+      const replacedByDirectiveDispatch = directiveAgentPending && llmResponse.tool_calls.length === 0;
+      if (!forcedCallReturnedProse && !replacedByDirectiveDispatch && llmResponse.tool_calls.length === 0 && llmResponse.finishReason === "length") {
         const continued = await continueLengthLimitedResponse(provider, messages, llmResponse, signal, chunkSink);
         llmResponse = continued.response;
         llmCalls += continued.additionalCalls;
@@ -3007,19 +3015,74 @@ async function _runTurn(
       // shipping over the evidence path, and reasoning alone is never shown — it is the model's
       // scratchpad, not its answer. The caveat is mandatory: this text did not finish.
       const partial = (err as { partialResponse?: LLMResponse } | null)?.partialResponse;
-      const partialText = typeof partial?.content === "string" ? partial.content.trim() : "";
-      if (partialText.length >= MIN_SUBSTANTIVE_OUTPUT_CHARS) {
-        const cleaned = sanitizeUserFacingAssistantResponse(partialText, 0);
-        if (cleaned.trim().length >= MIN_SUBSTANTIVE_OUTPUT_CHARS) {
-          const finalResponse = prependTurnIncompleteCaveat(cleaned);
+      if (directiveAgentPending && !timeoutSignal.aborted) {
+        // A pending --agent turn's call broke off: a stall, a socket error. Its one right answer
+        // was the delegation to the named agent, and the directive block below dispatches it in
+        // the call's place, as it does for a call that answered in prose (a3773aa). The call's
+        // prose is the orchestrator's own answer, which the turn does not show (6dbbe90): salvaged,
+        // it shipped as the turn's answer and the named agent never ran (integration review,
+        // 2026-10-08). Past the turn's deadline there is no time left to run the agent; the turn
+        // ends below as any other cut call does, without that prose.
+        llmResponse = {
+          content: null,
+          tool_calls: [],
+          usage: partial?.usage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+          finishReason: "incomplete",
+        };
+      } else {
+        const partialText = typeof partial?.content === "string" ? partial.content.trim() : "";
+        if (!directiveAgentPending && partialText.length >= MIN_SUBSTANTIVE_OUTPUT_CHARS) {
+          const cleaned = sanitizeUserFacingAssistantResponse(partialText, 0);
+          if (cleaned.trim().length >= MIN_SUBSTANTIVE_OUTPUT_CHARS) {
+            const finalResponse = prependTurnIncompleteCaveat(cleaned);
+            persistAssistantTurnState(session, finalResponse, getTurnSwarmState());
+            if (opts.onChunk) opts.onChunk(finalResponse);
+            logAudit("guardrail_flagged", {
+              type: "llm_error_partial_salvaged",
+              error: String(err).slice(0, 300),
+              partialChars: cleaned.length,
+              reasoningChars: partial?.reasoning?.length ?? 0,
+            }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+            const performance = buildTurnPerformanceMetrics({
+              turnStartedAt,
+              firstModelResponseMs,
+              llmCalls,
+              llmTimeMs,
+              toolCallsRequested,
+              toolExecutionTimeMs,
+              lastPromptMetrics,
+              completionChars: finalResponse.length,
+              finishReason: "llm_error_partial_salvaged",
+              blocked: false,
+              toolIterations: iterationCount,
+            });
+            logAudit("turn_performance", { ...performance, usage: totalUsage }, {
+              sessionId: session.id, channel: session.channel, severity: "info",
+            });
+            logAudit("message_sent", { length: finalResponse.length, toolCalls: iterationCount, usage: totalUsage, performance }, {
+              sessionId: session.id, channel: session.channel, severity: "info",
+            });
+            return {
+              response: finalResponse,
+              toolCallsExecuted: iterationCount,
+              guardrailEvents,
+              usage: totalUsage,
+              blocked: false,
+              swarmState: getTurnSwarmState(),
+              performance,
+              qualityScorecard: buildCurrentTurnScorecard(finalResponse.length, "llm_error_partial_salvaged"),
+            };
+          }
+        }
+        const delegateEvidence = findRecentDelegateEvidence(session.getHistory(), { scopeToCurrentTurn: true });
+        const sharedFactsEvidence = await getSharedFactsEvidenceForFinalSynthesis(session.id);
+        const recoveryEvidence = chooseBetterRecoveryEvidence(delegateEvidence, sharedFactsEvidence, { preferHigherScore: false });
+        if (recoveryEvidence) {
+          const finalResponse = formatRecoveryEvidenceForFinalUser(recoveryEvidence.evidence, {
+            sourceSensitive: initialDynamicGuidance?.sourceSensitive ?? false,
+          });
           persistAssistantTurnState(session, finalResponse, getTurnSwarmState());
           if (opts.onChunk) opts.onChunk(finalResponse);
-          logAudit("guardrail_flagged", {
-            type: "llm_error_partial_salvaged",
-            error: String(err).slice(0, 300),
-            partialChars: cleaned.length,
-            reasoningChars: partial?.reasoning?.length ?? 0,
-          }, { sessionId: session.id, channel: session.channel, severity: "warn" });
           const performance = buildTurnPerformanceMetrics({
             turnStartedAt,
             firstModelResponseMs,
@@ -3029,15 +3092,25 @@ async function _runTurn(
             toolExecutionTimeMs,
             lastPromptMetrics,
             completionChars: finalResponse.length,
-            finishReason: "llm_error_partial_salvaged",
+            finishReason: "llm_error_evidence_backstop",
             blocked: false,
             toolIterations: iterationCount,
           });
+          logAudit("guardrail_flagged", {
+            type: "llm_error_evidence_backstop",
+            error: String(err).slice(0, 300),
+            evidenceLength: recoveryEvidence.evidence.length,
+            evidenceItems: recoveryEvidence.itemCount,
+          }, { sessionId: session.id, channel: session.channel, severity: "warn" });
           logAudit("turn_performance", { ...performance, usage: totalUsage }, {
-            sessionId: session.id, channel: session.channel, severity: "info",
+            sessionId: session.id,
+            channel: session.channel,
+            severity: "info",
           });
           logAudit("message_sent", { length: finalResponse.length, toolCalls: iterationCount, usage: totalUsage, performance }, {
-            sessionId: session.id, channel: session.channel, severity: "info",
+            sessionId: session.id,
+            channel: session.channel,
+            severity: "info",
           });
           return {
             response: finalResponse,
@@ -3047,76 +3120,27 @@ async function _runTurn(
             blocked: false,
             swarmState: getTurnSwarmState(),
             performance,
-            qualityScorecard: buildCurrentTurnScorecard(finalResponse.length, "llm_error_partial_salvaged"),
+            qualityScorecard: buildCurrentTurnScorecard(finalResponse.length, "llm_error_evidence_backstop"),
           };
         }
+        return blocked(
+          `LLM error: ${String(err)}`,
+          getTurnSwarmState(),
+          buildTurnPerformanceMetrics({
+            turnStartedAt,
+            firstModelResponseMs,
+            llmCalls,
+            llmTimeMs,
+            toolCallsRequested,
+            toolExecutionTimeMs,
+            lastPromptMetrics,
+            completionChars: 0,
+            finishReason: "llm_error",
+            blocked: true,
+            toolIterations: iterationCount,
+          }),
+        );
       }
-      const delegateEvidence = findRecentDelegateEvidence(session.getHistory(), { scopeToCurrentTurn: true });
-      const sharedFactsEvidence = await getSharedFactsEvidenceForFinalSynthesis(session.id);
-      const recoveryEvidence = chooseBetterRecoveryEvidence(delegateEvidence, sharedFactsEvidence, { preferHigherScore: false });
-      if (recoveryEvidence) {
-        const finalResponse = formatRecoveryEvidenceForFinalUser(recoveryEvidence.evidence, {
-          sourceSensitive: initialDynamicGuidance?.sourceSensitive ?? false,
-        });
-        persistAssistantTurnState(session, finalResponse, getTurnSwarmState());
-        if (opts.onChunk) opts.onChunk(finalResponse);
-        const performance = buildTurnPerformanceMetrics({
-          turnStartedAt,
-          firstModelResponseMs,
-          llmCalls,
-          llmTimeMs,
-          toolCallsRequested,
-          toolExecutionTimeMs,
-          lastPromptMetrics,
-          completionChars: finalResponse.length,
-          finishReason: "llm_error_evidence_backstop",
-          blocked: false,
-          toolIterations: iterationCount,
-        });
-        logAudit("guardrail_flagged", {
-          type: "llm_error_evidence_backstop",
-          error: String(err).slice(0, 300),
-          evidenceLength: recoveryEvidence.evidence.length,
-          evidenceItems: recoveryEvidence.itemCount,
-        }, { sessionId: session.id, channel: session.channel, severity: "warn" });
-        logAudit("turn_performance", { ...performance, usage: totalUsage }, {
-          sessionId: session.id,
-          channel: session.channel,
-          severity: "info",
-        });
-        logAudit("message_sent", { length: finalResponse.length, toolCalls: iterationCount, usage: totalUsage, performance }, {
-          sessionId: session.id,
-          channel: session.channel,
-          severity: "info",
-        });
-        return {
-          response: finalResponse,
-          toolCallsExecuted: iterationCount,
-          guardrailEvents,
-          usage: totalUsage,
-          blocked: false,
-          swarmState: getTurnSwarmState(),
-          performance,
-          qualityScorecard: buildCurrentTurnScorecard(finalResponse.length, "llm_error_evidence_backstop"),
-        };
-      }
-      return blocked(
-        `LLM error: ${String(err)}`,
-        getTurnSwarmState(),
-        buildTurnPerformanceMetrics({
-          turnStartedAt,
-          firstModelResponseMs,
-          llmCalls,
-          llmTimeMs,
-          toolCallsRequested,
-          toolExecutionTimeMs,
-          lastPromptMetrics,
-          completionChars: 0,
-          finishReason: "llm_error",
-          blocked: true,
-          toolIterations: iterationCount,
-        }),
-      );
     }
 
     totalUsage.promptTokens += llmResponse.usage.promptTokens;
@@ -3183,11 +3207,11 @@ async function _runTurn(
       }
     }
     // This response asks only for the delegation the user directed the turn to, and that agent has
-    // not run yet. The workflow-catalog check, the workflow-run force after a catalog search and the
-    // synthesis-required guard below let it through: the user named the agent, and a catalog match
-    // or a synthesis note left by other orchestration is the runtime's own guess. Turned away, it
-    // never ran at all — the workflow ran in its place, or the guard rejected it and shipped a
-    // forced partial answer (review of a3773aa, 2026-10-08).
+    // not run yet. The workflow-catalog check and the synthesis-required guard below let it through,
+    // and the workflow-run force after a catalog search spares the whole directed turn: the user
+    // named the agent, and a catalog match or a synthesis note left by other orchestration is the
+    // runtime's own guess. Turned away, it never ran at all — the workflow ran in its place, or the
+    // guard rejected it and shipped a forced partial answer (review of a3773aa, 2026-10-08).
     const directiveDelegationRequested = directiveAgent !== undefined
       && directiveAgentPending
       && llmResponse.tool_calls.length > 0
@@ -3398,13 +3422,18 @@ async function _runTurn(
       AGENT_DISCOVERY_TOOL_NAMES.has(toolCall.name) && toolCall.name !== "search_workflows"
     );
     const repeatedWorkflowSearchRequested = llmResponse.tool_calls.some((toolCall) => toolCall.name === "search_workflows");
+    // A directed turn is not held to this check at all, as the two tool-free checks further down are
+    // not. Exempting only the directed delegation left every other call to it: an undirected
+    // delegation before the named agent ran, or a follow-up delegation after it ran, was dropped with
+    // "Call run_workflow now" and, made again, rewritten into the matched workflow, so a workflow the
+    // user did not name ran before or after the agent they did (review of f607ce0, 2026-10-08).
     if (
       !workflowCatalogSuppressedForMaintenance
       &&
       shouldRequireWorkflowExecutionAfterSearch(workflowSearchMatches)
       && !workflowRunCompletedThisTurn
       && !runWorkflowRequested
-      && !directiveDelegationRequested
+      && directiveAgent === undefined
       && (nonWorkflowOrchestrationRequested || nonWorkflowDiscoveryRequested || repeatedWorkflowSearchRequested)
     ) {
       if (!workflowExecutionRetryUsed) {
@@ -3710,12 +3739,18 @@ async function _runTurn(
         releaseAfterRoutingNudge("tool_free_workflow_answer_rejected");
       }
 
+      // The same holds for a workflow a catalog search matched earlier in a directed turn. The
+      // answer from the named agent's result was rejected with "Call run_workflow now"; a model that
+      // obeyed had its run_workflow turned away by the synthesis-required guard, and the turn
+      // shipped a forced partial answer in place of the agent-backed one (integration review,
+      // 2026-10-08).
       if (
         !releasedAfterRoutingNudge
         && !workflowCatalogSuppressedForMaintenance
         &&
         shouldRequireWorkflowExecutionAfterSearch(workflowSearchMatches)
         && !workflowRunCompletedThisTurn
+        && directiveAgent === undefined
       ) {
         if (!workflowExecutionRetryUsed) {
           workflowExecutionRetryUsed = true;
@@ -4958,9 +4993,25 @@ async function _runTurn(
             builderAgent: deliverableIntent.builder,
           }, { sessionId: session.id, channel: session.channel, severity: "warn" });
         }
-        const relayDeliverable = (getConfig().orchestration?.relaySingleDeliverable ?? true) && !turnNeedsUnbuiltAppArtifact
+        const relayCandidate = (getConfig().orchestration?.relaySingleDeliverable ?? true) && !turnNeedsUnbuiltAppArtifact
           ? extractSingleRelayableDeliverable(toolResultMessages, _turnDelegationCount)
           : null;
+        // A turn the user directed to an agent (`--agent`) is not answered by another agent's
+        // deliverable before that agent has run. The one delegation counted here may never have
+        // reached it: a delegation naming no agent is routed within the grant, and when routing
+        // finds no match the architect fallback's ephemeral agent answers. Relayed, that answer
+        // ended the turn scored complete before the forced iteration could delegate to the named
+        // agent (integration review, 2026-10-08). Read from directiveAgentRan, which the tool loop
+        // above sets: directiveAgentPending was read before this round's tools ran, so it still
+        // holds when the named agent itself returned the deliverable, which is relayed as before.
+        const relayHeldForDirective = relayCandidate !== null && directiveAgent !== undefined && !directiveAgentRan;
+        if (relayHeldForDirective) {
+          logAudit("guardrail_flagged", {
+            type: "single_deliverable_relay_suppressed_directive_pending",
+            directiveAgent,
+          }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+        }
+        const relayDeliverable = relayHeldForDirective ? null : relayCandidate;
         if (relayDeliverable) {
           let finalResponse = sanitizeUserFacingAssistantResponse(relayDeliverable, iterationCount);
           // This early return bypasses the terminal guards, and with them the artifact verification

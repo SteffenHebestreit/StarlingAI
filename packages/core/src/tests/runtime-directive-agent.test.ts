@@ -66,20 +66,47 @@ vi.mock("../retrieval/document-rag.js", () => ({
  * agent for an undirected delegation. Reached only through a real fan-out tool (realTools).
  */
 const architectRuns = vi.hoisted(() => [] as string[]);
+/** What the ephemeral agent answers: a short answer, unless a test sets a long one. */
+const architectAnswer = vi.hoisted(() => ({ text: "" }));
 vi.mock("../tools/ephemeral-agent-factory.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../tools/ephemeral-agent-factory.js")>()),
   runArchitectFallback: vi.fn(async (task: string) => {
     architectRuns.push(task);
-    return { success: true, output: "[menu_planner]: Starter, main and dessert for six.", metadata: { agentName: "menu_planner", ephemeral: true } };
+    return { success: true, output: `[menu_planner]: ${architectAnswer.text || "Starter, main and dessert for six."}`, metadata: { agentName: "menu_planner", ephemeral: true } };
   }),
 }));
+
+/**
+ * A specialist's own run, stubbed for a test that sets `specialistRuns.stubbed` (one that runs the
+ * real delegate_to_agent): `ran` holds the agents that ran, in order. Otherwise the real run.
+ */
+const specialistRuns = vi.hoisted(() => ({ stubbed: false, ran: [] as string[] }));
+vi.mock("../agent/sub-agent.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../agent/sub-agent.js")>();
+  return {
+    ...actual,
+    runSubAgentWithStats: vi.fn(async (opts: Parameters<typeof actual.runSubAgentWithStats>[0]) => {
+      if (!specialistRuns.stubbed) return actual.runSubAgentWithStats(opts);
+      specialistRuns.ran.push(opts.agentName);
+      return {
+        output: `${opts.agentName.toUpperCase()}-FINDING: int() truncates the cent in invoices.py at line 12.`,
+        stats: {
+          agentName: opts.agentName, sessionId: `sub:${opts.agentName}`, promptChars: 0, userContentChars: 0, toolCount: 1, toolNames: ["read_file"],
+          iterations: 1, usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 }, maxIterations: 4, model: "mock", capabilities: [],
+          terminalState: "completed", outcome: "success",
+        },
+      } as Awaited<ReturnType<typeof actual.runSubAgentWithStats>>;
+    }),
+  };
+});
 
 /**
  * The specialist and the orchestration tools around it, stubbed; everything else is the real
  * registry. `delegated` holds the delegations that reached a specialist. A delegation naming an
  * agent outside the turn's grant gets the refusal delegate_to_agent gives it. A test that needs a
  * real fan-out tool puts its name in `realTools`; its children then run the real delegation path,
- * and a delegate_to_agent call the turn makes is still stubbed.
+ * and a delegate_to_agent call the turn makes is still stubbed, unless the test puts that name in
+ * `realTools` as well.
  */
 const delegated = vi.hoisted(() => [] as Array<Record<string, unknown>>);
 /** What each delegate_to_agent call was handed beside its arguments (ToolContext.delegationDocuments). */
@@ -88,6 +115,8 @@ const handedDocuments = vi.hoisted(() => [] as Array<string | undefined>);
 const delegationContexts = vi.hoisted(() => [] as Array<Record<string, unknown>>);
 const executed = vi.hoisted(() => [] as string[]);
 const realTools = vi.hoisted(() => new Set<string>());
+/** What a stubbed delegation that reached a specialist returns: a short finding, unless a test sets a long report. */
+const specialistReport = vi.hoisted(() => ({ text: "" }));
 vi.mock("../tools/registry.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../tools/registry.js")>();
   return {
@@ -118,7 +147,9 @@ vi.mock("../tools/registry.js", async (importOriginal) => {
         delegated.push(args);
         return {
           success: true,
-          output: `Delegated result from ${agentName} — TASK COMPLETED.\nObserved evidence:\nTRUNCATION-IN-INVOICES-AND-RECEIPTS`,
+          output: specialistReport.text
+            ? `[${agentName}]: ${specialistReport.text}`
+            : `Delegated result from ${agentName} — TASK COMPLETED.\nObserved evidence:\nTRUNCATION-IN-INVOICES-AND-RECEIPTS`,
           metadata: { agentName, attemptedAgents: [agentName], delegationSucceeded: true, delegationOutcome: "success", terminalState: "completed" },
         };
       }
@@ -208,6 +239,33 @@ function answerStream(text: string) {
   })();
 }
 
+/** A prose response the completion cap cut off. */
+function cutStream(text: string) {
+  return (async function* () {
+    yield { type: "text_delta", content: text };
+    yield { type: "done", finishReason: "length", usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } };
+  })();
+}
+
+/** Whether a provider.stream call was offered no tools: a length continuation's call. */
+const isContinuationCall = (call: unknown[]): boolean => Array.isArray(call[1]) && call[1].length === 0;
+
+/**
+ * A long, structured deliverable: its delegation result is framed "Present the full content below
+ * VERBATIM", and a turn whose one delegation returned it relays it as the answer.
+ */
+function longReport(title: string, subject: string): string {
+  return [
+    `# ${title}`,
+    "",
+    ...["Overview", "Findings", "Details"].flatMap((section, s) => [
+      `## ${section}`,
+      ...Array.from({ length: 8 }, (_v, i) => `- ${section} item ${s * 8 + i + 1}: ${subject}, item ${s * 8 + i + 1} written out in full.`),
+      "",
+    ]),
+  ].join("\n");
+}
+
 const CODE_ANALYST = {
   description: "Analyzes source code and finds bugs.",
   capabilities: ["code analysis"],
@@ -259,6 +317,10 @@ describe("a turn the user directed to one agent", () => {
     routingTier.complete = null;
     realTools.clear();
     architectRuns.length = 0;
+    architectAnswer.text = "";
+    specialistReport.text = "";
+    specialistRuns.stubbed = false;
+    specialistRuns.ran.length = 0;
     vi.resetModules();
     (await import("../config/loader.js")).resetConfigForTests();
   });
@@ -327,6 +389,118 @@ describe("a turn the user directed to one agent", () => {
 
     expect(delegated).toHaveLength(1);
     expect(streamed.join("")).not.toContain("DRAFT");
+  });
+
+  // A response the dispatch replaces is not continued when the completion cap cut it: an unforced
+  // call's prose was continued like an answer, at the cost of slow-model calls whose text was then
+  // thrown away, and on iteration 0 streamed to the user (integration review, 2026-10-08).
+  it("neither continues nor streams cut prose it replaces with the delegation", async () => {
+    // Forcing off, the turn's first call is unforced; only its own text was held back (6dbbe90).
+    const { AgentSession, runTurn } = await loadRuntime({ orchestration: { forceToolChoiceWhenOrchestrationRequired: false } });
+    let call = 0;
+    streamMock.mockImplementation((_messages: unknown, tools: unknown[]) => {
+      if (tools.length === 0) return answerStream("CONTINUATION: the rest of the orchestrator's own answer.");
+      call += 1;
+      return call === 1 ? cutStream("DRAFT: int() truncates; use round(). I answered this myself") : answerStream(ANSWER);
+    });
+    const streamed: string[] = [];
+
+    const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
+    await runTurn({ session, userMessage: MESSAGE, allowedAgents: ["code_analyst"], directiveAgent: "code_analyst", onChunk: (text) => streamed.push(text) });
+
+    expect(toolChoiceOf(0)).toBeUndefined();
+    expect(streamMock.mock.calls.filter(isContinuationCall)).toHaveLength(0);
+    expect(streamed.join("")).not.toContain("DRAFT");
+    expect(streamed.join("")).not.toContain("CONTINUATION");
+    expect(delegated).toEqual([expect.objectContaining({ agentName: "code_analyst" })]);
+  });
+
+  it("does not continue cut prose it replaces with the delegation after a workflow ran", async () => {
+    // Once run_workflow ran, the call is no longer forced while the directive is still pending.
+    const { AgentSession, runTurn } = await loadRuntime();
+    let call = 0;
+    streamMock.mockImplementation((_messages: unknown, tools: unknown[]) => {
+      if (tools.length === 0) return cutStream("CONTINUATION: more of the orchestrator's own answer");
+      call += 1;
+      if (call === 1) return toolStream("run_workflow", { name: "code_review", workflowType: "scene" });
+      return call === 2 ? cutStream("DRAFT: int() truncates; use round(). I answered this myself") : answerStream(ANSWER);
+    });
+
+    const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
+    await runTurn({ session, userMessage: MESSAGE, allowedAgents: ["code_analyst"], directiveAgent: "code_analyst" });
+
+    expect(toolChoiceOf(1)).toBeUndefined();
+    expect(streamMock.mock.calls.filter(isContinuationCall)).toHaveLength(0);
+    expect(streamMock).toHaveBeenCalledTimes(3);
+    expect(delegated).toEqual([expect.objectContaining({ agentName: "code_analyst" })]);
+  });
+
+  // A stream that broke off: the provider failed after the model had written prose, which
+  // collectStream hands the turn as the error's partial response.
+  describe("when the call breaks off after the model wrote prose", () => {
+    const PROSE = "ORCHESTRATOR-OWN-ANSWER: int() truncates the cent; use round(subtotal + tax, 2). ".repeat(6);
+    function brokenStream(): AsyncGenerator<unknown> {
+      return (async function* () {
+        yield { type: "text_delta", content: PROSE };
+        throw new Error("OpenAI-compatible stream failed (model: m): Error: socket hang up");
+      })();
+    }
+    const salvaged = (): boolean => auditMock.mock.calls.some(([, details]) => (details as { type?: string } | undefined)?.type === "llm_error_partial_salvaged");
+
+    it("dispatches the named agent and shows none of the prose", async () => {
+      // The salvage shipped the orchestrator's own prose with an "incomplete" caveat, and the named
+      // agent never ran (integration review, 2026-10-08).
+      const { AgentSession, runTurn } = await loadRuntime();
+      let call = 0;
+      streamMock.mockImplementation(() => {
+        call += 1;
+        return call === 1 ? brokenStream() : answerStream(ANSWER);
+      });
+      const streamed: string[] = [];
+
+      const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
+      const result = await runTurn({ session, userMessage: MESSAGE, allowedAgents: ["code_analyst"], directiveAgent: "code_analyst", onChunk: (text) => streamed.push(text) });
+
+      expect(delegated).toEqual([expect.objectContaining({ agentName: "code_analyst", task: MESSAGE })]);
+      expect(result.response).not.toContain("ORCHESTRATOR-OWN-ANSWER");
+      expect(streamed.join("")).not.toContain("ORCHESTRATOR-OWN-ANSWER");
+      expect(salvaged()).toBe(false);
+      expect(result.response).toContain("MODEL-ANSWER");
+    });
+
+    it("shows none of the prose when the turn's deadline cut the call", async () => {
+      // Past the deadline there is no time left to run the agent; the turn ends without the prose.
+      const { AgentSession, runTurn } = await loadRuntime();
+      streamMock.mockImplementation((_messages: unknown, _tools: unknown, signal: AbortSignal) => (async function* () {
+        yield { type: "text_delta", content: PROSE };
+        await new Promise((_resolve, reject) => {
+          if (signal.aborted) reject(signal.reason);
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      })());
+      const streamed: string[] = [];
+
+      const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
+      const result = await runTurn({
+        session, userMessage: MESSAGE, allowedAgents: ["code_analyst"], directiveAgent: "code_analyst", turnTimeoutOverrideMs: 1_500, onChunk: (text) => streamed.push(text),
+      });
+
+      expect(result.response).not.toContain("ORCHESTRATOR-OWN-ANSWER");
+      expect(streamed.join("")).not.toContain("ORCHESTRATOR-OWN-ANSWER");
+      expect(salvaged()).toBe(false);
+    }, 15_000);
+
+    it("still salvages the prose of a turn no agent was named for", async () => {
+      // The control: the salvage is unchanged where no dispatch replaces the call.
+      const { AgentSession, runTurn } = await loadRuntime();
+      streamMock.mockImplementation(() => brokenStream());
+
+      const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
+      const result = await runTurn({ session, userMessage: MESSAGE });
+
+      expect(result.performance?.finishReason).toBe("llm_error_partial_salvaged");
+      expect(result.response).toContain("ORCHESTRATOR-OWN-ANSWER");
+    });
   });
 
   // The dispatch handed the agent the bare request, and a specialist starts from its task and
@@ -606,6 +780,76 @@ describe("a turn the user directed to one agent", () => {
     expect(result.response).not.toContain("I answered this myself");
   });
 
+  it("runs the named agent though an ephemeral agent already answered the same request", async () => {
+    // The model's first call delegated the user's request word for word and named no agent; routing
+    // within the grant found no match and an ephemeral agent answered. The runtime's own dispatch to
+    // code_analyst carries the same request, and signature reuse served it the ephemeral agent's
+    // answer: code_analyst never ran, the turn stayed directed, the next dispatch hit the reuse
+    // limit, and the turn ended in a delegation failure (integration review, 2026-10-08).
+    const VEGAN = "Plan a vegan dinner menu for six guests";
+    realTools.add("delegate_to_agent");
+    specialistRuns.stubbed = true;
+    const { AgentSession, runTurn } = await loadRuntime({ subAgents: { code_analyst: CODE_ANALYST } });
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      call += 1;
+      return call === 1 ? toolStream("delegate_to_agent", { task: VEGAN }) : answerStream(ANSWER);
+    });
+
+    const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
+    const result = await runTurn({ session, userMessage: VEGAN, allowedAgents: ["code_analyst"], directiveAgent: "code_analyst" });
+
+    expect(architectRuns).toHaveLength(1);
+    expect(specialistRuns.ran).toEqual(["code_analyst"]);
+    expect(result.performance?.finishReason).not.toBe("delegation_failures_terminal");
+    expect(result.response).toContain("MODEL-ANSWER");
+  });
+
+  it("does not relay an ephemeral agent's long deliverable before the named agent ran", async () => {
+    // A delegation that named no agent was routed within the grant, found no match, and the
+    // architect fallback's ephemeral agent answered with a long deliverable. The single-deliverable
+    // relay shipped it as the turn's answer, scored complete, and code_analyst never ran: the forced
+    // iteration that would have delegated to it never came (integration review, 2026-10-08).
+    realTools.add("swarm_delegate");
+    architectAnswer.text = longReport("Vegan dinner for six", "a dish of lentils, herbs and roasted vegetables");
+    const { AgentSession, runTurn } = await loadRuntime({ subAgents: { code_analyst: CODE_ANALYST } });
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      call += 1;
+      return call === 1 ? toolStream("swarm_delegate", { task: "Plan a vegan dinner menu for six guests" }) : answerStream(ANSWER);
+    });
+
+    const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
+    const result = await runTurn({ session, userMessage: MESSAGE, allowedAgents: ["code_analyst"], directiveAgent: "code_analyst" });
+
+    expect(architectRuns).toHaveLength(1);
+    expect(result.performance?.finishReason).not.toBe("single_deliverable_relayed");
+    expect(toolChoiceOf(1)).toBe("required");
+    expect(promptOf(1)).toContain(DIRECTIVE_LINE);
+    expect(delegated).toEqual([expect.objectContaining({ agentName: "code_analyst" })]);
+  });
+
+  it("still relays the named agent's own long deliverable", async () => {
+    // The control. The agent the user named returned the deliverable in this round, so the turn
+    // ends with it; read from the directive as it stood before the round's tools ran, the relay
+    // was held here as well.
+    specialistReport.text = longReport("Why invoices.py undercharges", "int() truncates the cent in total()");
+    const { AgentSession, runTurn } = await loadRuntime();
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      call += 1;
+      return call === 1 ? delegateStream() : answerStream(ANSWER);
+    });
+
+    const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
+    const result = await runTurn({ session, userMessage: MESSAGE, allowedAgents: ["code_analyst"], directiveAgent: "code_analyst" });
+
+    expect(delegated).toHaveLength(1);
+    expect(result.performance?.finishReason).toBe("single_deliverable_relayed");
+    expect(streamMock).toHaveBeenCalledTimes(1);
+    expect(result.response).toContain("int() truncates the cent in total()");
+  });
+
   it("stays directed when a task graph's node was turned away, though the turn before ran the agent under its id", async () => {
     // The turn's swarm state is seeded with the previous turn's tasks, attempts included, and a node
     // whose id repeats one of them keeps that task's attempts. Node n1 was turned away this turn
@@ -718,6 +962,75 @@ describe("a turn the user directed to one agent", () => {
     expect(executed).not.toContain("run_workflow");
     expect(delegated).toHaveLength(1);
     expect(result.response).toContain("MODEL-ANSWER");
+    // The answer from the agent's result stands: it is not rejected with an order to run the
+    // workflow the search matched (integration review, 2026-10-08).
+    expect(streamMock).toHaveBeenCalledTimes(3);
+    expect(streamMock.mock.calls.map((_call, index) => promptOf(index)).join("\n")).not.toContain("Call run_workflow now");
+  });
+
+  it("ships the answer from the named agent's result to a model that would run the matched workflow", async () => {
+    // The answer was rejected with "Call run_workflow now". A model that obeyed had its run_workflow
+    // turned away by the synthesis-required guard, and the turn shipped a forced partial answer in
+    // place of the agent-backed one.
+    const { AgentSession, runTurn } = await loadRuntime();
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      call += 1;
+      if (call === 1) return toolStream("search_workflows", { query: "code bug review" });
+      if (call === 2) return delegateStream();
+      if (call === 3) return answerStream(ANSWER);
+      return toolStream("run_workflow", { name: "code_review", workflowType: "scene" });
+    });
+
+    const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
+    const result = await runTurn({ session, userMessage: MESSAGE, allowedAgents: ["code_analyst"], directiveAgent: "code_analyst" });
+
+    expect(result.performance?.finishReason).not.toBe("synthesis_required_tool_call_rejected");
+    expect(executed).not.toContain("run_workflow");
+    expect(result.response).toContain("MODEL-ANSWER");
+  });
+
+  it("runs no workflow a catalog search matched in place of another delegation before the named agent ran", async () => {
+    // The workflow-run check let only the directed delegation through. Another delegation was
+    // dropped with "Call run_workflow now" and, made again, rewritten into the matched workflow, so
+    // the turn ran a workflow nobody asked for before the named agent (review of f607ce0, 2026-10-08).
+    const { AgentSession, runTurn } = await loadRuntime();
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      call += 1;
+      if (call === 1) return toolStream("search_workflows", { query: "code bug review" });
+      if (call <= 3) return toolStream("swarm_delegate", { task: "Find the bug in invoices.py." });
+      return answerStream(ANSWER);
+    });
+
+    const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
+    await runTurn({ session, userMessage: MESSAGE, allowedAgents: ["code_analyst"], directiveAgent: "code_analyst" });
+
+    expect(executed).not.toContain("run_workflow");
+    // The delegation the model asked for ran as it asked, the first time it asked.
+    expect(executed.slice(0, 2)).toEqual(["search_workflows", "swarm_delegate"]);
+    expect(streamMock.mock.calls.map((_call, index) => promptOf(index)).join("\n")).not.toContain("Call run_workflow now");
+  });
+
+  it("runs no workflow a catalog search matched in place of a second delegation after the named agent ran", async () => {
+    // Once the agent had run, the directed delegation was no longer exempt: a follow-up delegation
+    // was dropped with "Call run_workflow now" and, made again, rewritten into the matched workflow,
+    // which then ran after the agent the user had named.
+    const { AgentSession, runTurn } = await loadRuntime();
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      call += 1;
+      if (call === 1) return toolStream("search_workflows", { query: "code bug review" });
+      if (call <= 4) return delegateStream();
+      return answerStream(ANSWER);
+    });
+
+    const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
+    await runTurn({ session, userMessage: MESSAGE, allowedAgents: ["code_analyst"], directiveAgent: "code_analyst" });
+
+    expect(executed).not.toContain("run_workflow");
+    expect(delegated[0]).toMatchObject({ agentName: "code_analyst" });
+    expect(streamMock.mock.calls.map((_call, index) => promptOf(index)).join("\n")).not.toContain("Call run_workflow now");
   });
 
   describe("when the request matches a job's catalog triggers", () => {

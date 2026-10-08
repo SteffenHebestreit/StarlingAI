@@ -225,6 +225,13 @@ export interface ToolContext {
    */
   delegationDocuments?: string;
   /**
+   * The agent the user directed this turn to (`--agent`, RunTurnOptions.directiveAgent), set by the
+   * runtime on such a turn only. A delegation naming that agent is served by signature reuse only
+   * from that agent's own earlier run (tools/sub-agent.ts): served another agent's result for the
+   * same task, the named agent never ran.
+   */
+  directiveAgent?: string;
+  /**
    * Tool names that MUST pause for human approval regardless of tier defaults.
    * Enforced unconditionally — cannot be bypassed by config or tier settings.
    */

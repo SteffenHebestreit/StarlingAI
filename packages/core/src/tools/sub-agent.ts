@@ -569,9 +569,24 @@ function resolveTaskLeaseTtlMs(ctx: ToolContext, agentTimeoutMs?: number | "unbo
   return Math.max(5_000, Math.min(bounded, 60_000));
 }
 
-function findReusableSwarmTask(ctx: ToolContext, signature: string): SwarmTaskState | undefined {
+/** Whether a task's run was the given agent's: the agent its result is from, or one it attempted. */
+function taskRanAgent(task: SwarmTaskState, agentName: string): boolean {
+  return task.selectedAgent === agentName || task.attempts.some((attempt) => attempt.agentName === agentName);
+}
+
+/**
+ * The earlier task this delegation's signature matches. With `requiredAgent` (a delegation naming
+ * the agent the user directed the turn to), a task that did not fail matches only when that agent
+ * ran it; a failed one still matches, and the retry check then decides whether the named agent is
+ * new to it. The first match is not enough there: a later delegation to the agent would miss the
+ * agent's own run behind another agent's and start it again, past the reuse limit.
+ */
+function findReusableSwarmTask(ctx: ToolContext, signature: string, requiredAgent?: string): SwarmTaskState | undefined {
   if (!ctx.swarmState) return undefined;
-  return Object.values(ctx.swarmState.tasks).find((task) => task.signature === signature);
+  if (requiredAgent === undefined) return Object.values(ctx.swarmState.tasks).find((task) => task.signature === signature);
+  const matches = Object.values(ctx.swarmState.tasks).filter((task) => task.signature === signature);
+  return matches.find((task) => task.status !== "failed" && taskRanAgent(task, requiredAgent))
+    ?? matches.find((task) => task.status === "failed");
 }
 
 function allocateParallelTaskIds(ctx: ToolContext, count: number): string[] {
@@ -1007,9 +1022,20 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   // sets allowSignatureReuse because its `parallel_N` ids are auto-allocated, so a later round
   // that re-issues the same canonical research reuses the earlier slice's evidence instead of
   // re-running it (audit d20a9a5e: the coordinator researched the same request twice = ~2x turn).
+  //
+  // A delegation naming the agent the user directed the turn to (`--agent`) is served only that
+  // agent's own earlier result. Matched by signature alone, the runtime's own dispatch to the agent
+  // (the user's request as its task) was served what an ephemeral agent had answered for an
+  // undirected delegation of the same words: the named agent never ran, the turn stayed directed,
+  // and the next dispatch hit the reuse limit until the turn ended in a delegation failure
+  // (integration review, 2026-10-08). No other delegation is affected.
+  const reuseBoundToAgent = ctx.directiveAgent !== undefined && request.agentName?.trim() === ctx.directiveAgent
+    ? ctx.directiveAgent
+    : undefined;
   const reusableTask = reusableTaskById?.signature === signature
+    && (reuseBoundToAgent === undefined || reusableTaskById.status === "failed" || taskRanAgent(reusableTaskById, reuseBoundToAgent))
     ? reusableTaskById
-    : ((request.taskId && !request.allowSignatureReuse) ? undefined : findReusableSwarmTask(ctx, signature));
+    : ((request.taskId && !request.allowSignatureReuse) ? undefined : findReusableSwarmTask(ctx, signature, reuseBoundToAgent));
   const reusableTaskAttemptedAgents = reusableTask?.attempts.map((attempt) => attempt.agentName) ?? [];
 
   if (reusableTask?.status === "completed" && reusableTask.output) {
