@@ -10,6 +10,10 @@ import type { MemoryRecord } from "../memory/service.js";
  * Under multi-user auth a workspace-scope record is stored in its writer's own root,
  * <workspace>/users/<segment>/, but its graph node carried no tenant, and the "Critical Memory"
  * block every turn injects returned every account's workspace decisions and preferences.
+ *
+ * The block's read had a rule of its own, in which a null user tenant matched every node: under
+ * multi-user auth a request with no user got every account's user-scope decisions and preferences
+ * (found in review, 2026-10-08). It now applies the reader rule of the graph inspector and graph_query.
  */
 const { isGraphDbAvailable, runCypher, toPlainRecords } = vi.hoisted(() => ({
   isGraphDbAvailable: vi.fn(() => true),
@@ -83,13 +87,38 @@ describe("workspace-scope graph nodes are partitioned by account", () => {
     // One query per reader: a cached block is never served across accounts.
     expect(reads).toHaveLength(2);
     const [aliceRead, bobRead] = reads.map(([query, params]) => ({ query: String(query), params: params as Record<string, unknown> }));
-    expect(aliceRead!.params["workspaceTenant"]).toBe(scope.safeUserSegment("alice"));
-    expect(bobRead!.params["workspaceTenant"]).toBe(scope.safeUserSegment("bob"));
-    expect(aliceRead!.params["sharedTenant"]).toBe(graph.SHARED_WORKSPACE_TENANT);
-    // The workspace branch of the filter is gated on the tenant, not open to every node.
+    expect(aliceRead!.params["readerWorkspaceTenant"]).toBe(scope.safeUserSegment("alice"));
+    expect(bobRead!.params["readerWorkspaceTenant"]).toBe(scope.safeUserSegment("bob"));
+    expect(aliceRead!.params["sharedWorkspaceTenant"]).toBe(graph.SHARED_WORKSPACE_TENANT);
+    expect(aliceRead!.params["readerUserTenant"]).toBe("alice");
+    // The workspace branch of the filter is gated on the tenant, not open to every node: the reader
+    // rule the graph inspector and graph_query apply.
+    expect(aliceRead!.query).toContain(graph.graphMemoryReadablePredicate("m"));
     expect(aliceRead!.query.replace(/\s+/g, " ")).toContain(
-      "m.scope = 'workspace' AND ($workspaceTenant IS NULL OR m.tenant = $workspaceTenant OR m.tenant = $sharedTenant)",
+      "m.scope = 'workspace' AND m.tenant IN [$readerWorkspaceTenant, $sharedWorkspaceTenant]",
     );
+  });
+
+  // A request with no user under multi-user auth (an A2A, MCP or federation run, and the sub-agent
+  // runs started from one) read every account's user-scope decisions and preferences: a null user
+  // tenant matched every node (found in review, 2026-10-08).
+  it("reads no account's user memory for a request with no user", async () => {
+    const { graph } = await load(true);
+    await graph.graphL0Layer("mission_coordinator");
+
+    const read = runCypher.mock.calls.find(([query]) => String(query).includes("['decision', 'preference']"));
+    const query = String(read![0]).replace(/\s+/g, " ");
+    const params = read![1] as Record<string, unknown>;
+    // No tenant test is open to every node, and a user node is read by equality alone, which a null
+    // tenant never satisfies.
+    expect(query).not.toMatch(/IS NULL OR m\.tenant/);
+    expect(query).toContain("m.scope = 'user' AND m.tenant = $readerUserTenant");
+    expect(params["readerUserTenant"]).toBeNull();
+    expect(params["readerWorkspaceTenant"]).toBe(graph.SHARED_WORKSPACE_TENANT);
+    // The rule graph_query and the inspector apply: no user node is readable without a user.
+    const reader = graph.graphMemoryReader()!;
+    expect(reader.readerUserTenant).toBeNull();
+    expect(graph.isGraphMemoryReadable(["MemoryRecord"], { scope: "user", tenant: "alice" }, reader)).toBe(false);
   });
 
   it("leaves a single-operator install unpartitioned", async () => {
@@ -99,5 +128,11 @@ describe("workspace-scope graph nodes are partitioned by account", () => {
     expect(mergeParams()[0]!["tenant"]).toBeNull();
     const read = runCypher.mock.calls.find(([query]) => String(query).includes("['decision', 'preference']"));
     expect((read![1] as Record<string, unknown>)["workspaceTenant"]).toBeNull();
+    expect((read![1] as Record<string, unknown>)["tenant"]).toBeNull();
+    // The query of a single operator is the one it was: no tenant, every node.
+    expect(String(read![0]).replace(/\s+/g, " ")).toContain(
+      "((m.scope = 'workspace' AND ($workspaceTenant IS NULL OR m.tenant = $workspaceTenant OR m.tenant = $sharedTenant))"
+      + " OR (m.scope = 'user' AND ($tenant IS NULL OR m.tenant = $tenant)))",
+    );
   });
 });

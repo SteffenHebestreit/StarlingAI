@@ -313,13 +313,23 @@ export async function graphL0Layer(
   const cached = _graphL0Cache.get(cacheKey);
   if (cached && Date.now() - cached.storedAt <= GRAPH_L0_CACHE_TTL_MS) return cached.content;
 
+  // Under multi-user auth the nodes read are those of the reader rule the graph inspector and
+  // graph_query apply. This read had a rule of its own, in which a null user tenant matched every
+  // node: a request with no user (an A2A, MCP or federation run, and the sub-agent runs started from
+  // one) got every account's user-scope decisions and preferences as its Critical Memory (found in
+  // review, 2026-10-08). With the reader rule a request with no user reads no user node. With one
+  // operator the query is the one it was.
+  const reader = graphMemoryReader();
+  const tenantFilter = reader
+    ? graphMemoryReadablePredicate("m")
+    : `((m.scope = 'workspace'
+              AND ($workspaceTenant IS NULL OR m.tenant = $workspaceTenant OR m.tenant = $sharedTenant))
+             OR (m.scope = 'user' AND ($tenant IS NULL OR m.tenant = $tenant)))`;
   try {
     const queryPromise = runCypher(`
       MATCH (m:MemoryRecord)
       WHERE m.kind IN ['decision', 'preference']
-        AND ((m.scope = 'workspace'
-              AND ($workspaceTenant IS NULL OR m.tenant = $workspaceTenant OR m.tenant = $sharedTenant))
-             OR (m.scope = 'user' AND ($tenant IS NULL OR m.tenant = $tenant)))
+        AND ${tenantFilter}
         AND (m.validTo IS NULL OR m.validTo > $now)
         AND ($domain IS NULL OR m.domain = $domain OR m.domain IS NULL)
       RETURN m.id AS id, m.kind AS kind, m.content AS content
@@ -328,9 +338,7 @@ export async function graphL0Layer(
     `, {
       domain: domain ?? null,
       now: new Date().toISOString(),
-      tenant,
-      workspaceTenant,
-      sharedTenant: SHARED_WORKSPACE_TENANT,
+      ...(reader ?? { tenant, workspaceTenant, sharedTenant: SHARED_WORKSPACE_TENANT }),
     }).catch(() => null); // swallow a late rejection after timeout
     const result = await Promise.race([
       queryPromise,
