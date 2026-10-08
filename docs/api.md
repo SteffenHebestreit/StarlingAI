@@ -746,7 +746,7 @@ Body:
 { "sessionId": "...", "message": "Summarise the quarterly report" }
 ```
 
-`sessionId` is optional. An id no session has starts a new session under that id, owned by the caller, so a client may pre-generate one (a UUID, say). Under multi-user auth a session another account owns gets `404`. So does an id no session has unless it is 1 to 128 letters, digits, `_` or `-` (a UUID is fine). An id with a colon is read as naming another session: one in a namespace the system mints ids in for runs no chat started (`sub:`, `workflow:`, `a2a-in:`, `a2a-out:`, `a2a:`, `mcp:`, `fed:`, `eval:`, `eval-judge:`, `scene-eval:`, `selfimprove:`, `job:`), whose shared facts live under its id, and one ending in `:ephemeral`, whose sub-agent runs resolve to the session named before it.
+`sessionId` is optional. An id no session has starts a new session under that id, owned by the caller, so a client may pre-generate one (a UUID, say). Under multi-user auth a session another account owns gets `404`. So does an id no session has unless it is 1 to 128 letters, digits, `_` or `-` (a UUID is fine). An id with a colon is read as naming another session: one in a namespace the system mints ids in for runs no chat started (`sub:`, `workflow:`, `a2a-in:`, `a2a-out:`, `a2a:`, `mcp:`, `fed:`, `eval:`, `eval-judge:`, `scene-eval:`, `selfimprove:`, `job:`), whose shared facts live under its id, and one ending in `:ephemeral`, whose sub-agent runs resolve to the session named before it. A `sessionId` that is not a string (or `null`) gets `400`.
 
 It emits the same logical event types used by the WebSocket flow.
 
@@ -829,7 +829,7 @@ Calling any other method returns `-32601` with `Method not found — use tasks/s
 
 ### Public A2A surface
 
-`POST /a2a/v1` (JSON-RPC `tasks/send`, `tasks/get`) and its agent card at `GET /.well-known/agent-card.json` are served when `a2a.enabled` is set. The JSON-RPC endpoint takes the shared `a2a.inboundBearerToken` when one is configured, and otherwise a gateway token (or, with OIDC A2A on, a peer's token from the identity provider). Under multi-user auth a gateway token whose account has been removed gets `401`, as on `/api`, and a `tasks/send` task runs as the account the token names, with the workspace root and memory that account's chat runs have. A caller with the shared bearer or an OIDC peer's token is no account of this deployment, and its task runs in the shared workspace root.
+`POST /a2a/v1` (JSON-RPC `tasks/send`, `tasks/get`) and its agent card at `GET /.well-known/agent-card.json` are served when `a2a.enabled` is set. The JSON-RPC endpoint takes the shared `a2a.inboundBearerToken` when one is configured, and otherwise a gateway token (or, with OIDC A2A on, a peer's token from the identity provider). Under multi-user auth a gateway token whose account has been removed gets `401`, as on `/api`, and a `tasks/send` task runs as the account the token names, with the workspace root and memory that account's chat runs have. A caller with the shared bearer or an OIDC peer's token is no account of this deployment, and its task runs in the shared workspace root. Under multi-user auth a `tasks/send` `sessionId` that is not a string gets the JSON-RPC error `-32602`.
 
 ## MCP server
 

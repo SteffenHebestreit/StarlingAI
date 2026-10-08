@@ -47,10 +47,12 @@ const CLIENT_SESSION_ID = /^[A-Za-z0-9_-]{1,128}$/;
  *   and with it her shared facts, turn steering, plan and grants (found in review, 2026-10-09).
  *
  * A fixed character set closes both, where a list of forbidden prefixes closed only the first.
- * Clients that pre-generate a UUID keep working.
+ * Clients that pre-generate a UUID keep working. The id must be a string too: RegExp.test reads any
+ * value as its string, so `["<alice's id>"]` from a JSON body passed as Alice's id while every
+ * lookup keyed by the value itself missed her session (found in review, 2026-10-09).
  * With auth off there is one operator and nothing to keep apart.
  */
-export function clientMayCreateSessionId(sessionId: string): boolean {
+export function clientMayCreateSessionId(sessionId: unknown): boolean {
   if (getConfig().auth?.enabled !== true) return true;
-  return CLIENT_SESSION_ID.test(sessionId);
+  return typeof sessionId === "string" && CLIENT_SESSION_ID.test(sessionId);
 }

@@ -79,6 +79,21 @@ export async function handleAguiStream(
     return;
   }
 
+  // Under multi-user auth the id must be a string, checked before anything looks it up. The body is
+  // parsed JSON, and `["<alice's id>"]` passed every gate as a different value from the one it was
+  // used as: the session map, keyed by the value itself, held no session under the array, so the
+  // owner gate found none, the id-shape check read it as its string, and a session owned by Bob was
+  // created with the array as its id. Every id built from it as a string (a sub-agent run's root,
+  // the Redis keys of its facts and its record) was Alice's (found in review, 2026-10-09). A null
+  // id is no id, as before. With auth off the id is taken as it comes, as before.
+  const rawSessionId: unknown = body.sessionId;
+  if (rawSessionId !== undefined && rawSessionId !== null && typeof rawSessionId !== "string" && getConfig().auth?.enabled === true) {
+    log.warn({ caller: userId ?? "(none)", sessionIdType: Array.isArray(rawSessionId) ? "array" : typeof rawSessionId }, "AG-UI stream denied: sessionId is not a string");
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "sessionId must be a string" }));
+    return;
+  }
+
   // Get or create session — try Redis fallback for cross-instance routing.
   // Create it UNDER the requested id (so session-scoped documents uploaded with
   // that sessionId are in retrieval scope) and attribute it to the authenticated
