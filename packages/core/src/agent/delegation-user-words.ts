@@ -54,14 +54,32 @@ function normalizeForContainment(text: string): string {
 }
 
 /**
+ * The line the web chat (and the E2E runner, which sends what it sends) puts first in the bubble
+ * text of a message with attachments: "📎 " and the file names. It is in no message.
+ */
+const ATTACHMENT_LINE = /^📎[^\n]*(?:\n|$)/u;
+
+/**
  * The words specialists are told the user typed, from a chat entry point that received the typed
  * text separately from the message (the web chat's displayContent). That field is supplied by the
  * client and the input guardrail and moderation run on the message alone, so the typed text is
  * trusted only when the checked message contains it; otherwise the checked message is used.
+ *
+ * With attachments the bubble text starts with the attachment line, and the message carries each
+ * picture's analysis ahead of the typed text instead. Read as a whole the bubble text was in no
+ * message, so the whole message, the analysis a vision model wrote included, was taken for the
+ * user's words: a specialist told to write in the language of the user's own words read an English
+ * description as what a German speaker wrote. The words are what follows that line, and none when
+ * nothing follows it.
  */
 export function typedUserWords(checkedMessage: string, typed: string | undefined): string {
   const text = typed?.trim() ?? "";
-  return text && checkedMessage.includes(text) ? text : checkedMessage;
+  if (!text) return checkedMessage;
+  if (checkedMessage.includes(text)) return text;
+  const attachmentLine = ATTACHMENT_LINE.exec(text);
+  if (!attachmentLine) return checkedMessage;
+  const afterAttachments = text.slice(attachmentLine[0].length).trim();
+  return checkedMessage.includes(afterAttachments) ? afterAttachments : checkedMessage;
 }
 
 /**
