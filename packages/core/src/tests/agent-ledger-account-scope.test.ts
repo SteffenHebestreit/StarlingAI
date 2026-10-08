@@ -179,6 +179,59 @@ describe("the user-profile prefetch and the deployment's agent ledger", () => {
   });
 });
 
+describe("a busy account and the caller's own lessons", () => {
+  beforeAll(async () => { await import("../tools/memory.js"); });
+
+  /** Bob's lesson, then 200 lessons recorded for Alice: more than the 200-entry window a search
+   *  used to read before keeping the caller's own. */
+  function seedBusy(): { bobRoot: string } {
+    const shared = mkdtempSync(join(tmpdir(), "agent-ledger-busy-"));
+    dirs.push(shared);
+    const lesson = (task: string, account: string, minute: number) => appendOutcome(shared, {
+      ts: new Date(Date.UTC(2026, 9, 8, 10, minute)).toISOString(),
+      agent: "researcher",
+      task,
+      outcome: "success",
+      iterations: 1,
+      totalTokens: 0,
+      lesson: "check the primary source",
+      account,
+    });
+    lesson(BOB_TASK, safeUserSegment("bob"), 0);
+    for (let i = 1; i <= 200; i++) lesson(`Alice's errand number ${i} in Hamburg`, safeUserSegment("alice"), i);
+    return { bobRoot: userWorkspaceRoot(shared, "bob") };
+  }
+
+  it("under multi-user auth, a search still finds the caller's own lesson behind 200 of another account's", async () => {
+    withAuth(true);
+    const { bobRoot } = seedBusy();
+
+    const result = await asBob(() => getTool("memory_search")!.execute(
+      { query: "Hamburg", scopes: ["agent"] },
+      { sessionId: "busy-account-bob", workspacePath: bobRoot, userId: "bob" },
+    ));
+
+    expect(result.output).toContain(BOB_TASK);
+    expect(result.output).not.toContain("Alice's errand");
+  });
+
+  it("under multi-user auth, a sub-agent's lesson guidance finds it too", async () => {
+    withAuth(true);
+    const { bobRoot } = seedBusy();
+
+    const guidance = await asBob(() => formatScopedMemoryGuidance(bobRoot, "Hamburg ferry timetables", {
+      sessionId: "busy-account-guidance",
+      targetAgent: "researcher",
+      scopes: ["agent"],
+      limit: 4,
+      maxChars: 1_400,
+    }));
+
+    expect(guidance).toContain(BOB_TASK);
+    expect(guidance).not.toContain("Alice's errand");
+  });
+});
+
 describe("the account a ledger entry is written for", () => {
   it("is the user-scope segment of the request's user under multi-user auth, never the raw user id", () => {
     withAuth(true);
