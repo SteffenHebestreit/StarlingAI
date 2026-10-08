@@ -68,4 +68,16 @@ describe("turn quality scorecard", () => {
     expect(scorecard.outcomeStatus).toBe("blocked");
     expect(scorecard.partialOrFailureReason).toBe("rate_limited");
   });
+
+  it("a turn whose delegation masked figures no tool returned is partial, not completed (E2E 2026-10-07)", () => {
+    expect(buildTurnQualityScorecard({ ...base, delegatedFiguresUnobserved: true })).toMatchObject({
+      version: 2,
+      outcomeStatus: "partial",
+      partialOrFailureReason: "delegated_figures_unobserved",
+    });
+    expect(buildTurnQualityScorecard({ ...base, delegatedFiguresUnobserved: false })).toMatchObject({
+      outcomeStatus: "completed",
+      partialOrFailureReason: null,
+    });
+  });
 });

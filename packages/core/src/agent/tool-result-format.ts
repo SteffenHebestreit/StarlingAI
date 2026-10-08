@@ -27,7 +27,19 @@ import {
   looksLikeInterruptedDelegationWithoutUsableEvidence,
 } from "./interrupted-delegation-evidence.js";
 import { collectArtifactRecords, type ArtifactRecord } from "./artifact-metadata.js";
-import { PRODUCED_FILES_HEADER, RUN_STOP_HEADER, TOOL_DECLINES_HEADER, TOOL_FAILURES_HEADER } from "./delegated-run-record.js";
+import {
+  EXECUTIONS_HEADER,
+  PRODUCED_FILES_HEADER,
+  RUN_STOP_HEADER,
+  TOOL_DECLINES_HEADER,
+  TOOL_FAILURES_HEADER,
+  TOOL_FAILURES_UNRECOVERED_HEADER,
+  executionRecordLine,
+  noExecutionCompleted,
+  readExecutionRecord,
+  unbackedFiguresMasked,
+} from "./delegated-run-record.js";
+import { UNOBSERVED_FIGURE_MARKER } from "./figure-provenance.js";
 import { defangFramingMarkers } from "../guardrails/framing-markers.js";
 import { IN_REPLY_LANGUAGE } from "./reply-language.js";
 import { isPlanReportResult } from "./turn-tool-contribution.js";
@@ -193,18 +205,36 @@ function cappedBlock(header: string, lines: string[], maxLines: number): string 
  * failed on the way. Without this the frames carry only the specialist's own account. In f4ebf47b
  * that account named the engine the user had asked for; that call had returned a 404, the file came
  * from the fast tier instead, and the final answer repeated the claim. "" when nothing was recorded.
+ *
+ * When the run executed code and none of it completed with output (specialistExecutions), the
+ * block also says so, and its failed calls are listed as failures: the neutral header's "the run
+ * went on after them, so they are not its outcome" is false then (E2E 2026-10-07, seven sandbox
+ * runs failed or printed nothing). A run any of whose executions printed gets the block as before,
+ * unless it masked figures: a coordinator adds up its specialists' records, so one coder that
+ * printed and one that made its figures up read as "1 completed with output", and the partial
+ * note still sends the reader to the record above for the masked ones.
  */
 export function formatDelegatedRunRecord(metadata?: Record<string, unknown>, runStopLine?: string): string {
   if (!metadata) return "";
   const frameAgent = typeof metadata["agentName"] === "string" ? metadata["agentName"] : undefined;
+  const executions = readExecutionRecord(metadata["specialistExecutions"]);
+  const noneCompleted = noExecutionCompleted(executions);
+  const executionLines = executions && (noneCompleted || unbackedFiguresMasked(executions))
+    ? [`- ${executionRecordLine(executions)}`]
+    : [];
   return [
     cappedBlock(RUN_STOP_HEADER, runStopLine ? [`- ${runStopLine}`] : [], 1),
+    cappedBlock(EXECUTIONS_HEADER, executionLines, 1),
     cappedBlock(
       PRODUCED_FILES_HEADER,
       collectArtifactRecords(metadata).map((record) => producedFileLine(record, frameAgent)),
       PRODUCED_FILES_MAX_LINES,
     ),
-    cappedBlock(TOOL_FAILURES_HEADER, toolFailureLines(metadata["specialistToolFailures"], frameAgent), TOOL_FAILURES_MAX_LINES),
+    cappedBlock(
+      noneCompleted ? TOOL_FAILURES_UNRECOVERED_HEADER : TOOL_FAILURES_HEADER,
+      toolFailureLines(metadata["specialistToolFailures"], frameAgent),
+      TOOL_FAILURES_MAX_LINES,
+    ),
     cappedBlock(TOOL_DECLINES_HEADER, toolFailureLines(metadata["specialistToolFailures"], frameAgent, true), TOOL_FAILURES_MAX_LINES),
   ].filter(Boolean).join("\n");
 }
@@ -239,6 +269,15 @@ export function delegatedRunStopLine(metadata?: Record<string, unknown>): string
 /** The partial frame's instruction for a run a stop ended. Harness text only: the facts are in the record above it. */
 const STOPPED_PARTIAL_NOTE = "IMPORTANT: The specialist was stopped before it finished (how is recorded above). "
   + "Use only the explicit partial evidence below; state what remains unverified or incomplete instead of filling gaps. "
+  + "Do NOT delegate again for this task in this turn.";
+
+/**
+ * The partial frame's instruction for a run that masked figures it stated without any tool having
+ * returned them (agent/figure-provenance.ts). The default partial note says "continue your workflow
+ * … Proceed with any dependent tools", which would build the next step on values nothing computed.
+ */
+const UNBACKED_FIGURES_NOTE = `IMPORTANT: Figures marked ${UNOBSERVED_FIGURE_MARKER} appear in no tool result of this run (see the record above), `
+  + "so nothing that ran computed them: do NOT supply, estimate or round values for them; say they could not be computed. "
   + "Do NOT delegate again for this task in this turn.";
 
 export function buildModelVisibleToolResult(
@@ -404,7 +443,9 @@ function frameToolResult(
         ? STOPPED_PARTIAL_NOTE
         : timedOut
           ? "IMPORTANT: The specialist timed out. Use only the explicit partial evidence below; state what remains unverified or incomplete instead of filling gaps. Do NOT delegate again for this task in this turn."
-          : "IMPORTANT: Use the partial evidence below to continue your workflow. Do NOT treat this as a workflow failure. Proceed with any dependent tools.";
+          : unbackedFiguresMasked(readExecutionRecord(metadata?.["specialistExecutions"]))
+            ? UNBACKED_FIGURES_NOTE
+            : "IMPORTANT: Use the partial evidence below to continue your workflow. Do NOT treat this as a workflow failure. Proceed with any dependent tools.";
       const parts = [
         `Delegated result from ${agentName} — PARTIAL PROGRESS${timedOut ? " (TIMEOUT)" : ""}.`,
         attemptedAgents.length > 1 ? `Attempts: ${attemptedAgents.join(", ")}.` : "",

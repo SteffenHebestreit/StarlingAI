@@ -151,7 +151,7 @@ import {
 // Re-export the originally-exported buildModelVisibleToolResult so existing imports
 // from runtime.js (runtime-delegation-loop.test.ts, runtime-guidance.test.ts) keep working.
 export { buildModelVisibleToolResult } from "./tool-result-format.js";
-import { stripDelegatedRunRecord } from "./delegated-run-record.js";
+import { executionRecordLine, readExecutionRecord, stripDelegatedRunRecord, unbackedFiguresMasked } from "./delegated-run-record.js";
 import { IN_REPLY_LANGUAGE, buildReplyLanguageRule, buildTurnReplyLanguageInstruction, detectTurnUserLanguage, isFirstUserTurn, localizedFixedText } from "./reply-language.js";
 
 // Turn-preparation phases + the blocked() early-exit builder (god-file seam): the
@@ -2170,6 +2170,10 @@ async function _runTurn(
   let _turnDelegationCount = 0;
   let _turnShareFindingCount = 0;
   let _forcedSynthesisFired = false;
+  // The latest delegation that carried a run record masked figures no tool had returned
+  // (agent/delegated-run-record.ts). A later delegation with a record decides again, so a retry
+  // whose code printed clears it.
+  let _turnDelegatedFiguresUnobserved = false;
   const turnQualitySignals = createTurnQualitySignals();
   const buildCurrentTurnScorecard = (finalAnswerLength: number, finishReason: string, blocked = false) =>
     buildTurnQualityScorecard({
@@ -2183,6 +2187,7 @@ async function _runTurn(
       blocked,
       artifactCount: collectTurnArtifactAttachments(session).filter((artifact) => artifact["isDirectory"] !== true).length,
       quality: turnQualitySignals,
+      delegatedFiguresUnobserved: _turnDelegatedFiguresUnobserved,
     });
   // Final-response QA gate: at most ONE corrective build per turn (shared latch across both
   // finalization paths — normal-stop and forced-terminal).
@@ -3997,6 +4002,7 @@ async function _runTurn(
         guardrailEvents,
         artifactCount: collectTurnArtifactAttachments(session).filter((artifact) => artifact["isDirectory"] !== true).length,
         qualitySignals: turnQualitySignals,
+        delegatedFiguresUnobserved: _turnDelegatedFiguresUnobserved,
       });
     }
 
@@ -4752,6 +4758,38 @@ async function _runTurn(
 
     session.addMessages(toolResultMessages);
 
+    // DELEGATED FIGURES NO TOOL RETURNED (E2E 2026-10-07). The coder's sandbox runs all failed or
+    // printed nothing, it stated two figures anyway, and they reached the user word for word. The
+    // run now masks such figures itself; here the turn reads its record (metadata, never the
+    // frame text) and stops treating that run as a finished result: no plan continuation on top of
+    // it, an honest synthesis directive, and a partial scorecard.
+    const maskedDelegatedRuns: Array<{ agent: string; line: string }> = [];
+    {
+      let sawExecutionRecord = false;
+      let maskedFigures = 0;
+      for (const message of toolResultMessages) {
+        const record = readExecutionRecord(message.metadata?.["specialistExecutions"]);
+        if (!record) continue;
+        sawExecutionRecord = true;
+        if (!unbackedFiguresMasked(record)) continue;
+        maskedFigures += record.unobservedFigures ?? 0;
+        const agentName = message.metadata?.["agentName"];
+        maskedDelegatedRuns.push({
+          agent: typeof agentName === "string" && agentName ? agentName : "delegated agent",
+          line: executionRecordLine(record),
+        });
+      }
+      if (sawExecutionRecord) _turnDelegatedFiguresUnobserved = maskedDelegatedRuns.length > 0;
+      if (maskedDelegatedRuns.length > 0) {
+        guardrailEvents.push({ type: "guardrail_flagged", details: "delegated_figures_unobserved" });
+        logAudit("guardrail_flagged", {
+          type: "delegated_figures_unobserved",
+          agents: maskedDelegatedRuns.map((run) => run.agent),
+          unobservedFigures: maskedFigures,
+        }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+      }
+    }
+
     if (workflowExecutionCorrectionPending) {
       continue;
     }
@@ -4779,7 +4817,8 @@ async function _runTurn(
             // "has the plan progressed", and not to the signal the honesty chain reads.
             executedDelegations: _turnDelegationCount + (workflowRunCompletedThisTurn ? 1 : 0),
             delegationCap: delegateCap,
-            lastDelegationSucceeded: true,
+            // A step whose figures were made up is not a step the next one may build on.
+            lastDelegationSucceeded: maskedDelegatedRuns.length === 0,
             enabled: true,
           });
           if (planDecision.continue && continuationPlan) {
@@ -4911,6 +4950,7 @@ async function _runTurn(
           content: buildSynthesisRequiredDirective({
             artifactPaths: synthesisArtifacts.map((artifact) => String(artifact["relativePath"] ?? artifact["filename"] ?? "artifact")),
             partialEvidence: partialEvidenceSynthesis,
+            unobservedRuns: maskedDelegatedRuns,
           }),
         });
       } else if (disposition === "continue") {
@@ -5436,6 +5476,7 @@ async function _runTurn(
     guardrailEvents,
     artifactCount: collectTurnArtifactAttachments(session).filter((artifact) => artifact["isDirectory"] !== true).length,
     qualitySignals: turnQualitySignals,
+    delegatedFiguresUnobserved: _turnDelegatedFiguresUnobserved,
   });
 }
 

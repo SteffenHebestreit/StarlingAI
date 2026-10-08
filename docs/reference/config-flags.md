@@ -11,13 +11,13 @@ Every public schema field, where it is declared, and how many production files r
 | `a2a` | packages/core/src/config/schema.ts:399 | 12 |
 | `accessKeyId` | packages/core/src/config/schema.ts:459 | 2 |
 | `accessToken` | packages/core/src/config/schemas/channels.ts:51 | 9 |
-| `account` | packages/core/src/config/schemas/channels.ts:71 | 80 |
+| `account` | packages/core/src/config/schemas/channels.ts:71 | 81 |
 | `acquireTimeoutMs` | packages/core/src/config/schema.ts:1674 | 1 |
 | `activeModelPreset` | packages/core/src/config/schema.ts:1705 | 2 |
 | `adaptive` | packages/core/src/config/schemas/decisions.ts:57 | 14 |
 | `addHosts` | packages/core/src/config/schema.ts:686 | 1 |
 | `admin` | packages/core/src/config/schema.ts:371 | 27 |
-| `agents` | packages/core/src/config/schema.ts:1695 | 176 |
+| `agents` | packages/core/src/config/schema.ts:1695 | 177 |
 | `alertmanager` | packages/core/src/config/schema.ts:1135 | 1 |
 | `all` | packages/core/src/config/schema.ts:1288 | 291 |
 | `allowedAgents` | packages/core/src/config/schema.ts:1308 | 29 |
@@ -107,7 +107,7 @@ Every public schema field, where it is declared, and how many production files r
 | `currency` | packages/core/src/config/schema.ts:517 | 11 |
 | `customInstructions` | packages/core/src/config/schema.ts:272 | 2 |
 | `dailyUsd` | packages/core/src/config/schema.ts:520 | 2 |
-| `default` | packages/core/src/config/schema.ts:1264 | 279 |
+| `default` | packages/core/src/config/schema.ts:1264 | 280 |
 | `defaultAlertmanager` | packages/core/src/config/schema.ts:1132 | 1 |
 | `defaultContainerized` | packages/core/src/config/schema.ts:1731 | 6 |
 | `defaultGithub` | packages/core/src/config/schema.ts:1154 | 1 |
@@ -468,7 +468,7 @@ Every public schema field, where it is declared, and how many production files r
 | `suppressUnvalidatedDraftStreaming` | packages/core/src/config/schemas/orchestration.ts:196 | 1 |
 | `surface` | packages/core/src/config/schema.ts:892 | 93 |
 | `surfaceRoutingNearMisses` | packages/core/src/config/schemas/orchestration.ts:832 | 2 |
-| `synthesis` | packages/core/src/config/schema.ts:237 | 58 |
+| `synthesis` | packages/core/src/config/schema.ts:237 | 59 |
 | `systemPrompt` | packages/core/src/config/schema.ts:920 | 20 |
 | `tags` | packages/core/src/config/schema.ts:567 | 76 |
 | `targetAgreement` | packages/core/src/config/schemas/decisions.ts:59 | 5 |

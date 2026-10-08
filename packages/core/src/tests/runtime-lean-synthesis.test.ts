@@ -83,4 +83,29 @@ describe("buildSynthesisRequiredDirective", () => {
     expect(d).toContain("attached to this message as files");
     expect(d).not.toContain("did NOT complete");
   });
+
+  // E2E 2026-10-07: the coder's script was attached, so the artifact branch told the orchestrator
+  // "The orchestration is COMPLETE … state what was completed" over figures nothing had computed.
+  it("a run that masked figures no tool returned gets an honest directive, ahead of the artifact one", () => {
+    const line = "7 code executions, none completed with output (4 failed, 3 printed nothing); "
+      + "2 figures in the run's account appear in no tool result and are masked as [not observed]";
+    const d = buildSynthesisRequiredDirective({
+      artifactPaths: ["generated/primes.js"],
+      partialEvidence: true,
+      unobservedRuns: [{ agent: "coder", line }],
+    });
+    expect(d.startsWith("[SYNTHESIS REQUIRED]")).toBe(true);
+    expect(d).toContain("The delegated run of coder stated figures that no tool returned");
+    expect(d).toContain("generated/primes.js");
+    expect(d).toContain(line);
+    expect(d).toContain("[not observed]");
+    expect(d).toContain("Do NOT delegate again");
+    expect(d).not.toContain("is COMPLETE");
+    expect(d.toLowerCase()).not.toContain("copy the exact names");
+    expect(d).not.toContain("did NOT complete");
+    // No files, no files clause; no masked run, the directive it was.
+    expect(buildSynthesisRequiredDirective({ unobservedRuns: [{ agent: "coder", line }] })).not.toContain("name the files");
+    expect(buildSynthesisRequiredDirective({ artifactPaths: ["deck.html"], unobservedRuns: [] }))
+      .toBe(buildSynthesisRequiredDirective({ artifactPaths: ["deck.html"] }));
+  });
 });

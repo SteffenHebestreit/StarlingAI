@@ -12,7 +12,7 @@
  * importers (tests, tools) keep working unchanged.
  */
 import { DELEGATE_TOOL_RESULT_RE, looksLikeOrchestrationOnlyEvidence } from "./runtime-utils.js";
-import { stripDelegatedRunRecord } from "./delegated-run-record.js";
+import { readExecutionRecord, stripDelegatedRunRecord, unbackedFiguresMasked } from "./delegated-run-record.js";
 import { EVIDENCE_SECTION_RE } from "./interrupted-delegation-evidence.js";
 import { looksLikeDegenerateRepetition } from "./text-dedup.js";
 import { looksLikeProviderErrorEcho } from "./container-failure.js";
@@ -71,7 +71,7 @@ export function looksLikeTruncatedCodeDeliverable(text: string): boolean {
  * answer (headings/table/bullets) that is not a raw dump / provider error / scaffold.
  */
 export function extractSingleRelayableDeliverable(
-  toolResultMessages: readonly { role: string; content?: string | null }[],
+  toolResultMessages: readonly { role: string; content?: string | null; metadata?: Record<string, unknown> }[],
   turnDelegationCount: number,
 ): string | null {
   if (turnDelegationCount !== 1) return null;
@@ -79,6 +79,11 @@ export function extractSingleRelayableDeliverable(
     (m) => m.role === "tool" && typeof m.content === "string" && DELEGATE_TOOL_RESULT_RE.test(String(m.content)),
   );
   if (delegateResults.length !== 1) return null;
+  // A run that stated figures no tool had returned is never shipped as-is, whatever its frame
+  // says. This early return skips the terminal guards, and before the run record existed the only
+  // thing standing between a fabricated table and the user was a regex over the frame's heading
+  // (E2E 2026-10-07: "8.393" primes relayed verbatim). Read from the metadata, not the text.
+  if (unbackedFiguresMasked(readExecutionRecord(delegateResults[0]!.metadata?.["specialistExecutions"]))) return null;
   const content = stripDelegatedRunRecord(String(delegateResults[0]!.content ?? ""));
   if (!/TASK COMPLETED\b/i.test(content)) return null;
   if (/TASK FAILED|PARTIAL PROGRESS|TASK COMPLETED \(PARTIAL/i.test(content)) return null;
