@@ -60,9 +60,47 @@ Ctrl+C cancels the running turns (`chat.cancel`) and writes the report; a second
 **Durable memory is emptied before each attempt.** What a scenario stores (memory_store) reaches every
 later turn of the account through the durable-facts capsule, so one scenario's facts would steer the next
 (the memory scenario's German fact pulled an English question's reply into German, 2026-10-07). With
-`--concurrency 1` (the default) the attempt's identity loses every user- and workspace-scope memory entry
-before the attempt starts. Concurrent attempts share the account, so then nothing is reset. `--keep-memory`
-keeps it.
+`--concurrency 1` (the default) the attempt's identity — and the identity of any turn with `as` — loses every
+user- and workspace-scope memory entry, and its user model (`recall_context` serves it too), before the
+attempt starts. A scenario therefore cannot rely on what an earlier one stored; one that needs a record
+stores it itself (the viewer-isolation scenario: a turn as `eval`, then one `as: "eval-viewer"`).
+Concurrent attempts share the account, so then nothing is reset. `--keep-memory` keeps it.
+
+A delete cannot be undone, so the reset deletes only what is provably the eval account's own, and the
+attempt's notes in the report say what it left and why:
+
+- the gateway runs with auth on (`GET /api/auth/mode`, asked before every reset) — with auth off every
+  account's memory is the shared single-operator store, and a token from before the switch still works;
+- the identity logs in as its own eval account (`GET /api/auth/me`: `eval` → `eval`, `eval-viewer` →
+  `eval-viewer`) — a credentials file may map it to any account;
+- no other eval account lists the same entries — a gateway older than the per-user workspace routes
+  (5fc9a8e) keeps workspace memory in one store for every account.
+
+`eval-viewer`'s memory and user model cannot be emptied through the API: every mutating route is
+operator-only, so its deletes are refused (`HTTP 403`, noted), while a viewer turn can still store memory.
+A listing or a delete that fails is noted too.
+
+A deleted entry's MemGraph node goes with it, so the "Critical Memory" block cannot inject it any more.
+Nodes of entries deleted before that (2026-10-08) stay in the graph until removed by hand. For the eval
+accounts, between runs, in Memgraph (the `memgraph` service): `MATCH (m:MemoryRecord) WHERE m.tenant IN
+['eval', 'eval-viewer', 'eval-1bbd174404efbce9', 'eval-viewer-bddbb40019b93c64'] DETACH DELETE m` (user-scope
+nodes carry the username, workspace-scope nodes the account's storage segment).
+
+Nothing is reset while a turn the harness stopped on the account may still run (`chat.cancel` got no final
+status, or the socket died during the send or mid-turn): what it stores after a reset would land in the
+next attempt. The reset waits up to the cancel grace (30 s) for `session.get` to report the turn ended, and
+is skipped with a note otherwise. Such turns outlive the run too: a run that ends, or quits at once on a
+second Ctrl+C, while one has not been seen to end leaves it in the run lock (below), and the next run's
+reset of that account waits for it the same way. A turn whose session is gone (`sai wipe`) counts as
+ended once the gateway has restarted since it was sent (`gateway.status` uptime). The run names the lock
+it took such turns from; deleting that file forgets them.
+
+**One run at a time.** Two `pnpm e2e:evaluate` runs share the gateway's eval accounts, and one's reset or
+mail purge lands in the other's attempts. A run therefore refuses to start (exit code 2) while another run
+uses the same gateway, from whichever checkout or credentials file. The lock is
+`starlingai-e2e-run-<hash of the gateway URL>.json` in the system's temp directory (`localhost`, `127.0.0.1`
+and `[::1]` count as one host); a lock whose process is gone (a crash) is taken over, and one that cannot be
+read counts as held — delete it if no run is left.
 
 **Mail-isolation preflight (fail closed).** Before any scenario runs, the harness asks the running
 mail-service — through `pnpm e2e:env status --json`, which calls `GET /api/accounts` inside its container
@@ -72,7 +110,8 @@ rebuild the mail-service image and run pnpm e2e:setup"). A mail-service containe
 safe; one that runs but cannot be asked (Docker unreachable, no answer) stops the run as well.
 
 Exit codes: `0` every scenario that ran passed · `1` a scenario failed or the baseline shows a regression ·
-`2` usage error, invalid scenario file, missing credentials, refused login, or the mail preflight · `3`
+`2` usage error, invalid scenario file, missing credentials, refused login, the mail preflight, or another
+run against the same gateway · `3`
 environment-suspect (everything was skipped, or ≥ 25 % of the attempts ended on harness errors). Through
 `pnpm` a non-zero code may arrive as 1; `node --import tsx packages/core/src/e2e/cli.ts …` keeps it.
 
@@ -126,10 +165,10 @@ give it a new kebab-case `id` and keep what you need. One file holds one scenari
 
 | Kind | What it does |
 |---|---|
-| `turn` | `chat.send` into the attempt's current session (created on first use, channel `eval`). `agent` appends `--agent <name>`; `effort` is the message's effort tier; `attachments` (paths under [`fixtures/`](fixtures/)) are uploaded into the session and attached as the web client does (images also get their vision analysis inlined); `timeoutMs` (default 10 min) cancels the turn when it passes. Inline flags work as in the dashboard — the harness answers no approval or question card, so add `--auto` where a turn must not wait for one. |
-| `http` | A gateway request as the scenario identity, or `as`. `{sessionId}` in `path` is the current session. Without `expect.status` any 2xx passes; `bodyIncludes` is case-sensitive. |
+| `turn` | `chat.send` into the attempt's current session (created on first use, channel `eval`). `as` runs the turn as another identity, in that identity's own session — e.g. store something as `eval`, then check as `eval-viewer` in the same attempt. `agent` appends `--agent <name>`; `effort` is the message's effort tier; `attachments` (paths under [`fixtures/`](fixtures/)) are uploaded into the session and attached as the web client does (images also get their vision analysis inlined); `timeoutMs` (default 10 min) cancels the turn when it passes. Inline flags work as in the dashboard — the harness answers no approval or question card, so add `--auto` where a turn must not wait for one. |
+| `http` | A gateway request as the scenario identity, or `as`. `{sessionId}` in `path` is the scenario identity's current session. Without `expect.status` any 2xx passes; `bodyIncludes` is case-sensitive. |
 | `wait` | Sleeps `ms`. Keeps the previous turn's event window open (below). |
-| `newSession` | Later turns run in a fresh session of the same identity. |
+| `newSession` | Later turns run in a fresh session of their identity. |
 | `mail` | `clear` empties every GreenMail mailbox; `deliver` sends `message` over SMTP to the eval inbox; `expect` waits up to 30 s until at least `min` (default 1) messages to `to` (default the eval inbox) match every `subjectIncludes` / `bodyIncludes` (case-insensitive, body decoded), then checks `max`. Scenarios with mail steps never run beside each other. |
 
 The attempt stops at the first failed step. `timeoutMs` of the scenario (default 15 min) bounds the whole

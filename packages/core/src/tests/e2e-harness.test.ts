@@ -1,16 +1,17 @@
 /**
  * The end-to-end harness (src/e2e) against a FAKE gateway: a local http + ws server that speaks
  * just the protocol the harness uses — login, hello-ok, RPC (audit.subscribe, session.create,
- * chat.send, chat.cancel, session.get), audit.event and status messages, the steer route, the
- * upload route and an echo route — plus a fake OpenAI-compatible judge and a fake GreenMail
- * (REST + SMTP). Nothing here reaches a real gateway or model.
+ * chat.send, chat.cancel, session.get, gateway.status), audit.event and status messages, the steer
+ * route, the upload route and an echo route — plus a fake OpenAI-compatible judge and a fake
+ * GreenMail (REST + SMTP). Nothing here reaches a real gateway or model.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import http from "node:http";
 import net from "node:net";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { WebSocketServer, type WebSocket } from "ws";
 import bcrypt from "bcryptjs";
 import JSON5 from "json5";
@@ -21,7 +22,15 @@ import {
   rootSessionOf,
   type E2ECredentials,
 } from "../e2e/gateway-client.js";
-import { runScenario, runScenarios, redactSecrets, type RunnerDeps, type RunnerOptions } from "../e2e/runner.js";
+import {
+  adoptUnconfirmedTurns,
+  runScenario,
+  runScenarios,
+  redactSecrets,
+  unconfirmedTurnsOf,
+  type RunnerDeps,
+  type RunnerOptions,
+} from "../e2e/runner.js";
 import {
   environmentStatusFromScript,
   interpretEnvironmentStatus,
@@ -30,14 +39,14 @@ import {
   ServiceProber,
   type ServiceProbeContext,
 } from "../e2e/services.js";
-import { runE2ECli, type CliIo } from "../e2e/cli.js";
+import { runE2ECli, runLockPath, type CliIo, type InterruptHooks } from "../e2e/cli.js";
 import { filterScenarios, loadScenarios } from "../e2e/loader.js";
 import { buildReport, compareWithBaseline, writeReport } from "../e2e/report.js";
 import { resolveSetupPaths, runE2ESetup, SetupRefusedError } from "../e2e/setup.js";
 import { detectReplyLanguage, fieldMatches, summarizeAgents, summarizeTools } from "../e2e/assertions.js";
 import { parseJudgeScore } from "../e2e/judge.js";
 import { GreenMailAdapter, parseMimeMessage, type MailAdapter } from "../e2e/mail.js";
-import { findRepoRoot } from "../e2e/paths.js";
+import { findRepoRoot, resolveE2EPaths } from "../e2e/paths.js";
 import type { E2EScenario } from "../e2e/scenario.js";
 
 // ── fake gateway ─────────────────────────────────────────────────────────────
@@ -57,6 +66,8 @@ interface TurnContext {
   sessionId: string;
   requestId: string;
   message: string;
+  /** The account whose session the turn runs in. */
+  user: string;
   audit: (type: string, data?: Record<string, unknown>, sessionId?: string) => void;
   finish: (status: "ok" | "error" | "blocked", response: string, extra?: Record<string, unknown>) => void;
   addTranscript: (entry: Record<string, unknown>) => void;
@@ -66,20 +77,43 @@ interface TurnContext {
 
 type TurnScript = (turn: TurnContext) => Promise<void>;
 
-const PASSWORDS = { eval: "pw-eval-0123456789abcdefXYZ", "eval-viewer": "pw-viewer-0123456789abcdefXYZ" };
+const PASSWORDS = { eval: "pw-eval-0123456789abcdefXYZ", "eval-viewer": "pw-viewer-0123456789abcdefXYZ", alice: "pw-alice-0123456789abcdefXYZ" };
+/** alice: an account of the deployment that is not an eval account. */
+const ROLES: Record<string, "operator" | "viewer"> = { eval: "operator", "eval-viewer": "viewer", alice: "operator" };
+
+type MemoryScope = "user" | "workspace";
 
 class FakeGateway {
   url = "";
   healthy = true;
   judgeAnswer = "SCORE: 9";
+  /** auth.enabled: off, every account's memory is the one shared single-operator store. */
+  authEnabled = true;
+  /** Workspace memory in one store for every account, as the routes before 5fc9a8e kept it. */
+  sharedWorkspace = false;
+  /** An HTTP status every memory listing answers with instead of the entries. */
+  memoryListingStatus: number | null = null;
+  /** The same, for one account's listings only. */
+  readonly memoryListingFailures = new Map<string, number>();
+  /** The next chat.send starts its turn, and the socket dies before the send is answered. */
+  dropSocketOnNextSend = false;
+  /** The next chat.send is answered with an error, and no turn starts. */
+  refuseNextSend = false;
+  /** When the gateway process started: gateway.status answers with the uptime since. */
+  startedAt = Date.now();
   readonly judgeRequests: Array<Record<string, unknown>> = [];
   readonly chatSends: Array<Record<string, unknown>> = [];
   readonly sessionChannels: string[] = [];
   readonly steers: Array<{ sessionId: string; message: string; requestId?: string; clientMessageId?: string }> = [];
   readonly cancels: string[] = [];
   readonly httpPaths: string[] = [];
-  /** Durable memory keys by `<user>:<scope>`, for the reset before each attempt. */
-  readonly memory = new Map<string, Set<string>>();
+  /** HTTP requests ("<METHOD> <path>") and "chat.send", in the order they arrived. */
+  readonly sequence: string[] = [];
+  /** Durable memory by `<store>:<scope>` (store: the account, or "shared"), key → record. */
+  readonly memory = new Map<string, Map<string, { id?: string; content: string }>>();
+  private memoryCounter = 0;
+  /** The dialectic user model by store (user-model/service.ts): its lists only. */
+  readonly userModels = new Map<string, Record<string, string[]>>();
   private readonly server = http.createServer((req, res) => void this.handleHttp(req, res));
   private readonly wss = new WebSocketServer({ noServer: true });
   private readonly sessions = new Map<string, { owner: string; transcript: Array<Record<string, unknown>> }>();
@@ -98,6 +132,23 @@ class FakeGateway {
   /** Another chat of the account, so its events reach the account's audit stream. */
   adoptSession(sessionId: string, owner: string): void {
     this.sessions.set(sessionId, { owner, transcript: [] });
+  }
+
+  /** The store a request of `user` reaches, as the gateway resolves it from the request context. */
+  storeOf(user: string, scope: MemoryScope): string {
+    return !this.authEnabled || (scope === "workspace" && this.sharedWorkspace) ? "shared" : user;
+  }
+
+  /** A durable memory entry as memory_store writes one: a fresh id per entry (withoutId: listed without one). */
+  remember(store: string, scope: MemoryScope, key: string, content = key, options: { withoutId?: boolean } = {}): void {
+    const entries = this.memory.get(`${store}:${scope}`) ?? new Map<string, { id?: string; content: string }>();
+    this.memory.set(`${store}:${scope}`, entries);
+    this.memoryCounter += 1;
+    entries.set(key, options.withoutId ? { content } : { id: `mem-${this.memoryCounter}`, content });
+  }
+
+  memoryKeys(store: string, scope: MemoryScope): string[] {
+    return [...(this.memory.get(`${store}:${scope}`)?.keys() ?? [])];
   }
 
   async start(): Promise<void> {
@@ -170,11 +221,15 @@ class FakeGateway {
         case "session.get": {
           const session = this.sessions.get(String(params["sessionId"]));
           if (!session || session.owner !== user) return fail(`Error: Session not found: ${String(params["sessionId"])}`);
-          respond({ transcript: session.transcript, totalMessages: session.transcript.length });
+          // Like gateway/rpc.ts: whether a turn still runs in the session, a stopped one unwinding included.
+          respond({ transcript: session.transcript, totalMessages: session.transcript.length, activeTurn: this.activeBySession.has(String(params["sessionId"])) });
           return;
         }
         case "chat.send":
           this.startTurn(ws, user, params, respond, fail);
+          return;
+        case "gateway.status":
+          respond({ status: "running", sessions: this.sessions.size, uptime: (Date.now() - this.startedAt) / 1000 });
           return;
         case "chat.cancel": {
           const requestId = String(params["requestId"]);
@@ -198,17 +253,28 @@ class FakeGateway {
     const message = String(params["message"]);
     const session = this.sessions.get(sessionId);
     if (!session || session.owner !== user) return fail(`Error: Session not found: ${sessionId}`);
+    if (this.refuseNextSend) {
+      this.refuseNextSend = false;
+      return fail("Error: chat.send refused");
+    }
     this.chatSends.push(params);
+    this.sequence.push("chat.send");
     const turn: FakeTurn = { requestId, sessionId, ws, steers: [], steerWaiters: [], cancelled: false, onCancel: [], done: false };
     this.turns.set(requestId, turn);
     this.activeBySession.set(sessionId, requestId);
-    ws.send(JSON.stringify({ type: "status", data: { requestId, status: "accepted" } }));
-    respond({ accepted: true, requestId });
+    if (this.dropSocketOnNextSend) {
+      this.dropSocketOnNextSend = false;
+      ws.terminate();
+    } else {
+      ws.send(JSON.stringify({ type: "status", data: { requestId, status: "accepted" } }));
+      respond({ accepted: true, requestId });
+    }
     const script = this.scripts.find((candidate) => candidate.match.test(message))?.run;
     const context: TurnContext = {
       sessionId,
       requestId,
       message,
+      user,
       audit: (type, data = {}, sid = sessionId) => this.emitAudit(type, sid, data),
       finish: (status, response, extra = {}) => {
         if (turn.done) return;
@@ -243,6 +309,7 @@ class FakeGateway {
   private async handleHttp(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const url = new URL(req.url ?? "/", "http://fake");
     this.httpPaths.push(`${req.method} ${url.pathname}`);
+    this.sequence.push(`${req.method} ${url.pathname}`);
     const json = (status: number, body: unknown): void => {
       res.writeHead(status, { "Content-Type": "application/json" });
       res.end(JSON.stringify(body));
@@ -256,14 +323,18 @@ class FakeGateway {
       this.logins += 1;
       const token = `tok-${username}-${this.logins}`;
       this.tokens.set(token, username);
-      return json(200, { token, username, role: username === "eval" ? "operator" : "viewer" });
+      return json(200, { token, username, role: ROLES[username] });
     }
     if (req.method === "POST" && url.pathname === "/v1/chat/completions") {
       this.judgeRequests.push(JSON.parse(body.toString()) as Record<string, unknown>);
       return json(200, { choices: [{ message: { role: "assistant", content: this.judgeAnswer } }] });
     }
+    if (req.method === "GET" && url.pathname === "/api/auth/mode") return json(200, { authEnabled: this.authEnabled, provider: "builtin" });
     const user = this.userOf(req.headers["authorization"]);
     if (!user) return json(401, { error: "Unauthorized" });
+    if (req.method === "GET" && url.pathname === "/api/auth/me") return json(200, { username: user, role: ROLES[user] });
+    // The gateway's role gate (gateway/index.ts): under auth, every mutating /api route is operator-only.
+    if (this.authEnabled && req.method !== "GET" && ROLES[user] !== "operator") return json(403, { error: "Operator role required for this action" });
     if (req.method === "GET" && url.pathname === "/api/health/subsystems") {
       return json(200, { healthy: true, degraded: false, checks: [{ name: "primary_model", status: "ok", detail: "fake reachable" }, { name: "engram", status: "ok", detail: "not configured (RAG enhancement off)" }] });
     }
@@ -271,14 +342,29 @@ class FakeGateway {
       return json(200, { hello: "world", user, session: decodeURIComponent(url.pathname.slice("/api/echo/".length)), token: "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJldmFsIn0.c2lnbmF0dXJlLXNpZ25hdHVyZQ" });
     }
     if (req.method === "GET" && url.pathname === "/api/memory/entries") {
+      const failure = this.memoryListingStatus ?? this.memoryListingFailures.get(user) ?? null;
+      if (failure !== null) return json(failure, { error: "memory store unavailable" });
       const scope = url.searchParams.get("scope") === "user" ? "user" : "workspace";
-      const keys = [...(this.memory.get(`${user}:${scope}`) ?? [])];
-      return json(200, { scope, total: keys.length, returned: keys.length, records: keys.map((key) => ({ key })) });
+      const query = (url.searchParams.get("query") ?? "").toLowerCase();
+      const limit = Number(url.searchParams.get("limit") ?? 200);
+      const records = [...(this.memory.get(`${this.storeOf(user, scope)}:${scope}`) ?? new Map<string, { id?: string; content: string }>())]
+        .map(([key, entry]) => ({ ...(entry.id ? { id: entry.id } : {}), key, subject: key, content: entry.content }))
+        .filter((record) => !query || record.content.toLowerCase().includes(query) || record.key.toLowerCase().includes(query));
+      const paged = records.slice(0, limit);
+      return json(200, { scope, total: records.length, returned: paged.length, records: paged });
+    }
+    if (req.method === "GET" && url.pathname === "/api/user-model") {
+      const lists = this.userModels.get(this.storeOf(user, "user")) ?? {};
+      return json(200, { schemaVersion: 1, goals: [], expertise: [], workingStyle: [], communication: [], openQuestions: [], ...lists, revision: 1, updatedAt: "2026-10-08T00:00:00.000Z", updatedBy: "system" });
+    }
+    if (req.method === "POST" && url.pathname === "/api/user-model/reset") {
+      this.userModels.delete(this.storeOf(user, "user"));
+      return json(200, { schemaVersion: 1, goals: [], expertise: [], workingStyle: [], communication: [], openQuestions: [], revision: 2, updatedAt: "2026-10-08T00:00:00.000Z", updatedBy: "user" });
     }
     const memoryEntry = /^\/api\/memory\/entries\/([^/]+)$/.exec(url.pathname);
     if (req.method === "DELETE" && memoryEntry) {
       const scope = url.searchParams.get("scope") === "user" ? "user" : "workspace";
-      const deleted = this.memory.get(`${user}:${scope}`)?.delete(decodeURIComponent(memoryEntry[1]!)) ?? false;
+      const deleted = this.memory.get(`${this.storeOf(user, scope)}:${scope}`)?.delete(decodeURIComponent(memoryEntry[1]!)) ?? false;
       return deleted ? json(200, { scope, deleted: true }) : json(404, { error: "Memory entry not found" });
     }
     const steer = /^\/api\/sessions\/([^/]+)\/steer$/.exec(url.pathname);
@@ -408,6 +494,16 @@ afterAll(async () => {
 beforeEach(() => {
   gateway.healthy = true;
   gateway.judgeAnswer = "SCORE: 9";
+  gateway.authEnabled = true;
+  gateway.sharedWorkspace = false;
+  gateway.memoryListingStatus = null;
+  gateway.memoryListingFailures.clear();
+  gateway.dropSocketOnNextSend = false;
+  gateway.refuseNextSend = false;
+  // A gateway that has run for an hour.
+  gateway.startedAt = Date.now() - 3_600_000;
+  gateway.memory.clear();
+  gateway.userModels.clear();
   gateway.setScripts([
     { match: /^hello/i, run: helloScript },
     { match: /^steer/i, run: steerScript },
@@ -662,27 +758,340 @@ describe("e2e harness against a fake gateway", () => {
   it("empties the attempt identity's durable memory before each attempt, when attempts run one at a time", async () => {
     // What a scenario stores is in every later turn's prompt: the memory scenario's German fact
     // pulled a later English question's reply into German (2026-10-07).
-    gateway.memory.set("eval:user", new Set(["favorite_tea"]));
-    gateway.memory.set("eval:workspace", new Set(["project_note"]));
-    gateway.memory.set("eval-viewer:user", new Set(["viewer_note"]));
+    gateway.remember("eval", "user", "favorite_tea");
+    gateway.remember("eval", "workspace", "project_note");
+    gateway.remember("eval-viewer", "user", "viewer_note");
     const scenario: E2EScenario = { id: "fake-reset", title: "Reset", group: "core", steps: [{ ...helloTurn }] };
-    try {
-      await runScenario(loaded(scenario), deps(), FAST);
-      expect([...(gateway.memory.get("eval:user") ?? [])]).toEqual([]);
-      expect([...(gateway.memory.get("eval:workspace") ?? [])]).toEqual([]);
-      // Only the attempt's own identity.
-      expect([...(gateway.memory.get("eval-viewer:user") ?? [])]).toEqual(["viewer_note"]);
+    const reset = await runScenario(loaded(scenario), deps(), FAST);
+    expect(gateway.memoryKeys("eval", "user")).toEqual([]);
+    expect(gateway.memoryKeys("eval", "workspace")).toEqual([]);
+    expect(reset.attempts[0]!.notes).toEqual([]);
+    // Only the attempt's own identity.
+    expect(gateway.memoryKeys("eval-viewer", "user")).toEqual(["viewer_note"]);
 
-      // Attempts that run at once share the account: no reset.
-      gateway.memory.set("eval:user", new Set(["favorite_tea"]));
-      await runScenario(loaded(scenario), deps(), { ...FAST, concurrency: 2 });
-      expect([...(gateway.memory.get("eval:user") ?? [])]).toEqual(["favorite_tea"]);
-      // ...and none when switched off.
-      await runScenario(loaded(scenario), deps(), { ...FAST, resetDurableMemory: false });
-      expect([...(gateway.memory.get("eval:user") ?? [])]).toEqual(["favorite_tea"]);
+    // Attempts that run at once share the account: no reset.
+    gateway.remember("eval", "user", "favorite_tea");
+    await runScenario(loaded(scenario), deps(), { ...FAST, concurrency: 2 });
+    expect(gateway.memoryKeys("eval", "user")).toEqual(["favorite_tea"]);
+    // ...and none when switched off.
+    await runScenario(loaded(scenario), deps(), { ...FAST, resetDurableMemory: false });
+    expect(gateway.memoryKeys("eval", "user")).toEqual(["favorite_tea"]);
+  });
+
+  it("deletes only the eval account's own memory: not with auth off, not as another account, not in a shared store", async () => {
+    // The memory routes resolve the caller's stores from the request context; without a user in
+    // it they fall back to the shared single-operator stores, and a delete cannot be undone.
+    const scenario: E2EScenario = { id: "fake-reset-own", title: "Reset own memory only", group: "core", steps: [{ ...helloTurn }] };
+    gateway.remember("shared", "user", "operator_pref");
+    gateway.remember("shared", "workspace", "operator_decision");
+
+    // Auth switched off during a run: the cached token still verifies, every store is the shared one.
+    gateway.authEnabled = false;
+    const authOff = await runScenario(loaded(scenario), deps(), FAST);
+    gateway.authEnabled = true;
+    expect(gateway.memoryKeys("shared", "user")).toEqual(["operator_pref"]);
+    expect(gateway.memoryKeys("shared", "workspace")).toEqual(["operator_decision"]);
+    expect(authOff.attempts[0]!.notes).toEqual([
+      "memory reset skipped: the gateway runs with auth off, so every account's memory is the shared single-operator store",
+    ]);
+
+    // A credentials file that maps the identity "eval" to another account of the deployment.
+    gateway.remember("alice", "user", "alice_pref");
+    const mapped = new GatewayClient({
+      baseUrl: gateway.url,
+      credentials: { ...credentials(), eval: { username: "alice", password: PASSWORDS.alice } },
+      rpcTimeoutMs: 5_000,
+      connectTimeoutMs: 5_000,
+    });
+    try {
+      const otherAccount = await runScenario(loaded(scenario), deps({ client: mapped }), FAST);
+      expect(gateway.memoryKeys("alice", "user")).toEqual(["alice_pref"]);
+      expect(otherAccount.attempts[0]!.notes).toEqual(['memory reset skipped: eval logs in as account "alice", not as its eval account "eval"']);
     } finally {
-      gateway.memory.clear();
+      mapped.close();
     }
+
+    // A gateway that keeps workspace memory in one store for every account (the routes before
+    // 5fc9a8e): eval's own user memory goes, the shared workspace store stays.
+    gateway.sharedWorkspace = true;
+    gateway.remember("eval", "user", "favorite_tea");
+    const shared = await runScenario(loaded(scenario), deps(), FAST);
+    expect(gateway.memoryKeys("eval", "user")).toEqual([]);
+    expect(gateway.memoryKeys("shared", "workspace")).toEqual(["operator_decision"]);
+    expect(shared.attempts[0]!.notes).toEqual([
+      "memory reset: eval's workspace memory left as it is: eval-viewer lists the same entries, so the gateway keeps that scope in one shared store",
+    ]);
+  });
+
+  it("leaves a scope alone when nothing shows it is the eval account's own: no other eval account, its listing failed, an entry without an id", async () => {
+    // Only another eval account's listing tells a shared store apart (a gateway older than 5fc9a8e
+    // keeps workspace memory in one store for every account), so without it the reset proves
+    // nothing, and a delete there takes the operator's memory for good.
+    const scenario: E2EScenario = { id: "fake-reset-unproven", title: "Reset without proof", group: "core", steps: [{ ...helloTurn }] };
+    gateway.sharedWorkspace = true;
+    gateway.remember("shared", "workspace", "operator_decision");
+
+    // A credentials file with eval alone (written by hand, or eval-viewer taken out).
+    gateway.remember("eval", "user", "favorite_tea");
+    const alone = new GatewayClient({ baseUrl: gateway.url, credentials: { eval: credentials()["eval"]! }, rpcTimeoutMs: 5_000, connectTimeoutMs: 5_000 });
+    try {
+      const evalOnly = await runScenario(loaded(scenario), deps({ client: alone }), FAST);
+      expect(evalOnly.attempts[0]!.notes).toEqual([
+        "memory reset: eval's user memory left as it is: cannot tell whether it is eval's own (no other eval account to compare with)",
+        "memory reset: eval's workspace memory left as it is: cannot tell whether it is eval's own (no other eval account to compare with)",
+      ]);
+    } finally {
+      alone.close();
+    }
+    expect(gateway.memoryKeys("shared", "workspace")).toEqual(["operator_decision"]);
+    expect(gateway.memoryKeys("eval", "user")).toEqual(["favorite_tea"]);
+
+    // eval-viewer's listing fails: no answer is no proof.
+    gateway.memory.delete("eval:user");
+    gateway.memoryListingFailures.set("eval-viewer", 500);
+    const unlisted = await runScenario(loaded(scenario), deps(), FAST);
+    expect(unlisted.attempts[0]!.notes).toEqual([
+      "memory reset: eval's workspace memory left as it is: cannot tell whether it is eval's own (eval-viewer's listing answered HTTP 500)",
+    ]);
+    expect(gateway.memoryKeys("shared", "workspace")).toEqual(["operator_decision"]);
+
+    // An entry listed without an id cannot be compared with another account's entries.
+    gateway.memoryListingFailures.clear();
+    gateway.sharedWorkspace = false;
+    gateway.remember("eval", "user", "favorite_tea");
+    gateway.remember("eval", "user", "legacy_note", "legacy_note", { withoutId: true });
+    const idless = await runScenario(loaded(scenario), deps(), FAST);
+    expect(idless.attempts[0]!.notes).toEqual([
+      "memory reset: eval's user memory left as it is: cannot tell whether it is eval's own (an entry without an id)",
+    ]);
+    expect(gateway.memoryKeys("eval", "user")).toEqual(["favorite_tea", "legacy_note"]);
+  });
+
+  it("says what the reset left: entries the gateway refused to delete, a listing that failed; and empties more than one page", async () => {
+    // eval-viewer is a viewer, and every mutating route is operator-only: its memory stays.
+    const viewerScenario: E2EScenario = { id: "fake-reset-viewer", title: "Reset as the viewer", group: "core", identity: "eval-viewer", steps: [{ ...helloTurn }] };
+    gateway.remember("eval-viewer", "user", "viewer_note");
+    gateway.remember("eval-viewer", "workspace", "viewer_draft");
+    const deletesBefore = gateway.httpPaths.filter((path) => path.startsWith("DELETE /api/memory/entries/")).length;
+    const viewer = await runScenario(loaded(viewerScenario), deps(), FAST);
+    expect(gateway.memoryKeys("eval-viewer", "user")).toEqual(["viewer_note"]);
+    expect(viewer.attempts[0]!.notes).toEqual([
+      "memory reset: 1 entry of eval-viewer's user memory not deleted (HTTP 403)",
+      "memory reset: 1 entry of eval-viewer's workspace memory not deleted (HTTP 403)",
+    ]);
+    // A 403 is the role's answer: the other entries are not tried.
+    expect(gateway.httpPaths.filter((path) => path.startsWith("DELETE /api/memory/entries/")).length - deletesBefore).toBe(1);
+
+    const scenario: E2EScenario = { id: "fake-reset-report", title: "Reset reports", group: "core", steps: [{ ...helloTurn }] };
+    gateway.memoryListingStatus = 500;
+    const unlisted = await runScenario(loaded(scenario), deps(), FAST);
+    gateway.memoryListingStatus = null;
+    expect(unlisted.attempts[0]!.notes).toEqual([
+      "memory reset: eval's user memory could not be listed (HTTP 500)",
+      "memory reset: eval's workspace memory could not be listed (HTTP 500)",
+    ]);
+
+    // One listing holds at most 500 entries: the reset lists again until nothing is left.
+    for (let index = 0; index < 501; index += 1) gateway.remember("eval", "user", `fact_${index}`);
+    const paged = await runScenario(loaded(scenario), deps(), FAST);
+    expect(gateway.memoryKeys("eval", "user")).toEqual([]);
+    expect(paged.attempts[0]!.notes).toEqual([]);
+  });
+
+  it("leaves the memory alone while a turn it stopped may still run on the account, and resets again once it ended", async () => {
+    // A turn that outlives chat.cancel (no final status within the grace) and stores memory after
+    // its attempt ended: a reset before the next attempt would race it.
+    let finishLingering: (() => void) | undefined;
+    gateway.setScripts([
+      { match: /^linger/, run: async (turn) => {
+        await turn.cancelled;
+        gateway.remember("eval", "user", "late_fact");
+        await new Promise<void>((resolveFinish) => { finishLingering = resolveFinish; });
+        turn.finish("ok", "Done after all.");
+      } },
+      { match: /^hello/i, run: helloScript },
+    ]);
+    const options: RunnerOptions = { ...FAST, cancelGraceMs: 300 };
+    const lingering: E2EScenario = { id: "fake-linger", title: "A turn that outlives its cancel", group: "guards", steps: [{ kind: "turn", message: "linger after the cancel", timeoutMs: 200 }] };
+    const scenario: E2EScenario = { id: "fake-after-linger", title: "The next attempt", group: "core", steps: [{ ...helloTurn }] };
+    const stopped = await runScenario(loaded(lingering), deps(), options);
+    const requestId = stopped.attempts[0]!.steps[0]!.turn!.requestId;
+    expect(stopped.attempts[0]!.steps[0]!.turn!.cancel).toEqual({ cancelled: true, known: true });
+
+    const next = await runScenario(loaded(scenario), deps(), options);
+    expect(next.attempts[0]!.notes).toEqual([`memory reset skipped: turn ${requestId} of eval was stopped earlier and has not been seen to end`]);
+    expect(gateway.memoryKeys("eval", "user")).toEqual(["late_fact"]);
+
+    finishLingering?.();
+    const later = await runScenario(loaded(scenario), deps(), options);
+    expect(later.attempts[0]!.notes).toEqual([]);
+    expect(gateway.memoryKeys("eval", "user")).toEqual([]);
+  });
+
+  it("waits the same way for a turn whose socket died, mid-turn or during the send, and learns from session.get that it ended", async () => {
+    // Such a turn's final status goes to the dead socket, so only session.get can tell the harness
+    // it ended; until it does, what the turn stores after a reset lands in the next attempt.
+    const options: RunnerOptions = { ...FAST, cancelGraceMs: 300 };
+    const next: E2EScenario = { id: "fake-after-drop", title: "The next attempt", group: "core", steps: [{ ...helloTurn }] };
+    const held = (onStart: (turn: TurnContext) => Promise<void>) => {
+      let release: () => void = () => undefined;
+      const released = new Promise<void>((resolveRelease) => { release = resolveRelease; });
+      let markStored: () => void = () => undefined;
+      const stored = new Promise<void>((resolveStored) => { markStored = resolveStored; });
+      const run: TurnScript = async (turn) => {
+        await onStart(turn);
+        gateway.remember(turn.user, "user", "late_fact");
+        markStored();
+        await released;
+        turn.finish("ok", "Done after all.");
+      };
+      return { run, stored, release: () => release() };
+    };
+
+    for (const drop of ["mid-turn", "send"] as const) {
+      // Mid-turn: every socket drops 50 ms in (a rotated secret, a gateway restart behind a proxy),
+      // and the harness stops the turn from a new connection. During the send: the gateway took the
+      // turn, and the socket died before chat.send was answered.
+      const turn = held(async (running) => {
+        if (drop !== "mid-turn") return;
+        setTimeout(() => gateway.revokeTokens(), 50);
+        await running.cancelled;
+      });
+      gateway.setScripts([{ match: /^drop/, run: turn.run }, { match: /^hello/i, run: helloScript }]);
+      gateway.dropSocketOnNextSend = drop === "send";
+      const dropped = await runScenario(loaded({ id: `fake-drop-${drop}`, title: `Socket dies (${drop})`, group: "guards", steps: [{ kind: "turn", message: `drop the socket (${drop})` }] }), deps(), options);
+      expect(dropped.attempts[0]!.outcome, drop).toBe("error");
+      const requestId = String(gateway.chatSends.at(-1)!["requestId"]);
+      // The gateway keeps a turn running when its socket closes: the harness stops it from a new one.
+      expect(gateway.cancels, drop).toContain(requestId);
+      expect(dropped.attempts[0]!.failures[0], drop).toMatch(/; chat\.cancel from a new connection: cancelled=true$/);
+      await turn.stored;
+
+      const blocked = await runScenario(loaded(next), deps(), options);
+      expect(blocked.attempts[0]!.notes, drop).toEqual([`memory reset skipped: turn ${requestId} of eval was stopped earlier and has not been seen to end`]);
+      expect(gateway.memoryKeys("eval", "user"), drop).toEqual(["late_fact"]);
+
+      turn.release();
+      const after = await runScenario(loaded(next), deps(), options);
+      expect(after.attempts[0]!.notes, drop).toEqual([]);
+      expect(gateway.memoryKeys("eval", "user"), drop).toEqual([]);
+    }
+  });
+
+  it("stops waiting for a turn an earlier run left once the gateway has restarted since its send, also when its session is gone", async () => {
+    // A wipe restarts the gateway and takes the session: session.get answers with an error, which
+    // confirms nothing, and the turn held back every reset of its account in every later run.
+    const options: RunnerOptions = { ...FAST, cancelGraceMs: 300 };
+    adoptUnconfirmedTurns(client, [{ identity: "eval", requestId: "e2e-before-the-wipe", sessionId: "sess-wiped", sentAt: Date.now() - 60_000 }]);
+    gateway.remember("eval", "user", "favorite_tea");
+    const scenario: E2EScenario = { id: "fake-after-wipe", title: "After a wipe", group: "core", steps: [{ ...helloTurn }] };
+    const waiting = await runScenario(loaded(scenario), deps(), options);
+    expect(waiting.attempts[0]!.notes).toEqual(["memory reset skipped: turn e2e-before-the-wipe of eval was stopped earlier and has not been seen to end"]);
+    expect(gateway.memoryKeys("eval", "user")).toEqual(["favorite_tea"]);
+
+    gateway.startedAt = Date.now();
+    const restarted = await runScenario(loaded(scenario), deps(), options);
+    expect(restarted.attempts[0]!.notes).toEqual([]);
+    expect(gateway.memoryKeys("eval", "user")).toEqual([]);
+    expect(unconfirmedTurnsOf(client)).toEqual([]);
+  });
+
+  it("tracks no turn for a send the gateway refused", async () => {
+    // No turn started: tracked, it would hold a reset back until session.get or a restart said so.
+    gateway.refuseNextSend = true;
+    const refused = await runScenario(loaded({ id: "fake-refused-send", title: "A refused send", group: "guards", steps: [{ ...helloTurn }] }), deps(), FAST);
+    expect(refused.attempts[0]!.failures).toEqual(['step 1 turn "greet": chat.send failed: chat.send: Error: chat.send refused']);
+    expect(unconfirmedTurnsOf(client)).toEqual([]);
+  });
+
+  it("runs a turn with `as` as that identity, in its own session, beside the scenario identity's", async () => {
+    gateway.setScripts([{ match: /^whoami/, run: async (turn) => turn.finish("ok", `I am ${turn.user}`) }]);
+    const scenario: E2EScenario = {
+      id: "fake-as-turn",
+      title: "A turn as another identity",
+      group: "core",
+      steps: [
+        { kind: "turn", id: "own", message: "whoami first", expect: { reply: { includes: ["I am eval"] } } },
+        { kind: "turn", id: "other", as: "eval-viewer", message: "whoami as the viewer", expect: { reply: { includes: ["I am eval-viewer"] } } },
+        { kind: "turn", id: "own-again", message: "whoami again", expect: { reply: { includes: ["I am eval"] } } },
+        // {sessionId} stays the scenario identity's session.
+        { kind: "http", method: "GET", path: "/api/echo/{sessionId}", expect: { bodyIncludes: ['"user":"eval"'] } },
+      ],
+    };
+    // The other identity's memory is reset before the attempt like the scenario identity's.
+    gateway.remember("eval-viewer", "user", "viewer_note");
+    const result = await runScenario(loaded(scenario), deps(), FAST);
+    const attempt = result.attempts[0]!;
+    expect(attempt.failures).toEqual([]);
+    const [own, other, ownAgain] = attempt.steps.map((step) => step.turn?.sessionId);
+    expect(ownAgain).toBe(own);
+    expect(other).not.toBe(own);
+    expect(attempt.sessions).toEqual([own, other]);
+    expect(attempt.steps[3]!.http?.path).toBe(`/api/echo/${own}`);
+    expect(attempt.notes).toEqual(["memory reset: 1 entry of eval-viewer's user memory not deleted (HTTP 403)"]);
+  });
+
+  it("checks that eval-viewer cannot recall eval's preference with that preference in place, whatever ran before", async () => {
+    // The isolation scenario passed without testing anything when the memory scenario had not run
+    // just before it (--id, --tag isolation): every eval attempt empties eval's memory first.
+    const paths = resolveE2EPaths();
+    const { selected } = filterScenarios(loadScenarios(paths.scenariosDir, paths.fixturesDir).scenarios, { tags: ["isolation"] });
+    expect(selected.map((entry) => entry.scenario.id)).toEqual(["core-ix-memory-viewer-isolation"]);
+    const store: TurnScript = async (turn) => {
+      turn.audit("tool_call_requested", { tool: "memory_store", args: { scope: "user" } });
+      gateway.remember(turn.user, "user", "lieblingstee", "Lieblingsteesorte: Polarstern-Rooibos");
+      turn.audit("tool_call_completed", { tool: "memory_store", success: true });
+      turn.finish("ok", "Gemerkt.");
+    };
+    const recall = (partition: "leaks" | "holds"): TurnScript => async (turn) => {
+      const stores = partition === "leaks" ? [...gateway.memory.values()] : [gateway.memory.get(`${turn.user}:user`)];
+      const known = stores.flatMap((entries) => [...(entries?.values() ?? [])].map((entry) => entry.content));
+      turn.finish("ok", known.length > 0 ? `Gespeichert ist: ${known.join("; ")}` : "Dazu habe ich nichts über dich gespeichert.");
+    };
+
+    gateway.setScripts([{ match: /merke dir/i, run: store }, { match: /Teesorte/i, run: recall("leaks") }]);
+    const leaking = await runScenarios(selected, deps(), FAST);
+    expect(leaking[0]!.status).toBe("failed");
+    expect(leaking[0]!.attempts[0]!.failures).toEqual(['step 2 turn "ask-other-account": reply.excludes "Polarstern": found']);
+
+    gateway.setScripts([{ match: /merke dir/i, run: store }, { match: /Teesorte/i, run: recall("holds") }]);
+    const holding = await runScenarios(selected, deps(), FAST);
+    expect(holding[0]!.attempts[0]!.failures).toEqual([]);
+    expect(holding[0]!.status).toBe("passed");
+
+    // The remember turn answers without storing: the viewer has nothing to leak, so a pass would
+    // prove nothing. The store must complete, or the attempt fails right there.
+    gateway.setScripts([{ match: /merke dir/i, run: async (turn) => turn.finish("ok", "Gemerkt.") }, { match: /Teesorte/i, run: recall("leaks") }]);
+    const unstored = await runScenarios(selected, deps(), FAST);
+    expect(unstored[0]!.status).toBe("failed");
+    expect(unstored[0]!.attempts[0]!.failures).toEqual([
+      'step 1 turn "remember": events.must tool_call_completed{data.tool in [memory_store, user_model_update]}: expected ≥1, saw 0',
+    ]);
+  });
+
+  it("empties the identity's user model before the attempt's first turn, which recall_context serves", async () => {
+    // The memory scenario accepts user_model_update as the store: a model left from an earlier run
+    // could answer its recall turn on its own.
+    gateway.userModels.set("eval", { workingStyle: ["Lieblingsteesorte: Polarstern-Rooibos"] });
+    gateway.userModels.set("eval-viewer", { goals: ["Teesorten kennenlernen"] });
+    const scenario: E2EScenario = { id: "fake-reset-model", title: "Reset the user model", group: "core", steps: [{ ...helloTurn }] };
+    const start = gateway.sequence.length;
+    const result = await runScenario(loaded(scenario), deps(), FAST);
+    expect(result.attempts[0]!.notes).toEqual([]);
+    expect(gateway.userModels.has("eval")).toBe(false);
+    const sequence = gateway.sequence.slice(start);
+    expect(sequence.indexOf("POST /api/user-model/reset")).toBeGreaterThanOrEqual(0);
+    expect(sequence.indexOf("POST /api/user-model/reset")).toBeLessThan(sequence.indexOf("chat.send"));
+    // Only the attempt's own identity.
+    expect(gateway.userModels.get("eval-viewer")).toEqual({ goals: ["Teesorten kennenlernen"] });
+
+    // The viewer may not reset it (operator-only, like every mutating route): noted. An empty model
+    // is not reset at all.
+    const viewerScenario: E2EScenario = { id: "fake-reset-model-viewer", title: "Reset as the viewer", group: "core", identity: "eval-viewer", steps: [{ ...helloTurn }] };
+    expect((await runScenario(loaded(viewerScenario), deps(), FAST)).attempts[0]!.notes).toEqual(["memory reset: eval-viewer's user model not emptied (HTTP 403)"]);
+    const resets = gateway.sequence.filter((entry) => entry === "POST /api/user-model/reset").length;
+    await runScenario(loaded(scenario), deps(), FAST);
+    expect(gateway.sequence.filter((entry) => entry === "POST /api/user-model/reset").length).toBe(resets);
   });
 
   it("skips — never fails — a scenario whose required service is down", async () => {
@@ -1219,6 +1628,8 @@ describe("e2e harness — pure helpers", () => {
 describe("e2e CLI (in process, against the fake gateway)", () => {
   const cliDir = join(scratch, "cli");
   const credsFile = join(cliDir, "creds.local.json");
+  // The run locks of these runs: never the machine's own temp directory.
+  const lockDir = join(cliDir, "locks");
   const notRunning = async () => ({ json: { mailService: { running: false } } });
 
   beforeAll(() => {
@@ -1228,15 +1639,24 @@ describe("e2e CLI (in process, against the fake gateway)", () => {
     writeFileSync(join(cliDir, "scenarios", "fail.jsonc"), JSON.stringify({ id: "cli-fail", title: "CLI fail", group: "guards", steps: [{ kind: "turn", message: "hello again", expect: { reply: { includes: ["banana"] } } }] }));
   });
 
+  // A lock one test leaves behind must not refuse the next test's runs.
+  beforeEach(() => {
+    rmSync(lockDir, { recursive: true, force: true });
+    mkdirSync(lockDir, { recursive: true });
+  });
+
+  // Only what the run needs: no E2E_* variable of the shell leaks in.
+  const cliEnv = (): NodeJS.ProcessEnv => ({ E2E_GATEWAY_URL: gateway.url, E2E_CREDENTIALS_PATH: credsFile, INIT_CWD: cliDir, E2E_EVENT_GRACE_MS: "50" });
+
   async function cli(argv: string[], extra: Partial<CliIo> = {}): Promise<{ code: number; out: string; err: string }> {
     const out: string[] = [];
     const err: string[] = [];
     const code = await runE2ECli(argv, {
-      // Only what the run needs: no E2E_* variable of the shell leaks in.
-      env: { E2E_GATEWAY_URL: gateway.url, E2E_CREDENTIALS_PATH: credsFile, INIT_CWD: cliDir, E2E_EVENT_GRACE_MS: "50" },
+      env: cliEnv(),
       out: (line) => out.push(line),
       err: (line) => err.push(line),
       environment: notRunning,
+      lockDir,
       ...extra,
     });
     return { code, out: out.join("\n"), err: err.join("\n") };
@@ -1299,6 +1719,129 @@ describe("e2e CLI (in process, against the fake gateway)", () => {
     const regressed = await cli(["evaluate", "--scenarios", "scenarios", "--id", "cli-pass", "--out", "out-3", "--baseline", reportPath]);
     expect(regressed.code).toBe(1);
     expect(regressed.out).toContain("Baseline: 1 regression(s) — cli-pass");
+  });
+
+  it("logs in up front as every identity a turn runs as: a refused eval-viewer login stops the run before any turn", async () => {
+    // eval-viewer's only use here is a turn's `as`: unchecked, its refused login would fail every
+    // attempt the same way, one at a time.
+    mkdirSync(join(cliDir, "as-scenarios"), { recursive: true });
+    writeFileSync(join(cliDir, "as-scenarios", "as.jsonc"), JSON.stringify({
+      id: "cli-as",
+      title: "CLI turn as the viewer",
+      group: "core",
+      steps: [{ kind: "turn", message: "hello from eval" }, { kind: "turn", as: "eval-viewer", message: "hello from the viewer" }],
+    }));
+    const viewerRefused = join(cliDir, "viewer-refused.local.json");
+    writeFileSync(viewerRefused, JSON.stringify({ ...credentials(), "eval-viewer": { username: "eval-viewer", password: "not-the-viewer-password" } }));
+    const sends = gateway.chatSends.length;
+    const refused = await cli(["evaluate", "--scenarios", "as-scenarios", "--out", "as-refused"], { env: { ...cliEnv(), E2E_CREDENTIALS_PATH: viewerRefused } });
+    expect(refused.code).toBe(2);
+    expect(refused.err).toContain('login as "eval-viewer" (eval-viewer) failed: HTTP 401');
+    expect(gateway.chatSends.length).toBe(sends);
+    expect(existsSync(join(cliDir, "as-refused"))).toBe(false);
+  });
+
+  it("runs one evaluate at a time per gateway, whatever accounts file: a live run's lock refuses, a dead run's is taken over", async () => {
+    // Two runs share the gateway's eval accounts: one's reset before an attempt deleted what the
+    // other's memory scenario stored between its two turns, and the concurrency gate sees only its
+    // own process. The lock sat beside the credentials file, so a second checkout (with a copy of the
+    // file) or another E2E_CREDENTIALS_PATH took a lock of its own against the same gateway.
+    const lock = runLockPath(gateway.url, lockDir);
+    const port = Number(new URL(gateway.url).port);
+    for (const spelling of [`http://localhost:${port}/`, `http://[::1]:${port}`, `http://127.0.0.2:${port}`]) {
+      expect(runLockPath(spelling, lockDir), spelling).toBe(lock);
+    }
+    expect(runLockPath(`http://127.0.0.1:${port + 1}`, lockDir)).not.toBe(lock);
+    expect(runLockPath(`http://gateway.example:${port}`, lockDir)).not.toBe(lock);
+    // This process stands in for the other run: it is alive.
+    writeFileSync(lock, JSON.stringify({ pid: process.pid, startedAt: "2026-10-08T10:00:00.000Z" }));
+    const sends = gateway.chatSends.length;
+    const copied = join(cliDir, "other-checkout", "eval", "e2e", ".credentials.local.json");
+    mkdirSync(dirname(copied), { recursive: true });
+    writeFileSync(copied, JSON.stringify(credentials()));
+    const refused = await cli(["evaluate", "--scenarios", "scenarios", "--id", "cli-pass", "--out", "locked"], { env: { ...cliEnv(), E2E_CREDENTIALS_PATH: copied } });
+    expect(refused.code).toBe(2);
+    expect(refused.err).toBe(`Refusing to run: another e2e run (pid ${process.pid}, since 2026-10-08T10:00:00.000Z) is using the eval accounts, and two runs break each other's scenarios (one's memory reset or mail purge lands in the other's attempts). Wait for it, or delete ${lock} if no such run is left.`);
+    expect(gateway.chatSends.length).toBe(sends);
+    expect(existsSync(join(cliDir, "locked"))).toBe(false);
+
+    // A lock that cannot be read may be one a starting run is writing this moment: held.
+    writeFileSync(lock, "{ not json");
+    const unreadable = await cli(["evaluate", "--scenarios", "scenarios", "--id", "cli-pass", "--out", "locked"]);
+    expect(unreadable.code).toBe(2);
+    expect(unreadable.err).toBe(`Refusing to run: another e2e run is using the eval accounts, and two runs break each other's scenarios (one's memory reset or mail purge lands in the other's attempts). Wait for it, or delete ${lock} if no such run is left.`);
+    expect(gateway.chatSends.length).toBe(sends);
+    expect(existsSync(join(cliDir, "locked"))).toBe(false);
+
+    // A run that ended without removing its lock (a crash): the lock is taken over.
+    const gone = spawnSync(process.execPath, ["-e", ""]).pid;
+    writeFileSync(lock, JSON.stringify({ pid: gone, startedAt: "2026-10-08T09:00:00.000Z" }));
+    const run = await cli(["evaluate", "--scenarios", "scenarios", "--id", "cli-pass", "--out", "unlocked"]);
+    expect(run.code).toBe(0);
+    // Released when the run ends.
+    expect(existsSync(lock)).toBe(false);
+  });
+
+  it("leaves the turns it has not seen end in the lock when it quits, and the next run's reset waits for them", async () => {
+    // A second Ctrl+C deleted the lock and quit while the turn the first one stopped was still
+    // unwinding; the next run took the lock and reset the account under that turn, which could
+    // still store memory into its first attempt.
+    const lock = runLockPath(gateway.url, lockDir);
+    mkdirSync(join(cliDir, "held-scenarios"), { recursive: true });
+    writeFileSync(join(cliDir, "held-scenarios", "hold.jsonc"), JSON.stringify({ id: "cli-hold", title: "CLI held turn", group: "guards", steps: [{ kind: "turn", message: "hold on while I think" }] }));
+    let markStarted: () => void = () => undefined;
+    const started = new Promise<void>((resolveStarted) => { markStarted = resolveStarted; });
+    let markStopped: () => void = () => undefined;
+    const stopped = new Promise<void>((resolveStopped) => { markStopped = resolveStopped; });
+    let finish: () => void = () => undefined;
+    const finished = new Promise<void>((resolveFinished) => { finish = resolveFinished; });
+    gateway.setScripts([
+      { match: /^hold on/, run: async (turn) => {
+        markStarted();
+        await turn.cancelled;
+        gateway.remember(turn.user, "user", "late_fact");
+        markStopped();
+        await finished;
+        turn.finish("ok", "Done after all.");
+      } },
+      { match: /^hello/i, run: helloScript },
+    ]);
+    const keyboard: { ctrlC?: () => void } = {};
+    let lockAtExit: unknown = null;
+    const interrupts: InterruptHooks = {
+      on: (listener) => { keyboard.ctrlC = listener; },
+      off: () => { delete keyboard.ctrlC; },
+      exit: (code) => {
+        lockAtExit = existsSync(lock) ? JSON.parse(readFileSync(lock, "utf8")) : null;
+        throw new Error(`exit ${code}`);
+      },
+    };
+    const runner = { cancelGraceMs: 300 };
+
+    const quitting = cli(["evaluate", "--scenarios", "held-scenarios", "--out", "quit"], { interrupts, runner });
+    await started;
+    const { requestId, sessionId } = gateway.chatSends.at(-1) as { requestId: string; sessionId: string };
+    keyboard.ctrlC!();
+    await stopped;
+    expect(() => keyboard.ctrlC!()).toThrow("exit 130");
+    expect(lockAtExit).toMatchObject({ pid: process.pid, ended: expect.any(String), turns: [{ identity: "eval", requestId, sessionId, sentAt: expect.any(Number) }] });
+    // Here the process lives on: the run ends without the turn's final status, and leaves it in the
+    // lock as well.
+    await quitting;
+    expect(JSON.parse(readFileSync(lock, "utf8"))).toMatchObject({ ended: expect.any(String), turns: [{ requestId }] });
+
+    const waiting = await cli(["evaluate", "--scenarios", "scenarios", "--id", "cli-pass", "--out", "after-quit"], { runner });
+    expect(waiting.code).toBe(0);
+    expect(waiting.out).toContain(`An earlier run left 1 turn(s) it had not seen end (${requestId} of eval) in ${lock}`);
+    expect(waiting.out).toContain(`memory reset skipped: turn ${requestId} of eval was stopped earlier and has not been seen to end`);
+    expect(gateway.memoryKeys("eval", "user")).toEqual(["late_fact"]);
+
+    finish();
+    const resetting = await cli(["evaluate", "--scenarios", "scenarios", "--id", "cli-pass", "--out", "after-end"], { runner });
+    expect(resetting.code).toBe(0);
+    expect(resetting.out).not.toContain("memory reset skipped");
+    expect(gateway.memoryKeys("eval", "user")).toEqual([]);
+    expect(existsSync(lock)).toBe(false);
   });
 
   it("exits 2 on usage errors and unknown ids, 1 on invalid scenario files", async () => {

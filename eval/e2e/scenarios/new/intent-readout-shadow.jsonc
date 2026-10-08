@@ -19,14 +19,20 @@
 //             with reason "timeout" is the environment's too: the first live run (2026-10-07) timed
 //             out because the cache warmer re-warmed the orchestrator's cold 13k-token head on the
 //             same model server at the same moment (14.4 s), and the readout's second call starved.
-//             A readout that times out on every run would still pass here; the report's event data
-//             shows the reason.
+//   readoutFailure — the readout's own failure, also on a row whose reason says "timeout": after a
+//             failed readout the shadow still asks the pre-route question when the turn had a
+//             capsule with agents, and when that runs into the 15 s deadline the reason becomes
+//             "timeout" (agent/intent-shadow.ts askShadowReadings, the usual case with
+//             discoveryPrefetch on). A real timeout leaves "aborted" here; "error" or "no_logprobs"
+//             is the regression, whatever the reason says.
+//             A readout that times out on every run would still pass here. The report keeps event
+//             counts, not the row: the session's audit export shows the reason.
 {
   id: "new-intent-readout-shadow-row",
   title: "An ordinary turn gets exactly one intent readout shadow row after its reply, and the readout does not fail",
   group: "new",
   tags: ["intent", "shadow", "smoke"],
-  description: "Guards the intent readout shadow (1d3209a, f731513): after an ordinary turn delivers, one intent_readout_shadow row must follow, named by the turn's request id, carrying the both-orders readout version, and not failing for any reason but a timeout. A missing row means the shadow stopped running; a failed one means the readout (grammar, logprobs, routing tier) broke.",
+  description: "Guards the intent readout shadow (1d3209a, f731513): after an ordinary turn delivers, one intent_readout_shadow row must follow, named by the turn's request id, carrying the both-orders readout version, and not failing for any reason but a timeout, nor with a readout that failed by itself (readoutFailure other than aborted) behind a timeout reason. A missing row means the shadow stopped running; a failed one means the readout (grammar, logprobs, routing tier) broke.",
   requires: ["model"],
   identity: "eval",
   timeoutMs: 420000,
@@ -58,6 +64,15 @@
                 "data.turnId": { regex: "^e2e-" },
                 "data.status": "failed",
                 "data.reason": { regex: "^(?!timeout$)" },
+              },
+            },
+            // The readout failed by itself, though the row's reason may say "timeout" (header). A
+            // row without a readout failure has null here, which no regex matches.
+            {
+              type: "intent_readout_shadow",
+              where: {
+                "data.turnId": { regex: "^e2e-" },
+                "data.readoutFailure": { regex: "^(?!aborted$)" },
               },
             },
           ],

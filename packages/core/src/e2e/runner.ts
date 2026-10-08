@@ -1,6 +1,7 @@
 /**
  * Runs scenarios against a live gateway: one attempt = the scenario's steps in order, in fresh
- * sessions, as one identity. A scenario repeated k times passes only when all k attempts pass
+ * sessions, as the scenario's identity (a turn with `as` runs as another one, in that identity's
+ * own session). A scenario repeated k times passes only when all k attempts pass
  * (pass^k). Scenarios run `concurrency` at a time (default 1: the model backend is shared);
  * scenarios with mail steps never overlap each other, because a purge empties every mailbox.
  *
@@ -43,6 +44,7 @@ import { judgeReply, JudgeError, type JudgeConfig } from "./judge.js";
 import type { MailAdapter, MailMessageSummary } from "./mail.js";
 import type { ServiceProber, ServiceState } from "./services.js";
 import type { LoadedScenario } from "./loader.js";
+import { E2E_ACCOUNTS } from "./setup.js";
 import { attachmentEntryKey, extractArtifactsFromMetadata } from "../agent/artifact-metadata.js";
 
 export interface RunnerDeps {
@@ -77,7 +79,9 @@ export interface RunnerOptions {
    * Empty the attempt identity's durable memory before each attempt, when attempts run one at a
    * time (concurrent attempts share the account, so one would delete another's). What a scenario
    * stores is in every later turn's prompt (the durable-facts capsule): the memory scenario's
-   * German fact pulled a later English question's reply into German (2026-10-07).
+   * German fact pulled a later English question's reply into German (2026-10-07). Only memory that
+   * is provably the eval account's own is deleted (resetDurableMemory); the attempt's notes say
+   * what was left and why.
    */
   resetDurableMemory?: boolean;
   /** Aborts the run (Ctrl+C): running turns are cancelled, scenarios not started are skipped. */
@@ -354,7 +358,8 @@ interface AttemptContext {
   attemptTimeoutMs: number;
   /** The run was interrupted (not the attempt's own deadline). */
   interrupted: boolean;
-  sessionId: string | null;
+  /** Each identity's current session; a turn with `as` runs in its identity's own. */
+  sessionIds: Map<string, string>;
   sessions: string[];
 }
 
@@ -396,28 +401,265 @@ function addCounts(target: Record<string, number>, source: Record<string, number
   for (const [key, count] of Object.entries(source)) target[key] = (target[key] ?? 0) + count;
 }
 
+/** A turn whose end the run has not seen. */
+export interface UnconfirmedTurn {
+  identity: string;
+  requestId: string;
+  sessionId: string;
+  /** When the harness sent it (ms since the epoch, this machine's clock). */
+  sentAt: number;
+}
+
 /**
- * Delete every durable memory entry (user and workspace scope) the identity holds. Best effort: a
- * gateway without the memory API, or a failed call, leaves the account as it is.
+ * Turns whose end the run has not seen, by client, identity and request id: tracked from before
+ * chat.send until the final status arrives. One still here after its step was stopped without the
+ * harness seeing it end: chat.cancel got no final status within cancelGraceMs, or the socket died
+ * during the send or mid-turn. Such a turn may still be running on the gateway, and what it stores
+ * after the next attempt's reset lands in that attempt's memory. It may outlive the process too, so
+ * a run that ends or quits leaves its turns to the next one (unconfirmedTurnsOf,
+ * adoptUnconfirmedTurns).
  */
-export async function resetDurableMemory(identity: string, deps: RunnerDeps, signal?: AbortSignal): Promise<number> {
-  let removed = 0;
-  for (const scope of ["user", "workspace"] as const) {
-    try {
-      const listed = await deps.client.http(identity, "GET", `/api/memory/entries?scope=${scope}&limit=500`, signal ? { signal } : {});
-      if (!listed.ok) continue;
-      const records = (listed.json as { records?: Array<{ key?: unknown }> } | undefined)?.records ?? [];
-      for (const record of records) {
-        if (typeof record.key !== "string" || !record.key) continue;
-        const deleted = await deps.client.http(identity, "DELETE", `/api/memory/entries/${encodeURIComponent(record.key)}?scope=${scope}`, signal ? { signal } : {});
-        if (deleted.ok) removed += 1;
-      }
-    } catch {
-      // Best effort, see above.
+const unconfirmedTurns = new WeakMap<GatewayClient, Map<string, Map<string, UnconfirmedTurn>>>();
+const TURN_END_POLL_MS = 250;
+/** gateway.status reports the gateway's uptime as it answers; this much slack covers the way back. */
+const RESTART_SLACK_MS = 1_000;
+
+function turnsOf(client: GatewayClient, identity: string): Map<string, UnconfirmedTurn> {
+  let byIdentity = unconfirmedTurns.get(client);
+  if (!byIdentity) {
+    byIdentity = new Map();
+    unconfirmedTurns.set(client, byIdentity);
+  }
+  let turns = byIdentity.get(identity);
+  if (!turns) {
+    turns = new Map();
+    byIdentity.set(identity, turns);
+  }
+  return turns;
+}
+
+/** Every identity's turns the client's run has not seen end, oldest first. */
+export function unconfirmedTurnsOf(client: GatewayClient): UnconfirmedTurn[] {
+  return [...(unconfirmedTurns.get(client)?.values() ?? [])]
+    .flatMap((turns) => [...turns.values()])
+    .sort((a, b) => a.sentAt - b.sentAt);
+}
+
+/** Turns an earlier run left: a reset of their identity waits for them as for the run's own. */
+export function adoptUnconfirmedTurns(client: GatewayClient, turns: readonly UnconfirmedTurn[]): void {
+  for (const turn of turns) turnsOf(client, turn.identity).set(turn.requestId, { ...turn });
+}
+
+/**
+ * The turn's final status reached this client, or the gateway says no turn runs in its session:
+ * session.get's activeTurn covers a stopped turn that is still unwinding (gateway/rpc.ts), and an
+ * answer without the field confirms nothing. When session.get fails, a gateway process that started
+ * after the send does not run the turn. A wipe restarts the gateway and takes the session with it,
+ * and the session.get error alone would hold every reset of the account back, in every later run.
+ */
+async function turnEnded(turn: UnconfirmedTurn, deps: RunnerDeps): Promise<boolean> {
+  try {
+    const connection = await deps.client.connection(turn.identity);
+    if (connection.finalStatusOf(turn.requestId)) return true;
+    const session = await connection.getSession(turn.sessionId).catch(() => null);
+    if (session) return session["activeTurn"] === false;
+    const status = await connection.rpc<unknown>("gateway.status", {});
+    const uptimeS = isRecord(status) && typeof status["uptime"] === "number" ? status["uptime"] : null;
+    return uptimeS !== null && Date.now() - uptimeS * 1000 > turn.sentAt + RESTART_SLACK_MS;
+  } catch {
+    return false;
+  }
+}
+
+/** The identity's turns not seen to end within waitMs; those that ended are forgotten. */
+async function turnsStillRunning(identity: string, deps: RunnerDeps, waitMs: number, signal?: AbortSignal): Promise<string[]> {
+  const turns = unconfirmedTurns.get(deps.client)?.get(identity);
+  if (!turns || turns.size === 0) return [];
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    for (const turn of [...turns.values()]) {
+      if (await turnEnded(turn, deps)) turns.delete(turn.requestId);
+    }
+    if (turns.size === 0 || Date.now() >= deadline || signal?.aborted) return [...turns.keys()];
+    await sleep(Math.min(TURN_END_POLL_MS, deadline - Date.now()), signal);
+  }
+}
+
+/** What the memory reset before an attempt did, and why it left anything. */
+export interface MemoryResetResult {
+  /** Durable memory entries deleted. */
+  removed: number;
+  /** The user model held something and was emptied. */
+  userModelEmptied: boolean;
+  /** One line per reason the reset was skipped or left something; they become attempt notes. */
+  notes: string[];
+}
+
+type MemoryEntryScope = "user" | "workspace";
+
+interface MemoryListing {
+  total: number;
+  records: Array<{ id: string; key: string }>;
+}
+
+/** The most entries one listing returns (the route's own cap, gateway/memory-graph-routes.ts). */
+const MEMORY_PAGE = 500;
+/** Listings per scope before the reset gives up on a store that does not shrink. */
+const MEMORY_RESET_MAX_PASSES = 10;
+
+function entries(count: number): string {
+  return `${count} ${count === 1 ? "entry" : "entries"}`;
+}
+
+/** One page of the identity's durable memory in a scope, or the reason it could not be listed. */
+async function listMemory(identity: string, scope: MemoryEntryScope, deps: RunnerDeps, signal?: AbortSignal): Promise<MemoryListing | string> {
+  const listed = await deps.client.http(identity, "GET", `/api/memory/entries?scope=${scope}&limit=${MEMORY_PAGE}`, signal ? { signal } : {});
+  if (!listed.ok) return `HTTP ${listed.status}`;
+  const body = isRecord(listed.json) ? listed.json : {};
+  const records = (Array.isArray(body["records"]) ? body["records"] : []).flatMap((record) =>
+    isRecord(record) && typeof record["key"] === "string" && record["key"]
+      ? [{ id: typeof record["id"] === "string" ? record["id"] : "", key: record["key"] }]
+      : []);
+  return { total: typeof body["total"] === "number" ? body["total"] : records.length, records };
+}
+
+/**
+ * Why the identity's memory may not be deleted at all, or null. The memory routes resolve the
+ * caller's stores from the request context, and with auth off there is no user in it: every
+ * request reaches the shared single-operator stores, while the token the harness got at login still
+ * verifies (auth reloads without a restart, so this is asked before every reset). And a credentials
+ * file may map the identity to any account, whose memory is not the eval account's to empty.
+ */
+async function resetRefusal(identity: string, deps: RunnerDeps, signal?: AbortSignal): Promise<string | null> {
+  const account = E2E_ACCOUNTS.find((candidate) => candidate.identity === identity);
+  if (!account) return `${identity} is not an eval identity (pnpm e2e:setup creates ${E2E_ACCOUNTS.map((candidate) => candidate.identity).join(" and ")})`;
+  const mode = await deps.client.http(null, "GET", "/api/auth/mode", signal ? { signal } : {});
+  if (!mode.ok) return `GET /api/auth/mode answered HTTP ${mode.status}`;
+  if (!isRecord(mode.json) || mode.json["authEnabled"] !== true) {
+    return "the gateway runs with auth off, so every account's memory is the shared single-operator store";
+  }
+  const me = await deps.client.http(identity, "GET", "/api/auth/me", signal ? { signal } : {});
+  if (!me.ok) return `GET /api/auth/me as ${identity} answered HTTP ${me.status}`;
+  const username = isRecord(me.json) && typeof me.json["username"] === "string" ? me.json["username"] : "";
+  if (username !== account.username) {
+    return `${identity} logs in as ${username ? `account "${username}"` : "an account without a name"}, not as its eval account "${account.username}"`;
+  }
+  return null;
+}
+
+/**
+ * Whether the listed records are the identity's own: no other eval account lists any of them. A
+ * gateway older than the per-user workspace routes (5fc9a8e) lists and deletes workspace memory at
+ * the shared root for every account, and nothing else in its answers tells that store apart.
+ * Null when they are the identity's own; otherwise why the scope is left as it is.
+ */
+async function sharedStoreReason(identity: string, scope: MemoryEntryScope, listing: MemoryListing, deps: RunnerDeps, signal?: AbortSignal): Promise<string | null> {
+  const ids = new Set(listing.records.map((record) => record.id));
+  if (ids.has("")) return `cannot tell whether it is ${identity}'s own (an entry without an id)`;
+  const others = E2E_ACCOUNTS.filter((account) => account.identity !== identity && deps.client.hasIdentity(account.identity));
+  if (others.length === 0) return `cannot tell whether it is ${identity}'s own (no other eval account to compare with)`;
+  for (const other of others) {
+    const theirs = await listMemory(other.identity, scope, deps, signal);
+    if (typeof theirs === "string") return `cannot tell whether it is ${identity}'s own (${other.identity}'s listing answered ${theirs})`;
+    if (theirs.records.some((record) => ids.has(record.id))) {
+      return `${other.identity} lists the same entries, so the gateway keeps that scope in one shared store`;
     }
   }
-  if (removed > 0) deps.log?.(`     reset: removed ${removed} durable memory entr${removed === 1 ? "y" : "ies"} of ${identity}`);
-  return removed;
+  return null;
+}
+
+/**
+ * Empty the identity's durable memory (user and workspace scope) and its user model before an
+ * attempt, but only what is provably the eval account's own: a delete cannot be undone, and a store
+ * the reset should not touch is the operator's or another account's (resetRefusal,
+ * sharedStoreReason). Whatever it skips or cannot delete comes back as notes: the reset used to drop
+ * failed listings and deletes without a word, and eval-viewer's memory was never emptied, because
+ * every mutating route is operator-only (the gateway's role gate) while memory_store has no role
+ * gate at all.
+ *
+ * The user model is a store of its own (user-model/service.ts), and recall_context serves it: the
+ * memory scenario accepts user_model_update as the place its preference is kept, so a model left
+ * from an earlier run could answer the recall by itself. It is kept per account wherever auth is on,
+ * so the gate above is all it needs.
+ *
+ * Nothing is reset either while a turn stopped on the account may still run (waited for up to
+ * turnWaitMs), whether this run stopped it or an earlier one left it in the run lock: attempts
+ * running one at a time is all the concurrency gate sees, and a turn that outlived its chat.cancel
+ * can store memory after the reset, into the next attempt.
+ */
+export async function resetDurableMemory(identity: string, deps: RunnerDeps, signal?: AbortSignal, turnWaitMs = 0): Promise<MemoryResetResult> {
+  const notes: string[] = [];
+  let removed = 0;
+  let userModelEmptied = false;
+  // A 401 or 403 is the account's answer, not the entry's: the remaining deletes are not tried.
+  let forbidden: string | null = null;
+  try {
+    const refusal = await resetRefusal(identity, deps, signal);
+    const running = refusal ? [] : await turnsStillRunning(identity, deps, turnWaitMs, signal);
+    if (refusal) {
+      notes.push(`memory reset skipped: ${refusal}`);
+    } else if (running.length > 0) {
+      notes.push(`memory reset skipped: ${running.length === 1 ? "turn" : "turns"} ${running.join(", ")} of ${identity} ${running.length === 1 ? "was" : "were"} stopped earlier and ${running.length === 1 ? "has" : "have"} not been seen to end`);
+    } else {
+      for (const scope of ["user", "workspace"] as const) {
+        for (let pass = 1; ; pass += 1) {
+          const listing = await listMemory(identity, scope, deps, signal);
+          if (typeof listing === "string") {
+            notes.push(`memory reset: ${identity}'s ${scope} memory could not be listed (${listing})`);
+            break;
+          }
+          if (listing.records.length === 0) break;
+          if (pass === 1) {
+            const shared = await sharedStoreReason(identity, scope, listing, deps, signal);
+            if (shared) {
+              notes.push(`memory reset: ${identity}'s ${scope} memory left as it is: ${shared}`);
+              break;
+            }
+          }
+          if (pass > MEMORY_RESET_MAX_PASSES) {
+            notes.push(`memory reset: ${entries(listing.total)} of ${identity}'s ${scope} memory still listed after ${MEMORY_RESET_MAX_PASSES} rounds of deletes`);
+            break;
+          }
+          const refused = new Map<string, number>();
+          let progress = 0;
+          for (const record of listing.records) {
+            if (forbidden) {
+              refused.set(forbidden, (refused.get(forbidden) ?? 0) + 1);
+              continue;
+            }
+            const deleted = await deps.client.http(identity, "DELETE", `/api/memory/entries/${encodeURIComponent(record.key)}?scope=${scope}`, signal ? { signal } : {});
+            if (deleted.ok) {
+              removed += 1;
+              progress += 1;
+            } else if (deleted.status !== 404) { // 404: gone already
+              const why = `HTTP ${deleted.status}`;
+              refused.set(why, (refused.get(why) ?? 0) + 1);
+              if (deleted.status === 401 || deleted.status === 403) forbidden = why;
+            }
+          }
+          for (const [why, count] of refused) notes.push(`memory reset: ${entries(count)} of ${identity}'s ${scope} memory not deleted (${why})`);
+          if (refused.size > 0 || progress === 0 || listing.total <= listing.records.length) break;
+        }
+      }
+      const model = await deps.client.http(identity, "GET", "/api/user-model", signal ? { signal } : {});
+      if (!model.ok) {
+        notes.push(`memory reset: ${identity}'s user model could not be read (HTTP ${model.status})`);
+      } else if (Object.values(isRecord(model.json) ? model.json : {}).some((value) => Array.isArray(value) && value.length > 0)) {
+        const reset = forbidden ? null : await deps.client.http(identity, "POST", "/api/user-model/reset", signal ? { signal } : {});
+        if (reset?.ok) userModelEmptied = true;
+        else notes.push(`memory reset: ${identity}'s user model not emptied (${reset ? `HTTP ${reset.status}` : forbidden})`);
+      }
+    }
+  } catch (err) {
+    if (!signal?.aborted) notes.push(`memory reset stopped: ${describeError(err)}`);
+  }
+  if (removed > 0) {
+    deps.log?.(`     reset: removed ${removed} durable memory entr${removed === 1 ? "y" : "ies"} of ${identity}${userModelEmptied ? " and emptied its user model" : ""}`);
+  } else if (userModelEmptied) {
+    deps.log?.(`     reset: emptied the user model of ${identity}`);
+  }
+  for (const note of notes) deps.log?.(`     ${note}`);
+  return { removed, userModelEmptied, notes };
 }
 
 export async function runAttempt(
@@ -440,7 +682,7 @@ export async function runAttempt(
     deadline: startedAt + attemptTimeoutMs,
     attemptTimeoutMs,
     interrupted: false,
-    sessionId: null,
+    sessionIds: new Map(),
     sessions: [],
   };
   const onRunAbort = (): void => {
@@ -449,8 +691,14 @@ export async function runAttempt(
   };
   if (opts.signal?.aborted) onRunAbort();
   else opts.signal?.addEventListener("abort", onRunAbort, { once: true });
+  const resetNotes: string[] = [];
   if (opts.resetDurableMemory && opts.concurrency === 1 && !controller.signal.aborted) {
-    await resetDurableMemory(ctx.identity, deps, controller.signal);
+    // Every identity a turn of the attempt runs as: what any of them stored before would steer it.
+    const identities = new Set([ctx.identity, ...scenario.steps.flatMap((step) => (step.kind === "turn" && step.as ? [step.as] : []))]);
+    for (const identity of identities) {
+      if (controller.signal.aborted) break;
+      resetNotes.push(...(await resetDurableMemory(identity, deps, controller.signal, opts.cancelGraceMs)).notes);
+    }
   }
   const steps: StepResult[] = [];
   let open: { window: OpenTurnWindow; result: StepResult } | null = null;
@@ -494,7 +742,7 @@ export async function runAttempt(
     startedAt: new Date(startedAt).toISOString(),
     durationMs: Date.now() - startedAt,
     failures: failed.flatMap((step) => step.failures.map((failure) => `${step.label}: ${failure}`)),
-    notes: steps.flatMap((step) => step.notes.map((note) => `${step.label}: ${note}`)),
+    notes: [...resetNotes, ...steps.flatMap((step) => step.notes.map((note) => `${step.label}: ${note}`))],
     sessions: ctx.sessions,
     steps,
     eventTypeCounts: counts,
@@ -538,7 +786,7 @@ function runStepBody(step: E2EStep, ctx: AttemptContext): Promise<StepOutcome> {
         return { failures: [], notes: [] };
       });
     case "newSession":
-      ctx.sessionId = null;
+      ctx.sessionIds.clear();
       return Promise.resolve({ failures: [], notes: [] });
     case "mail":
       return runMailStep(step, ctx);
@@ -549,9 +797,10 @@ function runStepBody(step: E2EStep, ctx: AttemptContext): Promise<StepOutcome> {
   }
 }
 
-async function ensureSession(ctx: AttemptContext): Promise<string> {
-  if (ctx.sessionId) return ctx.sessionId;
-  const connection = await ctx.deps.client.connection(ctx.identity);
+async function ensureSession(ctx: AttemptContext, identity = ctx.identity): Promise<string> {
+  const current = ctx.sessionIds.get(identity);
+  if (current) return current;
+  const connection = await ctx.deps.client.connection(identity);
   let sessionId: string;
   try {
     // "eval": the runtime keeps eval traffic out of its learning loops (LRN-403).
@@ -560,7 +809,7 @@ async function ensureSession(ctx: AttemptContext): Promise<string> {
     if (err instanceof E2EInfraError) throw err;
     throw new E2EInfraError(`session.create failed: ${describeError(err)}`);
   }
-  ctx.sessionId = sessionId;
+  ctx.sessionIds.set(identity, sessionId);
   ctx.sessions.push(sessionId);
   return sessionId;
 }
@@ -713,7 +962,7 @@ interface PreparedMessage {
  * documents stored in the session's uploads/ and sent as attachments; images stored too, with
  * their vision analysis inlined ahead of the text; the bubble text names the files.
  */
-async function prepareMessage(step: E2ETurnStep, sessionId: string, ctx: AttemptContext): Promise<PreparedMessage> {
+async function prepareMessage(step: E2ETurnStep, sessionId: string, ctx: AttemptContext, identity: string): Promise<PreparedMessage> {
   const typed = step.agent ? `${step.message} --agent ${step.agent}` : step.message;
   if (!step.attachments || step.attachments.length === 0) return { message: typed };
   const attachments: Array<Record<string, unknown>> = [];
@@ -727,13 +976,13 @@ async function prepareMessage(step: E2ETurnStep, sessionId: string, ctx: Attempt
     const file = { path, filename, contentType };
     if (contentType.startsWith("image/")) {
       const [stored, analysis] = await Promise.all([
-        ctx.deps.client.uploadAttachment(ctx.identity, sessionId, file, ctx.signal),
-        ctx.deps.client.analyzeImage(ctx.identity, file, ctx.signal),
+        ctx.deps.client.uploadAttachment(identity, sessionId, file, ctx.signal),
+        ctx.deps.client.analyzeImage(identity, file, ctx.signal),
       ]);
       attachments.push({ filename, contentType: stored.contentType, previewMode: "image", size: stored.size, relativePath: stored.relativePath });
       imageContexts.push(`Image analysis (${filename}):\n\n${analysis}`);
     } else {
-      const stored = await ctx.deps.client.uploadAttachment(ctx.identity, sessionId, file, ctx.signal);
+      const stored = await ctx.deps.client.uploadAttachment(identity, sessionId, file, ctx.signal);
       attachments.push({ filename: stored.filename, relativePath: stored.relativePath, contentType: stored.contentType, size: stored.size, previewMode: "download" });
     }
   }
@@ -779,9 +1028,9 @@ async function collectArtifacts(connection: GatewayConnection, sessionId: string
 
 /** Best effort: stop a turn whose socket died, from a fresh connection (chat.cancel works across
  *  connections for a session the caller owns). */
-async function cancelFromFreshConnection(ctx: AttemptContext, requestId: string): Promise<string> {
+async function cancelFromFreshConnection(ctx: AttemptContext, identity: string, requestId: string): Promise<string> {
   try {
-    const connection = await ctx.deps.client.connection(ctx.identity);
+    const connection = await ctx.deps.client.connection(identity);
     const result = await connection.cancel(requestId);
     return `chat.cancel from a new connection: cancelled=${result.cancelled}`;
   } catch (err) {
@@ -845,11 +1094,13 @@ async function closeTurnWindow(window: OpenTurnWindow, result: StepResult, ctx: 
 
 async function runTurnStep(step: E2ETurnStep, ctx: AttemptContext): Promise<StepOutcome> {
   const { client } = ctx.deps;
-  const connection = await client.connection(ctx.identity);
-  const sessionId = await ensureSession(ctx);
+  // A turn with `as` runs as that identity, in its own session.
+  const identity = step.as ?? ctx.identity;
+  const connection = await client.connection(identity);
+  const sessionId = await ensureSession(ctx, identity);
   connection.registerRoot(sessionId);
   const notes: string[] = [];
-  const prepared = await prepareMessage(step, sessionId, ctx);
+  const prepared = await prepareMessage(step, sessionId, ctx, identity);
   const requestId = `e2e-${randomUUID()}`;
   const ownTimeoutMs = step.timeoutMs ?? ctx.opts.defaultTurnTimeoutMs;
   const remainingMs = Math.max(0, ctx.deadline - Date.now());
@@ -857,9 +1108,12 @@ async function runTurnStep(step: E2ETurnStep, ctx: AttemptContext): Promise<Step
   // When the attempt's deadline is the nearer one, a timeout here is the attempt's.
   const limitedByAttempt = remainingMs < ownTimeoutMs;
   const startSeq = connection.currentSeq();
-  const during = new DuringController(step.during ?? [], { connection, client, identity: ctx.identity, sessionId, requestId, startSeq });
+  const during = new DuringController(step.during ?? [], { connection, client, identity, sessionId, requestId, startSeq });
   const sentAt = Date.now();
   during.attach(sentAt);
+  // Until its final status arrives the turn may be running: a reset of the account waits for it.
+  const tracked = turnsOf(client, identity);
+  tracked.set(requestId, { identity, requestId, sessionId, sentAt });
   try {
     await connection.sendChat({
       sessionId,
@@ -871,7 +1125,14 @@ async function runTurnStep(step: E2ETurnStep, ctx: AttemptContext): Promise<Step
     });
   } catch (err) {
     during.detach();
-    if (err instanceof E2EInfraError) throw err;
+    if (err instanceof E2EInfraError) {
+      // The gateway may have taken the send before the socket failed, and it keeps a turn running
+      // when its socket closes (gateway/rpc.ts close): stopped like a turn whose socket dies
+      // mid-turn, it stays tracked until a reset sees it end.
+      const cancelled = await cancelFromFreshConnection(ctx, identity, requestId);
+      throw new E2EInfraError(`${err.message}; ${cancelled}`);
+    }
+    tracked.delete(requestId);
     return { failures: [`chat.send failed: ${describeError(err)}`], notes };
   }
   during.armTimers();
@@ -882,7 +1143,8 @@ async function runTurnStep(step: E2ETurnStep, ctx: AttemptContext): Promise<Step
   } catch (err) {
     during.detach();
     if (err instanceof E2EInfraError) {
-      const cancelled = await cancelFromFreshConnection(ctx, requestId);
+      // The final status goes to the dead socket: the turn stays tracked until a reset sees it end.
+      const cancelled = await cancelFromFreshConnection(ctx, identity, requestId);
       throw new E2EInfraError(`${err.message}; ${cancelled}`);
     }
     throw err;
@@ -912,6 +1174,8 @@ async function runTurnStep(step: E2ETurnStep, ctx: AttemptContext): Promise<Step
       ? `${attemptTimeoutFailure(ctx)} while this turn ran (${cancelText})`
       : `turn timed out after ${turnTimeoutMs} ms (${cancelText})`);
   }
+  // Seen to end. A turn stopped without its final status stays tracked.
+  if (final) tracked.delete(requestId);
 
   await during.settle();
   during.detach();

@@ -5,7 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { readRecentOutcomes } from "../agent/outcomes.js";
 import { readFlowMemoryEntries } from "../agent/flow-memory.js";
 import { readAllFacts } from "../swarm/memory.js";
-import { upsertMemoryToGraph, graphL0Layer, graphRerank, graphTrackRetrieval } from "./graph-service.js";
+import { upsertMemoryToGraph, deleteMemoryFromGraph, graphL0Layer, graphRerank, graphTrackRetrieval } from "./graph-service.js";
 import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
 import { deploymentWorkspaceRoot } from "../tools/workspace-path.js";
@@ -534,6 +534,8 @@ function compactDurableMemoryRecords(
       if (record.id === canonical.id) continue;
       if (record.key) {
         rmSync(join(memoryDirForScope(scope, workspacePath), `${record.key}.json`), { force: true });
+        // Like a delete: the merged-away record's node must not outlive its file.
+        void deleteMemoryFromGraph(record.id).catch((err) => log.debug({ err }, "Graph delete-through failed (compaction)"));
       }
     }
   }
@@ -670,11 +672,17 @@ function deleteDurableMemoryRecordByKey(
   const dir = memoryDirForScope(scope, workspacePath);
   const filePath = join(dir, `${safeKey(key)}.json`);
   if (!existsSync(filePath)) return false;
+  let id: string | undefined;
+  try {
+    id = parseStoredWorkspaceMemory(readFileSync(filePath, "utf-8"))?.id;
+  } catch {
+    // Unreadable: no node id to remove.
+  }
   rmSync(filePath, { force: true });
   _invalidateDurableCache(_cacheKey(scope, dir));
-  // The MemGraph write-through node (if any) is intentionally left in place —
-  // there is no durable→graph delete path, and an orphaned node is harmless to
-  // the read-only inspector view.
+  // Its MemGraph node goes too: the Critical Memory block reads the graph, not the files, and kept
+  // injecting a deleted preference (graph-service.ts deleteMemoryFromGraph).
+  if (id) void deleteMemoryFromGraph(id).catch((err) => log.debug({ err }, "Graph delete-through failed"));
   return true;
 }
 

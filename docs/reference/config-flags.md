@@ -137,7 +137,7 @@ Every public schema field, where it is declared, and how many production files r
 | `deliverableConsistencyQaMaxRounds` | packages/core/src/config/schemas/orchestration.ts:406 | 1 |
 | `description` | packages/core/src/config/schema.ts:565 | 182 |
 | `detectWriteChurnOverwrite` | packages/core/src/config/schemas/orchestration.ts:427 | 2 |
-| `digest` | packages/core/src/config/schema.ts:1974 | 53 |
+| `digest` | packages/core/src/config/schema.ts:1974 | 54 |
 | `dir` | packages/core/src/config/schema.ts:1963 | 59 |
 | `disabled` | packages/core/src/config/schema.ts:809 | 109 |
 | `disabledGroups` | packages/core/src/config/schema.ts:1992 | 3 |
@@ -196,7 +196,7 @@ Every public schema field, where it is declared, and how many production files r
 | `historyLimit` | packages/core/src/config/schemas/channels.ts:22 | 5 |
 | `holdoutRate` | packages/core/src/config/schema.ts:1486 | 2 |
 | `honestSynthesisOnPartialEvidence` | packages/core/src/config/schemas/orchestration.ts:602 | 1 |
-| `host` | packages/core/src/config/schema.ts:707 | 112 |
+| `host` | packages/core/src/config/schema.ts:707 | 113 |
 | `http` | packages/core/src/config/schema.ts:752 | 86 |
 | `humanInLoopSteps` | packages/core/src/config/schema.ts:1309 | 20 |
 | `id` | packages/core/src/config/schema.ts:561 | 288 |
@@ -296,7 +296,7 @@ Every public schema field, where it is declared, and how many production files r
 | `minSamples` | packages/core/src/config/schemas/decisions.ts:61 | 6 |
 | `minStepsToAuthor` | packages/core/src/config/schema.ts:1464 | 2 |
 | `minVramMb` | packages/core/src/config/schema.ts:822 | 1 |
-| `mode` | packages/core/src/config/schema.ts:471 | 139 |
+| `mode` | packages/core/src/config/schema.ts:471 | 140 |
 | `model` | packages/core/src/config/schema.ts:1234 | 268 |
 | `modelModeration` | packages/core/src/config/schema.ts:1230 | 4 |
 | `modelPresets` | packages/core/src/config/schema.ts:1702 | 1 |
@@ -314,7 +314,7 @@ Every public schema field, where it is declared, and how many production files r
 | `notes` | packages/core/src/config/schema.ts:790 | 55 |
 | `oneLiner` | packages/core/src/config/schema.ts:899 | 3 |
 | `openaiCompatible` | packages/core/src/config/schema.ts:105 | 2 |
-| `operator` | packages/core/src/config/schema.ts:372 | 110 |
+| `operator` | packages/core/src/config/schema.ts:372 | 111 |
 | `orchestratorMaxToolIterations` | packages/core/src/config/schemas/effort.ts:23 | 1 |
 | `orchestratorTurnSloMs` | packages/core/src/config/schema.ts:1754 | 2 |
 | `orgId` | packages/core/src/config/schema.ts:1125 | 1 |
@@ -347,7 +347,7 @@ Every public schema field, where it is declared, and how many production files r
 | `plugins` | packages/core/src/config/schema.ts:1961 | 16 |
 | `points` | packages/core/src/config/schemas/decisions.ts:56 | 50 |
 | `pollIntervalMs` | packages/core/src/config/schemas/channels.ts:66 | 4 |
-| `port` | packages/core/src/config/schema.ts:303 | 38 |
+| `port` | packages/core/src/config/schema.ts:303 | 39 |
 | `primary` | packages/core/src/config/schema.ts:111 | 69 |
 | `profiles` | packages/core/src/config/schema.ts:1088 | 10 |
 | `progressVerifierSemantic` | packages/core/src/config/schemas/orchestration.ts:670 | 2 |
@@ -363,7 +363,7 @@ Every public schema field, where it is declared, and how many production files r
 | `promptCacheWarmKeeper` | packages/core/src/config/schema.ts:1821 | 2 |
 | `promptInjectionBlock` | packages/core/src/config/schema.ts:1218 | 6 |
 | `promptPer1m` | packages/core/src/config/schema.ts:510 | 1 |
-| `protocol` | packages/core/src/config/schema.ts:700 | 51 |
+| `protocol` | packages/core/src/config/schema.ts:700 | 52 |
 | `provider` | packages/core/src/config/schema.ts:431 | 130 |
 | `providers` | packages/core/src/config/schema.ts:1210 | 100 |
 | `publicUrl` | packages/core/src/config/schema.ts:317 | 7 |
@@ -454,7 +454,7 @@ Every public schema field, where it is declared, and how many production files r
 | `stagedArtifactBuilds` | packages/core/src/config/schemas/orchestration.ts:442 | 1 |
 | `steps` | packages/core/src/config/schema.ts:1380 | 79 |
 | `stopPhrases` | packages/core/src/config/schemas/multimodal.ts:238 | 3 |
-| `store` | packages/core/src/config/schema.ts:1613 | 157 |
+| `store` | packages/core/src/config/schema.ts:1613 | 161 |
 | `subAgentDisagreementVerify` | packages/core/src/config/schemas/orchestration.ts:644 | 2 |
 | `subAgentHeadRewarm` | packages/core/src/config/schema.ts:1858 | 2 |
 | `subAgentMaxIterations` | packages/core/src/config/schemas/effort.ts:25 | 2 |
@@ -510,7 +510,7 @@ Every public schema field, where it is declared, and how many production files r
 | `urlNotFetchedShortAnswerGuard` | packages/core/src/config/schemas/orchestration.ts:283 | 1 |
 | `urls` | packages/core/src/config/schema.ts:786 | 10 |
 | `userAgent` | packages/core/src/config/schema.ts:1149 | 3 |
-| `username` | packages/core/src/config/schema.ts:352 | 50 |
+| `username` | packages/core/src/config/schema.ts:352 | 51 |
 | `usernameClaim` | packages/core/src/config/schema.ts:392 | 1 |
 | `usernameSelector` | packages/core/src/config/schema.ts:787 | 5 |
 | `userProfilePrefetch` | packages/core/src/config/schemas/orchestration.ts:624 | 4 |
@@ -519,7 +519,7 @@ Every public schema field, where it is declared, and how many production files r
 | `verifyArtifactsMaxRepairAttempts` | packages/core/src/config/schemas/orchestration.ts:380 | 1 |
 | `verifyArtifactsRepair` | packages/core/src/config/schemas/orchestration.ts:377 | 1 |
 | `verifyToken` | packages/core/src/config/schemas/channels.ts:47 | 20 |
-| `viewer` | packages/core/src/config/schema.ts:373 | 20 |
+| `viewer` | packages/core/src/config/schema.ts:373 | 21 |
 | `virtualization` | packages/core/src/config/schema.ts:1087 | 1 |
 | `visionApiKey` | packages/core/src/config/schemas/multimodal.ts:25 | 7 |
 | `visionBaseUrl` | packages/core/src/config/schemas/multimodal.ts:23 | 8 |
