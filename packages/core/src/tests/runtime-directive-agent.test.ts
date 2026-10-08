@@ -990,6 +990,49 @@ describe("a turn the user directed to one agent", () => {
     expect(result.response).toContain("MODEL-ANSWER");
   });
 
+  it("runs no workflow a catalog search matched in place of another delegation before the named agent ran", async () => {
+    // The workflow-run check let only the directed delegation through. Another delegation was
+    // dropped with "Call run_workflow now" and, made again, rewritten into the matched workflow, so
+    // the turn ran a workflow nobody asked for before the named agent (review of f607ce0, 2026-10-08).
+    const { AgentSession, runTurn } = await loadRuntime();
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      call += 1;
+      if (call === 1) return toolStream("search_workflows", { query: "code bug review" });
+      if (call <= 3) return toolStream("swarm_delegate", { task: "Find the bug in invoices.py." });
+      return answerStream(ANSWER);
+    });
+
+    const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
+    await runTurn({ session, userMessage: MESSAGE, allowedAgents: ["code_analyst"], directiveAgent: "code_analyst" });
+
+    expect(executed).not.toContain("run_workflow");
+    // The delegation the model asked for ran as it asked, the first time it asked.
+    expect(executed.slice(0, 2)).toEqual(["search_workflows", "swarm_delegate"]);
+    expect(streamMock.mock.calls.map((_call, index) => promptOf(index)).join("\n")).not.toContain("Call run_workflow now");
+  });
+
+  it("runs no workflow a catalog search matched in place of a second delegation after the named agent ran", async () => {
+    // Once the agent had run, the directed delegation was no longer exempt: a follow-up delegation
+    // was dropped with "Call run_workflow now" and, made again, rewritten into the matched workflow,
+    // which then ran after the agent the user had named.
+    const { AgentSession, runTurn } = await loadRuntime();
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      call += 1;
+      if (call === 1) return toolStream("search_workflows", { query: "code bug review" });
+      if (call <= 4) return delegateStream();
+      return answerStream(ANSWER);
+    });
+
+    const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
+    await runTurn({ session, userMessage: MESSAGE, allowedAgents: ["code_analyst"], directiveAgent: "code_analyst" });
+
+    expect(executed).not.toContain("run_workflow");
+    expect(delegated[0]).toMatchObject({ agentName: "code_analyst" });
+    expect(streamMock.mock.calls.map((_call, index) => promptOf(index)).join("\n")).not.toContain("Call run_workflow now");
+  });
+
   describe("when the request matches a job's catalog triggers", () => {
     // The user named the agent; a catalog match is the runtime's guess (review of 6955e34, 2026-10-08).
     const DECK_REQUEST = "Create a cited slide deck about Dresden with real photos and sources";

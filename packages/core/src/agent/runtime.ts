@@ -3207,11 +3207,11 @@ async function _runTurn(
       }
     }
     // This response asks only for the delegation the user directed the turn to, and that agent has
-    // not run yet. The workflow-catalog check, the workflow-run force after a catalog search and the
-    // synthesis-required guard below let it through: the user named the agent, and a catalog match
-    // or a synthesis note left by other orchestration is the runtime's own guess. Turned away, it
-    // never ran at all — the workflow ran in its place, or the guard rejected it and shipped a
-    // forced partial answer (review of a3773aa, 2026-10-08).
+    // not run yet. The workflow-catalog check and the synthesis-required guard below let it through,
+    // and the workflow-run force after a catalog search spares the whole directed turn: the user
+    // named the agent, and a catalog match or a synthesis note left by other orchestration is the
+    // runtime's own guess. Turned away, it never ran at all — the workflow ran in its place, or the
+    // guard rejected it and shipped a forced partial answer (review of a3773aa, 2026-10-08).
     const directiveDelegationRequested = directiveAgent !== undefined
       && directiveAgentPending
       && llmResponse.tool_calls.length > 0
@@ -3422,13 +3422,18 @@ async function _runTurn(
       AGENT_DISCOVERY_TOOL_NAMES.has(toolCall.name) && toolCall.name !== "search_workflows"
     );
     const repeatedWorkflowSearchRequested = llmResponse.tool_calls.some((toolCall) => toolCall.name === "search_workflows");
+    // A directed turn is not held to this check at all, as the two tool-free checks further down are
+    // not. Exempting only the directed delegation left every other call to it: an undirected
+    // delegation before the named agent ran, or a follow-up delegation after it ran, was dropped with
+    // "Call run_workflow now" and, made again, rewritten into the matched workflow, so a workflow the
+    // user did not name ran before or after the agent they did (review of f607ce0, 2026-10-08).
     if (
       !workflowCatalogSuppressedForMaintenance
       &&
       shouldRequireWorkflowExecutionAfterSearch(workflowSearchMatches)
       && !workflowRunCompletedThisTurn
       && !runWorkflowRequested
-      && !directiveDelegationRequested
+      && directiveAgent === undefined
       && (nonWorkflowOrchestrationRequested || nonWorkflowDiscoveryRequested || repeatedWorkflowSearchRequested)
     ) {
       if (!workflowExecutionRetryUsed) {
