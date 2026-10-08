@@ -9,6 +9,7 @@ import {
   maskUnobservedFigures,
   namedFileSpans,
   numericDateForms,
+  scriptInvocation,
   verbatimQuotedCodeSpans,
   verbatimQuotedCommandSpans,
 } from "../agent/figure-provenance.js";
@@ -181,6 +182,22 @@ describe("a command an answer quotes whole", () => {
     expect(verbatimQuotedCommandSpans("`head -50` gab nichts aus", [LISTING])).toEqual([]);
     expect(verbatimQuotedCommandSpans("```\nAnzahl der Primzahlen: 8393\nSumme: 7597648268\n```", [HEREDOC])).toEqual([]);
     expect(verbatimQuotedCommandSpans(`\`${LISTING}\``, [])).toEqual([]);
+  });
+
+  it("a script run by path is quotable as it ran, or behind the program that runs it", () => {
+    const invocation = scriptInvocation({ path: "primes.js", args: ["200001"] })!;
+    expect(invocation).toBe("primes.js 200001");
+    for (const quote of ["`primes.js 200001`", "`node primes.js 200001`", "`npx tsx primes.js 200001`", "```\npython3 primes.js 200001\n```"]) {
+      expect(maskUnobservedFigures(quote, new Set(), verbatimQuotedCommandSpans(quote, [], [invocation])).masked).toBe(0);
+    }
+    // A word in front that holds a figure is no program, and another argument is no quote of it.
+    for (const quote of ["`8393 primes.js 200001`", "`node 8393 primes.js 200001`", "`primes.js 200002`"]) {
+      expect(verbatimQuotedCommandSpans(quote, [], [invocation])).toEqual([]);
+    }
+    // A command is quotable only whole, with nothing in front.
+    expect(verbatimQuotedCommandSpans("`sudo ls /usr/bin/ | head -50`", [LISTING], [])).toEqual([]);
+    expect(scriptInvocation({ command: "node primes.js" })).toBeUndefined();
+    expect(scriptInvocation({ path: "primes.js" })).toBe("primes.js");
   });
 });
 

@@ -199,17 +199,51 @@ export function verbatimQuotedCodeSpans(text: string, sources: readonly string[]
  * and spaces around it, IS the command. A figure there is one of the command the run executed.
  * Part of a command is no such quote, and neither are some of its lines: a fence that repeats the
  * lines of a heredoc the command wrote would hand that file's figures back as the command's.
+ *
+ * `invocations` are scripts the run executed by path, with their arguments ("primes.js 200001",
+ * see scriptInvocation). An honest report quotes one as it is or behind the program that runs it
+ * (`node primes.js 200001`): up to two words of letters and digits in front, which hold no figure
+ * of their own, since a digit glued to a letter is none.
  */
-export function verbatimQuotedCommandSpans(text: string, commands: readonly string[]): FigureCheckSpan[] {
+export function verbatimQuotedCommandSpans(
+  text: string,
+  commands: readonly string[],
+  invocations: readonly string[] = [],
+): FigureCheckSpan[] {
   const quotable = new Set(commands.map(normalizedCommand).filter(Boolean));
-  if (quotable.size === 0) return [];
+  const quotableInvocations = new Set(invocations.map(normalizedCommand).filter(Boolean));
+  if (quotable.size === 0 && quotableInvocations.size === 0) return [];
+  const quotes = (content: string): boolean => {
+    if (quotable.has(content)) return true;
+    let rest = content;
+    for (let words = 0; words <= 2; words++) {
+      if (quotableInvocations.has(rest)) return true;
+      const program = /^\p{L}[\p{L}\p{N}_]*[ \t]+/u.exec(rest);
+      if (!program) return false;
+      rest = rest.slice(program[0].length);
+    }
+    return false;
+  };
   const spans: FigureCheckSpan[] = [];
   for (const match of text.matchAll(/(?<!`)(`+)(?!`)([\s\S]*?[^`])\1(?!`)/g)) {
-    if (!quotable.has(normalizedCommand(match[2]!))) continue;
+    if (!quotes(normalizedCommand(match[2]!))) continue;
     const start = match.index ?? 0;
     spans.push({ start, end: start + match[0].length });
   }
-  return [...spans, ...fencedBlockSpans(text, (body) => quotable.has(body.trim()))];
+  return [...spans, ...fencedBlockSpans(text, (body) => quotes(body.trim()))];
+}
+
+/**
+ * How a sandbox call that runs a script by path (run_script: `path` and `args`) is written: the path
+ * and its arguments, space-separated. Such a call has no command of its own to quote. Undefined for
+ * a call of any other shape.
+ */
+export function scriptInvocation(args: Record<string, unknown> | undefined): string | undefined {
+  const path = args?.["path"];
+  const scriptArgs = args?.["args"] ?? [];
+  if (typeof path !== "string" || !path.trim() || !Array.isArray(scriptArgs)) return undefined;
+  if (!scriptArgs.every((arg) => typeof arg === "string" || (typeof arg === "number" && Number.isFinite(arg)))) return undefined;
+  return [path.trim(), ...scriptArgs.map(String)].join(" ");
 }
 
 function normalizedCommand(text: string): string {

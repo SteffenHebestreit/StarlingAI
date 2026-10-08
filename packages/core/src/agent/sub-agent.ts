@@ -44,6 +44,7 @@ import {
   maskUnobservedFigures,
   namedFileSpans,
   numericDateForms,
+  scriptInvocation,
   verbatimQuotedCodeSpans,
   verbatimQuotedCommandSpans,
   type FigureCheckSpan,
@@ -3825,6 +3826,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // of a heredoc the command wrote would hand that file's figures back. A git_* call never
     // reports programOutputChars, so a commit message is never quotable.
     const ranCommands: string[] = [];
+    // And the scripts they ran by path (run_script), as path and arguments: such a call has no
+    // command, so "`primes.js 200001`" quoting what ran came back with its argument masked, and the
+    // honest report was flagged as one that made a figure up. Quotable as they are or behind the
+    // program that runs them (verbatimQuotedCommandSpans).
+    const ranScriptInvocations: string[] = [];
     const noteWrittenText = (toolName: string, args: Record<string, unknown>, writtenPath: unknown): void => {
       const path = normalizeArtifactPath(args["path"]) ?? normalizeArtifactPath(writtenPath);
       if (!path) return;
@@ -3858,7 +3864,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         text,
         [...writtenFileText].filter(([path]) => ranByTheRun(path)).map(([, content]) => content),
       )),
-      ...verbatimQuotedCommandSpans(text, ranCommands),
+      ...verbatimQuotedCommandSpans(text, ranCommands, ranScriptInvocations),
     ];
     // The places a text names a file the run wrote, by its path or its base name. The path the run
     // chose stays its claim (recordOwnClaims): the write's own "File written: results-8393.txt"
@@ -7300,6 +7306,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
               ranCallArguments.push(...argumentTexts(tc.arguments));
               const command = tc.arguments?.["command"];
               if (typeof command === "string") ranCommands.push(command);
+              const invocation = scriptInvocation(tc.arguments);
+              if (invocation) ranScriptInvocations.push(invocation);
             }
           }
         }

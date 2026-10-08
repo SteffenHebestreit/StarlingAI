@@ -1110,6 +1110,21 @@ describe("the code a delegated run executed, and the figures it states", () => {
       expect(result.executions?.unobservedFigures).toBe(1);
     }, 60_000);
 
+    it("a script run by path, quoted with its argument, keeps it; the prose beside it does not", async () => {
+      // run_script takes a path and arguments, not a command, so in review an honest report quoting
+      // what it ran came back "`primes.js [not observed]`" and was counted as made up.
+      await registerTools({ run_script: () => failed("Error: Cannot find module 'bigint-sieve'") });
+      const quoted = "Gestartet habe ich `primes.js 200001`, also:\n```sh\nnode primes.js 200001\n```\nEs brach ab (Cannot find module 'bigint-sieve').";
+      completeMock.mockImplementation(async (messages: Message[]) => scripted([
+        { tool: "run_script", args: { path: "primes.js", args: ["200001"] } },
+      ], `Die Obergrenze war 200001. ${quoted}`)(messages));
+
+      const result = await runAgent("coder", "Zaehle die Primzahlen mit einem Skript in der Sandbox.", "parent-provenance-run-script-quoted");
+
+      expect(result.output).toBe(`Die Obergrenze war [not observed]. ${quoted}`);
+      expect(result.executions).toEqual({ attempted: 1, failed: 1, succeededWithOutput: 0, unobservedFigures: 1 });
+    }, 60_000);
+
     it("control: a figure of the task in a command stays", async () => {
       const finalAnswer = "Ich habe primes.js mit 100000 und 200000 gestartet; es lief nicht, ich nenne keine Zahlen.";
       const result = await runSandboxWrite("parent-provenance-task-figures", [

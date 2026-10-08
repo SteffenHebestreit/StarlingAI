@@ -38,7 +38,7 @@ Every public schema field, where it is declared, and how many production files r
 | `appSecret` | packages/core/src/config/schemas/channels.ts:49 | 5 |
 | `appToken` | packages/core/src/config/schemas/channels.ts:33 | 4 |
 | `architectAgentName` | packages/core/src/config/schema.ts:315 | 1 |
-| `args` | packages/core/src/config/schema.ts:697 | 159 |
+| `args` | packages/core/src/config/schema.ts:697 | 160 |
 | `audience` | packages/core/src/config/schema.ts:430 | 8 |
 | `auditRate` | packages/core/src/config/schemas/decisions.ts:63 | 5 |
 | `authToken` | packages/core/src/config/schema.ts:94 | 16 |
