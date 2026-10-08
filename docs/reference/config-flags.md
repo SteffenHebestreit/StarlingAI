@@ -226,7 +226,7 @@ Every public schema field, where it is declared, and how many production files r
 | `keywords` | packages/core/src/config/schemas/multimodal.ts:237 | 28 |
 | `kubeconfigPath` | packages/core/src/config/schema.ts:1069 | 1 |
 | `kubectlBinary` | packages/core/src/config/schema.ts:1067 | 1 |
-| `label` | packages/core/src/config/schema.ts:249 | 141 |
+| `label` | packages/core/src/config/schema.ts:249 | 142 |
 | `labeledAt` | packages/core/src/config/schema.ts:903 | 1 |
 | `labeledBy` | packages/core/src/config/schema.ts:902 | 1 |
 | `language` | packages/core/src/config/schemas/multimodal.ts:236 | 94 |
@@ -306,7 +306,7 @@ Every public schema field, where it is declared, and how many production files r
 | `moderateToolOutputs` | packages/core/src/config/schema.ts:1237 | 1 |
 | `monthlyUsd` | packages/core/src/config/schema.ts:521 | 2 |
 | `mounts` | packages/core/src/config/schema.ts:683 | 11 |
-| `name` | packages/core/src/config/schema.ts:1973 | 365 |
+| `name` | packages/core/src/config/schema.ts:1973 | 366 |
 | `negativePrompt` | packages/core/src/config/schemas/multimodal.ts:175 | 7 |
 | `network` | packages/core/src/config/schema.ts:684 | 53 |
 | `node` | packages/core/src/config/schema.ts:1042 | 234 |

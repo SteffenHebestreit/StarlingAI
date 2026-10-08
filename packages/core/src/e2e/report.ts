@@ -10,7 +10,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { E2EService } from "./scenario.js";
 import type { ScenarioResult } from "./runner.js";
-import { buildChanges, describeProvenance, type E2EProvenance } from "./provenance.js";
+import { buildChanges, confounders, describeProvenance, type E2EProvenance } from "./provenance.js";
 import { compareSuite, compareTallies, type AttemptTally, type ScenarioChange, type SuiteChangeVerdict } from "./stats.js";
 
 export interface E2ERunMeta {
@@ -77,6 +77,8 @@ export interface BaselineComparison {
   suite: SuiteChangeVerdict;
   /** What differs between the two runs' builds; null when either report records no provenance. */
   buildChanges: string[] | null;
+  /** Why the verdicts may not be the code's: a run whose stack may not have run its checkout's code. */
+  confounded: string[];
 }
 
 export interface E2EReport {
@@ -246,6 +248,7 @@ export function compareWithBaseline(report: E2EReport, baseline: E2EReport, file
     missingScenarios,
     suite: compareSuite(pairs),
     buildChanges: buildChanges(baseline.meta?.provenance, report.meta.provenance),
+    confounded: confounders(baseline.meta?.provenance, report.meta.provenance),
   };
 }
 
@@ -344,6 +347,7 @@ export function renderMarkdown(report: E2EReport): string {
     lines.push("", `## Baseline: ${baseline.file}`, "");
     lines.push(`${baseline.regressions.length} regression(s), ${baseline.improvements.length} improvement(s), ${baseline.flaky.length} flaky, ${baseline.inconclusive.length} inconclusive, ${baseline.unchanged} unchanged, ${baseline.newScenarios.length} new, ${baseline.missingScenarios.length} not run now. A scenario counts as regressed or improved only when the 95 % interval of its pass-rate difference excludes zero.`);
     lines.push("", `- Suite: ${describeSuite(baseline.suite)}`, `- Builds: ${describeBuildChanges(baseline.buildChanges)}`);
+    if (baseline.confounded.length > 0) lines.push(`- **Confounded** — ${baseline.confounded.join("; ")}`);
     const listed = [...baseline.regressions, ...baseline.improvements, ...baseline.flaky, ...baseline.inconclusive];
     if (listed.length > 0) {
       lines.push("", "| Scenario | Baseline | Now | Δ pass rate (95 % CI) | Verdict |", "|---|---|---|---|---|");

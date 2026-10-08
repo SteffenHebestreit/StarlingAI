@@ -148,7 +148,8 @@ function baselineLine(baseline: BaselineComparison): string {
   };
   return `Baseline: ${baseline.regressions.length} regression(s)${ids(baseline.regressions)}, ${baseline.flaky.length} flaky${ids(baseline.flaky)}, `
     + `${baseline.inconclusive.length} inconclusive${ids(baseline.inconclusive)}, ${baseline.improvements.length} improvement(s)${ids(baseline.improvements)}; `
-    + `suite ${describeSuite(baseline.suite)}; builds: ${describeBuildChanges(baseline.buildChanges)}`;
+    + `suite ${describeSuite(baseline.suite)}; builds: ${describeBuildChanges(baseline.buildChanges)}`
+    + (baseline.confounded.length > 0 ? `; CONFOUNDED — ${baseline.confounded.join("; ")}` : "");
 }
 
 function identitiesOf(selected: readonly LoadedScenario[]): string[] {

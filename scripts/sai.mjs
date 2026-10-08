@@ -255,6 +255,9 @@ async function cmdStart() {
     ok("Clean slate: DB volumes, flat-file memory + audit log, and uploaded files removed (credentials preserved).");
   }
 
+  // The commit the gateway image is built from, for its labels (docker/gateway/Dockerfile).
+  stampBuildRevision();
+
   // Build images
   if (wantBuild) {
     hdr(`Building images${noCache ? " (no cache)" : ""}...`);
@@ -658,6 +661,27 @@ function ensureDockerDaemon() {
 function hasNvidiaGpu() {
   try { execSync("nvidia-smi -L", { stdio: "ignore" }); return true; }
   catch { return false; }
+}
+
+// HEAD and whether the tree has uncommitted changes, as SAI_BUILD_SHA / SAI_BUILD_DIRTY for the
+// compose build args that label the gateway image. The e2e harness compares the running image's
+// revision with the commit it tests: twice (2026-09-05, 2026-10-06) the stack ran an image older
+// than the code under test. Outside a git checkout both stay empty, and so do the labels.
+function stampBuildRevision() {
+  const git = (args) => {
+    try { return execSync(`git ${args}`, { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] }).trim(); }
+    catch { return null; }
+  };
+  const sha = git("rev-parse HEAD");
+  if (!sha || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(sha)) {
+    delete process.env.SAI_BUILD_SHA;
+    delete process.env.SAI_BUILD_DIRTY;
+    return;
+  }
+  const status = git("status --porcelain");
+  process.env.SAI_BUILD_SHA = sha;
+  // A status git could not produce is not a clean tree.
+  process.env.SAI_BUILD_DIRTY = status === "" ? "false" : "true";
 }
 
 function loadDotEnv() {

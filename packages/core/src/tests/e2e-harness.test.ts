@@ -1336,7 +1336,7 @@ describe("e2e CLI (in process, against the fake gateway)", () => {
     writeFileSync(join(cliDir, "suspect", "kb.jsonc"), JSON.stringify({ id: "suspect-kb", title: "Needs engram", group: "core", requires: ["engram"], steps: turn("hello kb") }));
     const provenance = {
       harness: { sha: "0123456789abcdef0123456789abcdef01234567", dirty: false, committedAt: "2026-10-08T12:00:00+02:00" },
-      gatewayImage: { id: `sha256:${"3b".repeat(32)}`, createdAt: "2026-10-07T21:09:32.557822715Z" },
+      gatewayImage: { id: `sha256:${"3b".repeat(32)}`, createdAt: "2026-10-07T21:09:32.557822715Z", revision: null, dirty: null },
       missing: [],
       warnings: ["the gateway image 3b3b3b3b3b3b was built 2026-10-07T21:09:32.557822715Z, before the harness's HEAD 0123456 was committed (2026-10-08T12:00:00+02:00): the stack may not run the code under test"],
     };
@@ -1352,6 +1352,29 @@ describe("e2e CLI (in process, against the fake gateway)", () => {
     expect(report.meta.provenance).toEqual(provenance);
     const markdown = readFileSync(join(cliDir, "suspect-out", reports.find((file) => file.endsWith(".md"))!), "utf8");
     expect(markdown).toContain(`> **Provenance** — ${provenance.warnings[0]}`);
+  });
+
+  it("warns, and labels the baseline comparison confounded, when the gateway image was built from another commit", async () => {
+    mkdirSync(join(cliDir, "confound"), { recursive: true });
+    writeFileSync(join(cliDir, "confound", "c.jsonc"), JSON.stringify({ id: "confound-c", title: "Confound C", group: "core", steps: [{ kind: "turn", message: "hello confound", expect: { reply: { includes: ["42"] } } }] }));
+    const first = await cli(["evaluate", "--scenarios", "confound", "--out", "confound-1"]);
+    expect(first.code).toBe(0);
+    const baselinePath = join(cliDir, "confound-1", readdirSync(join(cliDir, "confound-1")).find((file) => file.endsWith(".json"))!);
+
+    // The stack's gateway image names a commit other than this checkout's HEAD (the default
+    // provenance: real git, the image from the environment status).
+    const image = { id: `sha256:${"4c".repeat(32)}`, created: "2026-10-08T13:00:00Z", revision: "f".repeat(40), dirty: false };
+    const stale = await cli(["evaluate", "--scenarios", "confound", "--out", "confound-2", "--baseline", baselinePath], {
+      environment: async () => ({ json: { mailService: { running: false }, gateway: { running: true, image } } }),
+    });
+    expect(stale.err).toBe("");
+    expect(stale.code).toBe(0);
+    const warning = "the gateway image 4c4c4c4c4c4c was built from fffffff, but the harness runs [0-9a-f]{7}: the stack may not run the code under test";
+    expect(stale.out).toMatch(/^Build: harness [0-9a-f]{7}( \(dirty\))? · gateway image 4c4c4c4c4c4c from fffffff built 2026-10-08T13:00:00Z$/m);
+    expect(stale.out).toMatch(new RegExp(`^PROVENANCE: ${warning}$`, "m"));
+    expect(stale.out).toMatch(new RegExp(`^Baseline: .*; CONFOUNDED — this run: ${warning}$`, "m"));
+    const markdownFile = readdirSync(join(cliDir, "confound-2")).find((file) => file.endsWith(".md"))!;
+    expect(readFileSync(join(cliDir, "confound-2", markdownFile), "utf8")).toMatch(new RegExp(`^- \\*\\*Confounded\\*\\* — this run: ${warning}$`, "m"));
   });
 
   it("exits 2 on usage errors and unknown ids, 1 on invalid scenario files", async () => {

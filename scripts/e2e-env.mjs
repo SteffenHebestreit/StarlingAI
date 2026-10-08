@@ -55,6 +55,9 @@ const GATEWAY_DIST_FILE = "/app/packages/core/dist/tools/web.js";
 const GATEWAY_DIST_MARKER = "allowedPrivateHosts";
 const MAIL_DIST_FILE = "/app/packages/mail-service/dist/config.js";
 const MAIL_DIST_MARKER = "SAI_MAIL_SERVICE_ACCOUNTS_DIR";
+// The gateway image's build labels (docker/gateway/Dockerfile, filled in by `sai start`).
+const BUILD_REVISION_LABEL = "org.opencontainers.image.revision";
+const BUILD_DIRTY_LABEL = "starlingai.build.dirty";
 
 const [command = "status", ...flags] = process.argv.slice(2);
 const asJson = flags.includes("--json");
@@ -209,13 +212,27 @@ function distHasMarker(container, file, marker) {
   return r.ok && Number(r.out) > 0;
 }
 
-/** The image a container runs and when it was built: the e2e report records which build answered. */
+/**
+ * The image a container runs: its id, when it was built, and the commit `sai start` built it from
+ * (the labels docker/gateway/Dockerfile sets; null when the image carries none). The e2e report
+ * records which build answered.
+ */
 function imageOf(container) {
   if (!container) return null;
   const id = docker(["inspect", "--format", "{{.Image}}", container]);
   if (!id.ok || !id.out) return null;
-  const created = docker(["image", "inspect", "--format", "{{.Created}}", id.out]);
-  return { id: id.out, created: created.ok && created.out ? created.out : null };
+  const meta = docker(["image", "inspect", "--format", "{{json .Created}}\t{{json .Config.Labels}}", id.out]);
+  const [created, labels] = (meta.ok ? meta.out.split("\t") : []).map((part) => {
+    try { return JSON.parse(part); } catch { return null; }
+  });
+  const label = (key) => (labels && typeof labels === "object" && typeof labels[key] === "string" && labels[key] ? labels[key] : null);
+  const dirty = label(BUILD_DIRTY_LABEL);
+  return {
+    id: id.out,
+    created: typeof created === "string" && created ? created : null,
+    revision: label(BUILD_REVISION_LABEL),
+    dirty: dirty === "true" ? true : dirty === "false" ? false : null,
+  };
 }
 
 /** Accounts the mail-service shows the eval user ({ id, allowedUsers }). The token is expanded INSIDE the container. */

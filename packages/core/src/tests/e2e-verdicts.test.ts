@@ -14,6 +14,7 @@ import { compareSuite, compareTallies, signTestPValue } from "../e2e/stats.js";
 import {
   buildChanges,
   captureProvenance,
+  confounders,
   describeProvenance,
   gatewayImageFromStatus,
   provenanceWarnings,
@@ -337,15 +338,21 @@ describe("e2e provenance", () => {
   });
 
   it("reads the gateway image from the e2e environment status, and records why when it cannot", async () => {
-    const status = { gateway: { running: true, image: { id: `sha256:${"3b".repeat(32)}`, created: "2026-10-07T21:09:32.557822715Z" } } };
-    expect(gatewayImageFromStatus(status)).toEqual({ id: `sha256:${"3b".repeat(32)}`, createdAt: "2026-10-07T21:09:32.557822715Z" });
+    // An image built before `sai start` stamped labels: id and build time only.
+    const status = { gateway: { running: true, image: { id: `sha256:${"3b".repeat(32)}`, created: "2026-10-07T21:09:32.557822715Z", revision: null, dirty: null } } };
+    expect(gatewayImageFromStatus(status)).toEqual({ id: `sha256:${"3b".repeat(32)}`, createdAt: "2026-10-07T21:09:32.557822715Z", revision: null, dirty: null });
     expect(gatewayImageFromStatus({ gateway: { running: false, image: null } })).toBeNull();
     expect(gatewayImageFromStatus({ mailService: { running: false } })).toBeNull();
+    // The labels, as scripts/e2e-env.mjs reads them; anything but a commit id or a boolean is unknown.
+    const labelled = (revision: unknown, dirty: unknown) => gatewayImageFromStatus({ gateway: { image: { id: "sha256:aa", created: null, revision, dirty } } });
+    expect(labelled(SHA, true)).toEqual({ id: "sha256:aa", createdAt: null, revision: SHA, dirty: true });
+    expect(labelled("", false)).toMatchObject({ revision: null, dirty: false });
+    expect(labelled("0123456", "true")).toMatchObject({ revision: null, dirty: null });
 
     const full = await captureProvenance("/repo", async () => ({ json: status }), fakeGit(committed));
     expect(full).toEqual({
       harness: { sha: SHA, dirty: false, committedAt: "2026-10-08T12:00:00+02:00" },
-      gatewayImage: { id: `sha256:${"3b".repeat(32)}`, createdAt: "2026-10-07T21:09:32.557822715Z" },
+      gatewayImage: { id: `sha256:${"3b".repeat(32)}`, createdAt: "2026-10-07T21:09:32.557822715Z", revision: null, dirty: null },
       missing: [],
       // Built the evening before HEAD was committed.
       warnings: [`the gateway image ${"3b".repeat(6)} was built 2026-10-07T21:09:32.557822715Z, before the harness's HEAD 0123456 was committed (2026-10-08T12:00:00+02:00): the stack may not run the code under test`],
@@ -365,18 +372,40 @@ describe("e2e provenance", () => {
       .toEqual(["gateway image: the e2e environment status names none (no running gateway container of this checkout)"]);
   });
 
-  it("warns only when the image was built before HEAD was committed", () => {
+  it("without a revision label, warns only when the image was built before HEAD was committed", () => {
     const harness = { sha: SHA, dirty: false, committedAt: "2026-10-07T18:27:27+02:00" };
-    expect(provenanceWarnings(harness, { id: "sha256:aa", createdAt: "2026-10-07T21:09:32.557822715Z" })).toEqual([]);
-    expect(provenanceWarnings(harness, { id: "sha256:aa", createdAt: "2026-10-07T16:00:00Z" })).toHaveLength(1);
-    expect(provenanceWarnings(harness, { id: "sha256:aa", createdAt: null })).toEqual([]);
-    expect(provenanceWarnings(null, { id: "sha256:aa", createdAt: "2026-10-07T16:00:00Z" })).toEqual([]);
+    const unlabelled = (createdAt: string | null) => ({ id: "sha256:aa", createdAt, revision: null, dirty: null });
+    expect(provenanceWarnings(harness, unlabelled("2026-10-07T21:09:32.557822715Z"))).toEqual([]);
+    expect(provenanceWarnings(harness, unlabelled("2026-10-07T16:00:00Z"))).toHaveLength(1);
+    expect(provenanceWarnings(harness, unlabelled(null))).toEqual([]);
+    expect(provenanceWarnings(null, unlabelled("2026-10-07T16:00:00Z"))).toEqual([]);
+  });
+
+  it("compares an image that names its commit with HEAD, whatever its build time", () => {
+    const other = "fedcba9876543210fedcba9876543210fedcba98";
+    const clean = { sha: SHA, dirty: false, committedAt: "2026-10-08T12:00:00+02:00" };
+    const dirty = { ...clean, dirty: true };
+    // Built before HEAD's commit date, yet from HEAD: the label is exact, the time only a fallback.
+    const image = (revision: string, built: boolean | null, createdAt = "2026-10-07T21:09:32Z") => ({ id: `sha256:${"4c".repeat(32)}`, createdAt, revision, dirty: built });
+    expect(provenanceWarnings(clean, image(SHA, false))).toEqual([]);
+    expect(provenanceWarnings(dirty, image(SHA, true))).toEqual([]);
+    expect(provenanceWarnings(dirty, image(SHA, false))).toEqual([]);
+    // Built from another commit, though after HEAD was committed.
+    expect(provenanceWarnings(clean, image(other, false, "2026-10-09T08:00:00Z"))).toEqual([
+      `the gateway image ${"4c".repeat(6)} was built from fedcba9, but the harness runs 0123456: the stack may not run the code under test`,
+    ]);
+    // Built from HEAD plus changes the clean checkout no longer has.
+    expect(provenanceWarnings(clean, image(SHA, true))).toEqual([
+      `the gateway image ${"4c".repeat(6)} was built from 0123456 with uncommitted changes the checkout no longer has: the stack may not run the code under test`,
+    ]);
+    expect(describeProvenance({ harness: dirty, gatewayImage: image(SHA, true), missing: [], warnings: [] }))
+      .toBe(`harness 0123456 (dirty) · gateway image ${"4c".repeat(6)} from 0123456 (dirty) built 2026-10-07T21:09:32Z`);
   });
 
   it("lists what differs between two runs' builds, and renders it with the baseline", () => {
-    const at = (sha: string, dirty: boolean, image: string | null): E2EProvenance => ({
+    const at = (sha: string, dirty: boolean, image: string | null, revision: string | null = null): E2EProvenance => ({
       harness: { sha, dirty, committedAt: null },
-      gatewayImage: image ? { id: `sha256:${image}`, createdAt: null } : null,
+      gatewayImage: image ? { id: `sha256:${image}`, createdAt: null, revision, dirty: revision ? dirty : null } : null,
       missing: [],
       warnings: [],
     });
@@ -384,6 +413,10 @@ describe("e2e provenance", () => {
     expect(buildChanges(at(SHA, false, "a".repeat(64)), at(SHA, false, "a".repeat(64)))).toEqual([]);
     expect(buildChanges(at(SHA, false, "a".repeat(64)), at(other, true, "b".repeat(64)))).toEqual([
       `gateway image ${"a".repeat(12)} → ${"b".repeat(12)}`,
+      "harness 0123456 → fedcba9 (dirty)",
+    ]);
+    expect(buildChanges(at(SHA, false, "a".repeat(64), SHA), at(other, true, "b".repeat(64), other))).toEqual([
+      `gateway image ${"a".repeat(12)} from 0123456 → ${"b".repeat(12)} from fedcba9 (dirty)`,
       "harness 0123456 → fedcba9 (dirty)",
     ]);
     expect(buildChanges(at(SHA, true, null), at(SHA, true, "b".repeat(64)))).toEqual([
@@ -395,8 +428,28 @@ describe("e2e provenance", () => {
     const before = buildReport([ran("a", "P")], { ...META, provenance: at(SHA, false, "a".repeat(64)) });
     const now = buildReport([ran("a", "P")], { ...META, provenance: at(SHA, false, "b".repeat(64)) });
     now.baseline = compareWithBaseline(now, before, "before.json");
+    expect(now.baseline.confounded).toEqual([]);
     const markdown = renderMarkdown(now);
     expect(markdown).toContain(`- Build: harness 0123456 · gateway image ${"b".repeat(12)}\n`);
     expect(markdown).toContain(`- Builds: gateway image ${"a".repeat(12)} → ${"b".repeat(12)}`);
+    expect(markdown).not.toContain("Confounded");
+  });
+
+  it("labels a baseline comparison confounded when either run's stack may not have run its checkout's code", () => {
+    const stale = "the gateway image 4c4c4c4c4c4c was built from fedcba9, but the harness runs 0123456: the stack may not run the code under test";
+    const old = "the gateway image 3b3b3b3b3b3b was built 2026-10-07T16:00:00Z, before the harness's HEAD 0123456 was committed (2026-10-07T18:27:27+02:00): the stack may not run the code under test";
+    const at = (warnings: string[]): E2EProvenance => ({ harness: null, gatewayImage: null, missing: [], warnings });
+    expect(confounders(at([old]), at([stale]))).toEqual([`this run: ${stale}`, `the baseline: ${old}`]);
+    expect(confounders(at([]), at([]))).toEqual([]);
+    // A baseline from before provenance tells nothing either way.
+    expect(confounders(undefined, at([stale]))).toEqual([`this run: ${stale}`]);
+
+    const before = buildReport([ran("a", "P")], META);
+    const now = buildReport([ran("a", "P")], { ...META, provenance: at([stale]) });
+    now.baseline = compareWithBaseline(now, before, "before.json");
+    expect(now.baseline.confounded).toEqual([`this run: ${stale}`]);
+    const markdown = renderMarkdown(now);
+    expect(markdown).toContain(`> **Provenance** — ${stale}`);
+    expect(markdown).toContain(`- **Confounded** — this run: ${stale}`);
   });
 });
