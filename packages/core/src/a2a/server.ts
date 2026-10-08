@@ -127,9 +127,20 @@ async function handleJsonRpcRequest(req: IncomingMessage, res: ServerResponse): 
   try {
     let result: unknown;
     switch (rpc.method) {
-      case "tasks/send":
-        result = await handleTasksSend(rpc.params as A2ATasksSendParams, caller, authResult.user);
+      case "tasks/send": {
+        const params = rpc.params as A2ATasksSendParams;
+        // Under multi-user auth a sessionId must be a string. The body is parsed JSON, and a
+        // non-string one was used as the task's session id as it came and as its string inside the
+        // caller's namespace, two different values (found in review, 2026-10-09). With auth off the
+        // id is taken as it comes, as before; a null one is no id there and here.
+        const rawSessionId: unknown = params?.sessionId;
+        if (rawSessionId !== undefined && rawSessionId !== null && typeof rawSessionId !== "string" && getConfig().auth?.enabled === true) {
+          logAudit("a2a_request_failed", { method: rpc.method, caller, reason: "session_id_not_a_string" }, { severity: "warn" });
+          return respondError(res, id, A2A_ERROR.INVALID_PARAMS);
+        }
+        result = await handleTasksSend(params, caller, authResult.user);
         break;
+      }
       case "tasks/get": {
         const params = rpc.params as { id?: string };
         if (!params?.id) {

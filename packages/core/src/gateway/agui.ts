@@ -79,6 +79,21 @@ export async function handleAguiStream(
     return;
   }
 
+  // Under multi-user auth the id must be a string, checked before anything looks it up. The body is
+  // parsed JSON, and `["<alice's id>"]` passed every gate as a different value from the one it was
+  // used as: the session map, keyed by the value itself, held no session under the array, so the
+  // owner gate found none, the id-shape check read it as its string, and a session owned by Bob was
+  // created with the array as its id. Every id built from it as a string (a sub-agent run's root,
+  // the Redis keys of its facts and its record) was Alice's (found in review, 2026-10-09). A null
+  // id is no id, as before. With auth off the id is taken as it comes, as before.
+  const rawSessionId: unknown = body.sessionId;
+  if (rawSessionId !== undefined && rawSessionId !== null && typeof rawSessionId !== "string" && getConfig().auth?.enabled === true) {
+    log.warn({ caller: userId ?? "(none)", sessionIdType: Array.isArray(rawSessionId) ? "array" : typeof rawSessionId }, "AG-UI stream denied: sessionId is not a string");
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "sessionId must be a string" }));
+    return;
+  }
+
   // Get or create session — try Redis fallback for cross-instance routing.
   // Create it UNDER the requested id (so session-scoped documents uploaded with
   // that sessionId are in retrieval scope) and attribute it to the authenticated
@@ -124,13 +139,14 @@ export async function handleAguiStream(
     }
   }
 
-  // No session has the id, so the createSession below would adopt it. Under multi-user auth not an
-  // id in a namespace the system mints ids in: A2A, MCP, federation and nested runs have no session
-  // record there, and a session adopted under such an id shared that run's facts bucket, another
-  // account's included (see clientMayCreateSessionId). The opaque 404 of the gates above, so the
-  // reply says nothing about whose run that is.
+  // No session has the id, so the createSession below would adopt it. Under multi-user auth only an
+  // id with no colon: an id with one was taken apart as naming another session, so a session
+  // adopted under `a2a-in:<alice>:<id>` shared her A2A run's facts bucket, and one adopted under
+  // `<alice's id>:ephemeral` had sub-agent runs that resolved to her session (see
+  // clientMayCreateSessionId). The opaque 404 of the gates above, so the reply says nothing about
+  // whose run or session that is.
   if (!session && sessionId && !clientMayCreateSessionId(sessionId)) {
-    log.warn({ sessionId, caller: userId ?? "(none)" }, "AG-UI stream denied: session id in a reserved namespace");
+    log.warn({ sessionId, caller: userId ?? "(none)" }, "AG-UI stream denied: a session id a client may not start a session under");
     res.writeHead(404, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "Session not found" }));
     return;

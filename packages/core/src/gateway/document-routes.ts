@@ -11,15 +11,32 @@
  * document-leak fix. Legacy single-operator mode keeps the flat instance-wide view.
  */
 import type { Hono } from "hono";
-import { verifyToken, extractBearerToken, authenticatedUser } from "./auth.js";
+import { verifyToken, extractBearerToken, authenticatedUser, type AuthenticatedUser } from "./auth.js";
+import { callerMayUseSession } from "./session-route-access.js";
 import { getConfig } from "../config/loader.js";
+
+/**
+ * The session a request names, when its caller may act for it (callerMayUseSession, the rule of the
+ * /api/sessions routes), and "" (no session) when it may not.
+ *
+ * Every route took the session id from the query or the form as it came, and a session's documents
+ * are the ones whose source is that id's: a caller who knew another account's session id could
+ * list, download, mark outdated or delete that session's documents (found in review, 2026-10-09).
+ * Under multi-user auth such an id now counts as none, so that session's documents read as not
+ * found and nothing about the session shows. The dashboard sends the id of the chat it has open
+ * with some of these calls, and an id it still holds for a chat that is gone must not fail them.
+ * With auth off every caller may, as before.
+ */
+function usableSessionId(user: AuthenticatedUser | null, sessionId: string): string {
+  return sessionId && callerMayUseSession(user, sessionId) ? sessionId : "";
+}
 
 export function registerDocumentRoutes(app: Hono): void {
   app.get("/api/documents", async (c) => {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
     const user = await authenticatedUser(c.req.header("Authorization"));
-    const sessionId = c.req.query("sessionId") ?? "";
+    const sessionId = usableSessionId(user, c.req.query("sessionId") ?? "");
     try {
       const [{ engramListDocuments }, { listRegistry }, { parseScopeFromSource, callerManageableSources }] = await Promise.all([
         import("../retrieval/engram.js"),
@@ -34,12 +51,17 @@ export function registerDocumentRoutes(app: Hono): void {
       const withoutKbOnly = (docs ?? []).filter((d) => !(d.sources.length > 0 && d.sources.every((s) => s.startsWith("kb:"))));
       // Multi-user mode: never list another user's / another session's documents.
       // Legacy single-operator mode (auth disabled) keeps the flat instance-wide view.
-      const inScope = getConfig().auth.enabled
-        ? (() => {
-            const manageable = callerManageableSources({ userId: user?.username, sessionId });
-            return withoutKbOnly.filter((d) => d.sources.some((s) => manageable.has(s)));
-          })()
+      const manageable = getConfig().auth.enabled
+        ? callerManageableSources({ userId: user?.username, sessionId })
+        : null;
+      const inScope = manageable
+        ? withoutKbOnly.filter((d) => d.sources.some((s) => manageable.has(s)))
         : withoutKbOnly;
+      // And of a listed document, only the sources the caller may manage. A document is stored once
+      // and shared by every scope that holds it, and its entry listed every source: another
+      // account's `user:<name>` and `session:<id>`, so the account's session ids and the fact that
+      // it holds the same file (found in review, 2026-10-09).
+      const listedSources = (sources: string[]): string[] => (manageable ? sources.filter((s) => manageable.has(s)) : sources);
       const documents = inScope.map((d) => ({
         id: d.id,
         title: d.title ?? null,
@@ -49,7 +71,7 @@ export function registerDocumentRoutes(app: Hono): void {
         // engram's list endpoint does not expose the invalidation marker — the
         // registry stamp (set by POST /:id/invalidate below) is the UI's view of it.
         invalidated: registry.some((e) => e.documentId === d.id && e.invalidatedAt),
-        scopes: d.sources.map((src) => {
+        scopes: listedSources(d.sources).map((src) => {
           const reg = registry.find((e) => e.documentId === d.id && e.source === src);
           return {
             scope: parseScopeFromSource(src) ?? "unknown",
@@ -80,6 +102,10 @@ export function registerDocumentRoutes(app: Hono): void {
     const sessionId = (() => { const s = formData.get("sessionId"); return typeof s === "string" && /^[\w-]{1,64}$/.test(s) ? s : ""; })();
     if (scope === "session" && !sessionId) return c.json({ error: "sessionId is required for session scope" }, 400);
     if (scope === "user" && !user?.username) return c.json({ error: "user scope requires authentication" }, 400);
+    // The session an upload goes into is a write target: under multi-user auth only one the caller
+    // may act for, or the file landed in another account's session library, where that account's
+    // turns retrieve it. Refused with the session routes' opaque 404.
+    if (sessionId && !callerMayUseSession(user, sessionId)) return c.json({ error: "Session not found" }, 404);
 
     try {
       const { basename } = await import("node:path");
@@ -132,7 +158,7 @@ export function registerDocumentRoutes(app: Hono): void {
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
     const user = await authenticatedUser(c.req.header("Authorization"));
     const id = c.req.param("id");
-    const sessionId = c.req.query("sessionId") ?? "";
+    const sessionId = usableSessionId(user, c.req.query("sessionId") ?? "");
     try {
       const { invalidateDocument, callerManageableSources } = await import("../retrieval/document-rag.js");
       if (getConfig().auth.enabled) {
@@ -163,7 +189,7 @@ export function registerDocumentRoutes(app: Hono): void {
     const id = c.req.param("id");
     const scopeRaw = c.req.query("scope");
     const scope = scopeRaw && ["session", "user", "workspace"].includes(scopeRaw) ? scopeRaw as "session" | "user" | "workspace" : undefined;
-    const sessionId = c.req.query("sessionId") ?? "";
+    const sessionId = usableSessionId(user, c.req.query("sessionId") ?? "");
     const ctx = { sessionId, ...(user?.username ? { userId: user.username } : {}) };
     try {
       const { forgetDocument, callerManageableSources, resolveScopeSource, parseScopeFromSource } =
@@ -197,7 +223,7 @@ export function registerDocumentRoutes(app: Hono): void {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
     const user = await authenticatedUser(c.req.header("Authorization"));
-    const sessionId = c.req.query("sessionId") ?? "";
+    const sessionId = usableSessionId(user, c.req.query("sessionId") ?? "");
     const id = c.req.param("id");
     try {
       // Multi-user mode: don't stream another user's / another session's file bytes.

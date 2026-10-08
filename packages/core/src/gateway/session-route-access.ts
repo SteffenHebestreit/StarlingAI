@@ -1,6 +1,5 @@
 import { getConfig } from "../config/loader.js";
 import { getSessionRecord } from "../agent/session.js";
-import { isInternalSessionId } from "../agent/session-ids.js";
 import { userHasRole, type AuthenticatedUser } from "./auth.js";
 
 /**
@@ -26,19 +25,34 @@ export function callerMayUseSession(caller: AuthenticatedUser | null, sessionId:
   return session.userId === undefined || session.userId === caller?.username;
 }
 
+/** The ids a client may start a session under: letters, digits, `_` and `-`, at most 128 of them.
+ *  A UUID fits, and so does every id the system mints for a chat session (a UUID). */
+const CLIENT_SESSION_ID = /^[A-Za-z0-9_-]{1,128}$/;
+
 /**
  * Whether a client may start a new session under an id it chose (the AG-UI stream adopts the id a
  * request names when no session has it).
  *
- * Under multi-user auth, not an id in a namespace the system mints ids in (isInternalSessionId).
- * Runs there have no session record, so the id looked free, and a session created under it shared
- * the run's facts bucket: a turn's shared facts live under its session id, a sub-agent's under its
- * root's. A2A ids are predictable from the account's name (`a2a-in:<user segment>:<id>`), so one
- * account could name another's A2A run and read what it found (found in review, 2026-10-08). Any
- * other id stays the client's to choose, so clients that pre-generate a UUID keep working.
+ * Under multi-user auth, only an id of the CLIENT_SESSION_ID shape, which has no colon. A colon is
+ * how a session id names another session, and an id that does was taken apart as one:
+ *
+ * - The namespaces the system mints ids in (INTERNAL_SESSION_ID_PREFIXES) all end in one. Runs
+ *   there have no session record, so the id looked free, and a session created under it shared the
+ *   run's facts bucket. A2A ids are predictable from the account's name (`a2a-in:<user segment>:
+ *   <id>`), so one account could name another's A2A run and read what it found (found in review,
+ *   2026-10-08).
+ * - `<alice's session id>:ephemeral` looked like an id of the client's own, but a sub-agent run of
+ *   it is `sub:<alice's id>:ephemeral:<agent>:<stamp>`, and parentSessionOf reads `ephemeral` there
+ *   as the namespace of an ephemeral agent's name. The run resolved to Alice's session as its root,
+ *   and with it her shared facts, turn steering, plan and grants (found in review, 2026-10-09).
+ *
+ * A fixed character set closes both, where a list of forbidden prefixes closed only the first.
+ * Clients that pre-generate a UUID keep working. The id must be a string too: RegExp.test reads any
+ * value as its string, so `["<alice's id>"]` from a JSON body passed as Alice's id while every
+ * lookup keyed by the value itself missed her session (found in review, 2026-10-09).
  * With auth off there is one operator and nothing to keep apart.
  */
-export function clientMayCreateSessionId(sessionId: string): boolean {
+export function clientMayCreateSessionId(sessionId: unknown): boolean {
   if (getConfig().auth?.enabled !== true) return true;
-  return !isInternalSessionId(sessionId);
+  return typeof sessionId === "string" && CLIENT_SESSION_ID.test(sessionId);
 }

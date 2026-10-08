@@ -525,6 +525,7 @@ describe("AG-UI streaming", () => {
       const { handleAguiStream } = await import("../gateway/agui.js");
       const session = await import("../agent/session.js");
       const { safeUserSegment } = await import("../runtime/user-scope.js");
+      const { INTERNAL_SESSION_ID_PREFIXES } = await import("../agent/session-ids.js");
       const aliceRun = `a2a-in:${safeUserSegment("alice")}:ferry-plan`;
 
       for (const sessionId of [
@@ -532,6 +533,8 @@ describe("AG-UI streaming", () => {
         `sub:${aliceRun}:researcher:1790000000000`,
         `workflow:${aliceRun}:daily_brief:0b6e1f62-5d0c-4a7e-9a52-3c1f0f9d2b11`,
         "mcp:alice:0b6e1f62-5d0c-4a7e-9a52-3c1f0f9d2b11",
+        // Every namespace the system mints ids in, fed:, a2a-out:, eval: and job: among them.
+        ...INTERNAL_SESSION_ID_PREFIXES.map((prefix) => `${prefix}alice:0b6e1f62-5d0c-4a7e-9a52-3c1f0f9d2b11`),
       ]) {
         const res = new FakeResponse();
         await handleAguiStream(res as never, { sessionId, message: "what did she find?" }, { userId: "bob", role: "operator" });
@@ -549,6 +552,137 @@ describe("AG-UI streaming", () => {
       expect(session.getSessionRecord(ownId)?.userId).toBe("bob");
     } finally {
       vi.unmock("../config/loader.js");
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("under active auth, does not start a session under another session's id with an :ephemeral tail", async () => {
+    // Regression (review, 2026-10-09): `<alice's id>:ephemeral` is in no namespace the system mints
+    // ids in, so it was adopted. A sub-agent run of that session is
+    // `sub:<alice's id>:ephemeral:<agent>:<stamp>`, which parses back to alice's session as its root
+    // (`ephemeral` reads as an ephemeral agent's namespace), and her shared facts, turn steering,
+    // plan and grants were bob's runs' too. Only an id with no colon may be chosen now.
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agui-ephemeral-"));
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      gateway: { jwtSecret: "a".repeat(32), turnTimeoutMs: 30_000 },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+
+    const ran = vi.fn(async () => ({ response: "ok", toolCallsExecuted: 0, guardrailEvents: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 }, blocked: false }));
+    vi.doMock("../agent/runtime.js", () => ({ runTurn: ran }));
+    vi.doMock("../config/loader.js", async () => {
+      const actual = await vi.importActual<typeof import("../config/loader.js")>("../config/loader.js");
+      return {
+        ...actual,
+        getConfig: () => {
+          const cfg = actual.getConfig();
+          return { ...cfg, auth: { ...cfg.auth, enabled: true, provider: "builtin", users: [] } };
+        },
+      };
+    });
+
+    try {
+      const { handleAguiStream } = await import("../gateway/agui.js");
+      const session = await import("../agent/session.js");
+      const { rootSessionOf } = await import("../agent/session-ids.js");
+      const alice = session.createSession({ channel: "webchat", userId: "alice" });
+      const borrowed = `${alice.id}:ephemeral`;
+      // What made the id worth having: bob's sub-agent runs under it resolve to alice's session.
+      expect(rootSessionOf(`sub:${borrowed}:researcher:1790000000000`)).toBe(alice.id);
+
+      const res = new FakeResponse();
+      await handleAguiStream(res as never, { sessionId: borrowed, message: "what is she planning?" }, { userId: "bob", role: "operator" });
+      expect(res.statusCode).toBe(404);
+      expect(session.getSessionRecord(borrowed)).toBeUndefined();
+      expect(ran).not.toHaveBeenCalled();
+
+      // A plain UUID a client pre-generates is still bob's to start a session under.
+      const ownId = "9c4e7b21-3a6f-4d58-8e0b-1f2a3c4d5e6f";
+      const resOwn = new FakeResponse();
+      await handleAguiStream(resOwn as never, { sessionId: ownId, message: "hi" }, { userId: "bob", role: "operator" });
+      expect(resOwn.statusCode).toBe(200);
+      expect(ran).toHaveBeenCalledTimes(1);
+      expect(session.getSessionRecord(ownId)?.userId).toBe("bob");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("under active auth, refuses a sessionId that is not a string before looking it up", async () => {
+    // Regression (review, 2026-10-09): `["<alice's id>"]` missed every lookup keyed by the value
+    // itself (no session record, so no owner gate), passed the id-shape check as its string, and a
+    // session owned by bob was created with the array as its id. Its sub-agent runs' root, and the
+    // Redis keys built from the id, were alice's session.
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agui-type-"));
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      gateway: { jwtSecret: "a".repeat(32), turnTimeoutMs: 30_000 },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+
+    const ran = vi.fn(async () => ({ response: "ok", toolCallsExecuted: 0, guardrailEvents: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 }, blocked: false }));
+    vi.doMock("../agent/runtime.js", () => ({ runTurn: ran }));
+    vi.doMock("../config/loader.js", async () => {
+      const actual = await vi.importActual<typeof import("../config/loader.js")>("../config/loader.js");
+      return {
+        ...actual,
+        getConfig: () => {
+          const cfg = actual.getConfig();
+          return { ...cfg, auth: { ...cfg.auth, enabled: true, provider: "builtin", users: [] } };
+        },
+      };
+    });
+
+    try {
+      const { handleAguiStream } = await import("../gateway/agui.js");
+      const { clientMayCreateSessionId } = await import("../gateway/session-route-access.js");
+      const session = await import("../agent/session.js");
+      const alice = session.createSession({ channel: "webchat", userId: "alice" });
+      const before = session.getAllSessions().length;
+
+      for (const sessionId of [[alice.id], [`${alice.id}:ephemeral`], { toString: () => alice.id }, 42]) {
+        const res = new FakeResponse();
+        await handleAguiStream(res as never, { sessionId: sessionId as never, message: "what is she planning?" }, { userId: "bob", role: "operator" });
+        expect(res.statusCode, JSON.stringify(sessionId)).toBe(400);
+        expect(JSON.parse(res.chunks.join(""))).toEqual({ error: "sessionId must be a string" });
+      }
+      expect(ran).not.toHaveBeenCalled();
+      expect(session.getAllSessions()).toHaveLength(before);
+      // The id-shape check on its own refuses a non-string too.
+      expect(clientMayCreateSessionId([alice.id])).toBe(false);
+      expect(clientMayCreateSessionId(alice.id)).toBe(true);
+
+      // A null id is no id: a new session of bob's own, as before.
+      const resNull = new FakeResponse();
+      await handleAguiStream(resNull as never, { sessionId: null as never, message: "hi" }, { userId: "bob", role: "operator" });
+      expect(resNull.statusCode).toBe(200);
+      expect(ran).toHaveBeenCalledTimes(1);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("with auth off, takes a non-string sessionId as it comes, as before", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agui-type-off-"));
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      gateway: { jwtSecret: "a".repeat(32), turnTimeoutMs: 30_000 },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+
+    const ran = vi.fn(async () => ({ response: "ok", toolCallsExecuted: 0, guardrailEvents: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 }, blocked: false }));
+    vi.doMock("../agent/runtime.js", () => ({ runTurn: ran }));
+
+    try {
+      const { handleAguiStream } = await import("../gateway/agui.js");
+      const { clientMayCreateSessionId } = await import("../gateway/session-route-access.js");
+      const res = new FakeResponse();
+      await handleAguiStream(res as never, { sessionId: ["5f0c2a8e-7b1d-4c3e-9f6a-2d8b4e1c7a90"] as never, message: "hi" });
+      expect(res.statusCode).toBe(200);
+      expect(ran).toHaveBeenCalledTimes(1);
+      expect(clientMayCreateSessionId(["5f0c2a8e-7b1d-4c3e-9f6a-2d8b4e1c7a90"])).toBe(true);
+    } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
   });
@@ -571,10 +705,12 @@ describe("AG-UI streaming", () => {
 
     try {
       const { handleAguiStream } = await import("../gateway/agui.js");
-      const res = new FakeResponse();
-      await handleAguiStream(res as never, { sessionId: "a2a-in:ferry-plan", message: "hi" });
-      expect(res.statusCode).toBe(200);
-      expect(seenSessionId).toBe("a2a-in:ferry-plan");
+      for (const sessionId of ["a2a-in:ferry-plan", "5f0c2a8e-7b1d-4c3e-9f6a-2d8b4e1c7a90:ephemeral"]) {
+        const res = new FakeResponse();
+        await handleAguiStream(res as never, { sessionId, message: "hi" });
+        expect(res.statusCode, sessionId).toBe(200);
+        expect(seenSessionId).toBe(sessionId);
+      }
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

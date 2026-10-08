@@ -72,13 +72,13 @@ async function deployment(authEnabled: boolean, extra: Record<string, unknown> =
 }
 
 /** tasks/send to the researcher with `bearer`; returns the HTTP status and the JSON-RPC answer. */
-async function send(bearer: string): Promise<{ status: number | undefined; answer: { result?: unknown; error?: { code: number } } }> {
+async function send(bearer: string, extra: Record<string, unknown> = {}): Promise<{ status: number | undefined; answer: { result?: unknown; error?: { code: number } } }> {
   const { handleA2ARequest } = await import("../a2a/server.js");
   const body = JSON.stringify({
     jsonrpc: "2.0",
     id: 1,
     method: "tasks/send",
-    params: { agentId: "researcher", message: { role: "user", parts: [{ type: "text", text: "Remember that I prefer the early ferry." }] } },
+    params: { agentId: "researcher", message: { role: "user", parts: [{ type: "text", text: "Remember that I prefer the early ferry." }] }, ...extra },
   });
   const req = Object.assign(Readable.from([Buffer.from(body)]), {
     method: "POST",
@@ -170,5 +170,26 @@ describe("tasks/send and the workspace root a task runs in", () => {
     expect(status).toBe(200);
     const { getConfig } = await import("../config/loader.js");
     expect(runs).toEqual([{ userId: "alice", contextUserId: undefined, workspacePath: getConfig().workspacePath }]);
+  });
+});
+
+describe("tasks/send and a sessionId that is not a string", () => {
+  it("under multi-user auth, refuses it as invalid params and runs nothing", async () => {
+    await deployment(true);
+
+    const { status, answer } = await send(await tokenFor("bob"), { sessionId: ["ferry-plan"] });
+
+    expect(status).toBe(200);
+    expect(answer.error?.code).toBe(A2A_ERROR.INVALID_PARAMS.code);
+    expect(runs).toHaveLength(0);
+  });
+
+  it("with one operator, takes it as it comes, as before", async () => {
+    await deployment(false);
+
+    const { answer } = await send(await tokenFor("bob"), { sessionId: ["ferry-plan"] });
+
+    expect(answer.error).toBeUndefined();
+    expect(runs).toHaveLength(1);
   });
 });
