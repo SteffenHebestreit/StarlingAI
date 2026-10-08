@@ -81,7 +81,7 @@ Every public schema field, where it is declared, and how many production files r
 | `clientId` | packages/core/src/config/schema.ts:384 | 6 |
 | `clientSecret` | packages/core/src/config/schema.ts:386 | 4 |
 | `cloudFallback` | packages/core/src/config/schema.ts:113 | 3 |
-| `command` | packages/core/src/config/schema.ts:672 | 51 |
+| `command` | packages/core/src/config/schema.ts:672 | 53 |
 | `completes` | packages/core/src/config/schema.ts:888 | 14 |
 | `completionPer1m` | packages/core/src/config/schema.ts:511 | 1 |
 | `computerUse` | packages/core/src/config/schema.ts:1946 | 13 |
@@ -309,7 +309,7 @@ Every public schema field, where it is declared, and how many production files r
 | `name` | packages/core/src/config/schema.ts:1973 | 365 |
 | `negativePrompt` | packages/core/src/config/schemas/multimodal.ts:175 | 7 |
 | `network` | packages/core/src/config/schema.ts:684 | 53 |
-| `node` | packages/core/src/config/schema.ts:1042 | 233 |
+| `node` | packages/core/src/config/schema.ts:1042 | 234 |
 | `normalizeDelegationToEnglish` | packages/core/src/config/schemas/orchestration.ts:573 | 2 |
 | `notes` | packages/core/src/config/schema.ts:790 | 55 |
 | `oneLiner` | packages/core/src/config/schema.ts:899 | 3 |
@@ -491,7 +491,7 @@ Every public schema field, where it is declared, and how many production files r
 | `toolMode` | packages/core/src/config/schema.ts:271 | 6 |
 | `toolName` | packages/core/src/config/schemas/multimodal.ts:17 | 70 |
 | `toolRerankMinTools` | packages/core/src/config/schemas/orchestration.ts:651 | 2 |
-| `tools` | packages/core/src/config/schema.ts:921 | 221 |
+| `tools` | packages/core/src/config/schema.ts:921 | 222 |
 | `topK` | packages/core/src/config/schema.ts:169 | 7 |
 | `topLogprobs` | packages/core/src/config/schemas/decisions.ts:145 | 7 |
 | `topP` | packages/core/src/config/schema.ts:168 | 4 |
@@ -532,4 +532,4 @@ Every public schema field, where it is declared, and how many production files r
 | `windowMs` | packages/core/src/config/schema.ts:267 | 8 |
 | `workspaceAccess` | packages/core/src/config/schema.ts:940 | 5 |
 | `workspaceName` | packages/core/src/config/schemas/retrieval.ts:160 | 3 |
-| `workspacePath` | packages/core/src/config/schema.ts:2003 | 122 |
+| `workspacePath` | packages/core/src/config/schema.ts:2003 | 123 |

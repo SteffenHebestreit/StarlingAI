@@ -22,7 +22,11 @@
  *                     exemption is compiled); when the status cannot be read, the HTTP probe alone
  *   web-search        GET E2E_SEARXNG_URL/healthz when set; otherwise no route reports SearXNG,
  *                     so it is assumed up (marked "assumed" in the report)
- *   sandbox           no route reports it: assumed up (marked "assumed")
+ *   sandbox           GET /api/health/subsystems  check "sandbox" = ok and measured: the gateway's
+ *                     canary ran a docker run through shell_exec and got both what it printed on
+ *                     stdout and on stderr back. A failed run or lost output is down, and so is a
+ *                     verdict the canary has not measured ("not configured"; "not checked yet", as
+ *                     it starts no container while a turn runs) or a gateway too old to report it
  *
  * Answers are cached for ttlMs, and the gateway routes they share are fetched once per window.
  * Response bodies are read for the fields above only — /api/mcp/servers and the computer-use
@@ -213,14 +217,18 @@ export class ServiceProber {
     return response.status;
   }
 
-  private async subsystem(name: string): Promise<{ status: string; detail: string } | string> {
+  private async subsystem(name: string): Promise<{ status: string; detail: string; checkedAt?: string } | string> {
     const result = await this.gatewayGet("/api/health/subsystems");
     // 503 means "something is unavailable" and still carries the checks.
     if (result.status !== 200 && result.status !== 503) return `GET /api/health/subsystems answered HTTP ${result.status}`;
     const checks = isRecord(result.json) && Array.isArray(result.json["checks"]) ? result.json["checks"] : [];
     const check = checks.find((entry): entry is Record<string, unknown> => isRecord(entry) && entry["name"] === name);
     if (!check) return `GET /api/health/subsystems reports no "${name}" check`;
-    return { status: String(check["status"] ?? "unknown"), detail: typeof check["detail"] === "string" ? check["detail"] : "" };
+    return {
+      status: String(check["status"] ?? "unknown"),
+      detail: typeof check["detail"] === "string" ? check["detail"] : "",
+      ...(typeof check["checkedAt"] === "string" ? { checkedAt: check["checkedAt"] } : {}),
+    };
   }
 
   private async subsystemState(service: E2EService, name: string, requireConfigured = false): Promise<ServiceState> {
@@ -329,8 +337,15 @@ export class ServiceProber {
           return { service, up: false, detail: `SearXNG unreachable at ${url} (${describeError(err)})` };
         }
       }
-      case "sandbox":
-        return { service, up: true, assumed: true, detail: "no probe (no gateway route reports the sandbox)" };
+      case "sandbox": {
+        // This was assumed up, and from July to 2026-10-07 the docker-socket proxy dropped every
+        // sandbox command's output: the sandbox scenario was graded on whatever the coder made of
+        // "(no output)". Only a verdict the canary measured lets a scenario that needs it run.
+        const check = await this.subsystem("sandbox");
+        if (typeof check === "string") return { service, up: false, detail: check };
+        const up = check.status === "ok" && check.checkedAt !== undefined;
+        return { service, up, detail: `sandbox: ${check.status}${check.detail ? ` — ${check.detail}` : ""}` };
+      }
       default: {
         const unknown: never = service;
         return { service: unknown, up: false, detail: "unknown service" };
