@@ -505,6 +505,11 @@ function frameToolResult(
     return truncatePlainText(resultText, PLAN_REPORT_MAX_CHARS);
   }
 
+  // A fan-out one of whose runs masked figures (its summed record, tools/sub-agent.ts) gets the
+  // partial delegation's note instead of "Relay ALL … numbers": its evidence holds figures that
+  // nothing computed, and the record above it says so.
+  const fanOutMasked = unbackedFiguresMasked(readExecutionRecord(metadata?.["specialistExecutions"]));
+
   if (toolName === "parallel_delegate") {
     const succeeded = Number(metadata?.["succeeded"] ?? 0);
     const failed = Number(metadata?.["failed"] ?? 0);
@@ -512,7 +517,9 @@ function frameToolResult(
     const evidence = truncatePlainText(stripPresentationFormatting(resultText), 1600);
     return [
       `Parallel delegation completed. Successful tasks: ${succeeded}/${taskCount}. Failed tasks: ${failed}.`,
-      "IMPORTANT: Relay ALL specific details from the evidence below (names, numbers, values, statuses) in your answer. Do NOT replace them with guessed details.",
+      fanOutMasked
+        ? UNBACKED_FIGURES_NOTE
+        : "IMPORTANT: Relay ALL specific details from the evidence below (names, numbers, values, statuses) in your answer. Do NOT replace them with guessed details.",
       `Observed evidence:\n${evidence || "No usable delegated result returned."}`,
     ].join("\n");
   }
@@ -527,7 +534,9 @@ function frameToolResult(
       : `Task graph completed. Nodes completed: ${completed}. Failed: ${failed}. Blocked: ${blocked}.`;
     return [
       taskGraphStatus,
-      "IMPORTANT: Relay ALL specific details from the evidence below (task states, selected agents, values) in your answer. Do NOT replace them with guessed details.",
+      fanOutMasked
+        ? UNBACKED_FIGURES_NOTE
+        : "IMPORTANT: Relay ALL specific details from the evidence below (task states, selected agents, values) in your answer. Do NOT replace them with guessed details.",
       `Observed evidence:\n${evidence || "No usable task-graph result returned."}`,
     ].join("\n");
   }

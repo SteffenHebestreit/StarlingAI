@@ -81,5 +81,9 @@ describe("what a record says", () => {
     expect(executionRecordLine({ attempted: 3, failed: 1, succeededWithOutput: 1 })).toBe(
       "3 code executions: 1 completed with output, 1 failed, 1 printed nothing",
     );
+    // A coordinator's own entry among the runs that masked figures: the code was its specialists'.
+    expect(executionRecordLine({ attempted: 0, failed: 0, succeededWithOutput: 0, unobservedFigures: 2 })).toBe(
+      "ran no code itself; 2 figures in the run's account appear in no tool result and are masked as [not observed]",
+    );
   });
 });

@@ -155,6 +155,24 @@ describe("record_plan folds the plan round", () => {
     expect(collapsed).not.toContain("PLAIN-END");
   });
 
+  it("hands the turn the record of the code its steps' runs executed, as execute_plan does", async () => {
+    // The fold is the default planned path: in review it carried no record either.
+    const masked = { attempted: 1, failed: 1, succeededWithOutput: 0, unobservedFigures: 2 };
+    respond = () => ({
+      success: true,
+      output: "[researcher]: [not observed] Kanäle",
+      metadata: { agentName: "researcher", delegationOutcome: "partial", specialistExecutions: masked },
+    });
+
+    const result = await record();
+
+    expect(result.metadata?.["specialistExecutions"]).toEqual({ ...masked, attempted: 2, failed: 2, unobservedFigures: 4 });
+    expect(result.metadata?.["maskedRuns"]).toEqual([
+      { agentName: "researcher", executions: masked, artifacts: [] },
+      { agentName: "researcher", executions: masked, artifacts: [] },
+    ]);
+  });
+
   it("does not fold when the response also issued another call — that call may already be the first step", async () => {
     const result = await record(PLAN, { responseToolCalls: ["record_plan", "delegate_to_agent"] });
     expect(dispatched).toEqual([]);

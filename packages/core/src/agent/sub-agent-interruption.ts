@@ -215,6 +215,10 @@ export function buildInterruptedSubAgentOutput(params: {
    *  has no outputPath — so without these a cut-off build reported nothing at all
    *  even though a valid skeleton and several finished subsystems were on disk. */
   mutatedFileLines?: string[];
+  /** Applied to each recovered evidence line the output carries: the snippets of tool results
+   *  and the artifacts' text previews. Never to the runtime's own lines (the files on disk and
+   *  their byte counts, the artifact count): the run masks its own claims here. */
+  maskEvidence?: (line: string) => string;
 }): string {
   const swarmSummary = formatSwarmProgressForInterruption(params.swarmState);
   const progressLines: string[] = [];
@@ -267,7 +271,8 @@ export function buildInterruptedSubAgentOutput(params: {
       const head = params.primaryDelegationBody.content.slice(0, 200).replace(/\s+/g, " ").trim();
       return !snippet.includes(head.slice(0, 80));
     })
-    .slice(-snippetCap);
+    .slice(-snippetCap)
+    .map((snippet) => (params.maskEvidence ? params.maskEvidence(snippet) : snippet));
   if (evidenceSnippets.length > 0) {
     progressLines.push("Recovered evidence snippets from completed tools:");
     for (const snippet of evidenceSnippets) {

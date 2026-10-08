@@ -37,21 +37,28 @@ import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type ToolContext, ty
 import { isToolAllowed, requiresSandbox } from "../guardrails/tool-tiers.js";
 import {
   addArgumentFigureKeys,
-  addFigureKeys,
+  addReceivedFigureKeys,
+  argumentTexts,
   countUnobservedFigures,
+  maskFiguresByKey,
   maskUnobservedFigures,
+  namedFileSpans,
+  numericDateForms,
+  scriptInvocation,
   verbatimQuotedCodeSpans,
+  verbatimQuotedCommandSpans,
   type FigureCheckSpan,
 } from "./figure-provenance.js";
 import {
   addExecutionRecord,
   capOutcomeForUnbackedFigures,
+  createFanOutExecutionRecords,
   executionCountPhrase,
   executionShortfallPhrase,
   noExecutionCompleted,
-  readExecutionRecord,
   unbackedFiguresMasked,
   type DelegatedExecutionRecord,
+  type MaskedDelegatedRun,
 } from "./delegated-run-record.js";
 import { scanOutput } from "../guardrails/output.js";
 import { neutralizeToolResultFraming } from "../guardrails/input.js";
@@ -653,9 +660,11 @@ function isDelegationToolName(name: string): boolean {
 }
 
 /** A tool that runs another agent and hands back the record of the code that run executed
- *  (specialistExecutions, agent/delegated-run-record.ts). */
+ *  (specialistExecutions, agent/delegated-run-record.ts). run_workflow's scenes and jobs run
+ *  agents too, and now hand their records back; mission_coordinator and web_task_coordinator
+ *  hold it. */
 function receivesExecutionRecords(name: string): boolean {
-  return isDelegationToolName(name) || name === "create_ephemeral_agent";
+  return isDelegationToolName(name) || name === "create_ephemeral_agent" || name === "run_workflow";
 }
 
 // How many `sub:` hops deep this session is. The orchestrator is depth 0; its
@@ -1429,7 +1438,15 @@ export const NEVER_REPLAYED_TOOLS = new Set<string>(["generate_image"]);
 // arguments of theirs that identify the fact and its source instead of stating anything. See the
 // figure check at their call site.
 const SHARED_FACT_TOOLS = new Set<string>(["share_finding", "share_evidence"]);
-const SHARED_FACT_IDENTITY_FIELDS = new Set<string>(["key", "sourceUrl"]);
+// supportingKeys names other facts; share_evidence keeps it only while it is an array.
+const SHARED_FACT_IDENTITY_FIELDS = new Set<string>(["key", "sourceUrl", "supportingKeys"]);
+// Scores the tools take only as numbers (share_evidence refuses anything else): a rating of the
+// finding from 0 to 1, never a figure the run states. "0.85" reads as the figure 85. Only a rating
+// is: share_finding stores any number it is given there, and in review "accuracy_score: 8393"
+// reached the store unmasked and uncounted (see isSharedFactRating).
+const SHARED_FACT_SCORE_FIELDS = new Set<string>(["accuracyScore", "trustworthinessScore", "corroborationScore"]);
+const isSharedFactRating = (value: unknown): boolean =>
+  typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
 
 /**
  * Structural completeness check for a written text artifact, used by the
@@ -2599,6 +2616,10 @@ export interface SubAgentRunResult {
   /** Present only when the run (or a run it delegated to) executed code or masked unobserved
    *  figures; see DelegatedExecutionRecord. */
   executions?: DelegatedExecutionRecord;
+  /** Present only when the run delegated and a run of it masked figures: each such run with its own
+   *  name and files (the delegated ones as they came back, and this run when its own account did),
+   *  so its delegation can tell the turn which run that was. See MaskedDelegatedRun. */
+  maskedRuns?: MaskedDelegatedRun[];
   /** QPR-004: the turn's quality scorecard when the transport surfaces one
    *  (gateway-routed eval runs capture the turn_scorecard audit event). */
   qualityScorecard?: import("./turn-scorecard.js").TurnQualityScorecard;
@@ -3186,7 +3207,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           ?? agentCfg.maxIterations ?? DEFAULT_MAX_ITERATIONS);
 
     // Build system prompt
-    const today = new Date().toLocaleDateString("en-US", {
+    const todayDate = new Date();
+    const today = todayDate.toLocaleDateString("en-US", {
       weekday: "long", year: "numeric", month: "long", day: "numeric",
     });
     const flowGuidance = formatFlowMemoryGuidance(opts.workspacePath, sanitizedTask, {
@@ -3748,6 +3770,16 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // "None of your 1 code execution has completed with output yet" and lost the instruction to
     // keep everything it had gathered. The outcome cap and the reported record keep the sum.
     const ownExecutionRecord: DelegatedExecutionRecord = { attempted: 0, failed: 0, succeededWithOutput: 0 };
+    // EACH RUN THAT MASKED FIGURES, BY NAME. The records a coordinator adds to its own are a sum, and
+    // its artifacts hold every file its specialists wrote. In review an orchestrator delegated to a
+    // coordinator whose parallel_delegate ran a coder (broken sandbox, figures masked) and a writer
+    // that finished generated/report.html; the turn then named both files as the coordinator's,
+    // written but not run successfully, and the finished report never as a deliverable. So the runs
+    // its delegations name are kept apart (createFanOutExecutionRecords), and so are the files this
+    // run recorded itself.
+    const delegatedRuns = createFanOutExecutionRecords();
+    let delegatedToAnotherAgent = false;
+    const ownArtifacts = new Set<Record<string, unknown>>();
     // Only a run that can execute code, or receive the record of a run that did, is checked; a
     // researcher holds neither and pays nothing. A coordinator restates what its specialists
     // returned: in review, build_lead (delegate_to_agent only) answered "8392 … 1255204276" over a
@@ -3756,48 +3788,56 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // An agent without an allow-list holds every registered tool, so the wire list stands in.
     const tracksFigures = (effectiveToolNames ?? tools.map((tool) => tool.name))
       .some((name) => requiresSandbox(name) || receivesExecutionRecords(name));
-    // Keys of every figure the run RECEIVED or EXECUTED: its system prompt, every user, tool and
-    // system message, its per-iteration nudges, and the arguments of its sandbox calls. Never its
-    // own prose, the files it wrote, or what it shared: those are the claims being checked.
+    // Keys of every figure the run RECEIVED: its system prompt, every user, tool and system
+    // message, and its per-iteration nudges. Never its own prose, the files it wrote, what it
+    // shared or the commands it sent to the sandbox: those are the claims being checked.
     const observedFigureKeys = new Set<string>();
-    if (tracksFigures) addFigureKeys(observedFigureKeys, systemPrompt);
+    if (tracksFigures) {
+      addReceivedFigureKeys(observedFigureKeys, systemPrompt);
+      // The prompt's "Today's date" in the numeric forms an answer writes it in.
+      addReceivedFigureKeys(observedFigureKeys, numericDateForms(todayDate));
+    }
     // A RUN'S OWN CLAIM HANDED BACK TO IT IS STILL ITS OWN CLAIM. Keys of the figures the run put
-    // into the arguments of its own calls before any input had contained them: the files it wrote,
-    // what it shared, the task it delegated. In review, a coder whose sandbox was broken wrote its
-    // "result" into results.md from its head, read the file back, and the read counted as the
-    // figure's source, so its answer went unmasked and the run reported success. A grep over the
-    // file, a git diff, the echo of share_finding, the shared-findings refresh, read_shared_facts and
-    // a specialist repeating a delegated task's figure hand the claim back the same way. So no tool
-    // result or system message adds one of these keys; the user's own messages, the system prompt
-    // and the runtime's nudges still do. The same session-00b3675d rule keeps a read-back of the
-    // run's own file out of the shared facts (see the auto-share below).
+    // into the arguments of its own calls before any input had contained them: the files it
+    // wrote, what it shared, the task it delegated, the commands it ran. In review, a coder whose
+    // sandbox was broken wrote its "result" into results.md from its head, read the file back, and
+    // the read counted as the figure's source, so its answer went unmasked and the run reported
+    // success. A grep over the file, a git diff, the echo of share_finding, the shared-findings
+    // refresh, read_shared_facts and a specialist repeating a delegated task's figure hand the
+    // claim back the same way. So no tool result or system message adds one of these keys; the
+    // user's own messages, the system prompt and the runtime's nudges still do. The same
+    // session-00b3675d rule keeps a read-back of the run's own file out of the shared facts (see
+    // the auto-share below).
     const ownClaimFigureKeys = new Set<string>();
     // How far into `history` the set has read. The trim digests, drops and clamps history in place,
     // so the set is filled BEFORE each trim; rebuilt from history when the answer is written, it
-    // would miss a figure the run read early and the trim has since removed.
+    // would miss a figure the run read early and the trim has since removed. The run's own
+    // messages add nothing: their prose and their calls are what it claims.
     let absorbedHistoryLength = 0;
     const absorbNewHistory = (): void => {
       if (!tracksFigures) return;
       for (; absorbedHistoryLength < history.length; absorbedHistoryLength++) {
         const message = history[absorbedHistoryLength]!;
-        if (message.role !== "assistant") {
-          const content = typeof message.content === "string" ? message.content : "";
-          addFigureKeys(observedFigureKeys, content, message.role === "user" ? undefined : ownClaimFigureKeys);
-          continue;
-        }
-        for (const call of message.tool_calls ?? []) {
-          if (requiresSandbox(call.function.name)) addFigureKeys(observedFigureKeys, call.function.arguments);
-        }
+        if (message.role === "assistant") continue;
+        const content = typeof message.content === "string" ? message.content : "";
+        addReceivedFigureKeys(observedFigureKeys, content, message.role === "user" ? undefined : ownClaimFigureKeys);
       }
     };
     /**
-     * The figures a call's arguments introduce. A sandbox call's arguments are what the run
-     * executed, read above as received. A read (IDEMPOTENT_TOOLS) asks for something and claims
-     * nothing: a figure in a path, pattern or query is confirmed by an input that contains it.
-     * Read when the call is made, against what the run had received by then.
+     * The figures a call's arguments introduce. A read (IDEMPOTENT_TOOLS) asks for something and
+     * claims nothing: a figure in a path, pattern or query is confirmed by an input that contains
+     * it. Read when the call is made, against what the run had received by then.
+     *
+     * A sandbox call's arguments are claims like any other's. They were read as received, as what
+     * the run executed, and in review that laundered the broken-sandbox run's figures twice: a
+     * shell_exec `cat > results.md <<'X'` heredoc holding "8393" and "7597648268" exited 0 and
+     * printed nothing, and git_commit's message "primes: 8393 Primzahlen, Summe 7597648268" is the
+     * model's prose, not a program; either way the answer stating them went out unmasked as a
+     * success, while the same text through write_file was masked. A command the run quotes whole
+     * keeps its figures (see the quoted-code check below).
      */
     const recordOwnClaims = (toolName: string, args: unknown): void => {
-      if (!tracksFigures || requiresSandbox(toolName) || IDEMPOTENT_TOOLS.has(toolName)) return;
+      if (!tracksFigures || IDEMPOTENT_TOOLS.has(toolName)) return;
       const claimed = new Set<string>();
       addArgumentFigureKeys(claimed, args);
       for (const key of claimed) {
@@ -3814,8 +3854,23 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // that quote through too. The texts are the run's own arguments to write_file and edit_file, per
     // file, and never count as received, so a figure its prose states is checked as before.
     const writtenFileText = new Map<string, string>();
-    // The arguments of the sandbox calls that ran (their result reports programOutputChars).
+    // The arguments of the sandbox calls that ran (their result reports programOutputChars), value
+    // by value. Read from the call's JSON, a script named right after a line break of the command
+    // (`node \` and `primes.js` on the next line, a shell line continuation) was glued to the
+    // escape's "n", never matched, and the honest quote of the script it ran came back masked.
     const ranCallArguments: string[] = [];
+    // And their commands, as the model wrote them. A command is a claim of the run like any other
+    // argument (recordOwnClaims), and an honest report quotes what it ran: "`ls /usr/bin/ | head
+    // -50` gab nichts aus" is not a figure the run made up. So the check also reads past a quote
+    // of a WHOLE command that ran, inline or fenced. Only a whole one: a fence repeating the lines
+    // of a heredoc the command wrote would hand that file's figures back. A git_* call never
+    // reports programOutputChars, so a commit message is never quotable.
+    const ranCommands: string[] = [];
+    // And the scripts they ran by path (run_script), as path and arguments: such a call has no
+    // command, so "`primes.js 200001`" quoting what ran came back with its argument masked, and the
+    // honest report was flagged as one that made a figure up. Quotable as they are or behind the
+    // program that runs them (verbatimQuotedCommandSpans).
+    const ranScriptInvocations: string[] = [];
     const noteWrittenText = (toolName: string, args: Record<string, unknown>, writtenPath: unknown): void => {
       const path = normalizeArtifactPath(args["path"]) ?? normalizeArtifactPath(writtenPath);
       if (!path) return;
@@ -3844,10 +3899,21 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         return false;
       });
     };
-    const quotedCodeSpans = (text: string): FigureCheckSpan[] => (writtenFileText.size === 0 ? [] : verbatimQuotedCodeSpans(
-      text,
-      [...writtenFileText].filter(([path]) => ranByTheRun(path)).map(([, content]) => content),
-    ));
+    const quotedCodeSpans = (text: string): FigureCheckSpan[] => [
+      ...(writtenFileText.size === 0 ? [] : verbatimQuotedCodeSpans(
+        text,
+        [...writtenFileText].filter(([path]) => ranByTheRun(path)).map(([, content]) => content),
+      )),
+      ...verbatimQuotedCommandSpans(text, ranCommands, ranScriptInvocations),
+    ];
+    // The places a text names a file the run wrote, by its path or its base name. The path the run
+    // chose stays its claim (recordOwnClaims): the write's own "File written: results-8393.txt"
+    // must not vouch for "8393 Primzahlen". Only the name itself is read past.
+    const writtenFileNameSpans = (text: string): FigureCheckSpan[] => {
+      const paths = [...writtenFileText.keys(), ...mutatedWorkspacePaths, ...pathsWrittenThisRun];
+      if (paths.length === 0) return [];
+      return namedFileSpans(text, paths.flatMap((path) => [path, path.split("/").pop() ?? ""]));
+    };
     // Measured, never acted on: how many figures a run with at least one productive execution
     // stated without an input containing them (the partial-output case the mask does not cover).
     let shadowUnobservedFigures: number | undefined;
@@ -3860,7 +3926,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     const quarantineUnobservedFigures = (text: string, site: string): string => {
       if (!tracksFigures) return text;
       absorbNewHistory();
-      const quoted = quotedCodeSpans(text);
+      const quoted = [...quotedCodeSpans(text), ...writtenFileNameSpans(text)];
       if (noExecutionCompleted(executionRecord)) {
         const { text: maskedText, masked } = maskUnobservedFigures(text, observedFigureKeys, quoted);
         if (masked > 0) {
@@ -3878,6 +3944,61 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       }
       if (executionRecord.attempted > 0) shadowUnobservedFigures = countUnobservedFigures(text, observedFigureKeys, quoted);
       return text;
+    };
+    /**
+     * WHAT THE RUN WROTE ITSELF, HANDED BACK BY A TOOL, IS NOT EVIDENCE IN THE RUNTIME'S OWN
+     * CHANNELS EITHER. The keys of the run's own claims that no input of it contained. In review,
+     * with a broken sandbox, the coder wrote "8393" and "7597648268" into results.md from its head
+     * and its execution failed. Its answer was masked, but a grep over the file was auto-shared as
+     * a fact under a tool-provenance key, which a coordinator then restated unmasked as a success;
+     * and when the model answered nothing, the scaffold below carried both figures to the parent as
+     * "Recovered evidence snippets", from a read-back or from the write's own text preview.
+     * `exceptRanFiles` leaves out the figures of files the run wrote and ran, the code constants
+     * the quoted-code check above reads past too (with the same caveat: a `cat` of a file counts).
+     */
+    const unreceivedOwnClaims = (exceptRanFiles: boolean): Set<string> => {
+      absorbNewHistory();
+      const ranFileKeys = new Set<string>();
+      if (exceptRanFiles) {
+        for (const [path, content] of writtenFileText) if (ranByTheRun(path)) addArgumentFigureKeys(ranFileKeys, content);
+      }
+      return new Set([...ownClaimFigureKeys].filter((key) => !observedFigureKeys.has(key) && !ranFileKeys.has(key)));
+    };
+    // What the last scaffold built masked: a later one replaces it as the run's account.
+    let scaffoldUnobservedFigures = 0;
+    /**
+     * The interrupted-run scaffold (buildInterruptedSubAgentOutput), with its evidence lines masked
+     * for the run's own claims while none of its executions has completed with output, and the
+     * masked figures counted in its record, so the parent's frame and the turn's directive say so.
+     * The runtime's own lines (files on disk, byte counts) are never touched.
+     */
+    const buildScaffold = (params: Parameters<typeof buildInterruptedSubAgentOutput>[0]): string => {
+      if (!tracksFigures || !noExecutionCompleted(executionRecord)) return buildInterruptedSubAgentOutput(params);
+      const unreceived = unreceivedOwnClaims(true);
+      let masked = 0;
+      const output = buildInterruptedSubAgentOutput({
+        ...params,
+        maskEvidence: (line) => {
+          const result = maskFiguresByKey(line, unreceived, writtenFileNameSpans(line));
+          masked += result.masked;
+          return result.text;
+        },
+      });
+      const total = (executionRecord.unobservedFigures ?? 0) - scaffoldUnobservedFigures + masked;
+      scaffoldUnobservedFigures = masked;
+      if (total > 0) executionRecord.unobservedFigures = total;
+      else delete executionRecord.unobservedFigures;
+      if (masked > 0) {
+        logAudit("guardrail_flagged", {
+          type: "sub_agent_unobserved_figures_masked",
+          agentName: opts.agentName,
+          site: "interrupted_scaffold",
+          masked,
+          attempted: executionRecord.attempted,
+          failed: executionRecord.failed,
+        }, { sessionId: subSessionId, severity: "warn" });
+      }
+      return output;
     };
     // Workspace-relative paths this run successfully wrote or edited, in call order.
     // Feeds describeMutatedWorkspaceFiles on the interrupted paths so a cut-off staged
@@ -4181,8 +4302,29 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // the loop brake did, and what code the run executed.
     const executionsToReport = (): DelegatedExecutionRecord | undefined =>
       (executionRecord.attempted > 0 || unbackedFiguresMasked(executionRecord) ? { ...executionRecord } : undefined);
+    // A run that delegated hands back each run that masked figures (see delegatedRuns): those its
+    // delegations named, and itself, with only the files it recorded itself, when figures of its own
+    // account were masked beyond its specialists'. A run that delegated nothing is named by its own
+    // delegation, with its files, as before.
+    const maskedRunsToReport = (): MaskedDelegatedRun[] | undefined => {
+      if (!delegatedToAnotherAgent) return undefined;
+      const delegated = delegatedRuns.metadata();
+      const runs = [...(delegated.maskedRuns ?? [])];
+      const ownMasked = (executionRecord.unobservedFigures ?? 0) - (delegated.specialistExecutions?.unobservedFigures ?? 0);
+      if (ownMasked > 0) {
+        runs.push({
+          agentName: opts.agentName,
+          executions: { ...ownExecutionRecord, unobservedFigures: ownMasked },
+          artifacts: artifacts
+            .filter((artifact) => ownArtifacts.has(artifact))
+            .map((artifact) => refreshWorkspaceArtifactSnapshot(artifact, opts.workspacePath)),
+        });
+      }
+      return runs.length > 0 ? runs : undefined;
+    };
     const withArtifacts = (result: { output: string; stats: SubAgentExecutionStats }): SubAgentRunResult => {
       const executions = executionsToReport();
+      const maskedRuns = maskedRunsToReport();
       return {
         ...result,
         ...(artifacts.length > 0
@@ -4192,6 +4334,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         ...(loopEnforced ? { loopEnforced: { ...loopEnforced } } : {}),
         ...(wardenStop ? { wardenStop: { ...wardenStop } } : {}),
         ...(executions ? { executions } : {}),
+        ...(maskedRuns ? { maskedRuns } : {}),
       };
     };
 
@@ -4407,7 +4550,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     const forcedAnswerMessages = (instruction: string): LLMMessage[] => {
       // The instruction is a system message the run receives, like a per-iteration nudge: a figure
       // it states (the rescue's count of tool calls) is not one the answer made up.
-      if (tracksFigures) addFigureKeys(observedFigureKeys, instruction);
+      if (tracksFigures) addReceivedFigureKeys(observedFigureKeys, instruction);
       return composeSubAgentMessages(systemPrompt, history, [instruction]);
     };
     const completeWithoutTools = async (
@@ -4498,7 +4641,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         return { result: rawResult, forcedOutcome: null };
       }
 
-      const recovered = buildInterruptedSubAgentOutput({
+      const recovered = buildScaffold({
         agentName: opts.agentName,
         reason: "produced no final response after substantive work.",
         swarmState: opts.swarmState,
@@ -4536,7 +4679,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         return { result: rawResult, forcedOutcome: null };
       }
 
-      const recovered = buildInterruptedSubAgentOutput({
+      const recovered = buildScaffold({
         agentName: opts.agentName,
         reason: "produced an incomplete synthesis after substantive work.",
         swarmState: toolContext.swarmState,
@@ -4593,7 +4736,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // 12,000 characters of them, where the snapshot it started with held 12 or 2,400. A
       // teammate's figure that reached it only here was masked as made up (review of E2E
       // 2026-10-07). What the run shared itself is in them too, and stays its own claim.
-      if (tracksFigures) addFigureKeys(observedFigureKeys, curated, ownClaimFigureKeys);
+      if (tracksFigures) addReceivedFigureKeys(observedFigureKeys, curated, ownClaimFigureKeys);
       return buildFactsFirstSynthesisMessages(`${opts.task}${userWordsBlock}`, curated);
     };
     /** Run a forced-synthesis completion, preferring the streaming accumulator so
@@ -4783,7 +4926,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         if (result === "Sub-agent produced no final response.") {
           return null;
         }
-        // The model's answer only: a recovered scaffold is the runtime's own account of the run.
+        // The model's answer only: a recovered scaffold is the runtime's own account of the run,
+        // whose evidence lines buildScaffold masked as it built them.
         if (!recovered.forcedOutcome && !truncationRecovered.forcedOutcome) {
           result = quarantineUnobservedFigures(result, "grace_synthesis");
         }
@@ -5514,7 +5658,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
               ? "progress supervisor wound the run down after no forward progress"
               : `timeout (${turnTimeoutMs}ms) reached after current operation finished`,
         });
-        const output = buildInterruptedSubAgentOutput({
+        const output = buildScaffold({
           agentName: opts.agentName,
           reason: windDownReason,
           swarmState: toolContext.swarmState,
@@ -5551,7 +5695,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           timeoutMs: turnTimeoutMs,
           error: "cancelled",
         });
-        const output = buildInterruptedSubAgentOutput({
+        const output = buildScaffold({
           agentName: opts.agentName,
           reason: "was cancelled",
           swarmState: toolContext.swarmState,
@@ -5772,7 +5916,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // absorbNewHistory); the nudges count too, since the model reads them as context.
       if (tracksFigures) {
         absorbNewHistory();
-        addFigureKeys(observedFigureKeys, nudgeMessage);
+        addReceivedFigureKeys(observedFigureKeys, nudgeMessage);
       }
       const trimmed = trimSubAgentHistory(history, {
         systemPromptChars: systemPrompt.length + nudgeMessage.length,
@@ -5960,7 +6104,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             timeoutMs: turnTimeoutMs,
             error: "cancelled",
           });
-          const output = buildInterruptedSubAgentOutput({
+          const output = buildScaffold({
             agentName: opts.agentName,
             reason: "was cancelled",
             swarmState: toolContext.swarmState,
@@ -6032,7 +6176,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             timeoutMs: turnTimeoutMs,
             error: `timeout (${turnTimeoutMs}ms) aborted the in-flight completion`,
           });
-          const output = buildInterruptedSubAgentOutput({
+          const output = buildScaffold({
             agentName: opts.agentName,
             reason: `timed out after ${turnTimeoutMs}ms while a completion was still generating`,
             swarmState: toolContext.swarmState,
@@ -6086,7 +6230,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             timeoutMs: turnTimeoutMs,
             error: String(err).slice(0, 200),
           });
-          const output = buildInterruptedSubAgentOutput({
+          const output = buildScaffold({
             agentName: opts.agentName,
             reason: "timed out while finalizing the answer after substantive work",
             swarmState: toolContext.swarmState,
@@ -6304,7 +6448,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           timeoutMs: turnTimeoutMs,
           error: `timeout (${turnTimeoutMs}ms) reached before starting another tool run`,
         });
-        const output = buildInterruptedSubAgentOutput({
+        const output = buildScaffold({
           agentName: opts.agentName,
           reason: `timed out after ${turnTimeoutMs}ms before starting another tool run`,
           swarmState: toolContext.swarmState,
@@ -6438,7 +6582,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         const truncationRecovered = recoverHallucinatedTruncationAfterSubstantiveWork(result);
         result = truncationRecovered.result;
         // E2E 2026-10-07 ended here: "8.393" and "7.597.648.268" after seven sandbox runs that failed
-        // or printed nothing. A recovered scaffold is the runtime's own account and is left alone.
+        // or printed nothing. A recovered scaffold is the runtime's own account, whose evidence lines
+        // buildScaffold masked as it built them.
         if (!recovered.forcedOutcome && !truncationRecovered.forcedOutcome) {
           result = quarantineUnobservedFigures(result, "final_answer");
         }
@@ -7168,14 +7313,28 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         // publisher and dates with the value (formatSharedFindingValue), and in review a figure
         // in `notes` reached the store and the FACT lines while `value` and `claim` were masked.
         // The key names the finding and the URL its source; neither is a figure the run states.
+        // A value need not be a string: the tools store String(value) (tools/memory.ts), and in
+        // review `value: 8393` (a JSON number, which the runtime's kwargs repair also produces)
+        // and `value: [8393, 7597648268]` reached the store as "8393" and "8393,7597648268"
+        // while the same figures as strings were masked. So a number or an array is checked as
+        // the text the tool will store, and a field nothing was masked in keeps its type.
         let executedArgs = tc.arguments;
         if (SHARED_FACT_TOOLS.has(tc.name) && tracksFigures && noExecutionCompleted(executionRecord)) {
           absorbNewHistory();
           const maskedArgs: Record<string, unknown> = { ...tc.arguments };
           let maskedInShare = 0;
           for (const [field, value] of Object.entries(maskedArgs)) {
-            if (typeof value !== "string" || SHARED_FACT_IDENTITY_FIELDS.has(field)) continue;
-            const { text, masked } = maskUnobservedFigures(value, observedFigureKeys);
+            if (SHARED_FACT_IDENTITY_FIELDS.has(field)) continue;
+            // Any other score is checked as the text the tool stores; masked, it is text, which
+            // share_finding drops and share_evidence refuses.
+            if (SHARED_FACT_SCORE_FIELDS.has(field) && isSharedFactRating(value)) continue;
+            // An object stores as "[object Object]" and states no figure.
+            const stored = typeof value === "string"
+              ? value
+              : (typeof value === "number" || Array.isArray(value) ? String(value) : undefined);
+            if (stored === undefined) continue;
+            const { text, masked } = maskUnobservedFigures(stored, observedFigureKeys);
+            if (masked === 0) continue;
             maskedArgs[field] = text;
             maskedInShare += masked;
           }
@@ -7205,7 +7364,13 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
               if (!result.success) record.failed += 1;
               else if (printed > 0) record.succeededWithOutput += 1;
             }
-            if (tracksFigures) ranCallArguments.push(JSON.stringify(tc.arguments ?? {}));
+            if (tracksFigures) {
+              ranCallArguments.push(...argumentTexts(tc.arguments));
+              const command = tc.arguments?.["command"];
+              if (typeof command === "string") ranCommands.push(command);
+              const invocation = scriptInvocation(tc.arguments);
+              if (invocation) ranScriptInvocations.push(invocation);
+            }
           }
         }
         if (tracksFigures && result.success && (tc.name === "write_file" || tc.name === "edit_file")) {
@@ -7263,7 +7428,9 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         toolFailures.push(...readToolFailures(result.metadata?.["specialistToolFailures"]));
         // And what they executed: a coordinator whose specialist masked figures did not succeed either.
         if (receivesExecutionRecords(tc.name)) {
-          addExecutionRecord(executionRecord, readExecutionRecord(result.metadata?.["specialistExecutions"]));
+          delegatedToAnotherAgent = true;
+          const delegatedAgent = tc.arguments?.["agentName"];
+          addExecutionRecord(executionRecord, delegatedRuns.add(result.metadata, typeof delegatedAgent === "string" ? delegatedAgent : undefined));
         }
         let resultContent = result.success
           ? result.output
@@ -7558,7 +7725,22 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
               // The read-back of this run's own write is kept out of shared facts (above)
               // but still reaches recentEvidenceSnippets: that is the run's own working
               // memory, where re-reading what it wrote is exactly the point.
-              const share = readsBackOwnOutput ? null : autoShareUsefulFinding({
+              // So is any other result that hands back figures the run wrote itself and no
+              // input of it held, while none of its executions has completed with output: in
+              // review a grep over the coder's head-written results.md was shared as
+              // auto_coder_grep_files_*, and its coordinator restated the figures as a success.
+              // Checked by figure, not by tool, so a grep, a git diff or a search counts alike.
+              const handsBackOwnClaims = !readsBackOwnOutput && tracksFigures && noExecutionCompleted(executionRecord)
+                && maskFiguresByKey(usefulTrimmed, unreceivedOwnClaims(false), writtenFileNameSpans(usefulTrimmed)).masked > 0;
+              if (handsBackOwnClaims) {
+                logAudit("sub_agent_tool_call", {
+                  agentName: opts.agentName,
+                  tool: tc.name,
+                  phase: "shared_finding_skipped",
+                  reason: "hands_back_own_claims",
+                }, { sessionId: subSessionId, severity: "info" });
+              }
+              const share = readsBackOwnOutput || handsBackOwnClaims ? null : autoShareUsefulFinding({
                 sessionId: subSessionId,
                 agentName: opts.agentName,
                 toolName: tc.name,
@@ -7648,10 +7830,14 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           }
         }
 
+        const recordedBefore = artifacts.length;
         recordArtifacts(result.metadata, {
           sourceAgent: opts.agentName,
           sourceTool: tc.name,
         });
+        if (!receivesExecutionRecords(tc.name)) {
+          for (const artifact of artifacts.slice(recordedBefore)) ownArtifacts.add(artifact);
+        }
 
         // Staged-build salvage bookkeeping. edit_file's metadata carries no
         // outputPath/dataUrl/externalUrl, so recordArtifacts ignores it entirely — a
@@ -8556,7 +8742,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           artifacts,
         })
       : recoveredEvidenceSnippets.length > 0
-      ? buildInterruptedSubAgentOutput({
+      ? buildScaffold({
           agentName: opts.agentName,
           reason: `reached the maximum number of tool-call iterations (${maxIterations}). Partial result may be incomplete.`,
           swarmState: toolContext.swarmState,

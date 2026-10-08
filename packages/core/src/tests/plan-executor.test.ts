@@ -752,3 +752,150 @@ describe("execute_plan dispatches each step to the tool that runs that kind", ()
     expect(result.error).toMatch(/record_plan/);
   });
 });
+
+/**
+ * A STEP WHOSE FIGURES WERE MADE UP (E2E 2026-10-07 class). The coder's sandbox failed, it stated
+ * figures anyway, and they came back masked with its record (specialistExecutions). In review the
+ * plan recorded that step `done`, handed its masked text to the next step as the result it
+ * depended on, said every step had run, and carried no record, so the turn scored itself complete.
+ */
+describe("execute_plan and the code its steps' runs executed", () => {
+  const MASKED = { attempted: 1, failed: 1, succeededWithOutput: 0, unobservedFigures: 2 };
+  const PRIMES = { filename: "primes.js", outputPath: "generated/primes.js", sourceTool: "write_file" };
+  const coder = (executions: Record<string, unknown>, output: string): ToolResult => ({
+    success: true,
+    output: `[coder]: ${output}`,
+    metadata: {
+      agentName: "coder",
+      delegationOutcome: executions["unobservedFigures"] ? "partial" : "success",
+      terminalState: "completed",
+      specialistExecutions: executions,
+      artifacts: [PRIMES],
+    },
+  });
+  const COUNT_THEN_EXPLAIN = basePlan([
+    { id: "s1", description: "count the primes with a script", kind: "delegate", agent: "coder" },
+    { id: "s2", description: "explain the count", kind: "delegate", agent: "content_writer", dependsOn: ["s1"] },
+  ]);
+
+  beforeEach(() => {
+    calls.length = 0;
+  });
+  afterEach(() => { vi.clearAllMocks(); });
+
+  it("a step whose run masked figures fails, nothing builds on it, and its record goes up with its name and files", async () => {
+    respond = (name, args) => (name === "delegate_to_agent" && args["agentName"] === "coder"
+      ? coder(MASKED, "Es gibt [not observed] Primzahlen, ihre Summe ist [not observed].")
+      : { success: true, output: "explained" });
+    await persistTurnPlan(SESSION, COUNT_THEN_EXPLAIN);
+
+    const result = await run();
+
+    // The dependent step never received the masked text.
+    expect(calls.map((c) => c.args["agentName"])).toEqual(["coder"]);
+    expect(result.metadata?.["failed"]).toBe(1);
+    expect(result.output).toContain("its run stated figures no tool returned (masked as [not observed]), so they were not computed");
+    expect(result.output).not.toContain("Every step has run");
+    expect(result.metadata?.["specialistExecutions"]).toEqual(MASKED);
+    expect(result.metadata?.["maskedRuns"]).toEqual([{ agentName: "coder", executions: MASKED, artifacts: [PRIMES] }]);
+    // Its file still goes up, to be named as written but not run successfully.
+    expect(result.metadata?.["artifacts"]).toEqual([PRIMES]);
+    // And the turn is told the plan's failure is that step's masked figures and nothing else.
+    expect(result.metadata?.["maskedSteps"]).toEqual(["s1"]);
+  });
+
+  it("a step that really failed is not counted among the masked ones (agent/runtime.ts failureIsOnlyMaskedRuns)", async () => {
+    respond = (name, args) => (args["agentName"] === "coder"
+      ? coder(MASKED, "Es gibt [not observed] Primzahlen.")
+      : { success: false, output: "", error: "researcher: every web_search call failed", metadata: { agentName: "researcher", delegationSucceeded: false } });
+    await persistTurnPlan(SESSION, basePlan([
+      { id: "s1", description: "research the sieve's history", kind: "delegate", agent: "researcher" },
+      { id: "s2", description: "count the primes with a script", kind: "delegate", agent: "coder" },
+    ]));
+
+    const result = await run();
+
+    expect(result.metadata?.["failed"]).toBe(2);
+    expect(result.metadata?.["maskedSteps"]).toEqual(["s2"]);
+  });
+
+  it("a workflow step stopped by masked figures and nothing else counts among them; one stopped otherwise does not", async () => {
+    const blockedWorkflow = (byMaskedFigures: boolean): ToolResult => ({
+      success: false,
+      output: "Workflow prime_packet [job] blocked.",
+      error: "Workflow prime_packet [job] blocked.",
+      metadata: {
+        workflowName: "prime_packet",
+        workflowType: "job",
+        blocked: true,
+        ...(byMaskedFigures ? { blockedByMaskedFigures: true } : {}),
+        specialistExecutions: MASKED,
+        maskedRuns: [{ agentName: "coder", executions: MASKED, artifacts: [PRIMES] }],
+      },
+    });
+    const plan = basePlan([{ id: "s1", description: "count and explain the primes", kind: "reuse", workflow: "prime_packet" }]);
+
+    respond = () => blockedWorkflow(true);
+    await persistTurnPlan(SESSION, plan);
+    expect((await run()).metadata?.["maskedSteps"]).toEqual(["s1"]);
+
+    respond = () => blockedWorkflow(false);
+    await persistTurnPlan(SESSION, plan);
+    const result = await run();
+    expect(result.metadata?.["failed"]).toBe(1);
+    expect(result.metadata).not.toHaveProperty("maskedSteps");
+  });
+
+  it("a step that is itself a fan-out hands its masked runs up as they are, each with its own files", async () => {
+    // A run_workflow (or any fan-out) step carries every run's files and names no agent of its own.
+    // Collapsed into one entry under the step, the workflow's finished report would be named as the
+    // masked coder's unrun output, which is what the entries exist to prevent.
+    const REPORT = { filename: "report.html", outputPath: "generated/report.html", sourceTool: "write_file" };
+    respond = (name) => (name === "run_workflow"
+      ? {
+        success: true,
+        output: "Workflow prime_report [scene] completed.\n\nDer Bericht ist fertig; es gibt [not observed] Primzahlen.",
+        metadata: {
+          workflowName: "prime_report",
+          workflowType: "scene",
+          artifacts: [PRIMES, REPORT],
+          specialistExecutions: MASKED,
+          maskedRuns: [{ agentName: "coder", executions: MASKED, artifacts: [PRIMES] }],
+        },
+      }
+      : { success: true, output: "explained" });
+    await persistTurnPlan(SESSION, basePlan([
+      { id: "s1", description: "count the primes and report", kind: "reuse", workflow: "prime_report" },
+    ]));
+
+    const result = await run();
+
+    expect(result.metadata?.["maskedRuns"]).toEqual([{ agentName: "coder", executions: MASKED, artifacts: [PRIMES] }]);
+    expect(result.metadata?.["artifacts"]).toEqual([PRIMES, REPORT]);
+  });
+
+  it("control: a step whose script printed is done, carried on, and its record summed", async () => {
+    respond = (name, args) => (name === "delegate_to_agent" && args["agentName"] === "coder"
+      ? coder({ attempted: 1, failed: 0, succeededWithOutput: 1 }, "Es gibt 8392 Primzahlen.")
+      : { success: true, output: "explained" });
+    await persistTurnPlan(SESSION, COUNT_THEN_EXPLAIN);
+
+    const result = await run();
+
+    expect(calls.map((c) => c.args["agentName"])).toEqual(["coder", "content_writer"]);
+    expect(String(calls[1]?.args["task"])).toContain("Es gibt 8392 Primzahlen.");
+    expect(result.output).toContain("Every step has run");
+    expect(result.metadata?.["specialistExecutions"]).toEqual({ attempted: 1, failed: 0, succeededWithOutput: 1 });
+    expect(result.metadata?.["maskedRuns"]).toBeUndefined();
+  });
+
+  it("control: a plan whose steps ran no code hands back no record", async () => {
+    respond = () => ({ success: true, output: "ok", metadata: { agentName: "content_writer" } });
+    await persistTurnPlan(SESSION, COUNT_THEN_EXPLAIN);
+
+    const result = await run();
+
+    expect(result.metadata).not.toHaveProperty("specialistExecutions");
+    expect(result.metadata).not.toHaveProperty("maskedRuns");
+  });
+});

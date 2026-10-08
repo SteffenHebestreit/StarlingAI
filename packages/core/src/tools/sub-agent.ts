@@ -7,7 +7,7 @@
 
 import { registerTool, getAllTools, searchToolsByEmbedding, executeTool, type SwarmState, type SwarmTaskAttempt, type SwarmTaskState, type ToolContext, type ToolResult } from "./registry.js";
 import { runSubAgent, runSubAgentWithStats, type SubAgentLoopEnforced, type SubAgentToolFailure, type SubAgentWardenStop } from "../agent/sub-agent.js";
-import { capOutcomeForUnbackedFigures, readExecutionRecord, type DelegatedExecutionRecord } from "../agent/delegated-run-record.js";
+import { capOutcomeForUnbackedFigures, createFanOutExecutionRecords, readExecutionRecord, readMaskedRuns, type DelegatedExecutionRecord, type MaskedDelegatedRun } from "../agent/delegated-run-record.js";
 import { buildPriorLoopNote } from "../agent/delegation-loop-notes.js";
 import { runAsWriteSibling, SiblingWriteGroup } from "../agent/sibling-write-ownership.js";
 import { collectArtifactRecords } from "../agent/artifact-metadata.js";
@@ -1213,6 +1213,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       loopEnforced?: SubAgentLoopEnforced;
       wardenStop?: SubAgentWardenStop;
       executions?: DelegatedExecutionRecord;
+      maskedRuns?: MaskedDelegatedRun[];
     }
     | undefined;
   /** Routing metadata for agents that were auto-selected by resolveAgentRouting. */
@@ -2233,6 +2234,9 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       // The code the run executed and the figures it masked (agent/delegated-run-record.ts),
       // passed up as specialistExecutions.
       let runExecutions: DelegatedExecutionRecord | undefined;
+      // And each run under it that masked figures, by name, when the run delegated (a coordinator):
+      // passed up as maskedRuns, so the turn names that run and its files only.
+      let runMaskedRuns: MaskedDelegatedRun[] = [];
 
       if (typeof runSubAgentWithStats === "function") {
         const maybeResult = await runSubAgentWithStats(subAgentArgs);
@@ -2252,6 +2256,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
             .filter((failure) => (failure.agent ?? candidate) === candidate && !failure.declinedByUser)
             .map((failure) => failure.tool);
           runExecutions = readExecutionRecord(maybeResult.executions) ?? undefined;
+          runMaskedRuns = readMaskedRuns(maybeResult.maskedRuns);
           runLoopEnforced = maybeResult.loopEnforced;
           runWardenStop = maybeResult.wardenStop;
           if (runLoopEnforced || runWardenStop) {
@@ -2412,6 +2417,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
             ...(runLoopEnforced ? { loopEnforced: runLoopEnforced } : {}),
             ...(runWardenStop ? { wardenStop: runWardenStop } : {}),
             ...(runExecutions ? { executions: runExecutions } : {}),
+            ...(runMaskedRuns.length > 0 ? { maskedRuns: runMaskedRuns } : {}),
           };
         }
         publishSwarmState(ctx);
@@ -2554,6 +2560,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           ...(runWardenStop ? { wardenStop: runWardenStop } : {}),
           // What the run executed: read by the frame, the relay and the turn's scorecard.
           ...(runExecutions ? { specialistExecutions: runExecutions } : {}),
+          ...(runMaskedRuns.length > 0 ? { maskedRuns: runMaskedRuns } : {}),
           ...(routingInfo && { routingReason: { confidence: routingInfo.confidence, matchedTerms: routingInfo.matchedTerms, score: routingInfo.score } }),
         },
       };
@@ -2668,6 +2675,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         ...(bestPartialResult.loopEnforced ? { loopEnforced: bestPartialResult.loopEnforced } : {}),
         ...(bestPartialResult.wardenStop ? { wardenStop: bestPartialResult.wardenStop } : {}),
         ...(bestPartialResult.executions ? { specialistExecutions: bestPartialResult.executions } : {}),
+        ...(bestPartialResult.maskedRuns ? { maskedRuns: bestPartialResult.maskedRuns } : {}),
         ...(bestPartialResult.routingInfo
           ? {
             routingReason: {
@@ -3016,6 +3024,8 @@ registerTool({
     const graphArtifacts: Record<string, unknown>[] = [];
     // And every node's failed tool calls, from failed nodes as well as completed ones.
     const graphToolFailures: unknown[] = [];
+    // And the code each node's run executed (see parallel_delegate).
+    const graphExecutions = createFanOutExecutionRecords();
     // Who ran each node this run started, from the node's own result: the agent it is from and the
     // agents it attempted, read as a delegation's result is. The swarm state cannot say it: the
     // turn's is seeded with the previous turn's tasks, attempts included, and a node whose id
@@ -3223,6 +3233,7 @@ registerTool({
       nodeRuns[node.id] = delegationAgentsOf(result.metadata);
       const nodeToolFailures = result.metadata?.["specialistToolFailures"];
       if (Array.isArray(nodeToolFailures)) graphToolFailures.push(...nodeToolFailures);
+      graphExecutions.add(result.metadata, node.agentName);
 
       if (result.success) {
         completed.add(node.id);
@@ -3300,6 +3311,7 @@ registerTool({
         swarmState,
         ...(graphArtifacts.length > 0 ? { artifacts: graphArtifacts } : {}),
         ...(graphToolFailures.length > 0 ? { specialistToolFailures: graphToolFailures } : {}),
+        ...graphExecutions.metadata(),
       },
     };
   },
@@ -4415,7 +4427,11 @@ registerTool({
     const aggregatedArtifacts: Record<string, unknown>[] = [];
     // Each slice's failed tool calls, failed slices included; every entry names its agent.
     const aggregatedToolFailures: unknown[] = [];
-    for (const result of results) {
+    // And the code each slice's run executed, so the coordinator's own figure check and the turn's
+    // read the record a single delegate_to_agent hands back (agent/delegated-run-record.ts).
+    const sliceExecutions = createFanOutExecutionRecords();
+    for (const [index, result] of results.entries()) {
+      sliceExecutions.add(result.metadata, dispatchTasks[index]?.agentName);
       const arts = result.metadata?.["artifacts"];
       if (Array.isArray(arts)) {
         for (const artifact of arts) {
@@ -4463,6 +4479,7 @@ registerTool({
         ...(disagreementMarker ? { subAgentDisagreement: true } : {}),
         ...(aggregatedArtifacts.length > 0 ? { artifacts: aggregatedArtifacts } : {}),
         ...(aggregatedToolFailures.length > 0 ? { specialistToolFailures: aggregatedToolFailures } : {}),
+        ...sliceExecutions.metadata(),
         ...(duplicatesRemoved > 0 ? { requestedTaskCount: runnableTasks.length, duplicatesRemoved } : {}),
       },
     };

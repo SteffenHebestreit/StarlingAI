@@ -178,10 +178,11 @@ const promptOf = (callIndex: number): string =>
 
 const tempDirs: string[] = [];
 
-/** A turn whose model delegates each of `delegations` in turn, then answers HONEST_ANSWER. */
+/** A turn whose model delegates each of `delegations` in turn, then answers HONEST_ANSWER. A
+ *  delegation naming `tool` calls that tool with `args` instead (execute_plan, for one). */
 async function runTurnWith(
   orchestration: Record<string, unknown>,
-  delegations: Array<{ id: string; agentName: string; task: string }>,
+  delegations: Array<{ id: string; agentName: string; task: string; tool?: string; args?: Record<string, unknown> }>,
 ) {
   const configDir = mkdtempSync(join(tmpdir(), "sai-figure-turn-"));
   const workspacePath = mkdtempSync(join(tmpdir(), "sai-figure-turn-ws-"));
@@ -196,6 +197,8 @@ async function runTurnWith(
   writeFileSync(join(workspacePath, "generated", "report.html"), REPORT_HTML, "utf8");
   process.env["SAI_CONFIG_PATH"] = join(configDir, "starlingai.json");
   vi.resetModules();
+  // The plan tools register on import, as register-builtins does in the gateway.
+  await import("../tools/turn-plan-tool.js");
   const [{ AgentSession }, { runTurn }] = await Promise.all([
     import("../agent/session.js"),
     import("../agent/runtime.js"),
@@ -206,7 +209,7 @@ async function runTurnWith(
     const next = delegations[call];
     call += 1;
     return next
-      ? toolCallStream(next.id, "delegate_to_agent", { agentName: next.agentName, task: next.task })
+      ? toolCallStream(next.id, next.tool ?? "delegate_to_agent", next.args ?? { agentName: next.agentName, task: next.task })
       : answerStream(HONEST_ANSWER);
   });
 
@@ -282,6 +285,32 @@ describe("a turn whose delegated run masked figures no tool returned", () => {
     expect(directives[0]).toContain("The turn's other deliverables are attached to this message as files (generated/report.html)");
   });
 
+  it("delegated through a coordinator, is named by the run its delegation names, with that run's file only", async () => {
+    // A coordinator's delegation carries its fan-out's summed record and every file of it; the run
+    // that masked figures comes up by name in maskedRuns (tools/sub-agent.ts, as the coordinator's
+    // run hands it back). In review it did not, and the writer's finished report was named as the
+    // coordinator's output, written but not run successfully.
+    delegation.result = {
+      success: true,
+      output: "[fan_lead]: Der Bericht generated/report.html ist fertig; die Zählung im Sandbox-Skript lief nicht.",
+      metadata: {
+        ...COMPLETED,
+        agentName: "fan_lead",
+        delegationOutcome: "partial",
+        artifacts: [INCIDENT_ARTIFACT, REPORT_DELEGATION.metadata.artifacts[0]],
+        specialistExecutions: INCIDENT_EXECUTIONS,
+        maskedRuns: [{ agentName: "coder", executions: INCIDENT_EXECUTIONS, artifacts: [INCIDENT_ARTIFACT] }],
+      },
+    };
+    const { session } = await runTurnWith({}, [{ id: "call_lead", agentName: "fan_lead", task: "Lass die Primzahlen zählen und berichte." }]);
+
+    const directives = synthesisDirectives(session);
+    expect(directives).toHaveLength(1);
+    expect(directives[0]).toContain("The delegated run of coder stated figures that no tool returned");
+    expect(directives[0]).toContain("name the files it wrote (generated/primes.js) as written but not run successfully");
+    expect(directives[0]).toContain("The turn's other deliverables are attached to this message as files (generated/report.html)");
+  });
+
   it("is not a plan step the next one may build on", async () => {
     recordedPlan.current = TWO_STEP_PLAN;
     await runIncidentTurn(MASKED_DELEGATION, { planDrivenContinuation: true });
@@ -296,6 +325,90 @@ describe("a turn whose delegated run masked figures no tool returned", () => {
 
     expect(promptOf(1)).toContain("[CONTINUE PLAN]");
     expect(auditTypes()).toContain("plan_driven_continuation");
+  });
+
+  describe("inside execute_plan", () => {
+    // In review execute_plan carried no record: the masked coder step was recorded done, its text
+    // went to the next step as the result it depended on, and the turn scored itself complete
+    // under "Copy the exact names, numbers, values … from the evidence".
+    const REPORT_COUNT_EXPLAIN = {
+      ...REPORT_THEN_COUNT_PLAN,
+      steps: [
+        ...REPORT_THEN_COUNT_PLAN.steps,
+        { id: "s3", description: "explain the count", kind: "delegate", agent: "content_writer", dependsOn: ["s2"] },
+      ],
+      // Recorded in this turn: execute_plan refuses a plan older than the turn.
+      createdAt: new Date(Date.now() + 60_000).toISOString(),
+    };
+    const executePlan = [{ id: "call_plan", agentName: "", task: "", tool: "execute_plan", args: {} }];
+
+    it("names the masked step's run and its file only, and its dependent never runs on it", async () => {
+      recordedPlan.current = REPORT_COUNT_EXPLAIN;
+      delegation.queue = [REPORT_DELEGATION, MASKED_DELEGATION, REPORT_DELEGATION];
+      const { session, turn } = await runTurnWith({}, executePlan);
+
+      // s1 and s2 ran; s3 depended on the masked count and did not.
+      expect(delegation.queue).toHaveLength(1);
+      const directives = synthesisDirectives(session);
+      expect(directives).toHaveLength(1);
+      expect(directives[0]).toContain("The delegated run of coder stated figures that no tool returned");
+      expect(directives[0]).toContain("name the files it wrote (generated/primes.js) as written but not run successfully");
+      expect(directives[0]).toContain("The turn's other deliverables are attached to this message as files (generated/report.html)");
+      expect(turn.qualityScorecard).toMatchObject({ outcomeStatus: "partial", partialOrFailureReason: "delegated_figures_unobserved" });
+    });
+
+    it("a step that really failed beside the masked one keeps the failure path, with the masked run's account", async () => {
+      // In review the masked coder step turned the whole plan's failure into the coder's directive:
+      // the research step that had really failed got no failure handling, the counter went back to
+      // 0, and the failed-research backstop never armed.
+      const RESEARCH_FAILED = {
+        success: false,
+        output: "",
+        error: "researcher: every web_search call failed (network unreachable); no source was read.",
+        metadata: {
+          ...COMPLETED,
+          agentName: "researcher",
+          taskId: "task_r",
+          attemptedAgents: ["researcher"],
+          delegationSucceeded: false,
+          delegationOutcome: "failure",
+          terminalState: "failed",
+        },
+      };
+      recordedPlan.current = {
+        ...REPORT_COUNT_EXPLAIN,
+        objective: "the history of the sieve, and the prime count from a script",
+        steps: [
+          { id: "s1", description: "research who first described the sieve, and in which year", kind: "delegate", agent: "researcher" },
+          { id: "s2", description: "count the primes with a script", kind: "delegate", agent: "coder" },
+        ],
+      };
+      delegation.queue = [RESEARCH_FAILED, MASKED_DELEGATION];
+      const { session, turn } = await runTurnWith({ failedResearchHonestyBackstop: true }, executePlan);
+
+      expect(delegation.queue).toHaveLength(0);
+      expect(synthesisDirectives(session)).toEqual([]);
+      const failed = session.getHistory()
+        .filter((message) => message.role === "system" && String(message.content ?? "").startsWith("[DELEGATION FAILED]"))
+        .map((message) => String(message.content));
+      expect(failed).toHaveLength(1);
+      expect(failed[0]).toContain("The delegated run of coder also stated figures that no tool returned");
+      expect(failed[0]).toContain("name the files it wrote (generated/primes.js) as written but not run successfully");
+      expect(turn.qualityScorecard?.wardenFailureCount).toBe(1);
+      expect(auditTypes()).toContain("source_sensitive_failed_delegation_evidence_backstop");
+    });
+
+    it("control: a plan whose coder printed synthesizes as before", async () => {
+      recordedPlan.current = REPORT_COUNT_EXPLAIN;
+      delegation.queue = [REPORT_DELEGATION, PRINTED_DELEGATION, REPORT_DELEGATION];
+      const { session, turn } = await runTurnWith({}, executePlan);
+
+      expect(delegation.queue).toHaveLength(0);
+      const directives = synthesisDirectives(session);
+      expect(directives.join("\n")).not.toContain("stated figures that no tool returned");
+      expect(turn.qualityScorecard?.partialOrFailureReason).not.toBe("delegated_figures_unobserved");
+      expect(auditTypes()).not.toContain("delegated_figures_unobserved");
+    });
   });
 
   it("control: a run whose script printed is relayed as before", async () => {

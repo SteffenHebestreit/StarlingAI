@@ -32,6 +32,8 @@ import { getPerTurnToolCallLimit } from "../agent/delegation-response-collapse.j
 import { delegationAgentsOf, type NestedToolCall } from "../agent/turn-tool-contribution.js";
 import { withDelegationFanoutAllowance, withTurnGatherRole, batchEvidenceGatherPoint } from "./sub-agent.js";
 import { isWebReachingToolName } from "./agent-routing.js";
+import { createFanOutExecutionRecords, readExecutionRecord, unbackedFiguresMasked } from "../agent/delegated-run-record.js";
+import { UNOBSERVED_FIGURE_MARKER } from "../agent/figure-provenance.js";
 // This tool's output is mostly untrusted delegated content, re-emitted as the orchestrator's own.
 // A step whose result merely quoted an HTML-ish role tag replaced the ENTIRE report with "Tool
 // output blocked by guardrails", while the metadata still said N done and 0 failed, so the turn
@@ -111,6 +113,10 @@ interface StepRun {
   artifacts?: unknown[];
   /** Tool calls that failed inside the step's specialist, propagated so the report can list them. */
   toolFailures?: unknown[];
+  /** The metadata of the step's result, read for the record of the code its run executed. */
+  executionMetadata?: Record<string, unknown>;
+  /** The step failed only because its run masked figures (see the masked-step branch of runStep). */
+  maskedFigures?: true;
 }
 
 /**
@@ -285,9 +291,20 @@ async function runStep(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<
     // Forwarded like the artifacts below, and from a failed step as well: which calls failed on the
     // way is what tells a recovery onto another path apart from the path the step asked for.
     const stepToolFailures = result.metadata?.["specialistToolFailures"];
-    const failures = Array.isArray(stepToolFailures) && stepToolFailures.length > 0 ? { toolFailures: stepToolFailures } : {};
+    const failures = {
+      ...(Array.isArray(stepToolFailures) && stepToolFailures.length > 0 ? { toolFailures: stepToolFailures } : {}),
+      ...(result.metadata ? { executionMetadata: result.metadata } : {}),
+    };
     if (!result.success) {
-      return { status: "failed", detail: (result.error ?? "step failed").slice(0, 300), call: made(false, false, result.metadata), ...failures };
+      return {
+        status: "failed",
+        detail: (result.error ?? "step failed").slice(0, 300),
+        call: made(false, false, result.metadata),
+        ...failures,
+        // A workflow stopped by a step whose run masked figures, and by nothing else
+        // (tools/workflow-catalog.ts): the step failed for the same reason as the branch below.
+        ...(result.metadata?.["blockedByMaskedFigures"] === true ? { maskedFigures: true as const } : {}),
+      };
     }
     // A DELEGATION CAN FAIL ON A SUCCESSFUL ToolResult. delegate_to_agent returns success:true and
     // carries the verdict in metadata: the sub-agent's own <final_answer status="failure">, a
@@ -328,11 +345,29 @@ async function runStep(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<
     // the auto-build fire again for work already done. parallel_delegate and run_task_graph
     // aggregate the same way.
     const stepArtifacts = result.metadata?.["artifacts"];
+    const forwardedArtifacts = Array.isArray(stepArtifacts) && stepArtifacts.length > 0 ? { artifacts: stepArtifacts } : {};
+    // A STEP WHOSE FIGURES WERE MADE UP IS NOT A RESULT. Its run stated figures that no tool of it
+    // returned, and they came back masked (agent/delegated-run-record.ts). In review such a coder
+    // step came back partial, was recorded `done`, and its masked text went to the next step under
+    // "RESULTS THIS STEP DEPENDS ON — use them; do not re-derive", while the report said every
+    // step had run. It fails instead: nothing builds on it, and the report says what it lacks. Its
+    // files still go up, so the turn can name them as written but not run successfully.
+    if (unbackedFiguresMasked(readExecutionRecord(result.metadata?.["specialistExecutions"]))) {
+      return {
+        status: "failed",
+        detail: `its run stated figures no tool returned (masked as ${UNOBSERVED_FIGURE_MARKER}), so they were not computed: `
+          + "do not supply them, and do not run this step again this turn",
+        call: made(true, false, result.metadata),
+        ...forwardedArtifacts,
+        ...failures,
+        maskedFigures: true,
+      };
+    }
     return {
       status: "done",
       result: result.output,
       call: made(true, false, result.metadata),
-      ...(Array.isArray(stepArtifacts) && stepArtifacts.length > 0 ? { artifacts: stepArtifacts } : {}),
+      ...forwardedArtifacts,
       ...failures,
     };
   } catch (err) {
@@ -404,6 +439,12 @@ registerTool({
     const results = new Map<string, string>((plan.outcomes ?? []).flatMap((o) => (o.result ? [[o.id, o.result]] : [])));
     const artifacts: unknown[] = [];
     const specialistToolFailures: unknown[] = [];
+    // The code each dispatched step's run executed (see parallel_delegate).
+    const stepExecutions = createFanOutExecutionRecords();
+    // The steps of this call that failed only because their run masked figures. The turn reads the
+    // plan's failure as theirs only when every failed step is one of them (agent/runtime.ts): a
+    // research step that really failed beside a masked coder step keeps the failure path armed.
+    const maskedSteps: string[] = [];
 
     // THE RESUME PATH. Without these a `manual` step is terminal: it is not `pending`, so it is
     // never re-offered, and it never settles, so its dependents stay blocked for good. The tool
@@ -525,6 +566,8 @@ registerTool({
         if (run.result) results.set(step.id, run.result);
         if (run.artifacts) artifacts.push(...run.artifacts);
         if (run.toolFailures) specialistToolFailures.push(...run.toolFailures);
+        stepExecutions.add(run.executionMetadata, step.agent);
+        if (run.status === "failed" && run.maskedFigures) maskedSteps.push(step.id);
         if (run.status === "done" || run.status === "failed") ran.push(step.id);
       }
     }
@@ -690,6 +733,8 @@ registerTool({
           : {}),
         ...(artifacts.length > 0 ? { artifacts } : {}),
         ...(specialistToolFailures.length > 0 ? { specialistToolFailures } : {}),
+        ...stepExecutions.metadata(),
+        ...(maskedSteps.length > 0 ? { maskedSteps } : {}),
       },
     };
   },

@@ -30,25 +30,38 @@ export function looksLikeTransparentIncompleteReport(text: string): boolean {
  * deliverables. In review, a report content_writer had finished was named as the coder's unrun
  * output, and nothing said it was attached.
  */
+/** A delegated run whose account stated figures no tool returned: its run-record line and the files
+ *  it wrote, as its delegation recorded them. */
+export interface UnobservedRun {
+  agent: string;
+  line: string;
+  files?: readonly string[];
+}
+
+function describeUnobservedRuns(unobservedRuns: readonly UnobservedRun[]): { agents: string; lines: string; runFiles: string[]; filesClause: string } {
+  const agents = [...new Set(unobservedRuns.map((run) => run.agent))].join(", ");
+  const lines = unobservedRuns.length === 1
+    ? unobservedRuns[0]!.line
+    : unobservedRuns.map((run) => `${run.agent}: ${run.line}`).join("; ");
+  const runFiles = [...new Set(unobservedRuns.flatMap((run) => run.files ?? []))].filter(Boolean);
+  const filesClause = runFiles.length > 0
+    ? `name the files it wrote (${runFiles.slice(0, 12).join(", ")}) as written but not run successfully, `
+    : "";
+  return { agents, lines, runFiles, filesClause };
+}
+
 export function buildSynthesisRequiredDirective(opts: {
   artifactPaths?: readonly string[];
   partialEvidence?: boolean;
   /** Delegated runs whose account stated figures no tool returned: each with its run-record line
    *  and the files that run wrote, as its delegation recorded them. */
-  unobservedRuns?: readonly { agent: string; line: string; files?: readonly string[] }[];
+  unobservedRuns?: readonly UnobservedRun[];
 }): string {
   const artifactPaths = (opts.artifactPaths ?? []).filter(Boolean);
   const unobservedRuns = opts.unobservedRuns ?? [];
   if (unobservedRuns.length > 0) {
-    const agents = [...new Set(unobservedRuns.map((run) => run.agent))].join(", ");
-    const lines = unobservedRuns.length === 1
-      ? unobservedRuns[0]!.line
-      : unobservedRuns.map((run) => `${run.agent}: ${run.line}`).join("; ");
-    const runFiles = [...new Set(unobservedRuns.flatMap((run) => run.files ?? []))].filter(Boolean);
+    const { agents, lines, runFiles, filesClause } = describeUnobservedRuns(unobservedRuns);
     const otherFiles = artifactPaths.filter((path) => !runFiles.includes(path));
-    const filesClause = runFiles.length > 0
-      ? `name the files it wrote (${runFiles.slice(0, 12).join(", ")}) as written but not run successfully, `
-      : "";
     const deliverables = otherFiles.length > 0
       ? ` The turn's other deliverables are attached to this message as files (${otherFiles.slice(0, 12).join(", ")}): list each with a one-line description.`
       : "";
@@ -72,6 +85,20 @@ export function buildSynthesisRequiredDirective(opts: {
     + "You MUST now write your final answer using ONLY the details from those Observed evidence blocks. "
     + "Do NOT delegate again for the same information — the evidence is already collected. "
     + "Copy the exact names, numbers, values, task states, and statuses from the evidence into your answer.";
+}
+
+/**
+ * The same account of the runs that masked figures, for a turn in which another delegation failed
+ * as well (agent/runtime.ts). That failure keeps the turn on its failure path, which may still try
+ * another strategy, so this note neither ends the orchestration nor forbids delegating: it rides on
+ * the failure directive and says what the masked runs did not compute, whatever the turn writes
+ * next.
+ */
+export function buildUnobservedRunsNote(unobservedRuns: readonly UnobservedRun[]): string {
+  const { agents, lines, filesClause } = describeUnobservedRuns(unobservedRuns);
+  return `The delegated run of ${agents} also stated figures that no tool returned; they are masked as ${UNOBSERVED_FIGURE_MARKER} (${lines}). `
+    + `Whatever you write next: ${filesClause}say plainly that the masked values were not computed, `
+    + "and do NOT state, estimate or round any value that only running the code could produce.";
 }
 
 /**

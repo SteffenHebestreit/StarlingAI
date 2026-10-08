@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { logAudit } from "../audit/logger.js";
 import { requestApprovalViaChannel } from "../approval/index.js";
-import { archiveSession, createSession } from "../agent/session.js";
+import { archiveSession, createSession, type AgentSession } from "../agent/session.js";
+import { createFanOutExecutionRecords, readExecutionRecord, unbackedFiguresMasked } from "../agent/delegated-run-record.js";
+import { UNOBSERVED_FIGURE_MARKER } from "../agent/figure-provenance.js";
 import { runSubAgentWithStats } from "../agent/sub-agent.js";
 import { runTurn, collectTurnArtifactAttachments } from "../agent/runtime.js";
 import { getConfig } from "../config/loader.js";
@@ -903,12 +905,56 @@ function resolveWorkflowReference(name: string, workflowType: WorkflowType | "au
   };
 }
 
+type FanOutExecutionRecords = ReturnType<typeof createFanOutExecutionRecords>;
+/** What run_workflow hands back about the code the workflow's runs executed (agent/delegated-run-record.ts). */
+type WorkflowExecutions = ReturnType<FanOutExecutionRecords["metadata"]>;
+
+/**
+ * Adds the record of every delegation the workflow's own orchestrator turns made. They ran in the
+ * workflow's session, which is archived when it ends, so the parent turn reads none of their tool
+ * messages: a coder's masked figures inside a workflow reached the turn as "Workflow … completed"
+ * with no record, and the turn's honest directive never fired.
+ */
+function addSessionExecutions(into: FanOutExecutionRecords, session: AgentSession, recorded?: WeakSet<object>): void {
+  for (const message of session.getHistory()) {
+    if (message.role !== "tool" || !message.metadata || recorded?.has(message)) continue;
+    recorded?.add(message);
+    into.add(message.metadata);
+  }
+}
+
+/** What a job step whose run masked figures says, under its answer, in place of a result. */
+const MASKED_STEP_NOTE = `_(This step's run stated figures no tool returned; they are masked as ${UNOBSERVED_FIGURE_MARKER} and were not computed.)_`;
+
+/** A run's result as its delegation's metadata, for the fan-out record: a coordinator's masked runs
+ *  go up as they are, each with its own files. */
+function runExecutionMetadata(
+  agentName: string,
+  run: { executions?: unknown; artifacts?: unknown[]; maskedRuns?: unknown[] },
+): Record<string, unknown> {
+  return { agentName, specialistExecutions: run.executions, artifacts: run.artifacts, maskedRuns: run.maskedRuns };
+}
+
+/**
+ * A QA attempt the job did not adopt, for the fan-out record: the code it executed still counts, but
+ * what it stated reaches nobody, so nothing it masked is reported. In review the first attempt of an
+ * expectArtifact step masked its figures, the re-attempt saved primes.js and printed the count and
+ * was adopted, and the job still handed back the discarded attempt as a run that masked figures:
+ * the turn was told the values were not computed while its evidence carried the computed ones.
+ */
+function discardedAttemptMetadata(agentName: string, run: { executions?: unknown }): Record<string, unknown> {
+  const record = readExecutionRecord(run.executions);
+  if (!record) return { agentName };
+  const { unobservedFigures: _stated, ...executed } = record;
+  return { agentName, specialistExecutions: executed };
+}
+
 async function runSceneInline(
   scene: SceneSummary,
   params: Record<string, string>,
   workflowContext: string | undefined,
   ctx: ToolContext,
-): Promise<{ response: string; blocked: boolean; toolCallsExecuted: number; bootstrapAgent?: string; artifacts?: Array<Record<string, unknown>> }> {
+): Promise<{ response: string; blocked: boolean; toolCallsExecuted: number; bootstrapAgent?: string; artifacts?: Array<Record<string, unknown>>; executions: WorkflowExecutions }> {
   const mergedParams = mergeSceneParams(scene, params);
   const enrichedWorkflowContext = buildWorkflowParamContext(scene.task, mergedParams, workflowContext, ctx.swarmState?.objective);
   const task = appendWorkflowContext(applyTemplate(scene.task, mergedParams), enrichedWorkflowContext);
@@ -1013,6 +1059,8 @@ async function runSceneInline(
         bootstrapBlocked ? "blocked" : "completed",
         finalBootstrapResponse,
       );
+      const bootstrapExecutions = createFanOutExecutionRecords();
+      bootstrapExecutions.add(runExecutionMetadata(bootstrapAgent, bootstrapRun));
 
       return {
         response: finalBootstrapResponse,
@@ -1023,6 +1071,7 @@ async function runSceneInline(
         // collector finds nothing — thread the agent's own collected artifacts (e.g.
         // the built deck/paper, saved images) so the parent surfaces downloads.
         artifacts: bootstrapRun.artifacts,
+        executions: bootstrapExecutions.metadata(),
       };
     }
 
@@ -1063,11 +1112,14 @@ async function runSceneInline(
     // without a clickable download AND letting the source-sensitive auto-build
     // spuriously re-fire (it keys on "zero artifacts this turn"). run_workflow
     // threads these into its result metadata.artifacts.
+    const sceneExecutions = createFanOutExecutionRecords();
+    addSessionExecutions(sceneExecutions, session);
     return {
       response: result.response,
       blocked: resultBlocked,
       toolCallsExecuted: result.toolCallsExecuted,
       artifacts: collectTurnArtifactAttachments(session),
+      executions: sceneExecutions.metadata(),
     };
   } finally {
     const workflowTask = ctx.swarmState?.tasks[workflowTaskId];
@@ -1083,7 +1135,7 @@ async function runJobInline(
   params: Record<string, string>,
   workflowContext: string | undefined,
   ctx: ToolContext,
-): Promise<{ response: string; blocked: boolean; toolCallsExecuted: number; executedSteps: number; artifacts?: Array<Record<string, unknown>> }> {
+): Promise<{ response: string; blocked: boolean; blockedByMaskedFigures?: true; toolCallsExecuted: number; executedSteps: number; artifacts?: Array<Record<string, unknown>>; executions: WorkflowExecutions }> {
   const steps = resolveJobSteps(job, params);
   const enrichedWorkflowContext = buildWorkflowParamContext(job.description || job.name, params, workflowContext, ctx.swarmState?.objective);
   const workflowTaskId = `workflow:job:${job.name}`;
@@ -1104,7 +1156,15 @@ async function runJobInline(
   try {
     const sections: string[] = [];
     const directStepArtifacts: Array<Record<string, unknown>> = [];
+    const jobExecutions = createFanOutExecutionRecords();
+    // The tool messages of the job's session already in its record. A step's orchestrator turn
+    // leaves its delegations there; they are read right after that turn, before the next step's
+    // turn can compact them out of the history.
+    const recordedToolMessages = new WeakSet<object>();
     let blocked = false;
+    // The step that stopped the job was stopped only because its run masked figures: the turn
+    // reads the job's failure as that run's (agent/runtime.ts, tools/plan-executor.ts).
+    let blockedByMaskedFigures = false;
     let toolCallsExecuted = 0;
     let executedSteps = 0;
 
@@ -1145,6 +1205,7 @@ async function runJobInline(
       const directAgent = resolveSingleStepLeafAgent(allowedAgents);
       let stepResponse: string;
       let stepBlocked: boolean;
+      let stepMaskedFigures = false;
       if (directAgent) {
         const directIntro = `You are the "${directAgent}" specialist running ONE scoped step of a pipeline. Carry out this step's work YOURSELF with your own tools — you have no sub-agents and must not try to delegate.\n\n`;
         const directOpts = {
@@ -1171,6 +1232,7 @@ async function runJobInline(
 
         let run = await runSubAgentWithStats({ ...directOpts, task: `${directIntro}${stepTask}` });
         toolCallsExecuted += run.stats.toolCount;
+        let discarded: typeof run | undefined;
 
         // QA deliverable check: a step that MUST persist an output file but produced none
         // gets ONE corrective re-attempt with the failure folded in. A clean retry that
@@ -1182,8 +1244,17 @@ async function runJobInline(
           const correctiveTask = `${directIntro}${stepTask}\n\n[QA RE-ATTEMPT] Your previous attempt did NOT persist the required output file — no artifact was saved. Produce it now and make sure the artifact tool call SUCCEEDS before you stop: pass every array argument as a real JSON array (e.g. slides=[{…}], bullets=[…]) — never a quoted string; use only allowed enum values (an invalid theme is ignored, not rejected); embed any images as Markdown ![alt](images/<file>). Do not paste the file contents into your reply.`;
           const retry = await runSubAgentWithStats({ ...directOpts, task: correctiveTask });
           toolCallsExecuted += retry.stats.toolCount;
-          if (producedArtifact(retry)) run = retry; // adopt the attempt that produced the file
+          if (producedArtifact(retry)) { // adopt the attempt that produced the file
+            discarded = run;
+            run = retry;
+          } else {
+            discarded = retry;
+          }
         }
+        // Recorded once the step's run is settled: the adopted attempt as it ran, the other one
+        // for the code it executed only (discardedAttemptMetadata).
+        jobExecutions.add(runExecutionMetadata(directAgent, run));
+        if (discarded) jobExecutions.add(discardedAttemptMetadata(directAgent, discarded));
 
         stepResponse = run.output.trim() || `Step '${step.label}' produced no output.`;
         stepBlocked = run.stats.outcome === "failure" || workflowOutputIsBlocked(stepResponse);
@@ -1193,6 +1264,14 @@ async function runJobInline(
         if (step.expectArtifact && !producedArtifact(run)) {
           stepBlocked = true;
           stepResponse = `${stepResponse}\n\n_(This step was required to produce an output file but none was saved.)_`.trim();
+        }
+        // Nor is a step whose run stated figures no tool returned: the next step would build on
+        // the masked text as its input, as a plan's dependent step did in review (see
+        // tools/plan-executor.ts). The job stops there and says why.
+        if (unbackedFiguresMasked(run.executions)) {
+          stepMaskedFigures = !stepBlocked;
+          stepBlocked = true;
+          stepResponse = `${stepResponse}\n\n${MASKED_STEP_NOTE}`.trim();
         }
       } else {
         const result = await runTurn({
@@ -1216,6 +1295,19 @@ async function runJobInline(
         stepResponse = result.response.trim();
         stepBlocked = result.blocked || workflowOutputIsBlocked(result.response);
         toolCallsExecuted += result.toolCallsExecuted;
+        // The delegations this step's turn made, and whether one of them masked figures. In review
+        // only the end of the job read the session, and only for the record: a step whose turn had
+        // delegated to a coder that masked its figures did not stop the job, and the next step ran
+        // on its answer, as the next step after a direct one no longer does (above).
+        const stepRuns = createFanOutExecutionRecords();
+        addSessionExecutions(stepRuns, session, recordedToolMessages);
+        const stepRecord = stepRuns.metadata();
+        jobExecutions.add({ ...stepRecord });
+        if (stepRecord.maskedRuns) {
+          stepMaskedFigures = !stepBlocked;
+          stepBlocked = true;
+          stepResponse = `${stepResponse}\n\n${MASKED_STEP_NOTE}`.trim();
+        }
       }
 
       sections.push(`## ${step.label}\n\n${stepResponse}`.trim());
@@ -1223,6 +1315,7 @@ async function runJobInline(
 
       if (stepBlocked) {
         blocked = true;
+        blockedByMaskedFigures = stepMaskedFigures;
         break;
       }
     }
@@ -1252,9 +1345,11 @@ async function runJobInline(
     return {
       response,
       blocked,
+      ...(blockedByMaskedFigures ? { blockedByMaskedFigures: true as const } : {}),
       toolCallsExecuted,
       executedSteps,
       artifacts,
+      executions: jobExecutions.metadata(),
     };
   } finally {
     const workflowTask = ctx.swarmState?.tasks[workflowTaskId];
@@ -1664,6 +1759,8 @@ registerTool({
           // Propagate scene-built artifacts (deck/images/paper) so the parent turn
           // surfaces them as clickable downloads and the auto-build doesn't re-fire.
           ...(result.artifacts && result.artifacts.length > 0 ? { artifacts: result.artifacts } : {}),
+          // And the record of the code its runs executed (agent/delegated-run-record.ts).
+          ...result.executions,
         },
       };
     }
@@ -1678,12 +1775,14 @@ registerTool({
         workflowName: job!.name,
         workflowType: "job",
         blocked: result.blocked,
+        ...(result.blockedByMaskedFigures ? { blockedByMaskedFigures: true } : {}),
         toolCallsExecuted: result.toolCallsExecuted,
         stepCount: job!.steps.length,
         executedSteps: result.executedSteps,
         // Propagate the build step's artifacts so the parent turn surfaces downloads
         // and the auto-build doesn't re-fire (see runJobInline).
         ...(result.artifacts && result.artifacts.length > 0 ? { artifacts: result.artifacts } : {}),
+        ...result.executions,
       },
     };
   },
