@@ -27,6 +27,7 @@ import {
   compactUserMemoryRecords,
   compactWorkspaceMemoryRecords,
   promoteMemoryRecords,
+  searchableMemoryScopes,
   searchMemoryRecordsWithStatus,
   storeUserMemoryRecord,
   storeWorkspaceMemoryRecord,
@@ -403,6 +404,8 @@ function resolveDurableWriteScope(
 
 const SCOPE_DOWNGRADE_NOTE = " (requested scope 'user' was stored to workspace: no authenticated user on this session)";
 
+const AGENT_SCOPE_NOT_SEARCHED_NOTE = "Agent lessons are not searchable on a multi-user deployment: the agent scope was not searched.";
+
 registerTool({
   name: "memory_store",
   description:
@@ -538,9 +541,19 @@ registerTool({
     if (!query) return { success: false, output: "", error: "query is required" };
 
     try {
+      // Under multi-user auth the agent scope is not searched, asked for or not: it lists every
+      // account's delegated tasks (memory/service.ts searchableMemoryScopes). The metadata then
+      // names the scopes searched, and a request that named the agent scope is told it was left
+      // out, so an empty answer is not read as "no lessons stored".
+      const searchable = searchableMemoryScopes(scopes);
+      const agentWithheld = !searchable.includes("agent") && (!scopes?.length || scopes.includes("agent"));
+      const agentNote = agentWithheld && scopes?.includes("agent") ? AGENT_SCOPE_NOT_SEARCHED_NOTE : "";
+      if (agentWithheld && searchable.length === 0) {
+        return { success: true, output: `No memories found matching '${query}'.\n${agentNote}`, metadata: { count: 0, scopes: [], semanticRan: true } };
+      }
       const search = await searchMemoryRecordsWithStatus(ctx.workspacePath, query, {
         limit,
-        scopes,
+        scopes: agentWithheld ? searchable : scopes,
         kinds,
         sessionId: deriveSharedSessionId(ctx.sessionId),
         targetAgent,
@@ -556,10 +569,10 @@ registerTool({
       const uncompared = search.notComparedSemantically > 0
         ? `${search.notComparedSemantically} stored record(s) without a word match were not compared by meaning — narrow scopes or kinds to include them.`
         : "";
-      const notes = [lexicalOnly, uncompared].filter(Boolean).join("\n");
+      const notes = [lexicalOnly, uncompared, agentNote].filter(Boolean).join("\n");
       const metadata = {
         count: results.length,
-        scopes: scopes ?? ["workspace", "user", "session", "agent"],
+        scopes: agentWithheld ? searchable : scopes ?? ["workspace", "user", "session", "agent"],
         semanticRan: search.semanticRan,
         ...(unmatched.size > 0 ? { unmatched: unmatched.size } : {}),
       };

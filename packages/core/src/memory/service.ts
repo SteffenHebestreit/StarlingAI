@@ -209,6 +209,29 @@ export async function searchMemoryRecords(
   return (await searchMemoryRecordsWithStatus(workspacePath, query, opts)).records;
 }
 
+/** Every scope a search reads when its caller names none. */
+const ALL_MEMORY_SCOPES: readonly MemoryScope[] = ["workspace", "user", "session", "agent"];
+
+/**
+ * The scopes a memory search may read: those requested (every scope when none are), without the
+ * agent scope under multi-user auth. That scope reads the deployment's outcome ledger, one file for
+ * every account, where a lesson's subject is the task it was recorded for, so one account's search
+ * listed another account's delegated task (found in review, 2026-10-08). An outcome names no
+ * account: the scope cannot be narrowed to the caller's own records and stays out whole. With one
+ * operator the ledger is that operator's own. A config that cannot be read counts as multi-user.
+ * Empty when only the agent scope was asked for there.
+ */
+export function searchableMemoryScopes(requested?: readonly MemoryScope[]): MemoryScope[] {
+  const scopes = requested?.length ? [...requested] : [...ALL_MEMORY_SCOPES];
+  let multiUser: boolean;
+  try {
+    multiUser = getConfig().auth?.enabled === true;
+  } catch {
+    multiUser = true;
+  }
+  return multiUser ? scopes.filter((scope) => scope !== "agent") : scopes;
+}
+
 export async function searchMemoryRecordsWithStatus(
   workspacePath: string,
   query: string,
@@ -216,7 +239,7 @@ export async function searchMemoryRecordsWithStatus(
 ): Promise<MemorySearchResult> {
   const normalizedQuery = normalizeText(query.trim());
   const tokens = tokenize(normalizedQuery);
-  const scopes = new Set<MemoryScope>(opts.scopes?.length ? opts.scopes : ["workspace", "user", "session", "agent"]);
+  const scopes = new Set<MemoryScope>(opts.scopes?.length ? opts.scopes : ALL_MEMORY_SCOPES);
   const allowedKinds = opts.kinds?.length ? new Set(opts.kinds.map((kind) => normalizeKind(kind)).filter(Boolean) as MemoryKind[]) : null;
   const records: MemoryRecord[] = [];
 
