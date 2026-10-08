@@ -120,6 +120,7 @@ describe("create_ephemeral_agent policy", () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toContain("cannot mix multiple execution families");
+    expect(result.rejectedBeforeEffect).toBe(true);
   }, 15000);
 
   it("rejects overly broad ephemeral coordinators", async () => {
@@ -143,6 +144,54 @@ describe("create_ephemeral_agent policy", () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toContain("parallel_delegate");
+    expect(result.rejectedBeforeEffect).toBe(true);
+  }, 15000);
+
+  // The two refusals above and the two below are each marked as turned away before anything ran
+  // (ToolResult.rejectedBeforeEffect). That mark gives the turn's one create_ephemeral_agent call back
+  // for a corrected grant; without it the E2E run (2026-10-07) had its corrected call turned away as
+  // over the cap and answered without running anything. runtime-rejected-call-cap.test.ts stubs this
+  // tool with a result that already carries the mark, so only these tests see the tool set it.
+  it("marks a call missing its spec as turned away before any effect", async () => {
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+
+    const result = await getTool("create_ephemeral_agent")!.execute({
+      agentName: "prime_calculator",
+      tools: ["read_file"],
+    }, {
+      sessionId: "test-session",
+      workspacePath: "/workspace",
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("are required");
+    expect(result.rejectedBeforeEffect).toBe(true);
+  }, 15000);
+
+  // The rejection itself needs no embedding backend; only the suggested tools (the skipped test
+  // below) do.
+  it("marks a grant of an unknown tool as turned away before any effect", async () => {
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+
+    const result = await getTool("create_ephemeral_agent")!.execute({
+      agentName: "current_docs_researcher",
+      systemPrompt: "Use current public documentation and cite sources.",
+      tools: ["google_search_the_web", "web_fetch"],
+      task: "Find current documentation for an integration feature.",
+    }, {
+      sessionId: "test-session",
+      workspacePath: "/workspace",
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("Unknown tool(s) requested: google_search_the_web");
+    expect(result.rejectedBeforeEffect).toBe(true);
   }, 15000);
 
   it("accepts research-shaped ephemeral agents that include web_search", async () => {
