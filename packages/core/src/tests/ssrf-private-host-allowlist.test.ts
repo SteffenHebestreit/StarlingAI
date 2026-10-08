@@ -42,6 +42,29 @@ describe("resolvedHostIsBlocked — the allowlist decision", () => {
     expect(resolvedHostIsBlocked("example.com", ["93.184.215.14"], [])).toBe(false);
     expect(resolvedHostIsBlocked("example.com", ["93.184.215.14"], ["example.com"])).toBe(false);
   });
+
+  // A name answering with the metadata or unspecified address in an IPv6 form was let through:
+  // never-allowed addresses were only consulted for a listed name, and the first check did not
+  // know these forms as private.
+  it("refuses a loopback, link-local or unspecified address in any IPv6 form, listed or not", () => {
+    for (const address of ["::ffff:169.254.169.254", "::ffff:a9fe:a9fe", "::ffff:0.0.0.0", "::ffff:7f00:1", "64:ff9b::a9fe:a9fe", "::a9fe:a9fe"]) {
+      expect(resolvedHostIsBlocked(SITE, [address], []), address).toBe(true);
+      expect(resolvedHostIsBlocked(SITE, [address], [SITE]), `${address} (listed)`).toBe(true);
+    }
+  });
+
+  it("treats a LAN address in an IPv6 form like the LAN address: refused unless listed", () => {
+    for (const address of ["::ffff:172.22.0.14", "::ffff:ac16:e", "64:ff9b::ac16:e"]) {
+      expect(resolvedHostIsBlocked(SITE, [address], []), address).toBe(true);
+      expect(resolvedHostIsBlocked(SITE, [address], [SITE]), `${address} (listed)`).toBe(false);
+    }
+  });
+
+  it("leaves a public IPv4 address in an IPv6 form alone", () => {
+    for (const address of ["::ffff:8.8.8.8", "::ffff:808:808", "64:ff9b::808:808"]) {
+      expect(resolvedHostIsBlocked("example.com", [address], []), address).toBe(false);
+    }
+  });
 });
 
 describe("isNeverAllowedAddress", () => {
@@ -50,6 +73,15 @@ describe("isNeverAllowedAddress", () => {
       expect(isNeverAllowedAddress(a), a).toBe(true);
     }
     for (const a of ["172.22.0.14", "10.0.0.7", "192.168.1.20", "fd00::14", "93.184.215.14"]) {
+      expect(isNeverAllowedAddress(a), a).toBe(false);
+    }
+  });
+
+  it("reads the IPv4 address inside mapped, compatible and NAT64 IPv6 forms", () => {
+    for (const a of ["::ffff:a9fe:a9fe", "64:ff9b::a9fe:a9fe", "64:ff9b::169.254.169.254", "::a9fe:a9fe", "::ffff:0:a9fe:a9fe", "::ffff:7f00:1"]) {
+      expect(isNeverAllowedAddress(a), a).toBe(true);
+    }
+    for (const a of ["::ffff:8.8.8.8", "::ffff:808:808", "::ffff:ac16:e", "64:ff9b::808:808"]) {
       expect(isNeverAllowedAddress(a), a).toBe(false);
     }
   });

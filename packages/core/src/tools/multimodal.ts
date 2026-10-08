@@ -1431,17 +1431,33 @@ function registerBrowserTool(input: {
     description: input.description,
     parameters: input.parameters,
     async execute(args) {
+      const { checkUrlSsrf, leaveRefusedPage, refusedBrowserAnswer } = await import("./web.js");
       if (input.guardUrlArg) {
         const raw = args[input.guardUrlArg];
         if (typeof raw === "string" && raw.trim()) {
-          const { checkUrlSsrf } = await import("./web.js");
           const blocked = await checkUrlSsrf(raw);
           if (blocked) return fail(`Refusing to navigate the browser: ${blocked}.`);
         }
       }
       try {
         const raw = await callPlaywrightTool(input.mcpToolName, args);
-        const output = PAGE_ACTION_TOOLS.has(input.mcpToolName) ? await withInlineSnapshot(raw) : raw;
+        // The check above sees only the URL the browser is sent to. A redirect, the page's own
+        // script or a click then moved it with nothing checking where, and the answer carried
+        // that page: a public URL that redirected to http://10.0.0.5/ answered with its snapshot.
+        // The page an answer reports, and the snapshot fetched after an action, are now checked
+        // before any of it is shown; an answer of the page that reports no URL (a screenshot)
+        // has the tab's address read for it.
+        let refused = await refusedBrowserAnswer([raw]);
+        let output = raw;
+        if (!refused && PAGE_ACTION_TOOLS.has(input.mcpToolName)) {
+          const inlined = await withInlineSnapshot(raw);
+          output = inlined.output;
+          refused = await refusedBrowserAnswer([inlined.snapshot]);
+        }
+        if (refused) {
+          await leaveRefusedPage();
+          return fail(`Refusing to show the page the browser is on: ${refused}. The browser was sent to about:blank.`);
+        }
         return { success: true, output, metadata: { server: "playwright", tool: input.mcpToolName } };
       } catch (error) {
         log.error({ err: error, tool: input.mcpToolName }, "browser tool failed");
@@ -1462,17 +1478,22 @@ const PAGE_ACTION_TOOLS = new Set(["browser_navigate", "browser_click", "browser
  */
 const SNAPSHOT_FILE_LINK = /^#{1,4}[ \t]*Snapshot[ \t]*\n-[ \t]*\[Snapshot\]\([^)\n]*\)[^\n]*$/m;
 
-/** The action's answer with the page's snapshot in place of the link to it. */
-async function withInlineSnapshot(output: string): Promise<string> {
-  if (!SNAPSHOT_FILE_LINK.test(output)) return output;
+/**
+ * The action's answer with the page's snapshot in place of the link to it, and that snapshot as
+ * fetched ("" when none was), whose Page URL may differ from the action's: the page can move on
+ * in between.
+ */
+async function withInlineSnapshot(output: string): Promise<{ output: string; snapshot: string }> {
+  if (!SNAPSHOT_FILE_LINK.test(output)) return { output, snapshot: "" };
+  let snapshot = "";
   try {
-    const snapshot = await callPlaywrightTool("browser_snapshot", {});
+    snapshot = await callPlaywrightTool("browser_snapshot", {});
     const section = snapshot.match(/#{1,4}[ \t]*Snapshot[ \t]*\n```[\s\S]*?```/)?.[0];
-    if (section) return output.replace(SNAPSHOT_FILE_LINK, section);
+    if (section) return { output: output.replace(SNAPSHOT_FILE_LINK, section), snapshot };
   } catch (error) {
     log.warn({ err: error }, "browser snapshot after an action failed");
   }
-  return output.replace(SNAPSHOT_FILE_LINK, "### Snapshot\n(not available here: call browser_snapshot to see the page)");
+  return { output: output.replace(SNAPSHOT_FILE_LINK, "### Snapshot\n(not available here: call browser_snapshot to see the page)"), snapshot };
 }
 
 async function readWorkspaceBinaryFile(path: string, workspacePath: string): Promise<WorkspaceBinaryFile> {

@@ -342,6 +342,11 @@ class OversizeError extends Error {}
  * concurrency slot). Returns the downloaded bytes rather than a live Response.
  */
 async function crawlFetch(url: string, opts: { timeoutMs: number; maxBytes: number; userAgent: string; allowPrivateHosts: boolean; signal: AbortSignal }): Promise<CrawlFetchResult> {
+  // The host check below resolves a name and the connection resolved it again, so a name that
+  // answered differently the second time reached a private address. Through the guard's
+  // dispatcher the connection makes the same decision on the address it connects to;
+  // allowPrivateHosts, which lets a crawl reach private hosts on purpose, keeps the default one.
+  const dispatcher = opts.allowPrivateHosts ? undefined : (await import("../tools/web.js")).guardedDispatcher;
   let current = url;
   for (let hop = 0; hop <= 5; hop++) {
     const parsed = new URL(current); // caller passes normalized http(s) URLs
@@ -357,7 +362,8 @@ async function crawlFetch(url: string, opts: { timeoutMs: number; maxBytes: numb
         redirect: "manual",
         signal: controller.signal,
         headers: { "User-Agent": opts.userAgent, Accept: "text/html,application/xhtml+xml,application/pdf,text/plain,text/markdown;q=0.9,*/*;q=0.5" },
-      });
+        ...(dispatcher ? { dispatcher } : {}),
+      } as RequestInit);
       if (res.status >= 300 && res.status < 400 && res.headers.has("location")) {
         // Drain/cancel the redirect body so the connection is freed, then follow.
         try { await res.body?.cancel(); } catch { /* ignore */ }

@@ -1,8 +1,10 @@
-import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
+import { getTool, registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
 import type { Config } from "../config/schema.js";
+import { lookup as dnsLookupCallback, type LookupAddress, type LookupOptions } from "node:dns";
 import { lookup as dnsLookup } from "node:dns/promises";
+import { Agent } from "undici";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, posix } from "node:path";
 import { analyzeImageBytes, callPlaywrightTool, extractDocumentBytesToMarkdown } from "./multimodal.js";
@@ -251,6 +253,32 @@ registerTool({
   },
 });
 
+/**
+ * Redirects web_fetch follows, every target checked: as many as Chromium follows. A page the
+ * direct request cannot read goes to the browser, which walks the same chain; with a limit of 5
+ * here the browser was handed the rest of a longer chain, hops 6 to 20, unchecked.
+ */
+const WEB_FETCH_MAX_REDIRECTS = 20;
+
+/**
+ * The longest one web_fetch redirect chain may take, all hops together: the old worst case, the
+ * first request and five redirects at 12 s each. A timeoutMs of web_fetch's own, should it get
+ * one, wins when it is smaller.
+ */
+const WEB_FETCH_CHAIN_BUDGET_MS = 72_000;
+
+function webFetchChainBudgetMs(): number {
+  const own = getTool("web_fetch")?.timeoutMs;
+  return own && own > 0 ? Math.min(WEB_FETCH_CHAIN_BUDGET_MS, own) : WEB_FETCH_CHAIN_BUDGET_MS;
+}
+
+/** web_fetch's answer when the browser ended on a page the guard refuses: nothing from it, and the tab sent away. */
+async function refuseBrowserLanding(url: string, reason: string): Promise<ToolResult> {
+  log.warn({ url, reason }, "web_fetch: the browser landed on a page the SSRF guard refuses");
+  await leaveRefusedPage();
+  return { success: false, output: "", error: `${url} led the browser to a page the guard refuses (${reason}); nothing from that page is returned` };
+}
+
 registerTool({
   name: "web_fetch",
   description: "Fetch a public URL and return its readable text. HTML pages end with a list of their links (absolute URLs, same site first): follow those instead of guessing paths. JSON is returned verbatim, PDFs as extracted text; JavaScript-only pages are browser-rendered when available.",
@@ -307,7 +335,7 @@ registerTool({
             "User-Agent": "Mozilla/5.0 (compatible; StarlingAI/0.1; +https://starlingai.io)",
             "Accept": "text/html,application/xhtml+xml,application/json,text/plain,*/*",
           },
-        });
+        }, WEB_FETCH_MAX_REDIRECTS, webFetchChainBudgetMs());
         directStatus = res.status;
         if (res.ok) {
           const ct = res.headers.get("content-type") ?? "";
@@ -346,6 +374,14 @@ registerTool({
           }
         }
       } catch (err) {
+        // The guard turned a host away, the requested one or a redirect's target. This used to
+        // fall through like any failed request: the browser was handed the same URL, followed
+        // the redirect unchecked and returned the internal page's text. A refusal now ends the
+        // call, with no render, no snapshot and no second direct request.
+        if (err instanceof SsrfRefusal) {
+          log.warn({ url, reason: err.message }, "web_fetch: the SSRF guard refused a host on the way");
+          return { success: false, output: "", error: err.message };
+        }
         // fall through to Playwright, remembering why
         directError = err instanceof Error ? err.message : String(err);
       }
@@ -369,21 +405,33 @@ registerTool({
       let renderedEmpty = false;
       if (playwrightAvailable) {
         try {
-          await callPlaywrightTool("browser_navigate", { url });
-          let rendered: { text: string; pageUrl: string | null; links: PageLink[] };
+          // The browser follows redirects, runs the page's scripts and may be answered unlike the
+          // direct request, and whatever page it ended on came back as this URL's content. That
+          // page is now checked, on arrival and again once read, before anything from it is used.
+          // This keeps the page out of the answer; it cannot take back the request the browser sent.
+          const arrival = await refusedBrowserPage(reportedPageUrls(await callPlaywrightTool("browser_navigate", { url })));
+          if (arrival) return await refuseBrowserLanding(url, arrival);
+          let rendered: { text: string; pageUrl: string | null; links: PageLink[]; frames?: string[] | null };
+          let pageReport: string;
           try {
             // browser_evaluate takes a FUNCTION. This sent `expression`, which Playwright MCP 1.61
             // rejects as a missing `function`, so this fast path never ran and every page came
             // back as a converted accessibility snapshot instead of its text.
-            rendered = parseRenderedPage(evaluateResultText(await callPlaywrightTool("browser_evaluate", {
-              function: PAGE_TEXT_AND_LINKS,
-            })));
+            pageReport = await callPlaywrightTool("browser_evaluate", { function: PAGE_TEXT_AND_LINKS });
+            rendered = parseRenderedPage(evaluateResultText(pageReport));
           } catch {
             // Fall back to snapshot and convert to readable text
             log.warn({ url }, "web_fetch: browser_evaluate unavailable, converting snapshot to text");
-            const rawSnapshot = await callPlaywrightTool("browser_snapshot", {});
-            rendered = { text: snapshotToReadableText(rawSnapshot), ...snapshotLinks(rawSnapshot, url) };
+            pageReport = await callPlaywrightTool("browser_snapshot", {});
+            rendered = { text: snapshotToReadableText(pageReport), ...snapshotLinks(pageReport, url) };
           }
+          const landing = await refusedBrowserPage([...reportedPageUrls(pageReport), ...(rendered.pageUrl ? [rendered.pageUrl] : [])]);
+          if (landing) return await refuseBrowserLanding(url, landing);
+          // The page can frame a private host, and the snapshot carries the frame's content. The
+          // page function lists the frames it found; a snapshot that shows one has them read.
+          const frames = rendered.frames !== undefined ? rendered.frames : showsFrames(pageReport) ? (await readPageAddresses()).frames : [];
+          const framed = await refusedFrameUrls(frames);
+          if (framed) return await refuseBrowserLanding(url, framed);
           // Emptiness is the page's text, never the envelope or the links around it.
           if (!rendered.text.trim()) {
             // An empty render is not the page's content. It was returned as a successful fetch
@@ -411,7 +459,7 @@ registerTool({
             "User-Agent": "StarlingAI/0.1 (research assistant)",
             "Accept": "text/html,application/xhtml+xml,text/plain,*/*",
           },
-        });
+        }, WEB_FETCH_MAX_REDIRECTS, webFetchChainBudgetMs());
         if (!res.ok) {
           return { success: false, output: "", error: `HTTP ${res.status} from ${url}${renderedNote}` };
         }
@@ -731,17 +779,49 @@ function evaluateResultText(output: string): string {
 }
 
 /**
+ * A browser expression for the addresses of the page's frames: each iframe or frame element's
+ * current address where it can be read (same origin, whose own frames are listed too), else its
+ * src, and every frame load the page's resource timing recorded, which still names a frame that
+ * has navigated since. An element with neither lists as "", and the expression is null when the
+ * frames could not be listed at all. A public page can frame a private one, and what the browser
+ * shows of the page (a snapshot, a screenshot) shows the frame with it.
+ */
+export const FRAME_ADDRESSES = `(() => {
+  try {
+    const found = [];
+    const visit = (doc, depth) => {
+      for (const frame of Array.from(doc.querySelectorAll('iframe, frame'))) {
+        let href = '';
+        let inner = null;
+        try { href = String(frame.contentWindow.location.href); inner = frame.contentDocument; } catch (e) { href = ''; }
+        found.push(href && href !== 'about:blank' ? href : (frame.src || href));
+        if (inner && depth < 8) visit(inner, depth + 1);
+      }
+      const timing = doc.defaultView && doc.defaultView.performance;
+      if (timing) for (const entry of timing.getEntriesByType('resource')) {
+        if (entry.initiatorType === 'iframe' || entry.initiatorType === 'frame') found.push(entry.name);
+      }
+    };
+    visit(document, 0);
+    return found;
+  } catch (e) {
+    return null;
+  }
+})()`;
+
+/**
  * The browser_evaluate function web_fetch sends: the page's text (whitespace evened out as
- * before), the URL the browser ended on, and its first LINK_SCAN_MAX links as [href, label]
- * pairs, returned as ONE JSON string. Text and links come back in the same round trip, and a
- * string result is what evaluateResultText reads. innerText has no link targets, so a rendered
- * page used to reach the agent with its menu as bare words. A link longer than LINK_URL_MAX is
- * never listed, so it is not sent either: a data: URI download link can run to megabytes.
+ * before), the URL the browser ended on, its first LINK_SCAN_MAX links as [href, label]
+ * pairs and its frames' addresses (FRAME_ADDRESSES), returned as ONE JSON string. Text and links
+ * come back in the same round trip, and a string result is what evaluateResultText reads.
+ * innerText has no link targets, so a rendered page used to reach the agent with its menu as
+ * bare words. A link longer than LINK_URL_MAX is never listed, so it is not sent either: a data:
+ * URI download link can run to megabytes.
  */
 const PAGE_TEXT_AND_LINKS = `() => {
   const t = (document.body?.innerText ?? '').replace(/\\t/g, ' ').replace(/[ \\t]{3,}/g, '  ').replace(/\\n{4,}/g, '\\n\\n\\n').trim();
   const l = Array.from(document.links ?? []).filter((a) => typeof a.href === 'string' && a.href.length <= ${LINK_URL_MAX}).slice(0, ${LINK_SCAN_MAX}).map((a) => [a.href, (a.innerText || a.getAttribute('aria-label') || a.title || a.querySelector('img')?.alt || '').replace(/\\s+/g, ' ').trim().slice(0, 200)]);
-  return JSON.stringify({ t, u: document.URL, l });
+  return JSON.stringify({ t, u: document.URL, l, f: ${FRAME_ADDRESSES} });
 }`;
 
 /**
@@ -749,13 +829,13 @@ const PAGE_TEXT_AND_LINKS = `() => {
  * or an envelope a future Playwright MCP renders differently — is the page text, with no links.
  * A page URL that is not http(s) (a browser error page's) is dropped; the requested URL stands in.
  */
-function parseRenderedPage(answer: string): { text: string; pageUrl: string | null; links: PageLink[] } {
+function parseRenderedPage(answer: string): { text: string; pageUrl: string | null; links: PageLink[]; frames?: string[] | null } {
   try {
     const value: unknown = JSON.parse(answer);
     if (value && typeof value === "object" && typeof (value as { t?: unknown }).t === "string") {
-      const page = value as { t: string; u?: unknown; l?: unknown };
+      const page = value as { t: string; u?: unknown; l?: unknown; f?: unknown };
       const pageUrl = typeof page.u === "string" && /^https?:\/\//i.test(page.u) ? page.u : null;
-      return { text: page.t, pageUrl, links: renderedLinks(page.l) };
+      return { text: page.t, pageUrl, links: renderedLinks(page.l), ...("f" in page ? { frames: frameList(page.f) } : {}) };
     }
   } catch {
     // not JSON: the answer is the page text itself
@@ -855,9 +935,10 @@ function pdfFilenameFromUrl(url: string): string {
 async function fetchAndExtractPdf(url: string, maxLength: number, shareSuffix: string): Promise<ToolResult> {
   let bytes: Uint8Array;
   try {
+    // The direct request already walked this chain; this one may follow it as far.
     const res = await safeFetch(url, 20000, {
       headers: { "User-Agent": "StarlingAI/0.1 (research assistant)", "Accept": "application/pdf,*/*" },
-    });
+    }, WEB_FETCH_MAX_REDIRECTS);
     if (!res.ok) return { success: false, output: "", error: `HTTP ${res.status} from ${url}` };
     bytes = new Uint8Array(await res.arrayBuffer());
   } catch (err) {
@@ -916,32 +997,29 @@ export async function hostIsBlocked(host: string): Promise<boolean> {
 }
 
 /**
- * Whether a host that resolved to `addresses` is refused. Any private address refuses it,
- * unless the host is listed in `allowedPrivateHosts` (exact name, any case) — and even a
- * listed host is refused when one of its addresses is loopback, link-local or unspecified,
- * so the list can open a fixture on a LAN or container network, never the gateway itself or
- * a cloud-metadata endpoint.
+ * Whether a host that resolved to `addresses` is refused. A loopback, link-local or
+ * unspecified address refuses it whatever the list says, so the list can open a fixture on a
+ * LAN or container network, never the gateway itself or a cloud-metadata endpoint. Any other
+ * private address refuses it unless the host is listed in `allowedPrivateHosts` (exact name,
+ * any case). The never-allowed test came after the private one and only for a listed host, so
+ * an address the private test did not know (::ffff:169.254.169.254) was let through.
  */
 export function resolvedHostIsBlocked(host: string, addresses: readonly string[], allowedPrivateHosts: readonly string[]): boolean {
+  if (addresses.some((address) => isNeverAllowedAddress(address))) return true;
   if (!addresses.some((address) => isPrivateHost(address))) return false;
   const name = host.toLowerCase().replace(/\.$/, "");
-  const listed = allowedPrivateHosts.some((entry) => entry.toLowerCase() === name);
-  return !listed || addresses.some((address) => isNeverAllowedAddress(address));
+  return !allowedPrivateHosts.some((entry) => entry.toLowerCase() === name);
 }
 
 /**
  * Addresses no host reaches through the guard, listed or not: loopback, link-local
- * (169.254.0.0/16 holds the cloud-metadata endpoint; fe80::/10) and the unspecified address,
- * in IPv4, IPv6 and IPv4-mapped IPv6 form. An IPv4-mapped address in hex form is refused too.
+ * (169.254.0.0/16 holds the cloud-metadata endpoint; fe80::/10) and the unspecified address
+ * (0.0.0.0/8, ::), also as the IPv4 address inside an IPv6 one (embeddedIPv4).
  */
 export function isNeverAllowedAddress(address: string): boolean {
   const a = address.replace(/^\[|\]$/g, "").toLowerCase();
-  const mapped = a.startsWith("::ffff:");
-  const v4 = mapped ? a.slice("::ffff:".length) : a;
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(v4)) {
-    return v4.startsWith("127.") || v4.startsWith("169.254.") || v4.startsWith("0.");
-  }
-  if (mapped) return true;
+  const v4 = /^\d{1,3}(\.\d{1,3}){3}$/.test(a) ? a : embeddedIPv4(a);
+  if (v4 !== null) return v4.startsWith("127.") || v4.startsWith("169.254.") || v4.startsWith("0.");
   return a === "::1" || a === "::" || /^fe[89ab][0-9a-f]:/.test(a);
 }
 
@@ -952,6 +1030,65 @@ function configuredPrivateHostAllowlist(): readonly string[] {
   } catch {
     return [];
   }
+}
+
+/** The code of a connection guardedConnectLookup refused. */
+const CONNECT_REFUSED = "ESSRFBLOCKED";
+
+type ConnectLookupCallback = (err: NodeJS.ErrnoException | null, address: string | LookupAddress[], family?: number) => void;
+
+/**
+ * The lookup a guarded connection resolves its name with. hostIsBlocked resolves a name to
+ * decide and the request then resolved it again to connect, so a name whose answers changed in
+ * between (DNS rebinding) passed the check on a public address and connected to a private one.
+ * This resolves the name once, at connect time, and hands the connection only addresses that
+ * pass the same decision: a name in guardrails.allowedPrivateHosts may reach a LAN address, and
+ * loopback, link-local (metadata) and unspecified addresses are refused even then. It answers in
+ * the shape asked for, one address or all of them.
+ */
+export function guardedConnectLookup(hostname: string, options: LookupOptions | undefined, callback: ConnectLookupCallback): void {
+  dnsLookupCallback(hostname, { ...options, all: true }, (err, records) => {
+    if (err) {
+      callback(err, "");
+      return;
+    }
+    if (records.length === 0) {
+      callback(Object.assign(new Error(`getaddrinfo ENOTFOUND ${hostname}`), { code: "ENOTFOUND" }), "");
+      return;
+    }
+    const name = hostname.toLowerCase();
+    const addresses = records.map((record) => record.address);
+    if (isPrivateHost(name) || isPrivateHost(name.replace(/\.$/, "")) || resolvedHostIsBlocked(name, addresses, configuredPrivateHostAllowlist())) {
+      callback(Object.assign(new Error(`${hostname} resolved to a private/internal network address when connecting; the connection is refused`), { code: CONNECT_REFUSED }), "");
+      return;
+    }
+    // The first record was handed over whatever the family asked for, so a connection asking for
+    // IPv4 could be given an IPv6 address. Only records of that family answer it now.
+    const family = options?.family === 4 || options?.family === "IPv4" ? 4 : options?.family === 6 || options?.family === "IPv6" ? 6 : 0;
+    const answer = family === 0 ? records : records.filter((record) => record.family === family);
+    if (answer.length === 0) {
+      callback(Object.assign(new Error(`getaddrinfo ENOTFOUND ${hostname}`), { code: "ENOTFOUND" }), "");
+      return;
+    }
+    if (options?.all) callback(null, answer);
+    else callback(null, answer[0]!.address, answer[0]!.family);
+  });
+}
+
+/**
+ * The dispatcher for requests to caller-supplied URLs: every connection it opens resolves its
+ * name through guardedConnectLookup. The checks before a request stay; they refuse early and
+ * cover IP literals, which a connection does not look up. It takes the place of the global
+ * dispatcher for these requests, so a proxy set through the environment (NODE_USE_ENV_PROXY
+ * with HTTP_PROXY / HTTPS_PROXY) does not apply to them: they connect directly. Proxy support
+ * would mean handing this lookup to a proxy-aware agent; none is configured today.
+ */
+export const guardedDispatcher = new Agent({ connect: { lookup: guardedConnectLookup } });
+
+/** What guardedConnectLookup said when it refused the connection a fetch failed on, else null. */
+export function connectRefusalReason(err: unknown): string | null {
+  const cause = (err as { cause?: { code?: unknown; message?: unknown } } | null | undefined)?.cause;
+  return cause?.code === CONNECT_REFUSED && typeof cause.message === "string" ? cause.message : null;
 }
 
 /**
@@ -979,12 +1116,173 @@ export async function checkUrlSsrf(rawUrl: string): Promise<string | null> {
   return null;
 }
 
+/** The page URLs a Playwright MCP answer reports, from its "- Page URL: …" lines. */
+export function reportedPageUrls(output: string): string[] {
+  return [...output.matchAll(/^[ \t]*-[ \t]+Page URL:[ \t]*(\S+)/gm)].map((match) => match[1]!);
+}
+
+/**
+ * The last page the guard let the browser show; the same page reported again is not re-checked.
+ * This saves a lookup per answer while the browser stays on one page: a per-URL dedup, not a
+ * security cache. A name that rebinds to a private address while the browser sits on its page is
+ * not caught by it, since the URL does not change (the browser's connection is made by then).
+ */
+let lastClearedPageUrl: string | undefined;
+
+/**
+ * Why the browser may not show the page it reports being on, or null when every one of
+ * `pageUrls` passes. checkUrlSsrf sees only the URL the browser is sent to; a redirect, the page's
+ * own script or a click then moves it with nothing checking where, so the page it ended on is
+ * checked before anything from it is used. An http(s) page goes through checkUrlSsrf (and so
+ * guardrails.allowedPrivateHosts), a local file is refused, and the browser's own pages
+ * (about:blank, an error page) belong to no host. A blob:, view-source: or filesystem: page
+ * belongs to the URL inside it; read as a page of no host, blob:http://10.0.0.5/… passed.
+ */
+export async function refusedBrowserPage(pageUrls: Iterable<string>): Promise<string | null> {
+  for (const pageUrl of pageUrls) {
+    if (pageUrl === lastClearedPageUrl) continue;
+    const refused = await pageAddressRefusal(pageUrl);
+    if (refused) {
+      lastClearedPageUrl = undefined;
+      return refused;
+    }
+    if (/^https?:\/\//i.test(innerPageUrl(pageUrl))) lastClearedPageUrl = pageUrl;
+  }
+  return null;
+}
+
+/** The URL a blob:, view-source: or filesystem: page belongs to; any other page URL as it is. */
+function innerPageUrl(pageUrl: string): string {
+  let target = pageUrl;
+  while (/^(?:blob|view-source|filesystem):/i.test(target)) target = target.slice(target.indexOf(":") + 1);
+  return target;
+}
+
+/** Why a page or frame at `pageUrl` may not be shown, or null: refusedBrowserPage's decision, without its memory. */
+async function pageAddressRefusal(pageUrl: string): Promise<string | null> {
+  const target = innerPageUrl(pageUrl);
+  if (/^file:/i.test(target)) return "a local file is not allowed";
+  return /^https?:\/\//i.test(target) ? checkUrlSsrf(target) : null;
+}
+
+/** A frame list as the page reported it: its addresses, or null when it is not a list of them. */
+function frameList(value: unknown): string[] | null {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string") ? (value as string[]) : null;
+}
+
+/**
+ * Why a page's frames may not be shown, or null: one on a host the guard refuses, one whose
+ * address could not be read, or a list that could not be read (null). This keeps a frame's
+ * content out of the answer; only egress control on the browser's network stops the request
+ * the frame made.
+ */
+export async function refusedFrameUrls(reported: unknown): Promise<string | null> {
+  const frames = frameList(reported);
+  if (frames === null) return "the addresses of its frames could not be read";
+  const checked = new Set<string>();
+  for (const frame of frames) {
+    if (!frame) return "the address of one of its frames could not be read";
+    let origin = frame;
+    try {
+      origin = new URL(innerPageUrl(frame)).origin;
+    } catch {
+      // checked as it is
+    }
+    if (checked.has(origin)) continue;
+    checked.add(origin);
+    const refused = await pageAddressRefusal(frame);
+    if (refused) return `a frame on it: ${refused}`;
+  }
+  return null;
+}
+
+/** Whether a Playwright MCP answer carries an image of the page (a screenshot), which shows its frames too. */
+function carriesImage(output: string): boolean {
+  return /"type"\s*:\s*"image"/.test(output);
+}
+
+/** Whether a Playwright MCP answer carries something of the page: a snapshot, an image or a result. */
+function carriesPageContent(output: string): boolean {
+  return /```ya?ml/.test(output) || carriesImage(output) || /^#{1,4}[ \t]*Result\b/m.test(output);
+}
+
+/** Whether a snapshot in the answer shows a frame's content: an iframe, or an element inside one (a ref such as f1e2). */
+function showsFrames(output: string): boolean {
+  return /^[ \t]*-[ \t]+'?iframe\b/m.test(output) || /\[ref=f\d+e\d+\]/.test(output);
+}
+
+/** browser_evaluate's function for the tab's address and its frames' (FRAME_ADDRESSES), as one JSON string. */
+const PAGE_ADDRESSES = `() => JSON.stringify({ u: location.href, f: ${FRAME_ADDRESSES} })`;
+
+/** The address of the page the shared browser tab is on and its frames', read now; null where they cannot be read. */
+async function readPageAddresses(): Promise<{ page: string | null; frames: string[] | null }> {
+  try {
+    const output = await callPlaywrightTool("browser_evaluate", { function: PAGE_ADDRESSES });
+    const value: unknown = JSON.parse(evaluateResultText(output));
+    const read = value !== null && typeof value === "object" ? (value as { u?: unknown; f?: unknown }) : {};
+    const page = typeof read.u === "string" && /^[a-z][a-z0-9+.-]*:\S*$/i.test(read.u) ? read.u : reportedPageUrls(output)[0] ?? null;
+    return { page, frames: frameList(read.f) };
+  } catch {
+    return { page: null, frames: null };
+  }
+}
+
+/**
+ * Why the browser answers in `outputs` may not be shown, or null. The page URLs they report are
+ * checked. An answer that carries something of the page but reports no URL, such as a
+ * screenshot taken while the tab's header had not changed, passed unchecked; the tab's address
+ * is now read for it, and one that cannot be read refuses it. An answer that shows frames (an
+ * iframe in its snapshot, or an image of the page) has its frames' addresses read and checked;
+ * a page without frames costs no extra call.
+ */
+export async function refusedBrowserAnswer(outputs: readonly string[]): Promise<string | null> {
+  const pageUrls = outputs.flatMap((output) => reportedPageUrls(output));
+  if (pageUrls.length > 0) {
+    const refused = await refusedBrowserPage(pageUrls);
+    if (refused) return refused;
+  }
+  const pageUnknown = pageUrls.length === 0 && outputs.some((output) => carriesPageContent(output));
+  const framesShown = outputs.some((output) => showsFrames(output) || carriesImage(output));
+  if (!pageUnknown && !framesShown) return null;
+  const read = await readPageAddresses();
+  if (pageUnknown) {
+    if (read.page === null) return "its address could not be read";
+    const refused = await refusedBrowserPage([read.page]);
+    if (refused) return refused;
+  }
+  return refusedFrameUrls(read.frames);
+}
+
+/** Sends the shared browser tab to about:blank after a refused page, so no later call starts on it. */
+export async function leaveRefusedPage(): Promise<void> {
+  try {
+    await callPlaywrightTool("browser_navigate", { url: "about:blank" });
+  } catch (err) {
+    log.warn({ err }, "could not send the browser to about:blank after a refused page");
+  }
+}
+
+/**
+ * The guard turned a request away before it was sent: the host, or the target of a redirect
+ * on the way, is private or internal, a redirect left http(s), or the chain was still going at
+ * the hop limit, so the guard never saw where it ends. It is kept apart from network errors
+ * because web_fetch hands those to the browser, and the browser follows the same redirects with
+ * nothing checking where they lead.
+ */
+class SsrfRefusal extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SsrfRefusal";
+  }
+}
+
 /**
  * fetch() that re-runs the SSRF guard on EVERY redirect hop. The plain guard only
  * validated the initial URL, so a public URL that 30x-redirected to 169.254.169.254
  * or an internal host bypassed it. Follows redirects manually, re-checking each
- * Location target's host (and its DNS) before the next request. Only for
- * user/LLM-supplied URLs — NOT the configured (trusted) search backends.
+ * Location target's host (and its DNS) before the next request; a host or target it
+ * turns away throws SsrfRefusal. Only for user/LLM-supplied URLs — NOT the configured
+ * (trusted) search backends.
  */
 async function safeFetch(url: string, ms: number, init?: RequestInit, maxRedirects = 5): Promise<Response> {
   return (await safeFetchFinal(url, ms, init, maxRedirects)).res;
@@ -994,9 +1292,19 @@ async function safeFetch(url: string, ms: number, init?: RequestInit, maxRedirec
  * safeFetch, also returning the URL of the hop that answered. A page's relative links resolve
  * against that URL, not the one requested (/produkte answered from /produkte/seite-1.html), and
  * `res.url` cannot be relied on for it: it is "" on a Response that was not fetched.
+ *
+ * `chainBudgetMs` bounds the whole chain. Once a redirect has been followed, a hop that runs out
+ * of time, its own `ms` or what is left of the budget, is a refusal rather than a network error:
+ * web_fetch hands a network error to the browser, which walks the rest of the chain unchecked,
+ * so a slow hop was a way past the per-hop check. The first request keeps its own timeout and
+ * fails as before.
  */
-async function safeFetchFinal(url: string, ms: number, init?: RequestInit, maxRedirects = 5): Promise<{ res: Response; finalUrl: string }> {
+async function safeFetchFinal(url: string, ms: number, init?: RequestInit, maxRedirects = 5, chainBudgetMs = Number.POSITIVE_INFINITY): Promise<{ res: Response; finalUrl: string }> {
+  const deadline = Date.now() + chainBudgetMs;
+  const tooSlow = () => new SsrfRefusal(`${url}: the redirect chain took too long; it is not followed further`);
   let current = url;
+  // The URLs this chain has requested, fragments dropped (they are never sent).
+  const requested = new Set<string>();
   for (let hop = 0; hop <= maxRedirects; hop++) {
     let host: string;
     try {
@@ -1005,33 +1313,102 @@ async function safeFetchFinal(url: string, ms: number, init?: RequestInit, maxRe
       throw new Error("Invalid URL");
     }
     if (await hostIsBlocked(host)) {
-      throw new Error("Fetching private/internal network addresses is not allowed");
+      throw new SsrfRefusal(hop === 0
+        ? "Fetching private/internal network addresses is not allowed"
+        : `${url} redirects to a private/internal network address; fetching it is not allowed`);
     }
+    // The host check above resolves the name, which can take as long as its server likes.
+    const left = deadline - Date.now();
+    if (hop > 0 && left <= 0) throw tooSlow();
+    requested.add(withoutFragment(current));
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), ms);
+    const timer = setTimeout(() => controller.abort(), hop === 0 ? ms : Math.min(ms, left));
     let res: Response;
     try {
-      res = await fetch(current, { ...init, signal: controller.signal, redirect: "manual" });
+      res = await fetch(current, { ...init, signal: controller.signal, redirect: "manual", dispatcher: guardedDispatcher } as RequestInit);
+    } catch (err) {
+      if (hop > 0 && controller.signal.aborted) throw tooSlow();
+      // The name passed the check above and resolved to a private address when connecting: a
+      // refusal, never a network error the browser, which resolves names itself, gets to retry.
+      const refused = connectRefusalReason(err);
+      if (refused) throw new SsrfRefusal(`${url}: ${refused}`);
+      throw err;
     } finally {
       clearTimeout(timer);
     }
     if (res.status >= 300 && res.status < 400 && res.headers.has("location")) {
       const next = new URL(res.headers.get("location")!, current).toString();
-      if (!/^https?:\/\//i.test(next)) throw new Error("Redirect to a non-http(s) scheme is not allowed");
+      if (!/^https?:\/\//i.test(next)) throw new SsrfRefusal("Redirect to a non-http(s) scheme is not allowed");
+      // Back to a URL the guard already let through: a loop, such as a cookie check that only a
+      // client keeping cookies gets past. Not a refusal, so web_fetch still tries the browser.
+      if (requested.has(withoutFragment(next))) throw new Error("Redirect loop");
       current = next;
       continue;
     }
     return { res, finalUrl: current };
   }
-  throw new Error("Too many redirects");
+  throw new SsrfRefusal(`${url} redirects more than ${maxRedirects} times; it is not followed further`);
+}
+
+function withoutFragment(url: string): string {
+  const hash = url.indexOf("#");
+  return hash < 0 ? url : url.slice(0, hash);
+}
+
+/** The eight 16-bit groups of an IPv6 address (a trailing dotted IPv4 counts as two), or null. */
+function ipv6Hextets(address: string): number[] | null {
+  if (!address.includes(":")) return null;
+  let text = address;
+  const tail: number[] = [];
+  const dotted = /^(.*:)(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(text);
+  if (dotted) {
+    const octets = dotted.slice(2, 6).map(Number);
+    if (octets.some((octet) => octet > 255)) return null;
+    tail.push((octets[0]! << 8) | octets[1]!, (octets[2]! << 8) | octets[3]!);
+    text = dotted[1]!.endsWith("::") ? dotted[1]! : dotted[1]!.slice(0, -1);
+  }
+  const halves = text.split("::");
+  if (halves.length > 2) return null;
+  const groups = (part: string) => (part === "" ? [] : part.split(":").map((group) => (/^[0-9a-f]{1,4}$/.test(group) ? parseInt(group, 16) : Number.NaN)));
+  const head = groups(halves[0]!);
+  const rest = halves.length === 2 ? groups(halves[1]!) : [];
+  if ([...head, ...rest].some((group) => Number.isNaN(group))) return null;
+  const known = head.length + rest.length + tail.length;
+  if (halves.length === 1) return known === 8 ? [...head, ...tail] : null;
+  return known <= 7 ? [...head, ...new Array<number>(8 - known).fill(0), ...rest, ...tail] : null;
+}
+
+/**
+ * The IPv4 address an IPv6 address carries, dotted, or null: IPv4-mapped ::ffff:a.b.c.d (also
+ * written ::ffff:xxxx:xxxx), IPv4-translated ::ffff:0:a.b.c.d, the deprecated IPv4-compatible
+ * ::a.b.c.d and the NAT64 well-known prefix 64:ff9b::/96. A connection to any of these reaches
+ * the IPv4 address.
+ */
+function embeddedIPv4(address: string): string | null {
+  const g = ipv6Hextets(address);
+  if (!g) return null;
+  const zeroTo = (end: number) => g.slice(0, end).every((group) => group === 0);
+  const mapped = zeroTo(5) && g[5] === 0xffff;
+  const translated = zeroTo(4) && g[4] === 0xffff && g[5] === 0;
+  const compatible = zeroTo(6);
+  const nat64 = g[0] === 0x64 && g[1] === 0xff9b && g.slice(2, 6).every((group) => group === 0);
+  if (!mapped && !translated && !compatible && !nat64) return null;
+  return `${g[6]! >> 8}.${g[6]! & 0xff}.${g[7]! >> 8}.${g[7]! & 0xff}`;
+}
+
+/** Whether a dotted IPv4 address is loopback, RFC 1918, link-local (metadata) or in 0.0.0.0/8. */
+function isPrivateIPv4(dotted: string): boolean {
+  const [a, b] = dotted.split(".").map(Number);
+  return a === 127 || a === 10 || a === 0 || (a === 172 && b! >= 16 && b! <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254);
 }
 
 export function isPrivateHost(host: string): boolean {
   // Strip IPv6 brackets if present; lowercase so IPv6 hextets match case-insensitively.
   const h = host.replace(/^\[|\]$/g, "").toLowerCase();
 
-  // Loopback
-  if (h === "localhost" || h === "127.0.0.1" || h === "::1") return true;
+  // Loopback, and every name under .localhost (RFC 6761): a subdomain of it was left to the
+  // resolver, and one answering NXDOMAIN let it through while a browser maps it to loopback.
+  if (h === "localhost" || h.endsWith(".localhost") || h === "127.0.0.1" || h === "::1") return true;
   // Unspecified / any-address
   if (h === "0.0.0.0" || h === "::") return true;
   // IPv6 Unique-Local Addresses fc00::/7 (fc00–fdff first hextet). The 4-hex-digit
@@ -1039,10 +1416,13 @@ export function isPrivateHost(host: string): boolean {
   if (/^f[cd][0-9a-f]{2}:/.test(h)) return true;
   // IPv6 link-local fe80::/10 (fe80–febf first hextet)
   if (/^fe[89ab][0-9a-f]:/.test(h)) return true;
-  // IPv6-mapped IPv4 loopback (::ffff:127.0.0.1)
-  if (/^::ffff:127\./i.test(h)) return true;
-  // IPv6-mapped private ranges
-  if (/^::ffff:(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(h)) return true;
+  // An IPv6 address that carries an IPv4 one reaches that IPv4 address, so it is judged as it.
+  // Only the dotted ::ffff: forms of 127/8 and RFC 1918 were known here, and the metadata
+  // endpoint as ::ffff:169.254.169.254 (::ffff:a9fe:a9fe once URL parsing has written it) passed.
+  const embedded = embeddedIPv4(h);
+  if (embedded !== null) return isPrivateIPv4(embedded);
+  // 0.0.0.0/8 (dotted form): "this network", which reaches the host itself.
+  if (/^0\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h)) return true;
   // Loopback 127.0.0.0/8 (dotted form) — the literal check above only caught
   // 127.0.0.1, so 127.0.0.2 … 127.255.255.255 (all loopback) slipped through.
   if (h.startsWith("127.")) return true;

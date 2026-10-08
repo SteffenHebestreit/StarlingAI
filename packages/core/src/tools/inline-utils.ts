@@ -331,6 +331,11 @@ registerTool({
 
 // ─── url_inspect ─────────────────────────────────────────────────────────────
 
+/** Redirects a probe follows before it gives up: as many as web_fetch follows. */
+const URL_INSPECT_MAX_REDIRECTS = 5;
+/** The statuses fetch follows as redirects with redirect "follow". */
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
 registerTool({
   name: "url_inspect",
   description:
@@ -368,19 +373,36 @@ registerTool({
 
     const followRedirects = args["followRedirects"] !== false;
     const timeoutMs = Math.min(30_000, Math.max(1_000, Number(args["timeoutMs"] ?? 8000)));
+    // The probe had no SSRF guard and let fetch follow redirects, so http://10.0.0.5/ was probed
+    // as asked, and a public URL that redirected into the private network answered with that
+    // service's status and headers. web_fetch's guard now decides every host the probe reaches,
+    // guardrails.allowedPrivateHosts included, and each redirect is followed by hand, its target
+    // checked before it is requested.
+    const { checkUrlSsrf, connectRefusalReason, guardedDispatcher } = await import("./web.js");
 
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     timer.unref?.();
     try {
-      const res = await fetch(parsed.toString(), {
-        method: "HEAD",
-        redirect: followRedirects ? "follow" : "manual",
-        signal: ctrl.signal,
-      });
+      let current = parsed.toString();
+      const refused = await checkUrlSsrf(current);
+      if (refused) return { success: false, output: "", error: `Refusing to probe that URL: ${refused}.` };
+      let res = await fetch(current, { method: "HEAD", redirect: "manual", signal: ctrl.signal, dispatcher: guardedDispatcher } as RequestInit);
+      for (let redirects = 0; followRedirects && REDIRECT_STATUSES.has(res.status) && res.headers.has("location"); redirects++) {
+        if (redirects >= URL_INSPECT_MAX_REDIRECTS) {
+          return { success: false, output: "", error: `URL probe failed: more than ${URL_INSPECT_MAX_REDIRECTS} redirects` };
+        }
+        const next = new URL(res.headers.get("location")!, current).toString();
+        const refusedHop = await checkUrlSsrf(next);
+        if (refusedHop) {
+          return { success: false, output: "", error: `Refusing to follow the redirect from ${current}: ${refusedHop}.` };
+        }
+        current = next;
+        res = await fetch(current, { method: "HEAD", redirect: "manual", signal: ctrl.signal, dispatcher: guardedDispatcher } as RequestInit);
+      }
       const headers: Record<string, string> = {};
       res.headers.forEach((v, k) => { headers[k] = v; });
-      const finalUrl = res.url || parsed.toString();
+      const finalUrl = res.url || current;
       const redirected = finalUrl !== parsed.toString();
       const lines = [
         `${res.status} ${res.statusText || ""}`.trim(),
@@ -406,10 +428,14 @@ registerTool({
       };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      // A name that passed the check above and resolved to a private address when connecting.
+      const refusedConnection = connectRefusalReason(err);
       return {
         success: false,
         output: "",
-        error: ctrl.signal.aborted ? `URL probe timed out after ${timeoutMs}ms` : `URL probe failed: ${msg}`,
+        error: refusedConnection
+          ? `Refusing to probe that URL: ${refusedConnection}.`
+          : ctrl.signal.aborted ? `URL probe timed out after ${timeoutMs}ms` : `URL probe failed: ${msg}`,
       };
     } finally {
       clearTimeout(timer);
