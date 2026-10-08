@@ -38,6 +38,7 @@ import { detectReplyLanguage, fieldMatches, summarizeAgents, summarizeTools } fr
 import { parseJudgeScore } from "../e2e/judge.js";
 import { GreenMailAdapter, parseMimeMessage, type MailAdapter } from "../e2e/mail.js";
 import { findRepoRoot } from "../e2e/paths.js";
+import type { E2EProvenance } from "../e2e/provenance.js";
 import type { E2EScenario } from "../e2e/scenario.js";
 
 // ── fake gateway ─────────────────────────────────────────────────────────────
@@ -80,6 +81,8 @@ class FakeGateway {
   readonly httpPaths: string[] = [];
   /** Durable memory keys by `<user>:<scope>`, for the reset before each attempt. */
   readonly memory = new Map<string, Set<string>>();
+  /** What GET /api/models/preset answers: the dashboard's Local ⇄ Claude switch. */
+  modelPreset: { active: string | null; activePrimary: string | null } = { active: null, activePrimary: null };
   private readonly server = http.createServer((req, res) => void this.handleHttp(req, res));
   private readonly wss = new WebSocketServer({ noServer: true });
   private readonly sessions = new Map<string, { owner: string; transcript: Array<Record<string, unknown>> }>();
@@ -267,6 +270,9 @@ class FakeGateway {
     if (req.method === "GET" && url.pathname === "/api/health/subsystems") {
       return json(200, { healthy: true, degraded: false, checks: [{ name: "primary_model", status: "ok", detail: "fake reachable" }, { name: "engram", status: "ok", detail: "not configured (RAG enhancement off)" }] });
     }
+    if (req.method === "GET" && url.pathname === "/api/models/preset") {
+      return json(200, { ...this.modelPreset, defaultPrimary: "local/fake-model", scope: "all", presets: [{ name: "claude", primary: "anthropic/claude-fake" }] });
+    }
     if (req.method === "GET" && url.pathname.startsWith("/api/echo/")) {
       return json(200, { hello: "world", user, session: decodeURIComponent(url.pathname.slice("/api/echo/".length)), token: "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJldmFsIn0.c2lnbmF0dXJlLXNpZ25hdHVyZQ" });
     }
@@ -408,6 +414,7 @@ afterAll(async () => {
 beforeEach(() => {
   gateway.healthy = true;
   gateway.judgeAnswer = "SCORE: 9";
+  gateway.modelPreset = { active: null, activePrimary: null };
   gateway.setScripts([
     { match: /^hello/i, run: helloScript },
     { match: /^steer/i, run: steerScript },
@@ -1289,18 +1296,23 @@ describe("e2e CLI (in process, against the fake gateway)", () => {
     expect(all.err).toBe("");
     expect(all.code).toBe(1);
     expect(all.out).toContain("Mail isolation: the mail-service container is not running");
-    expect(all.out).toMatch(/^Build: harness [0-9a-f]{7}( \(dirty\))? · gateway image unknown$/m);
+    expect(all.out).toMatch(/^Build: harness [0-9a-f]{7}( \(dirty\))? · gateway image unknown · config unknown · model local\/fake-model$/m);
     expect(all.out).toContain("Scenarios: 1 passed, 1 failed, 0 skipped of 2");
     expect(all.out).toMatch(/FAIL cli-fail attempt 1\/1 \([\d.]+ s\): step 1 turn: reply\.includes "banana": not found/);
     const files = readdirSync(join(cliDir, "out-1"));
     expect(files.filter((file) => file.endsWith(".json"))).toHaveLength(1);
     expect(files.filter((file) => file.endsWith(".md"))).toHaveLength(1);
     const reportPath = join(cliDir, "out-1", files.find((file) => file.endsWith(".json"))!);
-    // The run records what it ran on: this checkout's HEAD, and why the gateway image is unknown.
-    const written = JSON.parse(readFileSync(reportPath, "utf8")) as { meta: { provenance: { harness: { sha: string }; gatewayImage: null; missing: string[] } } };
-    expect(written.meta.provenance.harness.sha).toMatch(/^[0-9a-f]{40}/);
+    // The run records what it ran on: this checkout's HEAD, the gateway's models, and why the image and config are unknown.
+    const written = JSON.parse(readFileSync(reportPath, "utf8")) as { meta: { provenance: E2EProvenance } };
+    expect(written.meta.provenance.harness?.sha).toMatch(/^[0-9a-f]{40}/);
     expect(written.meta.provenance.gatewayImage).toBeNull();
-    expect(written.meta.provenance.missing).toEqual(["gateway image: the e2e environment status names none (no running gateway container of this checkout)"]);
+    expect(written.meta.provenance.gatewayConfig).toBeNull();
+    expect(written.meta.provenance.model).toEqual({ active: null, activePrimary: null, defaultPrimary: "local/fake-model", scope: "all" });
+    expect(written.meta.provenance.missing).toEqual([
+      "gateway image: the e2e environment status names none (no running gateway container of this checkout)",
+      "gateway config: the e2e environment status names none (no running gateway container of this checkout)",
+    ]);
 
     const one = await cli(["evaluate", "--scenarios", "scenarios", "--id", "cli-pass", "--out", "out-2"]);
     expect(one.code).toBe(0);
@@ -1356,15 +1368,17 @@ describe("e2e CLI (in process, against the fake gateway)", () => {
     writeFileSync(join(cliDir, "suspect", "b.jsonc"), JSON.stringify({ id: "suspect-b", title: "Suspect B", group: "core", steps: turn("hello b") }));
     writeFileSync(join(cliDir, "suspect", "kb.jsonc"), JSON.stringify({ id: "suspect-kb", title: "Needs engram", group: "core", requires: ["engram"], steps: turn("hello kb") }));
     const provenance = {
-      harness: { sha: "0123456789abcdef0123456789abcdef01234567", dirty: false, committedAt: "2026-10-08T12:00:00+02:00" },
+      harness: { sha: "0123456789abcdef0123456789abcdef01234567", dirty: false, changes: null, committedAt: "2026-10-08T12:00:00+02:00" },
       gatewayImage: { id: `sha256:${"3b".repeat(32)}`, createdAt: "2026-10-07T21:09:32.557822715Z", revision: null, dirty: null },
+      gatewayConfig: { compiled: "a7".repeat(32), overlay: "absent" },
+      model: { active: null, activePrimary: null, defaultPrimary: "local/qwen3.6-35b", scope: "all" },
       missing: [],
       warnings: ["the gateway image 3b3b3b3b3b3b was built 2026-10-07T21:09:32.557822715Z, before the harness's HEAD 0123456 was committed (2026-10-08T12:00:00+02:00): the stack may not run the code under test"],
     };
     const run = await cli(["evaluate", "--scenarios", "suspect", "--out", "suspect-out"], { provenance: async () => provenance });
     expect(run.err).toBe("");
     expect(run.code).toBe(3);
-    expect(run.out).toContain("Build: harness 0123456 · gateway image 3b3b3b3b3b3b built 2026-10-07T21:09:32.557822715Z");
+    expect(run.out).toContain("Build: harness 0123456 · gateway image 3b3b3b3b3b3b built 2026-10-07T21:09:32.557822715Z · config a7a7a7a7a7a7, no overlay · model local/qwen3.6-35b");
     expect(run.out).toContain("Scenarios: 2 passed, 0 failed, 1 skipped of 3");
     expect(run.out).toContain("ENVIRONMENT SUSPECT: 1 of 3 selected scenarios were skipped because engram was down (engram: ok — not configured (RAG enhancement off))");
     expect(run.out).toContain(`PROVENANCE: ${provenance.warnings[0]}`);
@@ -1385,17 +1399,46 @@ describe("e2e CLI (in process, against the fake gateway)", () => {
     // The stack's gateway image names a commit other than this checkout's HEAD (the default
     // provenance: real git, the image from the environment status).
     const image = { id: `sha256:${"4c".repeat(32)}`, created: "2026-10-08T13:00:00Z", revision: "f".repeat(40), dirty: false };
+    const config = { compiled: "a7".repeat(32), overlay: "absent" };
     const stale = await cli(["evaluate", "--scenarios", "confound", "--out", "confound-2", "--baseline", baselinePath], {
-      environment: async () => ({ json: { mailService: { running: false }, gateway: { running: true, image } } }),
+      environment: async () => ({ json: { mailService: { running: false }, gateway: { running: true, image, config } } }),
     });
     expect(stale.err).toBe("");
     expect(stale.code).toBe(0);
     const warning = "the gateway image 4c4c4c4c4c4c was built from fffffff, but the harness runs [0-9a-f]{7}: the stack may not run the code under test";
-    expect(stale.out).toMatch(/^Build: harness [0-9a-f]{7}( \(dirty\))? · gateway image 4c4c4c4c4c4c from fffffff built 2026-10-08T13:00:00Z$/m);
+    expect(stale.out).toMatch(/^Build: harness [0-9a-f]{7}( \(dirty\))? · gateway image 4c4c4c4c4c4c from fffffff built 2026-10-08T13:00:00Z · config a7a7a7a7a7a7, no overlay · model local\/fake-model$/m);
     expect(stale.out).toMatch(new RegExp(`^PROVENANCE: ${warning}$`, "m"));
     expect(stale.out).toMatch(new RegExp(`^Baseline: .*; CONFOUNDED — this run: ${warning}$`, "m"));
     const markdownFile = readdirSync(join(cliDir, "confound-2")).find((file) => file.endsWith(".md"))!;
     expect(readFileSync(join(cliDir, "confound-2", markdownFile), "utf8")).toMatch(new RegExp(`^- \\*\\*Confounded\\*\\* — this run: ${warning}$`, "m"));
+  });
+
+  it("lists a flag flipped in a local shard and a preset switched on the dashboard as build changes, not as a confound", async () => {
+    mkdirSync(join(cliDir, "ab"), { recursive: true });
+    writeFileSync(join(cliDir, "ab", "ab.jsonc"), JSON.stringify({ id: "ab-a", title: "A/B", group: "core", steps: [{ kind: "turn", message: "hello ab", expect: { reply: { includes: ["42"] } } }] }));
+    // One image, built after HEAD was committed: no provenance warning on either run.
+    const image = { id: `sha256:${"5d".repeat(32)}`, created: "2099-01-01T00:00:00Z", revision: null, dirty: null };
+    const status = (compiled: string) => async () => ({ json: { mailService: { running: false }, gateway: { running: true, image, config: { compiled, overlay: "absent" } } } });
+    const first = await cli(["evaluate", "--scenarios", "ab", "--out", "ab-1"], { environment: status("a7".repeat(32)) });
+    expect(first.code).toBe(0);
+    const baselinePath = join(cliDir, "ab-1", readdirSync(join(cliDir, "ab-1")).find((file) => file.endsWith(".json"))!);
+
+    // Between the runs the compiled config changed and the dashboard switched to the Claude preset.
+    gateway.modelPreset = { active: "claude", activePrimary: "anthropic/claude-fake" };
+    const second = await cli(["evaluate", "--scenarios", "ab", "--out", "ab-2", "--baseline", baselinePath], { environment: status("c3".repeat(32)) });
+    expect(second.err).toBe("");
+    expect(second.code).toBe(0);
+    expect(second.out).toMatch(/^Build: harness [0-9a-f]{7}( \(dirty\))? · gateway image 5d5d5d5d5d5d built 2099-01-01T00:00:00Z · config c3c3c3c3c3c3, no overlay · model anthropic\/claude-fake \(preset claude\)$/m);
+    expect(second.out).toContain("builds: compiled config a7a7a7a7a7a7 → c3c3c3c3c3c3; model local/fake-model → anthropic/claude-fake (preset claude)");
+    expect(second.out).not.toContain("CONFOUNDED");
+
+    // A gateway that is down names no model, and the report says why.
+    gateway.healthy = false;
+    const down = await cli(["evaluate", "--scenarios", "ab", "--out", "ab-3"], { environment: status("c3".repeat(32)) });
+    expect(down.code).toBe(3);
+    expect(down.out).toMatch(/ · model unknown$/m);
+    const report = JSON.parse(readFileSync(join(cliDir, "ab-3", readdirSync(join(cliDir, "ab-3")).find((file) => file.endsWith(".json"))!), "utf8")) as { meta: { provenance: E2EProvenance } };
+    expect(report.meta.provenance.missing).toEqual(["model: the gateway is down (GET /healthz → 503)"]);
   });
 
   it("exits 2 on usage errors and unknown ids, 1 on invalid scenario files", async () => {

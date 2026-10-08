@@ -38,7 +38,7 @@ import {
 } from "./services.js";
 import { RUNNER_DEFAULTS, runScenarios } from "./runner.js";
 import { buildReport, compareWithBaseline, describeBuildChanges, describeSuite, exitCodeFor, loadReport, writeReport, type BaselineComparison } from "./report.js";
-import { captureProvenance, describeProvenance, type E2EProvenance } from "./provenance.js";
+import { captureProvenance, describeProvenance, readGatewayModel, type E2EProvenance, type ModelSource } from "./provenance.js";
 import { resolveSetupPaths, runE2ESetup, SetupRefusedError } from "./setup.js";
 
 const VALUE_FLAGS = new Set(["group", "tag", "id", "repeat", "concurrency", "baseline", "out", "scenarios"]);
@@ -63,7 +63,7 @@ export interface CliIo {
   environment?: EnvironmentStatusSource | null;
   /** The mail-isolation preflight. Default: read from the environment status. */
   mailIsolation?: MailIsolationCheck;
-  /** What the run ran on. Default: git of the repo root and the environment status's gateway image. */
+  /** What the run ran on. Default: git of the repo root, the environment status's gateway image and config, and the gateway's models. */
   provenance?: () => Promise<E2EProvenance>;
   repoRoot?: string;
 }
@@ -205,9 +205,6 @@ async function evaluate(args: ParsedArgs, io: CliIo, repoRoot: string): Promise<
     return 2;
   }
   io.out(`Mail isolation: ${isolation.detail}`);
-  const provenance = await (io.provenance ?? (() => captureProvenance(repoRoot, environment)))();
-  io.out(`Build: ${describeProvenance(provenance)}`);
-  for (const warning of provenance.warnings) io.out(`PROVENANCE: ${warning}`);
 
   const credentials = readCredentialsFile(paths.credentialsPath);
   const gatewayUrl = gatewayUrlFromEnv(io.env);
@@ -233,8 +230,9 @@ async function evaluate(args: ParsedArgs, io: CliIo, repoRoot: string): Promise<
   try {
     // A refused login would fail every attempt the same way; say so once, up front.
     const [gateway] = await prober.check(["gateway"]);
+    const identities = identitiesOf(selected);
     if (gateway?.up) {
-      for (const identity of identitiesOf(selected)) {
+      for (const identity of identities) {
         try {
           await client.token(identity);
         } catch (err) {
@@ -245,6 +243,15 @@ async function evaluate(args: ParsedArgs, io: CliIo, repoRoot: string): Promise<
     } else {
       io.err(`Gateway down: ${gateway?.detail ?? "unknown"} — its scenarios are skipped.`);
     }
+
+    // What the run ran on; the gateway's models are read as an identity that just logged in.
+    const modelIdentity = identities[0] ?? "eval";
+    const model: ModelSource = gateway?.up
+      ? () => readGatewayModel((path) => client.http(modelIdentity, "GET", path))
+      : async () => ({ missing: `model: the gateway is down (${gateway?.detail ?? "unknown"})` });
+    const provenance = await (io.provenance ?? (() => captureProvenance(repoRoot, environment, { model })))();
+    io.out(`Build: ${describeProvenance(provenance)}`);
+    for (const warning of provenance.warnings) io.out(`PROVENANCE: ${warning}`);
 
     const startedAt = new Date().toISOString();
     io.out(`Running ${selected.length} scenario(s) against ${gatewayUrl} (repeat ${repeat}, concurrency ${concurrency})`);

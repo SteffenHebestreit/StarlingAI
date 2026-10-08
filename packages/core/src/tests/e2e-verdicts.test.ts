@@ -5,12 +5,18 @@
  * reports as the harness wrote them, reduced to the fields the verdicts read) are re-graded with
  * today's rules.
  */
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 // @ts-expect-error — plain .mjs, no types
 import * as buildProvenanceModule from "../../../../scripts/build-provenance.mjs";
-import { buildReport, compareWithBaseline, exitCodeFor, renderMarkdown, type E2EReport, type E2ERunMeta } from "../e2e/report.js";
+// @ts-expect-error — plain .mjs, no types
+import * as configDigestModule from "../../../../scripts/gateway-config-digest.mjs";
+import { E2EInfraError, type HttpResult } from "../e2e/gateway-client.js";
+import { buildReport, compareWithBaseline, describeBuildChanges, exitCodeFor, renderMarkdown, type E2EReport, type E2ERunMeta } from "../e2e/report.js";
 import type { AttemptResult, ScenarioResult } from "../e2e/runner.js";
 import type { ServiceState } from "../e2e/services.js";
 import { compareSuite, compareTallies, signTestPValue } from "../e2e/stats.js";
@@ -19,8 +25,10 @@ import {
   captureProvenance,
   confounders,
   describeProvenance,
+  gatewayConfigFromStatus,
   gatewayImageFromStatus,
   provenanceWarnings,
+  readGatewayModel,
   readHarnessSource,
   type E2EProvenance,
   type GitRunner,
@@ -128,6 +136,12 @@ const buildProvenance = buildProvenanceModule as {
   stampBuildRevision: (env: Record<string, string | undefined>, git: GitAnswers) => void;
   imageFromInspect: (id: string, inspected: string | null) => unknown;
   imageOfContainer: (docker: DockerRunner, container: string | null) => unknown;
+};
+
+/** scripts/gateway-config-digest.mjs, which `pnpm e2e:env status` runs in the gateway container. */
+const configDigest = configDigestModule as {
+  CONFIG_DIGEST_SCRIPT: string;
+  configOfContainer: (docker: DockerRunner, container: string | null) => unknown;
 };
 
 /** The instructions of one Dockerfile stage: comments dropped, continuation lines joined. */
@@ -421,9 +435,15 @@ describe("e2e provenance", () => {
   const committed = { "rev-parse HEAD": SHA, "status --porcelain=v1": "", "log -1 --format=%cI HEAD": "2026-10-08T12:00:00+02:00" };
 
   it("reads HEAD, the dirty flag and the commit date, and never calls an unreadable tree clean", () => {
-    expect(readHarnessSource("/repo", fakeGit(committed))).toEqual({ sha: SHA, dirty: false, committedAt: "2026-10-08T12:00:00+02:00" });
-    expect(readHarnessSource("/repo", fakeGit({ ...committed, "status --porcelain=v1": " M config/gateway/10-gateway.jsonc" }))?.dirty).toBe(true);
-    expect(readHarnessSource("/repo", fakeGit({ ...committed, "status --porcelain=v1": null }))?.dirty).toBe(true);
+    expect(readHarnessSource("/repo", fakeGit(committed))).toEqual({ sha: SHA, dirty: false, changes: null, committedAt: "2026-10-08T12:00:00+02:00" });
+    const edited = { ...committed, "status --porcelain=v1": " M config/gateway/10-gateway.jsonc", "diff --no-ext-diff --binary HEAD": "diff --git a/config/gateway/10-gateway.jsonc b/config/gateway/10-gateway.jsonc", "ls-files --others --exclude-standard -z": "" };
+    expect(readHarnessSource("/repo", fakeGit(edited))).toMatchObject({ dirty: true, changes: expect.stringMatching(/^[0-9a-f]{64}$/) });
+    // Changes git cannot list are unknown, never "the same as before".
+    expect(readHarnessSource("/repo", fakeGit({ ...edited, "diff --no-ext-diff --binary HEAD": null }))).toMatchObject({ dirty: true, changes: null });
+    expect(readHarnessSource("/repo", fakeGit({ ...edited, "ls-files --others --exclude-standard -z": null }))).toMatchObject({ dirty: true, changes: null });
+    expect(readHarnessSource("/repo", fakeGit({ ...edited, "status --porcelain=v1": null }))).toMatchObject({ dirty: true, changes: null });
+    // An untracked file that cannot be read (gone since git listed it) leaves the changes unknown.
+    expect(readHarnessSource("/repo", fakeGit({ ...edited, "ls-files --others --exclude-standard -z": "eval/e2e/scenarios/gone.jsonc\0" }))).toMatchObject({ dirty: true, changes: null });
     expect(readHarnessSource("/repo", fakeGit({ ...committed, "rev-parse HEAD": null }))).toBeNull();
     expect(readHarnessSource("/repo", fakeGit({ ...committed, "rev-parse HEAD": "fatal: not a git repository" }))).toBeNull();
 
@@ -431,6 +451,49 @@ describe("e2e provenance", () => {
     const real = readHarnessSource(findRepoRoot());
     expect(real?.sha).toMatch(/^[0-9a-f]{40}/);
     expect(Number.isFinite(Date.parse(real?.committedAt ?? ""))).toBe(true);
+    expect(real?.changes).toEqual(real?.dirty ? expect.stringMatching(/^[0-9a-f]{64}$/) : null);
+  });
+
+  it("digests the uncommitted changes, untracked files included, so two dirty runs can tell the same changes from others", () => {
+    const repo = mkdtempSync(join(tmpdir(), "e2e-provenance-"));
+    try {
+      const git = (...args: string[]) => execFileSync("git", ["-c", "user.name=e2e", "-c", "user.email=e2e@example.test", ...args], { cwd: repo, stdio: ["ignore", "pipe", "ignore"] });
+      git("init", "-q");
+      writeFileSync(join(repo, "scenario.jsonc"), "{ \"id\": \"a\" }\n");
+      writeFileSync(join(repo, ".gitignore"), "out/\n");
+      git("add", "-A");
+      git("commit", "-q", "-m", "base");
+      expect(readHarnessSource(repo)).toMatchObject({ dirty: false, changes: null });
+
+      writeFileSync(join(repo, "scenario.jsonc"), "{ \"id\": \"b\" }\n");
+      const edited = readHarnessSource(repo)!.changes;
+      expect(edited).toMatch(/^[0-9a-f]{64}$/);
+      expect(readHarnessSource(repo)!.changes).toBe(edited);
+      // What git ignores (reports, local shards) is not the harness.
+      mkdirSync(join(repo, "out"));
+      writeFileSync(join(repo, "out", "report.json"), "{}\n");
+      expect(readHarnessSource(repo)!.changes).toBe(edited);
+      // A new scenario file counts, by its content: the same name with other content differs.
+      writeFileSync(join(repo, "new.jsonc"), "{ \"id\": \"c\" }\n");
+      const added = readHarnessSource(repo)!.changes;
+      expect(added).not.toBe(edited);
+      writeFileSync(join(repo, "new.jsonc"), "{ \"id\": \"d\" }\n");
+      expect(readHarnessSource(repo)!.changes).not.toBe(added);
+      rmSync(join(repo, "new.jsonc"));
+      expect(readHarnessSource(repo)!.changes).toBe(edited);
+      // Another edit of the same tracked file.
+      writeFileSync(join(repo, "scenario.jsonc"), "{ \"id\": \"e\" }\n");
+      expect(readHarnessSource(repo)!.changes).not.toBe(edited);
+
+      // A diff past execFileSync's 1 MiB default output still has a digest.
+      writeFileSync(join(repo, "fixture.txt"), `${"x".repeat(80)}\n`.repeat(16_000));
+      git("add", "fixture.txt");
+      git("commit", "-q", "-m", "fixture");
+      writeFileSync(join(repo, "fixture.txt"), `${"y".repeat(80)}\n`.repeat(16_000));
+      expect(readHarnessSource(repo)!.changes).toMatch(/^[0-9a-f]{64}$/);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
   });
 
   it("reads the gateway image from the e2e environment status, and records why when it cannot", async () => {
@@ -445,31 +508,124 @@ describe("e2e provenance", () => {
     expect(labelled("", false)).toMatchObject({ revision: null, dirty: false });
     expect(labelled("0123456", "true")).toMatchObject({ revision: null, dirty: null });
 
-    const full = await captureProvenance("/repo", async () => ({ json: status }), fakeGit(committed));
+    const config = { compiled: "a7".repeat(32), overlay: "absent" };
+    const model = { active: null, activePrimary: null, defaultPrimary: "local/qwen3.6-35b", scope: "all" };
+    const full = await captureProvenance("/repo", async () => ({ json: { gateway: { ...status.gateway, config } } }), {
+      git: fakeGit(committed),
+      model: async () => ({ model }),
+    });
     expect(full).toEqual({
-      harness: { sha: SHA, dirty: false, committedAt: "2026-10-08T12:00:00+02:00" },
+      harness: { sha: SHA, dirty: false, changes: null, committedAt: "2026-10-08T12:00:00+02:00" },
       gatewayImage: { id: `sha256:${"3b".repeat(32)}`, createdAt: "2026-10-07T21:09:32.557822715Z", revision: null, dirty: null },
+      gatewayConfig: config,
+      model,
       missing: [],
       // Built the evening before HEAD was committed.
       warnings: [`the gateway image ${"3b".repeat(6)} was built 2026-10-07T21:09:32.557822715Z, before the harness's HEAD 0123456 was committed (2026-10-08T12:00:00+02:00): the stack may not run the code under test`],
     });
-    expect(describeProvenance(full)).toBe(`harness 0123456 · gateway image ${"3b".repeat(6)} built 2026-10-07T21:09:32.557822715Z`);
+    expect(describeProvenance(full)).toBe(`harness 0123456 · gateway image ${"3b".repeat(6)} built 2026-10-07T21:09:32.557822715Z · config ${"a7".repeat(6)}, no overlay · model local/qwen3.6-35b`);
 
-    const blind = await captureProvenance("/repo", async () => ({ error: "pnpm e2e:env status --json gave no status (e2e:env: Docker is not reachable)" }), fakeGit({}));
+    const blind = await captureProvenance("/repo", async () => ({ error: "pnpm e2e:env status --json gave no status (e2e:env: Docker is not reachable)" }), {
+      git: fakeGit({}),
+      model: async () => ({ missing: "model: the gateway is down" }),
+    });
     expect(blind).toEqual({
       harness: null,
       gatewayImage: null,
-      missing: ["harness: git could not read the checkout at /repo", "gateway image: pnpm e2e:env status --json gave no status (e2e:env: Docker is not reachable)"],
+      gatewayConfig: null,
+      model: null,
+      missing: [
+        "harness: git could not read the checkout at /repo",
+        "gateway image and config: pnpm e2e:env status --json gave no status (e2e:env: Docker is not reachable)",
+        "model: the gateway is down",
+      ],
       warnings: [],
     });
-    expect(describeProvenance(blind)).toBe("harness unknown · gateway image unknown");
-    expect((await captureProvenance("/repo", null, fakeGit(committed))).missing).toEqual(["gateway image: scripts/e2e-env.mjs not found"]);
-    expect((await captureProvenance("/repo", async () => ({ json: { mailService: { running: false } } }), fakeGit(committed))).missing)
-      .toEqual(["gateway image: the e2e environment status names none (no running gateway container of this checkout)"]);
+    expect(describeProvenance(blind)).toBe("harness unknown · gateway image unknown · config unknown · model unknown");
+    expect((await captureProvenance("/repo", null, { git: fakeGit(committed) })).missing).toEqual(["gateway image and config: scripts/e2e-env.mjs not found", "model: not read"]);
+    expect((await captureProvenance("/repo", async () => ({ json: { mailService: { running: false } } }), { git: fakeGit(committed), model: async () => ({ model }) })).missing).toEqual([
+      "gateway image: the e2e environment status names none (no running gateway container of this checkout)",
+      "gateway config: the e2e environment status names none (no running gateway container of this checkout)",
+    ]);
+    // A running gateway docker could not read is not "no running gateway".
+    expect((await captureProvenance("/repo", async () => ({ json: { gateway: { running: true, image: null, config: null } } }), { git: fakeGit(committed), model: async () => ({ model }) })).missing).toEqual([
+      "gateway image: docker could not read the running gateway container's image",
+      "gateway config: the running gateway container did not report the digests of its config",
+    ]);
+  });
+
+  it("reads the digests of the config files the gateway reads, inside its container", () => {
+    const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
+    const dir = mkdtempSync(join(tmpdir(), "e2e-config-digest-"));
+    try {
+      // The script `pnpm e2e:env status` runs in the gateway container (docker exec … node -e), run here on two temp files.
+      const compiled = join(dir, "starlingai.json");
+      const overlay = join(dir, "starlingai.runtime.json");
+      writeFileSync(compiled, "{\"agents\":{\"defaults\":{\"model\":{\"primary\":\"local/qwen3.6-35b\"}}}}\n");
+      const inContainer = (paths: { SAI_CONFIG_PATH?: string; SAI_MUTABLE_CONFIG_PATH?: string }): unknown => {
+        const env: NodeJS.ProcessEnv = { ...process.env };
+        delete env["SAI_CONFIG_PATH"];
+        delete env["SAI_MUTABLE_CONFIG_PATH"];
+        return JSON.parse(execFileSync(process.execPath, ["-e", configDigest.CONFIG_DIGEST_SCRIPT], { env: { ...env, ...paths }, encoding: "utf8" }));
+      };
+      // No overlay yet: no runtime change was ever saved.
+      expect(inContainer({ SAI_CONFIG_PATH: compiled, SAI_MUTABLE_CONFIG_PATH: overlay })).toEqual({ compiled: sha256(readFileSync(compiled, "utf8")), overlay: "absent" });
+      // The dashboard switched the preset.
+      writeFileSync(overlay, "{\"agents\":{\"defaults\":{\"activeModelPreset\":\"claude\"}}}");
+      expect(inContainer({ SAI_CONFIG_PATH: compiled, SAI_MUTABLE_CONFIG_PATH: overlay })).toEqual({ compiled: sha256(readFileSync(compiled, "utf8")), overlay: sha256(readFileSync(overlay, "utf8")) });
+      // Unset, or not a readable file: unknown, not absent.
+      expect(inContainer({})).toEqual({ compiled: null, overlay: null });
+      expect(inContainer({ SAI_CONFIG_PATH: dir, SAI_MUTABLE_CONFIG_PATH: overlay })).toMatchObject({ compiled: null });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+
+    // Through docker, into the status, into the provenance.
+    const answer = { compiled: "a7".repeat(32), overlay: "absent" };
+    const calls: string[][] = [];
+    const exec = ["exec", "starlingai-gateway-1", "node", "-e", configDigest.CONFIG_DIGEST_SCRIPT];
+    const docker = (out: string | null): DockerRunner => (args) => {
+      calls.push(args);
+      return out !== null && args.join(" ") === exec.join(" ") ? { ok: true, out } : { ok: false, out: "" };
+    };
+    const config = configDigest.configOfContainer(docker(JSON.stringify(answer)), "starlingai-gateway-1");
+    expect(calls).toEqual([exec]);
+    expect(config).toEqual(answer);
+    expect(gatewayConfigFromStatus({ gateway: { running: true, config } })).toEqual(answer);
+    expect(configDigest.configOfContainer(docker(JSON.stringify({ compiled: "not a digest", overlay: "b".repeat(64) })), "starlingai-gateway-1")).toEqual({ compiled: null, overlay: "b".repeat(64) });
+    expect(configDigest.configOfContainer(docker("node: not found"), "starlingai-gateway-1")).toBeNull();
+    expect(configDigest.configOfContainer(docker(null), "starlingai-gateway-1")).toBeNull();
+    expect(configDigest.configOfContainer(docker(JSON.stringify(answer)), null)).toBeNull();
+    expect(gatewayConfigFromStatus({ gateway: { running: true, config: null } })).toBeNull();
+    expect(gatewayConfigFromStatus({ gateway: { running: true, config: { compiled: null, overlay: null } } })).toBeNull();
+    expect(gatewayConfigFromStatus({ gateway: { config: { compiled: "a7".repeat(32), overlay: "b".repeat(63) } } })).toEqual({ compiled: "a7".repeat(32), overlay: null });
+
+    // `pnpm e2e:env status` reports it.
+    const environment = readFileSync(join(findRepoRoot(), "scripts", "e2e-env.mjs"), "utf8");
+    expect(environment).toMatch(/^import \{ configOfContainer \} from "\.\/gateway-config-digest\.mjs";$/m);
+    expect(functionSource(environment, "async function collectStatus(")).toMatch(/\bgateway: \{[^}]*\bconfig: configOfContainer\(docker, gatewayRunning\),/);
+  });
+
+  it("reads the models the gateway answers with from its preset route, and why when it cannot", async () => {
+    const answer = (status: number, json: unknown) => async (path: string): Promise<HttpResult> => {
+      expect(path).toBe("/api/models/preset");
+      return { status, ok: status >= 200 && status < 300, text: JSON.stringify(json), json };
+    };
+    // Only the ids: not the preset list.
+    expect(await readGatewayModel(answer(200, {
+      active: "claude", activePrimary: "anthropic/claude-opus-4-1", defaultPrimary: "local/qwen3.6-35b", scope: "coordinator_qa",
+      presets: [{ name: "claude", primary: "anthropic/claude-opus-4-1" }],
+    }))).toEqual({ model: { active: "claude", activePrimary: "anthropic/claude-opus-4-1", defaultPrimary: "local/qwen3.6-35b", scope: "coordinator_qa" } });
+    expect(await readGatewayModel(answer(200, { active: null, activePrimary: null, defaultPrimary: "local/qwen3.6-35b", scope: "all" })))
+      .toEqual({ model: { active: null, activePrimary: null, defaultPrimary: "local/qwen3.6-35b", scope: "all" } });
+    expect(await readGatewayModel(answer(404, { error: "not found" }))).toEqual({ missing: "model: GET /api/models/preset answered HTTP 404" });
+    expect(await readGatewayModel(answer(200, { active: null }))).toEqual({ missing: "model: GET /api/models/preset named no model" });
+    expect(await readGatewayModel(async () => { throw new E2EInfraError("GET /api/models/preset failed: fetch failed"); }))
+      .toEqual({ missing: "model: GET /api/models/preset failed: fetch failed" });
   });
 
   it("without a revision label, warns only when the image was built before HEAD was committed", () => {
-    const harness = { sha: SHA, dirty: false, committedAt: "2026-10-07T18:27:27+02:00" };
+    const harness = { sha: SHA, dirty: false, changes: null, committedAt: "2026-10-07T18:27:27+02:00" };
     const unlabelled = (createdAt: string | null) => ({ id: "sha256:aa", createdAt, revision: null, dirty: null });
     expect(provenanceWarnings(harness, unlabelled("2026-10-07T21:09:32.557822715Z"))).toEqual([]);
     expect(provenanceWarnings(harness, unlabelled("2026-10-07T16:00:00Z"))).toHaveLength(1);
@@ -479,8 +635,8 @@ describe("e2e provenance", () => {
 
   it("compares an image that names its commit with HEAD, whatever its build time", () => {
     const other = "fedcba9876543210fedcba9876543210fedcba98";
-    const clean = { sha: SHA, dirty: false, committedAt: "2026-10-08T12:00:00+02:00" };
-    const dirty = { ...clean, dirty: true };
+    const clean = { sha: SHA, dirty: false, changes: null, committedAt: "2026-10-08T12:00:00+02:00" };
+    const dirty = { ...clean, dirty: true, changes: "d1".repeat(32) };
     // Built before HEAD's commit date, yet from HEAD: the label is exact, the time only a fallback.
     const image = (revision: string, built: boolean | null, createdAt = "2026-10-07T21:09:32Z") => ({ id: `sha256:${"4c".repeat(32)}`, createdAt, revision, dirty: built });
     expect(provenanceWarnings(clean, image(SHA, false))).toEqual([]);
@@ -494,19 +650,24 @@ describe("e2e provenance", () => {
     expect(provenanceWarnings(clean, image(SHA, true))).toEqual([
       `the gateway image ${"4c".repeat(6)} was built from 0123456 with uncommitted changes the checkout no longer has: the stack may not run the code under test`,
     ]);
-    expect(describeProvenance({ harness: dirty, gatewayImage: image(SHA, true), missing: [], warnings: [] }))
-      .toBe(`harness 0123456 (dirty) · gateway image ${"4c".repeat(6)} from 0123456 (dirty) built 2026-10-07T21:09:32Z`);
+    expect(describeProvenance({ harness: dirty, gatewayImage: image(SHA, true), gatewayConfig: null, model: null, missing: [], warnings: [] }))
+      .toBe(`harness 0123456 (dirty) · gateway image ${"4c".repeat(6)} from 0123456 (dirty) built 2026-10-07T21:09:32Z · config unknown · model unknown`);
   });
 
   it("lists what differs between two runs' builds, and renders it with the baseline", () => {
-    const at = (sha: string, dirty: boolean, image: string | null, revision: string | null = null): E2EProvenance => ({
-      harness: { sha, dirty, committedAt: null },
+    const CONFIG = { compiled: "a7".repeat(32), overlay: "absent" };
+    const LOCAL = { active: null, activePrimary: null, defaultPrimary: "local/qwen3.6-35b", scope: "all" };
+    const at = (sha: string, dirty: boolean, image: string | null, revision: string | null = null, changes: string | null = dirty ? "d1".repeat(32) : null): E2EProvenance => ({
+      harness: { sha, dirty, changes, committedAt: null },
       gatewayImage: image ? { id: `sha256:${image}`, createdAt: null, revision, dirty: revision ? dirty : null } : null,
+      gatewayConfig: CONFIG,
+      model: LOCAL,
       missing: [],
       warnings: [],
     });
     const other = "fedcba9876543210fedcba9876543210fedcba98";
     expect(buildChanges(at(SHA, false, "a".repeat(64)), at(SHA, false, "a".repeat(64)))).toEqual([]);
+    expect(describeBuildChanges([])).toBe("same gateway image, config, model and harness checkout");
     expect(buildChanges(at(SHA, false, "a".repeat(64)), at(other, true, "b".repeat(64)))).toEqual([
       `gateway image ${"a".repeat(12)} → ${"b".repeat(12)}`,
       "harness 0123456 → fedcba9 (dirty)",
@@ -515,26 +676,52 @@ describe("e2e provenance", () => {
       `gateway image ${"a".repeat(12)} from 0123456 → ${"b".repeat(12)} from fedcba9 (dirty)`,
       "harness 0123456 → fedcba9 (dirty)",
     ]);
-    expect(buildChanges(at(SHA, true, null), at(SHA, true, "b".repeat(64)))).toEqual([
+    expect(buildChanges(at(SHA, true, null, null, null), at(SHA, true, "b".repeat(64)))).toEqual([
       "gateway image unknown in the baseline",
       "harness 0123456 (dirty) in both runs: the uncommitted changes may differ",
     ]);
     expect(buildChanges(undefined, at(SHA, false, null))).toBeNull();
 
+    // Two dirty runs of one commit: the digest of the uncommitted changes tells.
+    expect(buildChanges(at(SHA, true, "a".repeat(64)), at(SHA, true, "a".repeat(64)))).toEqual([]);
+    expect(buildChanges(at(SHA, true, "a".repeat(64)), at(SHA, true, "a".repeat(64), null, "d2".repeat(32)))).toEqual([
+      "harness 0123456 (dirty) in both runs: the uncommitted changes differ",
+    ]);
+
+    // Same image and checkout. A flag flipped in a gitignored *.local.jsonc shard: the compiled config differs.
+    const same = at(SHA, false, "a".repeat(64));
+    expect(buildChanges(same, { ...same, gatewayConfig: { ...CONFIG, compiled: "c3".repeat(32) } })).toEqual([`compiled config ${"a7".repeat(6)} → ${"c3".repeat(6)}`]);
+    // The dashboard switched the preset: the runtime overlay and the model differ.
+    const claude = { active: "claude", activePrimary: "anthropic/claude-opus-4-1", defaultPrimary: "local/qwen3.6-35b", scope: "all" };
+    expect(buildChanges(same, { ...same, gatewayConfig: { ...CONFIG, overlay: "e5".repeat(32) }, model: claude })).toEqual([
+      `runtime overlay none → ${"e5".repeat(6)}`,
+      "model local/qwen3.6-35b → anthropic/claude-opus-4-1 (preset claude)",
+    ]);
+    // A preset for some agents only: the others keep the default.
+    expect(buildChanges(same, { ...same, model: { ...claude, scope: "coordinator_qa" } })).toEqual([
+      "model local/qwen3.6-35b → anthropic/claude-opus-4-1 for coordinator_qa, else local/qwen3.6-35b (preset claude)",
+    ]);
+    // Without a preset its scope changes nothing.
+    expect(buildChanges(same, { ...same, model: { ...LOCAL, scope: "coordinator_qa" } })).toEqual([]);
+    // Unknown on one side is said, never taken for "the same".
+    expect(buildChanges({ ...same, gatewayConfig: null, model: null }, same)).toEqual(["gateway config unknown in the baseline", "model unknown in the baseline"]);
+    expect(buildChanges(same, { ...same, gatewayConfig: { compiled: null, overlay: "absent" } })).toEqual(["compiled config unknown in this run"]);
+
     const before = buildReport([ran("a", "P")], { ...META, provenance: at(SHA, false, "a".repeat(64)) });
-    const now = buildReport([ran("a", "P")], { ...META, provenance: at(SHA, false, "b".repeat(64)) });
+    const now = buildReport([ran("a", "P")], { ...META, provenance: { ...at(SHA, false, "b".repeat(64)), model: claude } });
     now.baseline = compareWithBaseline(now, before, "before.json");
+    // A model or config change is what an A/B run is for: listed, not confounded.
     expect(now.baseline.confounded).toEqual([]);
     const markdown = renderMarkdown(now);
-    expect(markdown).toContain(`- Build: harness 0123456 · gateway image ${"b".repeat(12)}\n`);
-    expect(markdown).toContain(`- Builds: gateway image ${"a".repeat(12)} → ${"b".repeat(12)}`);
+    expect(markdown).toContain(`- Build: harness 0123456 · gateway image ${"b".repeat(12)} · config ${"a7".repeat(6)}, no overlay · model anthropic/claude-opus-4-1 (preset claude)\n`);
+    expect(markdown).toContain(`- Builds: gateway image ${"a".repeat(12)} → ${"b".repeat(12)}; model local/qwen3.6-35b → anthropic/claude-opus-4-1 (preset claude)`);
     expect(markdown).not.toContain("Confounded");
   });
 
   it("labels a baseline comparison confounded when either run's stack may not have run its checkout's code", () => {
     const stale = "the gateway image 4c4c4c4c4c4c was built from fedcba9, but the harness runs 0123456: the stack may not run the code under test";
     const old = "the gateway image 3b3b3b3b3b3b was built 2026-10-07T16:00:00Z, before the harness's HEAD 0123456 was committed (2026-10-07T18:27:27+02:00): the stack may not run the code under test";
-    const at = (warnings: string[]): E2EProvenance => ({ harness: null, gatewayImage: null, missing: [], warnings });
+    const at = (warnings: string[]): E2EProvenance => ({ harness: null, gatewayImage: null, gatewayConfig: null, model: null, missing: [], warnings });
     expect(confounders(at([old]), at([stale]))).toEqual([`this run: ${stale}`, `the baseline: ${old}`]);
     expect(confounders(at([]), at([]))).toEqual([]);
     // A baseline from before provenance tells nothing either way.

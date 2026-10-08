@@ -108,10 +108,14 @@ Every run writes `artifacts/evaluations/e2e/<timestamp>.json` and a Markdown sum
   2026-10-07 22:07 skipped 47 of 52 after the model endpoint died); or a quarter of the attempts ended on harness
   errors.
 - **meta.provenance**: what the run ran on — the git HEAD, dirty flag and commit date of the checkout the
-  harness ran from, and the gateway container's image: its id, build time and the commit it was built from
-  (labels `pnpm sai start` stamps; read through `pnpm e2e:env status --json`), with the reason for any part it
-  could not read. When the image was built from another commit than HEAD (an image without the label: before
-  HEAD was committed), the report and the CLI warn that the stack may not run the code under test.
+  harness ran from, with a digest of its uncommitted changes (diff, status and untracked files); the gateway
+  container's image: its id, build time and the commit it was built from (labels `pnpm sai start` stamps);
+  digests of the config files the gateway reads, the compiled `starlingai.json` and its runtime overlay (both
+  through `pnpm e2e:env status --json`); and the models it answers with (`GET /api/models/preset`: the active
+  preset, its primary model, the default primary and the preset's scope). Each part it could not read is
+  recorded with the reason. When the image was built from another commit than HEAD (an image without the
+  label: before HEAD was committed), the report and the CLI warn that the stack may not run the code under
+  test.
 - **scenarios[]**: status, skip reason, the probed services, and every **attempt**: outcome (`passed`,
   `failed` = an expectation failed, `error` = the harness/environment failed or the run was interrupted),
   duration, failures, notes, the sessions it created (open them in the dashboard's audit/debug export), and
@@ -125,10 +129,13 @@ Every run writes `artifacts/evaluations/e2e/<timestamp>.json` and a Markdown sum
   attempts in one run all ended on a harness error has **no trial** there: no pass rate, so no estimate. At
   k=1 no single scenario can be decisive, so the **suite** is compared too: an exact sign test over the
   scenarios run with equally many attempts in both — far more lower than higher is a regression. Also new
-  scenarios, ones not run now, and what differs between the two runs' builds (gateway image, harness
-  commit); when either run carried the provenance warning above, the comparison is labelled **confounded**.
-  The baseline never sets the exit code on its own: a scenario, or the suite, can only fall below its
-  baseline by failing attempts now, and a failed scenario exits 1.
+  scenarios, ones not run now, and what differs between the two runs' builds: gateway image, compiled config
+  (a flag flipped in a gitignored `*.local.jsonc` shard), runtime overlay and model (a preset switched on the
+  dashboard), harness commit, and whether two dirty runs carried the same uncommitted changes. A part unknown
+  in either run is listed as unknown. A config or model change is what an A/B run is for, so it is listed and
+  nothing more; when either run carried the provenance warning above, the comparison is labelled
+  **confounded**. The baseline never sets the exit code on its own: a scenario, or the suite, can only fall
+  below its baseline by failing attempts now, and a failed scenario exits 1.
 
 A failure names its step and the exact miss, e.g.
 `step 2 turn "draft-reply": tools.mustNotCall mail_send_draft: expected no call, saw 1 (mail_agent×1)` or

@@ -270,10 +270,10 @@ export function describeSuite(suite: SuiteChangeVerdict): string {
   return `${counts} — ${verdict} (sign test p = ${suite.pValue.toFixed(3)})`;
 }
 
-/** "same gateway image and harness commit", the differences, or why they are unknown. */
+/** "same gateway image, config, model and harness checkout", the differences, or why they are unknown. */
 export function describeBuildChanges(changes: string[] | null): string {
   if (changes === null) return "unknown (a report without provenance)";
-  return changes.length === 0 ? "same gateway image and harness commit" : changes.join("; ");
+  return changes.length === 0 ? "same gateway image, config, model and harness checkout" : changes.join("; ");
 }
 
 /**
