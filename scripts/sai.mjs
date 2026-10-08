@@ -13,12 +13,13 @@
  *   sai health                             Check service health endpoints
  *   sai dev [gateway|web]                  Start development mode
  */
-import { execSync, spawn } from "node:child_process";
+import { execFileSync, execSync, spawn } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { stampBuildRevision } from "./build-provenance.mjs";
 import { PRODUCT } from "./product.mjs";
 
 const BOLD = "\x1b[1m";
@@ -254,6 +255,12 @@ async function cmdStart() {
     wipeUploadedFiles();
     ok("Clean slate: DB volumes, flat-file memory + audit log, and uploaded files removed (credentials preserved).");
   }
+
+  // HEAD and whether the tree has uncommitted changes, as SAI_BUILD_SHA / SAI_BUILD_DIRTY for the
+  // compose build args that label the gateway image (scripts/build-provenance.mjs). The e2e harness
+  // compares the running image's revision with the commit it tests: twice (2026-09-05, 2026-10-06)
+  // the stack ran an image older than the code under test.
+  stampBuildRevision(process.env, gitOutput);
 
   // Build images
   if (wantBuild) {
@@ -658,6 +665,12 @@ function ensureDockerDaemon() {
 function hasNvidiaGpu() {
   try { execSync("nvidia-smi -L", { stdio: "ignore" }); return true; }
   catch { return false; }
+}
+
+/** git's trimmed output in the repo root, or null when git failed or is missing. */
+function gitOutput(args) {
+  try { return execFileSync("git", args, { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true }).trim(); }
+  catch { return null; }
 }
 
 function loadDotEnv() {

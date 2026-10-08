@@ -15,10 +15,11 @@
  * (the operator's real mail) and refuses to run — fail closed — when it does or cannot tell. It also
  * refuses while another evaluate run uses the same gateway (acquireRunLock).
  *
- * Exit codes: 0 every scenario that ran passed · 1 failures or baseline regressions ·
+ * Exit codes: 0 every scenario that ran passed · 1 a scenario failed ·
  * 2 usage, invalid scenarios, missing credentials, a refused login, the mail-isolation
- * preflight or another run against the same gateway · 3 environment-suspect (everything skipped, or
- * a quarter of the attempts ended on harness errors). Through pnpm a non-zero code may surface as 1.
+ * preflight or another run against the same gateway · 3 environment-suspect (everything skipped,
+ * a fifth of the selected scenarios skipped for one service, or a quarter of the attempts ended on
+ * harness errors). Through pnpm a non-zero code may surface as 1.
  */
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -48,7 +49,8 @@ import {
   type RunnerOptions,
   type UnconfirmedTurn,
 } from "./runner.js";
-import { buildReport, compareWithBaseline, loadReport, writeReport } from "./report.js";
+import { buildReport, compareWithBaseline, describeBuildChanges, describeSuite, exitCodeFor, loadReport, writeReport, type BaselineComparison } from "./report.js";
+import { captureProvenance, describeProvenance, readGatewayModel, type E2EProvenance, type ModelSource } from "./provenance.js";
 import { resolveSetupPaths, runE2ESetup, SetupRefusedError } from "./setup.js";
 
 const VALUE_FLAGS = new Set(["group", "tag", "id", "repeat", "concurrency", "baseline", "out", "scenarios"]);
@@ -96,6 +98,8 @@ export interface CliIo {
   environment?: EnvironmentStatusSource | null;
   /** The mail-isolation preflight. Default: read from the environment status. */
   mailIsolation?: MailIsolationCheck;
+  /** What the run ran on. Default: git of the repo root, the environment status's gateway image and config, and the gateway's models. */
+  provenance?: () => Promise<E2EProvenance>;
   repoRoot?: string;
 }
 
@@ -293,6 +297,19 @@ function acquireRunLock(path: string, gatewayUrl: string): RunLockHandle | { ref
   return { refusal: `the run lock ${path} could not be taken` };
 }
 
+function baselineLine(baseline: BaselineComparison): string {
+  const ids = (deltas: BaselineComparison["regressions"]): string => {
+    if (deltas.length === 0) return "";
+    const shown = deltas.slice(0, 6).map((delta) => delta.id).join(", ");
+    return ` (${shown}${deltas.length > 6 ? ", …" : ""})`;
+  };
+  return `Baseline: ${baseline.regressions.length} regression(s)${ids(baseline.regressions)}, ${baseline.flaky.length} flaky${ids(baseline.flaky)}, `
+    + `${baseline.inconclusive.length} inconclusive${ids(baseline.inconclusive)}, ${baseline.improvements.length} improvement(s)${ids(baseline.improvements)}`
+    + `${baseline.noTrial.length > 0 ? `, ${baseline.noTrial.length} with no trial${ids(baseline.noTrial)}` : ""}; `
+    + `suite ${describeSuite(baseline.suite)}; builds: ${describeBuildChanges(baseline.buildChanges)}`
+    + (baseline.confounded.length > 0 ? `; CONFOUNDED — ${baseline.confounded.join("; ")}` : "");
+}
+
 function identitiesOf(selected: readonly LoadedScenario[]): string[] {
   const identities = new Set<string>();
   for (const { scenario } of selected) {
@@ -389,8 +406,9 @@ async function evaluate(args: ParsedArgs, io: CliIo, repoRoot: string): Promise<
   try {
     // A refused login would fail every attempt the same way; say so once, up front.
     const [gateway] = await prober.check(["gateway"]);
+    const identities = identitiesOf(selected);
     if (gateway?.up) {
-      for (const identity of identitiesOf(selected)) {
+      for (const identity of identities) {
         try {
           await client.token(identity);
         } catch (err) {
@@ -401,6 +419,15 @@ async function evaluate(args: ParsedArgs, io: CliIo, repoRoot: string): Promise<
     } else {
       io.err(`Gateway down: ${gateway?.detail ?? "unknown"} — its scenarios are skipped.`);
     }
+
+    // What the run ran on; the gateway's models are read as an identity that just logged in.
+    const modelIdentity = identities[0] ?? "eval";
+    const model: ModelSource = gateway?.up
+      ? () => readGatewayModel((path) => client.http(modelIdentity, "GET", path))
+      : async () => ({ missing: `model: the gateway is down (${gateway?.detail ?? "unknown"})` });
+    const provenance = await (io.provenance ?? (() => captureProvenance(repoRoot, environment, { model })))();
+    io.out(`Build: ${describeProvenance(provenance)}`);
+    for (const warning of provenance.warnings) io.out(`PROVENANCE: ${warning}`);
 
     const startedAt = new Date().toISOString();
     io.out(`Running ${selected.length} scenario(s) against ${gatewayUrl} (repeat ${repeat}, concurrency ${concurrency})`);
@@ -421,6 +448,7 @@ async function evaluate(args: ParsedArgs, io: CliIo, repoRoot: string): Promise<
       filters: { groups: filter.groups, tags: filter.tags, ids: filter.ids },
       judge: judge ? `${judge.model} @ ${judge.url}` : null,
       mail: `${mail.name} (inbox ${mail.inbox})`,
+      provenance,
     });
     if (baseline && baselinePath) report.baseline = compareWithBaseline(report, baseline, baselinePath);
     const written = writeReport(report, outDir);
@@ -429,16 +457,12 @@ async function evaluate(args: ParsedArgs, io: CliIo, repoRoot: string): Promise<
     io.out("");
     io.out(`Scenarios: ${summary.passed} passed, ${summary.failed} failed, ${summary.skipped} skipped of ${summary.scenarios}`);
     io.out(`Attempts: ${summary.attemptsPassed}/${summary.attempts} passed (${(summary.passRate * 100).toFixed(1)} %), pass^k ${(summary.passAllRate * 100).toFixed(1)} %`);
-    if (report.baseline) {
-      io.out(`Baseline: ${report.baseline.regressions.length} regression(s)${report.baseline.regressions.length > 0 ? ` — ${report.baseline.regressions.map((delta) => delta.id).join(", ")}` : ""}`);
-    }
+    if (report.baseline) io.out(baselineLine(report.baseline));
     if (report.environment.suspect) io.out(`ENVIRONMENT SUSPECT: ${report.environment.reasons.join("; ")}`);
+    for (const warning of provenance.warnings) io.out(`PROVENANCE: ${warning}`);
     io.out(`Report: ${written.jsonPath}`);
     io.out(`        ${written.markdownPath}`);
-
-    if (report.environment.suspect) return 3;
-    if (summary.failed > 0 || (report.baseline?.regressions.length ?? 0) > 0) return 1;
-    return 0;
+    return exitCodeFor(report);
   } finally {
     interrupts?.off(onSigint);
     const unconfirmed = unconfirmedTurnsOf(client);

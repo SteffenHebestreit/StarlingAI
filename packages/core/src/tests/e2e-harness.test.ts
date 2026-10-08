@@ -47,6 +47,7 @@ import { detectReplyLanguage, fieldMatches, summarizeAgents, summarizeTools } fr
 import { parseJudgeScore } from "../e2e/judge.js";
 import { GreenMailAdapter, parseMimeMessage, type MailAdapter } from "../e2e/mail.js";
 import { findRepoRoot, resolveE2EPaths } from "../e2e/paths.js";
+import type { E2EProvenance } from "../e2e/provenance.js";
 import type { E2EScenario } from "../e2e/scenario.js";
 
 // ── fake gateway ─────────────────────────────────────────────────────────────
@@ -114,6 +115,8 @@ class FakeGateway {
   private memoryCounter = 0;
   /** The dialectic user model by store (user-model/service.ts): its lists only. */
   readonly userModels = new Map<string, Record<string, string[]>>();
+  /** What GET /api/models/preset answers: the dashboard's Local ⇄ Claude switch. */
+  modelPreset: { active: string | null; activePrimary: string | null } = { active: null, activePrimary: null };
   private readonly server = http.createServer((req, res) => void this.handleHttp(req, res));
   private readonly wss = new WebSocketServer({ noServer: true });
   private readonly sessions = new Map<string, { owner: string; transcript: Array<Record<string, unknown>> }>();
@@ -338,6 +341,9 @@ class FakeGateway {
     if (req.method === "GET" && url.pathname === "/api/health/subsystems") {
       return json(200, { healthy: true, degraded: false, checks: [{ name: "primary_model", status: "ok", detail: "fake reachable" }, { name: "engram", status: "ok", detail: "not configured (RAG enhancement off)" }] });
     }
+    if (req.method === "GET" && url.pathname === "/api/models/preset") {
+      return json(200, { ...this.modelPreset, defaultPrimary: "local/fake-model", scope: "all", presets: [{ name: "claude", primary: "anthropic/claude-fake" }] });
+    }
     if (req.method === "GET" && url.pathname.startsWith("/api/echo/")) {
       return json(200, { hello: "world", user, session: decodeURIComponent(url.pathname.slice("/api/echo/".length)), token: "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJldmFsIn0.c2lnbmF0dXJlLXNpZ25hdHVyZQ" });
     }
@@ -504,6 +510,7 @@ beforeEach(() => {
   gateway.startedAt = Date.now() - 3_600_000;
   gateway.memory.clear();
   gateway.userModels.clear();
+  gateway.modelPreset = { active: null, activePrimary: null };
   gateway.setScripts([
     { match: /^hello/i, run: helloScript },
     { match: /^steer/i, run: steerScript },
@@ -1606,20 +1613,26 @@ describe("e2e harness — pure helpers", () => {
     expect(text).toBe('{"token":"[redacted]","password":"[redacted]","note":"[redacted-jwt]","h":"[redacted-hash]"}');
   });
 
-  it("compares a run with a baseline and flags regressions", () => {
+  it("compares a run with a baseline: a pass rate that moved within chance is flaky, not a regression", () => {
     const meta = {
       startedAt: "2026-10-07T10:00:00.000Z", finishedAt: "2026-10-07T10:00:01.000Z", gatewayUrl: "http://x",
       repeat: 2, concurrency: 1, filters: { groups: [], tags: [], ids: [] }, judge: null, mail: null,
     };
     const scenarioResult = (id: string, passCount: number) => ({
       id, title: id, group: "core", tags: [], file: `${id}.jsonc`, status: passCount === 2 ? "passed" as const : "failed" as const,
-      services: [], repeat: 2, attempts: [], passCount, passRate: passCount / 2, passAll: passCount === 2, durationMs: 1,
+      services: [], repeat: 2, passCount, passRate: passCount / 2, passAll: passCount === 2, durationMs: 1,
+      attempts: [0, 1].map((index) => ({
+        index, outcome: index < passCount ? "passed" as const : "failed" as const, startedAt: meta.startedAt, durationMs: 1,
+        failures: [], notes: [], sessions: [], steps: [], eventTypeCounts: {}, tools: {}, agents: {},
+      })),
     });
     const baseline = buildReport([scenarioResult("a", 2), scenarioResult("b", 1), scenarioResult("gone", 2)], meta);
     const current = buildReport([scenarioResult("a", 1), scenarioResult("b", 2), scenarioResult("new", 2)], meta);
     const comparison = compareWithBaseline(current, baseline, "baseline.json");
-    expect(comparison.regressions.map((delta) => delta.id)).toEqual(["a"]);
-    expect(comparison.improvements.map((delta) => delta.id)).toEqual(["b"]);
+    // 2/2 → 1/2 and 1/2 → 2/2: within chance at k=2 (stats.ts; e2e-verdicts.test.ts has the decisive cases).
+    expect(comparison.regressions).toEqual([]);
+    expect(comparison.improvements).toEqual([]);
+    expect(comparison.flaky.map((delta) => delta.id)).toEqual(["a", "b"]);
     expect(comparison.newScenarios).toEqual(["new"]);
     expect(comparison.missingScenarios).toEqual(["gone"]);
   });
@@ -1698,27 +1711,154 @@ describe("e2e CLI (in process, against the fake gateway)", () => {
     expect(await mailIsolationCheck(null)()).toEqual({ safe: false, detail: "cannot verify mail isolation: scripts/e2e-env.mjs not found" });
   });
 
-  it("runs, reports and exits by the result; --id narrows; a baseline flags a regression", async () => {
+  it("runs, reports and exits by the result; --id narrows; a baseline flags a decisive regression only", async () => {
     const all = await cli(["evaluate", "--scenarios", "scenarios", "--out", "out-1"]);
     expect(all.err).toBe("");
     expect(all.code).toBe(1);
     expect(all.out).toContain("Mail isolation: the mail-service container is not running");
+    expect(all.out).toMatch(/^Build: harness [0-9a-f]{7}( \(dirty\))? · gateway image unknown · config unknown · model local\/fake-model$/m);
     expect(all.out).toContain("Scenarios: 1 passed, 1 failed, 0 skipped of 2");
     expect(all.out).toMatch(/FAIL cli-fail attempt 1\/1 \([\d.]+ s\): step 1 turn: reply\.includes "banana": not found/);
     const files = readdirSync(join(cliDir, "out-1"));
     expect(files.filter((file) => file.endsWith(".json"))).toHaveLength(1);
     expect(files.filter((file) => file.endsWith(".md"))).toHaveLength(1);
     const reportPath = join(cliDir, "out-1", files.find((file) => file.endsWith(".json"))!);
+    // The run records what it ran on: this checkout's HEAD, the gateway's models, and why the image and config are unknown.
+    const written = JSON.parse(readFileSync(reportPath, "utf8")) as { meta: { provenance: E2EProvenance } };
+    expect(written.meta.provenance.harness?.sha).toMatch(/^[0-9a-f]{40}/);
+    expect(written.meta.provenance.gatewayImage).toBeNull();
+    expect(written.meta.provenance.gatewayConfig).toBeNull();
+    expect(written.meta.provenance.model).toEqual({ active: null, activePrimary: null, defaultPrimary: "local/fake-model", scope: "all" });
+    expect(written.meta.provenance.missing).toEqual([
+      "gateway image: the e2e environment status names none (no running gateway container of this checkout)",
+      "gateway config: the e2e environment status names none (no running gateway container of this checkout)",
+    ]);
 
     const one = await cli(["evaluate", "--scenarios", "scenarios", "--id", "cli-pass", "--out", "out-2"]);
     expect(one.code).toBe(0);
     expect(one.out).toContain("Scenarios: 1 passed, 0 failed, 0 skipped of 1");
 
-    // The same scenario now fails: a regression against the first report.
+    // The same scenario now fails. Once against one pass is within chance: inconclusive, while the
+    // failure itself still exits 1.
     gateway.setScripts([{ match: /^hello from the cli/, run: async (turn) => turn.finish("ok", "no number here") }]);
-    const regressed = await cli(["evaluate", "--scenarios", "scenarios", "--id", "cli-pass", "--out", "out-3", "--baseline", reportPath]);
+    const flipped = await cli(["evaluate", "--scenarios", "scenarios", "--id", "cli-pass", "--out", "out-3", "--baseline", reportPath]);
+    expect(flipped.code).toBe(1);
+    expect(flipped.out).toContain("Baseline: 0 regression(s), 0 flaky, 1 inconclusive (cli-pass), 0 improvement(s); suite 1 lower, 0 higher, 0 the same — no decisive change (sign test p = 0.500)");
+
+    // Three failures against three passes: decisive.
+    const passed = (index: number) => ({ index, outcome: "passed" as const, startedAt: "2026-10-08T09:00:00.000Z", durationMs: 1, failures: [], notes: [], sessions: [], steps: [], eventTypeCounts: {}, tools: {}, agents: {} });
+    const threeOfThree = buildReport([{
+      id: "cli-pass", title: "CLI pass", group: "core", tags: [], file: "pass.jsonc", status: "passed", services: [], repeat: 3,
+      attempts: [0, 1, 2].map(passed), passCount: 3, passRate: 1, passAll: true, durationMs: 3,
+    }], {
+      startedAt: "2026-10-08T09:00:00.000Z", finishedAt: "2026-10-08T09:00:03.000Z", gatewayUrl: gateway.url,
+      repeat: 3, concurrency: 1, filters: { groups: [], tags: [], ids: ["cli-pass"] }, judge: null, mail: null,
+    });
+    const threePath = writeReport(threeOfThree, join(cliDir, "baseline-3")).jsonPath;
+    const regressed = await cli(["evaluate", "--scenarios", "scenarios", "--id", "cli-pass", "--repeat", "3", "--out", "out-4", "--baseline", threePath]);
     expect(regressed.code).toBe(1);
-    expect(regressed.out).toContain("Baseline: 1 regression(s) — cli-pass");
+    expect(regressed.out).toContain("Baseline: 1 regression(s) (cli-pass), 0 flaky, 0 inconclusive, 0 improvement(s);");
+  });
+
+  it("names a scenario whose baseline attempts all ended on a harness error as having no trial, with no estimate", async () => {
+    const errored = (index: number) => ({ index, outcome: "error" as const, startedAt: "2026-10-08T09:00:00.000Z", durationMs: 1, failures: ["gateway closed the WebSocket"], notes: [], sessions: [], steps: [], eventTypeCounts: {}, tools: {}, agents: {} });
+    const crashed = buildReport([{
+      id: "cli-pass", title: "CLI pass", group: "core", tags: [], file: "pass.jsonc", status: "failed", services: [], repeat: 3,
+      attempts: [0, 1, 2].map(errored), passCount: 0, passRate: 0, passAll: false, durationMs: 3,
+    }], {
+      startedAt: "2026-10-08T09:00:00.000Z", finishedAt: "2026-10-08T09:00:03.000Z", gatewayUrl: gateway.url,
+      repeat: 3, concurrency: 1, filters: { groups: [], tags: [], ids: ["cli-pass"] }, judge: null, mail: null,
+    });
+    const crashedPath = writeReport(crashed, join(cliDir, "baseline-crashed")).jsonPath;
+    const run = await cli(["evaluate", "--scenarios", "scenarios", "--id", "cli-pass", "--out", "out-no-trial", "--baseline", crashedPath]);
+    expect(run.err).toBe("");
+    expect(run.code).toBe(0);
+    expect(run.out).toContain("Baseline: 0 regression(s), 0 flaky, 0 inconclusive, 0 improvement(s), 1 with no trial (cli-pass); "
+      + "suite not compared: no scenario ran with as many attempts in both runs (1 with no trial in a run left out);");
+    const markdownFile = readdirSync(join(cliDir, "out-no-trial")).find((file) => file.endsWith(".md"))!;
+    const markdown = readFileSync(join(cliDir, "out-no-trial", markdownFile), "utf8");
+    expect(markdown).toContain("| `cli-pass` | 0/0 | 1/1 | none: no trial in the baseline | no trial |");
+    expect(markdown).not.toContain("+100 pp");
+  });
+
+  it("exits 3 when a fifth of the selected scenarios were skipped for one service, and prints what the run ran on", async () => {
+    mkdirSync(join(cliDir, "suspect"), { recursive: true });
+    const turn = (message: string) => [{ kind: "turn", message, expect: { reply: { includes: ["42"] } } }];
+    writeFileSync(join(cliDir, "suspect", "a.jsonc"), JSON.stringify({ id: "suspect-a", title: "Suspect A", group: "core", steps: turn("hello a") }));
+    writeFileSync(join(cliDir, "suspect", "b.jsonc"), JSON.stringify({ id: "suspect-b", title: "Suspect B", group: "core", steps: turn("hello b") }));
+    writeFileSync(join(cliDir, "suspect", "kb.jsonc"), JSON.stringify({ id: "suspect-kb", title: "Needs engram", group: "core", requires: ["engram"], steps: turn("hello kb") }));
+    const provenance = {
+      harness: { sha: "0123456789abcdef0123456789abcdef01234567", dirty: false, changes: null, committedAt: "2026-10-08T12:00:00+02:00" },
+      gatewayImage: { id: `sha256:${"3b".repeat(32)}`, createdAt: "2026-10-07T21:09:32.557822715Z", revision: null, dirty: null },
+      gatewayConfig: { compiled: "a7".repeat(32), overlay: "absent" },
+      model: { active: null, activePrimary: null, defaultPrimary: "local/qwen3.6-35b", scope: "all" },
+      missing: [],
+      warnings: ["the gateway image 3b3b3b3b3b3b was built 2026-10-07T21:09:32.557822715Z, before the harness's HEAD 0123456 was committed (2026-10-08T12:00:00+02:00): the stack may not run the code under test"],
+    };
+    const run = await cli(["evaluate", "--scenarios", "suspect", "--out", "suspect-out"], { provenance: async () => provenance });
+    expect(run.err).toBe("");
+    expect(run.code).toBe(3);
+    expect(run.out).toContain("Build: harness 0123456 · gateway image 3b3b3b3b3b3b built 2026-10-07T21:09:32.557822715Z · config a7a7a7a7a7a7, no overlay · model local/qwen3.6-35b");
+    expect(run.out).toContain("Scenarios: 2 passed, 0 failed, 1 skipped of 3");
+    expect(run.out).toContain("ENVIRONMENT SUSPECT: 1 of 3 selected scenarios were skipped because engram was down (engram: ok — not configured (RAG enhancement off))");
+    expect(run.out).toContain(`PROVENANCE: ${provenance.warnings[0]}`);
+    const reports = readdirSync(join(cliDir, "suspect-out"));
+    const report = JSON.parse(readFileSync(join(cliDir, "suspect-out", reports.find((file) => file.endsWith(".json"))!), "utf8")) as { meta: { provenance: unknown } };
+    expect(report.meta.provenance).toEqual(provenance);
+    const markdown = readFileSync(join(cliDir, "suspect-out", reports.find((file) => file.endsWith(".md"))!), "utf8");
+    expect(markdown).toContain(`> **Provenance** — ${provenance.warnings[0]}`);
+  });
+
+  it("warns, and labels the baseline comparison confounded, when the gateway image was built from another commit", async () => {
+    mkdirSync(join(cliDir, "confound"), { recursive: true });
+    writeFileSync(join(cliDir, "confound", "c.jsonc"), JSON.stringify({ id: "confound-c", title: "Confound C", group: "core", steps: [{ kind: "turn", message: "hello confound", expect: { reply: { includes: ["42"] } } }] }));
+    const first = await cli(["evaluate", "--scenarios", "confound", "--out", "confound-1"]);
+    expect(first.code).toBe(0);
+    const baselinePath = join(cliDir, "confound-1", readdirSync(join(cliDir, "confound-1")).find((file) => file.endsWith(".json"))!);
+
+    // The stack's gateway image names a commit other than this checkout's HEAD (the default
+    // provenance: real git, the image from the environment status).
+    const image = { id: `sha256:${"4c".repeat(32)}`, created: "2026-10-08T13:00:00Z", revision: "f".repeat(40), dirty: false };
+    const config = { compiled: "a7".repeat(32), overlay: "absent" };
+    const stale = await cli(["evaluate", "--scenarios", "confound", "--out", "confound-2", "--baseline", baselinePath], {
+      environment: async () => ({ json: { mailService: { running: false }, gateway: { running: true, image, config } } }),
+    });
+    expect(stale.err).toBe("");
+    expect(stale.code).toBe(0);
+    const warning = "the gateway image 4c4c4c4c4c4c was built from fffffff, but the harness runs [0-9a-f]{7}: the stack may not run the code under test";
+    expect(stale.out).toMatch(/^Build: harness [0-9a-f]{7}( \(dirty\))? · gateway image 4c4c4c4c4c4c from fffffff built 2026-10-08T13:00:00Z · config a7a7a7a7a7a7, no overlay · model local\/fake-model$/m);
+    expect(stale.out).toMatch(new RegExp(`^PROVENANCE: ${warning}$`, "m"));
+    expect(stale.out).toMatch(new RegExp(`^Baseline: .*; CONFOUNDED — this run: ${warning}$`, "m"));
+    const markdownFile = readdirSync(join(cliDir, "confound-2")).find((file) => file.endsWith(".md"))!;
+    expect(readFileSync(join(cliDir, "confound-2", markdownFile), "utf8")).toMatch(new RegExp(`^- \\*\\*Confounded\\*\\* — this run: ${warning}$`, "m"));
+  });
+
+  it("lists a flag flipped in a local shard and a preset switched on the dashboard as build changes, not as a confound", async () => {
+    mkdirSync(join(cliDir, "ab"), { recursive: true });
+    writeFileSync(join(cliDir, "ab", "ab.jsonc"), JSON.stringify({ id: "ab-a", title: "A/B", group: "core", steps: [{ kind: "turn", message: "hello ab", expect: { reply: { includes: ["42"] } } }] }));
+    // One image, built after HEAD was committed: no provenance warning on either run.
+    const image = { id: `sha256:${"5d".repeat(32)}`, created: "2099-01-01T00:00:00Z", revision: null, dirty: null };
+    const status = (compiled: string) => async () => ({ json: { mailService: { running: false }, gateway: { running: true, image, config: { compiled, overlay: "absent" } } } });
+    const first = await cli(["evaluate", "--scenarios", "ab", "--out", "ab-1"], { environment: status("a7".repeat(32)) });
+    expect(first.code).toBe(0);
+    const baselinePath = join(cliDir, "ab-1", readdirSync(join(cliDir, "ab-1")).find((file) => file.endsWith(".json"))!);
+
+    // Between the runs the compiled config changed and the dashboard switched to the Claude preset.
+    gateway.modelPreset = { active: "claude", activePrimary: "anthropic/claude-fake" };
+    const second = await cli(["evaluate", "--scenarios", "ab", "--out", "ab-2", "--baseline", baselinePath], { environment: status("c3".repeat(32)) });
+    expect(second.err).toBe("");
+    expect(second.code).toBe(0);
+    expect(second.out).toMatch(/^Build: harness [0-9a-f]{7}( \(dirty\))? · gateway image 5d5d5d5d5d5d built 2099-01-01T00:00:00Z · config c3c3c3c3c3c3, no overlay · model anthropic\/claude-fake \(preset claude\)$/m);
+    expect(second.out).toContain("builds: compiled config a7a7a7a7a7a7 → c3c3c3c3c3c3; model local/fake-model → anthropic/claude-fake (preset claude)");
+    expect(second.out).not.toContain("CONFOUNDED");
+
+    // A gateway that is down names no model, and the report says why.
+    gateway.healthy = false;
+    const down = await cli(["evaluate", "--scenarios", "ab", "--out", "ab-3"], { environment: status("c3".repeat(32)) });
+    expect(down.code).toBe(3);
+    expect(down.out).toMatch(/ · model unknown$/m);
+    const report = JSON.parse(readFileSync(join(cliDir, "ab-3", readdirSync(join(cliDir, "ab-3")).find((file) => file.endsWith(".json"))!), "utf8")) as { meta: { provenance: E2EProvenance } };
+    expect(report.meta.provenance.missing).toEqual(["model: the gateway is down (GET /healthz → 503)"]);
   });
 
   it("logs in up front as every identity a turn runs as: a refused eval-viewer login stops the run before any turn", async () => {

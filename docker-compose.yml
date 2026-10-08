@@ -7,6 +7,11 @@ services:
       context: .
       dockerfile: docker/gateway/Dockerfile
       target: runtime
+      # The commit the image is built from, stamped into its labels: `sai start` sets both from
+      # git; built another way they stay empty. The e2e harness reads them off the running image.
+      args:
+        SAI_BUILD_SHA: ${SAI_BUILD_SHA:-}
+        SAI_BUILD_DIRTY: ${SAI_BUILD_DIRTY:-}
     image: starlingai/gateway:dev
     restart: unless-stopped
     # Cap RSS so a runaway agent loop / large attachment / leak can't OOM the

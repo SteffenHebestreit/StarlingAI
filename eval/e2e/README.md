@@ -109,11 +109,11 @@ lacks `eval`) is your shared mail: the run stops with exit code 2 ("eval can see
 rebuild the mail-service image and run pnpm e2e:setup"). A mail-service container that is not running is
 safe; one that runs but cannot be asked (Docker unreachable, no answer) stops the run as well.
 
-Exit codes: `0` every scenario that ran passed · `1` a scenario failed or the baseline shows a regression ·
-`2` usage error, invalid scenario file, missing credentials, refused login, the mail preflight, or another
-run against the same gateway · `3`
-environment-suspect (everything was skipped, or ≥ 25 % of the attempts ended on harness errors). Through
-`pnpm` a non-zero code may arrive as 1; `node --import tsx packages/core/src/e2e/cli.ts …` keeps it.
+Exit codes: `0` every scenario that ran passed · `1` a scenario failed · `2` usage error, invalid scenario
+file, missing credentials, refused login, the mail preflight, or another run against the same gateway ·
+`3` environment-suspect (everything was skipped, one service was down for ≥ 20 % of the selected scenarios,
+or ≥ 25 % of the attempts ended on harness errors). Through `pnpm` a non-zero code may arrive as 1;
+`node --import tsx packages/core/src/e2e/cli.ts …` keeps it.
 
 ### Services: skipped, never failed
 
@@ -140,15 +140,40 @@ Every run writes `artifacts/evaluations/e2e/<timestamp>.json` and a Markdown sum
 
 - **summary**: scenarios passed/failed/skipped; attempts passed, failed and errored; the **attempt pass rate**
   (attempts passed / attempts run) and **pass^k** (scenarios whose every attempt passed / scenarios run).
-- **environment**: `suspect: true` with reasons when the run says more about the environment than the swarm.
+- **environment**: `suspect: true` with reasons when the run says more about the environment than the swarm:
+  every scenario was skipped; one service was down for at least a fifth of the selected scenarios (the reason
+  names it, and says so when it was up for an earlier scenario, i.e. went down during the run — the full run of
+  2026-10-07 22:07 skipped 47 of 52 after the model endpoint died); or a quarter of the attempts ended on harness
+  errors.
+- **meta.provenance**: what the run ran on — the git HEAD, dirty flag and commit date of the checkout the
+  harness ran from, with a digest of its uncommitted changes (diff, status and untracked files); the gateway
+  container's image: its id, build time and the commit it was built from (labels `pnpm sai start` stamps);
+  digests of the config files the gateway reads, the compiled `starlingai.json` and its runtime overlay (both
+  through `pnpm e2e:env status --json`); and the models it answers with (`GET /api/models/preset`: the active
+  preset, its primary model, the default primary and the preset's scope). Each part it could not read is
+  recorded with the reason. When the image was built from another commit than HEAD (an image without the
+  label: before HEAD was committed), the report and the CLI warn that the stack may not run the code under
+  test.
 - **scenarios[]**: status, skip reason, the probed services, and every **attempt**: outcome (`passed`,
   `failed` = an expectation failed, `error` = the harness/environment failed or the run was interrupted),
   duration, failures, notes, the sessions it created (open them in the dashboard's audit/debug export), and
   per step: the turn's request id, status, reply (secrets redacted), duration, how long its event window
   stayed open, audit-event type counts, tool calls (dispatched, refused, per caller), sub-agent runs,
   artifacts, WS message counts, the `during` actions and the judge.
-- **baseline** (with `--baseline`): scenarios whose pass rate fell (or that passed every attempt before and
-  not now) are **regressions**; also improvements, new scenarios and ones not run now.
+- **baseline** (with `--baseline`): each scenario run in both reports, by its attempts (harness errors left
+  out): **regressed** or **improved** only when the 95 % interval of the pass-rate difference excludes zero
+  (3/3 → 0/3 does; 5/5 → 4/5 does not); otherwise **flaky** when it passed and failed within one run, or
+  **inconclusive** when each run was uniform but they disagree (a k=1 flip, 1/1 → 0/1). A scenario whose
+  attempts in one run all ended on a harness error has **no trial** there: no pass rate, so no estimate. At
+  k=1 no single scenario can be decisive, so the **suite** is compared too: an exact sign test over the
+  scenarios run with equally many attempts in both — far more lower than higher is a regression. Also new
+  scenarios, ones not run now, and what differs between the two runs' builds: gateway image, compiled config
+  (a flag flipped in a gitignored `*.local.jsonc` shard), runtime overlay and model (a preset switched on the
+  dashboard), harness commit, and whether two dirty runs carried the same uncommitted changes. A part unknown
+  in either run is listed as unknown. A config or model change is what an A/B run is for, so it is listed and
+  nothing more; when either run carried the provenance warning above, the comparison is labelled
+  **confounded**. The baseline never sets the exit code on its own: a scenario, or the suite, can only fall
+  below its baseline by failing attempts now, and a failed scenario exits 1.
 
 A failure names its step and the exact miss, e.g.
 `step 2 turn "draft-reply": tools.mustNotCall mail_send_draft: expected no call, saw 1 (mail_agent×1)` or

@@ -52,6 +52,11 @@ containers and says when one is too old:
   `isolatedUsers`. With an older image the eval account is not loaded.
 - **gateway**: `guardrails.allowedPrivateHosts`. With an older image the SSRF guard still refuses the site.
 
+`status --json` also names the gateway image (`gateway.image`: id, build time, and the commit and dirty flag
+`pnpm sai start` stamps into its labels) and the config it reads (`gateway.config`: sha256 digests of the
+compiled `starlingai.json` and of the runtime overlay, `"absent"` when there is none, read inside the
+container), which the harness records as the run's provenance.
+
 ## Mail: how agents reach the eval mailbox
 
 ```

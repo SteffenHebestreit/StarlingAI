@@ -28,8 +28,10 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, wr
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import JSON5 from "json5";
+import { imageOfContainer } from "./build-provenance.mjs";
 import { collectShardPaths, deepMerge } from "./config-shards.mjs";
 import { NON_CONFIG_WORKSPACE_ZONES } from "./config-zones.mjs";
+import { configOfContainer } from "./gateway-config-digest.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const rel = (path) => relative(repoRoot, path).split("\\").join("/");
@@ -268,6 +270,10 @@ async function collectStatus() {
     },
     gateway: {
       running: Boolean(gatewayRunning),
+      // Its id, build time, and the commit `sai start` built it from (scripts/build-provenance.mjs).
+      image: imageOfContainer(docker, gatewayRunning),
+      // Digests of the compiled config and the runtime overlay it reads (scripts/gateway-config-digest.mjs).
+      config: configOfContainer(docker, gatewayRunning),
       imageSupportsAllowlist: distHasMarker(gatewayRunning, GATEWAY_DIST_FILE, GATEWAY_DIST_MARKER),
       resolvesSite: gatewayResolvesSite(gatewayRunning),
     },
