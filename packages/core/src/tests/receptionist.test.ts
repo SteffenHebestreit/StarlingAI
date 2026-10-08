@@ -149,6 +149,16 @@ describe("receptionist — source-sensitivity in the micro-call prompt", () => {
       expect(languageIsUndetermined(determined)).toBe(false);
     }
   });
+
+  it("languageIsUndetermined: counts the characters of a script written without spaces as words", () => {
+    // Split at spaces, a Chinese or Japanese sentence was one word and got the bare-greeting directive.
+    for (const sentence of ["如何在冬天储存电池？", "今日のニュースは？", "你今天过得怎么样？"]) {
+      expect(languageIsUndetermined(sentence)).toBe(false);
+      expect(String(buildReceptionistMessages(sentence, { defaultLanguage: "German" })[0]!.content)).not.toContain("Reply in GERMAN");
+    }
+    // Two characters stay as bare as two short words.
+    for (const bare of ["你好", "谢谢"]) expect(languageIsUndetermined(bare)).toBe(true);
+  });
 });
 
 describe("receptionist — micro-call", () => {

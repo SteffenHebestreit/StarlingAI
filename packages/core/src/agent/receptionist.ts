@@ -242,6 +242,10 @@ export function receptionistEscalated(raw: string, confidenceAttempt: boolean): 
   return !text || text.includes(ESCALATE_SENTINEL);
 }
 
+/** A character of a script that puts no spaces between words. */
+const UNSPACED_SCRIPT_CHARACTER =
+  /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]/gu;
+
 /**
  * Does the user's message carry NO reliable language signal? A bare social token — "hi", "hey",
  * "ok", "danke", an emoji — is used verbatim in German chat too, so it does NOT establish English.
@@ -255,13 +259,23 @@ export function receptionistEscalated(raw: string, confidenceAttempt: boolean): 
  * emits ONE unconditional language directive instead, leaving the model nothing to weigh.
  *
  * Structural, no keyword table: an umlaut/ß is a positive German marker; otherwise a message of at
- * most two short word-tokens (or pure emoji/punctuation) is treated as carrying no language.
+ * most two short word-tokens (or pure emoji/punctuation) is treated as carrying no language. In a
+ * script written without spaces each character counts as a word: split at spaces, a Chinese or
+ * Japanese sentence ("如何在冬天储存电池？") was one word, and got the bare-greeting directive.
+ *
+ * The fast lane's rule only. The full path asks the detector alone (reply-language.ts,
+ * buildTurnReplyLanguageInstruction).
  */
 export function languageIsUndetermined(userMessage: string): boolean {
   const raw = (userMessage ?? "").trim();
   if (!raw) return true;
   if (/[äöüß]/i.test(raw)) return false; // unambiguous German marker
-  const words = raw.replace(/[^\p{L}\p{N}\s]/gu, " ").trim().split(/\s+/).filter(Boolean);
+  const words = raw
+    .replace(UNSPACED_SCRIPT_CHARACTER, " $& ")
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
   if (words.length === 0) return true; // emoji / punctuation only
   return words.length <= 2 && raw.length <= 15; // a bare greeting or acknowledgement
 }
