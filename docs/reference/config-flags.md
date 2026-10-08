@@ -296,7 +296,7 @@ Every public schema field, where it is declared, and how many production files r
 | `minSamples` | packages/core/src/config/schemas/decisions.ts:61 | 6 |
 | `minStepsToAuthor` | packages/core/src/config/schema.ts:1464 | 2 |
 | `minVramMb` | packages/core/src/config/schema.ts:822 | 1 |
-| `mode` | packages/core/src/config/schema.ts:471 | 139 |
+| `mode` | packages/core/src/config/schema.ts:471 | 140 |
 | `model` | packages/core/src/config/schema.ts:1234 | 268 |
 | `modelModeration` | packages/core/src/config/schema.ts:1230 | 4 |
 | `modelPresets` | packages/core/src/config/schema.ts:1702 | 1 |
@@ -314,7 +314,7 @@ Every public schema field, where it is declared, and how many production files r
 | `notes` | packages/core/src/config/schema.ts:790 | 55 |
 | `oneLiner` | packages/core/src/config/schema.ts:899 | 3 |
 | `openaiCompatible` | packages/core/src/config/schema.ts:105 | 2 |
-| `operator` | packages/core/src/config/schema.ts:372 | 110 |
+| `operator` | packages/core/src/config/schema.ts:372 | 111 |
 | `orchestratorMaxToolIterations` | packages/core/src/config/schemas/effort.ts:23 | 1 |
 | `orchestratorTurnSloMs` | packages/core/src/config/schema.ts:1754 | 2 |
 | `orgId` | packages/core/src/config/schema.ts:1125 | 1 |
@@ -454,7 +454,7 @@ Every public schema field, where it is declared, and how many production files r
 | `stagedArtifactBuilds` | packages/core/src/config/schemas/orchestration.ts:442 | 1 |
 | `steps` | packages/core/src/config/schema.ts:1380 | 79 |
 | `stopPhrases` | packages/core/src/config/schemas/multimodal.ts:238 | 3 |
-| `store` | packages/core/src/config/schema.ts:1613 | 157 |
+| `store` | packages/core/src/config/schema.ts:1613 | 160 |
 | `subAgentDisagreementVerify` | packages/core/src/config/schemas/orchestration.ts:644 | 2 |
 | `subAgentHeadRewarm` | packages/core/src/config/schema.ts:1858 | 2 |
 | `subAgentMaxIterations` | packages/core/src/config/schemas/effort.ts:25 | 2 |
@@ -510,7 +510,7 @@ Every public schema field, where it is declared, and how many production files r
 | `urlNotFetchedShortAnswerGuard` | packages/core/src/config/schemas/orchestration.ts:283 | 1 |
 | `urls` | packages/core/src/config/schema.ts:786 | 10 |
 | `userAgent` | packages/core/src/config/schema.ts:1149 | 3 |
-| `username` | packages/core/src/config/schema.ts:352 | 50 |
+| `username` | packages/core/src/config/schema.ts:352 | 51 |
 | `usernameClaim` | packages/core/src/config/schema.ts:392 | 1 |
 | `usernameSelector` | packages/core/src/config/schema.ts:787 | 5 |
 | `userProfilePrefetch` | packages/core/src/config/schemas/orchestration.ts:624 | 4 |
@@ -519,7 +519,7 @@ Every public schema field, where it is declared, and how many production files r
 | `verifyArtifactsMaxRepairAttempts` | packages/core/src/config/schemas/orchestration.ts:380 | 1 |
 | `verifyArtifactsRepair` | packages/core/src/config/schemas/orchestration.ts:377 | 1 |
 | `verifyToken` | packages/core/src/config/schemas/channels.ts:47 | 20 |
-| `viewer` | packages/core/src/config/schema.ts:373 | 20 |
+| `viewer` | packages/core/src/config/schema.ts:373 | 21 |
 | `virtualization` | packages/core/src/config/schema.ts:1087 | 1 |
 | `visionApiKey` | packages/core/src/config/schemas/multimodal.ts:25 | 7 |
 | `visionBaseUrl` | packages/core/src/config/schemas/multimodal.ts:23 | 8 |
