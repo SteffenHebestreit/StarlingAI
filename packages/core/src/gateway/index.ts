@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { createServer } from "node:http";
 import { Readable } from "node:stream";
-import { timingSafeEqual } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { resolve, basename, extname } from "node:path";
 import { z } from "zod";
@@ -3839,11 +3839,13 @@ export function createGateway() {
         ? extractBearerToken(req.headers["authorization"] as string)
         : null;
 
-      if (!token || !await verifyToken(token)) {
+      const verified = token ? await verifyToken(token) : null;
+      if (!verified) {
         res.writeHead(401, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32001, message: "Unauthorized" }, id: null }));
         return;
       }
+      const a2aCaller = typeof verified.sub === "string" ? verified.sub : "authenticated";
 
       const agentName = decodeURIComponent(a2aMatch[1]!);
       // Bound the buffered body so any authenticated caller can't stream an unbounded
@@ -3884,7 +3886,17 @@ export function createGateway() {
 
           const task  = String(rpc.params?.["task"] ?? "");
           const ctx   = rpc.params?.["context"] ? String(rpc.params["context"]) : undefined;
-          const sessId = rpc.params?.["sessionId"] ? String(rpc.params["sessionId"]) : `a2a:${Date.now()}`;
+          // The session the run works in. A caller-chosen id was used as it came, so under
+          // multi-user auth one account could name another's session and the run read and wrote
+          // that session's shared facts, peer messages and checkpoints (found in review,
+          // 2026-10-08). There it now names a session in the caller's own namespace, the one
+          // tasks/send on the public A2A surface uses; and an id the route mints is not a
+          // timestamp another account could name. With one operator, both as before.
+          const { callerScopedSessionId } = await import("../a2a/server.js");
+          const multiUser = getConfig().auth?.enabled === true;
+          const sessId = rpc.params?.["sessionId"]
+            ? callerScopedSessionId(String(rpc.params["sessionId"]), a2aCaller)
+            : `a2a:${multiUser ? randomUUID() : Date.now()}`;
           const autoApprove = rpc.params?.["autoApprove"] === true;
 
           const result = await runSubAgent({
