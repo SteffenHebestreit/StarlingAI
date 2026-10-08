@@ -4958,9 +4958,25 @@ async function _runTurn(
             builderAgent: deliverableIntent.builder,
           }, { sessionId: session.id, channel: session.channel, severity: "warn" });
         }
-        const relayDeliverable = (getConfig().orchestration?.relaySingleDeliverable ?? true) && !turnNeedsUnbuiltAppArtifact
+        const relayCandidate = (getConfig().orchestration?.relaySingleDeliverable ?? true) && !turnNeedsUnbuiltAppArtifact
           ? extractSingleRelayableDeliverable(toolResultMessages, _turnDelegationCount)
           : null;
+        // A turn the user directed to an agent (`--agent`) is not answered by another agent's
+        // deliverable before that agent has run. The one delegation counted here may never have
+        // reached it: a delegation naming no agent is routed within the grant, and when routing
+        // finds no match the architect fallback's ephemeral agent answers. Relayed, that answer
+        // ended the turn scored complete before the forced iteration could delegate to the named
+        // agent (integration review, 2026-10-08). Read from directiveAgentRan, which the tool loop
+        // above sets: directiveAgentPending was read before this round's tools ran, so it still
+        // holds when the named agent itself returned the deliverable, which is relayed as before.
+        const relayHeldForDirective = relayCandidate !== null && directiveAgent !== undefined && !directiveAgentRan;
+        if (relayHeldForDirective) {
+          logAudit("guardrail_flagged", {
+            type: "single_deliverable_relay_suppressed_directive_pending",
+            directiveAgent,
+          }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+        }
+        const relayDeliverable = relayHeldForDirective ? null : relayCandidate;
         if (relayDeliverable) {
           let finalResponse = sanitizeUserFacingAssistantResponse(relayDeliverable, iterationCount);
           // This early return bypasses the terminal guards, and with them the artifact verification

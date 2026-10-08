@@ -66,11 +66,13 @@ vi.mock("../retrieval/document-rag.js", () => ({
  * agent for an undirected delegation. Reached only through a real fan-out tool (realTools).
  */
 const architectRuns = vi.hoisted(() => [] as string[]);
+/** What the ephemeral agent answers: a short answer, unless a test sets a long one. */
+const architectAnswer = vi.hoisted(() => ({ text: "" }));
 vi.mock("../tools/ephemeral-agent-factory.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../tools/ephemeral-agent-factory.js")>()),
   runArchitectFallback: vi.fn(async (task: string) => {
     architectRuns.push(task);
-    return { success: true, output: "[menu_planner]: Starter, main and dessert for six.", metadata: { agentName: "menu_planner", ephemeral: true } };
+    return { success: true, output: `[menu_planner]: ${architectAnswer.text || "Starter, main and dessert for six."}`, metadata: { agentName: "menu_planner", ephemeral: true } };
   }),
 }));
 
@@ -88,6 +90,8 @@ const handedDocuments = vi.hoisted(() => [] as Array<string | undefined>);
 const delegationContexts = vi.hoisted(() => [] as Array<Record<string, unknown>>);
 const executed = vi.hoisted(() => [] as string[]);
 const realTools = vi.hoisted(() => new Set<string>());
+/** What a stubbed delegation that reached a specialist returns: a short finding, unless a test sets a long report. */
+const specialistReport = vi.hoisted(() => ({ text: "" }));
 vi.mock("../tools/registry.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../tools/registry.js")>();
   return {
@@ -118,7 +122,9 @@ vi.mock("../tools/registry.js", async (importOriginal) => {
         delegated.push(args);
         return {
           success: true,
-          output: `Delegated result from ${agentName} — TASK COMPLETED.\nObserved evidence:\nTRUNCATION-IN-INVOICES-AND-RECEIPTS`,
+          output: specialistReport.text
+            ? `[${agentName}]: ${specialistReport.text}`
+            : `Delegated result from ${agentName} — TASK COMPLETED.\nObserved evidence:\nTRUNCATION-IN-INVOICES-AND-RECEIPTS`,
           metadata: { agentName, attemptedAgents: [agentName], delegationSucceeded: true, delegationOutcome: "success", terminalState: "completed" },
         };
       }
@@ -208,6 +214,22 @@ function answerStream(text: string) {
   })();
 }
 
+/**
+ * A long, structured deliverable: its delegation result is framed "Present the full content below
+ * VERBATIM", and a turn whose one delegation returned it relays it as the answer.
+ */
+function longReport(title: string, subject: string): string {
+  return [
+    `# ${title}`,
+    "",
+    ...["Overview", "Findings", "Details"].flatMap((section, s) => [
+      `## ${section}`,
+      ...Array.from({ length: 8 }, (_v, i) => `- ${section} item ${s * 8 + i + 1}: ${subject}, item ${s * 8 + i + 1} written out in full.`),
+      "",
+    ]),
+  ].join("\n");
+}
+
 const CODE_ANALYST = {
   description: "Analyzes source code and finds bugs.",
   capabilities: ["code analysis"],
@@ -259,6 +281,8 @@ describe("a turn the user directed to one agent", () => {
     routingTier.complete = null;
     realTools.clear();
     architectRuns.length = 0;
+    architectAnswer.text = "";
+    specialistReport.text = "";
     vi.resetModules();
     (await import("../config/loader.js")).resetConfigForTests();
   });
@@ -604,6 +628,51 @@ describe("a turn the user directed to one agent", () => {
     expect(promptOf(1)).toContain(DIRECTIVE_LINE);
     expect(delegated).toEqual([expect.objectContaining({ agentName: "code_analyst" })]);
     expect(result.response).not.toContain("I answered this myself");
+  });
+
+  it("does not relay an ephemeral agent's long deliverable before the named agent ran", async () => {
+    // A delegation that named no agent was routed within the grant, found no match, and the
+    // architect fallback's ephemeral agent answered with a long deliverable. The single-deliverable
+    // relay shipped it as the turn's answer, scored complete, and code_analyst never ran: the forced
+    // iteration that would have delegated to it never came (integration review, 2026-10-08).
+    realTools.add("swarm_delegate");
+    architectAnswer.text = longReport("Vegan dinner for six", "a dish of lentils, herbs and roasted vegetables");
+    const { AgentSession, runTurn } = await loadRuntime({ subAgents: { code_analyst: CODE_ANALYST } });
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      call += 1;
+      return call === 1 ? toolStream("swarm_delegate", { task: "Plan a vegan dinner menu for six guests" }) : answerStream(ANSWER);
+    });
+
+    const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
+    const result = await runTurn({ session, userMessage: MESSAGE, allowedAgents: ["code_analyst"], directiveAgent: "code_analyst" });
+
+    expect(architectRuns).toHaveLength(1);
+    expect(result.performance?.finishReason).not.toBe("single_deliverable_relayed");
+    expect(toolChoiceOf(1)).toBe("required");
+    expect(promptOf(1)).toContain(DIRECTIVE_LINE);
+    expect(delegated).toEqual([expect.objectContaining({ agentName: "code_analyst" })]);
+  });
+
+  it("still relays the named agent's own long deliverable", async () => {
+    // The control. The agent the user named returned the deliverable in this round, so the turn
+    // ends with it; read from the directive as it stood before the round's tools ran, the relay
+    // was held here as well.
+    specialistReport.text = longReport("Why invoices.py undercharges", "int() truncates the cent in total()");
+    const { AgentSession, runTurn } = await loadRuntime();
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      call += 1;
+      return call === 1 ? delegateStream() : answerStream(ANSWER);
+    });
+
+    const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
+    const result = await runTurn({ session, userMessage: MESSAGE, allowedAgents: ["code_analyst"], directiveAgent: "code_analyst" });
+
+    expect(delegated).toHaveLength(1);
+    expect(result.performance?.finishReason).toBe("single_deliverable_relayed");
+    expect(streamMock).toHaveBeenCalledTimes(1);
+    expect(result.response).toContain("int() truncates the cent in total()");
   });
 
   it("stays directed when a task graph's node was turned away, though the turn before ran the agent under its id", async () => {
