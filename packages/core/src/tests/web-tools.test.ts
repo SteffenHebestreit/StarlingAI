@@ -715,3 +715,98 @@ describe("web_fetch lists the page's links after its text", () => {
     expect(content.length).toBeLessThanOrEqual(8000 + note.length);
   });
 });
+
+/**
+ * safeFetch refuses a redirect into a private or internal host, but web_fetch caught the refusal
+ * like any failed request and handed the same URL to the browser. The browser followed the
+ * redirect with nothing checking it, so a public page that answered 302 with a service on the
+ * private network had that service's page returned as its content.
+ */
+describe("web_fetch never hands the browser a URL the SSRF guard refused", () => {
+  // An IP literal: the SSRF guard needs no DNS for it.
+  const PUBLIC = "http://93.184.215.14";
+  const INTERNAL = "QuestDB tables: trades, user_credentials";
+
+  async function webFetch(url: string, sessionId: string) {
+    const { getTool } = await import("../tools/registry.js");
+    return getTool("web_fetch")!.execute({ url }, { sessionId, workspacePath: "/workspace" });
+  }
+
+  /** A browser that renders wherever it is sent, a redirect's target included: what Playwright does. */
+  function followingBrowser() {
+    const callTool = vi.fn(async (input: { name: string }) => input.name === "browser_evaluate"
+      ? { content: [{ type: "text", text: `### Result\n${JSON.stringify(INTERNAL)}` }] }
+      : { content: [{ type: "text", text: `### Snapshot\n\`\`\`yaml\n- text: ${INTERNAL}\n\`\`\`` }] });
+    mcpConnections.set("playwright", { client: { callTool } });
+    return callTool;
+  }
+
+  /** fetch answering from `redirects` (URL -> Location), and with the internal page for anything else. */
+  function web(redirects: Record<string, string>) {
+    const requested: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const u = String(input);
+      requested.push(u);
+      const location = redirects[u];
+      return location !== undefined
+        ? new Response(null, { status: 302, headers: { Location: location } })
+        : new Response(`<html><body><p>${INTERNAL}</p></body></html>`, { status: 200, headers: { "Content-Type": "text/html" } });
+    }));
+    return requested;
+  }
+
+  it.each([
+    ["loopback", "http://127.0.0.1:9000/exec?query=select%20*%20from%20user_credentials"],
+    ["a private network", "http://10.0.0.5/admin"],
+    ["the cloud-metadata endpoint", "http://169.254.169.254/latest/meta-data/"],
+    ["IPv6 loopback", "http://[::1]:8080/"],
+  ])("fails a redirect into %s and calls no browser tool", async (_label, target) => {
+    const requested = web({ [`${PUBLIC}/go`]: target });
+    const callTool = followingBrowser();
+
+    const r = await webFetch(`${PUBLIC}/go`, "s-fetch-redirect-private");
+    expect(r.success).toBe(false);
+    expect(r.error).toBe(`${PUBLIC}/go redirects to a private/internal network address; fetching it is not allowed`);
+    expect(r.output).not.toContain(INTERNAL);
+    expect(callTool, "a browser tool was called").not.toHaveBeenCalled();
+    expect(requested, "only the public URL was requested, and only once").toEqual([`${PUBLIC}/go`]);
+  });
+
+  it("fails when a later hop of the chain is the one into the private network", async () => {
+    const requested = web({ [`${PUBLIC}/go`]: "/weiter", [`${PUBLIC}/weiter`]: "http://10.0.0.5/admin" });
+    const callTool = followingBrowser();
+
+    const r = await webFetch(`${PUBLIC}/go`, "s-fetch-redirect-private-hop2");
+    expect(r.success).toBe(false);
+    expect(r.error).toMatch(/redirects to a private\/internal network address/);
+    expect(callTool).not.toHaveBeenCalled();
+    expect(requested).toEqual([`${PUBLIC}/go`, `${PUBLIC}/weiter`]);
+  });
+
+  it("fails a redirect off http(s) the same way", async () => {
+    web({ [`${PUBLIC}/go`]: "file:///etc/passwd" });
+    const callTool = followingBrowser();
+
+    const r = await webFetch(`${PUBLIC}/go`, "s-fetch-redirect-scheme");
+    expect(r.success).toBe(false);
+    expect(r.error).toBe("Redirect to a non-http(s) scheme is not allowed");
+    expect(callTool).not.toHaveBeenCalled();
+  });
+
+  it("still renders the page in the browser when the direct request fails for any other reason", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      throw new TypeError("fetch failed");
+    }));
+    const callTool = vi.fn(async (input: { name: string }) => input.name === "browser_evaluate"
+      ? { content: [{ type: "text", text: "### Result\n\"Fahrplan: Abfahrt 7:15, Ankunft 9:40\"" }] }
+      : { content: [{ type: "text", text: "" }] });
+    mcpConnections.set("playwright", { client: { callTool } });
+
+    const r = await webFetch(`${PUBLIC}/fahrplan`, "s-fetch-direct-failed");
+    expect(r.success).toBe(true);
+    expect(r.metadata?.["fetchMethod"]).toBe("playwright");
+    expect(r.output).toContain(`**Content from:** ${PUBLIC}/fahrplan (browser-rendered; a direct request failed (fetch failed))`);
+    expect(r.output).toContain("Fahrplan: Abfahrt 7:15, Ankunft 9:40");
+    expect(callTool.mock.calls.map(([input]) => input.name)).toEqual(["browser_navigate", "browser_evaluate"]);
+  });
+});

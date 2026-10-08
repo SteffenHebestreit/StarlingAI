@@ -346,6 +346,14 @@ registerTool({
           }
         }
       } catch (err) {
+        // The guard turned a host away, the requested one or a redirect's target. This used to
+        // fall through like any failed request: the browser was handed the same URL, followed
+        // the redirect unchecked and returned the internal page's text. A refusal now ends the
+        // call, with no render, no snapshot and no second direct request.
+        if (err instanceof SsrfRefusal) {
+          log.warn({ url, reason: err.message }, "web_fetch: the SSRF guard refused a host on the way");
+          return { success: false, output: "", error: err.message };
+        }
         // fall through to Playwright, remembering why
         directError = err instanceof Error ? err.message : String(err);
       }
@@ -976,11 +984,25 @@ export async function checkUrlSsrf(rawUrl: string): Promise<string | null> {
 }
 
 /**
+ * The guard turned a request away before it was sent: the host, or the target of a redirect
+ * on the way, is private or internal, or a redirect left http(s). It is kept apart from network
+ * errors because web_fetch hands those to the browser, and the browser follows the same
+ * redirect with nothing checking where it leads.
+ */
+class SsrfRefusal extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SsrfRefusal";
+  }
+}
+
+/**
  * fetch() that re-runs the SSRF guard on EVERY redirect hop. The plain guard only
  * validated the initial URL, so a public URL that 30x-redirected to 169.254.169.254
  * or an internal host bypassed it. Follows redirects manually, re-checking each
- * Location target's host (and its DNS) before the next request. Only for
- * user/LLM-supplied URLs — NOT the configured (trusted) search backends.
+ * Location target's host (and its DNS) before the next request; a host or target it
+ * turns away throws SsrfRefusal. Only for user/LLM-supplied URLs — NOT the configured
+ * (trusted) search backends.
  */
 async function safeFetch(url: string, ms: number, init?: RequestInit, maxRedirects = 5): Promise<Response> {
   return (await safeFetchFinal(url, ms, init, maxRedirects)).res;
@@ -1001,7 +1023,9 @@ async function safeFetchFinal(url: string, ms: number, init?: RequestInit, maxRe
       throw new Error("Invalid URL");
     }
     if (await hostIsBlocked(host)) {
-      throw new Error("Fetching private/internal network addresses is not allowed");
+      throw new SsrfRefusal(hop === 0
+        ? "Fetching private/internal network addresses is not allowed"
+        : `${url} redirects to a private/internal network address; fetching it is not allowed`);
     }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), ms);
@@ -1013,7 +1037,7 @@ async function safeFetchFinal(url: string, ms: number, init?: RequestInit, maxRe
     }
     if (res.status >= 300 && res.status < 400 && res.headers.has("location")) {
       const next = new URL(res.headers.get("location")!, current).toString();
-      if (!/^https?:\/\//i.test(next)) throw new Error("Redirect to a non-http(s) scheme is not allowed");
+      if (!/^https?:\/\//i.test(next)) throw new SsrfRefusal("Redirect to a non-http(s) scheme is not allowed");
       current = next;
       continue;
     }
