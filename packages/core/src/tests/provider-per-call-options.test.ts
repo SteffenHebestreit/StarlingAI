@@ -11,7 +11,12 @@ vi.mock("../audit/logger.js", async (importOriginal) => {
   };
 });
 
-const { LMStudioProvider, _resetRejectedReasoningEffortsForTests } = await import("../providers/lmstudio.js");
+const {
+  LMStudioProvider,
+  _resetRejectedReasoningEffortsForTests,
+  _resetToolCallPrefillRefusalsForTests,
+  isToolCallPrefillRefusal,
+} = await import("../providers/lmstudio.js");
 
 /**
  * PER-CALL CONTROLS ON THE OPENAI-COMPATIBLE WIRE.
@@ -55,7 +60,8 @@ const STREAM_REASONING_CHARS = STREAM_REASONING.join("").length;
 /** What the stub answers on the complete path. */
 const COMPLETE_REASONING = "Considering the definition of wet.";
 
-function mockProvider(cfg: Partial<ModelConfig> = {}) {
+/** `refuse` answers a request with an error instead (the SDK throws a non-2xx answer at the send). */
+function mockProvider(cfg: Partial<ModelConfig> = {}, refuse?: (body: Record<string, unknown>) => Error | undefined) {
   const bodies: Array<Record<string, unknown>> = [];
   const provider = new LMStudioProvider("http://localhost:1234/v1", "test", { ...base, ...cfg }, { maxRetries: 0 });
   (provider as unknown as { client: unknown }).client = {
@@ -63,6 +69,8 @@ function mockProvider(cfg: Partial<ModelConfig> = {}) {
       completions: {
         create: async (body: Record<string, unknown>) => {
           bodies.push(body);
+          const refusal = refuse?.(body);
+          if (refusal) throw refusal;
           if (body["stream"]) {
             return (async function* () {
               for (const part of STREAM_REASONING) {
@@ -89,7 +97,10 @@ function mockProvider(cfg: Partial<ModelConfig> = {}) {
 const modelCalls = () => rows.filter((r) => r.type === "provider_model_call").map((r) => r.data);
 
 beforeEach(() => { rows.length = 0; });
-afterEach(() => _resetRejectedReasoningEffortsForTests());
+afterEach(() => {
+  _resetRejectedReasoningEffortsForTests();
+  _resetToolCallPrefillRefusalsForTests();
+});
 
 const THINKING_OFF: StreamCallOptions = { controls: { enableThinking: false, reasoningEffort: "none" } };
 
@@ -245,5 +256,225 @@ describe("no options → byte-identical request body", () => {
     await provider.complete(messages, tools);
     expect(JSON.stringify(bodies[0])).toBe(COMPLETE_BODY);
     expect(JSON.stringify(bodies[0])).toBe(JSON.stringify(bodies[1]));
+  });
+});
+
+/**
+ * A FORCED CALL THAT STARTS INSIDE ITS TOOL CALL (ModelConfig.toolCallPrefill, CompletionCallOptions.prefillToolCall).
+ *
+ * On the deployed llama.cpp (b11015) tool_choice "required" only keeps the turn from ending until a
+ * call is complete. A model that wants to answer itself writes prose until max_tokens: 13,263
+ * characters on the --agent turn of 2026-10-07. With a trailing assistant message
+ * `<tool_call>\n<function=` the call is the continuation, 24 times in 24 against 10 in 24 without on
+ * one prompt (2026-10-08). The server's conditions are what is pinned here: only under "required",
+ * never after an assistant message, never carrying tool_calls, a function name only when the grammar
+ * offers it. Every assertion reads the request body the client stub received, or the audit row.
+ */
+const PREFILL_OPENER = "<tool_call>\n<function=";
+const FORCED_PREFILLED: StreamCallOptions = { toolChoice: "required", prefillToolCall: {} };
+const QWEN_XML: Partial<ModelConfig> = { toolCallPrefill: "qwen-xml" };
+
+const wireMessages = (body: Record<string, unknown>) => body["messages"] as Array<Record<string, unknown>>;
+const lastWireMessage = (body: Record<string, unknown>) => wireMessages(body)[wireMessages(body).length - 1]!;
+/** What llama-server answers a continuation it cannot take (std::invalid_argument → 400). */
+const prefillRefusal = () => Object.assign(new Error("400 Cannot have 2 or more assistant messages at the end of the list."), { status: 400 });
+const refusePrefilled = (body: Record<string, unknown>) => (lastWireMessage(body)["role"] === "assistant" ? prefillRefusal() : undefined);
+
+describe("a prefilled tool call goes out only on a forced call, and only where the model config names the syntax", () => {
+  it("complete() and the stream path append the opener after the normalised messages", async () => {
+    const { provider, bodies } = mockProvider(QWEN_XML);
+
+    await provider.complete(messages, tools, undefined, FORCED_PREFILLED);
+    await provider.completeViaStream(messages, tools, undefined, FORCED_PREFILLED);
+
+    expect(bodies).toHaveLength(2);
+    for (const body of bodies) {
+      expect(wireMessages(body).map((m) => m["role"])).toEqual(["system", "user", "assistant"]);
+      expect(lastWireMessage(body)).toEqual({ role: "assistant", content: PREFILL_OPENER });
+      // The string, never the object form: llama-server reads the object as "auto" and says so
+      // only in its own log.
+      expect(body["tool_choice"]).toBe("required");
+    }
+  });
+
+  it("is not sent without 'required', unasked, or without the flag", async () => {
+    const { provider, bodies } = mockProvider(QWEN_XML);
+    await provider.complete(messages, tools, undefined, { toolChoice: "auto", prefillToolCall: {} });
+    await provider.complete(messages, tools, undefined, { prefillToolCall: {} });
+    await provider.completeViaStream(messages, tools, undefined, { toolChoice: "auto", prefillToolCall: {} });
+    await provider.complete(messages, tools, undefined, { toolChoice: "required" });
+    const { provider: unflagged, bodies: unflaggedBodies } = mockProvider();
+    await unflagged.complete(messages, tools, undefined, FORCED_PREFILLED);
+    await unflagged.completeViaStream(messages, tools, undefined, FORCED_PREFILLED);
+
+    for (const body of [...bodies, ...unflaggedBodies]) {
+      expect(wireMessages(body).map((m) => m["role"])).toEqual(["system", "user"]);
+    }
+  });
+
+  it("is never sent after an assistant message, and is content only — never tool_calls", async () => {
+    const { provider, bodies } = mockProvider(QWEN_XML);
+    // llama-server answers 400 "Cannot have 2 or more assistant messages at the end of the list".
+    const endsWithAssistant: LLMMessage[] = [...messages, { role: "assistant", content: "Let me check." }];
+    const endsWithToolCall: LLMMessage[] = [...messages, {
+      role: "assistant",
+      content: null,
+      tool_calls: [{ id: "call_1", type: "function", function: { name: "record_verdict", arguments: "{}" } }],
+    }];
+    await provider.complete(endsWithAssistant, tools, undefined, FORCED_PREFILLED);
+    await provider.completeViaStream(endsWithAssistant, tools, undefined, FORCED_PREFILLED);
+    await provider.complete(endsWithToolCall, tools, undefined, FORCED_PREFILLED);
+
+    expect(wireMessages(bodies[0]!)).toHaveLength(endsWithAssistant.length);
+    expect(lastWireMessage(bodies[0]!)).toEqual({ role: "assistant", content: "Let me check." });
+    expect(wireMessages(bodies[1]!)).toHaveLength(endsWithAssistant.length);
+    expect(wireMessages(bodies[2]!)).toHaveLength(endsWithToolCall.length);
+    expect(lastWireMessage(bodies[2]!)["tool_calls"]).toHaveLength(1);
+
+    // The prefill itself: llama-server answers 400 "Cannot continue an assistant message that
+    // contains tool calls", so the message carries the two fields and nothing else.
+    const { provider: forced, bodies: forcedBodies } = mockProvider(QWEN_XML);
+    await forced.complete(messages, tools, undefined, FORCED_PREFILLED);
+    expect(Object.keys(lastWireMessage(forcedBodies[0]!)).sort()).toEqual(["content", "role"]);
+  });
+
+  it("names the tool only when that tool is in the request; any other name leaves the opener bare", async () => {
+    const { provider, bodies } = mockProvider(QWEN_XML);
+    await provider.complete(messages, tools, undefined, { toolChoice: "required", prefillToolCall: { tool: "record_verdict" } });
+    await provider.completeViaStream(messages, tools, undefined, { toolChoice: "required", prefillToolCall: { tool: "record_verdict" } });
+    await provider.complete(messages, tools, undefined, { toolChoice: "required", prefillToolCall: { tool: "delegate_to_agent" } });
+
+    expect(lastWireMessage(bodies[0]!)).toEqual({ role: "assistant", content: `${PREFILL_OPENER}record_verdict>\n` });
+    expect(lastWireMessage(bodies[1]!)).toEqual({ role: "assistant", content: `${PREFILL_OPENER}record_verdict>\n` });
+    // delegate_to_agent is not among this request's tools. The grammar offers only the names sent,
+    // and an opener it rejects fails the whole request, so the opener stays bare.
+    expect(lastWireMessage(bodies[2]!)).toEqual({ role: "assistant", content: PREFILL_OPENER });
+  });
+
+  it("the audit row says what was sent, and a row the feature does not govern is left as it was", async () => {
+    const { provider } = mockProvider(QWEN_XML);
+    await provider.complete(messages, tools, undefined, FORCED_PREFILLED);
+    await provider.completeViaStream(messages, tools, undefined, { toolChoice: "required", prefillToolCall: { tool: "record_verdict" } });
+    await provider.complete(messages, tools, undefined, { toolChoice: "auto", prefillToolCall: {} });
+    await provider.complete(messages, tools, undefined, { toolChoice: "required" });
+
+    const calls = modelCalls();
+    expect(calls).toHaveLength(4);
+    expect(calls[0]!["prefill"]).toBe("bare");
+    expect(calls[0]).not.toHaveProperty("prefillSkipped");
+    expect(calls[1]!["prefill"]).toBe("named");
+    expect(calls[2]!["prefill"]).toBeNull();
+    expect(calls[2]!["prefillSkipped"]).toBe("tool_choice");
+    expect(calls[3]).not.toHaveProperty("prefill");
+  });
+});
+
+describe("a refused prefill: the endpoint is remembered, and the call is retried once without it", () => {
+  it("complete(): learns the refusal, retries outside the attempt budget, and the next forced call goes without", async () => {
+    // maxRetries 0: without a retry of its own, the refusal would end the call.
+    const { provider, bodies } = mockProvider(QWEN_XML, refusePrefilled);
+
+    const first = await provider.complete(messages, tools, undefined, FORCED_PREFILLED);
+    await provider.complete(messages, tools, undefined, FORCED_PREFILLED);
+
+    expect(first.content).toBe("YES");
+    expect(bodies.map((body) => lastWireMessage(body)["role"])).toEqual(["assistant", "user", "user"]);
+    expect(modelCalls().map((row) => [row["finishReason"], row["prefill"], row["prefillSkipped"]])).toEqual([
+      ["error", "bare", undefined],
+      ["stop", null, "endpoint_refused"],
+      ["stop", null, "endpoint_refused"],
+    ]);
+  });
+
+  it("the stream path: the refusal comes before any chunk, and the retry is served", async () => {
+    const { provider, bodies } = mockProvider(QWEN_XML, refusePrefilled);
+
+    const first = await provider.completeViaStream(messages, tools, undefined, FORCED_PREFILLED);
+    await provider.completeViaStream(messages, tools, undefined, FORCED_PREFILLED);
+
+    expect(first.content).toBe("YES");
+    expect(bodies.map((body) => lastWireMessage(body)["role"])).toEqual(["assistant", "user", "user"]);
+  });
+
+  it("the stream's retry is not one of its drop-retry attempts: refused, then dropped, then served", async () => {
+    // maxRetries 0 floors the stream at two attempts. The refusal must not use one of them up.
+    let call = 0;
+    const { provider, bodies } = mockProvider(QWEN_XML, () => {
+      call += 1;
+      if (call === 1) return prefillRefusal();
+      if (call === 2) return new Error("Premature close");
+      return undefined;
+    });
+
+    const result = await provider.completeViaStream(messages, tools, undefined, FORCED_PREFILLED);
+
+    expect(result.content).toBe("YES");
+    expect(bodies).toHaveLength(3);
+  });
+
+  it("is remembered per endpoint AND model: another model behind the same address keeps its prefill", async () => {
+    const { provider: refusing } = mockProvider(QWEN_XML, refusePrefilled);
+    await refusing.complete(messages, tools, undefined, FORCED_PREFILLED);
+
+    const { provider: other, bodies } = mockProvider({ ...QWEN_XML, primary: "lmstudio/qwen/qwen3.6-27b" });
+    await other.complete(messages, tools, undefined, FORCED_PREFILLED);
+
+    expect(lastWireMessage(bodies[0]!)).toEqual({ role: "assistant", content: PREFILL_OPENER });
+  });
+
+  it("learns nothing from a failure that is not a refusal of the request, or from a request that carried no prefill", async () => {
+    // 429 is load, not shape: the call fails as before, and the next forced call is still prefilled.
+    const rateLimited = () => Object.assign(new Error("429 Too Many Requests"), { status: 429 });
+    let limited = true;
+    const { provider, bodies } = mockProvider(QWEN_XML, () => (limited ? rateLimited() : undefined));
+    await expect(provider.complete(messages, tools, undefined, FORCED_PREFILLED)).rejects.toThrow(/429/);
+    limited = false;
+    await provider.complete(messages, tools, undefined, FORCED_PREFILLED);
+    expect(bodies).toHaveLength(2);
+    expect(lastWireMessage(bodies[1]!)).toEqual({ role: "assistant", content: PREFILL_OPENER });
+
+    // A 400 to a request with no prefill on it is not retried by this path.
+    const { provider: unflagged, bodies: unflaggedBodies } = mockProvider({}, () => prefillRefusal());
+    await expect(unflagged.complete(messages, tools, undefined, FORCED_PREFILLED)).rejects.toThrow(/400/);
+    expect(unflaggedBodies).toHaveLength(1);
+  });
+
+  it("reads only a 4xx about the request as a refusal", () => {
+    expect(isToolCallPrefillRefusal(prefillRefusal())).toBe(true);
+    expect(isToolCallPrefillRefusal({ status: 400, message: "Cannot continue an assistant message that contains tool calls." })).toBe(true);
+    expect(isToolCallPrefillRefusal({ status: 422, message: "unprocessable" })).toBe(true);
+    // The credential, time and load: a condition that passes must not switch the prefill off for good.
+    for (const status of [401, 403, 408, 429]) expect(isToolCallPrefillRefusal({ status, message: "x" })).toBe(false);
+    // A llama-swap restart answers 502 for seconds.
+    expect(isToolCallPrefillRefusal({ status: 502, message: "Bad Gateway" })).toBe(false);
+    // The reasoning_effort ladder owns its own refusal.
+    expect(isToolCallPrefillRefusal({ status: 400, message: "Invalid 'reasoning_effort' value: 'none'." })).toBe(false);
+    expect(isToolCallPrefillRefusal(new Error("Premature close"))).toBe(false);
+  });
+});
+
+describe("flag off → a forced call's request is byte-identical, prefill asked for or not", () => {
+  it("asking for a prefill changes nothing without the flag, on either path, and the audit row has no prefill field", async () => {
+    const { provider, bodies } = mockProvider();
+    await provider.complete(messages, tools, undefined, { toolChoice: "required", prefillToolCall: { tool: "record_verdict" } });
+    await provider.complete(messages, tools, undefined, { toolChoice: "required" });
+    await provider.completeViaStream(messages, tools, undefined, { toolChoice: "required", prefillToolCall: {} });
+    await provider.completeViaStream(messages, tools, undefined, { toolChoice: "required" });
+
+    expect(JSON.stringify(bodies[0])).toBe(JSON.stringify(bodies[1]));
+    expect(JSON.stringify(bodies[2])).toBe(JSON.stringify(bodies[3]));
+    expect(modelCalls().filter((row) => "prefill" in row || "prefillSkipped" in row)).toEqual([]);
+  });
+
+  it("the flag alone changes nothing: a forced call that does not ask is the same request with or without it", async () => {
+    const { provider: off, bodies: offBodies } = mockProvider();
+    const { provider: on, bodies: onBodies } = mockProvider(QWEN_XML);
+    for (const provider of [off, on]) {
+      await provider.complete(messages, tools, undefined, { toolChoice: "required" });
+      for await (const _chunk of provider.stream(messages, tools, undefined, { toolChoice: "required" })) { /* drain */ }
+    }
+
+    expect(onBodies).toHaveLength(2);
+    expect(onBodies.map((body) => JSON.stringify(body))).toEqual(offBodies.map((body) => JSON.stringify(body)));
   });
 });
