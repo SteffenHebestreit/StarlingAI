@@ -759,6 +759,56 @@ describe("the code a delegated run executed, and the figures it states", () => {
     }, 60_000);
   });
 
+  describe("(o) code the run quotes from a file it wrote and ran", () => {
+    // The sandbox is broken and the coder reports honestly, quoting the script it wrote. Its
+    // constants are no input's (LIMIT = 200001 is its own choice): masked, they broke the quoted
+    // code and flagged an honest report as one that made figures up.
+    const SCRIPT = String(INCIDENT.calls[0]!.args["content"]);
+    const HONEST = "Das Skript lief nicht: shell_exec endete mit Exit code 1. Ich nenne keine Zahlen. So sieht primes.js aus:\n"
+      + "```js\n" + SCRIPT.trimEnd() + "\n```";
+    const runQuoting = async (files: Record<string, string>, finalAnswer: string) => {
+      await registerTools({
+        write_file: (args) => ({
+          success: true,
+          output: `File written: generated/${String(args["path"])}`,
+          metadata: { filename: String(args["path"]), outputPath: `generated/${String(args["path"])}`, contentType: "text/plain", previewMode: "text" },
+        }),
+        shell_exec: () => failed(),
+      });
+      completeMock.mockImplementation(async (messages: Message[]) => scripted([
+        ...Object.entries(files).map(([path, content]) => ({ tool: "write_file", args: { path, content } })),
+        { tool: "shell_exec", args: { command: "cd /workspace && node primes.js" } },
+      ], finalAnswer)(messages));
+      return runAgent("coder", INCIDENT.task, "parent-provenance-quote");
+    };
+
+    it("an honest report quoting the script it ran is left as it was", async () => {
+      const result = await runQuoting({ "primes.js": SCRIPT }, HONEST);
+
+      expect(result.output).toBe(HONEST);
+      expect(result.executions).toEqual({ attempted: 1, failed: 1, succeededWithOutput: 0 });
+    }, 60_000);
+
+    it("a figure its prose states beside the quote is still masked", async () => {
+      const result = await runQuoting({ "primes.js": SCRIPT }, `Es gibt 8393 Primzahlen. ${HONEST}`);
+
+      expect(result.output).toBe(`Es gibt [not observed] Primzahlen. ${HONEST}`);
+      expect(result.executions?.unobservedFigures).toBe(1);
+    }, 60_000);
+
+    it("a file it wrote and never ran is its claim, quoted or not", async () => {
+      // Quoted verbatim, results.md would otherwise hand the read-back finding its figure back.
+      const results = "Anzahl der Primzahlen: 8393";
+      const result = await runQuoting(
+        { "primes.js": SCRIPT, "results.md": results },
+        `Das Skript lief nicht. Laut results.md:\n\`\`\`\n${results}\n\`\`\``,
+      );
+
+      expect(result.output).toBe("Das Skript lief nicht. Laut results.md:\n```\nAnzahl der Primzahlen: [not observed]\n```");
+      expect(result.executions?.unobservedFigures).toBe(1);
+    }, 60_000);
+  });
+
   it("(k) a figure the runtime's forced-answer instruction gave the run is one it received", async () => {
     // Ten checks in the run's only iteration, all failing; the synthesis comes back empty, and the
     // rescue tells the model how many tool calls it made. The count it repeats is not made up.

@@ -71,12 +71,29 @@ export function addArgumentFigureKeys(into: Set<string>, value: unknown, depth =
   }
 }
 
-/** `text` with every figure whose key is not in `observed` replaced by the marker, and how many were. */
-export function maskUnobservedFigures(text: string, observed: ReadonlySet<string>): { text: string; masked: number } {
+/** A stretch of an answer, by character offsets, that the figure check reads past. */
+export interface FigureCheckSpan {
+  readonly start: number;
+  readonly end: number;
+}
+
+function insideSpan(offset: number, spans: readonly FigureCheckSpan[]): boolean {
+  return spans.some((span) => offset >= span.start && offset < span.end);
+}
+
+/**
+ * `text` with every figure whose key is not in `observed` replaced by the marker, and how many were.
+ * A figure inside one of `skip` is left alone and not counted.
+ */
+export function maskUnobservedFigures(
+  text: string,
+  observed: ReadonlySet<string>,
+  skip: readonly FigureCheckSpan[] = [],
+): { text: string; masked: number } {
   let masked = 0;
-  const result = text.replace(FIGURE_RE, (figure) => {
+  const result = text.replace(FIGURE_RE, (figure: string, offset: number) => {
     const key = figureKey(figure);
-    if (!countsAsFigure(key) || observed.has(key)) return figure;
+    if (!countsAsFigure(key) || observed.has(key) || insideSpan(offset, skip)) return figure;
     masked++;
     return UNOBSERVED_FIGURE_MARKER;
   });
@@ -84,11 +101,64 @@ export function maskUnobservedFigures(text: string, observed: ReadonlySet<string
 }
 
 /** How many figures in `text` maskUnobservedFigures would replace. */
-export function countUnobservedFigures(text: string, observed: ReadonlySet<string>): number {
+export function countUnobservedFigures(text: string, observed: ReadonlySet<string>, skip: readonly FigureCheckSpan[] = []): number {
   let count = 0;
   for (const match of text.matchAll(FIGURE_RE)) {
     const key = figureKey(match[0]);
-    if (countsAsFigure(key) && !observed.has(key)) count++;
+    if (countsAsFigure(key) && !observed.has(key) && !insideSpan(match.index ?? 0, skip)) count++;
   }
   return count;
+}
+
+/**
+ * The bodies of the fenced code blocks in `text` that quote one of `sources` verbatim: whole lines
+ * of it, in order, compared without trailing whitespace or line-ending style. A figure there is a
+ * figure of the code it quotes, not one the answer states. A fence that never closes, a body that
+ * is part of a line, and a line the answer changed are no such quote.
+ */
+export function verbatimQuotedCodeSpans(text: string, sources: readonly string[]): FigureCheckSpan[] {
+  const quotable = sources.map(normalizeQuotedLines).filter(Boolean).map((source) => `\n${source}\n`);
+  if (quotable.length === 0 || !/^ {0,3}(?:`{3,}|~{3,})/m.test(text)) return [];
+  const lines: Array<{ text: string; start: number }> = [];
+  let offset = 0;
+  for (const line of text.split("\n")) {
+    lines.push({ text: line.replace(/\r$/, ""), start: offset });
+    offset += line.length + 1;
+  }
+  const spans: FigureCheckSpan[] = [];
+  for (let open = 0; open < lines.length; open++) {
+    const opening = /^( {0,3})(`{3,}|~{3,})(.*)$/.exec(lines[open]!.text);
+    if (!opening) continue;
+    const indent = opening[1]!.length;
+    const fence = opening[2]!;
+    // A backtick fence's info string holds no backtick (CommonMark): "```x```" is inline code.
+    if (fence.startsWith("`") && opening[3]!.includes("`")) continue;
+    let close = open + 1;
+    while (close < lines.length && !closesFence(lines[close]!.text, fence)) close++;
+    // An open fence runs to the end of the answer, and nothing in it is a delimited quote.
+    if (close >= lines.length) break;
+    const body = normalizeQuotedLines(lines.slice(open + 1, close).map((line) => withoutIndent(line.text, indent)).join("\n"));
+    if (body && quotable.some((source) => source.includes(`\n${body}\n`))) {
+      spans.push({ start: lines[open + 1]!.start, end: lines[close]!.start });
+    }
+    open = close;
+  }
+  return spans;
+}
+
+function closesFence(line: string, fence: string): boolean {
+  const closing = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(line);
+  return closing !== null && closing[1]![0] === fence[0] && closing[1]!.length >= fence.length;
+}
+
+/** "\n" line endings, nothing trailing on a line, no blank lines around. */
+function normalizeQuotedLines(text: string): string {
+  return text.replace(/\r\n?/g, "\n").split("\n").map((line) => line.replace(/[ \t]+$/, "")).join("\n").replace(/^\n+|\n+$/g, "");
+}
+
+/** The line without up to `columns` spaces: the fence's own indent (CommonMark). */
+function withoutIndent(line: string, columns: number): string {
+  let removed = 0;
+  while (removed < columns && line[removed] === " ") removed++;
+  return line.slice(removed);
 }

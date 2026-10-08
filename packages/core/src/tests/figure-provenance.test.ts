@@ -6,6 +6,7 @@ import {
   countUnobservedFigures,
   figureKey,
   maskUnobservedFigures,
+  verbatimQuotedCodeSpans,
 } from "../agent/figure-provenance.js";
 import { INCIDENT, INVENTED_FIGURES } from "./support/figure-provenance-incident.js";
 
@@ -58,6 +59,35 @@ describe("the figures a run's own calls state", () => {
     const keys = new Set<string>();
     addFigureKeys(keys, "Anzahl 8.393, Lauf 4711", new Set(["8393"]));
     expect([...keys]).toEqual(["4711"]);
+  });
+});
+
+describe("code an answer quotes verbatim", () => {
+  // The incident's script: LIMIT = 200001 is the coder's own choice, in no input of the run.
+  const SCRIPT = String(INCIDENT.calls[0]!.args["content"]);
+
+  it("whole lines of a source in a closed fence are read past; the prose around them is not", () => {
+    const answer = "So sieht es aus:\n```js\nconst LIMIT = 200001;\nconst sieve = new Uint8Array(LIMIT);\n```\nEs gibt 8393 Primzahlen.";
+    const spans = verbatimQuotedCodeSpans(answer, [SCRIPT]);
+
+    expect(spans).toHaveLength(1);
+    expect(maskUnobservedFigures(answer, new Set(), spans)).toEqual({
+      text: "So sieht es aus:\n```js\nconst LIMIT = 200001;\nconst sieve = new Uint8Array(LIMIT);\n```\nEs gibt [not observed] Primzahlen.",
+      masked: 1,
+    });
+    expect(countUnobservedFigures(answer, new Set(), spans)).toBe(1);
+  });
+
+  it("line endings, trailing whitespace and the fence's own indent do not matter", () => {
+    expect(verbatimQuotedCodeSpans("  ~~~\r\n  const LIMIT = 200001;   \r\n  ~~~\r\nfertig", [SCRIPT])).toHaveLength(1);
+  });
+
+  it("a changed line, part of a line, an open fence or no source is no quote", () => {
+    for (const body of ["const LIMIT = 200002;", "LIMIT = 200001;", "200001"]) {
+      expect(verbatimQuotedCodeSpans(`\`\`\`\n${body}\n\`\`\``, [SCRIPT])).toEqual([]);
+    }
+    expect(verbatimQuotedCodeSpans("```\nconst LIMIT = 200001;\n", [SCRIPT])).toEqual([]);
+    expect(verbatimQuotedCodeSpans("```\nconst LIMIT = 200001;\n```", [])).toEqual([]);
   });
 });
 

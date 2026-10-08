@@ -35,7 +35,14 @@ import { STEERING_PREFIX } from "./turn-boundary.js";
 import { currentEffortProfile, effectiveOrchestration, effectiveSubAgentTurnSloMs } from "../runtime/effort-context.js";
 import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type ToolContext, type SwarmState, type ToolResult } from "../tools/registry.js";
 import { isToolAllowed, requiresSandbox } from "../guardrails/tool-tiers.js";
-import { addArgumentFigureKeys, addFigureKeys, countUnobservedFigures, maskUnobservedFigures } from "./figure-provenance.js";
+import {
+  addArgumentFigureKeys,
+  addFigureKeys,
+  countUnobservedFigures,
+  maskUnobservedFigures,
+  verbatimQuotedCodeSpans,
+  type FigureCheckSpan,
+} from "./figure-provenance.js";
 import {
   addExecutionRecord,
   capOutcomeForUnbackedFigures,
@@ -3765,6 +3772,49 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         if (!observedFigureKeys.has(key)) ownClaimFigureKeys.add(key);
       }
     };
+    // QUOTED CODE IS NOT A CLAIM. In review, the coder of a broken sandbox reported honestly and
+    // quoted the script it had written, and "const LIMIT = 200001;" came back "const LIMIT = [not
+    // observed];": broken code, and an honest report flagged as one that made figures up. So the
+    // check reads past a fenced code block that quotes, verbatim and in whole lines, a file the run
+    // wrote and one of its sandbox calls then ran. Only such a file: results.md written from the
+    // run's head and quoted verbatim would hand the read-back case its figure back. The texts are
+    // the run's own arguments to write_file and edit_file, per file, and never count as received,
+    // so a figure its prose states is checked as before.
+    const writtenFileText = new Map<string, string>();
+    // The arguments of the sandbox calls that ran (their result reports programOutputChars).
+    const ranCallArguments: string[] = [];
+    const noteWrittenText = (toolName: string, args: Record<string, unknown>, writtenPath: unknown): void => {
+      const path = normalizeArtifactPath(args["path"]) ?? normalizeArtifactPath(writtenPath);
+      if (!path) return;
+      const before = writtenFileText.get(path);
+      if (toolName === "write_file") {
+        const content = typeof args["content"] === "string" ? args["content"] : "";
+        writtenFileText.set(path, String(args["mode"] ?? "").toLowerCase() === "append" ? `${before ?? ""}${content}` : content);
+        return;
+      }
+      // edit_file, applied as the tool applies it; a file the run did not write, or one that changed
+      // since, keeps only the new text as the run's own.
+      const oldText = typeof args["old_string"] === "string" ? args["old_string"] : "";
+      const newText = typeof args["new_string"] === "string" ? args["new_string"] : "";
+      writtenFileText.set(path, before !== undefined && oldText && before.includes(oldText)
+        ? (args["replace_all"] === true ? before.split(oldText).join(newText) : before.replace(oldText, newText))
+        : `${before ?? ""}\n${newText}`);
+    };
+    /** A file one of the run's sandbox calls named, as a path ending in its name or as the name. */
+    const ranByTheRun = (path: string): boolean => {
+      const name = path.split("/").pop() ?? "";
+      const isNameChar = (char: string | undefined): boolean => char !== undefined && /[\w.-]/.test(char);
+      return name.length > 0 && ranCallArguments.some((text) => {
+        for (let at = text.indexOf(name); at >= 0; at = text.indexOf(name, at + 1)) {
+          if (!isNameChar(text[at - 1]) && !isNameChar(text[at + name.length])) return true;
+        }
+        return false;
+      });
+    };
+    const quotedCodeSpans = (text: string): FigureCheckSpan[] => (writtenFileText.size === 0 ? [] : verbatimQuotedCodeSpans(
+      text,
+      [...writtenFileText].filter(([path]) => ranByTheRun(path)).map(([, content]) => content),
+    ));
     // Measured, never acted on: how many figures a run with at least one productive execution
     // stated without an input containing them (the partial-output case the mask does not cover).
     let shadowUnobservedFigures: number | undefined;
@@ -3777,8 +3827,9 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     const quarantineUnobservedFigures = (text: string, site: string): string => {
       if (!tracksFigures) return text;
       absorbNewHistory();
+      const quoted = quotedCodeSpans(text);
       if (noExecutionCompleted(executionRecord)) {
-        const { text: maskedText, masked } = maskUnobservedFigures(text, observedFigureKeys);
+        const { text: maskedText, masked } = maskUnobservedFigures(text, observedFigureKeys, quoted);
         if (masked > 0) {
           executionRecord.unobservedFigures = (executionRecord.unobservedFigures ?? 0) + masked;
           logAudit("guardrail_flagged", {
@@ -3792,7 +3843,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         }
         return maskedText;
       }
-      if (executionRecord.attempted > 0) shadowUnobservedFigures = countUnobservedFigures(text, observedFigureKeys);
+      if (executionRecord.attempted > 0) shadowUnobservedFigures = countUnobservedFigures(text, observedFigureKeys, quoted);
       return text;
     };
     // Workspace-relative paths this run successfully wrote or edited, in call order.
@@ -7106,7 +7157,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
               if (!result.success) record.failed += 1;
               else if (printed > 0) record.succeededWithOutput += 1;
             }
+            if (tracksFigures) ranCallArguments.push(JSON.stringify(tc.arguments ?? {}));
           }
+        }
+        if (tracksFigures && result.success && (tc.name === "write_file" || tc.name === "edit_file")) {
+          noteWrittenText(tc.name, tc.arguments ?? {}, result.metadata?.["outputPath"]);
         }
         browserDecider?.afterToolCall(tc, result);
         if (isDelegationToolName(tc.name)) {
