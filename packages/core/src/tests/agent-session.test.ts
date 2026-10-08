@@ -1,8 +1,10 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { AgentSession, createSession, getSessionTranscript, resetSessionsForTests, archiveIdleSessions } from "../agent/session.js";
+import * as configLoader from "../config/loader.js";
+import { safeUserSegment } from "../runtime/user-scope.js";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -734,6 +736,43 @@ describe("AgentSession effort/time-limit settings", () => {
     // The built-in config default is "medium"; createSession seeds it so the
     // composer always has a concrete tier to display.
     expect(session.getSettings().effort).toBe("medium");
+  });
+});
+
+describe("AgentSession workspace root under multi-user auth", () => {
+  // Found in review (2026-10-08): the constructor partitions the root it is given, and a restored
+  // session gave it the root it had persisted, already the user's. After one gateway restart the
+  // root was <shared>/users/<seg>/users/<seg>, so the receptionist's capsule, the durable-facts
+  // capsule and memory_store all used a directory with none of the user's records in it.
+  const shared = resolve("/srv/workspace");
+  const segment = safeUserSegment("alice");
+  const aliceRoot = resolve(shared, "users", segment);
+
+  beforeEach(() => {
+    const real = configLoader.getConfig();
+    vi.spyOn(configLoader, "getConfig").mockReturnValue({ ...real, auth: { ...real.auth, enabled: true } } as typeof real);
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it("keeps the user's root when the session is restored, however often", () => {
+    const session = new AgentSession({ channel: "webchat", userId: "alice", workspacePath: shared, systemPrompt: "x" });
+    expect(session.getWorkspacePath()).toBe(aliceRoot);
+
+    const restored = AgentSession.fromRecord(session.toRecord());
+    expect(restored.getWorkspacePath()).toBe(aliceRoot);
+    expect(AgentSession.fromRecord(restored.toRecord()).getWorkspacePath()).toBe(aliceRoot);
+  });
+
+  it("keeps the caller's root for a workflow run started from it", () => {
+    // tools/workflow-catalog.ts passes the caller's root, already partitioned, with the caller's id.
+    const run = createSession({ sessionId: "workflow:s1:demo:1", channel: "workflow", userId: "alice", workspacePath: aliceRoot });
+    expect(run.getWorkspacePath()).toBe(aliceRoot);
+  });
+
+  it("brings a session persisted with the extra levels back to the user's root", () => {
+    const session = new AgentSession({ channel: "webchat", userId: "alice", workspacePath: shared, systemPrompt: "x" });
+    const record = { ...session.toRecord(), workspacePath: resolve(aliceRoot, "users", segment, "users", segment) };
+    expect(AgentSession.fromRecord(record).getWorkspacePath()).toBe(aliceRoot);
   });
 });
 

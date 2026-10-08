@@ -105,4 +105,27 @@ describe("receptionist memory capsule scope", () => {
     expect(prompt).toContain("Alices Nordhafen-Mischung");
     expect(prompt).not.toContain("geteilten Wurzel");
   });
+
+  it("still finds the user's records once the session has been restored", async () => {
+    // A restored session's root came back one level deeper per restore (found in review,
+    // 2026-10-08): the lane read <shared>/users/<seg>/users/<seg> and offered nothing of the user's.
+    const { sent } = setUp();
+    getConfig().auth = { ...authBefore, enabled: true };
+    const live = new AgentSession({ channel: "webchat", userId: "alice", systemPrompt: "test" });
+    storeWorkspaceMemoryRecord(live.getWorkspacePath(), { key: "alice_tea", subject: "Lieblingstee", content: "Alices Nordhafen-Mischung", kind: "preference" });
+    const session = AgentSession.fromRecord(live.toRecord());
+
+    const output = await prepareReceptionistFastLane({
+      eligible: true,
+      userMessage: "hi",
+      signal: new AbortController().signal,
+      opts: { session, userMessage: "hi" },
+      session,
+      guardrailEvents: [],
+      turnStartedAt: Date.now(),
+    });
+
+    expect(output?.performance?.finishReason).toBe("receptionist_fast_lane");
+    expect(sent.join("\n")).toContain("Alices Nordhafen-Mischung");
+  });
 });
