@@ -38,6 +38,8 @@ import { ToolTier, getToolTier } from "../guardrails/tool-tiers.js";
 import { runSubAgentWithStats, type SubAgentRunResult } from "../agent/sub-agent.js";
 import { userHasRole, type AuthRole } from "../gateway/auth.js";
 import { listAllScenes, type SceneSummary } from "../credentials/scenes.js";
+import { runWithRequestContext } from "../runtime/request-context.js";
+import { userWorkspaceRoot } from "../tools/workspace-path.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { PRODUCT } from "../product/index.js";
@@ -53,13 +55,37 @@ interface AdvertisedTool {
   inputSchema: Record<string, unknown>;
 }
 
-interface ExposeContext {
+export interface ExposeContext {
   /** Identity attached to audit entries — "http", "stdio", or a session id. */
   caller: string;
   /** Authenticated role. Mirrors the REST RBAC: viewers may call read-only tools
    *  but not mutating tools, sub-agent delegations, or scenes. Defaults to
-   *  "operator" for trusted local (stdio / no-auth) callers. */
+   *  "operator" for trusted local (stdio / no-auth) callers. Read at call time, so the
+   *  HTTP transport can hand a session its caller's live role on every request. */
   role: AuthRole;
+  /** The account a signed-in caller resolved to under multi-user auth (server-http.ts). Its calls
+   *  run as that account: in its own workspace root, with the account on the run and on the
+   *  request context. Absent with one operator, for stdio and for an anonymous caller, whose calls
+   *  run in the shared root with no account, as before. */
+  userId?: string;
+}
+
+/**
+ * The workspace root a call runs in. Every call ran in the shared root, so under multi-user auth a
+ * memory a delegation stored with the default 'workspace' scope was the shared root's, and every
+ * other account read it: the storage directory, not the writer, decides a workspace record's
+ * tenant (found in review, 2026-10-09). A signed-in account's call now runs in its own root, as its
+ * chat runs and A2A tasks do.
+ */
+function callWorkspaceRoot(ctx: ExposeContext): string {
+  const shared = getConfig().workspacePath;
+  return ctx.userId ? userWorkspaceRoot(shared, ctx.userId) : shared;
+}
+
+/** Run `fn` with the caller's account on the request context, which a run's own memory reads and
+ *  per-user stores take their account from; with none there when the call has no account. */
+function asCaller<T>(ctx: ExposeContext, fn: () => Promise<T>): Promise<T> {
+  return ctx.userId ? runWithRequestContext({ userId: ctx.userId }, fn) : fn();
 }
 
 /** Operators may run mutating tools / sub-agents / scenes; viewers are read-only. Exported for testing. */
@@ -298,10 +324,12 @@ async function runNativeToolCall(
   }
 
   const sessionId = `mcp:${ctx.caller}:${randomUUID()}`;
-  const result = await executeTool(name, args, {
+  const result = await asCaller(ctx, () => executeTool(name, args, {
     sessionId,
-    workspacePath: getConfig().workspacePath,
-  });
+    workspacePath: callWorkspaceRoot(ctx),
+    // The account and its live role on the tool context, as a chat turn's tools have them.
+    ...(ctx.userId ? { userId: ctx.userId, userRole: ctx.role } : {}),
+  }));
 
   return {
     isError: !result.success,
@@ -333,13 +361,15 @@ async function runAgentCall(
   if (!task.trim()) return errorResult("`task` is required");
 
   const parentSessionId = `mcp:${ctx.caller}:${randomUUID()}`;
-  const run = await runSubAgentWithStats({
+  const run = await asCaller(ctx, () => runSubAgentWithStats({
     agentName,
     task,
     context,
     parentSessionId,
-    workspacePath: config.workspacePath,
-  });
+    workspacePath: callWorkspaceRoot(ctx),
+    // The account on the run's tools too, so a 'user' memory and per-user resources are the caller's.
+    ...(ctx.userId ? { userId: ctx.userId } : {}),
+  }));
 
   return {
     // A failed / timed-out / max-iterations run must not be reported as success.
@@ -402,15 +432,16 @@ async function runSceneCall(
   }
 
   const parentSessionId = `mcp:${ctx.caller}:scene:${sceneName}:${randomUUID()}`;
-  const run = await runSubAgentWithStats({
+  const run = await asCaller(ctx, () => runSubAgentWithStats({
     agentName: bootstrapAgent,
     task: renderedTask,
     context,
     parentSessionId,
-    workspacePath: config.workspacePath,
+    workspacePath: callWorkspaceRoot(ctx),
     allowedAgents: scene.allowedAgents,
     humanInLoopSteps: scene.humanInLoopSteps,
-  });
+    ...(ctx.userId ? { userId: ctx.userId } : {}),
+  }));
 
   return {
     isError: mcpSubAgentFailed(run),

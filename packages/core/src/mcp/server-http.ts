@@ -10,6 +10,10 @@
  *     used for `/api/*` is required.  Operators get full access; viewer
  *     tokens are accepted and inherit the read-only RBAC the rest of the
  *     gateway already enforces (Tier 2 calls still pause for approval).
+ *     Under multi-user auth the token's account is resolved against the user
+ *     store on every request (a removed account gets 401; the role is the
+ *     account's live one), its calls run as that account in its own workspace
+ *     root, and a session serves only the caller that opened it.
  *   - When false, any caller can hit `/mcp`.  Only acceptable when bound
  *     to a trusted local socket.
  *
@@ -25,17 +29,21 @@ import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { randomUUID } from "node:crypto";
 
 import { getConfig } from "../config/loader.js";
-import { verifyToken, extractBearerToken, normalizeRole, type AuthRole } from "../gateway/auth.js";
+import { authenticatedUser, verifyToken, extractBearerToken, normalizeRole, type AuthRole } from "../gateway/auth.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
-import { createStarlingMcpServer } from "./server.js";
+import { createStarlingMcpServer, type ExposeContext } from "./server.js";
 
 const log = childLogger("mcp:server-http");
 
 interface McpHttpSession {
   transport: StreamableHTTPServerTransport;
   server: Server;
+  /** The caller that created the session; under multi-user auth the only one that may use it. */
   caller: string;
+  /** What the session's calls run with. Under multi-user auth its role is set again on every
+   *  request, to the caller's live one. */
+  ctx: ExposeContext;
 }
 
 const _sessions = new Map<string, McpHttpSession>();
@@ -62,10 +70,12 @@ export async function handleMcpHttpRequest(
 
   // Auth — JWT from Authorization or the `?token=` query parameter (the
   // streamable HTTP client SDKs vary; both forms are widely supported).
+  const multiUser = getConfig().auth?.enabled === true;
   let caller = "anonymous";
   // No-auth (trusted local socket) callers get operator; authed callers get their
   // token's role so the MCP RBAC matches the REST gate (viewers → read-only).
   let role: AuthRole = "operator";
+  let userId: string | undefined;
   if (expose.http.requireAuth) {
     const headerToken = req.headers["authorization"]
       ? extractBearerToken(req.headers["authorization"] as string)
@@ -73,7 +83,15 @@ export async function handleMcpHttpRequest(
     const queryToken = url.searchParams.get("token");
     const token = headerToken ?? queryToken;
     const verified = token ? await verifyToken(token) : null;
-    if (!verified) {
+    // Under multi-user auth a signed token is only as good as the account behind it. Any unexpired
+    // one was accepted here and its claims stood, so a deleted or disabled account kept calling
+    // tools and agents for the rest of the token's lifetime, and a demoted one kept the operator
+    // role its token named (found in review, 2026-10-09). The caller is now resolved against the
+    // user store on every request, as on /api, the AG-UI stream and the A2A routes: a token whose
+    // account no longer resolves is refused, and the role is the account's live one. With one
+    // operator there is no user store and the token's own claims stand, as before.
+    const user = verified && multiUser ? await authenticatedUser(`Bearer ${token}`) : null;
+    if (!verified || (multiUser && !user)) {
       logAudit("mcp_server_request", {
         method: "auth",
         caller: "anonymous",
@@ -83,15 +101,46 @@ export async function handleMcpHttpRequest(
       res.end(JSON.stringify({ error: "Unauthorized" }));
       return true;
     }
-    caller = (verified as { sub?: string }).sub ?? "authenticated";
-    role = normalizeRole((verified as { role?: unknown }).role);
+    if (user) {
+      caller = user.username;
+      role = user.role;
+      userId = user.username;
+    } else {
+      caller = (verified as { sub?: string }).sub ?? "authenticated";
+      role = normalizeRole((verified as { role?: unknown }).role);
+    }
   }
 
   const sessionHeader = req.headers["mcp-session-id"];
   const sessionId = Array.isArray(sessionHeader) ? sessionHeader[0] : sessionHeader;
 
+  // Reuse an existing session when the client sent us a session id.
+  // Otherwise, only initialize-style POSTs (and the bootstrap GET that some
+  // clients issue) are allowed to mint a new session.
+  let session = sessionId ? _sessions.get(sessionId) : undefined;
+
+  // Under multi-user auth a session is its creator's. Any caller that sent its id was served on it,
+  // with the creator's identity and role, so another account that learned the id ran calls as the
+  // creator, or closed the session (found in review, 2026-10-09). Another caller now gets the reply
+  // an unknown id gets, which says nothing about whose session it is. With one operator there is
+  // nobody to keep apart, and any caller is served as before.
+  if (session && multiUser && session.caller !== caller) {
+    log.warn({ sessionId, caller }, "MCP request refused: the session belongs to another caller");
+    logAudit("mcp_server_request", {
+      method: "session",
+      caller,
+      outcome: "rejected",
+    }, { severity: "warn" });
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Unknown MCP session" }));
+    return true;
+  }
+  // The caller's live role for this request's calls, should the account's role have changed since
+  // the session opened.
+  if (session && multiUser) session.ctx.role = role;
+
   if (req.method === "DELETE") {
-    if (sessionId && _sessions.has(sessionId)) {
+    if (sessionId && session) {
       await teardownSession(sessionId, "delete");
       res.writeHead(204);
       res.end();
@@ -101,11 +150,6 @@ export async function handleMcpHttpRequest(
     res.end(JSON.stringify({ error: "Unknown MCP session" }));
     return true;
   }
-
-  // Reuse an existing session when the client sent us a session id.
-  // Otherwise, only initialize-style POSTs (and the bootstrap GET that some
-  // clients issue) are allowed to mint a new session.
-  let session = sessionId ? _sessions.get(sessionId) : undefined;
 
   if (!session) {
     // A present-but-unknown session id is stale / torn-down / forged — never mint a
@@ -122,7 +166,7 @@ export async function handleMcpHttpRequest(
       res.end(JSON.stringify({ error: "Method not allowed for new MCP session" }));
       return true;
     }
-    session = await createHttpSession(caller, role);
+    session = await createHttpSession({ caller, role, ...(userId ? { userId } : {}) });
   }
 
   try {
@@ -137,9 +181,10 @@ export async function handleMcpHttpRequest(
   return true;
 }
 
-async function createHttpSession(caller: string, role: AuthRole): Promise<McpHttpSession> {
+async function createHttpSession(ctx: ExposeContext): Promise<McpHttpSession> {
+  const { caller } = ctx;
   const generatedId = randomUUID();
-  const server = createStarlingMcpServer({ caller, role });
+  const server = createStarlingMcpServer(ctx);
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: () => generatedId,
   });
@@ -150,7 +195,7 @@ async function createHttpSession(caller: string, role: AuthRole): Promise<McpHtt
   };
 
   await server.connect(transport);
-  const session: McpHttpSession = { transport, server, caller };
+  const session: McpHttpSession = { transport, server, caller, ctx };
   // The transport mints its session id on first POST; track it under the
   // generated id immediately so subsequent requests with the right header
   // can find us, and also under the transport-assigned id once that lands.
