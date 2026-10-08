@@ -23,6 +23,7 @@ import { verifyInboundA2aToken } from "../gateway/oidc.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { PRODUCT } from "../product/index.js";
+import { safeUserSegment } from "../runtime/user-scope.js";
 import {
   A2A_ERROR,
   A2A_PROTOCOL_VERSION,
@@ -205,6 +206,11 @@ async function handleTasksSend(params: A2ATasksSendParams, caller: string): Prom
     throw new Error("task id already exists");
   }
   const sessionId = params.sessionId ?? `a2a-in:${randomUUID()}`;
+  // The session the run works in. A caller-chosen id was used as it came, so under multi-user auth
+  // a caller could name another account's session and the run would read and write its shared
+  // facts, peer messages and checkpoints (found in review, 2026-10-08). There it now names a
+  // session in the caller's own namespace; the task still reports the id the caller sent.
+  const runSessionId = params.sessionId ? callerScopedSessionId(params.sessionId, caller) : sessionId;
   const userText = params.message.parts.map((p) => p.text).join("\n").trim();
   const context =
     typeof (params.metadata?.["context"]) === "string"
@@ -226,7 +232,7 @@ async function handleTasksSend(params: A2ATasksSendParams, caller: string): Prom
       agentName,
       task: userText,
       context,
-      parentSessionId: sessionId,
+      parentSessionId: runSessionId,
       workspacePath: config.workspacePath,
       // Scope per-user resource guards (mail/credentials/compute) to the caller. A
       // machine "shared-bearer" caller carries no user identity, so it is correctly
@@ -307,6 +313,16 @@ async function authorizeInbound(req: IncomingMessage): Promise<AuthResult> {
     if (claims) return { ok: true, caller: typeof claims.sub === "string" ? claims.sub : "a2a-oidc" };
   }
   return { ok: false, caller: "anonymous" };
+}
+
+/** A caller-chosen session id inside the caller's own namespace under multi-user auth; as it came
+ *  with one operator. A config that cannot be read counts as multi-user. */
+function callerScopedSessionId(sessionId: string, caller: string): string {
+  let multiUser = true;
+  try {
+    multiUser = getConfig().auth?.enabled === true;
+  } catch { /* fail closed */ }
+  return multiUser ? `a2a-in:${safeUserSegment(caller)}:${sessionId}` : sessionId;
 }
 
 function resolveSecret(value: string): string {
