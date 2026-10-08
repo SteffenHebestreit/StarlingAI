@@ -71,6 +71,7 @@ import { getBidderWorkerStatus } from "../swarm/bidder-worker.js";
 import { getSceneJobWorkerStatus } from "../agent/scene-worker.js";
 import { getAgentMessageBacklog, readAllFacts } from "../swarm/memory.js";
 import { deriveSharedSessionId } from "../tools/memory.js";
+import { userWorkspaceRoot } from "../tools/workspace-path.js";
 import { turnSteeringManager } from "../agent/turn-steering.js";
 import { userInputBroker } from "../agent/user-input-broker.js";
 import { getLoadedDynamicTools, listPromotionCandidates, approvePromotion, rejectPromotion, getDynamicToolStats } from "../tools/dynamic-tools.js";
@@ -3914,7 +3915,12 @@ export function createGateway() {
             task,
             context: ctx,
             parentSessionId: sessId,
-            workspacePath: getConfig().workspacePath,
+            // The caller's own workspace root, as the caller's chat runs have (AgentSession). In
+            // the shared root a memory stored with the default 'workspace' scope is the shared
+            // root's, and every account reads it.
+            workspacePath: a2aUser
+              ? userWorkspaceRoot(getConfig().workspacePath, a2aUser.username)
+              : getConfig().workspacePath,
             approvalCallback: autoApprove
               ? async () => true
               : undefined,

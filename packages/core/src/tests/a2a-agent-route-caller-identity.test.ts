@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { PRODUCT } from "../product/index.js";
 import type { SubAgentRunOptions } from "../agent/sub-agent.js";
 
@@ -15,9 +15,12 @@ import type { SubAgentRunOptions } from "../agent/sub-agent.js";
  * agent here for the rest of its lifetime. The route now resolves the caller against the user store
  * and runs the task as that account, both on the run's tools (userId) and on the request context
  * the run's own memory reads take their account from. With one operator, the run is as before.
- * These run against the whole gateway.
+ *
+ * The run also worked in the shared workspace root, where a memory stored with the default
+ * 'workspace' scope is read by every account just the same; it now works in the caller's own root,
+ * as the caller's chat runs do. These run against the whole gateway.
  */
-const runs = vi.hoisted(() => [] as Array<{ userId: string | undefined; contextUserId: string | undefined }>);
+const runs = vi.hoisted(() => [] as Array<{ userId: string | undefined; contextUserId: string | undefined; workspacePath: string }>);
 
 vi.mock("../agent/sub-agent.js", async (importActual) => {
   // The request context of the module instance the gateway itself loaded (the factory runs on the
@@ -26,7 +29,7 @@ vi.mock("../agent/sub-agent.js", async (importActual) => {
   return {
     ...(await importActual<typeof import("../agent/sub-agent.js")>()),
     runSubAgent: async (opts: SubAgentRunOptions): Promise<string> => {
-      runs.push({ userId: opts.userId, contextUserId: currentUserId() });
+      runs.push({ userId: opts.userId, contextUserId: currentUserId(), workspacePath: opts.workspacePath });
       return "The ferries leave at 07:40.";
     },
   };
@@ -86,17 +89,23 @@ async function bootGateway(authEnabled: boolean) {
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${await auth.createToken(user, { role: "operator" })}` },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tasks/send", params: { task: "Remember that I prefer the early ferry." } }),
   });
-  return { send, stop: () => gateway.stop() };
+  const { workspacePath } = (await import("../config/loader.js")).getConfig();
+  return { send, workspacePath, stop: () => gateway.stop() };
 }
 
 describe("the legacy A2A route and the account a task runs as", () => {
-  it("under multi-user auth, runs the task as the caller, on its tools and on the request context", async () => {
+  it("under multi-user auth, runs the task as the caller, on its tools, on the request context and in its own root", async () => {
     const gw = await bootGateway(true);
     try {
       const response = await gw.send("alice");
       expect(response.status).toBe(200);
       expect(await response.text()).toContain("07:40");
-      expect(runs).toEqual([{ userId: "alice", contextUserId: "alice" }]);
+      const { safeUserSegment } = await import("../runtime/user-scope.js");
+      expect(runs).toEqual([{
+        userId: "alice",
+        contextUserId: "alice",
+        workspacePath: resolve(gw.workspacePath, "users", safeUserSegment("alice")),
+      }]);
     } finally {
       await gw.stop();
     }
@@ -118,7 +127,7 @@ describe("the legacy A2A route and the account a task runs as", () => {
     try {
       const response = await gw.send("alice");
       expect(response.status).toBe(200);
-      expect(runs).toEqual([{ userId: undefined, contextUserId: undefined }]);
+      expect(runs).toEqual([{ userId: undefined, contextUserId: undefined, workspacePath: gw.workspacePath }]);
     } finally {
       await gw.stop();
     }
