@@ -162,6 +162,14 @@ describe("graph_query under multi-user auth", () => {
       { x: boltMap([["__proto__", []], ["leak", m.bobPreference]]) },
       // The reader's own node as the prototype: the map inherits the driver's node marker.
       { x: { wrap: boltMap([["__proto__", m.alicePreference], ["leak", m.bobNote]]) } },
+      // A map with the path-segment marker as the prototype: it inherits the marker and a relationship.
+      {
+        x: boltMap([
+          ["__proto__", boltMap([["__isPathSegment__", true], ["start", m.alicePreference], ["relationship", m.bobPreference], ["end", m.alicePreference]])],
+        ]),
+      },
+      // A path of the reader's own as the prototype.
+      { x: boltMap([["__proto__", new Path(m.alicePreference, m.alicePreference, [])], ["leak", m.bobNote]]) },
     ];
     for (const row of crafted) {
       answer([row]);
