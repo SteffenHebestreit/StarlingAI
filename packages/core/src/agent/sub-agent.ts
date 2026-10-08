@@ -1438,8 +1438,12 @@ const SHARED_FACT_TOOLS = new Set<string>(["share_finding", "share_evidence"]);
 // supportingKeys names other facts; share_evidence keeps it only while it is an array.
 const SHARED_FACT_IDENTITY_FIELDS = new Set<string>(["key", "sourceUrl", "supportingKeys"]);
 // Scores the tools take only as numbers (share_evidence refuses anything else): a rating of the
-// finding, never a figure the run states. "0.85" reads as the figure 85.
+// finding from 0 to 1, never a figure the run states. "0.85" reads as the figure 85. Only a rating
+// is: share_finding stores any number it is given there, and in review "accuracy_score: 8393"
+// reached the store unmasked and uncounted (see isSharedFactRating).
 const SHARED_FACT_SCORE_FIELDS = new Set<string>(["accuracyScore", "trustworthinessScore", "corroborationScore"]);
+const isSharedFactRating = (value: unknown): boolean =>
+  typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
 
 /**
  * Structural completeness check for a written text artifact, used by the
@@ -7253,7 +7257,9 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           let maskedInShare = 0;
           for (const [field, value] of Object.entries(maskedArgs)) {
             if (SHARED_FACT_IDENTITY_FIELDS.has(field)) continue;
-            if (SHARED_FACT_SCORE_FIELDS.has(field) && typeof value === "number") continue;
+            // Any other score is checked as the text the tool stores; masked, it is text, which
+            // share_finding drops and share_evidence refuses.
+            if (SHARED_FACT_SCORE_FIELDS.has(field) && isSharedFactRating(value)) continue;
             // An object stores as "[object Object]" and states no figure.
             const stored = typeof value === "string"
               ? value

@@ -881,6 +881,23 @@ describe("the code a delegated run executed, and the figures it states", () => {
         expect(result.executions?.unobservedFigures).toBe(1);
       }, 60_000);
 
+      it("a score that is no rating is checked like the figure it is", async () => {
+        // share_finding stores any number it is given as a score (formatSharedFindingValue), with
+        // no range check. In review the figures went into the store as "accuracy_score: 8393" and
+        // "corroboration_score: 7597648268", unmasked and uncounted. Masked, a score is text,
+        // which share_finding drops and share_evidence refuses.
+        const { result, stored } = await shareAfterFailedRun("parent-provenance-share-scores", "share_finding", {
+          key: "prime_count",
+          value: "Zaehlung abgeschlossen",
+          accuracyScore: 8393,
+          corroborationScore: 7597648268,
+        });
+
+        expect(stored).toBe("Zaehlung abgeschlossen");
+        expect(result.executions?.unobservedFigures).toBe(2);
+        expect(result.stats.outcome).toBe("partial");
+      }, 60_000);
+
       it("control: a number the task contained is stored as given", async () => {
         const { result, stored } = await shareAfterFailedRun("parent-provenance-share-task-number", "share_finding", { key: "lower_bound", value: 100000 });
 
