@@ -49,11 +49,16 @@ vi.mock("../guardrails/moderation.js", () => ({
 }));
 vi.mock("../guardrails/output.js", () => ({ scanOutput: vi.fn((text: string) => ({ safe: true, redacted: text })) }));
 vi.mock("../audit/logger.js", () => ({ logAudit: vi.fn() }));
+/** What document retrieval found for this turn's attachments; empty, as without engram, by default. */
+const rag = vi.hoisted(() => ({ contextBlock: "" }));
+vi.mock("../retrieval/document-rag.js", () => ({
+  augmentTurnWithDocuments: async () => ({ ingested: rag.contextBlock ? 1 : 0, failed: 0, contextBlock: rag.contextBlock, retrievalUnavailable: false }),
+}));
 
 /**
  * The specialist and the orchestration tools around it, stubbed; everything else is the real
- * registry. `delegated` holds the delegations that reached code_analyst. A delegation naming any
- * other agent gets the refusal delegate_to_agent gives an agent outside the turn's grant.
+ * registry. `delegated` holds the delegations that reached a specialist. A delegation naming an
+ * agent outside the turn's grant gets the refusal delegate_to_agent gives it.
  */
 const delegated = vi.hoisted(() => [] as Array<Record<string, unknown>>);
 const executed = vi.hoisted(() => [] as string[]);
@@ -61,17 +66,18 @@ vi.mock("../tools/registry.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../tools/registry.js")>();
   return {
     ...actual,
-    executeTool: vi.fn(async (name: string, args: Record<string, unknown>, ctx: never, meta?: never) => {
+    executeTool: vi.fn(async (name: string, args: Record<string, unknown>, ctx: { allowedAgents?: string[] }, meta?: never) => {
       executed.push(name);
-      if (name === "delegate_to_agent" && args["agentName"] !== "code_analyst") {
-        return { success: false, output: "", error: `Agent '${String(args["agentName"])}' is not permitted in this scene. Allowed agents: code_analyst` };
+      const agentName = String(args["agentName"] ?? "");
+      if (name === "delegate_to_agent" && ctx.allowedAgents && !ctx.allowedAgents.includes(agentName)) {
+        return { success: false, output: "", error: `Agent '${agentName}' is not permitted in this scene. Allowed agents: ${ctx.allowedAgents.join(", ")}` };
       }
       if (name === "delegate_to_agent") {
         delegated.push(args);
         return {
           success: true,
-          output: "Delegated result from code_analyst — TASK COMPLETED.\nObserved evidence:\nTRUNCATION-IN-INVOICES-AND-RECEIPTS",
-          metadata: { agentName: "code_analyst", attemptedAgents: ["code_analyst"], delegationSucceeded: true, delegationOutcome: "success", terminalState: "completed" },
+          output: `Delegated result from ${agentName} — TASK COMPLETED.\nObserved evidence:\nTRUNCATION-IN-INVOICES-AND-RECEIPTS`,
+          metadata: { agentName, attemptedAgents: [agentName], delegationSucceeded: true, delegationOutcome: "success", terminalState: "completed" },
         };
       }
       if (name === "create_ephemeral_agent") {
@@ -98,7 +104,7 @@ vi.mock("../tools/registry.js", async (importOriginal) => {
           metadata: { workflowName: "code_review", workflowType: "scene", blocked: false, stepCount: 1, toolCallsExecuted: 3 },
         };
       }
-      return actual.executeTool(name, args, ctx, meta);
+      return actual.executeTool(name, args, ctx as never, meta);
     }),
   };
 });
@@ -164,6 +170,7 @@ describe("a turn the user directed to one agent", () => {
     completeMock.mockClear();
     delegated.length = 0;
     executed.length = 0;
+    rag.contextBlock = "";
     vi.resetModules();
     (await import("../config/loader.js")).resetConfigForTests();
   });
@@ -204,7 +211,56 @@ describe("a turn the user directed to one agent", () => {
 
     expect(delegated).toHaveLength(1);
     expect(delegated[0]).toMatchObject({ agentName: "code_analyst", task: MESSAGE });
+    // A first turn without attachments has nothing to add to the request.
+    expect(delegated[0]).not.toHaveProperty("context");
     expect(result.response).not.toContain("I answered this myself");
+  });
+
+  // The dispatch handed the agent the bare request, and a specialist starts from its task and
+  // context alone (review of a3773aa, 2026-10-08).
+  it("hands the named agent the excerpts of the attached file the orchestrator was shown", async () => {
+    // The upload reaches the turn only as the orchestrator's [DOCUMENT CONTEXT] message, and its
+    // path is never given to the model (E2E core-build-data-csv-total).
+    rag.contextBlock = ["umsatz-q3-2026.csv", "Monat;Gebiet;Umsatz", "Jul;Nord;18432", "Aug;Nord;18011", "Sep;West;15400"].join("\n");
+    const { AgentSession, runTurn } = await loadRuntime();
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      call += 1;
+      return call === 1 ? answerStream("Der Gesamtumsatz beträgt 51843 EUR.") : answerStream(ANSWER);
+    });
+
+    const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
+    await runTurn({
+      session,
+      userMessage: "Im Anhang ist umsatz-q3-2026.csv. Wie hoch ist der Gesamtumsatz des Quartals?",
+      userAttachments: [{ filename: "umsatz-q3-2026.csv", path: "uploads/s/1-umsatz-q3-2026.csv", mimeType: "text/csv", size: 300 }] as never,
+      allowedAgents: ["data_analyst"],
+      directiveAgent: "data_analyst",
+    });
+
+    expect(delegated).toHaveLength(1);
+    expect(delegated[0]).toMatchObject({ agentName: "data_analyst" });
+    expect(String(delegated[0]!["context"])).toContain("Jul;Nord;18432");
+  });
+
+  it("hands the named agent the exchange a follow-up refers back to", async () => {
+    const { AgentSession, runTurn } = await loadRuntime();
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      call += 1;
+      return call === 1 ? answerStream("Use round(subtotal + tax, 2) instead of int().") : answerStream(ANSWER);
+    });
+
+    const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
+    session.addMessage({ role: "user", content: MESSAGE });
+    session.addMessage({ role: "assistant", content: "total() truncates the cents with int(): 10.999 becomes 10." });
+    await runTurn({ session, userMessage: "Und wie behebe ich das?", allowedAgents: ["code_analyst"], directiveAgent: "code_analyst" });
+
+    expect(delegated).toHaveLength(1);
+    expect(delegated[0]).toMatchObject({ agentName: "code_analyst", task: "Und wie behebe ich das?" });
+    const context = String(delegated[0]!["context"]);
+    expect(context).toContain("def total(subtotal, tax)");
+    expect(context).toContain("10.999 becomes 10");
   });
 
   it("forces nothing when the agents are only narrowed (a scene's grant)", async () => {

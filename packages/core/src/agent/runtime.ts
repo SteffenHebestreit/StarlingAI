@@ -71,7 +71,7 @@ import {
   readNestedToolCalls,
   STATE_DEPENDENT_TOOL_NAMES,
 } from "./turn-tool-contribution.js";
-import { delegationRanAgent, isDelegationToAgent } from "./directive-agent.js";
+import { buildDirectiveDelegationContext, delegationRanAgent, isDelegationToAgent } from "./directive-agent.js";
 import { longRunningGenerationManager } from "./long-running-generation.js";
 import { recordUnconsumedSteering, turnSteeringManager, type SteeringMessage } from "./turn-steering.js";
 import { registerSessionAbortController, deregisterSessionAbortController } from "./warden.js";
@@ -3085,10 +3085,17 @@ async function _runTurn(
     // under `tool_choice: required` the local model wrote 13,000 characters of prose, and the turn
     // shipped them as the answer (E2E, 2026-10-07).
     if (directiveAgent !== undefined && directiveAgentPending && llmResponse.tool_calls.length === 0) {
+      // The request goes as it is, with what the orchestrator had in view beside it: the excerpts
+      // of this turn's attachments and the exchange before it (directive-agent.ts).
+      const context = buildDirectiveDelegationContext(session.getHistory(), { priorUserRequest, priorAssistantAnswer });
       // Built afresh: the prose call's truncation marker must not mark the dispatch incomplete.
       llmResponse = {
         content: null,
-        tool_calls: [{ id: `directive_${randomUUID()}`, name: "delegate_to_agent", arguments: { agentName: directiveAgent, task: userMessage } }],
+        tool_calls: [{
+          id: `directive_${randomUUID()}`,
+          name: "delegate_to_agent",
+          arguments: { agentName: directiveAgent, task: userMessage, ...(context ? { context } : {}) },
+        }],
         usage: llmResponse.usage,
         finishReason: "tool_calls",
       };

@@ -229,7 +229,7 @@ Every public schema field, where it is declared, and how many production files r
 | `label` | packages/core/src/config/schema.ts:249 | 141 |
 | `labeledAt` | packages/core/src/config/schema.ts:903 | 1 |
 | `labeledBy` | packages/core/src/config/schema.ts:902 | 1 |
-| `language` | packages/core/src/config/schemas/multimodal.ts:236 | 94 |
+| `language` | packages/core/src/config/schemas/multimodal.ts:236 | 95 |
 | `layaFirstMs` | packages/core/src/config/schemas/decisions.ts:52 | 3 |
 | `leanContextInjection` | packages/core/src/config/schema.ts:1786 | 3 |
 | `leanSynthesisPrompt` | packages/core/src/config/schemas/orchestration.ts:304 | 1 |
@@ -243,7 +243,7 @@ Every public schema field, where it is declared, and how many production files r
 | `maxActiveTimeMs` | packages/core/src/config/schema.ts:1638 | 2 |
 | `maxBaseCandidates` | packages/core/src/config/schemas/multimodal.ts:230 | 1 |
 | `maxBodyBytes` | packages/core/src/config/schema.ts:315 | 3 |
-| `maxChars` | packages/core/src/config/schema.ts:1238 | 25 |
+| `maxChars` | packages/core/src/config/schema.ts:1238 | 26 |
 | `maxConcurrent` | packages/core/src/config/schema.ts:928 | 3 |
 | `maxConcurrentCrawls` | packages/core/src/config/schemas/retrieval.ts:200 | 1 |
 | `maxConcurrentPerModel` | packages/core/src/config/schemas/multimodal.ts:124 | 1 |
@@ -297,7 +297,7 @@ Every public schema field, where it is declared, and how many production files r
 | `minStepsToAuthor` | packages/core/src/config/schema.ts:1464 | 2 |
 | `minVramMb` | packages/core/src/config/schema.ts:822 | 1 |
 | `mode` | packages/core/src/config/schema.ts:471 | 139 |
-| `model` | packages/core/src/config/schema.ts:1234 | 268 |
+| `model` | packages/core/src/config/schema.ts:1234 | 269 |
 | `modelModeration` | packages/core/src/config/schema.ts:1230 | 4 |
 | `modelPresets` | packages/core/src/config/schema.ts:1702 | 1 |
 | `modelPresetScope` | packages/core/src/config/schema.ts:1717 | 3 |
@@ -404,7 +404,7 @@ Every public schema field, where it is declared, and how many production files r
 | `retrievalTopK` | packages/core/src/config/schemas/retrieval.ts:103 | 3 |
 | `reuseSessionEvidenceOnRefinement` | packages/core/src/config/schemas/orchestration.ts:586 | 1 |
 | `riskGatedQA` | packages/core/src/config/schemas/effort.ts:47 | 7 |
-| `role` | packages/core/src/config/schema.ts:918 | 128 |
+| `role` | packages/core/src/config/schema.ts:918 | 129 |
 | `rolesClaim` | packages/core/src/config/schema.ts:394 | 1 |
 | `routing` | packages/core/src/config/schema.ts:236 | 105 |
 | `routingRestatementRescue` | packages/core/src/config/schemas/orchestration.ts:851 | 1 |
@@ -472,7 +472,7 @@ Every public schema field, where it is declared, and how many production files r
 | `systemPrompt` | packages/core/src/config/schema.ts:920 | 20 |
 | `tags` | packages/core/src/config/schema.ts:567 | 76 |
 | `targetAgreement` | packages/core/src/config/schemas/decisions.ts:59 | 5 |
-| `task` | packages/core/src/config/schema.ts:1299 | 141 |
+| `task` | packages/core/src/config/schema.ts:1299 | 142 |
 | `taskConditionalPrompt` | packages/core/src/config/schema.ts:1800 | 1 |
 | `taskGraphFailureDisposition` | packages/core/src/config/schemas/orchestration.ts:488 | 1 |
 | `taskTimeoutMs` | packages/core/src/config/schema.ts:652 | 1 |
