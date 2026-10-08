@@ -37,7 +37,7 @@ import {
   type MailIsolationCheck,
 } from "./services.js";
 import { RUNNER_DEFAULTS, runScenarios } from "./runner.js";
-import { buildReport, compareWithBaseline, exitCodeFor, loadReport, writeReport } from "./report.js";
+import { buildReport, compareWithBaseline, describeSuite, exitCodeFor, loadReport, writeReport, type BaselineComparison } from "./report.js";
 import { resolveSetupPaths, runE2ESetup, SetupRefusedError } from "./setup.js";
 
 const VALUE_FLAGS = new Set(["group", "tag", "id", "repeat", "concurrency", "baseline", "out", "scenarios"]);
@@ -135,6 +135,17 @@ function validate(args: ParsedArgs, io: CliIo, repoRoot: string): number {
   }
   io.out(`${scenarios.length} scenario(s) valid in ${dir}`);
   return 0;
+}
+
+function baselineLine(baseline: BaselineComparison): string {
+  const ids = (deltas: BaselineComparison["regressions"]): string => {
+    if (deltas.length === 0) return "";
+    const shown = deltas.slice(0, 6).map((delta) => delta.id).join(", ");
+    return ` (${shown}${deltas.length > 6 ? ", …" : ""})`;
+  };
+  return `Baseline: ${baseline.regressions.length} regression(s)${ids(baseline.regressions)}, ${baseline.flaky.length} flaky${ids(baseline.flaky)}, `
+    + `${baseline.inconclusive.length} inconclusive${ids(baseline.inconclusive)}, ${baseline.improvements.length} improvement(s)${ids(baseline.improvements)}; `
+    + `suite ${describeSuite(baseline.suite)}`;
 }
 
 function identitiesOf(selected: readonly LoadedScenario[]): string[] {
@@ -253,9 +264,7 @@ async function evaluate(args: ParsedArgs, io: CliIo, repoRoot: string): Promise<
     io.out("");
     io.out(`Scenarios: ${summary.passed} passed, ${summary.failed} failed, ${summary.skipped} skipped of ${summary.scenarios}`);
     io.out(`Attempts: ${summary.attemptsPassed}/${summary.attempts} passed (${(summary.passRate * 100).toFixed(1)} %), pass^k ${(summary.passAllRate * 100).toFixed(1)} %`);
-    if (report.baseline) {
-      io.out(`Baseline: ${report.baseline.regressions.length} regression(s)${report.baseline.regressions.length > 0 ? ` — ${report.baseline.regressions.map((delta) => delta.id).join(", ")}` : ""}`);
-    }
+    if (report.baseline) io.out(baselineLine(report.baseline));
     if (report.environment.suspect) io.out(`ENVIRONMENT SUSPECT: ${report.environment.reasons.join("; ")}`);
     io.out(`Report: ${written.jsonPath}`);
     io.out(`        ${written.markdownPath}`);

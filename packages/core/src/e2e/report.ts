@@ -2,13 +2,15 @@
  * The run report: artifacts/evaluations/e2e/<timestamp>.json plus a Markdown summary beside it.
  * Per scenario: every attempt with its outcome, failures, duration, the audit-event type counts
  * and the tools and agents its turns used; overall: the attempt pass rate and pass^k (the share of
- * scenarios whose every attempt passed). With a baseline report, scenarios whose pass rate fell
- * are listed as regressions.
+ * scenarios whose every attempt passed). With a baseline report, each scenario run in both reads
+ * regressed, improved, flaky, inconclusive or unchanged by an interval test, and the suite as a
+ * whole by a sign test (stats.ts).
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { E2EService } from "./scenario.js";
 import type { ScenarioResult } from "./runner.js";
+import { compareSuite, compareTallies, type AttemptTally, type ScenarioChange, type SuiteChangeVerdict } from "./stats.js";
 
 export interface E2ERunMeta {
   startedAt: string;
@@ -45,17 +47,31 @@ export interface BaselineDelta {
   passRate: number;
   baselinePassAll: boolean;
   passAll: boolean;
+  /** Attempts that ended on a verdict (harness errors excluded) and how many passed, in each run. */
+  baselineTally: AttemptTally;
+  tally: AttemptTally;
+  change: ScenarioChange;
+  /** 95 % interval of the pass-rate difference (now − baseline); null when a run has no trial. */
+  ci: { low: number; high: number } | null;
 }
 
 export interface BaselineComparison {
   file: string;
+  /** The pass rate fell decisively: the 95 % interval of the difference lies below zero. */
   regressions: BaselineDelta[];
+  /** The pass rate rose decisively. */
   improvements: BaselineDelta[];
+  /** Passed and failed within one run, and no decisive change. */
+  flaky: BaselineDelta[];
+  /** Each run uniform, but they disagree (1/1 then 0/1): too few attempts to tell a change from chance. */
+  inconclusive: BaselineDelta[];
   unchanged: number;
   /** Run now, not run in the baseline. */
   newScenarios: string[];
   /** Run in the baseline, not run now (filtered out or skipped). */
   missingScenarios: string[];
+  /** The scenarios run in both, taken together: the only verdict a k=1 comparison can reach. */
+  suite: SuiteChangeVerdict;
 }
 
 export interface E2EReport {
@@ -165,13 +181,25 @@ export function loadReport(path: string): E2EReport {
   return report as E2EReport;
 }
 
-/** Scenarios run in both reports, compared by pass rate; a lower rate now is a regression. */
+/** A scenario's attempts as trials: an attempt that ended on a harness error says nothing about the swarm. */
+function tallyOf(result: ScenarioResult): AttemptTally {
+  const trials = result.attempts.filter((attempt) => attempt.outcome !== "error");
+  return { passed: trials.filter((attempt) => attempt.outcome === "passed").length, trials: trials.length };
+}
+
+/**
+ * Scenarios run in both reports, each compared by an interval test on its trials (stats.ts): a
+ * lower pass rate is a regression only when the interval says so; k=1 flips read inconclusive.
+ */
 export function compareWithBaseline(report: E2EReport, baseline: E2EReport, file: string): BaselineComparison {
   const ranBefore = new Map(baseline.scenarios.filter((result) => result.status !== "skipped").map((result) => [result.id, result]));
   const ranNow = report.scenarios.filter((result) => result.status !== "skipped");
   const regressions: BaselineDelta[] = [];
   const improvements: BaselineDelta[] = [];
+  const flaky: BaselineDelta[] = [];
+  const inconclusive: BaselineDelta[] = [];
   const newScenarios: string[] = [];
+  const pairs: Array<{ baseline: AttemptTally; now: AttemptTally }> = [];
   let unchanged = 0;
   for (const current of ranNow) {
     const before = ranBefore.get(current.id);
@@ -179,20 +207,49 @@ export function compareWithBaseline(report: E2EReport, baseline: E2EReport, file
       newScenarios.push(current.id);
       continue;
     }
+    const baselineTally = tallyOf(before);
+    const tally = tallyOf(current);
+    pairs.push({ baseline: baselineTally, now: tally });
+    const { change, ci } = compareTallies(baselineTally, tally);
     const delta: BaselineDelta = {
       id: current.id,
       baselinePassRate: before.passRate,
       passRate: current.passRate,
       baselinePassAll: before.passAll,
       passAll: current.passAll,
+      baselineTally,
+      tally,
+      change,
+      ci,
     };
-    if (current.passRate < before.passRate || (before.passAll && !current.passAll)) regressions.push(delta);
-    else if (current.passRate > before.passRate) improvements.push(delta);
+    if (change === "regressed") regressions.push(delta);
+    else if (change === "improved") improvements.push(delta);
+    else if (change === "flaky") flaky.push(delta);
+    else if (change === "inconclusive") inconclusive.push(delta);
     else unchanged += 1;
   }
   const nowIds = new Set(ranNow.map((result) => result.id));
   const missingScenarios = [...ranBefore.keys()].filter((id) => !nowIds.has(id));
-  return { file, regressions, improvements, unchanged, newScenarios, missingScenarios };
+  return {
+    file,
+    regressions,
+    improvements,
+    flaky,
+    inconclusive,
+    unchanged,
+    newScenarios,
+    missingScenarios,
+    suite: compareSuite(pairs),
+  };
+}
+
+/** "6 lower, 0 higher, 16 the same — regressed (sign test p = 0.016)" */
+export function describeSuite(suite: SuiteChangeVerdict): string {
+  const counts = `${suite.lower} lower, ${suite.higher} higher, ${suite.same} the same${suite.unpaired > 0 ? `, ${suite.unpaired} with unequal attempt counts left out` : ""}`;
+  if (suite.lower + suite.higher + suite.same === 0) return `not compared: no scenario ran with as many attempts in both runs${suite.unpaired > 0 ? ` (${suite.unpaired} left out)` : ""}`;
+  if (suite.change === "unchanged") return `${counts} — unchanged`;
+  const verdict = suite.change === "inconclusive" ? "no decisive change" : suite.change;
+  return `${counts} — ${verdict} (sign test p = ${suite.pValue.toFixed(3)})`;
 }
 
 /**
@@ -208,6 +265,25 @@ export function exitCodeFor(report: E2EReport): 0 | 1 | 3 {
 function percent(rate: number): string {
   return `${(rate * 100).toFixed(1)} %`;
 }
+
+/** "−33 pp [−75, +35]": the pass-rate difference and its 95 % interval, in percentage points. */
+function difference(delta: BaselineDelta): string {
+  const points = (value: number): string => {
+    const rounded = Math.round(value * 100);
+    return `${rounded > 0 ? "+" : rounded < 0 ? "−" : ""}${Math.abs(rounded)}`;
+  };
+  const rate = (tally: AttemptTally): number => (tally.trials > 0 ? tally.passed / tally.trials : 0);
+  const estimate = `${points(rate(delta.tally) - rate(delta.baselineTally))} pp`;
+  return delta.ci ? `${estimate} [${points(delta.ci.low)}, ${points(delta.ci.high)}]` : `${estimate} (a run had no trial)`;
+}
+
+const CHANGE_LABEL: Record<ScenarioChange, string> = {
+  regressed: "**regression**",
+  improved: "improvement",
+  flaky: "flaky",
+  inconclusive: "inconclusive",
+  unchanged: "unchanged",
+};
 
 function duration(ms: number): string {
   if (ms < 60_000) return `${(ms / 1000).toFixed(1)} s`;
@@ -249,11 +325,17 @@ export function renderMarkdown(report: E2EReport): string {
   if (report.baseline) {
     const baseline = report.baseline;
     lines.push("", `## Baseline: ${baseline.file}`, "");
-    lines.push(`${baseline.regressions.length} regression(s), ${baseline.improvements.length} improvement(s), ${baseline.unchanged} unchanged, ${baseline.newScenarios.length} new, ${baseline.missingScenarios.length} not run now.`);
-    if (baseline.regressions.length > 0 || baseline.improvements.length > 0) {
-      lines.push("", "| Scenario | Baseline | Now | |", "|---|---|---|---|");
-      for (const delta of baseline.regressions) lines.push(`| \`${delta.id}\` | ${percent(delta.baselinePassRate)} | ${percent(delta.passRate)} | **regression** |`);
-      for (const delta of baseline.improvements) lines.push(`| \`${delta.id}\` | ${percent(delta.baselinePassRate)} | ${percent(delta.passRate)} | improvement |`);
+    lines.push(`${baseline.regressions.length} regression(s), ${baseline.improvements.length} improvement(s), ${baseline.flaky.length} flaky, ${baseline.inconclusive.length} inconclusive, ${baseline.unchanged} unchanged, ${baseline.newScenarios.length} new, ${baseline.missingScenarios.length} not run now. A scenario counts as regressed or improved only when the 95 % interval of its pass-rate difference excludes zero.`);
+    lines.push("", `- Suite: ${describeSuite(baseline.suite)}`);
+    const listed = [...baseline.regressions, ...baseline.improvements, ...baseline.flaky, ...baseline.inconclusive];
+    if (listed.length > 0) {
+      lines.push("", "| Scenario | Baseline | Now | Δ pass rate (95 % CI) | Verdict |", "|---|---|---|---|---|");
+      for (const delta of listed) {
+        lines.push(`| \`${delta.id}\` | ${delta.baselineTally.passed}/${delta.baselineTally.trials} | ${delta.tally.passed}/${delta.tally.trials} | ${difference(delta)} | ${CHANGE_LABEL[delta.change]} |`);
+      }
+    }
+    if (baseline.inconclusive.length > 0) {
+      lines.push("", "Inconclusive: each run was uniform, but they disagree; with three attempts or more on both sides (`--repeat 3`) a drop can be told from chance.");
     }
   }
 

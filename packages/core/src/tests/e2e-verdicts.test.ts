@@ -1,13 +1,15 @@
 /**
- * Run verdicts of the e2e harness (src/e2e): when a run is environment-suspect. The seven reports
- * of 2026-10-07 (fixtures/e2e-reports-2026-10-07.json: the reports as the harness wrote them,
- * reduced to the fields the verdicts read) are re-graded with today's rules.
+ * Run verdicts of the e2e harness (src/e2e): when a run is environment-suspect, and when a scenario
+ * or the whole suite regressed against a baseline (stats.ts). The seven reports of 2026-10-07
+ * (fixtures/e2e-reports-2026-10-07.json: the reports as the harness wrote them, reduced to the
+ * fields the verdicts read) are re-graded with today's rules.
  */
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { buildReport, exitCodeFor, renderMarkdown, type E2EReport, type E2ERunMeta } from "../e2e/report.js";
+import { buildReport, compareWithBaseline, exitCodeFor, renderMarkdown, type E2EReport, type E2ERunMeta } from "../e2e/report.js";
 import type { AttemptResult, ScenarioResult } from "../e2e/runner.js";
 import type { ServiceState } from "../e2e/services.js";
+import { compareSuite, compareTallies, signTestPValue } from "../e2e/stats.js";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -86,9 +88,81 @@ function regraded(file: string): E2EReport {
   return buildReport(report.scenarios, report.meta);
 }
 
+/** The rule before 2026-10-08: any lower pass rate, or pass^k lost, was a regression. */
+function oldRuleRegressions(report: E2EReport, baseline: E2EReport): string[] {
+  const before = new Map(baseline.scenarios.filter((result) => result.status !== "skipped").map((result) => [result.id, result]));
+  return report.scenarios.filter((result) => {
+    const previous = result.status !== "skipped" ? before.get(result.id) : undefined;
+    return previous !== undefined && (result.passRate < previous.passRate || (previous.passAll && !result.passAll));
+  }).map((result) => result.id);
+}
+
+const SMOKE_1542 = "2026-10-07T15-42-55-888Z.json";
+const SMOKE_2120 = "2026-10-07T21-20-07-177Z.json";
+const SITE_RERUN_2139 = "2026-10-07T21-39-14-552Z.json";
 const FULL_2207 = "2026-10-07T22-07-37-965Z.json";
+const SITE_SCENARIOS = ["core-build-site-company-facts", "core-build-site-doc-only-facts"];
 
 // ── tests ────────────────────────────────────────────────────────────────────
+
+describe("e2e verdicts — interval and sign test (stats.ts)", () => {
+  it("calls a scenario's change only when the 95 % interval of the difference excludes zero", () => {
+    expect(compareTallies({ passed: 3, trials: 3 }, { passed: 0, trials: 3 }).change).toBe("regressed");
+    expect(compareTallies({ passed: 0, trials: 3 }, { passed: 3, trials: 3 }).change).toBe("improved");
+    expect(compareTallies({ passed: 5, trials: 5 }, { passed: 1, trials: 5 }).change).toBe("regressed");
+    // One flip, or two, can be chance: each run was uniform, so inconclusive.
+    expect(compareTallies({ passed: 1, trials: 1 }, { passed: 0, trials: 1 }).change).toBe("inconclusive");
+    expect(compareTallies({ passed: 0, trials: 1 }, { passed: 1, trials: 1 }).change).toBe("inconclusive");
+    expect(compareTallies({ passed: 2, trials: 2 }, { passed: 0, trials: 2 }).change).toBe("inconclusive");
+    // Passed and failed within one run: flaky, whichever way the rate moved.
+    expect(compareTallies({ passed: 5, trials: 5 }, { passed: 4, trials: 5 }).change).toBe("flaky");
+    expect(compareTallies({ passed: 5, trials: 5 }, { passed: 2, trials: 5 }).change).toBe("flaky");
+    expect(compareTallies({ passed: 0, trials: 1 }, { passed: 2, trials: 3 }).change).toBe("flaky");
+    expect(compareTallies({ passed: 2, trials: 3 }, { passed: 2, trials: 3 }).change).toBe("flaky");
+    expect(compareTallies({ passed: 3, trials: 3 }, { passed: 3, trials: 3 }).change).toBe("unchanged");
+    expect(compareTallies({ passed: 0, trials: 2 }, { passed: 0, trials: 1 }).change).toBe("unchanged");
+    // No trial in a run (every attempt errored): nothing to compare.
+    expect(compareTallies({ passed: 1, trials: 1 }, { passed: 0, trials: 0 })).toEqual({ change: "inconclusive", ci: null });
+
+    const drop = compareTallies({ passed: 3, trials: 3 }, { passed: 0, trials: 3 }).ci!;
+    expect(drop.high).toBeLessThan(0);
+    expect(drop.low).toBeGreaterThanOrEqual(-1);
+    const flip = compareTallies({ passed: 1, trials: 1 }, { passed: 0, trials: 1 }).ci!;
+    expect(flip.low).toBeLessThan(0);
+    expect(flip.high).toBeGreaterThan(0);
+  });
+
+  it("computes the exact one-sided sign-test tail", () => {
+    expect(signTestPValue(6, 6)).toBeCloseTo(1 / 64, 12);
+    expect(signTestPValue(3, 4)).toBeCloseTo(5 / 16, 12);
+    expect(signTestPValue(6, 8)).toBeCloseTo(37 / 256, 12);
+    expect(signTestPValue(0, 5)).toBe(1);
+    expect(signTestPValue(6, 5)).toBe(0);
+    // P(X ≥ k) + P(X ≥ n − k + 1) = 1 by symmetry, also where the terms are tiny.
+    for (const n of [1, 7, 52, 400]) {
+      for (let k = 1; k <= n; k += Math.max(1, Math.floor(n / 9))) expect(signTestPValue(k, n) + signTestPValue(n - k + 1, n)).toBeCloseTo(1, 9);
+    }
+  });
+
+  it("decides the suite by a sign test over the scenarios with equal attempt counts", () => {
+    const pair = (before: [number, number], now: [number, number]) => ({ baseline: { passed: before[0], trials: before[1] }, now: { passed: now[0], trials: now[1] } });
+    const flips = (lower: number, higher: number, same = 10) => [
+      ...Array.from({ length: lower }, () => pair([1, 1], [0, 1])),
+      ...Array.from({ length: higher }, () => pair([0, 1], [1, 1])),
+      ...Array.from({ length: same }, () => pair([1, 1], [1, 1])),
+    ];
+    // At k=1 no scenario is decisive alone; six flips down and none up is.
+    expect(compareSuite(flips(6, 0))).toMatchObject({ change: "regressed", lower: 6, higher: 0, same: 10, unpaired: 0 });
+    expect(compareSuite(flips(6, 0)).pValue).toBeCloseTo(1 / 64, 12);
+    expect(compareSuite(flips(5, 0)).change).toBe("inconclusive");
+    expect(compareSuite(flips(0, 6)).change).toBe("improved");
+    expect(compareSuite(flips(2, 3)).change).toBe("inconclusive");
+    expect(compareSuite(flips(2, 3)).pValue).toBeCloseTo(0.5, 12);
+    expect(compareSuite(flips(0, 0))).toMatchObject({ change: "unchanged", pValue: 1 });
+    // More attempts see a failure more often: unequal counts stay out of the test.
+    expect(compareSuite([pair([1, 1], [2, 3]), pair([3, 3], [0, 1])])).toMatchObject({ change: "inconclusive", lower: 0, higher: 0, same: 0, unpaired: 2 });
+  });
+});
 
 describe("e2e verdicts — environment-suspect runs", () => {
   it("marks a run suspect when one service was down for a fifth of the selected scenarios, and says it went down mid-run", () => {
@@ -165,5 +239,67 @@ describe("e2e verdicts — re-grading the reports of 2026-10-07", () => {
       expect(exitCodeFor(report), file).toBe(exitCodeFor(written(file)));
     }
     expect(others.map((file) => exitCodeFor(regraded(file)))).toEqual([1, 0, 1, 1, 1, 1]);
+  });
+
+  it("reads the site scenarios' k=1 failures as inconclusive and their 2/3 rerun as flaky, where the old rule saw regressions", () => {
+    // 15:42 → 21:20, both smoke at k=1: the site scenarios went 1/1 → 0/1.
+    expect(oldRuleRegressions(written(SMOKE_2120), written(SMOKE_1542))).toEqual(SITE_SCENARIOS);
+    const smoke = compareWithBaseline(regraded(SMOKE_2120), regraded(SMOKE_1542), SMOKE_1542);
+    expect(smoke.regressions).toEqual([]);
+    expect(smoke.inconclusive.filter((delta) => SITE_SCENARIOS.includes(delta.id)).map((delta) => [delta.id, delta.baselineTally, delta.tally])).toEqual([
+      ["core-build-site-company-facts", { passed: 1, trials: 1 }, { passed: 0, trials: 1 }],
+      ["core-build-site-doc-only-facts", { passed: 1, trials: 1 }, { passed: 0, trials: 1 }],
+    ]);
+    // Taken together: 2 lower and 3 higher of 22 — no decisive change either.
+    expect(smoke.suite).toMatchObject({ change: "inconclusive", lower: 2, higher: 3, same: 17, unpaired: 0 });
+    expect(smoke.suite.pValue).toBeCloseTo(0.5, 12);
+
+    // The rerun at k=3, 21:39 (same build): 2/3 each — flaky against either earlier run.
+    for (const baseline of [SMOKE_2120, SMOKE_1542]) {
+      const rerun = compareWithBaseline(regraded(SITE_RERUN_2139), regraded(baseline), baseline);
+      expect(rerun.regressions, baseline).toEqual([]);
+      expect(rerun.flaky.map((delta) => delta.id), baseline).toEqual(SITE_SCENARIOS);
+    }
+    expect(oldRuleRegressions(written(SITE_RERUN_2139), written(SMOKE_1542))).toEqual(SITE_SCENARIOS);
+  });
+
+  it("reads the English-question scenario's 5/5 then 4/5, three minutes apart, as flaky, not regressed", () => {
+    const before = "2026-10-07T13-57-57-133Z.json";
+    const after = "2026-10-07T14-00-13-648Z.json";
+    expect(oldRuleRegressions(written(after), written(before))).toEqual(["guards-language-english-question"]);
+    const comparison = compareWithBaseline(regraded(after), regraded(before), before);
+    expect(comparison.regressions).toEqual([]);
+    expect(comparison.flaky.map((delta) => [delta.id, delta.baselineTally, delta.tally])).toEqual([
+      ["guards-language-english-question", { passed: 5, trials: 5 }, { passed: 4, trials: 5 }],
+    ]);
+  });
+});
+
+describe("e2e verdicts — baseline comparison", () => {
+  it("compares each scenario by its trials, harness errors left out, and renders every verdict", () => {
+    const baseline = buildReport([ran("drops", "PPP"), ran("recovers", "FFF"), ran("wobbles", "PPP"), ran("flips", "P"), ran("steady", "PPP"), ran("errs", "PPP"), ran("gone", "P")], META);
+    const report = buildReport([ran("drops", "FFF"), ran("recovers", "PPP"), ran("wobbles", "PFP"), ran("flips", "F"), ran("steady", "PPP"), ran("errs", "PPE"), ran("new", "P")], META);
+    const comparison = compareWithBaseline(report, baseline, "baseline.json");
+    expect(comparison.regressions.map((delta) => delta.id)).toEqual(["drops"]);
+    expect(comparison.improvements.map((delta) => delta.id)).toEqual(["recovers"]);
+    expect(comparison.flaky.map((delta) => delta.id)).toEqual(["wobbles"]);
+    expect(comparison.inconclusive.map((delta) => delta.id)).toEqual(["flips"]);
+    // 3/3 → 2 passed + 1 harness error: two trials, both passed.
+    expect(comparison.unchanged).toBe(2);
+    expect(comparison.newScenarios).toEqual(["new"]);
+    expect(comparison.missingScenarios).toEqual(["gone"]);
+    // drops/flips lower, recovers higher, wobbles lower; errs has 2 trials now against 3.
+    expect(comparison.suite).toMatchObject({ change: "inconclusive", lower: 3, higher: 1, same: 1, unpaired: 1 });
+    expect(comparison.regressions[0]).toMatchObject({ baselineTally: { passed: 3, trials: 3 }, tally: { passed: 0, trials: 3 }, change: "regressed" });
+
+    report.baseline = comparison;
+    expect(exitCodeFor(report)).toBe(1);
+    const markdown = renderMarkdown(report);
+    expect(markdown).toContain("1 regression(s), 1 improvement(s), 1 flaky, 1 inconclusive, 2 unchanged, 1 new, 1 not run now.");
+    expect(markdown).toContain("- Suite: 3 lower, 1 higher, 1 the same, 1 with unequal attempt counts left out — no decisive change (sign test p = 0.313)");
+    expect(markdown).toContain("| `drops` | 3/3 | 0/3 | −100 pp [−100, −10] | **regression** |");
+    expect(markdown).toContain("| `recovers` | 0/3 | 3/3 | +100 pp [+10, +100] | improvement |");
+    expect(markdown).toContain("| `wobbles` | 3/3 | 2/3 | −33 pp [−75, +35] | flaky |");
+    expect(markdown).toContain("| `flips` | 1/1 | 0/1 | −100 pp [−100, +42] | inconclusive |");
   });
 });

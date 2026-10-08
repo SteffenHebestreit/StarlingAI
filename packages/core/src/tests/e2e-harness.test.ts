@@ -1197,20 +1197,26 @@ describe("e2e harness — pure helpers", () => {
     expect(text).toBe('{"token":"[redacted]","password":"[redacted]","note":"[redacted-jwt]","h":"[redacted-hash]"}');
   });
 
-  it("compares a run with a baseline and flags regressions", () => {
+  it("compares a run with a baseline: a pass rate that moved within chance is flaky, not a regression", () => {
     const meta = {
       startedAt: "2026-10-07T10:00:00.000Z", finishedAt: "2026-10-07T10:00:01.000Z", gatewayUrl: "http://x",
       repeat: 2, concurrency: 1, filters: { groups: [], tags: [], ids: [] }, judge: null, mail: null,
     };
     const scenarioResult = (id: string, passCount: number) => ({
       id, title: id, group: "core", tags: [], file: `${id}.jsonc`, status: passCount === 2 ? "passed" as const : "failed" as const,
-      services: [], repeat: 2, attempts: [], passCount, passRate: passCount / 2, passAll: passCount === 2, durationMs: 1,
+      services: [], repeat: 2, passCount, passRate: passCount / 2, passAll: passCount === 2, durationMs: 1,
+      attempts: [0, 1].map((index) => ({
+        index, outcome: index < passCount ? "passed" as const : "failed" as const, startedAt: meta.startedAt, durationMs: 1,
+        failures: [], notes: [], sessions: [], steps: [], eventTypeCounts: {}, tools: {}, agents: {},
+      })),
     });
     const baseline = buildReport([scenarioResult("a", 2), scenarioResult("b", 1), scenarioResult("gone", 2)], meta);
     const current = buildReport([scenarioResult("a", 1), scenarioResult("b", 2), scenarioResult("new", 2)], meta);
     const comparison = compareWithBaseline(current, baseline, "baseline.json");
-    expect(comparison.regressions.map((delta) => delta.id)).toEqual(["a"]);
-    expect(comparison.improvements.map((delta) => delta.id)).toEqual(["b"]);
+    // 2/2 → 1/2 and 1/2 → 2/2: within chance at k=2 (stats.ts; e2e-verdicts.test.ts has the decisive cases).
+    expect(comparison.regressions).toEqual([]);
+    expect(comparison.improvements).toEqual([]);
+    expect(comparison.flaky.map((delta) => delta.id)).toEqual(["a", "b"]);
     expect(comparison.newScenarios).toEqual(["new"]);
     expect(comparison.missingScenarios).toEqual(["gone"]);
   });
@@ -1278,7 +1284,7 @@ describe("e2e CLI (in process, against the fake gateway)", () => {
     expect(await mailIsolationCheck(null)()).toEqual({ safe: false, detail: "cannot verify mail isolation: scripts/e2e-env.mjs not found" });
   });
 
-  it("runs, reports and exits by the result; --id narrows; a baseline flags a regression", async () => {
+  it("runs, reports and exits by the result; --id narrows; a baseline flags a decisive regression only", async () => {
     const all = await cli(["evaluate", "--scenarios", "scenarios", "--out", "out-1"]);
     expect(all.err).toBe("");
     expect(all.code).toBe(1);
@@ -1294,11 +1300,26 @@ describe("e2e CLI (in process, against the fake gateway)", () => {
     expect(one.code).toBe(0);
     expect(one.out).toContain("Scenarios: 1 passed, 0 failed, 0 skipped of 1");
 
-    // The same scenario now fails: a regression against the first report.
+    // The same scenario now fails. Once against one pass is within chance: inconclusive, while the
+    // failure itself still exits 1.
     gateway.setScripts([{ match: /^hello from the cli/, run: async (turn) => turn.finish("ok", "no number here") }]);
-    const regressed = await cli(["evaluate", "--scenarios", "scenarios", "--id", "cli-pass", "--out", "out-3", "--baseline", reportPath]);
+    const flipped = await cli(["evaluate", "--scenarios", "scenarios", "--id", "cli-pass", "--out", "out-3", "--baseline", reportPath]);
+    expect(flipped.code).toBe(1);
+    expect(flipped.out).toContain("Baseline: 0 regression(s), 0 flaky, 1 inconclusive (cli-pass), 0 improvement(s); suite 1 lower, 0 higher, 0 the same — no decisive change (sign test p = 0.500)");
+
+    // Three failures against three passes: decisive.
+    const passed = (index: number) => ({ index, outcome: "passed" as const, startedAt: "2026-10-08T09:00:00.000Z", durationMs: 1, failures: [], notes: [], sessions: [], steps: [], eventTypeCounts: {}, tools: {}, agents: {} });
+    const threeOfThree = buildReport([{
+      id: "cli-pass", title: "CLI pass", group: "core", tags: [], file: "pass.jsonc", status: "passed", services: [], repeat: 3,
+      attempts: [0, 1, 2].map(passed), passCount: 3, passRate: 1, passAll: true, durationMs: 3,
+    }], {
+      startedAt: "2026-10-08T09:00:00.000Z", finishedAt: "2026-10-08T09:00:03.000Z", gatewayUrl: gateway.url,
+      repeat: 3, concurrency: 1, filters: { groups: [], tags: [], ids: ["cli-pass"] }, judge: null, mail: null,
+    });
+    const threePath = writeReport(threeOfThree, join(cliDir, "baseline-3")).jsonPath;
+    const regressed = await cli(["evaluate", "--scenarios", "scenarios", "--id", "cli-pass", "--repeat", "3", "--out", "out-4", "--baseline", threePath]);
     expect(regressed.code).toBe(1);
-    expect(regressed.out).toContain("Baseline: 1 regression(s) — cli-pass");
+    expect(regressed.out).toContain("Baseline: 1 regression(s) (cli-pass), 0 flaky, 0 inconclusive, 0 improvement(s);");
   });
 
   it("exits 3 when a fifth of the selected scenarios were skipped for one service", async () => {
