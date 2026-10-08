@@ -1125,8 +1125,13 @@ async function runTurnStep(step: E2ETurnStep, ctx: AttemptContext): Promise<Step
     });
   } catch (err) {
     during.detach();
-    // The gateway may have taken the send before the socket failed: the turn stays tracked.
-    if (err instanceof E2EInfraError) throw err;
+    if (err instanceof E2EInfraError) {
+      // The gateway may have taken the send before the socket failed, and it keeps a turn running
+      // when its socket closes (gateway/rpc.ts close): stopped like a turn whose socket dies
+      // mid-turn, it stays tracked until a reset sees it end.
+      const cancelled = await cancelFromFreshConnection(ctx, identity, requestId);
+      throw new E2EInfraError(`${err.message}; ${cancelled}`);
+    }
     tracked.delete(requestId);
     return { failures: [`chat.send failed: ${describeError(err)}`], notes };
   }

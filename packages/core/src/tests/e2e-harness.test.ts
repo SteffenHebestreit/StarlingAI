@@ -962,6 +962,9 @@ describe("e2e harness against a fake gateway", () => {
       const dropped = await runScenario(loaded({ id: `fake-drop-${drop}`, title: `Socket dies (${drop})`, group: "guards", steps: [{ kind: "turn", message: `drop the socket (${drop})` }] }), deps(), options);
       expect(dropped.attempts[0]!.outcome, drop).toBe("error");
       const requestId = String(gateway.chatSends.at(-1)!["requestId"]);
+      // The gateway keeps a turn running when its socket closes: the harness stops it from a new one.
+      expect(gateway.cancels, drop).toContain(requestId);
+      expect(dropped.attempts[0]!.failures[0], drop).toMatch(/; chat\.cancel from a new connection: cancelled=true$/);
       await turn.stored;
 
       const blocked = await runScenario(loaded(next), deps(), options);
