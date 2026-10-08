@@ -96,7 +96,7 @@ Every public schema field, where it is declared, and how many production files r
 | `configRemovals` | packages/core/src/config/schema.ts:1715 | 3 |
 | `configureTimeoutMs` | packages/core/src/config/schemas/multimodal.ts:228 | 1 |
 | `consolidationIntervalMs` | packages/core/src/config/schema.ts:1542 | 1 |
-| `container` | packages/core/src/config/schema.ts:716 | 79 |
+| `container` | packages/core/src/config/schema.ts:716 | 80 |
 | `contextWindow` | packages/core/src/config/schema.ts:122 | 14 |
 | `control` | packages/core/src/config/schema.ts:1690 | 57 |
 | `coordinatorToolCaps` | packages/core/src/config/schemas/orchestration.ts:893 | 4 |
@@ -139,7 +139,7 @@ Every public schema field, where it is declared, and how many production files r
 | `detectWriteChurnOverwrite` | packages/core/src/config/schemas/orchestration.ts:427 | 2 |
 | `digest` | packages/core/src/config/schema.ts:1998 | 55 |
 | `dir` | packages/core/src/config/schema.ts:1987 | 59 |
-| `disabled` | packages/core/src/config/schema.ts:833 | 109 |
+| `disabled` | packages/core/src/config/schema.ts:833 | 110 |
 | `disabledGroups` | packages/core/src/config/schema.ts:2016 | 3 |
 | `disabledTools` | packages/core/src/config/schema.ts:2018 | 3 |
 | `discovery` | packages/core/src/config/schema.ts:624 | 39 |
@@ -201,7 +201,7 @@ Every public schema field, where it is declared, and how many production files r
 | `humanInLoopSteps` | packages/core/src/config/schema.ts:1333 | 20 |
 | `id` | packages/core/src/config/schema.ts:585 | 297 |
 | `ignoreCase` | packages/core/src/config/schema.ts:1380 | 2 |
-| `image` | packages/core/src/config/schema.ts:704 | 101 |
+| `image` | packages/core/src/config/schema.ts:704 | 102 |
 | `imapHost` | packages/core/src/config/schemas/channels.ts:57 | 6 |
 | `imapPassword` | packages/core/src/config/schemas/channels.ts:60 | 7 |
 | `imapPort` | packages/core/src/config/schemas/channels.ts:58 | 4 |
@@ -297,7 +297,7 @@ Every public schema field, where it is declared, and how many production files r
 | `minStepsToAuthor` | packages/core/src/config/schema.ts:1488 | 2 |
 | `minVramMb` | packages/core/src/config/schema.ts:846 | 1 |
 | `mode` | packages/core/src/config/schema.ts:495 | 141 |
-| `model` | packages/core/src/config/schema.ts:1258 | 274 |
+| `model` | packages/core/src/config/schema.ts:1258 | 275 |
 | `modelModeration` | packages/core/src/config/schema.ts:1254 | 4 |
 | `modelPresets` | packages/core/src/config/schema.ts:1726 | 1 |
 | `modelPresetScope` | packages/core/src/config/schema.ts:1741 | 4 |
@@ -308,7 +308,7 @@ Every public schema field, where it is declared, and how many production files r
 | `mounts` | packages/core/src/config/schema.ts:707 | 11 |
 | `name` | packages/core/src/config/schema.ts:1997 | 370 |
 | `negativePrompt` | packages/core/src/config/schemas/multimodal.ts:175 | 7 |
-| `network` | packages/core/src/config/schema.ts:708 | 56 |
+| `network` | packages/core/src/config/schema.ts:708 | 57 |
 | `node` | packages/core/src/config/schema.ts:1066 | 239 |
 | `normalizeDelegationToEnglish` | packages/core/src/config/schemas/orchestration.ts:573 | 3 |
 | `notes` | packages/core/src/config/schema.ts:814 | 56 |
@@ -492,7 +492,7 @@ Every public schema field, where it is declared, and how many production files r
 | `toolMode` | packages/core/src/config/schema.ts:295 | 6 |
 | `toolName` | packages/core/src/config/schemas/multimodal.ts:17 | 71 |
 | `toolRerankMinTools` | packages/core/src/config/schemas/orchestration.ts:651 | 2 |
-| `tools` | packages/core/src/config/schema.ts:945 | 225 |
+| `tools` | packages/core/src/config/schema.ts:945 | 226 |
 | `topK` | packages/core/src/config/schema.ts:169 | 7 |
 | `topLogprobs` | packages/core/src/config/schemas/decisions.ts:145 | 7 |
 | `topP` | packages/core/src/config/schema.ts:168 | 4 |

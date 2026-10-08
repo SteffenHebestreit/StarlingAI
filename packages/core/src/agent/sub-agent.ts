@@ -62,6 +62,7 @@ import { withSpan, genAi } from "../observability/tracing.js";
 import { runSubAgentInContainer } from "./container-runner.js";
 import { userWordsBlockForRun, type TurnUserWords } from "./delegation-user-words.js";
 import { looksLikeContainerLevelFailure, looksLikeModelTemplateArtifact, looksLikeProviderErrorEcho, looksLikeHallucinatedTruncationClaim } from "./container-failure.js";
+import { WORKER_REGISTERED_TOOL_NAMES, missingContainerTools, formatMissingContainerToolsFailure } from "./container-tool-support.js";
 import { appendOutcome, computeAdaptiveSubAgentTimeoutMs, extractTaskKeywords } from "./outcomes.js";
 import { recordAccount } from "../runtime/user-scope.js";
 import { formatFlowMemoryGuidance } from "./flow-memory.js";
@@ -3070,15 +3071,39 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         (config.agents.defaultContainerized === true && agentCfg.container?.disabled !== true)
       );
     if (isContainerized) {
-      const maxConcurrent = agentCfg.maxConcurrent ?? DEFAULT_CONCURRENCY;
-      await acquireSlot(opts.agentName, maxConcurrent, opts.parentSessionId);
+      // STATIC PRE-FLIGHT — the same check the worker makes on itself (agent/container-entrypoint.ts),
+      // made here before a container is ever started. The agent-worker process registers only the
+      // tools in WORKER_REGISTERED_TOOL_NAMES (today: none, because it imports no tool module), so an
+      // agent whose declared tools are not in that set would reach an empty registry in the worker and
+      // could only answer in prose. Refuse now, shaping the SAME honest failure the worker would write
+      // as the runner's "container error:" string so looksLikeContainerLevelFailure classifies it as a
+      // failure below. We do NOT fall back to in-process execution: start() refuses that bargain
+      // deliberately (it would erase the isolation the operator enabled defaultContainerized for), so a
+      // worker that cannot run the agent's tools must surface as a FAILED delegation the retry/fallback
+      // cascade acts on — never a silent downgrade.
+      const missingWorkerTools = (agentCfg.tools?.length ?? 0) > 0
+        ? missingContainerTools(agentCfg.tools, WORKER_REGISTERED_TOOL_NAMES)
+        : [];
       let containerRun;
-      try {
-        const containerReason = agentCfg.container?.enabled ? "explicit" : "defaultContainerized";
-        log.info({ agentName: opts.agentName, maxConcurrent, containerReason }, "Dispatching to containerized sub-agent");
-        containerRun = await runSubAgentInContainer({ ...opts, signal }, agentCfg, modelConfig, providerEndpoint.baseUrl, providerEndpoint.apiKey);
-      } finally {
-        releaseSlot(opts.agentName);
+      if (missingWorkerTools.length > 0) {
+        containerRun = {
+          output: `Sub-agent '${opts.agentName}' container error: ${formatMissingContainerToolsFailure(opts.agentName, missingWorkerTools, agentCfg.tools!.length)}`,
+          metrics: { containerRuntimeMs: 0, heartbeatSupported: false },
+        };
+        log.error(
+          { agentName: opts.agentName, missing: missingWorkerTools.slice(0, 20), declared: agentCfg.tools!.length },
+          "Refusing containerized dispatch — the agent-worker registers none of this agent's tools",
+        );
+      } else {
+        const maxConcurrent = agentCfg.maxConcurrent ?? DEFAULT_CONCURRENCY;
+        await acquireSlot(opts.agentName, maxConcurrent, opts.parentSessionId);
+        try {
+          const containerReason = agentCfg.container?.enabled ? "explicit" : "defaultContainerized";
+          log.info({ agentName: opts.agentName, maxConcurrent, containerReason }, "Dispatching to containerized sub-agent");
+          containerRun = await runSubAgentInContainer({ ...opts, signal }, agentCfg, modelConfig, providerEndpoint.baseUrl, providerEndpoint.apiKey);
+        } finally {
+          releaseSlot(opts.agentName);
+        }
       }
       // Detect container-level failures (spawn errors, non-zero exits, container
       // crashes, timeouts) that the runner reports as a failure-prefixed string
