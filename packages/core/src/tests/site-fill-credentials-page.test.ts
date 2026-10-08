@@ -34,6 +34,8 @@ describe("site_fill_credentials types only into a page of the credential's own s
           loginUrl: "https://login.sso-provider.test/oauth/authorize?client_id=app",
           urls: { reports: "http://reports.lan.example/monthly" },
         },
+        "192.168.10.20": { username: "admin", password: "pw-for-router", loginUrl: "http://192.168.10.20/login" },
+        "shop.example": { username: "agent", password: "pw-for-shop", loginUrl: "https://www.shop-login.example/signin" },
       },
     }), "utf8");
     process.env["SAI_CONFIG_PATH"] = configPath;
@@ -209,5 +211,31 @@ describe("site_fill_credentials types only into a page of the credential's own s
       expect((await fill("app.example.com")).success, url).toBe(false);
       expect(typed(other.callTool), url).toEqual([]);
     }
+  });
+
+  it("fills a credential for an IP address on that address only", async () => {
+    const router = browserOn("http://192.168.10.20/login");
+    expect((await fill("192.168.10.20")).success).toBe(true);
+    expect(typed(router.callTool)).toHaveLength(3);
+
+    // No host can end in ".192.168.10.20": URL parsing reads a numeric last label as an IPv4
+    // address, so such a page URL cannot be read, and the fill is refused for that.
+    for (const url of ["http://192.168.10.21/login", "http://10.192.168.10.20/login"]) {
+      const other = browserOn(url);
+      expect((await fill("192.168.10.20")).success, url).toBe(false);
+      expect(typed(other.callTool), url).toEqual([]);
+    }
+  });
+
+  it("matches a URL recorded with www. on the bare host and its subdomains", async () => {
+    for (const url of ["https://shop-login.example/signin", "https://www.shop-login.example/signin", "https://eu.shop-login.example/signin"]) {
+      const page = browserOn(url);
+      expect((await fill("shop.example")).success, url).toBe(true);
+      expect(typed(page.callTool), url).toHaveLength(3);
+    }
+
+    const lookalike = browserOn("https://evil-shop-login.example/signin");
+    expect((await fill("shop.example")).success).toBe(false);
+    expect(typed(lookalike.callTool)).toEqual([]);
   });
 });

@@ -1096,6 +1096,20 @@ describe("web_fetch's redirect chain has a deadline", () => {
     expect(requested).toHaveLength(7);
   });
 
+  it("cuts off the last hop of a chain when the budget runs out during it, though the hop is under 12 s", async () => {
+    const pages: Record<string, Page> = {};
+    for (let i = 0; i < 6; i++) pages[`${PUBLIC}/h${i}`] = { delayMs: 11_000, location: `/h${i + 1}` };
+    pages[`${PUBLIC}/h6`] = { delayMs: 11_000 };
+    const requested = web(pages);
+    const callTool = renderingBrowser();
+
+    const r = await withFakeTime(() => webFetch(`${PUBLIC}/h0`, "s-chain-slow-last-hop"));
+    expect(r.success).toBe(false);
+    expect(r.error).toBe(`${PUBLIC}/h0: the redirect chain took too long; it is not followed further`);
+    expect(callTool).not.toHaveBeenCalled();
+    expect(requested).toHaveLength(7);
+  });
+
   it("still renders the page in the browser when the first request alone is slow", async () => {
     web({ [`${PUBLIC}/langsam`]: { hang: true } });
     const callTool = renderingBrowser();
