@@ -184,8 +184,14 @@ export function registerSubAgentRoutes(app: Hono): void {
 
     const { readFileSync, existsSync } = await import("node:fs");
     const { resolve } = await import("node:path");
-    const workspacePath = getConfig().workspacePath;
+    const cfg = getConfig();
+    const workspacePath = cfg.workspacePath;
     const outcomesFile = resolve(workspacePath, `${PRODUCT.stateDirName}/agent_outcomes.ndjson`);
+    // Under multi-user auth the counts only. A lesson is text an agent wrote on some account's task
+    // (record_lesson), often naming what that task was about, and the ledger names no account: every
+    // signed-in account, a viewer too, read the latest one per agent, whoever's task it came from
+    // (found in review, 2026-10-08). With one operator the lessons are that operator's own.
+    const withLessons = cfg.auth?.enabled !== true;
 
     if (!existsSync(outcomesFile)) return c.json({ agents: [], totalEntries: 0 });
 
@@ -221,7 +227,7 @@ export function registerSubAgentRoutes(app: Hono): void {
       successRate: s.calls > 0 ? Math.round((s.success / s.calls) * 100) : 0,
       avgTokens: s.calls > 0 ? Math.round(s.totalTokens / s.calls) : 0,
       avgIterations: s.calls > 0 ? Math.round((s.totalIterations / s.calls) * 10) / 10 : 0,
-      latestLesson: s.latestLesson,
+      ...(withLessons ? { latestLesson: s.latestLesson } : {}),
       lastSeen: s.lastSeen,
     })).sort((a, b) => b.calls - a.calls);
 
