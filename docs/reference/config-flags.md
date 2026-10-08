@@ -19,7 +19,7 @@ Every public schema field, where it is declared, and how many production files r
 | `admin` | packages/core/src/config/schema.ts:395 | 32 |
 | `agents` | packages/core/src/config/schema.ts:1719 | 180 |
 | `alertmanager` | packages/core/src/config/schema.ts:1159 | 1 |
-| `all` | packages/core/src/config/schema.ts:1312 | 299 |
+| `all` | packages/core/src/config/schema.ts:1312 | 300 |
 | `allowedAgents` | packages/core/src/config/schema.ts:1332 | 29 |
 | `allowedPrivateHosts` | packages/core/src/config/schema.ts:1275 | 5 |
 | `allowedUserIds` | packages/core/src/config/schemas/channels.ts:11 | 5 |

@@ -133,6 +133,24 @@ describe("the code a delegated run executed, and the figures it states", () => {
           tools: ["delegate_to_agent", "share_finding"],
           maxIterations: 4,
         },
+        fan_lead: {
+          description: "Coordinates code work in parallel.",
+          systemPrompt: "FAN-LEAD-KQ Hand the computation to the coder.",
+          tools: ["parallel_delegate"],
+          maxIterations: 4,
+        },
+        graph_lead: {
+          description: "Coordinates code work as a task graph.",
+          systemPrompt: "GRAPH-LEAD-KQ Hand the computation to the coder.",
+          tools: ["run_task_graph"],
+          maxIterations: 4,
+        },
+        workflow_lead: {
+          description: "Coordinates code work through a saved workflow.",
+          systemPrompt: "WORKFLOW-LEAD-KQ Run the counting workflow.",
+          tools: ["run_workflow"],
+          maxIterations: 4,
+        },
         notes_lead: {
           description: "Coordinates a code check and reads notes.",
           systemPrompt: "NOTES-LEAD-KQ Have the coder check the code, read the notes and summarize.",
@@ -513,6 +531,85 @@ describe("the code a delegated run executed, and the figures it states", () => {
       const result = await runAgent("build_lead", INCIDENT.task, "parent-provenance-coordinator-printed");
 
       expect(result.output).toBe(leadAnswer);
+      expect(result.executions).toEqual({ attempted: 1, failed: 0, succeededWithOutput: 1 });
+      expect(result.stats.outcome).toBe("success");
+    }, 60_000);
+  });
+
+  describe("(s) a coordinator's fan-out hands back what its specialist executed", () => {
+    // In review parallel_delegate, run_task_graph and run_workflow dropped the coder's record, so a
+    // coordinator restating the coder's masked figures through them went out unmasked as a success;
+    // through delegate_to_agent the same answer was masked and partial.
+    const MADE_UP = "Ergebnis: Es gibt 8392 Primzahlen, ihre Summe ist 1255204276.";
+    const runLead = async (lead: string, marker: string, fanOut: { tool: string; args: Record<string, unknown> }, root: string, leadAnswer = MADE_UP) => {
+      completeMock.mockImplementation(async (messages: Message[]) => {
+        if (!systemIncludes(messages, marker)) return scripted(INCIDENT.calls, INCIDENT.reply)(messages);
+        return scripted([fanOut], leadAnswer)(messages);
+      });
+      return runAgent(lead, INCIDENT.task, root);
+    };
+    const parallel = { tool: "parallel_delegate", args: { tasks: [{ agentName: "coder", task: INCIDENT.task }] } };
+
+    it("through parallel_delegate", async () => {
+      await registerTools(incidentTools());
+      const result = await runLead("fan_lead", "FAN-LEAD-KQ", parallel, "parent-provenance-fan-parallel");
+
+      expect(result.output).toBe("Ergebnis: Es gibt [not observed] Primzahlen, ihre Summe ist [not observed].");
+      // The coder's two and the lead's two.
+      expect(result.executions).toEqual({ ...INCIDENT_EXECUTIONS, unobservedFigures: 4 });
+      expect(result.stats.outcome).toBe("partial");
+    }, 60_000);
+
+    it("through run_task_graph", async () => {
+      await registerTools(incidentTools());
+      const result = await runLead("graph_lead", "GRAPH-LEAD-KQ", {
+        tool: "run_task_graph",
+        args: { nodes: [{ id: "count", agentName: "coder", task: INCIDENT.task }] },
+      }, "parent-provenance-fan-graph");
+
+      expect(result.output).toBe("Ergebnis: Es gibt [not observed] Primzahlen, ihre Summe ist [not observed].");
+      expect(result.executions).toEqual({ ...INCIDENT_EXECUTIONS, unobservedFigures: 4 });
+      expect(result.stats.outcome).toBe("partial");
+    }, 60_000);
+
+    it("through run_workflow", async () => {
+      // The workflow's own runner is tools/workflow-catalog.ts; here it hands back the record its
+      // coder step left, as it now does.
+      await registerTools({
+        run_workflow: () => ({
+          success: true,
+          output: "Workflow prime_count [job] completed.\n\n## Count\n\nEs gibt [not observed] Primzahlen.",
+          metadata: {
+            workflowName: "prime_count",
+            workflowType: "job",
+            specialistExecutions: { ...INCIDENT_EXECUTIONS, unobservedFigures: 2 },
+          },
+        }),
+      });
+      // Its answer names the workflow's header, so it is kept rather than replaced by the
+      // workflow's own output (maybePreferWorkflowOutput).
+      const result = await runLead("workflow_lead", "WORKFLOW-LEAD-KQ", {
+        tool: "run_workflow",
+        args: { name: "prime_count" },
+      }, "parent-provenance-fan-workflow", `Workflow prime_count [job] completed. ${MADE_UP}`);
+
+      expect(result.output).toBe("Workflow prime_count [job] completed. Ergebnis: Es gibt [not observed] Primzahlen, ihre Summe ist [not observed].");
+      expect(result.executions).toEqual({ ...INCIDENT_EXECUTIONS, unobservedFigures: 4 });
+      expect(result.stats.outcome).toBe("partial");
+    }, 60_000);
+
+    it("control: what the coder's script printed, the lead restates through parallel_delegate as it was", async () => {
+      await registerTools({ shell_exec: () => printed("Anzahl der Primzahlen: 8392\nSumme der Primzahlen:   1255204276") });
+      completeMock.mockImplementation(async (messages: Message[]) => {
+        if (!systemIncludes(messages, "FAN-LEAD-KQ")) {
+          return scripted([{ tool: "shell_exec", args: { command: "node primes.js" } }], "Es gibt 8392 Primzahlen, Summe 1255204276.")(messages);
+        }
+        return scripted([parallel], MADE_UP)(messages);
+      });
+
+      const result = await runAgent("fan_lead", INCIDENT.task, "parent-provenance-fan-printed");
+
+      expect(result.output).toBe(MADE_UP);
       expect(result.executions).toEqual({ attempted: 1, failed: 0, succeededWithOutput: 1 });
       expect(result.stats.outcome).toBe("success");
     }, 60_000);

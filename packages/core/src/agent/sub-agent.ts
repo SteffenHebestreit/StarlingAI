@@ -657,9 +657,11 @@ function isDelegationToolName(name: string): boolean {
 }
 
 /** A tool that runs another agent and hands back the record of the code that run executed
- *  (specialistExecutions, agent/delegated-run-record.ts). */
+ *  (specialistExecutions, agent/delegated-run-record.ts). run_workflow's scenes and jobs run
+ *  agents too, and now hand their records back; mission_coordinator and web_task_coordinator
+ *  hold it. */
 function receivesExecutionRecords(name: string): boolean {
-  return isDelegationToolName(name) || name === "create_ephemeral_agent";
+  return isDelegationToolName(name) || name === "create_ephemeral_agent" || name === "run_workflow";
 }
 
 // How many `sub:` hops deep this session is. The orchestrator is depth 0; its

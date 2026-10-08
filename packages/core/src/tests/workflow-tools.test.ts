@@ -1681,3 +1681,158 @@ describe("workflow catalog tools", () => {
     }
   });
 });
+
+/**
+ * A workflow's runs hand their records up (E2E 2026-10-07 class). In review run_workflow dropped
+ * them: a coder whose sandbox failed and whose figures came back masked inside a workflow reached
+ * the turn as "Workflow … completed" with no record, so neither the coordinator's own figure check
+ * nor the turn's honest directive fired, and a job's next step built on the masked text.
+ */
+describe("run_workflow and the code its runs executed", () => {
+  const MASKED = { attempted: 1, failed: 1, succeededWithOutput: 0, unobservedFigures: 2 };
+  const PRIMES = { filename: "primes.js", outputPath: "generated/primes.js", sourceTool: "write_file" };
+  const config = () => writeTempConfig({
+    agents: { defaults: { model: { primary: "lmstudio/qwen/qwen3.5-9b" } } },
+    scenes: {
+      prime_report: {
+        description: "Count the primes and write them up.",
+        task: "Count the primes between 100000 and 200000 and write a short report.",
+        allowedAgents: ["coder", "content_writer"],
+      },
+      count_primes: { description: "Count the primes.", task: "Count the primes between 100000 and 200000.", allowedAgents: ["coder"] },
+      explain_count: { description: "Explain the count.", task: "Explain the count of primes.", allowedAgents: ["content_writer"] },
+    },
+    jobs: {
+      prime_packet: {
+        description: "Count the primes, then explain the count.",
+        steps: [
+          { scene: "count_primes", label: "Count" },
+          { scene: "explain_count", label: "Explain" },
+        ],
+      },
+    },
+    subAgents: {
+      coder: { description: "Writes and runs code.", tools: ["write_file", "shell_exec"], maxIterations: 4 },
+      content_writer: { description: "Writes reports.", tools: ["write_file"], maxIterations: 4 },
+    },
+  });
+  const subAgentRun = (agentName: string, executions?: Record<string, unknown>) => ({
+    output: agentName === "coder" ? "Es gibt [not observed] Primzahlen." : "Der Bericht erklärt die Zählung.",
+    stats: { outcome: executions?.["unobservedFigures"] ? "partial" : "success", toolCount: 1, iterations: 1, toolNames: [] },
+    artifacts: agentName === "coder" ? [PRIMES] : [],
+    ...(executions ? { executions } : {}),
+  });
+  const runWorkflow = async (name: string, workflowType: string) => {
+    const [{ getTool }] = await Promise.all([import("../tools/registry.js"), import("../tools/workflow-catalog.js")]);
+    return getTool("run_workflow")!.execute({ name, workflowType }, { sessionId: "workflow-records", workspacePath: "/workspace" });
+  };
+
+  it("a scene's orchestrator turn: the records its delegations left in the workflow's session", async () => {
+    const { tempDir, configPath } = config();
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+    vi.doMock("../agent/runtime.js", () => ({
+      collectTurnArtifactAttachments: () => [],
+      runTurn: vi.fn(async (opts: { session: { addMessages(messages: unknown[]): void } }) => {
+        opts.session.addMessages([{
+          role: "tool",
+          tool_call_id: "d1",
+          content: "Delegated result from coder — PARTIAL PROGRESS.",
+          metadata: { agentName: "coder", specialistExecutions: MASKED, artifacts: [PRIMES] },
+        }]);
+        return { response: "Die Zahlen konnten nicht berechnet werden.", toolCallsExecuted: 1, guardrailEvents: [], usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 }, blocked: false };
+      }),
+    }));
+
+    try {
+      const result = await runWorkflow("prime_report", "scene");
+
+      expect(result.metadata?.["specialistExecutions"]).toEqual(MASKED);
+      expect(result.metadata?.["maskedRuns"]).toEqual([{ agentName: "coder", executions: MASKED, artifacts: [PRIMES] }]);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("a scene's bootstrap coordinator: the record its run added up", async () => {
+    const { tempDir, configPath } = writeTempConfig({
+      agents: { defaults: { model: { primary: "lmstudio/qwen/qwen3.5-9b" } } },
+      scenes: {
+        prime_mission: {
+          description: "Count the primes as a mission.",
+          task: "Use mission_coordinator first. It should have the primes between 100000 and 200000 counted and summed.",
+          allowedAgents: ["mission_coordinator", "coder"],
+        },
+      },
+      subAgents: {
+        mission_coordinator: { description: "Coordinates multi-step work.", tools: ["delegate_to_agent", "parallel_delegate"], maxIterations: 6 },
+        coder: { description: "Writes and runs code.", tools: ["write_file", "shell_exec"], maxIterations: 4 },
+      },
+    });
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+    vi.doMock("../agent/runtime.js", () => ({ collectTurnArtifactAttachments: () => [], runTurn: vi.fn() }));
+    vi.doMock("../agent/sub-agent.js", () => ({
+      runSubAgentWithStats: vi.fn(async () => ({
+        output: "Der Coder hat primes.js geschrieben; es gibt [not observed] Primzahlen.",
+        stats: { outcome: "partial", toolCount: 2, iterations: 2, toolNames: ["delegate_to_agent", "parallel_delegate"] },
+        artifacts: [PRIMES],
+        executions: MASKED,
+      })),
+    }));
+
+    try {
+      const result = await runWorkflow("prime_mission", "scene");
+
+      expect(result.metadata?.["bootstrapAgent"]).toBe("mission_coordinator");
+      expect(result.metadata?.["specialistExecutions"]).toEqual(MASKED);
+      expect(result.metadata?.["maskedRuns"]).toEqual([{ agentName: "mission_coordinator", executions: MASKED, artifacts: [PRIMES] }]);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("a job's step whose run masked figures stops the job, and its record goes up", async () => {
+    const { tempDir, configPath } = config();
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+    const runSubAgentMock = vi.fn(async (opts: { agentName: string }) => subAgentRun(opts.agentName, opts.agentName === "coder" ? MASKED : undefined));
+    vi.doMock("../agent/runtime.js", () => ({ collectTurnArtifactAttachments: () => [], runTurn: vi.fn() }));
+    vi.doMock("../agent/sub-agent.js", () => ({ runSubAgentWithStats: runSubAgentMock }));
+
+    try {
+      const result = await runWorkflow("prime_packet", "job");
+
+      // The explaining step never ran on the masked count.
+      expect(runSubAgentMock.mock.calls.map((c) => (c[0] as { agentName: string }).agentName)).toEqual(["coder"]);
+      expect(result.success).toBe(false);
+      expect(result.metadata?.["blocked"]).toBe(true);
+      expect(result.output).toContain("they are masked as [not observed] and were not computed");
+      expect(result.metadata?.["specialistExecutions"]).toEqual(MASKED);
+      expect(result.metadata?.["maskedRuns"]).toEqual([{ agentName: "coder", executions: MASKED, artifacts: [PRIMES] }]);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("control: a job whose coder's script printed runs on, with its record summed", async () => {
+    const { tempDir, configPath } = config();
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+    const printed = { attempted: 1, failed: 0, succeededWithOutput: 1 };
+    const runSubAgentMock = vi.fn(async (opts: { agentName: string }) => subAgentRun(opts.agentName, opts.agentName === "coder" ? printed : undefined));
+    vi.doMock("../agent/runtime.js", () => ({ collectTurnArtifactAttachments: () => [], runTurn: vi.fn() }));
+    vi.doMock("../agent/sub-agent.js", () => ({ runSubAgentWithStats: runSubAgentMock }));
+
+    try {
+      const result = await runWorkflow("prime_packet", "job");
+
+      expect(runSubAgentMock).toHaveBeenCalledTimes(2);
+      expect(result.success).toBe(true);
+      expect(result.metadata?.["specialistExecutions"]).toEqual(printed);
+      expect(result.metadata).not.toHaveProperty("maskedRuns");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});

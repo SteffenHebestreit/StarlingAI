@@ -152,7 +152,7 @@ import {
 // Re-export the originally-exported buildModelVisibleToolResult so existing imports
 // from runtime.js (runtime-delegation-loop.test.ts, runtime-guidance.test.ts) keep working.
 export { buildModelVisibleToolResult } from "./tool-result-format.js";
-import { executionRecordLine, readExecutionRecord, stripDelegatedRunRecord, unbackedFiguresMasked } from "./delegated-run-record.js";
+import { executionRecordLine, readExecutionRecord, readMaskedRuns, stripDelegatedRunRecord, unbackedFiguresMasked } from "./delegated-run-record.js";
 import { IN_REPLY_LANGUAGE, buildReplyLanguageRule, buildTurnReplyLanguageInstruction, detectTurnUserLanguage, isFirstUserTurn, localizedFixedText } from "./reply-language.js";
 
 // Turn-preparation phases + the blocked() early-exit builder (god-file seam): the
@@ -4868,6 +4868,23 @@ async function _runTurn(
         sawExecutionRecord = true;
         if (!unbackedFiguresMasked(record)) continue;
         maskedFigures += record.unobservedFigures ?? 0;
+        // A fan-out (parallel_delegate, run_task_graph, execute_plan, run_workflow) names no agent
+        // of its own and carries every run's files: its record is a sum. Each run that masked
+        // figures is listed with its own name and files, so another run's finished report is not
+        // presented as the masked run's unrun output.
+        const fanOutRuns = readMaskedRuns(message.metadata?.["maskedRuns"]);
+        if (fanOutRuns.length > 0) {
+          for (const run of fanOutRuns) {
+            const runFiles: Array<Record<string, unknown>> = [];
+            extractArtifactsFromMetadata({ artifacts: run.artifacts }, runFiles, new Set());
+            maskedDelegatedRuns.push({
+              agent: run.agentName,
+              line: executionRecordLine(run.executions),
+              files: runFiles.map((artifact) => String(artifact["relativePath"] ?? artifact["filename"] ?? "artifact")),
+            });
+          }
+          continue;
+        }
         const agentName = message.metadata?.["agentName"];
         // The files this delegation recorded, named the way the turn's attachments are, so the
         // directive can tell them from the files another delegation of the turn finished.
@@ -4898,7 +4915,15 @@ async function _runTurn(
     // When orchestration returns grounded evidence, inject a strong nudge
     // telling the model to synthesize NOW instead of re-delegating for the same data.
     {
-      const disposition = classifyPostOrchestrationDisposition(toolResultMessages);
+      const classifiedDisposition = classifyPostOrchestrationDisposition(toolResultMessages);
+      // A plan step or a workflow step whose run masked figures is recorded as failed, so nothing
+      // builds on it (tools/plan-executor.ts, tools/workflow-catalog.ts), and the plan reads as a
+      // failure here. What the turn owes the user then is the honest account a masked
+      // delegate_to_agent gets below, not "attempt a different strategy": the sandbox the run
+      // needed did not run its code.
+      const disposition = classifiedDisposition === "failure" && maskedDelegatedRuns.length > 0
+        ? "synthesize"
+        : classifiedDisposition;
       if (disposition === "synthesize") {
         _consecutiveDelegationFailures = 0;
         // #1 (audit 763394da): before synthesizing/relaying after a successful

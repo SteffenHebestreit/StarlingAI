@@ -453,4 +453,27 @@ describe("the code a delegated run executed", () => {
     expect(frame).not.toContain(TOOL_FAILURES_UNRECOVERED_HEADER);
     expect(stripDelegatedRunRecord(frame)).not.toContain("8 code executions");
   });
+
+  it("a fan-out one of whose runs masked figures: its summed record above, and the partial note instead of 'Relay ALL … numbers'", () => {
+    // parallel_delegate and run_task_graph now hand back their runs' summed record (tools/sub-agent.ts).
+    const masked = { attempted: 7, failed: 4, succeededWithOutput: 0, unobservedFigures: 2 };
+    const cases: Array<[string, string, Record<string, unknown>]> = [
+      ["parallel_delegate", `**[coder]**:\n${MASKED_REPLY}`, { taskCount: 1, succeeded: 1, failed: 0 }],
+      ["run_task_graph", `Swarm task graph complete.\n- count [completed] coder\n\n${MASKED_REPLY}`, { completed: ["count"], failed: [], blocked: [] }],
+    ];
+    for (const [tool, text, metadata] of cases) {
+      const plain = buildModelVisibleToolResult(tool, text, metadata);
+      const frame = buildModelVisibleToolResult(tool, text, { ...metadata, specialistExecutions: masked });
+
+      expect(noteOf(plain)).toMatch(/^IMPORTANT: Relay ALL specific details/);
+      expect(noteOf(frame)).toBe("IMPORTANT: Figures marked [not observed] appear in no tool result of this run (see the record above), "
+        + "so nothing that ran computed them: do NOT supply, estimate or round values for them; say they could not be computed. "
+        + "Do NOT delegate again for this task in this turn.");
+      expect(frame.indexOf(EXECUTIONS_HEADER)).toBeGreaterThanOrEqual(0);
+      expect(frame.indexOf(EXECUTIONS_HEADER)).toBeLessThan(frame.search(/^IMPORTANT:/m));
+      expect(evidenceOf(frame)).toBe(evidenceOf(plain));
+      // A fan-out whose runs printed keeps the frame it had.
+      expect(buildModelVisibleToolResult(tool, text, { ...metadata, specialistExecutions: { attempted: 1, failed: 0, succeededWithOutput: 1 } })).toBe(plain);
+    }
+  });
 });

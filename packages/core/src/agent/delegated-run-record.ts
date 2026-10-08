@@ -104,6 +104,77 @@ export function addExecutionRecord(into: DelegatedExecutionRecord, add: Delegate
   if (add.unobservedFigures) into.unobservedFigures = (into.unobservedFigures ?? 0) + add.unobservedFigures;
 }
 
+/**
+ * One run of a fan-out whose account had figures masked: who ran it, its record and the files it
+ * recorded. A fan-out's summed record cannot say which of its runs that was, and the turn names that
+ * run and its files, and only those, as written but not run successfully (agent/runtime.ts).
+ */
+export interface MaskedDelegatedRun {
+  agentName: string;
+  executions: DelegatedExecutionRecord;
+  artifacts: Record<string, unknown>[];
+}
+
+function recordsIn(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === "object" && !Array.isArray(entry))
+    : [];
+}
+
+/** The well-formed entries of a fan-out's `maskedRuns`, each one a run that did mask figures. */
+export function readMaskedRuns(value: unknown): MaskedDelegatedRun[] {
+  return recordsIn(value).flatMap((entry) => {
+    const executions = readExecutionRecord(entry["executions"]);
+    const agentName = entry["agentName"];
+    if (typeof agentName !== "string" || !agentName || !unbackedFiguresMasked(executions)) return [];
+    return [{ agentName, executions: executions!, artifacts: recordsIn(entry["artifacts"]) }];
+  });
+}
+
+/**
+ * What a fan-out (parallel_delegate, run_task_graph, execute_plan, run_workflow) hands back about
+ * the code its runs executed: the sum of their records as `specialistExecutions`, and each run that
+ * masked figures as an entry of `maskedRuns`. In review all four dropped the record: a coordinator
+ * whose coder's only execution failed restated the coder's masked figures through parallel_delegate
+ * and went out as a success, and a plan built its next step on the masked text while the turn
+ * scored itself complete. Each run is added as its delegation's metadata (agentName, artifacts,
+ * specialistExecutions, maskedRuns); a run's own masked runs are passed on as they are. Nothing is
+ * handed back when no run carried a record, so a fan-out that ran no code stays as it was.
+ */
+export function createFanOutExecutionRecords(): {
+  add(metadata: Record<string, unknown> | undefined, agentName?: string): DelegatedExecutionRecord | null;
+  metadata(): { specialistExecutions?: DelegatedExecutionRecord; maskedRuns?: MaskedDelegatedRun[] };
+} {
+  let total: DelegatedExecutionRecord | null = null;
+  const maskedRuns: MaskedDelegatedRun[] = [];
+  return {
+    add(metadata, agentName) {
+      const record = readExecutionRecord(metadata?.["specialistExecutions"]);
+      if (!record) return null;
+      total ??= { attempted: 0, failed: 0, succeededWithOutput: 0 };
+      addExecutionRecord(total, record);
+      const nested = readMaskedRuns(metadata?.["maskedRuns"]);
+      if (nested.length > 0) {
+        maskedRuns.push(...nested);
+      } else if (unbackedFiguresMasked(record)) {
+        const named = metadata?.["agentName"];
+        maskedRuns.push({
+          agentName: typeof named === "string" && named ? named : agentName || "delegated agent",
+          executions: record,
+          artifacts: recordsIn(metadata?.["artifacts"]),
+        });
+      }
+      return record;
+    },
+    metadata() {
+      return {
+        ...(total ? { specialistExecutions: { ...total } } : {}),
+        ...(maskedRuns.length > 0 ? { maskedRuns: [...maskedRuns] } : {}),
+      };
+    },
+  };
+}
+
 /** The run executed code and none of it completed with output: every figure it states came from elsewhere. */
 export function noExecutionCompleted(record: DelegatedExecutionRecord | null | undefined): boolean {
   return Boolean(record) && record!.attempted > 0 && record!.succeededWithOutput === 0;
