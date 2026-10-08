@@ -41,6 +41,7 @@ import {
   countUnobservedFigures,
   maskUnobservedFigures,
   verbatimQuotedCodeSpans,
+  verbatimQuotedCommandSpans,
   type FigureCheckSpan,
 } from "./figure-provenance.js";
 import {
@@ -3735,48 +3736,52 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // An agent without an allow-list holds every registered tool, so the wire list stands in.
     const tracksFigures = (effectiveToolNames ?? tools.map((tool) => tool.name))
       .some((name) => requiresSandbox(name) || receivesExecutionRecords(name));
-    // Keys of every figure the run RECEIVED or EXECUTED: its system prompt, every user, tool and
-    // system message, its per-iteration nudges, and the arguments of its sandbox calls. Never its
-    // own prose, the files it wrote, or what it shared: those are the claims being checked.
+    // Keys of every figure the run RECEIVED: its system prompt, every user, tool and system
+    // message, and its per-iteration nudges. Never its own prose, the files it wrote, what it
+    // shared or the commands it sent to the sandbox: those are the claims being checked.
     const observedFigureKeys = new Set<string>();
     if (tracksFigures) addFigureKeys(observedFigureKeys, systemPrompt);
     // A RUN'S OWN CLAIM HANDED BACK TO IT IS STILL ITS OWN CLAIM. Keys of the figures the run put
-    // into the arguments of its own calls before any input had contained them: the files it wrote,
-    // what it shared, the task it delegated. In review, a coder whose sandbox was broken wrote its
-    // "result" into results.md from its head, read the file back, and the read counted as the
-    // figure's source, so its answer went unmasked and the run reported success. A grep over the
-    // file, a git diff, the echo of share_finding, the shared-findings refresh, read_shared_facts and
-    // a specialist repeating a delegated task's figure hand the claim back the same way. So no tool
-    // result or system message adds one of these keys; the user's own messages, the system prompt
-    // and the runtime's nudges still do. The same session-00b3675d rule keeps a read-back of the
-    // run's own file out of the shared facts (see the auto-share below).
+    // into the arguments of its own calls before any input had contained them: the files it
+    // wrote, what it shared, the task it delegated, the commands it ran. In review, a coder whose
+    // sandbox was broken wrote its "result" into results.md from its head, read the file back, and
+    // the read counted as the figure's source, so its answer went unmasked and the run reported
+    // success. A grep over the file, a git diff, the echo of share_finding, the shared-findings
+    // refresh, read_shared_facts and a specialist repeating a delegated task's figure hand the
+    // claim back the same way. So no tool result or system message adds one of these keys; the
+    // user's own messages, the system prompt and the runtime's nudges still do. The same
+    // session-00b3675d rule keeps a read-back of the run's own file out of the shared facts (see
+    // the auto-share below).
     const ownClaimFigureKeys = new Set<string>();
     // How far into `history` the set has read. The trim digests, drops and clamps history in place,
     // so the set is filled BEFORE each trim; rebuilt from history when the answer is written, it
-    // would miss a figure the run read early and the trim has since removed.
+    // would miss a figure the run read early and the trim has since removed. The run's own
+    // messages add nothing: their prose and their calls are what it claims.
     let absorbedHistoryLength = 0;
     const absorbNewHistory = (): void => {
       if (!tracksFigures) return;
       for (; absorbedHistoryLength < history.length; absorbedHistoryLength++) {
         const message = history[absorbedHistoryLength]!;
-        if (message.role !== "assistant") {
-          const content = typeof message.content === "string" ? message.content : "";
-          addFigureKeys(observedFigureKeys, content, message.role === "user" ? undefined : ownClaimFigureKeys);
-          continue;
-        }
-        for (const call of message.tool_calls ?? []) {
-          if (requiresSandbox(call.function.name)) addFigureKeys(observedFigureKeys, call.function.arguments);
-        }
+        if (message.role === "assistant") continue;
+        const content = typeof message.content === "string" ? message.content : "";
+        addFigureKeys(observedFigureKeys, content, message.role === "user" ? undefined : ownClaimFigureKeys);
       }
     };
     /**
-     * The figures a call's arguments introduce. A sandbox call's arguments are what the run
-     * executed, read above as received. A read (IDEMPOTENT_TOOLS) asks for something and claims
-     * nothing: a figure in a path, pattern or query is confirmed by an input that contains it.
-     * Read when the call is made, against what the run had received by then.
+     * The figures a call's arguments introduce. A read (IDEMPOTENT_TOOLS) asks for something and
+     * claims nothing: a figure in a path, pattern or query is confirmed by an input that contains
+     * it. Read when the call is made, against what the run had received by then.
+     *
+     * A sandbox call's arguments are claims like any other's. They were read as received, as what
+     * the run executed, and in review that laundered the broken-sandbox run's figures twice: a
+     * shell_exec `cat > results.md <<'X'` heredoc holding "8393" and "7597648268" exited 0 and
+     * printed nothing, and git_commit's message "primes: 8393 Primzahlen, Summe 7597648268" is the
+     * model's prose, not a program; either way the answer stating them went out unmasked as a
+     * success, while the same text through write_file was masked. A command the run quotes whole
+     * keeps its figures (see the quoted-code check below).
      */
     const recordOwnClaims = (toolName: string, args: unknown): void => {
-      if (!tracksFigures || requiresSandbox(toolName) || IDEMPOTENT_TOOLS.has(toolName)) return;
+      if (!tracksFigures || IDEMPOTENT_TOOLS.has(toolName)) return;
       const claimed = new Set<string>();
       addArgumentFigureKeys(claimed, args);
       for (const key of claimed) {
@@ -3795,6 +3800,13 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     const writtenFileText = new Map<string, string>();
     // The arguments of the sandbox calls that ran (their result reports programOutputChars).
     const ranCallArguments: string[] = [];
+    // And their commands, as the model wrote them. A command is a claim of the run like any other
+    // argument (recordOwnClaims), and an honest report quotes what it ran: "`ls /usr/bin/ | head
+    // -50` gab nichts aus" is not a figure the run made up. So the check also reads past a quote
+    // of a WHOLE command that ran, inline or fenced. Only a whole one: a fence repeating the lines
+    // of a heredoc the command wrote would hand that file's figures back. A git_* call never
+    // reports programOutputChars, so a commit message is never quotable.
+    const ranCommands: string[] = [];
     const noteWrittenText = (toolName: string, args: Record<string, unknown>, writtenPath: unknown): void => {
       const path = normalizeArtifactPath(args["path"]) ?? normalizeArtifactPath(writtenPath);
       if (!path) return;
@@ -3823,10 +3835,13 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         return false;
       });
     };
-    const quotedCodeSpans = (text: string): FigureCheckSpan[] => (writtenFileText.size === 0 ? [] : verbatimQuotedCodeSpans(
-      text,
-      [...writtenFileText].filter(([path]) => ranByTheRun(path)).map(([, content]) => content),
-    ));
+    const quotedCodeSpans = (text: string): FigureCheckSpan[] => [
+      ...(writtenFileText.size === 0 ? [] : verbatimQuotedCodeSpans(
+        text,
+        [...writtenFileText].filter(([path]) => ranByTheRun(path)).map(([, content]) => content),
+      )),
+      ...verbatimQuotedCommandSpans(text, ranCommands),
+    ];
     // Measured, never acted on: how many figures a run with at least one productive execution
     // stated without an input containing them (the partial-output case the mask does not cover).
     let shadowUnobservedFigures: number | undefined;
@@ -7196,7 +7211,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
               if (!result.success) record.failed += 1;
               else if (printed > 0) record.succeededWithOutput += 1;
             }
-            if (tracksFigures) ranCallArguments.push(JSON.stringify(tc.arguments ?? {}));
+            if (tracksFigures) {
+              ranCallArguments.push(JSON.stringify(tc.arguments ?? {}));
+              const command = tc.arguments?.["command"];
+              if (typeof command === "string") ranCommands.push(command);
+            }
           }
         }
         if (tracksFigures && result.success && (tc.name === "write_file" || tc.name === "edit_file")) {

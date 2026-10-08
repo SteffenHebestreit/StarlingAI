@@ -118,7 +118,36 @@ export function countUnobservedFigures(text: string, observed: ReadonlySet<strin
  */
 export function verbatimQuotedCodeSpans(text: string, sources: readonly string[]): FigureCheckSpan[] {
   const quotable = sources.map(normalizeQuotedLines).filter(Boolean).map((source) => `\n${source}\n`);
-  if (quotable.length === 0 || !/^ {0,3}(?:`{3,}|~{3,})/m.test(text)) return [];
+  if (quotable.length === 0) return [];
+  return fencedBlockSpans(text, (body) => quotable.some((source) => source.includes(`\n${body}\n`)));
+}
+
+/**
+ * The inline code spans and the closed fenced code blocks in `text` that quote one of `commands`
+ * whole: their content, compared without line-ending style, trailing whitespace or the blank lines
+ * and spaces around it, IS the command. A figure there is one of the command the run executed.
+ * Part of a command is no such quote, and neither are some of its lines: a fence that repeats the
+ * lines of a heredoc the command wrote would hand that file's figures back as the command's.
+ */
+export function verbatimQuotedCommandSpans(text: string, commands: readonly string[]): FigureCheckSpan[] {
+  const quotable = new Set(commands.map(normalizedCommand).filter(Boolean));
+  if (quotable.size === 0) return [];
+  const spans: FigureCheckSpan[] = [];
+  for (const match of text.matchAll(/(?<!`)(`+)(?!`)([\s\S]*?[^`])\1(?!`)/g)) {
+    if (!quotable.has(normalizedCommand(match[2]!))) continue;
+    const start = match.index ?? 0;
+    spans.push({ start, end: start + match[0].length });
+  }
+  return [...spans, ...fencedBlockSpans(text, (body) => quotable.has(body.trim()))];
+}
+
+function normalizedCommand(text: string): string {
+  return normalizeQuotedLines(text).trim();
+}
+
+/** The bodies of the closed fenced code blocks in `text` whose normalized body `accept` takes. */
+function fencedBlockSpans(text: string, accept: (body: string) => boolean): FigureCheckSpan[] {
+  if (!/^ {0,3}(?:`{3,}|~{3,})/m.test(text)) return [];
   const lines: Array<{ text: string; start: number }> = [];
   let offset = 0;
   for (const line of text.split("\n")) {
@@ -138,7 +167,7 @@ export function verbatimQuotedCodeSpans(text: string, sources: readonly string[]
     // An open fence runs to the end of the answer, and nothing in it is a delimited quote.
     if (close >= lines.length) break;
     const body = normalizeQuotedLines(lines.slice(open + 1, close).map((line) => withoutIndent(line.text, indent)).join("\n"));
-    if (body && quotable.some((source) => source.includes(`\n${body}\n`))) {
+    if (body && accept(body)) {
       spans.push({ start: lines[open + 1]!.start, end: lines[close]!.start });
     }
     open = close;

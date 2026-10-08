@@ -7,6 +7,7 @@ import {
   figureKey,
   maskUnobservedFigures,
   verbatimQuotedCodeSpans,
+  verbatimQuotedCommandSpans,
 } from "../agent/figure-provenance.js";
 import { INCIDENT, INVENTED_FIGURES } from "./support/figure-provenance-incident.js";
 
@@ -91,15 +92,40 @@ describe("code an answer quotes verbatim", () => {
   });
 });
 
+describe("a command an answer quotes whole", () => {
+  const LISTING = "ls /usr/bin/ | head -50";
+  const HEREDOC = "cat > results.md <<'X'\nAnzahl der Primzahlen: 8393\nSumme: 7597648268\nX";
+
+  it("inline, it is read past; the prose around it is not", () => {
+    const answer = `\`${LISTING}\` gab nichts aus; es gibt 8393 Primzahlen.`;
+    const spans = verbatimQuotedCommandSpans(answer, [LISTING]);
+
+    expect(spans).toHaveLength(1);
+    expect(maskUnobservedFigures(answer, new Set(), spans)).toEqual({
+      text: `\`${LISTING}\` gab nichts aus; es gibt [not observed] Primzahlen.`,
+      masked: 1,
+    });
+  });
+
+  it("in a closed fence, it is read past", () => {
+    const answer = `Ausgeführt:\n\`\`\`sh\n${HEREDOC}\n\`\`\`\nfertig`;
+    expect(maskUnobservedFigures(answer, new Set(), verbatimQuotedCommandSpans(answer, [HEREDOC])).masked).toBe(0);
+  });
+
+  it("part of a command, inline, or some of its lines in a fence, is no quote", () => {
+    expect(verbatimQuotedCommandSpans("`head -50` gab nichts aus", [LISTING])).toEqual([]);
+    expect(verbatimQuotedCommandSpans("```\nAnzahl der Primzahlen: 8393\nSumme: 7597648268\n```", [HEREDOC])).toEqual([]);
+    expect(verbatimQuotedCommandSpans(`\`${LISTING}\``, [])).toEqual([]);
+  });
+});
+
 describe("masking the figures no input of the run contained", () => {
-  // What the coder's run received or executed: the task, every tool result as the model read it,
-  // and the commands it sent to the sandbox. Not the script it wrote: write_file content is its
-  // own claim, and "200001" in it proves nothing.
+  // What the coder's run received: the task and every tool result as the model read it. Not what
+  // it wrote: the script and the commands are its own claims, and "200001" in them proves nothing.
   const corpus = new Set<string>();
   addFigureKeys(corpus, INCIDENT.task);
   for (const call of INCIDENT.calls) {
     addFigureKeys(corpus, call.result.success ? call.result.output : `Error: ${call.result.error}`);
-    if (call.tool === "shell_exec" || call.tool === "run_script") addFigureKeys(corpus, JSON.stringify(call.args));
   }
 
   it("masks exactly the two invented figures of the recorded reply and keeps the task's", () => {

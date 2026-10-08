@@ -888,6 +888,110 @@ describe("the code a delegated run executed, and the figures it states", () => {
     }, 60_000);
   });
 
+  describe("(p) what the run put into its own sandbox calls is its claim", () => {
+    // The sandbox is broken: every command fails or prints nothing. A sandbox call's arguments
+    // were read as received, so the figures of a heredoc the model wrote from its head, or of its
+    // commit message, came back as evidence for its answer.
+    const HEREDOC = "cat > results.md <<'X'\nAnzahl der Primzahlen: 8393\nSumme: 7597648268\nX";
+    const RESULTS = "Anzahl der Primzahlen: 8393\nSumme: 7597648268\n";
+    const failingNode = (args: Record<string, unknown>): ToolResult =>
+      (String(args["command"]).startsWith("node ") ? failed() : silent(String(args["command"])));
+    const runSandboxWrite = async (
+      root: string,
+      calls: Array<{ tool: string; args: Record<string, unknown> }>,
+      finalAnswer: string,
+      handlers: Record<string, Handler> = {},
+    ) => {
+      await registerTools({ shell_exec: failingNode, ...handlers });
+      completeMock.mockImplementation(async (messages: Message[]) => scripted([
+        { tool: "shell_exec", args: { command: "node primes.js" } },
+        ...calls,
+      ], finalAnswer)(messages));
+      return runAgent("coder", INCIDENT.task, root);
+    };
+
+    it("a heredoc the run wrote from its head", async () => {
+      const result = await runSandboxWrite("parent-provenance-heredoc", [
+        { tool: "shell_exec", args: { command: HEREDOC } },
+      ], "Es gibt 8393 Primzahlen, ihre Summe ist 7597648268.");
+
+      expect(result.output).toBe("Es gibt [not observed] Primzahlen, ihre Summe ist [not observed].");
+      expect(result.executions).toEqual({ attempted: 2, failed: 1, succeededWithOutput: 0, unobservedFigures: 2 });
+      expect(result.stats.outcome).toBe("partial");
+    }, 60_000);
+
+    it("the same file read back", async () => {
+      const result = await runSandboxWrite("parent-provenance-heredoc-read", [
+        { tool: "shell_exec", args: { command: HEREDOC } },
+        { tool: "read_file", args: { path: "results.md" } },
+      ], "Es gibt 8393 Primzahlen, ihre Summe ist 7597648268.", {
+        read_file: () => ({ success: true, output: RESULTS }),
+      });
+
+      expect(result.output).toBe("Es gibt [not observed] Primzahlen, ihre Summe ist [not observed].");
+      expect(result.executions?.unobservedFigures).toBe(2);
+    }, 60_000);
+
+    it("a figure right after a line break of the command, read back", async () => {
+      // In the call's JSON the escape glues "n" to the figure ("\\n8393"), so a claim read from
+      // that text would miss it and the read-back would vouch for it.
+      const result = await runSandboxWrite("parent-provenance-heredoc-newline", [
+        { tool: "shell_exec", args: { command: "cat > results.md <<'X'\n8393\n7597648268\nX" } },
+        { tool: "read_file", args: { path: "results.md" } },
+      ], "Es gibt 8393 Primzahlen, ihre Summe ist 7597648268.", {
+        read_file: () => ({ success: true, output: "8393\n7597648268\n" }),
+      });
+
+      expect(result.output).toBe("Es gibt [not observed] Primzahlen, ihre Summe ist [not observed].");
+      expect(result.executions?.unobservedFigures).toBe(2);
+    }, 60_000);
+
+    it("a commit message, echoed by git_commit", async () => {
+      const result = await runSandboxWrite("parent-provenance-commit-message", [
+        { tool: "git_commit", args: { message: "primes: 8393 Primzahlen, Summe 7597648268" } },
+      ], "Es gibt 8393 Primzahlen, Summe 7597648268.", {
+        git_commit: (args) => ({
+          success: true,
+          output: `[main 4f3c2a1] ${String(args["message"])}\n 1 file changed, 2 insertions(+)`,
+          metadata: { sandboxed: true },
+        }),
+      });
+
+      expect(result.output).toBe("Es gibt [not observed] Primzahlen, Summe [not observed].");
+      expect(result.executions).toEqual({ attempted: 1, failed: 1, succeededWithOutput: 0, unobservedFigures: 2 });
+      expect(result.stats.outcome).toBe("partial");
+    }, 60_000);
+
+    it("a fence repeating the heredoc's lines is no quote of the command", async () => {
+      const result = await runSandboxWrite("parent-provenance-heredoc-lines", [
+        { tool: "shell_exec", args: { command: HEREDOC } },
+      ], "Das Skript lief nicht. In results.md steht:\n```\nAnzahl der Primzahlen: 8393\nSumme: 7597648268\n```");
+
+      expect(result.output).toBe("Das Skript lief nicht. In results.md steht:\n```\nAnzahl der Primzahlen: [not observed]\nSumme: [not observed]\n```");
+      expect(result.executions?.unobservedFigures).toBe(2);
+    }, 60_000);
+
+    it("the whole command, quoted, keeps its figures; the prose beside it does not", async () => {
+      const quote = "Ausgeführt habe ich:\n```sh\n" + HEREDOC + "\n```";
+      const result = await runSandboxWrite("parent-provenance-heredoc-quoted", [
+        { tool: "shell_exec", args: { command: HEREDOC } },
+      ], `Es gibt 8393 Primzahlen. ${quote}`);
+
+      expect(result.output).toBe(`Es gibt [not observed] Primzahlen. ${quote}`);
+      expect(result.executions?.unobservedFigures).toBe(1);
+    }, 60_000);
+
+    it("control: a figure of the task in a command stays", async () => {
+      const finalAnswer = "Ich habe primes.js mit 100000 und 200000 gestartet; es lief nicht, ich nenne keine Zahlen.";
+      const result = await runSandboxWrite("parent-provenance-task-figures", [
+        { tool: "shell_exec", args: { command: "node primes.js 100000 200000" } },
+      ], finalAnswer);
+
+      expect(result.output).toBe(finalAnswer);
+      expect(result.executions).toEqual({ attempted: 2, failed: 2, succeededWithOutput: 0 });
+    }, 60_000);
+  });
+
   it("(k) a figure the runtime's forced-answer instruction gave the run is one it received", async () => {
     // Ten checks in the run's only iteration, all failing; the synthesis comes back empty, and the
     // rescue tells the model how many tool calls it made. The count it repeats is not made up.
