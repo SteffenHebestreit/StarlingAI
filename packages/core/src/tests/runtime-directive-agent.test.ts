@@ -435,6 +435,74 @@ describe("a turn the user directed to one agent", () => {
     expect(delegated).toEqual([expect.objectContaining({ agentName: "code_analyst" })]);
   });
 
+  // A stream that broke off: the provider failed after the model had written prose, which
+  // collectStream hands the turn as the error's partial response.
+  describe("when the call breaks off after the model wrote prose", () => {
+    const PROSE = "ORCHESTRATOR-OWN-ANSWER: int() truncates the cent; use round(subtotal + tax, 2). ".repeat(6);
+    function brokenStream(): AsyncGenerator<unknown> {
+      return (async function* () {
+        yield { type: "text_delta", content: PROSE };
+        throw new Error("OpenAI-compatible stream failed (model: m): Error: socket hang up");
+      })();
+    }
+    const salvaged = (): boolean => auditMock.mock.calls.some(([, details]) => (details as { type?: string } | undefined)?.type === "llm_error_partial_salvaged");
+
+    it("dispatches the named agent and shows none of the prose", async () => {
+      // The salvage shipped the orchestrator's own prose with an "incomplete" caveat, and the named
+      // agent never ran (integration review, 2026-10-08).
+      const { AgentSession, runTurn } = await loadRuntime();
+      let call = 0;
+      streamMock.mockImplementation(() => {
+        call += 1;
+        return call === 1 ? brokenStream() : answerStream(ANSWER);
+      });
+      const streamed: string[] = [];
+
+      const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
+      const result = await runTurn({ session, userMessage: MESSAGE, allowedAgents: ["code_analyst"], directiveAgent: "code_analyst", onChunk: (text) => streamed.push(text) });
+
+      expect(delegated).toEqual([expect.objectContaining({ agentName: "code_analyst", task: MESSAGE })]);
+      expect(result.response).not.toContain("ORCHESTRATOR-OWN-ANSWER");
+      expect(streamed.join("")).not.toContain("ORCHESTRATOR-OWN-ANSWER");
+      expect(salvaged()).toBe(false);
+      expect(result.response).toContain("MODEL-ANSWER");
+    });
+
+    it("shows none of the prose when the turn's deadline cut the call", async () => {
+      // Past the deadline there is no time left to run the agent; the turn ends without the prose.
+      const { AgentSession, runTurn } = await loadRuntime();
+      streamMock.mockImplementation((_messages: unknown, _tools: unknown, signal: AbortSignal) => (async function* () {
+        yield { type: "text_delta", content: PROSE };
+        await new Promise((_resolve, reject) => {
+          if (signal.aborted) reject(signal.reason);
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      })());
+      const streamed: string[] = [];
+
+      const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
+      const result = await runTurn({
+        session, userMessage: MESSAGE, allowedAgents: ["code_analyst"], directiveAgent: "code_analyst", turnTimeoutOverrideMs: 1_500, onChunk: (text) => streamed.push(text),
+      });
+
+      expect(result.response).not.toContain("ORCHESTRATOR-OWN-ANSWER");
+      expect(streamed.join("")).not.toContain("ORCHESTRATOR-OWN-ANSWER");
+      expect(salvaged()).toBe(false);
+    }, 15_000);
+
+    it("still salvages the prose of a turn no agent was named for", async () => {
+      // The control: the salvage is unchanged where no dispatch replaces the call.
+      const { AgentSession, runTurn } = await loadRuntime();
+      streamMock.mockImplementation(() => brokenStream());
+
+      const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
+      const result = await runTurn({ session, userMessage: MESSAGE });
+
+      expect(result.performance?.finishReason).toBe("llm_error_partial_salvaged");
+      expect(result.response).toContain("ORCHESTRATOR-OWN-ANSWER");
+    });
+  });
+
   // The dispatch handed the agent the bare request, and a specialist starts from its task and
   // context alone (review of a3773aa, 2026-10-08).
   it("hands the named agent the excerpts of the attached file the orchestrator was shown", async () => {

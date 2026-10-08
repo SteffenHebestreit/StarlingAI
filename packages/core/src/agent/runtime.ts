@@ -3015,19 +3015,74 @@ async function _runTurn(
       // shipping over the evidence path, and reasoning alone is never shown — it is the model's
       // scratchpad, not its answer. The caveat is mandatory: this text did not finish.
       const partial = (err as { partialResponse?: LLMResponse } | null)?.partialResponse;
-      const partialText = typeof partial?.content === "string" ? partial.content.trim() : "";
-      if (partialText.length >= MIN_SUBSTANTIVE_OUTPUT_CHARS) {
-        const cleaned = sanitizeUserFacingAssistantResponse(partialText, 0);
-        if (cleaned.trim().length >= MIN_SUBSTANTIVE_OUTPUT_CHARS) {
-          const finalResponse = prependTurnIncompleteCaveat(cleaned);
+      if (directiveAgentPending && !timeoutSignal.aborted) {
+        // A pending --agent turn's call broke off: a stall, a socket error. Its one right answer
+        // was the delegation to the named agent, and the directive block below dispatches it in
+        // the call's place, as it does for a call that answered in prose (a3773aa). The call's
+        // prose is the orchestrator's own answer, which the turn does not show (6dbbe90): salvaged,
+        // it shipped as the turn's answer and the named agent never ran (integration review,
+        // 2026-10-08). Past the turn's deadline there is no time left to run the agent; the turn
+        // ends below as any other cut call does, without that prose.
+        llmResponse = {
+          content: null,
+          tool_calls: [],
+          usage: partial?.usage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+          finishReason: "incomplete",
+        };
+      } else {
+        const partialText = typeof partial?.content === "string" ? partial.content.trim() : "";
+        if (!directiveAgentPending && partialText.length >= MIN_SUBSTANTIVE_OUTPUT_CHARS) {
+          const cleaned = sanitizeUserFacingAssistantResponse(partialText, 0);
+          if (cleaned.trim().length >= MIN_SUBSTANTIVE_OUTPUT_CHARS) {
+            const finalResponse = prependTurnIncompleteCaveat(cleaned);
+            persistAssistantTurnState(session, finalResponse, getTurnSwarmState());
+            if (opts.onChunk) opts.onChunk(finalResponse);
+            logAudit("guardrail_flagged", {
+              type: "llm_error_partial_salvaged",
+              error: String(err).slice(0, 300),
+              partialChars: cleaned.length,
+              reasoningChars: partial?.reasoning?.length ?? 0,
+            }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+            const performance = buildTurnPerformanceMetrics({
+              turnStartedAt,
+              firstModelResponseMs,
+              llmCalls,
+              llmTimeMs,
+              toolCallsRequested,
+              toolExecutionTimeMs,
+              lastPromptMetrics,
+              completionChars: finalResponse.length,
+              finishReason: "llm_error_partial_salvaged",
+              blocked: false,
+              toolIterations: iterationCount,
+            });
+            logAudit("turn_performance", { ...performance, usage: totalUsage }, {
+              sessionId: session.id, channel: session.channel, severity: "info",
+            });
+            logAudit("message_sent", { length: finalResponse.length, toolCalls: iterationCount, usage: totalUsage, performance }, {
+              sessionId: session.id, channel: session.channel, severity: "info",
+            });
+            return {
+              response: finalResponse,
+              toolCallsExecuted: iterationCount,
+              guardrailEvents,
+              usage: totalUsage,
+              blocked: false,
+              swarmState: getTurnSwarmState(),
+              performance,
+              qualityScorecard: buildCurrentTurnScorecard(finalResponse.length, "llm_error_partial_salvaged"),
+            };
+          }
+        }
+        const delegateEvidence = findRecentDelegateEvidence(session.getHistory(), { scopeToCurrentTurn: true });
+        const sharedFactsEvidence = await getSharedFactsEvidenceForFinalSynthesis(session.id);
+        const recoveryEvidence = chooseBetterRecoveryEvidence(delegateEvidence, sharedFactsEvidence, { preferHigherScore: false });
+        if (recoveryEvidence) {
+          const finalResponse = formatRecoveryEvidenceForFinalUser(recoveryEvidence.evidence, {
+            sourceSensitive: initialDynamicGuidance?.sourceSensitive ?? false,
+          });
           persistAssistantTurnState(session, finalResponse, getTurnSwarmState());
           if (opts.onChunk) opts.onChunk(finalResponse);
-          logAudit("guardrail_flagged", {
-            type: "llm_error_partial_salvaged",
-            error: String(err).slice(0, 300),
-            partialChars: cleaned.length,
-            reasoningChars: partial?.reasoning?.length ?? 0,
-          }, { sessionId: session.id, channel: session.channel, severity: "warn" });
           const performance = buildTurnPerformanceMetrics({
             turnStartedAt,
             firstModelResponseMs,
@@ -3037,15 +3092,25 @@ async function _runTurn(
             toolExecutionTimeMs,
             lastPromptMetrics,
             completionChars: finalResponse.length,
-            finishReason: "llm_error_partial_salvaged",
+            finishReason: "llm_error_evidence_backstop",
             blocked: false,
             toolIterations: iterationCount,
           });
+          logAudit("guardrail_flagged", {
+            type: "llm_error_evidence_backstop",
+            error: String(err).slice(0, 300),
+            evidenceLength: recoveryEvidence.evidence.length,
+            evidenceItems: recoveryEvidence.itemCount,
+          }, { sessionId: session.id, channel: session.channel, severity: "warn" });
           logAudit("turn_performance", { ...performance, usage: totalUsage }, {
-            sessionId: session.id, channel: session.channel, severity: "info",
+            sessionId: session.id,
+            channel: session.channel,
+            severity: "info",
           });
           logAudit("message_sent", { length: finalResponse.length, toolCalls: iterationCount, usage: totalUsage, performance }, {
-            sessionId: session.id, channel: session.channel, severity: "info",
+            sessionId: session.id,
+            channel: session.channel,
+            severity: "info",
           });
           return {
             response: finalResponse,
@@ -3055,76 +3120,27 @@ async function _runTurn(
             blocked: false,
             swarmState: getTurnSwarmState(),
             performance,
-            qualityScorecard: buildCurrentTurnScorecard(finalResponse.length, "llm_error_partial_salvaged"),
+            qualityScorecard: buildCurrentTurnScorecard(finalResponse.length, "llm_error_evidence_backstop"),
           };
         }
+        return blocked(
+          `LLM error: ${String(err)}`,
+          getTurnSwarmState(),
+          buildTurnPerformanceMetrics({
+            turnStartedAt,
+            firstModelResponseMs,
+            llmCalls,
+            llmTimeMs,
+            toolCallsRequested,
+            toolExecutionTimeMs,
+            lastPromptMetrics,
+            completionChars: 0,
+            finishReason: "llm_error",
+            blocked: true,
+            toolIterations: iterationCount,
+          }),
+        );
       }
-      const delegateEvidence = findRecentDelegateEvidence(session.getHistory(), { scopeToCurrentTurn: true });
-      const sharedFactsEvidence = await getSharedFactsEvidenceForFinalSynthesis(session.id);
-      const recoveryEvidence = chooseBetterRecoveryEvidence(delegateEvidence, sharedFactsEvidence, { preferHigherScore: false });
-      if (recoveryEvidence) {
-        const finalResponse = formatRecoveryEvidenceForFinalUser(recoveryEvidence.evidence, {
-          sourceSensitive: initialDynamicGuidance?.sourceSensitive ?? false,
-        });
-        persistAssistantTurnState(session, finalResponse, getTurnSwarmState());
-        if (opts.onChunk) opts.onChunk(finalResponse);
-        const performance = buildTurnPerformanceMetrics({
-          turnStartedAt,
-          firstModelResponseMs,
-          llmCalls,
-          llmTimeMs,
-          toolCallsRequested,
-          toolExecutionTimeMs,
-          lastPromptMetrics,
-          completionChars: finalResponse.length,
-          finishReason: "llm_error_evidence_backstop",
-          blocked: false,
-          toolIterations: iterationCount,
-        });
-        logAudit("guardrail_flagged", {
-          type: "llm_error_evidence_backstop",
-          error: String(err).slice(0, 300),
-          evidenceLength: recoveryEvidence.evidence.length,
-          evidenceItems: recoveryEvidence.itemCount,
-        }, { sessionId: session.id, channel: session.channel, severity: "warn" });
-        logAudit("turn_performance", { ...performance, usage: totalUsage }, {
-          sessionId: session.id,
-          channel: session.channel,
-          severity: "info",
-        });
-        logAudit("message_sent", { length: finalResponse.length, toolCalls: iterationCount, usage: totalUsage, performance }, {
-          sessionId: session.id,
-          channel: session.channel,
-          severity: "info",
-        });
-        return {
-          response: finalResponse,
-          toolCallsExecuted: iterationCount,
-          guardrailEvents,
-          usage: totalUsage,
-          blocked: false,
-          swarmState: getTurnSwarmState(),
-          performance,
-          qualityScorecard: buildCurrentTurnScorecard(finalResponse.length, "llm_error_evidence_backstop"),
-        };
-      }
-      return blocked(
-        `LLM error: ${String(err)}`,
-        getTurnSwarmState(),
-        buildTurnPerformanceMetrics({
-          turnStartedAt,
-          firstModelResponseMs,
-          llmCalls,
-          llmTimeMs,
-          toolCallsRequested,
-          toolExecutionTimeMs,
-          lastPromptMetrics,
-          completionChars: 0,
-          finishReason: "llm_error",
-          blocked: true,
-          toolIterations: iterationCount,
-        }),
-      );
     }
 
     totalUsage.promptTokens += llmResponse.usage.promptTokens;
