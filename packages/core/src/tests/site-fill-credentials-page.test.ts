@@ -28,6 +28,12 @@ describe("site_fill_credentials types only into a page of the credential's own s
         "example.com": { username: "agent@example.com", password: "pw-for-example", loginUrl: "https://example.com/login" },
         "intranet.example": { username: "agent", password: "pw-for-intranet", loginUrl: "http://intranet.example/login" },
         "nourl.example": { username: "agent", password: "pw-for-nourl" },
+        "app.example.com": {
+          username: "agent@example.com",
+          password: "pw-for-app",
+          loginUrl: "https://login.sso-provider.test/oauth/authorize?client_id=app",
+          urls: { reports: "http://reports.lan.example/monthly" },
+        },
       },
     }), "utf8");
     process.env["SAI_CONFIG_PATH"] = configPath;
@@ -115,7 +121,7 @@ describe("site_fill_credentials types only into a page of the credential's own s
 
     const r = await fill("example.com");
     expect(r.success).toBe(false);
-    expect(r.error).toBe("Refusing to fill the credential for example.com into a plain http page on example.com: only a credential whose login URL is http may be typed into one. Nothing was typed.");
+    expect(r.error).toBe("Refusing to fill the credential for example.com into a plain http page on example.com: only a host the credential records an http URL for takes it over http. Nothing was typed.");
     expect(typed(callTool)).toEqual([]);
   });
 
@@ -158,5 +164,50 @@ describe("site_fill_credentials types only into a page of the credential's own s
     expect(r.success).toBe(false);
     expect(r.error).toBe("Refusing to fill the credential for example.com: the browser's current page could not be read, so its host is unknown. Take a browser_snapshot and try again. Nothing was typed.");
     expect(typed(callTool)).toEqual([]);
+  });
+
+  // The operator records the URLs of a credential (no model-facing tool writes credentials), and
+  // a login page on another domain, such as a single sign-on provider's, is one of them. Those
+  // URLs' hosts are the credential's sites too; anything not recorded stays refused.
+  it("fills on the host of the login URL recorded for the credential (an SSO provider)", async () => {
+    const { callTool } = browserOn("https://login.sso-provider.test/oauth/authorize?client_id=app");
+
+    const r = await fill("app.example.com");
+    expect(r.success).toBe(true);
+    expect(typed(callTool)[1]!.arguments["text"]).toBe("pw-for-app");
+  });
+
+  it.each([
+    ["a host that only starts with the recorded one", "https://login.sso-provider.test.evil.test/oauth/authorize", "login.sso-provider.test.evil.test"],
+    ["the recorded host's parent domain", "https://sso-provider.test/login", "sso-provider.test"],
+    ["another host", "https://attacker.test/login", "attacker.test"],
+  ])("refuses %s, typing nothing", async (_label, url, pageHost) => {
+    const { callTool } = browserOn(url);
+
+    const r = await fill("app.example.com");
+    expect(r.success).toBe(false);
+    expect(r.error).toBe(`Refusing to fill the credential for app.example.com: the browser is on ${pageHost}, which is not app.example.com, login.sso-provider.test or reports.lan.example, nor a subdomain of one. Nothing was typed.`);
+    expect(typed(callTool)).toEqual([]);
+  });
+
+  it("refuses the recorded login host over http when the recorded URL is https", async () => {
+    const { callTool } = browserOn("http://login.sso-provider.test/oauth/authorize?client_id=app");
+
+    const r = await fill("app.example.com");
+    expect(r.success).toBe(false);
+    expect(r.error).toBe("Refusing to fill the credential for app.example.com into a plain http page on login.sso-provider.test: only a host the credential records an http URL for takes it over http. Nothing was typed.");
+    expect(typed(callTool)).toEqual([]);
+  });
+
+  it("lets an http recorded URL permit http on its own host only", async () => {
+    const reports = browserOn("http://reports.lan.example/monthly");
+    expect((await fill("app.example.com")).success).toBe(true);
+    expect(typed(reports.callTool)).toHaveLength(3);
+
+    for (const url of ["http://app.example.com/login", "http://eu.reports.lan.example/monthly"]) {
+      const other = browserOn(url);
+      expect((await fill("app.example.com")).success, url).toBe(false);
+      expect(typed(other.callTool), url).toEqual([]);
+    }
   });
 });

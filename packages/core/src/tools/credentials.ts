@@ -23,42 +23,54 @@ const log = childLogger("tool:credentials");
 // ── The page a credential may be typed into ───────────────────────────────────
 // The fill typed the stored username and password into whatever page the browser was on, and a
 // redirect, a page's own script or a look-alike link can put a foreign site there. The page
-// must be the credential's own host or a subdomain of it, as a password manager matches, and
-// served over https unless the credential's login URL says the site is http.
+// must be one of the credential's sites or a subdomain of one, as a password manager matches,
+// and served over https unless a URL recorded on the credential reaches that host over http.
 
-/** A host as URL parsing writes it (lower case, IDN as punycode), without a trailing dot. */
-function urlHost(host: string): string {
+/** A host as URL parsing writes it (lower case, IDN as punycode), without a trailing dot or a leading "www.". */
+function siteHost(host: string): string {
+  let parsed: string;
   try {
-    return new URL(`http://${host.trim()}`).hostname.replace(/\.$/, "");
+    parsed = new URL(`http://${host.trim()}`).hostname;
   } catch {
-    return host.trim().toLowerCase().replace(/\.$/, "");
+    parsed = host.trim().toLowerCase();
   }
+  return parsed.replace(/\.$/, "").replace(/^www\./, "");
 }
 
 /**
- * Whether the credential is for a plain-http site: its login URL is http, or, without one, every
- * URL recorded for it is. A credential that records no URL at all counts as an https one.
+ * The credential's sites: its own hostname, and the host of every URL recorded on it, the login
+ * URL and the named URLs. The operator records those (no model-facing tool writes credentials),
+ * and a login page on another domain, a single sign-on provider's, is one of them. `http` marks a
+ * host one of those URLs reaches over plain http; on no other host does a credential go over http.
  */
-function credentialAllowsHttp(cred: Pick<ResolvedSiteCredential, "loginUrl" | "urls">): boolean {
-  const recorded = cred.loginUrl ? [cred.loginUrl] : Object.values(cred.urls ?? {});
-  const protocols = recorded.map((url) => {
+function credentialSites(cred: Pick<ResolvedSiteCredential, "hostname" | "loginUrl" | "urls">): Array<{ host: string; http: boolean }> {
+  const sites = [{ host: siteHost(cred.hostname), http: false }];
+  for (const recorded of [cred.loginUrl, ...Object.values(cred.urls ?? {})]) {
+    let url: URL;
     try {
-      return new URL(url).protocol;
+      url = new URL(recorded ?? "");
     } catch {
-      return "";
+      continue;
     }
-  });
-  return protocols.length > 0 && protocols.every((protocol) => protocol === "http:");
+    if (url.protocol !== "https:" && url.protocol !== "http:") continue;
+    const host = siteHost(url.hostname);
+    const known = sites.find((site) => site.host === host);
+    if (known) known.http ||= url.protocol === "http:";
+    else sites.push({ host, http: url.protocol === "http:" });
+  }
+  return sites;
 }
 
 /**
- * Why the credential may not be typed into the page at `pageUrl`, or null when it may. The site
- * is the credential's hostname without a leading "www."; the page's host must equal it or end in
- * "." plus it (an IP address only equals), so evil-example.com and example.com.attacker.test are
- * other sites, and a look-alike in another script is compared as the punycode URL parsing makes.
+ * Why the credential may not be typed into the page at `pageUrl`, or null when it may. The page's
+ * host must equal one of the credential's sites or end in "." plus one (an IP address only
+ * equals), so evil-example.com and example.com.attacker.test are other sites, and a look-alike in
+ * another script is compared as the punycode URL parsing makes. Over plain http it must be a host
+ * a recorded http URL reaches, that host itself and not its subdomains.
  */
 export function credentialPageRefusal(cred: Pick<ResolvedSiteCredential, "hostname" | "loginUrl" | "urls">, pageUrl: string | undefined): string | null {
-  const site = urlHost(cred.hostname).replace(/^www\./, "");
+  const sites = credentialSites(cred);
+  const site = sites[0]!.host;
   let page: URL | undefined;
   try {
     page = pageUrl ? new URL(pageUrl) : undefined;
@@ -69,12 +81,16 @@ export function credentialPageRefusal(cred: Pick<ResolvedSiteCredential, "hostna
     return `Refusing to fill the credential for ${site}: the browser's current page could not be read, so its host is unknown. Take a browser_snapshot and try again. Nothing was typed.`;
   }
   const pageHost = page.hostname.replace(/\.$/, "");
-  const ownSite = pageHost === site || (isIP(site) === 0 && pageHost.endsWith(`.${site}`));
+  const ownSite = sites.some(({ host }) => pageHost === host || (isIP(host) === 0 && pageHost.endsWith(`.${host}`)));
   if (!ownSite) {
-    return `Refusing to fill the credential for ${site}: the browser is on ${pageHost}, which is neither ${site} nor a subdomain of it. Nothing was typed.`;
+    const names = sites.map(({ host }) => host);
+    const which = names.length === 1
+      ? `neither ${site} nor a subdomain of it`
+      : `not ${names.slice(0, -1).join(", ")} or ${names[names.length - 1]}, nor a subdomain of one`;
+    return `Refusing to fill the credential for ${site}: the browser is on ${pageHost}, which is ${which}. Nothing was typed.`;
   }
-  if (page.protocol === "http:" && !credentialAllowsHttp(cred)) {
-    return `Refusing to fill the credential for ${site} into a plain http page on ${pageHost}: only a credential whose login URL is http may be typed into one. Nothing was typed.`;
+  if (page.protocol === "http:" && !sites.some(({ host, http }) => http && host === pageHost.replace(/^www\./, ""))) {
+    return `Refusing to fill the credential for ${site} into a plain http page on ${pageHost}: only a host the credential records an http URL for takes it over http. Nothing was typed.`;
   }
   return null;
 }

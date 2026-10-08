@@ -19,7 +19,7 @@ Every public schema field, where it is declared, and how many production files r
 | `admin` | packages/core/src/config/schema.ts:371 | 27 |
 | `agents` | packages/core/src/config/schema.ts:1695 | 176 |
 | `alertmanager` | packages/core/src/config/schema.ts:1135 | 1 |
-| `all` | packages/core/src/config/schema.ts:1288 | 290 |
+| `all` | packages/core/src/config/schema.ts:1288 | 289 |
 | `allowedAgents` | packages/core/src/config/schema.ts:1308 | 29 |
 | `allowedPrivateHosts` | packages/core/src/config/schema.ts:1251 | 5 |
 | `allowedUserIds` | packages/core/src/config/schemas/channels.ts:11 | 5 |
@@ -150,7 +150,7 @@ Every public schema field, where it is declared, and how many production files r
 | `distillSharedFactsMinChars` | packages/core/src/config/schemas/orchestration.ts:697 | 1 |
 | `distributedCancel` | packages/core/src/config/schema.ts:1667 | 2 |
 | `dmPolicy` | packages/core/src/config/schemas/channels.ts:18 | 5 |
-| `domain` | packages/core/src/config/schema.ts:885 | 40 |
+| `domain` | packages/core/src/config/schema.ts:885 | 41 |
 | `driveMinProbability` | packages/core/src/config/schemas/decisions.ts:88 | 1 |
 | `durableApprovals` | packages/core/src/config/schemas/orchestration.ts:885 | 2 |
 | `durableTaskGraph` | packages/core/src/config/schema.ts:1622 | 4 |
@@ -297,7 +297,7 @@ Every public schema field, where it is declared, and how many production files r
 | `minStepsToAuthor` | packages/core/src/config/schema.ts:1464 | 2 |
 | `minVramMb` | packages/core/src/config/schema.ts:822 | 1 |
 | `mode` | packages/core/src/config/schema.ts:471 | 139 |
-| `model` | packages/core/src/config/schema.ts:1234 | 268 |
+| `model` | packages/core/src/config/schema.ts:1234 | 269 |
 | `modelModeration` | packages/core/src/config/schema.ts:1230 | 4 |
 | `modelPresets` | packages/core/src/config/schema.ts:1702 | 1 |
 | `modelPresetScope` | packages/core/src/config/schema.ts:1717 | 3 |
@@ -314,7 +314,7 @@ Every public schema field, where it is declared, and how many production files r
 | `notes` | packages/core/src/config/schema.ts:790 | 55 |
 | `oneLiner` | packages/core/src/config/schema.ts:899 | 3 |
 | `openaiCompatible` | packages/core/src/config/schema.ts:105 | 2 |
-| `operator` | packages/core/src/config/schema.ts:372 | 111 |
+| `operator` | packages/core/src/config/schema.ts:372 | 112 |
 | `orchestratorMaxToolIterations` | packages/core/src/config/schemas/effort.ts:23 | 1 |
 | `orchestratorTurnSloMs` | packages/core/src/config/schema.ts:1754 | 2 |
 | `orgId` | packages/core/src/config/schema.ts:1125 | 1 |
@@ -364,7 +364,7 @@ Every public schema field, where it is declared, and how many production files r
 | `promptInjectionBlock` | packages/core/src/config/schema.ts:1218 | 6 |
 | `promptPer1m` | packages/core/src/config/schema.ts:510 | 1 |
 | `protocol` | packages/core/src/config/schema.ts:700 | 52 |
-| `provider` | packages/core/src/config/schema.ts:431 | 130 |
+| `provider` | packages/core/src/config/schema.ts:431 | 131 |
 | `providers` | packages/core/src/config/schema.ts:1210 | 100 |
 | `publicUrl` | packages/core/src/config/schema.ts:317 | 7 |
 | `qaDeliveryLoop` | packages/core/src/config/schemas/orchestration.ts:317 | 5 |
