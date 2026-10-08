@@ -56,19 +56,20 @@ function ledger(dir: string): OutcomeEntry[] {
 
 /** Loads the modules once for the deployment last configured; `run` makes one run of the probe
  *  agent on `task` in the request context of `userId` (none: no user). */
-async function load(dir: string): Promise<{ run: (userId: string | undefined, task: string, parentSessionId?: string) => Promise<void>; segment: (userId: string) => string }> {
+async function load(dir: string): Promise<{ run: (userId: string | undefined, task: string, parentSessionId?: string, runUserId?: string) => Promise<void>; segment: (userId: string) => string }> {
   vi.resetModules();
   (await import("../config/loader.js")).resetConfigForTests();
   const { runWithRequestContext } = await import("../runtime/request-context.js");
   const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
   const { safeUserSegment } = await import("../runtime/user-scope.js");
   return {
-    run: async (userId, task, parentSessionId = `parent-${Math.random().toString(36).slice(2)}`) => {
+    run: async (userId, task, parentSessionId = `parent-${Math.random().toString(36).slice(2)}`, runUserId) => {
       await runWithRequestContext(userId ? { userId } : {}, () => runSubAgentWithStats({
         agentName: AGENT,
         task,
         parentSessionId,
         workspacePath: dir,
+        ...(runUserId ? { userId: runUserId } : {}),
       }));
     },
     segment: safeUserSegment,
@@ -95,6 +96,19 @@ describe("a delegated run's outcome and the account it ran for", () => {
     const entries = ledger(dir).filter((entry) => entry.agent === AGENT);
     expect(entries.length).toBeGreaterThan(0);
     for (const entry of entries) expect(entry.account).toBe(segment("bob"));
+  });
+
+  it("under multi-user auth, records the account its tools act as, when the run names one and the request has none", async () => {
+    // An A2A caller's run: the server passes the caller as the run's userId, outside any request.
+    const dir = deployment(true);
+    const { run, segment } = await load(dir);
+    completeMock.mockImplementation(() => FINAL);
+
+    await run(undefined, "Check the Hamburg ferry times for the commute.", undefined, "carol");
+
+    const entries = ledger(dir).filter((entry) => entry.agent === AGENT);
+    expect(entries.length).toBeGreaterThan(0);
+    for (const entry of entries) expect(entry.account).toBe(segment("carol"));
   });
 
   it("records no account for a run with no user, nor with one operator", async () => {

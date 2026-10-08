@@ -2185,7 +2185,7 @@ function rejectSuspiciousNoToolOutput(
   // appendOutcome call in the run's own finalizer. A per-user root splits one deployment ledger
   // into one per account, and the readers only ever look at the shared one.
   // For the account the run is for, like the run's other outcomes (recordOutcome).
-  const account = recordAccount();
+  const account = recordAccount(opts.userId);
   appendOutcome(getConfig().workspacePath, {
     ts: new Date().toISOString(),
     agent: opts.agentName,
@@ -3853,10 +3853,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // G32: task-class fingerprint for outcome-weighted routing (written into every appendOutcome call)
     const taskKeywords = extractTaskKeywords(sanitizedTask);
 
-    // The account this run is for (it inherits the request of the turn that delegated it), on every
-    // outcome it writes and every lesson it records: under multi-user auth a reader shows an entry's
-    // task and lesson to that account only (memory/service.ts).
-    const runAccount = recordAccount();
+    // The account this run is for, on every outcome it writes and every lesson it records: under
+    // multi-user auth a reader shows an entry's task and lesson to that account only
+    // (memory/service.ts). The identity its tools act as (toolContext.userId, else the request's): an
+    // A2A caller's run has no request user of its own, only opts.userId.
+    const runAccount = recordAccount(opts.userId);
     /** G32: Thin wrapper that auto-injects taskKeywords + sharedFindingsCount.
      *  Also closes the graph-memory retrieval feedback loop on success/partial
      *  outcomes so retrieved memories that led to a real deliverable get
