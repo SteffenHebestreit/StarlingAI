@@ -399,6 +399,56 @@ function addCounts(target: Record<string, number>, source: Record<string, number
   for (const [key, count] of Object.entries(source)) target[key] = (target[key] ?? 0) + count;
 }
 
+/**
+ * Turns this run stopped without seeing them end, by client and identity (request id → session):
+ * chat.cancel got no final status within cancelGraceMs, or the socket died mid-turn. Such a turn
+ * may still be running on the gateway, and what it stores after the next attempt's reset lands in
+ * that attempt's memory.
+ */
+const unconfirmedTurns = new WeakMap<GatewayClient, Map<string, Map<string, string>>>();
+const TURN_END_POLL_MS = 250;
+
+function noteUnconfirmedTurn(ctx: AttemptContext, identity: string, requestId: string, sessionId: string): void {
+  let byIdentity = unconfirmedTurns.get(ctx.deps.client);
+  if (!byIdentity) {
+    byIdentity = new Map();
+    unconfirmedTurns.set(ctx.deps.client, byIdentity);
+  }
+  let turns = byIdentity.get(identity);
+  if (!turns) {
+    turns = new Map();
+    byIdentity.set(identity, turns);
+  }
+  turns.set(requestId, sessionId);
+}
+
+/** The turn's final status reached this client, or the gateway says no turn runs in its session. */
+async function turnEnded(identity: string, deps: RunnerDeps, requestId: string, sessionId: string): Promise<boolean> {
+  try {
+    const connection = await deps.client.connection(identity);
+    if (connection.finalStatusOf(requestId)) return true;
+    // session.get's activeTurn covers a stopped turn that is still unwinding (gateway/rpc.ts); an
+    // answer without the field confirms nothing.
+    return (await connection.getSession(sessionId))["activeTurn"] === false;
+  } catch {
+    return false;
+  }
+}
+
+/** The identity's stopped turns not seen to end within waitMs; those that ended are forgotten. */
+async function turnsStillRunning(identity: string, deps: RunnerDeps, waitMs: number, signal?: AbortSignal): Promise<string[]> {
+  const turns = unconfirmedTurns.get(deps.client)?.get(identity);
+  if (!turns || turns.size === 0) return [];
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    for (const [requestId, sessionId] of [...turns]) {
+      if (await turnEnded(identity, deps, requestId, sessionId)) turns.delete(requestId);
+    }
+    if (turns.size === 0 || Date.now() >= deadline || signal?.aborted) return [...turns.keys()];
+    await sleep(Math.min(TURN_END_POLL_MS, deadline - Date.now()), signal);
+  }
+}
+
 /** What the memory reset before an attempt did, and why it left anything. */
 export interface MemoryResetResult {
   /** Durable memory entries deleted. */
@@ -495,8 +545,12 @@ async function sharedStoreReason(identity: string, scope: MemoryEntryScope, list
  * memory scenario accepts user_model_update as the place its preference is kept, so a model left
  * from an earlier run could answer the recall by itself. It is kept per account wherever auth is on,
  * so the gate above is all it needs.
+ *
+ * Nothing is reset either while a turn this run stopped on the account may still run (waited for up
+ * to turnWaitMs): attempts running one at a time is all the concurrency gate sees, and a turn that
+ * outlived its chat.cancel can store memory after the reset, into the next attempt.
  */
-export async function resetDurableMemory(identity: string, deps: RunnerDeps, signal?: AbortSignal): Promise<MemoryResetResult> {
+export async function resetDurableMemory(identity: string, deps: RunnerDeps, signal?: AbortSignal, turnWaitMs = 0): Promise<MemoryResetResult> {
   const notes: string[] = [];
   let removed = 0;
   let userModelEmptied = false;
@@ -504,8 +558,11 @@ export async function resetDurableMemory(identity: string, deps: RunnerDeps, sig
   let forbidden: string | null = null;
   try {
     const refusal = await resetRefusal(identity, deps, signal);
+    const running = refusal ? [] : await turnsStillRunning(identity, deps, turnWaitMs, signal);
     if (refusal) {
       notes.push(`memory reset skipped: ${refusal}`);
+    } else if (running.length > 0) {
+      notes.push(`memory reset skipped: ${running.length === 1 ? "turn" : "turns"} ${running.join(", ")} of ${identity} ${running.length === 1 ? "was" : "were"} stopped earlier and ${running.length === 1 ? "has" : "have"} not been seen to end`);
     } else {
       for (const scope of ["user", "workspace"] as const) {
         for (let pass = 1; ; pass += 1) {
@@ -599,7 +656,7 @@ export async function runAttempt(
   else opts.signal?.addEventListener("abort", onRunAbort, { once: true });
   const resetNotes: string[] = [];
   if (opts.resetDurableMemory && opts.concurrency === 1 && !controller.signal.aborted) {
-    resetNotes.push(...(await resetDurableMemory(ctx.identity, deps, controller.signal)).notes);
+    resetNotes.push(...(await resetDurableMemory(ctx.identity, deps, controller.signal, opts.cancelGraceMs)).notes);
   }
   const steps: StepResult[] = [];
   let open: { window: OpenTurnWindow; result: StepResult } | null = null;
@@ -1020,7 +1077,11 @@ async function runTurnStep(step: E2ETurnStep, ctx: AttemptContext): Promise<Step
     });
   } catch (err) {
     during.detach();
-    if (err instanceof E2EInfraError) throw err;
+    if (err instanceof E2EInfraError) {
+      // The gateway may have taken the send before the socket failed.
+      noteUnconfirmedTurn(ctx, ctx.identity, requestId, sessionId);
+      throw err;
+    }
     return { failures: [`chat.send failed: ${describeError(err)}`], notes };
   }
   during.armTimers();
@@ -1032,6 +1093,7 @@ async function runTurnStep(step: E2ETurnStep, ctx: AttemptContext): Promise<Step
     during.detach();
     if (err instanceof E2EInfraError) {
       const cancelled = await cancelFromFreshConnection(ctx, requestId);
+      noteUnconfirmedTurn(ctx, ctx.identity, requestId, sessionId);
       throw new E2EInfraError(`${err.message}; ${cancelled}`);
     }
     throw err;
@@ -1053,6 +1115,8 @@ async function runTurnStep(step: E2ETurnStep, ctx: AttemptContext): Promise<Step
     if (typeof after !== "string") {
       final = after;
       cancel.finalStatus = after.status;
+    } else {
+      noteUnconfirmedTurn(ctx, ctx.identity, requestId, sessionId);
     }
     const cancelText = cancel.error
       ? `chat.cancel failed: ${cancel.error}`

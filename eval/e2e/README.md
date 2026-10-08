@@ -78,6 +78,16 @@ attempt's notes in the report say what it left and why:
 operator-only, so its deletes are refused (`HTTP 403`, noted), while a viewer turn can still store memory.
 A listing or a delete that fails is noted too.
 
+Nothing is reset while a turn the harness stopped on the account may still run (`chat.cancel` got no final
+status, or the socket died mid-turn): what it stores after a reset would land in the next attempt. The
+reset waits up to the cancel grace (30 s) for `session.get` to report the turn ended, and is skipped with a
+note otherwise.
+
+**One run at a time.** Two `pnpm e2e:evaluate` runs share the eval accounts, and one's reset or mail purge
+lands in the other's attempts. A run therefore refuses to start (exit code 2) while another run uses the
+same credentials file; the lock is `.e2e-run.local.json` beside that file, and a lock whose process is gone
+(a second Ctrl+C, a crash) is taken over.
+
 **Mail-isolation preflight (fail closed).** Before any scenario runs, the harness asks the running
 mail-service — through `pnpm e2e:env status --json`, which calls `GET /api/accounts` inside its container
 with `X-Sai-User: eval` — which accounts `eval` can see. Any account not bound to `eval` (its `allowedUsers`
@@ -86,7 +96,8 @@ rebuild the mail-service image and run pnpm e2e:setup"). A mail-service containe
 safe; one that runs but cannot be asked (Docker unreachable, no answer) stops the run as well.
 
 Exit codes: `0` every scenario that ran passed · `1` a scenario failed or the baseline shows a regression ·
-`2` usage error, invalid scenario file, missing credentials, refused login, or the mail preflight · `3`
+`2` usage error, invalid scenario file, missing credentials, refused login, the mail preflight, or another
+run of the same accounts · `3`
 environment-suspect (everything was skipped, or ≥ 25 % of the attempts ended on harness errors). Through
 `pnpm` a non-zero code may arrive as 1; `node --import tsx packages/core/src/e2e/cli.ts …` keeps it.
 

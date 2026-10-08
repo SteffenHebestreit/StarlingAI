@@ -8,6 +8,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import http from "node:http";
 import net from "node:net";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -202,7 +203,8 @@ class FakeGateway {
         case "session.get": {
           const session = this.sessions.get(String(params["sessionId"]));
           if (!session || session.owner !== user) return fail(`Error: Session not found: ${String(params["sessionId"])}`);
-          respond({ transcript: session.transcript, totalMessages: session.transcript.length });
+          // Like gateway/rpc.ts: whether a turn still runs in the session, a stopped one unwinding included.
+          respond({ transcript: session.transcript, totalMessages: session.transcript.length, activeTurn: this.activeBySession.has(String(params["sessionId"])) });
           return;
         }
         case "chat.send":
@@ -813,6 +815,36 @@ describe("e2e harness against a fake gateway", () => {
     const paged = await runScenario(loaded(scenario), deps(), FAST);
     expect(gateway.memoryKeys("eval", "user")).toEqual([]);
     expect(paged.attempts[0]!.notes).toEqual([]);
+  });
+
+  it("leaves the memory alone while a turn it stopped may still run on the account, and resets again once it ended", async () => {
+    // A turn that outlives chat.cancel (no final status within the grace) and stores memory after
+    // its attempt ended: a reset before the next attempt would race it.
+    let finishLingering: (() => void) | undefined;
+    gateway.setScripts([
+      { match: /^linger/, run: async (turn) => {
+        await turn.cancelled;
+        gateway.remember("eval", "user", "late_fact");
+        await new Promise<void>((resolveFinish) => { finishLingering = resolveFinish; });
+        turn.finish("ok", "Done after all.");
+      } },
+      { match: /^hello/i, run: helloScript },
+    ]);
+    const options: RunnerOptions = { ...FAST, cancelGraceMs: 300 };
+    const lingering: E2EScenario = { id: "fake-linger", title: "A turn that outlives its cancel", group: "guards", steps: [{ kind: "turn", message: "linger after the cancel", timeoutMs: 200 }] };
+    const scenario: E2EScenario = { id: "fake-after-linger", title: "The next attempt", group: "core", steps: [{ ...helloTurn }] };
+    const stopped = await runScenario(loaded(lingering), deps(), options);
+    const requestId = stopped.attempts[0]!.steps[0]!.turn!.requestId;
+    expect(stopped.attempts[0]!.steps[0]!.turn!.cancel).toEqual({ cancelled: true, known: true });
+
+    const next = await runScenario(loaded(scenario), deps(), options);
+    expect(next.attempts[0]!.notes).toEqual([`memory reset skipped: turn ${requestId} of eval was stopped earlier and has not been seen to end`]);
+    expect(gateway.memoryKeys("eval", "user")).toEqual(["late_fact"]);
+
+    finishLingering?.();
+    const later = await runScenario(loaded(scenario), deps(), options);
+    expect(later.attempts[0]!.notes).toEqual([]);
+    expect(gateway.memoryKeys("eval", "user")).toEqual([]);
   });
 
   it("empties the identity's user model before the attempt's first turn, which recall_context serves", async () => {
@@ -1454,6 +1486,28 @@ describe("e2e CLI (in process, against the fake gateway)", () => {
     const regressed = await cli(["evaluate", "--scenarios", "scenarios", "--id", "cli-pass", "--out", "out-3", "--baseline", reportPath]);
     expect(regressed.code).toBe(1);
     expect(regressed.out).toContain("Baseline: 1 regression(s) — cli-pass");
+  });
+
+  it("runs one evaluate at a time per accounts file: a live run's lock refuses, a dead run's is taken over", async () => {
+    // Two runs share the eval accounts: one's reset before an attempt deleted what the other's
+    // memory scenario stored between its two turns, and the concurrency gate sees only its own process.
+    const lock = join(cliDir, ".e2e-run.local.json");
+    // This process stands in for the other run: it is alive.
+    writeFileSync(lock, JSON.stringify({ pid: process.pid, startedAt: "2026-10-08T10:00:00.000Z" }));
+    const sends = gateway.chatSends.length;
+    const refused = await cli(["evaluate", "--scenarios", "scenarios", "--id", "cli-pass", "--out", "locked"]);
+    expect(refused.code).toBe(2);
+    expect(refused.err).toBe(`Refusing to run: another e2e run (pid ${process.pid}, since 2026-10-08T10:00:00.000Z) is using the eval accounts, and two runs break each other's scenarios (one's memory reset or mail purge lands in the other's attempts). Wait for it, or delete ${lock} if no such run is left.`);
+    expect(gateway.chatSends.length).toBe(sends);
+    expect(existsSync(join(cliDir, "locked"))).toBe(false);
+
+    // A run that ended without removing its lock (a second Ctrl+C, a crash): the lock is taken over.
+    const gone = spawnSync(process.execPath, ["-e", ""]).pid;
+    writeFileSync(lock, JSON.stringify({ pid: gone, startedAt: "2026-10-08T09:00:00.000Z" }));
+    const run = await cli(["evaluate", "--scenarios", "scenarios", "--id", "cli-pass", "--out", "unlocked"]);
+    expect(run.code).toBe(0);
+    // Released when the run ends.
+    expect(existsSync(lock)).toBe(false);
   });
 
   it("exits 2 on usage errors and unknown ids, 1 on invalid scenario files", async () => {

@@ -12,18 +12,20 @@
  * E2E_SITE_URL, E2E_SEARXNG_URL (see eval/e2e/README.md).
  *
  * Before any scenario runs, evaluate checks that the eval identity sees no shared mail account
- * (the operator's real mail) and refuses to run — fail closed — when it does or cannot tell.
+ * (the operator's real mail) and refuses to run — fail closed — when it does or cannot tell. It also
+ * refuses while another evaluate run uses the same accounts file (acquireRunLock).
  *
  * Exit codes: 0 every scenario that ran passed · 1 failures or baseline regressions ·
- * 2 usage, invalid scenarios, missing credentials, a refused login or the mail-isolation
- * preflight · 3 environment-suspect (everything skipped, or a quarter of the attempts ended on
- * harness errors). Through pnpm a non-zero code may surface as 1.
+ * 2 usage, invalid scenarios, missing credentials, a refused login, the mail-isolation
+ * preflight or another run of the same accounts · 3 environment-suspect (everything skipped, or a
+ * quarter of the attempts ended on harness errors). Through pnpm a non-zero code may surface as 1.
  */
-import { resolve } from "node:path";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { findRepoRoot, resolveE2EPaths } from "./paths.js";
 import { filterScenarios, loadScenarios, type LoadedScenario } from "./loader.js";
-import { E2EInfraError, GatewayClient, gatewayUrlFromEnv, readCredentialsFile } from "./gateway-client.js";
+import { describeError, E2EInfraError, GatewayClient, gatewayUrlFromEnv, readCredentialsFile } from "./gateway-client.js";
 import { judgeConfigFromEnv } from "./judge.js";
 import { mailAdapterFromEnv } from "./mail.js";
 import {
@@ -136,6 +138,55 @@ function validate(args: ParsedArgs, io: CliIo, repoRoot: string): number {
   return 0;
 }
 
+/** Whether a process with this id runs (EPERM: it does, under another user). */
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+function readRunLock(path: string): { pid: number; startedAt?: string } | null {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+    if (typeof parsed !== "object" || parsed === null || typeof (parsed as { pid?: unknown }).pid !== "number") return null;
+    const { pid, startedAt } = parsed as { pid: number; startedAt?: unknown };
+    return { pid, ...(typeof startedAt === "string" ? { startedAt } : {}) };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * One evaluate run at a time per accounts file. Two runs share the eval accounts, and each resets
+ * the attempt identity's memory before every attempt (and a mail scenario purges every mailbox):
+ * one run's reset deleted what the other's memory scenario stored between its two turns, and that
+ * scenario failed on the harness's own doing. The concurrency gate sees only its own process.
+ *
+ * The lock is a file beside the credentials, created exclusively. One whose process is gone (a
+ * second Ctrl+C, a crash) is taken over; one that cannot be read counts as held, since a run may be
+ * writing it this moment.
+ */
+function acquireRunLock(path: string): { release: () => void } | { refusal: string } {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      writeFileSync(path, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }), { flag: "wx" });
+      return { release: () => { if (readRunLock(path)?.pid === process.pid) rmSync(path, { force: true }); } };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw new E2EInfraError(`cannot take the run lock ${path}: ${describeError(err)}`);
+    }
+    const holder = readRunLock(path);
+    if (!holder || processAlive(holder.pid)) {
+      const who = holder ? `another e2e run (pid ${holder.pid}${holder.startedAt ? `, since ${holder.startedAt}` : ""})` : "another e2e run";
+      return { refusal: `${who} is using the eval accounts, and two runs break each other's scenarios (one's memory reset or mail purge lands in the other's attempts). Wait for it, or delete ${path} if no such run is left.` };
+    }
+    rmSync(path, { force: true });
+  }
+  return { refusal: `the run lock ${path} could not be taken` };
+}
+
 function identitiesOf(selected: readonly LoadedScenario[]): string[] {
   const identities = new Set<string>();
   for (const { scenario } of selected) {
@@ -203,9 +254,17 @@ async function evaluate(args: ParsedArgs, io: CliIo, repoRoot: string): Promise<
     ...(io.env["E2E_SEARXNG_URL"]?.trim() ? { searxngUrl: io.env["E2E_SEARXNG_URL"].trim() } : {}),
   });
 
+  const lock = acquireRunLock(join(dirname(paths.credentialsPath), ".e2e-run.local.json"));
+  if ("refusal" in lock) {
+    io.err(`Refusing to run: ${lock.refusal}`);
+    return 2;
+  }
   const interrupt = new AbortController();
   const onSigint = (): void => {
-    if (interrupt.signal.aborted) process.exit(130);
+    if (interrupt.signal.aborted) {
+      lock.release();
+      process.exit(130);
+    }
     io.err("\nInterrupted — cancelling running turns (Ctrl+C again to quit at once)…");
     interrupt.abort();
   };
@@ -265,6 +324,7 @@ async function evaluate(args: ParsedArgs, io: CliIo, repoRoot: string): Promise<
   } finally {
     if (io.handleSigint) process.off("SIGINT", onSigint);
     client.close();
+    lock.release();
   }
 }
 
