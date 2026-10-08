@@ -6,8 +6,22 @@ import { extractSingleRelayableDeliverable } from "../agent/deliverable-relay.js
 import { findRecentJunkDelegationResult } from "../agent/response-finalization.js";
 import { classifyPostOrchestrationDisposition } from "../agent/runtime.js";
 import { AgentSession } from "../agent/session.js";
-import { TOOL_DECLINES_HEADER, TOOL_FAILURES_HEADER, stripDelegatedRunRecord } from "../agent/delegated-run-record.js";
+import {
+  EXECUTIONS_HEADER,
+  PRODUCED_FILES_HEADER,
+  TOOL_DECLINES_HEADER,
+  TOOL_FAILURES_HEADER,
+  TOOL_FAILURES_UNRECOVERED_HEADER,
+  stripDelegatedRunRecord,
+} from "../agent/delegated-run-record.js";
 import { hasRecentUnresolvedDelegatedAction } from "../agent/response-finalization.js";
+import {
+  INCIDENT,
+  INCIDENT_ARTIFACT,
+  INCIDENT_EXECUTIONS,
+  MASKED_REPLY,
+  incidentToolFailures,
+} from "./support/figure-provenance-incident.js";
 
 // Session f4ebf47b: the specialist's prose and the filename both said Qwen; the tool recorded the
 // fast tier's model. Only the recorded values may reach the answer as fact.
@@ -316,5 +330,127 @@ describe("the run record stays out of the frame's verdict and out of the reply",
     expect(record).toContain("Exit code 1");
     expect(record).not.toContain("<system>");
     expect(record).not.toContain("</system>");
+  });
+});
+
+// E2E 2026-10-07: the coder's sandbox runs all failed or printed nothing, its answer stated two
+// figures no tool had returned, and the single-deliverable relay shipped them. The run's record of
+// what it executed now reaches the frame, and the relay reads it from the metadata.
+describe("the code a delegated run executed", () => {
+  const SUCCESS = {
+    agentName: "coder",
+    delegationSucceeded: true,
+    delegationOutcome: "success",
+    delegationVerdict: "heuristic",
+    terminalState: "completed",
+  };
+  const INCIDENT_METADATA = {
+    ...SUCCESS,
+    taskId: "task_1",
+    attemptedAgents: ["coder"],
+    delegationOutcome: "partial",
+    artifacts: [INCIDENT_ARTIFACT],
+    specialistToolFailures: incidentToolFailures(),
+    specialistExecutions: INCIDENT_EXECUTIONS,
+  };
+  const noteOf = (frame: string) => frame.split("\n").find((line) => line.startsWith("IMPORTANT:"));
+
+  it("a run that masked figures: partial, its executions above the instruction, and the relay holds it back", () => {
+    const frame = buildModelVisibleToolResult("delegate_to_agent", `[coder]: ${MASKED_REPLY}`, INCIDENT_METADATA);
+
+    expect(frame.split("\n")[0]).toBe("Delegated result from coder — PARTIAL PROGRESS.");
+    expect(frame).toContain(`${EXECUTIONS_HEADER}\n- 7 code executions, none completed with output (4 failed, 3 printed nothing); `
+      + "2 figures in the run's account appear in no tool result and are masked as [not observed]\n");
+    // In order: the verdict, what ran, the file, the failures as failures, the instruction, the account.
+    const order = [
+      frame.indexOf("PARTIAL PROGRESS"),
+      frame.indexOf(EXECUTIONS_HEADER),
+      frame.indexOf(PRODUCED_FILES_HEADER),
+      frame.indexOf(TOOL_FAILURES_UNRECOVERED_HEADER),
+      frame.search(/^IMPORTANT:/m),
+      frame.search(/^Observed evidence:/m),
+    ];
+    expect(order.every((at) => at >= 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    // "The run went on after them, so they are not its outcome" is false for this run.
+    expect(frame).not.toContain(TOOL_FAILURES_HEADER);
+    expect(frame).not.toContain("not its outcome");
+    expect(noteOf(frame)).toBe("IMPORTANT: Figures marked [not observed] appear in no tool result of this run (see the record above), "
+      + "so nothing that ran computed them: do NOT supply, estimate or round values for them; say they could not be computed. "
+      + "Do NOT delegate again for this task in this turn.");
+    expect(disposition(frame, INCIDENT_METADATA)).toBe("synthesize");
+    const stripped = stripDelegatedRunRecord(frame);
+    for (const header of [EXECUTIONS_HEADER, PRODUCED_FILES_HEADER, TOOL_FAILURES_UNRECOVERED_HEADER]) {
+      expect(stripped).not.toContain(header);
+    }
+    expect(stripped).not.toContain("7 code executions");
+    expect(stripped.split("\n")[0]).toBe(frame.split("\n")[0]);
+    expect(evidenceOf(stripped)).toBe(evidenceOf(frame));
+    expect(extractSingleRelayableDeliverable([{ role: "tool", content: frame, metadata: INCIDENT_METADATA }], 1)).toBeNull();
+  });
+
+  it("the relay reads the record from the metadata, whatever the frame's heading says", () => {
+    // The frame the incident's reply got: a completed delegation, "present it VERBATIM".
+    const frame = buildModelVisibleToolResult("delegate_to_agent", `[coder]: ${INCIDENT.reply}`, SUCCESS);
+    expect(frame.split("\n")[0]).toBe("Delegated result from coder — TASK COMPLETED.");
+    expect(frame).toContain("Present the full content below VERBATIM");
+    const relay = (metadata: Record<string, unknown>) =>
+      extractSingleRelayableDeliverable([{ role: "tool", content: frame, metadata }], 1);
+
+    expect(relay({ ...SUCCESS, specialistExecutions: INCIDENT_EXECUTIONS })).toBeNull();
+    // The identical message without the record ships the reply, figures and all.
+    expect(relay(SUCCESS)).toBe(INCIDENT.reply);
+    // A record that masked nothing does not hold it back.
+    expect(relay({ ...SUCCESS, specialistExecutions: { ...INCIDENT_EXECUTIONS, unobservedFigures: 0 } })).toBe(INCIDENT.reply);
+  });
+
+  it("a grep that matched nothing: the frame says what ran, and its verdict and instruction stay", () => {
+    const text = "[coder]: Keine TODO-Einträge in src/app.js gefunden.";
+    const failure = { agent: "coder", tool: "shell_exec", error: "Exit code 1: Command failed: docker run --rm --network=none starlingai/sandbox:latest sh -lc grep -n TODO src/app.js" };
+    const plain = { ...SUCCESS, specialistToolFailures: [failure] };
+    const recorded = { ...plain, specialistExecutions: { attempted: 1, failed: 1, succeededWithOutput: 0 } };
+    const framedPlain = buildModelVisibleToolResult("delegate_to_agent", text, plain);
+    const framed = buildModelVisibleToolResult("delegate_to_agent", text, recorded);
+
+    expect(framed.split("\n")[0]).toBe("Delegated result from coder — TASK COMPLETED.");
+    expect(framed).toContain(`${EXECUTIONS_HEADER}\n- 1 code execution, none completed with output (1 failed)\n`);
+    expect(framed).toContain(`${TOOL_FAILURES_UNRECOVERED_HEADER}\n- shell_exec: `);
+    expect(noteOf(framed)).toBe(noteOf(framedPlain));
+    expect(disposition(framed, recorded)).toBe(disposition(framedPlain, plain));
+    expect(evidenceOf(framed)).toBe(evidenceOf(framedPlain));
+  });
+
+  it("a run any of whose executions completed with output gets the frame it got before", () => {
+    const partialText = "[coder]: The script printed the count; the sum is still running.";
+    const cases: Array<[string, Record<string, unknown>]> = [
+      [`[coder]: ${INCIDENT.reply}`, SUCCESS],
+      [NARRATION, { ...DELEGATION, artifacts: [ARTIFACT], specialistToolFailures: [FAILURE_404] }],
+      [partialText, { ...SUCCESS, delegationOutcome: "partial", specialistToolFailures: incidentToolFailures() }],
+    ];
+    for (const [text, metadata] of cases) {
+      const plain = buildModelVisibleToolResult("delegate_to_agent", text, metadata);
+      const withRecord = buildModelVisibleToolResult("delegate_to_agent", text, {
+        ...metadata,
+        specialistExecutions: { attempted: 3, failed: 1, succeededWithOutput: 1 },
+      });
+      expect(withRecord).toBe(plain);
+    }
+  });
+
+  it("a record that masked figures is shown even when another execution printed: the note points at it", () => {
+    // A coordinator adds up its specialists' records: one coder's script printed, the incident's
+    // coder made its figures up. The partial note says "see the record above", so the line is there.
+    const added = { attempted: 8, failed: 4, succeededWithOutput: 1, unobservedFigures: 2 };
+    const metadata = { ...INCIDENT_METADATA, specialistExecutions: added };
+    const frame = buildModelVisibleToolResult("delegate_to_agent", `[coder]: ${MASKED_REPLY}`, metadata);
+
+    expect(frame).toContain(`${EXECUTIONS_HEADER}\n- 8 code executions: 1 completed with output, 4 failed, 3 printed nothing; `
+      + "2 figures in the run's account appear in no tool result and are masked as [not observed]\n");
+    expect(frame.indexOf(EXECUTIONS_HEADER)).toBeLessThan(frame.search(/^IMPORTANT:/m));
+    expect(noteOf(frame)).toContain("(see the record above)");
+    // One execution printed, so the run did go on after its failures: they keep the neutral header.
+    expect(frame).toContain(TOOL_FAILURES_HEADER);
+    expect(frame).not.toContain(TOOL_FAILURES_UNRECOVERED_HEADER);
+    expect(stripDelegatedRunRecord(frame)).not.toContain("8 code executions");
   });
 });

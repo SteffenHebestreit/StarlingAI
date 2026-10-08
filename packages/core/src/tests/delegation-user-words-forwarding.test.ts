@@ -206,6 +206,8 @@ describe("the user's own words reach every delegated specialist", () => {
   const RECORDED = {
     artifacts: [{ sourceTool: "generate_image", outputPath: "generated/harbour.png", tier: "fast", model: "image" }],
     toolFailures: [{ agent: "ephemeral:harbour_researcher", tool: "generate_image", error: "HTTP 404: no router" }],
+    // And what it executed (E2E 2026-10-07: figures no tool returned, masked by the run).
+    executions: { attempted: 2, failed: 1, succeededWithOutput: 0, unobservedFigures: 1 },
   };
 
   it("architect fallback: the delegation carries the run's files and failed calls", async () => {
@@ -230,6 +232,7 @@ describe("the user's own words reach every delegated specialist", () => {
 
     expect(result.metadata?.["specialistToolFailures"]).toEqual(RECORDED.toolFailures);
     expect(result.metadata?.["artifacts"]).toEqual(expect.arrayContaining([expect.objectContaining({ outputPath: "generated/harbour.png" })]));
+    expect(result.metadata?.["specialistExecutions"]).toEqual(RECORDED.executions);
   }, 30_000);
 
   it("create_ephemeral_agent: the result carries the run's files and failed calls", async () => {
@@ -247,7 +250,11 @@ describe("the user's own words reach every delegated specialist", () => {
       task: "Find sources on the harbour at dusk.",
     }, ctx("s-ephemeral-record"));
 
-    expect(result.metadata).toMatchObject({ specialistToolFailures: RECORDED.toolFailures, artifacts: RECORDED.artifacts });
+    expect(result.metadata).toMatchObject({
+      specialistToolFailures: RECORDED.toolFailures,
+      artifacts: RECORDED.artifacts,
+      specialistExecutions: RECORDED.executions,
+    });
   }, 30_000);
 
   it("ask_user: the user's answer is recorded as their words; an unattended stand-in is not", async () => {

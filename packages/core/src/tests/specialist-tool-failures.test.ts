@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SwarmState, ToolContext } from "../tools/registry.js";
+import { INCIDENT, INCIDENT_EXECUTIONS, INVENTED_FIGURES, MASKED_REPLY, recordedResult } from "./support/figure-provenance-incident.js";
 
 const completeMock = vi.fn();
 
@@ -67,6 +68,12 @@ describe("failed tool calls inside a delegated run", () => {
           systemPrompt: "COORD-3K9 Hand the drawing to a specialist.",
           tools: ["delegate_to_agent"],
           maxIterations: 4,
+        },
+        coder: {
+          description: "Writes and runs code in the sandbox.",
+          systemPrompt: "CODER-KQ Write the script, run it in the sandbox and report what it printed.",
+          tools: ["write_file", "list_files", "shell_exec", "run_script"],
+          maxIterations: 10,
         },
       },
     }), "utf8");
@@ -426,6 +433,89 @@ describe("failed tool calls inside a delegated run", () => {
       expect(echoed.metadata?.["delegationSucceeded"]).toBe(true); // the success path, where the flag is written
       expect(echoed.metadata?.["specialistToolFailures"]).toBeUndefined(); // its fetch worked: only the task filter decides
       expect(echoed.metadata?.["delegationEvidence"]).toBeUndefined();
+    }, 60_000);
+  });
+
+  // E2E 2026-10-07: the coder's seven sandbox runs failed or printed nothing, its answer stated two
+  // figures no tool had returned, and the delegation came back a success. The run's record now
+  // travels in the delegation's metadata, and an outcome cannot be "success" over masked figures.
+  describe("a delegated run whose figures no tool returned", () => {
+    const registerIncidentTools = async () => {
+      await import("../tools/sub-agent.js");
+      const { registerTool } = await import("../tools/registry.js");
+      for (const name of ["write_file", "list_files", "shell_exec", "run_script"]) {
+        registerTool({
+          name,
+          description: `Recorded ${name}.`,
+          parameters: { type: "object", properties: {} },
+          async execute(args) {
+            return recordedResult(name, args);
+          },
+        });
+      }
+    };
+    const replayIncident = (finalAnswer: string) => async (messages: Message[]) => {
+      const done = toolResultsIn(messages);
+      const next = INCIDENT.calls[done];
+      return next ? call(`c${done + 1}`, next.tool, next.args) : answer(finalAnswer);
+    };
+    const delegate = async (sessionId: string) => {
+      const { getTool } = await import("../tools/registry.js");
+      const ctx: ToolContext = {
+        sessionId,
+        workspacePath: tempDir,
+        swarmState: freshSwarmState(),
+        approvalCallback: async () => true,
+      };
+      return getTool("delegate_to_agent")!.execute({ agentName: "coder", task: INCIDENT.task }, ctx);
+    };
+
+    it("delegate_to_agent returns it as partial, with its execution record and the figures masked", async () => {
+      await registerIncidentTools();
+      completeMock.mockImplementation(replayIncident(INCIDENT.reply));
+
+      const result = await delegate("s-figures-incident");
+
+      expect(result.success).toBe(true);
+      expect(result.metadata?.["delegationOutcome"]).toBe("partial");
+      expect(result.metadata?.["specialistExecutions"]).toEqual(INCIDENT_EXECUTIONS);
+      expect(result.output).toContain(MASKED_REPLY);
+      for (const figure of INVENTED_FIGURES) expect(result.output).not.toContain(figure);
+    }, 60_000);
+
+    it("the run's own <final_answer status=\"success\"> does not outrank the record", async () => {
+      await registerIncidentTools();
+      completeMock.mockImplementation(replayIncident(`<final_answer status="success">${INCIDENT.reply}</final_answer>`));
+
+      const result = await delegate("s-figures-explicit-success");
+
+      expect(result.metadata?.["delegationOutcome"]).toBe("partial");
+      expect(result.metadata?.["specialistExecutions"]).toEqual(INCIDENT_EXECUTIONS);
+      for (const figure of INVENTED_FIGURES) expect(result.output).not.toContain(figure);
+    }, 60_000);
+
+    it("a run that failed outright hands its record to the partial result the delegation keeps", async () => {
+      // Every execution failed and the answer says so, so the run is a failure; its account is long
+      // enough to be kept as the delegation's best partial result, and that result carries the record.
+      await registerIncidentTools();
+      const runs = [
+        { tool: "shell_exec", args: { command: "cd /workspace && node primes.js" } },
+        { tool: "run_script", args: { path: "primes.js" } },
+      ];
+      const report = "No results found: the sandbox was unreachable. Both runs of primes.js ended with an error and printed nothing, "
+        + "so the primes between 100000 and 200000 could not be counted here; from memory there are about 8393 of them. "
+        + "The script is in the workspace and can be run again once the sandbox works.";
+      completeMock.mockImplementation(async (messages: Message[]) => {
+        const done = toolResultsIn(messages);
+        const next = runs[done];
+        return next ? call(`c${done + 1}`, next.tool, next.args) : answer(report);
+      });
+
+      const result = await delegate("s-figures-partial-fallback");
+
+      expect(result.metadata?.["partialFallback"]).toBe(true);
+      expect(result.metadata?.["specialistExecutions"]).toEqual({ attempted: 2, failed: 2, succeededWithOutput: 0, unobservedFigures: 1 });
+      expect(result.output).not.toContain("8393");
     }, 60_000);
   });
 });

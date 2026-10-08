@@ -2481,4 +2481,251 @@ describe("sub-agent turn timeouts", () => {
       rmSync(tempDir, { recursive: true, force: true });
     }
   }, 10000);
+
+  // E2E 2026-10-07: every sandbox run of the coder failed or printed nothing, and its answer stated
+  // figures no tool had returned. The check holds on the answers a deadline or the iteration limit
+  // forces too, not only on the run's own last word: each is masked, and the run is not a success.
+  describe("figures no tool returned, on the forced synthesis paths", () => {
+    const usage = { promptTokens: 1, completionTokens: 1, totalTokens: 2 };
+    const TASK = "Count the primes p with 100000 <= p <= 200000 with a script in the sandbox.";
+    const silentRun = {
+      success: true,
+      output: "(no output)",
+      metadata: { command: "node primes.js", exitCode: 0, sandboxed: true, programOutputChars: 0 },
+    };
+    const failedRun = {
+      success: false,
+      output: "",
+      error: "Exit code 1: Command failed: docker run --rm --network=none starlingai/sandbox:latest sh -lc node primes.js\n",
+      metadata: { sandboxed: true, exitCode: 1, programOutputChars: 0 },
+    };
+
+    const writeAgent = (prefix: string, agent: Record<string, unknown>) => {
+      const tempDir = mkdtempSync(join(tmpdir(), prefix));
+      const configPath = join(tempDir, "starlingai.json");
+      writeFileSync(configPath, JSON.stringify({
+        subAgents: {
+          prime_coder: {
+            description: "Runs a script in the sandbox",
+            systemPrompt: "Run the script in the sandbox and report what it printed.",
+            ...agent,
+          },
+        },
+      }), "utf8");
+      process.env["SAI_CONFIG_PATH"] = configPath;
+      return tempDir;
+    };
+
+    it("masks them in the timeout synthesis of a run whose code printed nothing", async () => {
+      const tempDir = writeAgent("guardedclaw-sub-timeout-figures-", { tools: ["shell_exec"], maxIterations: 3, turnTimeoutMs: 1000 });
+      vi.useFakeTimers();
+      vi.resetModules();
+
+      const { registerTool, unregisterTool } = await import("../tools/registry.js");
+      registerTool({
+        name: "shell_exec",
+        description: "Run a command in the sandbox",
+        parameters: { type: "object", properties: {} },
+        async execute() {
+          return silentRun;
+        },
+      });
+
+      completeMock
+        .mockResolvedValueOnce({
+          content: "",
+          tool_calls: [{ id: "run-1", name: "shell_exec", arguments: { command: "node primes.js" } }],
+          usage,
+          finishReason: "tool_calls",
+        })
+        .mockImplementationOnce((_messages: unknown, _tools: unknown, signal?: AbortSignal) => new Promise((resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+          setTimeout(() => resolve({
+            content: "",
+            tool_calls: [{ id: "run-2", name: "shell_exec", arguments: { command: "node primes.js --verbose" } }],
+            usage,
+            finishReason: "tool_calls",
+          }), 1100);
+        }))
+        .mockResolvedValueOnce({
+          content: "Zwischen 100000 und 200000 gibt es 8393 Primzahlen.",
+          tool_calls: [],
+          usage,
+          finishReason: "stop",
+        });
+
+      const { subscribeToAudit } = await import("../audit/logger.js");
+      const auditEvents: Array<{ type: string; data: Record<string, unknown> }> = [];
+      const unsubscribe = subscribeToAudit((event) => {
+        auditEvents.push({ type: event.type, data: event.data as Record<string, unknown> });
+      });
+
+      try {
+        const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+        const resultPromise = runSubAgentWithStats({
+          agentName: "prime_coder",
+          task: TASK,
+          parentSessionId: "parent-timeout-figures",
+          workspacePath: tempDir,
+          approvalCallback: async () => true,
+        });
+        await vi.advanceTimersByTimeAsync(1100);
+        const result = await resultPromise;
+
+        expect(completeMock).toHaveBeenCalledTimes(3);
+        expect(result.stats.terminalState).toBe("completed");
+        expect(result.output).toBe("Zwischen 100000 und 200000 gibt es [not observed] Primzahlen.");
+        expect(result.stats.outcome).toBe("partial");
+        expect(result.executions).toEqual({ attempted: 1, failed: 0, succeededWithOutput: 0, unobservedFigures: 1 });
+        const flagged = auditEvents.find((event) => event.type === "guardrail_flagged" && event.data["type"] === "sub_agent_unobserved_figures_masked");
+        expect(flagged?.data["site"]).toBe("grace_synthesis");
+      } finally {
+        unsubscribe();
+        vi.useRealTimers();
+        unregisterTool("shell_exec");
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    }, 10000);
+
+    it("masks them in the max-iterations synthesis, and the file it wrote does not make the run a success", async () => {
+      const tempDir = writeAgent("guardedclaw-sub-max-iter-figures-", { tools: ["write_file", "shell_exec"], maxIterations: 1 });
+      vi.resetModules();
+
+      const { registerTool, unregisterTool } = await import("../tools/registry.js");
+      registerTool({
+        name: "write_file",
+        description: "Write a file",
+        parameters: { type: "object", properties: {} },
+        async execute() {
+          return {
+            success: true,
+            output: "File written: generated/primes.js (460 chars)",
+            metadata: { filename: "primes.js", outputPath: "generated/primes.js", contentType: "text/javascript; charset=utf-8", previewMode: "text" },
+          };
+        },
+      });
+      registerTool({
+        name: "shell_exec",
+        description: "Run a command in the sandbox",
+        parameters: { type: "object", properties: {} },
+        async execute() {
+          return failedRun;
+        },
+      });
+
+      completeMock
+        .mockResolvedValueOnce({
+          content: "",
+          tool_calls: [
+            { id: "write-1", name: "write_file", arguments: { path: "primes.js", content: "console.log(count)" } },
+            { id: "run-1", name: "shell_exec", arguments: { command: "node primes.js" } },
+          ],
+          usage,
+          finishReason: "tool_calls",
+        })
+        .mockResolvedValueOnce({
+          content: "primes.js ist geschrieben: es gibt 8393 Primzahlen zwischen 100000 und 200000.",
+          tool_calls: [],
+          usage,
+          finishReason: "stop",
+        });
+
+      const { subscribeToAudit } = await import("../audit/logger.js");
+      const auditEvents: Array<{ type: string; data: Record<string, unknown> }> = [];
+      const unsubscribe = subscribeToAudit((event) => {
+        auditEvents.push({ type: event.type, data: event.data as Record<string, unknown> });
+      });
+
+      try {
+        const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+        const result = await runSubAgentWithStats({
+          agentName: "prime_coder",
+          task: TASK,
+          parentSessionId: "parent-max-iter-figures",
+          workspacePath: tempDir,
+          approvalCallback: async () => true,
+        });
+
+        expect(result.output).toBe("primes.js ist geschrieben: es gibt [not observed] Primzahlen zwischen 100000 und 200000.");
+        expect(result.stats.outcome).toBe("partial");
+        expect(result.artifacts?.some((artifact) => artifact["outputPath"] === "generated/primes.js")).toBe(true);
+        const completionEvent = auditEvents.find((event) => event.type === "sub_agent_completed" && event.data["agentName"] === "prime_coder");
+        // The written file is what made this path report success before.
+        expect(completionEvent?.data["completedFromArtifact"]).toBe(true);
+        expect(completionEvent?.data["outcome"]).toBe("partial");
+        const flagged = auditEvents.find((event) => event.type === "guardrail_flagged" && event.data["type"] === "sub_agent_unobserved_figures_masked");
+        expect(flagged?.data["site"]).toBe("max_iterations_synthesis");
+      } finally {
+        unsubscribe();
+        unregisterTool("write_file");
+        unregisterTool("shell_exec");
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    }, 10000);
+
+    it("masks them in the soft-deadline synthesis", async () => {
+      // The reserve before the hard deadline opens once the run is past it: turnTimeoutMs >= 60 s and
+      // a 30 s reserve at T = 60 s. Date.now is advanced by the tool itself, so no real deadline fires.
+      const tempDir = writeAgent("guardedclaw-sub-soft-deadline-figures-", { tools: ["shell_exec"], maxIterations: 6, turnTimeoutMs: 60_000 });
+      vi.resetModules();
+      const realNow = Date.now.bind(Date);
+      let clockOffset = 0;
+      const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => realNow() + clockOffset);
+
+      const { registerTool, unregisterTool } = await import("../tools/registry.js");
+      registerTool({
+        name: "shell_exec",
+        description: "Run a command in the sandbox",
+        parameters: { type: "object", properties: {} },
+        async execute() {
+          clockOffset = 40_000;
+          return silentRun;
+        },
+      });
+
+      completeMock
+        .mockResolvedValueOnce({
+          content: "",
+          tool_calls: [{ id: "run-1", name: "shell_exec", arguments: { command: "node primes.js" } }],
+          usage,
+          finishReason: "tool_calls",
+        })
+        .mockResolvedValueOnce({
+          content: "Es gibt 8393 Primzahlen zwischen 100000 und 200000.",
+          tool_calls: [],
+          usage,
+          finishReason: "stop",
+        });
+
+      const { subscribeToAudit } = await import("../audit/logger.js");
+      const auditEvents: Array<{ type: string; data: Record<string, unknown> }> = [];
+      const unsubscribe = subscribeToAudit((event) => {
+        auditEvents.push({ type: event.type, data: event.data as Record<string, unknown> });
+      });
+
+      try {
+        const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+        const result = await runSubAgentWithStats({
+          agentName: "prime_coder",
+          task: TASK,
+          parentSessionId: "parent-soft-deadline-figures",
+          workspacePath: tempDir,
+          approvalCallback: async () => true,
+        });
+
+        // The gate really opened; otherwise this would describe the run's own last word.
+        expect(auditEvents.filter((event) => event.type === "sub_agent_soft_deadline")).toHaveLength(1);
+        expect(completeMock).toHaveBeenCalledTimes(2);
+        expect(result.output).toBe("Es gibt [not observed] Primzahlen zwischen 100000 und 200000.");
+        expect(result.stats.outcome).toBe("partial");
+        const flagged = auditEvents.find((event) => event.type === "guardrail_flagged" && event.data["type"] === "sub_agent_unobserved_figures_masked");
+        expect(flagged?.data["site"]).toBe("soft_deadline_synthesis");
+      } finally {
+        unsubscribe();
+        nowSpy.mockRestore();
+        unregisterTool("shell_exec");
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    }, 10000);
+  });
 });

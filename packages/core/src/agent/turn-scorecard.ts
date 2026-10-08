@@ -53,6 +53,8 @@ export interface BuildTurnQualityScorecardInput {
   failed?: boolean;
   artifactCount: number;
   quality?: TurnQualitySignals;
+  /** The turn's latest delegation masked figures no tool had returned (its run record). */
+  delegatedFiguresUnobserved?: boolean;
 }
 
 export function createTurnQualitySignals(): TurnQualitySignals {
@@ -84,6 +86,9 @@ function outcomeFor(input: BuildTurnQualityScorecardInput, quality: TurnQualityS
   // A turn that shipped a file which failed its integrity check is NOT "completed",
   // however clean the prose was. The user got a broken deliverable.
   if (quality.artifactVerificationStatus === "fail") return { status: "partial", reason: "artifact_verification_failed" };
+  // The figures the user asked for were never computed: whatever the answer says about them, the
+  // turn did not complete (E2E 2026-10-07 recorded the fabricated primes turn as "completed").
+  if (input.delegatedFiguresUnobserved) return { status: "partial", reason: "delegated_figures_unobserved" };
   if (input.wardenFailureCount > 0) return { status: "partial", reason: "delegation_failures" };
   if (input.forcedSynthesisFired) return { status: "partial", reason: input.finishReason };
   return { status: "completed", reason: null };

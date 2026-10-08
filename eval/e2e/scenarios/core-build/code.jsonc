@@ -19,6 +19,10 @@
 //   sub_agent_tool_call {agentName, tool, phase, args, success}
 //     agent/sub-agent.ts:4748 (logAudit), payload :2296; phase "start" (dispatched) at :6527,
 //     phase "done" with args + result.success at :6918
+//   sub_agent_tool_call data.metadata.programOutputChars: what the program printed, set by
+//     tools/shell.ts (printedChars) and kept in the audit by summarizeToolAuditMetadata. A run
+//     whose output the sandbox swallowed still "succeeds" with "(no output)" (E2E 2026-10-07),
+//     so success alone does not show that anything was computed.
 //   guardrail_flagged {type: "artifact_verification_failed" | "artifact_completion_claim_unbacked_bannered"}
 //     agent/turn-finalize-guards.ts:941 / :913, agent/runtime.ts:4803
 // shell_exec and run_script both run in the Docker sandbox and need per-call approval
@@ -30,7 +34,7 @@
     title: "Code: the coder computes an exact result in its sandbox",
     group: "core",
     tags: ["code", "sandbox", "smoke"],
-    description: "The coder writes and runs a script in the Docker sandbox: count and sum of the primes between 100000 and 200000 (8392 primes, sum 1255204276 — computed locally with two methods in Node and Python; not a memorizable value). Protects: the sandbox execution path (run_script/shell_exec dispatched with --auto approval, finishing successfully) and an exact computed answer rather than an estimate.",
+    description: "The coder writes and runs a script in the Docker sandbox: count and sum of the primes between 100000 and 200000 (8392 primes, sum 1255204276 — computed locally with two methods in Node and Python; not a memorizable value). Protects: the sandbox execution path (run_script/shell_exec dispatched with --auto approval, finishing successfully and printing output) and an exact computed answer rather than an estimate.",
     requires: ["model", "sandbox"],
     timeoutMs: 900000,
     steps: [
@@ -48,7 +52,7 @@
           agents: { mustRun: ["coder"] },
           events: {
             must: [
-              { type: "sub_agent_tool_call", where: { "data.agentName": "coder", "data.tool": { in: ["run_script", "shell_exec"] }, "data.phase": "done", "data.success": true } },
+              { type: "sub_agent_tool_call", where: { "data.agentName": "coder", "data.tool": { in: ["run_script", "shell_exec"] }, "data.phase": "done", "data.success": true, "data.metadata.programOutputChars": { gte: 1 } } },
             ],
           },
         },
