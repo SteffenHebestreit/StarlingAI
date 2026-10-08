@@ -2000,6 +2000,119 @@ describe("swarm orchestration tools", () => {
     expect(stateResult.output).toContain("summary [completed]");
   }, 15000);
 
+  it("delegate_to_agent hands the agent the document excerpts the turn set beside the call", async () => {
+    // The runtime's own dispatch on a turn directed to an agent carries this turn's [DOCUMENT
+    // CONTEXT] excerpts beside its arguments, which are kept in the session history and the audit
+    // (ToolContext.delegationDocuments). The agent gets them before the call's own context.
+    const [{ getTool }] = await Promise.all([import("../tools/registry.js"), import("../tools/sub-agent.js")]);
+
+    await getTool("delegate_to_agent")!.execute({
+      agentName: "researcher",
+      task: "What is the total revenue of the quarter?",
+      context: "[EARLIER IN THIS CONVERSATION — the exchange before this request]\nRequest: Hallo",
+    }, {
+      sessionId: "session-dispatch-documents",
+      workspacePath: "/workspace",
+      swarmState: { objective: "Initial", startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), tasks: {} },
+      delegationDocuments: "[DOCUMENT CONTEXT]\numsatz-q3-2026.csv\nJul;Nord;18432",
+    });
+
+    expect(runSubAgentWithStatsMock).toHaveBeenCalledTimes(1);
+    const context = String(runSubAgentWithStatsMock.mock.calls[0]?.[0]?.context ?? "");
+    expect(context).toContain("Jul;Nord;18432");
+    expect(context).toContain("Request: Hallo");
+    expect(context.indexOf("Jul;Nord;18432")).toBeLessThan(context.indexOf("Request: Hallo"));
+  }, 15000);
+
+  // What a turn directed to an agent (--agent) reads to tell whether that agent ran
+  // (agent/directive-agent.ts): each node's or slice's own result, never the swarm state.
+  describe("reports which agent each child ran, from the child's own result", () => {
+    it("run_task_graph: one entry per node this run started", async () => {
+      runSubAgentMock.mockImplementation(async ({ agentName, task }: SubAgentRunOptions) => `${agentName}:${task}:done`);
+      const [{ getTool }] = await Promise.all([import("../tools/registry.js"), import("../tools/sub-agent.js")]);
+
+      const graphResult = await getTool("run_task_graph")!.execute({
+        nodes: [
+          { id: "research", agentName: "researcher", task: "Collect facts" },
+          { id: "code", agentName: "code_analyst", task: "Inspect implementation" },
+        ],
+      }, {
+        sessionId: "session-node-runs",
+        workspacePath: "/workspace",
+        swarmState: { objective: "Initial", startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), tasks: {} },
+      });
+
+      expect(graphResult.metadata?.["nodeRuns"]).toEqual({
+        research: { agentName: "researcher", attemptedAgents: ["researcher"] },
+        code: { agentName: "code_analyst", attemptedAgents: ["code_analyst"] },
+      });
+    }, 15000);
+
+    it("run_task_graph: a node turned away before any agent ran names none, though a task carried in under its id does", async () => {
+      // The turn's swarm state is seeded with the previous turn's tasks, attempts included, and a
+      // node whose id repeats one of them keeps that task's attempts. Node n1 was turned away this
+      // turn and still showed code_analyst's attempt from the turn before, so an --agent turn read
+      // it as code_analyst having run (review of faeee22, 2026-10-08).
+      const [{ getTool }, { delegationRanAgent }] = await Promise.all([
+        import("../tools/registry.js"),
+        import("../agent/directive-agent.js"),
+        import("../tools/sub-agent.js"),
+      ]);
+      const swarmState: SwarmState = {
+        objective: "Previous turn",
+        startedAt: "2026-10-07T10:00:00.000Z",
+        updatedAt: "2026-10-07T10:01:00.000Z",
+        tasks: {
+          n1: {
+            id: "n1",
+            title: "n1",
+            status: "completed",
+            dependsOn: [],
+            signature: "previous-signature",
+            selectedAgent: "code_analyst",
+            output: "total() truncates with int()",
+            attempts: [{ agentName: "code_analyst", status: "completed", startedAt: "2026-10-07T10:00:05.000Z", finishedAt: "2026-10-07T10:00:50.000Z" }],
+          },
+        },
+      };
+      // A cancelled turn turns every node away before its agent starts.
+      const cancelled = new AbortController();
+      cancelled.abort();
+
+      const graphResult = await getTool("run_task_graph")!.execute({
+        nodes: [{ id: "n1", agentName: "code_analyst", task: "Which PDF library should invoices.py use?" }],
+      }, { sessionId: "session-node-runs-carried", workspacePath: "/workspace", swarmState, signal: cancelled.signal });
+
+      expect(runSubAgentWithStatsMock).not.toHaveBeenCalled();
+      expect(graphResult.metadata?.["failed"]).toEqual(["n1"]);
+      // The trap: the swarm state still shows the attempt from the turn before.
+      expect(swarmState.tasks["n1"]?.attempts.map((attempt) => attempt.agentName)).toEqual(["code_analyst"]);
+      expect(graphResult.metadata?.["nodeRuns"]).toEqual({ n1: {} });
+      expect(delegationRanAgent("run_task_graph", graphResult.metadata, "code_analyst")).toBe(false);
+    }, 15000);
+
+    it("parallel_delegate: one nested call per slice, with the agents it ran", async () => {
+      runSubAgentMock.mockImplementation(async ({ agentName, task }: SubAgentRunOptions) => `${agentName}:${task}:done`);
+      const [{ getTool }] = await Promise.all([import("../tools/registry.js"), import("../tools/sub-agent.js")]);
+
+      const result = await getTool("parallel_delegate")!.execute({
+        tasks: [
+          { agentName: "researcher", task: "Collect facts about the harbour" },
+          { agentName: "code_analyst", task: "Inspect the implementation of total()" },
+        ],
+      }, {
+        sessionId: "session-slice-agents",
+        workspacePath: "/workspace",
+        swarmState: { objective: "Initial", startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), tasks: {} },
+      });
+
+      expect(result.metadata?.["nestedCalls"]).toEqual([
+        { tool: "delegate_to_agent", success: true, agentName: "researcher", attemptedAgents: ["researcher"] },
+        { tool: "delegate_to_agent", success: true, agentName: "code_analyst", attemptedAgents: ["code_analyst"] },
+      ]);
+    }, 15000);
+  });
+
   it("reuses an identical completed swarm task instead of creating a duplicate card", async () => {
     runSubAgentMock.mockImplementation(async ({ agentName, task }: SubAgentRunOptions) => `${agentName}:${task}:done`);
 

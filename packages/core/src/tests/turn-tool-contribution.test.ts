@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DELEGATION_WAIT_TOOL_NAMES,
+  delegationAgentsOf,
   nestedCallContribution,
   STATE_DEPENDENT_TOOL_NAMES,
   toolCallContribution,
@@ -110,6 +111,37 @@ describe("who may report nested calls", () => {
     expect(nestedCallContribution({ tool: "delegate_to_agent", success: false }).delegations).toBe(0);
     expect(nestedCallContribution({ tool: "run_workflow", success: true }).workflowCompleted).toBe(true);
     expect(nestedCallContribution({ tool: "run_workflow", success: true, workflowNotFound: true }).workflowCompleted).toBe(false);
+  });
+});
+
+/**
+ * WHICH AGENT A NESTED DELEGATION RAN. A plan step or a fan-out slice that names no agent is routed,
+ * and the architect fallback may answer it with an ephemeral agent; the turn cannot tell from the
+ * grant who ran, so the reporter stamps it from the delegation's own result (directive-agent.ts).
+ */
+describe("the agents a nested delegation ran", () => {
+  it("reads them off a delegation's result: the agent it is from and the agents it attempted", () => {
+    expect(delegationAgentsOf({ agentName: "code_analyst", attemptedAgents: ["code_analyst"], taskId: "t1" }))
+      .toEqual({ agentName: "code_analyst", attemptedAgents: ["code_analyst"] });
+    // The architect fallback's ephemeral agent is not among the agents routing attempted.
+    expect(delegationAgentsOf({ agentName: "menu_planner", attemptedAgents: [] })).toEqual({ agentName: "menu_planner" });
+    expect(delegationAgentsOf({ attemptedAgents: ["coder", 7, null, ""] })).toEqual({ attemptedAgents: ["coder"] });
+    expect(delegationAgentsOf(undefined)).toEqual({});
+    expect(delegationAgentsOf({ agentName: 7, attemptedAgents: "coder" })).toEqual({});
+  });
+
+  it("keeps the agents a reporter stamped on its nested calls", () => {
+    expect(readNestedToolCalls("parallel_delegate", {
+      nestedCalls: [
+        { tool: "delegate_to_agent", success: true, agentName: "menu_planner" },
+        { tool: "delegate_to_agent", success: false, attemptedAgents: ["code_analyst"] },
+        { tool: "delegate_to_agent", success: true, agentName: ["code_analyst"] },   // malformed: dropped
+      ],
+    })).toEqual([
+      { tool: "delegate_to_agent", success: true, agentName: "menu_planner" },
+      { tool: "delegate_to_agent", success: false, attemptedAgents: ["code_analyst"] },
+      { tool: "delegate_to_agent", success: true },
+    ]);
   });
 });
 

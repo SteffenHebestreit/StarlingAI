@@ -71,6 +71,7 @@ import {
   readNestedToolCalls,
   STATE_DEPENDENT_TOOL_NAMES,
 } from "./turn-tool-contribution.js";
+import { buildDirectiveDelegationContext, delegationRanAgent, isDelegationToAgent, nestedCallRanAgent } from "./directive-agent.js";
 import { longRunningGenerationManager } from "./long-running-generation.js";
 import { recordUnconsumedSteering, turnSteeringManager, type SteeringMessage } from "./turn-steering.js";
 import { registerSessionAbortController, deregisterSessionAbortController } from "./warden.js";
@@ -1771,8 +1772,16 @@ async function _runTurn(
   // Runs BEFORE document-RAG augmentation so a trivial "hi" never pays the
   // (CPU-bound) engram search cost; turns WITH attachments skip the fast lane so
   // their files are always ingested + injected below.
+  //
+  // The agent the user directed this turn to (`--agent NAME`). allowedAgents narrows routing to it,
+  // and that alone let the orchestrator answer the turn itself: code_analyst never ran on two
+  // diagnoses the E2E suite pinned to it (2026-10-07), and the agent evaluations that pin an agent
+  // this way were measuring the orchestrator. Until that agent has run, the turn delegates to it.
+  // Read before the fast lane, which skips such a turn: small talk directed to an agent was answered
+  // by the front desk, and the agent never ran (review of 0b5089e, 2026-10-08).
+  const directiveAgent = opts.directiveAgent?.trim() || undefined;
   const fastLaneOutput = await prepareReceptionistFastLane({
-    eligible: detectedDynamicGuidance === null && !hasTurnAttachments && getConfig().receptionist?.enabled === true,
+    eligible: detectedDynamicGuidance === null && !hasTurnAttachments && directiveAgent === undefined && getConfig().receptionist?.enabled === true,
     userMessage,
     signal,
     opts,
@@ -2265,11 +2274,18 @@ async function _runTurn(
   });
   let delegatedResearchRetryUsed = false;
   let delegatedResearchEnforcementPrompt = "";
-  // The agent the user directed this turn to (`--agent NAME`). allowedAgents narrows routing to it,
-  // and that alone let the orchestrator answer the turn itself: code_analyst never ran on two
-  // diagnoses the E2E suite pinned to it (2026-10-07), and the agent evaluations that pin an agent
-  // this way were measuring the orchestrator. Until the turn has delegated, it must.
-  const directiveAgent = opts.directiveAgent?.trim() || undefined;
+  // Whether the agent the user directed this turn to (directiveAgent) has run: set from a tool
+  // RESULT that shows the agent ran (directive-agent.ts). The delegation tally this used to read is
+  // kept on the request, so a delegation the runtime or the tool turned away (unparseable
+  // arguments, another agent outside the grant, an ephemeral agent refused before it ran) released
+  // the directive and the orchestrator answered itself. The agent called by its own name as a tool
+  // ran without counting, so the model's finished answer was then rewritten into a second
+  // delegation; the synthesis-required guard rejected it, and the turn shipped a forced partial
+  // answer (review of 0b5089e/a3773aa, 2026-10-08).
+  let directiveAgentRan = false;
+  // This turn's document excerpts for the delegation the runtime dispatched itself, keyed by that
+  // call's id: handed to it beside its arguments when it runs (ToolContext.delegationDocuments).
+  let directiveDispatchDocuments: { toolCallId: string; documents: string } | undefined;
   let maintenanceDelegationRetryUsed = false;
   let maintenanceMisrouteRetryUsed = false;
   let maintenanceDelegationEnforcementPrompt = "";
@@ -2661,7 +2677,7 @@ async function _runTurn(
       }
     }
 
-    const directiveAgentPending = directiveAgent !== undefined && _turnDelegationCount === 0;
+    const directiveAgentPending = directiveAgent !== undefined && !directiveAgentRan;
     const {
       messages,
       collapsedHistory,
@@ -2785,11 +2801,14 @@ async function _runTurn(
         (getConfig().orchestration?.autonomousModeAntiRefusal ?? false)
         && opts.autoApprove === true
         && deliverableIntent.wantsArtifact;
+      // The directive (`--agent`) is released by its agent having run, not by the tally: a
+      // delegation the tally counted may never have reached that agent.
       const mustOrchestrateBeforeAnswering =
-        (requiresDelegatedResearch || requiresArtifactDelegation || workflowCatalogRequired || requiresMaintenanceDelegation || autonomousArtifactBuild || directiveAgentPending)
+        (((requiresDelegatedResearch || requiresArtifactDelegation || workflowCatalogRequired || requiresMaintenanceDelegation || autonomousArtifactBuild)
+          && _turnDelegationCount === 0)
+          || directiveAgentPending)
         && !inWorkflowStep
         && !delegatedResearchRetryUsed
-        && _turnDelegationCount === 0
         && !workflowRunCompletedThisTurn
         && ((_turnToolCallCounts.get("run_workflow") ?? 0) === 0);
       const { forcedPlanState, forceToolChoice, streamTools, restriction } = await resolveIterationTools({
@@ -3075,10 +3094,21 @@ async function _runTurn(
     // under `tool_choice: required` the local model wrote 13,000 characters of prose, and the turn
     // shipped them as the answer (E2E, 2026-10-07).
     if (directiveAgent !== undefined && directiveAgentPending && llmResponse.tool_calls.length === 0) {
+      // The request goes as it is, with what the orchestrator had in view beside it: the excerpts
+      // of this turn's attachments and the exchange before it (directive-agent.ts). The excerpts
+      // stay out of the arguments, which the history and the audit keep after the next turn has
+      // pruned the excerpts' own note; the call is handed them when it runs.
+      const { context, documents } = buildDirectiveDelegationContext(session.getHistory(), { priorUserRequest, priorAssistantAnswer });
+      const dispatchId = `directive_${randomUUID()}`;
+      directiveDispatchDocuments = documents ? { toolCallId: dispatchId, documents } : undefined;
       // Built afresh: the prose call's truncation marker must not mark the dispatch incomplete.
       llmResponse = {
         content: null,
-        tool_calls: [{ id: `directive_${randomUUID()}`, name: "delegate_to_agent", arguments: { agentName: directiveAgent, task: userMessage } }],
+        tool_calls: [{
+          id: dispatchId,
+          name: "delegate_to_agent",
+          arguments: { agentName: directiveAgent, task: userMessage, ...(context ? { context } : {}) },
+        }],
         usage: llmResponse.usage,
         finishReason: "tool_calls",
       };
@@ -3118,6 +3148,16 @@ async function _runTurn(
         enforceRequiredResearchFallbackRouteOnToolCall(tc, requiredResearchFallbackRoute, session.id, guardrailEvents);
       }
     }
+    // This response asks only for the delegation the user directed the turn to, and that agent has
+    // not run yet. The workflow-catalog check, the workflow-run force after a catalog search and the
+    // synthesis-required guard below let it through: the user named the agent, and a catalog match
+    // or a synthesis note left by other orchestration is the runtime's own guess. Turned away, it
+    // never ran at all — the workflow ran in its place, or the guard rejected it and shipped a
+    // forced partial answer (review of a3773aa, 2026-10-08).
+    const directiveDelegationRequested = directiveAgent !== undefined
+      && directiveAgentPending
+      && llmResponse.tool_calls.length > 0
+      && llmResponse.tool_calls.every((toolCall) => isDelegationToAgent(toolCall, directiveAgent));
 
     if (llmResponse.tool_calls.length > 0 && llmResponse.content?.trim()) {
       logAudit("assistant_text_with_tool_calls_suppressed", {
@@ -3330,6 +3370,7 @@ async function _runTurn(
       shouldRequireWorkflowExecutionAfterSearch(workflowSearchMatches)
       && !workflowRunCompletedThisTurn
       && !runWorkflowRequested
+      && !directiveDelegationRequested
       && (nonWorkflowOrchestrationRequested || nonWorkflowDiscoveryRequested || repeatedWorkflowSearchRequested)
     ) {
       if (!workflowExecutionRetryUsed) {
@@ -3399,7 +3440,10 @@ async function _runTurn(
       }
     }
 
-    if (workflowCatalogRequired && !workflowCatalogAttemptedThisTurn && llmResponse.tool_calls.length > 0) {
+    // The directed delegation is not held to the catalog check either: dropped, it was followed by
+    // a correction to run the matched workflow instead, beside the line that names the agent, and a
+    // model that obeyed ran the workflow before the agent (review of 6955e34, 2026-10-08).
+    if (workflowCatalogRequired && !workflowCatalogAttemptedThisTurn && llmResponse.tool_calls.length > 0 && !directiveDelegationRequested) {
       if (!workflowCatalogRetryUsed) {
         workflowCatalogRetryUsed = true;
         workflowCatalogEnforcementPrompt = [
@@ -3443,7 +3487,7 @@ async function _runTurn(
       && message.content.startsWith("[USER RESPONSE REQUIRED]"),
     );
 
-    if (synthesisRequiredInHistory && llmResponse.tool_calls.length > 0 && !forcedWorkflowRunThisIteration) {
+    if (synthesisRequiredInHistory && llmResponse.tool_calls.length > 0 && !forcedWorkflowRunThisIteration && !directiveDelegationRequested) {
       // Fix 3: If the prior delegation was a partial/timeout whose surfaced
       // substance is below the usability floor (e.g. 900-char truncation
       // stub), the model's recovery delegation is the correct response —
@@ -3602,7 +3646,12 @@ async function _runTurn(
         releaseAfterRoutingNudge("tool_free_maintenance_answer_rejected");
       }
 
-      if (!releasedAfterRoutingNudge && workflowCatalogRequired && !workflowCatalogAttemptedThisTurn) {
+      // A turn the user directed to an agent answers from that agent's result, and the catalog
+      // check does not ask it for a workflow on top: the agent has run by the time a tool-free
+      // answer gets here (until then such an answer is replaced by the delegation itself). The
+      // answer was rejected with an order to call run_workflow, and a model that obeyed ran the
+      // matched job after the agent the user had named (review of 6955e34, 2026-10-08).
+      if (!releasedAfterRoutingNudge && workflowCatalogRequired && !workflowCatalogAttemptedThisTurn && directiveAgent === undefined) {
         if (!workflowCatalogRetryUsed) {
           workflowCatalogRetryUsed = true;
           workflowCatalogEnforcementPrompt = [
@@ -4410,7 +4459,13 @@ async function _runTurn(
 
       const toolStartedAt = Date.now();
       const humanWaitCreditedBefore = turnBudget?.humanWaitCreditedMs?.() ?? 0;
-      const result = await executeTool(tc.name, tc.arguments, toolContext, { toolCallId: tc.id });
+      // The runtime's own dispatch on a turn directed to an agent carries this turn's document
+      // excerpts for this call alone, beside its arguments (ToolContext.delegationDocuments).
+      if (tc.name === "delegate_to_agent" && directiveDispatchDocuments?.toolCallId === tc.id) {
+        toolContext.delegationDocuments = directiveDispatchDocuments.documents;
+      }
+      const result = await executeTool(tc.name, tc.arguments, toolContext, { toolCallId: tc.id })
+        .finally(() => { delete toolContext.delegationDocuments; });
       const toolDurationMs = Date.now() - toolStartedAt;
       // The part of this call spent waiting on the person was credited to the deadline as it ended.
       const humanWaitMs = (turnBudget?.humanWaitCreditedMs?.() ?? 0) - humanWaitCreditedBefore;
@@ -4481,6 +4536,11 @@ async function _runTurn(
       } else if (toolResultContribution(tc.name, result).workflowCompleted) {
         workflowRunCompletedThisTurn = true;
       }
+      // tc.name is read here, after the agent-name-as-tool rewrite, so the agent called by its own
+      // name counts as the delegation it became.
+      if (directiveAgent !== undefined && delegationRanAgent(tc.name, result.metadata, directiveAgent)) {
+        directiveAgentRan = true;
+      }
 
       // execute_plan delegates from INSIDE one tool call, so the loop above never sees those
       // delegations and the turn ended believing it had orchestrated nothing: the shared-facts
@@ -4496,6 +4556,10 @@ async function _runTurn(
         _turnDelegationCount += nestedContribution.delegations;
         if (nestedContribution.workflowCompleted) workflowRunCompletedThisTurn = true;
         _turnToolCallCounts.set(nested.tool, (_turnToolCallCounts.get(nested.tool) ?? 0) + 1);
+        // A plan step or a fan-out slice reports the agents its own result named. The grant does
+        // not say who ran: routing within it may find no match, and the architect fallback, which
+        // no grant binds, then answers with an ephemeral agent (directive-agent.ts).
+        if (directiveAgent !== undefined && nestedCallRanAgent(nested, directiveAgent)) directiveAgentRan = true;
       }
 
       pendingSearchAgentSuggestion = tc.name === "search_agents"

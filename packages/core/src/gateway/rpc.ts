@@ -41,6 +41,7 @@ import { turnSteeringManager, unconsumedSteeringOf, type SteeringMessage } from 
 import { HUMAN_WAIT_RECHECK_MS, trackHumanWaits, userInputBroker, type UserInputCaller } from "../agent/user-input-broker.js";
 import { clampUserInputTimeoutMs } from "../agent/user-input.js";
 import { typedUserWords } from "../agent/delegation-user-words.js";
+import { isKnownAgentName } from "../agent/directive-agent.js";
 import { currentRequestContext, runWithRequestContext } from "../runtime/request-context.js";
 
 /**
@@ -945,6 +946,22 @@ export class RpcConnection {
             this.sendEvent({ type: "status", data: { status: "error", requestId, error: err instanceof Error ? err.message : String(err) } });
             return { accepted: false, requestId };
           }
+        }
+
+        // --agent names an agent this deployment has. The name was taken as typed: a typo, or an
+        // agent an evaluation still pins after it was renamed, was forced and dispatched, no agent of
+        // that name could be routed to, and an architect-built ephemeral agent answered in its place
+        // with nothing said (review of 0b5089e/a3773aa, 2026-10-08).
+        if (overrideFlags.forceAgent && !isKnownAgentName(overrideFlags.forceAgent)) {
+          this.sendEvent({
+            type: "status",
+            data: {
+              status: "blocked",
+              requestId,
+              response: `There is no agent named ${JSON.stringify(overrideFlags.forceAgent)} (--agent). Check the name, or send the message without --agent to let the assistant choose.`,
+            },
+          });
+          return { accepted: false, requestId };
         }
 
         const runMatch = message.match(/^\/run\s+(\S+)(?:\s+(.*))?$/s);

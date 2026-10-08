@@ -588,6 +588,40 @@ describe("execute_plan dispatches each step to the tool that runs that kind", ()
     ]);   // s3 dispatched nothing, so it contributes nothing
   });
 
+  it("reports which agent each delegate step ran, from the step's own result", async () => {
+    // A delegate step that names no agent is routed, and the architect fallback may answer it with
+    // an ephemeral agent. The turn read a step that ran as the named agent's on an --agent turn, so
+    // that ephemeral agent's answer released the directive (review of 6955e34, 2026-10-08).
+    respond = (name) => (name === "delegate_to_agent"
+      ? { success: true, output: "menu", metadata: { agentName: "menu_planner", attemptedAgents: [], delegationSucceeded: true } }
+      // Another tool's result is not a delegation's, whatever its metadata names.
+      : { success: true, output: "ok", metadata: { agentName: "code_analyst", attemptedAgents: ["code_analyst"] } });
+    await persistTurnPlan(SESSION, basePlan([
+      { id: "s1", description: "plan the menu", kind: "delegate", parallelGroup: 1 },
+      { id: "s2", description: "run the flow", kind: "reuse", workflow: "research_pack", parallelGroup: 1 },
+    ]));
+
+    const result = await run();
+    expect(result.metadata?.["nestedCalls"]).toEqual([
+      { tool: "delegate_to_agent", success: true, agentName: "menu_planner" },
+      { tool: "run_workflow", success: true },
+    ]);
+  });
+
+  it("reports the agents a failed delegate step attempted: they ran", async () => {
+    respond = () => ({
+      success: true,
+      output: "",
+      metadata: { attemptedAgents: ["code_analyst"], delegationSucceeded: false, delegationOutcome: "timeout_cascade" },
+    });
+    await persistTurnPlan(SESSION, basePlan([{ id: "s1", description: "find the bug", kind: "delegate", agent: "code_analyst" }]));
+
+    const result = await run();
+    expect(result.metadata?.["nestedCalls"]).toEqual([
+      { tool: "delegate_to_agent", success: false, attemptedAgents: ["code_analyst"] },
+    ]);
+  });
+
   it("takes the loadable set from the caller, not the deployment config", async () => {
     // The runtime narrows a turn's tool mode on the fly — a source-sensitive turn is downgraded to
     // orchestration_only — so reading the CONFIGURED mode here handed those turns back every direct

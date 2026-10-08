@@ -148,6 +148,33 @@ export interface NestedToolCall {
   tool: string;
   success: boolean;
   workflowNotFound?: boolean;
+  /**
+   * For a delegation: the agent its result is from and the agents it attempted, as its own result
+   * named them (delegationAgentsOf). A step or a slice that names no agent is routed, and when
+   * routing finds no match the architect fallback answers it with an ephemeral agent, which no
+   * grant binds: who ran cannot be read from the turn's grant (agent/directive-agent.ts).
+   */
+  agentName?: string;
+  attemptedAgents?: string[];
+}
+
+/**
+ * The agents a delegation's result names: the agent the result is from, and the agents it
+ * attempted. A reporter stamps them on the nested call it reports for that delegation, and
+ * run_task_graph reports them per node. Anything malformed is left out.
+ */
+export function delegationAgentsOf(
+  metadata: Record<string, unknown> | undefined,
+): Pick<NestedToolCall, "agentName" | "attemptedAgents"> {
+  const agentName = metadata?.["agentName"];
+  const attempted = metadata?.["attemptedAgents"];
+  const attemptedAgents = Array.isArray(attempted)
+    ? attempted.filter((name): name is string => typeof name === "string" && name.length > 0)
+    : [];
+  return {
+    ...(typeof agentName === "string" && agentName.length > 0 ? { agentName } : {}),
+    ...(attemptedAgents.length > 0 ? { attemptedAgents } : {}),
+  };
 }
 
 /**
@@ -189,6 +216,7 @@ export function readNestedToolCalls(
       tool,
       success: record["success"] === true,
       ...(record["workflowNotFound"] === true ? { workflowNotFound: true } : {}),
+      ...delegationAgentsOf(record),
     });
   }
   return calls;
