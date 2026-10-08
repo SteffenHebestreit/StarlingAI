@@ -8,7 +8,7 @@ Every public schema field, where it is declared, and how many production files r
 
 | Field | Declared in | Read sites |
 | --- | --- | --- |
-| `a2a` | packages/core/src/config/schema.ts:423 | 15 |
+| `a2a` | packages/core/src/config/schema.ts:423 | 16 |
 | `accessKeyId` | packages/core/src/config/schema.ts:483 | 2 |
 | `accessToken` | packages/core/src/config/schemas/channels.ts:51 | 9 |
 | `account` | packages/core/src/config/schemas/channels.ts:71 | 92 |

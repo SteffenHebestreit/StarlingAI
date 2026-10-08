@@ -16,16 +16,13 @@
  * (`mcp:<caller>:`, `fed:<issuer>:`), evaluations (`eval:`, `eval-judge:`, `scene-eval:`), the
  * self-improvement loop (`selfimprove:`) and `job:`, the namespace a job's runs act as. Such a run
  * has no session record, and its shared facts, peer messages and checkpoints live under its id.
+ * Each ends in a colon, which an id a client may start a session under never has
+ * (clientMayCreateSessionId in gateway/session-route-access.ts).
  */
 export const INTERNAL_SESSION_ID_PREFIXES: readonly string[] = [
   "sub:", "workflow:", "a2a-in:", "a2a-out:", "a2a:", "mcp:", "fed:",
   "eval:", "eval-judge:", "scene-eval:", "selfimprove:", "job:",
 ];
-
-/** Whether `sessionId` lies in a namespace the system mints ids in (INTERNAL_SESSION_ID_PREFIXES). */
-export function isInternalSessionId(sessionId: string): boolean {
-  return INTERNAL_SESSION_ID_PREFIXES.some((prefix) => sessionId.startsWith(prefix));
-}
 
 /** The namespace of agents the ephemeral-agent factory mints; part of the agent name, not the parent. */
 const EPHEMERAL_NAMESPACE = "ephemeral";

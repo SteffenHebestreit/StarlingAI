@@ -124,13 +124,14 @@ export async function handleAguiStream(
     }
   }
 
-  // No session has the id, so the createSession below would adopt it. Under multi-user auth not an
-  // id in a namespace the system mints ids in: A2A, MCP, federation and nested runs have no session
-  // record there, and a session adopted under such an id shared that run's facts bucket, another
-  // account's included (see clientMayCreateSessionId). The opaque 404 of the gates above, so the
-  // reply says nothing about whose run that is.
+  // No session has the id, so the createSession below would adopt it. Under multi-user auth only an
+  // id with no colon: an id with one was taken apart as naming another session, so a session
+  // adopted under `a2a-in:<alice>:<id>` shared her A2A run's facts bucket, and one adopted under
+  // `<alice's id>:ephemeral` had sub-agent runs that resolved to her session (see
+  // clientMayCreateSessionId). The opaque 404 of the gates above, so the reply says nothing about
+  // whose run or session that is.
   if (!session && sessionId && !clientMayCreateSessionId(sessionId)) {
-    log.warn({ sessionId, caller: userId ?? "(none)" }, "AG-UI stream denied: session id in a reserved namespace");
+    log.warn({ sessionId, caller: userId ?? "(none)" }, "AG-UI stream denied: a session id a client may not start a session under");
     res.writeHead(404, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "Session not found" }));
     return;
