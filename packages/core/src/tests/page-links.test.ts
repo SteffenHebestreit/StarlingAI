@@ -298,9 +298,10 @@ describe("formatLinkSection", () => {
 
   it("stays within its budget and says how many links it left out", () => {
     const links = Array.from({ length: 40 }, (_, i) => link(`https://www.example.com/artikel/${i + 1}.html`, `Artikel ${i + 1}`));
-    // 133 fits exactly one line under the hinted header; at 610 a tenth line would fit only if the
-    // header's count stayed one digit wide — "10 of 40" is one character longer than "9 of 40".
-    for (const budget of [133, 334, 610, 1000]) {
+    // 133 fits exactly one line under the hinted header. At 620 a tenth line fits only if the
+    // header is counted one digit wide; "10 of 40" is one character wider, and the section would
+    // end one character over its budget.
+    for (const budget of [133, 334, 620, 1000]) {
       const section = formatLinkSection(links, PAGE, budget);
       expect(section.text.length, `budget ${budget}`).toBeLessThanOrEqual(budget);
       expect(section.shown).toBeGreaterThan(0);
