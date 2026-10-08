@@ -746,4 +746,36 @@ describe("web_fetch lists the page's links after its text", () => {
     expect(filled.output.slice(prefix.length)).toBe(full);
     expect(filled.metadata?.["linkCount"]).toBe(0);
   });
+
+  // A hash-routed app (Docsify-style docs, Vue or Angular in hash mode) addresses its views as
+  // #/route. With every fragment cleared, each in-app link became the page's own URL and was left
+  // out with it, so the page named its chapters with no URL behind them: the state in which the
+  // researcher guessed paths.
+  it("lists a hash-routed app's views: a #/ fragment is part of the address", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => html(JS_SHELL)));
+    mcpConnections.set("playwright", {
+      client: {
+        callTool: browserRendering({
+          URL: `${SITE}/#/quickstart`,
+          body: { innerText: "Quickstart\n\nInstall the CLI, then run init. Configuration and Plugins are described in their own chapters." },
+          links: [
+            anchor(`${SITE}/#/`, "Home"),
+            anchor(`${SITE}/#/quickstart`, "Quickstart"),
+            anchor(`${SITE}/#/configuration`, "Configuration"),
+            anchor(`${SITE}/#/plugins`, "Plugins"),
+            anchor("https://github.com/example/docs", "GitHub"),
+          ],
+        }).callTool,
+      },
+    });
+
+    const r = await webFetch({ url: `${SITE}/#/quickstart` }, "s-fetch-links-hash-routes");
+    expect(r.metadata?.["fetchMethod"]).toBe("playwright");
+    expect(sectionOf(r.output).lines).toEqual([
+      `- Home -> ${SITE}/#/`,
+      `- Configuration -> ${SITE}/#/configuration`,
+      `- Plugins -> ${SITE}/#/plugins`,
+      "- GitHub -> https://github.com/example/docs",
+    ]);
+  });
 });

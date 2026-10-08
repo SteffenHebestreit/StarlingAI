@@ -106,6 +106,16 @@ describe("extractHtmlLinks", () => {
     expect(extractHtmlLinks(html, "https://www.example.com/")).toEqual([{ url: "https://www.example.com/kept.html", label: "Kept" }]);
   });
 
+  it("keeps a hash route (#/view, #!view) as part of the URL, and still drops an in-page fragment", () => {
+    const html = `<a href="#/configuration">Configuration</a> <a href="#!/plugins">Plugins</a>
+      <a href="#top">Top</a> <a href="#!">No-op</a> <a href="/handbuch.html#e31">E31</a>`;
+    expect(extractHtmlLinks(html, "https://docs.example.com/#/quickstart")).toEqual([
+      { url: "https://docs.example.com/#/configuration", label: "Configuration" },
+      { url: "https://docs.example.com/#!/plugins", label: "Plugins" },
+      { url: "https://docs.example.com/handbuch.html", label: "E31" },
+    ]);
+  });
+
   it("reads href as an attribute of its own: not data-href, not text inside another attribute's value", () => {
     const html = `<a data-href="/wrong.html" href="/right.html">Right</a>
       <a title="see href=/also-wrong.html" href="/also-right.html">Also right</a>
@@ -230,6 +240,22 @@ describe("snapshotLinks (Playwright MCP 1.61)", () => {
       ],
     });
   });
+
+  it("keeps a hash route in a /url target, resolved against a Page URL that has one", () => {
+    const snapshot = [
+      "- Page URL: https://docs.example.com/#/quickstart",
+      "```yaml",
+      "- link \"Configuration\" [ref=e2] [cursor=pointer]:",
+      "  - /url: \"#/configuration\"",
+      "- link \"Nach oben\" [ref=e3] [cursor=pointer]:",
+      "  - /url: \"#top\"",
+      "```",
+    ].join("\n");
+    expect(snapshotLinks(snapshot, "http://fallback.invalid/")).toEqual({
+      pageUrl: "https://docs.example.com/#/quickstart",
+      links: [{ url: "https://docs.example.com/#/configuration", label: "Configuration" }],
+    });
+  });
 });
 
 describe("renderedLinks", () => {
@@ -248,6 +274,19 @@ describe("renderedLinks", () => {
     ]);
     expect(renderedLinks(undefined)).toEqual([]);
     expect(renderedLinks("[]")).toEqual([]);
+  });
+
+  it("keeps a hash route in an absolute link, and drops an in-page fragment", () => {
+    expect(renderedLinks([
+      ["https://docs.example.com/#/configuration", "Configuration"],
+      ["https://docs.example.com/#!/plugins", "Plugins"],
+      ["https://docs.example.com/handbuch.html#e31", "E31"],
+      ["https://docs.example.com/handbuch.html", "Handbuch"],
+    ])).toEqual([
+      { url: "https://docs.example.com/#/configuration", label: "Configuration" },
+      { url: "https://docs.example.com/#!/plugins", label: "Plugins" },
+      { url: "https://docs.example.com/handbuch.html", label: "E31" },
+    ]);
   });
 });
 
@@ -275,6 +314,19 @@ describe("formatLinkSection", () => {
       "- Not the site -> https://notexample.com/x",
     ].join("\n"));
     expect(section).toMatchObject({ shown: 6, total: 6 });
+  });
+
+  it("leaves out the page's own view of a hash-routed app and lists its other views; an in-page fragment still names the page itself", () => {
+    expect(formatLinkSection([
+      link("https://docs.example.com/#/", "Home"),
+      link("https://docs.example.com/#/quickstart", "Quickstart"),
+      link("https://docs.example.com/#/configuration", "Configuration"),
+    ], "https://docs.example.com/#/quickstart", 10_000).text).toBe([
+      "[Links on this page — 2 of 2, same site first]",
+      "- Home -> https://docs.example.com/#/",
+      "- Configuration -> https://docs.example.com/#/configuration",
+    ].join("\n"));
+    expect(formatLinkSection([link("https://www.example.com/handbuch.html", "Handbuch")], "https://www.example.com/handbuch.html#e31", 10_000).text).toBe("");
   });
 
   it("prints a link without a label, or labelled with a URL, bare, and keeps ' -> ' the line's own separator", () => {

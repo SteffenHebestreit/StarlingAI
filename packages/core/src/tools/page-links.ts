@@ -9,13 +9,13 @@
  * web_fetch calls before it reached /dokumentation.html.
  *
  * Three sources — a raw HTML page, a Playwright MCP (1.61) snapshot, and [href, label] pairs
- * collected in the browser — normalised the same way: absolute http(s) URLs without their
- * fragment, deduplicated by URL, the first non-empty label kept. formatLinkSection writes the
- * section itself. No imports: result-shaping imports LINK_SECTION_RE from here, and nothing
- * this module pulls in may close a cycle back to it.
+ * collected in the browser — normalised the same way: absolute http(s) URLs without an in-page
+ * fragment (a hash route stays), deduplicated by URL, the first non-empty label kept.
+ * formatLinkSection writes the section itself. No imports: result-shaping imports
+ * LINK_SECTION_RE from here, and nothing this module pulls in may close a cycle back to it.
  */
 
-/** One link of a page: an absolute http(s) URL without its fragment, and its label ("" when it has none). */
+/** One link of a page: an absolute http(s) URL without an in-page fragment, and its label ("" when it has none). */
 export interface PageLink {
   url: string;
   label: string;
@@ -78,10 +78,24 @@ function readAttributes(source: string): Map<string, string> {
   return attributes;
 }
 
-/** `href` as an absolute http(s) URL without its fragment, or null (a fragment-only, mailto:, javascript: … link). */
+/**
+ * A fragment that addresses a view of a hash-routed app (Docsify-style docs, a Vue or Angular app
+ * on hash URLs): "#/configuration", "#/", "#!/page", "#!key=value". Told apart from an in-page
+ * fragment (#top, #e31) by its shape alone; a bare "#!" is a no-op link, not a view. Clearing
+ * these turned every in-app link into the page's own URL, so a rendered docs app listed none of
+ * its chapters.
+ */
+function isRouteFragment(fragment: string): boolean {
+  return /^#(?:\/|!.)/.test(fragment);
+}
+
+/**
+ * `href` as an absolute http(s) URL without an in-page fragment, or null (a link to a place on
+ * the page, mailto:, javascript: …). A hash route is part of the address and stays.
+ */
 function resolveLink(href: string, base: string | undefined): string | null {
   const target = href.trim();
-  if (!target || target.startsWith("#")) return null;
+  if (!target || (target.startsWith("#") && !isRouteFragment(target))) return null;
   let parsed: URL;
   try {
     parsed = base === undefined ? new URL(target) : new URL(target, base);
@@ -89,7 +103,7 @@ function resolveLink(href: string, base: string | undefined): string | null {
     return null;
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
-  parsed.hash = "";
+  if (!isRouteFragment(parsed.hash)) parsed.hash = "";
   return parsed.href;
 }
 
