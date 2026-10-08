@@ -239,7 +239,11 @@ export async function searchMemoryRecordsWithStatus(
 ): Promise<MemorySearchResult> {
   const normalizedQuery = normalizeText(query.trim());
   const tokens = tokenize(normalizedQuery);
-  const scopes = new Set<MemoryScope>(opts.scopes?.length ? opts.scopes : ALL_MEMORY_SCOPES);
+  // For every caller, not only the search tools: memory_promote copied another account's task into
+  // the caller's own memory and named it in its answer, a sub-agent's memory guidance put it in the
+  // sub-agent's prompt, and the user-profile prefetch presented it as stored memory about this user
+  // (found in review, 2026-10-08). A caller that names only the agent scope there gets nothing.
+  const scopes = new Set<MemoryScope>(searchableMemoryScopes(opts.scopes));
   const allowedKinds = opts.kinds?.length ? new Set(opts.kinds.map((kind) => normalizeKind(kind)).filter(Boolean) as MemoryKind[]) : null;
   const records: MemoryRecord[] = [];
 
