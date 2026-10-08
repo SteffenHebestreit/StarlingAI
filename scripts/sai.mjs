@@ -13,12 +13,13 @@
  *   sai health                             Check service health endpoints
  *   sai dev [gateway|web]                  Start development mode
  */
-import { execSync, spawn } from "node:child_process";
+import { execFileSync, execSync, spawn } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { stampBuildRevision } from "./build-provenance.mjs";
 import { PRODUCT } from "./product.mjs";
 
 const BOLD = "\x1b[1m";
@@ -255,8 +256,11 @@ async function cmdStart() {
     ok("Clean slate: DB volumes, flat-file memory + audit log, and uploaded files removed (credentials preserved).");
   }
 
-  // The commit the gateway image is built from, for its labels (docker/gateway/Dockerfile).
-  stampBuildRevision();
+  // HEAD and whether the tree has uncommitted changes, as SAI_BUILD_SHA / SAI_BUILD_DIRTY for the
+  // compose build args that label the gateway image (scripts/build-provenance.mjs). The e2e harness
+  // compares the running image's revision with the commit it tests: twice (2026-09-05, 2026-10-06)
+  // the stack ran an image older than the code under test.
+  stampBuildRevision(process.env, gitOutput);
 
   // Build images
   if (wantBuild) {
@@ -663,25 +667,10 @@ function hasNvidiaGpu() {
   catch { return false; }
 }
 
-// HEAD and whether the tree has uncommitted changes, as SAI_BUILD_SHA / SAI_BUILD_DIRTY for the
-// compose build args that label the gateway image. The e2e harness compares the running image's
-// revision with the commit it tests: twice (2026-09-05, 2026-10-06) the stack ran an image older
-// than the code under test. Outside a git checkout both stay empty, and so do the labels.
-function stampBuildRevision() {
-  const git = (args) => {
-    try { return execSync(`git ${args}`, { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] }).trim(); }
-    catch { return null; }
-  };
-  const sha = git("rev-parse HEAD");
-  if (!sha || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(sha)) {
-    delete process.env.SAI_BUILD_SHA;
-    delete process.env.SAI_BUILD_DIRTY;
-    return;
-  }
-  const status = git("status --porcelain");
-  process.env.SAI_BUILD_SHA = sha;
-  // A status git could not produce is not a clean tree.
-  process.env.SAI_BUILD_DIRTY = status === "" ? "false" : "true";
+/** git's trimmed output in the repo root, or null when git failed or is missing. */
+function gitOutput(args) {
+  try { return execFileSync("git", args, { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true }).trim(); }
+  catch { return null; }
 }
 
 function loadDotEnv() {

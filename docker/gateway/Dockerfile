@@ -84,10 +84,11 @@ HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
 EXPOSE 8765
 
 # The commit this image is built from and whether the tree had uncommitted changes, passed in by
-# `sai start` (scripts/sai.mjs; empty when built another way). The e2e harness reads them off the
-# running image (scripts/e2e-env.mjs) to name the build a run measured: twice (2026-09-05,
-# 2026-10-06) the stack ran an image older than the code under test, and only grepping the baked
-# dist showed it. Declared last, so a new commit re-runs no build step.
+# `sai start` (empty when built another way). The e2e harness reads them off the running image
+# (`pnpm e2e:env status`) to name the build a run measured: twice (2026-09-05, 2026-10-06) the
+# stack ran an image older than the code under test, and only grepping the baked dist showed it.
+# scripts/build-provenance.mjs holds the arg and label names for both sides. Declared last, so a
+# new commit re-runs no build step.
 ARG SAI_BUILD_SHA=
 ARG SAI_BUILD_DIRTY=
 LABEL org.opencontainers.image.revision="${SAI_BUILD_SHA}" \

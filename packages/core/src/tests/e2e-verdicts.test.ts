@@ -6,7 +6,10 @@
  * today's rules.
  */
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+// @ts-expect-error — plain .mjs, no types
+import * as buildProvenanceModule from "../../../../scripts/build-provenance.mjs";
 import { buildReport, compareWithBaseline, exitCodeFor, renderMarkdown, type E2EReport, type E2ERunMeta } from "../e2e/report.js";
 import type { AttemptResult, ScenarioResult } from "../e2e/runner.js";
 import type { ServiceState } from "../e2e/services.js";
@@ -108,6 +111,63 @@ function oldRuleRegressions(report: E2EReport, baseline: E2EReport): string[] {
     const previous = result.status !== "skipped" ? before.get(result.id) : undefined;
     return previous !== undefined && (result.passRate < previous.passRate || (previous.passAll && !result.passAll));
   }).map((result) => result.id);
+}
+
+// ── the gateway image's build labels (scripts/build-provenance.mjs) ─────────
+
+type GitAnswers = (args: string[]) => string | null;
+type DockerRunner = (args: string[]) => { ok: boolean; out: string };
+
+/** scripts/build-provenance.mjs, which `sai start` and `pnpm e2e:env` share. */
+const buildProvenance = buildProvenanceModule as {
+  BUILD_SHA_ARG: string;
+  BUILD_DIRTY_ARG: string;
+  BUILD_REVISION_LABEL: string;
+  BUILD_DIRTY_LABEL: string;
+  IMAGE_INSPECT_FORMAT: string;
+  stampBuildRevision: (env: Record<string, string | undefined>, git: GitAnswers) => void;
+  imageFromInspect: (id: string, inspected: string | null) => unknown;
+  imageOfContainer: (docker: DockerRunner, container: string | null) => unknown;
+};
+
+/** The instructions of one Dockerfile stage: comments dropped, continuation lines joined. */
+function dockerfileStage(text: string, stage: string): string[] {
+  const instructions = text.replace(/\r\n/g, "\n").split("\n").filter((line) => !/^\s*#/.test(line)).join("\n")
+    .replace(/\\\n/g, " ").split("\n").map((line) => line.trim()).filter(Boolean);
+  const from = instructions.findIndex((line) => new RegExp(`^FROM\\s+\\S+\\s+AS\\s+${stage}$`, "i").test(line));
+  if (from < 0) return [];
+  const next = instructions.findIndex((line, index) => index > from && /^FROM\s/i.test(line));
+  return instructions.slice(from + 1, next < 0 ? undefined : next);
+}
+
+/** The scalar entries of the block mapping at `path`, in YAML laid out as docker-compose.yml is. */
+function yamlMapping(text: string, path: readonly string[]): Record<string, string> {
+  const entries: Record<string, string> = {};
+  const open: Array<{ indent: number; childIndent: number | null }> = [];
+  for (const line of text.replace(/\r\n/g, "\n").split("\n")) {
+    if (!line.trim() || line.trimStart().startsWith("#")) continue;
+    const indent = line.length - line.trimStart().length;
+    while (open.length > 0 && indent <= open[open.length - 1]!.indent) open.pop();
+    const parent = open[open.length - 1];
+    if (parent) {
+      parent.childIndent ??= indent;
+      if (indent !== parent.childIndent) continue;
+    } else if (indent !== 0) continue;
+    const entry = /^([\w.-]+):(?:\s+(.*))?$/.exec(line.trim());
+    if (!entry) continue;
+    if (open.length === path.length) entries[entry[1]!] = (entry[2] ?? "").trim();
+    else if (entry[1] === path[open.length]) open.push({ indent, childIndent: null });
+  }
+  return entries;
+}
+
+/** A top-level function of a script, from its signature to its closing brace. */
+function functionSource(source: string, signature: string): string {
+  const text = source.replace(/\r\n/g, "\n");
+  const start = text.indexOf(signature);
+  if (start < 0) return "";
+  const end = text.indexOf("\n}\n", start);
+  return text.slice(start, end < 0 ? undefined : end + 2);
 }
 
 const SMOKE_1542 = "2026-10-07T15-42-55-888Z.json";
@@ -451,5 +511,138 @@ describe("e2e provenance", () => {
     const markdown = renderMarkdown(now);
     expect(markdown).toContain(`> **Provenance** — ${stale}`);
     expect(markdown).toContain(`- **Confounded** — this run: ${stale}`);
+  });
+});
+
+describe("e2e provenance — the gateway image's build labels, from git to the report", () => {
+  const SHA = "0123456789abcdef0123456789abcdef01234567";
+  const ID = `sha256:${"3b".repeat(32)}`;
+  const CREATED = "2026-10-07T21:09:32.557822715Z";
+  const { BUILD_SHA_ARG, BUILD_DIRTY_ARG, BUILD_REVISION_LABEL, BUILD_DIRTY_LABEL, IMAGE_INSPECT_FORMAT } = buildProvenance;
+  const git = (answers: Record<string, string | null>): GitAnswers => (args) => answers[args.join(" ")] ?? null;
+  /** Docker answering by its arguments; a command without an answer fails. */
+  const docker = (answers: Record<string, string>, calls: string[][] = []): DockerRunner => (args) => {
+    calls.push(args);
+    const out = answers[args.join(" ")];
+    return out === undefined ? { ok: false, out: "" } : { ok: true, out };
+  };
+  /** Docker for one running gateway container whose image carries these labels. */
+  const gatewayContainer = (labels: Record<string, string> | null): DockerRunner => docker({
+    "inspect --format {{.Image}} starlingai-gateway-1": ID,
+    [`image inspect --format ${IMAGE_INSPECT_FORMAT} ${ID}`]: `${JSON.stringify(CREATED)}\t${JSON.stringify(labels)}`,
+  });
+  const root = findRepoRoot();
+
+  it("stamps HEAD and the dirty flag for the build, and clears both outside a git checkout", () => {
+    const env: Record<string, string | undefined> = {};
+    buildProvenance.stampBuildRevision(env, git({ "rev-parse HEAD": SHA, "status --porcelain": "" }));
+    expect(env).toEqual({ SAI_BUILD_SHA: SHA, SAI_BUILD_DIRTY: "false" });
+    buildProvenance.stampBuildRevision(env, git({ "rev-parse HEAD": SHA, "status --porcelain": "?? eval/e2e/scenarios/new.jsonc" }));
+    expect(env).toEqual({ SAI_BUILD_SHA: SHA, SAI_BUILD_DIRTY: "true" });
+    // A status git could not produce is not a clean tree.
+    buildProvenance.stampBuildRevision(env, git({ "rev-parse HEAD": SHA, "status --porcelain": null }));
+    expect(env["SAI_BUILD_DIRTY"]).toBe("true");
+    // Outside a checkout, values left in the shell must not label the image.
+    for (const head of [null, "fatal: not a git repository (or any of the parent directories): .git"]) {
+      const shell: Record<string, string | undefined> = { SAI_BUILD_SHA: SHA, SAI_BUILD_DIRTY: "false", PATH: "/usr/bin" };
+      buildProvenance.stampBuildRevision(shell, git({ "rev-parse HEAD": head, "status --porcelain": "" }));
+      expect(shell).toEqual({ PATH: "/usr/bin" });
+    }
+  });
+
+  it("reads the image's build time and labels as docker image inspect prints them", () => {
+    // The stack's gateway image on 2026-10-08, built before the labels: compose's own labels only.
+    const unlabelled = `"${CREATED}"\t{"com.docker.compose.project":"starlingai","com.docker.compose.service":"gateway","com.docker.compose.version":"5.5.1"}`;
+    expect(buildProvenance.imageFromInspect(ID, unlabelled)).toEqual({ id: ID, created: CREATED, revision: null, dirty: null });
+    const labelled = (revision: string, dirty: string) => `"${CREATED}"\t${JSON.stringify({ [BUILD_REVISION_LABEL]: revision, [BUILD_DIRTY_LABEL]: dirty })}`;
+    expect(buildProvenance.imageFromInspect(ID, labelled(SHA, "true"))).toEqual({ id: ID, created: CREATED, revision: SHA, dirty: true });
+    expect(buildProvenance.imageFromInspect(ID, labelled(SHA, "false"))).toEqual({ id: ID, created: CREATED, revision: SHA, dirty: false });
+    expect(buildProvenance.imageFromInspect(ID, labelled(SHA, "yes"))).toEqual({ id: ID, created: CREATED, revision: SHA, dirty: null });
+    // Built another way: empty args, empty labels.
+    expect(buildProvenance.imageFromInspect(ID, labelled("", ""))).toEqual({ id: ID, created: CREATED, revision: null, dirty: null });
+    // No label at all prints null; a failed or garbled inspect leaves the id alone.
+    expect(buildProvenance.imageFromInspect(ID, `"${CREATED}"\tnull`)).toEqual({ id: ID, created: CREATED, revision: null, dirty: null });
+    expect(buildProvenance.imageFromInspect(ID, null)).toEqual({ id: ID, created: null, revision: null, dirty: null });
+    expect(buildProvenance.imageFromInspect(ID, "Error: No such image")).toEqual({ id: ID, created: null, revision: null, dirty: null });
+  });
+
+  it("asks docker for the container's image, then for that image's build time and labels", () => {
+    const calls: string[][] = [];
+    const runner = docker({
+      "inspect --format {{.Image}} starlingai-gateway-1": ID,
+      [`image inspect --format ${IMAGE_INSPECT_FORMAT} ${ID}`]: `"${CREATED}"\tnull`,
+    }, calls);
+    expect(buildProvenance.imageOfContainer(runner, "starlingai-gateway-1")).toEqual({ id: ID, created: CREATED, revision: null, dirty: null });
+    expect(calls).toEqual([
+      ["inspect", "--format", "{{.Image}}", "starlingai-gateway-1"],
+      ["image", "inspect", "--format", "{{json .Created}}\t{{json .Config.Labels}}", ID],
+    ]);
+    // No container (the stack is down, or not this checkout's): no docker call, no image.
+    expect(buildProvenance.imageOfContainer(docker({}, calls), null)).toBeNull();
+    expect(calls).toHaveLength(2);
+    expect(buildProvenance.imageOfContainer(docker({}), "starlingai-gateway-1")).toBeNull();
+    // The image id without its metadata.
+    expect(buildProvenance.imageOfContainer(docker({ "inspect --format {{.Image}} starlingai-gateway-1": ID }), "starlingai-gateway-1"))
+      .toEqual({ id: ID, created: null, revision: null, dirty: null });
+  });
+
+  it("carries the commit from sai start through the compose build args and the Dockerfile's labels to the report", () => {
+    // docker-compose.yml: the gateway builds the runtime stage and passes both args from the environment.
+    const compose = readFileSync(join(root, "docker-compose.yml"), "utf8");
+    const build = yamlMapping(compose, ["services", "gateway", "build"]);
+    expect(build["target"]).toBe("runtime");
+    const composeArgs = yamlMapping(compose, ["services", "gateway", "build", "args"]);
+    expect(Object.keys(composeArgs).sort()).toEqual([BUILD_DIRTY_ARG, BUILD_SHA_ARG].sort());
+
+    // docker/gateway/Dockerfile: that stage declares both args, then labels the image with them.
+    const stage = dockerfileStage(readFileSync(join(root, "docker", "gateway", "Dockerfile"), "utf8"), build["target"]!);
+    const labelArgs = new Map<string, { arg: string; at: number }>();
+    stage.forEach((instruction, at) => {
+      if (!/^LABEL\s/i.test(instruction)) return;
+      for (const [, label, arg] of instruction.matchAll(/([\w.-]+)="\$\{(\w+)\}"/g)) labelArgs.set(label!, { arg: arg!, at });
+    });
+    expect(labelArgs.get(BUILD_REVISION_LABEL)?.arg).toBe(BUILD_SHA_ARG);
+    expect(labelArgs.get(BUILD_DIRTY_LABEL)?.arg).toBe(BUILD_DIRTY_ARG);
+    for (const { arg, at } of labelArgs.values()) {
+      // An ARG is in scope only after its declaration in the stage that uses it.
+      const declared = stage.findIndex((instruction) => new RegExp(`^ARG\\s+${arg}(=.*)?$`).test(instruction));
+      expect(declared, arg).toBeGreaterThanOrEqual(0);
+      expect(declared, arg).toBeLessThan(at);
+    }
+
+    // The chain: the environment `sai start` stamps → compose substitutes the args → the labels →
+    // `docker image inspect` → `pnpm e2e:env status --json` → the provenance a report records.
+    const imageBuiltFrom = (env: Record<string, string | undefined>) => {
+      const args = Object.fromEntries(Object.entries(composeArgs).map(([name, value]) => {
+        const variable = /^\$\{(\w+)(?::-([^}]*))?\}$/.exec(value);
+        expect(variable, `${name}: ${value}`).not.toBeNull();
+        return [name, env[variable![1]!] || (variable![2] ?? "")];
+      }));
+      const labels = { "com.docker.compose.service": "gateway", ...Object.fromEntries([...labelArgs].map(([label, { arg }]) => [label, args[arg] ?? ""])) };
+      const image = buildProvenance.imageOfContainer(gatewayContainer(labels), "starlingai-gateway-1");
+      return gatewayImageFromStatus({ gateway: { running: true, image } });
+    };
+    const clean: Record<string, string | undefined> = {};
+    buildProvenance.stampBuildRevision(clean, git({ "rev-parse HEAD": SHA, "status --porcelain": "" }));
+    expect(imageBuiltFrom(clean)).toEqual({ id: ID, createdAt: CREATED, revision: SHA, dirty: false });
+    const dirty: Record<string, string | undefined> = {};
+    buildProvenance.stampBuildRevision(dirty, git({ "rev-parse HEAD": SHA, "status --porcelain": " M packages/core/src/e2e/report.ts" }));
+    expect(imageBuiltFrom(dirty)).toEqual({ id: ID, createdAt: CREATED, revision: SHA, dirty: true });
+    // Built without `sai start`: the image names no commit, and the harness falls back to the build time.
+    expect(imageBuiltFrom({})).toEqual({ id: ID, createdAt: CREATED, revision: null, dirty: null });
+  });
+
+  it("is stamped by sai start before any image is built, and read by e2e:env status", () => {
+    const sai = readFileSync(join(root, "scripts", "sai.mjs"), "utf8");
+    expect(sai).toMatch(/^import \{ stampBuildRevision \} from "\.\/build-provenance\.mjs";$/m);
+    const start = functionSource(sai, "async function cmdStart(");
+    const stamp = start.indexOf("stampBuildRevision(process.env, ");
+    expect(stamp).toBeGreaterThan(-1);
+    for (const command of ['dc("build"', 'dc("up"']) {
+      expect(start.indexOf(command), command).toBeGreaterThan(stamp);
+    }
+    const environment = readFileSync(join(root, "scripts", "e2e-env.mjs"), "utf8");
+    expect(environment).toMatch(/^import \{ imageOfContainer \} from "\.\/build-provenance\.mjs";$/m);
+    expect(functionSource(environment, "async function collectStatus(")).toMatch(/\bgateway: \{[^}]*\bimage: imageOfContainer\(docker, gatewayRunning\),/);
   });
 });
