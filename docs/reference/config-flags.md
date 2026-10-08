@@ -306,10 +306,10 @@ Every public schema field, where it is declared, and how many production files r
 | `moderateToolOutputs` | packages/core/src/config/schema.ts:1261 | 1 |
 | `monthlyUsd` | packages/core/src/config/schema.ts:545 | 2 |
 | `mounts` | packages/core/src/config/schema.ts:707 | 11 |
-| `name` | packages/core/src/config/schema.ts:1997 | 370 |
+| `name` | packages/core/src/config/schema.ts:1997 | 371 |
 | `negativePrompt` | packages/core/src/config/schemas/multimodal.ts:175 | 7 |
 | `network` | packages/core/src/config/schema.ts:708 | 56 |
-| `node` | packages/core/src/config/schema.ts:1066 | 239 |
+| `node` | packages/core/src/config/schema.ts:1066 | 240 |
 | `normalizeDelegationToEnglish` | packages/core/src/config/schemas/orchestration.ts:573 | 3 |
 | `notes` | packages/core/src/config/schema.ts:814 | 56 |
 | `oneLiner` | packages/core/src/config/schema.ts:923 | 3 |
@@ -329,7 +329,7 @@ Every public schema field, where it is declared, and how many production files r
 | `password` | packages/core/src/config/schema.ts:808 | 47 |
 | `passwordHash` | packages/core/src/config/schema.ts:378 | 4 |
 | `passwordSelector` | packages/core/src/config/schema.ts:812 | 5 |
-| `path` | packages/core/src/config/schemas/decisions.ts:111 | 305 |
+| `path` | packages/core/src/config/schemas/decisions.ts:111 | 306 |
 | `pattern` | packages/core/src/config/schema.ts:1378 | 59 |
 | `patterns` | packages/core/src/config/schema.ts:1315 | 27 |
 | `pdf` | packages/core/src/config/schemas/render.ts:18 | 25 |

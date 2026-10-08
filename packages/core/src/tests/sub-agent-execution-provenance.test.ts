@@ -992,6 +992,74 @@ describe("the code a delegated run executed, and the figures it states", () => {
     }, 60_000);
   });
 
+  describe("(q) an honest report restating, in another form, what its inputs held", () => {
+    // The sandbox is broken and the coder says so. Each answer also states one invented figure,
+    // which must still be masked.
+    const runHonest = async (root: string, command: string, stderr: string, finalAnswer: string, calls: Array<{ tool: string; args: Record<string, unknown> }> = []) => {
+      await registerTools({
+        shell_exec: () => failed(stderr),
+        write_file: (args) => ({
+          success: true,
+          output: `File written: generated/${String(args["path"])}`,
+          metadata: { filename: String(args["path"]), outputPath: `generated/${String(args["path"])}`, contentType: "text/plain", previewMode: "text" },
+        }),
+      });
+      completeMock.mockImplementation(async (messages: Message[]) => scripted([
+        ...calls,
+        { tool: "shell_exec", args: { command } },
+      ], finalAnswer)(messages));
+      return runAgent("coder", INCIDENT.task, root);
+    };
+
+    it("versions node printed, glued to a v", async () => {
+      const result = await runHonest(
+        "parent-provenance-node-versions",
+        "node primes.js",
+        "error: this script needs Node.js >= v20.11.0, found v18.17.0\n\nNode.js v18.17.0",
+        "Die Sandbox hat Node 18.17.0 (Node 18), das Skript braucht Node 20.11.0; es gibt 8393 Primzahlen.",
+      );
+
+      expect(result.output).toBe("Die Sandbox hat Node 18.17.0 (Node 18), das Skript braucht Node 20.11.0; es gibt [not observed] Primzahlen.");
+      expect(result.executions?.unobservedFigures).toBe(1);
+    }, 60_000);
+
+    it("an interpreter version glued to its name", async () => {
+      const result = await runHonest(
+        "parent-provenance-python-version",
+        "python3 primes.py",
+        "/usr/local/bin/python3: error while loading shared libraries: libpython3.11.so.1.0: cannot open shared object file: No such file or directory",
+        "Python 3.11 ist in der Sandbox defekt (libpython3.11.so.1.0 fehlt); es gibt 8393 Primzahlen.",
+      );
+
+      expect(result.output).toBe("Python 3.11 ist in der Sandbox defekt (libpython3.11.so.1.0 fehlt); es gibt [not observed] Primzahlen.");
+      expect(result.executions?.unobservedFigures).toBe(1);
+    }, 60_000);
+
+    it("today's date written in numbers", async () => {
+      const now = new Date();
+      const [yyyy, mm, dd] = [String(now.getFullYear()), String(now.getMonth() + 1).padStart(2, "0"), String(now.getDate()).padStart(2, "0")];
+      const stand = `Stand ${dd}.${mm}.${yyyy} (${yyyy}-${mm}-${dd}): primes.js lief nicht`;
+      const result = await runHonest("parent-provenance-date", "node primes.js", "", `${stand}; es gibt 8393 Primzahlen.`);
+
+      expect(result.output).toBe(`${stand}; es gibt [not observed] Primzahlen.`);
+      expect(result.executions?.unobservedFigures).toBe(1);
+    }, 60_000);
+
+    it("the name of a file it wrote and never ran", async () => {
+      // Its content repeats the name's figure, so the write's own echo is no input for it.
+      const result = await runHonest(
+        "parent-provenance-file-name",
+        "node primes.js",
+        "",
+        "sieve-4096.js liegt im Workspace und prüft 4096 Zahlen; ausgeführt wurde es nicht.",
+        [{ tool: "write_file", args: { path: "sieve-4096.js", content: "const LIMIT = 4096;\n" } }],
+      );
+
+      expect(result.output).toBe("sieve-4096.js liegt im Workspace und prüft [not observed] Zahlen; ausgeführt wurde es nicht.");
+      expect(result.executions?.unobservedFigures).toBe(1);
+    }, 60_000);
+  });
+
   it("(k) a figure the runtime's forced-answer instruction gave the run is one it received", async () => {
     // Ten checks in the run's only iteration, all failing; the synthesis comes back empty, and the
     // rescue tells the model how many tool calls it made. The count it repeats is not made up.

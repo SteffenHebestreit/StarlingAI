@@ -3,9 +3,12 @@ import {
   UNOBSERVED_FIGURE_MARKER,
   addArgumentFigureKeys,
   addFigureKeys,
+  addReceivedFigureKeys,
   countUnobservedFigures,
   figureKey,
   maskUnobservedFigures,
+  namedFileSpans,
+  numericDateForms,
   verbatimQuotedCodeSpans,
   verbatimQuotedCommandSpans,
 } from "../agent/figure-provenance.js";
@@ -44,7 +47,69 @@ describe("figure keys", () => {
   });
 });
 
+describe("what a run received, read in every form an answer may restate it in", () => {
+  const received = (text: string, except?: ReadonlySet<string>): string[] => {
+    const keys = new Set<string>();
+    addReceivedFigureKeys(keys, text, except);
+    return [...keys].sort();
+  };
+
+  it("an identifier's digits, as a figure and as their leading run", () => {
+    // Strictly, "v18.17.0" gives only 170.
+    expect(received("found v18.17.0, needs >= v20.11.0")).toEqual(["110", "170", "18", "1817", "20", "2011"]);
+    expect(received("Node.js v16.20.2")).toEqual(expect.arrayContaining(["16"]));
+    expect(received("libpython3.11.so.1.0: cannot open shared object file")).toEqual(expect.arrayContaining(["311"]));
+  });
+
+  it("a grouped or decimal figure keeps its one key, and an excluded key stays out", () => {
+    expect(received("Summe: 1.255.204.276, Anteil 3,14159")).toEqual(["1255204276", "314159"]);
+    expect(received("build x8393", new Set(["8393"]))).toEqual([]);
+  });
+
+  it("the answer is still read strictly", () => {
+    const keys = new Set<string>();
+    addReceivedFigureKeys(keys, "found v18.17.0");
+    expect(maskUnobservedFigures("Die Sandbox hat Node 18.17.0 (v18), es gibt 8393 Primzahlen.", keys)).toEqual({
+      text: "Die Sandbox hat Node 18.17.0 (v18), es gibt [not observed] Primzahlen.",
+      masked: 1,
+    });
+  });
+
+  it("the run's date in numbers", () => {
+    const date = new Date(2026, 9, 8);
+    expect(numericDateForms(date)).toBe("2026-10-08 08.10.2026 10/08/2026 20261008");
+    const keys = new Set<string>();
+    addReceivedFigureKeys(keys, "Today's date: Thursday, October 8, 2026");
+    addReceivedFigureKeys(keys, numericDateForms(date));
+    expect(maskUnobservedFigures("Stand 08.10.2026 (2026-10-08), 8.10.2026", keys).masked).toBe(0);
+    expect(maskUnobservedFigures("Stand 09.10.2026", keys).text).toBe("Stand [not observed].2026");
+  });
+});
+
+describe("a file the run wrote, named in its answer", () => {
+  it("is read past as a whole name, a full stop after it included", () => {
+    const text = "sieve-4096.js liegt im Workspace (generated/sieve-4096.js) und prüft 4096 Zahlen; siehe sieve-4096.js.";
+    const spans = namedFileSpans(text, ["generated/sieve-4096.js", "sieve-4096.js"]);
+
+    expect(maskUnobservedFigures(text, new Set(), spans)).toEqual({
+      text: "sieve-4096.js liegt im Workspace (generated/sieve-4096.js) und prüft [not observed] Zahlen; siehe sieve-4096.js.",
+      masked: 1,
+    });
+  });
+
+  it("not where the name continues another, and not a name without a digit", () => {
+    expect(namedFileSpans("old-sieve-4096.js und sieve-4096.json", ["sieve-4096.js"])).toEqual([]);
+    expect(namedFileSpans("primes.js", ["primes.js"])).toEqual([]);
+  });
+});
+
 describe("the figures a run's own calls state", () => {
+  it("a figure it glued to a letter is its own too", () => {
+    const keys = new Set<string>();
+    addArgumentFigureKeys(keys, { path: "results-v2.md", content: "build x8393" });
+    expect(keys.has("8393")).toBe(true);
+  });
+
   it("are read from the arguments value by value, at any depth, numbers included", () => {
     const args = { path: "results.md", content: "Anzahl:\n8393", rows: [[1255204276, "Summe"]], limit: 7 };
     const keys = new Set<string>();

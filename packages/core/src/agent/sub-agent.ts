@@ -37,9 +37,11 @@ import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type ToolContext, ty
 import { isToolAllowed, requiresSandbox } from "../guardrails/tool-tiers.js";
 import {
   addArgumentFigureKeys,
-  addFigureKeys,
+  addReceivedFigureKeys,
   countUnobservedFigures,
   maskUnobservedFigures,
+  namedFileSpans,
+  numericDateForms,
   verbatimQuotedCodeSpans,
   verbatimQuotedCommandSpans,
   type FigureCheckSpan,
@@ -3166,7 +3168,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           ?? agentCfg.maxIterations ?? DEFAULT_MAX_ITERATIONS);
 
     // Build system prompt
-    const today = new Date().toLocaleDateString("en-US", {
+    const todayDate = new Date();
+    const today = todayDate.toLocaleDateString("en-US", {
       weekday: "long", year: "numeric", month: "long", day: "numeric",
     });
     const flowGuidance = formatFlowMemoryGuidance(opts.workspacePath, sanitizedTask, {
@@ -3740,7 +3743,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // message, and its per-iteration nudges. Never its own prose, the files it wrote, what it
     // shared or the commands it sent to the sandbox: those are the claims being checked.
     const observedFigureKeys = new Set<string>();
-    if (tracksFigures) addFigureKeys(observedFigureKeys, systemPrompt);
+    if (tracksFigures) {
+      addReceivedFigureKeys(observedFigureKeys, systemPrompt);
+      // The prompt's "Today's date" in the numeric forms an answer writes it in.
+      addReceivedFigureKeys(observedFigureKeys, numericDateForms(todayDate));
+    }
     // A RUN'S OWN CLAIM HANDED BACK TO IT IS STILL ITS OWN CLAIM. Keys of the figures the run put
     // into the arguments of its own calls before any input had contained them: the files it
     // wrote, what it shared, the task it delegated, the commands it ran. In review, a coder whose
@@ -3764,7 +3771,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         const message = history[absorbedHistoryLength]!;
         if (message.role === "assistant") continue;
         const content = typeof message.content === "string" ? message.content : "";
-        addFigureKeys(observedFigureKeys, content, message.role === "user" ? undefined : ownClaimFigureKeys);
+        addReceivedFigureKeys(observedFigureKeys, content, message.role === "user" ? undefined : ownClaimFigureKeys);
       }
     };
     /**
@@ -3842,6 +3849,14 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       )),
       ...verbatimQuotedCommandSpans(text, ranCommands),
     ];
+    // The places a text names a file the run wrote, by its path or its base name. The path the run
+    // chose stays its claim (recordOwnClaims): the write's own "File written: results-8393.txt"
+    // must not vouch for "8393 Primzahlen". Only the name itself is read past.
+    const writtenFileNameSpans = (text: string): FigureCheckSpan[] => {
+      const paths = [...writtenFileText.keys(), ...mutatedWorkspacePaths, ...pathsWrittenThisRun];
+      if (paths.length === 0) return [];
+      return namedFileSpans(text, paths.flatMap((path) => [path, path.split("/").pop() ?? ""]));
+    };
     // Measured, never acted on: how many figures a run with at least one productive execution
     // stated without an input containing them (the partial-output case the mask does not cover).
     let shadowUnobservedFigures: number | undefined;
@@ -3854,7 +3869,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     const quarantineUnobservedFigures = (text: string, site: string): string => {
       if (!tracksFigures) return text;
       absorbNewHistory();
-      const quoted = quotedCodeSpans(text);
+      const quoted = [...quotedCodeSpans(text), ...writtenFileNameSpans(text)];
       if (noExecutionCompleted(executionRecord)) {
         const { text: maskedText, masked } = maskUnobservedFigures(text, observedFigureKeys, quoted);
         if (masked > 0) {
@@ -4401,7 +4416,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     const forcedAnswerMessages = (instruction: string): LLMMessage[] => {
       // The instruction is a system message the run receives, like a per-iteration nudge: a figure
       // it states (the rescue's count of tool calls) is not one the answer made up.
-      if (tracksFigures) addFigureKeys(observedFigureKeys, instruction);
+      if (tracksFigures) addReceivedFigureKeys(observedFigureKeys, instruction);
       return composeSubAgentMessages(systemPrompt, history, [instruction]);
     };
     const completeWithoutTools = async (
@@ -4587,7 +4602,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // 12,000 characters of them, where the snapshot it started with held 12 or 2,400. A
       // teammate's figure that reached it only here was masked as made up (review of E2E
       // 2026-10-07). What the run shared itself is in them too, and stays its own claim.
-      if (tracksFigures) addFigureKeys(observedFigureKeys, curated, ownClaimFigureKeys);
+      if (tracksFigures) addReceivedFigureKeys(observedFigureKeys, curated, ownClaimFigureKeys);
       return buildFactsFirstSynthesisMessages(`${opts.task}${userWordsBlock}`, curated);
     };
     /** Run a forced-synthesis completion, preferring the streaming accumulator so
@@ -5766,7 +5781,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // absorbNewHistory); the nudges count too, since the model reads them as context.
       if (tracksFigures) {
         absorbNewHistory();
-        addFigureKeys(observedFigureKeys, nudgeMessage);
+        addReceivedFigureKeys(observedFigureKeys, nudgeMessage);
       }
       const trimmed = trimSubAgentHistory(history, {
         systemPromptChars: systemPrompt.length + nudgeMessage.length,

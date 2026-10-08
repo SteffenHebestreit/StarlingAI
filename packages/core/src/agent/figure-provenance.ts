@@ -21,8 +21,14 @@
 export const UNOBSERVED_FIGURE_MARKER = "[not observed]";
 
 /** A run of digits, optionally grouped in threes by . , ' ’ NBSP or NNBSP, with an optional decimal
- *  tail; never one that continues a word or a number in front of it. */
-const FIGURE_RE = /(?<![\p{L}\p{N}_])(?:\p{Nd}{1,3}(?:[.,'\u2019\u00a0\u202f]\p{Nd}{3})+(?:[.,]\p{Nd}+)?|\p{Nd}+(?:[.,]\p{Nd}+)?)(?!\p{N})/gu;
+ *  tail, that no digit follows. */
+const FIGURE_BODY = String.raw`(?:\p{Nd}{1,3}(?:[.,'\u2019\u00a0\u202f]\p{Nd}{3})+(?:[.,]\p{Nd}+)?|\p{Nd}+(?:[.,]\p{Nd}+)?)(?!\p{N})`;
+/** A figure: never one that continues a word or a number in front of it. */
+const FIGURE_RE = new RegExp(String.raw`(?<![\p{L}\p{N}_])${FIGURE_BODY}`, "gu");
+/** The digits an identifier carries: a figure glued to a letter or "_" in front of it, the "18.17"
+ *  of "v18.17.0" and the "3.11" of "python3.11". */
+const GLUED_FIGURE_RE = new RegExp(String.raw`(?<=[\p{L}_])${FIGURE_BODY}`, "gu");
+const LEADING_DIGITS_RE = /^\p{Nd}+/u;
 
 const DECIMAL_DIGIT_RE = /\p{Nd}/u;
 
@@ -59,12 +65,47 @@ export function addFigureKeys(into: Set<string>, text: string | null | undefined
 }
 
 /**
- * Add the key of every figure in a tool call's arguments: each string and number, at any depth.
- * Read value by value, not from the call's JSON, where an escape glues a letter to the figure
- * behind it ("Anzahl:\n8393" is "Anzahl:\\n8393" there, and "n8393" is no figure).
+ * Add the key of every figure `text` holds as an input of the run: every key addFigureKeys adds,
+ * and the digits an identifier carries, as a figure and as their leading digit run. In review an
+ * honest report of a broken sandbox was masked because its inputs held a figure only in another
+ * form: node printed "Node.js v18.17.0" and "needs >= v20.11.0", the answer said "Node 18.17.0 …
+ * 20.11.0" and "Node 18"; a library error named "libpython3.11.so", the answer "Python 3.11".
+ * Read strictly, "v18.17.0" gives only the key 170. So an input's "v18.17.0" also gives 1817 and
+ * 18, and "python3.11" also 311. An answer is still read strictly (maskUnobservedFigures): v18,
+ * x86_64 or ES2020 there are no figures it states. A grouped or decimal figure keeps its one key.
+ */
+export function addReceivedFigureKeys(into: Set<string>, text: string | null | undefined, except?: ReadonlySet<string>): void {
+  if (!text) return;
+  addFigureKeys(into, text, except);
+  for (const match of text.matchAll(GLUED_FIGURE_RE)) {
+    for (const raw of [match[0], LEADING_DIGITS_RE.exec(match[0])?.[0] ?? ""]) {
+      const key = figureKey(raw);
+      if (countsAsFigure(key) && !except?.has(key)) into.add(key);
+    }
+  }
+}
+
+/**
+ * The run's date as programs and locales write it in numbers: 2026-10-08, 08.10.2026, 10/08/2026
+ * and 20261008. The system prompt gives it as "Thursday, October 8, 2026", whose keys are 8 and
+ * 2026, and in review "Stand 08.10.2026 (2026-10-08)" came back "Stand [not observed].2026
+ * (2026-[not observed]-08)". Indexed with the prompt, never written into it.
+ */
+export function numericDateForms(date: Date): string {
+  const yyyy = String(date.getFullYear());
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const dd = String(date.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd} ${dd}.${mm}.${yyyy} ${mm}/${dd}/${yyyy} ${yyyy}${mm}${dd}`;
+}
+
+/**
+ * Add the key of every figure in a tool call's arguments: each string and number, at any depth,
+ * read the way an input is (addReceivedFigureKeys), so a figure the run wrote glued to a letter is
+ * still its own when a tool hands it back. Read value by value, not from the call's JSON, whose
+ * escapes change the text ("Anzahl:\n8393" is "Anzahl:\\n8393" there).
  */
 export function addArgumentFigureKeys(into: Set<string>, value: unknown, depth = 0): void {
-  if (typeof value === "string") addFigureKeys(into, value);
+  if (typeof value === "string") addReceivedFigureKeys(into, value);
   else if (typeof value === "number" && Number.isFinite(value)) addFigureKeys(into, String(value));
   else if (value && typeof value === "object" && depth < 8) {
     for (const entry of Array.isArray(value) ? value : Object.values(value)) addArgumentFigureKeys(into, entry, depth + 1);
@@ -143,6 +184,28 @@ export function verbatimQuotedCommandSpans(text: string, commands: readonly stri
 
 function normalizedCommand(text: string): string {
   return normalizeQuotedLines(text).trim();
+}
+
+const isNameChar = (char: string | undefined): boolean => char !== undefined && /[\w.-]/.test(char);
+
+/**
+ * Where `text` names one of `names` (files the run wrote, by path or base name) as a whole name:
+ * nothing that continues a file name on either side, except a sentence's full stop after it. A
+ * figure there is part of a name the run chose, not one it states: in review the honest
+ * "sieve-4096.js liegt im Workspace" came back "sieve-[not observed].js". The name's digits stay
+ * the run's own claim everywhere else in the text.
+ */
+export function namedFileSpans(text: string, names: Iterable<string>): FigureCheckSpan[] {
+  const spans: FigureCheckSpan[] = [];
+  for (const name of new Set(names)) {
+    if (!/\p{Nd}/u.test(name)) continue;
+    for (let at = text.indexOf(name); at >= 0; at = text.indexOf(name, at + 1)) {
+      const after = at + name.length;
+      const endsName = !isNameChar(text[after]) || (text[after] === "." && !isNameChar(text[after + 1]));
+      if (!isNameChar(text[at - 1]) && endsName) spans.push({ start: at, end: after });
+    }
+  }
+  return spans;
 }
 
 /** The bodies of the closed fenced code blocks in `text` whose normalized body `accept` takes. */
