@@ -71,14 +71,25 @@ const ATTACHMENT_LINE = /^📎[^\n]*(?:\n|$)/u;
  * user's words: a specialist told to write in the language of the user's own words read an English
  * description as what a German speaker wrote. The words are what follows that line, and none when
  * nothing follows it.
+ *
+ * `withoutFlags` takes the entry point's inline flags (--auto, --effort, …) out of the typed text,
+ * as they were taken out of the message. It runs on the text after the attachment line: run on the
+ * whole bubble text, a flag typed first took the line break in front of it, the typed words joined
+ * the attachment line, and the turn got no words of the person's at all.
  */
-export function typedUserWords(checkedMessage: string, typed: string | undefined): string {
+export function typedUserWords(
+  checkedMessage: string,
+  typed: string | undefined,
+  withoutFlags: (text: string) => string = (text) => text,
+): string {
   const text = typed?.trim() ?? "";
   if (!text) return checkedMessage;
-  if (checkedMessage.includes(text)) return text;
-  const attachmentLine = ATTACHMENT_LINE.exec(text);
-  if (!attachmentLine) return checkedMessage;
-  const afterAttachments = text.slice(attachmentLine[0].length).trim();
+  const attachmentLine = ATTACHMENT_LINE.exec(text)?.[0];
+  if (!attachmentLine) {
+    const words = withoutFlags(text).trim();
+    return words && checkedMessage.includes(words) ? words : checkedMessage;
+  }
+  const afterAttachments = withoutFlags(text.slice(attachmentLine.length)).trim();
   return checkedMessage.includes(afterAttachments) ? afterAttachments : checkedMessage;
 }
 

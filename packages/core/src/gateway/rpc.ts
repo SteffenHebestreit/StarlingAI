@@ -1247,10 +1247,11 @@ export class RpcConnection {
           userDisplayContent: displayContent,
           // What the person typed. `message` can carry inlined image analysis (the web chat's typed
           // text is displayContent then), and after /run it is the scene's template, which is not
-          // the user's words at all.
+          // the user's words at all. The flags come out of the typed text as they came out of the
+          // message, below the attachment line (typedUserWords).
           userWords: runMatch
             ? undefined
-            : typedUserWords(message, displayContent ? parseOverrideFlags(displayContent).clean : undefined),
+            : typedUserWords(message, displayContent, (typed) => parseOverrideFlags(typed).clean),
           userAttachments,
           signal: ac.signal,
           allowedAgents: effectiveAllowedAgents,
