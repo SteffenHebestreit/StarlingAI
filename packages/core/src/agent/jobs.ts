@@ -114,7 +114,7 @@ export interface ClaimedSceneJob extends SceneJob {
 
 interface SceneJobStore {
   createJob(input: CreateSceneJobInput): Promise<SceneJob>;
-  listJobs(opts?: { limit?: number; status?: JobStatus }): Promise<SceneJob[]>;
+  listJobs(opts?: ListJobsOptions): Promise<SceneJob[]>;
   getJob(id: string): Promise<SceneJob | undefined>;
   claimNextJob(workerId: string): Promise<ClaimedSceneJob | undefined>;
   updateProgress(id: string, patch: Partial<SceneJobProgress>): Promise<void>;
@@ -191,7 +191,15 @@ export async function createJob(input: CreateSceneJobInput): Promise<SceneJob> {
   return job;
 }
 
-export async function listJobs(opts?: { limit?: number; status?: JobStatus }): Promise<SceneJob[]> {
+/** Which jobs a listing returns: the newest `limit` (default 50, at most 200) of those with the
+ *  given status and, when `userId` is set, run as that user. Both filters apply before the limit. */
+export interface ListJobsOptions {
+  limit?: number;
+  status?: JobStatus;
+  userId?: string;
+}
+
+export async function listJobs(opts?: ListJobsOptions): Promise<SceneJob[]> {
   return (await getStore()).listJobs(opts);
 }
 
@@ -363,11 +371,12 @@ class InMemorySceneJobStore implements SceneJobStore {
     return toPublicJob(job);
   }
 
-  async listJobs(opts?: { limit?: number; status?: JobStatus }): Promise<SceneJob[]> {
+  async listJobs(opts?: ListJobsOptions): Promise<SceneJob[]> {
     this.pruneTerminalJobs();
     const limit = normalizeListLimit(opts?.limit);
     return [...this.jobs.values()]
       .filter((job) => !opts?.status || job.status === opts.status)
+      .filter((job) => opts?.userId === undefined || job.userId === opts.userId)
       .sort((left, right) => (right.completedAt ?? right.startedAt ?? right.createdAt).localeCompare(left.completedAt ?? left.startedAt ?? left.createdAt))
       .slice(0, limit)
       .map((job) => toPublicJob(job));
@@ -621,15 +630,19 @@ class PostgresSceneJobStore implements SceneJobStore {
     };
   }
 
-  async listJobs(opts?: { limit?: number; status?: JobStatus }): Promise<SceneJob[]> {
+  async listJobs(opts?: ListJobsOptions): Promise<SceneJob[]> {
     const limit = normalizeListLimit(opts?.limit);
-    const values: Array<JobStatus | number> = [];
-    const where = opts?.status
-      ? (() => {
-          values.push(opts.status);
-          return `WHERE status = $${values.length}`;
-        })()
-      : "";
+    const values: Array<JobStatus | number | string> = [];
+    const conditions: string[] = [];
+    if (opts?.status) {
+      values.push(opts.status);
+      conditions.push(`status = $${values.length}`);
+    }
+    if (opts?.userId !== undefined) {
+      values.push(opts.userId);
+      conditions.push(`user_id = $${values.length}`);
+    }
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
     values.push(limit);
     const limitParam = `$${values.length}`;
 
