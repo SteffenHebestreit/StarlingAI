@@ -2202,7 +2202,7 @@ function normalizeSubAgentOutput(content: string | null | undefined): string {
   return normalized.length > 0 ? normalized : "Sub-agent produced no final response.";
 }
 
-function summarizeToolAuditMetadata(metadata: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+export function summarizeToolAuditMetadata(metadata: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
   if (!metadata) return undefined;
 
   const summary: Record<string, unknown> = {};
@@ -2217,6 +2217,9 @@ function summarizeToolAuditMetadata(metadata: Record<string, unknown> | undefine
     "fetchMethod",
     "contentType",
     "contentLength",
+    // How many of the page's links web_fetch listed for the model; outputChars alone cannot
+    // say whether an agent that guessed a URL had been shown the real one.
+    "linkCount",
     "outputPath",
     "filename",
     "previewMode",
