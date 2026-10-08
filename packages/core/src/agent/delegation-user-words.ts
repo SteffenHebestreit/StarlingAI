@@ -54,14 +54,43 @@ function normalizeForContainment(text: string): string {
 }
 
 /**
+ * The line the web chat (and the E2E runner, which sends what it sends) puts first in the bubble
+ * text of a message with attachments: "📎 " and the file names. It is in no message.
+ */
+const ATTACHMENT_LINE = /^📎[^\n]*(?:\n|$)/u;
+
+/**
  * The words specialists are told the user typed, from a chat entry point that received the typed
  * text separately from the message (the web chat's displayContent). That field is supplied by the
  * client and the input guardrail and moderation run on the message alone, so the typed text is
  * trusted only when the checked message contains it; otherwise the checked message is used.
+ *
+ * With attachments the bubble text starts with the attachment line, and the message carries each
+ * picture's analysis ahead of the typed text instead. Read as a whole the bubble text was in no
+ * message, so the whole message, the analysis a vision model wrote included, was taken for the
+ * user's words: a specialist told to write in the language of the user's own words read an English
+ * description as what a German speaker wrote. The words are what follows that line, and none when
+ * nothing follows it.
+ *
+ * `withoutFlags` takes the entry point's inline flags (--auto, --effort, …) out of the typed text,
+ * as they were taken out of the message. It runs on the text after the attachment line: run on the
+ * whole bubble text, a flag typed first took the line break in front of it, the typed words joined
+ * the attachment line, and the turn got no words of the person's at all.
  */
-export function typedUserWords(checkedMessage: string, typed: string | undefined): string {
+export function typedUserWords(
+  checkedMessage: string,
+  typed: string | undefined,
+  withoutFlags: (text: string) => string = (text) => text,
+): string {
   const text = typed?.trim() ?? "";
-  return text && checkedMessage.includes(text) ? text : checkedMessage;
+  if (!text) return checkedMessage;
+  const attachmentLine = ATTACHMENT_LINE.exec(text)?.[0];
+  if (!attachmentLine) {
+    const words = withoutFlags(text).trim();
+    return words && checkedMessage.includes(words) ? words : checkedMessage;
+  }
+  const afterAttachments = withoutFlags(text.slice(attachmentLine.length)).trim();
+  return checkedMessage.includes(afterAttachments) ? afterAttachments : checkedMessage;
 }
 
 /**

@@ -135,7 +135,7 @@ Every public schema field, where it is declared, and how many production files r
 | `deliverable` | packages/core/src/config/schema.ts:886 | 55 |
 | `deliverableConsistencyQa` | packages/core/src/config/schemas/orchestration.ts:403 | 2 |
 | `deliverableConsistencyQaMaxRounds` | packages/core/src/config/schemas/orchestration.ts:406 | 1 |
-| `description` | packages/core/src/config/schema.ts:565 | 182 |
+| `description` | packages/core/src/config/schema.ts:565 | 183 |
 | `detectWriteChurnOverwrite` | packages/core/src/config/schemas/orchestration.ts:427 | 2 |
 | `digest` | packages/core/src/config/schema.ts:1974 | 53 |
 | `dir` | packages/core/src/config/schema.ts:1963 | 59 |
@@ -201,7 +201,7 @@ Every public schema field, where it is declared, and how many production files r
 | `humanInLoopSteps` | packages/core/src/config/schema.ts:1309 | 20 |
 | `id` | packages/core/src/config/schema.ts:561 | 290 |
 | `ignoreCase` | packages/core/src/config/schema.ts:1356 | 2 |
-| `image` | packages/core/src/config/schema.ts:680 | 96 |
+| `image` | packages/core/src/config/schema.ts:680 | 97 |
 | `imapHost` | packages/core/src/config/schemas/channels.ts:57 | 6 |
 | `imapPassword` | packages/core/src/config/schemas/channels.ts:60 | 7 |
 | `imapPort` | packages/core/src/config/schemas/channels.ts:58 | 4 |
@@ -329,7 +329,7 @@ Every public schema field, where it is declared, and how many production files r
 | `password` | packages/core/src/config/schema.ts:784 | 47 |
 | `passwordHash` | packages/core/src/config/schema.ts:354 | 4 |
 | `passwordSelector` | packages/core/src/config/schema.ts:788 | 5 |
-| `path` | packages/core/src/config/schemas/decisions.ts:111 | 300 |
+| `path` | packages/core/src/config/schemas/decisions.ts:111 | 301 |
 | `pattern` | packages/core/src/config/schema.ts:1354 | 58 |
 | `patterns` | packages/core/src/config/schema.ts:1291 | 27 |
 | `pdf` | packages/core/src/config/schemas/render.ts:18 | 25 |
@@ -412,7 +412,7 @@ Every public schema field, where it is declared, and how many production files r
 | `routingTriage` | packages/core/src/config/schemas/orchestration.ts:759 | 1 |
 | `sampleRate` | packages/core/src/config/schema.ts:551 | 2 |
 | `sandboxShellExec` | packages/core/src/config/schema.ts:1221 | 2 |
-| `scene` | packages/core/src/config/schema.ts:1331 | 77 |
+| `scene` | packages/core/src/config/schema.ts:1331 | 79 |
 | `scopes` | packages/core/src/config/schema.ts:390 | 24 |
 | `searchTimeoutMs` | packages/core/src/config/schemas/retrieval.ts:97 | 2 |
 | `searxngBaseUrl` | packages/core/src/config/schemas/retrieval.ts:77 | 1 |

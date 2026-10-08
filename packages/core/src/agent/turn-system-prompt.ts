@@ -48,6 +48,7 @@ import { buildUserProfileEvidence } from "./user-profile-prefetch.js";
 import { logAudit } from "../audit/logger.js";
 import { getConfig } from "../config/loader.js";
 import { childLogger } from "../logger.js";
+import { currentRequestContext } from "../runtime/request-context.js";
 
 const log = childLogger("agent:runtime");
 
@@ -246,9 +247,13 @@ export async function assembleTurnSystemMessages(
       : "";
     // Later iterations carry no language line, and the head names no default language: a message
     // with no language of its own (a bare link that needs a fetch) would reach its answer with the
-    // default nowhere in view. Only then is the reply-language line repeated.
+    // default nowhere in view. Only then is the reply-language line repeated. The person's typed
+    // words come from the request context, where a forced synthesis reads them too.
     const languageAndIdentityGuidance = iterationCount === 0
-      ? buildLanguageAndIdentityTurnGuidance(userMessage, { firstTurn: isFirstUserTurn(session.getHistory()) })
+      ? buildLanguageAndIdentityTurnGuidance(userMessage, {
+        firstTurn: isFirstUserTurn(session.getHistory()),
+        userWords: currentRequestContext()?.userWords,
+      })
       : messageHasOwnLanguage(userMessage) ? "" : buildTurnReplyLanguageInstruction(userMessage);
     // Memory guidance and procedural-skill guidance are independent and each do a
     // query embedding, so run them concurrently instead of serially on time-to-first

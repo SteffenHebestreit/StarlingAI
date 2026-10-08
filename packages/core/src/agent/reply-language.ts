@@ -26,7 +26,8 @@
  */
 import { getConfig } from "../config/loader.js";
 import { currentRequestContext } from "../runtime/request-context.js";
-import { detectTextLanguage } from "./text-language.js";
+import { detectTextLanguage, detectUniformTextLanguage } from "./text-language.js";
+import { midTurnUserMessages, startsTurn, type TurnBoundaryMessage } from "./turn-boundary.js";
 
 /** Used when config cannot be read (unit tests without a config, a broken shard). */
 const FALLBACK_DEFAULT_LANGUAGE = "German";
@@ -76,12 +77,34 @@ export function messageHasOwnLanguage(userMessage: string): boolean {
 }
 
 /**
- * Whether this is the conversation's first message: the history holds no earlier user message. A
- * standing language instruction can only be an earlier message, so on a first turn the only
- * requests left are the message itself and the durable facts.
+ * Whether this is the conversation's first turn: the person has written no other message in it. A
+ * standing language instruction can only be such a message, so on a first turn the only requests
+ * left are the message itself and the durable facts.
+ *
+ * What the person sends while the turn runs counts: it can carry a request ("auf Deutsch, bitte"),
+ * and the first-turn line lists none but those two. The progress monitor's redirect does not. It is
+ * user-role for the model, but nobody wrote it, and counted it took the first-turn line away from
+ * the forced synthesis that follows it.
  */
-export function isFirstUserTurn(history: readonly { role: string }[]): boolean {
-  return history.filter((message) => message.role === "user").length <= 1;
+export function isFirstUserTurn(history: readonly (TurnBoundaryMessage & { content?: unknown })[]): boolean {
+  return history.filter((message) => startsTurn(message) || (midTurnUserMessages(message)?.length ?? 0) > 0).length <= 1;
+}
+
+export interface TurnReplyLanguageOptions {
+  /** The conversation's first turn (isFirstUserTurn). */
+  firstTurn?: boolean;
+  /**
+   * What the person typed to open the turn (RunTurnOptions.userWords, which runTurn keeps in
+   * RequestContext.userWords). Unset when no person wrote the message: a /run scene's template, a
+   * scene worker's or a workflow step's task.
+   */
+  userWords?: string | undefined;
+}
+
+/** "that message (…)", quoting the text the line is about. */
+function quotedSubject(text: string): string {
+  const compact = text.trim().replace(/\s+/g, " ").slice(0, 280);
+  return compact ? `that message (${JSON.stringify(compact)})` : "the user's latest message";
 }
 
 /**
@@ -89,31 +112,42 @@ export function isFirstUserTurn(history: readonly { role: string }[]): boolean {
  * instruction the orchestrator sees on the turn, so it has to carry the whole precedence and not
  * just "same language as this message" — that version overrode an explicit request.
  *
- * The default language is named only for a message the detector cannot call (a greeting, "ok", a
- * bare link, code; or any message before the detector has loaded): elsewhere it cannot apply, and
- * named it pulled the reply into it (see buildReplyLanguageRule).
+ * The default language is named only for a message the detector cannot call (a bare "hi" or "ok",
+ * an emoji, a bare link, code; or any message before the detector has loaded): elsewhere it cannot
+ * apply, and named it pulled the reply into it (see buildReplyLanguageRule).
+ *
+ * A short message the detector can call keeps its language here. The fast lane gives a message of
+ * two short words the conversation's or the default language instead (languageIsUndetermined): its
+ * small model answers greetings and needs the language decided for it. This path answers tasks.
+ * Read the fast lane's way here, "Weather today?" or a short Chinese sentence opening a
+ * conversation was pointed at the default, a whole answer the person may not read; read by the
+ * detector, a "Good morning" the fast lane would answer in German gets English, one short reply in
+ * a language the person just wrote.
  */
 export function buildTurnReplyLanguageInstruction(
   userMessage: string,
   defaultLanguage: string = defaultReplyLanguage(),
-  opts: { firstTurn?: boolean } = {},
+  opts: TurnReplyLanguageOptions = {},
 ): string {
-  const compact = userMessage.trim().replace(/\s+/g, " ").slice(0, 280);
-  const subject = compact ? `that message (${JSON.stringify(compact)})` : "the user's latest message";
   const own = detectTextLanguage(userMessage);
   const defaultClause = own ? "" : ` (${defaultLanguage} if there is none)`;
   const tail = `If it has no language of its own, keep the language the conversation has been using${defaultClause}.`;
-  // On a first turn the line names the message's language. Unnamed, an English first question
-  // still came back German 5 times in 12; named, 0 times in 12 (2026-10-07), with a request in the
-  // message, or one stored among the durable facts, kept every time (6/6, 10/10). Later in a
-  // conversation it names none: a standing "from now on, English" written earlier lost to a named
-  // message language (6 of 14 kept) — see buildReplyLanguageRule.
-  if (own && opts.firstTurn) {
+  // On a first turn the line names the language of what the person typed. Unnamed, an English
+  // first question still came back German 5 times in 12; named, 0 times in 12 (2026-10-07), with a
+  // request in the message, or one stored among the durable facts, kept every time (6/6, 10/10).
+  // Later in a conversation it names none: a standing "from now on, English" written earlier lost
+  // to a named message language (6 of 14 kept) — see buildReplyLanguageRule.
+  // Named, the language decides the reply, so it is named only where it is beyond doubt: from the
+  // person's own words, never from a template the swarm wrote or the analysis inlined ahead of a
+  // picture's question, and only when every sentence of them is in it. Read as a whole, a German
+  // question about an English quote or an error message is English.
+  const named = own && opts.firstTurn ? detectUniformTextLanguage(opts.userWords) : null;
+  if (named) {
     return "Reply in the language the user asked for, if they asked for one — in that message or in the durable facts "
-      + `you were given; otherwise in ${own.name}, the language of ${subject}. ${tail}`;
+      + `you were given; otherwise in ${named.name}, the language of ${quotedSubject(opts.userWords ?? userMessage)}. ${tail}`;
   }
   return "Reply in the language the user asked for, if they asked for one — in their latest message or as a standing "
-    + `instruction earlier; otherwise in the language of ${subject}. ${tail}`;
+    + `instruction earlier; otherwise in the language of ${quotedSubject(userMessage)}. ${tail}`;
 }
 
 /**

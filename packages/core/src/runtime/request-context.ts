@@ -75,6 +75,14 @@ export interface RequestContext {
    * instead, which also honours a language the user asked for.
    */
   userMessageLanguage?: string;
+  /**
+   * What the person typed to open this turn (RunTurnOptions.userWords), set by runTurn and never
+   * inherited: a nested turn's message is a workflow step the swarm wrote. Unset for a turn no person
+   * opened (a /run scene, a scene worker, a workflow step), empty for a picture sent without text.
+   * The reply-language line reads it, in the turn's prompt and in a forced synthesis: on a
+   * conversation's first turn it names a language from these words only (reply-language.ts).
+   */
+  userWords?: string;
 }
 
 /**

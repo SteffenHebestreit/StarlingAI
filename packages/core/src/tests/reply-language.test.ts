@@ -39,9 +39,11 @@ import {
   isFirstUserTurn,
   lastAssistantReplyText,
   localizedFixedText,
+  messageHasOwnLanguage,
 } from "../agent/reply-language.js";
 import {
   detectTextLanguage,
+  detectUniformTextLanguage,
   languageNameForCode,
   proseForLanguageDetection,
   warmTextLanguageDetector,
@@ -54,6 +56,11 @@ import { runWithRequestContext } from "../runtime/request-context.js";
 beforeAll(async () => {
   await warmTextLanguageDetector();
 });
+
+/** What the web chat puts ahead of a picture's typed question: the vision model's analysis. */
+const IMAGE_ANALYSIS = "Image analysis (schild.jpg):\n\n## Description\nThe image shows a blue round road sign with a "
+  + "white bicycle symbol, mounted on a metal pole next to a street. Below it hangs a smaller white sign with black "
+  + "text. Trees and a parked car are in the background.";
 
 beforeEach(() => {
   configState.defaultLanguage = undefined;
@@ -98,23 +105,84 @@ describe("the reply-language rule", () => {
     // Unnamed, an English first question still came back German 5 times in 12; named, never. Later
     // turns name none: a standing request written earlier lost to a named language (2026-10-07).
     const english = "How should I store the batteries of my power tools over the winter?";
-    const first = buildTurnReplyLanguageInstruction(english, "German", { firstTurn: true });
+    const first = buildTurnReplyLanguageInstruction(english, "German", { firstTurn: true, userWords: english });
     expect(first).toContain("otherwise in English, the language of that message");
     // Requests still win: one in the message, or one stored among the durable facts.
     expect(first).toContain("the language the user asked for, if they asked for one — in that message or in the durable facts");
-    const later = buildTurnReplyLanguageInstruction(english, "German", { firstTurn: false });
+    const later = buildTurnReplyLanguageInstruction(english, "German", { firstTurn: false, userWords: english });
     expect(later).not.toContain("otherwise in English");
     expect(later).toContain("as a standing instruction earlier");
     // A message with no language of its own names no language, only the default.
-    const bare = buildTurnReplyLanguageInstruction("ok", "German", { firstTurn: true });
+    const bare = buildTurnReplyLanguageInstruction("ok", "German", { firstTurn: true, userWords: "ok" });
     expect(bare).not.toContain("otherwise in English");
     expect(bare).toContain("(German if there is none)");
+  });
+
+  it("names a language only from the words a person typed", () => {
+    // A /run scene's template, a scene worker's or a workflow step's task: the swarm wrote it, and on
+    // the fresh session such a turn runs in, it is the first turn.
+    const template = "Collect the release notes of the configured repositories and summarize what changed this week.";
+    const scene = buildTurnReplyLanguageInstruction(template, "German", { firstTurn: true });
+    expect(scene).not.toContain("otherwise in English");
+    expect(scene).toContain("otherwise in the language of that message");
+    // A picture's turn: the analysis ahead of the question is the vision model's, the question the person's.
+    const typed = "Was genau bedeutet dieses Schild für mich als Radfahrer?";
+    const picture = `${IMAGE_ANALYSIS}\n\n${typed}`;
+    expect(buildTurnReplyLanguageInstruction(picture, "German", { firstTurn: true, userWords: typed }))
+      .toContain(`otherwise in German, the language of that message (${JSON.stringify(typed)})`);
+  });
+
+  it("names none for words in more than one language", () => {
+    // Each reads as a whole as one language, and named, that language decided the reply.
+    for (const mixed of [
+      "Was heißt das genau für mich? \"Refunds are not provided for partial billing periods.\"",
+      "Was bedeutet dieser Fehler? Error: Cannot find module 'express'. Require stack: /app/server.js",
+      `${IMAGE_ANALYSIS}\n\nWas genau bedeutet dieses Schild für mich als Radfahrer?`,
+      // Single quotation marks, in the forms German and English use, around a passage mid-sentence.
+      "Was bedeutet 'Refunds are not provided for partial billing periods' für mich?",
+      "Was bedeutet ‚Refunds are not provided for partial billing periods‘ für mich?",
+      "Was bedeutet ‘Refunds are not provided for partial billing periods’ für mich?",
+      "Was meint der Vermieter mit 'the deposit will be withheld until the final inspection is completed'?",
+      // A short question ahead of a paste, without quotation marks: on a line of its own, and before a colon.
+      "Was heißt das?\nRefunds are not provided for partial billing periods. Please contact our support team if you believe an exception applies.",
+      "Übersetze: Refunds are not provided for partial billing periods. Please contact our support team if you believe an exception applies.",
+    ]) {
+      const line = buildTurnReplyLanguageInstruction(mixed, "German", { firstTurn: true, userWords: mixed });
+      expect(line).not.toMatch(/otherwise in [A-Z]\w+, the language/);
+      expect(line).toContain("otherwise in the language of that message");
+    }
+  });
+
+  it("names the language of words in one language with a short phrase or a list in them", () => {
+    // Read on its own, a short part is often called another language: "No emojis." Portuguese,
+    // "Bullet points." French, "- Pixel 9 Pro" Czech, "Formeller Ton." Danish, "- Olivenöl"
+    // Portuguese. Each such call took the first-turn language away from a message in one language.
+    for (const [words, language] of [
+      ["Write a short LinkedIn post about our new release. Keep it under 100 words. No emojis.", "English"],
+      ["Summarize the main arguments for and against remote work. Bullet points.", "English"],
+      ["Draft a polite reply to my landlord asking when I will get my deposit back.\n\nCheers, Tom", "English"],
+      ["Which of these phones has the best camera?\n- Pixel 9 Pro\n- Galaxy S24 Ultra\n- iPhone 16 Pro", "English"],
+      ["Was kann ich heute Abend mit diesen Zutaten kochen?\n- Olivenöl\n- Parmesan\n- Tomaten\n- Spaghetti", "German"],
+      ["Schreib eine kurze Absage an den Bewerber. Formeller Ton.", "German"],
+    ] as const) {
+      expect(buildTurnReplyLanguageInstruction(words, "German", { firstTurn: true, userWords: words }))
+        .toContain(`otherwise in ${language}, the language of that message`);
+    }
   });
 
   it("knows a first turn by the history holding no earlier user message", () => {
     expect(isFirstUserTurn([])).toBe(true);
     expect(isFirstUserTurn([{ role: "system" }, { role: "user" }])).toBe(true);
     expect(isFirstUserTurn([{ role: "user" }, { role: "assistant" }, { role: "user" }])).toBe(false);
+  });
+
+  it("counts what the person sent while the turn ran, and not the oversight redirect", () => {
+    // The redirect is user-role for the model, but nobody wrote it.
+    const oversight = { role: "user", metadata: { midTurn: true, midTurnSource: "oversight" } };
+    expect(isFirstUserTurn([{ role: "user" }, { role: "assistant" }, oversight])).toBe(true);
+    // Their own mid-turn message can carry a request the first-turn line does not list.
+    const steering = { role: "user", metadata: { midTurn: true, midTurnSource: "user", steering: [{ id: "s1", text: "Antworte bitte auf Deutsch." }] } };
+    expect(isFirstUserTurn([{ role: "user" }, { role: "assistant" }, steering])).toBe(false);
   });
 
   it("uses the configured default language", () => {
@@ -162,6 +230,27 @@ describe("receptionist language line", () => {
     expect(content).toContain("French is this assistant's default language");
   });
 
+  it("gives a bare two-word message one directive, while the full path keeps the language the detector reads", () => {
+    // The fast lane's small model answers social turns, and needs the language decided for it.
+    expect(String(buildReceptionistMessages("Weather today?", { defaultLanguage: "German" })[0]!.content)).toContain("Reply in GERMAN");
+    // The full path answers tasks. Read as the fast lane reads them, a two-word request and a short
+    // Chinese or Japanese sentence (no spaces, so one "word") had no language, and opening a
+    // conversation they were pointed at the default.
+    for (const [message, language] of [
+      ["Weather today?", "English"],
+      ["如何在冬天储存电池？", "Chinese"],
+      ["今日のニュースは？", "Japanese"],
+    ] as const) {
+      expect(messageHasOwnLanguage(message)).toBe(true);
+      const line = buildTurnReplyLanguageInstruction(message, "German", { firstTurn: true, userWords: message });
+      expect(line).toContain(`otherwise in ${language}, the language of that message`);
+      expect(line).not.toContain("if there is none)");
+    }
+    // What the detector cannot call has no language on either path.
+    expect(messageHasOwnLanguage("ok")).toBe(false);
+    expect(messageHasOwnLanguage("你好")).toBe(false);
+  });
+
   it("keeps the measured-best line for a message that carries a language", () => {
     // Counter-intuitive and deliberate (see receptionist.ts): on the routing model this line gets a
     // requested language either honoured or ESCALATED to the full assistant; every "if the user asks
@@ -203,6 +292,29 @@ describe("text-language — a statistical detector, not a word list", () => {
   it("names codes in English", () => {
     expect(languageNameForCode("de")).toBe("German");
     expect(languageNameForCode("pl")).toBe("Polish");
+  });
+
+  it("tells a text in one language from a text that changes language", () => {
+    expect(detectUniformTextLanguage("Kannst du mir beim Debuggen helfen? Der Server stürzt beim Start ab.")?.name).toBe("German");
+    expect(detectUniformTextLanguage("Can you help me debug this issue? The server crashes on startup.")?.name).toBe("English");
+    expect(detectUniformTextLanguage("Was heißt das genau für mich? \"Refunds are not provided for partial billing periods.\"")).toBeNull();
+    // A question after a long paste: the whole is called from its start, the end is read too.
+    const paste = "The European Central Bank kept interest rates unchanged on Thursday, citing persistent inflation. ".repeat(50);
+    expect(detectTextLanguage(`${paste}\n\nWas bedeutet das für meinen Kredit?`)?.name).toBe("English");
+    expect(detectUniformTextLanguage(`${paste}\n\nWas bedeutet das für meinen Kredit?`)).toBeNull();
+    expect(detectUniformTextLanguage("ok")).toBeNull();
+    expect(detectUniformTextLanguage(undefined)).toBeNull();
+  });
+
+  it("reads the words around a quoted passage together, and an apostrophe as no quotation mark", () => {
+    // Around the quote, "Was bedeutet" and "für mich?" are each too short to tell; together they are German.
+    expect(detectUniformTextLanguage("Was bedeutet 'Refunds are not provided for partial billing periods' für mich?")).toBeNull();
+    // An apostrophe inside the passage does not end it.
+    expect(detectUniformTextLanguage("Was bedeutet 'it's not my fault, the delivery was late again' hier genau?")).toBeNull();
+    // A quoted term in the text's own language, and apostrophes, leave a text in one language.
+    expect(detectUniformTextLanguage("Was ist der Unterschied zwischen 'git merge' und 'git rebase'?")?.name).toBe("German");
+    expect(detectUniformTextLanguage("I don't know what the users' settings were. It's been broken since the update.")?.name)
+      .toBe("English");
   });
 });
 
