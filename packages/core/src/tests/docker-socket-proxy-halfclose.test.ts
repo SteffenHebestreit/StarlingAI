@@ -73,3 +73,35 @@ it.skipIf(process.platform === "win32")("relays the container's output after the
   expect(received).toContain("101 UPGRADED");
   expect(received).toContain("CONTAINER-OUTPUT");
 });
+
+/** Writes `request`, half-closes, and reports what came back and whether the proxy closed the connection. */
+function halfClosedRequest(request: string): Promise<{ got: string; closed: boolean }> {
+  return new Promise((resolve, reject) => {
+    const client = net.connect(proxyPort, "127.0.0.1");
+    let got = "";
+    let sent = false;
+    const timer = setTimeout(() => { resolve({ got, closed: false }); client.destroy(); }, 2000);
+    client.on("connect", () => { client.write(request); client.end(); sent = true; });
+    client.on("data", (chunk) => { got += chunk.toString("latin1"); });
+    // Once the request is out, a reset closes the connection as well; before it, the test is broken.
+    client.on("error", (err) => { if (!sent) { clearTimeout(timer); reject(err); } });
+    client.on("close", () => { clearTimeout(timer); resolve({ got, closed: true }); });
+  });
+}
+
+// The half-open server keeps a socket open after the client's FIN, so a client that half-closes (or
+// goes away) before its request is complete has to be closed by the proxy itself, or it holds a
+// socket in the one container that holds docker.sock. The daemon is never contacted here, so these
+// run on Windows as well.
+it("closes a client that half-closes before its request head is complete", async () => {
+  expect(await halfClosedRequest("GET /v1.55/_ping HTTP/1.1\r\nHost: dock")).toEqual({ got: "", closed: true });
+});
+
+it("refuses a create whose body a half-close cut short", async () => {
+  const { got, closed } = await halfClosedRequest(
+    "POST /v1.55/containers/create HTTP/1.1\r\nHost: docker\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{\"Image\":",
+  );
+  expect(got).toMatch(/^HTTP\/1\.1 400 /);
+  expect(got).toContain("create/exec body incomplete");
+  expect(closed).toBe(true);
+});
