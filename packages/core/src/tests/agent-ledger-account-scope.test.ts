@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as configLoader from "../config/loader.js";
 import { appendOutcome } from "../agent/outcomes.js";
+import { appendFlowMemoryEntry } from "../agent/flow-memory.js";
 import { buildUserProfileEvidence } from "../agent/user-profile-prefetch.js";
 import {
   _clearDurableMemoryCaches,
@@ -229,6 +230,57 @@ describe("a busy account and the caller's own lessons", () => {
 
     expect(guidance).toContain(BOB_TASK);
     expect(guidance).not.toContain("Alice's errand");
+  });
+});
+
+describe("where the caller's own agent-scope records are kept, and how many", () => {
+  beforeAll(async () => { await import("../tools/memory.js"); });
+
+  async function agentSearchAsBob(bobRoot: string, query: string): Promise<string> {
+    const result = await asBob(() => getTool("memory_search")!.execute(
+      { query, scopes: ["agent"], limit: 50 },
+      { sessionId: "own-records-bob", workspacePath: bobRoot, userId: "bob" },
+    ));
+    expect(result.success).toBe(true);
+    return result.output;
+  }
+
+  it("under multi-user auth, keeps the caller's own lessons before capping at 60, not after", async () => {
+    withAuth(true);
+    const shared = mkdtempSync(join(tmpdir(), "agent-ledger-cap-"));
+    dirs.push(shared);
+    const lesson = (task: string, account: string, minute: number) => appendOutcome(shared, {
+      ts: new Date(Date.UTC(2026, 9, 8, 10, minute)).toISOString(),
+      agent: "researcher", task, outcome: "success", iterations: 1, totalTokens: 0, lesson: "check the primary source", account,
+    });
+    // Within the first 200-entry read, but behind more than 60 of another account's.
+    lesson(BOB_TASK, safeUserSegment("bob"), 0);
+    for (let i = 1; i <= 70; i++) lesson(`Alice's errand number ${i} in Hamburg`, safeUserSegment("alice"), i);
+
+    const output = await agentSearchAsBob(userWorkspaceRoot(shared, "bob"), "Hamburg");
+
+    expect(output).toContain(BOB_TASK);
+  });
+
+  it("under multi-user auth, shows the caller's own flow entries only, chosen before the cap", async () => {
+    withAuth(true);
+    const shared = mkdtempSync(join(tmpdir(), "agent-ledger-flow-"));
+    dirs.push(shared);
+    const bobRoot = userWorkspaceRoot(shared, "bob");
+    const flow = (summary: string, account?: string) => appendFlowMemoryEntry(bobRoot, {
+      scope: "workflow", request: "Hamburg ferry settings", summary, targetAgent: "researcher", actions: [], outcome: "applied",
+      ...(account ? { account } : {}),
+    });
+    flow("Bob tuned the researcher for the Hamburg ferries", safeUserSegment("bob"));
+    // More than the 120 flow entries a search keeps, all another account's or from before accounts.
+    for (let i = 1; i <= 130; i++) flow(`Alice's Hamburg change number ${i}`, safeUserSegment("alice"));
+    flow("A Hamburg change from before accounts");
+
+    const output = await agentSearchAsBob(bobRoot, "Hamburg");
+
+    expect(output).toContain("Bob tuned the researcher");
+    expect(output).not.toContain("Alice's Hamburg change");
+    expect(output).not.toContain("from before accounts");
   });
 });
 

@@ -219,6 +219,24 @@ describe("record_lesson and the run that records it", () => {
     expect(ledger(dir).find((entry) => entry.lesson === LESSON_A)).toMatchObject({ agent: AGENT, task: TASK_A });
   });
 
+  it("files a lesson recorded after the run ended under no run's task, though it carries that run's session id", async () => {
+    // The run is over: nothing of it may still claim a lesson, not even a call naming its session.
+    const pinned = Date.UTC(2026, 9, 8, 12, 0, 0);
+    vi.spyOn(Date, "now").mockReturnValue(pinned);
+    const dir = deployment(false, ["record_lesson"]);
+    const { run } = await load(dir);
+    completeMock.mockImplementation(() => FINAL);
+    try {
+      await run(undefined, TASK_A, "parent-ended");
+      const { executeTool } = await import("../tools/registry.js");
+      await executeTool("record_lesson", { lesson: LESSON_A, outcome: "success" }, { sessionId: `sub:parent-ended:${AGENT}:${pinned}`, workspacePath: dir });
+    } finally {
+      vi.restoreAllMocks();
+    }
+
+    expect(ledger(dir).find((entry) => entry.lesson === LESSON_A)).toMatchObject({ agent: AGENT, task: "(lesson recorded explicitly)" });
+  });
+
   it("with one operator, files the lesson under its own run's task, though another task's run finished in between", async () => {
     const { dir } = await interleave(false, undefined, undefined);
 
