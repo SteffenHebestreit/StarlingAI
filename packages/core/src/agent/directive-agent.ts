@@ -103,19 +103,33 @@ function clip(text: string, maxChars: number): string {
   return text.length <= maxChars ? text : `${text.slice(0, maxChars)}…`;
 }
 
+/** What the runtime's own delegation to the named agent hands the agent besides the request. */
+export interface DirectiveDelegationContext {
+  /** The exchange before this request: the call's `context` argument, recorded with the call. */
+  context?: string;
+  /**
+   * This turn's [DOCUMENT CONTEXT] excerpts, handed to the agent beside the call and never put in
+   * its arguments (ToolContext.delegationDocuments). The arguments are kept, in the session history
+   * and the audit, while the note the excerpts come from is pruned at the next turn so that a
+   * document does not outlive the turn it was attached to. Put in the arguments, a CSV's rows were
+   * still in the history and the audit after the next turn (review of bf095a1, 2026-10-08).
+   */
+  documents?: string;
+}
+
 /**
- * The context the runtime's own delegation to the named agent carries: what the orchestrator had
- * in view that the bare request lacks. A specialist starts from its task and context alone. The
- * excerpts of a file attached this turn reach the turn only as the orchestrator's
- * [DOCUMENT CONTEXT] message, and the upload is never handed to the model, so the agent asked for a
- * CSV's total got no rows. A follow-up ("and how do I fix it?") names its subject only in the
- * exchange before it, which goes along whenever there is one: whether a message refers back cannot
- * be read from its words in every language. Undefined when there is neither.
+ * What the runtime's own delegation to the named agent carries: what the orchestrator had in view
+ * that the bare request lacks. A specialist starts from its task and context alone. The excerpts of
+ * a file attached this turn reach the turn only as the orchestrator's [DOCUMENT CONTEXT] message,
+ * and the upload is never handed to the model, so the agent asked for a CSV's total got no rows. A
+ * follow-up ("and how do I fix it?") names its subject only in the exchange before it, which goes
+ * along whenever there is one: whether a message refers back cannot be read from its words in
+ * every language. Each part is absent when there is nothing for it.
  */
 export function buildDirectiveDelegationContext(
   history: readonly { role: string; content?: unknown; metadata?: Record<string, unknown> | undefined }[],
   prior: { priorUserRequest?: string | undefined; priorAssistantAnswer?: string | undefined },
-): string | undefined {
+): DirectiveDelegationContext {
   const documents = history
     .slice(currentTurnStartIndex(history) + 1)
     .flatMap((message) => (
@@ -129,9 +143,8 @@ export function buildDirectiveDelegationContext(
     ...(request ? [`Request: ${clip(request, PRIOR_REQUEST_MAX_CHARS)}`] : []),
     ...(answer ? [`Answer: ${clip(answer, PRIOR_ANSWER_MAX_CHARS)}`] : []),
   ];
-  const parts = [
-    ...documents,
-    ...(earlier.length > 0 ? [`[EARLIER IN THIS CONVERSATION — the exchange before this request]\n${earlier.join("\n\n")}`] : []),
-  ];
-  return parts.length > 0 ? parts.join("\n\n") : undefined;
+  return {
+    ...(earlier.length > 0 ? { context: `[EARLIER IN THIS CONVERSATION — the exchange before this request]\n${earlier.join("\n\n")}` } : {}),
+    ...(documents.length > 0 ? { documents: documents.join("\n\n") } : {}),
+  };
 }

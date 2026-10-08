@@ -2281,6 +2281,9 @@ async function _runTurn(
   // delegation; the synthesis-required guard rejected it, and the turn shipped a forced partial
   // answer (review of 0b5089e/a3773aa, 2026-10-08).
   let directiveAgentRan = false;
+  // This turn's document excerpts for the delegation the runtime dispatched itself, keyed by that
+  // call's id: handed to it beside its arguments when it runs (ToolContext.delegationDocuments).
+  let directiveDispatchDocuments: { toolCallId: string; documents: string } | undefined;
   let maintenanceDelegationRetryUsed = false;
   let maintenanceMisrouteRetryUsed = false;
   let maintenanceDelegationEnforcementPrompt = "";
@@ -3090,13 +3093,17 @@ async function _runTurn(
     // shipped them as the answer (E2E, 2026-10-07).
     if (directiveAgent !== undefined && directiveAgentPending && llmResponse.tool_calls.length === 0) {
       // The request goes as it is, with what the orchestrator had in view beside it: the excerpts
-      // of this turn's attachments and the exchange before it (directive-agent.ts).
-      const context = buildDirectiveDelegationContext(session.getHistory(), { priorUserRequest, priorAssistantAnswer });
+      // of this turn's attachments and the exchange before it (directive-agent.ts). The excerpts
+      // stay out of the arguments, which the history and the audit keep after the next turn has
+      // pruned the excerpts' own note; the call is handed them when it runs.
+      const { context, documents } = buildDirectiveDelegationContext(session.getHistory(), { priorUserRequest, priorAssistantAnswer });
+      const dispatchId = `directive_${randomUUID()}`;
+      directiveDispatchDocuments = documents ? { toolCallId: dispatchId, documents } : undefined;
       // Built afresh: the prose call's truncation marker must not mark the dispatch incomplete.
       llmResponse = {
         content: null,
         tool_calls: [{
-          id: `directive_${randomUUID()}`,
+          id: dispatchId,
           name: "delegate_to_agent",
           arguments: { agentName: directiveAgent, task: userMessage, ...(context ? { context } : {}) },
         }],
@@ -4450,7 +4457,13 @@ async function _runTurn(
 
       const toolStartedAt = Date.now();
       const humanWaitCreditedBefore = turnBudget?.humanWaitCreditedMs?.() ?? 0;
-      const result = await executeTool(tc.name, tc.arguments, toolContext, { toolCallId: tc.id });
+      // The runtime's own dispatch on a turn directed to an agent carries this turn's document
+      // excerpts for this call alone, beside its arguments (ToolContext.delegationDocuments).
+      if (tc.name === "delegate_to_agent" && directiveDispatchDocuments?.toolCallId === tc.id) {
+        toolContext.delegationDocuments = directiveDispatchDocuments.documents;
+      }
+      const result = await executeTool(tc.name, tc.arguments, toolContext, { toolCallId: tc.id })
+        .finally(() => { delete toolContext.delegationDocuments; });
       const toolDurationMs = Date.now() - toolStartedAt;
       // The part of this call spent waiting on the person was credited to the deadline as it ended.
       const humanWaitMs = (turnBudget?.humanWaitCreditedMs?.() ?? 0) - humanWaitCreditedBefore;

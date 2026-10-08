@@ -215,6 +215,16 @@ export interface ToolContext {
    */
   responseToolCalls?: readonly string[];
   /**
+   * This turn's document excerpts ([DOCUMENT CONTEXT]), for the one delegation the runtime
+   * dispatches itself on a turn the user directed to an agent (agent/directive-agent.ts). The turn
+   * loop sets it for that call alone and clears it when the call returns; delegate_to_agent hands it
+   * to the agent before the call's own context. It travels here and not in the call's arguments,
+   * because the arguments are kept (the session history, the audit, the transcript) while the note
+   * the excerpts come from is pruned at the next turn, so that a document does not outlive the turn
+   * it was attached to.
+   */
+  delegationDocuments?: string;
+  /**
    * Tool names that MUST pause for human approval regardless of tier defaults.
    * Enforced unconditionally — cannot be bypassed by config or tier settings.
    */

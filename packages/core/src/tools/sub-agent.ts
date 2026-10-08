@@ -3861,7 +3861,12 @@ registerTool({
     // agentName is now optional — omitting it triggers undirected swarm bidding
     const requestedAgentName = args["agentName"] ? String(args["agentName"]).trim() : "";
     let task = deriveDelegationTask(args);
-    const context = args["context"] ? String(args["context"]) : undefined;
+    // The excerpts of this turn's attachments, when this call is the runtime's own dispatch on a
+    // turn directed to an agent: handed over beside the arguments, which are kept long after the
+    // excerpts' own note is pruned (ToolContext.delegationDocuments). They go before the call's own
+    // context, where they stood when they were part of it.
+    const ownContext = args["context"] ? String(args["context"]) : undefined;
+    const context = [ctx.delegationDocuments, ownContext].filter(Boolean).join("\n\n") || undefined;
     // Work internally in English: translate a non-English task to English for routing +
     // the sub-agent's work, carrying an output-language directive so the deliverable still
     // comes back in the language the user wants. Context evidence is left verbatim. Gated, fail-open.

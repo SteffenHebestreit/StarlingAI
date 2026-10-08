@@ -2000,6 +2000,30 @@ describe("swarm orchestration tools", () => {
     expect(stateResult.output).toContain("summary [completed]");
   }, 15000);
 
+  it("delegate_to_agent hands the agent the document excerpts the turn set beside the call", async () => {
+    // The runtime's own dispatch on a turn directed to an agent carries this turn's [DOCUMENT
+    // CONTEXT] excerpts beside its arguments, which are kept in the session history and the audit
+    // (ToolContext.delegationDocuments). The agent gets them before the call's own context.
+    const [{ getTool }] = await Promise.all([import("../tools/registry.js"), import("../tools/sub-agent.js")]);
+
+    await getTool("delegate_to_agent")!.execute({
+      agentName: "researcher",
+      task: "What is the total revenue of the quarter?",
+      context: "[EARLIER IN THIS CONVERSATION — the exchange before this request]\nRequest: Hallo",
+    }, {
+      sessionId: "session-dispatch-documents",
+      workspacePath: "/workspace",
+      swarmState: { objective: "Initial", startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), tasks: {} },
+      delegationDocuments: "[DOCUMENT CONTEXT]\numsatz-q3-2026.csv\nJul;Nord;18432",
+    });
+
+    expect(runSubAgentWithStatsMock).toHaveBeenCalledTimes(1);
+    const context = String(runSubAgentWithStatsMock.mock.calls[0]?.[0]?.context ?? "");
+    expect(context).toContain("Jul;Nord;18432");
+    expect(context).toContain("Request: Hallo");
+    expect(context.indexOf("Jul;Nord;18432")).toBeLessThan(context.indexOf("Request: Hallo"));
+  }, 15000);
+
   // What a turn directed to an agent (--agent) reads to tell whether that agent ran
   // (agent/directive-agent.ts): each node's or slice's own result, never the swarm state.
   describe("reports which agent each child ran, from the child's own result", () => {

@@ -52,7 +52,9 @@ vi.mock("../guardrails/moderation.js", () => ({
   moderateToolResultText: vi.fn(async () => null),
 }));
 vi.mock("../guardrails/output.js", () => ({ scanOutput: vi.fn((text: string) => ({ safe: true, redacted: text })) }));
-vi.mock("../audit/logger.js", () => ({ logAudit: vi.fn() }));
+/** The audit log, kept so a test can read what a row recorded. */
+const auditMock = vi.hoisted(() => vi.fn());
+vi.mock("../audit/logger.js", () => ({ logAudit: auditMock }));
 /** What document retrieval found for this turn's attachments; empty, as without engram, by default. */
 const rag = vi.hoisted(() => ({ contextBlock: "" }));
 vi.mock("../retrieval/document-rag.js", () => ({
@@ -80,14 +82,22 @@ vi.mock("../tools/ephemeral-agent-factory.js", async (importOriginal) => ({
  * and a delegate_to_agent call the turn makes is still stubbed.
  */
 const delegated = vi.hoisted(() => [] as Array<Record<string, unknown>>);
+/** What each delegate_to_agent call was handed beside its arguments (ToolContext.delegationDocuments). */
+const handedDocuments = vi.hoisted(() => [] as Array<string | undefined>);
+/** The tool context each delegate_to_agent call ran with: the turn's own, shared by every call. */
+const delegationContexts = vi.hoisted(() => [] as Array<Record<string, unknown>>);
 const executed = vi.hoisted(() => [] as string[]);
 const realTools = vi.hoisted(() => new Set<string>());
 vi.mock("../tools/registry.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../tools/registry.js")>();
   return {
     ...actual,
-    executeTool: vi.fn(async (name: string, args: Record<string, unknown>, ctx: { allowedAgents?: string[] }, meta?: never) => {
+    executeTool: vi.fn(async (name: string, args: Record<string, unknown>, ctx: { allowedAgents?: string[]; delegationDocuments?: string }, meta?: never) => {
       executed.push(name);
+      if (name === "delegate_to_agent") {
+        handedDocuments.push(ctx.delegationDocuments);
+        delegationContexts.push(ctx as Record<string, unknown>);
+      }
       if (realTools.has(name)) return actual.executeTool(name, args, ctx as never, meta);
       const agentName = String(args["agentName"] ?? "");
       if (name === "delegate_to_agent" && ctx.allowedAgents && !ctx.allowedAgents.includes(agentName)) {
@@ -238,6 +248,9 @@ describe("a turn the user directed to one agent", () => {
     streamMock.mockReset();
     completeMock.mockClear();
     delegated.length = 0;
+    handedDocuments.length = 0;
+    delegationContexts.length = 0;
+    auditMock.mockClear();
     executed.length = 0;
     rag.contextBlock = "";
     routingTier.complete = null;
@@ -312,7 +325,53 @@ describe("a turn the user directed to one agent", () => {
 
     expect(delegated).toHaveLength(1);
     expect(delegated[0]).toMatchObject({ agentName: "data_analyst" });
-    expect(String(delegated[0]!["context"])).toContain("Jul;Nord;18432");
+    expect(handedDocuments[0]).toContain("Jul;Nord;18432");
+  });
+
+  it("keeps the attached file's excerpts out of the dispatched call, so they do not outlive the turn", async () => {
+    // The excerpts went into the dispatched call's `context` argument, and the call is kept: in the
+    // session history and the audited tool_call_requested row. The [DOCUMENT CONTEXT] note they came
+    // from is pruned at the next turn so a document does not outlive the turn it was attached to,
+    // and the arguments still held a CSV's rows after the next turn (review of bf095a1, 2026-10-08).
+    const ROW = "Jul;Nord;18432";
+    rag.contextBlock = ["umsatz-q3-2026.csv", "Monat;Gebiet;Umsatz", ROW, "Aug;Nord;18011"].join("\n");
+    const { AgentSession, runTurn } = await loadRuntime();
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      call += 1;
+      return call === 1 ? answerStream("Der Gesamtumsatz beträgt 36443 EUR.") : answerStream(ANSWER);
+    });
+
+    const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
+    await runTurn({
+      session,
+      userMessage: "Im Anhang ist umsatz-q3-2026.csv. Wie hoch ist der Gesamtumsatz des Quartals?",
+      userAttachments: [{ filename: "umsatz-q3-2026.csv", path: "uploads/s/1-umsatz-q3-2026.csv", mimeType: "text/csv", size: 300 }] as never,
+      allowedAgents: ["data_analyst"],
+      directiveAgent: "data_analyst",
+    });
+    // The next turn, without the attachment, prunes the note.
+    rag.contextBlock = "";
+    streamMock.mockImplementation(() => answerStream("Gern geschehen."));
+    await runTurn({ session, userMessage: "Danke!" });
+
+    // The agent was handed the excerpts, beside the call, and for that call alone: the turn's tool
+    // context no longer holds them, so a later delegation of the turn (the corrective build reuses
+    // that context) is not handed them as well.
+    expect(handedDocuments[0]).toContain(ROW);
+    expect(delegationContexts[0]).not.toHaveProperty("delegationDocuments");
+    const history = session.getHistory();
+    expect(history.some((message) => message.role === "system" && String(message.content ?? "").startsWith("[DOCUMENT CONTEXT]"))).toBe(false);
+    const recordedArguments = history
+      .flatMap((message) => (message.role === "assistant" ? message.tool_calls ?? [] : []))
+      .map((toolCall) => toolCall.function.arguments);
+    expect(recordedArguments.some((args) => args.includes("data_analyst"))).toBe(true);
+    expect(recordedArguments.join("\n")).not.toContain(ROW);
+    const auditedArguments = auditMock.mock.calls
+      .filter(([event]) => event === "tool_call_requested")
+      .map(([, details]) => JSON.stringify((details as { args?: unknown }).args));
+    expect(auditedArguments).toHaveLength(1);
+    expect(auditedArguments.join("\n")).not.toContain(ROW);
   });
 
   it("hands the named agent the exchange a follow-up refers back to", async () => {

@@ -142,7 +142,7 @@ describe("nestedCallRanAgent: a plan step or a fan-out slice", () => {
 });
 
 describe("buildDirectiveDelegationContext", () => {
-  it("carries this turn's document excerpts, and no earlier turn's", () => {
+  it("hands over this turn's document excerpts, and no earlier turn's", () => {
     const history = [
       { role: "user", content: "Hier ist das zweite Quartal." },
       { role: "system", content: "[DOCUMENT CONTEXT]\numsatz-q2-2026.csv\nApr;Nord;9100" },
@@ -152,23 +152,28 @@ describe("buildDirectiveDelegationContext", () => {
       // Steering arrives inside the turn as a user-role message; the turn did not start there.
       { role: "user", content: "[USER STEERING — sent mid-turn] Nur Nord.", metadata: { [MID_TURN_USER_MESSAGE_METADATA]: true } },
     ];
-    const context = buildDirectiveDelegationContext(history, {}) ?? "";
-    expect(context).toContain("Jul;Nord;18432");
-    expect(context).not.toContain("Apr;Nord;9100");
+    const { context, documents } = buildDirectiveDelegationContext(history, {});
+    expect(documents).toContain("Jul;Nord;18432");
+    expect(documents).not.toContain("Apr;Nord;9100");
+    // Kept apart from the call's own context, which is recorded with the call: the session history,
+    // the audit and the transcript kept a CSV's rows long after the [DOCUMENT CONTEXT] note was
+    // pruned at the next turn (review of bf095a1, 2026-10-08).
+    expect(context).toBeUndefined();
   });
 
   it("bounds the exchange before this request", () => {
-    const context = buildDirectiveDelegationContext([{ role: "user", content: "Und wie behebe ich das?" }], {
+    const { context = "", documents } = buildDirectiveDelegationContext([{ role: "user", content: "Und wie behebe ich das?" }], {
       priorUserRequest: `${"R".repeat(600)}REQUEST-TAIL`,
       priorAssistantAnswer: `${"A".repeat(1_500)}ANSWER-TAIL`,
-    }) ?? "";
+    });
+    expect(documents).toBeUndefined();
     expect(context).toContain(`Request: ${"R".repeat(600)}…`);
     expect(context).toContain(`Answer: ${"A".repeat(1_500)}…`);
     expect(context).not.toContain("REQUEST-TAIL");
     expect(context).not.toContain("ANSWER-TAIL");
   });
 
-  it("is undefined when the request has nothing beside it", () => {
-    expect(buildDirectiveDelegationContext([{ role: "user", content: "Warum fehlt ein Cent?" }], {})).toBeUndefined();
+  it("hands over nothing when the request has nothing beside it", () => {
+    expect(buildDirectiveDelegationContext([{ role: "user", content: "Warum fehlt ein Cent?" }], {})).toEqual({});
   });
 });
