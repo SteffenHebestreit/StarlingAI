@@ -778,4 +778,96 @@ describe("web_fetch lists the page's links after its text", () => {
       "- GitHub -> https://github.com/example/docs",
     ]);
   });
+
+  // A JS page can move client-side after it loads (/konto to a sign-in page, often on another
+  // host). The links listed are the page the browser ended on: its own address is left out, and
+  // "same site" is its site. Every browser test before these ended on the URL requested, so
+  // listing against the requested URL failed none of them.
+  it("reads a rendered page's links against the URL the browser ended on", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => html(JS_SHELL)));
+    mcpConnections.set("playwright", {
+      client: {
+        callTool: browserRendering({
+          URL: "https://login.example.org/anmelden",
+          body: { innerText: "Anmelden\n\nBitte melden Sie sich mit Ihrem Kundenkonto an." },
+          links: [
+            anchor(`${SITE}/index.html`, "Zurück zum Shop"),
+            anchor("https://login.example.org/anmelden", "Anmelden"),
+            anchor("https://login.example.org/passwort", "Passwort vergessen"),
+          ],
+        }).callTool,
+      },
+    });
+
+    const r = await webFetch({ url: `${SITE}/konto` }, "s-fetch-links-landing");
+    expect(r.metadata?.["fetchMethod"]).toBe("playwright");
+    expect(sectionOf(r.output).lines).toEqual([
+      "- Passwort vergessen -> https://login.example.org/passwort",
+      `- Zurück zum Shop -> ${SITE}/index.html`,
+    ]);
+  });
+
+  it("reads the snapshot fallback's links against its Page URL, not the URL requested", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => html(JS_SHELL)));
+    const snapshot = [
+      "### Page",
+      "- Page URL: https://login.example.org/anmelden",
+      "- Page Title: Anmelden",
+      "### Snapshot",
+      "```yaml",
+      "- main [ref=e1]:",
+      "  - heading \"Anmelden\" [level=1] [ref=e2]",
+      "  - paragraph [ref=e3]:",
+      "    - text: Bitte melden Sie sich mit Ihrem Kundenkonto an.",
+      "  - link \"Zurück zum Shop\" [ref=e4] [cursor=pointer]:",
+      `    - /url: ${SITE}/index.html`,
+      "  - link \"Anmelden\" [ref=e5] [cursor=pointer]:",
+      "    - /url: /anmelden",
+      "  - link \"Passwort vergessen\" [ref=e6] [cursor=pointer]:",
+      "    - /url: /passwort",
+      "```",
+    ].join("\n");
+    mcpConnections.set("playwright", {
+      client: {
+        callTool: vi.fn(async (input: { name: string }) => {
+          if (input.name === "browser_evaluate") return { content: [{ type: "text", text: "evaluate unavailable" }], isError: true };
+          if (input.name === "browser_snapshot") return { content: [{ type: "text", text: snapshot }] };
+          return { content: [{ type: "text", text: "" }] };
+        }),
+      },
+    });
+
+    const r = await webFetch({ url: `${SITE}/konto` }, "s-fetch-links-snapshot-landing");
+    expect(r.metadata?.["fetchMethod"]).toBe("playwright");
+    expect(sectionOf(r.output).lines).toEqual([
+      "- Passwort vergessen -> https://login.example.org/passwort",
+      `- Zurück zum Shop -> ${SITE}/index.html`,
+    ]);
+  });
+
+  // chrome-error://chromewebdata/ is no page's address: as the page URL it would list the page's
+  // own link and group no link as same site.
+  it("lets the requested URL stand in for a page URL that is not http(s), such as a browser error page's", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => html(JS_SHELL)));
+    mcpConnections.set("playwright", {
+      client: {
+        callTool: browserRendering({
+          URL: "chrome-error://chromewebdata/",
+          body: { innerText: "Diese Seite ist nicht erreichbar.\n\nDie Verbindung wurde unterbrochen." },
+          links: [
+            anchor("https://partner.example/", "Partnershop"),
+            anchor(`${SITE}/konto`, "Konto"),
+            anchor(`${SITE}/hilfe.html`, "Hilfe"),
+          ],
+        }).callTool,
+      },
+    });
+
+    const r = await webFetch({ url: `${SITE}/konto` }, "s-fetch-links-error-page");
+    expect(r.metadata?.["fetchMethod"]).toBe("playwright");
+    expect(sectionOf(r.output).lines).toEqual([
+      `- Hilfe -> ${SITE}/hilfe.html`,
+      "- Partnershop -> https://partner.example/",
+    ]);
+  });
 });

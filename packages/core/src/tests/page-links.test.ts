@@ -15,6 +15,7 @@ import { describe, expect, it } from "vitest";
 import {
   extractHtmlLinks,
   formatLinkSection,
+  LINK_LABEL_MAX,
   LINK_SCAN_MAX,
   LINK_SECTION_RE,
   LINK_URL_MAX,
@@ -286,6 +287,18 @@ describe("renderedLinks", () => {
       { url: "https://docs.example.com/#/configuration", label: "Configuration" },
       { url: "https://docs.example.com/#!/plugins", label: "Plugins" },
       { url: "https://docs.example.com/handbuch.html", label: "E31" },
+    ]);
+  });
+
+  // A cut inside an emoji's surrogate pair would end the label with half a character.
+  it(`cuts a label at ${LINK_LABEL_MAX} characters without leaving half of a character behind`, () => {
+    const kept = "x".repeat(LINK_LABEL_MAX - 2);
+    expect(renderedLinks([
+      ["https://www.example.com/a", `${kept}x\u{1F527} Werkzeug`],
+      ["https://www.example.com/b", `${kept}\u{1F527} Werkzeug`],
+    ])).toEqual([
+      { url: "https://www.example.com/a", label: `${kept}x` },
+      { url: "https://www.example.com/b", label: `${kept}\u{1F527}` },
     ]);
   });
 });
