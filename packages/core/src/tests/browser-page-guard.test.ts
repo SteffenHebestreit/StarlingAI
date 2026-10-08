@@ -112,6 +112,28 @@ describe("browser tools refuse to show a page on a host the SSRF guard refuses",
     expect(calls(callTool)).toEqual(["browser_snapshot"]);
   });
 
+  it.each([
+    ["a blob: page", "blob:http://10.0.0.5/9f1c2d3e-0b5c-4f00-8a00-0000000000a1"],
+    ["a view-source: page", "view-source:http://10.0.0.5/admin"],
+  ])("refuses %s whose URL inside is on a private host", async (_label, pageUrl) => {
+    const callTool = browser({ browser_snapshot: page(pageUrl) });
+
+    const r = await (await tool("browser_snapshot")).execute({}, ctx);
+    expect(r.success).toBe(false);
+    expect(JSON.stringify(r)).not.toContain(INTERNAL);
+    expect(calls(callTool)).toEqual(["browser_snapshot", "navigate about:blank"]);
+  });
+
+  it("shows a blob: page whose URL inside is public", async () => {
+    const answer = page(`blob:${PUBLIC}/9f1c2d3e-0b5c-4f00-8a00-0000000000a2`, "Export: 18 Artikel");
+    const callTool = browser({ browser_snapshot: answer });
+
+    const r = await (await tool("browser_snapshot")).execute({}, ctx);
+    expect(r.success).toBe(true);
+    expect(r.output).toBe(answer);
+    expect(calls(callTool)).toEqual(["browser_snapshot"]);
+  });
+
   it("refuses a page on a LAN name that resolves to a private address when it is not listed", async () => {
     const callTool = browser({ browser_snapshot: page(`http://${LAN_HOST}/b`) });
 

@@ -1019,19 +1019,22 @@ let lastClearedPageUrl: string | undefined;
  * own script or a click then moves it with nothing checking where, so the page it ended on is
  * checked before anything from it is used. An http(s) page goes through checkUrlSsrf (and so
  * guardrails.allowedPrivateHosts), a local file is refused, and the browser's own pages
- * (about:blank, an error page) belong to no host.
+ * (about:blank, an error page) belong to no host. A blob:, view-source: or filesystem: page
+ * belongs to the URL inside it; read as a page of no host, blob:http://10.0.0.5/… passed.
  */
 export async function refusedBrowserPage(pageUrls: Iterable<string>): Promise<string | null> {
   for (const pageUrl of pageUrls) {
     if (pageUrl === lastClearedPageUrl) continue;
-    const refused = /^file:/i.test(pageUrl)
+    let target = pageUrl;
+    while (/^(?:blob|view-source|filesystem):/i.test(target)) target = target.slice(target.indexOf(":") + 1);
+    const refused = /^file:/i.test(target)
       ? "a local file is not allowed"
-      : /^https?:\/\//i.test(pageUrl) ? await checkUrlSsrf(pageUrl) : null;
+      : /^https?:\/\//i.test(target) ? await checkUrlSsrf(target) : null;
     if (refused) {
       lastClearedPageUrl = undefined;
       return refused;
     }
-    if (/^https?:\/\//i.test(pageUrl)) lastClearedPageUrl = pageUrl;
+    if (/^https?:\/\//i.test(target)) lastClearedPageUrl = pageUrl;
   }
   return null;
 }
