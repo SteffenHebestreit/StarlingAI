@@ -924,7 +924,10 @@ export class RpcConnection {
             const queued = await createJob({
               sceneName: jobName,
               definitionType: "job",
-              userId: `job:${jobName}`,
+              // As the signed-in user, like the REST route: their run, listed, read and cancelled as
+              // theirs (gateway/scene-job-access.ts) and acting with their per-user resources. A
+              // connection with no user runs it as the job itself.
+              userId: this.connUserId ?? `job:${jobName}`,
               steps,
               turnTimeoutMs: effectiveTurnTimeoutMs,
             });
