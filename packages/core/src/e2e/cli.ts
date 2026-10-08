@@ -86,7 +86,7 @@ export interface CliIo {
   err: (line: string) => void;
   /** Ctrl+C cancels running turns (the real CLI only). */
   handleSigint?: boolean;
-  /** Stands in for the process's Ctrl+C and exit (tests); taken like handleSigint. */
+  /** Stands in for the process's Ctrl+C and exit in tests; given, Ctrl+C is handled as with handleSigint. */
   interrupts?: InterruptHooks;
   /** The run lock's directory (runLockPath). Default: the system's temp directory. */
   lockDir?: string;
@@ -360,15 +360,18 @@ async function evaluate(args: ParsedArgs, io: CliIo, repoRoot: string): Promise<
     ...(io.env["E2E_SEARXNG_URL"]?.trim() ? { searxngUrl: io.env["E2E_SEARXNG_URL"].trim() } : {}),
   });
 
-  const lock = acquireRunLock(runLockPath(gatewayUrl, io.lockDir), gatewayUrl);
+  const lockPath = runLockPath(gatewayUrl, io.lockDir);
+  const lock = acquireRunLock(lockPath, gatewayUrl);
   if ("refusal" in lock) {
     io.err(`Refusing to run: ${lock.refusal}`);
     return 2;
   }
   if (lock.inherited.length > 0) {
+    // Named with the file: a turn no reset can confirm (its session deleted, the gateway not
+    // restarted since) passes from run to run until someone deletes it.
     adoptUnconfirmedTurns(client, lock.inherited);
     const named = lock.inherited.map((turn) => `${turn.requestId} of ${turn.identity}`).join(", ");
-    io.out(`An earlier run left ${lock.inherited.length} turn(s) it had not seen end (${named}): the memory reset of their account waits for them.`);
+    io.out(`An earlier run left ${lock.inherited.length} turn(s) it had not seen end (${named}) in ${lockPath}: the memory reset of their account waits for them.`);
   }
   const interrupt = new AbortController();
   const interrupts = io.interrupts ?? (io.handleSigint ? PROCESS_INTERRUPTS : null);

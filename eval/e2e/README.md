@@ -92,7 +92,8 @@ next attempt. The reset waits up to the cancel grace (30 s) for `session.get` to
 is skipped with a note otherwise. Such turns outlive the run too: a run that ends, or quits at once on a
 second Ctrl+C, while one has not been seen to end leaves it in the run lock (below), and the next run's
 reset of that account waits for it the same way. A turn whose session is gone (`sai wipe`) counts as
-ended once the gateway has restarted since it was sent (`gateway.status` uptime).
+ended once the gateway has restarted since it was sent (`gateway.status` uptime). The run names the lock
+it took such turns from; deleting that file forgets them.
 
 **One run at a time.** Two `pnpm e2e:evaluate` runs share the gateway's eval accounts, and one's reset or
 mail purge lands in the other's attempts. A run therefore refuses to start (exit code 2) while another run

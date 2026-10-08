@@ -1832,7 +1832,7 @@ describe("e2e CLI (in process, against the fake gateway)", () => {
 
     const waiting = await cli(["evaluate", "--scenarios", "scenarios", "--id", "cli-pass", "--out", "after-quit"], { runner });
     expect(waiting.code).toBe(0);
-    expect(waiting.out).toContain(`An earlier run left 1 turn(s) it had not seen end (${requestId} of eval)`);
+    expect(waiting.out).toContain(`An earlier run left 1 turn(s) it had not seen end (${requestId} of eval) in ${lock}`);
     expect(waiting.out).toContain(`memory reset skipped: turn ${requestId} of eval was stopped earlier and has not been seen to end`);
     expect(gateway.memoryKeys("eval", "user")).toEqual(["late_fact"]);
 
