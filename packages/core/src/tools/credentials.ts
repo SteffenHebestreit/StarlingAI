@@ -11,13 +11,73 @@
  *                         from the credential store without the LLM ever seeing
  *                         the values.
  */
+import { isIP } from "node:net";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
-import { lookupSiteCredential, siteCredentialMissMessage } from "../credentials/sites.js";
+import { lookupSiteCredential, siteCredentialMissMessage, type ResolvedSiteCredential } from "../credentials/sites.js";
 import { callPlaywrightTool } from "./multimodal.js";
 import { childLogger } from "../logger.js";
 import { logAudit } from "../audit/logger.js";
 
 const log = childLogger("tool:credentials");
+
+// ── The page a credential may be typed into ───────────────────────────────────
+// The fill typed the stored username and password into whatever page the browser was on, and a
+// redirect, a page's own script or a look-alike link can put a foreign site there. The page
+// must be the credential's own host or a subdomain of it, as a password manager matches, and
+// served over https unless the credential's login URL says the site is http.
+
+/** A host as URL parsing writes it (lower case, IDN as punycode), without a trailing dot. */
+function urlHost(host: string): string {
+  try {
+    return new URL(`http://${host.trim()}`).hostname.replace(/\.$/, "");
+  } catch {
+    return host.trim().toLowerCase().replace(/\.$/, "");
+  }
+}
+
+/**
+ * Whether the credential is for a plain-http site: its login URL is http, or, without one, every
+ * URL recorded for it is. A credential that records no URL at all counts as an https one.
+ */
+function credentialAllowsHttp(cred: Pick<ResolvedSiteCredential, "loginUrl" | "urls">): boolean {
+  const recorded = cred.loginUrl ? [cred.loginUrl] : Object.values(cred.urls ?? {});
+  const protocols = recorded.map((url) => {
+    try {
+      return new URL(url).protocol;
+    } catch {
+      return "";
+    }
+  });
+  return protocols.length > 0 && protocols.every((protocol) => protocol === "http:");
+}
+
+/**
+ * Why the credential may not be typed into the page at `pageUrl`, or null when it may. The site
+ * is the credential's hostname without a leading "www."; the page's host must equal it or end in
+ * "." plus it (an IP address only equals), so evil-example.com and example.com.attacker.test are
+ * other sites, and a look-alike in another script is compared as the punycode URL parsing makes.
+ */
+export function credentialPageRefusal(cred: Pick<ResolvedSiteCredential, "hostname" | "loginUrl" | "urls">, pageUrl: string | undefined): string | null {
+  const site = urlHost(cred.hostname).replace(/^www\./, "");
+  let page: URL | undefined;
+  try {
+    page = pageUrl ? new URL(pageUrl) : undefined;
+  } catch {
+    page = undefined;
+  }
+  if (!page || (page.protocol !== "https:" && page.protocol !== "http:")) {
+    return `Refusing to fill the credential for ${site}: the browser's current page could not be read, so its host is unknown. Take a browser_snapshot and try again. Nothing was typed.`;
+  }
+  const pageHost = page.hostname.replace(/\.$/, "");
+  const ownSite = pageHost === site || (isIP(site) === 0 && pageHost.endsWith(`.${site}`));
+  if (!ownSite) {
+    return `Refusing to fill the credential for ${site}: the browser is on ${pageHost}, which is neither ${site} nor a subdomain of it. Nothing was typed.`;
+  }
+  if (page.protocol === "http:" && !credentialAllowsHttp(cred)) {
+    return `Refusing to fill the credential for ${site} into a plain http page on ${pageHost}: only a credential whose login URL is http may be typed into one. Nothing was typed.`;
+  }
+  return null;
+}
 
 // ── Login-form auto-location ──────────────────────────────────────────────────
 // LLM-supplied element refs go stale or are guessed wrong (especially by smaller
@@ -195,11 +255,21 @@ registerTool({
     // (frequently stale or mis-guessed) LLM-supplied refs. The hints, when given,
     // are tried first and the located refs are the fallback.
     let located: { usernameRef?: string; passwordRef?: string; submitRef?: string } = {};
+    // The page the credential goes into is the one this snapshot shows, read in this call: an
+    // earlier answer, or a page the guard cleared before, may show a page the browser has left.
+    let pageUrl: string | undefined;
     try {
       const snapshot = await callPlaywrightTool("browser_snapshot", {});
+      pageUrl = /^[ \t]*-[ \t]+Page URL:[ \t]*(\S+)/m.exec(snapshot)?.[1];
       located = pickLoginRefs(parseSnapshotElements(snapshot));
     } catch (err) {
       log.debug({ err, hostname: cred.hostname }, "site_fill_credentials: snapshot for auto-location failed; relying on supplied refs");
+    }
+
+    const refusal = credentialPageRefusal(cred, pageUrl);
+    if (refusal) {
+      logAudit("guardrail_flagged", { type: "credential_fill_refused", hostname: cred.hostname, reason: refusal }, { sessionId: ctx.sessionId, severity: "warn" });
+      return { success: false, output: "", error: refusal, metadata: { hostname: cred.hostname, refused: true } };
     }
 
     const usernameRef = hintUsernameRef ?? located.usernameRef;

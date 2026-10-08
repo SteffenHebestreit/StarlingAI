@@ -19,7 +19,7 @@ Every public schema field, where it is declared, and how many production files r
 | `admin` | packages/core/src/config/schema.ts:371 | 27 |
 | `agents` | packages/core/src/config/schema.ts:1695 | 176 |
 | `alertmanager` | packages/core/src/config/schema.ts:1135 | 1 |
-| `all` | packages/core/src/config/schema.ts:1288 | 289 |
+| `all` | packages/core/src/config/schema.ts:1288 | 290 |
 | `allowedAgents` | packages/core/src/config/schema.ts:1308 | 29 |
 | `allowedPrivateHosts` | packages/core/src/config/schema.ts:1251 | 5 |
 | `allowedUserIds` | packages/core/src/config/schemas/channels.ts:11 | 5 |
@@ -196,8 +196,8 @@ Every public schema field, where it is declared, and how many production files r
 | `historyLimit` | packages/core/src/config/schemas/channels.ts:22 | 5 |
 | `holdoutRate` | packages/core/src/config/schema.ts:1486 | 2 |
 | `honestSynthesisOnPartialEvidence` | packages/core/src/config/schemas/orchestration.ts:602 | 1 |
-| `host` | packages/core/src/config/schema.ts:707 | 115 |
-| `http` | packages/core/src/config/schema.ts:752 | 88 |
+| `host` | packages/core/src/config/schema.ts:707 | 116 |
+| `http` | packages/core/src/config/schema.ts:752 | 89 |
 | `humanInLoopSteps` | packages/core/src/config/schema.ts:1309 | 20 |
 | `id` | packages/core/src/config/schema.ts:561 | 288 |
 | `ignoreCase` | packages/core/src/config/schema.ts:1356 | 2 |
@@ -309,7 +309,7 @@ Every public schema field, where it is declared, and how many production files r
 | `name` | packages/core/src/config/schema.ts:1973 | 366 |
 | `negativePrompt` | packages/core/src/config/schemas/multimodal.ts:175 | 7 |
 | `network` | packages/core/src/config/schema.ts:684 | 55 |
-| `node` | packages/core/src/config/schema.ts:1042 | 232 |
+| `node` | packages/core/src/config/schema.ts:1042 | 233 |
 | `normalizeDelegationToEnglish` | packages/core/src/config/schemas/orchestration.ts:573 | 2 |
 | `notes` | packages/core/src/config/schema.ts:790 | 55 |
 | `oneLiner` | packages/core/src/config/schema.ts:899 | 3 |
@@ -363,7 +363,7 @@ Every public schema field, where it is declared, and how many production files r
 | `promptCacheWarmKeeper` | packages/core/src/config/schema.ts:1821 | 2 |
 | `promptInjectionBlock` | packages/core/src/config/schema.ts:1218 | 6 |
 | `promptPer1m` | packages/core/src/config/schema.ts:510 | 1 |
-| `protocol` | packages/core/src/config/schema.ts:700 | 51 |
+| `protocol` | packages/core/src/config/schema.ts:700 | 52 |
 | `provider` | packages/core/src/config/schema.ts:431 | 130 |
 | `providers` | packages/core/src/config/schema.ts:1210 | 100 |
 | `publicUrl` | packages/core/src/config/schema.ts:317 | 7 |
