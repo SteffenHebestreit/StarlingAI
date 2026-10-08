@@ -64,6 +64,16 @@ later turn of the account through the durable-facts capsule, so one scenario's f
 before the attempt starts. Concurrent attempts share the account, so then nothing is reset. `--keep-memory`
 keeps it.
 
+A delete cannot be undone, so the reset deletes only what is provably the eval account's own, and the
+attempt's notes in the report say what it left and why:
+
+- the gateway runs with auth on (`GET /api/auth/mode`, asked before every reset) — with auth off every
+  account's memory is the shared single-operator store, and a token from before the switch still works;
+- the identity logs in as its own eval account (`GET /api/auth/me`: `eval` → `eval`, `eval-viewer` →
+  `eval-viewer`) — a credentials file may map it to any account;
+- no other eval account lists the same entries — a gateway older than the per-user workspace routes
+  (5fc9a8e) keeps workspace memory in one store for every account.
+
 **Mail-isolation preflight (fail closed).** Before any scenario runs, the harness asks the running
 mail-service — through `pnpm e2e:env status --json`, which calls `GET /api/accounts` inside its container
 with `X-Sai-User: eval` — which accounts `eval` can see. Any account not bound to `eval` (its `allowedUsers`

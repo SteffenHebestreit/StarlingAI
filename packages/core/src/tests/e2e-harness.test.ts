@@ -66,20 +66,29 @@ interface TurnContext {
 
 type TurnScript = (turn: TurnContext) => Promise<void>;
 
-const PASSWORDS = { eval: "pw-eval-0123456789abcdefXYZ", "eval-viewer": "pw-viewer-0123456789abcdefXYZ" };
+const PASSWORDS = { eval: "pw-eval-0123456789abcdefXYZ", "eval-viewer": "pw-viewer-0123456789abcdefXYZ", alice: "pw-alice-0123456789abcdefXYZ" };
+/** alice: an account of the deployment that is not an eval account. */
+const ROLES: Record<string, "operator" | "viewer"> = { eval: "operator", "eval-viewer": "viewer", alice: "operator" };
+
+type MemoryScope = "user" | "workspace";
 
 class FakeGateway {
   url = "";
   healthy = true;
   judgeAnswer = "SCORE: 9";
+  /** auth.enabled: off, every account's memory is the one shared single-operator store. */
+  authEnabled = true;
+  /** Workspace memory in one store for every account, as the routes before 5fc9a8e kept it. */
+  sharedWorkspace = false;
   readonly judgeRequests: Array<Record<string, unknown>> = [];
   readonly chatSends: Array<Record<string, unknown>> = [];
   readonly sessionChannels: string[] = [];
   readonly steers: Array<{ sessionId: string; message: string; requestId?: string; clientMessageId?: string }> = [];
   readonly cancels: string[] = [];
   readonly httpPaths: string[] = [];
-  /** Durable memory keys by `<user>:<scope>`, for the reset before each attempt. */
-  readonly memory = new Map<string, Set<string>>();
+  /** Durable memory by `<store>:<scope>` (store: the account, or "shared"), key → record. */
+  readonly memory = new Map<string, Map<string, { id: string; content: string }>>();
+  private memoryCounter = 0;
   private readonly server = http.createServer((req, res) => void this.handleHttp(req, res));
   private readonly wss = new WebSocketServer({ noServer: true });
   private readonly sessions = new Map<string, { owner: string; transcript: Array<Record<string, unknown>> }>();
@@ -98,6 +107,23 @@ class FakeGateway {
   /** Another chat of the account, so its events reach the account's audit stream. */
   adoptSession(sessionId: string, owner: string): void {
     this.sessions.set(sessionId, { owner, transcript: [] });
+  }
+
+  /** The store a request of `user` reaches, as the gateway resolves it from the request context. */
+  storeOf(user: string, scope: MemoryScope): string {
+    return !this.authEnabled || (scope === "workspace" && this.sharedWorkspace) ? "shared" : user;
+  }
+
+  /** A durable memory entry as memory_store writes one: a fresh id per entry. */
+  remember(store: string, scope: MemoryScope, key: string, content = key): void {
+    const entries = this.memory.get(`${store}:${scope}`) ?? new Map<string, { id: string; content: string }>();
+    this.memory.set(`${store}:${scope}`, entries);
+    this.memoryCounter += 1;
+    entries.set(key, { id: `mem-${this.memoryCounter}`, content });
+  }
+
+  memoryKeys(store: string, scope: MemoryScope): string[] {
+    return [...(this.memory.get(`${store}:${scope}`)?.keys() ?? [])];
   }
 
   async start(): Promise<void> {
@@ -256,14 +282,16 @@ class FakeGateway {
       this.logins += 1;
       const token = `tok-${username}-${this.logins}`;
       this.tokens.set(token, username);
-      return json(200, { token, username, role: username === "eval" ? "operator" : "viewer" });
+      return json(200, { token, username, role: ROLES[username] });
     }
     if (req.method === "POST" && url.pathname === "/v1/chat/completions") {
       this.judgeRequests.push(JSON.parse(body.toString()) as Record<string, unknown>);
       return json(200, { choices: [{ message: { role: "assistant", content: this.judgeAnswer } }] });
     }
+    if (req.method === "GET" && url.pathname === "/api/auth/mode") return json(200, { authEnabled: this.authEnabled, provider: "builtin" });
     const user = this.userOf(req.headers["authorization"]);
     if (!user) return json(401, { error: "Unauthorized" });
+    if (req.method === "GET" && url.pathname === "/api/auth/me") return json(200, { username: user, role: ROLES[user] });
     if (req.method === "GET" && url.pathname === "/api/health/subsystems") {
       return json(200, { healthy: true, degraded: false, checks: [{ name: "primary_model", status: "ok", detail: "fake reachable" }, { name: "engram", status: "ok", detail: "not configured (RAG enhancement off)" }] });
     }
@@ -272,13 +300,18 @@ class FakeGateway {
     }
     if (req.method === "GET" && url.pathname === "/api/memory/entries") {
       const scope = url.searchParams.get("scope") === "user" ? "user" : "workspace";
-      const keys = [...(this.memory.get(`${user}:${scope}`) ?? [])];
-      return json(200, { scope, total: keys.length, returned: keys.length, records: keys.map((key) => ({ key })) });
+      const query = (url.searchParams.get("query") ?? "").toLowerCase();
+      const limit = Number(url.searchParams.get("limit") ?? 200);
+      const records = [...(this.memory.get(`${this.storeOf(user, scope)}:${scope}`) ?? new Map<string, { id: string; content: string }>())]
+        .map(([key, entry]) => ({ id: entry.id, key, subject: key, content: entry.content }))
+        .filter((record) => !query || record.content.toLowerCase().includes(query) || record.key.toLowerCase().includes(query));
+      const paged = records.slice(0, limit);
+      return json(200, { scope, total: records.length, returned: paged.length, records: paged });
     }
     const memoryEntry = /^\/api\/memory\/entries\/([^/]+)$/.exec(url.pathname);
     if (req.method === "DELETE" && memoryEntry) {
       const scope = url.searchParams.get("scope") === "user" ? "user" : "workspace";
-      const deleted = this.memory.get(`${user}:${scope}`)?.delete(decodeURIComponent(memoryEntry[1]!)) ?? false;
+      const deleted = this.memory.get(`${this.storeOf(user, scope)}:${scope}`)?.delete(decodeURIComponent(memoryEntry[1]!)) ?? false;
       return deleted ? json(200, { scope, deleted: true }) : json(404, { error: "Memory entry not found" });
     }
     const steer = /^\/api\/sessions\/([^/]+)\/steer$/.exec(url.pathname);
@@ -408,6 +441,9 @@ afterAll(async () => {
 beforeEach(() => {
   gateway.healthy = true;
   gateway.judgeAnswer = "SCORE: 9";
+  gateway.authEnabled = true;
+  gateway.sharedWorkspace = false;
+  gateway.memory.clear();
   gateway.setScripts([
     { match: /^hello/i, run: helloScript },
     { match: /^steer/i, run: steerScript },
@@ -662,27 +698,69 @@ describe("e2e harness against a fake gateway", () => {
   it("empties the attempt identity's durable memory before each attempt, when attempts run one at a time", async () => {
     // What a scenario stores is in every later turn's prompt: the memory scenario's German fact
     // pulled a later English question's reply into German (2026-10-07).
-    gateway.memory.set("eval:user", new Set(["favorite_tea"]));
-    gateway.memory.set("eval:workspace", new Set(["project_note"]));
-    gateway.memory.set("eval-viewer:user", new Set(["viewer_note"]));
+    gateway.remember("eval", "user", "favorite_tea");
+    gateway.remember("eval", "workspace", "project_note");
+    gateway.remember("eval-viewer", "user", "viewer_note");
     const scenario: E2EScenario = { id: "fake-reset", title: "Reset", group: "core", steps: [{ ...helloTurn }] };
-    try {
-      await runScenario(loaded(scenario), deps(), FAST);
-      expect([...(gateway.memory.get("eval:user") ?? [])]).toEqual([]);
-      expect([...(gateway.memory.get("eval:workspace") ?? [])]).toEqual([]);
-      // Only the attempt's own identity.
-      expect([...(gateway.memory.get("eval-viewer:user") ?? [])]).toEqual(["viewer_note"]);
+    const reset = await runScenario(loaded(scenario), deps(), FAST);
+    expect(gateway.memoryKeys("eval", "user")).toEqual([]);
+    expect(gateway.memoryKeys("eval", "workspace")).toEqual([]);
+    expect(reset.attempts[0]!.notes).toEqual([]);
+    // Only the attempt's own identity.
+    expect(gateway.memoryKeys("eval-viewer", "user")).toEqual(["viewer_note"]);
 
-      // Attempts that run at once share the account: no reset.
-      gateway.memory.set("eval:user", new Set(["favorite_tea"]));
-      await runScenario(loaded(scenario), deps(), { ...FAST, concurrency: 2 });
-      expect([...(gateway.memory.get("eval:user") ?? [])]).toEqual(["favorite_tea"]);
-      // ...and none when switched off.
-      await runScenario(loaded(scenario), deps(), { ...FAST, resetDurableMemory: false });
-      expect([...(gateway.memory.get("eval:user") ?? [])]).toEqual(["favorite_tea"]);
+    // Attempts that run at once share the account: no reset.
+    gateway.remember("eval", "user", "favorite_tea");
+    await runScenario(loaded(scenario), deps(), { ...FAST, concurrency: 2 });
+    expect(gateway.memoryKeys("eval", "user")).toEqual(["favorite_tea"]);
+    // ...and none when switched off.
+    await runScenario(loaded(scenario), deps(), { ...FAST, resetDurableMemory: false });
+    expect(gateway.memoryKeys("eval", "user")).toEqual(["favorite_tea"]);
+  });
+
+  it("deletes only the eval account's own memory: not with auth off, not as another account, not in a shared store", async () => {
+    // The memory routes resolve the caller's stores from the request context; without a user in
+    // it they fall back to the shared single-operator stores, and a delete cannot be undone.
+    const scenario: E2EScenario = { id: "fake-reset-own", title: "Reset own memory only", group: "core", steps: [{ ...helloTurn }] };
+    gateway.remember("shared", "user", "operator_pref");
+    gateway.remember("shared", "workspace", "operator_decision");
+
+    // Auth switched off during a run: the cached token still verifies, every store is the shared one.
+    gateway.authEnabled = false;
+    const authOff = await runScenario(loaded(scenario), deps(), FAST);
+    gateway.authEnabled = true;
+    expect(gateway.memoryKeys("shared", "user")).toEqual(["operator_pref"]);
+    expect(gateway.memoryKeys("shared", "workspace")).toEqual(["operator_decision"]);
+    expect(authOff.attempts[0]!.notes).toEqual([
+      "memory reset skipped: the gateway runs with auth off, so every account's memory is the shared single-operator store",
+    ]);
+
+    // A credentials file that maps the identity "eval" to another account of the deployment.
+    gateway.remember("alice", "user", "alice_pref");
+    const mapped = new GatewayClient({
+      baseUrl: gateway.url,
+      credentials: { ...credentials(), eval: { username: "alice", password: PASSWORDS.alice } },
+      rpcTimeoutMs: 5_000,
+      connectTimeoutMs: 5_000,
+    });
+    try {
+      const otherAccount = await runScenario(loaded(scenario), deps({ client: mapped }), FAST);
+      expect(gateway.memoryKeys("alice", "user")).toEqual(["alice_pref"]);
+      expect(otherAccount.attempts[0]!.notes).toEqual(['memory reset skipped: eval logs in as account "alice", not as its eval account "eval"']);
     } finally {
-      gateway.memory.clear();
+      mapped.close();
     }
+
+    // A gateway that keeps workspace memory in one store for every account (the routes before
+    // 5fc9a8e): eval's own user memory goes, the shared workspace store stays.
+    gateway.sharedWorkspace = true;
+    gateway.remember("eval", "user", "favorite_tea");
+    const shared = await runScenario(loaded(scenario), deps(), FAST);
+    expect(gateway.memoryKeys("eval", "user")).toEqual([]);
+    expect(gateway.memoryKeys("shared", "workspace")).toEqual(["operator_decision"]);
+    expect(shared.attempts[0]!.notes).toEqual([
+      "memory reset: eval's workspace memory left as it is: eval-viewer lists the same entries, so the gateway keeps that scope in one shared store",
+    ]);
   });
 
   it("skips — never fails — a scenario whose required service is down", async () => {

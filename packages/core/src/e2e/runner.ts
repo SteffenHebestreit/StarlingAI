@@ -43,6 +43,7 @@ import { judgeReply, JudgeError, type JudgeConfig } from "./judge.js";
 import type { MailAdapter, MailMessageSummary } from "./mail.js";
 import type { ServiceProber, ServiceState } from "./services.js";
 import type { LoadedScenario } from "./loader.js";
+import { E2E_ACCOUNTS } from "./setup.js";
 import { attachmentEntryKey, extractArtifactsFromMetadata } from "../agent/artifact-metadata.js";
 
 export interface RunnerDeps {
@@ -77,7 +78,9 @@ export interface RunnerOptions {
    * Empty the attempt identity's durable memory before each attempt, when attempts run one at a
    * time (concurrent attempts share the account, so one would delete another's). What a scenario
    * stores is in every later turn's prompt (the durable-facts capsule): the memory scenario's
-   * German fact pulled a later English question's reply into German (2026-10-07).
+   * German fact pulled a later English question's reply into German (2026-10-07). Only memory that
+   * is provably the eval account's own is deleted (resetDurableMemory); the attempt's notes say
+   * what was left and why.
    */
   resetDurableMemory?: boolean;
   /** Aborts the run (Ctrl+C): running turns are cancelled, scenarios not started are skipped. */
@@ -396,28 +399,112 @@ function addCounts(target: Record<string, number>, source: Record<string, number
   for (const [key, count] of Object.entries(source)) target[key] = (target[key] ?? 0) + count;
 }
 
+/** What the memory reset before an attempt did, and why it left anything. */
+export interface MemoryResetResult {
+  /** Durable memory entries deleted. */
+  removed: number;
+  /** One line per reason the reset was skipped or left something; they become attempt notes. */
+  notes: string[];
+}
+
+type MemoryEntryScope = "user" | "workspace";
+
+interface MemoryListing {
+  total: number;
+  records: Array<{ id: string; key: string }>;
+}
+
+/** One page of the identity's durable memory in a scope, or the reason it could not be listed. */
+async function listMemory(identity: string, scope: MemoryEntryScope, deps: RunnerDeps, signal?: AbortSignal): Promise<MemoryListing | string> {
+  const listed = await deps.client.http(identity, "GET", `/api/memory/entries?scope=${scope}&limit=500`, signal ? { signal } : {});
+  if (!listed.ok) return `HTTP ${listed.status}`;
+  const body = isRecord(listed.json) ? listed.json : {};
+  const records = (Array.isArray(body["records"]) ? body["records"] : []).flatMap((record) =>
+    isRecord(record) && typeof record["key"] === "string" && record["key"]
+      ? [{ id: typeof record["id"] === "string" ? record["id"] : "", key: record["key"] }]
+      : []);
+  return { total: typeof body["total"] === "number" ? body["total"] : records.length, records };
+}
+
 /**
- * Delete every durable memory entry (user and workspace scope) the identity holds. Best effort: a
- * gateway without the memory API, or a failed call, leaves the account as it is.
+ * Why the identity's memory may not be deleted at all, or null. The memory routes resolve the
+ * caller's stores from the request context, and with auth off there is no user in it: every
+ * request reaches the shared single-operator stores, while the token the harness got at login still
+ * verifies (auth reloads without a restart, so this is asked before every reset). And a credentials
+ * file may map the identity to any account, whose memory is not the eval account's to empty.
  */
-export async function resetDurableMemory(identity: string, deps: RunnerDeps, signal?: AbortSignal): Promise<number> {
-  let removed = 0;
-  for (const scope of ["user", "workspace"] as const) {
-    try {
-      const listed = await deps.client.http(identity, "GET", `/api/memory/entries?scope=${scope}&limit=500`, signal ? { signal } : {});
-      if (!listed.ok) continue;
-      const records = (listed.json as { records?: Array<{ key?: unknown }> } | undefined)?.records ?? [];
-      for (const record of records) {
-        if (typeof record.key !== "string" || !record.key) continue;
-        const deleted = await deps.client.http(identity, "DELETE", `/api/memory/entries/${encodeURIComponent(record.key)}?scope=${scope}`, signal ? { signal } : {});
-        if (deleted.ok) removed += 1;
-      }
-    } catch {
-      // Best effort, see above.
+async function resetRefusal(identity: string, deps: RunnerDeps, signal?: AbortSignal): Promise<string | null> {
+  const account = E2E_ACCOUNTS.find((candidate) => candidate.identity === identity);
+  if (!account) return `${identity} is not an eval identity (pnpm e2e:setup creates ${E2E_ACCOUNTS.map((candidate) => candidate.identity).join(" and ")})`;
+  const mode = await deps.client.http(null, "GET", "/api/auth/mode", signal ? { signal } : {});
+  if (!mode.ok) return `GET /api/auth/mode answered HTTP ${mode.status}`;
+  if (!isRecord(mode.json) || mode.json["authEnabled"] !== true) {
+    return "the gateway runs with auth off, so every account's memory is the shared single-operator store";
+  }
+  const me = await deps.client.http(identity, "GET", "/api/auth/me", signal ? { signal } : {});
+  if (!me.ok) return `GET /api/auth/me as ${identity} answered HTTP ${me.status}`;
+  const username = isRecord(me.json) && typeof me.json["username"] === "string" ? me.json["username"] : "";
+  if (username !== account.username) {
+    return `${identity} logs in as ${username ? `account "${username}"` : "an account without a name"}, not as its eval account "${account.username}"`;
+  }
+  return null;
+}
+
+/**
+ * Whether the listed records are the identity's own: no other eval account lists any of them. A
+ * gateway older than the per-user workspace routes (5fc9a8e) lists and deletes workspace memory at
+ * the shared root for every account, and nothing else in its answers tells that store apart.
+ * Null when they are the identity's own; otherwise why the scope is left as it is.
+ */
+async function sharedStoreReason(identity: string, scope: MemoryEntryScope, listing: MemoryListing, deps: RunnerDeps, signal?: AbortSignal): Promise<string | null> {
+  const ids = new Set(listing.records.map((record) => record.id));
+  if (ids.has("")) return `cannot tell whether it is ${identity}'s own (an entry without an id)`;
+  const others = E2E_ACCOUNTS.filter((account) => account.identity !== identity && deps.client.hasIdentity(account.identity));
+  if (others.length === 0) return `cannot tell whether it is ${identity}'s own (no other eval account to compare with)`;
+  for (const other of others) {
+    const theirs = await listMemory(other.identity, scope, deps, signal);
+    if (typeof theirs === "string") return `cannot tell whether it is ${identity}'s own (${other.identity}'s listing answered ${theirs})`;
+    if (theirs.records.some((record) => ids.has(record.id))) {
+      return `${other.identity} lists the same entries, so the gateway keeps that scope in one shared store`;
     }
   }
+  return null;
+}
+
+/**
+ * Empty the identity's durable memory (user and workspace scope) before an attempt, but only what
+ * is provably the eval account's own: a delete cannot be undone, and a store the reset should not
+ * touch is the operator's or another account's (resetRefusal, sharedStoreReason). What it skips
+ * comes back as notes.
+ */
+export async function resetDurableMemory(identity: string, deps: RunnerDeps, signal?: AbortSignal): Promise<MemoryResetResult> {
+  const notes: string[] = [];
+  let removed = 0;
+  try {
+    const refusal = await resetRefusal(identity, deps, signal);
+    if (refusal) {
+      notes.push(`memory reset skipped: ${refusal}`);
+    } else {
+      for (const scope of ["user", "workspace"] as const) {
+        const listing = await listMemory(identity, scope, deps, signal);
+        if (typeof listing === "string" || listing.records.length === 0) continue;
+        const shared = await sharedStoreReason(identity, scope, listing, deps, signal);
+        if (shared) {
+          notes.push(`memory reset: ${identity}'s ${scope} memory left as it is: ${shared}`);
+          continue;
+        }
+        for (const record of listing.records) {
+          const deleted = await deps.client.http(identity, "DELETE", `/api/memory/entries/${encodeURIComponent(record.key)}?scope=${scope}`, signal ? { signal } : {});
+          if (deleted.ok) removed += 1;
+        }
+      }
+    }
+  } catch (err) {
+    if (!signal?.aborted) notes.push(`memory reset stopped: ${describeError(err)}`);
+  }
   if (removed > 0) deps.log?.(`     reset: removed ${removed} durable memory entr${removed === 1 ? "y" : "ies"} of ${identity}`);
-  return removed;
+  for (const note of notes) deps.log?.(`     ${note}`);
+  return { removed, notes };
 }
 
 export async function runAttempt(
@@ -449,8 +536,9 @@ export async function runAttempt(
   };
   if (opts.signal?.aborted) onRunAbort();
   else opts.signal?.addEventListener("abort", onRunAbort, { once: true });
+  const resetNotes: string[] = [];
   if (opts.resetDurableMemory && opts.concurrency === 1 && !controller.signal.aborted) {
-    await resetDurableMemory(ctx.identity, deps, controller.signal);
+    resetNotes.push(...(await resetDurableMemory(ctx.identity, deps, controller.signal)).notes);
   }
   const steps: StepResult[] = [];
   let open: { window: OpenTurnWindow; result: StepResult } | null = null;
@@ -494,7 +582,7 @@ export async function runAttempt(
     startedAt: new Date(startedAt).toISOString(),
     durationMs: Date.now() - startedAt,
     failures: failed.flatMap((step) => step.failures.map((failure) => `${step.label}: ${failure}`)),
-    notes: steps.flatMap((step) => step.notes.map((note) => `${step.label}: ${note}`)),
+    notes: [...resetNotes, ...steps.flatMap((step) => step.notes.map((note) => `${step.label}: ${note}`))],
     sessions: ctx.sessions,
     steps,
     eventTypeCounts: counts,
