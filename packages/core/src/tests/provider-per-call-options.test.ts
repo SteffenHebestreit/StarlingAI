@@ -338,6 +338,24 @@ describe("a prefilled tool call goes out only on a forced call, and only where t
     expect(Object.keys(lastWireMessage(forcedBodies[0]!)).sort()).toEqual(["content", "role"]);
   });
 
+  it("is not sent on a forced call with no tools: no tool_choice goes out then, so no grammar would take the opener", async () => {
+    const { provider, bodies } = mockProvider(QWEN_XML);
+    await provider.complete(messages, [], undefined, FORCED_PREFILLED);
+    await provider.completeViaStream(messages, [], undefined, FORCED_PREFILLED);
+
+    expect(bodies).toHaveLength(2);
+    for (const body of bodies) {
+      expect(body["tool_choice"]).toBeUndefined();
+      // Sent anyway, the opener would be continued as plain text: the reply would read
+      // "<tool_call>\n<function=…" with nothing to parse it as a call.
+      expect(wireMessages(body).map((m) => m["role"])).toEqual(["system", "user"]);
+    }
+    expect(modelCalls().map((row) => [row["prefill"], row["prefillSkipped"]])).toEqual([
+      [null, "no_tools"],
+      [null, "no_tools"],
+    ]);
+  });
+
   it("names the tool only when that tool is in the request; any other name leaves the opener bare", async () => {
     const { provider, bodies } = mockProvider(QWEN_XML);
     await provider.complete(messages, tools, undefined, { toolChoice: "required", prefillToolCall: { tool: "record_verdict" } });
