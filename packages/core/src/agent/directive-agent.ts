@@ -5,8 +5,22 @@
  * agent, and a response that calls no tool is replaced by the delegation itself (runtime.ts). Three
  * questions that loop asks are answered here: did a call run the agent, which requested calls are
  * the delegation to it, and what the runtime's own delegation hands the agent besides the request.
+ * The gateway asks a fourth before the turn starts: is there an agent of that name at all.
  */
+import { getConfig } from "../config/loader.js";
+import { withPromotedAgents } from "./promoted-agents.js";
 import { currentTurnStartIndex } from "./turn-boundary.js";
+
+/**
+ * Whether a name names an agent this deployment has: a configured sub-agent or a promoted one (the
+ * promoted catalog is deployment-scoped, see maybePromoteEphemeral). An empty catalog refuses
+ * nothing, the rule delegate_to_agent applies to the names it is given.
+ */
+export function isKnownAgentName(agentName: string): boolean {
+  const config = getConfig();
+  const known = Object.keys(withPromotedAgents(config.subAgents, config.workspacePath));
+  return known.length === 0 || known.includes(agentName);
+}
 
 /**
  * Whether a requested tool call is the delegation to the named agent: delegate_to_agent naming it,

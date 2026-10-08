@@ -19,7 +19,7 @@ Every public schema field, where it is declared, and how many production files r
 | `admin` | packages/core/src/config/schema.ts:371 | 27 |
 | `agents` | packages/core/src/config/schema.ts:1695 | 177 |
 | `alertmanager` | packages/core/src/config/schema.ts:1135 | 1 |
-| `all` | packages/core/src/config/schema.ts:1288 | 289 |
+| `all` | packages/core/src/config/schema.ts:1288 | 290 |
 | `allowedAgents` | packages/core/src/config/schema.ts:1308 | 29 |
 | `allowedPrivateHosts` | packages/core/src/config/schema.ts:1251 | 3 |
 | `allowedUserIds` | packages/core/src/config/schemas/channels.ts:11 | 5 |
@@ -92,7 +92,7 @@ Every public schema field, where it is declared, and how many production files r
 | `confidenceDemotion` | packages/core/src/config/schemas/retrieval.ts:133 | 1 |
 | `confidenceMinScoreGap` | packages/core/src/config/schemas/retrieval.ts:139 | 1 |
 | `confidenceMinTopRerank` | packages/core/src/config/schemas/retrieval.ts:147 | 1 |
-| `config` | packages/core/src/config/schema.ts:1206 | 276 |
+| `config` | packages/core/src/config/schema.ts:1206 | 277 |
 | `configRemovals` | packages/core/src/config/schema.ts:1691 | 3 |
 | `configureTimeoutMs` | packages/core/src/config/schemas/multimodal.ts:228 | 1 |
 | `consolidationIntervalMs` | packages/core/src/config/schema.ts:1518 | 1 |
@@ -532,4 +532,4 @@ Every public schema field, where it is declared, and how many production files r
 | `windowMs` | packages/core/src/config/schema.ts:267 | 8 |
 | `workspaceAccess` | packages/core/src/config/schema.ts:940 | 5 |
 | `workspaceName` | packages/core/src/config/schemas/retrieval.ts:160 | 3 |
-| `workspacePath` | packages/core/src/config/schema.ts:2003 | 122 |
+| `workspacePath` | packages/core/src/config/schema.ts:2003 | 123 |
