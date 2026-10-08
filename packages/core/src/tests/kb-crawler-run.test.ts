@@ -204,3 +204,42 @@ describe("runCrawl (stubbed fetch)", () => {
     expect(after!.lastCrawl?.pagesIngested).toBe(0);
   });
 });
+
+/**
+ * The crawler checked each host before its request, and the request resolved the name again to
+ * connect, so a name that answered differently the second time (DNS rebinding) reached a
+ * private address. Its connections now go through the guard's dispatcher, which decides on the
+ * address it connects to; with allowPrivateHosts, which lets the crawl reach private hosts on
+ * purpose, they do not.
+ */
+describe("runCrawl's connections", () => {
+  it("go through the SSRF guard's dispatcher, unless allowPrivateHosts lets the crawl reach private hosts", async () => {
+    const { guardedDispatcher } = await import("../tools/web.js");
+    expect(guardedDispatcher, "web.ts has no guarded dispatcher").toBeDefined();
+    const dispatchers: unknown[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_input: string | URL, init?: { dispatcher?: unknown }) => {
+      dispatchers.push(init?.dispatcher);
+      return new Response(htmlPage("Index"), { status: 200, headers: { "content-type": "text/html" } });
+    }));
+    const openConfig = loaderModule.getConfig();
+    vi.mocked(loaderModule.getConfig).mockReturnValue({
+      ...openConfig,
+      retrieval: { ...openConfig.retrieval, knowledgeBases: { ...openConfig.retrieval.knowledgeBases, allowPrivateHosts: false } },
+    } as typeof openConfig);
+
+    // An IP literal: the guard's check needs no DNS for it.
+    const guarded = await createKnowledgeBase({ name: "Public docs", seedUrls: ["https://93.184.215.14/docs/"], respectRobots: false });
+    if (!guarded.ok) throw new Error(guarded.error);
+    await crawlAndWait(guarded.value.id);
+    expect(dispatchers.length).toBeGreaterThan(0);
+    expect(dispatchers.every((dispatcher) => dispatcher === guardedDispatcher), "a request without the guard's dispatcher").toBe(true);
+
+    dispatchers.length = 0;
+    vi.mocked(loaderModule.getConfig).mockReturnValue(openConfig);
+    const intranet = await createKnowledgeBase({ name: "Intranet wiki", seedUrls: ["https://wiki.lan.example/docs/"], respectRobots: false });
+    if (!intranet.ok) throw new Error(intranet.error);
+    await crawlAndWait(intranet.value.id);
+    expect(dispatchers.length).toBeGreaterThan(0);
+    expect(dispatchers.every((dispatcher) => dispatcher === undefined), "allowPrivateHosts went through the guard").toBe(true);
+  });
+});

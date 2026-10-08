@@ -2,7 +2,9 @@ import { getTool, registerTool, type ToolContext, type ToolResult } from "./regi
 import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
 import type { Config } from "../config/schema.js";
+import { lookup as dnsLookupCallback, type LookupAddress, type LookupOptions } from "node:dns";
 import { lookup as dnsLookup } from "node:dns/promises";
+import { Agent } from "undici";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, posix } from "node:path";
 import { analyzeImageBytes, callPlaywrightTool, extractDocumentBytesToMarkdown } from "./multimodal.js";
@@ -992,6 +994,54 @@ function configuredPrivateHostAllowlist(): readonly string[] {
   }
 }
 
+/** The code of a connection guardedConnectLookup refused. */
+const CONNECT_REFUSED = "ESSRFBLOCKED";
+
+type ConnectLookupCallback = (err: NodeJS.ErrnoException | null, address: string | LookupAddress[], family?: number) => void;
+
+/**
+ * The lookup a guarded connection resolves its name with. hostIsBlocked resolves a name to
+ * decide and the request then resolved it again to connect, so a name whose answers changed in
+ * between (DNS rebinding) passed the check on a public address and connected to a private one.
+ * This resolves the name once, at connect time, and hands the connection only addresses that
+ * pass the same decision: a name in guardrails.allowedPrivateHosts may reach a LAN address, and
+ * loopback, link-local (metadata) and unspecified addresses are refused even then. It answers in
+ * the shape asked for, one address or all of them.
+ */
+export function guardedConnectLookup(hostname: string, options: LookupOptions | undefined, callback: ConnectLookupCallback): void {
+  dnsLookupCallback(hostname, { ...options, all: true }, (err, records) => {
+    if (err) {
+      callback(err, "");
+      return;
+    }
+    if (records.length === 0) {
+      callback(Object.assign(new Error(`getaddrinfo ENOTFOUND ${hostname}`), { code: "ENOTFOUND" }), "");
+      return;
+    }
+    const name = hostname.toLowerCase();
+    const addresses = records.map((record) => record.address);
+    if (isPrivateHost(name) || isPrivateHost(name.replace(/\.$/, "")) || resolvedHostIsBlocked(name, addresses, configuredPrivateHostAllowlist())) {
+      callback(Object.assign(new Error(`${hostname} resolved to a private/internal network address when connecting; the connection is refused`), { code: CONNECT_REFUSED }), "");
+      return;
+    }
+    if (options?.all) callback(null, records);
+    else callback(null, records[0]!.address, records[0]!.family);
+  });
+}
+
+/**
+ * The dispatcher for requests to caller-supplied URLs: every connection it opens resolves its
+ * name through guardedConnectLookup. The checks before a request stay; they refuse early and
+ * cover IP literals, which a connection does not look up.
+ */
+export const guardedDispatcher = new Agent({ connect: { lookup: guardedConnectLookup } });
+
+/** What guardedConnectLookup said when it refused the connection a fetch failed on, else null. */
+export function connectRefusalReason(err: unknown): string | null {
+  const cause = (err as { cause?: { code?: unknown; message?: unknown } } | null | undefined)?.cause;
+  return cause?.code === CONNECT_REFUSED && typeof cause.message === "string" ? cause.message : null;
+}
+
 /**
  * Shared SSRF gate for tools that hand a URL to an out-of-process fetcher which
  * has no guard of its own (the Playwright browser, which sits on the service
@@ -1123,9 +1173,13 @@ async function safeFetchFinal(url: string, ms: number, init?: RequestInit, maxRe
     const timer = setTimeout(() => controller.abort(), hop === 0 ? ms : Math.min(ms, left));
     let res: Response;
     try {
-      res = await fetch(current, { ...init, signal: controller.signal, redirect: "manual" });
+      res = await fetch(current, { ...init, signal: controller.signal, redirect: "manual", dispatcher: guardedDispatcher } as RequestInit);
     } catch (err) {
       if (hop > 0 && controller.signal.aborted) throw tooSlow();
+      // The name passed the check above and resolved to a private address when connecting: a
+      // refusal, never a network error the browser, which resolves names itself, gets to retry.
+      const refused = connectRefusalReason(err);
+      if (refused) throw new SsrfRefusal(`${url}: ${refused}`);
       throw err;
     } finally {
       clearTimeout(timer);

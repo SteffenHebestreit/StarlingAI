@@ -1,4 +1,4 @@
-import { checkUrlSsrf } from "../web.js";
+import { checkUrlSsrf, connectRefusalReason, guardedDispatcher } from "../web.js";
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_USER_AGENT = "StarlingAI-DataFeeds/1.0 (+https://github.com/starlingai)";
@@ -75,15 +75,26 @@ export async function fetchText(url: string, opts: FetchTextOptions = {}): Promi
 
 /** fetch for a URL the guard let through, each redirect followed by hand once its target passes the guard too. */
 async function fetchFollowingCheckedRedirects(url: string, init: RequestInit): Promise<Response> {
+  // Each connection resolves its name through the guard as well, so a name that passed the check
+  // and answers with a private address when connecting is refused there.
+  const send = async (target: string): Promise<Response> => {
+    try {
+      return await fetch(target, { ...init, redirect: "manual", dispatcher: guardedDispatcher } as RequestInit);
+    } catch (err) {
+      const refused = connectRefusalReason(err);
+      if (refused) throw new Error(`Refusing to fetch ${target}: ${refused}`);
+      throw err;
+    }
+  };
   let current = url;
-  let response = await fetch(current, { ...init, redirect: "manual" });
+  let response = await send(current);
   for (let redirects = 0; REDIRECT_STATUSES.has(response.status) && response.headers.has("location"); redirects++) {
     if (redirects >= MAX_REDIRECTS) throw new Error(`more than ${MAX_REDIRECTS} redirects`);
     const next = new URL(response.headers.get("location")!, current).toString();
     const refused = await checkUrlSsrf(next);
     if (refused) throw new Error(`Refusing to follow the redirect from ${current}: ${refused}`);
     current = next;
-    response = await fetch(current, { ...init, redirect: "manual" });
+    response = await send(current);
   }
   return response;
 }
