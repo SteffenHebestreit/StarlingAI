@@ -1,9 +1,9 @@
 /**
  * The end-to-end harness (src/e2e) against a FAKE gateway: a local http + ws server that speaks
  * just the protocol the harness uses — login, hello-ok, RPC (audit.subscribe, session.create,
- * chat.send, chat.cancel, session.get), audit.event and status messages, the steer route, the
- * upload route and an echo route — plus a fake OpenAI-compatible judge and a fake GreenMail
- * (REST + SMTP). Nothing here reaches a real gateway or model.
+ * chat.send, chat.cancel, session.get, gateway.status), audit.event and status messages, the steer
+ * route, the upload route and an echo route — plus a fake OpenAI-compatible judge and a fake
+ * GreenMail (REST + SMTP). Nothing here reaches a real gateway or model.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import http from "node:http";
