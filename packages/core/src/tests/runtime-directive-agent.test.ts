@@ -77,11 +77,36 @@ vi.mock("../tools/ephemeral-agent-factory.js", async (importOriginal) => ({
 }));
 
 /**
+ * A specialist's own run, stubbed for a test that sets `specialistRuns.stubbed` (one that runs the
+ * real delegate_to_agent): `ran` holds the agents that ran, in order. Otherwise the real run.
+ */
+const specialistRuns = vi.hoisted(() => ({ stubbed: false, ran: [] as string[] }));
+vi.mock("../agent/sub-agent.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../agent/sub-agent.js")>();
+  return {
+    ...actual,
+    runSubAgentWithStats: vi.fn(async (opts: Parameters<typeof actual.runSubAgentWithStats>[0]) => {
+      if (!specialistRuns.stubbed) return actual.runSubAgentWithStats(opts);
+      specialistRuns.ran.push(opts.agentName);
+      return {
+        output: `${opts.agentName.toUpperCase()}-FINDING: int() truncates the cent in invoices.py at line 12.`,
+        stats: {
+          agentName: opts.agentName, sessionId: `sub:${opts.agentName}`, promptChars: 0, userContentChars: 0, toolCount: 1, toolNames: ["read_file"],
+          iterations: 1, usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 }, maxIterations: 4, model: "mock", capabilities: [],
+          terminalState: "completed", outcome: "success",
+        },
+      } as Awaited<ReturnType<typeof actual.runSubAgentWithStats>>;
+    }),
+  };
+});
+
+/**
  * The specialist and the orchestration tools around it, stubbed; everything else is the real
  * registry. `delegated` holds the delegations that reached a specialist. A delegation naming an
  * agent outside the turn's grant gets the refusal delegate_to_agent gives it. A test that needs a
  * real fan-out tool puts its name in `realTools`; its children then run the real delegation path,
- * and a delegate_to_agent call the turn makes is still stubbed.
+ * and a delegate_to_agent call the turn makes is still stubbed, unless the test puts that name in
+ * `realTools` as well.
  */
 const delegated = vi.hoisted(() => [] as Array<Record<string, unknown>>);
 /** What each delegate_to_agent call was handed beside its arguments (ToolContext.delegationDocuments). */
@@ -283,6 +308,8 @@ describe("a turn the user directed to one agent", () => {
     architectRuns.length = 0;
     architectAnswer.text = "";
     specialistReport.text = "";
+    specialistRuns.stubbed = false;
+    specialistRuns.ran.length = 0;
     vi.resetModules();
     (await import("../config/loader.js")).resetConfigForTests();
   });
@@ -628,6 +655,31 @@ describe("a turn the user directed to one agent", () => {
     expect(promptOf(1)).toContain(DIRECTIVE_LINE);
     expect(delegated).toEqual([expect.objectContaining({ agentName: "code_analyst" })]);
     expect(result.response).not.toContain("I answered this myself");
+  });
+
+  it("runs the named agent though an ephemeral agent already answered the same request", async () => {
+    // The model's first call delegated the user's request word for word and named no agent; routing
+    // within the grant found no match and an ephemeral agent answered. The runtime's own dispatch to
+    // code_analyst carries the same request, and signature reuse served it the ephemeral agent's
+    // answer: code_analyst never ran, the turn stayed directed, the next dispatch hit the reuse
+    // limit, and the turn ended in a delegation failure (integration review, 2026-10-08).
+    const VEGAN = "Plan a vegan dinner menu for six guests";
+    realTools.add("delegate_to_agent");
+    specialistRuns.stubbed = true;
+    const { AgentSession, runTurn } = await loadRuntime({ subAgents: { code_analyst: CODE_ANALYST } });
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      call += 1;
+      return call === 1 ? toolStream("delegate_to_agent", { task: VEGAN }) : answerStream(ANSWER);
+    });
+
+    const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
+    const result = await runTurn({ session, userMessage: VEGAN, allowedAgents: ["code_analyst"], directiveAgent: "code_analyst" });
+
+    expect(architectRuns).toHaveLength(1);
+    expect(specialistRuns.ran).toEqual(["code_analyst"]);
+    expect(result.performance?.finishReason).not.toBe("delegation_failures_terminal");
+    expect(result.response).toContain("MODEL-ANSWER");
   });
 
   it("does not relay an ephemeral agent's long deliverable before the named agent ran", async () => {

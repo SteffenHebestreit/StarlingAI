@@ -2126,6 +2126,8 @@ async function _runTurn(
     // mid-turn steering is typed by a person on every surface, and is pushed in below.
     turnUserWords: { opening: opts.userWords ?? "", midTurn: [] },
     ...(turnEvidence ? { turnEvidence } : {}),
+    // Undefined on a turn no agent was named for, and then the context carries no field at all.
+    ...(directiveAgent ? { directiveAgent } : {}),
     swarmState: {
       objective: userMessage,
       startedAt: new Date().toISOString(),
