@@ -705,6 +705,85 @@ describe("the code a delegated run executed, and the figures it states", () => {
       expect(stored).not.toContain("8393");
       expect(result.executions?.unobservedFigures).toBe(2);
     }, 60_000);
+
+    describe("a figure shared as a number or a list", () => {
+      // The tools store String(value). In review `value: 8393` reached the store as "8393" and
+      // `value: [8393, 7597648268]` as "8393,7597648268", unmasked and uncounted, while the same
+      // figures written as strings were masked.
+      const EVIDENCE = {
+        sourceTitle: "primes.js",
+        sourceUrl: "https://example.test/runs/4712",
+        evidenceType: "derived",
+        accuracyScore: 0.5,
+        trustworthinessScore: 0.5,
+        corroborationScore: 0.5,
+        validationStatus: "unverified",
+      };
+      const shareAfterFailedRun = async (root: string, tool: string, args: Record<string, unknown>) => {
+        await registerTools({ shell_exec: () => failed() }, { realShare: true });
+        completeMock.mockImplementation(async (messages: Message[]) => scripted([
+          { tool: "shell_exec", args: { command: "node primes.js" } },
+          { tool, args },
+        ], "Das Skript lief nicht.")(messages));
+        const result = await runAgent("coder", INCIDENT.task, root);
+        return { result, stored: (await sharedFacts(root))[String(args["key"])] };
+      };
+
+      it("share_finding with a JSON number", async () => {
+        const { result, stored } = await shareAfterFailedRun("parent-provenance-share-number", "share_finding", { key: "prime_count", value: 8393 });
+
+        expect(stored).toBe("[not observed]");
+        expect(result.executions?.unobservedFigures).toBe(1);
+      }, 60_000);
+
+      it("share_finding with a list: the text it stores reads as one figure", async () => {
+        const { result, stored } = await shareAfterFailedRun("parent-provenance-share-list", "share_finding", {
+          key: "prime_stats",
+          value: [8393, 7597648268],
+        });
+
+        expect(stored).toBe("[not observed]");
+        expect(result.executions?.unobservedFigures).toBe(1);
+      }, 60_000);
+
+      it("share_evidence with numbers for its value and its claim", async () => {
+        const { result, stored } = await shareAfterFailedRun("parent-provenance-evidence-numbers", "share_evidence", {
+          key: "prime_count",
+          value: 8393,
+          claim: 7597648268,
+          ...EVIDENCE,
+        });
+
+        expect(stored).toContain("claim: [not observed]");
+        expect(stored).not.toContain("8393");
+        expect(stored).not.toContain("7597648268");
+        expect(result.executions?.unobservedFigures).toBe(2);
+        expect(result.stats.outcome).toBe("partial");
+      }, 60_000);
+
+      it("control: the scores and the supporting keys keep their type, and a task figure is stored as given", async () => {
+        const { result, stored } = await shareAfterFailedRun("parent-provenance-evidence-scores", "share_evidence", {
+          key: "prime_count",
+          value: 8393,
+          claim: "Untergrenze 100000",
+          ...EVIDENCE,
+          accuracyScore: 0.85,
+          supportingKeys: ["prime_sum", "lauf-4711"],
+        });
+
+        expect(stored).toContain("accuracy_score: 0.85");
+        expect(stored).toContain("supporting_keys: prime_sum, lauf-4711");
+        expect(stored).toContain("claim: Untergrenze 100000");
+        expect(result.executions?.unobservedFigures).toBe(1);
+      }, 60_000);
+
+      it("control: a number the task contained is stored as given", async () => {
+        const { result, stored } = await shareAfterFailedRun("parent-provenance-share-task-number", "share_finding", { key: "lower_bound", value: 100000 });
+
+        expect(stored).toBe("100000");
+        expect(result.executions?.unobservedFigures).toBeUndefined();
+      }, 60_000);
+    });
   });
 
   describe("(n) the facts-first synthesis prompt is something the run received", () => {

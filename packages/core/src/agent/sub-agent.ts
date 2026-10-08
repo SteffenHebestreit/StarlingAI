@@ -1428,7 +1428,11 @@ export const NEVER_REPLAYED_TOOLS = new Set<string>(["generate_image"]);
 // arguments of theirs that identify the fact and its source instead of stating anything. See the
 // figure check at their call site.
 const SHARED_FACT_TOOLS = new Set<string>(["share_finding", "share_evidence"]);
-const SHARED_FACT_IDENTITY_FIELDS = new Set<string>(["key", "sourceUrl"]);
+// supportingKeys names other facts; share_evidence keeps it only while it is an array.
+const SHARED_FACT_IDENTITY_FIELDS = new Set<string>(["key", "sourceUrl", "supportingKeys"]);
+// Scores the tools take only as numbers (share_evidence refuses anything else): a rating of the
+// finding, never a figure the run states. "0.85" reads as the figure 85.
+const SHARED_FACT_SCORE_FIELDS = new Set<string>(["accuracyScore", "trustworthinessScore", "corroborationScore"]);
 
 /**
  * Structural completeness check for a written text artifact, used by the
@@ -7143,14 +7147,26 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         // publisher and dates with the value (formatSharedFindingValue), and in review a figure
         // in `notes` reached the store and the FACT lines while `value` and `claim` were masked.
         // The key names the finding and the URL its source; neither is a figure the run states.
+        // A value need not be a string: the tools store String(value) (tools/memory.ts), and in
+        // review `value: 8393` (a JSON number, which the runtime's kwargs repair also produces)
+        // and `value: [8393, 7597648268]` reached the store as "8393" and "8393,7597648268"
+        // while the same figures as strings were masked. So a number or an array is checked as
+        // the text the tool will store, and a field nothing was masked in keeps its type.
         let executedArgs = tc.arguments;
         if (SHARED_FACT_TOOLS.has(tc.name) && tracksFigures && noExecutionCompleted(executionRecord)) {
           absorbNewHistory();
           const maskedArgs: Record<string, unknown> = { ...tc.arguments };
           let maskedInShare = 0;
           for (const [field, value] of Object.entries(maskedArgs)) {
-            if (typeof value !== "string" || SHARED_FACT_IDENTITY_FIELDS.has(field)) continue;
-            const { text, masked } = maskUnobservedFigures(value, observedFigureKeys);
+            if (SHARED_FACT_IDENTITY_FIELDS.has(field)) continue;
+            if (SHARED_FACT_SCORE_FIELDS.has(field) && typeof value === "number") continue;
+            // An object stores as "[object Object]" and states no figure.
+            const stored = typeof value === "string"
+              ? value
+              : (typeof value === "number" || Array.isArray(value) ? String(value) : undefined);
+            if (stored === undefined) continue;
+            const { text, masked } = maskUnobservedFigures(stored, observedFigureKeys);
+            if (masked === 0) continue;
             maskedArgs[field] = text;
             maskedInShare += masked;
           }
