@@ -44,7 +44,8 @@ import { withSpan, genAi } from "../observability/tracing.js";
 import { runSubAgentInContainer } from "./container-runner.js";
 import { userWordsBlockForRun, type TurnUserWords } from "./delegation-user-words.js";
 import { looksLikeContainerLevelFailure, looksLikeModelTemplateArtifact, looksLikeProviderErrorEcho, looksLikeHallucinatedTruncationClaim } from "./container-failure.js";
-import { appendOutcome, computeAdaptiveSubAgentTimeoutMs, extractTaskKeywords } from "./outcomes.js";
+import { appendOutcome, beginOutcomeRun, computeAdaptiveSubAgentTimeoutMs, extractTaskKeywords } from "./outcomes.js";
+import { recordAccount } from "../runtime/user-scope.js";
 import { formatFlowMemoryGuidance } from "./flow-memory.js";
 import { acquireSlot, releaseSlot, DEFAULT_CONCURRENCY } from "../swarm/concurrency.js";
 import { applyActiveModelPreset, createChatProvider, getChatProviderForTier, resolveProviderEndpoint, tierModelDefaults } from "../providers/index.js";
@@ -2927,6 +2928,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       log.warn({ err }, "Failed to register browser session for live preview");
     }
   }
+  // Releases this run's registration for record_lesson (beginOutcomeRun, below), in the finally.
+  let endOutcomeRun: (() => void) | undefined;
 
   try {
 
@@ -3887,6 +3890,14 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         graphMarkSessionRetrievalsUnhelpful(subSessionId, { penalty: 0.03 }).catch(() => {});
       }
     };
+    // A lesson the run records (record_lesson) is filed under the task its own outcome carries,
+    // for the account it runs for.
+    endOutcomeRun = beginOutcomeRun(subSessionId, {
+      agent: opts.agentName,
+      task: opts.task.slice(0, 200),
+      account: recordAccount(),
+      progress: () => ({ iterations, totalTokens: usage.totalTokens }),
+    });
 
     // A STAGED BUILD CANNOT SUCCEED WHILE ITS OWN MARKERS ARE STILL IN THE FILE.
     //
@@ -8269,6 +8280,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     if (supervisorTimer) clearInterval(supervisorTimer);
     unregisterWardenStop?.();
     browserDecider?.finish();
+    endOutcomeRun?.();
     // The run's result is already computed; it is handed to the parent only once every
     // finding it gathered is in shared facts (or its distill hit the 60 s deadline).
     await joinPendingShares();

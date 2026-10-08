@@ -234,7 +234,7 @@ Every public schema field, where it is declared, and how many production files r
 | `leanContextInjection` | packages/core/src/config/schema.ts:1786 | 3 |
 | `leanSynthesisPrompt` | packages/core/src/config/schemas/orchestration.ts:304 | 1 |
 | `leanToolCatalog` | packages/core/src/config/schema.ts:1776 | 3 |
-| `ledger` | packages/core/src/config/schemas/decisions.ts:101 | 47 |
+| `ledger` | packages/core/src/config/schemas/decisions.ts:101 | 48 |
 | `liftMinSamplesPerArm` | packages/core/src/config/schema.ts:1493 | 1 |
 | `loginUrl` | packages/core/src/config/schema.ts:785 | 6 |
 | `loopAwareDelegation` | packages/core/src/config/schemas/orchestration.ts:529 | 8 |

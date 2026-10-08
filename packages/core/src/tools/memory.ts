@@ -13,7 +13,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, extname } from "node:path";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
-import { appendOutcome, readRecentOutcomes } from "../agent/outcomes.js";
+import { appendOutcome, outcomeRunFor } from "../agent/outcomes.js";
 import { appendAgentMessage, writeSharedFact, readAllFacts, searchSharedFacts, isAtomicFactValue } from "../swarm/memory.js";
 import { appendEvidenceClaim } from "../swarm/evidence-ledger.js";
 import { emitSwarmEvent } from "../swarm/bus.js";
@@ -892,23 +892,29 @@ registerTool({
 
     if (!lesson) return { success: false, output: "", error: "lesson is required" };
 
+    // The run this call belongs to: its task, account and progress (agent/sub-agent.ts registers
+    // each in-process run under the session id its tool calls carry). The lesson used to take the
+    // task of the latest ledger entry for this agent's name, which was another run's: one that
+    // finished meanwhile, possibly for another account, and otherwise the agent's PREVIOUS run, since
+    // this run's own outcome is written when it ends (found in review, 2026-10-08). A call from
+    // outside a registered run is filed under no one's task.
+    const run = outcomeRunFor(ctx.sessionId);
     // Derive agent name from sessionId (sub:parentId:agentName:timestamp)
     const parts = ctx.sessionId.split(":");
-    const agentName = parts.length >= 3 ? parts[2]! : "unknown";
+    const agentName = run?.agent ?? (parts.length >= 3 ? parts[2]! : "unknown");
+    const progress = run?.progress();
 
-    // Read the most recent outcome for this agent and attach the lesson. Shared root: the ledger
-    // describes the deployment's agents, and a per-user root reads one account's slice of it.
-    const recents = readRecentOutcomes(getConfig().workspacePath, 20);
-    const latest = [...recents].reverse().find(o => o.agent === agentName);
-
+    // Shared root: the ledger describes the deployment's agents, and a per-user root holds one
+    // account's slice of it.
     appendOutcome(getConfig().workspacePath, {
       ts: new Date().toISOString(),
       agent: agentName,
-      task: latest?.task ?? "(lesson recorded explicitly)",
+      task: run?.task ?? "(lesson recorded explicitly)",
       outcome,
-      iterations: latest?.iterations ?? 0,
-      totalTokens: latest?.totalTokens ?? 0,
+      iterations: progress?.iterations ?? 0,
+      totalTokens: progress?.totalTokens ?? 0,
       lesson,
+      ...(run?.account ? { account: run.account } : {}),
     });
 
     log.info({ agentName, outcome, lesson }, "Lesson recorded");
