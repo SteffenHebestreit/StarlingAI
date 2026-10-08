@@ -839,6 +839,32 @@ describe("a turn the user directed to one agent", () => {
     expect(executed).not.toContain("run_workflow");
     expect(delegated).toHaveLength(1);
     expect(result.response).toContain("MODEL-ANSWER");
+    // The answer from the agent's result stands: it is not rejected with an order to run the
+    // workflow the search matched (integration review, 2026-10-08).
+    expect(streamMock).toHaveBeenCalledTimes(3);
+    expect(streamMock.mock.calls.map((_call, index) => promptOf(index)).join("\n")).not.toContain("Call run_workflow now");
+  });
+
+  it("ships the answer from the named agent's result to a model that would run the matched workflow", async () => {
+    // The answer was rejected with "Call run_workflow now". A model that obeyed had its run_workflow
+    // turned away by the synthesis-required guard, and the turn shipped a forced partial answer in
+    // place of the agent-backed one.
+    const { AgentSession, runTurn } = await loadRuntime();
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      call += 1;
+      if (call === 1) return toolStream("search_workflows", { query: "code bug review" });
+      if (call === 2) return delegateStream();
+      if (call === 3) return answerStream(ANSWER);
+      return toolStream("run_workflow", { name: "code_review", workflowType: "scene" });
+    });
+
+    const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
+    const result = await runTurn({ session, userMessage: MESSAGE, allowedAgents: ["code_analyst"], directiveAgent: "code_analyst" });
+
+    expect(result.performance?.finishReason).not.toBe("synthesis_required_tool_call_rejected");
+    expect(executed).not.toContain("run_workflow");
+    expect(result.response).toContain("MODEL-ANSWER");
   });
 
   describe("when the request matches a job's catalog triggers", () => {

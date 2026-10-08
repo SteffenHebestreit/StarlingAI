@@ -3712,12 +3712,18 @@ async function _runTurn(
         releaseAfterRoutingNudge("tool_free_workflow_answer_rejected");
       }
 
+      // The same holds for a workflow a catalog search matched earlier in a directed turn. The
+      // answer from the named agent's result was rejected with "Call run_workflow now"; a model that
+      // obeyed had its run_workflow turned away by the synthesis-required guard, and the turn
+      // shipped a forced partial answer in place of the agent-backed one (integration review,
+      // 2026-10-08).
       if (
         !releasedAfterRoutingNudge
         && !workflowCatalogSuppressedForMaintenance
         &&
         shouldRequireWorkflowExecutionAfterSearch(workflowSearchMatches)
         && !workflowRunCompletedThisTurn
+        && directiveAgent === undefined
       ) {
         if (!workflowExecutionRetryUsed) {
           workflowExecutionRetryUsed = true;
