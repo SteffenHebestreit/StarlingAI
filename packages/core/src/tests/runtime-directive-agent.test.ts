@@ -529,4 +529,58 @@ describe("a turn the user directed to one agent", () => {
     expect(delegated).toHaveLength(1);
     expect(result.response).toContain("MODEL-ANSWER");
   });
+
+  describe("when the request matches a job's catalog triggers", () => {
+    // The user named the agent; a catalog match is the runtime's guess (review of 6955e34, 2026-10-08).
+    const DECK_REQUEST = "Create a cited slide deck about Dresden with real photos and sources";
+    const CATALOG_JOB = {
+      subAgents: { content_writer: { description: "Writes documents and decks.", capabilities: ["writing"], tags: ["write"], tools: ["write_file"], maxIterations: 4 } },
+      scenes: { deck_slides: { description: "Build the slides.", task: "Build slides about {{topic}}." } },
+      jobs: {
+        sourced_presentation: {
+          description: "Build a source-backed presentation package with verified images.",
+          steps: [{ scene: "deck_slides" }],
+          catalogTriggers: {
+            requiresActionVerb: true,
+            patterns: [{ all: ["\\b(?:presentations?|slide[\\s-]?decks?|slides?)\\b", "\\b(?:images?|photos?)\\b", "\\b(?:sources?|cited?|research)\\b"] }],
+          },
+        },
+      },
+    };
+
+    async function runDeckTurn(): Promise<void> {
+      const { AgentSession, runTurn } = await loadRuntime(CATALOG_JOB);
+      let call = 0;
+      streamMock.mockImplementation(() => {
+        call += 1;
+        return call === 1
+          ? toolStream("delegate_to_agent", { agentName: "content_writer", task: "Build the Dresden deck." })
+          : answerStream(ANSWER);
+      });
+      const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
+      await runTurn({ session, userMessage: DECK_REQUEST, allowedAgents: ["content_writer"], directiveAgent: "content_writer" });
+    }
+
+    it("runs the delegation to the named agent as the model asked for it", async () => {
+      // The workflow-catalog check dropped the directed delegation and told the model "Do NOT jump
+      // straight to delegate_to_agent ... call run_workflow now" beside the line that names the
+      // agent, so a model that followed it ran the matched job before the agent.
+      await runDeckTurn();
+
+      expect(executed[0]).toBe("delegate_to_agent");
+      expect(delegated[0]).toMatchObject({ agentName: "content_writer", task: "Build the Dresden deck." });
+      expect(promptOf(1)).not.toContain("Do NOT jump straight to delegate_to_agent");
+    });
+
+    it("answers from the named agent's result without a catalog check on top", async () => {
+      // Once the agent had run, the answer from its result was rejected as "A tool-free answer is
+      // invalid for this turn", with an order to call run_workflow: a model that obeyed ran the
+      // matched job after the agent the user had named.
+      await runDeckTurn();
+
+      expect(streamMock).toHaveBeenCalledTimes(2);
+      expect(promptOf(1)).not.toContain("A tool-free answer is invalid");
+      expect(executed).toEqual(["delegate_to_agent"]);
+    });
+  });
 });

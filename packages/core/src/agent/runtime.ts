@@ -3140,11 +3140,11 @@ async function _runTurn(
       }
     }
     // This response asks only for the delegation the user directed the turn to, and that agent has
-    // not run yet. The workflow-run force after a catalog search and the synthesis-required guard
-    // below let it through: the user named the agent, and a catalog match or a synthesis note left
-    // by other orchestration is the runtime's own guess. Turned away, it never ran at all — the
-    // workflow ran in its place, or the guard rejected it and shipped a forced partial answer
-    // (review of a3773aa, 2026-10-08).
+    // not run yet. The workflow-catalog check, the workflow-run force after a catalog search and the
+    // synthesis-required guard below let it through: the user named the agent, and a catalog match
+    // or a synthesis note left by other orchestration is the runtime's own guess. Turned away, it
+    // never ran at all — the workflow ran in its place, or the guard rejected it and shipped a
+    // forced partial answer (review of a3773aa, 2026-10-08).
     const directiveDelegationRequested = directiveAgent !== undefined
       && directiveAgentPending
       && llmResponse.tool_calls.length > 0
@@ -3431,7 +3431,10 @@ async function _runTurn(
       }
     }
 
-    if (workflowCatalogRequired && !workflowCatalogAttemptedThisTurn && llmResponse.tool_calls.length > 0) {
+    // The directed delegation is not held to the catalog check either: dropped, it was followed by
+    // a correction to run the matched workflow instead, beside the line that names the agent, and a
+    // model that obeyed ran the workflow before the agent (review of 6955e34, 2026-10-08).
+    if (workflowCatalogRequired && !workflowCatalogAttemptedThisTurn && llmResponse.tool_calls.length > 0 && !directiveDelegationRequested) {
       if (!workflowCatalogRetryUsed) {
         workflowCatalogRetryUsed = true;
         workflowCatalogEnforcementPrompt = [
@@ -3634,7 +3637,12 @@ async function _runTurn(
         releaseAfterRoutingNudge("tool_free_maintenance_answer_rejected");
       }
 
-      if (!releasedAfterRoutingNudge && workflowCatalogRequired && !workflowCatalogAttemptedThisTurn) {
+      // A turn the user directed to an agent answers from that agent's result, and the catalog
+      // check does not ask it for a workflow on top: the agent has run by the time a tool-free
+      // answer gets here (until then such an answer is replaced by the delegation itself). The
+      // answer was rejected with an order to call run_workflow, and a model that obeyed ran the
+      // matched job after the agent the user had named (review of 6955e34, 2026-10-08).
+      if (!releasedAfterRoutingNudge && workflowCatalogRequired && !workflowCatalogAttemptedThisTurn && directiveAgent === undefined) {
         if (!workflowCatalogRetryUsed) {
           workflowCatalogRetryUsed = true;
           workflowCatalogEnforcementPrompt = [
