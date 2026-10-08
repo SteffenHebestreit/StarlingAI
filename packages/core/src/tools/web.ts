@@ -14,6 +14,7 @@ import {
   LINK_BUDGET_MAX_SHARE,
   LINK_BUDGET_MIN_SHARE,
   LINK_SCAN_MAX,
+  LINK_URL_MAX,
   renderedLinks,
   snapshotLinks,
   type PageLink,
@@ -734,11 +735,12 @@ function evaluateResultText(output: string): string {
  * before), the URL the browser ended on, and its first LINK_SCAN_MAX links as [href, label]
  * pairs, returned as ONE JSON string. Text and links come back in the same round trip, and a
  * string result is what evaluateResultText reads. innerText has no link targets, so a rendered
- * page used to reach the agent with its menu as bare words.
+ * page used to reach the agent with its menu as bare words. A link longer than LINK_URL_MAX is
+ * never listed, so it is not sent either: a data: URI download link can run to megabytes.
  */
 const PAGE_TEXT_AND_LINKS = `() => {
   const t = (document.body?.innerText ?? '').replace(/\\t/g, ' ').replace(/[ \\t]{3,}/g, '  ').replace(/\\n{4,}/g, '\\n\\n\\n').trim();
-  const l = Array.from(document.links ?? []).slice(0, ${LINK_SCAN_MAX}).map((a) => [a.href, (a.innerText || a.getAttribute('aria-label') || a.title || a.querySelector('img')?.alt || '').replace(/\\s+/g, ' ').trim().slice(0, 200)]);
+  const l = Array.from(document.links ?? []).filter((a) => typeof a.href === 'string' && a.href.length <= ${LINK_URL_MAX}).slice(0, ${LINK_SCAN_MAX}).map((a) => [a.href, (a.innerText || a.getAttribute('aria-label') || a.title || a.querySelector('img')?.alt || '').replace(/\\s+/g, ' ').trim().slice(0, 200)]);
   return JSON.stringify({ t, u: document.URL, l });
 }`;
 

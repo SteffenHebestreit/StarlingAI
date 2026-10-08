@@ -498,11 +498,13 @@ describe("web_fetch lists the page's links after its text", () => {
     querySelector: (selector: string) => (selector === "img" && extra.alt ? { alt: extra.alt } : null),
   });
 
-  /** Playwright MCP 1.61 running the exact `function` web_fetch sends against `document`. */
+  /** Playwright MCP 1.61 running the exact `function` web_fetch sends against `document`; `evaluated` holds what it returned. */
   function browserRendering(document: unknown) {
-    return vi.fn(async (input: { name: string; arguments: Record<string, unknown> }) => {
+    const evaluated: unknown[] = [];
+    const callTool = vi.fn(async (input: { name: string; arguments: Record<string, unknown> }) => {
       if (input.name !== "browser_evaluate") return { content: [{ type: "text", text: "" }] };
       const value: unknown = runInNewContext(`(${String(input.arguments["function"])})()`, { document });
+      evaluated.push(value);
       return {
         content: [{
           type: "text",
@@ -510,6 +512,7 @@ describe("web_fetch lists the page's links after its text", () => {
         }],
       };
     });
+    return { callTool, evaluated };
   }
 
   it("lists the start page's links on the native path (the incident)", async () => {
@@ -585,13 +588,15 @@ describe("web_fetch lists the page's links after its text", () => {
 
   it("reads a rendered page's text and links in the one browser_evaluate call", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => html(JS_SHELL)));
-    const callTool = browserRendering({
+    const csvExport = `data:text/csv;charset=utf-8,${"Artikel;Preis%0A".repeat(400)}`;
+    const { callTool, evaluated } = browserRendering({
       URL: `${SITE}/app`,
       body: { innerText: "Preisrechner\tNordlicht\n\n\n\n\nBasic 9 EUR, Pro 29 EUR" },
       links: [
         anchor(`${SITE}/dokumentation.html`, "Dokumentation"),
         anchor(`${SITE}/dokumentation.html#e31`, "  Fehlercodes  "),
         anchor(`${SITE}/app`, "Preisrechner"),
+        anchor(csvExport, "CSV exportieren"),
         anchor("https://partner.example/", "", { aria: "Partnershop" }),
         anchor(`${SITE}/logo`, "", { alt: "Logo" }),
         anchor("mailto:info@nordlicht-werkzeuge.test", "Mail"),
@@ -613,6 +618,10 @@ describe("web_fetch lists the page's links after its text", () => {
     expect(r.output).not.toContain("mailto:");
     expect(r.metadata?.["linkCount"]).toBe(3);
     expect(callTool.mock.calls.map(([input]) => input.name)).toEqual(["browser_navigate", "browser_evaluate"]);
+    // A link too long to list is not sent back from the browser either.
+    const sent = JSON.parse(String(evaluated[0])) as { l: Array<[string, string]> };
+    expect(sent.l.map(([href]) => href)).not.toContain(csvExport);
+    expect(String(evaluated[0]).length).toBeLessThan(1_000);
   });
 
   it("lists the links of the snapshot fallback, and keeps its nav labels in the text", async () => {
@@ -669,7 +678,7 @@ describe("web_fetch lists the page's links after its text", () => {
           URL: `${SITE}/konto`,
           body: { innerText: "Bestellübersicht: 3 offene Aufträge, 1 Rücksendung" },
           links: [anchor(`${SITE}/bereich-1.html`, "A")],
-        }),
+        }).callTool,
       },
     });
 
@@ -681,7 +690,7 @@ describe("web_fetch lists the page's links after its text", () => {
   it("still fails an empty render that has links (emptiness reads the text, not the envelope)", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => html("<div id=\"app\"></div>")));
     mcpConnections.set("playwright", {
-      client: { callTool: browserRendering({ URL: `${SITE}/leer`, body: { innerText: "" }, links: [anchor(`${SITE}/start.html`, "Start")] }) },
+      client: { callTool: browserRendering({ URL: `${SITE}/leer`, body: { innerText: "" }, links: [anchor(`${SITE}/start.html`, "Start")] }).callTool },
     });
 
     const r = await webFetch({ url: `${SITE}/leer` }, "s-fetch-links-empty");
