@@ -9,6 +9,7 @@ import {
   _clearDurableMemoryCaches,
   formatScopedMemoryGuidance,
   listWorkspaceMemoryRecords,
+  searchableMemoryScopes,
   storeWorkspaceMemoryRecord,
 } from "../memory/service.js";
 import { runWithRequestContext } from "../runtime/request-context.js";
@@ -150,5 +151,14 @@ describe("the user-profile prefetch and the deployment's agent ledger", () => {
     const evidence = await evidenceForBob(bobRoot);
 
     expect(evidence).toContain(ALICE_TASK);
+  });
+});
+
+describe("the rule the readers share", () => {
+  it("counts a config that cannot be read as multi-user", () => {
+    vi.spyOn(configLoader, "getConfig").mockImplementation(() => { throw new Error("config unreadable"); });
+
+    expect(searchableMemoryScopes()).toEqual(["workspace", "user", "session"]);
+    expect(searchableMemoryScopes(["agent"])).toEqual([]);
   });
 });
