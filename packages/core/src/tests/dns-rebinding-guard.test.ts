@@ -131,11 +131,12 @@ function allowPrivateHosts(hosts: string[]) {
   } as typeof realConfig);
 }
 
-/** What guardedConnectLookup hands a connection asking for `hostname`. */
-async function lookUp(hostname: string, all: boolean): Promise<{ error: (Error & { code?: string }) | null; address?: unknown; family?: unknown }> {
+/** What guardedConnectLookup hands a connection asking for `hostname` (of one address family, when given). */
+async function lookUp(hostname: string, all: boolean, family?: number | "IPv4" | "IPv6"): Promise<{ error: (Error & { code?: string }) | null; address?: unknown; family?: unknown }> {
   const { guardedConnectLookup } = await import("../tools/web.js");
   return new Promise((resolve) => {
-    guardedConnectLookup(hostname, { all }, (error, address, family) => resolve({ error: error as (Error & { code?: string }) | null, address, family }));
+    guardedConnectLookup(hostname, family === undefined ? { all } : { all, family }, (error, address, answeredFamily) =>
+      resolve({ error: error as (Error & { code?: string }) | null, address, family: answeredFamily }));
   });
 }
 
@@ -178,6 +179,25 @@ describe("the connect-time lookup makes the guard's decision", () => {
     connectAnswers.set("www.public.example", [{ address: "93.184.215.14", family: 4 }]);
 
     expect(await lookUp("www.public.example", false)).toEqual({ error: null, address: "93.184.215.14", family: 4 });
+  });
+
+  // net may ask for one address family. The first record was handed over whatever its family,
+  // so a connection asking for IPv4 could be given an IPv6 address.
+  it("answers in the address family the connection asks for", async () => {
+    connectAnswers.set("dual.public.example", [{ address: "2001:db8::1", family: 6 }, { address: "93.184.215.14", family: 4 }]);
+
+    expect(await lookUp("dual.public.example", false, 4)).toEqual({ error: null, address: "93.184.215.14", family: 4 });
+    expect(await lookUp("dual.public.example", false, "IPv4")).toEqual({ error: null, address: "93.184.215.14", family: 4 });
+    expect(await lookUp("dual.public.example", false, 6)).toEqual({ error: null, address: "2001:db8::1", family: 6 });
+    expect(await lookUp("dual.public.example", true, 4)).toEqual({ error: null, address: [{ address: "93.184.215.14", family: 4 }], family: undefined });
+    expect(await lookUp("dual.public.example", false, 0)).toEqual({ error: null, address: "2001:db8::1", family: 6 });
+  });
+
+  it("fails like a resolver when no address of the asked family exists", async () => {
+    connectAnswers.set("v6only.public.example", [{ address: "2001:db8::2", family: 6 }]);
+
+    const { error } = await lookUp("v6only.public.example", false, 4);
+    expect(error?.code).toBe("ENOTFOUND");
   });
 });
 

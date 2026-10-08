@@ -1021,8 +1021,16 @@ export function guardedConnectLookup(hostname: string, options: LookupOptions | 
       callback(Object.assign(new Error(`${hostname} resolved to a private/internal network address when connecting; the connection is refused`), { code: CONNECT_REFUSED }), "");
       return;
     }
-    if (options?.all) callback(null, records);
-    else callback(null, records[0]!.address, records[0]!.family);
+    // The first record was handed over whatever the family asked for, so a connection asking for
+    // IPv4 could be given an IPv6 address. Only records of that family answer it now.
+    const family = options?.family === 4 || options?.family === "IPv4" ? 4 : options?.family === 6 || options?.family === "IPv6" ? 6 : 0;
+    const answer = family === 0 ? records : records.filter((record) => record.family === family);
+    if (answer.length === 0) {
+      callback(Object.assign(new Error(`getaddrinfo ENOTFOUND ${hostname}`), { code: "ENOTFOUND" }), "");
+      return;
+    }
+    if (options?.all) callback(null, answer);
+    else callback(null, answer[0]!.address, answer[0]!.family);
   });
 }
 
