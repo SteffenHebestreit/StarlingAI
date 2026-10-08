@@ -220,6 +220,30 @@ export const ModelConfigSchema = z.object({
    *     `promptCache: false` to disable.
    *  Optional so inline ModelConfig literals don't all have to set it. */
   promptCache: z.boolean().optional(),
+  /** OPTIONAL, off when unset. Starts a FORCED tool call (tool_choice "required") inside the
+   *  call: the OpenAI-compatible provider appends a trailing assistant message holding the
+   *  opening of the model's tool-call syntax, and the server continues it. The only format is
+   *  "qwen-xml", the Qwen3-Coder XML syntax Qwen3.5/3.6 use on llama.cpp (`<tool_call>` then
+   *  `<function=`). Only callers that ask for it get it (CompletionCallOptions.prefillToolCall;
+   *  today the orchestrator's forced calls), so every other request is unchanged.
+   *
+   *  Why: on the deployed llama.cpp (b11015), "required" only keeps the turn from ENDING until a
+   *  call is complete, and prose before the call is allowed. A model that wants to answer itself
+   *  writes until max_tokens with no call (forced_tool_call_burned_budget: 13,263 characters on
+   *  2026-10-07). Prefilled, the call came 24 times in 24 against 10 in 24 on the same prompt,
+   *  streamed and not, thinking on or off. A continuation closes the think block, so a prefilled
+   *  call does not deliberate first.
+   *
+   *  Set it only on a model whose endpoints (primary, fallback and cloudFallback share this
+   *  config) all serve that syntax through llama.cpp's Qwen3-Coder handler with
+   *  --prefill-assistant (on by default): the opener must be a valid start of the server's
+   *  tool-call grammar. A model preset that replaces the model (activeModelPreset) drops it,
+   *  as it drops the tiers and endpoint overrides: the syntax is the replaced model's. A
+   *  prefilled request answered with an HTTP 4xx about the request is retried once without the
+   *  prefill, and only when that retry is served is the endpoint remembered and its forced calls
+   *  sent without one; a context overflow is not taken for a refusal. Qwen3's JSON tool-call
+   *  syntax needs a different opener and is not covered. The Anthropic provider ignores it. */
+  toolCallPrefill: z.enum(["qwen-xml"]).optional(),
   /** Optional model-tier ladder. When set, the orchestrator swaps in the
    *  tier-specific model for certain paths instead of `primary`:
    *   - `routing`   : lightweight classifier/picker calls (reserved — wired as

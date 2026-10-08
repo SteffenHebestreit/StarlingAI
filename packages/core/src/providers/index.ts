@@ -304,6 +304,10 @@ export function applyActiveModelPreset(modelConfig: ModelConfig, config: Config 
     ...(preset.contextWindow !== undefined ? { contextWindow: preset.contextWindow } : {}),
     // Tier-ladder models are tuned for the local stack; bypass while testing a preset.
     tiers: undefined,
+    // The tool-call syntax a prefilled forced call opens is the replaced model's too. Kept, every
+    // forced call to the preset model would start with an opener its server's tool-call grammar
+    // may not take, which fails the request (ModelConfig.toolCallPrefill).
+    toolCallPrefill: undefined,
   };
 }
 

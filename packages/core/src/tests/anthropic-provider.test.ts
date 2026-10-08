@@ -138,6 +138,27 @@ describe("model presets (Local ⇄ Claude switch)", () => {
     expect(applied.enableThinking).toBe(true);
   });
 
+  it("drops toolCallPrefill with the replaced model: the tool-call syntax it opens is that model's", () => {
+    // The flag where it is set (the default model) and a configured preset on another
+    // OpenAI-compatible model. Carried over, every forced call to the preset model would open with
+    // the Qwen3-Coder syntax, and an opener its server's tool-call grammar does not take fails the
+    // request.
+    const config = makeConfig({
+      agents: { defaults: { activeModelPreset: "gemma", modelPresets: { gemma: { primary: "lmstudio/gemma-4-26b" } } } },
+    });
+    const base = ModelConfigSchema.parse({ primary: "lmstudio/qwen", toolCallPrefill: "qwen-xml" });
+    const applied = applyActiveModelPreset(base, config);
+    expect(applied.primary).toBe("lmstudio/gemma-4-26b");
+    expect(applied.fallback).toBe("lmstudio/qwen");
+    expect(applied.toolCallPrefill).toBeUndefined();
+
+    // A preset naming the model already in use replaces nothing, so the flag stays.
+    const samePreset = makeConfig({
+      agents: { defaults: { activeModelPreset: "qwen", modelPresets: { qwen: { primary: "lmstudio/qwen" } } } },
+    });
+    expect(applyActiveModelPreset(base, samePreset).toolCallPrefill).toBe("qwen-xml");
+  });
+
   it("overrides per-agent model overrides too (whole-swarm switch)", () => {
     const config = makeConfig({
       providers: { anthropic: { authToken: "sk-ant-oat01-token" } },

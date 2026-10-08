@@ -11,6 +11,10 @@ import type { ModelConfig } from "../config/schema.js";
 import { resolveStreamTotalCapMs } from "./stream-budget.js";
 import { wireHeadSignature, type PromptHeadSignature } from "./prompt-head.js";
 import { beginProviderCall, recordProviderToken, endProviderCall } from "../observability/provider-activity-monitor.js";
+// The failover chain's redaction of key-shaped strings in an error's text, for the warnings here
+// that quote what a server answered a prefilled call. One-way at runtime: failover.ts imports
+// only types from this module, which are erased.
+import { errorText } from "./failover.js";
 // The burn threshold is the supervisor's, IMPORTED rather than restated. Copying the
 // literal here is how the two would drift, and the whole point of this guard is that it
 // fires on exactly the shape agent/progress-verifier.ts already classifies as "burning".
@@ -231,6 +235,23 @@ export interface CompletionCallOptions {
    *  read it on the non-streaming path too, and the forced-tool-call callers reach the
    *  model through completeViaStream, which is typed on this interface. */
   toolChoice?: "auto" | "required" | "none";
+  /**
+   * Start THIS forced call inside its tool call (ModelConfig.toolCallPrefill).
+   *
+   * Sent only when the call is forced (`toolChoice: "required"`), the model config names the
+   * tool-call syntax, and this endpoint has not refused a prefill before. Then a trailing
+   * assistant message carrying the opener (`<tool_call>\n<function=` for "qwen-xml") goes after
+   * the normalised messages, and the server continues it inside its tool-call grammar. `tool`
+   * names the function as well (`<tool_call>\n<function=NAME>\n`), but only when that tool is in
+   * this request's tools: a name the grammar does not offer fails the request, so any other name
+   * leaves the opener bare and the model picks among the tools sent.
+   *
+   * On the deployed llama.cpp (b11015), "required" only keeps the turn from ending until a call
+   * is complete, so a model that wants to answer itself writes prose until max_tokens. Prefilled,
+   * the call came 24 times in 24 against 10 in 24 on the same prompt (2026-10-08). The Anthropic
+   * provider ignores it: its tool_choice is enforced natively.
+   */
+  prefillToolCall?: { tool?: string };
   /**
    * Constrain the response to a JSON Schema for THIS call (OpenAI-compatible
    * `response_format`; llama.cpp implements it natively as a grammar).
@@ -1093,6 +1114,161 @@ export function isRejectedReasoningEffortError(err: unknown): boolean {
   return /reasoning_effort/i.test(message);
 }
 
+/** What a prefilled forced call carried: the bare opener, or the opener with a function name. */
+export type ToolCallPrefillKind = "bare" | "named";
+
+/**
+ * Why a requested prefill stayed off the wire. "endpoint_refused": a refusal remembered for this
+ * endpoint and model (_prefillRefusingEndpoints). "refusal_retry": this call's prefilled request
+ * was answered with a 4xx, and this is the one retry without it, which decides whether the
+ * prefill was the cause. "refused_in_call": an attempt of that call after the retry failed; it
+ * decides nothing, and the rest of the call goes without the prefill.
+ */
+export type ToolCallPrefillSkip =
+  | "tool_choice" | "no_tools" | "endpoint_refused" | "refusal_retry" | "refused_in_call" | "assistant_last";
+
+/** Why an attempt goes without the prefill when its own call's prefilled request was refused (ToolCallPrefillSkip). */
+export type CallPrefillRefusal = Extract<ToolCallPrefillSkip, "refusal_retry" | "refused_in_call">;
+
+export interface ToolCallPrefillDecision {
+  /** The prefill sent, or null when one was asked for and withheld (`skipped` says why). */
+  kind: ToolCallPrefillKind | null;
+  /** The trailing assistant message, exactly when `kind` is not null. Content only, never
+   *  `tool_calls`: llama-server answers 400 "Cannot continue an assistant message that contains
+   *  tool calls". */
+  message?: { role: "assistant"; content: string };
+  skipped?: ToolCallPrefillSkip;
+}
+
+/** How a Qwen3-Coder XML tool call opens, up to the function name (ModelConfig.toolCallPrefill "qwen-xml"). */
+const QWEN_XML_TOOL_CALL_OPENER = "<tool_call>\n<function=";
+
+/**
+ * Whether THIS call goes out prefilled, and with what (CompletionCallOptions.prefillToolCall).
+ *
+ * `undefined` when the feature does not govern the call at all — the model config names no
+ * tool-call syntax, or the caller did not ask — and then nothing about the request changes.
+ * Otherwise the decision is recorded on the call's audit row, a withheld one with its reason.
+ *
+ * The conditions are the server's, measured and read from llama.cpp at b11015:
+ * - only under "required": the always-on tool-call grammar is what makes the opener binding,
+ *   and nothing else was measured;
+ * - not without tools: without them tool_choice is not even sent, so there is no grammar;
+ * - not after an assistant message: llama-server answers 400 "Cannot have 2 or more assistant
+ *   messages at the end of the list";
+ * - a NAME only when it is one of the tools sent: the grammar offers those names alone, and an
+ *   opener it rejects fails the whole request. The bare opener is a valid start for any of them.
+ *   No parameter is ever prefilled: the grammar puts the required parameters first, and
+ *   delegate_to_agent requires only `task`, so `<parameter=agentName>` would be refused.
+ * And the endpoint's own record: not where a refusal is remembered, and not for the rest of a
+ * call whose own prefilled request was refused (ToolCallPrefillSkip).
+ */
+export function resolveToolCallPrefill(input: {
+  syntax: ModelConfig["toolCallPrefill"];
+  toolChoice: CompletionCallOptions["toolChoice"];
+  request: CompletionCallOptions["prefillToolCall"];
+  /** The messages exactly as they go on the wire, after normalizeMessagesForModel and the gpt-oss line. */
+  wireMessages: ReadonlyArray<{ role: string }>;
+  toolNames: readonly string[];
+  endpointRefused: boolean;
+  /** Set once this call's prefilled request was answered with a 4xx: "refusal_retry" on the one
+   *  retry without it, "refused_in_call" on any attempt after that (callPrefillRefusal). */
+  callRefusal: CallPrefillRefusal | undefined;
+}): ToolCallPrefillDecision | undefined {
+  if (input.syntax !== "qwen-xml" || input.request === undefined) return undefined;
+  if (input.toolChoice !== "required") return { kind: null, skipped: "tool_choice" };
+  if (input.toolNames.length === 0) return { kind: null, skipped: "no_tools" };
+  if (input.endpointRefused) return { kind: null, skipped: "endpoint_refused" };
+  if (input.callRefusal) return { kind: null, skipped: input.callRefusal };
+  if (input.wireMessages[input.wireMessages.length - 1]?.role === "assistant") return { kind: null, skipped: "assistant_last" };
+  const tool = input.request.tool;
+  if (tool && input.toolNames.includes(tool)) {
+    return { kind: "named", message: { role: "assistant", content: `${QWEN_XML_TOOL_CALL_OPENER}${tool}>\n` } };
+  }
+  return { kind: "bare", message: { role: "assistant", content: QWEN_XML_TOOL_CALL_OPENER } };
+}
+
+/**
+ * Endpoints that refused a prefilled tool call, keyed `${baseUrl}|${modelId}`. Every later forced
+ * call to one goes without the prefill instead of failing, for the life of the process.
+ *
+ * REMEMBERED ON PROOF, NOT ON THE FIRST 4xx. A prefilled request answered with a 4xx about the
+ * request (isToolCallPrefillRefusal) is retried once without the prefill, and the endpoint goes in
+ * here only if that retry is served: the same call, without the prefill, went through. This set
+ * used to take the first 4xx at its word, and a 4xx the prefill did not cause is answered to the
+ * retry as well — so it switched the prefill off until a restart, the mode that wrote 13,263
+ * characters of prose on 2026-10-07, on an answer that had nothing to do with it. The rest of
+ * that call goes without the prefill either way.
+ *
+ * Keyed on the model too, because the server decides per model which tool-call handler and
+ * grammar apply: one llama-swap address serves several models, and one model's refusal says
+ * nothing about another's. A llama-swap model that spills over to a second station is still one
+ * key, so a refusal from either station turns the prefill off for both.
+ */
+const _prefillRefusingEndpoints = new Set<string>();
+
+/** Test-only: forget which endpoints have refused a prefill. */
+export function _resetToolCallPrefillRefusalsForTests(): void {
+  _prefillRefusingEndpoints.clear();
+}
+
+/**
+ * True for an answer that MAY refuse a prefilled request — a suspicion, which only the served
+ * retry turns into a remembered refusal (_prefillRefusingEndpoints). That is HTTP 4xx, the status
+ * llama-server gives a request it rejects (b11015): a message shape it cannot continue
+ * (`std::invalid_argument` → 400), and an opener its tool-call grammar does not take ("Failed to
+ * initialize samplers", 400 — on the stream path too, where the first error goes out as a plain
+ * response).
+ *
+ * Not the 4xx answers that say nothing about the prefill. 401 and 403 are about the credential,
+ * 408 and 429 about time and load. A context overflow is a 400 on llama-server
+ * (exceed_context_size_error) and a body over a proxy's limit a 413: about size, so the same call
+ * without the prefill fails the same way, and retrying it would only send it twice. A refused
+ * reasoning_effort is that field's fault, and its own ladder handles it. A 5xx is not read as a
+ * refusal either: a llama-swap restart answers 502 for seconds.
+ */
+export function isToolCallPrefillRefusal(err: unknown): boolean {
+  const status = (err as { status?: unknown } | undefined)?.status;
+  if (typeof status !== "number" || status < 400 || status >= 500) return false;
+  if (status === 401 || status === 403 || status === 408 || status === 413 || status === 429) return false;
+  if ((err as { type?: unknown }).type === "exceed_context_size_error") return false;
+  return !isRejectedReasoningEffortError(err);
+}
+
+/** A prefilled request answered with a refusal-class 4xx, held while the call is retried without it. */
+interface SuspectedPrefillRefusal {
+  kind: ToolCallPrefillKind;
+  status: number;
+  /** What the server answered, redacted (failover.ts errorText). */
+  error: string;
+}
+
+/**
+ * Where the next attempt of a call stands with a refusal of its own prefill: the retry the
+ * suspicion asked for ("refusal_retry"), an attempt after that retry failed ("refused_in_call"),
+ * or neither (`retried` false). The suspicion is held only until that retry ends, so while it is
+ * held the next attempt IS that retry.
+ *
+ * ONLY THAT RETRY READS "refusal_retry". Every later attempt of the call used to read it too: a
+ * call refused, retried into a 502 and then served by its budgeted attempt left a served
+ * "refusal_retry" row with nothing remembered, and one refusal left two such rows. The stream
+ * path writes no row for a request that fails before its first chunk, so there a refused,
+ * dropped, then served call left that served row alone, reading as the retry that decided.
+ */
+function callPrefillRefusal(retried: boolean, suspected: SuspectedPrefillRefusal | undefined): CallPrefillRefusal | undefined {
+  if (suspected) return "refusal_retry";
+  return retried ? "refused_in_call" : undefined;
+}
+
+/** One stream attempt's prefill, passed from stream() to streamOnce() and back. */
+interface StreamPrefillAttempt {
+  /** Set by stream(): where this attempt stands with the call's own refused prefill (callPrefillRefusal). */
+  callRefusal: CallPrefillRefusal | undefined;
+  /** Filled by streamOnce() before the request is sent, so stream() can tell a refused prefill
+   *  from any other failure. */
+  sent?: ToolCallPrefillDecision;
+}
+
 /** Effort for gpt-oss-style models: explicit reasoningEffort wins; otherwise map
  *  the boolean toggle (off→low, on→high); undefined → leave the model/GUI default. */
 function resolveReasoningEffort(
@@ -1511,6 +1687,9 @@ export class LMStudioProvider {
     timings?: ServerCallTimings;
     /** The head this request sent (folded system text + tool block), hashed: providers/prompt-head.ts. */
     head?: PromptHeadSignature;
+    /** The prefill decision for this request (resolveToolCallPrefill); undefined when the feature
+     *  does not govern the call, and then the row is exactly what it was before it existed. */
+    prefill?: ToolCallPrefillDecision;
   }): void {
     const now = Date.now();
     const ext = input.extensions ?? {};
@@ -1546,6 +1725,15 @@ export class LMStudioProvider {
       // toolsHash alone separates the orchestrator's forced subsets from its full block.
       ...(input.head
         ? { headHash: input.head.headHash, toolsHash: input.head.toolsHash, systemHash: input.head.systemHash, systemChars: input.head.systemChars }
+        : {}),
+      // Whether a forced call went out prefilled. A flag that never reaches the wire is this
+      // deployment's recurring silent failure (the thinking-off switch above was inert for a
+      // month), so a withheld prefill says why: the one retry after a 4xx reads
+      // `prefillSkipped: "refusal_retry"` (served, it means the refusal was remembered), a later
+      // attempt of that call "refused_in_call", and once a refusal is remembered every forced
+      // call to that endpoint reads "endpoint_refused" rather than looking prefilled.
+      ...(input.prefill
+        ? { prefill: input.prefill.kind, ...(input.prefill.skipped ? { prefillSkipped: input.prefill.skipped } : {}) }
         : {}),
     }, { ...attribution.opts, severity: "info" });
   }
@@ -1602,6 +1790,59 @@ export class LMStudioProvider {
     log.warn({ endpoint: this.baseUrl, model: modelId, value: sent },
       "Endpoint rejected this reasoning_effort — stepping down for the retry and every later call");
     return true;
+  }
+
+  /** The prefill decision for ONE attempt, on the messages exactly as they go on the wire. Per
+   *  attempt, because the rest of a call whose prefilled request was refused goes without it
+   *  (suspectToolCallPrefillRefusal, callPrefillRefusal). */
+  private toolCallPrefillFor(
+    modelId: string,
+    wireMessages: readonly ChatCompletionMessageParam[],
+    tools: readonly LLMToolDef[],
+    options: CompletionCallOptions | undefined,
+    callRefusal: CallPrefillRefusal | undefined,
+  ): ToolCallPrefillDecision | undefined {
+    return resolveToolCallPrefill({
+      syntax: this.modelConfig.toolCallPrefill,
+      toolChoice: options?.toolChoice,
+      request: options?.prefillToolCall,
+      wireMessages,
+      toolNames: tools.map((tool) => tool.name),
+      endpointRefused: _prefillRefusingEndpoints.has(`${this.baseUrl}|${modelId}`),
+      callRefusal,
+    });
+  }
+
+  /**
+   * A failure that may be the prefill's: the request carried one and was answered with a
+   * refusal-class 4xx (isToolCallPrefillRefusal). Returns the suspicion, which tells the caller to
+   * retry once without the prefill; NOTHING is remembered here. Only a served retry shows the
+   * prefill was the cause (rememberToolCallPrefillRefusal). A request that carried no prefill is
+   * never blamed on one.
+   */
+  private suspectToolCallPrefillRefusal(
+    modelId: string,
+    prefill: ToolCallPrefillDecision | undefined,
+    err: unknown,
+  ): SuspectedPrefillRefusal | undefined {
+    if (!prefill?.kind || !isToolCallPrefillRefusal(err)) return undefined;
+    // The server's own words, which the status alone does not carry: the retry's outcome is what
+    // decides, and an operator reading this line has to be able to tell a refused opener from
+    // anything else a 400 can mean.
+    const suspected: SuspectedPrefillRefusal = { kind: prefill.kind, status: (err as { status: number }).status, error: errorText(err) };
+    log.warn({ endpoint: this.baseUrl, model: modelId, prefill: suspected.kind, status: suspected.status, error: suspected.error },
+      "Endpoint answered a prefilled tool call with a 4xx — retrying the call once without the prefill");
+    return suspected;
+  }
+
+  /** The retry without the prefill was served, so the prefill is what the endpoint refused:
+   *  remember it, and its forced calls go without one from now on (_prefillRefusingEndpoints). */
+  private rememberToolCallPrefillRefusal(modelId: string, refusal: SuspectedPrefillRefusal): void {
+    const key = `${this.baseUrl}|${modelId}`;
+    if (_prefillRefusingEndpoints.has(key)) return;
+    _prefillRefusingEndpoints.add(key);
+    log.warn({ endpoint: this.baseUrl, model: modelId, prefill: refusal.kind, status: refusal.status, error: refusal.error },
+      "Endpoint refused a prefilled tool call and served the same call without it — sending its forced calls without one from now on");
   }
 
   /**
@@ -1845,6 +2086,12 @@ export class LMStudioProvider {
     let attempt = 0;
     const maxAttempts = this.configuredMaxRetries + 1;
     const retryDelay = 2000;
+    // A refused prefill gets ONE retry without it, outside the attempt budget: maxRetries is
+    // often 0 here, and the refusal is about the request's shape, which the retry changes. The
+    // rest of the call goes without the prefill; the refusal is remembered only if THAT retry is
+    // served (see _prefillRefusingEndpoints), so it is dropped on any failure of the retry.
+    let prefillRetried = false;
+    let suspectedPrefillRefusal: SuspectedPrefillRefusal | undefined;
 
     while (attempt < maxAttempts) {
       const startedAt = Date.now();
@@ -1856,6 +2103,9 @@ export class LMStudioProvider {
       const { extensions, sampling } = this.resolveCallShape(modelId, options?.controls, options?.temperature);
       const effectiveTemp = sampling.temperature;
       const effectiveTopP = sampling.topP;
+      // Appended to the wire messages, after the system fold and the gpt-oss line, so neither
+      // can touch it. Unasked, `messages` is the very array it always was.
+      const prefill = this.toolCallPrefillFor(modelId, openAIMessages, tools, options, callPrefillRefusal(prefillRetried, suspectedPrefillRefusal));
       // In-flight visibility: a non-streaming complete() is a black box (no token
       // deltas), so the monitor can only report how long it has been awaiting a
       // response — but that alone surfaces a remote that's stuck on a 20K-token
@@ -1875,7 +2125,7 @@ export class LMStudioProvider {
         const response = await this.withHardTimeout(signal, hardTimeoutMs, (s) => this.client.chat.completions.create(
           {
             model: modelId,
-            messages: openAIMessages,
+            messages: prefill?.message ? [...openAIMessages, prefill.message] : openAIMessages,
             tools: openAITools.length > 0 ? openAITools : undefined,
             // Same default and the same per-call override as the streaming path: the
             // forced-tool-call callers (options.toolChoice "required") land on BOTH.
@@ -1947,6 +2197,8 @@ export class LMStudioProvider {
         }));
 
         this.recordRequestSuccess(startedAt);
+        // Served without the prefill, after the prefilled request was refused: the prefill was the cause.
+        if (suspectedPrefillRefusal) this.rememberToolCallPrefillRefusal(modelId, suspectedPrefillRefusal);
         {
           const reasoningTokens = reasoningTokensOf(response.usage);
           this.auditModelCall({
@@ -1967,6 +2219,7 @@ export class LMStudioProvider {
             // whenever llama-server sent it.
             timings: readServerTimings((response as { timings?: unknown }).timings),
             head,
+            prefill,
           });
         }
 
@@ -2024,6 +2277,7 @@ export class LMStudioProvider {
             extensions,
             reasoningChars: null,
             head,
+            prefill,
           });
         };
         if (signal?.aborted) {
@@ -2041,6 +2295,16 @@ export class LMStudioProvider {
         if (err instanceof ProviderHardTimeoutError) {
           log.error({ attempt, timeoutMs: err.timeoutMs, model: modelId }, "OpenAI-compatible completion hit hard timeout — not retrying");
           throw err;
+        }
+        // The retry without the prefill failed too, so it does not show the prefill was the cause.
+        suspectedPrefillRefusal = undefined;
+        // No delay: the refusal was immediate and the retry is a different request.
+        if (!prefillRetried) {
+          suspectedPrefillRefusal = this.suspectToolCallPrefillRefusal(modelId, prefill, err);
+          if (suspectedPrefillRefusal) {
+            prefillRetried = true;
+            continue;
+          }
         }
         attempt++;
         // (`signal?.aborted` used to be an OR here; the cancel branch above now owns that case,
@@ -2249,15 +2513,40 @@ export class LMStudioProvider {
     // configuredMaxRetries (which governs semantic/API retries and is often 0 on
     // the slow local model). So floor the budget at 2 attempts.
     const maxAttempts = Math.max(2, this.configuredMaxRetries + 1);
+    const modelId = this.parseModelId(this.modelConfig.primary);
+    let prefillRetried = false;
+    let suspectedPrefillRefusal: SuspectedPrefillRefusal | undefined;
     for (let attempt = 1; ; attempt++) {
       let yielded = 0;
+      // Where this attempt stands with the call's own refused prefill, and — recorded by
+      // streamOnce before it sends — what its request carried.
+      const prefillAttempt: StreamPrefillAttempt = { callRefusal: callPrefillRefusal(prefillRetried, suspectedPrefillRefusal) };
       try {
-        for await (const chunk of this.streamOnce(messages, tools, signal, options)) {
+        for await (const chunk of this.streamOnce(messages, tools, signal, options, prefillAttempt)) {
           yielded++;
           yield chunk;
         }
+        // SERVED TO THE END without the prefill, after the prefilled request was refused: the
+        // prefill was the cause. Not at the first chunk — a retry cut mid-stream was not served,
+        // and a stream counts as served here where the failover chain counts it (markSuccess).
+        if (suspectedPrefillRefusal) this.rememberToolCallPrefillRefusal(modelId, suspectedPrefillRefusal);
         return;
       } catch (err) {
+        // The retry without the prefill failed too, so it does not show the prefill was the cause.
+        suspectedPrefillRefusal = undefined;
+        // A REFUSED PREFILL IS RETRIED ONCE, WITHOUT IT. llama-server refuses a request before any
+        // chunk (HTTP 4xx; in streaming mode its first error goes out as a plain response), so
+        // nothing was yielded. The retry is not one of the drop budget's attempts: an endpoint
+        // that refused the prefill and then drops the connection still gets its transient-drop
+        // retry, without the prefill, as the rest of the call is.
+        if (yielded === 0 && !prefillRetried && !signal?.aborted) {
+          suspectedPrefillRefusal = this.suspectToolCallPrefillRefusal(modelId, prefillAttempt.sent, err);
+          if (suspectedPrefillRefusal) {
+            prefillRetried = true;
+            attempt -= 1;
+            continue;
+          }
+        }
         const effortRejected = this.noteReasoningEffortRejection(this.parseModelId(this.modelConfig.primary), err, options?.controls);
         if (yielded === 0 && attempt < maxAttempts && !signal?.aborted && (effortRejected || isRetryableStreamError(err))) {
           log.warn(
@@ -2275,7 +2564,8 @@ export class LMStudioProvider {
     messages: LLMMessage[],
     tools: LLMToolDef[],
     signal?: AbortSignal,
-    options?: StreamCallOptions
+    options?: StreamCallOptions,
+    prefillAttempt?: StreamPrefillAttempt,
   ): AsyncGenerator<StreamChunk> {
     const modelId = this.parseModelId(this.modelConfig.primary);
     const openAIMessages = this.withReasoningSystemLine(modelId, normalizeMessagesForModel(messages, modelId), options?.controls);
@@ -2284,6 +2574,9 @@ export class LMStudioProvider {
       function: { name: t.name, description: t.description, parameters: t.parameters },
     }));
     const head = wireHeadSignature(openAIMessages, tools);
+    // As in complete(): after the system fold and the gpt-oss line, decided per attempt.
+    const prefill = this.toolCallPrefillFor(modelId, openAIMessages, tools, options, prefillAttempt?.callRefusal);
+    if (prefillAttempt) prefillAttempt.sent = prefill;
 
     // Same per-attempt shape as complete() — see resolveCallShape. streamOnce IS the attempt
     // (stream() re-enters it on a retry), so building here rebuilds both halves after a
@@ -2321,7 +2614,7 @@ export class LMStudioProvider {
     const stream = await this.withHardTimeout(streamSignal, this.requestTimeoutMs + 5000, (s) => createStream(
       {
         model: modelId,
-        messages: openAIMessages,
+        messages: prefill?.message ? [...openAIMessages, prefill.message] : openAIMessages,
         tools: openAITools.length > 0 ? openAITools : undefined,
         // Default "auto"; callers may force "required" to stop the model from
         // emitting a tool-free prose answer when the turn must orchestrate first
@@ -2669,6 +2962,7 @@ export class LMStudioProvider {
         reasoningChars: progress.reasoningChars,
         timings: collectedTimings,
         head,
+        prefill,
       });
       throw reason instanceof Error
         ? reason
@@ -2691,6 +2985,7 @@ export class LMStudioProvider {
       reasoningChars: progress.reasoningChars,
       timings: collectedTimings,
       head,
+      prefill,
     });
     yield { type: "done", finishReason: collectedFinishReason ?? "stop", usage: collectedUsage };
   }
