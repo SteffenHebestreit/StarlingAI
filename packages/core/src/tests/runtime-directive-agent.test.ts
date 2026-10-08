@@ -309,6 +309,26 @@ describe("a turn the user directed to one agent", () => {
     expect(result.response).not.toContain("I answered this myself");
   });
 
+  it("streams none of the prose it replaces with the delegation", async () => {
+    // The prose was held back while the response might still call a tool, then flushed to the
+    // user when none came: a draft the turn discarded a moment later (review of a3773aa, 2026-10-08).
+    const { AgentSession, runTurn } = await loadRuntime();
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      call += 1;
+      return call === 1
+        ? answerStream("DRAFT: int() truncates; use round(). I answered this myself instead of delegating.")
+        : answerStream("Both files truncate with int(); round instead.");
+    });
+    const streamed: string[] = [];
+
+    const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
+    await runTurn({ session, userMessage: MESSAGE, allowedAgents: ["code_analyst"], directiveAgent: "code_analyst", onChunk: (text) => streamed.push(text) });
+
+    expect(delegated).toHaveLength(1);
+    expect(streamed.join("")).not.toContain("DRAFT");
+  });
+
   // The dispatch handed the agent the bare request, and a specialist starts from its task and
   // context alone (review of a3773aa, 2026-10-08).
   it("hands the named agent the excerpts of the attached file the orchestrator was shown", async () => {

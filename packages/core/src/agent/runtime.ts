@@ -2863,7 +2863,11 @@ async function _runTurn(
         ),
         chunkSink,
         {
-          deferTextUntilToolDecision: streamTools.length > 0,
+          // While an --agent directive is pending, a response that calls nothing is replaced by the
+          // delegation below, so its prose is a draft the user would see and then lose: it is held
+          // back, and dropped once no call came.
+          deferTextUntilToolDecision: streamTools.length > 0 || directiveAgentPending,
+          ...(directiveAgentPending ? { discardTextWithoutToolCall: true } : {}),
           // Provider chain-of-thought is intentionally not streamed to the
           // client. Keep phase/status telemetry instead of raw reasoning.
         },
@@ -6356,12 +6360,13 @@ async function continueLengthLimitedResponse(
 
 /**
  * Consume a streaming LLM generator into a complete LLMResponse.
- * Optionally defers text until the response is known not to contain tool calls.
+ * Optionally defers text until the response is known not to contain tool calls, and with
+ * `discardTextWithoutToolCall` never sends it: the caller replaces a response that calls nothing.
  */
 export async function collectStream(
   generator: AsyncGenerator<StreamChunk>,
   onChunk?: (text: string) => void,
-  options: { deferTextUntilToolDecision?: boolean; onReasoning?: (text: string) => void } = {},
+  options: { deferTextUntilToolDecision?: boolean; discardTextWithoutToolCall?: boolean; onReasoning?: (text: string) => void } = {},
 ): Promise<LLMResponse> {
   let content = "";
   let reasoning = "";
@@ -6453,7 +6458,7 @@ export async function collectStream(
     })(),
   }));
 
-  if (options.deferTextUntilToolDecision && onChunk && !sawToolCall && content) {
+  if (options.deferTextUntilToolDecision && !options.discardTextWithoutToolCall && onChunk && !sawToolCall && content) {
     onChunk(content);
   }
 
