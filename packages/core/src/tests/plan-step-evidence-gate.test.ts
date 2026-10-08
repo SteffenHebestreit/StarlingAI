@@ -254,6 +254,29 @@ describe("the research gate's turn trigger", () => {
     expect(ctx.turnEvidence?.outsideEngaged).toBe("researcher");
   }, 30_000);
 
+  it("keeps a later delegation on its agent once an outside agent ran as a FALLBACK (the dispatch claims the turn's outside source)", async () => {
+    // web_coder fails and researcher, named only as its fallback, takes the step. The claim made
+    // when a delegation is decided names the first agent asked for (web_coder), so only the claim at
+    // dispatch records that researcher ran, and with no facts shared it is all that holds the next
+    // builder on its step.
+    let webCoderRuns = 0;
+    runner.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => {
+      const failed = args.agentName === "web_coder" && webCoderRuns++ === 0;
+      return {
+        output: failed ? "web_coder: could not finish the page." : `${args.agentName}: done`,
+        stats: { ...statsFor(args), toolNames: ["write_file"], ...(failed ? { outcome: "failure" as const } : {}) },
+      };
+    });
+    const { getTool } = await import("../tools/registry.js");
+    await import("../tools/sub-agent.js");
+    const ctx = turnCtx("s-fallback");
+    await getTool("delegate_to_agent")!.execute({ agentName: "web_coder", fallbackAgents: ["researcher"], task: FRENCH_BUILD }, ctx);
+    await getTool("delegate_to_agent")!.execute({ agentName: "web_coder", task: GERMAN_STEP }, ctx);
+
+    expect(ran()).toEqual(["web_coder", "researcher", "web_coder"]);
+    expect(ctx.turnEvidence?.outsideEngaged).toBe("researcher");
+  }, 30_000);
+
   it("redirects one of two delegations racing through the gate, never both", async () => {
     // The runtime dispatches one response's calls in order; this pins the re-read of the turn's
     // outside source after the facts read for any caller that does not.
