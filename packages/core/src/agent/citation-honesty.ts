@@ -25,13 +25,17 @@ export function looksLikeTransparentIncompleteReport(text: string): boolean {
  * A delegated run that masked figures no tool had returned (`unobservedRuns`, from its run record)
  * outranks all three. Its script is usually attached, so the artifact shape told the orchestrator
  * "The orchestration is COMPLETE … state what was completed" over a computation that never ran
- * (E2E 2026-10-07: primes.js written, seven sandbox runs failed or printed nothing).
+ * (E2E 2026-10-07: primes.js written, seven sandbox runs failed or printed nothing). Only the
+ * files those runs wrote are named as written but not run; the turn's other files are still its
+ * deliverables. In review, a report content_writer had finished was named as the coder's unrun
+ * output, and nothing said it was attached.
  */
 export function buildSynthesisRequiredDirective(opts: {
   artifactPaths?: readonly string[];
   partialEvidence?: boolean;
-  /** Delegated runs whose account stated figures no tool returned, each with its run-record line. */
-  unobservedRuns?: readonly { agent: string; line: string }[];
+  /** Delegated runs whose account stated figures no tool returned: each with its run-record line
+   *  and the files that run wrote, as its delegation recorded them. */
+  unobservedRuns?: readonly { agent: string; line: string; files?: readonly string[] }[];
 }): string {
   const artifactPaths = (opts.artifactPaths ?? []).filter(Boolean);
   const unobservedRuns = opts.unobservedRuns ?? [];
@@ -40,12 +44,17 @@ export function buildSynthesisRequiredDirective(opts: {
     const lines = unobservedRuns.length === 1
       ? unobservedRuns[0]!.line
       : unobservedRuns.map((run) => `${run.agent}: ${run.line}`).join("; ");
-    const filesClause = artifactPaths.length > 0
-      ? `name the files it wrote (${artifactPaths.slice(0, 12).join(", ")}) as written but not run successfully, `
+    const runFiles = [...new Set(unobservedRuns.flatMap((run) => run.files ?? []))].filter(Boolean);
+    const otherFiles = artifactPaths.filter((path) => !runFiles.includes(path));
+    const filesClause = runFiles.length > 0
+      ? `name the files it wrote (${runFiles.slice(0, 12).join(", ")}) as written but not run successfully, `
+      : "";
+    const deliverables = otherFiles.length > 0
+      ? ` The turn's other deliverables are attached to this message as files (${otherFiles.slice(0, 12).join(", ")}): list each with a one-line description.`
       : "";
     return `[SYNTHESIS REQUIRED] The delegated run of ${agents} stated figures that no tool returned; they are masked as ${UNOBSERVED_FIGURE_MARKER} (${lines}). `
       + `Write the final answer ${IN_REPLY_LANGUAGE}: say what was run and how it failed (from the run record above, in plain words), `
-      + `${filesClause}and say plainly that the masked values were not computed. `
+      + `${filesClause}and say plainly that the masked values were not computed.${deliverables} `
       + "Do NOT state, estimate or round any value that only running the code could produce. Do NOT delegate again.";
   }
   if (artifactPaths.length > 0) {

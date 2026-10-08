@@ -4763,7 +4763,7 @@ async function _runTurn(
     // run now masks such figures itself; here the turn reads its record (metadata, never the
     // frame text) and stops treating that run as a finished result: no plan continuation on top of
     // it, an honest synthesis directive, and a partial scorecard.
-    const maskedDelegatedRuns: Array<{ agent: string; line: string }> = [];
+    const maskedDelegatedRuns: Array<{ agent: string; line: string; files: string[] }> = [];
     {
       let sawExecutionRecord = false;
       let maskedFigures = 0;
@@ -4774,9 +4774,14 @@ async function _runTurn(
         if (!unbackedFiguresMasked(record)) continue;
         maskedFigures += record.unobservedFigures ?? 0;
         const agentName = message.metadata?.["agentName"];
+        // The files this delegation recorded, named the way the turn's attachments are, so the
+        // directive can tell them from the files another delegation of the turn finished.
+        const runFiles: Array<Record<string, unknown>> = [];
+        extractArtifactsFromMetadata(message.metadata ?? {}, runFiles, new Set());
         maskedDelegatedRuns.push({
           agent: typeof agentName === "string" && agentName ? agentName : "delegated agent",
           line: executionRecordLine(record),
+          files: runFiles.map((artifact) => String(artifact["relativePath"] ?? artifact["filename"] ?? "artifact")),
         });
       }
       if (sawExecutionRecord) _turnDelegatedFiguresUnobserved = maskedDelegatedRuns.length > 0;
