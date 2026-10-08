@@ -1074,7 +1074,10 @@ export function guardedConnectLookup(hostname: string, options: LookupOptions | 
 /**
  * The dispatcher for requests to caller-supplied URLs: every connection it opens resolves its
  * name through guardedConnectLookup. The checks before a request stay; they refuse early and
- * cover IP literals, which a connection does not look up.
+ * cover IP literals, which a connection does not look up. It takes the place of the global
+ * dispatcher for these requests, so a proxy set through the environment (NODE_USE_ENV_PROXY
+ * with HTTP_PROXY / HTTPS_PROXY) does not apply to them: they connect directly. Proxy support
+ * would mean handing this lookup to a proxy-aware agent; none is configured today.
  */
 export const guardedDispatcher = new Agent({ connect: { lookup: guardedConnectLookup } });
 
@@ -1114,7 +1117,12 @@ export function reportedPageUrls(output: string): string[] {
   return [...output.matchAll(/^[ \t]*-[ \t]+Page URL:[ \t]*(\S+)/gm)].map((match) => match[1]!);
 }
 
-/** The last page the guard let the browser show; the same page reported again is not re-checked. */
+/**
+ * The last page the guard let the browser show; the same page reported again is not re-checked.
+ * This saves a lookup per answer while the browser stays on one page: a per-URL dedup, not a
+ * security cache. A name that rebinds to a private address while the browser sits on its page is
+ * not caught by it, since the URL does not change (the browser's connection is made by then).
+ */
 let lastClearedPageUrl: string | undefined;
 
 /**
