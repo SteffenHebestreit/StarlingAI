@@ -152,11 +152,11 @@ describe("graph_query under multi-user auth", () => {
     for (const foreign of ["Earl Grey", "Suedhafen", "0.125"]) expect(result.output).not.toContain(foreign);
   });
 
-  // The queries below are refused before they run; the answers stand for one that reaches the graph
-  // some other way, and the reducer has to hold on its own.
   it("refuses an answer holding a map whose __proto__ key became its prototype", async () => {
     const { run, scope } = await load(true);
     const m = memories(scope.safeUserSegment("alice"), scope.safeUserSegment("bob"));
+    // A query that names __proto__ is refused before it runs (below); these answers stand for one
+    // that reaches the graph some other way, and the reducer has to hold on its own.
     const crafted = [
       // RETURN {__proto__: [], leak: m}: a list as the prototype, so not a plain map, and leak its one key.
       { x: boltMap([["__proto__", []], ["leak", m.bobPreference]]) },
@@ -183,7 +183,12 @@ describe("graph_query under multi-user auth", () => {
   it("takes a map that carries one of the driver's markers as a key for the map it is", async () => {
     const { run, scope } = await load(true);
     const m = memories(scope.safeUserSegment("alice"), scope.safeUserSegment("bob"));
-    // RETURN {asNode: {__isNode__: true, labels: [], properties: {}, leak: m}, asSegment: ..., asPath: ...}
+    // No name in this query is refused, so it runs. The answer has the shape the driver builds for
+    // it, with another foreign node under each key to tell the three apart.
+    const cypher = "MATCH (a:MemoryRecord {id: 'mem-alice-user'}), (m:MemoryRecord) RETURN {"
+      + "asNode: {__isNode__: true, labels: [], properties: {}, leak: m}, "
+      + "asSegment: {__isPathSegment__: true, start: a, relationship: m, end: a}, "
+      + "asPath: {__isPath__: true, start: a, end: a, segments: [], leak: m}} AS x LIMIT 50";
     answer([{
       x: {
         asNode: boltMap([["__isNode__", true], ["labels", []], ["properties", {}], ["leak", m.bobPreference]]),
@@ -191,7 +196,8 @@ describe("graph_query under multi-user auth", () => {
         asPath: boltMap([["__isPath__", true], ["start", m.alicePreference], ["end", m.alicePreference], ["segments", []], ["leak", m.ownerless]]),
       },
     }]);
-    const result = await run("alice", "graph_query", { cypher: "MATCH (m:MemoryRecord) RETURN {wrap: m} AS x LIMIT 50" });
+    const result = await run("alice", "graph_query", { cypher });
+    expect(runCypher).toHaveBeenCalledTimes(1);
     expect(result.success).toBe(true);
     for (const foreign of ["Earl Grey", "Suedhafen", "\"bob\"", "budget = 40000"]) expect(result.output).not.toContain(foreign);
     // Every key of each map comes back, the nodes under them reduced.
