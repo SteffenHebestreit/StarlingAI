@@ -14,6 +14,7 @@ import { verifyToken, extractBearerToken, authenticatedUser, userHasRole } from 
 import type { Context } from "hono";
 import { childLogger } from "../logger.js";
 import { PRODUCT } from "../product/index.js";
+import { canReadRecord, recordReader } from "../runtime/user-scope.js";
 import { resolveAgentRouting } from "../tools/sub-agent.js";
 import { appendFlowMemoryEntry, readFlowMemoryEntries } from "../agent/flow-memory.js";
 import { listConversationConfigProposals } from "../agent/config-assistant-proposals.js";
@@ -184,18 +185,17 @@ export function registerSubAgentRoutes(app: Hono): void {
 
     const { readFileSync, existsSync } = await import("node:fs");
     const { resolve } = await import("node:path");
-    const cfg = getConfig();
-    const workspacePath = cfg.workspacePath;
+    const workspacePath = getConfig().workspacePath;
     const outcomesFile = resolve(workspacePath, `${PRODUCT.stateDirName}/agent_outcomes.ndjson`);
-    // Under multi-user auth the counts only. A lesson is text an agent wrote on some account's task
-    // (record_lesson), often naming what that task was about, and the ledger names no account: every
-    // signed-in account, a viewer too, read the latest one per agent, whoever's task it came from
-    // (found in review, 2026-10-08). With one operator the lessons are that operator's own.
-    const withLessons = cfg.auth?.enabled !== true;
+    // The counts cover the whole deployment; the latest lesson, under multi-user auth, is the
+    // caller's own. A lesson is text an agent wrote on some account's task (record_lesson), often
+    // naming what that task was about, and every signed-in account, a viewer too, read the latest
+    // one per agent, whoever's task it came from (found in review, 2026-10-08).
+    const reader = recordReader();
 
     if (!existsSync(outcomesFile)) return c.json({ agents: [], totalEntries: 0 });
 
-    type OutcomeRow = { ts: string; agent: string; task: string; outcome: string; iterations: number; totalTokens: number; lesson?: string };
+    type OutcomeRow = { ts: string; agent: string; task: string; outcome: string; iterations: number; totalTokens: number; lesson?: string; account?: string };
     let entries: OutcomeRow[];
     try {
       entries = readFileSync(outcomesFile, "utf-8")
@@ -213,7 +213,7 @@ export function registerSubAgentRoutes(app: Hono): void {
       s.calls++;
       s.totalTokens += e.totalTokens ?? 0;
       s.totalIterations += e.iterations ?? 0;
-      if (e.lesson) s.latestLesson = e.lesson;
+      if (e.lesson && canReadRecord(reader, e.account)) s.latestLesson = e.lesson;
       if (!s.lastSeen || e.ts > s.lastSeen) s.lastSeen = e.ts;
       statsMap.set(e.agent, s);
     }
@@ -227,7 +227,7 @@ export function registerSubAgentRoutes(app: Hono): void {
       successRate: s.calls > 0 ? Math.round((s.success / s.calls) * 100) : 0,
       avgTokens: s.calls > 0 ? Math.round(s.totalTokens / s.calls) : 0,
       avgIterations: s.calls > 0 ? Math.round((s.totalIterations / s.calls) * 10) / 10 : 0,
-      ...(withLessons ? { latestLesson: s.latestLesson } : {}),
+      latestLesson: s.latestLesson,
       lastSeen: s.lastSeen,
     })).sort((a, b) => b.calls - a.calls);
 

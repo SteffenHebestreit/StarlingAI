@@ -27,6 +27,9 @@ export interface FlowMemoryEntry {
   outcome: FlowMemoryOutcome;
   lesson?: string;
   tags: string[];
+  /** The account whose request this was: its user-scope segment, never the raw user id. Absent
+   *  with one operator and on entries written before it existed. */
+  account?: string;
 }
 
 export interface FlowMemoryMatch extends FlowMemoryEntry {

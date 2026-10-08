@@ -404,7 +404,7 @@ function resolveDurableWriteScope(
 
 const SCOPE_DOWNGRADE_NOTE = " (requested scope 'user' was stored to workspace: no authenticated user on this session)";
 
-const AGENT_SCOPE_NOT_SEARCHED_NOTE = "Agent lessons are not searchable on a multi-user deployment: the agent scope was not searched.";
+const AGENT_SCOPE_NOT_SEARCHED_NOTE = "Agent lessons are searchable only by the account they were recorded for, and this request has no account: the agent scope was not searched.";
 
 registerTool({
   name: "memory_store",
@@ -541,10 +541,11 @@ registerTool({
     if (!query) return { success: false, output: "", error: "query is required" };
 
     try {
-      // Under multi-user auth the agent scope is not searched, asked for or not: it lists every
-      // account's delegated tasks (memory/service.ts searchableMemoryScopes). The metadata then
-      // names the scopes searched, and a request that named the agent scope is told it was left
-      // out, so an empty answer is not read as "no lessons stored".
+      // Under multi-user auth the agent scope shows the caller's own lessons only, and with no user
+      // in the request it is not searched, asked for or not (memory/service.ts
+      // searchableMemoryScopes). The metadata then names the scopes searched, and a request that
+      // named the agent scope is told it was left out, so an empty answer is not read as "no
+      // lessons stored".
       const searchable = searchableMemoryScopes(scopes);
       const agentWithheld = !searchable.includes("agent") && (!scopes?.length || scopes.includes("agent"));
       const agentNote = agentWithheld && scopes?.includes("agent") ? AGENT_SCOPE_NOT_SEARCHED_NOTE : "";

@@ -113,9 +113,10 @@ describe("recall_context tool", () => {
     expect(result.output).not.toContain("## Recent related sessions");
   });
 
-  it("searches only the caller's own memory scopes under multi-user auth", async () => {
+  it("searches every memory scope under multi-user auth too, leaving the agent scope's filtering to the service", async () => {
     // The agent scope is the deployment's outcome ledger, with every account's delegated tasks in
-    // it: left out under multi-user auth. With one operator the search is made as before.
+    // it. Under multi-user auth the memory service shows the caller's own entries of it only
+    // (recall-context-account-scope.test.ts), so the search is made the same way with and without.
     const { getTool } = await import("../tools/registry.js");
     const tool = getTool("recall_context");
     harness.memorySearches.length = 0;
@@ -127,7 +128,7 @@ describe("recall_context tool", () => {
     }
     await tool!.execute({ query: "which provider do I prefer", include: ["user"] }, CTX);
 
-    expect(harness.memorySearches[0]?.["scopes"]).toEqual(["workspace", "user", "session"]);
+    expect(harness.memorySearches[0]).not.toHaveProperty("scopes");
     expect(harness.memorySearches[1]).not.toHaveProperty("scopes");
   });
 

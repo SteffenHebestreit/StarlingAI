@@ -13,7 +13,7 @@ import { logAudit } from "../audit/logger.js";
 import { isEmbeddingAvailable, computeQueryEmbedding, computeRetrievalQueryEmbedding, computeTextEmbeddings, cosineSimilarity } from "../providers/embeddings.js";
 
 import { PRODUCT } from "../product/index.js";
-import { userScopedDir } from "../runtime/user-scope.js";
+import { canReadRecord, recordReader, userScopedDir } from "../runtime/user-scope.js";
 
 const log = childLogger("memory:service");
 
@@ -214,22 +214,16 @@ const ALL_MEMORY_SCOPES: readonly MemoryScope[] = ["workspace", "user", "session
 
 /**
  * The scopes a memory search may read: those requested (every scope when none are), without the
- * agent scope under multi-user auth. That scope reads the deployment's outcome ledger, one file for
- * every account, where a lesson's subject is the task it was recorded for, so one account's search
- * listed another account's delegated task (found in review, 2026-10-08). An outcome names no
- * account: the scope cannot be narrowed to the caller's own records and stays out whole. With one
- * operator the ledger is that operator's own. A config that cannot be read counts as multi-user.
- * Empty when only the agent scope was asked for there.
+ * agent scope when nothing in it could be shown, which is under multi-user auth with no user in
+ * the request. That scope reads the deployment's outcome ledger, one file for every account, and
+ * under multi-user auth a search shows only the caller's own entries of it (readAgentMemoryRecords).
+ * A config that cannot be read counts as multi-user with no user. Empty when only the agent scope
+ * was asked for there.
  */
 export function searchableMemoryScopes(requested?: readonly MemoryScope[]): MemoryScope[] {
   const scopes = requested?.length ? [...requested] : [...ALL_MEMORY_SCOPES];
-  let multiUser: boolean;
-  try {
-    multiUser = getConfig().auth?.enabled === true;
-  } catch {
-    multiUser = true;
-  }
-  return multiUser ? scopes.filter((scope) => scope !== "agent") : scopes;
+  const reader = recordReader();
+  return reader.all || reader.segment ? scopes : scopes.filter((scope) => scope !== "agent");
 }
 
 export async function searchMemoryRecordsWithStatus(
@@ -239,10 +233,8 @@ export async function searchMemoryRecordsWithStatus(
 ): Promise<MemorySearchResult> {
   const normalizedQuery = normalizeText(query.trim());
   const tokens = tokenize(normalizedQuery);
-  // For every caller, not only the search tools: memory_promote copied another account's task into
-  // the caller's own memory and named it in its answer, a sub-agent's memory guidance put it in the
-  // sub-agent's prompt, and the user-profile prefetch presented it as stored memory about this user
-  // (found in review, 2026-10-08). A caller that names only the agent scope there gets nothing.
+  // For every caller, not only the search tools: memory_promote, a sub-agent's memory guidance and
+  // the user-profile prefetch read the agent scope too (found in review, 2026-10-08).
   const scopes = new Set<MemoryScope>(searchableMemoryScopes(opts.scopes));
   const allowedKinds = opts.kinds?.length ? new Set(opts.kinds.map((kind) => normalizeKind(kind)).filter(Boolean) as MemoryKind[]) : null;
   const records: MemoryRecord[] = [];
@@ -1012,6 +1004,15 @@ const AGENT_LESSON_SCAN_WINDOW = 200;
 function readAgentMemoryRecords(workspacePath: string, targetAgent?: string): MemoryRecord[] {
   const records: MemoryRecord[] = [];
 
+  // Under multi-user auth, the caller's own entries only. The ledger holds every account's runs,
+  // and a lesson's subject is the task it was recorded for: one account's search listed another
+  // account's delegated task (found in review, 2026-10-08). An entry of another account, or with
+  // none (written before entries carried one), is left out, and a request with no user sees none.
+  // With one operator every entry is theirs.
+  const reader = recordReader();
+  if (!reader.all && !reader.segment) return records;
+  const own = (account: string | undefined) => canReadRecord(reader, account);
+
   // The agent outcomes ledger is DEPLOYMENT-scoped: it describes this deployment's agents, and
   // every other reader resolves it against the shared root. The path threaded through here is the
   // caller's execution root, which per-user workspaces make one account's directory — so this read
@@ -1020,15 +1021,17 @@ function readAgentMemoryRecords(workspacePath: string, targetAgent?: string): Me
   // (user-scoped memory above) are correctly per-user and must keep the caller's path.
   // The 60-outcome cap used to apply BEFORE the agent filter: with a target agent, its lessons
   // had to be among the deployment's last 60 outcomes of ANY agent, so a busy swarm pushed an
-  // idle agent's lessons out and a targeted search found none. Filter first, then cap.
-  const outcomes = targetAgent
+  // idle agent's lessons out and a targeted search found none. Filter first, then cap — by the
+  // caller's account as well, or a busy deployment would push one account's lessons out the same way.
+  const outcomes = targetAgent || !reader.all
     ? readRecentOutcomes(deploymentWorkspaceRoot(workspacePath), AGENT_LESSON_SCAN_WINDOW)
-      .filter((outcome) => outcome.agent === targetAgent && outcome.lesson?.trim())
+      .filter((outcome) => (!targetAgent || outcome.agent === targetAgent) && outcome.lesson?.trim() && own(outcome.account))
       .slice(-AGENT_LESSONS_PER_SEARCH)
     : readRecentOutcomes(deploymentWorkspaceRoot(workspacePath), AGENT_LESSONS_PER_SEARCH);
   for (const outcome of outcomes) {
     if (targetAgent && outcome.agent !== targetAgent) continue;
     if (!outcome.lesson?.trim()) continue;
+    if (!own(outcome.account)) continue;
 
     records.push({
       id: `outcome:${outcome.agent}:${outcome.ts}`,
@@ -1045,13 +1048,14 @@ function readAgentMemoryRecords(workspacePath: string, targetAgent?: string): Me
     });
   }
 
-  const flowEntries = targetAgent
+  const flowEntries = targetAgent || !reader.all
     ? readFlowMemoryEntries(workspacePath, AGENT_LESSON_SCAN_WINDOW)
-      .filter((entry) => entry.targetAgent === targetAgent || entry.assistantAgent === targetAgent)
+      .filter((entry) => (!targetAgent || entry.targetAgent === targetAgent || entry.assistantAgent === targetAgent) && own(entry.account))
       .slice(-FLOW_ENTRIES_PER_SEARCH)
     : readFlowMemoryEntries(workspacePath, FLOW_ENTRIES_PER_SEARCH);
   for (const entry of flowEntries) {
     if (targetAgent && entry.targetAgent !== targetAgent && entry.assistantAgent !== targetAgent) continue;
+    if (!own(entry.account)) continue;
     records.push({
       id: entry.id,
       scope: "agent",
