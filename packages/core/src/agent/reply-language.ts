@@ -27,6 +27,7 @@
 import { getConfig } from "../config/loader.js";
 import { currentRequestContext } from "../runtime/request-context.js";
 import { detectTextLanguage } from "./text-language.js";
+import { midTurnUserMessages, startsTurn, type TurnBoundaryMessage } from "./turn-boundary.js";
 
 /** Used when config cannot be read (unit tests without a config, a broken shard). */
 const FALLBACK_DEFAULT_LANGUAGE = "German";
@@ -76,12 +77,17 @@ export function messageHasOwnLanguage(userMessage: string): boolean {
 }
 
 /**
- * Whether this is the conversation's first message: the history holds no earlier user message. A
- * standing language instruction can only be an earlier message, so on a first turn the only
- * requests left are the message itself and the durable facts.
+ * Whether this is the conversation's first turn: the person has written no other message in it. A
+ * standing language instruction can only be such a message, so on a first turn the only requests
+ * left are the message itself and the durable facts.
+ *
+ * What the person sends while the turn runs counts: it can carry a request ("auf Deutsch, bitte"),
+ * and the first-turn line lists none but those two. The progress monitor's redirect does not. It is
+ * user-role for the model, but nobody wrote it, and counted it took the first-turn line away from
+ * the forced synthesis that follows it.
  */
-export function isFirstUserTurn(history: readonly { role: string }[]): boolean {
-  return history.filter((message) => message.role === "user").length <= 1;
+export function isFirstUserTurn(history: readonly (TurnBoundaryMessage & { content?: unknown })[]): boolean {
+  return history.filter((message) => startsTurn(message) || (midTurnUserMessages(message)?.length ?? 0) > 0).length <= 1;
 }
 
 /**

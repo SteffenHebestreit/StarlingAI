@@ -117,6 +117,15 @@ describe("the reply-language rule", () => {
     expect(isFirstUserTurn([{ role: "user" }, { role: "assistant" }, { role: "user" }])).toBe(false);
   });
 
+  it("counts what the person sent while the turn ran, and not the oversight redirect", () => {
+    // The redirect is user-role for the model, but nobody wrote it.
+    const oversight = { role: "user", metadata: { midTurn: true, midTurnSource: "oversight" } };
+    expect(isFirstUserTurn([{ role: "user" }, { role: "assistant" }, oversight])).toBe(true);
+    // Their own mid-turn message can carry a request the first-turn line does not list.
+    const steering = { role: "user", metadata: { midTurn: true, midTurnSource: "user", steering: [{ id: "s1", text: "Antworte bitte auf Deutsch." }] } };
+    expect(isFirstUserTurn([{ role: "user" }, { role: "assistant" }, steering])).toBe(false);
+  });
+
   it("uses the configured default language", () => {
     configState.defaultLanguage = "French";
     expect(defaultReplyLanguage()).toBe("French");

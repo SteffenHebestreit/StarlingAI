@@ -502,7 +502,7 @@ Every public schema field, where it is declared, and how many production files r
 | `trustModelRouting` | packages/core/src/config/schema.ts:285 | 2 |
 | `trustProxyHeader` | packages/core/src/config/schema.ts:441 | 1 |
 | `turnTimeoutMs` | packages/core/src/config/schema.ts:313 | 23 |
-| `type` | packages/core/src/config/schema.ts:964 | 459 |
+| `type` | packages/core/src/config/schema.ts:964 | 460 |
 | `ungroundedFactualAnswerGuard` | packages/core/src/config/schemas/orchestration.ts:150 | 2 |
 | `upfrontSourceSensitiveClassifier` | packages/core/src/config/schemas/orchestration.ts:183 | 2 |
 | `url` | packages/core/src/config/schema.ts:563 | 146 |
