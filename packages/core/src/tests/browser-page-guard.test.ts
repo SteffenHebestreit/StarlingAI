@@ -55,12 +55,13 @@ describe("browser tools refuse to show a page on a host the SSRF guard refuses",
     return handler;
   }
 
-  /** Playwright MCP answering each tool with `answers[name]`, and with nothing otherwise. */
-  function browser(answers: Record<string, string>) {
-    const callTool = vi.fn(async (input: { name: string; arguments: Record<string, unknown> }) => ({
-      content: [{ type: "text", text: answers[input.name] ?? "" }],
-      isError: false,
-    }));
+  type ContentPart = { type: string; text?: string; data?: string; mimeType?: string };
+  /** Playwright MCP answering each tool with `answers[name]` (text, or content parts), and with nothing otherwise. */
+  function browser(answers: Record<string, string | ContentPart[]>) {
+    const callTool = vi.fn(async (input: { name: string; arguments: Record<string, unknown> }) => {
+      const answer = answers[input.name] ?? "";
+      return { content: typeof answer === "string" ? [{ type: "text", text: answer }] : answer, isError: false };
+    });
     mcpConnections.set("playwright", { client: { callTool } });
     return callTool;
   }
@@ -161,6 +162,62 @@ describe("browser tools refuse to show a page on a host the SSRF guard refuses",
     expect((await snapshot.execute({}, ctx)).success).toBe(true);
     expect((await snapshot.execute({}, ctx)).success).toBe(true);
     expect(lanLookups).toEqual([LAN_HOST]);
+  });
+
+  // A screenshot answer reports no Page URL unless the tab's header changed, so the check above
+  // saw nothing to check and the image of whatever page the tab had drifted to went out.
+  const IMAGE = "aW50ZXJuYWwgZGFzaGJvYXJk";
+  const screenshot: ContentPart[] = [
+    { type: "text", text: "### Result\nTook the viewport screenshot and saved it as page.png" },
+    { type: "image", data: IMAGE, mimeType: "image/png" },
+  ];
+  /** browser_evaluate's answer for location.href, the tab being at `url`. */
+  const tabAt = (url: string) => `### Result\n${JSON.stringify(url)}`;
+
+  it("reads the tab's address for a screenshot that reports none, and refuses a private one", async () => {
+    const callTool = browser({ browser_screenshot: screenshot, browser_evaluate: tabAt("http://10.0.0.5/dashboard") });
+
+    const r = await (await tool("browser_screenshot")).execute({}, ctx);
+    expect(r.success).toBe(false);
+    expect(r.error).toBe("Refusing to show the page the browser is on: requesting private/internal network addresses is not allowed. The browser was sent to about:blank.");
+    expect(JSON.stringify(r)).not.toContain(IMAGE);
+    expect(calls(callTool)).toEqual(["browser_screenshot", "browser_evaluate", "navigate about:blank"]);
+  });
+
+  it("checks an answer that is only an image the same way", async () => {
+    const callTool = browser({ browser_screenshot: [screenshot[1]!], browser_evaluate: tabAt("http://192.168.1.1/") });
+
+    const r = await (await tool("browser_screenshot")).execute({}, ctx);
+    expect(r.success).toBe(false);
+    expect(JSON.stringify(r)).not.toContain(IMAGE);
+    expect(calls(callTool)).toEqual(["browser_screenshot", "browser_evaluate", "navigate about:blank"]);
+  });
+
+  it("refuses a screenshot when the tab's address cannot be read", async () => {
+    const callTool = browser({ browser_screenshot: screenshot, browser_evaluate: "### Result\nundefined" });
+
+    const r = await (await tool("browser_screenshot")).execute({}, ctx);
+    expect(r.success).toBe(false);
+    expect(r.error).toBe("Refusing to show the page the browser is on: its address could not be read. The browser was sent to about:blank.");
+    expect(JSON.stringify(r)).not.toContain(IMAGE);
+    expect(calls(callTool)).toEqual(["browser_screenshot", "browser_evaluate", "navigate about:blank"]);
+  });
+
+  it("returns a screenshot of a public tab as it was", async () => {
+    const callTool = browser({ browser_screenshot: screenshot, browser_evaluate: tabAt(`${PUBLIC}/galerie`) });
+
+    const r = await (await tool("browser_screenshot")).execute({}, ctx);
+    expect(r.success).toBe(true);
+    expect(r.output).toContain(IMAGE);
+    expect(calls(callTool)).toEqual(["browser_screenshot", "browser_evaluate"]);
+  });
+
+  it("asks nothing more for an answer that carries nothing of the page", async () => {
+    const callTool = browser({ browser_click: "clicked" });
+
+    const r = await (await tool("browser_click")).execute({ element: "OK", ref: "e2" }, ctx);
+    expect(r).toMatchObject({ success: true, output: "clicked" });
+    expect(calls(callTool)).toEqual(["browser_click"]);
   });
 
   /** browser_evaluate's answer for the axe audit, run on the page at `url`. */

@@ -1431,7 +1431,7 @@ function registerBrowserTool(input: {
     description: input.description,
     parameters: input.parameters,
     async execute(args) {
-      const { checkUrlSsrf, leaveRefusedPage, refusedBrowserPage, reportedPageUrls } = await import("./web.js");
+      const { checkUrlSsrf, leaveRefusedPage, refusedBrowserAnswer } = await import("./web.js");
       if (input.guardUrlArg) {
         const raw = args[input.guardUrlArg];
         if (typeof raw === "string" && raw.trim()) {
@@ -1445,13 +1445,14 @@ function registerBrowserTool(input: {
         // script or a click then moved it with nothing checking where, and the answer carried
         // that page: a public URL that redirected to http://10.0.0.5/ answered with its snapshot.
         // The page an answer reports, and the snapshot fetched after an action, are now checked
-        // before any of it is shown.
-        let refused = await refusedBrowserPage(reportedPageUrls(raw));
+        // before any of it is shown; an answer of the page that reports no URL (a screenshot)
+        // has the tab's address read for it.
+        let refused = await refusedBrowserAnswer([raw]);
         let output = raw;
         if (!refused && PAGE_ACTION_TOOLS.has(input.mcpToolName)) {
           const inlined = await withInlineSnapshot(raw);
           output = inlined.output;
-          refused = await refusedBrowserPage(reportedPageUrls(inlined.snapshot));
+          refused = await refusedBrowserAnswer([inlined.snapshot]);
         }
         if (refused) {
           await leaveRefusedPage();

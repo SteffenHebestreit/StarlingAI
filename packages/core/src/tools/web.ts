@@ -1106,6 +1106,37 @@ export async function refusedBrowserPage(pageUrls: Iterable<string>): Promise<st
   return null;
 }
 
+/** Whether a Playwright MCP answer carries something of the page: a snapshot, an image (a screenshot) or a result. */
+function carriesPageContent(output: string): boolean {
+  return /```ya?ml/.test(output) || /"type"\s*:\s*"image"/.test(output) || /^#{1,4}[ \t]*Result\b/m.test(output);
+}
+
+/** The address of the page the shared browser tab is on, read now; null when it cannot be read. */
+async function currentTabUrl(): Promise<string | null> {
+  try {
+    const output = await callPlaywrightTool("browser_evaluate", { function: "() => location.href" });
+    const value = evaluateResultText(output).trim();
+    if (/^[a-z][a-z0-9+.-]*:\S*$/i.test(value)) return value;
+    return reportedPageUrls(output)[0] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Why the browser answers in `outputs` may not be shown, or null. The page URLs they report are
+ * checked. An answer that carries something of the page but reports no URL, such as a
+ * screenshot taken while the tab's header had not changed, passed unchecked; the tab's address
+ * is now read for it, and one that cannot be read refuses it.
+ */
+export async function refusedBrowserAnswer(outputs: readonly string[]): Promise<string | null> {
+  const pageUrls = outputs.flatMap((output) => reportedPageUrls(output));
+  if (pageUrls.length > 0) return refusedBrowserPage(pageUrls);
+  if (!outputs.some((output) => carriesPageContent(output))) return null;
+  const tabUrl = await currentTabUrl();
+  return tabUrl === null ? "its address could not be read" : refusedBrowserPage([tabUrl]);
+}
+
 /** Sends the shared browser tab to about:blank after a refused page, so no later call starts on it. */
 export async function leaveRefusedPage(): Promise<void> {
   try {

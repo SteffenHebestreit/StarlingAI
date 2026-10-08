@@ -208,11 +208,12 @@ function _registerBridgedTool(
  * The playwright server drives the gateway's shared browser, and its bridged tools reached it
  * unchecked: mcp__playwright__browser_navigate opened http://10.0.0.5/ as asked, and a page a
  * redirect or script had moved there came back in the answer. They now take the checks the
- * gateway's own browser tools take: the URL before a navigation, and the page an answer reports,
- * which ends the call and sends the tab to about:blank when the guard refuses it.
+ * gateway's own browser tools take: the URL before a navigation, and the page an answer reports
+ * (or, for an answer of the page that reports none, such as a screenshot, the tab's address read
+ * now), which ends the call and sends the tab to about:blank when the guard refuses it.
  */
 async function guardBrowserCall(mcpToolName: string, args: Record<string, unknown>, call: () => Promise<ToolResult>): Promise<ToolResult> {
-  const { checkUrlSsrf, leaveRefusedPage, refusedBrowserPage, reportedPageUrls } = await import("../tools/web.js");
+  const { checkUrlSsrf, leaveRefusedPage, refusedBrowserAnswer } = await import("../tools/web.js");
   const url = args["url"];
   if (mcpToolName === "browser_navigate" && typeof url === "string" && url.trim()) {
     const blocked = await checkUrlSsrf(url);
@@ -220,7 +221,7 @@ async function guardBrowserCall(mcpToolName: string, args: Record<string, unknow
   }
   const result = await call();
   if (!result.success) return result;
-  const refused = await refusedBrowserPage(reportedPageUrls(result.output));
+  const refused = await refusedBrowserAnswer([result.output]);
   if (!refused) return result;
   await leaveRefusedPage();
   return { success: false, output: "", error: `Refusing to show the page the browser is on: ${refused}. The browser was sent to about:blank.` };
