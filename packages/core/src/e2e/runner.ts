@@ -416,10 +416,11 @@ export interface UnconfirmedTurn {
  * harness seeing it end: chat.cancel got no final status within cancelGraceMs, or the socket died
  * during the send or mid-turn. Such a turn may still be running on the gateway, and what it stores
  * after the next attempt's reset lands in that attempt's memory. It may outlive the process too, so
- * a run that ends or quits leaves its turns to the next one (unconfirmedTurnsOf,
- * adoptUnconfirmedTurns).
+ * a run leaves its turns to the next one (unconfirmedTurnsOf, adoptUnconfirmedTurns), and a run that
+ * dies leaves those its watcher last wrote down (watchUnconfirmedTurns).
  */
 const unconfirmedTurns = new WeakMap<GatewayClient, Map<string, Map<string, UnconfirmedTurn>>>();
+const unconfirmedTurnWatchers = new WeakMap<GatewayClient, (turns: UnconfirmedTurn[]) => void>();
 const TURN_END_POLL_MS = 250;
 /** gateway.status reports the gateway's uptime as it answers; this much slack covers the way back. */
 const RESTART_SLACK_MS = 1_000;
@@ -445,9 +446,26 @@ export function unconfirmedTurnsOf(client: GatewayClient): UnconfirmedTurn[] {
     .sort((a, b) => a.sentAt - b.sentAt);
 }
 
-/** Turns an earlier run left: a reset of their identity waits for them as for the run's own. */
+/**
+ * Turns an earlier run left: a reset of their identity waits for them as for the run's own. No
+ * watcher is told: the run lock that handed them over lists them from the moment it is taken.
+ */
 export function adoptUnconfirmedTurns(client: GatewayClient, turns: readonly UnconfirmedTurn[]): void {
   for (const turn of turns) turnsOf(client, turn.identity).set(turn.requestId, { ...turn });
+}
+
+/**
+ * Hands every change of the client's unconfirmed turns to `watcher`, as it happens: before
+ * chat.send, and as a turn is seen to end. The CLI writes them into the run lock. Written only when
+ * the run ended or quit, they were lost with a run that was killed mid-turn (TaskStop, a closed
+ * terminal), and the next run reset the account under a turn that went on storing memory.
+ */
+export function watchUnconfirmedTurns(client: GatewayClient, watcher: (turns: UnconfirmedTurn[]) => void): void {
+  unconfirmedTurnWatchers.set(client, watcher);
+}
+
+function unconfirmedTurnsChanged(client: GatewayClient): void {
+  unconfirmedTurnWatchers.get(client)?.(unconfirmedTurnsOf(client));
 }
 
 /**
@@ -478,7 +496,10 @@ async function turnsStillRunning(identity: string, deps: RunnerDeps, waitMs: num
   const deadline = Date.now() + waitMs;
   for (;;) {
     for (const turn of [...turns.values()]) {
-      if (await turnEnded(turn, deps)) turns.delete(turn.requestId);
+      if (await turnEnded(turn, deps)) {
+        turns.delete(turn.requestId);
+        unconfirmedTurnsChanged(deps.client);
+      }
     }
     if (turns.size === 0 || Date.now() >= deadline || signal?.aborted) return [...turns.keys()];
     await sleep(Math.min(TURN_END_POLL_MS, deadline - Date.now()), signal);
@@ -1114,6 +1135,7 @@ async function runTurnStep(step: E2ETurnStep, ctx: AttemptContext): Promise<Step
   // Until its final status arrives the turn may be running: a reset of the account waits for it.
   const tracked = turnsOf(client, identity);
   tracked.set(requestId, { identity, requestId, sessionId, sentAt });
+  unconfirmedTurnsChanged(client);
   try {
     await connection.sendChat({
       sessionId,
@@ -1133,6 +1155,7 @@ async function runTurnStep(step: E2ETurnStep, ctx: AttemptContext): Promise<Step
       throw new E2EInfraError(`${err.message}; ${cancelled}`);
     }
     tracked.delete(requestId);
+    unconfirmedTurnsChanged(client);
     return { failures: [`chat.send failed: ${describeError(err)}`], notes };
   }
   during.armTimers();
@@ -1175,7 +1198,10 @@ async function runTurnStep(step: E2ETurnStep, ctx: AttemptContext): Promise<Step
       : `turn timed out after ${turnTimeoutMs} ms (${cancelText})`);
   }
   // Seen to end. A turn stopped without its final status stays tracked.
-  if (final) tracked.delete(requestId);
+  if (final) {
+    tracked.delete(requestId);
+    unconfirmedTurnsChanged(client);
+  }
 
   await during.settle();
   during.detach();

@@ -89,9 +89,10 @@ nodes carry the username, workspace-scope nodes the account's storage segment).
 Nothing is reset while a turn the harness stopped on the account may still run (`chat.cancel` got no final
 status, or the socket died during the send or mid-turn): what it stores after a reset would land in the
 next attempt. The reset waits up to the cancel grace (30 s) for `session.get` to report the turn ended, and
-is skipped with a note otherwise. Such turns outlive the run too: a run that ends, or quits at once on a
-second Ctrl+C, while one has not been seen to end leaves it in the run lock (below), and the next run's
-reset of that account waits for it the same way. A turn whose session is gone (`sai wipe`) counts as
+is skipped with a note otherwise. Such turns outlive the run too: the run lock (below) lists every turn
+not yet seen to end as it is sent, so a run that ends, quits at once on a second Ctrl+C or is killed
+(TaskStop, `Stop-Process`, a closed terminal) leaves them there, and the next run's reset of that account
+waits for them the same way. A turn whose session is gone (`sai wipe`) counts as
 ended once the gateway has restarted since it was sent (`gateway.status` uptime). The run names the lock
 it took such turns from; deleting that file forgets them.
 
@@ -99,8 +100,8 @@ it took such turns from; deleting that file forgets them.
 mail purge lands in the other's attempts. A run therefore refuses to start (exit code 2) while another run
 uses the same gateway, from whichever checkout or credentials file. The lock is
 `starlingai-e2e-run-<hash of the gateway URL>.json` in the system's temp directory (`localhost`, `127.0.0.1`
-and `[::1]` count as one host); a lock whose process is gone (a crash) is taken over, and one that cannot be
-read counts as held — delete it if no run is left.
+and `[::1]` count as one host); a lock whose process is gone (a crash or a kill) is taken over with the
+turns it lists, and one that cannot be read counts as held — delete it if no run is left.
 
 **Mail-isolation preflight (fail closed).** Before any scenario runs, the harness asks the running
 mail-service — through `pnpm e2e:env status --json`, which calls `GET /api/accounts` inside its container
