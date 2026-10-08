@@ -51,12 +51,17 @@ export function registerDocumentRoutes(app: Hono): void {
       const withoutKbOnly = (docs ?? []).filter((d) => !(d.sources.length > 0 && d.sources.every((s) => s.startsWith("kb:"))));
       // Multi-user mode: never list another user's / another session's documents.
       // Legacy single-operator mode (auth disabled) keeps the flat instance-wide view.
-      const inScope = getConfig().auth.enabled
-        ? (() => {
-            const manageable = callerManageableSources({ userId: user?.username, sessionId });
-            return withoutKbOnly.filter((d) => d.sources.some((s) => manageable.has(s)));
-          })()
+      const manageable = getConfig().auth.enabled
+        ? callerManageableSources({ userId: user?.username, sessionId })
+        : null;
+      const inScope = manageable
+        ? withoutKbOnly.filter((d) => d.sources.some((s) => manageable.has(s)))
         : withoutKbOnly;
+      // And of a listed document, only the sources the caller may manage. A document is stored once
+      // and shared by every scope that holds it, and its entry listed every source: another
+      // account's `user:<name>` and `session:<id>`, so the account's session ids and the fact that
+      // it holds the same file (found in review, 2026-10-09).
+      const listedSources = (sources: string[]): string[] => (manageable ? sources.filter((s) => manageable.has(s)) : sources);
       const documents = inScope.map((d) => ({
         id: d.id,
         title: d.title ?? null,
@@ -66,7 +71,7 @@ export function registerDocumentRoutes(app: Hono): void {
         // engram's list endpoint does not expose the invalidation marker — the
         // registry stamp (set by POST /:id/invalidate below) is the UI's view of it.
         invalidated: registry.some((e) => e.documentId === d.id && e.invalidatedAt),
-        scopes: d.sources.map((src) => {
+        scopes: listedSources(d.sources).map((src) => {
           const reg = registry.find((e) => e.documentId === d.id && e.source === src);
           return {
             scope: parseScopeFromSource(src) ?? "unknown",

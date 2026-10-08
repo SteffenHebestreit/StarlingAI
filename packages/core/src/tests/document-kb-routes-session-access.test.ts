@@ -218,6 +218,31 @@ describe("document routes and the session a request names", () => {
     expect(reached).toEqual(["getUpload", "forgetDocument", "scanAndStoreUpload", "ingestDocumentBytes"]);
   });
 
+  it("under multi-user auth, lists of a shared document only the sources the caller may manage", async () => {
+    // A document is stored once, shared by every scope that holds it. Its entry listed every source,
+    // so bob's list named alice's session id and showed that she holds the same file (review,
+    // 2026-10-09).
+    const { request, aliceSession } = await deployment(true);
+    engramDocs.list = [{ id: "doc-shared", title: "Ferry notes", chunkCount: 2, sources: ["user:bob", `session:${aliceSession}`, "user:alice"] }];
+
+    const list = await request("bob", "/api/documents");
+    expect(list.status).toBe(200);
+    const text = await list.text();
+    expect(text).not.toContain(aliceSession);
+    expect(text).not.toContain("user:alice");
+    expect((JSON.parse(text) as { documents: Array<{ id: string; scopes: Array<{ scope: string; source: string }> }> }).documents)
+      .toEqual([expect.objectContaining({ id: "doc-shared", scopes: [{ scope: "user", source: "user:bob" }] })]);
+  });
+
+  it("with one operator, lists every source of a document, as before", async () => {
+    const { request, aliceSession } = await deployment(false);
+    engramDocs.list = [{ id: "doc-shared", title: "Ferry notes", chunkCount: 2, sources: ["user:bob", `session:${aliceSession}`, "user:alice"] }];
+
+    const list = await request("bob", "/api/documents");
+    const documents = ((await list.json()) as { documents: Array<{ scopes: Array<{ source: string }> }> }).documents;
+    expect(documents[0]?.scopes.map((scope) => scope.source)).toEqual(["user:bob", `session:${aliceSession}`, "user:alice"]);
+  });
+
   it("with one operator, takes the session id as it comes, as before", async () => {
     const { request, aliceSession } = await deployment(false);
     aliceSessionDocument(aliceSession);
