@@ -14,6 +14,7 @@ import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type ToolContext } f
 import { isToolAllowed } from "../guardrails/tool-tiers.js";
 import { scanOutput } from "../guardrails/output.js";
 import type { ContainerTaskPayload, ContainerTaskResult } from "./container-runner.js";
+import { missingContainerTools, formatMissingContainerToolsFailure } from "./container-tool-support.js";
 import { createChatProvider } from "../providers/index.js";
 
 async function readStdin(): Promise<string> {
@@ -62,6 +63,26 @@ async function main(): Promise<void> {
     providerBaseUrl,
     providerApiKey,
   } = payload;
+
+  // THE WORKER REGISTERS NO TOOLS. This process imports tools/registry.js for
+  // getToolsAsLLMDefs/executeTool, but a tool only enters the registry as the import side
+  // effect of its own module, and this entrypoint imports none of them — so the registry is
+  // empty. An agent that DECLARES tools would otherwise reach the loop below with zero of them
+  // wired up: getToolsAsLLMDefs returns nothing, the model is handed no tools, and it can only
+  // answer in prose, which reads downstream as a completed run and invites invented results.
+  // Fail loud instead: if any declared tool is not registered in THIS process, end now with a
+  // container-level failure that names the missing tools, before the provider is ever built or
+  // called. An agent that declares no tools is unaffected and runs exactly as before.
+  const registeredHere = new Set(getToolsAsLLMDefs().map((def) => def.name));
+  const missingTools = missingContainerTools(agentConfig.tools, registeredHere);
+  if ((agentConfig.tools?.length ?? 0) > 0 && missingTools.length > 0) {
+    clearInterval(heartbeatTimer);
+    writeResult({
+      success: false,
+      error: formatMissingContainerToolsFailure(agentName, missingTools, agentConfig.tools!.length),
+    });
+    return;
+  }
 
   const provider = createChatProvider(resolvedModelConfig, {
     providerId: resolvedModelConfig.primary.split("/")[0] || "lmstudio",
