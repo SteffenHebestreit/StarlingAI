@@ -129,7 +129,7 @@ Most live in `config/schemas/orchestration.ts` (keys are `orchestration.<flag>`)
 |---|---|---|
 | **Guardrails** (prompt-injection block, secret scan, moderation) | mostly on | `guardrails.*`: `promptInjectionBlock`(true), `outputSecretScan`(true), `modelModeration.enabled`(false) |
 | **Receptionist fast-lane** (cheap short-answer bypass) | off | `receptionist.*`: `enabled`(false), `maxResponseChars`(400), `alwaysEscalateTerms`([]) |
-| **Model sampling / context / cache** | per model | `agents.defaults.model.*`: `contextWindow`(32768), `temperature`, tiers, `promptCache` |
+| **Model sampling / context / cache** | per model | `agents.defaults.model.*`: `contextWindow`(32768), `temperature`, tiers, `promptCache`, `toolCallPrefill`(off; `"qwen-xml"` starts the orchestrator's forced tool calls inside the call on llama.cpp Qwen3.5/3.6) |
 | **Base-prompt assembly** | lean on | `leanContextInjection`(true), `taskConditionalPrompt`(false, reverted), split-orchestration, cache-warm |
 
 ---

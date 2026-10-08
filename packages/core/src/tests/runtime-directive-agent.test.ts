@@ -105,6 +105,9 @@ const promptOf = (callIndex: number): string =>
 /** The tool choice the given provider.stream call was made with. */
 const toolChoiceOf = (callIndex: number): unknown =>
   (streamMock.mock.calls[callIndex]?.[3] as { toolChoice?: unknown } | undefined)?.toolChoice;
+/** The tool-call prefill the given provider.stream call asked for. */
+const prefillOf = (callIndex: number): unknown =>
+  (streamMock.mock.calls[callIndex]?.[3] as { prefillToolCall?: unknown } | undefined)?.prefillToolCall;
 
 const MESSAGE = "Why does invoices.py undercharge by a cent? def total(subtotal, tax): return int(subtotal + tax)";
 const DIRECTIVE_LINE = 'directed this request to the agent "code_analyst"';
@@ -132,9 +135,14 @@ describe("a turn the user directed to one agent", () => {
 
     expect(toolChoiceOf(0)).toBe("required");
     expect(promptOf(0)).toContain(DIRECTIVE_LINE);
+    // The call has one right answer, so the prefill names it: under "required" alone the local
+    // model wrote 13,000 characters of prose here (2026-10-07). No agentName is prefilled — the
+    // tool requires only `task`, and the grammar puts required parameters first.
+    expect(prefillOf(0)).toEqual({ tool: "delegate_to_agent" });
     expect(delegated).toHaveLength(1);
     // Delegated: the answer is the model's own again.
     expect(toolChoiceOf(1)).toBeUndefined();
+    expect(prefillOf(1)).toBeUndefined();
     expect(promptOf(1)).not.toContain(DIRECTIVE_LINE);
   });
 

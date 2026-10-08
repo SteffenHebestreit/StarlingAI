@@ -486,7 +486,7 @@ Every public schema field, where it is declared, and how many production files r
 | `token` | packages/core/src/config/schema.ts:1167 | 183 |
 | `tokenId` | packages/core/src/config/schema.ts:1066 | 1 |
 | `tokenSecret` | packages/core/src/config/schema.ts:1067 | 1 |
-| `toolCallPrefill` | packages/core/src/config/schema.ts:243 | 1 |
+| `toolCallPrefill` | packages/core/src/config/schema.ts:243 | 2 |
 | `toolCallsPerTurn` | packages/core/src/config/schema.ts:286 | 1 |
 | `toolCapMultiplier` | packages/core/src/config/schemas/effort.ts:45 | 1 |
 | `toolMode` | packages/core/src/config/schema.ts:292 | 6 |

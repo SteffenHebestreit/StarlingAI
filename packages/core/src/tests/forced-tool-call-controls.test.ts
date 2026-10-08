@@ -175,6 +175,10 @@ describe("a forced tool call is issued thinking-off with a bounded output — un
     expect(forced?.["toolChoice"], "first call was not the forced call").toBe("required");
     expect(forced?.["controls"]).toEqual({ enableThinking: false, reasoningEffort: "none" });
     expect(forced?.["maxTokens"]).toBe(4000);
+    // Thinking-off made the burn rarer, not impossible (9 of 12 forced calls on a prompt the model
+    // wanted to answer itself). The prefill is asked for on every forced call, bare when no tool
+    // is the one right answer; the provider sends it only where ModelConfig.toolCallPrefill is set.
+    expect(forced?.["prefillToolCall"]).toEqual({});
 
     // The next call is not forced: no options at all, so the instance config (thinking ON, the
     // derived max_tokens budget) applies exactly as before this change.
@@ -203,5 +207,8 @@ describe("a forced tool call is issued thinking-off with a bounded output — un
     // But NOT silenced: this is the call that writes the plan, and thinking-off was justified by
     // "the plan was recorded one call earlier" — which is false for the call recording it.
     expect(forced?.["controls"], "the planning call was sent thinking-off").toBeUndefined();
+    // The prefill is asked for here too. Where the flag sends it, the continuation starts after a
+    // closed think block, so this call stops deliberating; a two-phase plan call is the follow-up.
+    expect(forced?.["prefillToolCall"]).toEqual({});
   });
 });
