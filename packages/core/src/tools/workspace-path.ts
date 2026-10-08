@@ -54,10 +54,20 @@ export const UPLOADS_SUBDIR = "uploads";
  * config loader — they are not one person's work. Same for the ledgers under the state dir. The
  * two maintenance agents that edit those zones run with workspaceAccess "full" and keep the
  * shared root; everyone else gets their own.
+ *
+ * IDEMPOTENT: a root that already is this user's comes back unchanged. A session persists the
+ * root this returns and hands it back here on every restore (AgentSession.fromRecord), and a
+ * workflow run passes the caller's root together with the caller's id. Each pass nested it one
+ * level deeper, <shared>/users/<seg>/users/<seg> after a single gateway restart, and nothing of
+ * the user's (their memory, their files) is in there. The user's own segment is stripped first,
+ * however often it repeats, so a session persisted with the extra levels comes back right too.
  */
 export function userWorkspaceRoot(sharedRoot: string, userId?: string): string {
   const segment = activeUserScopeSegment(userId);
-  return segment ? resolve(sharedRoot, USERS_SUBDIR, segment) : sharedRoot;
+  if (!segment) return sharedRoot;
+  let root = resolve(sharedRoot);
+  while (basename(root) === segment && basename(dirname(root)) === USERS_SUBDIR) root = dirname(dirname(root));
+  return resolve(root, USERS_SUBDIR, segment);
 }
 
 /**

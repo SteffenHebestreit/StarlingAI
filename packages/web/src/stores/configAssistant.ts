@@ -12,7 +12,8 @@ export interface FlowMemoryEntry {
   id: string;
   ts: string;
   scope: FlowMemoryScope;
-  request: string;
+  /** Absent for another account's entry on a multi-user deployment: only its author and an admin get it. */
+  request?: string;
   summary: string;
   assistantAgent?: string;
   targetAgent?: string;
@@ -47,7 +48,8 @@ export interface ConfigAssistantProposal {
   ts: string;
   status: ConfigAssistantProposalStatus;
   mode: ConfigAssistantMode;
-  request: string;
+  /** Absent for another account's proposal on a multi-user deployment: only its author and an admin get it. */
+  request?: string;
   summary: string;
   assistantAgent: string;
   targetAgent?: string;

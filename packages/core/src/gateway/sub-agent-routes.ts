@@ -14,6 +14,8 @@ import { verifyToken, extractBearerToken, authenticatedUser, userHasRole } from 
 import type { Context } from "hono";
 import { childLogger } from "../logger.js";
 import { PRODUCT } from "../product/index.js";
+import { canReadRecord, recordAccount, recordReader } from "../runtime/user-scope.js";
+import { presentRequestItem, requestTextReader } from "./config-assistant-visibility.js";
 import { resolveAgentRouting } from "../tools/sub-agent.js";
 import { appendFlowMemoryEntry, readFlowMemoryEntries } from "../agent/flow-memory.js";
 import { listConversationConfigProposals } from "../agent/config-assistant-proposals.js";
@@ -186,10 +188,15 @@ export function registerSubAgentRoutes(app: Hono): void {
     const { resolve } = await import("node:path");
     const workspacePath = getConfig().workspacePath;
     const outcomesFile = resolve(workspacePath, `${PRODUCT.stateDirName}/agent_outcomes.ndjson`);
+    // The counts cover the whole deployment; the latest lesson, under multi-user auth, is the
+    // caller's own. A lesson is text an agent wrote on some account's task (record_lesson), often
+    // naming what that task was about, and every signed-in account, a viewer too, read the latest
+    // one per agent, whoever's task it came from (found in review, 2026-10-08).
+    const reader = recordReader();
 
     if (!existsSync(outcomesFile)) return c.json({ agents: [], totalEntries: 0 });
 
-    type OutcomeRow = { ts: string; agent: string; task: string; outcome: string; iterations: number; totalTokens: number; lesson?: string };
+    type OutcomeRow = { ts: string; agent: string; task: string; outcome: string; iterations: number; totalTokens: number; lesson?: string; account?: string };
     let entries: OutcomeRow[];
     try {
       entries = readFileSync(outcomesFile, "utf-8")
@@ -207,7 +214,7 @@ export function registerSubAgentRoutes(app: Hono): void {
       s.calls++;
       s.totalTokens += e.totalTokens ?? 0;
       s.totalIterations += e.iterations ?? 0;
-      if (e.lesson) s.latestLesson = e.lesson;
+      if (e.lesson && canReadRecord(reader, e.account)) s.latestLesson = e.lesson;
       if (!s.lastSeen || e.ts > s.lastSeen) s.lastSeen = e.ts;
       statsMap.set(e.agent, s);
     }
@@ -234,7 +241,9 @@ export function registerSubAgentRoutes(app: Hono): void {
 
     const limitRaw = Number(c.req.query("limit") ?? "50");
     const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(200, Math.trunc(limitRaw))) : 50;
-    const entries = readFlowMemoryEntries(getConfig().workspacePath, limit).reverse();
+    // Under multi-user auth an entry's request text goes to its author and an admin only.
+    const mayRead = await requestTextReader(c.req.header("Authorization"));
+    const entries = readFlowMemoryEntries(getConfig().workspacePath, limit).reverse().map((entry) => presentRequestItem(entry, mayRead));
     return c.json({ entries, totalEntries: entries.length });
   });
 
@@ -254,8 +263,10 @@ export function registerSubAgentRoutes(app: Hono): void {
       return c.json({ error: "Invalid flow-memory entry", details: parsed.error.flatten() }, 400);
     }
 
-    const entry = appendFlowMemoryEntry(getConfig().workspacePath, parsed.data);
-    return c.json(entry, 201);
+    // The caller is the entry's author: a body cannot name another account (the schema has no field
+    // for it, and zod drops what it does not know).
+    const entry = appendFlowMemoryEntry(getConfig().workspacePath, { ...parsed.data, account: recordAccount() });
+    return c.json(presentRequestItem(entry, () => true), 201);
   });
 
   app.get("/api/config-assistant/proposals", async (c) => {
@@ -264,7 +275,9 @@ export function registerSubAgentRoutes(app: Hono): void {
 
     const limitRaw = Number(c.req.query("limit") ?? "50");
     const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(100, Math.trunc(limitRaw))) : 50;
-    const proposals = listConversationConfigProposals(getConfig().workspacePath, limit);
+    // Under multi-user auth a proposal's request text goes to its author and an admin only.
+    const mayRead = await requestTextReader(c.req.header("Authorization"));
+    const proposals = listConversationConfigProposals(getConfig().workspacePath, limit).map((proposal) => presentRequestItem(proposal, mayRead));
     return c.json({ proposals, totalEntries: proposals.length });
   });
 

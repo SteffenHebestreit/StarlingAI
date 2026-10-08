@@ -161,6 +161,21 @@ describe("the workspace root is per-user", () => {
     expect(asUser("bob", () => userWorkspaceRoot(SHARED))).not.toBe(aliceRoot());
   });
 
+  it("leaves a root that already is the user's as it is, however often it was nested", () => {
+    // A restored session hands its persisted root back in, and so does a workflow run with the
+    // caller's root and id: each pass nested it once more, <shared>/users/<seg>/users/<seg>, a
+    // directory with none of the user's memory in it (found in review, 2026-10-08).
+    mockAuth(true);
+    const segment = safeUserSegment("alice");
+    const doubled = resolve(aliceRoot(), "users", segment);
+    expect(asUser("alice", () => userWorkspaceRoot(aliceRoot()))).toBe(aliceRoot());
+    expect(asUser("alice", () => userWorkspaceRoot(doubled))).toBe(aliceRoot());
+    expect(asUser("alice", () => userWorkspaceRoot(resolve(doubled, "users", segment)))).toBe(aliceRoot());
+    // Only the user's own segment is taken back: any other directory stays the root it is.
+    const elsewhere = resolve(SHARED, "users", "someone-0123456789abcdef");
+    expect(asUser("alice", () => userWorkspaceRoot(elsewhere))).toBe(resolve(elsewhere, "users", segment));
+  });
+
   it("puts the working zones inside that root, with no second partition", () => {
     // The zone name stays plain: the user segment lives in the ROOT, and applying it here too
     // would produce <root>/users/<seg>/generated/users/<seg>.

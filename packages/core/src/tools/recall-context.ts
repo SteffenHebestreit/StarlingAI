@@ -175,6 +175,10 @@ registerTool({
 
     if (requested.has("memory")) {
       try {
+        // Every scope, the agent scope included: under multi-user auth the service shows only the
+        // caller's own entries of the deployment's outcome ledger (memory/service.ts
+        // readAgentMemoryRecords), so a question about themselves no longer lists another
+        // account's delegated task (found in review, 2026-10-08).
         const search = await searchMemoryRecordsWithStatus(ctx.workspacePath, query, { limit: limitFor("memory"), sessionId: sharedSessionId });
         const records = search.records;
         const unmatched = new Set(search.unmatchedIds);

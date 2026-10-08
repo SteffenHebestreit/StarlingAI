@@ -36,6 +36,17 @@ export interface OutcomeEntry {
   taskKeywords?: string[];
   /** G32: Number of share_finding calls made during this run (quality signal). */
   sharedFindingsCount?: number;
+  /**
+   * The account the run was for: its user-scope segment (runtime/user-scope.ts recordAccount),
+   * never the raw user id. Set by the writers that run for an account: a sub-agent run's outcomes
+   * (agent/sub-agent.ts), a collapsed parallel_delegate (tools/sub-agent.ts) and record_lesson.
+   * Absent with one operator, for a run with no user, for the warden's entries, and on entries
+   * written before it existed. A reader that shows an entry's task or lesson shows it only to that
+   * account (memory/service.ts, gateway/sub-agent-routes.ts). Not stamped here: this module is a
+   * leaf the session and the warden import, and importing the user scope (and through it the
+   * config) from it hung runtime-superseded-turn.test.ts, which imports both at once.
+   */
+  account?: string;
 }
 
 const OUTCOMES_FILE = `${PRODUCT.stateDirName}/agent_outcomes.ndjson`;
@@ -57,6 +68,36 @@ export function appendOutcome(workspacePath: string, entry: OutcomeEntry): void 
   } catch (err) {
     log.warn({ err }, "Failed to write agent outcome — non-critical, continuing");
   }
+}
+
+/** What record_lesson takes from the run it is called in. */
+export interface OutcomeRun {
+  agent: string;
+  /** The task as the run's own outcome records it. */
+  task: string;
+  /** The account the run is for, as appendOutcome would stamp it. */
+  account?: string;
+  /** How far the run has got. */
+  progress(): { iterations: number; totalTokens: number };
+}
+
+const _runs = new Map<string, OutcomeRun>();
+
+/**
+ * Register an in-process run under the session id its tool calls carry (`sub:<parent>:<agent>:<ts>`),
+ * until the returned call removes it. A lesson recorded in the run is filed under the run's own task:
+ * the last ledger entry for the agent's name was another run's (found in review, 2026-10-08).
+ */
+export function beginOutcomeRun(sessionId: string, run: OutcomeRun): () => void {
+  _runs.set(sessionId, run);
+  return () => {
+    if (_runs.get(sessionId) === run) _runs.delete(sessionId);
+  };
+}
+
+/** The registered run a tool call with this session id belongs to, if any. */
+export function outcomeRunFor(sessionId: string): OutcomeRun | undefined {
+  return _runs.get(sessionId);
 }
 
 export function readRecentOutcomes(workspacePath: string, limit = 40): OutcomeEntry[] {

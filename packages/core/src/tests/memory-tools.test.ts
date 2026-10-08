@@ -428,6 +428,36 @@ describe("memory tools", () => {
     expect(searchResult.output).toContain("[user/preference]");
   });
 
+  it("promotes nothing when the requested sources are only the destination itself", async () => {
+    // Filtered down to an empty list, such a request reached the search as "no scopes", which
+    // reads every scope: workspace into workspace copied the session's facts and the agents'
+    // lessons, which nobody asked for (found in review, 2026-10-08).
+    const workspacePath = mkdtempSync(join(tmpdir(), "starlingai-memory-tools-"));
+    const userMemoryPath = mkdtempSync(join(tmpdir(), "starlingai-user-memory-tools-"));
+    dirs.push(workspacePath, userMemoryPath);
+    process.env["SAI_USER_MEMORY_PATH"] = userMemoryPath;
+    appendOutcome(workspacePath, {
+      ts: "2026-04-01T12:00:00.000Z",
+      agent: "browser_agent",
+      task: "Avoid browser loops",
+      outcome: "success",
+      iterations: 2,
+      totalTokens: 800,
+      lesson: "Stop retrying when the page state is stable and the needed evidence is already visible.",
+    });
+    await writeSharedFact("parent-session", "loop_guard", "Browser loops end once the page state is stable.");
+    const ctx = { sessionId: "sub:parent-session:productivity_agent:1", workspacePath, userId: "test-user" };
+
+    const { executeTool } = await import("../tools/registry.js");
+    const intoWorkspace = await executeTool("memory_promote", { query: "browser loops", scopes: ["workspace"] }, ctx);
+    const intoUser = await executeTool("memory_promote", { query: "browser loops", scopes: ["user"], destinationScope: "user" }, ctx);
+
+    expect(intoWorkspace.output).toContain("Workspace memory promotion completed, but no matching entries were promoted.");
+    expect(intoUser.output).toContain("User memory promotion completed, but no matching entries were promoted.");
+    const durable = await executeTool("memory_search", { query: "browser loops", scopes: ["workspace", "user"] }, ctx);
+    expect(durable.output).toContain("No memories found");
+  });
+
   it("rejects near-duplicate share_finding when token overlap ≥85%", async () => {
     const { executeTool } = await import("../tools/registry.js");
 

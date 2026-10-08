@@ -44,7 +44,8 @@ import { withSpan, genAi } from "../observability/tracing.js";
 import { runSubAgentInContainer } from "./container-runner.js";
 import { userWordsBlockForRun, type TurnUserWords } from "./delegation-user-words.js";
 import { looksLikeContainerLevelFailure, looksLikeModelTemplateArtifact, looksLikeProviderErrorEcho, looksLikeHallucinatedTruncationClaim } from "./container-failure.js";
-import { appendOutcome, computeAdaptiveSubAgentTimeoutMs, extractTaskKeywords } from "./outcomes.js";
+import { appendOutcome, beginOutcomeRun, computeAdaptiveSubAgentTimeoutMs, extractTaskKeywords } from "./outcomes.js";
+import { recordAccount } from "../runtime/user-scope.js";
 import { formatFlowMemoryGuidance } from "./flow-memory.js";
 import { acquireSlot, releaseSlot, DEFAULT_CONCURRENCY } from "../swarm/concurrency.js";
 import { applyActiveModelPreset, createChatProvider, getChatProviderForTier, resolveProviderEndpoint, tierModelDefaults } from "../providers/index.js";
@@ -2182,6 +2183,8 @@ function rejectSuspiciousNoToolOutput(
   // Shared root, like every other writer and reader of this ledger — see the note at the
   // appendOutcome call in the run's own finalizer. A per-user root splits one deployment ledger
   // into one per account, and the readers only ever look at the shared one.
+  // For the account the run is for, like the run's other outcomes (recordOutcome).
+  const account = recordAccount();
   appendOutcome(getConfig().workspacePath, {
     ts: new Date().toISOString(),
     agent: opts.agentName,
@@ -2192,6 +2195,7 @@ function rejectSuspiciousNoToolOutput(
     durationMs: Date.now() - runStartedAt,
     timeoutMs: turnTimeoutMs,
     error: reason,
+    ...(account ? { account } : {}),
   });
 
   return { output: error, stats: failureStats };
@@ -2927,6 +2931,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       log.warn({ err }, "Failed to register browser session for live preview");
     }
   }
+  // Releases this run's registration for record_lesson (beginOutcomeRun, below), in the finally.
+  let endOutcomeRun: (() => void) | undefined;
 
   try {
 
@@ -3849,6 +3855,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // G32: task-class fingerprint for outcome-weighted routing (written into every appendOutcome call)
     const taskKeywords = extractTaskKeywords(sanitizedTask);
 
+    // The account this run is for (it inherits the request of the turn that delegated it), on every
+    // outcome it writes and every lesson it records: under multi-user auth a reader shows an entry's
+    // task and lesson to that account only (memory/service.ts).
+    const runAccount = recordAccount();
     /** G32: Thin wrapper that auto-injects taskKeywords + sharedFindingsCount.
      *  Also closes the graph-memory retrieval feedback loop on success/partial
      *  outcomes so retrieved memories that led to a real deliverable get
@@ -3864,6 +3874,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         ...fields,
         taskKeywords,
         sharedFindingsCount: shareFindinCallCount,
+        ...(runAccount ? { account: runAccount } : {}),
       });
       // ADR-003 ack boundary: the run's outcome is durably recorded here. A
       // success/partial outcome means the delivered peer messages were processed
@@ -3887,6 +3898,14 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         graphMarkSessionRetrievalsUnhelpful(subSessionId, { penalty: 0.03 }).catch(() => {});
       }
     };
+    // A lesson the run records (record_lesson) is filed under the task its own outcome carries,
+    // for the account it runs for.
+    endOutcomeRun = beginOutcomeRun(subSessionId, {
+      agent: opts.agentName,
+      task: opts.task.slice(0, 200),
+      account: runAccount,
+      progress: () => ({ iterations, totalTokens: usage.totalTokens }),
+    });
 
     // A STAGED BUILD CANNOT SUCCEED WHILE ITS OWN MARKERS ARE STILL IN THE FILE.
     //
@@ -8269,6 +8288,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     if (supervisorTimer) clearInterval(supervisorTimer);
     unregisterWardenStop?.();
     browserDecider?.finish();
+    endOutcomeRun?.();
     // The run's result is already computed; it is handed to the parent only once every
     // finding it gathered is in shared facts (or its distill hit the 60 s deadline).
     await joinPendingShares();

@@ -120,6 +120,8 @@ import {
   updateConversationConfigProposal,
 } from "../agent/config-assistant-proposals.js";
 import { appendFlowMemoryEntry } from "../agent/flow-memory.js";
+import { recordAccount } from "../runtime/user-scope.js";
+import { presentRequestItem, requestTextReader } from "./config-assistant-visibility.js";
 
 
 import { JobConfigSchema } from "../config/schema.js";
@@ -2978,6 +2980,8 @@ export function createGateway() {
         validations: result.draft.validations,
         tags: result.draft.tags,
         lesson: result.draft.lesson,
+        // Whose request it is: under multi-user auth its text goes back to them and an admin only.
+        account: recordAccount(),
       });
 
       const flowEntry = appendFlowMemoryEntry(cfg.workspacePath, {
@@ -2993,6 +2997,7 @@ export function createGateway() {
         outcome: "proposed",
         lesson: proposal.lesson,
         tags: proposal.tags,
+        account: proposal.account,
       });
 
       // Structured attribution audit trail — creation event (GAP-3)
@@ -3004,7 +3009,7 @@ export function createGateway() {
         summary: proposal.summary,
       }, { severity: "info", channel: "config-assistant" });
 
-      return c.json({ proposal, flowMemoryId: flowEntry.id }, 201);
+      return c.json({ proposal: presentRequestItem(proposal, () => true), flowMemoryId: flowEntry.id }, 201);
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
     }
@@ -3109,9 +3114,13 @@ export function createGateway() {
         outcome: "applied",
         lesson: proposal.lesson,
         tags: proposal.tags,
+        // The request is still its author's, whoever applies it.
+        account: proposal.account,
       });
 
-      return c.json({ proposal: updated ?? proposal });
+      // Any operator may apply any proposal; the request text goes to its author and an admin only.
+      const mayRead = await requestTextReader(c.req.header("Authorization"));
+      return c.json({ proposal: presentRequestItem(updated ?? proposal, mayRead) });
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
     }
@@ -3163,9 +3172,13 @@ export function createGateway() {
       outcome: parsed.data.outcome,
       lesson: parsed.data.lesson ?? proposal.lesson,
       tags: proposal.tags,
+      // The request is still its author's, whoever gives the feedback.
+      account: proposal.account,
     });
 
-    return c.json({ proposal: updated ?? proposal });
+    // The request text goes to its author and an admin only.
+    const mayRead = await requestTextReader(c.req.header("Authorization"));
+    return c.json({ proposal: presentRequestItem(updated ?? proposal, mayRead) });
   });
 
   // ── AG-UI streaming chat (SSE) ────────────────────────────────────────────

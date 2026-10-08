@@ -13,7 +13,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, extname } from "node:path";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
-import { appendOutcome, readRecentOutcomes } from "../agent/outcomes.js";
+import { appendOutcome, outcomeRunFor } from "../agent/outcomes.js";
 import { appendAgentMessage, writeSharedFact, readAllFacts, searchSharedFacts, isAtomicFactValue } from "../swarm/memory.js";
 import { appendEvidenceClaim } from "../swarm/evidence-ledger.js";
 import { emitSwarmEvent } from "../swarm/bus.js";
@@ -21,18 +21,21 @@ import { logAudit } from "../audit/logger.js";
 import { isAgentMessagingSuppressed } from "../agent/warden.js";
 import { readPromotedAgents } from "../agent/promoted-agents.js";
 import { getConfig } from "../config/loader.js";
+import { recordAccount } from "../runtime/user-scope.js";
 import { getEmbeddingProvider } from "../providers/index.js";
 import { getSession } from "../agent/session.js";
 import {
   compactUserMemoryRecords,
   compactWorkspaceMemoryRecords,
   promoteMemoryRecords,
+  searchableMemoryScopes,
   searchMemoryRecordsWithStatus,
   storeUserMemoryRecord,
   storeWorkspaceMemoryRecord,
   type DurableMemoryScope,
   type MemoryKind,
   type MemoryScope,
+  type PromoteMemoryResult,
 } from "../memory/service.js";
 import { computeMemoryCurationReport } from "../memory/steward.js";
 import {
@@ -403,6 +406,8 @@ function resolveDurableWriteScope(
 
 const SCOPE_DOWNGRADE_NOTE = " (requested scope 'user' was stored to workspace: no authenticated user on this session)";
 
+const AGENT_SCOPE_NOT_SEARCHED_NOTE = "Agent lessons are searchable only by the account they were recorded for, and this request has no account: the agent scope was not searched.";
+
 registerTool({
   name: "memory_store",
   description:
@@ -538,9 +543,20 @@ registerTool({
     if (!query) return { success: false, output: "", error: "query is required" };
 
     try {
+      // Under multi-user auth the agent scope shows the caller's own lessons only, and with no user
+      // in the request it is not searched, asked for or not (memory/service.ts
+      // searchableMemoryScopes). The metadata then names the scopes searched, and a request that
+      // named the agent scope is told it was left out, so an empty answer is not read as "no
+      // lessons stored".
+      const searchable = searchableMemoryScopes(scopes);
+      const agentWithheld = !searchable.includes("agent") && (!scopes?.length || scopes.includes("agent"));
+      const agentNote = agentWithheld && scopes?.includes("agent") ? AGENT_SCOPE_NOT_SEARCHED_NOTE : "";
+      if (agentWithheld && searchable.length === 0) {
+        return { success: true, output: `No memories found matching '${query}'.\n${agentNote}`, metadata: { count: 0, scopes: [], semanticRan: true } };
+      }
       const search = await searchMemoryRecordsWithStatus(ctx.workspacePath, query, {
         limit,
-        scopes,
+        scopes: agentWithheld ? searchable : scopes,
         kinds,
         sessionId: deriveSharedSessionId(ctx.sessionId),
         targetAgent,
@@ -556,10 +572,10 @@ registerTool({
       const uncompared = search.notComparedSemantically > 0
         ? `${search.notComparedSemantically} stored record(s) without a word match were not compared by meaning — narrow scopes or kinds to include them.`
         : "";
-      const notes = [lexicalOnly, uncompared].filter(Boolean).join("\n");
+      const notes = [lexicalOnly, uncompared, agentNote].filter(Boolean).join("\n");
       const metadata = {
         count: results.length,
-        scopes: scopes ?? ["workspace", "user", "session", "agent"],
+        scopes: agentWithheld ? searchable : scopes ?? ["workspace", "user", "session", "agent"],
         semanticRan: search.semanticRan,
         ...(unmatched.size > 0 ? { unmatched: unmatched.size } : {}),
       };
@@ -752,9 +768,8 @@ registerTool({
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const query = String(args["query"] ?? "").trim();
     const limit = Math.min(20, Math.max(1, Number(args["limit"] ?? 5)));
-    const scopes = Array.isArray(args["scopes"])
-      ? args["scopes"].map(String).filter((value): value is MemoryScope => value === "workspace" || value === "session" || value === "agent")
-      : undefined;
+    const requestedScopes = Array.isArray(args["scopes"]) ? args["scopes"].map(String) : undefined;
+    const scopes = requestedScopes?.filter((value): value is MemoryScope => value === "workspace" || value === "session" || value === "agent");
     const kind = String(args["kind"] ?? "").trim().toLowerCase() as MemoryKind | "";
     const targetAgent = String(args["targetAgent"] ?? "").trim() || undefined;
     const requestedDestinationScope = String(args["destinationScope"] ?? "workspace").trim().toLowerCase() as DurableMemoryScope | "";
@@ -766,18 +781,22 @@ registerTool({
     const { scope: destinationScope, downgraded } = resolveDurableWriteScope(requestedDestinationScope, ctx);
 
     try {
-      const result = await promoteMemoryRecords(ctx.workspacePath, query, {
-        sessionId: deriveSharedSessionId(ctx.sessionId),
-        scopes,
-        targetAgent,
-        destinationKind: kind || undefined,
-        destinationScope,
-        maxPromotions: limit,
-        writeContext: {
-          agentName: ctx.currentAgentName,
-          sessionId: ctx.sessionId,
-        },
-      });
+      // A list naming no source scope ("user", the user destination itself) asks for nothing: left
+      // empty it would reach the service as "no scopes", every default source.
+      const result: PromoteMemoryResult = requestedScopes?.length && !scopes?.length
+        ? { promoted: [], merged: [], skipped: 0, destinationScope }
+        : await promoteMemoryRecords(ctx.workspacePath, query, {
+          sessionId: deriveSharedSessionId(ctx.sessionId),
+          scopes,
+          targetAgent,
+          destinationKind: kind || undefined,
+          destinationScope,
+          maxPromotions: limit,
+          writeContext: {
+            agentName: ctx.currentAgentName,
+            sessionId: ctx.sessionId,
+          },
+        });
 
       const promotedLines = result.promoted.map((record) => `- promoted **${record.subject}** as ${record.kind}`);
       const mergedLines = result.merged.map((record) => `- merged into **${record.subject}** as ${record.kind}`);
@@ -878,23 +897,31 @@ registerTool({
 
     if (!lesson) return { success: false, output: "", error: "lesson is required" };
 
+    // The run this call belongs to: its task, account and progress (agent/sub-agent.ts registers
+    // each in-process run under the session id its tool calls carry). The lesson used to take the
+    // task of the latest ledger entry for this agent's name, which was another run's: one that
+    // finished meanwhile, possibly for another account, and otherwise the agent's PREVIOUS run, since
+    // this run's own outcome is written when it ends (found in review, 2026-10-08). A call from
+    // outside a registered run is filed under no one's task.
+    const run = outcomeRunFor(ctx.sessionId);
     // Derive agent name from sessionId (sub:parentId:agentName:timestamp)
     const parts = ctx.sessionId.split(":");
-    const agentName = parts.length >= 3 ? parts[2]! : "unknown";
+    const agentName = run?.agent ?? (parts.length >= 3 ? parts[2]! : "unknown");
+    const progress = run?.progress();
+    // The run's account; outside a registered run, the request's.
+    const account = run ? run.account : recordAccount();
 
-    // Read the most recent outcome for this agent and attach the lesson. Shared root: the ledger
-    // describes the deployment's agents, and a per-user root reads one account's slice of it.
-    const recents = readRecentOutcomes(getConfig().workspacePath, 20);
-    const latest = [...recents].reverse().find(o => o.agent === agentName);
-
+    // Shared root: the ledger describes the deployment's agents, and a per-user root holds one
+    // account's slice of it.
     appendOutcome(getConfig().workspacePath, {
       ts: new Date().toISOString(),
       agent: agentName,
-      task: latest?.task ?? "(lesson recorded explicitly)",
+      task: run?.task ?? "(lesson recorded explicitly)",
       outcome,
-      iterations: latest?.iterations ?? 0,
-      totalTokens: latest?.totalTokens ?? 0,
+      iterations: progress?.iterations ?? 0,
+      totalTokens: progress?.totalTokens ?? 0,
       lesson,
+      ...(account ? { account } : {}),
     });
 
     log.info({ agentName, outcome, lesson }, "Lesson recorded");

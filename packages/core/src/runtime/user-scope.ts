@@ -84,6 +84,49 @@ export function activeUserScopeSegment(userId: string | undefined = currentUserI
 /** The `users` directory name, shared with the workspace zone resolver. */
 export { USERS_SUBDIR };
 
+// ── Records of a store every account writes to ────────────────────────────────
+// The agent outcome ledger and flow memory are one file for the whole deployment. Each record
+// carries the user-scope segment of the account it was written for (never the raw user id), so a
+// reader that shows a record's text can keep to the caller's own.
+
+/** The segment to stamp on a record written now: the ambient user's under multi-user auth, none
+ *  otherwise. None too when the config cannot be read; such a record is then shown to no one. */
+export function recordAccount(): string | undefined {
+  try {
+    return activeUserScopeSegment();
+  } catch {
+    return undefined;
+  }
+}
+
+/** Whose records the current request may read. */
+export interface RecordReader {
+  /** Multi-user auth is off: every record is the one operator's. */
+  all: boolean;
+  /** The caller's segment under multi-user auth; absent when the request has no user. */
+  segment?: string;
+}
+
+/**
+ * Every record with multi-user auth off; under it the caller's own, and none when the request has
+ * no user. A config that cannot be read counts as multi-user with no user: nothing is shown.
+ */
+export function recordReader(): RecordReader {
+  try {
+    if (!partitioningEnabled()) return { all: true };
+    const segment = activeUserScopeSegment();
+    return segment ? { all: false, segment } : { all: false };
+  } catch {
+    return { all: false };
+  }
+}
+
+/** Whether a record written for `account` is the reader's to see. A record with no account is
+ *  visible only with multi-user auth off. */
+export function canReadRecord(reader: RecordReader, account: string | undefined): boolean {
+  return reader.all || (reader.segment !== undefined && account === reader.segment);
+}
+
 /**
  * The per-user store segments that exist under `<base>/users` — for background
  * drivers / admin surfaces that must enumerate every user's bucket rather than

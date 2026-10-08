@@ -27,6 +27,12 @@ export interface FlowMemoryEntry {
   outcome: FlowMemoryOutcome;
   lesson?: string;
   tags: string[];
+  /** The account whose request this was: its user-scope segment, never the raw user id. Absent
+   *  with one operator, for a request with no user, and on entries written before it existed.
+   *  Under multi-user auth the request text goes back only to that account and to an admin
+   *  (gateway/config-assistant-visibility.ts), and an agent-scope search shows the entry only to
+   *  that account (memory/service.ts). */
+  account?: string;
 }
 
 export interface FlowMemoryMatch extends FlowMemoryEntry {
@@ -54,6 +60,7 @@ export function appendFlowMemoryEntry(
     outcome: entry.outcome,
     lesson: entry.lesson?.trim().slice(0, 800) || undefined,
     tags: normalizeList(entry.tags, MAX_TAGS, 48),
+    ...(entry.account ? { account: entry.account } : {}),
   };
 
   try {
