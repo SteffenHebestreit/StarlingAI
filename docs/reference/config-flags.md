@@ -8,7 +8,7 @@ Every public schema field, where it is declared, and how many production files r
 
 | Field | Declared in | Read sites |
 | --- | --- | --- |
-| `a2a` | packages/core/src/config/schema.ts:423 | 12 |
+| `a2a` | packages/core/src/config/schema.ts:423 | 15 |
 | `accessKeyId` | packages/core/src/config/schema.ts:483 | 2 |
 | `accessToken` | packages/core/src/config/schemas/channels.ts:51 | 9 |
 | `account` | packages/core/src/config/schemas/channels.ts:71 | 92 |
@@ -59,7 +59,7 @@ Every public schema field, where it is declared, and how many production files r
 | `blockOn` | packages/core/src/config/schema.ts:1263 | 1 |
 | `botToken` | packages/core/src/config/schemas/channels.ts:10 | 10 |
 | `browser` | packages/core/src/config/schemas/decisions.ts:85 | 74 |
-| `bucket` | packages/core/src/config/schema.ts:482 | 23 |
+| `bucket` | packages/core/src/config/schema.ts:482 | 25 |
 | `budget` | packages/core/src/config/schema.ts:1655 | 91 |
 | `budgets` | packages/core/src/config/schema.ts:543 | 14 |
 | `candidateTopK` | packages/core/src/config/schemas/retrieval.ts:105 | 2 |
@@ -221,7 +221,7 @@ Every public schema field, where it is declared, and how many production files r
 | `intentReadout` | packages/core/src/config/schemas/orchestration.ts:786 | 5 |
 | `intervalMs` | packages/core/src/config/schema.ts:627 | 8 |
 | `isolation` | packages/core/src/config/schema.ts:2005 | 21 |
-| `issuer` | packages/core/src/config/schema.ts:407 | 7 |
+| `issuer` | packages/core/src/config/schema.ts:407 | 8 |
 | `jwtSecret` | packages/core/src/config/schema.ts:328 | 6 |
 | `keywords` | packages/core/src/config/schemas/multimodal.ts:237 | 29 |
 | `kubeconfigPath` | packages/core/src/config/schema.ts:1093 | 1 |
@@ -306,7 +306,7 @@ Every public schema field, where it is declared, and how many production files r
 | `moderateToolOutputs` | packages/core/src/config/schema.ts:1261 | 1 |
 | `monthlyUsd` | packages/core/src/config/schema.ts:545 | 2 |
 | `mounts` | packages/core/src/config/schema.ts:707 | 11 |
-| `name` | packages/core/src/config/schema.ts:1997 | 371 |
+| `name` | packages/core/src/config/schema.ts:1997 | 372 |
 | `negativePrompt` | packages/core/src/config/schemas/multimodal.ts:175 | 7 |
 | `network` | packages/core/src/config/schema.ts:708 | 57 |
 | `node` | packages/core/src/config/schema.ts:1066 | 240 |
@@ -466,7 +466,7 @@ Every public schema field, where it is declared, and how many production files r
 | `submitSelector` | packages/core/src/config/schema.ts:813 | 5 |
 | `supersedeStaleFacts` | packages/core/src/config/schema.ts:1550 | 1 |
 | `suppressUnvalidatedDraftStreaming` | packages/core/src/config/schemas/orchestration.ts:196 | 1 |
-| `surface` | packages/core/src/config/schema.ts:916 | 93 |
+| `surface` | packages/core/src/config/schema.ts:916 | 94 |
 | `surfaceRoutingNearMisses` | packages/core/src/config/schemas/orchestration.ts:832 | 2 |
 | `synthesis` | packages/core/src/config/schema.ts:261 | 59 |
 | `systemPrompt` | packages/core/src/config/schema.ts:944 | 20 |
@@ -511,7 +511,7 @@ Every public schema field, where it is declared, and how many production files r
 | `urlNotFetchedShortAnswerGuard` | packages/core/src/config/schemas/orchestration.ts:283 | 1 |
 | `urls` | packages/core/src/config/schema.ts:810 | 10 |
 | `userAgent` | packages/core/src/config/schema.ts:1173 | 3 |
-| `username` | packages/core/src/config/schema.ts:376 | 52 |
+| `username` | packages/core/src/config/schema.ts:376 | 53 |
 | `usernameClaim` | packages/core/src/config/schema.ts:416 | 1 |
 | `usernameSelector` | packages/core/src/config/schema.ts:811 | 5 |
 | `userProfilePrefetch` | packages/core/src/config/schemas/orchestration.ts:624 | 4 |

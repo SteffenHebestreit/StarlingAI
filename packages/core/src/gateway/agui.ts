@@ -28,6 +28,7 @@ import { extendDeadlineForDelegationWait, resolveDelegationWaitCeilingMs } from 
 import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
 import { roleRank } from "./auth.js";
+import { clientMayCreateSessionId } from "./session-route-access.js";
 import type { InterventionNotice } from "../agent/interventions.js";
 
 const TURN_TIMEOUT_SYNTHESIS_GRACE_MS = 65_000;
@@ -121,6 +122,18 @@ export async function handleAguiStream(
       res.end(JSON.stringify({ error: "Session not found" }));
       return;
     }
+  }
+
+  // No session has the id, so the createSession below would adopt it. Under multi-user auth not an
+  // id in a namespace the system mints ids in: A2A, MCP, federation and nested runs have no session
+  // record there, and a session adopted under such an id shared that run's facts bucket, another
+  // account's included (see clientMayCreateSessionId). The opaque 404 of the gates above, so the
+  // reply says nothing about whose run that is.
+  if (!session && sessionId && !clientMayCreateSessionId(sessionId)) {
+    log.warn({ sessionId, caller: userId ?? "(none)" }, "AG-UI stream denied: session id in a reserved namespace");
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Session not found" }));
+    return;
   }
 
   // SSE headers

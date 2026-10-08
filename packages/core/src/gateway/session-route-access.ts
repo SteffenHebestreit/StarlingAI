@@ -1,5 +1,6 @@
 import { getConfig } from "../config/loader.js";
 import { getSessionRecord } from "../agent/session.js";
+import { isInternalSessionId } from "../agent/session-ids.js";
 import { userHasRole, type AuthenticatedUser } from "./auth.js";
 
 /**
@@ -23,4 +24,21 @@ export function callerMayUseSession(caller: AuthenticatedUser | null, sessionId:
   const session = getSessionRecord(sessionId);
   if (!session) return false;
   return session.userId === undefined || session.userId === caller?.username;
+}
+
+/**
+ * Whether a client may start a new session under an id it chose (the AG-UI stream adopts the id a
+ * request names when no session has it).
+ *
+ * Under multi-user auth, not an id in a namespace the system mints ids in (isInternalSessionId).
+ * Runs there have no session record, so the id looked free, and a session created under it shared
+ * the run's facts bucket: a turn's shared facts live under its session id, a sub-agent's under its
+ * root's. A2A ids are predictable from the account's name (`a2a-in:<user segment>:<id>`), so one
+ * account could name another's A2A run and read what it found (found in review, 2026-10-08). Any
+ * other id stays the client's to choose, so clients that pre-generate a UUID keep working.
+ * With auth off there is one operator and nothing to keep apart.
+ */
+export function clientMayCreateSessionId(sessionId: string): boolean {
+  if (getConfig().auth?.enabled !== true) return true;
+  return !isInternalSessionId(sessionId);
 }

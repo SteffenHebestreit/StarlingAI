@@ -9,6 +9,24 @@
  * nobody else reads, and its audit events, steering and operator stops missed their turn (2026-10-07).
  */
 
+/**
+ * The namespaces of session ids the system mints for runs no chat client started: nested runs
+ * (`sub:`, `workflow:`), A2A runs (`a2a-in:<user segment>:<id>` and `a2a-in:<uuid>` on the public
+ * surface, `a2a:` on the legacy route, `a2a-out:` for calls to a peer), MCP and federation runs
+ * (`mcp:<caller>:`, `fed:<issuer>:`), evaluations (`eval:`, `eval-judge:`, `scene-eval:`), the
+ * self-improvement loop (`selfimprove:`) and `job:`, the namespace a job's runs act as. Such a run
+ * has no session record, and its shared facts, peer messages and checkpoints live under its id.
+ */
+export const INTERNAL_SESSION_ID_PREFIXES: readonly string[] = [
+  "sub:", "workflow:", "a2a-in:", "a2a-out:", "a2a:", "mcp:", "fed:",
+  "eval:", "eval-judge:", "scene-eval:", "selfimprove:", "job:",
+];
+
+/** Whether `sessionId` lies in a namespace the system mints ids in (INTERNAL_SESSION_ID_PREFIXES). */
+export function isInternalSessionId(sessionId: string): boolean {
+  return INTERNAL_SESSION_ID_PREFIXES.some((prefix) => sessionId.startsWith(prefix));
+}
+
 /** The namespace of agents the ephemeral-agent factory mints; part of the agent name, not the parent. */
 const EPHEMERAL_NAMESPACE = "ephemeral";
 

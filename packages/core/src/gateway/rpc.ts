@@ -817,8 +817,10 @@ export class RpcConnection {
 
       case "chat.send": {
         const sessionId = String(params["sessionId"] ?? this.activeSessionId ?? "");
-        // Don't let a caller drive a turn on another user's existing session
-        // (a not-yet-created session id falls through — it will be owned by them).
+        // Don't let a caller drive a turn on another user's existing session. An id with no
+        // session behind it passes here and is refused below, where resolveSession finds nothing:
+        // chat.send never creates a session under a client's id (session.create mints the id), so
+        // it cannot adopt the id of a run that has no record, as an A2A run's (a2a-in:<user>:<id>).
         // Stays the BARE message: an ownership denial must not describe the session's
         // fate, or the id becomes probeable for existence.
         if (sessionId && !this.canAccessSession(sessionId)) throw new Error(`Session not found: ${sessionId}`);
