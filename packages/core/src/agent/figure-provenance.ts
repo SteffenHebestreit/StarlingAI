@@ -49,12 +49,25 @@ function countsAsFigure(key: string): boolean {
   return key.length >= 2;
 }
 
-/** Add the key of every figure in `text` to `into`. */
-export function addFigureKeys(into: Set<string>, text: string | null | undefined): void {
+/** Add the key of every figure in `text` to `into`, except the keys in `except`. */
+export function addFigureKeys(into: Set<string>, text: string | null | undefined, except?: ReadonlySet<string>): void {
   if (!text) return;
   for (const match of text.matchAll(FIGURE_RE)) {
     const key = figureKey(match[0]);
-    if (countsAsFigure(key)) into.add(key);
+    if (countsAsFigure(key) && !except?.has(key)) into.add(key);
+  }
+}
+
+/**
+ * Add the key of every figure in a tool call's arguments: each string and number, at any depth.
+ * Read value by value, not from the call's JSON, where an escape glues a letter to the figure
+ * behind it ("Anzahl:\n8393" is "Anzahl:\\n8393" there, and "n8393" is no figure).
+ */
+export function addArgumentFigureKeys(into: Set<string>, value: unknown, depth = 0): void {
+  if (typeof value === "string") addFigureKeys(into, value);
+  else if (typeof value === "number" && Number.isFinite(value)) addFigureKeys(into, String(value));
+  else if (value && typeof value === "object" && depth < 8) {
+    for (const entry of Array.isArray(value) ? value : Object.values(value)) addArgumentFigureKeys(into, entry, depth + 1);
   }
 }
 

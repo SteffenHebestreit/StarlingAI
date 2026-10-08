@@ -35,7 +35,7 @@ import { STEERING_PREFIX } from "./turn-boundary.js";
 import { currentEffortProfile, effectiveOrchestration, effectiveSubAgentTurnSloMs } from "../runtime/effort-context.js";
 import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type ToolContext, type SwarmState, type ToolResult } from "../tools/registry.js";
 import { isToolAllowed, requiresSandbox } from "../guardrails/tool-tiers.js";
-import { addFigureKeys, countUnobservedFigures, maskUnobservedFigures } from "./figure-provenance.js";
+import { addArgumentFigureKeys, addFigureKeys, countUnobservedFigures, maskUnobservedFigures } from "./figure-provenance.js";
 import {
   addExecutionRecord,
   capOutcomeForUnbackedFigures,
@@ -1408,6 +1408,12 @@ export const IDEMPOTENT_TOOLS = new Set<string>([
 // one: a repeated generate_image is "make another one", and in a chat the person may choose
 // different settings for it. The turn loop exempts the same tool (STATE_DEPENDENT_TOOL_NAMES).
 export const NEVER_REPLAYED_TOOLS = new Set<string>(["generate_image"]);
+
+// The tools a run publishes a fact to the session's shared memory with (tools/memory.ts), and the
+// arguments of theirs that identify the fact and its source instead of stating anything. See the
+// figure check at their call site.
+const SHARED_FACT_TOOLS = new Set<string>(["share_finding", "share_evidence"]);
+const SHARED_FACT_IDENTITY_FIELDS = new Set<string>(["key", "sourceUrl"]);
 
 /**
  * Structural completeness check for a written text artifact, used by the
@@ -3699,6 +3705,17 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // own prose, the files it wrote, or what it shared: those are the claims being checked.
     const observedFigureKeys = new Set<string>();
     if (tracksFigures) addFigureKeys(observedFigureKeys, systemPrompt);
+    // A RUN'S OWN CLAIM HANDED BACK TO IT IS STILL ITS OWN CLAIM. Keys of the figures the run put
+    // into the arguments of its own calls before any input had contained them: the files it wrote,
+    // what it shared, the task it delegated. In review, a coder whose sandbox was broken wrote its
+    // "result" into results.md from its head, read the file back, and the read counted as the
+    // figure's source, so its answer went unmasked and the run reported success. A grep over the
+    // file, a git diff, the echo of share_finding, the shared-findings refresh, read_shared_facts and
+    // a specialist repeating a delegated task's figure hand the claim back the same way. So no tool
+    // result or system message adds one of these keys; the user's own messages, the system prompt
+    // and the runtime's nudges still do. The same session-00b3675d rule keeps a read-back of the
+    // run's own file out of the shared facts (see the auto-share below).
+    const ownClaimFigureKeys = new Set<string>();
     // How far into `history` the set has read. The trim digests, drops and clamps history in place,
     // so the set is filled BEFORE each trim; rebuilt from history when the answer is written, it
     // would miss a figure the run read early and the trim has since removed.
@@ -3708,12 +3725,27 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       for (; absorbedHistoryLength < history.length; absorbedHistoryLength++) {
         const message = history[absorbedHistoryLength]!;
         if (message.role !== "assistant") {
-          addFigureKeys(observedFigureKeys, typeof message.content === "string" ? message.content : "");
+          const content = typeof message.content === "string" ? message.content : "";
+          addFigureKeys(observedFigureKeys, content, message.role === "user" ? undefined : ownClaimFigureKeys);
           continue;
         }
         for (const call of message.tool_calls ?? []) {
           if (requiresSandbox(call.function.name)) addFigureKeys(observedFigureKeys, call.function.arguments);
         }
+      }
+    };
+    /**
+     * The figures a call's arguments introduce. A sandbox call's arguments are what the run
+     * executed, read above as received. A read (IDEMPOTENT_TOOLS) asks for something and claims
+     * nothing: a figure in a path, pattern or query is confirmed by an input that contains it.
+     * Read when the call is made, against what the run had received by then.
+     */
+    const recordOwnClaims = (toolName: string, args: unknown): void => {
+      if (!tracksFigures || requiresSandbox(toolName) || IDEMPOTENT_TOOLS.has(toolName)) return;
+      const claimed = new Set<string>();
+      addArgumentFigureKeys(claimed, args);
+      for (const key of claimed) {
+        if (!observedFigureKeys.has(key)) ownClaimFigureKeys.add(key);
       }
     };
     // Measured, never acted on: how many figures a run with at least one productive execution
@@ -4440,8 +4472,14 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     };
     // The user's words ride along: this prompt replaces the run's history, and without them a
     // synthesis of an English paraphrase had nothing to tell it the user wrote in German.
-    const buildFactsFirstSynthMessages = (curated: string): LLMMessage[] =>
-      buildFactsFirstSynthesisMessages(`${opts.task}${userWordsBlock}`, curated);
+    const buildFactsFirstSynthMessages = (curated: string): LLMMessage[] => {
+      // The findings are something the run receives, like the forced-answer instruction: up to
+      // 12,000 characters of them, where the snapshot it started with held 12 or 2,400. A
+      // teammate's figure that reached it only here was masked as made up (review of E2E
+      // 2026-10-07). What the run shared itself is in them too, and stays its own claim.
+      if (tracksFigures) addFigureKeys(observedFigureKeys, curated, ownClaimFigureKeys);
+      return buildFactsFirstSynthesisMessages(`${opts.task}${userWordsBlock}`, curated);
+    };
     /** Run a forced-synthesis completion, preferring the streaming accumulator so
      *  it gets token-progress + the per-chunk inactivity abort (a hung synthesis
      *  is exactly the failure we're guarding against). */
@@ -6533,6 +6571,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             continue;
           }
         }
+        // Whatever happens to the call below, its arguments are what the model claimed.
+        recordOwnClaims(tc.name, tc.arguments);
 
         const priorApprovalFailure = approvalBlockedTools.get(tc.name);
         if (priorApprovalFailure) {
@@ -7007,15 +7047,17 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         // What a run shares becomes a fact other agents build on, so a figure it publishes while no
         // execution of its own has completed with output is held to the same rule as its answer.
         // Its arguments are the model's own claim, checked against what the run had received
-        // before it made this call.
+        // before it made this call. Every text field is: the tool stores notes, source title,
+        // publisher and dates with the value (formatSharedFindingValue), and in review a figure
+        // in `notes` reached the store and the FACT lines while `value` and `claim` were masked.
+        // The key names the finding and the URL its source; neither is a figure the run states.
         let executedArgs = tc.arguments;
-        if (tc.name === "share_finding" && tracksFigures && noExecutionCompleted(executionRecord)) {
+        if (SHARED_FACT_TOOLS.has(tc.name) && tracksFigures && noExecutionCompleted(executionRecord)) {
           absorbNewHistory();
           const maskedArgs: Record<string, unknown> = { ...tc.arguments };
           let maskedInShare = 0;
-          for (const field of ["value", "claim"]) {
-            const value = maskedArgs[field];
-            if (typeof value !== "string") continue;
+          for (const [field, value] of Object.entries(maskedArgs)) {
+            if (typeof value !== "string" || SHARED_FACT_IDENTITY_FIELDS.has(field)) continue;
             const { text, masked } = maskUnobservedFigures(value, observedFigureKeys);
             maskedArgs[field] = text;
             maskedInShare += masked;
@@ -7026,7 +7068,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             logAudit("guardrail_flagged", {
               type: "sub_agent_unobserved_figures_masked",
               agentName: opts.agentName,
-              site: "share_finding",
+              site: tc.name,
               masked: maskedInShare,
               attempted: executionRecord.attempted,
               failed: executionRecord.failed,

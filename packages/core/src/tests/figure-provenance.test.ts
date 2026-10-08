@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   UNOBSERVED_FIGURE_MARKER,
+  addArgumentFigureKeys,
   addFigureKeys,
   countUnobservedFigures,
   figureKey,
@@ -38,6 +39,25 @@ describe("figure keys", () => {
       text: "v18 x86_64 ES2020 eval-1bbd174404efbce9, step 3",
       masked: 0,
     });
+  });
+});
+
+describe("the figures a run's own calls state", () => {
+  it("are read from the arguments value by value, at any depth, numbers included", () => {
+    const args = { path: "results.md", content: "Anzahl:\n8393", rows: [[1255204276, "Summe"]], limit: 7 };
+    const keys = new Set<string>();
+    addArgumentFigureKeys(keys, args);
+    expect([...keys].sort()).toEqual(["1255204276", "8393"]);
+    // The call's JSON glues the escape's letter to the figure behind it.
+    const fromJson = new Set<string>();
+    addFigureKeys(fromJson, JSON.stringify(args));
+    expect(fromJson.has("8393")).toBe(false);
+  });
+
+  it("a key the caller excludes is not added", () => {
+    const keys = new Set<string>();
+    addFigureKeys(keys, "Anzahl 8.393, Lauf 4711", new Set(["8393"]));
+    expect([...keys]).toEqual(["4711"]);
   });
 });
 

@@ -81,7 +81,10 @@ describe("the code a delegated run executed, and the figures it states", () => {
   let shared: Array<Record<string, unknown>> = [];
 
   const writeConfig = (contextWindow?: number) => {
-    const coderTools = ["write_file", "read_file", "list_files", "shell_exec", "run_script", "share_finding", "git_commit"];
+    const coderTools = [
+      "write_file", "read_file", "list_files", "grep_files", "shell_exec", "run_script",
+      "share_finding", "share_evidence", "read_shared_facts", "git_commit",
+    ];
     writeFileSync(join(tempDir, "starlingai.json"), JSON.stringify({
       // The outcomes ledger is written under the deployment's workspace (agent/outcomes.ts).
       workspacePath: tempDir,
@@ -102,6 +105,12 @@ describe("the code a delegated run executed, and the figures it states", () => {
           description: "Runs a batch of checks in the sandbox.",
           systemPrompt: "ONE-SHOT-KQ Run the checks in the sandbox and report what they printed.",
           tools: ["shell_exec"],
+          maxIterations: 1,
+        },
+        facts_coder: {
+          description: "Runs one script in the sandbox and reports.",
+          systemPrompt: "FACTS-KQ Run the script in the sandbox and report what it printed.",
+          tools: ["shell_exec", "share_finding"],
           maxIterations: 1,
         },
         lean_coder: {
@@ -139,21 +148,25 @@ describe("the code a delegated run executed, and the figures it states", () => {
     vi.resetModules();
   });
 
-  /** Fake tools, registered after the real ones have loaded, so none of them replaces a fake mid-run. */
-  const registerTools = async (handlers: Record<string, Handler>) => {
+  /** Fake tools, registered after the real ones have loaded, so none of them replaces a fake mid-run.
+   *  `realShare` keeps the real share_finding, which formats what it stores and echoes it. */
+  const registerTools = async (handlers: Record<string, Handler>, { realShare = false } = {}) => {
     await import("../tools/sub-agent.js");
     await Promise.all([
       import("../tools/filesystem.js"),
+      import("../tools/code-navigation.js"),
       import("../tools/shell.js"),
       import("../tools/git.js"),
       import("../tools/memory.js"),
     ]);
     const { registerTool } = await import("../tools/registry.js");
     const all: Record<string, Handler> = {
-      share_finding: (args) => {
-        shared.push(args);
-        return { success: true, output: `Finding "${String(args["key"])}" shared.` };
-      },
+      ...(realShare ? {} : {
+        share_finding: (args: Record<string, unknown>) => {
+          shared.push(args);
+          return { success: true, output: `Finding "${String(args["key"])}" shared.` };
+        },
+      }),
       git_commit: () => ({ success: true, output: "[main 4f3c2a1] add primes script\n 1 file changed, 23 insertions(+)", metadata: { sandboxed: true } }),
       ...handlers,
     };
@@ -470,6 +483,203 @@ describe("the code a delegated run executed, and the figures it states", () => {
     expect(result.stats.outcome).toBe("partial");
     expect(result.executions).toEqual({ attempted: 1, failed: 1, succeededWithOutput: 0 });
   }, 60_000);
+
+  describe("(l) what the run wrote, handed back to it, is not evidence for it", () => {
+    // The sandbox is broken: the coder writes its "result" into results.md from its head, its one
+    // execution fails, and it reads the file back. The write's arguments were never evidence; the
+    // read hands the same figure back, and it was counted as one the run had received.
+    const RESULTS = "# Ergebnis\nAnzahl der Primzahlen: 8393\n";
+    const writeResults = { tool: "write_file", args: { path: "results.md", content: RESULTS } };
+    const writeTool = (args: Record<string, unknown>): ToolResult => ({
+      success: true,
+      output: `File written: generated/${String(args["path"])} (${String(args["content"]).length} chars)`,
+      metadata: { filename: String(args["path"]), outputPath: `generated/${String(args["path"])}`, contentType: "text/markdown", previewMode: "text" },
+    });
+
+    const runReadBack = async (readCall: { tool: string; args: Record<string, unknown> }, handlers: Record<string, Handler>) => {
+      await registerTools({ write_file: writeTool, shell_exec: () => failed(), ...handlers });
+      completeMock.mockImplementation(async (messages: Message[]) => scripted([
+        writeResults,
+        { tool: "shell_exec", args: { command: "node primes.js" } },
+        readCall,
+      ], "Es gibt 8393 Primzahlen.")(messages));
+      return runAgent("coder", INCIDENT.task, "parent-provenance-read-back");
+    };
+
+    it("read_file of the file it wrote", async () => {
+      const result = await runReadBack({ tool: "read_file", args: { path: "results.md" } }, {
+        read_file: () => ({ success: true, output: RESULTS }),
+      });
+
+      expect(result.output).toBe("Es gibt [not observed] Primzahlen.");
+      expect(result.executions).toEqual({ attempted: 1, failed: 1, succeededWithOutput: 0, unobservedFigures: 1 });
+      expect(result.stats.outcome).toBe("partial");
+    }, 60_000);
+
+    it("grep_files over it", async () => {
+      const result = await runReadBack({ tool: "grep_files", args: { pattern: "Anzahl" } }, {
+        grep_files: () => ({ success: true, output: "generated/results.md:2\n> 2\tAnzahl der Primzahlen: 8393" }),
+      });
+
+      expect(result.output).toBe("Es gibt [not observed] Primzahlen.");
+      expect(result.executions?.unobservedFigures).toBe(1);
+    }, 60_000);
+
+    it("control: a file its program wrote is evidence", async () => {
+      // The program redirected what it printed, so the execution itself printed nothing; the file
+      // holds what the program computed, not what the run wrote.
+      await registerTools({
+        write_file: writeTool,
+        shell_exec: (args) => silent(String(args["command"])),
+        read_file: () => ({ success: true, output: "Anzahl der Primzahlen: 8392\n" }),
+      });
+      completeMock.mockImplementation(async (messages: Message[]) => scripted([
+        { tool: "write_file", args: { path: "primes.js", content: "console.log(count)" } },
+        { tool: "shell_exec", args: { command: "node primes.js > out.txt" } },
+        { tool: "read_file", args: { path: "out.txt" } },
+      ], "Es gibt 8392 Primzahlen.")(messages));
+
+      const result = await runAgent("coder", INCIDENT.task, "parent-provenance-program-file");
+
+      expect(result.output).toBe("Es gibt 8392 Primzahlen.");
+      expect(result.executions).toEqual({ attempted: 1, failed: 0, succeededWithOutput: 0 });
+    }, 60_000);
+  });
+
+  describe("(m) what the run shared, with the real share_finding", () => {
+    const sharedFacts = async (root: string) => (await import("../swarm/memory.js")).readAllFacts(root);
+
+    it("a figure shared before its first execution does not come back as evidence", async () => {
+      // The gate is still closed when it shares, so the value is stored as given. Its echo, the
+      // shared-findings refresh and read_shared_facts then hand the figure back to the run.
+      await registerTools({ shell_exec: () => failed() }, { realShare: true });
+      completeMock.mockImplementation(async (messages: Message[]) => scripted([
+        { tool: "share_finding", args: { key: "prime_count", value: "8393" } },
+        { tool: "shell_exec", args: { command: "node primes.js" } },
+        { tool: "read_shared_facts", args: {} },
+      ], "Es gibt 8393 Primzahlen.")(messages));
+
+      const result = await runAgent("coder", INCIDENT.task, "parent-provenance-share-first");
+
+      // The precondition: the run did read its own figure back, three ways.
+      const prompts = completeMock.mock.calls.map(([messages]) => promptText(messages as Message[]));
+      expect(prompts.at(-1)).toContain("'prime_count' = \"8393\"");
+      expect(prompts.at(-1)).toContain("- prime_count: 8393");
+      expect(prompts.at(-1)).toContain("**prime_count**: 8393");
+      expect(result.output).toBe("Es gibt [not observed] Primzahlen.");
+      expect(result.executions?.unobservedFigures).toBe(1);
+      expect(result.stats.outcome).toBe("partial");
+    }, 60_000);
+
+    it("every free-text field of a share made while no execution completed is masked", async () => {
+      await registerTools({ shell_exec: () => failed() }, { realShare: true });
+      completeMock.mockImplementation(async (messages: Message[]) => scripted([
+        { tool: "shell_exec", args: { command: "node primes.js" } },
+        {
+          tool: "share_finding",
+          args: {
+            key: "prime_count",
+            value: "Primzahlen im Bereich",
+            notes: "Anzahl 8393",
+            sourceTitle: "Lauf vom 4711",
+            sourceUrl: "https://example.test/runs/4712",
+          },
+        },
+      ], "Es gibt 8393 Primzahlen.")(messages));
+
+      const result = await runAgent("coder", INCIDENT.task, "parent-provenance-share-notes");
+
+      const stored = (await sharedFacts("parent-provenance-share-notes"))["prime_count"];
+      expect(stored).toContain("notes: Anzahl [not observed]");
+      expect(stored).toContain("source_title: Lauf vom [not observed]");
+      // The key and the URL identify the finding and its source; they are left as given.
+      expect(stored).toContain("source_url: https://example.test/runs/4712");
+      expect(stored).not.toContain("8393");
+      expect(result.output).toBe("Es gibt [not observed] Primzahlen.");
+      expect(result.executions?.unobservedFigures).toBe(3);
+    }, 60_000);
+
+    it("share_evidence publishes to the same store and is held to the same rule", async () => {
+      await registerTools({ shell_exec: () => failed() }, { realShare: true });
+      completeMock.mockImplementation(async (messages: Message[]) => scripted([
+        { tool: "shell_exec", args: { command: "node primes.js" } },
+        {
+          tool: "share_evidence",
+          args: {
+            key: "prime_count",
+            value: "8393 Primzahlen",
+            claim: "Im Bereich liegen 8393 Primzahlen.",
+            sourceTitle: "primes.js",
+            sourceUrl: "https://example.test/runs/4712",
+            evidenceType: "derived",
+            accuracyScore: 0.5,
+            trustworthinessScore: 0.5,
+            corroborationScore: 0.5,
+            validationStatus: "unverified",
+          },
+        },
+      ], "Das Skript lief nicht.")(messages));
+
+      const result = await runAgent("coder", INCIDENT.task, "parent-provenance-share-evidence");
+
+      const stored = (await sharedFacts("parent-provenance-share-evidence"))["prime_count"];
+      expect(stored).toContain("claim: Im Bereich liegen [not observed] Primzahlen.");
+      expect(stored).not.toContain("8393");
+      expect(result.executions?.unobservedFigures).toBe(2);
+    }, 60_000);
+  });
+
+  describe("(n) the facts-first synthesis prompt is something the run received", () => {
+    // Once the session's shared findings pass 400 characters, the grace, soft-deadline and
+    // max-iterations syntheses replace the history with them (buildFactsFirstSynthesisMessages).
+    // The snapshot the run started with holds at most 12 of them, so a later one reaches the
+    // model only through this prompt.
+    const FILLER = "Eine lange Notiz eines anderen Agenten ohne jede Zahl, nur damit die Momentaufnahme im Auftrag voll ist "
+      + "und weitere Funde nicht mehr hineinpassen, wie bei einer langen Sitzung mit vielen geteilten Funden.";
+    const seedFacts = async (root: string) => {
+      const { writeSharedFact } = await import("../swarm/memory.js");
+      for (const letter of "abcdefghijkl") await writeSharedFact(root, `${letter}_note`, FILLER);
+      await writeSharedFact(root, "zz_population", "Berlin hatte laut Statistikamt 3850809 Einwohner.");
+    };
+    const runFactsFirst = async (root: string, calls: Array<{ name: string; arguments: Record<string, unknown> }>, finalAnswer: string) => {
+      await seedFacts(root);
+      await registerTools({ shell_exec: () => failed() }, { realShare: true });
+      const prompts: string[] = [];
+      completeMock.mockImplementation(async (messages: Message[]) => {
+        prompts.push(promptText(messages));
+        if (prompts.length > 1) return answer(finalAnswer);
+        return { content: "", tool_calls: calls.map((entry, index) => ({ id: `c${index + 1}`, ...entry })), usage, finishReason: "tool_calls" };
+      });
+      const result = await runAgent("facts_coder", "Zaehle die Primzahlen.", root);
+      // The precondition: the synthesis took the facts-first path.
+      expect(prompts).toHaveLength(2);
+      expect(prompts[1]).toContain("CURATED FINDINGS");
+      return { result, prompts };
+    };
+
+    it("a teammate's figure it was given there is not masked", async () => {
+      const finalAnswer = "Die Primzahlen konnte ich nicht berechnen, das Skript lief nicht. Aus den Funden: Berlin hatte 3850809 Einwohner.";
+      const { result, prompts } = await runFactsFirst("parent-provenance-facts-first", [
+        { name: "shell_exec", arguments: { command: "node primes.js" } },
+      ], finalAnswer);
+
+      expect(prompts[0]).not.toContain("3850809");
+      expect(prompts[1]).toContain("3850809");
+      expect(result.output).toBe(finalAnswer);
+      expect(result.executions).toEqual({ attempted: 1, failed: 1, succeededWithOutput: 0 });
+    }, 60_000);
+
+    it("a figure the run shared itself stays its own claim there", async () => {
+      const { result, prompts } = await runFactsFirst("parent-provenance-facts-first-own", [
+        { name: "share_finding", arguments: { key: "prime_count", value: "8393" } },
+        { name: "shell_exec", arguments: { command: "node primes.js" } },
+      ], "Es gibt 8393 Primzahlen.");
+
+      expect(prompts[1]).toContain("- 8393");
+      expect(result.output).toBe("Es gibt [not observed] Primzahlen.");
+      expect(result.executions?.unobservedFigures).toBe(1);
+    }, 60_000);
+  });
 
   it("(k) a figure the runtime's forced-answer instruction gave the run is one it received", async () => {
     // Ten checks in the run's only iteration, all failing; the synthesis comes back empty, and the
