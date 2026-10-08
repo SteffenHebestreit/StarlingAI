@@ -952,6 +952,15 @@ describe("e2e harness against a fake gateway", () => {
     const holding = await runScenarios(selected, deps(), FAST);
     expect(holding[0]!.attempts[0]!.failures).toEqual([]);
     expect(holding[0]!.status).toBe("passed");
+
+    // The remember turn answers without storing: the viewer has nothing to leak, so a pass would
+    // prove nothing. The store must complete, or the attempt fails right there.
+    gateway.setScripts([{ match: /merke dir/i, run: async (turn) => turn.finish("ok", "Gemerkt.") }, { match: /Teesorte/i, run: recall("leaks") }]);
+    const unstored = await runScenarios(selected, deps(), FAST);
+    expect(unstored[0]!.status).toBe("failed");
+    expect(unstored[0]!.attempts[0]!.failures).toEqual([
+      'step 1 turn "remember": events.must tool_call_completed{data.tool in [memory_store, user_model_update]}: expected ≥1, saw 0',
+    ]);
   });
 
   it("empties the identity's user model before the attempt's first turn, which recall_context serves", async () => {
@@ -1522,12 +1531,14 @@ describe("e2e CLI (in process, against the fake gateway)", () => {
     writeFileSync(join(cliDir, "scenarios", "fail.jsonc"), JSON.stringify({ id: "cli-fail", title: "CLI fail", group: "guards", steps: [{ kind: "turn", message: "hello again", expect: { reply: { includes: ["banana"] } } }] }));
   });
 
+  // Only what the run needs: no E2E_* variable of the shell leaks in.
+  const cliEnv = (): NodeJS.ProcessEnv => ({ E2E_GATEWAY_URL: gateway.url, E2E_CREDENTIALS_PATH: credsFile, INIT_CWD: cliDir, E2E_EVENT_GRACE_MS: "50" });
+
   async function cli(argv: string[], extra: Partial<CliIo> = {}): Promise<{ code: number; out: string; err: string }> {
     const out: string[] = [];
     const err: string[] = [];
     const code = await runE2ECli(argv, {
-      // Only what the run needs: no E2E_* variable of the shell leaks in.
-      env: { E2E_GATEWAY_URL: gateway.url, E2E_CREDENTIALS_PATH: credsFile, INIT_CWD: cliDir, E2E_EVENT_GRACE_MS: "50" },
+      env: cliEnv(),
       out: (line) => out.push(line),
       err: (line) => err.push(line),
       environment: notRunning,
@@ -1593,6 +1604,26 @@ describe("e2e CLI (in process, against the fake gateway)", () => {
     const regressed = await cli(["evaluate", "--scenarios", "scenarios", "--id", "cli-pass", "--out", "out-3", "--baseline", reportPath]);
     expect(regressed.code).toBe(1);
     expect(regressed.out).toContain("Baseline: 1 regression(s) — cli-pass");
+  });
+
+  it("logs in up front as every identity a turn runs as: a refused eval-viewer login stops the run before any turn", async () => {
+    // eval-viewer's only use here is a turn's `as`: unchecked, its refused login would fail every
+    // attempt the same way, one at a time.
+    mkdirSync(join(cliDir, "as-scenarios"), { recursive: true });
+    writeFileSync(join(cliDir, "as-scenarios", "as.jsonc"), JSON.stringify({
+      id: "cli-as",
+      title: "CLI turn as the viewer",
+      group: "core",
+      steps: [{ kind: "turn", message: "hello from eval" }, { kind: "turn", as: "eval-viewer", message: "hello from the viewer" }],
+    }));
+    const viewerRefused = join(cliDir, "viewer-refused.local.json");
+    writeFileSync(viewerRefused, JSON.stringify({ ...credentials(), "eval-viewer": { username: "eval-viewer", password: "not-the-viewer-password" } }));
+    const sends = gateway.chatSends.length;
+    const refused = await cli(["evaluate", "--scenarios", "as-scenarios", "--out", "as-refused"], { env: { ...cliEnv(), E2E_CREDENTIALS_PATH: viewerRefused } });
+    expect(refused.code).toBe(2);
+    expect(refused.err).toContain('login as "eval-viewer" (eval-viewer) failed: HTTP 401');
+    expect(gateway.chatSends.length).toBe(sends);
+    expect(existsSync(join(cliDir, "as-refused"))).toBe(false);
   });
 
   it("runs one evaluate at a time per accounts file: a live run's lock refuses, a dead run's is taken over", async () => {
