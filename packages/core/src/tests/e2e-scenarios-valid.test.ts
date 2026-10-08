@@ -59,6 +59,9 @@ describe("e2e scenario files", () => {
     }
     // The readout itself ran into the deadline: the environment's, as the scenario allows.
     expect(judge({ status: "failed", reason: "timeout", intent: { ok: false, reason: "aborted", ms: 15_001 }, preRoute: null })).toEqual([]);
+    // A row without a readout failure carries null there, as every row of a readout that answered
+    // does: the second mustNot must not match it, or the scenario fails on every healthy run.
+    expect(judge({ status: "skipped", reason: "busy", intent: null, preRoute: null })).toEqual([]);
     expect(judge({ status: "failed", reason: "error", intent: { ok: false, reason: "error", ms: 40 }, preRoute: null })).not.toEqual([]);
     expect(judge({ status: "failed", reason: "no_provider", intent: null, preRoute: null })).not.toEqual([]);
   });
