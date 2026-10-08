@@ -108,6 +108,7 @@ import { longRunningGenerationManager } from "../agent/long-running-generation.j
 
 const log = childLogger("tool:sub-agent");
 import { isCanonicalResearchSliceTask } from "../agent/source-sensitive-delegation.js";
+import { delegationAgentsOf, type NestedToolCall } from "../agent/turn-tool-contribution.js";
 import { awaitQuorum } from "../agent/delegation-quorum.js";
 import { shouldCheckSubAgentDisagreement, checkSubAgentDisagreement } from "../agent/sub-agent-disagreement.js";
 
@@ -2888,6 +2889,13 @@ registerTool({
     const graphArtifacts: Record<string, unknown>[] = [];
     // And every node's failed tool calls, from failed nodes as well as completed ones.
     const graphToolFailures: unknown[] = [];
+    // Who ran each node this run started, from the node's own result: the agent it is from and the
+    // agents it attempted, read as a delegation's result is. The swarm state cannot say it: the
+    // turn's is seeded with the previous turn's tasks, attempts included, and a node whose id
+    // repeats one of them keeps that task's attempts even when it was turned away before any agent
+    // ran. A turn directed to an agent read such a node as that agent having run (review of
+    // faeee22, 2026-10-08).
+    const nodeRuns: Record<string, Pick<NestedToolCall, "agentName" | "attemptedAgents">> = {};
     const graphId = `graph_${Date.now()}_${Object.keys(swarmState.tasks).length}`;
     // Write ownership among the nodes running at the same time (agent/sibling-write-ownership.ts,
     // orchestration.siblingWriteOwnership). c297c5ea: the write_paper node edited the deck while
@@ -3081,6 +3089,7 @@ registerTool({
 
       const { node, result } = await Promise.race(active.values());
       active.delete(node.id);
+      nodeRuns[node.id] = delegationAgentsOf(result.metadata);
       const nodeToolFailures = result.metadata?.["specialistToolFailures"];
       if (Array.isArray(nodeToolFailures)) graphToolFailures.push(...nodeToolFailures);
 
@@ -3156,6 +3165,7 @@ registerTool({
         failed: [...failed],
         blocked: [...blocked],
         ...(reused.size > 0 ? { reused: [...reused] } : {}),
+        nodeRuns,
         swarmState,
         ...(graphArtifacts.length > 0 ? { artifacts: graphArtifacts } : {}),
         ...(graphToolFailures.length > 0 ? { specialistToolFailures: graphToolFailures } : {}),
@@ -4300,8 +4310,14 @@ registerTool({
         // whose step dispatched three specialists in one call looked one-third done and
         // decidePlanContinuation told the model to redo steps that had already run. Reported the
         // way execute_plan reports its steps, so the turn's own accounting applies to each child
-        // (agent/turn-tool-contribution.ts).
-        nestedCalls: results.map((result) => ({ tool: "delegate_to_agent", success: result.success === true })),
+        // (agent/turn-tool-contribution.ts). Each carries the agents its slice's result named: a
+        // slice that names no agent is routed, and the architect fallback may answer it with an
+        // ephemeral agent, so who ran cannot be read from the turn's grant.
+        nestedCalls: results.map((result) => ({
+          tool: "delegate_to_agent",
+          success: result.success === true,
+          ...delegationAgentsOf(result.metadata),
+        })),
         ...(disagreementMarker ? { subAgentDisagreement: true } : {}),
         ...(aggregatedArtifacts.length > 0 ? { artifacts: aggregatedArtifacts } : {}),
         ...(aggregatedToolFailures.length > 0 ? { specialistToolFailures: aggregatedToolFailures } : {}),

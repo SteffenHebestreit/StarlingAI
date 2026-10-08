@@ -29,6 +29,7 @@ import { loadTurnPlan, persistTurnPlan, type TurnPlan, type TurnPlanStep, type T
 import { planFrontier, planCycle } from "../agent/plan-frontier.js";
 import { BLOCKED_STEP_TOOLS } from "./tool-pipeline.js";
 import { getPerTurnToolCallLimit } from "../agent/delegation-response-collapse.js";
+import { delegationAgentsOf, type NestedToolCall } from "../agent/turn-tool-contribution.js";
 import { withDelegationFanoutAllowance } from "./sub-agent.js";
 // This tool's output is mostly untrusted delegated content, re-emitted as the orchestrator's own.
 // A step whose result merely quoted an HTML-ish role tag replaced the ENTIRE report with "Tool
@@ -102,7 +103,7 @@ function buildStepTask(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<
 interface StepRun {
   status: TurnPlanStepStatus;
   /** The call this step actually made, for the turn to account for as its own. */
-  call?: { tool: string; success: boolean; workflowNotFound?: boolean };
+  call?: NestedToolCall;
   detail?: string;
   result?: string;
   /** Artifacts the step produced, propagated so the parent turn can surface them as downloads. */
@@ -193,9 +194,19 @@ function isReasoningOnlyLeaf(plan: TurnPlan, step: TurnPlanStep): boolean {
 async function runStep(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<string, string>, ctx: ToolContext): Promise<StepRun> {
   const dispatch = dispatchFor(plan, step, results);
   if ("manual" in dispatch) return { status: "manual", detail: dispatch.manual };
-  /** Stamped on every outcome below, so nothing dispatched goes unreported to the turn. */
-  const made = (success: boolean, workflowNotFound = false): StepRun["call"] =>
-    ({ tool: dispatch.tool, success, ...(workflowNotFound ? { workflowNotFound: true } : {}) });
+  /**
+   * Stamped on every outcome below, so nothing dispatched goes unreported to the turn. A delegation
+   * carries the agents its own result named: a step that names no agent is routed, and the
+   * architect fallback may answer it with an ephemeral agent, so who ran cannot be read from the
+   * turn's grant (agent/directive-agent.ts). Read from a delegation's result only, never from
+   * another tool's, whose metadata may come from a remote endpoint.
+   */
+  const made = (success: boolean, workflowNotFound = false, metadata?: Record<string, unknown>): StepRun["call"] => ({
+    tool: dispatch.tool,
+    success,
+    ...(workflowNotFound ? { workflowNotFound: true } : {}),
+    ...(dispatch.tool === "delegate_to_agent" ? delegationAgentsOf(metadata) : {}),
+  });
   // ToolContext.allowedTools is a contract on every tool that fans out to other tools: it must not
   // reach outside the caller's grant. This one dispatches a tool name the MODEL wrote into a plan,
   // so without the check a step could name anything the tier gate happens to permit.
@@ -220,7 +231,7 @@ async function runStep(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<
     const stepToolFailures = result.metadata?.["specialistToolFailures"];
     const failures = Array.isArray(stepToolFailures) && stepToolFailures.length > 0 ? { toolFailures: stepToolFailures } : {};
     if (!result.success) {
-      return { status: "failed", detail: (result.error ?? "step failed").slice(0, 300), call: made(false), ...failures };
+      return { status: "failed", detail: (result.error ?? "step failed").slice(0, 300), call: made(false, false, result.metadata), ...failures };
     }
     // A DELEGATION CAN FAIL ON A SUCCESSFUL ToolResult. delegate_to_agent returns success:true and
     // carries the verdict in metadata: the sub-agent's own <final_answer status="failure">, a
@@ -238,7 +249,7 @@ async function runStep(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<
         return {
           status: "failed",
           detail: `the specialist reported failure (${outcome ?? terminalState ?? "no usable result"})`,
-          call: made(false),
+          call: made(false, false, result.metadata),
           ...failures,
         };
       }
@@ -264,7 +275,7 @@ async function runStep(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<
     return {
       status: "done",
       result: result.output,
-      call: made(true),
+      call: made(true, false, result.metadata),
       ...(Array.isArray(stepArtifacts) && stepArtifacts.length > 0 ? { artifacts: stepArtifacts } : {}),
       ...failures,
     };
@@ -394,7 +405,7 @@ registerTool({
     /** Tool-less final steps reported as done because they ARE the reply — named, so the model does them. */
     const reasoningLeaves: string[] = [];
     /** Every call this run made, reported so the TURN applies its own accounting to each. */
-    const nestedCalls: Array<{ tool: string; success: boolean; workflowNotFound?: boolean }> = [];
+    const nestedCalls: NestedToolCall[] = [];
     // Steps the delegate budget has deferred. Held out of the frontier rather than breaking the
     // loop: planFrontier hands back ONE step per round unless a parallelGroup widens it, so
     // stopping at the first capped delegate abandoned everything behind it — including `direct`

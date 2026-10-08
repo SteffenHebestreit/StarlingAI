@@ -60,18 +60,35 @@ vi.mock("../retrieval/document-rag.js", () => ({
 }));
 
 /**
+ * The architect fallback, stubbed: it designs and runs an ephemeral agent when routing finds no
+ * agent for an undirected delegation. Reached only through a real fan-out tool (realTools).
+ */
+const architectRuns = vi.hoisted(() => [] as string[]);
+vi.mock("../tools/ephemeral-agent-factory.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../tools/ephemeral-agent-factory.js")>()),
+  runArchitectFallback: vi.fn(async (task: string) => {
+    architectRuns.push(task);
+    return { success: true, output: "[menu_planner]: Starter, main and dessert for six.", metadata: { agentName: "menu_planner", ephemeral: true } };
+  }),
+}));
+
+/**
  * The specialist and the orchestration tools around it, stubbed; everything else is the real
  * registry. `delegated` holds the delegations that reached a specialist. A delegation naming an
- * agent outside the turn's grant gets the refusal delegate_to_agent gives it.
+ * agent outside the turn's grant gets the refusal delegate_to_agent gives it. A test that needs a
+ * real fan-out tool puts its name in `realTools`; its children then run the real delegation path,
+ * and a delegate_to_agent call the turn makes is still stubbed.
  */
 const delegated = vi.hoisted(() => [] as Array<Record<string, unknown>>);
 const executed = vi.hoisted(() => [] as string[]);
+const realTools = vi.hoisted(() => new Set<string>());
 vi.mock("../tools/registry.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../tools/registry.js")>();
   return {
     ...actual,
     executeTool: vi.fn(async (name: string, args: Record<string, unknown>, ctx: { allowedAgents?: string[] }, meta?: never) => {
       executed.push(name);
+      if (realTools.has(name)) return actual.executeTool(name, args, ctx as never, meta);
       const agentName = String(args["agentName"] ?? "");
       if (name === "delegate_to_agent" && ctx.allowedAgents && !ctx.allowedAgents.includes(agentName)) {
         return { success: false, output: "", error: `Agent '${agentName}' is not permitted in this scene. Allowed agents: ${ctx.allowedAgents.join(", ")}` };
@@ -99,15 +116,23 @@ vi.mock("../tools/registry.js", async (importOriginal) => {
         return { success: false, output: "", error: "Unknown tool(s) requested: nope.", rejectedBeforeEffect: true };
       }
       if (name === "parallel_delegate") {
+        // Each slice runs its agent, reported as the tool reports it: one nested call per slice,
+        // with the agents the slice's own result named.
+        const slices = args["tasks"] as Array<{ agentName: string }>;
         return {
           success: true,
           output: "**[code_analyst]**:\nint() truncates the cent in invoices.py and receipts.py.",
-          metadata: { taskCount: 1, succeeded: 1, failed: 0, nestedCalls: [{ tool: "delegate_to_agent", success: true }] },
+          metadata: {
+            taskCount: slices.length,
+            succeeded: slices.length,
+            failed: 0,
+            nestedCalls: slices.map((slice) => ({ tool: "delegate_to_agent", success: true, agentName: slice.agentName, attemptedAgents: [slice.agentName] })),
+          },
         };
       }
       if (name === "run_task_graph") {
-        // Each node runs its agent, reported as the tool reports it: the node ids by outcome, and
-        // each node's attempts in the swarm state.
+        // Each node runs its agent, reported as the tool reports it: the node ids by outcome, the
+        // agents each node's own result named, and each node's attempts in the swarm state.
         const nodes = args["nodes"] as Array<{ id: string; agentName: string }>;
         const startedAt = "2026-10-08T12:00:00.000Z";
         return {
@@ -117,6 +142,7 @@ vi.mock("../tools/registry.js", async (importOriginal) => {
             completed: nodes.map((node) => node.id),
             failed: [],
             blocked: [],
+            nodeRuns: Object.fromEntries(nodes.map((node) => [node.id, { agentName: node.agentName, attemptedAgents: [node.agentName] }])),
             swarmState: {
               objective: "Swarm task graph",
               startedAt,
@@ -215,6 +241,8 @@ describe("a turn the user directed to one agent", () => {
     executed.length = 0;
     rag.contextBlock = "";
     routingTier.complete = null;
+    realTools.clear();
+    architectRuns.length = 0;
     vi.resetModules();
     (await import("../config/loader.js")).resetConfigForTests();
   });
@@ -423,9 +451,9 @@ describe("a turn the user directed to one agent", () => {
     expect(promptOf(1)).not.toContain(DIRECTIVE_LINE);
   });
 
-  it("is released once a fan-out reported a delegation that ran", async () => {
-    // A tool that reports the calls it made (parallel_delegate, execute_plan) names no agent; on a
-    // turn whose grant is the named agent alone, a delegation that ran is that agent's.
+  it("is released once a fan-out reported a delegation of the named agent", async () => {
+    // A tool that reports the calls it made (parallel_delegate, execute_plan) reports with each the
+    // agents that call's own result named.
     const { AgentSession, runTurn } = await loadRuntime();
     let call = 0;
     streamMock.mockImplementation(() => {
@@ -465,6 +493,81 @@ describe("a turn the user directed to one agent", () => {
     expect(toolChoiceOf(1)).toBeUndefined();
     expect(promptOf(1)).not.toContain(DIRECTIVE_LINE);
     expect(result.response).toContain("MODEL-ANSWER");
+  });
+
+  it("stays directed when a fan-out slice that named no agent was answered by an ephemeral agent", async () => {
+    // A slice that names no agent is routed within the turn's grant, and when routing finds no
+    // match the architect fallback, which no grant binds, answers with an ephemeral agent. The
+    // release counted every nested delegation that succeeded as the named agent's, so the
+    // orchestrator's own answer shipped and code_analyst never ran (review of 6955e34, 2026-10-08).
+    realTools.add("parallel_delegate");
+    const { AgentSession, runTurn } = await loadRuntime({ subAgents: { code_analyst: CODE_ANALYST } });
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      call += 1;
+      if (call === 1) return toolStream("parallel_delegate", { tasks: [{ task: "Plan a vegan dinner menu for six guests" }] });
+      return answerStream(call === 2 ? "I answered this myself. ORCHESTRATOR-ANSWER" : ANSWER);
+    });
+
+    const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
+    const result = await runTurn({ session, userMessage: MESSAGE, allowedAgents: ["code_analyst"], directiveAgent: "code_analyst" });
+
+    expect(architectRuns).toHaveLength(1);
+    expect(toolChoiceOf(1)).toBe("required");
+    expect(promptOf(1)).toContain(DIRECTIVE_LINE);
+    expect(delegated).toEqual([expect.objectContaining({ agentName: "code_analyst" })]);
+    expect(result.response).not.toContain("I answered this myself");
+  });
+
+  it("stays directed when a task graph's node was turned away, though the turn before ran the agent under its id", async () => {
+    // The turn's swarm state is seeded with the previous turn's tasks, attempts included, and a node
+    // whose id repeats one of them keeps that task's attempts. Node n1 was turned away this turn
+    // (a research task redirected to an agent outside the grant) and still showed code_analyst's
+    // attempt from the turn before: the directive was released, the orchestrator's answer shipped,
+    // and code_analyst never ran (review of faeee22, 2026-10-08).
+    realTools.add("run_task_graph");
+    const { AgentSession, runTurn } = await loadRuntime({
+      subAgents: {
+        code_analyst: CODE_ANALYST,
+        researcher: { description: "Researches the web.", capabilities: ["web research"], tags: ["research"], tools: ["web_search", "web_fetch"], maxIterations: 4 },
+      },
+    });
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      call += 1;
+      if (call === 1) {
+        return toolStream("run_task_graph", { nodes: [{ id: "n1", agentName: "code_analyst", task: "Search online for the best PDF libraries and compare their pricing" }] });
+      }
+      return answerStream(call === 2 ? "I answered this myself. ORCHESTRATOR-ANSWER" : ANSWER);
+    });
+
+    const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
+    session.addMessage({ role: "user", content: MESSAGE });
+    session.addMessage({
+      role: "assistant",
+      content: "total() truncates with int(); round(subtotal + tax, 2) fixes it.",
+      metadata: {
+        swarmState: {
+          objective: "previous turn",
+          startedAt: "2026-10-07T10:00:00.000Z",
+          updatedAt: "2026-10-07T10:01:00.000Z",
+          tasks: {
+            n1: {
+              id: "n1", title: "n1", status: "completed", dependsOn: [], signature: "previous-signature",
+              output: "total() truncates with int()", selectedAgent: "code_analyst",
+              attempts: [{ agentName: "code_analyst", status: "completed", startedAt: "2026-10-07T10:00:05.000Z", finishedAt: "2026-10-07T10:00:50.000Z" }],
+            },
+          },
+        },
+      },
+    });
+    const result = await runTurn({ session, userMessage: "Which PDF library should invoices.py use?", allowedAgents: ["code_analyst"], directiveAgent: "code_analyst" });
+
+    expect(executed[0]).toBe("run_task_graph");
+    expect(toolChoiceOf(1)).toBe("required");
+    expect(promptOf(1)).toContain(DIRECTIVE_LINE);
+    expect(delegated).toEqual([expect.objectContaining({ agentName: "code_analyst" })]);
+    expect(result.response).not.toContain("I answered this myself");
   });
 
   it("delegates to the named agent after a workflow ran, and answers from both", async () => {

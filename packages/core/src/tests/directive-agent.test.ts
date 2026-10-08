@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildDirectiveDelegationContext, delegationRanAgent, isDelegationToAgent } from "../agent/directive-agent.js";
+import { buildDirectiveDelegationContext, delegationRanAgent, isDelegationToAgent, nestedCallRanAgent } from "../agent/directive-agent.js";
 import { MID_TURN_USER_MESSAGE_METADATA } from "../agent/turn-boundary.js";
 
 /**
@@ -10,15 +10,20 @@ import { MID_TURN_USER_MESSAGE_METADATA } from "../agent/turn-boundary.js";
 
 const STARTED_AT = "2026-10-08T12:00:00.000Z";
 
-/** A run_task_graph result as the tool reports it: node ids by outcome, attempts in the swarm state. */
+/**
+ * A run_task_graph result as the tool reports it: node ids by outcome, what each node this run
+ * started named as its agents (nodeRuns), and the turn's swarm state with each task's attempts.
+ */
 function taskGraphResult(
-  attemptsByTask: Record<string, string[]>,
+  nodeRuns: Record<string, { agentName?: string; attemptedAgents?: string[] }>,
   outcome: { completed?: string[]; failed?: string[]; blocked?: string[] },
+  attemptsByTask: Record<string, string[]> = {},
 ): Record<string, unknown> {
   return {
     completed: outcome.completed ?? [],
     failed: outcome.failed ?? [],
     blocked: outcome.blocked ?? [],
+    nodeRuns,
     swarmState: {
       objective: "Swarm task graph",
       startedAt: STARTED_AT,
@@ -83,29 +88,56 @@ describe("delegationRanAgent, for a task graph", () => {
   // A task graph's result names no agent of its own, and the release read only delegate_to_agent's
   // and swarm_delegate's results: a graph that had run the agent left the turn directed to it, and
   // the agent ran a second time (review of 6955e34, 2026-10-08).
-  it("reads the agent a node of the graph attempted, completed or failed", () => {
-    expect(delegationRanAgent("run_task_graph", taskGraphResult({ find_bug: ["code_analyst"] }, { completed: ["find_bug"] }), "code_analyst")).toBe(true);
+  it("reads the agents a node of this run named, completed or failed", () => {
+    expect(delegationRanAgent("run_task_graph", taskGraphResult({ find_bug: { agentName: "code_analyst", attemptedAgents: ["code_analyst"] } }, { completed: ["find_bug"] }), "code_analyst")).toBe(true);
     // A run that failed still ran.
-    expect(delegationRanAgent("run_task_graph", taskGraphResult({ find_bug: ["code_analyst"] }, { failed: ["find_bug"] }), "code_analyst")).toBe(true);
+    expect(delegationRanAgent("run_task_graph", taskGraphResult({ find_bug: { attemptedAgents: ["code_analyst"] } }, { failed: ["find_bug"] }), "code_analyst")).toBe(true);
   });
 
   it("does not count a node turned away before any agent ran, or one that ran another agent", () => {
-    expect(delegationRanAgent("run_task_graph", taskGraphResult({ find_bug: [] }, { failed: ["find_bug"] }), "code_analyst")).toBe(false);
-    expect(delegationRanAgent("run_task_graph", taskGraphResult({ find_bug: ["coder"] }, { completed: ["find_bug"] }), "code_analyst")).toBe(false);
+    expect(delegationRanAgent("run_task_graph", taskGraphResult({ find_bug: {} }, { failed: ["find_bug"] }), "code_analyst")).toBe(false);
+    expect(delegationRanAgent("run_task_graph", taskGraphResult({ find_bug: { agentName: "coder", attemptedAgents: ["coder"] } }, { completed: ["find_bug"] }), "code_analyst")).toBe(false);
+    // An ephemeral agent the architect built for a node that named none.
+    expect(delegationRanAgent("run_task_graph", taskGraphResult({ find_bug: { agentName: "menu_planner" } }, { completed: ["find_bug"] }), "code_analyst")).toBe(false);
   });
 
-  it("reads only the graph's own nodes, not the rest of the turn's swarm state", () => {
-    // The swarm state the result carries is the whole turn's: a task an earlier call ran is in it.
-    const result = taskGraphResult({ earlier_task: ["code_analyst"], find_bug: [] }, { failed: ["find_bug"] });
+  it("does not read the swarm state, whose tasks may have been carried in from an earlier turn", () => {
+    // The turn's swarm state is seeded with the previous turn's tasks, attempts included, and a node
+    // whose id repeats one of them keeps that task's attempts. Node n1 was turned away this turn
+    // before any agent ran, and the swarm state still showed code_analyst's attempt from the turn
+    // before: the directive was released and code_analyst never ran (review of faeee22, 2026-10-08).
+    const result = taskGraphResult({ n1: {} }, { failed: ["n1"] }, { n1: ["code_analyst"], earlier_task: ["code_analyst"] });
     expect(delegationRanAgent("run_task_graph", result, "code_analyst")).toBe(false);
   });
 
   it("reads a malformed report as no run", () => {
     expect(delegationRanAgent("run_task_graph", undefined, "code_analyst")).toBe(false);
     expect(delegationRanAgent("run_task_graph", { completed: ["find_bug"] }, "code_analyst")).toBe(false);
-    expect(delegationRanAgent("run_task_graph", { completed: ["find_bug"], swarmState: { tasks: null } }, "code_analyst")).toBe(false);
-    expect(delegationRanAgent("run_task_graph", { completed: ["find_bug"], swarmState: { tasks: { find_bug: { attempts: "code_analyst" } } } }, "code_analyst")).toBe(false);
-    expect(delegationRanAgent("run_task_graph", { completed: ["find_bug"], swarmState: { tasks: { find_bug: { attempts: [null, "code_analyst"] } } } }, "code_analyst")).toBe(false);
+    expect(delegationRanAgent("run_task_graph", { completed: ["find_bug"], nodeRuns: null }, "code_analyst")).toBe(false);
+    expect(delegationRanAgent("run_task_graph", { completed: ["find_bug"], nodeRuns: { find_bug: "code_analyst" } }, "code_analyst")).toBe(false);
+    expect(delegationRanAgent("run_task_graph", { completed: ["find_bug"], nodeRuns: { find_bug: { attemptedAgents: "code_analyst" } } }, "code_analyst")).toBe(false);
+  });
+});
+
+describe("nestedCallRanAgent: a plan step or a fan-out slice", () => {
+  // A step or a slice that names no agent is routed within the turn's grant, and when routing finds
+  // no match the architect fallback, which no grant binds, answers with an ephemeral agent. The
+  // release counted every nested delegation that succeeded as the named agent's, so an ephemeral
+  // agent's answer released the directive and the named agent never ran (review of 6955e34,
+  // 2026-10-08).
+  it("reads the agent the delegation's own result is from, or one it attempted", () => {
+    expect(nestedCallRanAgent({ tool: "delegate_to_agent", success: true, agentName: "code_analyst", attemptedAgents: ["code_analyst"] }, "code_analyst")).toBe(true);
+    // A run that failed still ran.
+    expect(nestedCallRanAgent({ tool: "delegate_to_agent", success: false, attemptedAgents: ["code_analyst"] }, "code_analyst")).toBe(true);
+  });
+
+  it("does not count a delegation an ephemeral agent answered, or one that names no agent", () => {
+    expect(nestedCallRanAgent({ tool: "delegate_to_agent", success: true, agentName: "menu_planner" }, "code_analyst")).toBe(false);
+    expect(nestedCallRanAgent({ tool: "delegate_to_agent", success: true }, "code_analyst")).toBe(false);
+  });
+
+  it("does not count a call of another tool, whatever it names", () => {
+    expect(nestedCallRanAgent({ tool: "run_workflow", success: true, agentName: "code_analyst" }, "code_analyst")).toBe(false);
   });
 });
 

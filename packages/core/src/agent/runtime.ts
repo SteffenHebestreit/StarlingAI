@@ -71,7 +71,7 @@ import {
   readNestedToolCalls,
   STATE_DEPENDENT_TOOL_NAMES,
 } from "./turn-tool-contribution.js";
-import { buildDirectiveDelegationContext, delegationRanAgent, isDelegationToAgent } from "./directive-agent.js";
+import { buildDirectiveDelegationContext, delegationRanAgent, isDelegationToAgent, nestedCallRanAgent } from "./directive-agent.js";
 import { longRunningGenerationManager } from "./long-running-generation.js";
 import { recordUnconsumedSteering, turnSteeringManager, type SteeringMessage } from "./turn-steering.js";
 import { registerSessionAbortController, deregisterSessionAbortController } from "./warden.js";
@@ -4541,10 +4541,10 @@ async function _runTurn(
         _turnDelegationCount += nestedContribution.delegations;
         if (nestedContribution.workflowCompleted) workflowRunCompletedThisTurn = true;
         _turnToolCallCounts.set(nested.tool, (_turnToolCallCounts.get(nested.tool) ?? 0) + 1);
-        // A plan step or a fan-out slice reports no agent name. It is counted only when it ran,
-        // and a turn directed to an agent grants delegation to that agent alone (chat.send), so a
-        // delegation that ran there ran that agent.
-        if (directiveAgent !== undefined && nestedContribution.delegations > 0) directiveAgentRan = true;
+        // A plan step or a fan-out slice reports the agents its own result named. The grant does
+        // not say who ran: routing within it may find no match, and the architect fallback, which
+        // no grant binds, then answers with an ephemeral agent (directive-agent.ts).
+        if (directiveAgent !== undefined && nestedCallRanAgent(nested, directiveAgent)) directiveAgentRan = true;
       }
 
       pendingSearchAgentSuggestion = tc.name === "search_agents"
