@@ -47,8 +47,8 @@ const BASE_TAG_RE = /<base\b((?:[^>"']|"[^"]*"|'[^']*')*)>/i;
 const IMG_TAG_RE = /<img\b((?:[^>"']|"[^"]*"|'[^']*')*)>/i;
 
 const NAMED_ENTITIES: Readonly<Record<string, string>> = {
-  amp: "&", lt: "<", gt: ">", quot: "\"", apos: "'", nbsp: " ",
-  ndash: "–", mdash: "—", hellip: "…", laquo: "«", raquo: "»",
+  amp: "&", lt: "<", gt: ">", quot: "\"", apos: "'", nbsp: "\u00a0",
+  ndash: "\u2013", mdash: "\u2014", hellip: "\u2026", laquo: "\u00ab", raquo: "\u00bb",
 };
 
 /** Character references, decoded in one pass so "&amp;lt;" becomes "&lt;" and not "<". */
