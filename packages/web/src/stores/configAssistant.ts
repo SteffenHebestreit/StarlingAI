@@ -8,32 +8,36 @@ export type ConfigAssistantFeedbackOutcome = "success" | "failure" | "partial" |
 export type FlowMemoryOutcome = "proposed" | "applied" | "success" | "failure" | "partial" | "rejected";
 export type FlowMemoryScope = "setup" | "enhancement" | "prompt" | "workflow";
 
+/**
+ * On a multi-user deployment another account's entry or proposal arrives as its structure only
+ * (ids, status, timestamps, config paths, prompt targets, outcomes): the fields written from its
+ * request go to its author and an admin. Those fields are optional here for that reason.
+ */
 export interface FlowMemoryEntry {
   id: string;
   ts: string;
   scope: FlowMemoryScope;
-  /** Absent for another account's entry on a multi-user deployment: only its author and an admin get it. */
   request?: string;
-  summary: string;
+  summary?: string;
   assistantAgent?: string;
   targetAgent?: string;
-  actions: string[];
+  actions?: string[];
   outcome: FlowMemoryOutcome;
   lesson?: string;
-  tags: string[];
+  tags?: string[];
 }
 
 export interface ConfigAssistantConfigChange {
   path: string;
-  value: unknown;
-  reason: string;
+  value?: unknown;
+  reason?: string;
 }
 
 export interface ConfigAssistantPromptChange {
   agentName: string;
   strategy: "replace" | "append";
-  prompt: string;
-  rationale: string;
+  prompt?: string;
+  rationale?: string;
 }
 
 export interface ConfigAssistantProposalFeedback {
@@ -48,15 +52,14 @@ export interface ConfigAssistantProposal {
   ts: string;
   status: ConfigAssistantProposalStatus;
   mode: ConfigAssistantMode;
-  /** Absent for another account's proposal on a multi-user deployment: only its author and an admin get it. */
   request?: string;
-  summary: string;
+  summary?: string;
   assistantAgent: string;
   targetAgent?: string;
   configChanges: ConfigAssistantConfigChange[];
   promptChanges: ConfigAssistantPromptChange[];
-  validations: string[];
-  tags: string[];
+  validations?: string[];
+  tags?: string[];
   lesson?: string;
   appliedAt?: string;
   feedbackHistory: ConfigAssistantProposalFeedback[];

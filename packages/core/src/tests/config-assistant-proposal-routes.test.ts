@@ -5,14 +5,14 @@ import { join } from "node:path";
 import { PRODUCT } from "../product/index.js";
 
 /**
- * Creating, applying and answering a config-assistant proposal records and returns its request
- * text as its author's (found in review, 2026-10-08).
+ * Creating, applying and answering a config-assistant proposal records it as its author's, and
+ * answers with what was written from the request only to them (found in review, 2026-10-08).
  *
  * The proposal and its flow entries carry the author's user-scope segment, whoever applies the
  * proposal or gives it feedback, and under multi-user auth the answer to applying or to feedback
- * carries the request text only for the author or an admin: any operator may act on any proposal,
- * and the dashboard puts the answer in its list. These run against the whole gateway, with the
- * drafting model stubbed.
+ * carries the request and everything drafted from it only for the author or an admin; any other
+ * account gets the structure. Any operator may act on any proposal, and the dashboard puts the
+ * answer in its list. These run against the whole gateway, with the drafting model stubbed.
  */
 const SUMMARY = "Prefer German legal sources in the researcher";
 const ALICE_REQUEST = "Make the researcher prefer German family-law sources for my custody case";
@@ -93,20 +93,25 @@ describe("config-assistant proposal routes and the request's author", () => {
       expect(created.text).not.toContain("\"account\"");
       const id = (JSON.parse(created.text) as { proposal: { id: string } }).proposal.id;
 
-      const feedback = await gw.send("bob", "operator", "POST", `/api/config-assistant/proposals/${id}/feedback`, { outcome: "partial" });
+      const feedback = await gw.send("bob", "operator", "POST", `/api/config-assistant/proposals/${id}/feedback`, { outcome: "partial", notes: "Bob's own note" });
       expect(feedback.status).toBe(200);
       expect(feedback.text).not.toContain(ALICE_REQUEST);
-      expect(feedback.text).toContain(SUMMARY);
+      expect(feedback.text).not.toContain(SUMMARY);
+      expect(feedback.text).not.toContain("Bob's own note");
+      expect(JSON.parse(feedback.text)).toMatchObject({ proposal: { id, status: "pending" } });
 
       const applied = await gw.send("bob", "operator", "POST", `/api/config-assistant/proposals/${id}/apply`);
       expect(applied.status).toBe(200);
       expect(applied.text).not.toContain(ALICE_REQUEST);
+      expect(applied.text).not.toContain(SUMMARY);
       expect(applied.text).not.toContain("\"account\"");
 
       const authorFeedback = await gw.send("alice", "operator", "POST", `/api/config-assistant/proposals/${id}/feedback`, { outcome: "success" });
       expect(authorFeedback.text).toContain(ALICE_REQUEST);
+      expect(authorFeedback.text).toContain(SUMMARY);
       const adminFeedback = await gw.send("carol", "admin", "POST", `/api/config-assistant/proposals/${id}/feedback`, { outcome: "success" });
       expect(adminFeedback.text).toContain(ALICE_REQUEST);
+      expect(adminFeedback.text).toContain(SUMMARY);
 
       const { proposals, flow } = gw.stored();
       expect(proposals[0]).toMatchObject({ request: ALICE_REQUEST, account: gw.segment("alice") });

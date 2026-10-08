@@ -3,6 +3,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { childLogger } from "../logger.js";
 import { isProtectedConfigPath } from "./config-assistant-proposals.js";
+import { canReadRecord, recordReader } from "../runtime/user-scope.js";
 
 import { PRODUCT } from "../product/index.js";
 
@@ -108,7 +109,14 @@ export function searchFlowMemory(
     outcomes?: FlowMemoryOutcome[];
   } = {},
 ): FlowMemoryMatch[] {
-  const entries = readFlowMemoryEntries(workspacePath, 200);
+  // Under multi-user auth, the caller's own entries only, chosen before anything is scored: the file
+  // holds every account's config-assistant requests, summaries and lessons, and this guidance goes
+  // into the caller's prompt. The whole file is read either way (readFlowMemoryEntries), so the last
+  // 200 are the caller's, however busy the other accounts are. A request with no user gets none.
+  const reader = recordReader();
+  const entries = reader.all
+    ? readFlowMemoryEntries(workspacePath, 200)
+    : readFlowMemoryEntries(workspacePath, Number.MAX_SAFE_INTEGER).filter((entry) => canReadRecord(reader, entry.account)).slice(-200);
   if (entries.length === 0) return [];
 
   const normalizedQuery = query.trim();

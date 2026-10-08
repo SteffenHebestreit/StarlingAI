@@ -121,7 +121,7 @@ import {
 } from "../agent/config-assistant-proposals.js";
 import { appendFlowMemoryEntry } from "../agent/flow-memory.js";
 import { recordAccount } from "../runtime/user-scope.js";
-import { presentRequestItem, requestTextReader } from "./config-assistant-visibility.js";
+import { presentProposal, requestTextReader } from "./config-assistant-visibility.js";
 
 
 import { JobConfigSchema } from "../config/schema.js";
@@ -3009,7 +3009,7 @@ export function createGateway() {
         summary: proposal.summary,
       }, { severity: "info", channel: "config-assistant" });
 
-      return c.json({ proposal: presentRequestItem(proposal, () => true), flowMemoryId: flowEntry.id }, 201);
+      return c.json({ proposal: presentProposal(proposal, () => true), flowMemoryId: flowEntry.id }, 201);
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
     }
@@ -3118,9 +3118,9 @@ export function createGateway() {
         account: proposal.account,
       });
 
-      // Any operator may apply any proposal; the request text goes to its author and an admin only.
+      // Any operator may apply any proposal; it goes back whole to its author and an admin only.
       const mayRead = await requestTextReader(c.req.header("Authorization"));
-      return c.json({ proposal: presentRequestItem(updated ?? proposal, mayRead) });
+      return c.json({ proposal: presentProposal(updated ?? proposal, mayRead) });
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
     }
@@ -3176,9 +3176,9 @@ export function createGateway() {
       account: proposal.account,
     });
 
-    // The request text goes to its author and an admin only.
+    // The proposal goes back whole to its author and an admin only.
     const mayRead = await requestTextReader(c.req.header("Authorization"));
-    return c.json({ proposal: presentRequestItem(updated ?? proposal, mayRead) });
+    return c.json({ proposal: presentProposal(updated ?? proposal, mayRead) });
   });
 
   // ── AG-UI streaming chat (SSE) ────────────────────────────────────────────

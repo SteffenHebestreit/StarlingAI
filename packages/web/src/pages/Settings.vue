@@ -1186,7 +1186,7 @@
                   <div v-for="entry in configAssistant.recentLearnings" :key="entry.id" class="flow-memory-card">
                     <div class="flex items-start justify-between gap-3">
                       <div>
-                        <div class="text-sm text-gray-100">{{ entry.summary }}</div>
+                        <div class="text-sm text-gray-100">{{ entry.summary ?? "Another account's change" }}</div>
                         <div class="text-[11px] text-gray-500 mt-1">
                           {{ formatConfigAssistantScope(entry.scope) }}<span v-if="entry.targetAgent"> • {{ entry.targetAgent }}</span> • {{ formatTimestamp(entry.ts) }}
                         </div>
@@ -1194,7 +1194,7 @@
                       <span :class="flowBadgeClass(entry.outcome)">{{ formatConfigAssistantOutcome(entry.outcome) }}</span>
                     </div>
                     <div v-if="entry.lesson" class="text-xs text-cyan-100/80 mt-2">{{ entry.lesson }}</div>
-                    <div v-if="entry.actions.length" class="routing-chip-row mt-2">
+                    <div v-if="entry.actions?.length" class="routing-chip-row mt-2">
                       <span v-for="action in entry.actions" :key="`${entry.id}-${action}`" class="routing-chip">{{ action }}</span>
                     </div>
                   </div>
@@ -1211,7 +1211,7 @@
                   <summary class="config-proposal-summary">
                     <div class="min-w-0">
                       <div class="flex items-center gap-2 flex-wrap">
-                        <span class="text-sm font-medium text-gray-100">{{ proposal.summary }}</span>
+                        <span class="text-sm font-medium text-gray-100">{{ proposal.summary ?? "Another account's proposal" }}</span>
                         <span :class="proposalBadgeClass(proposal.status)">{{ proposal.status }}</span>
                         <span class="routing-chip">{{ formatConfigAssistantScope(proposal.mode) }}</span>
                       </div>
@@ -1225,7 +1225,7 @@
                   <div class="mt-3 space-y-3 pl-1">
                     <div v-if="proposal.request" class="text-xs text-gray-400 whitespace-pre-wrap break-words">{{ proposal.request }}</div>
 
-                    <div v-if="proposal.validations.length" class="space-y-1.5">
+                    <div v-if="proposal.validations?.length" class="space-y-1.5">
                       <div class="text-[11px] uppercase tracking-[0.18em] text-gray-500">Checks</div>
                       <ul class="config-proposal-list">
                         <li v-for="validation in proposal.validations" :key="validation">{{ validation }}</li>
@@ -1236,8 +1236,8 @@
                       <div class="text-[11px] uppercase tracking-[0.18em] text-gray-500">Config Changes</div>
                       <div v-for="change in proposal.configChanges" :key="`${proposal.id}-${change.path}`" class="config-change-card">
                         <div class="text-xs font-mono text-cyan-200">{{ change.path }}</div>
-                        <div class="text-[11px] text-gray-500 mt-1">{{ change.reason }}</div>
-                        <pre class="config-change-preview">{{ stringifyPreview(change.value) }}</pre>
+                        <div v-if="change.reason" class="text-[11px] text-gray-500 mt-1">{{ change.reason }}</div>
+                        <pre v-if="'value' in change" class="config-change-preview">{{ stringifyPreview(change.value) }}</pre>
                       </div>
                     </div>
 
@@ -1248,8 +1248,8 @@
                           <span class="text-xs font-mono text-cyan-200">{{ change.agentName }}</span>
                           <span class="routing-chip">{{ change.strategy }}</span>
                         </div>
-                        <div class="text-[11px] text-gray-500 mt-1">{{ change.rationale }}</div>
-                        <pre class="config-change-preview">{{ change.prompt }}</pre>
+                        <div v-if="change.rationale" class="text-[11px] text-gray-500 mt-1">{{ change.rationale }}</div>
+                        <pre v-if="change.prompt !== undefined" class="config-change-preview">{{ change.prompt }}</pre>
                       </div>
                     </div>
 
