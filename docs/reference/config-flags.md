@@ -201,7 +201,7 @@ Every public schema field, where it is declared, and how many production files r
 | `humanInLoopSteps` | packages/core/src/config/schema.ts:1309 | 20 |
 | `id` | packages/core/src/config/schema.ts:561 | 288 |
 | `ignoreCase` | packages/core/src/config/schema.ts:1356 | 2 |
-| `image` | packages/core/src/config/schema.ts:680 | 96 |
+| `image` | packages/core/src/config/schema.ts:680 | 97 |
 | `imapHost` | packages/core/src/config/schemas/channels.ts:57 | 6 |
 | `imapPassword` | packages/core/src/config/schemas/channels.ts:60 | 7 |
 | `imapPort` | packages/core/src/config/schemas/channels.ts:58 | 4 |
@@ -412,7 +412,7 @@ Every public schema field, where it is declared, and how many production files r
 | `routingTriage` | packages/core/src/config/schemas/orchestration.ts:759 | 1 |
 | `sampleRate` | packages/core/src/config/schema.ts:551 | 2 |
 | `sandboxShellExec` | packages/core/src/config/schema.ts:1221 | 2 |
-| `scene` | packages/core/src/config/schema.ts:1331 | 77 |
+| `scene` | packages/core/src/config/schema.ts:1331 | 79 |
 | `scopes` | packages/core/src/config/schema.ts:390 | 24 |
 | `searchTimeoutMs` | packages/core/src/config/schemas/retrieval.ts:97 | 2 |
 | `searxngBaseUrl` | packages/core/src/config/schemas/retrieval.ts:77 | 1 |

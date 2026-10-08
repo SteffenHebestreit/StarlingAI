@@ -134,13 +134,41 @@ describe("the default reply language on later calls of a turn", () => {
     streamMock.mockImplementation(() => answerStream("Store them cool and half charged."));
     const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-reply-language-ws-")), systemPrompt: "You are a test agent." });
 
-    await runTurn({ session, userMessage: "How should I store the batteries of my power tools over the winter?" });
+    // As the chat entry points send it: the typed words beside the message.
+    const first = "How should I store the batteries of my power tools over the winter?";
+    await runTurn({ session, userMessage: first, userWords: first });
     expect(promptOf(0)).toContain("otherwise in English, the language of that message");
 
-    await runTurn({ session, userMessage: "And what about lithium batteries in a cold garage?" });
-    const second = promptOf(streamMock.mock.calls.length - 1);
-    expect(second).toContain("as a standing instruction earlier");
-    expect(second).not.toContain("otherwise in English");
+    const second = "And what about lithium batteries in a cold garage?";
+    await runTurn({ session, userMessage: second, userWords: second });
+    const secondPrompt = promptOf(streamMock.mock.calls.length - 1);
+    expect(secondPrompt).toContain("as a standing instruction earlier");
+    expect(secondPrompt).not.toContain("otherwise in English");
+  });
+
+  it("names no language for a message no person typed", async () => {
+    // A /run scene's template, a scene worker's or a workflow step's task, each on a fresh session:
+    // a first turn, with no words of the person's to read a language from.
+    const { AgentSession, runTurn } = await loadRuntime();
+    streamMock.mockImplementation(() => answerStream("Done."));
+    const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-reply-language-ws-")), systemPrompt: "You are a test agent." });
+
+    await runTurn({ session, userMessage: "Collect the release notes of the configured repositories and summarize what changed this week." });
+    expect(promptOf(0)).toContain("otherwise in the language of that message");
+    expect(promptOf(0)).not.toContain("otherwise in English");
+  });
+
+  it("names the language of the typed question on a picture's turn, not of the analysis ahead of it", async () => {
+    const { AgentSession, runTurn } = await loadRuntime();
+    streamMock.mockImplementation(() => answerStream("Das Schild gibt den Weg für Radfahrer frei."));
+    const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-reply-language-ws-")), systemPrompt: "You are a test agent." });
+
+    const typed = "Was genau bedeutet dieses Schild für mich als Radfahrer?";
+    const analysis = "Image analysis (schild.jpg):\n\n## Description\nThe image shows a blue round road sign with a white "
+      + "bicycle symbol, mounted on a metal pole next to a street. Below it hangs a smaller white sign with black text. "
+      + "Trees and a parked car are in the background.";
+    await runTurn({ session, userMessage: `${analysis}\n\n${typed}`, userWords: typed });
+    expect(promptOf(0)).toContain(`otherwise in German, the language of that message (${JSON.stringify(typed)})`);
   });
 
   it("is named on no call when the message has a language of its own", async () => {

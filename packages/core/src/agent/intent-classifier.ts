@@ -21,7 +21,7 @@ import { getConfig } from "../config/loader.js";
 import { loadMainAssistantPersonality } from "../personality/service.js";
 import type { MainAssistantToolMode } from "./default-tools.js";
 import { PRODUCT } from "../product/index.js";
-import { buildTurnReplyLanguageInstruction } from "./reply-language.js";
+import { buildTurnReplyLanguageInstruction, type TurnReplyLanguageOptions } from "./reply-language.js";
 
 // ── Intent term / pattern tables ─────────────────────────────────────────────
 //
@@ -475,7 +475,7 @@ function computeDynamicTurnGuidance(userMessage: string): DynamicTurnGuidance | 
 
 // ── Language / identity guidance ──────────────────────────────────────────────
 
-export function buildLanguageAndIdentityTurnGuidance(userMessage: string, opts: { firstTurn?: boolean } = {}): string {
+export function buildLanguageAndIdentityTurnGuidance(userMessage: string, opts: TurnReplyLanguageOptions = {}): string {
   const profile = loadMainAssistantPersonality();
   const languageInstruction = buildLanguageInstructionForTurn(userMessage, opts);
   const behaviorInstruction = "Be polite, brief, and efficient. Avoid small talk, filler, and unnecessary pleasantries. Do not introduce yourself or mention your name unless the user explicitly asks. The user already knows they are speaking to the assistant.";
@@ -494,7 +494,7 @@ export function buildLanguageAndIdentityTurnGuidance(userMessage: string, opts: 
  * message", and as the one instruction that quotes the message it outranked everything else: a
  * German message asking for an English answer got German. The precedence is in reply-language.ts.
  */
-export function buildLanguageInstructionForTurn(userMessage: string, opts: { firstTurn?: boolean } = {}): string {
+export function buildLanguageInstructionForTurn(userMessage: string, opts: TurnReplyLanguageOptions = {}): string {
   return buildTurnReplyLanguageInstruction(userMessage, undefined, opts);
 }
 

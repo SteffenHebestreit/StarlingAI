@@ -110,6 +110,30 @@ export function detectTextLanguage(text: string | null | undefined): DetectedLan
   }
 }
 
+/** Where a text can change language: a line break, a sentence end, a quotation mark. */
+const LANGUAGE_PART_BOUNDARY = /\n+|(?<=[.!?…])\s+|(?<=[。！？])|["“”„«»「」『』]+/u;
+
+/**
+ * The language of `text` when every line, sentence and quoted passage of it that can be told is in
+ * that one language; null when one of them reliably reads as another, or when the whole cannot be
+ * told. Read as a whole, a text is in whichever language has the most letters: a German question
+ * about an English quote, an error message or an image analysis reads as English. A long text is
+ * read at its start and its end, where the words around a paste are.
+ */
+export function detectUniformTextLanguage(text: string | null | undefined): DetectedLanguage | null {
+  const whole = detectTextLanguage(text);
+  if (!whole || !text) return null;
+  const withoutCode = text.replace(/```[\s\S]*?```/g, "\n");
+  const read = withoutCode.length > 2 * MAX_CHARS
+    ? `${withoutCode.slice(0, MAX_CHARS)}\n${withoutCode.slice(-MAX_CHARS)}`
+    : withoutCode;
+  for (const part of read.split(LANGUAGE_PART_BOUNDARY)) {
+    const language = detectTextLanguage(part);
+    if (language && language.code !== whole.code) return null;
+  }
+  return whole;
+}
+
 /** True when `text` is reliably German. False covers both "another language" and "cannot tell". */
 export function textIsGerman(text: string | null | undefined): boolean {
   return detectTextLanguage(text)?.code === "de";

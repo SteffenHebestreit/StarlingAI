@@ -1132,6 +1132,8 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
         // Not inherited: a nested turn writes to its own session, which no chat.send started.
         ...(opts.requestId ? { chatRequestId: opts.requestId } : {}),
         ...(userMessageLanguage ? { userMessageLanguage } : {}),
+        // Not inherited either: a nested turn's message is a workflow step, not the person's words.
+        ...(opts.userWords !== undefined ? { userWords: opts.userWords } : {}),
       },
       () => runWithPhaseTimings(() => runTurnImpl(opts)),
     );
@@ -5506,7 +5508,10 @@ export async function forceSynthesis(
     const history = session.getHistory();
     const turnMessage = history[currentTurnStartIndex(history)]?.content;
     const languageLine = typeof turnMessage === "string"
-      ? ` ${buildTurnReplyLanguageInstruction(turnMessage, undefined, { firstTurn: isFirstUserTurn(history) })}`
+      ? ` ${buildTurnReplyLanguageInstruction(turnMessage, undefined, {
+        firstTurn: isFirstUserTurn(history),
+        userWords: currentRequestContext()?.userWords,
+      })}`
       : "";
     // Inject a synthesize-now user message (not stored in permanent history)
     const messages: LLMMessage[] = [

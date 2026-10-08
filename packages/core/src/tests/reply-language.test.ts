@@ -42,6 +42,7 @@ import {
 } from "../agent/reply-language.js";
 import {
   detectTextLanguage,
+  detectUniformTextLanguage,
   languageNameForCode,
   proseForLanguageDetection,
   warmTextLanguageDetector,
@@ -54,6 +55,11 @@ import { runWithRequestContext } from "../runtime/request-context.js";
 beforeAll(async () => {
   await warmTextLanguageDetector();
 });
+
+/** What the web chat puts ahead of a picture's typed question: the vision model's analysis. */
+const IMAGE_ANALYSIS = "Image analysis (schild.jpg):\n\n## Description\nThe image shows a blue round road sign with a "
+  + "white bicycle symbol, mounted on a metal pole next to a street. Below it hangs a smaller white sign with black "
+  + "text. Trees and a parked car are in the background.";
 
 beforeEach(() => {
   configState.defaultLanguage = undefined;
@@ -98,17 +104,44 @@ describe("the reply-language rule", () => {
     // Unnamed, an English first question still came back German 5 times in 12; named, never. Later
     // turns name none: a standing request written earlier lost to a named language (2026-10-07).
     const english = "How should I store the batteries of my power tools over the winter?";
-    const first = buildTurnReplyLanguageInstruction(english, "German", { firstTurn: true });
+    const first = buildTurnReplyLanguageInstruction(english, "German", { firstTurn: true, userWords: english });
     expect(first).toContain("otherwise in English, the language of that message");
     // Requests still win: one in the message, or one stored among the durable facts.
     expect(first).toContain("the language the user asked for, if they asked for one — in that message or in the durable facts");
-    const later = buildTurnReplyLanguageInstruction(english, "German", { firstTurn: false });
+    const later = buildTurnReplyLanguageInstruction(english, "German", { firstTurn: false, userWords: english });
     expect(later).not.toContain("otherwise in English");
     expect(later).toContain("as a standing instruction earlier");
     // A message with no language of its own names no language, only the default.
-    const bare = buildTurnReplyLanguageInstruction("ok", "German", { firstTurn: true });
+    const bare = buildTurnReplyLanguageInstruction("ok", "German", { firstTurn: true, userWords: "ok" });
     expect(bare).not.toContain("otherwise in English");
     expect(bare).toContain("(German if there is none)");
+  });
+
+  it("names a language only from the words a person typed", () => {
+    // A /run scene's template, a scene worker's or a workflow step's task: the swarm wrote it, and on
+    // the fresh session such a turn runs in, it is the first turn.
+    const template = "Collect the release notes of the configured repositories and summarize what changed this week.";
+    const scene = buildTurnReplyLanguageInstruction(template, "German", { firstTurn: true });
+    expect(scene).not.toContain("otherwise in English");
+    expect(scene).toContain("otherwise in the language of that message");
+    // A picture's turn: the analysis ahead of the question is the vision model's, the question the person's.
+    const typed = "Was genau bedeutet dieses Schild für mich als Radfahrer?";
+    const picture = `${IMAGE_ANALYSIS}\n\n${typed}`;
+    expect(buildTurnReplyLanguageInstruction(picture, "German", { firstTurn: true, userWords: typed }))
+      .toContain(`otherwise in German, the language of that message (${JSON.stringify(typed)})`);
+  });
+
+  it("names none for words in more than one language", () => {
+    // Each reads as a whole as one language, and named, that language decided the reply.
+    for (const mixed of [
+      "Was heißt das genau für mich? \"Refunds are not provided for partial billing periods.\"",
+      "Was bedeutet dieser Fehler? Error: Cannot find module 'express'. Require stack: /app/server.js",
+      `${IMAGE_ANALYSIS}\n\nWas genau bedeutet dieses Schild für mich als Radfahrer?`,
+    ]) {
+      const line = buildTurnReplyLanguageInstruction(mixed, "German", { firstTurn: true, userWords: mixed });
+      expect(line).not.toMatch(/otherwise in [A-Z]\w+, the language/);
+      expect(line).toContain("otherwise in the language of that message");
+    }
   });
 
   it("knows a first turn by the history holding no earlier user message", () => {
@@ -212,6 +245,18 @@ describe("text-language — a statistical detector, not a word list", () => {
   it("names codes in English", () => {
     expect(languageNameForCode("de")).toBe("German");
     expect(languageNameForCode("pl")).toBe("Polish");
+  });
+
+  it("tells a text in one language from a text that changes language", () => {
+    expect(detectUniformTextLanguage("Kannst du mir beim Debuggen helfen? Der Server stürzt beim Start ab.")?.name).toBe("German");
+    expect(detectUniformTextLanguage("Can you help me debug this issue? The server crashes on startup.")?.name).toBe("English");
+    expect(detectUniformTextLanguage("Was heißt das genau für mich? \"Refunds are not provided for partial billing periods.\"")).toBeNull();
+    // A question after a long paste: the whole is called from its start, the end is read too.
+    const paste = "The European Central Bank kept interest rates unchanged on Thursday, citing persistent inflation. ".repeat(50);
+    expect(detectTextLanguage(`${paste}\n\nWas bedeutet das für meinen Kredit?`)?.name).toBe("English");
+    expect(detectUniformTextLanguage(`${paste}\n\nWas bedeutet das für meinen Kredit?`)).toBeNull();
+    expect(detectUniformTextLanguage("ok")).toBeNull();
+    expect(detectUniformTextLanguage(undefined)).toBeNull();
   });
 });
 

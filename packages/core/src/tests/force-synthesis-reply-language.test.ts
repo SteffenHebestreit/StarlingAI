@@ -48,8 +48,13 @@ type SeedMessage = { role: "user" | "assistant" | "tool"; content: string; metad
 /**
  * The RESPOND NOW message a forced synthesis sends for `userMessage`'s turn. `before` is the
  * conversation before that turn; `during` is what the turn added after its first tool result.
+ * `userWords` is what the person typed, as runTurn puts it in the request context: by default the
+ * message itself, as the chat entry points send it; null for a turn no person opened.
  */
-async function synthesizeAfter(userMessage: string, opts: { before?: SeedMessage[]; during?: SeedMessage[] } = {}): Promise<string> {
+async function synthesizeAfter(
+  userMessage: string,
+  opts: { before?: SeedMessage[]; during?: SeedMessage[]; userWords?: string | null } = {},
+): Promise<string> {
   const dir = mkdtempSync(join(tmpdir(), "sai-synthesis-language-"));
   writeFileSync(join(dir, "starlingai.json"), JSON.stringify({
     agents: { mainAssistant: { defaultLanguage: "German" } },
@@ -59,6 +64,7 @@ async function synthesizeAfter(userMessage: string, opts: { before?: SeedMessage
   await (await import("../agent/text-language.js")).warmTextLanguageDetector();
   const { AgentSession } = await import("../agent/session.js");
   const { forceSynthesis } = await import("../agent/runtime.js");
+  const { runWithRequestContext } = await import("../runtime/request-context.js");
 
   const session = new AgentSession({ channel: "test", workspacePath: dir, systemPrompt: "You are a test agent." });
   for (const message of opts.before ?? []) session.addMessage(message);
@@ -66,7 +72,9 @@ async function synthesizeAfter(userMessage: string, opts: { before?: SeedMessage
   session.addMessage({ role: "assistant", content: "…" });
   session.addMessage({ role: "tool", content: "evidence: store batteries cool, at 40-60 % charge" });
   for (const message of opts.during ?? []) session.addMessage(message);
-  await forceSynthesis(session, { complete: completeMock } as never, new AbortController().signal, "Write the final answer.");
+  const userWords = opts.userWords === undefined ? userMessage : opts.userWords;
+  await runWithRequestContext(userWords === null ? {} : { userWords }, () =>
+    forceSynthesis(session, { complete: completeMock } as never, new AbortController().signal, "Write the final answer."));
 
   const last = sentMessages.at(-1)?.at(-1);
   return typeof last?.content === "string" ? last.content : "";
@@ -130,6 +138,13 @@ describe("forced synthesis reply language", () => {
     });
     expect(later).toContain("as a standing instruction earlier");
     expect(later).not.toContain("otherwise in English");
+  });
+
+  it("names no language on a turn no person opened", async () => {
+    // A /run scene's template or a workflow step: the swarm wrote the message, not the person.
+    const instruction = await synthesizeAfter(ENGLISH_QUESTION, { userWords: null });
+    expect(instruction).toContain("otherwise in the language of that message");
+    expect(instruction).not.toContain("otherwise in English");
   });
 
   it("quotes the turn's own message, not the frame its mid-turn steering came in", async () => {
