@@ -137,7 +137,7 @@ Every public schema field, where it is declared, and how many production files r
 | `deliverableConsistencyQaMaxRounds` | packages/core/src/config/schemas/orchestration.ts:406 | 1 |
 | `description` | packages/core/src/config/schema.ts:589 | 183 |
 | `detectWriteChurnOverwrite` | packages/core/src/config/schemas/orchestration.ts:427 | 2 |
-| `digest` | packages/core/src/config/schema.ts:1998 | 55 |
+| `digest` | packages/core/src/config/schema.ts:1998 | 56 |
 | `dir` | packages/core/src/config/schema.ts:1987 | 59 |
 | `disabled` | packages/core/src/config/schema.ts:833 | 109 |
 | `disabledGroups` | packages/core/src/config/schema.ts:2016 | 3 |

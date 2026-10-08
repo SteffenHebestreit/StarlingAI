@@ -29,8 +29,12 @@
  *   (MemoryRecord)-[:SUPERSEDES {ts, reason}]->(MemoryRecord)
  *   (MemoryRecord)-[:CONTRADICTS {detectedAt, confidence}]->(MemoryRecord)
  *   (Agent)-[:RETRIEVED {ts, sessionId, rank, wasUseful}]->(MemoryRecord)
+ *
+ * Under multi-user auth a Session node's id and a RETRIEVED edge's sessionId hold graphSessionId's
+ * digest of the session id, never the id itself.
  */
 
+import { createHmac, randomBytes } from "node:crypto";
 import { isGraphDbAvailable, runCypher, toPlainRecords } from "../db/neo4j.js";
 import type { MemoryRecord } from "./service.js";
 import { childLogger } from "../logger.js";
@@ -127,6 +131,32 @@ export function isGraphMemoryReadable(
   if (properties["scope"] === "user") return tenant === reader.readerUserTenant;
   if (properties["scope"] === "workspace") return tenant === reader.readerWorkspaceTenant || tenant === reader.sharedWorkspaceTenant;
   return false;
+}
+
+/** The key of graphSessionId's digests: drawn once per process and never stored. */
+let _graphSessionKey: Buffer | null = null;
+
+/**
+ * The id a session goes by in the graph: under multi-user auth a digest of the session id keyed by
+ * this process, never the id itself; with one operator the id as it is.
+ *
+ * The graph is one instance for every account, and the session ids it held, on Session nodes and on
+ * RETRIEVED edges, were every account's to read: graph_query projected them as plain strings and the
+ * graph inspector showed the Session nodes (found in review, 2026-10-08). A session id is what a run
+ * names to work in that session's shared facts. The graph only ties a session's records and
+ * retrievals together with it, and the digest does that as well. The key is the process's own, so
+ * after a restart, or in another process, a session goes by another digest: its records then hang
+ * off two Session nodes. The retrieval feedback loop is unaffected, since it marks a turn's
+ * retrievals in the process that recorded them. A config that cannot be read counts as multi-user.
+ */
+export function graphSessionId(sessionId: string): string {
+  let multiUser = true;
+  try {
+    multiUser = getConfig().auth?.enabled === true;
+  } catch { /* fail closed: digest */ }
+  if (!multiUser) return sessionId;
+  _graphSessionKey ??= randomBytes(32);
+  return createHmac("sha256", _graphSessionKey).update(sessionId).digest("hex").slice(0, 32);
 }
 
 const log = childLogger("memory:graph");
@@ -230,7 +260,7 @@ export async function upsertMemoryToGraph(
         WITH s
         MATCH (m:MemoryRecord {id: $id})
         MERGE (s)-[:PRODUCED]->(m)
-      `, { sessionId, id: record.id }, { write: true });
+      `, { sessionId: graphSessionId(sessionId), id: record.id }, { write: true });
     } catch (err) {
       log.debug({ err }, "PRODUCED relationship upsert failed");
     }
@@ -550,7 +580,7 @@ export async function graphTrackRetrieval(
     `, {
       id: memoryId,
       agentName,
-      sessionId,
+      sessionId: graphSessionId(sessionId),
       rank,
       now: new Date().toISOString(),
     }, { write: true });
@@ -612,7 +642,7 @@ export async function graphPromoteFact(
       WITH m
       MERGE (s:Session {id: $sessionId})
       MERGE (s)-[:PRODUCED]->(m)
-    `, { id, content, agentName, key, sessionId, now }, { write: true });
+    `, { id, content, agentName, key, sessionId: graphSessionId(sessionId), now }, { write: true });
 
     // If the content changed, record the supersession. The fact uses a STABLE id
     // (one node per agent+key), so the MERGE above overwrote the content in place —
@@ -671,7 +701,7 @@ export async function graphMarkSessionRetrievalsUseful(
             ELSE coalesce(m.importance, 0.5) + $boost
           END
       RETURN count(ret) AS marked
-    `, { sessionId, boost }, { write: true });
+    `, { sessionId: graphSessionId(sessionId), boost }, { write: true });
 
     const marked = asInt(toPlainRecords(result ?? null as never)[0]?.["marked"], 0);
     if (marked > 0) log.debug({ sessionId, marked, boost }, "Retrieval feedback closed");
@@ -713,7 +743,7 @@ export async function graphMarkSessionRetrievalsUnhelpful(
             ELSE coalesce(m.importance, 0.5) - $penalty
           END
       RETURN count(ret) AS marked
-    `, { sessionId, penalty, floor }, { write: true });
+    `, { sessionId: graphSessionId(sessionId), penalty, floor }, { write: true });
 
     const marked = asInt(toPlainRecords(result ?? null as never)[0]?.["marked"], 0);
     if (marked > 0) log.debug({ sessionId, marked, penalty }, "Retrieval negative feedback applied");
