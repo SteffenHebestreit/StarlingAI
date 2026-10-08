@@ -246,10 +246,10 @@ function formatLinkLine(link: PageLink): string {
 /**
  * The links section: `[Links on this page — N of M, same site first]` and one `- LABEL -> URL`
  * line per link, the page's own URL left out, links on the page's site first and then the rest,
- * each group in page order. Ordering never decides inclusion beyond the budget: lines are added
- * in that order while the whole section stays within `budget` characters, and when some are left
- * out the header says so and that a larger maxLength lists more. A URL longer than LINK_URL_MAX
- * is never listed and not counted in M. Returns text "" when not even one line fits.
+ * each group in page order. Lines are added in that order while the whole section stays within
+ * `budget` characters; when some are left out, the header says how many were listed and that a
+ * larger maxLength lists more. A URL longer than LINK_URL_MAX is never listed and not counted in
+ * M. Returns text "" when not even one line fits.
  */
 export function formatLinkSection(links: readonly PageLink[], pageUrl: string, budget: number): { text: string; shown: number; total: number } {
   const self = resolveLink(pageUrl, undefined);
