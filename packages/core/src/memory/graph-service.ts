@@ -166,12 +166,19 @@ export async function upsertMemoryToGraph(
   const topic = record.kind;
 
   try {
+    // Under multi-user auth a write with no user in its context keeps the tenant the node has. The
+    // sleep-time sweep compacts each account's user memory in a context that names its directory
+    // and not the user, and the record the duplicates merged into was stored again with tenant null:
+    // the account lost its own preference from Critical Memory, the graph inspector and graph_query
+    // (found in review, 2026-10-08). A node the graph never had stays without one, which no account
+    // reads. With one operator no reader looks at the tenant, and the write is the one it was.
+    const keepTenant = getConfig().auth?.enabled === true;
     await runCypher(`
       MERGE (m:MemoryRecord {id: $id})
       SET m.content     = $content,
           m.kind        = $kind,
           m.scope       = $scope,
-          m.tenant      = $tenant,
+          m.tenant      = ${keepTenant ? "coalesce($tenant, m.tenant)" : "$tenant"},
           m.domain      = $domain,
           m.topic       = $topic,
           m.importance  = coalesce(m.importance, 0.5),
