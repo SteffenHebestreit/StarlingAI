@@ -18,7 +18,7 @@ import { timingSafeEqual } from "node:crypto";
 
 import { getConfig } from "../config/loader.js";
 import { runSubAgentWithStats } from "../agent/sub-agent.js";
-import { verifyToken, extractBearerToken } from "../gateway/auth.js";
+import { authenticatedUser, verifyToken, extractBearerToken } from "../gateway/auth.js";
 import { verifyInboundA2aToken } from "../gateway/oidc.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
@@ -303,7 +303,19 @@ async function authorizeInbound(req: IncomingMessage): Promise<AuthResult> {
   // Otherwise, accept a regular gateway JWT — operators get full access; viewer
   // tokens are accepted (tier policies still apply).
   const verified = await verifyToken(token);
-  if (verified) return { ok: true, caller: (verified as { sub?: string }).sub ?? "authenticated" };
+  if (verified) {
+    // Under multi-user auth a signed token is only as good as the account behind it. Any
+    // unexpired one was accepted here, so a deleted or disabled account kept running tasks for
+    // the rest of the token's lifetime (found in review, 2026-10-08). The caller is now resolved
+    // against the user store, as on /api, the AG-UI stream and the legacy /a2a/agents route, and a
+    // token whose account no longer resolves is refused. With one operator there is no user store
+    // and the token's own claims stand, as before.
+    if (getConfig().auth?.enabled === true) {
+      const user = await authenticatedUser(`Bearer ${token}`);
+      return user ? { ok: true, caller: user.username } : { ok: false, caller: "anonymous" };
+    }
+    return { ok: true, caller: (verified as { sub?: string }).sub ?? "authenticated" };
+  }
 
   // OIDC A2A: accept a PEER's IdP token, validated against the issuer's JWKS
   // (signature + issuer + configured audience). Lets us trust other agents that

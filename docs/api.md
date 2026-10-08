@@ -824,3 +824,7 @@ Response:
 ```
 
 Calling any other method returns `-32601` with `Method not found — use tasks/send`.
+
+### Public A2A surface
+
+`POST /a2a/v1` (JSON-RPC `tasks/send`, `tasks/get`) and its agent card at `GET /.well-known/agent-card.json` are served when `a2a.enabled` is set. The JSON-RPC endpoint takes the shared `a2a.inboundBearerToken` when one is configured, and otherwise a gateway token (or, with OIDC A2A on, a peer's token from the identity provider). Under multi-user auth a gateway token whose account has been removed gets `401`, as on `/api`.

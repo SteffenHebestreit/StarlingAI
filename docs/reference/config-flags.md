@@ -511,7 +511,7 @@ Every public schema field, where it is declared, and how many production files r
 | `urlNotFetchedShortAnswerGuard` | packages/core/src/config/schemas/orchestration.ts:283 | 1 |
 | `urls` | packages/core/src/config/schema.ts:810 | 10 |
 | `userAgent` | packages/core/src/config/schema.ts:1173 | 3 |
-| `username` | packages/core/src/config/schema.ts:376 | 52 |
+| `username` | packages/core/src/config/schema.ts:376 | 53 |
 | `usernameClaim` | packages/core/src/config/schema.ts:416 | 1 |
 | `usernameSelector` | packages/core/src/config/schema.ts:811 | 5 |
 | `userProfilePrefetch` | packages/core/src/config/schemas/orchestration.ts:624 | 4 |
