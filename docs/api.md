@@ -46,7 +46,7 @@ Scene webhooks are the main exception: `POST /api/scenes/:name/run` can authenti
 | `GET` | `/readyz` | returns readiness, active-session count, deployment-mode dependencies, latest event-loop lag, and in-flight provider activity (producing / prefill / stalled); clustered modes return `503` when Redis or PostgreSQL is unavailable |
 | `GET` | `/api/status` | authenticated summary of uptime and active sessions |
 | `GET` | `/api/runtime/status` | authenticated component health snapshot |
-| `GET` | `/api/health/subsystems` | authenticated deep self-checks (embeddings, vector store, graph, telemetry, event loop, provider activity); 503 if any subsystem is unavailable |
+| `GET` | `/api/health/subsystems` | authenticated deep self-checks (embeddings, vector store, graph, telemetry, event loop, provider activity, and a sandbox canary: a `docker run` through shell_exec must hand back what it printed on stdout and on stderr, else `degraded`, never 503; a verdict serves 5 minutes, carries `checkedAt` and `ageMs` (its age on the gateway's clock), and is not re-measured while a turn is running); 503 if any subsystem is unavailable |
 | `GET` | `/api/observability/recovery-nets` | authenticated firing counts per orchestration recovery net (which autopilots actually fire) |
 
 ## REST Endpoints

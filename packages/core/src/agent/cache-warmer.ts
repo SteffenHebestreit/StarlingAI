@@ -308,6 +308,15 @@ export function markOrchestratorIdle(): void {
   if (typeof rewarmTimer.unref === "function") rewarmTimer.unref();
 }
 
+/**
+ * How many turns this process is running. runTurn brackets every turn, nested ones included, with
+ * the two calls above whether or not the warm-keeper is on, so other background work that must not
+ * compete with a turn reads the count here (the sandbox canary, observability/health-checks.ts).
+ */
+export function orchestratorTurnsRunning(): number {
+  return activeTurns;
+}
+
 export function startCacheWarmer(): void {
   if (running || !enabled()) return;
   running = true;

@@ -81,11 +81,11 @@ Every public schema field, where it is declared, and how many production files r
 | `clientId` | packages/core/src/config/schema.ts:384 | 6 |
 | `clientSecret` | packages/core/src/config/schema.ts:386 | 4 |
 | `cloudFallback` | packages/core/src/config/schema.ts:113 | 3 |
-| `command` | packages/core/src/config/schema.ts:672 | 51 |
+| `command` | packages/core/src/config/schema.ts:672 | 53 |
 | `completes` | packages/core/src/config/schema.ts:888 | 14 |
 | `completionPer1m` | packages/core/src/config/schema.ts:511 | 1 |
 | `computerUse` | packages/core/src/config/schema.ts:1946 | 13 |
-| `concurrency` | packages/core/src/config/schemas/retrieval.ts:190 | 23 |
+| `concurrency` | packages/core/src/config/schemas/retrieval.ts:190 | 25 |
 | `concurrentSessions` | packages/core/src/config/schema.ts:266 | 1 |
 | `confidenceAttempt` | packages/core/src/config/schema.ts:1588 | 5 |
 | `confidenceAttemptMaxChars` | packages/core/src/config/schema.ts:1592 | 4 |
@@ -196,7 +196,7 @@ Every public schema field, where it is declared, and how many production files r
 | `historyLimit` | packages/core/src/config/schemas/channels.ts:22 | 5 |
 | `holdoutRate` | packages/core/src/config/schema.ts:1486 | 2 |
 | `honestSynthesisOnPartialEvidence` | packages/core/src/config/schemas/orchestration.ts:602 | 1 |
-| `host` | packages/core/src/config/schema.ts:707 | 112 |
+| `host` | packages/core/src/config/schema.ts:707 | 113 |
 | `http` | packages/core/src/config/schema.ts:752 | 86 |
 | `humanInLoopSteps` | packages/core/src/config/schema.ts:1309 | 20 |
 | `id` | packages/core/src/config/schema.ts:561 | 290 |
@@ -491,7 +491,7 @@ Every public schema field, where it is declared, and how many production files r
 | `toolMode` | packages/core/src/config/schema.ts:271 | 6 |
 | `toolName` | packages/core/src/config/schemas/multimodal.ts:17 | 70 |
 | `toolRerankMinTools` | packages/core/src/config/schemas/orchestration.ts:651 | 2 |
-| `tools` | packages/core/src/config/schema.ts:921 | 221 |
+| `tools` | packages/core/src/config/schema.ts:921 | 222 |
 | `topK` | packages/core/src/config/schema.ts:169 | 7 |
 | `topLogprobs` | packages/core/src/config/schemas/decisions.ts:145 | 7 |
 | `topP` | packages/core/src/config/schema.ts:168 | 4 |
@@ -514,7 +514,7 @@ Every public schema field, where it is declared, and how many production files r
 | `usernameClaim` | packages/core/src/config/schema.ts:392 | 1 |
 | `usernameSelector` | packages/core/src/config/schema.ts:787 | 5 |
 | `userProfilePrefetch` | packages/core/src/config/schemas/orchestration.ts:624 | 4 |
-| `users` | packages/core/src/config/schema.ts:433 | 38 |
+| `users` | packages/core/src/config/schema.ts:433 | 39 |
 | `verifyArtifacts` | packages/core/src/config/schemas/orchestration.ts:372 | 2 |
 | `verifyArtifactsMaxRepairAttempts` | packages/core/src/config/schemas/orchestration.ts:380 | 1 |
 | `verifyArtifactsRepair` | packages/core/src/config/schemas/orchestration.ts:377 | 1 |
@@ -532,4 +532,4 @@ Every public schema field, where it is declared, and how many production files r
 | `windowMs` | packages/core/src/config/schema.ts:267 | 8 |
 | `workspaceAccess` | packages/core/src/config/schema.ts:940 | 5 |
 | `workspaceName` | packages/core/src/config/schemas/retrieval.ts:160 | 3 |
-| `workspacePath` | packages/core/src/config/schema.ts:2003 | 122 |
+| `workspacePath` | packages/core/src/config/schema.ts:2003 | 123 |

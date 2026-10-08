@@ -22,7 +22,13 @@
  *                     exemption is compiled); when the status cannot be read, the HTTP probe alone
  *   web-search        GET E2E_SEARXNG_URL/healthz when set; otherwise no route reports SearXNG,
  *                     so it is assumed up (marked "assumed" in the report)
- *   sandbox           no route reports it: assumed up (marked "assumed")
+ *   sandbox           GET /api/health/subsystems  check "sandbox" = ok and measured: the gateway's
+ *                     canary ran a docker run through shell_exec and got both what it printed on
+ *                     stdout and on stderr back. A failed run or lost output is down, and so is a
+ *                     verdict the canary has not measured ("not configured"; "not checked yet", as
+ *                     it starts no container while a turn runs) or a gateway too old to report it.
+ *                     An ok verdict counts up to SANDBOX_VERDICT_MAX_AGE_MS old, by the ageMs the
+ *                     gateway reports with it
  *
  * Answers are cached for ttlMs, and the gateway routes they share are fetched once per window.
  * Response bodies are read for the fields above only — /api/mcp/servers and the computer-use
@@ -180,6 +186,16 @@ export function mailIsolationCheck(source: EnvironmentStatusSource | null): Mail
 
 export const DEFAULT_E2E_SITE_URL = "http://localhost:18081";
 
+/**
+ * The oldest ok sandbox verdict a scenario runs on: three of the canary's five-minute verdicts
+ * (SANDBOX_CANARY_TTL_MS, observability/health-checks.ts). The canary starts no container while a
+ * turn runs, so a gateway that is never idle (a turn that never ends, a turn waiting on an approval
+ * with no turn timeout, a run at --concurrency 2) served its last verdict for as long as that
+ * lasted, and a sandbox broken in the meantime ran its scenarios on a dead channel. Between the
+ * scenarios of a run at concurrency 1 the canary re-measures, so a verdict stays well inside this.
+ */
+export const SANDBOX_VERDICT_MAX_AGE_MS = 15 * 60_000;
+
 export class ServiceProber {
   private readonly cache = new Map<E2EService, { at: number; state: Promise<ServiceState> }>();
   private readonly shared = new Map<string, { at: number; result: Promise<HttpResult> }>();
@@ -213,14 +229,20 @@ export class ServiceProber {
     return response.status;
   }
 
-  private async subsystem(name: string): Promise<{ status: string; detail: string } | string> {
+  private async subsystem(name: string): Promise<{ status: string; detail: string; checkedAt?: string; ageMs?: number } | string> {
     const result = await this.gatewayGet("/api/health/subsystems");
     // 503 means "something is unavailable" and still carries the checks.
     if (result.status !== 200 && result.status !== 503) return `GET /api/health/subsystems answered HTTP ${result.status}`;
     const checks = isRecord(result.json) && Array.isArray(result.json["checks"]) ? result.json["checks"] : [];
     const check = checks.find((entry): entry is Record<string, unknown> => isRecord(entry) && entry["name"] === name);
     if (!check) return `GET /api/health/subsystems reports no "${name}" check`;
-    return { status: String(check["status"] ?? "unknown"), detail: typeof check["detail"] === "string" ? check["detail"] : "" };
+    const ageMs = check["ageMs"];
+    return {
+      status: String(check["status"] ?? "unknown"),
+      detail: typeof check["detail"] === "string" ? check["detail"] : "",
+      ...(typeof check["checkedAt"] === "string" ? { checkedAt: check["checkedAt"] } : {}),
+      ...(typeof ageMs === "number" && Number.isFinite(ageMs) && ageMs >= 0 ? { ageMs } : {}),
+    };
   }
 
   private async subsystemState(service: E2EService, name: string, requireConfigured = false): Promise<ServiceState> {
@@ -329,8 +351,23 @@ export class ServiceProber {
           return { service, up: false, detail: `SearXNG unreachable at ${url} (${describeError(err)})` };
         }
       }
-      case "sandbox":
-        return { service, up: true, assumed: true, detail: "no probe (no gateway route reports the sandbox)" };
+      case "sandbox": {
+        // This was assumed up, and from July to 2026-10-07 the docker-socket proxy dropped every
+        // sandbox command's output: the sandbox scenario was graded on whatever the coder made of
+        // "(no output)". Only a verdict the canary measured lets a scenario that needs it run.
+        const check = await this.subsystem("sandbox");
+        if (typeof check === "string") return { service, up: false, detail: check };
+        const detail = `sandbox: ${check.status}${check.detail ? ` — ${check.detail}` : ""}`;
+        if (check.status !== "ok" || check.checkedAt === undefined) return { service, up: false, detail };
+        // The age the gateway counts, never checkedAt against this host's clock: the gateway's VM
+        // clock can drift from it (WSL2 after sleep).
+        if (check.ageMs === undefined) return { service, up: false, detail: "sandbox verdict of unknown age: the gateway reports no ageMs with it" };
+        if (check.ageMs > SANDBOX_VERDICT_MAX_AGE_MS) {
+          const minutes = Math.ceil(check.ageMs / 60_000);
+          return { service, up: false, detail: `sandbox verdict ${minutes} min old, not re-measured while turns run, over the ${SANDBOX_VERDICT_MAX_AGE_MS / 60_000} min a scenario takes` };
+        }
+        return { service, up: true, detail };
+      }
       default: {
         const unknown: never = service;
         return { service: unknown, up: false, detail: "unknown service" };
