@@ -147,7 +147,10 @@ export async function lookupTrajectoryInjection(params: {
  * above all — never saw it, so the research gate fell back to an English-only word shape and a plan
  * written in German ran web_coder on a research step (E2E 2026-10-07). Only the orchestrator's own
  * turn carries it: a workflow step runs the agents the scene's author named, and a directed turn
- * (`--agent`) runs the agent the user named.
+ * (`--agent`) runs the agent the user named. A workflow step is either a nested turn (channel
+ * "workflow", or a workflow on the execution stack) or a queued scene or job, scheduled tasks
+ * included, which the scene worker runs as a turn of its own on channel "scene" with no stack: the
+ * judge runs on those too, and the trigger would otherwise replace the agent the author named.
  */
 export function turnEvidenceRequirement(params: {
   upfrontSourceSensitive: boolean;
@@ -156,7 +159,7 @@ export function turnEvidenceRequirement(params: {
   directiveAgent?: string;
 }): { required: true } | undefined {
   if (!params.upfrontSourceSensitive) return undefined;
-  if (params.channel === "workflow" || params.workflowDepth > 0) return undefined;
+  if (params.channel === "workflow" || params.channel === "scene" || params.workflowDepth > 0) return undefined;
   if (params.directiveAgent?.trim()) return undefined;
   return { required: true };
 }

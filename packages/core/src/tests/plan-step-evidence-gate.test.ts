@@ -402,6 +402,9 @@ describe("capability predicates behind the turn trigger", () => {
     expect(turnEvidenceRequirement({ upfrontSourceSensitive: true, channel: "eval", workflowDepth: 0 })).toEqual({ required: true });
     expect(turnEvidenceRequirement({ upfrontSourceSensitive: false, channel: "eval", workflowDepth: 0 })).toBeUndefined();
     expect(turnEvidenceRequirement({ upfrontSourceSensitive: true, channel: "workflow", workflowDepth: 0 })).toBeUndefined();
+    // A queued scene or job (the scene worker's own turn, scheduled tasks included): no workflow
+    // stack, but the workflow's author named its agents all the same.
+    expect(turnEvidenceRequirement({ upfrontSourceSensitive: true, channel: "scene", workflowDepth: 0 })).toBeUndefined();
     expect(turnEvidenceRequirement({ upfrontSourceSensitive: true, channel: "eval", workflowDepth: 1 })).toBeUndefined();
     expect(turnEvidenceRequirement({ upfrontSourceSensitive: true, channel: "cli", workflowDepth: 0, directiveAgent: "web_coder" })).toBeUndefined();
   });

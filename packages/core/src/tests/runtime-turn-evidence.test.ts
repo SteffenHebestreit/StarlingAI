@@ -155,14 +155,17 @@ describe("the up-front judge's verdict on the turn's tool context", () => {
 
   it("adds nothing on a directed turn or a workflow's turn, even when the judge said yes", async () => {
     // Each runs the agents someone named — the user with --agent, a scene's author — so the
-    // research gate's turn trigger has nothing to correct there.
+    // research gate's turn trigger has nothing to correct there. A queued scene or job runs on the
+    // scene worker's own session (channel "scene"), with no workflow stack.
     const directed = await delegationContext({ directiveAgent: "researcher" });
     delegatedWith.length = 0;
     const workflowChannel = await delegationContext({ channel: "workflow" });
     delegatedWith.length = 0;
     const workflowStep = await delegationContext({ workflowStack: ["scene:company_facts"] });
+    delegatedWith.length = 0;
+    const queuedScene = await delegationContext({ channel: "scene" });
 
-    for (const [label, ctx] of [["directed", directed], ["workflow channel", workflowChannel], ["workflow step", workflowStep]] as const) {
+    for (const [label, ctx] of [["directed", directed], ["workflow channel", workflowChannel], ["workflow step", workflowStep], ["queued scene", queuedScene]] as const) {
       expect(ctx, `${label}: the model's delegation never reached the tool`).toBeDefined();
       expect(ctx!.turnEvidence, label).toBeUndefined();
     }

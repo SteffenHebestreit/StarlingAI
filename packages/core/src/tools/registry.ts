@@ -246,7 +246,8 @@ export interface ToolContext {
   /**
    * The up-front judge's verdict that answering this turn needs outside facts
    * (orchestration.upfrontSourceSensitiveClassifier), set by the runtime on the orchestrator's own
-   * turn only — never on a workflow step, a directed (`--agent`) turn or a specialist's context.
+   * turn only — never on a workflow step (nested, or a queued scene or job on the scene worker), a
+   * directed (`--agent`) turn or a specialist's context.
    * One object per turn, shared by reference with every context spread from the orchestrator's.
    * `outsideEngaged` names the first agent this turn that can reach outside the workspace — one
    * dispatched or redirected to, an ephemeral agent, or a workflow run (`workflow:<name>`); once
