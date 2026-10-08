@@ -2929,7 +2929,13 @@ async function _runTurn(
           details: `forced tool call returned ${llmResponse.content?.length ?? 0} chars of prose and hit the completion cap; continuation skipped`,
         });
       }
-      if (!forcedCallReturnedProse && llmResponse.tool_calls.length === 0 && llmResponse.finishReason === "length") {
+      // Nor is a response the --agent dispatch below replaces: while the directive is pending, one
+      // that calls nothing becomes the delegation, its prose discarded. Continued, a call left unforced
+      // (orchestration.forceToolChoiceWhenOrchestrationRequired off, or after a workflow ran) spent up
+      // to MAX_LENGTH_CONTINUATION_ATTEMPTS slow-model calls on that prose, and on iteration 0 their
+      // text streamed to the user, who then lost it (integration review, 2026-10-08).
+      const replacedByDirectiveDispatch = directiveAgentPending && llmResponse.tool_calls.length === 0;
+      if (!forcedCallReturnedProse && !replacedByDirectiveDispatch && llmResponse.tool_calls.length === 0 && llmResponse.finishReason === "length") {
         const continued = await continueLengthLimitedResponse(provider, messages, llmResponse, signal, chunkSink);
         llmResponse = continued.response;
         llmCalls += continued.additionalCalls;

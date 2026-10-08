@@ -239,6 +239,17 @@ function answerStream(text: string) {
   })();
 }
 
+/** A prose response the completion cap cut off. */
+function cutStream(text: string) {
+  return (async function* () {
+    yield { type: "text_delta", content: text };
+    yield { type: "done", finishReason: "length", usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } };
+  })();
+}
+
+/** Whether a provider.stream call was offered no tools: a length continuation's call. */
+const isContinuationCall = (call: unknown[]): boolean => Array.isArray(call[1]) && call[1].length === 0;
+
 /**
  * A long, structured deliverable: its delegation result is framed "Present the full content below
  * VERBATIM", and a turn whose one delegation returned it relays it as the answer.
@@ -378,6 +389,50 @@ describe("a turn the user directed to one agent", () => {
 
     expect(delegated).toHaveLength(1);
     expect(streamed.join("")).not.toContain("DRAFT");
+  });
+
+  // A response the dispatch replaces is not continued when the completion cap cut it: an unforced
+  // call's prose was continued like an answer, at the cost of slow-model calls whose text was then
+  // thrown away, and on iteration 0 streamed to the user (integration review, 2026-10-08).
+  it("neither continues nor streams cut prose it replaces with the delegation", async () => {
+    // Forcing off, the turn's first call is unforced; only its own text was held back (6dbbe90).
+    const { AgentSession, runTurn } = await loadRuntime({ orchestration: { forceToolChoiceWhenOrchestrationRequired: false } });
+    let call = 0;
+    streamMock.mockImplementation((_messages: unknown, tools: unknown[]) => {
+      if (tools.length === 0) return answerStream("CONTINUATION: the rest of the orchestrator's own answer.");
+      call += 1;
+      return call === 1 ? cutStream("DRAFT: int() truncates; use round(). I answered this myself") : answerStream(ANSWER);
+    });
+    const streamed: string[] = [];
+
+    const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
+    await runTurn({ session, userMessage: MESSAGE, allowedAgents: ["code_analyst"], directiveAgent: "code_analyst", onChunk: (text) => streamed.push(text) });
+
+    expect(toolChoiceOf(0)).toBeUndefined();
+    expect(streamMock.mock.calls.filter(isContinuationCall)).toHaveLength(0);
+    expect(streamed.join("")).not.toContain("DRAFT");
+    expect(streamed.join("")).not.toContain("CONTINUATION");
+    expect(delegated).toEqual([expect.objectContaining({ agentName: "code_analyst" })]);
+  });
+
+  it("does not continue cut prose it replaces with the delegation after a workflow ran", async () => {
+    // Once run_workflow ran, the call is no longer forced while the directive is still pending.
+    const { AgentSession, runTurn } = await loadRuntime();
+    let call = 0;
+    streamMock.mockImplementation((_messages: unknown, tools: unknown[]) => {
+      if (tools.length === 0) return cutStream("CONTINUATION: more of the orchestrator's own answer");
+      call += 1;
+      if (call === 1) return toolStream("run_workflow", { name: "code_review", workflowType: "scene" });
+      return call === 2 ? cutStream("DRAFT: int() truncates; use round(). I answered this myself") : answerStream(ANSWER);
+    });
+
+    const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
+    await runTurn({ session, userMessage: MESSAGE, allowedAgents: ["code_analyst"], directiveAgent: "code_analyst" });
+
+    expect(toolChoiceOf(1)).toBeUndefined();
+    expect(streamMock.mock.calls.filter(isContinuationCall)).toHaveLength(0);
+    expect(streamMock).toHaveBeenCalledTimes(3);
+    expect(delegated).toEqual([expect.objectContaining({ agentName: "code_analyst" })]);
   });
 
   // The dispatch handed the agent the bare request, and a specialist starts from its task and
