@@ -14,10 +14,11 @@
  * Before any scenario runs, evaluate checks that the eval identity sees no shared mail account
  * (the operator's real mail) and refuses to run — fail closed — when it does or cannot tell.
  *
- * Exit codes: 0 every scenario that ran passed · 1 failures or baseline regressions ·
+ * Exit codes: 0 every scenario that ran passed · 1 a scenario failed ·
  * 2 usage, invalid scenarios, missing credentials, a refused login or the mail-isolation
- * preflight · 3 environment-suspect (everything skipped, or a quarter of the attempts ended on
- * harness errors). Through pnpm a non-zero code may surface as 1.
+ * preflight · 3 environment-suspect (everything skipped, a fifth of the selected scenarios skipped
+ * for one service, or a quarter of the attempts ended on harness errors). Through pnpm a non-zero
+ * code may surface as 1.
  */
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -36,7 +37,7 @@ import {
   type MailIsolationCheck,
 } from "./services.js";
 import { RUNNER_DEFAULTS, runScenarios } from "./runner.js";
-import { buildReport, compareWithBaseline, loadReport, writeReport } from "./report.js";
+import { buildReport, compareWithBaseline, exitCodeFor, loadReport, writeReport } from "./report.js";
 import { resolveSetupPaths, runE2ESetup, SetupRefusedError } from "./setup.js";
 
 const VALUE_FLAGS = new Set(["group", "tag", "id", "repeat", "concurrency", "baseline", "out", "scenarios"]);
@@ -258,10 +259,7 @@ async function evaluate(args: ParsedArgs, io: CliIo, repoRoot: string): Promise<
     if (report.environment.suspect) io.out(`ENVIRONMENT SUSPECT: ${report.environment.reasons.join("; ")}`);
     io.out(`Report: ${written.jsonPath}`);
     io.out(`        ${written.markdownPath}`);
-
-    if (report.environment.suspect) return 3;
-    if (summary.failed > 0 || (report.baseline?.regressions.length ?? 0) > 0) return 1;
-    return 0;
+    return exitCodeFor(report);
   } finally {
     if (io.handleSigint) process.off("SIGINT", onSigint);
     client.close();

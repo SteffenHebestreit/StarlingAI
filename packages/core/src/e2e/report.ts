@@ -7,6 +7,7 @@
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import type { E2EService } from "./scenario.js";
 import type { ScenarioResult } from "./runner.js";
 
 export interface E2ERunMeta {
@@ -69,6 +70,39 @@ export interface E2EReport {
 }
 
 const ERROR_SHARE_SUSPECT = 0.25;
+/**
+ * One service down for a fifth of the selected scenarios: the run measured that service. The full
+ * run of 2026-10-07 22:07 skipped 47 of 52 scenarios after the model endpoint died mid-run (a down
+ * probe is cached for a minute, and a skip ends at once), and read "4 passed, 1 failed".
+ */
+const SERVICE_SKIP_SHARE_SUSPECT = 0.2;
+
+interface ServiceOutage {
+  service: E2EService;
+  skipped: number;
+  /** The first skip's probe answer. */
+  detail: string;
+  /** The last scenario that saw the service up before the first skip: it went down during the run. */
+  upBefore: string | null;
+}
+
+/** Per service, the scenarios skipped because it was down, in run order. */
+function serviceOutages(results: readonly ScenarioResult[]): ServiceOutage[] {
+  const outages = new Map<E2EService, ServiceOutage>();
+  const lastUp = new Map<E2EService, string>();
+  for (const result of results) {
+    for (const state of result.services) {
+      if (state.up) {
+        lastUp.set(state.service, result.id);
+      } else if (result.status === "skipped") {
+        const outage = outages.get(state.service);
+        if (outage) outage.skipped += 1;
+        else outages.set(state.service, { service: state.service, skipped: 1, detail: state.detail, upBefore: lastUp.get(state.service) ?? null });
+      }
+    }
+  }
+  return [...outages.values()];
+}
 
 export function summarize(results: readonly ScenarioResult[]): E2EReportSummary {
   const ran = results.filter((result) => result.status !== "skipped");
@@ -96,6 +130,12 @@ export function buildReport(results: readonly ScenarioResult[], meta: E2ERunMeta
   const reasons: string[] = [];
   if (summary.scenarios > 0 && summary.run === 0) {
     reasons.push(`every selected scenario was skipped (${summary.skipped}) — required services were down`);
+  } else {
+    for (const outage of serviceOutages(results)) {
+      if (outage.skipped / summary.scenarios < SERVICE_SKIP_SHARE_SUSPECT) continue;
+      reasons.push(`${outage.skipped} of ${summary.scenarios} selected scenarios were skipped because ${outage.service} was down (${outage.detail})`
+        + (outage.upBefore ? `; it was up when ${outage.upBefore} started, so it went down during the run` : ""));
+    }
   }
   if (summary.attempts > 0 && summary.attemptsErrored / summary.attempts >= ERROR_SHARE_SUSPECT) {
     reasons.push(`${summary.attemptsErrored} of ${summary.attempts} attempts ended on a harness/environment error, not on an expectation`);
@@ -153,6 +193,16 @@ export function compareWithBaseline(report: E2EReport, baseline: E2EReport, file
   const nowIds = new Set(ranNow.map((result) => result.id));
   const missingScenarios = [...ranBefore.keys()].filter((id) => !nowIds.has(id));
   return { file, regressions, improvements, unchanged, newScenarios, missingScenarios };
+}
+
+/**
+ * The CLI's exit code for a finished run: 3 environment-suspect (it wins: the verdicts below it
+ * are the environment's) · 1 a scenario failed · 0 otherwise. A baseline never sets it on its
+ * own: a scenario, or the suite, can only fall below its baseline by failing attempts now.
+ */
+export function exitCodeFor(report: E2EReport): 0 | 1 | 3 {
+  if (report.environment.suspect) return 3;
+  return report.summary.failed > 0 ? 1 : 0;
 }
 
 function percent(rate: number): string {

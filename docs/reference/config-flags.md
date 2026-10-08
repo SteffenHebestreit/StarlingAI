@@ -160,7 +160,7 @@ Every public schema field, where it is declared, and how many production files r
 | `embeddingModel` | packages/core/src/config/schema.ts:173 | 27 |
 | `enabled` | packages/core/src/config/schema.ts:289 | 131 |
 | `enableThinking` | packages/core/src/config/schema.ts:195 | 21 |
-| `endpoint` | packages/core/src/config/schema.ts:456 | 80 |
+| `endpoint` | packages/core/src/config/schema.ts:456 | 81 |
 | `endpointUnits` | packages/core/src/config/schema.ts:1672 | 1 |
 | `enforce` | packages/core/src/config/schema.ts:531 | 24 |
 | `engramApiKey` | packages/core/src/config/schemas/retrieval.ts:94 | 2 |

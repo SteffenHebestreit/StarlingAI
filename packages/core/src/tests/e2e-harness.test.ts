@@ -1301,6 +1301,19 @@ describe("e2e CLI (in process, against the fake gateway)", () => {
     expect(regressed.out).toContain("Baseline: 1 regression(s) — cli-pass");
   });
 
+  it("exits 3 when a fifth of the selected scenarios were skipped for one service", async () => {
+    mkdirSync(join(cliDir, "suspect"), { recursive: true });
+    const turn = (message: string) => [{ kind: "turn", message, expect: { reply: { includes: ["42"] } } }];
+    writeFileSync(join(cliDir, "suspect", "a.jsonc"), JSON.stringify({ id: "suspect-a", title: "Suspect A", group: "core", steps: turn("hello a") }));
+    writeFileSync(join(cliDir, "suspect", "b.jsonc"), JSON.stringify({ id: "suspect-b", title: "Suspect B", group: "core", steps: turn("hello b") }));
+    writeFileSync(join(cliDir, "suspect", "kb.jsonc"), JSON.stringify({ id: "suspect-kb", title: "Needs engram", group: "core", requires: ["engram"], steps: turn("hello kb") }));
+    const run = await cli(["evaluate", "--scenarios", "suspect", "--out", "suspect-out"]);
+    expect(run.err).toBe("");
+    expect(run.code).toBe(3);
+    expect(run.out).toContain("Scenarios: 2 passed, 0 failed, 1 skipped of 3");
+    expect(run.out).toContain("ENVIRONMENT SUSPECT: 1 of 3 selected scenarios were skipped because engram was down (engram: ok — not configured (RAG enhancement off))");
+  });
+
   it("exits 2 on usage errors and unknown ids, 1 on invalid scenario files", async () => {
     expect((await cli(["evaluate", "--bogus"])).code).toBe(2);
     expect((await cli(["evaluate", "--scenarios", "scenarios", "--repeat", "0"])).code).toBe(2);

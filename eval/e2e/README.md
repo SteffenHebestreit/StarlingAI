@@ -71,10 +71,11 @@ lacks `eval`) is your shared mail: the run stops with exit code 2 ("eval can see
 rebuild the mail-service image and run pnpm e2e:setup"). A mail-service container that is not running is
 safe; one that runs but cannot be asked (Docker unreachable, no answer) stops the run as well.
 
-Exit codes: `0` every scenario that ran passed · `1` a scenario failed or the baseline shows a regression ·
-`2` usage error, invalid scenario file, missing credentials, refused login, or the mail preflight · `3`
-environment-suspect (everything was skipped, or ≥ 25 % of the attempts ended on harness errors). Through
-`pnpm` a non-zero code may arrive as 1; `node --import tsx packages/core/src/e2e/cli.ts …` keeps it.
+Exit codes: `0` every scenario that ran passed · `1` a scenario failed · `2` usage error, invalid scenario
+file, missing credentials, refused login, or the mail preflight · `3` environment-suspect (everything was
+skipped, one service was down for ≥ 20 % of the selected scenarios, or ≥ 25 % of the attempts ended on harness
+errors). Through `pnpm` a non-zero code may arrive as 1; `node --import tsx packages/core/src/e2e/cli.ts …`
+keeps it.
 
 ### Services: skipped, never failed
 
@@ -101,7 +102,11 @@ Every run writes `artifacts/evaluations/e2e/<timestamp>.json` and a Markdown sum
 
 - **summary**: scenarios passed/failed/skipped; attempts passed, failed and errored; the **attempt pass rate**
   (attempts passed / attempts run) and **pass^k** (scenarios whose every attempt passed / scenarios run).
-- **environment**: `suspect: true` with reasons when the run says more about the environment than the swarm.
+- **environment**: `suspect: true` with reasons when the run says more about the environment than the swarm:
+  every scenario was skipped; one service was down for at least a fifth of the selected scenarios (the reason
+  names it, and says so when it was up for an earlier scenario, i.e. went down during the run — the full run of
+  2026-10-07 22:07 skipped 47 of 52 after the model endpoint died); or a quarter of the attempts ended on harness
+  errors.
 - **scenarios[]**: status, skip reason, the probed services, and every **attempt**: outcome (`passed`,
   `failed` = an expectation failed, `error` = the harness/environment failed or the run was interrupted),
   duration, failures, notes, the sessions it created (open them in the dashboard's audit/debug export), and
