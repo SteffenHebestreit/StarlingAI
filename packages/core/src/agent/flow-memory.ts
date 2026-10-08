@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { childLogger } from "../logger.js";
 import { isProtectedConfigPath } from "./config-assistant-proposals.js";
 import { canReadRecord, recordReader } from "../runtime/user-scope.js";
+import { deploymentWorkspaceRoot } from "../tools/workspace-path.js";
 
 import { PRODUCT } from "../product/index.js";
 
@@ -113,10 +114,14 @@ export function searchFlowMemory(
   // holds every account's config-assistant requests, summaries and lessons, and this guidance goes
   // into the caller's prompt. The whole file is read either way (readFlowMemoryEntries), so the last
   // 200 are the caller's, however busy the other accounts are. A request with no user gets none.
+  // The file is at the deployment root, where its writers append it. There the root a run is given
+  // is the account's own directory, where no entry is ever written, so an agent's learned flow
+  // guidance came back empty for every chat session (found in review, 2026-10-08); it is read from
+  // the deployment root behind it. With one operator, from the root given, as before.
   const reader = recordReader();
   const entries = reader.all
     ? readFlowMemoryEntries(workspacePath, 200)
-    : readFlowMemoryEntries(workspacePath, Number.MAX_SAFE_INTEGER).filter((entry) => canReadRecord(reader, entry.account)).slice(-200);
+    : readFlowMemoryEntries(deploymentWorkspaceRoot(workspacePath), Number.MAX_SAFE_INTEGER).filter((entry) => canReadRecord(reader, entry.account)).slice(-200);
   if (entries.length === 0) return [];
 
   const normalizedQuery = query.trim();

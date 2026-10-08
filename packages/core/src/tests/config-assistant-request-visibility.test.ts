@@ -10,6 +10,7 @@ import { createToken, resetAuthStateForTests } from "../gateway/auth.js";
 import { registerSubAgentRoutes } from "../gateway/sub-agent-routes.js";
 import { runWithRequestContext } from "../runtime/request-context.js";
 import { safeUserSegment } from "../runtime/user-scope.js";
+import { userWorkspaceRoot } from "../tools/workspace-path.js";
 
 /**
  * A config-assistant request, and everything written from it, goes to its author and to an admin
@@ -221,6 +222,21 @@ describe("the learned flow guidance and whose entries it reads", () => {
     withConfig(root, true);
 
     const text = runWithRequestContext({ userId: "bob" }, () => guidance(root));
+
+    expect(text).toContain("Bob made the researcher");
+    expect(text).not.toContain("Alice");
+    expect(text).not.toContain("Someone before accounts");
+  });
+
+  // A chat session's runs are given the account's own root, where no flow entry is ever written:
+  // their learned flow guidance came back empty under multi-user auth (found in review, 2026-10-08).
+  it("under multi-user auth, a run in the caller's own root reads the caller's own entries from the deployment root", () => {
+    const root = seedGuidance();
+    withConfig(root, true);
+    const bobRoot = userWorkspaceRoot(root, "bob");
+    expect(bobRoot).not.toBe(root);
+
+    const text = runWithRequestContext({ userId: "bob" }, () => guidance(bobRoot));
 
     expect(text).toContain("Bob made the researcher");
     expect(text).not.toContain("Alice");
