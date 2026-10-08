@@ -80,6 +80,8 @@ class FakeGateway {
   authEnabled = true;
   /** Workspace memory in one store for every account, as the routes before 5fc9a8e kept it. */
   sharedWorkspace = false;
+  /** An HTTP status every memory listing answers with instead of the entries. */
+  memoryListingStatus: number | null = null;
   readonly judgeRequests: Array<Record<string, unknown>> = [];
   readonly chatSends: Array<Record<string, unknown>> = [];
   readonly sessionChannels: string[] = [];
@@ -292,6 +294,8 @@ class FakeGateway {
     const user = this.userOf(req.headers["authorization"]);
     if (!user) return json(401, { error: "Unauthorized" });
     if (req.method === "GET" && url.pathname === "/api/auth/me") return json(200, { username: user, role: ROLES[user] });
+    // The gateway's role gate (gateway/index.ts): under auth, every mutating /api route is operator-only.
+    if (this.authEnabled && req.method !== "GET" && ROLES[user] !== "operator") return json(403, { error: "Operator role required for this action" });
     if (req.method === "GET" && url.pathname === "/api/health/subsystems") {
       return json(200, { healthy: true, degraded: false, checks: [{ name: "primary_model", status: "ok", detail: "fake reachable" }, { name: "engram", status: "ok", detail: "not configured (RAG enhancement off)" }] });
     }
@@ -299,6 +303,7 @@ class FakeGateway {
       return json(200, { hello: "world", user, session: decodeURIComponent(url.pathname.slice("/api/echo/".length)), token: "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJldmFsIn0.c2lnbmF0dXJlLXNpZ25hdHVyZQ" });
     }
     if (req.method === "GET" && url.pathname === "/api/memory/entries") {
+      if (this.memoryListingStatus !== null) return json(this.memoryListingStatus, { error: "memory store unavailable" });
       const scope = url.searchParams.get("scope") === "user" ? "user" : "workspace";
       const query = (url.searchParams.get("query") ?? "").toLowerCase();
       const limit = Number(url.searchParams.get("limit") ?? 200);
@@ -443,6 +448,7 @@ beforeEach(() => {
   gateway.judgeAnswer = "SCORE: 9";
   gateway.authEnabled = true;
   gateway.sharedWorkspace = false;
+  gateway.memoryListingStatus = null;
   gateway.memory.clear();
   gateway.setScripts([
     { match: /^hello/i, run: helloScript },
@@ -761,6 +767,37 @@ describe("e2e harness against a fake gateway", () => {
     expect(shared.attempts[0]!.notes).toEqual([
       "memory reset: eval's workspace memory left as it is: eval-viewer lists the same entries, so the gateway keeps that scope in one shared store",
     ]);
+  });
+
+  it("says what the reset left: entries the gateway refused to delete, a listing that failed; and empties more than one page", async () => {
+    // eval-viewer is a viewer, and every mutating route is operator-only: its memory stays.
+    const viewerScenario: E2EScenario = { id: "fake-reset-viewer", title: "Reset as the viewer", group: "core", identity: "eval-viewer", steps: [{ ...helloTurn }] };
+    gateway.remember("eval-viewer", "user", "viewer_note");
+    gateway.remember("eval-viewer", "workspace", "viewer_draft");
+    const deletesBefore = gateway.httpPaths.filter((path) => path.startsWith("DELETE /api/memory/entries/")).length;
+    const viewer = await runScenario(loaded(viewerScenario), deps(), FAST);
+    expect(gateway.memoryKeys("eval-viewer", "user")).toEqual(["viewer_note"]);
+    expect(viewer.attempts[0]!.notes).toEqual([
+      "memory reset: 1 entry of eval-viewer's user memory not deleted (HTTP 403)",
+      "memory reset: 1 entry of eval-viewer's workspace memory not deleted (HTTP 403)",
+    ]);
+    // A 403 is the role's answer: the other entries are not tried.
+    expect(gateway.httpPaths.filter((path) => path.startsWith("DELETE /api/memory/entries/")).length - deletesBefore).toBe(1);
+
+    const scenario: E2EScenario = { id: "fake-reset-report", title: "Reset reports", group: "core", steps: [{ ...helloTurn }] };
+    gateway.memoryListingStatus = 500;
+    const unlisted = await runScenario(loaded(scenario), deps(), FAST);
+    gateway.memoryListingStatus = null;
+    expect(unlisted.attempts[0]!.notes).toEqual([
+      "memory reset: eval's user memory could not be listed (HTTP 500)",
+      "memory reset: eval's workspace memory could not be listed (HTTP 500)",
+    ]);
+
+    // One listing holds at most 500 entries: the reset lists again until nothing is left.
+    for (let index = 0; index < 501; index += 1) gateway.remember("eval", "user", `fact_${index}`);
+    const paged = await runScenario(loaded(scenario), deps(), FAST);
+    expect(gateway.memoryKeys("eval", "user")).toEqual([]);
+    expect(paged.attempts[0]!.notes).toEqual([]);
   });
 
   it("skips — never fails — a scenario whose required service is down", async () => {

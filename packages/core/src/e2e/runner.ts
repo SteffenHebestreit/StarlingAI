@@ -414,9 +414,18 @@ interface MemoryListing {
   records: Array<{ id: string; key: string }>;
 }
 
+/** The most entries one listing returns (the route's own cap, gateway/memory-graph-routes.ts). */
+const MEMORY_PAGE = 500;
+/** Listings per scope before the reset gives up on a store that does not shrink. */
+const MEMORY_RESET_MAX_PASSES = 10;
+
+function entries(count: number): string {
+  return `${count} ${count === 1 ? "entry" : "entries"}`;
+}
+
 /** One page of the identity's durable memory in a scope, or the reason it could not be listed. */
 async function listMemory(identity: string, scope: MemoryEntryScope, deps: RunnerDeps, signal?: AbortSignal): Promise<MemoryListing | string> {
-  const listed = await deps.client.http(identity, "GET", `/api/memory/entries?scope=${scope}&limit=500`, signal ? { signal } : {});
+  const listed = await deps.client.http(identity, "GET", `/api/memory/entries?scope=${scope}&limit=${MEMORY_PAGE}`, signal ? { signal } : {});
   if (!listed.ok) return `HTTP ${listed.status}`;
   const body = isRecord(listed.json) ? listed.json : {};
   const records = (Array.isArray(body["records"]) ? body["records"] : []).flatMap((record) =>
@@ -474,28 +483,59 @@ async function sharedStoreReason(identity: string, scope: MemoryEntryScope, list
 /**
  * Empty the identity's durable memory (user and workspace scope) before an attempt, but only what
  * is provably the eval account's own: a delete cannot be undone, and a store the reset should not
- * touch is the operator's or another account's (resetRefusal, sharedStoreReason). What it skips
- * comes back as notes.
+ * touch is the operator's or another account's (resetRefusal, sharedStoreReason). Whatever it skips
+ * or cannot delete comes back as notes: the reset used to drop failed listings and deletes without
+ * a word, and eval-viewer's memory was never emptied, because every mutating route is operator-only
+ * (the gateway's role gate) while memory_store has no role gate at all.
  */
 export async function resetDurableMemory(identity: string, deps: RunnerDeps, signal?: AbortSignal): Promise<MemoryResetResult> {
   const notes: string[] = [];
   let removed = 0;
+  // A 401 or 403 is the account's answer, not the entry's: the remaining deletes are not tried.
+  let forbidden: string | null = null;
   try {
     const refusal = await resetRefusal(identity, deps, signal);
     if (refusal) {
       notes.push(`memory reset skipped: ${refusal}`);
     } else {
       for (const scope of ["user", "workspace"] as const) {
-        const listing = await listMemory(identity, scope, deps, signal);
-        if (typeof listing === "string" || listing.records.length === 0) continue;
-        const shared = await sharedStoreReason(identity, scope, listing, deps, signal);
-        if (shared) {
-          notes.push(`memory reset: ${identity}'s ${scope} memory left as it is: ${shared}`);
-          continue;
-        }
-        for (const record of listing.records) {
-          const deleted = await deps.client.http(identity, "DELETE", `/api/memory/entries/${encodeURIComponent(record.key)}?scope=${scope}`, signal ? { signal } : {});
-          if (deleted.ok) removed += 1;
+        for (let pass = 1; ; pass += 1) {
+          const listing = await listMemory(identity, scope, deps, signal);
+          if (typeof listing === "string") {
+            notes.push(`memory reset: ${identity}'s ${scope} memory could not be listed (${listing})`);
+            break;
+          }
+          if (listing.records.length === 0) break;
+          if (pass === 1) {
+            const shared = await sharedStoreReason(identity, scope, listing, deps, signal);
+            if (shared) {
+              notes.push(`memory reset: ${identity}'s ${scope} memory left as it is: ${shared}`);
+              break;
+            }
+          }
+          if (pass > MEMORY_RESET_MAX_PASSES) {
+            notes.push(`memory reset: ${entries(listing.total)} of ${identity}'s ${scope} memory still listed after ${MEMORY_RESET_MAX_PASSES} rounds of deletes`);
+            break;
+          }
+          const refused = new Map<string, number>();
+          let progress = 0;
+          for (const record of listing.records) {
+            if (forbidden) {
+              refused.set(forbidden, (refused.get(forbidden) ?? 0) + 1);
+              continue;
+            }
+            const deleted = await deps.client.http(identity, "DELETE", `/api/memory/entries/${encodeURIComponent(record.key)}?scope=${scope}`, signal ? { signal } : {});
+            if (deleted.ok) {
+              removed += 1;
+              progress += 1;
+            } else if (deleted.status !== 404) { // 404: gone already
+              const why = `HTTP ${deleted.status}`;
+              refused.set(why, (refused.get(why) ?? 0) + 1);
+              if (deleted.status === 401 || deleted.status === 403) forbidden = why;
+            }
+          }
+          for (const [why, count] of refused) notes.push(`memory reset: ${entries(count)} of ${identity}'s ${scope} memory not deleted (${why})`);
+          if (refused.size > 0 || progress === 0 || listing.total <= listing.records.length) break;
         }
       }
     }
