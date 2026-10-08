@@ -783,6 +783,49 @@ describe("web_fetch never hands the browser a URL the SSRF guard refused", () =>
     expect(requested).toEqual([`${PUBLIC}/go`, `${PUBLIC}/weiter`]);
   });
 
+  it("follows a chain past 5 redirects with every hop checked, and fails at the private one", async () => {
+    const chain: Record<string, string> = {};
+    for (let i = 0; i < 6; i++) chain[`${PUBLIC}/h${i}`] = `/h${i + 1}`;
+    chain[`${PUBLIC}/h6`] = "http://10.0.0.5/admin";
+    const requested = web(chain);
+    const callTool = followingBrowser();
+
+    const r = await webFetch(`${PUBLIC}/h0`, "s-fetch-redirect-long-chain");
+    expect(r.success).toBe(false);
+    expect(r.error).toBe(`${PUBLIC}/h0 redirects to a private/internal network address; fetching it is not allowed`);
+    expect(r.output).not.toContain(INTERNAL);
+    expect(callTool, "a browser tool was called").not.toHaveBeenCalled();
+    expect(requested).toEqual(Array.from({ length: 7 }, (_, i) => `${PUBLIC}/h${i}`));
+  });
+
+  it("still hands a loop through public URLs it already checked to the browser, which keeps cookies", async () => {
+    const requested = web({ [`${PUBLIC}/konto`]: "/cookie-check", [`${PUBLIC}/cookie-check`]: "/konto" });
+    const callTool = vi.fn(async (input: { name: string }) => input.name === "browser_evaluate"
+      ? { content: [{ type: "text", text: "### Result\n\"Kontoübersicht: 3 offene Rechnungen\"" }] }
+      : { content: [{ type: "text", text: "" }] });
+    mcpConnections.set("playwright", { client: { callTool } });
+
+    const r = await webFetch(`${PUBLIC}/konto`, "s-fetch-redirect-loop");
+    expect(r.success).toBe(true);
+    expect(r.metadata?.["fetchMethod"]).toBe("playwright");
+    expect(r.output).toContain(`**Content from:** ${PUBLIC}/konto (browser-rendered; a direct request failed (Redirect loop))`);
+    expect(r.output).toContain("Kontoübersicht: 3 offene Rechnungen");
+    expect(requested, "the loop is seen when the chain returns to a URL it requested").toEqual([`${PUBLIC}/konto`, `${PUBLIC}/cookie-check`]);
+  });
+
+  it("fails a chain still redirecting after 20 hops without calling the browser, which gives up there too", async () => {
+    const chain: Record<string, string> = {};
+    for (let i = 0; i < 30; i++) chain[`${PUBLIC}/h${i}`] = `/h${i + 1}`;
+    const requested = web(chain);
+    const callTool = followingBrowser();
+
+    const r = await webFetch(`${PUBLIC}/h0`, "s-fetch-redirect-too-long");
+    expect(r.success).toBe(false);
+    expect(r.error).toBe(`${PUBLIC}/h0 redirects more than 20 times; it is not followed further`);
+    expect(callTool, "a browser tool was called").not.toHaveBeenCalled();
+    expect(requested).toEqual(Array.from({ length: 21 }, (_, i) => `${PUBLIC}/h${i}`));
+  });
+
   it("fails a redirect off http(s) the same way", async () => {
     web({ [`${PUBLIC}/go`]: "file:///etc/passwd" });
     const callTool = followingBrowser();

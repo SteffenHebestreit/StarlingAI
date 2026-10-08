@@ -251,6 +251,13 @@ registerTool({
   },
 });
 
+/**
+ * Redirects web_fetch follows, every target checked: as many as Chromium follows. A page the
+ * direct request cannot read goes to the browser, which walks the same chain; with a limit of 5
+ * here the browser was handed the rest of a longer chain, hops 6 to 20, unchecked.
+ */
+const WEB_FETCH_MAX_REDIRECTS = 20;
+
 registerTool({
   name: "web_fetch",
   description: "Fetch a public URL and return its readable text. HTML pages end with a list of their links (absolute URLs, same site first): follow those instead of guessing paths. JSON is returned verbatim, PDFs as extracted text; JavaScript-only pages are browser-rendered when available.",
@@ -307,7 +314,7 @@ registerTool({
             "User-Agent": "Mozilla/5.0 (compatible; StarlingAI/0.1; +https://starlingai.io)",
             "Accept": "text/html,application/xhtml+xml,application/json,text/plain,*/*",
           },
-        });
+        }, WEB_FETCH_MAX_REDIRECTS);
         directStatus = res.status;
         if (res.ok) {
           const ct = res.headers.get("content-type") ?? "";
@@ -419,7 +426,7 @@ registerTool({
             "User-Agent": "StarlingAI/0.1 (research assistant)",
             "Accept": "text/html,application/xhtml+xml,text/plain,*/*",
           },
-        });
+        }, WEB_FETCH_MAX_REDIRECTS);
         if (!res.ok) {
           return { success: false, output: "", error: `HTTP ${res.status} from ${url}${renderedNote}` };
         }
@@ -859,9 +866,10 @@ function pdfFilenameFromUrl(url: string): string {
 async function fetchAndExtractPdf(url: string, maxLength: number, shareSuffix: string): Promise<ToolResult> {
   let bytes: Uint8Array;
   try {
+    // The direct request already walked this chain; this one may follow it as far.
     const res = await safeFetch(url, 20000, {
       headers: { "User-Agent": "StarlingAI/0.1 (research assistant)", "Accept": "application/pdf,*/*" },
-    });
+    }, WEB_FETCH_MAX_REDIRECTS);
     if (!res.ok) return { success: false, output: "", error: `HTTP ${res.status} from ${url}` };
     bytes = new Uint8Array(await res.arrayBuffer());
   } catch (err) {
@@ -985,9 +993,10 @@ export async function checkUrlSsrf(rawUrl: string): Promise<string | null> {
 
 /**
  * The guard turned a request away before it was sent: the host, or the target of a redirect
- * on the way, is private or internal, or a redirect left http(s). It is kept apart from network
- * errors because web_fetch hands those to the browser, and the browser follows the same
- * redirect with nothing checking where it leads.
+ * on the way, is private or internal, a redirect left http(s), or the chain was still going at
+ * the hop limit, so the guard never saw where it ends. It is kept apart from network errors
+ * because web_fetch hands those to the browser, and the browser follows the same redirects with
+ * nothing checking where they lead.
  */
 class SsrfRefusal extends Error {
   constructor(message: string) {
@@ -1015,6 +1024,8 @@ async function safeFetch(url: string, ms: number, init?: RequestInit, maxRedirec
  */
 async function safeFetchFinal(url: string, ms: number, init?: RequestInit, maxRedirects = 5): Promise<{ res: Response; finalUrl: string }> {
   let current = url;
+  // The URLs this chain has requested, fragments dropped (they are never sent).
+  const requested = new Set<string>();
   for (let hop = 0; hop <= maxRedirects; hop++) {
     let host: string;
     try {
@@ -1027,6 +1038,7 @@ async function safeFetchFinal(url: string, ms: number, init?: RequestInit, maxRe
         ? "Fetching private/internal network addresses is not allowed"
         : `${url} redirects to a private/internal network address; fetching it is not allowed`);
     }
+    requested.add(withoutFragment(current));
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), ms);
     let res: Response;
@@ -1038,12 +1050,20 @@ async function safeFetchFinal(url: string, ms: number, init?: RequestInit, maxRe
     if (res.status >= 300 && res.status < 400 && res.headers.has("location")) {
       const next = new URL(res.headers.get("location")!, current).toString();
       if (!/^https?:\/\//i.test(next)) throw new SsrfRefusal("Redirect to a non-http(s) scheme is not allowed");
+      // Back to a URL the guard already let through: a loop, such as a cookie check that only a
+      // client keeping cookies gets past. Not a refusal, so web_fetch still tries the browser.
+      if (requested.has(withoutFragment(next))) throw new Error("Redirect loop");
       current = next;
       continue;
     }
     return { res, finalUrl: current };
   }
-  throw new Error("Too many redirects");
+  throw new SsrfRefusal(`${url} redirects more than ${maxRedirects} times; it is not followed further`);
+}
+
+function withoutFragment(url: string): string {
+  const hash = url.indexOf("#");
+  return hash < 0 ? url : url.slice(0, hash);
 }
 
 export function isPrivateHost(host: string): boolean {
