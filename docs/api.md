@@ -545,6 +545,8 @@ Supported RPC methods:
 
 `chat.send` also supports chat-triggered scenes via `/run <sceneName> key=value ...`, and inline override flags in the `message`: `--auto`, `--iter N`, `--agent NAME`, `--timeout N`, and `--effort low|medium|high|max` (a one-off effort tier for that message).
 
+`--agent NAME` hands the turn to that agent: the turn delegates to it before it answers. A name that is neither a configured nor a promoted agent starts no turn; the reply is `accepted: false`, with a `blocked` status whose `response` names the agent.
+
 `chat.send` answers once the turn has started; the turn itself reports through the events below. The reply:
 
 ```json
