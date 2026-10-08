@@ -138,10 +138,35 @@ describe("the reply-language rule", () => {
       "Was heißt das genau für mich? \"Refunds are not provided for partial billing periods.\"",
       "Was bedeutet dieser Fehler? Error: Cannot find module 'express'. Require stack: /app/server.js",
       `${IMAGE_ANALYSIS}\n\nWas genau bedeutet dieses Schild für mich als Radfahrer?`,
+      // Single quotation marks, in the forms German and English use, around a passage mid-sentence.
+      "Was bedeutet 'Refunds are not provided for partial billing periods' für mich?",
+      "Was bedeutet ‚Refunds are not provided for partial billing periods‘ für mich?",
+      "Was bedeutet ‘Refunds are not provided for partial billing periods’ für mich?",
+      "Was meint der Vermieter mit 'the deposit will be withheld until the final inspection is completed'?",
+      // A short question ahead of a paste, without quotation marks: on a line of its own, and before a colon.
+      "Was heißt das?\nRefunds are not provided for partial billing periods. Please contact our support team if you believe an exception applies.",
+      "Übersetze: Refunds are not provided for partial billing periods. Please contact our support team if you believe an exception applies.",
     ]) {
       const line = buildTurnReplyLanguageInstruction(mixed, "German", { firstTurn: true, userWords: mixed });
       expect(line).not.toMatch(/otherwise in [A-Z]\w+, the language/);
       expect(line).toContain("otherwise in the language of that message");
+    }
+  });
+
+  it("names the language of words in one language with a short phrase or a list in them", () => {
+    // Read on its own, a short part is often called another language: "No emojis." Portuguese,
+    // "Bullet points." French, "- Pixel 9 Pro" Czech, "Formeller Ton." Danish, "- Olivenöl"
+    // Portuguese. Each such call took the first-turn language away from a message in one language.
+    for (const [words, language] of [
+      ["Write a short LinkedIn post about our new release. Keep it under 100 words. No emojis.", "English"],
+      ["Summarize the main arguments for and against remote work. Bullet points.", "English"],
+      ["Draft a polite reply to my landlord asking when I will get my deposit back.\n\nCheers, Tom", "English"],
+      ["Which of these phones has the best camera?\n- Pixel 9 Pro\n- Galaxy S24 Ultra\n- iPhone 16 Pro", "English"],
+      ["Was kann ich heute Abend mit diesen Zutaten kochen?\n- Olivenöl\n- Parmesan\n- Tomaten\n- Spaghetti", "German"],
+      ["Schreib eine kurze Absage an den Bewerber. Formeller Ton.", "German"],
+    ] as const) {
+      expect(buildTurnReplyLanguageInstruction(words, "German", { firstTurn: true, userWords: words }))
+        .toContain(`otherwise in ${language}, the language of that message`);
     }
   });
 
@@ -272,6 +297,17 @@ describe("text-language — a statistical detector, not a word list", () => {
     expect(detectUniformTextLanguage(`${paste}\n\nWas bedeutet das für meinen Kredit?`)).toBeNull();
     expect(detectUniformTextLanguage("ok")).toBeNull();
     expect(detectUniformTextLanguage(undefined)).toBeNull();
+  });
+
+  it("reads the words around a quoted passage together, and an apostrophe as no quotation mark", () => {
+    // Around the quote, "Was bedeutet" and "für mich?" are each too short to tell; together they are German.
+    expect(detectUniformTextLanguage("Was bedeutet 'Refunds are not provided for partial billing periods' für mich?")).toBeNull();
+    // An apostrophe inside the passage does not end it.
+    expect(detectUniformTextLanguage("Was bedeutet 'it's not my fault, the delivery was late again' hier genau?")).toBeNull();
+    // A quoted term in the text's own language, and apostrophes, leave a text in one language.
+    expect(detectUniformTextLanguage("Was ist der Unterschied zwischen 'git merge' und 'git rebase'?")?.name).toBe("German");
+    expect(detectUniformTextLanguage("I don't know what the users' settings were. It's been broken since the update.")?.name)
+      .toBe("English");
   });
 });
 

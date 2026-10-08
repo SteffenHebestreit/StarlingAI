@@ -20,7 +20,8 @@ import { childLogger } from "../logger.js";
 const log = childLogger("agent:text-language");
 
 interface ElDetector {
-  detect(text: string): { language: string; isReliable(): boolean };
+  /** `isReliable(ratio)`: the top score reaches `ratio` times the language's average score (0.75 by default). */
+  detect(text: string): { language: string; isReliable(thresholdRatio?: number): boolean };
 }
 
 let detector: ElDetector | null = null;
@@ -63,6 +64,17 @@ export function proseForLanguageDetection(text: string): string {
 const MIN_LETTERS = 8;
 /** Enough text to call a language; scoring the rest only costs time. */
 const MAX_CHARS = 2_000;
+/**
+ * Below this many letters, a part of a text counts only when the detector is at least as sure of
+ * it as of an average text in its language (SURE_RELIABILITY; the usual bar is 0.75 of that). At
+ * the usual bar it called 36 of 65 short fragments another language than the text they came from:
+ * a list item, a product name, "No emojis." (Portuguese), "Formeller Ton." (Danish). At this one it
+ * called 2 of them so, and still named the language of 34 of 35 short questions like "Was heißt
+ * das?" (2026-10-08). From 20 letters on it was the other way round: the usual bar misread 1 part
+ * in 22, and this one missed 5 of 21 real sentences, "Error: Cannot find module" among them.
+ */
+const SURE_BELOW_LETTERS = 20;
+const SURE_RELIABILITY = 1;
 
 export interface DetectedLanguage {
   /** ISO 639-1 code, e.g. "de". */
@@ -94,31 +106,53 @@ export function languageNameForCode(code: string): string {
  * code or links, or the detector is not loaded yet). Starts loading the detector on first use.
  */
 export function detectTextLanguage(text: string | null | undefined): DetectedLanguage | null {
+  return detectLanguage(text, 0);
+}
+
+/** detectTextLanguage, with text of fewer than `sureBelowLetters` letters held to SURE_RELIABILITY. */
+function detectLanguage(text: string | null | undefined, sureBelowLetters: number): DetectedLanguage | null {
   if (!text) return null;
   if (!detector) {
     void warmTextLanguageDetector();
     return null;
   }
   const prose = proseForLanguageDetection(text).slice(0, MAX_CHARS);
-  if (prose.replace(/[^\p{L}]/gu, "").length < MIN_LETTERS) return null;
+  const letters = prose.replace(/[^\p{L}]/gu, "").length;
+  if (letters < MIN_LETTERS) return null;
   try {
     const result = detector.detect(prose);
-    if (!result.language || !result.isReliable()) return null;
+    if (!result.language || !(letters < sureBelowLetters ? result.isReliable(SURE_RELIABILITY) : result.isReliable())) {
+      return null;
+    }
     return { code: result.language, name: languageNameForCode(result.language) };
   } catch {
     return null;
   }
 }
 
-/** Where a text can change language: a line break, a sentence end, a quotation mark. */
-const LANGUAGE_PART_BOUNDARY = /\n+|(?<=[.!?…])\s+|(?<=[。！？])|["“”„«»「」『』]+/u;
+/**
+ * Where a text can change language: a line break, a sentence end, a colon ("Übersetze: <a paste>"
+ * was one English part), a quotation mark.
+ */
+const LANGUAGE_PART_BOUNDARY = /\n+|(?<=[.!?…:])\s+|(?<=[。！？：])|["“”„«»「」『』]+/u;
+
+/**
+ * A quoted passage: from a quotation mark at the start of a word to the next one at the end of a
+ * word. Single marks count too; the apostrophe inside "don't" or "it’s" neither opens nor closes one.
+ */
+const QUOTED_PASSAGE =
+  /(?<![\p{L}\p{N}])["“”„«»「」『』'‘’‚‹›](?:[^"“”„«»「」『』'‘’‚‹›]|(?<=[\p{L}\p{N}])['’](?=[\p{L}\p{N}]))*?["“”„«»「」『』'‘’‚‹›](?![\p{L}\p{N}])/gu;
 
 /**
  * The language of `text` when every line, sentence and quoted passage of it that can be told is in
- * that one language; null when one of them reliably reads as another, or when the whole cannot be
- * told. Read as a whole, a text is in whichever language has the most letters: a German question
- * about an English quote, an error message or an image analysis reads as English. A long text is
- * read at its start and its end, where the words around a paste are.
+ * that one language, and so are the words around its quoted passages; null when one of them reads
+ * as another, or when the whole cannot be told. Read as a whole, a text is in whichever language has
+ * the most letters: a German question about an English quote, an error message or an image analysis
+ * reads as English. A long text is read at its start and its end, where the words around a paste are.
+ *
+ * A short part has to be told for certain (SURE_BELOW_LETTERS). At the detector's usual bar, "No
+ * emojis." after an English request or a list of product names took the language away from a text
+ * written in one.
  */
 export function detectUniformTextLanguage(text: string | null | undefined): DetectedLanguage | null {
   const whole = detectTextLanguage(text);
@@ -127,8 +161,14 @@ export function detectUniformTextLanguage(text: string | null | undefined): Dete
   const read = withoutCode.length > 2 * MAX_CHARS
     ? `${withoutCode.slice(0, MAX_CHARS)}\n${withoutCode.slice(-MAX_CHARS)}`
     : withoutCode;
-  for (const part of read.split(LANGUAGE_PART_BOUNDARY)) {
-    const language = detectTextLanguage(part);
+  // The words around the quoted passages are one more part. Split at the quotation marks, "Was
+  // bedeutet" and "für mich?" around an English passage were each too short to tell, and a single
+  // mark is no boundary (an apostrophe looks the same): "Was bedeutet 'Refunds are not provided …'
+  // für mich?" was one English sentence.
+  const unquoted = read.replace(QUOTED_PASSAGE, " ");
+  const parts = read.split(LANGUAGE_PART_BOUNDARY);
+  for (const part of unquoted === read ? parts : [unquoted, ...parts]) {
+    const language = detectLanguage(part, SURE_BELOW_LETTERS);
     if (language && language.code !== whole.code) return null;
   }
   return whole;
